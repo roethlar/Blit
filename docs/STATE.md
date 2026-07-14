@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-14 (49th session)
+Last updated: 2026-07-14 (state-hygiene `drift` pass; last handoff was the 49th session)
 
 - **NEXT ACTION — fix ROUND 11's findings (all documented, none started), then re-review, then run.** Instrument at `8997f92`, prereg **rev 10**, rule **rewritten and simplified** (D-2026-07-14-3, owner: "simplify"). **NO DATA HAS EVER BEEN TAKEN.** Read `.review/results/macmac-harness-r11.{codex-engine,codex-harness,grok}.md`.
   **THE ENGINE HAS NO BLOCKERS FOR THE FIRST TIME IN ELEVEN ROUNDS.** Two HIGHs remain in it:
@@ -8,7 +8,7 @@ Last updated: 2026-07-14 (49th session)
   (b) **`B` hardens each cell but can make the SESSION verdict easier via `MIXED` precedence** — if B pushes one cell out of `EFFECT`, the `MIXED` branch stops firing and the session reports `REPRODUCES` instead of the inconclusive `MIXED`.
   **THE HARNESS HAS ONE BLOCKER**: **the registered topology is NOT enforced** — NIC/IP/MAC are env-overridable and **the MTU is never checked at all**, so the run could silently go over the 1GbE NIC or at MTU 1500. (pf-0 spent 256 runs on MTU; the rig must prove it is on the fabric it claims.) Plus four HIGHs: `resolve_disk` discards the `df` pipeline status; **both Time Machine gates use `tr -cd '0-9'`, so a malformed `"0%"` reads as "disabled"**; the new per-pair RTT gate is in the code but **not in the pre-registration**; and the drain still discards its producers' statuses.
   - **THE RULE, whole**: per cell, the paired ABBA differences (n is **exactly 8**), their median, one exact ≥95% CI (**at n=8 that IS `[min,max]`, so nothing can be trimmed** — the identity everything leans on), and the full range. One threshold `T = min(src/10, 230ms)`. Four states: **EFFECT** (CI clears +T+B), **INVERTED** (clears −T−B), **NONE** (the **full range** inside ±(T−B)), **UNCLEAR**. `B` = the arm bias the controls could not rule out, **relative to the arm**. **Every control must be NONE at T/2 or NO verdict is read — not a null, and not a reproduction.** The 1.10 bar is reported and takes **no part in inference**; the sign test is reported, not decided on. **No escalation**: a noisy rig is fixed by a quieter rig, not more pairs.
-  - **⚠ TO RUN IT THE OWNER MUST CLOSE THEIR CODEX SESSIONS** — nagatha is a bench **END**; the quiescence gate refuses while `codex`/`cargo`/`rustc` runs on **either** Mac. Time Machine OFF on both. Rig: nagatha `10.1.10.92` ↔ `q` `10.1.10.54`, 10GbE/9000, build pinned `f35702a`. **Then `pf-1`.**
+  - **⚠ TO RUN IT THE OWNER MUST CLOSE THEIR CODEX SESSIONS** — nagatha is a bench **END**; the quiescence gate refuses while `codex`/`cargo`/`rustc` runs on **either** Mac. Time Machine OFF on both. Rig = nagatha ↔ `q` over the 10GbE fabric at MTU 9000, build pinned `f35702a`; **host facts (NICs, IPs, MTU) live in `.agents/machines.md` — never restated here.** **Then `pf-1`.**
   - **CODEX'S CONTENT FILTER**: a whole-instrument review request gets **killed** ("flagged for possible cybersecurity risk") and produces **no review at all** — the "find the fail-open protection" framing reads as vulnerability scanning on top of ssh/sudo code. **Split it (engine / harness) and word it as plain measurement-correctness.** A killed run's file must never be mistaken for a review.
 - **THE INSTRUMENT IS THE RISK — ~110 findings across TEN reviews of this ONE harness, all accepted, none rejected, and it has still never run.** Three project claims were already retracted to harness bugs. **TWO DEFECT CLASSES recur in EVERY round; the next review must assume both are present.** (1) **"Fixed the branch I was shown, not the class"** — the same materiality bug escaped **four** rounds; a fail-open `pgrep` was fixed in one gate and left in its duplicate; the drain was fixed by VALUE and left failing by STATUS; Spotlight coerced a non-number to 0 exactly as the drain once accepted `"."`. **And a deletion regressed the build pin**: cutting the escalation block out took the adjacent `EXPECT_SHA` check with it, so any sha — including `.dirty` — was accepted. (2) **"A protection that never executes, or cannot fail"** — `SETTLE_MS` **had never run in any revision** (a quoting bug killed the `sleep` and its status was discarded), while the prereg asserted it for three revisions; the ssh-dispatch **bound** was measured once at preflight and never enforced on a run. Earned rules: **verify the instrument before believing the measurement**; **`bash -n` is not an execution**; **a protection that cannot be observed is not a protection**; **a mutation that cannot be killed is not a proof.**
 - **⚠ THE MAC↔MAC RIG IS *NOT* AN H1 DISCRIMINATOR — retracted 2026-07-14.** "Reproduces ⇒ H1 dies" was **WRONG**: H1 accuses **blit's own code paths**, not Windows, and that code runs on macOS too — so a reproduction is *consistent with* H1. It answers one thing, scoped to this pair: **can P1 occur WITHOUT a Windows peer?** A reproduction ⇒ P1 is not waivable as "Windows residue" (it does **not** prove a platform-*general* cost, and leaves macOS/APFS and host×role open). A null ⇒ it did not reproduce *on this pair* — consistent with "Windows required", **not proof** of it, and reportable only if the run could have SEEN the effect. Detail: the pre-registration.
@@ -17,7 +17,7 @@ Last updated: 2026-07-14 (49th session)
 - **THE FAST ARM IS BISTABLE — the trap named in pf-1's gate above.** `win_init` runs are **bimodal** (~730/~840 ms): S1 drew 6 low/2 high and S4 drew 2 low/6 high **at the same MTU**, and that mode mixture — not MTU — is what sets N_Δ. `mac_init` is stable to 5–6 ms. A counterfactual that merely shifts the mixture would **fake a recovery**.
 - **P1 REPRODUCES ON A SECOND MAC (2026-07-13, `docs/bench/otp12-q-baseline-2026-07-13/`).** `wm_tcp_mixed` = **1.385 FAIL** on `q`↔netwatch-01 **at MTU 9000**, while all three controls PASS at **1.002–1.043** in the same session (so rig noise is ~2–4% and P1 is 10× outside it). **P1 is a property of the macOS↔Windows PAIRING, not of one machine** — the assumption **H1** rests on (corrected 2026-07-14: H5/H6/H7 are **P2** hypotheses; the earlier "H1/H5/H6/H7" was wrong), never tested until now. **And jumbo does NOT dissolve P1** — pf-0 has now measured the matched 1500 arm and killed MTU outright (above).
 - **THE MAC IS A BENCH END — the codex loop and a rig-W session CANNOT run concurrently** (`.agents/machines.md`). A 53-min A-B-B-A attempt was destroyed by codex load on the Mac and discarded; the contamination is *asymmetric* (it inflates `mac_init` and MANUFACTURES P1). **Rig-W now runs on `q`** (dedicated M4 mini, quiet, faster than nagatha), which decouples the two for good.
-- Recent sessions (2026-07-11/13, 44th–46th): **otp-10/otp-11 closed; otp-12c RECORDED (rig D 7/7); the perf plan is ACTIVE (D-2026-07-13-1).** Every transfer rides the ONE session (separate local orchestration gone, −6.2k lines at 11b; the unsound journal fast path died with it). Suite **1488**. SMALL_FILE_CEILING paused (D-2026-07-05-1).
+- Recent sessions (2026-07-11/13, 44th–46th): **otp-10/otp-11 closed; otp-12c RECORDED (rig D 7/7); the perf plan is ACTIVE (D-2026-07-13-1).** Every transfer rides the ONE session (separate local orchestration gone, −6.2k lines at 11b; the unsound journal fast path died with it). Suite **1488 as of `bb28ddd`** — the last commit to touch `crates/`+`proto/`; every commit since is docs/scripts, so the count stands unre-run. SMALL_FILE_CEILING paused (D-2026-07-05-1).
 - **P1 (the headline invariance criterion) — the one thing between blit and shipping.** Fails rig W (`wm_tcp_mixed` 1.237 and 1.300 — do NOT read that as a regression, it is **two different Mac NICs**), but **PASSES 8/8 with Linux on both ends** (`docs/bench/otp12-perf-2026-07-13/`; P1's own cell 1.092/1.003). So it is **platform-INTERACTING, not pure layout** — yet **NOT exonerated**: a code path that only bites on one platform (H1's Windows accept branch) looks identical. **P1 HAS NO ESCAPE HATCH** (codex r5 F1): D-2026-07-12-1 waives only a *cross-direction* miss for a cell that ALREADY passes invariance — P1 *is* the invariance failure. So: **fix it to ≤1.10, or the owner amends acceptance criterion 1.** Neither is assumed.
 - **⚠ THREE of my claims were reported and RETRACTED on 2026-07-13**, all the same root cause — trusting an instrument I had not validated: (1) "P1 is code" (a harness that keyed durability to the *initiator*, not the destination); (2) "P1 is acceptable platform residue" (D-2026-07-12-1 does not cover it); (3) "macOS can't send jumbo / the switch is broken" (it was `net.inet.raw.maxdgram` capping *ping*; TCP was always fine — it cost the owner a pointless adapter swap). **Verify the instrument before believing the measurement.**
 
@@ -28,24 +28,21 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 ## Now (active work)
 
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
-  D-2026-07-05-4 "flip the plan and go") — otp-4a landed.** The
-  invariant (plan doc, verbatim): ONE block of transfer code;
-  direction/initiator/verb can NEVER affect wall time by blit's doing
-  — impossible by construction because the per-direction drivers and
-  `Push`/`PullSync` are deleted at cutover. Slices otp-1..13;
-  converge-up per cell (±10%); symmetric-fs disk-to-disk verdict
-  cells. **D-2026-07-05-2: same-build peers only, refusal at session
-  open.** Progress (each slice through the codex loop; per-slice
-  detail lives in DEVLOG + `.review/`, NOT here):
-  - **Closed `[x]`: otp-1 … otp-11** — the whole session machine, the
-    baselines (otp-2/2w), the **CUTOVER DELETION** (4 drivers +
-    `Push`/`PullSync` + 13 messages out of tree AND proto, −13.8k lines,
-    no bridge; relay removed D-2026-07-11-1), and **otp-11b's deletion of
-    the entire old orchestration** (−6.2k lines: orchestrator, engine,
-    local_worker, auto_tune, change_journal — the last an UNSOUND fast
-    path that silently lost data). The deletion-proof acceptance line
-    COMPLETES. Detail: DEVLOG 2026-07-10/11/12; evidence
-    `docs/bench/otp2{,w}-baseline-2026-07-10/`, `otp11-local-2026-07-11/`.
+  D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
+  verbatim): ONE block of transfer code; direction/initiator/verb can
+  NEVER affect wall time by blit's doing — impossible by construction
+  because the per-direction drivers and `Push`/`PullSync` are deleted
+  at cutover. Slices otp-1..13; converge-up per cell (±10%);
+  symmetric-fs disk-to-disk verdict cells. **D-2026-07-05-2:
+  same-build peers only, refusal at session open.**
+  - **Slices otp-1 … otp-11 are all `[x]` CLOSED** — the session
+    machine, the baselines, the cutover deletion (−13.8k lines) and
+    otp-11b's deletion of the old orchestration (−6.2k). The
+    deletion-proof acceptance line COMPLETES. The closed-slice record
+    was rotated verbatim to `docs/history/state-archive.md`
+    (2026-07-14 drift); per-slice detail lives in DEVLOG + `.review/`.
+  - **Open: otp-12d and otp-13** — both DEFERRED behind pf-final, see
+    Queue 1.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]`; **sf-3a+ blocked** until ONE_TRANSFER_PATH ships, then
   resume/re-derive on the unified baseline. Principle: ceiling-driven,
@@ -149,6 +146,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
+- **The Mac↔Mac run is BLOCKED and NOT clearable by an agent** — round 11's
+  findings are unfixed (engine 2 HIGH, harness 1 BLOCKER + 4 HIGH) and both
+  Macs must be codex-quiet. Basis and detail: NEXT ACTION at the top of this
+  file; never restated here (re-verified 2026-07-14 against
+  `.review/results/macmac-harness-r11.*` and `git log -- scripts/bench_otp12pf_mac.sh`,
+  whose newest commit is still round 10's `8997f92`).
 - **Rigs**: owner go standing through otp-12. zoey (12a), netwatch-01
   (12b), netwatch-01↔skippy (12c) done; **magneto↔skippy = the same-OS
   rig** (new 2026-07-13). Rig facts + the macOS ping/MTU trap:
@@ -169,7 +172,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   592) describes the deleted `determine_remote_tuning` — fix folded
   into **w10-docs-batch**; no one-off edit.
 - **(PARTIALLY RESOLVED 2026-07-04)** Windows triage: w9-3 fixed the
-  Linux daemon-spawn flakiness; windows-latest CI pending a push.
+  Linux daemon-spawn flakiness; **windows-latest CI has never been
+  observed green — check it live, do not record push state here.**
   NOTE 2026-07-12: the macOS `blit_utils` residual (pre-existing,
   reproduced at `6d37a22`) ran ELEVATED under heavy load (~3/12 vs 2/8
   historical) — own finding if it persists on a quiet machine.
@@ -179,18 +183,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 ## Handoff log (newest first, keep ≤ 3)
 
 - **2026-07-14 (49th)** — **Mac↔Mac instrument, rounds 3–6: 48 more findings, 48
-  accepted, NO DATA TAKEN; the harness REFUSES a timed run.** Four rework+review cycles,
-  each finding a defect capable of a **false claim**, each in a branch the previous fix
-  had not covered. **R3**: my timer read a 1000 ms sleep as **−1 ms**. **R4**: grok drove
-  a clean `VANISHES` while every control carried the full rig-W effect. **R5**: **the
-  settle had NEVER RUN, in any revision** — a quoting bug killed it in the very commit
-  that added it to neutralise an artifact that can *manufacture* P1. **R6**: the same
-  materiality bug escaped a **fourth** time (`REPRODUCES` off a **1 ms** effect; a
-  control at **D=+229** certified "clean"). Rev 7 answers structurally: **the bar takes
-  no part in inference**, and **the controls are a precondition for any verdict**.
-  Guard: 27 cases, **18/18 mutations killed**. Full: **DEVLOG 2026-07-14 18:45Z**.
-  **In-flight: the round-7 review (codex + grok) — results in
-  `.review/results/macmac-harness-r7.*`. READ THEM FIRST.** No rig time taken.
-  **NEXT: adjudicate round 7 → the run → pf-1.**
+  accepted, NO DATA TAKEN; the harness REFUSES a timed run.** Each cycle found a defect
+  capable of a **false claim**, each in a branch the previous fix had not covered (the
+  timer read a 1000 ms sleep as **−1 ms**; the **settle had NEVER RUN in any revision**;
+  the materiality bug escaped a **fourth** time). Rev 7 answered structurally: **the bar
+  takes no part in inference**, and **the controls are a precondition for any verdict**.
+  Blow-by-blow: **DEVLOG 2026-07-14 18:45Z** (not restated here).
+  **⚠ TRAILER CORRECTED BY `drift` 2026-07-14:** it claimed the round-7 review was in
+  flight and named round 7 as NEXT. **Rounds 7, 8, 9, 9b, 10 and 11 have all since
+  landed** (`1e03063..e65863c`; `.review/results/macmac-harness-r{7,8,9,9b,10,11}.*`),
+  still with **no datum taken**. Current position is the **NEXT ACTION at the top of
+  this file**. **DEVLOG OWES AN ENTRY FOR ROUNDS 7–11** — its newest is still
+  2026-07-14 18:45Z (rounds 5+6); the next `handoff` must write it.
 - **2026-07-14 (48th)** — pf-0 ran; **MTU is KILLED as a cause of P1** (`r = −3.1%`, 256 runs). The fast arm is **BISTABLE**. Full: **DEVLOG 2026-07-14 06:20Z**.
 - *(47th and earlier pruned to the cap — see DEVLOG 2026-07-06..14.)*
