@@ -90,11 +90,11 @@ CASES = [
      "REPRODUCES", "DOES-NOT-REPRODUCE"),
 
     ("codex r2: an effect the 10% bar alone would forgive (240ms @ 2500)",
-     dict(measurand_d=[-100, -50, 0, 50, 100, 200, 220, 240], src=2500),
+     dict(measurand_d=[-100, -50, 0, 50, 100, 200, 220, 240], src=2500, control_d=[0] * 8),
      "UNCLEAR", "DOES-NOT-REPRODUCE"),
 
     ("codex r2: the inverting threshold is -src/11, not -src/10 (CI [-190,0] @ 2000)",
-     dict(measurand_d=[-190, -190, 0, 0, 0, 0, 0, 0], src=2000),
+     dict(measurand_d=[-190, -190, 0, 0, 0, 0, 0, 0], src=2000, control_d=[0] * 8),
      "UNCLEAR", "DOES-NOT-REPRODUCE"),
 
     # --- an artifact must never read as an effect --------------------------------
@@ -178,6 +178,11 @@ CASES = [
     # could not exclude into the measurand's threshold.
     ("codex r8: an effect of exactly T is NOT a reproduction when the controls carry bias",
      dict(measurand_d=[100] * 8, src=1000, control_d=[5] * 8),
+     "UNCLEAR", "REPRODUCES"),
+
+    ("codex r9: B is RELATIVE — a 4.9% bias on a FAST control must not under-penalise a slower measurand",
+     dict(measurand_d=[130] * 8, src=1000,
+          control_d=[24] * 8, control_src=500),
      "UNCLEAR", "REPRODUCES"),
 
     ("grok r9: a null must also survive the TIGHTER bound (bias could be MASKING an effect)",
@@ -264,8 +269,16 @@ MUTATIONS = [
       "        if False:"],
      "null must also survive the TIGHTER bound"),
 
+    ("B is carried as RAW MILLISECONDS across controls of different arm speeds (codex r9)",
+     ['        B_frac = max(B_frac, abs(x["rng"][0]) / x["src"], abs(x["rng"][1]) / x["src"])',
+      '        B_frac = max(B_frac, abs(x["rng"][0]), abs(x["rng"][1]))',
+      '    B = B_frac * x["src"]                    # the control bias, on THIS cell\'s arm',
+      "    B = B_frac"],
+     "B is RELATIVE"),
+
     ("the control's residual bias is not carried into the measurand (codex r8)",
-     ['        B = max(B, abs(x["rng"][0]), abs(x["rng"][1]))', "        B = max(B, 0.0)"],
+     ['        B_frac = max(B_frac, abs(x["rng"][0]) / x["src"], abs(x["rng"][1]) / x["src"])',
+      "        B_frac = max(B_frac, 0.0)"],
      "exactly T is NOT a reproduction"),
 
     ("the engine trusts meta.complete and never counts the pairs (grok r3)",

@@ -217,17 +217,18 @@ for c in sorted(set(REGISTERED) | set(meta)):
 # codex, BLOCKER). The bias the controls FAIL TO EXCLUDE is therefore carried into the
 # measurand's thresholds:
 #
-#     B = max over clean controls of the largest |RANGE bound| -- the arm asymmetry the
-#                                                                 controls could not rule out.
-#         The RANGE, not the CI: the CI is an interval for the MEDIAN and it TRIMS, and a
-#         bound on what the rig might be carrying must not be computed by trimming.
+#     B = the arm asymmetry the controls could not rule out, as a FRACTION OF THE ARM,
+#         scaled to the cell it is applied to. Taken from each control's full RANGE (not its
+#         CI: the CI is an interval for the MEDIAN and it TRIMS, and a bound on what the rig
+#         might be carrying must never be computed by trimming). Relative, not raw ms:
+#         the controls run different fixtures at different speeds.
 #     an EFFECT must clear  T + B     (bias could be INFLATING it)
 #     a NULL   must fit in  T - B     (bias could be MASKING an effect)
 #
 # If the controls are genuinely clean, B is a few ms and this barely moves. If they are
 # marginal, it bites -- which is the point.
 dirty = []
-B = 0.0
+B_frac = 0.0          # RELATIVE, not raw milliseconds
 for c in CONTROLS:
     x = cell.get(c, {})
     if x.get("state") == "INCOMPLETE":
@@ -237,8 +238,16 @@ for c in CONTROLS:
     x["ctrl_T"] = c_pos
     if x["ctrl_state"] != "NONE":
         dirty.append(c)
-    else:
-        B = max(B, abs(x["rng"][0]), abs(x["rng"][1]))
+    elif x["src"]:
+        # B IS A FRACTION OF THE ARM, NOT A MILLISECOND COUNT (round-9 codex, BLOCKER).
+        # The controls run on DIFFERENT fixtures and therefore different arm speeds: the
+        # same 4.9% arm bias is 122 ms on a 2500 ms large-file control and 24 ms on a fast
+        # one. Carrying raw ms across them OVER-penalises a measurand slower than the
+        # control and UNDER-penalises one that is faster -- and the second direction is the
+        # dangerous one: a 4.9% bias measured on a fast control would license a measurand
+        # effect that is mostly rig. Take the bias as a FRACTION and scale it to whatever
+        # arm it is being applied to.
+        B_frac = max(B_frac, abs(x["rng"][0]) / x["src"], abs(x["rng"][1]) / x["src"])
 
 # ---- pass 3: grade the measurands, against thresholds widened by the control bias -----
 for c in MEASURANDS:
@@ -246,6 +255,7 @@ for c in MEASURANDS:
     if x.get("state") == "INCOMPLETE":
         continue
     t_pos, t_neg = thresholds(x["src"])
+    B = B_frac * x["src"]                    # the control bias, on THIS cell's arm
     x["T"] = t_pos
     x["B"] = B
     x["state"] = classify(x["ci"][0], x["ci"][1], x["rng"][0], x["rng"][1],

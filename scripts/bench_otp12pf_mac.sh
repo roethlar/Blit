@@ -80,7 +80,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SELF="${BASH_SOURCE[0]}"
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 VERDICT_PY="$SCRIPT_DIR/otp12pf_mac_verdict.py"
 VERDICT_TEST="$SCRIPT_DIR/otp12pf_mac_verdict_test.py"
 
@@ -656,9 +656,11 @@ for i in \$(seq 1 $DRAIN_ITERS); do
   out=\$(iostat -d -w 2 -c 2 '$dev' 2>/dev/null); rc=\$?
   if [ \$rc -ne 0 ]; then echo DRAIN-ERROR; exit 0; fi
   w=\$(echo \"\$out\" | tail -1 | awk '{print \$3}')
-  case \"\$w\" in
-    ''|*[!0-9.]*) echo DRAIN-ERROR; exit 0 ;;   # non-numeric must NEVER certify quiet
-  esac
+  # A REAL number, not merely digits-and-dots: "." and ".." pass a shape test, read as 0,
+  # and 0 < the threshold CERTIFIES QUIET (codex r9). awk decides, and it must see exactly
+  # one numeric field.
+  ok_num=\$(echo \"\$w\" | awk '{ print (NF == 1 && \$1 ~ /^[0-9]+(\\.[0-9]+)?\$/) ? 1 : 0 }')
+  if [ \"\$ok_num\" != 1 ]; then echo DRAIN-ERROR; exit 0; fi
   ok=\$(awk -v w=\"\$w\" -v t=$DRAIN_MBPS 'BEGIN{print (w+0 < t) ? 1 : 0}')
   if [ \"\$ok\" = 1 ]; then quiet=\$((quiet+1)); else quiet=0; fi
   if [ \$quiet -ge $DRAIN_QUIET ]; then echo \"drained_\${i}x2s\"; exit 0; fi
@@ -842,11 +844,15 @@ run_one_pair() {   # $1=idx $2=cell $3=srchost $4=dsthost $5=fixture $6=flag $7=
 }
 
 run_all_cells() {
-  local slot i cell sh dh w flag max=$(( 2 * RUNS )) n=${#CELL_TABLE[@]}
+  local slot i j cell sh dh w flag max=$(( 2 * RUNS )) n=${#CELL_TABLE[@]}
   for (( i = 0; i < n; i++ )); do CELL_VALID[$i]=0; CELL_ATTEMPTS[$i]=0; done
   for (( slot = 1; slot <= RUNS; slot++ )); do
     log "=== SLOT $slot / $RUNS (every cell takes one pair before any cell takes the next) ==="
-    for (( i = 0; i < n; i++ )); do
+    # ROTATE the cell order by slot. A FIXED order put both measurands ahead of every
+    # control in every slot, so a PERIODIC transient could land on the measurands and never
+    # on the controls that exist to catch it. Over 8 slots each cell occupies each position.
+    for (( j = 0; j < n; j++ )); do
+      i=$(( (j + slot - 1) % n ))
       read -r cell sh dh w flag <<<"${CELL_TABLE[$i]}"
       # a voided pair is retried IN PLACE, so the cell stays in step with its siblings
       while (( ${CELL_ATTEMPTS[$i]:-0} < max )); do

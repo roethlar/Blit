@@ -1,6 +1,6 @@
 # otp-12 Mac↔Mac rig — PRE-REGISTRATION (written before any timed run)
 
-**Status**: Pre-registered, **revision 9**. **NO DATA EXISTS YET.**
+**Status**: Pre-registered, **revision 10**. **NO DATA EXISTS YET.**
 
 > ## THE RULE IN ONE PARAGRAPH (rev 8 — D-2026-07-14-3, owner: "simplify")
 >
@@ -242,18 +242,31 @@ absent, and P1's whole claim is that the effect is *specific* to TCP × mixed.
 measurand effect of exactly `T` could be half real and half rig. The bias the controls **fail
 to exclude** is therefore carried into the measurand's thresholds:
 
-    B = max over clean controls of the largest |CI bound|
+    B = the arm bias the clean controls could NOT rule out, taken from each control's
+        full RANGE (not its CI — the CI trims, and a bound must never be computed by
+        trimming), as a FRACTION of the arm, then scaled to the cell it is applied to.
+
     an EFFECT must clear   T + B     (the bias could be INFLATING it)
     a NULL must fit inside T − B     (the bias could be MASKING an effect)
+
+**B is RELATIVE, not raw milliseconds (round-9, codex, BLOCKER).** The controls run
+different fixtures at different arm speeds: the *same* 4.9% bias is 122 ms on a 2500 ms
+large-file control and 24 ms on a fast one. Carrying raw ms across them **under-penalises a
+measurand faster than the control** — and that is the dangerous direction, because it would
+license a measurand effect that is mostly rig.
 
 If the controls are genuinely clean, `B` is a few ms and this barely moves. If they are
 marginal, it bites — which is the point.
 
 ### The controls are CONTEMPORANEOUS with the measurands
 
-The schedule is **slot-major**: within slot *i*, **every** cell takes one ABBA pair, in a
-fixed registered order, before any cell takes slot *i+1*. All six cells therefore span the
-same wall-clock window.
+The schedule is **slot-major**: within slot *i*, **every** cell takes one ABBA pair before
+any cell takes slot *i+1*. All six cells therefore span the same wall-clock window.
+
+**And the order ROTATES by slot (round-9, codex, HIGH).** A *fixed* order put both measurand
+cells ahead of every control in every slot — so a **periodic** transient could land on the
+measurands and never on the controls that exist to catch it. Over 8 slots each cell occupies
+each position.
 
 *(Round-8, codex, HIGH: both measurand cells used to run first and the controls afterwards
 — so **the controls certified a window they were never in**. A transient could hit the
