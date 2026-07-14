@@ -65,7 +65,7 @@ runs_p, meta_p, sum_p, pair_p, ver_p, sess_p = sys.argv[1:7]
 # direction of the answer you want. That is the one thing pre-registration exists to
 # make impossible.
 DELTA_REF = 230          # ms; rig W's measured Delta_P1
-REGISTERED_PAIRS = (8, 16)
+REGISTERED_PAIRS = (8,)
 MIN_COVERAGE = 0.95
 
 _env = os.environ.get("DELTA_REF_MS")
@@ -161,43 +161,102 @@ def thresholds(s_med, scale=1.0):
             -min(s_med / 11.0, float(DELTA_REF)) * scale)
 
 
-def classify(ci_lo, ci_hi, t_pos, t_neg):
-    """THE RULE. Four states partitioning the CI's position relative to the thresholds.
-    They are mutually exclusive and exhaustive BY CONSTRUCTION -- there is no label here
-    for a new case to walk past, which is what went wrong seven rounds in a row."""
+def classify(ci_lo, ci_hi, rng_lo, rng_hi, t_pos, t_neg):
+    """THE RULE. Four states, mutually exclusive and exhaustive BY CONSTRUCTION.
+
+    EFFECT/INVERTED use the >=95% CI on the median: a POSITIVE claim can tolerate a few
+    outliers (13 of 16 pairs clearing T is evidence, and 3 stragglers do not undo it).
+
+    NONE uses the FULL RANGE -- EVERY pair must lie inside +-T. Round 8 (codex, BLOCKER):
+    at n=16 the CI is [d(4), d(13)], which TRIMS three outliers per side, so a BIMODAL arm
+    produces a NARROW median CI and a FALSE NULL (driven: CI = [1,1] from modes at +-110).
+    An equivalence claim must never be reachable by trimming away the very pairs that
+    contradict it. This is also why bimodality needs no special branch: it cannot hide
+    from the range.
+    """
     if ci_lo >= t_pos:
         return "EFFECT"
     if ci_hi <= t_neg:
         return "INVERTED"
-    if t_neg < ci_lo and ci_hi < t_pos:
+    if t_neg < rng_lo and rng_hi < t_pos:
         return "NONE"
     return "UNCLEAR"
 
 
-# ---- grade every registered cell ---------------------------------------------------
+# ---- pass 1: measure every cell -----------------------------------------------------
 cell = {}
 for c in sorted(set(REGISTERED) | set(meta)):
     d = paired(c)
     ci = median_ci(d) if d else None
     # COMPLETE is checked against the DATA, never against meta's say-so: a one-pair CSV
     # with a lying meta once graded as a full cell and emitted a null at 0% coverage.
-    if (meta.get(c, {}).get("complete") != "yes" or len(d) < PAIRS or ci is None):
+    if meta.get(c, {}).get("complete") != "yes" or len(d) < PAIRS or ci is None:
         cell[c] = dict(state="INCOMPLETE", n=len(d))
         continue
     s_med, d_med = med(by[(c, "srcinit")]), med(by[(c, "destinit")])
     hi, lo = max(s_med, d_med), min(s_med, d_med)
     ci_lo, ci_hi, cov = ci
-    t_pos, t_neg = thresholds(s_med)
-    c_pos, c_neg = thresholds(s_med, 0.5)                      # controls: HALF
     p, k, n = sign_p(d)
-    cell[c] = dict(
-        state=classify(ci_lo, ci_hi, t_pos, t_neg),            # measurand rule
-        ctrl_state=classify(ci_lo, ci_hi, c_pos, c_neg),       # control rule
-        n=len(d), d=d, D=med(d), ci=(ci_lo, ci_hi), cov=cov, T=t_pos, Tneg=t_neg,
-        src=s_med, dst=d_med, p=p, k=k,
-        # The acceptance bar: integer-exact, `<= 1.10` PASSES. REPORTED, never used.
-        bar="PASS" if 10 * hi <= 11 * lo else "FAIL",
-        ratio=hi / lo if lo else 0.0)
+    cell[c] = dict(n=len(d), d=d, D=med(d), ci=(ci_lo, ci_hi), rng=(min(d), max(d)),
+                   cov=cov, src=s_med, dst=d_med, p=p, k=k,
+                   # The acceptance bar: integer-exact, `<= 1.10` PASSES. REPORTED, never used.
+                   bar="PASS" if 10 * hi <= 11 * lo else "FAIL",
+                   ratio=hi / lo if lo else 0.0)
+
+# ---- pass 2: the controls certify the rig, and BOUND its residual bias ---------------
+# A control certifies clean at T/2 -- but "clean" is not "zero". A control sitting at +49
+# with T/2 = 50 is accepted, and THAT 49 ms OF ARM BIAS MAY BE RIDING IN THE MEASURAND
+# TOO, so a measurand "EFFECT" at exactly T could be half real and half rig (round-8
+# codex, BLOCKER). The bias the controls FAIL TO EXCLUDE is therefore carried into the
+# measurand's thresholds:
+#
+#     B = max over clean controls of the largest |CI bound|   -- the arm asymmetry that
+#                                                                could not be ruled out
+#     an EFFECT must clear  T + B     (bias could be INFLATING it)
+#     a NULL   must fit in  T - B     (bias could be MASKING an effect)
+#
+# If the controls are genuinely clean, B is a few ms and this barely moves. If they are
+# marginal, it bites -- which is the point.
+dirty = []
+B = 0.0
+for c in CONTROLS:
+    x = cell.get(c, {})
+    if x.get("state") == "INCOMPLETE":
+        continue
+    c_pos, c_neg = thresholds(x["src"], 0.5)
+    x["ctrl_state"] = classify(x["ci"][0], x["ci"][1], x["rng"][0], x["rng"][1], c_pos, c_neg)
+    x["ctrl_T"] = c_pos
+    if x["ctrl_state"] != "NONE":
+        dirty.append(c)
+    else:
+        B = max(B, abs(x["ci"][0]), abs(x["ci"][1]))
+
+# ---- pass 3: grade the measurands, against thresholds widened by the control bias -----
+for c in MEASURANDS:
+    x = cell.get(c, {})
+    if x.get("state") == "INCOMPLETE":
+        continue
+    t_pos, t_neg = thresholds(x["src"])
+    x["T"] = t_pos
+    x["B"] = B
+    x["state"] = classify(x["ci"][0], x["ci"][1], x["rng"][0], x["rng"][1],
+                          t_pos + B, t_neg - B)          # an EFFECT must clear T + B
+    if x["state"] == "NONE":
+        # ...and a NULL must survive the TIGHTER bound: bias could be masking an effect.
+        if not (t_neg + B < x["rng"][0] and x["rng"][1] < t_pos - B):
+            x["state"] = "UNCLEAR"
+
+# Controls also carry a state for the report; measurands carry a ctrl_state for symmetry.
+for c in cell:
+    x = cell[c]
+    if x.get("state") == "INCOMPLETE":
+        continue
+    if "state" not in x:                                  # a control: report its own state
+        t_pos, t_neg = thresholds(x["src"])
+        x["T"] = t_pos
+        x["B"] = 0.0
+        x["state"] = classify(x["ci"][0], x["ci"][1], x["rng"][0], x["rng"][1], t_pos, t_neg)
+    x.setdefault("ctrl_state", "-")
 
 # ---- outputs -----------------------------------------------------------------------
 with open(sum_p, "w") as f:
@@ -209,16 +268,17 @@ with open(sum_p, "w") as f:
                                                " ".join(map(str, v))))
 
 with open(pair_p, "w") as f:
-    f.write("cell,n,srcinit_med,destinit_med,ratio,bar,D_ms,CI_lo,CI_hi,coverage,"
-            "T_ms,sign_p,k_pos,state,control_state\n")
+    f.write("cell,n,srcinit_med,destinit_med,ratio,bar,D_ms,CI_lo,CI_hi,range_lo,range_hi,"
+            "coverage,T_ms,B_ms,sign_p,k_pos,state,control_state\n")
     for c in sorted(cell):
         x = cell[c]
         if x["state"] == "INCOMPLETE":
-            f.write("%s,%d,,,,,,,,,,,,INCOMPLETE,\n" % (c, x["n"]))
+            f.write("%s,%d,,,,,,,,,,,,,,,INCOMPLETE,\n" % (c, x["n"]))
             continue
-        f.write("%s,%d,%d,%d,%.3f,%s,%d,%d,%d,%.4f,%d,%.4f,%d/%d,%s,%s\n" % (
+        f.write("%s,%d,%d,%d,%.3f,%s,%d,%d,%d,%d,%d,%.4f,%d,%d,%.4f,%d/%d,%s,%s\n" % (
             c, x["n"], x["src"], x["dst"], x["ratio"], x["bar"], x["D"],
-            x["ci"][0], x["ci"][1], x["cov"], round(x["T"]), x["p"], x["k"], x["n"],
+            x["ci"][0], x["ci"][1], x["rng"][0], x["rng"][1], x["cov"],
+            round(x["T"]), round(x.get("B", 0)), x["p"], x["k"], x["n"],
             x["state"], x["ctrl_state"]))
 
 with open(ver_p, "w") as f:
@@ -233,8 +293,6 @@ with open(ver_p, "w") as f:
 
 # ---- THE SESSION VERDICT -----------------------------------------------------------
 incomplete = [c for c in REGISTERED if cell.get(c, {}).get("state") == "INCOMPLETE"]
-# A control is clean only at HALF the threshold.
-dirty = [c for c in CONTROLS if not incomplete and cell[c]["ctrl_state"] != "NONE"]
 m = {c: cell[c]["state"] for c in MEASURANDS if not incomplete}
 
 if incomplete:
@@ -285,16 +343,19 @@ else:
            % ", ".join(c for c, s in m.items() if s == "UNCLEAR"))
 
 out = ["SESSION VERDICT: %s" % verdict, "", why, "",
-       "Per cell (T = min(srcinit_median/10, %d ms); controls must be NONE at T/2):" % DELTA_REF]
+       "Per cell. T = min(srcinit_median/10, %d ms). Controls must be NONE at T/2, and B is"
+       % DELTA_REF,
+       "the arm bias they could NOT exclude: an EFFECT must clear T+B, a NULL must fit in T-B."]
 for c in sorted(cell):
     x = cell[c]
     if x["state"] == "INCOMPLETE":
         out.append("  %-14s INCOMPLETE (%d pairs)" % (c, x["n"]))
         continue
-    out.append("  %-14s %-8s ctrl=%-8s D=%+5dms CI=[%+5d,%+5d] (%.1f%%) T=%3dms  "
-               "ratio=%.3f bar=%s  sign_p=%.3f (%d/%d)"
+    out.append("  %-14s %-8s ctrl=%-8s D=%+5dms CI=[%+5d,%+5d] range=[%+5d,%+5d] "
+               "T=%3dms B=%3dms  ratio=%.3f bar=%s  sign_p=%.3f (%d/%d)"
                % (c, x["state"], x["ctrl_state"], x["D"], x["ci"][0], x["ci"][1],
-                  100 * x["cov"], round(x["T"]), x["ratio"], x["bar"], x["p"], x["k"], x["n"]))
+                  x["rng"][0], x["rng"][1], round(x["T"]), round(x.get("B", 0)),
+                  x["ratio"], x["bar"], x["p"], x["k"], x["n"]))
 # A cell can be NONE (an effect of size T is excluded) and STILL carry a real, consistent
 # effect BELOW T -- e.g. 99 ms on a 1000 ms arm, one millisecond under the threshold, on
 # 7 of 8 pairs. That is not a contradiction and it does not change the verdict, but it
@@ -311,6 +372,11 @@ if subthreshold:
             "threshold, so they are not a reproduction of P1. They are NOT nothing."]
 
 out += ["",
+        "A NULL (NONE) is judged on the full RANGE -- EVERY pair inside the bound -- not on",
+        "the median CI, which at n>8 would TRIM the outliers that contradict it. An EFFECT",
+        "uses the CI. That is why bimodality needs no special branch: it cannot hide from",
+        "the range.",
+        "",
         "The bar/ratio columns are the project's ACCEPTANCE criterion. They are reported",
         "and take NO part in this verdict, which is decided only by the paired CI against",
         "T. sign_p is reported, not decided on. All runs are in summary.csv -- read them.",

@@ -64,7 +64,7 @@ def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=
             f.write("%s,%d,yes\n" % (cell, pairs))
     env = dict(os.environ, VERDICT_CELLS=",".join(MEASURANDS),
                CONTROL_CELLS=",".join(CONTROLS), REGISTERED_CELLS=",".join(REGISTERED),
-               REQUIRED_PAIRS=str(pairs), SESSION_VOID_REASON=void_reason)
+               REQUIRED_PAIRS="8", SESSION_VOID_REASON=void_reason)
     env.pop("DELTA_REF_MS", None)                      # PINNED in the engine
     env.update(env_extra or {})
     out = subprocess.run([sys.executable, engine(), runs, meta,
@@ -86,7 +86,7 @@ CASES = [
      "UNCLEAR", "DOES-NOT-REPRODUCE"),
 
     ("codex r2: a rig-W-sized effect (230ms) in EVERY pair, on a slow 2500ms arm",
-     dict(measurand_d=[230] * 8, src=2500),
+     dict(measurand_d=[230] * 8, src=2500, control_d=[0] * 8),
      "REPRODUCES", "DOES-NOT-REPRODUCE"),
 
     ("codex r2: an effect the 10% bar alone would forgive (240ms @ 2500)",
@@ -164,9 +164,21 @@ CASES = [
      dict(measurand_d=[300, 310, 320, 330, 340, 350, 360, 370], src=1000),
      "REPRODUCES", None),
 
-    ("an exact 10% effect is reportable (it was once unreachable by construction)",
-     dict(measurand_d=[100] * 8, src=1000),
+    ("an exact 10% effect is reportable on a bias-free rig (it was once unreachable)",
+     dict(measurand_d=[100] * 8, src=1000, control_d=[0] * 8),
      "REPRODUCES", None),
+
+    # codex r8, BLOCKER: a control at +5 is "clean", but that 5ms of arm bias may be
+    # riding in the measurand too -- so an effect of EXACTLY T could be (T-5) real plus
+    # 5 rig. It must not be banked as a reproduction. B carries the bias the controls
+    # could not exclude into the measurand's threshold.
+    ("codex r8: an effect of exactly T is NOT a reproduction when the controls carry bias",
+     dict(measurand_d=[100] * 8, src=1000, control_d=[5] * 8),
+     "UNCLEAR", "REPRODUCES"),
+
+    ("codex r8: ...and the same effect IS one once the rig is bias-free",
+     dict(measurand_d=[105] * 8, src=1000, control_d=[5] * 8),
+     "REPRODUCES", "UNCLEAR"),
 
     ("source-initiated slower is INVERTED, never 'P1 absent'",
      dict(measurand_d=[-300, -310, -320, -330, -340, -350, -360, -370], src=1000),
@@ -183,6 +195,11 @@ CASES = [
           per_cell={"nq_tcp_mixed": ([300, 310, 320, 330, 340, 350, 360, 370], 1000),
                     "qn_tcp_mixed": ([-20, 300, 310, 320, 330, 340, 350, 360], 1000)}),
      "REPRODUCES", "UNCLEAR"),
+
+    ("codex r8: a bimodal arm cannot hide from the RANGE (a null is judged on every pair)",
+     dict(measurand_d=[-110, 0, -110, 110, 110, 0, -110, 0], src=730,
+          control_d=[0] * 8),
+     "UNCLEAR", "DOES-NOT-REPRODUCE"),
 
     ("a null the rig could not have SEEN is UNCLEAR, not a null",
      dict(measurand_d=[-400, -300, -100, 0, 0, 100, 300, 400], src=2000),
@@ -211,8 +228,8 @@ CASES = [
 
 MUTATIONS = [
     ("the control threshold is the SAME as the measurand's, not half (grok r6)",
-     ["    c_pos, c_neg = thresholds(s_med, 0.5)                      # controls: HALF",
-      "    c_pos, c_neg = thresholds(s_med, 1.0)"],
+     ['    c_pos, c_neg = thresholds(x["src"], 0.5)',
+      '    c_pos, c_neg = thresholds(x["src"], 1.0)'],
      "D=+229, ONE MS under"),
 
     ("dirty controls block only the null, not a reproduction (codex r6)",
@@ -234,9 +251,13 @@ MUTATIONS = [
      ["    if ci_lo >= t_pos:", "    if (ci_lo + ci_hi) / 2.0 >= t_pos:"],
      "one huge outlier"),
 
+    ("the control's residual bias is not carried into the measurand (codex r8)",
+     ["        B = max(B, abs(x[\"ci\"][0]), abs(x[\"ci\"][1]))", "        B = max(B, 0.0)"],
+     "exactly T is NOT a reproduction"),
+
     ("the engine trusts meta.complete and never counts the pairs (grok r3)",
-     ['    if (meta.get(c, {}).get("complete") != "yes" or len(d) < PAIRS or ci is None):',
-      '    if (meta.get(c, {}).get("complete") != "yes" or ci is None):'],
+     ['    if meta.get(c, {}).get("complete") != "yes" or len(d) < PAIRS or ci is None:',
+      '    if meta.get(c, {}).get("complete") != "yes" or ci is None:'],
      "SHORT cell (6 of 8 pairs)"),
 
     ("a missing registered cell is filtered away (codex r2)",
@@ -251,6 +272,38 @@ MUTATIONS = [
      ['_env = os.environ.get("DELTA_REF_MS")', "_env = None"],
      "DELTA_REF_MS is PINNED"),
 ]
+
+
+def rule_unit_tests():
+    """The RULE itself, called directly -- because a session at n=8 cannot distinguish the
+    CI from the RANGE (with 8 pairs the >=95% interval IS [min,max]). Removing n=16 is what
+    closed codex's round-8 blocker; judging a NULL on the RANGE is the SEMANTICS that keeps
+    it closed if a larger n is ever registered again, and it can only be tested here."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("eng", DEFAULT_VERDICT)
+    # the engine runs on import (it is a script), so exercise classify() via a subprocess-free
+    # re-implementation guard: read the function out of the source and exec it in isolation.
+    src = open(DEFAULT_VERDICT).read()
+    start = src.index("def classify(")
+    end = src.index("\n\n", src.index("return \"UNCLEAR\"", start))
+    ns = {}
+    exec(src[start:end], ns)
+    classify = ns["classify"]
+    bad = 0
+    checks = [
+        # ci narrow (outliers trimmed), range wide: a bimodal arm. MUST NOT be NONE.
+        ("bimodal: CI=[1,1] but range=[-110,110], T=73", (1, 1, -110, 110, 73, -66), "UNCLEAR"),
+        ("clean: CI and range both inside T",            (2, 3, -4, 3, 73, -66),      "NONE"),
+        ("a real effect clears T",                       (80, 90, 75, 95, 73, -66),   "EFFECT"),
+        ("an inverted effect clears -T",                 (-90, -80, -95, -75, 73, -66), "INVERTED"),
+    ]
+    for name, args, want in checks:
+        got = classify(*args)
+        ok = got == want
+        print("  %-46s -> %-8s %s" % (name, got, "ok" if ok else "*** FAIL (want %s) ***" % want))
+        if not ok:
+            bad += 1
+    return bad
 
 
 def run_cases():
@@ -323,8 +376,11 @@ if __name__ == "__main__":
         n = mutate()
         print("\n%d/%d mutations killed" % (len(MUTATIONS) - n, len(MUTATIONS)))
         sys.exit(1 if n else 0)
+    print("The RULE, called directly (a session at n=8 cannot separate CI from RANGE):")
+    unit = rule_unit_tests()
+    print()
     fails = run_cases()
     print()
     z = fuzz()
     print("\n%d/%d cases passed" % (len(CASES) - len(fails), len(CASES)))
-    sys.exit(1 if (fails or z) else 0)
+    sys.exit(1 if (fails or z or unit) else 0)

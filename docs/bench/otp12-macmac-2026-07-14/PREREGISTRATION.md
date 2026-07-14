@@ -1,6 +1,6 @@
 # otp-12 Mac↔Mac rig — PRE-REGISTRATION (written before any timed run)
 
-**Status**: Pre-registered, **revision 8**. **NO DATA EXISTS YET.**
+**Status**: Pre-registered, **revision 9**. **NO DATA EXISTS YET.**
 
 > ## THE RULE IN ONE PARAGRAPH (rev 8 — D-2026-07-14-3, owner: "simplify")
 >
@@ -212,10 +212,20 @@ a new case to walk past**, which is precisely what went wrong seven rounds runni
 
 | state | condition |
 |---|---|
-| **EFFECT** | `CI_lo >= T_pos` — destination-initiated is slower, by at least T |
-| **INVERTED** | `CI_hi <= T_neg` — source-initiated is slower, by at least T |
-| **NONE** | `T_neg < CI_lo` and `CI_hi < T_pos` — an effect of size T is **EXCLUDED** (equivalence) |
+| **EFFECT** | `CI_lo >= T_pos + B` — destination-initiated is slower, by at least T |
+| **INVERTED** | `CI_hi <= T_neg − B` — source-initiated is slower, by at least T |
+| **NONE** | **the FULL RANGE** lies inside `(T_neg, T_pos)` — *every* pair, not just the median. An effect of size T is **EXCLUDED** (equivalence) |
 | **UNCLEAR** | anything else — the CI spans a threshold; the rig cannot answer |
+
+**A NULL IS JUDGED ON THE RANGE, AN EFFECT ON THE CI — and that asymmetry is the point
+(round-8, codex, BLOCKER).** The ≥95% CI is the *narrowest* valid interval, so at n>8 it
+**trims outliers**; a **bimodal** arm then yields a *narrow median CI* and a **false null**
+(codex drove `CI = [1,1]` from modes at ±110). **An equivalence claim must never be
+reachable by trimming away the very pairs that contradict it.** A *positive* claim may use
+the CI: pairs clearing T is evidence, and a few stragglers do not undo it.
+
+*This is also why bimodality needs no special branch — it cannot hide from the range. The
+previous rule hand-coded an `UNSTABLE` override for exactly this, and got it wrong.*
 
 ### The controls are a PRECONDITION, at HALF the threshold
 
@@ -226,6 +236,28 @@ all but 1 ms of P1 while we call the rig clean (round 6 drove exactly that).
 **If any control fails, NO verdict about the measurand is read — not a reproduction, and
 not a null.** Uncertainty about a rig-wide confound is not evidence that the confound is
 absent, and P1's whole claim is that the effect is *specific* to TCP × mixed.
+
+**And "clean" is not "zero" (round-8, codex, BLOCKER).** A control sitting at `+49` with
+`T/2 = 50` certifies — but *that 49 ms of arm bias may be riding in the measurand too*, so a
+measurand effect of exactly `T` could be half real and half rig. The bias the controls **fail
+to exclude** is therefore carried into the measurand's thresholds:
+
+    B = max over clean controls of the largest |CI bound|
+    an EFFECT must clear   T + B     (the bias could be INFLATING it)
+    a NULL must fit inside T − B     (the bias could be MASKING an effect)
+
+If the controls are genuinely clean, `B` is a few ms and this barely moves. If they are
+marginal, it bites — which is the point.
+
+### The controls are CONTEMPORANEOUS with the measurands
+
+The schedule is **slot-major**: within slot *i*, **every** cell takes one ABBA pair, in a
+fixed registered order, before any cell takes slot *i+1*. All six cells therefore span the
+same wall-clock window.
+
+*(Round-8, codex, HIGH: both measurand cells used to run first and the controls afterwards
+— so **the controls certified a window they were never in**. A transient could hit the
+measurand and be gone before the controls ran, and they would pronounce the rig clean.)*
 
 ### The session verdict
 
@@ -262,18 +294,15 @@ absent, and P1's whole claim is that the effect is *specific* to TCP × mixed.
   registered in advance — but it is **not nothing**, and it does not hide inside the word
   "none".
 
-### The escalation, registered in advance
+### There is NO escalation. `RUNS = 8`, and only 8.
 
-At n=8 the ≥95% interval **is the full range**, so one noisy pair can leave the rig
-`UNCLEAR`. A session returning **`UNCLEAR` or `CONTROLS-NOT-CLEAN`** — and *nothing else*
-— may be re-run **once** at `RUNS=16` (interval `[d(4), d(13)]`, coverage 97.9%, which
-tolerates three outliers per side).
+The `RUNS=16` escalation is **removed** (owner, 2026-07-14). A null is judged on the **full
+range**, which only **widens** with n — so more pairs could never rescue an `UNCLEAR` rig,
+nor certify a marginal control; and if you already have an `EFFECT`, you do not need them.
 
-It is triggered by a **power failure and by nothing else**, and that is **enforced**: the
-harness reads the prior session's `session_verdict.txt`, requires its data and manifest on
-the registered build, and **burns the escalation against the prior `runs.csv` hash** — so
-copying the session elsewhere cannot buy a second re-roll. **A result you merely dislike
-is not a trigger.**
+**A noisy rig is fixed by a quieter rig, not by more pairs — and `UNCLEAR` says exactly
+that.** Removing it also removes its entire p-hacking guard surface (a "once" marker, a
+verdict check, a data-hash burn), none of which now has to be right.
 
 ### The registered constants are PINNED IN CODE
 

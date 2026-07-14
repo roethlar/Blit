@@ -187,8 +187,6 @@ CELLS="$REGISTERED_CELLS"
 
 SESSION_TAG="$(date +%Y%m%dT%H%M%S)"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/logs/otp12pf_mac_$SESSION_TAG}"
-ESCALATED_FROM=""          # set only by the verified RUNS=16 escalation
-PRIOR_RUNS_SHA=""          # the data hash the escalation is bound to
 
 MUX="$(mktemp -d /tmp/blit-mm-mux.XXXXXX)"   # /tmp: macOS TMPDIR busts ssh's 104b ControlPath cap
 SSH_MUX=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=20
@@ -483,57 +481,12 @@ print(int(statistics.median(ts)))
 
 # =============================================================================
 preflight() {
-  # RUNS=8 is the registered value. RUNS=16 is the ONLY registered escalation, and
-  # it may be used for exactly ONE reason: a prior session returned
-  # INCONCLUSIVE-UNDERPOWERED. It must NEVER be used to chase a result someone
-  # dislikes -- that is the p-hacking this pre-registration exists to prevent.
-  #
-  # Why it exists (round-3 grok, MEDIUM): at n=8 the >=95% order-statistic interval
-  # is the FULL RANGE [min,max], so ONE noisy pair with |d| >= margin blocks a null
-  # forever and the rig can only ever say UNDERPOWERED -- a null-incapable
-  # instrument is broken too, just less dangerously. At n=16 the interval is
-  # [d(4), d(13)] (coverage 97.9%), which tolerates three outliers per side.
-  [[ "$RUNS" == 8 || "$RUNS" == 16 ]] \
-    || die "RUNS must be 8 (registered) or 16 (the registered escalation, valid ONLY after an INCONCLUSIVE-UNDERPOWERED session) — got '$RUNS'"
-  if [[ "$RUNS" == 16 ]]; then
-    # A FLAG IS NOT A JUSTIFICATION (round-5 codex, HIGH). `UNDERPOWERED_ESCALATION=1`
-    # was sufficient on its own: no prior session named, none verified, "once"
-    # unenforced. That is a re-roll button with a serious-sounding name. The
-    # escalation must now POINT AT the underpowered session and the harness READS ITS
-    # VERDICT — the trigger is evidence on disk, not an operator's assertion.
-    local prior="${UNDERPOWERED_ESCALATION:-}" v
-    [[ -n "$prior" ]] \
-      || die "RUNS=16 is the escalation arm. Set UNDERPOWERED_ESCALATION=<path to the prior session dir> that returned INCONCLUSIVE-UNDERPOWERED. It buys POWER; it is NOT a re-roll."
-    # The trigger must be a REAL SESSION, not a directory that merely contains the right
-    # words (round-6, codex HIGH + grok F5: "any directory containing the expected first
-    # verdict line authorizes escalation; provenance, hashes, build and prior runs=8 are
-    # never checked"). So the prior session must carry its own DATA and MANIFEST, and
-    # the escalation is bound to the CONTENT of that data, not to its path.
-    for _f in session_verdict.txt runs.csv meta.csv staging-manifest.txt; do
-      [[ -f "$prior/$_f" ]] \
-        || die "UNDERPOWERED_ESCALATION='$prior' has no $_f — the escalation must name a REAL prior session, not a directory with the right words in it"
-    done
-    v="$(head -1 "$prior/session_verdict.txt" | sed -n 's/^SESSION VERDICT: *//p')"
-    # The two outcomes that mean "not enough power", and NOTHING else. A result you
-    # merely dislike (REPRODUCES, INVERTED, MIXED, DOES-NOT-REPRODUCE) is not a trigger.
-    case "$v" in
-      UNCLEAR|CONTROLS-NOT-CLEAN) : ;;
-      *) die "the prior session '$prior' returned '$v'. RUNS=16 is triggered ONLY by a POWER failure (UNCLEAR or CONTROLS-NOT-CLEAN) — re-running any other result at higher n is p-hacking, and this gate exists to stop it." ;;
-    esac
-    grep -q "binary_identity=$REGISTERED_BUILD" "$prior/staging-manifest.txt" \
-      || die "the prior session '$prior' was not run on the registered build $REGISTERED_BUILD — it cannot authorise an escalation"
-    # "Once" is bound to the DATA, not the directory: copying the session elsewhere does
-    # not buy a second re-roll, because the burn records the runs.csv hash.
-    PRIOR_RUNS_SHA="$(shasum -a 256 "$prior/runs.csv" | cut -d' ' -f1)"
-    if [[ -f "$REPO_ROOT/logs/ESCALATED-SESSIONS" ]] \
-       && grep -q "$PRIOR_RUNS_SHA" "$REPO_ROOT/logs/ESCALATED-SESSIONS"; then
-      die "this exact session's data (runs.csv $PRIOR_RUNS_SHA) has ALREADY authorised an escalation — see logs/ESCALATED-SESSIONS. 'Once' means once, and it is bound to the DATA, not the path."
-    fi
-    ESCALATED_FROM="$prior"
-    log "  escalation: RUNS=16, triggered by $prior (verified INCONCLUSIVE-UNDERPOWERED, build $REGISTERED_BUILD, runs.csv $PRIOR_RUNS_SHA)"
-  fi
-  [[ "$EXPECT_SHA" == "$REGISTERED_BUILD" ]] \
-    || die "EXPECT_SHA='$EXPECT_SHA' but the PRE-REGISTERED build is $REGISTERED_BUILD — a run against another build is not the registered experiment"
+  # RUNS=8, and ONLY 8. The RUNS=16 escalation was removed (owner, 2026-07-14): a null is
+  # judged on the FULL RANGE, which only WIDENS with n, so more pairs could never rescue an
+  # UNCLEAR rig or certify a control -- and if you already have an EFFECT you do not need
+  # it. Its p-hacking guard surface goes with it.
+  [[ "$RUNS" == 8 ]] || die "RUNS must be 8 (the registered value) — got '$RUNS'"
+
   # The instrument must be the REVIEWED instrument: a modified harness must not be
   # able to claim the reviewed commit.
   git -C "$REPO_ROOT" diff --quiet HEAD -- "$SELF" "$VERDICT_PY" "$VERDICT_TEST" \
@@ -597,7 +550,6 @@ write_manifest() {
     echo "# binary_identity=$EXPECT_SHA runs=$RUNS settle_ms=$SETTLE_MS load_max=$LOAD_MAX"
     echo "# drain_mbps=$DRAIN_MBPS drain_quiet=$DRAIN_QUIET delta_ref_ms=$DELTA_REF_MS"
     echo "# drain_disk_nagatha=$N_DISK drain_disk_q=$Q_DISK ssh_rtt_ms=$SSH_RTT_MS"
-    echo "# escalated_from=${ESCALATED_FROM:-none}"   # a RUNS=16 run must carry its trigger
     echo "# cells=$CELLS"
     echo "host,role,sha,sha256,path"
     echo "nagatha,client,$EXPECT_SHA,$nb,$N_BLIT"
@@ -711,9 +663,10 @@ for i in \$(seq 1 $DRAIN_ITERS); do
   if [ \"\$ok\" = 1 ]; then quiet=\$((quiet+1)); else quiet=0; fi
   if [ \$quiet -ge $DRAIN_QUIET ]; then echo \"drained_\${i}x2s\"; exit 0; fi
 done
-echo DRAIN-TIMEOUT" 2>/dev/null | nocr | tail -1)"
-  # ONE token, or it is an error. A multi-line value whose FIRST line says "drained"
-  # must never satisfy the caller's `== drained*` test.
+echo DRAIN-TIMEOUT" 2>/dev/null | nocr | tail -1)" || out="DRAIN-ERROR"
+  # ONE token, or it is an error -- AND the probe must have EXITED cleanly. A drain that
+  # printed `drained_*` and THEN failed is not a drain (codex r8: I fixed the value and
+  # left the status, which is the same defect one layer down).
   case "$out" in
     drained_[0-9]*x2s) echo "$out" ;;
     DRAIN-TIMEOUT)     echo DRAIN-TIMEOUT ;;
@@ -836,30 +789,80 @@ arm_destinit() {
 CSV="$OUT_DIR/runs.csv"
 META="$OUT_DIR/meta.csv"
 
-run_pair_loop() {
-  local cell="$1" sh="$2" dh="$3"
-  local slot=1 attempts=0 valid=0 max=$(( 2 * RUNS ))
-  log "=== $cell (srcinit=$(hname "$sh") vs destinit=$(hname "$dh"), ABBA, $RUNS pairs) ==="
-  while (( valid < RUNS && attempts < max )); do
-    attempts=$(( attempts + 1 ))
-    local order pair=yes rowA="" rowB="" arm aname init rid run
-    if (( slot % 2 )); then order="A B"; else order="B A"; fi
-    for arm in $order; do
-      if [[ "$arm" == A ]]; then aname=srcinit; init="$(hname "$sh")"; else aname=destinit; init="$(hname "$dh")"; fi
-      rid="${aname}_s${slot}a${attempts}"; run="${SESSION_TAG}_${cell}_${rid}"
-      if [[ "$aname" == srcinit ]]; then arm_srcinit "$sh" "$dh" "$run"
-      else arm_destinit "$sh" "$dh" "$run"; fi
-      [[ "$RUN_VALID" == yes ]] || pair=no
-      local row="$cell,$aname,$EXPECT_SHA,$init,$slot,$RUN_MS,$RUN_FLUSH,$RUN_SETTLED,$RUN_FILES,$RUN_BYTES,$RUN_EXIT,$RUN_DRAIN,$RUN_COLD"
-      if [[ "$arm" == A ]]; then rowA="$row"; else rowB="$row"; fi
-      log "  $cell/$aname slot $slot (att $attempts): ${RUN_MS}ms (dest-fsync ${RUN_FLUSH}ms, $RUN_FILES files, exit $RUN_EXIT, $RUN_DRAIN, $RUN_COLD)"
-    done
-    echo "$rowA,$pair" >> "$CSV"; echo "$rowB,$pair" >> "$CSV"
-    if [[ "$pair" == yes ]]; then valid=$(( valid + 1 )); slot=$(( slot + 1 ))
-    else log "  $cell: pair at slot $slot VOIDED — re-running the slot"; fi
+# THE CELLS ARE INTERLEAVED, NOT RUN BACK TO BACK.
+#
+# Round-8 (codex, HIGH): both measurand cells used to run first, then the controls. So the
+# controls certified a window THEY NEVER SHARED -- a transient (a background process, a
+# thermal excursion, a disk that woke up) could hit the measurand and be entirely gone by
+# the time the gRPC/large controls ran, and they would certify the rig as clean. The
+# controls are the ONLY thing standing between this rig and a rig-wide artifact, and they
+# cannot vouch for a window they were not in.
+#
+# So the schedule is SLOT-MAJOR: within slot i, EVERY cell takes one ABBA pair, in a fixed
+# registered order, before any cell takes slot i+1. All six cells therefore span the same
+# wall-clock window and see the same transients.
+#
+#   cell           src dst fixture flag
+CELL_TABLE=(
+  "nq_tcp_mixed    n   q   mixed   "
+  "qn_tcp_mixed    q   n   mixed   "
+  "nq_grpc_mixed   n   q   mixed   --force-grpc"
+  "qn_grpc_mixed   q   n   mixed   --force-grpc"
+  "nq_tcp_large    n   q   large   "
+  "qn_tcp_large    q   n   large   "
+)
+
+# macOS ships bash 3.2, which has NO associative arrays. Parallel indexed arrays, keyed by
+# the cell's position in CELL_TABLE.
+CELL_VALID=(); CELL_ATTEMPTS=()
+run_one_pair() {   # $1=idx $2=cell $3=srchost $4=dsthost $5=fixture $6=flag $7=slot -> 0 if VALID
+  local i="$1" cell="$2" sh="$3" dh="$4" w="$5" flag="$6" slot="$7"
+  local attempts=$(( ${CELL_ATTEMPTS[$i]:-0} + 1 ))
+  CELL_ATTEMPTS[$i]=$attempts
+  CUR_W="$w"; CUR_FLAG="$flag"
+  local order pair=yes rowA="" rowB="" arm aname init rid run
+  # ABBA: the arm order alternates by slot, so a monotonic drift cannot favour one arm.
+  if (( slot % 2 )); then order="A B"; else order="B A"; fi
+  for arm in $order; do
+    if [[ "$arm" == A ]]; then aname=srcinit; init="$(hname "$sh")"; else aname=destinit; init="$(hname "$dh")"; fi
+    rid="${aname}_s${slot}a${attempts}"; run="${SESSION_TAG}_${cell}_${rid}"
+    if [[ "$aname" == srcinit ]]; then arm_srcinit "$sh" "$dh" "$run"; else arm_destinit "$sh" "$dh" "$run"; fi
+    [[ "$RUN_VALID" == yes ]] || pair=no
+    local row="$cell,$aname,$EXPECT_SHA,$init,$slot,$RUN_MS,$RUN_FLUSH,$RUN_SETTLED,$RUN_FILES,$RUN_BYTES,$RUN_EXIT,$RUN_DRAIN,$RUN_COLD"
+    if [[ "$arm" == A ]]; then rowA="$row"; else rowB="$row"; fi
+    log "  $cell/$aname slot $slot (att $attempts): ${RUN_MS}ms (fsync ${RUN_FLUSH}ms, settle ${RUN_SETTLED}ms, $RUN_FILES files, exit $RUN_EXIT, $RUN_DRAIN, $RUN_COLD)"
   done
-  if (( valid < RUNS )); then echo "$cell,$attempts,no" >> "$META"; log "  $cell INCOMPLETE: $valid/$RUNS"
-  else echo "$cell,$attempts,yes" >> "$META"; fi
+  echo "$rowA,$pair" >> "$CSV"; echo "$rowB,$pair" >> "$CSV"
+  if [[ "$pair" == yes ]]; then
+    CELL_VALID[$i]=$(( ${CELL_VALID[$i]:-0} + 1 ))
+    return 0
+  fi
+  log "  $cell: pair at slot $slot VOIDED"
+  return 1
+}
+
+run_all_cells() {
+  local slot i cell sh dh w flag max=$(( 2 * RUNS )) n=${#CELL_TABLE[@]}
+  for (( i = 0; i < n; i++ )); do CELL_VALID[$i]=0; CELL_ATTEMPTS[$i]=0; done
+  for (( slot = 1; slot <= RUNS; slot++ )); do
+    log "=== SLOT $slot / $RUNS (every cell takes one pair before any cell takes the next) ==="
+    for (( i = 0; i < n; i++ )); do
+      read -r cell sh dh w flag <<<"${CELL_TABLE[$i]}"
+      # a voided pair is retried IN PLACE, so the cell stays in step with its siblings
+      while (( ${CELL_ATTEMPTS[$i]:-0} < max )); do
+        if run_one_pair "$i" "$cell" "$sh" "$dh" "$w" "${flag:-}" "$slot"; then break; fi
+      done
+    done
+  done
+  for (( i = 0; i < n; i++ )); do
+    read -r cell sh dh w flag <<<"${CELL_TABLE[$i]}"
+    if (( ${CELL_VALID[$i]:-0} < RUNS )); then
+      echo "$cell,${CELL_ATTEMPTS[$i]},no" >> "$META"
+      log "  $cell INCOMPLETE: ${CELL_VALID[$i]}/$RUNS valid pairs"
+    else
+      echo "$cell,${CELL_ATTEMPTS[$i]},yes" >> "$META"
+    fi
+  done
 }
 
 SESSION_VOID_REASON=""
@@ -1048,29 +1051,13 @@ main() {
     log "PREFLIGHT_ONLY: checks passed; no daemon started, nothing timed"
     exit 0
   fi
-  # "Once" means once: burn the escalation the moment it is used, so the same
-  # underpowered session cannot authorise a second, third, nth re-roll.
-  if [[ -n "$ESCALATED_FROM" ]]; then
-    echo "escalated to $SESSION_TAG (RUNS=$RUNS) on $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      >> "$ESCALATED_FROM/ESCALATED"
-    # Bound to the DATA, so a copy of the session cannot buy a second re-roll.
-    echo "$PRIOR_RUNS_SHA $ESCALATED_FROM -> $SESSION_TAG" >> "$REPO_ROOT/logs/ESCALATED-SESSIONS"
-  fi
   log "session $SESSION_TAG  build=$EXPECT_SHA  nagatha=$N_IP  q=$Q_IP"
   echo "cell,arm,build,initiator,run,ms,flush_ms,settled_ms,files,bytes,exit,drain,cold,valid" > "$CSV"
   echo "cell,pairs_attempted,complete" > "$META"
   daemon_start n; daemon_start q
   smoke n; smoke q
 
-  local carrier w flag cell
-  for w in mixed large small; do
-    for carrier in tcp grpc; do
-      if [[ "$carrier" == grpc ]]; then flag="--force-grpc"; else flag=""; fi
-      CUR_W="$w"; CUR_FLAG="$flag"
-      cell="nq_${carrier}_${w}"; if [[ ",$CELLS," == *",$cell,"* ]]; then run_pair_loop "$cell" n q; fi
-      cell="qn_${carrier}_${w}"; if [[ ",$CELLS," == *",$cell,"* ]]; then run_pair_loop "$cell" q n; fi
-    done
-  done
+  run_all_cells
 
   # End-load BEFORE the verdict is computed, and it can VOID the session.
   log "  load1 (end): nagatha=$(load1 n)  q=$(load1 q)"
