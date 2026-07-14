@@ -4067,3 +4067,2449 @@ exec
    646	open(sess_p, "w").write("\n".join(lines) + "\n")
    647	print("\n".join(lines))
 
+exec
+/bin/zsh -lc "nl -ba scripts/otp12pf_mac_verdict_test.py | sed -n '1,300p'" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+     1	#!/usr/bin/env python3
+     2	"""Guard test for otp12pf_mac_verdict.py — run it before trusting a Mac<->Mac run.
+     3	
+     4	    python3 scripts/otp12pf_mac_verdict_test.py
+     5	
+     6	Every case below is a DEFECT A REVIEWER ACTUALLY FOUND in a previous revision of
+     7	this engine, encoded so it cannot come back. Each is mutation-proven: reverting the
+     8	fix in the engine makes exactly that case fail (see MUTATIONS at the bottom, run
+     9	with `--mutations`).
+    10	
+    11	    VERDICT_PY=<path> python3 scripts/otp12pf_mac_verdict_test.py   # test a copy
+    12	
+    13	The headline defects:
+    14	
+    15	  * codex r1 — a RANGE noise rule let a real 190 ms effect on 7/8 pairs report
+    16	    "VANISHES" (83% of rig W's Delta_P1).
+    17	  * codex r2 + grok — the equivalence margin was tied to the BAR, which on a slow
+    18	    arm is WIDER than the effect being excluded: all eight d_i = 230 on a 2500 ms
+    19	    arm still reported "VANISHES".
+    20	  * codex r2 — the negative margin used -0.10*src, but the bar is symmetric in
+    21	    RATIO, so the inverting bound is -src/11: a CI of [-190,0] on src=2000 reported
+    22	    "VANISHES" though -190 IS an inversion ratio of 1.105.
+    23	  * codex r2 — the sign test was computed and never read: 7/8 positive pairs could
+    24	    report REPRODUCES while the registered test said p = .0703 (not significant).
+    25	  * grok (REPRODUCED LIVE) — RIG-VOID failed open: a control with bar FAIL whose CI
+    26	    crossed zero escaped the void, and a session emitted VANISHES with its gRPC
+    27	    controls sitting at ratio 1.200 / bar FAIL.
+    28	  * codex r2 — a partial cell set was FILTERED, not marked INCOMPLETE, so a one-cell
+    29	    run could emit VANISHES while claiming "both" cells vanished.
+    30	  * grok — an exact 1.10 ratio could never REPRODUCE, because the bar is `<=1.10
+    31	    PASSES` and REPRODUCES demanded a bar FAIL: a precise 10% effect was
+    32	    unreportable by construction.
+    33	"""
+    34	import csv, os, random, subprocess, sys, tempfile
+    35	
+    36	HERE = os.path.dirname(os.path.abspath(__file__))
+    37	DEFAULT_VERDICT = os.path.join(HERE, "otp12pf_mac_verdict.py")
+    38	
+    39	
+    40	def engine():
+    41	    """Resolved per call, never cached: the mutation harness repoints it at runtime,
+    42	    and a cached path would silently test the UNMUTATED engine and report a kill it
+    43	    never made."""
+    44	    return os.environ.get("VERDICT_PY", DEFAULT_VERDICT)
+    45	CONTROLS = ("nq_grpc_mixed", "qn_grpc_mixed", "nq_tcp_large", "qn_tcp_large")
+    46	MEASURANDS = ("nq_tcp_mixed", "qn_tcp_mixed")
+    47	REGISTERED = MEASURANDS + CONTROLS
+    48	OUTCOMES = {"REPRODUCES", "INVERSION", "PARTIAL", "VANISHES", "UNDERPOWERED",
+    49	            "BAR-FAIL-INCONSISTENT", "UNSTABLE", "INCOMPLETE", "MIXED-SIGN",
+    50	            "RIG-VOID", "INCONCLUSIVE", "INCONCLUSIVE-UNDERPOWERED",
+    51	            "CONTROLS-UNCERTIFIED"}
+    52	
+    53	
+    54	def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=(),
+    55	            per_cell=None, void_reason="", pairs=8, env_extra=None):
+    56	    """Run the engine on a synthetic session and return its SESSION VERDICT.
+    57	
+    58	    `src` (and `control_src`) may be an INT (a constant source arm) or a LIST giving
+    59	    the srcinit of each pair. The constant-only helper could not express the case
+    60	    that matters most -- the bar is computed on the MARGINAL medians while the CI is
+    61	    computed on the PAIRED differences, and those two can disagree in DIRECTION only
+    62	    when the source arm varies (round-5 codex, HIGH: "the helper hardcodes constant
+    63	    source times", which is why the n=16 blocker was unguardable).
+    64	
+    65	    `per_cell` overrides individual cells with (d, src) so the two measurand
+    66	    directions can differ; `pairs` drives the n=16 escalation arm.
+    67	    """
+    68	    control_d = [5] * pairs if control_d is None else control_d
+    69	    per_cell = per_cell or {}
+    70	    tmp = tempfile.mkdtemp()
+    71	    runs, meta = os.path.join(tmp, "runs.csv"), os.path.join(tmp, "meta.csv")
+    72	    present = [c for c in REGISTERED if c not in drop_cells]
+    73	    with open(runs, "w") as f:
+    74	        w = csv.writer(f)
+    75	        w.writerow("cell,arm,build,initiator,run,ms,flush_ms,settled_ms,files,bytes,exit,drain,cold,valid".split(","))
+    76	        for cell in present:
+    77	            if cell in per_cell:
+    78	                d, s = per_cell[cell]
+    79	            elif cell in MEASURANDS:
+    80	                d, s = measurand_d, src
+    81	            else:
+    82	                d, s = control_d, control_src
+    83	            srcs = s if isinstance(s, list) else [s] * len(d)
+    84	            for i, (di, si) in enumerate(zip(d, srcs), 1):
+    85	                w.writerow([cell, "srcinit", "x", "h", i, si, 0, 250, 1, 1, 0, "drained_1x2s", "cold", "yes"])
+    86	                w.writerow([cell, "destinit", "x", "h", i, si + di, 0, 250, 1, 1, 0, "drained_1x2s", "cold", "yes"])
+    87	    with open(meta, "w") as f:
+    88	        f.write("cell,pairs_attempted,complete\n")
+    89	        for cell in present:
+    90	            # `complete=yes` is asserted even when the cell is SHORT: the engine must
+    91	            # not believe it (grok drove VANISHES out of a 1-pair session at 0% CI
+    92	            # coverage because the engine trusted this column).
+    93	            f.write("%s,%d,yes\n" % (cell, pairs))
+    94	    env = dict(os.environ,
+    95	               VERDICT_CELLS=",".join(MEASURANDS),
+    96	               CONTROL_CELLS=",".join(CONTROLS),
+    97	               REGISTERED_CELLS=",".join(REGISTERED),
+    98	               REQUIRED_PAIRS=str(pairs), SESSION_VOID_REASON=void_reason)
+    99	    env.pop("DELTA_REF_MS", None)          # it is PINNED in the engine now
+   100	    env.update(env_extra or {})
+   101	    out = subprocess.run([sys.executable, engine(), runs, meta,
+   102	                          os.path.join(tmp, "s.csv"), os.path.join(tmp, "p.csv"),
+   103	                          os.path.join(tmp, "v.csv"), os.path.join(tmp, "sv.txt")],
+   104	                         env=env, capture_output=True, text=True)
+   105	    if out.returncode == 2:
+   106	        # A DELIBERATE refusal (a pinned constant was tampered with, a row is corrupt).
+   107	        # Distinct from a crash: refusing is the engine working, not failing.
+   108	        return "ENGINE-REFUSED"
+   109	    if out.returncode != 0:
+   110	        return "ENGINE-CRASH: " + (out.stderr.strip().splitlines() or ["?"])[-1]
+   111	    return out.stdout.splitlines()[0].split(":", 1)[1].strip()
+   112	
+   113	
+   114	# (name, kwargs, must_be, must_not_be)
+   115	CASES = [
+   116	    ("codex r1: real 190ms effect on 7/8 pairs (83% of rig W's Delta_P1)",
+   117	     dict(measurand_d=[0, 180, 180, 190, 190, 200, 200, 200], src=2000),
+   118	     None, "VANISHES"),
+   119	
+   120	    ("codex r2: a rig-W-sized effect (230ms) in EVERY pair, on a slow 2500ms arm",
+   121	     dict(measurand_d=[230] * 8, src=2500),
+   122	     "PARTIAL", "VANISHES"),
+   123	
+   124	    # THE MARGIN'S OWN CASE. No consistent effect (so the effect-detection branch
+   125	    # does NOT fire), but the CI still reaches +240 -- ABOVE rig W's 230 ms and
+   126	    # BELOW the bar's 250 ms on this slow arm. A margin tied to the bar calls this
+   127	    # equivalence; the true margin, min(bar_breach, DELTA_REF), cannot exclude a
+   128	    # rig-W-sized effect and must say so.
+   129	    ("codex r2: the margin is min(bar_breach, DELTA_REF) -- the bar alone forgives 240ms",
+   130	     dict(measurand_d=[-100, -50, 0, 50, 100, 200, 220, 240], src=2500),
+   131	     "INCONCLUSIVE-UNDERPOWERED", "VANISHES"),
+   132	
+   133	    # The medians must PASS the bar here, or the cell never reaches the margin logic
+   134	    # and the case would not exercise the bound it claims to guard.
+   135	    ("codex r2: the negative bound is -src/11, not -0.10*src (CI [-190,0] @ 2000)",
+   136	     dict(measurand_d=[-190, -190, 0, 0, 0, 0, 0, 0], src=2000),
+   137	     "INCONCLUSIVE-UNDERPOWERED", "VANISHES"),
+   138	
+   139	    ("codex r2: the sign test must PARTICIPATE (7 pos + 1 neg -> p=.0703, n.s.)",
+   140	     dict(measurand_d=[-20, 300, 310, 320, 330, 340, 350, 360], src=1000),
+   141	     "BAR-FAIL-INCONSISTENT", "REPRODUCES"),
+   142	
+   143	    ("grok (reproduced live): a bar-FAIL control whose CI crosses zero blocks everything",
+   144	     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+   145	          control_d=[-100, -50, 300, 320, 340, 350, 360, 380], control_src=1000),
+   146	     "CONTROLS-UNCERTIFIED", "VANISHES"),
+   147	
+   148	    ("codex r2: a missing registered cell is INCOMPLETE, never filtered away",
+   149	     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+   150	          drop_cells=("qn_tcp_mixed",)),
+   151	     "INCOMPLETE", "VANISHES"),
+   152	
+   153	    ("grok: an EXACT 1.10 ratio must be reportable (it was unreachable)",
+   154	     dict(measurand_d=[100] * 8, src=1000),
+   155	     "REPRODUCES", None),
+   156	
+   157	    ("a genuinely absent effect is a real EQUIVALENCE result",
+   158	     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000),
+   159	     "VANISHES", None),
+   160	
+   161	    ("a bar-breaking, consistent slowdown reproduces",
+   162	     dict(measurand_d=[300, 310, 320, 330, 340, 350, 360, 370], src=1000),
+   163	     "REPRODUCES", None),
+   164	
+   165	    ("source-initiated is the slow arm -> INVERSION, never 'P1 absent'",
+   166	     dict(measurand_d=[-300, -310, -320, -330, -340, -350, -360, -370], src=1000),
+   167	     "INVERSION", None),
+   168	
+   169	    ("a null the rig could not have SEEN is UNDERPOWERED, not VANISHES",
+   170	     dict(measurand_d=[-400, -300, -100, 0, 0, 100, 300, 400], src=2000),
+   171	     "INCONCLUSIVE-UNDERPOWERED", "VANISHES"),
+   172	
+   173	    # --- ROUND 3 (grok) -------------------------------------------------------
+   174	    # THE BLOCKER, reproduced live: the round-2 RIG-VOID fix was only half of the
+   175	    # hole. A control carrying a real, 8/8, rig-W-sized effect on a SLOW arm is
+   176	    # bar-PASS (ratio 1.092) and lands as PARTIAL -- and PARTIAL did not void. The
+   177	    # session printed a clean VANISHES while EVERY control showed the exact effect
+   178	    # size the power gate is built around.
+   179	    ("grok r3 (reproduced): a Delta_ref-sized control effect must VOID the rig",
+   180	     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+   181	          control_d=[230] * 8, control_src=2500),
+   182	     "RIG-VOID", "VANISHES"),
+   183	
+   184	    # ...but a TINY consistent control asymmetry is host x role (q is the faster
+   185	    # Mac), is excluded as smaller than the margin, and must NOT void the rig --
+   186	    # or every session dies.
+   187	    ("grok r3: a margin-excluded control asymmetry must NOT void the rig",
+   188	     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+   189	          control_d=[5] * 8, control_src=1000),
+   190	     "VANISHES", "RIG-VOID"),
+   191	
+   192	    ("grok r3 (reproduced): n=1 with complete=yes must not grade at 0% coverage",
+   193	     dict(measurand_d=[0], src=2000, control_d=[5], control_src=1000),
+   194	     "INCOMPLETE", "VANISHES"),
+   195	
+   196	    ("grok r3 (reproduced): a clean one-direction REPRODUCES must not be masked",
+   197	     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+   198	          per_cell={"nq_tcp_mixed": ([300, 310, 320, 330, 340, 350, 360, 370], 1000),
+   199	                    "qn_tcp_mixed": ([-20, 300, 310, 320, 330, 340, 350, 360], 1000)}),
+   200	     "REPRODUCES", "BAR-FAIL-INCONSISTENT"),
+   201	
+   202	    ("grok r3: a harness-detected session void (end-load) refuses a verdict",
+   203	     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+   204	          void_reason="end-load on q is 9.1 (> 3.0)"),
+   205	     "RIG-VOID", "VANISHES"),
+   206	
+   207	    # --- ROUND 5 -------------------------------------------------------------
+   208	    # codex BLOCKER: `bar == FAIL` carried no DIRECTION, so a bar failure in the
+   209	    # INVERSE direction made a positive effect "material". Thirteen +1ms pairs and
+   210	    # three pairs that fall below the whole distribution => the marginal medians fail
+   211	    # the bar the OTHER way (1200 vs 1001) while every surviving pair is +1ms.
+   212	    # The old rule called that REPRODUCES -- P1 reproducing off ONE MILLISECOND.
+   213	    ("codex r5: a bar FAIL in the INVERSE direction cannot make +1ms 'material'",
+   214	     dict(measurand_d=[1] * 13 + [-4500] * 3,
+   215	          src=[1000] * 7 + [1200] * 6 + [5000] * 3,
+   216	          control_d=[5] * 16, control_src=1000, pairs=16),
+   217	     "PARTIAL", "REPRODUCES"),
+   218	
+   219	    # codex BLOCKER: the SAME materiality bug, third branch. ONE zero pair drags
+   220	    # ci_lo to 0, which demotes a control carrying the full rig-W effect from PARTIAL
+   221	    # to UNDERPOWERED -- and UNDERPOWERED was not on the void list. Session printed a
+   222	    # clean VANISHES with every control at D=+230.
+   223	    ("codex r5 (reproduced): an UNDERPOWERED control carrying D=+230 blocks the null",
+   224	     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+   225	          control_d=[0] + [230] * 7, control_src=2500),
+   226	     "CONTROLS-UNCERTIFIED", "VANISHES"),
+   227	
+   228	    # grok, same class, different shape: one NEGATIVE pair kills the sign test, so the
+   229	    # control is not even directional -- and it still must not support a null.
+   230	    ("grok r5 (reproduced): a non-directional but UNCERTIFIED control blocks the null",
+   231	     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+   232	          control_d=[230] * 7 + [-10], control_src=2500),
+   233	     "CONTROLS-UNCERTIFIED", "VANISHES"),
+   234	
+   235	    # --- ROUND 6 -------------------------------------------------------------
+   236	    # grok BLOCKER: certification used the SAME threshold as materiality, so a control
+   237	    # carrying D = +229 -- ONE MILLISECOND under the reference effect -- certified as
+   238	    # "clean" and the session printed VANISHES, prose and all. A control must carry
+   239	    # LESS THAN HALF the material effect, or "P1 is TCP-only" is not readable here.
+   240	    ("grok r6 (reproduced): a control at D=+229 (Delta_ref - 1) must NOT certify clean",
+   241	     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+   242	          control_d=[229] * 8, control_src=2500),
+   243	     "CONTROLS-UNCERTIFIED", "VANISHES"),
+   244	
+   245	    ("grok r6: ...nor at n=16 with zeros padding the CI down to [0,229]",
+   246	     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3] * 2, src=2000,
+   247	          control_d=[229] * 10 + [0] * 6, control_src=2500, pairs=16),
+   248	     "CONTROLS-UNCERTIFIED", "VANISHES"),
+   249	
+   250	    # codex BLOCKER: uncertified controls blocked only the NULL. With every control at
+   251	    # D=+230 the engine still confidently declared P1 REPRODUCED. Uncertainty about a
+   252	    # rig-wide confound is not evidence that the confound is absent.
+   253	    ("codex r6 (reproduced): uncertified controls must block a REPRODUCTION too",
+   254	     dict(measurand_d=[300, 310, 320, 330, 340, 350, 360, 370], src=1000,
+   255	          control_d=[0] + [230] * 7, control_src=2500),
+   256	     "CONTROLS-UNCERTIFIED", "REPRODUCES"),
+   257	
+   258	    # A control whose MARGINAL bar fails while its PAIRED CI is tight (n=16, three
+   259	    # outliers move the median) must not certify the rig.
+   260	    ("codex r6: a control's marginal bar FAIL cannot certify, even with a tight CI",
+   261	     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3] * 2, src=2000,
+   262	          control_d=[400] * 3 + [5] * 13, control_src=[1000] * 8 + [1200] * 8, pairs=16),
+   263	     "CONTROLS-UNCERTIFIED", "VANISHES"),
+   264	
+   265	    # codex BLOCKER: the MARGINAL-median bar bypassed the PAIRED magnitude test. Three
+   266	    # outliers move the marginal median enough to fail the bar in the matching
+   267	    # direction, while every pair in the CI is +1ms.
+   268	    ("codex r6 (reproduced): a marginal bar FAIL cannot substitute for paired magnitude",
+   269	     dict(measurand_d=[400] * 3 + [1] * 13,
+   270	          src=[1000] * 8 + [1200] * 8,
+   271	          control_d=[5] * 16, control_src=1000, pairs=16),
+   272	     "PARTIAL", "REPRODUCES"),
+   273	
+   274	    # grok BLOCKER: the zero-boundary null. A single zero pair vetoed `ci_lo > 0`, so
+   275	    # a 99ms effect on 7 of 8 pairs -- ONE MILLISECOND under the bar -- was "no effect"
+   276	    # AND null_excl (99 < 100), and reported VANISHES while the sign test REJECTED.
+   277	    # Direction is the sign test's job; the CI must not be able to veto it.
+   278	    ("grok r5 (reproduced): 7/8 pairs at 99ms is NOT equivalence, whatever the CI says",
+   279	     dict(measurand_d=[0] + [99] * 7, src=1000),
+   280	     "PARTIAL", "VANISHES"),
+   281	
+   282	    # codex BLOCKER: the registered constants were env-tunable, so the operator could
+   283	    # retune the decision rule after seeing the data. The engine must REFUSE.
+   284	    ("codex r5: DELTA_REF_MS is PINNED -- the rule is not tunable from the environment",
+   285	     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+   286	          control_d=[230] * 8, control_src=2500,
+   287	          env_extra={"DELTA_REF_MS": "240"}),
+   288	     "ENGINE-REFUSED", "VANISHES"),
+   289	]
+   290	
+   291	
+   292	def run_cases():
+   293	    failures = []
+   294	    for name, kw, must_be, must_not_be in CASES:
+   295	        got = session(**kw)
+   296	        ok = not (must_be and got != must_be) and not (must_not_be and got == must_not_be)
+   297	        print("%-64s -> %-26s %s" % (name[:64], got, "ok" if ok else "*** FAIL ***"))
+   298	        if not ok:
+   299	            failures.append(name)
+   300	            if must_be:
+
+exec
+/bin/zsh -lc "nl -ba scripts/otp12pf_mac_verdict_test.py | sed -n '301,580p'" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+   301	                print("      expected %s" % must_be)
+   302	            if must_not_be:
+   303	                print("      must NOT be %s" % must_not_be)
+   304	    return failures
+   305	
+   306	
+   307	def fuzz(n=300):
+   308	    """The taxonomy must be EXHAUSTIVE: no input may land outside the registered set.
+   309	
+   310	    The CONTROLS are fuzzed too. Round-3 grok: the old fuzz perturbed only the
+   311	    measurand and pinned the controls at [5]*8, so every dirty-control path -- the
+   312	    one that hid the BLOCKER -- went unexercised.
+   313	    """
+   314	    rng = random.Random(4242)
+   315	    bad = 0
+   316	    for _ in range(n):
+   317	        d = [rng.randint(-600, 600) for _ in range(8)]
+   318	        cd = [rng.randint(-300, 300) for _ in range(8)]
+   319	        src = rng.choice([600, 1000, 2000, 2500, 5000])
+   320	        csrc = rng.choice([600, 1000, 2500, 5000])
+   321	        got = session(measurand_d=d, src=src, control_d=cd, control_src=csrc)
+   322	        if got not in OUTCOMES:
+   323	            print("*** UNREGISTERED OUTCOME %r for d=%s src=%d ctrl=%s" % (got, d, src, cd))
+   324	            bad += 1
+   325	    print("fuzz: %d/%d inputs produced a registered outcome (measurand AND controls fuzzed)"
+   326	          % (n - bad, n))
+   327	    return bad
+   328	
+   329	
+   330	# --- MUTATION PROOF -----------------------------------------------------------
+   331	# A test that passes with its fix reverted is vacuous. Each mutation below REVERTS
+   332	# one fix in a COPY of the engine; the named case must then produce the forbidden
+   333	# verdict. `python3 scripts/otp12pf_mac_verdict_test.py --mutations`
+   334	#
+   335	# NOTE on the CI and the sign test. Rev 4 called them "mathematical duals". THAT WAS
+   336	# WRONG once a zero difference exists (round-5): the sign test DROPS zeros, so
+   337	# d = [0, 99x7] rejects at p = .0156 while the CI's lower bound is exactly 0. Rev 6
+   338	# therefore gives each the job it can actually do -- the SIGN TEST establishes
+   339	# DIRECTION, the CI establishes MAGNITUDE -- and the old conjunction (`ci_lo > 0 and
+   340	# p < .05`) is gone, because it silently required the CI to answer a question about
+   341	# direction that a single zero pair could veto. That veto is exactly how a 99 ms
+   342	# effect on 7 of 8 pairs came to be reported as VANISHES.
+   343	MUTATIONS = [
+   344	    ("equivalence margin tied to the BAR alone (codex r2 + grok)",
+   345	     ["        margin_hi = min(breach_hi, float(DELTA_REF))\n"
+   346	      "        margin_lo = max(breach_lo, -float(DELTA_REF))",
+   347	      "        margin_hi = breach_hi\n"
+   348	      "        margin_lo = breach_lo"],
+   349	     "the bar alone forgives 240ms", "VANISHES"),
+   350	
+   351	    # The OLD engine tested equivalence BEFORE it tested for an effect, so a cell
+   352	    # with a real effect that the bar forgave was called VANISHES rather than
+   353	    # PARTIAL. Restoring that order must resurrect codex's counterexample.
+   354	    ("equivalence tested BEFORE effect detection, with the bar-tied margin (codex r2)",
+   355	     ['        if dir_pos and material:\n'
+   356	      '            out = "REPRODUCES"',
+   357	      '        if bar == "PASS" and ci_lo > -breach_hi and ci_hi < breach_hi:\n'
+   358	      '            out = "VANISHES"\n'
+   359	      '        elif dir_pos and material:\n'
+   360	      '            out = "REPRODUCES"'],
+   361	     "rig-W-sized effect", "VANISHES"),
+   362	
+   363	    ("negative margin uses -0.10*src instead of -src/11 (codex r2)",
+   364	     ["        breach_lo = -s_med / 11.0", "        breach_lo = -s_med / 10.0"],
+   365	     "negative bound", "VANISHES"),
+   366	
+   367	    # A control whose MARGINAL bar fails cannot certify the rig, even when its PAIRED
+   368	    # CI is tight. At n=8 that is provably unreachable (a CI inside +-half-margin bounds
+   369	    # the median shift to <=5%), but at n=16 three outliers move the marginal median
+   370	    # while the CI stays at [5,5] -- so the clause is load-bearing exactly there.
+   371	    ("a bar-FAIL control certifies the rig anyway (codex r6)",
+   372	     ['    if dt.get("bar") == "FAIL":\n'
+   373	      '        return False            # a control breaching the acceptance bar certifies nothing',
+   374	      '    if False:\n'
+   375	      '        return False'],
+   376	     "marginal bar FAIL cannot certify", "VANISHES"),
+   377	
+   378	    # The fix is BOTH halves: the cell loop must walk the REGISTERED set (not merely
+   379	    # what turned up in the CSV), and absent cells must be marked INCOMPLETE rather
+   380	    # than filtered. Reverting only one leaves the other still catching it, so the
+   381	    # faithful revert of the old fail-open is both.
+   382	    ("a missing registered cell is filtered away, not INCOMPLETE (codex r2)",
+   383	     ["all_cells = sorted(set(REGISTERED_CELLS) | set(meta))",
+   384	      "all_cells = sorted(meta)",
+   385	      "missing = [c for c in REGISTERED_CELLS if c not in cell_outcome]",
+   386	      "missing = []"],
+   387	     "missing registered cell", "VANISHES"),
+   388	
+   389	    ("materiality requires a bar FAIL, so exact 1.10 is unreachable (grok)",
+   390	     ['        material = ci_lo >= breach_hi                # MAGNITUDE  -- the paired CI, only',
+   391	      '        material = (bar == "FAIL")'],
+   392	     "EXACT 1.10", "PARTIAL"),
+   393	
+   394	    # The sign test no longer PARTICIPATES: direction is asserted regardless of it.
+   395	    # (Rev 6 moved direction OUT of the CI and INTO the sign test, so the faithful
+   396	    # revert is to stop consulting the sign test at all.) 7 positive + 1 negative
+   397	    # then reports a clean REPRODUCES at p = .0703.
+   398	    ("the sign test does not participate: direction asserted without it (codex r2)",
+   399	     ["        directional = p < 0.05",
+   400	      "        directional = True"],
+   401	     "sign test must PARTICIPATE", "REPRODUCES"),
+   402	
+   403	    # --- ROUND 3 (grok) -------------------------------------------------------
+   404	    ("control void ignores absolute materiality -> a Delta_ref control escapes (grok r3)",
+   405	     ['    return bool(dt.get("directional") and dt.get("ci_at_or_beyond_margin"))',
+   406	      '    return False'],
+   407	     "Delta_ref-sized control effect", "VANISHES"),
+   408	
+   409	    ("engine trusts meta.complete and never checks n (grok r3)",
+   410	     ["    return len(paired(c)) >= REQUIRED_PAIRS",
+   411	      "    return len(paired(c)) > 0",
+   412	      "        if cov < MIN_COVERAGE:",
+   413	      "        if False:"],
+   414	     "n=1 with complete=yes", "VANISHES"),
+   415	
+   416	    ("UNSTABLE/BAR-FAIL-INCONSISTENT outrank REPRODUCES -> a clean repro is masked (grok r3)",
+   417	     ["    if repro and inv:\n"
+   418	      '        verdict = "MIXED-SIGN"',
+   419	      "    if barfi:\n"
+   420	      '        verdict = "BAR-FAIL-INCONSISTENT"\n'
+   421	      '        why = "masked"\n'
+   422	      "    elif repro and inv:\n"
+   423	      '        verdict = "MIXED-SIGN"'],
+   424	     "one-direction REPRODUCES", "BAR-FAIL-INCONSISTENT"),
+   425	
+   426	    ("a harness-detected session void is ignored (grok r3)",
+   427	     ['elif SESSION_VOID_REASON:', 'elif False:'],
+   428	     "session void (end-load)", "VANISHES"),
+   429	
+   430	    # --- ROUND 5 -------------------------------------------------------------
+   431	    ("`bar == FAIL` is direction-blind, so +1ms is 'material' (codex r5)",
+   432	     ['        material = ci_lo >= breach_hi                # MAGNITUDE  -- the paired CI, only\n'
+   433	      '        material_neg = ci_hi <= breach_lo',
+   434	      '        material = (bar == "FAIL") or ci_lo >= breach_hi\n'
+   435	      '        material_neg = (bar == "FAIL") or ci_hi <= breach_lo'],
+   436	     "INVERSE direction cannot make +1ms", "REPRODUCES"),
+   437	
+   438	    ("an UNCERTIFIED control can still support a null (codex r5 + grok r5)",
+   439	     ["elif ctrl_uncertified:", "elif ctrl_uncertified and False:"],
+   440	     "UNDERPOWERED control carrying D=+230", "VANISHES"),
+   441	
+   442	    ("the CI vetoes DIRECTION, so one zero pair turns 99ms into equivalence (grok r5)",
+   443	     ["        directional = p < 0.05",
+   444	      "        directional = p < 0.05 and ci_lo > 0 and ci_hi > 0"],
+   445	     "7/8 pairs at 99ms", "VANISHES"),
+   446	
+   447	    # --- ROUND 6 -------------------------------------------------------------
+   448	    ("the MARGINAL bar substitutes for PAIRED magnitude (codex r6)",
+   449	     ["        material = ci_lo >= breach_hi                # MAGNITUDE  -- the paired CI, only\n"
+   450	      "        material_neg = ci_hi <= breach_lo",
+   451	      "        material = ((bar == \"FAIL\") and d_med > s_med) or ci_lo >= breach_hi\n"
+   452	      "        material_neg = ((bar == \"FAIL\") and d_med < s_med) or ci_hi <= breach_lo"],
+   453	     "marginal bar FAIL cannot substitute", "REPRODUCES"),
+   454	
+   455	    ("a control certifies clean at the SAME threshold as materiality (grok r6)",
+   456	     ["    return (lo > m_lo / 2.0) and (hi < m_hi / 2.0)",
+   457	      "    return (lo > m_lo) and (hi < m_hi)"],
+   458	     "D=+229 (Delta_ref - 1)", "VANISHES"),
+   459	
+   460	    ("uncertified controls block only the NULL, not a REPRODUCTION (codex r6)",
+   461	     ["elif ctrl_uncertified:", "elif ctrl_uncertified and False:"],
+   462	     "block a REPRODUCTION too", "REPRODUCES"),
+   463	
+   464	    ("the registered DELTA_REF is taken from the environment again (codex r5)",
+   465	     ['DELTA_REF = REGISTERED_DELTA_REF_MS\n'
+   466	      '_env_delta = os.environ.get("DELTA_REF_MS")',
+   467	      'DELTA_REF = int(os.environ.get("DELTA_REF_MS", REGISTERED_DELTA_REF_MS))\n'
+   468	      '_env_delta = None'],
+   469	     "DELTA_REF_MS is PINNED", "VANISHES"),
+   470	]
+   471	
+   472	
+   473	def mutate():
+   474	    src = open(os.path.join(HERE, "otp12pf_mac_verdict.py")).read()
+   475	    bad = 0
+   476	    for name, subs, case_key, forbidden in MUTATIONS:
+   477	        body = src
+   478	        for i in range(0, len(subs), 2):
+   479	            old, new = subs[i], subs[i + 1]
+   480	            # A mutation whose target text no longer exists is a SILENT PASS -- the
+   481	            # engine drifted and the proof is stale. Fail loudly.
+   482	            if old not in body:
+   483	                print("*** STALE MUTATION (target text not found): %s" % name)
+   484	                bad += 1
+   485	                body = None
+   486	                break
+   487	            body = body.replace(old, new, 1)
+   488	        if body is None:
+   489	            continue
+   490	        tmp = tempfile.mkdtemp()
+   491	        path = os.path.join(tmp, "mutant.py")
+   492	        open(path, "w").write(body)
+   493	        case = next(c for c in CASES if case_key in c[0])
+   494	        os.environ["VERDICT_PY"] = path
+   495	        got = session(**case[1])
+   496	        del os.environ["VERDICT_PY"]
+   497	        # KILLED means THE CASE NOW FAILS -- by its own assertion, not by matching a
+   498	        # verdict named here. Checking only for a specific forbidden verdict let a
+   499	        # mutant "survive" merely by failing a DIFFERENT way than predicted, which is
+   500	        # still a caught regression. The case's own contract is the arbiter.
+   501	        _, _, must_be, must_not_be = case
+   502	        killed = (must_be and got != must_be) or (must_not_be and got == must_not_be)
+   503	        print("%-62s -> %-22s %s" % (name[:62], got,
+   504	                                     "KILLED (guard is real)" if killed
+   505	                                     else "*** SURVIVED — GUARD IS VACUOUS ***"))
+   506	        if not killed:
+   507	            bad += 1
+   508	    return bad
+   509	
+   510	
+   511	if __name__ == "__main__":
+   512	    if "--mutations" in sys.argv:
+   513	        print("Reverting each fix in a copy of the engine; the guard must then FAIL.\n")
+   514	        nbad = mutate()
+   515	        print()
+   516	        print("%d/%d mutations killed" % (len(MUTATIONS) - nbad, len(MUTATIONS)))
+   517	        sys.exit(1 if nbad else 0)
+   518	    fails = run_cases()
+   519	    print()
+   520	    bad = fuzz()
+   521	    print()
+   522	    print("%d/%d cases passed" % (len(CASES) - len(fails), len(CASES)))
+   523	    sys.exit(1 if (fails or bad) else 0)
+
+exec
+/bin/zsh -lc "nl -ba docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md | sed -n '1,300p'" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+     1	# otp-12 Mac↔Mac rig — PRE-REGISTRATION (written before any timed run)
+     2	
+     3	**Status**: Pre-registered, **revision 7**. **NO DATA EXISTS YET.**
+     4	
+     5	> ## THE RULE IN ONE PARAGRAPH (rev 7)
+     6	>
+     7	> **All inference is PAIRED.** The 1.10 bar is computed on the *marginal medians*; it is
+     8	> the project's **acceptance** criterion, it is reported in every row, and it takes **no
+     9	> part in inference** — because the marginal and paired statistics can disagree in both
+    10	> direction and magnitude, and every attempt to let the bar stand in for paired evidence
+    11	> produced a false verdict (rounds 3–6). **Direction** is the sign test. **Magnitude** is
+    12	> the paired CI. **Equivalence** is the CI against the margin. **The controls are a
+    13	> precondition**: unless every control is certified to carry less than *half* the
+    14	> material effect, **no verdict about the measurand may be read — not a null, and not a
+    15	> reproduction.**
+    16	
+    17	> ## ⛔ CORRECTION THAT THIS DOCUMENT OWES ITS READER
+    18	>
+    19	> **Revisions 3, 4 and 5 of this document asserted that a fixed, equal `SETTLE_MS`
+    20	> window precedes the fsync on both arms. THAT WAS NEVER TRUE.** The settle was
+    21	> computed by an `awk` inside a command substitution whose quoting was wrong, so the
+    22	> awk errored, `sleep` received an empty argument and failed, and the code discarded
+    23	> its exit status. **The settle has never executed — not once, in any revision.**
+    24	>
+    25	> It was introduced in `24660ae` — **the commit that added it to fix the
+    26	> free-writeback asymmetry that reverses sign with direction**, i.e. the artifact
+    27	> judged capable of *manufacturing a one-directional P1 out of nothing*. **The fix for
+    28	> that BLOCKER never ran.**
+    29	>
+    30	> Nothing is retracted, because **no data was ever taken**. It is fixed, it is
+    31	> validated at preflight, and `SELFTEST=1` now proves it on a real tree. But this
+    32	> document was wrong for three revisions, and it says so here rather than quietly
+    33	> correcting the text below.
+    34	
+    35	Every revision of this document and its instrument has been reviewed before it
+    36	measured anything, and **every review has found defects capable of a false claim**:
+    37	
+    38	- Round 1 (design, `f0343f4`): NOT READY — 1 BLOCKER + 7 HIGH + 1 LOW → **9/9
+    39	  accepted** (`.review/results/macmac-prereg.gpt-verdict.md`).
+    40	- Round 2 (instrument, `e1e351d`): NOT READY — 3 BLOCKER + 6 HIGH + 1 MEDIUM + 1
+    41	  LOW → **11/11 accepted** (`.review/results/macmac-harness.gpt-verdict.md`).
+    42	- Round 3 (reworked instrument, `24660ae`): **NOT READY** — codex: 5 BLOCKER + 6
+    43	  HIGH + 1 MEDIUM → **12/12 accepted**; **grok** (second reviewer, D-2026-07-14-2)
+    44	  independently **confirmed both blockers with its own measurements** and found **3
+    45	  more** → **15/15 accepted**.
+    46	  (`.review/results/macmac-harness-r2.{gpt,grok}-verdict.md`)
+    47	- Round 4 (the round-3 rework, `cae2e0f`): **NOT SAFE TO RUN** — **grok**, which
+    48	  **drove the engine to a clean `VANISHES` while every control carried the full
+    49	  rig-W effect** → **9 findings, 9 accepted** (1 BLOCKER, 3 HIGH, 4 MEDIUM, 1 LOW).
+    50	  (`.review/results/macmac-harness-r3.grok-verdict.md`)
+    51	- Round 5 (the round-4 rework, `a9460ce`): **NOT READY / NOT SAFE TO RUN** — **codex**
+    52	  (3 BLOCKER, 6 HIGH, 2 MEDIUM) **and grok**, which converged on the **same BLOCKER
+    53	  independently**: the materiality bug, **for the third round running**, in a branch
+    54	  neither had been shown. → **12 findings, 12 accepted.** Plus **the dead settle**
+    55	  (above), which the review's finding exposed but did not itself find.
+    56	  (`.review/results/macmac-harness-r5.verdict.md`)
+    57	
+    58	- Round 6 (the round-5 rework, `aebd50b`): **NOT READY** — **codex** (3 BLOCKER) **and
+    59	  grok** (2 BLOCKER), converging *again* on both hunted classes: the **marginal bar still
+    60	  substituted for paired magnitude** (a **1 ms** paired effect reported `REPRODUCES` at
+    61	  n=16), a control at **D=+229** — *one millisecond* under the reference effect —
+    62	  **certified as clean**, uncertified controls **blocked only the null and not a
+    63	  reproduction**, and the settle repair was **still not provable** (a no-op `sleep` would
+    64	  have passed while the log narrated "settle included"). → **13 findings, 13 accepted.**
+    65	  (`.review/results/macmac-harness-r6.{codex,grok}.md`)
+    66	**Six rounds. 69 findings. 69 accepted. 0 rejected. Still no datum taken** — which is
+    67	the only reason none of it became a retraction.
+    68	
+    69	**The rule below has been amended in revisions 4, 5, 6 and 7. That is legitimate
+    70	only because NO DATA HAS BEEN TAKEN** — before the first run is the only honest time
+    71	to change a pre-registered rule, and every amendment is forced by a reviewer's
+    72	finding, not by a number anyone has seen.
+    73	
+    74	**The pattern to distrust: every rework has introduced a defect of its own.** Round
+    75	2's killer (the timer) was introduced by the round-1 rework. Round 4's BLOCKER (the
+    76	control void) is the *same structural error* as round 3's — the equivalence margin
+    77	was fixed for the **measurand** and left bar-tied for the **controls**, so a control
+    78	carrying a full rig-W-sized effect was labelled "sub-bar" and escaped the void.
+    79	**Fixing a bug in one place is not fixing its class.**
+    80	
+    81	**Parent**: `docs/plan/OTP12_PERF_FINDINGS.md` (Active, D-2026-07-13-1).
+    82	
+    83	## What this experiment answers — and what it does NOT
+    84	
+    85	Revision 1 claimed this rig "discriminates H1 outright": *P1 reproduces
+    86	macOS↔macOS ⇒ H1 dies, because H1 accuses the Windows accept branch.*
+    87	
+    88	**That inference is invalid, and the premise is false.** H1, verbatim in the
+    89	parent, accuses **blit's own code paths** — the `SourceSockets` Dial/Accept
+    90	branches, `InitiatorReceivePlaneRun.add_dialed_stream`, and the destination's
+    91	synchronous dial-before-ACK at `transfer_session/mod.rs:3113`. **The word
+    92	"Windows" appears nowhere in H1.** Windows is merely *who happens to be the
+    93	accepting source* in P1's slow arm on rig W. The accused code runs on macOS too.
+    94	So a Mac↔Mac reproduction is **consistent with H1**, not fatal to it — and the
+    95	parent already warns that *"'consistent with H1' is not confirmation."*
+    96	
+    97	The bad framing was inherited from `docs/STATE.md` ("H1 accuses the *Windows*
+    98	accept branch") and copied without checking H1's text. **That is a repo error and
+    99	it is corrected wherever it appears.**
+   100	
+   101	The question, scoped to **this pair** (rev 2 said "a platform-general cost of the
+   102	layout"; a rig with two machines cannot license that):
+   103	
+   104	> **Can P1 occur WITHOUT a Windows peer — on this pair of Macs?**
+   105	
+   106	| outcome | what it licenses — and its limit |
+   107	|---|---|
+   108	| **P1 REPRODUCES** | P1 **does not require a Windows peer** (on this pair), so it is **not** waivable as "Windows residue", and every code-level hypothesis strengthens. **Limits**: it does **not** establish a platform-*general* cost (two Macs are not "all platforms"); it does **not** name the mechanism; it does **not** kill H1 (the code H1 accuses runs here too); and it leaves **macOS/APFS** and **host×role** explanations fully **OPEN** — "not Windows-specific" is not "not platform-specific" (round-3 BLOCKER). |
+   109	| **P1 does NOT reproduce (null)** | P1 **did not occur on this pair**. That is **consistent with** "the Windows peer is required" — but does **not prove it**: it could equally be a property of *these two machines*, their disks, or this macOS version. It does **not** confirm H1 either. |
+   110	
+   111	A null is only reportable at all if the rig could have **seen** a rig-W-sized
+   112	effect — see the POWER GATE. Otherwise it is `INCONCLUSIVE-UNDERPOWERED`.
+   113	
+   114	**This run does NOT bear on an escape hatch for P1, because P1 HAS NONE**
+   115	(round-3 BLOCKER; parent + codex r5 F1). D-2026-07-12-1 waives only a
+   116	*cross-direction* miss for a cell that **already passes** invariance — P1 *is* the
+   117	invariance failure. Rev 3 said this run bore on "whether P1 must be fixed in code
+   118	**or could be accepted as platform residue**". The second half was never on the
+   119	table: **P1 is fixed to ≤1.10, or the owner amends acceptance criterion 1.**
+   120	What this rig changes is the *hypothesis space*, not the *obligation*.
+   121	
+   122	## Rig
+   123	
+   124	- **nagatha** (owner's workstation): 10GbE `en11` = **10.1.10.92**, MTU 9000.
+   125	- **`q`** (M4 mini, dedicated bench Mac): 10GbE `en8` = **10.1.10.54**, MTU 9000.
+   126	- **Build**: `f35702a`, **clean `+f35702a`** on all four binaries (the `.dirty`
+   127	  form is rejected) — the cutover sha behind every P1 measurement (12b/12c,
+   128	  q-baseline, pf-0). HEAD is **not** code-identical to it, so the pin is
+   129	  deliberate, and the harness **refuses any other build**.
+   130	- **Both Macs are bench ENDS.** The codex loop cannot run during a session; the
+   131	  quiescence gate enforces it on **both** hosts and has fired correctly in
+   132	  practice (it refuses while the owner's `codex` runs on nagatha).
+   133	
+   134	**Endpoint asymmetry does NOT simply "cancel" (round-1 HIGH).** Switching the
+   135	initiator also **reassigns which machine runs the CLI and which runs the daemon**,
+   136	and `q` is the faster Mac. Only arm-independent costs cancel; **host×role
+   137	interactions do not.** Handled by *measuring both data directions and reporting
+   138	them separately*, not by assertion — and no conclusion may lean on the
+   139	cancellation being perfect.
+   140	
+   141	## Cells
+   142	
+   143	Grammar `<nq|qn>_<carrier>_<fixture>`: `nq_*` = data **nagatha→q**, `qn_*` = data
+   144	**q→nagatha**. Arms — the only variable — are `srcinit` (source's CLI pushes) and
+   145	`destinit` (dest's CLI pulls).
+   146	
+   147	    REGISTERED = nq_tcp_mixed,  qn_tcp_mixed     <- THE MEASURAND (P1's shape)
+   148	                 nq_grpc_mixed, qn_grpc_mixed    <- carrier control (P1 is TCP-only)
+   149	                 nq_tcp_large,  qn_tcp_large     <- fixture control (P1 is mixed-only)
+   150	
+   151	`RUNS=8`, ABBA-counterbalanced, pair-void. **All six cells must be present and
+   152	complete.** A partial set that is merely *filtered* would let a one-cell run emit
+   153	`VANISHES` while claiming both cells vanished (round-3 BLOCKER); missing cells are
+   154	`INCOMPLETE` and no verdict is read.
+   155	
+   156	**Both directions are measured, but a reproduction is NOT required in both
+   157	(round-1 HIGH).** P1's recorded signature on rig W is **one-directional**:
+   158	`wm_tcp_mixed` FAILS while `mw_tcp_mixed` PASSES. Demanding failure in both
+   159	directions here would rewrite the finding. So: **a reproduction in EITHER
+   160	direction demonstrates the cost without a Windows peer.** Because the two
+   161	directions differ in *which machine is the destination*, a one-directional result
+   162	is explicitly **not** dismissible as "machine asymmetry" (rev 1 did exactly that,
+   163	which would have let a real reproduction be waved away).
+   164	
+   165	## The paired statistic (REV 4 — the rev-3 rule was broken three ways)
+   166	
+   167	    per ABBA slot i:  d_i = destinit_i − srcinit_i     (positive = P1's direction)
+   168	      D    = median(d_i)                                (LOW median, applied everywhere)
+   169	      CI   = EXACT distribution-free order-statistic interval on the median
+   170	      sign = exact two-sided binomial test on the count of positive d_i
+   171	
+   172	**1. The CI is exact, not bootstrapped (round-3 HIGH).** Rev 3 used a 10k seeded
+   173	bootstrap and called it 95%. At n=8 it resolves to ≈`[d₂, d₇]`, whose true
+   174	coverage is **92.97%**, and the resamples add no information. Rev 4 uses the
+   175	narrowest order-statistic interval `[d₍ₖ₎, d₍ₙ₊₁₋ₖ₎]` whose exact coverage
+   176	`1 − 2·P(Bin(n,½) ≤ k−1)` is **≥ 95%**. At n=8 that is **k=1 → `[min(d), max(d)]`,
+   177	coverage 99.22%**. n=8 admits **no** exact 95% interval; the conservative side is
+   178	taken **deliberately**, and the true coverage is printed in every row.
+   179	
+   180	**2. The sign test now PARTICIPATES (round-3 HIGH).** Rev 3 computed it and never
+   181	read it, so 7/8 positive pairs could report `REPRODUCES` while the registered
+   182	two-sided test said `p = .0703`. An effect now requires **both** `CI` exclusion of
+   183	zero **and** `sign_p < .05`. At n=8 that means **all eight pairs must agree in
+   184	sign** (k=8 → p=.0078; k=7 → p=.0703, not significant).
+   185	
+   186	*Rev 4 called these two conditions mathematical **duals**. **That was wrong once a
+   187	zero difference exists** (round-4, grok): the sign test **drops zeros**, so
+   188	`d = [0, 300…360]` gives 7/7 positive → `p = .0156`, **significant** — while the CI's
+   189	lower bound is exactly `0`, which is not `> 0`. The **CI is therefore strictly the
+   190	more conservative** of the two, and it binds. They coincide only when no `d_i = 0`.
+   191	The conjunction is kept deliberately: it is conservative in the direction that
+   192	matters (against a false reproduction), and if `n` or the coverage level ever
+   193	changes, neither condition silently weakens.*
+   194	
+   195	**3. The margins are the effect's, not the bar's (round-3 BLOCKER, both reviewers,
+   196	both reproduced it).**
+   197	
+   198	    BREACH_HI  = +src_med / 10     the effect that reaches ratio 1.10
+   199	    BREACH_LO  = −src_med / 11     the effect that reaches the INVERSE 1.10
+   200	                                   (NOT −src/10: the bar is symmetric in RATIO,
+   201	                                    so the two boundaries are NOT symmetric in ms.
+   202	                                    Rev 3 called a CI of [−190, 0] on src=2000
+   203	                                    "VANISHES" though −190 IS an inversion of 1.105.)
+   204	
+   205	    MARGIN_HI  = min(BREACH_HI, Δ_ref)      Δ_ref = 230 ms, rig W's measured Δ_P1
+   206	    MARGIN_LO  = max(BREACH_LO, −Δ_ref)
+   207	
+   208	Rev 3 tied the equivalence margin to the **bar alone**, and on a slow arm **the bar
+   209	is WIDER than the effect it is supposed to exclude**. Codex's counterexample, which
+   210	grok reproduced independently: `src = 2500` with **all eight `d_i = 230`** — a
+   211	rig-W-sized effect **in every single pair** — gives ratio 1.092 (bar PASSES), CI
+   212	`[230, 230]`, margin `0.10 × 2500 = 250` ⊃ CI → **rev 3 said `VANISHES`**.
+   213	
+   214	Δ_ref is an **absolute floor** on the margin, in ms, deliberately: a null must
+   215	exclude an effect **the size of the one rig W actually measured**, however slow
+   216	this rig's arms turn out to be. The margin is always the *tighter* of the two,
+   217	i.e. the hardest to vanish.
+   218	
+   219	## POWER GATE — a null must be an EQUIVALENCE result, not an absence of evidence
+   220	
+   221	pf-0 reported a KILL with an instrument that could not resolve the effect it
+   222	killed. This design pre-empts that:
+   223	
+   224	- A **null is only reportable** if the CI lies **strictly inside** `(MARGIN_LO,
+   225	  MARGIN_HI)`. That is a genuine *equivalence* claim: "an effect big enough to
+   226	  matter is ruled out."
+   227	- If the CI **cannot exclude** the margin, the cell is **UNDERPOWERED** and the
+   228	  session verdict is **INCONCLUSIVE-UNDERPOWERED**. A PASS is then *not* "P1
+   229	  vanishes" — it is "this rig could not have seen it".
+   230	- A **reproduction** needs no such gate: an effect that is seen is seen.
+   231	
+   232	## Decision rule — computed BY THE HARNESS, exhaustive, in strict precedence
+   233	
+   234	`scripts/otp12pf_mac_verdict.py` emits `session_verdict.txt`. **The verdict is not
+   235	applied by hand after the numbers are visible.** `scripts/otp12pf_mac_verdict_test.py`
+   236	guards it: **17 cases, every one a defect a reviewer actually found**, each
+   237	**mutation-proven** — reverting that fix in a copy of the engine makes exactly that
+   238	case fail (**11/11 mutations killed**) — plus a **300-input fuzz over the measurand
+   239	AND the controls** asserting the taxonomy has **no unreportable region**. *(Round-4,
+   240	grok: the old fuzz pinned the controls at a clean value, so every dirty-control path
+   241	— the one hiding the BLOCKER — went unexercised. A mutation whose target text has
+   242	drifted is reported as **STALE**, not silently passed.)*
+   243	
+   244	**The bar is integer-exact (`10·hi ≤ 11·lo`) and `≤ 1.10` PASSES** — the project's
+   245	acceptance semantics, unchanged.
+   246	
+   247	### THE THREE QUESTIONS, KEPT SEPARATE (rev 6)
+   248	
+   249	Rounds 3, 4 and 5 each produced the **same class of defect**, because direction,
+   250	magnitude and equivalence were tangled into one expression: every patch closed the one
+   251	path it was shown and left the others open. They are now three questions, each answered
+   252	by the statistic that can actually answer it.
+   253	
+   254	    DIRECTION   -- the SIGN TEST.   directional = sign_p < .05  (zeros dropped)
+   255	                                    dir_pos / dir_neg by the majority sign
+   256	    MAGNITUDE   -- the CI.          material     = bar_fail_pos or CI_lo >= BREACH_HI
+   257	                                    material_neg = bar_fail_neg or CI_hi <= BREACH_LO
+   258	    EQUIVALENCE -- the CI vs MARGIN. null_excl   = CI strictly inside (MARGIN_LO, MARGIN_HI)
+   259	
+   260	    bar_fail_pos = bar FAILS **and** destinit_med > srcinit_med
+   261	    bar_fail_neg = bar FAILS **and** destinit_med < srcinit_med
+   262	
+   263	**A bar failure carries a DIRECTION (round-5 codex, BLOCKER).** It did not, and the bar
+   264	is computed on the **marginal medians** while the CI is computed on the **paired
+   265	differences** — and those two can point *opposite ways*. Verified: at n=16, thirteen
+   266	`+1 ms` pairs plus three pairs falling below the whole distribution make the marginal
+   267	medians fail the bar in the **inverse** direction (1200 vs 1001, ratio 1.199) while
+   268	every surviving pair is `+1 ms`. The old rule called that **`REPRODUCES`** — *P1
+   269	reproducing off one millisecond.* A bar failure is now material only to a claim that
+   270	points **the same way** as the failure.
+   271	
+   272	**DIRECTION IS THE SIGN TEST'S JOB, AND THE CI MUST NOT BE ABLE TO VETO IT (round-5 grok,
+   273	BLOCKER).** The old `pos_effect` demanded `CI_lo > 0`, so **a single zero pair** vetoed
+   274	it: `d = [0, 99×7]` at `src=1000` was "no effect" *and* `null_excl` (99 < margin 100) and
+   275	reported **`VANISHES`** — while the sign test **rejected** at `p = .0156`. Seven of eight
+   276	pairs carried a 99 ms effect, **one millisecond under the bar**, and it was called
+   277	equivalence.
+   278	
+   279	Materiality is also decoupled from a bar *failure*, because `≤1.10` PASSES: a **precise
+   280	10% effect was unreportable by construction** (grok). An effect whose CI reaches the 10%
+   281	threshold is material even where the bar exactly holds.
+   282	
+   283	| cell outcome | condition |
+   284	|---|---|
+   285	| **REPRODUCES** | `pos_effect` **and** `material` |
+   286	| **INVERSION** | `neg_effect` **and** `material_neg` |
+   287	| **PARTIAL** | a real effect (either sign) that is **not** material |
+   288	| **VANISHES** | no effect **and** `null_excl` — a genuine equivalence result |
+   289	| **UNDERPOWERED** | no effect and the CI **cannot exclude** the margin |
+   290	| **BAR-FAIL-INCONSISTENT** | the bar **FAILS** but the pairs do **not** agree in sign. The medians breach 1.10 while the paired evidence contradicts itself (pf-0's bistability, in a new dress). **Never a null, never a clean reproduction.** |
+   291	| **UNSTABLE** | *(override)* an arm is bimodal **and** the bar verdict flips on pooled runs |
+   292	| **INCOMPLETE** | the cell did not finish its registered pairs |
+   293	
+   294	Session precedence (first match wins; every cell's own outcome is still recorded):
+   295	
+   296	1. **INCOMPLETE** — any registered cell missing, **short of its `RUNS` pairs**, or
+   297	   graded on a **CI below 95% coverage**. *(Round-4, grok, **reproduced**: the engine
+   298	   trusted `meta.complete == yes` and required only ≥1 pair, so a **one-pair** CSV
+   299	   emitted **`VANISHES` at 0% CI coverage** — a confident false equivalence claim.
+   300	   The engine is separately executable and hashed into the manifest, so it must not
+
+exec
+/bin/zsh -lc "nl -ba docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md | sed -n '301,620p'" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+   301	   depend on the harness telling it the truth: it now counts the pairs itself.)*
+   302	2. **RIG-VOID / the controls.** Three rounds running, this rule was written as *"void
+   303	   if the control's outcome is one of {…}"* — and **three times an effect walked through
+   304	   a label that was not on the list**:
+   305	   - *r3 (grok, reproduced): a **bar-FAIL** control whose CI crossed zero was
+   306	     `INCONCLUSIVE` → escaped. Session emitted `VANISHES` with controls at ratio 1.200.*
+   307	   - *r4 (grok, reproduced): a **Δ_ref-sized** control effect on a slow arm was
+   308	     `PARTIAL` → escaped. Session emitted `VANISHES` with every control at `D=+230`.*
+   309	   - *r5 (codex **and** grok, both reproduced): **one zero pair** demoted that same
+   310	     control from `PARTIAL` to `UNDERPOWERED` → escaped **again**. Same headline.*
+   311	
+   312	   **So it is no longer written that way.** A control is not asked which label it got.
+   313	   It is asked the two questions it exists to answer:
+   314	
+   315	   **(a) Is it CONTAMINATING?** — it carries a **directional** effect whose CI sits **at
+   316	   or beyond the margin**, or it **fails the bar**, or it is **bimodal**. → **RIG-VOID**:
+   317	   the rig is carrying the very effect we came to measure, and *nothing* here can be
+   318	   trusted. (Also RIG-VOID if the **harness** voided the session — end-load, see Gates.)
+   319	
+   320	   **(b) Is it CERTIFIED CLEAN?** — is its effect **excluded** as smaller than the
+   321	   margin (`null_excl`)? **If not, A NULL IS NOT AVAILABLE** → `INCONCLUSIVE-UNDERPOWERED`.
+   322	   "The measurand shows nothing" is **not evidence of absence** when the rig cannot be
+   323	   shown free of a material arm asymmetry — a rig-wide artifact plus a cancellation
+   324	   looks *exactly* like a null.
+   325	
+   326	   An uncertified control **does not kill a REPRODUCTION**: a merely *noisy* control
+   327	   cannot manufacture a consistent 8/8 one-directional effect in the measurand, and
+   328	   voiding real evidence on that basis would be its own false negative *(grok r5: a
+   329	   false void is also a broken instrument)*. A **tiny** consistent asymmetry (host×role
+   330	   — `q` is the faster Mac) is margin-excluded, certifies clean, and is **never silent**:
+   331	   it prints as a CONTROL CAVEAT against P1's TCP-only/mixed-only claim.
+   332	3. **MIXED-SIGN** — one direction REPRODUCES and the other INVERTS: a host×role
+   333	   interaction this rig **cannot decompose**. Inconclusive for the question.
+   334	4. **REPRODUCES** — **either direction**. → *P1 can occur without a Windows peer, on
+   335	   this pair* (with every limit in the table at the top). *(Round-4, grok,
+   336	   **reproduced**: `UNSTABLE` and `BAR-FAIL-INCONSISTENT` outranked this, so a **clean
+   337	   8/8 reproduction** in `nq` was reported as `BAR-FAIL-INCONSISTENT` merely because
+   338	   `qn` was noisy — a **false NON-reproduction** against this document's own
+   339	   "either direction" rule. A messy sibling is now **reported, not substituted**.
+   340	   Demoting them cannot leak a null: `VANISHES` requires **all** measurand cells to
+   341	   vanish, so a messy sibling still blocks it.)*
+   342	5. **INVERSION** — a new finding; never banked as "P1 absent".
+   343	6. **UNSTABLE** — a bimodal arm whose verdict flips. Reported as unstable, not resolved.
+   344	7. **BAR-FAIL-INCONSISTENT** — self-contradictory measurand; report the runs verbatim.
+   345	8. **INCONCLUSIVE-UNDERPOWERED** — the null branch is unavailable.
+   346	9. **VANISHES** — **both** TCP×mixed cells exclude a `min(bar_breach, Δ_ref)`-sized effect.
+   347	10. **PARTIAL** — a real but margin-excluded asymmetry; pf-1 owns it.
+   348	11. **INCONCLUSIVE** — catch-all; report the cells verbatim. *(The fuzz shows it is
+   349	    unreachable; it exists so no input can fall out of the taxonomy.)*
+   350	
+   351	**No outcome may be reported that is not one of these.**
+   352	
+   353	### The escalation, registered in advance
+   354	
+   355	At `n=8` the ≥95% order-statistic interval **is the full range** `[min, max]`, so a
+   356	**single** noisy pair with `|d| ≥ margin` blocks a null **forever**: the rig can then
+   357	only ever say `INCONCLUSIVE-UNDERPOWERED` (round-4, grok — *a null-incapable
+   358	instrument is also broken, just less dangerously*).
+   359	
+   360	**The one registered escalation**: a session that returns `INCONCLUSIVE-UNDERPOWERED`
+   361	may be re-run **once** at `RUNS=16`, where the interval is `[d₍₄₎, d₍₁₃₎]` (coverage
+   362	**97.9%**) and tolerates three outliers per side.
+   363	
+   364	**It may be triggered by a POWER failure and by nothing else**, and that is now
+   365	**enforced, not merely asserted** (round-5 codex, HIGH: `UNDERPOWERED_ESCALATION=1` was
+   366	sufficient on its own — no prior session named, none verified, "once" unenforced. *A
+   367	re-roll button with a serious-sounding name.*):
+   368	
+   369	- `UNDERPOWERED_ESCALATION` must name the **prior session directory**;
+   370	- the harness **reads its `session_verdict.txt`** and refuses unless it says
+   371	  `INCONCLUSIVE-UNDERPOWERED`;
+   372	- it **burns** the escalation (writes an `ESCALATED` marker), so one underpowered
+   373	  session cannot authorise a second, third, nth re-roll. **"Once" means once.**
+   374	- the trigger is recorded in the manifest (`escalated_from=`).
+   375	
+   376	The trigger is **evidence on disk**, not an operator's assertion. The decision rule is
+   377	**unchanged** in the escalated run.
+   378	
+   379	### The registered constants are PINNED IN CODE
+   380	
+   381	`DELTA_REF_MS`, `SETTLE_MS`, `LOAD_MAX`, `DRAIN_MBPS`, `DRAIN_QUIET`, `DRAIN_ITERS` and
+   382	the timer tolerance are **literals**, in both the harness and the engine. The harness
+   383	**refuses to start** if one is merely *present* in the environment; the engine refuses a
+   384	mismatched `DELTA_REF_MS`.
+   385	
+   386	*(Round-5 codex, BLOCKER: they were `${VAR:-default}`, and `DELTA_REF_MS=240` turned a
+   387	`RIG-VOID` into a `VANISHES`. **A pre-registered rule the operator can retune from the
+   388	command line, after the data exists, in the direction of the answer they want, is not a
+   389	pre-registration at all.**)* To change one: amend this document and put it back through
+   390	review. That is the entire point of the document.
+   391	
+   392	**Bistability is a STATISTIC, not a vibe.** pf-0 found the rig-W fast arm bimodal,
+   393	where the mode *mixture* moved a median 72 ms at constant conditions. Here: an arm
+   394	whose runs split into two clusters separated by more than the paired spread, **and**
+   395	whose bar verdict flips when graded on pooled runs rather than medians, is
+   396	**UNSTABLE**. All 8 runs of every arm are printed in `summary.csv`, so this is
+   397	checkable rather than asserted.
+   398	
+   399	## The instrument — what round 3 found, and what now guards it
+   400	
+   401	**THE TIMER WAS MEASURING FSYNC NOISE (round-3 BLOCKER; I introduced it in the
+   402	rework that fixed round 2).** The transfer timer captured `time.monotonic()` in
+   403	**two separate `python3 -c` processes** and subtracted them. On macOS that clock is
+   404	**process-relative**. Measured on this rig: a **1000 ms sleep read as −1 ms on
+   405	nagatha and 2 ms on q** — *negative*. Every `ms` row would have been ≈ `fsync_ms`
+   406	alone, and the invariance ratio — **the entire measurand** — would have been
+   407	computed on fsync noise, which can manufacture or mask a one-directional effect at
+   408	will. The rig would have produced a clean session, 0 voided pairs, and a confident,
+   409	meaningless verdict. **Grok measured the same defect independently** (a 500 ms sleep
+   410	reading ~3 ms) before being shown codex's finding.
+   411	
+   412	The repo **already documented this trap** — `bench_otp12_zoey.sh:116` uses
+   413	`time.time()` and says why — and I reintroduced it anyway. **The lesson is not "add
+   414	a reviewer"; it is READ THE EXISTING HARNESSES BEFORE WRITING A NEW ONE.**
+   415	
+   416	Now: **one process times itself and spawns the client**, and — the structural fix —
+   417	**preflight PROVES THE CLOCK on both hosts against a known 1000 ms sleep before any
+   418	data is taken**, and a run whose timer returns a non-positive value **VOIDS** rather
+   419	than entering the data as a "fast" row. The timing bug class cannot ship again
+   420	without the instrument catching it on the rig.
+   421	
+   422	**Two defects that could have MANUFACTURED the result (round-2, still guarded):**
+   423	
+   424	1. **The durability check was fail-open.** `os.walk()` on a missing path returns
+   425	   **0 files in 0 ms** — a missing tree reads as a *fast, successful flush*. The two
+   426	   arms need **different** landed paths (blit uses rsync-style slash semantics: a
+   427	   push to `/bench/RUNDIR/` lands at `RUNDIR/src_<W>`; a pull into `RUNDIR` lands
+   428	   **directly in** `RUNDIR`). A wrong path would charge one arm **zero** durability
+   429	   while the other paid full — the otp-2w bug that once manufactured P1.
+   430	   **Guarded**: the fsync walk returns its **file count and byte sum**, and the pair
+   431	   **VOIDs** unless both match the fixture exactly.
+   432	2. **The free-writeback gap REVERSES SIGN WITH DIRECTION.** Between a client exiting
+   433	   and the fsync starting, the OS writes back dirty pages **for free**, and that gap
+   434	   is longer for whichever arm ran over ssh — and *which arm that is flips with the
+   435	   data direction*. Since P1's signature is one-directional, this artifact could
+   436	   produce a one-directional "reproduction" **out of nothing**.
+   437	   **⛔ AND UNTIL REV 6, THE SETTLE NEVER RAN AT ALL (see the correction at the top).**
+   438	   The `awk` computing its duration sat in a command substitution with the wrong
+   439	   quoting, so it errored, `sleep` got an empty argument and failed, and the exit
+   440	   status was discarded. Revisions 3–5 asserted this fix while it was dead — including
+   441	   the revision that *introduced* it to close this very BLOCKER.
+   442	
+   443	   **Now, and only now: equalized, and BOUNDED — not "removed" (round-3 HIGH).** The
+   444	   settle window is **equal on both arms** (250 ms, computed once at top level,
+   445	   validated at startup, and its failure **VOIDS the pair**). The residual is the ssh
+   446	   dispatch difference, **measured at ~15 ms** (median of 5, warm mux, recorded in the
+   447	   manifest every session; a failed ssh now refuses rather than contributing a
+   448	   flattering number). A pre-fsync delay of 10/20/200 ms produced **no measurable
+   449	   change** in fsync time here (72–94 ms, no trend) — APFS fsync on this rig is
+   450	   per-file-metadata bound, not writeback bound — so a 15 ms residual cannot plausibly
+   451	   move it. **That is a bound from measurement, not a removal by construction, and this
+   452	   document no longer claims otherwise.** `SELFTEST=1` walks a real tree and proves the
+   453	   settle actually executed.
+   454	
+   455	## Gates — every one fails CLOSED, and every one is EXECUTED
+   456	
+   457	Round 2 found the round-1 "fixes" **had never been run** (`bash -n` is not an
+   458	execution): the preflight **could not succeed at all** — `grep -c` exits 1 on no
+   459	match, so a **clean** binary tripped the dirty-marker probe and died, and `norm_mac`
+   460	used gawk's `strtonum()`, absent from stock macOS awk.
+   461	
+   462	`SELFTEST=1` **exercises the gates for real and takes no data.** It reports three
+   463	states — `[OK]`, `[FIRED]` (a genuinely unmet condition: the gate *works*), and
+   464	`[BROKEN]` (**the probe cannot answer at all**) — and **exits non-zero on any BROKEN**,
+   465	because *a blind gate is precisely what fails open on the night*. It also **prints what
+   466	it does NOT cover**.
+   467	
+   468	*(Round-5 codex, HIGH: the previous self-test labelled **every** nonzero result
+   469	`[FIRED]` — including a probe that could not answer — exited zero, and claimed "every
+   470	gate executes" while never touching drain, purge, daemon, fsync/settle, stale-daemon or
+   471	end-load. **A self-test that overstates itself is the very fail-open it exists to
+   472	hunt.**)*
+   473	
+   474	It has now earned itself three times: it caught `link_gate` **refusing a perfectly good
+   475	link** (`arp -n <ip>` prints **one line per interface** — `q` holds entries for nagatha
+   476	on en0, en1 *and* en8 — so the unfiltered MAC was a three-line string that could never
+   477	equal one MAC; the gate now checks the entry **on the egress NIC**, the more correct
+   478	question anyway); it caught **the dead settle**; and it caught **itself** breaking its
+   479	own next gate (it ran `resolve_disk` in a subshell, which discarded the global that
+   480	function exists to set, so the drain then had no device and blamed the harness).
+   481	
+   482	- **QUIESCENCE, BOTH MACS** — refuse if `codex`/`cargo`/`rustc` runs on **either**
+   483	  Mac. `pgrep` rc≥2 is an **error**, not "quiet" (rev 3 could not tell them apart).
+   484	- **TIME MACHINE, BOTH MACS** — refuse if a backup is running **or if autobackup is
+   485	  merely ENABLED** (macOS repeats hourly; pf-0's fired 1 minute before its run). A
+   486	  read error refuses.
+   487	- **SPOTLIGHT, BOTH MACS** — `mds_stores` CPU, taken as the **MAX across samples**
+   488	  (rev 3 took the last, so a late idle sample could overwrite an earlier busy one);
+   489	  a failed `top` is an **error**, not 0%.
+   490	- **LOAD** — `load1` on both Macs at start **and end**. A start `load1` above 3.0
+   491	  refuses; an **end** `load1` above 3.0 **VOIDS THE SESSION** (`RIG-VOID`), because a
+   492	  mid-session load spike is exactly the contamination the start gate exists to stop.
+   493	  *(Round-4, grok: rev 4 moved the end-load logging before the verdict and its
+   494	  comment claimed a session "can void on it" — but the code only **logged** it and
+   495	  graded anyway. A doc claim the code did not honour: the very defect class this
+   496	  review exists to kill.)*
+   497	- **COLD CACHES** both ends every run (`sudo -n /usr/sbin/purge`); a failed purge
+   498	  **VOIDS the pair**.
+   499	- **DRAIN** — destination disk quiet before each window (`< 2 MB/s`, 3 consecutive
+   500	  2 s samples). The device is **RESOLVED from the module path** through its APFS
+   501	  physical store (grok: rev 3 hardcoded `disk0` and could certify a disk the data
+   502	  never touched — and on APFS a *synthesized* disk can read idle while the physical
+   503	  store saturates). A **non-numeric** `iostat` sample is an **error**, never "quiet"
+   504	  (rev 3 read it as zero and **certified drainage**).
+   505	- **DURABILITY** — the per-file `fsync` walk runs **on the destination host for both
+   506	  arms**, is timed, and returns `NA` on a missing tree → the pair **VOIDS**.
+   507	- **FIXTURES** verified by **count AND byte sum** on both ends before any timed run.
+   508	- **PROVENANCE** — clean `+f35702a` on all four binaries (never `.dirty`); the
+   509	  harness, the **verdict engine** and its **guard test** are all hashed into the
+   510	  manifest; the instrument must be **committed and clean** in git (a modified
+   511	  harness must not be able to claim the reviewed commit); `EXPECT_SHA` must equal
+   512	  the **registered** build. `die` inside `$(...)` exits only the subshell, so the
+   513	  hash functions now **return non-zero** and the caller dies (rev 3 wrote an **empty
+   514	  hash** and called it provenance).
+   515	- **DAEMON LIFECYCLE** — the pid comes from `$!` (not `pgrep | head -1`, which picks
+   516	  the first of whatever is running); it must be **alive AND LISTENING** on the port;
+   517	  teardown is **verified** (a failed probe is a failure, not "GONE") and a survivor
+   518	  is recorded, not discarded.
+   519	- **LINK** — peer ARP **on the egress NIC** resolves to the **peer's** MAC (a host
+   520	  route on a directly-connected subnet installs a black hole that still reports the
+   521	  right interface), and the route egresses the 10GbE NIC (macOS routes by service
+   522	  order, so a 1GbE NIC can win and every run would go over gigabit).
+   523	- **THE VERDICT ENGINE'S OWN GUARD TEST RUNS AT PREFLIGHT — cases AND mutations.**
+   524	  If the decision rule fails its own cases, or if the proof that guards it turns out
+   525	  to be **vacuous** (a mutation survives), **no data is taken**. *(Round-4, grok: rev
+   526	  4's preflight ran only the cases, so a silently-reverted fix could still pass if
+   527	  the cases happened to pass for another reason.)*
+   528	
+   529	## What this does NOT establish
+   530	
+   531	- **It is not an H1 verdict** (see the top). H1 names code paths, not a platform.
+   532	- **A reproduction does not exonerate macOS/APFS or host×role** — "not
+   533	  Windows-specific" is **not** "not platform-specific" (round-3 BLOCKER).
+   534	- **It does not bear on an escape hatch for P1 — P1 has none.**
+   535	- **It cannot measure P2** — P2 is a converge bar against the OLD build and no old
+   536	  pair is staged on the Macs.
+   537	- **A null here cannot retract rig W.** P1 is measured and reproduced four times
+   538	  there; this rig can only speak about the *pairing*.
+   539	
+   540	## The runs
+   541	
+   542	```sh
+   543	SELFTEST=1 bash scripts/bench_otp12pf_mac.sh                 # exercise the gates, no data
+   544	PREFLIGHT_ONLY=1 EXPECT_SHA=f35702a bash scripts/bench_otp12pf_mac.sh
+   545	CLEARED_BY_REVIEW=1 EXPECT_SHA=f35702a bash scripts/bench_otp12pf_mac.sh   # the run
+   546	```
+   547	
+   548	The harness **refuses a timed run** until the round-3 review is adjudicated
+   549	(`CLEARED_BY_REVIEW`); the no-data modes always work. It **computes; it declares
+   550	nothing** — the verdict is read off the rule above.
+
+codex
+The first structural failure is now concrete: rev 7’s opening rule and the executable code say “bar never participates,” but later rev 7 sections still prescribe bar-based magnitude and the old control policy. I’m treating that as a preregistration conflict, then testing the runtime paths independently so the audit does not stop at documentation drift.
+exec
+/bin/zsh -lc "git diff --exit-code 1e03063..HEAD -- scripts/bench_otp12pf_mac.sh scripts/otp12pf_mac_verdict.py scripts/otp12pf_mac_verdict_test.py docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md; git show --format= --unified=8 1e03063 -- scripts/bench_otp12pf_mac.sh | sed -n '1,1200p'" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-3QhxuMkf' (errno=Operation not permitted)
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-eXn3iSky' (errno=Operation not permitted)
+diff --git a/docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md b/docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md
+index a2b3eb0..57bf197 100644
+--- a/docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md
++++ b/docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md
+@@ -48,6 +48,13 @@ measured anything, and **every review has found defects capable of a false claim
+   **drove the engine to a clean `VANISHES` while every control carried the full
+   rig-W effect** → **9 findings, 9 accepted** (1 BLOCKER, 3 HIGH, 4 MEDIUM, 1 LOW).
+   (`.review/results/macmac-harness-r3.grok-verdict.md`)
++- Round 5 (the round-4 rework, `a9460ce`): **NOT READY / NOT SAFE TO RUN** — **codex**
++  (3 BLOCKER, 6 HIGH, 2 MEDIUM) **and grok**, which converged on the **same BLOCKER
++  independently**: the materiality bug, **for the third round running**, in a branch
++  neither had been shown. → **12 findings, 12 accepted.** Plus **the dead settle**
++  (above), which the review's finding exposed but did not itself find.
++  (`.review/results/macmac-harness-r5.verdict.md`)
++
+ - Round 6 (the round-5 rework, `aebd50b`): **NOT READY** — **codex** (3 BLOCKER) **and
+   grok** (2 BLOCKER), converging *again* on both hunted classes: the **marginal bar still
+   substituted for paired magnitude** (a **1 ms** paired effect reported `REPRODUCES` at
+@@ -56,17 +63,10 @@ measured anything, and **every review has found defects capable of a false claim
+   reproduction**, and the settle repair was **still not provable** (a no-op `sleep` would
+   have passed while the log narrated "settle included"). → **13 findings, 13 accepted.**
+   (`.review/results/macmac-harness-r6.{codex,grok}.md`)
+-- Round 5 (the round-4 rework, `a9460ce`): **NOT READY / NOT SAFE TO RUN** — **codex**
+-  (3 BLOCKER, 6 HIGH, 2 MEDIUM) **and grok**, which converged on the **same BLOCKER
+-  independently**: the materiality bug, **for the third round running**, in a branch
+-  neither had been shown. → **12 findings, 12 accepted.** Plus **the dead settle**
+-  (above), which the review's finding exposed but did not itself find.
+-  (`.review/results/macmac-harness-r5.verdict.md`)
+-
+ **Six rounds. 69 findings. 69 accepted. 0 rejected. Still no datum taken** — which is
+ the only reason none of it became a retraction.
+ 
+-**The rule below has been amended in rev 4 and again in rev 5. That is legitimate
++**The rule below has been amended in revisions 4, 5, 6 and 7. That is legitimate
+ only because NO DATA HAS BEEN TAKEN** — before the first run is the only honest time
+ to change a pre-registered rule, and every amendment is forced by a reviewer's
+ finding, not by a number anyone has seen.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-4XxvuZ9y' (errno=Operation not permitted)
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-cV9SyoGo' (errno=Operation not permitted)
+diff --git a/scripts/bench_otp12pf_mac.sh b/scripts/bench_otp12pf_mac.sh
+index b0b9b64..ce81e61 100755
+--- a/scripts/bench_otp12pf_mac.sh
++++ b/scripts/bench_otp12pf_mac.sh
+@@ -183,25 +183,30 @@ TIMER_TOLERANCE_MS=120     # the timer self-test's allowed error on a 1000 ms sl
+ REGISTERED_CELLS="nq_tcp_mixed,qn_tcp_mixed,nq_grpc_mixed,qn_grpc_mixed,nq_tcp_large,qn_tcp_large"
+ CONTROL_CELLS="nq_grpc_mixed,qn_grpc_mixed,nq_tcp_large,qn_tcp_large"
+ VERDICT_CELLS="nq_tcp_mixed,qn_tcp_mixed"
+ CELLS="$REGISTERED_CELLS"
+ 
+ SESSION_TAG="$(date +%Y%m%dT%H%M%S)"
+ OUT_DIR="${OUT_DIR:-$REPO_ROOT/logs/otp12pf_mac_$SESSION_TAG}"
+ ESCALATED_FROM=""          # set only by the verified RUNS=16 escalation
++PRIOR_RUNS_SHA=""          # the data hash the escalation is bound to
+ 
+ MUX="$(mktemp -d /tmp/blit-mm-mux.XXXXXX)"   # /tmp: macOS TMPDIR busts ssh's 104b ControlPath cap
+ SSH_MUX=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=20
+          -o ControlMaster=auto -o "ControlPath=$MUX/%C" -o ControlPersist=180)
+ qssh() { ssh "${SSH_MUX[@]}" "$Q_SSH" "$@"; }
+ 
+ mkdir -p "$OUT_DIR/blit-logs"
+ log() { echo "$(date +%H:%M:%S) $*" | tee -a "$OUT_DIR/bench.log" >&2; }
+ die() { log "FATAL: $*"; exit 1; }
++# A gate that CANNOT ANSWER is BLIND, and blindness is what fails open on the night.
++# It is marked EXPLICITLY here, never inferred from the wording of a message —
++# inferring it from prose is how a blind timer came to be scored as a working gate.
++die_blind() { log "FATAL[PROBE-BLIND]: $*"; exit 1; }
+ nocr() { tr -d '\r'; }
+ 
+ # --- host abstraction: $1 = n (local) | q (remote) -----------------------------
+ # if/else, never `[[ ]] && a || b` — a non-zero command in the && chain silently
+ # falls through to the wrong host (the trap the Linux harness documents).
+ # `bash -c` locally pins the inner shell so local and remote parse identically.
+ # pipefail is set in BOTH children: without it a failed probe at the head of a
+ # pipeline is masked by a successful `tail`/`awk` and the gate reads "fine".
+@@ -251,19 +256,19 @@ print('R:%d,%d:R' % (ms, rc))
+ PYEOF" | nocr | sed -n 's/.*R:\(-\{0,1\}[0-9][0-9]*,[0-9][0-9]*\):R.*/\1/p' | head -1
+ }
+ 
+ # The gate that makes the timer bug unshippable: prove the clock on the rig,
+ # against a known interval, before any data is taken.
+ timer_gate() {
+   local h="$1" out ms rc lo hi
+   out="$(time_argv "$h" /bin/sleep 1)"
+-  [[ "$out" == *,* ]] || die "$(hname "$h"): the timer probe returned nothing — refusing"
++  [[ "$out" == *,* ]] || die_blind "$(hname "$h"): the timer probe returned nothing — refusing"
+   ms="${out%%,*}"; rc="${out##*,}"
+-  [[ "$rc" == 0 ]] || die "$(hname "$h"): the timer probe's own child exited $rc"
++  [[ "$rc" == 0 ]] || die_blind "$(hname "$h"): the timer probe's own child exited $rc"
+   lo=$(( 1000 - TIMER_TOLERANCE_MS )); hi=$(( 1000 + TIMER_TOLERANCE_MS ))
+   if (( ms < lo || ms > hi )); then
+     die "$(hname "$h"): THE TIMER IS LYING — a 1000 ms sleep measured ${ms} ms (allowed ${lo}-${hi}).
+ This is the round-2 killer: cross-process time.monotonic() on macOS is PROCESS-RELATIVE and
+ read -1 ms / 2 ms for this exact sleep. Every row would be fsync noise. REFUSING to take data."
+   fi
+   log "  timer ok on $(hname "$h"): a 1000 ms sleep measures ${ms} ms"
+ }
+@@ -334,55 +339,55 @@ else echo 'G:BROKEN:G'; fi" | nocr | sed -n 's/.*G:\([A-Z]*\):G.*/\1/p' | head -
+ }
+ 
+ quiescence_gate() {
+   local h="$1" p busy=""
+   for p in codex cargo rustc; do
+     case "$(pgrep_state "$h" "$p")" in
+       RUNNING) busy="$busy $p" ;;
+       NONE)    : ;;
+-      *)       die "$(hname "$h"): the quiescence probe for '$p' BROKE — refusing (a gate that cannot answer must not answer 'fine')" ;;
++      *)       die_blind "$(hname "$h"): the quiescence probe for '$p' BROKE — refusing (a gate that cannot answer must not answer 'fine')" ;;
+     esac
+   done
+   [[ -z "$busy" ]] || die "$(hname "$h") is NOT quiet (running:$busy). BOTH Macs are bench ENDS — load inflates one arm and MANUFACTURES P1. Stop them (never blanket-kill the owner's sessions) and re-run."
+ }
+ 
+ timemachine_gate() {   # FAIL-CLOSED on running OR merely ENABLED (the hole pf-0 found)
+   local h="$1" running auto
+   running="$(hrun "$h" "tmutil status 2>/dev/null | awk '/Running/{print \$3}' | tr -d ';' | head -1" | nocr | tr -cd '0-9')" || running=""
+-  [[ "$running" =~ ^[0-9]+$ ]] || die "$(hname "$h"): cannot read Time Machine status — refusing (a gate that cannot answer must not pass)"
++  [[ "$running" =~ ^[0-9]+$ ]] || die_blind "$(hname "$h"): cannot read Time Machine status — refusing (a gate that cannot answer must not pass)"
+   [[ "$running" -eq 0 ]] || die "$(hname "$h"): a Time Machine backup is RUNNING — it hammers CPU and disk on a bench end (one destination is on skippy, the same 10GbE fabric)."
+   auto="$(hrun "$h" "defaults read /Library/Preferences/com.apple.TimeMachine AutoBackup 2>/dev/null | tr -cd '0-9' | head -1" | nocr | tr -cd '0-9')" || auto=""
+-  [[ "$auto" =~ ^[0-9]+$ ]] || die "$(hname "$h"): cannot read Time Machine AutoBackup — refusing (a READ ERROR must never read as 'disabled')"
++  [[ "$auto" =~ ^[0-9]+$ ]] || die_blind "$(hname "$h"): cannot read Time Machine AutoBackup — refusing (a READ ERROR must never read as 'disabled')"
+   [[ "$auto" -eq 0 ]] || die "$(hname "$h"): Time Machine AUTOBACKUP is ENABLED. macOS repeats hourly, so a backup can start INSIDE the window — pf-0's fired 1 minute before its run. Disable it for the session (\`sudo tmutil disable\`) and re-enable after."
+ }
+ 
+ spotlight_gate() {
+   local h="$1" cpu
+   # The MAX across samples, not the last: a late idle sample could overwrite an
+   # earlier busy one. NR==0 (top produced nothing) is an ERROR, not 0% CPU.
+   cpu="$(hrun "$h" "top -l 2 -n 30 -o cpu -stats command,cpu 2>/dev/null \
+     | awk '/^mds_stores/{ if (\$2+0 > m) m = \$2+0 } END{ if (NR == 0) print \"ERR\"; else printf \"%d\", m+0 }'" | nocr)" || cpu="ERR"
+-  [[ "$cpu" =~ ^[0-9]+$ ]] || die "$(hname "$h"): cannot sample Spotlight CPU (got '$cpu') — refusing"
++  [[ "$cpu" =~ ^[0-9]+$ ]] || die_blind "$(hname "$h"): cannot sample Spotlight CPU (got '$cpu') — refusing"
+   [[ "$cpu" -lt 20 ]] || die "$(hname "$h"): Spotlight (mds_stores) is indexing at ${cpu}% CPU — a recorded bench contaminant. Wait for it to settle."
+ }
+ 
+ load1() { hrun "$1" "sysctl -n vm.loadavg" | nocr | awk '{print $2}'; }
+ load_gate() {
+   local h="$1" l ok
+   l="$(load1 "$h")" || l=""
+-  [[ "$l" =~ ^[0-9]+\.?[0-9]*$ ]] || die "$(hname "$h"): cannot read load1 (got '$l') — refusing"
++  [[ "$l" =~ ^[0-9]+\.?[0-9]*$ ]] || die_blind "$(hname "$h"): cannot read load1 (got '$l') — refusing"
+   ok="$(awk -v l="$l" -v m="$LOAD_MAX" 'BEGIN{print (l+0 <= m+0) ? 1 : 0}')"
+   [[ "$ok" == 1 ]] || die "$(hname "$h"): load1 is $l (> $LOAD_MAX) — a bench END must be quiet. Find what is running first."
+ }
+ 
+ link_gate() {   # both directions; the peer's ARP must be the PEER's MAC, never our own
+   local h="$1" o peer_ip want got route_nic nic
+   o="$(other "$h")"; peer_ip="$(hip "$o")"; want="$(hmac "$o" | norm_mac)"; nic="$(hnic "$h")"
+-  [[ -n "$want" ]] || die "$(hname "$o"): its configured MAC does not parse — refusing"
++  [[ -n "$want" ]] || die_blind "$(hname "$o"): its configured MAC does not parse — refusing"
+   hrun "$h" "ping -c1 -W1 '$peer_ip' >/dev/null 2>&1" \
+     || die "$(hname "$h") cannot ping $peer_ip — the link is down"
+   # The ARP entry ON THE NIC THE TRAFFIC WILL EGRESS. `arp -n <ip>` prints one line
+   # PER INTERFACE that has an entry — q holds entries for nagatha on en0, en1 AND
+   # en8 — so an unfiltered $4 yields a MULTI-LINE string that can never equal a
+   # single MAC. (Measured: this refused a perfectly good link. It is also the more
+   # correct check: a stale entry on the 1GbE NIC is irrelevant to the 10GbE path.)
+   got="$(hrun "$h" "arp -n '$peer_ip' 2>/dev/null | awk -v nic='$nic' '\$5 == \"on\" && \$6 == nic {print \$4}' | head -1" | nocr | norm_mac)"
+@@ -408,16 +413,17 @@ resolve_disk() {
+   # codex, HIGH). On APFS the volume lives on a synthesized container whose iostat
+   # counters can read IDLE while the physical store is saturated — so falling back to
+   # it is not a harmless default, it is a FALSE QUIET that certifies drainage on a
+   # device the data never touched. If the volume is APFS, the physical-store lookup
+   # must SUCCEED or the gate refuses.
+   dev="$(hrun "$h" "d=\$(df '$p' 2>/dev/null | awk 'NR==2{print \$1}' | sed 's|^/dev/||')
+ [ -n \"\$d\" ] || { echo 'D:NO-DF:D'; exit 0; }
+ info=\$(diskutil info \"\$d\" 2>/dev/null) || { echo 'D:NO-DISKUTIL:D'; exit 0; }
++[ -n \"\$info\" ] || { echo 'D:EMPTY-DISKUTIL:D'; exit 0; }
+ if echo \"\$info\" | grep -q 'APFS'; then
+   ps=\$(echo \"\$info\" | awk -F: '/APFS Physical Store/{gsub(/[ \t]/, \"\", \$2); print \$2}' | head -1)
+   [ -n \"\$ps\" ] || { echo 'D:APFS-NO-STORE:D'; exit 0; }
+   d=\"\$ps\"
+ fi
+ echo \"D:\$(echo \"\$d\" | sed -E 's/s[0-9]+\$//'):D\"" | nocr | sed -n 's/.*D:\([^:]*\):D.*/\1/p' | head -1)"
+   # Returns non-zero rather than dying, so the CALLER decides. (The self-test runs
+   # each gate in a subshell to survive a refusal — and a `die` in there was invisible
+@@ -463,18 +469,21 @@ for _ in range(5):
+     t = time.monotonic()
+     rc = subprocess.call(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+     if rc != 0:
+         print("SSH-FAILED")
+         raise SystemExit
+     ts.append((time.monotonic() - t) * 1000.0)
+ print(int(statistics.median(ts)))
+ ' ssh "${SSH_MUX[@]}" "$Q_SSH" true)"
+-  [[ "$SSH_RTT_MS" =~ ^[0-9]+$ ]] || die "cannot measure the ssh round trip (got '$SSH_RTT_MS') — refusing"
+-  log "  ssh dispatch (warm mux, median of 5): ${SSH_RTT_MS} ms — this BOUNDS the residual settle-gap asymmetry (the settle itself is ${SETTLE_MS} ms, EQUAL on both arms)"
++  [[ "$SSH_RTT_MS" =~ ^[0-9]+$ ]] || die_blind "cannot measure the ssh round trip (got '$SSH_RTT_MS') — refusing"
++  local rtt_max=$(( SETTLE_MS / 4 ))
++  (( SSH_RTT_MS <= rtt_max )) \
++    || die "ssh dispatch is ${SSH_RTT_MS} ms (max ${rtt_max} ms) — the residual free-writeback asymmetry is bounded BY this number, and at that size it is no longer negligible against a ${SETTLE_MS} ms settle. A measured bound that is not ENFORCED is a note, not a protection."
++  log "  ssh dispatch (warm mux, median of 5): ${SSH_RTT_MS} ms (max ${rtt_max}) — ENFORCED; it bounds the residual settle-gap asymmetry (the settle is ${SETTLE_MS} ms, EQUAL on both arms)"
+ }
+ 
+ # =============================================================================
+ preflight() {
+   # RUNS=8 is the registered value. RUNS=16 is the ONLY registered escalation, and
+   # it may be used for exactly ONE reason: a prior session returned
+   # INCONCLUSIVE-UNDERPOWERED. It must NEVER be used to chase a result someone
+   # dislikes -- that is the p-hacking this pre-registration exists to prevent.
+@@ -490,25 +499,39 @@ preflight() {
+     # A FLAG IS NOT A JUSTIFICATION (round-5 codex, HIGH). `UNDERPOWERED_ESCALATION=1`
+     # was sufficient on its own: no prior session named, none verified, "once"
+     # unenforced. That is a re-roll button with a serious-sounding name. The
+     # escalation must now POINT AT the underpowered session and the harness READS ITS
+     # VERDICT — the trigger is evidence on disk, not an operator's assertion.
+     local prior="${UNDERPOWERED_ESCALATION:-}" v
+     [[ -n "$prior" ]] \
+       || die "RUNS=16 is the escalation arm. Set UNDERPOWERED_ESCALATION=<path to the prior session dir> that returned INCONCLUSIVE-UNDERPOWERED. It buys POWER; it is NOT a re-roll."
+-    [[ -f "$prior/session_verdict.txt" ]] \
+-      || die "UNDERPOWERED_ESCALATION='$prior' has no session_verdict.txt — the escalation must name a REAL prior session"
++    # The trigger must be a REAL SESSION, not a directory that merely contains the right
++    # words (round-6, codex HIGH + grok F5: "any directory containing the expected first
++    # verdict line authorizes escalation; provenance, hashes, build and prior runs=8 are
++    # never checked"). So the prior session must carry its own DATA and MANIFEST, and
++    # the escalation is bound to the CONTENT of that data, not to its path.
++    for _f in session_verdict.txt runs.csv meta.csv staging-manifest.txt; do
++      [[ -f "$prior/$_f" ]] \
++        || die "UNDERPOWERED_ESCALATION='$prior' has no $_f — the escalation must name a REAL prior session, not a directory with the right words in it"
++    done
+     v="$(head -1 "$prior/session_verdict.txt" | sed -n 's/^SESSION VERDICT: *//p')"
+     [[ "$v" == "INCONCLUSIVE-UNDERPOWERED" ]] \
+       || die "the prior session '$prior' returned '$v', not INCONCLUSIVE-UNDERPOWERED. RUNS=16 is triggered by a POWER FAILURE and by nothing else — re-running a result you dislike at higher n is p-hacking, and this gate exists to stop it."
+-    [[ ! -f "$prior/ESCALATED" ]] \
+-      || die "the prior session '$prior' has ALREADY been escalated once (see $prior/ESCALATED). 'Once' means once."
++    grep -q "binary_identity=$REGISTERED_BUILD" "$prior/staging-manifest.txt" \
++      || die "the prior session '$prior' was not run on the registered build $REGISTERED_BUILD — it cannot authorise an escalation"
++    # "Once" is bound to the DATA, not the directory: copying the session elsewhere does
++    # not buy a second re-roll, because the burn records the runs.csv hash.
++    PRIOR_RUNS_SHA="$(shasum -a 256 "$prior/runs.csv" | cut -d' ' -f1)"
++    if [[ -f "$REPO_ROOT/logs/ESCALATED-SESSIONS" ]] \
++       && grep -q "$PRIOR_RUNS_SHA" "$REPO_ROOT/logs/ESCALATED-SESSIONS"; then
++      die "this exact session's data (runs.csv $PRIOR_RUNS_SHA) has ALREADY authorised an escalation — see logs/ESCALATED-SESSIONS. 'Once' means once, and it is bound to the DATA, not the path."
++    fi
+     ESCALATED_FROM="$prior"
+-    log "  escalation: RUNS=16, triggered by $prior (verified INCONCLUSIVE-UNDERPOWERED)"
++    log "  escalation: RUNS=16, triggered by $prior (verified INCONCLUSIVE-UNDERPOWERED, build $REGISTERED_BUILD, runs.csv $PRIOR_RUNS_SHA)"
+   fi
+   [[ "$EXPECT_SHA" == "$REGISTERED_BUILD" ]] \
+     || die "EXPECT_SHA='$EXPECT_SHA' but the PRE-REGISTERED build is $REGISTERED_BUILD — a run against another build is not the registered experiment"
+   # The instrument must be the REVIEWED instrument: a modified harness must not be
+   # able to claim the reviewed commit.
+   git -C "$REPO_ROOT" diff --quiet HEAD -- "$SELF" "$VERDICT_PY" "$VERDICT_TEST" \
+     || die "the instrument has UNCOMMITTED changes (harness/verdict/test) — it cannot claim the reviewed commit. Commit or stash first."
+   # The decision rule proves itself before it grades anything — AND proves the proof
+@@ -678,57 +701,79 @@ prep_run() {   # $1 = dest host
+   if [[ "$cn" == ok && "$cq" == ok ]]; then RUN_COLD=cold
+   else RUN_COLD="COLD-FAIL(nagatha=$cn,q=$cq)"; log "  WARNING: cold-cache FAILED ($RUN_COLD) — pair voids"; fi
+   out="$(drain_host "$dh")"; RUN_DRAIN="${out:-DRAIN-ERROR}"
+   [[ "$RUN_DRAIN" == drained* ]] || log "  WARNING: dest($(hname "$dh")) UNDRAINED ($RUN_DRAIN) — pair voids"
+   echo "$RUN_DRAIN $RUN_COLD" >> "$OUT_DIR/drain.log"
+ }
+ 
+ # --- durability: DESTINATION host, both arms, and it VERIFIES WHAT IT FLUSHED --
+-RUN_FLUSH=0; RUN_FILES=0; RUN_BYTES=0
+-fsync_tree() {   # $1 = DEST host, $2 = landed path -> "ms files bytes" or "NA 0 0"
++RUN_FLUSH=0; RUN_FILES=0; RUN_BYTES=0; RUN_SETTLED=0
++fsync_tree() {   # $1 = DEST host, $2 = landed path -> "ms files bytes settled_ms" | "NA 0 0 0"
+   local out
+-  # THE SETTLE IS REQUIRED, SO ITS FAILURE MUST BE FATAL (round-5 codex, HIGH): the
+-  # command status came from the python that followed, so a failed `sleep` was
+-  # invisible and the row stayed VALID — with the direction-reversing free-writeback
+-  # gap restored, which is the artifact the settle exists to equalize.
+-  out="$(hrun "$1" "sleep $SETTLE_SEC || { echo 'F:NA:0:0:F'; exit 0; }
+-python3 - '$2' <<'PYEOF'
++  # THE SETTLE IS PERFORMED AND **MEASURED** INSIDE THE SAME PROCESS AS THE WALK.
++  #
++  # It used to be a shell `sleep` before the python. Round 5 found the awk computing
++  # its duration had ALWAYS errored, so the sleep ALWAYS failed and THE SETTLE NEVER
++  # RAN. Round 6 then found the repair was still not provable: `sleep` is
++  # PATH/function-resolved, the walk's timer starts AFTER it, and the self-test only
++  # counted files — so a no-op `sleep` would pass while the log narrated "settle
++  # included" (codex + grok, BLOCKER, and grok measured a 44 ms "250 ms settle").
++  #
++  # A protection that cannot be OBSERVED is not a protection. The settle now happens
++  # in python, is timed by the same monotonic clock as the walk, and is REPORTED. The
++  # caller VOIDS the pair if it did not actually elapse. There is no shell sleep left
++  # to shadow, no exit status left to discard, and no narration left to trust.
++  out="$(hrun "$1" "python3 - '$SETTLE_SEC' '$2' <<'PYEOF'
+ import os, sys, time
+-p = sys.argv[1]
++settle = float(sys.argv[1])
++p = sys.argv[2]
++t0 = time.monotonic()
++time.sleep(settle)
++settled_ms = int((time.monotonic() - t0) * 1000)
+ if not os.path.isdir(p):
+-    print('F:NA:0:0:F')          # a MISSING tree must never read as a fast flush
++    print('F:NA:0:0:%d:F' % settled_ms)   # a MISSING tree must never read as a fast flush
+     raise SystemExit
+-t = time.monotonic()             # ONE process: this interval is measured by one clock
++t = time.monotonic()
+ files = 0
+ nbytes = 0
+ for root, _d, fs in os.walk(p):
+     for name in fs:
+         fp = os.path.join(root, name)
+         nbytes += os.path.getsize(fp)
+         fd = os.open(fp, os.O_RDONLY)
+         os.fsync(fd)
+         os.close(fd)
+         files += 1
+-print('F:%d:%d:%d:F' % (int((time.monotonic() - t) * 1000), files, nbytes))
+-PYEOF" | nocr | sed -n 's/.*F:\([^:]*\):\([0-9]*\):\([0-9]*\):F.*/\1 \2 \3/p' | head -1)" || out=""
+-  echo "${out:-NA 0 0}"
++print('F:%d:%d:%d:%d:F' % (int((time.monotonic() - t) * 1000), files, nbytes, settled_ms))
++PYEOF" | nocr | sed -n 's/.*F:\([^:]*\):\([0-9]*\):\([0-9]*\):\([0-9]*\):F.*/\1 \2 \3 \4/p' | head -1)" || out=""
++  echo "${out:-NA 0 0 0}"
+ }
++# The settle actually elapsed, on the destination's own clock. Anything else voids.
++settle_ok() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= SETTLE_MS && $1 < SETTLE_MS * 4 )); }
+ 
+ # --- one timed run ------------------------------------------------------------
+ RUN_MS=0; RUN_EXIT=0; RUN_VALID=yes
+ timed_run() {   # $1=init host $2=src $3=dst $4=DEST host $5=landed $6=flag $7=fixture
+   local ih="$1" src="$2" dst="$3" dh="$4" landed="$5" flag="${6:-}" w="$7" out bin wc wb
+   bin="$(hblit "$ih")"
+   prep_run "$dh"
+   out="$(time_argv "$ih" "$bin" copy "$src" "$dst" --yes $flag)"
+   if [[ "$out" == *,* ]]; then RUN_MS="${out%%,*}"; RUN_EXIT="${out##*,}"; else RUN_MS=0; RUN_EXIT=99; fi
+-  read -r RUN_FLUSH RUN_FILES RUN_BYTES <<<"$(fsync_tree "$dh" "$landed")"
++  read -r RUN_FLUSH RUN_FILES RUN_BYTES RUN_SETTLED <<<"$(fsync_tree "$dh" "$landed")"
+   RUN_VALID=yes
+   wc="$(fix_count "$w")"; wb="$(fix_bytes "$w")"
++  # The equal settle is the ONLY thing standing between this rig and a free-writeback
++  # artifact that REVERSES SIGN WITH DIRECTION — i.e. that can manufacture P1 out of
++  # nothing. It has already been silently dead once. If it did not measurably elapse,
++  # the row is not a fast row; it is a VOID row.
++  if ! settle_ok "$RUN_SETTLED"; then
++    log "  VOID: the settle did not elapse (measured ${RUN_SETTLED}ms, want >= ${SETTLE_MS}ms) — the free-writeback gap is UNEQUALIZED and can manufacture a one-directional result"
++    RUN_VALID=no
++  fi
+   if [[ "$RUN_FLUSH" == NA ]]; then
+     log "  VOID: fsync found no tree at $landed (a missing tree must never read as a fast flush)"
+     RUN_VALID=no; RUN_FLUSH=0
+   elif [[ "$RUN_FILES" != "$wc" || "$RUN_BYTES" != "$wb" ]]; then
+     log "  VOID: destination has $RUN_FILES files/$RUN_BYTES bytes, want $wc/$wb — an exit-0 zero/partial transfer must not become a fast row"
+     RUN_VALID=no
+   fi
+   # A negative or absurd transfer time means the CLOCK failed, not that the transfer
+@@ -772,17 +817,17 @@ run_pair_loop() {
+     local order pair=yes rowA="" rowB="" arm aname init rid run
+     if (( slot % 2 )); then order="A B"; else order="B A"; fi
+     for arm in $order; do
+       if [[ "$arm" == A ]]; then aname=srcinit; init="$(hname "$sh")"; else aname=destinit; init="$(hname "$dh")"; fi
+       rid="${aname}_s${slot}a${attempts}"; run="${SESSION_TAG}_${cell}_${rid}"
+       if [[ "$aname" == srcinit ]]; then arm_srcinit "$sh" "$dh" "$run"
+       else arm_destinit "$sh" "$dh" "$run"; fi
+       [[ "$RUN_VALID" == yes ]] || pair=no
+-      local row="$cell,$aname,$EXPECT_SHA,$init,$slot,$RUN_MS,$RUN_FLUSH,$RUN_FILES,$RUN_BYTES,$RUN_EXIT,$RUN_DRAIN,$RUN_COLD"
++      local row="$cell,$aname,$EXPECT_SHA,$init,$slot,$RUN_MS,$RUN_FLUSH,$RUN_SETTLED,$RUN_FILES,$RUN_BYTES,$RUN_EXIT,$RUN_DRAIN,$RUN_COLD"
+       if [[ "$arm" == A ]]; then rowA="$row"; else rowB="$row"; fi
+       log "  $cell/$aname slot $slot (att $attempts): ${RUN_MS}ms (dest-fsync ${RUN_FLUSH}ms, $RUN_FILES files, exit $RUN_EXIT, $RUN_DRAIN, $RUN_COLD)"
+     done
+     echo "$rowA,$pair" >> "$CSV"; echo "$rowB,$pair" >> "$CSV"
+     if [[ "$pair" == yes ]]; then valid=$(( valid + 1 )); slot=$(( slot + 1 ))
+     else log "  $cell: pair at slot $slot VOIDED — re-running the slot"; fi
+   done
+   if (( valid < RUNS )); then echo "$cell,$attempts,no" >> "$META"; log "  $cell INCOMPLETE: $valid/$RUNS"
+@@ -846,43 +891,51 @@ SELFTEST_FIRED=0; SELFTEST_BROKEN=0
+ # the first refusal and the remaining gates go untested (which is exactly what it did
+ # the first time it ran — the self-test could not even test itself).
+ gate_probe() {
+   local label="$1"; shift
+   local err rc=0
+   err="$( { "$@"; } 2>&1 )" || rc=1
+   if (( rc == 0 )); then
+     log "  [OK]     $label — answers, and the condition holds"
+-  elif grep -qiE 'cannot (read|sample|probe|measure|resolve|answer)|BROKE|did not answer|no sentinel|refusing \(a gate' <<<"$err"; then
++  elif grep -q 'PROBE-BLIND' <<<"$err"; then
+     SELFTEST_BROKEN=$(( SELFTEST_BROKEN + 1 ))
+     log "  [BROKEN] $label — THE PROBE COULD NOT ANSWER. A blind gate fails open on the night."
+   else
+     SELFTEST_FIRED=$(( SELFTEST_FIRED + 1 ))
+     log "  [FIRED]  $label — the gate REFUSED a genuinely unmet condition. It works."
+   fi
+   # Never hide what the gate said — including its own evidence on success.
+   [[ -n "$err" ]] && sed 's/^/           | /' <<<"$err" | tee -a "$OUT_DIR/bench.log" >&2
+   return 0
+ }
+ 
+ # The fsync/settle path, exercised for real on a throwaway tree. It is the durability
+ # measurement AND the equal-settle window — the two things that once manufactured P1 —
+ # and the self-test never touched them.
+ selftest_fsync() {
+-  local h="$1" d out ms files bytes
++  local h="$1" d ms files bytes settled
+   d="$(hmod "$h")/selftest_${SESSION_TAG}"
+   hrun "$h" "rm -rf '$d' && mkdir -p '$d' && printf 'aaaa' > '$d/a' && printf 'bb' > '$d/b'" \
+     || { log "  [BROKEN] fsync/settle — cannot stage a probe tree"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)); return 1; }
+-  read -r ms files bytes <<<"$(fsync_tree "$h" "$d")"
++  read -r ms files bytes settled <<<"$(fsync_tree "$h" "$d")"
+   hrun "$h" "rm -rf '$d'" >/dev/null 2>&1 || true
+   if [[ "$ms" == NA || "$files" != 2 || "$bytes" != 6 ]]; then
+     log "  [BROKEN] fsync/settle — walk returned ms=$ms files=$files bytes=$bytes, want 2 files / 6 bytes"
+     SELFTEST_BROKEN=$(( SELFTEST_BROKEN + 1 )); return 1
+   fi
+-  log "  [OK]     fsync/settle — walked 2 files/6 bytes in ${ms}ms (settle ${SETTLE_MS}ms included, counts VERIFIED)"
++  # THE SETTLE MUST BE PROVED, NOT NARRATED (round-6, both reviewers). The old check
++  # counted files and then LOGGED "settle included" — which is a sentence, not an
++  # assertion. It would have passed with the settle stone dead, which is precisely how
++  # the settle stayed dead for three revisions.
++  if ! settle_ok "$settled"; then
++    log "  [BROKEN] fsync/settle — THE SETTLE DID NOT ELAPSE: measured ${settled}ms, want >= ${SETTLE_MS}ms"
++    SELFTEST_BROKEN=$(( SELFTEST_BROKEN + 1 )); return 1
++  fi
++  log "  [OK]     fsync/settle — 2 files/6 bytes walked in ${ms}ms; settle MEASURED at ${settled}ms (>= ${SETTLE_MS}ms), counts VERIFIED"
+ }
+ 
+ selftest() {
+   local h
+   log "SELFTEST — exercising the gates for real. No transfer, NO DATA."
+   log "instrument: harness=$HARNESS_SHA256"
+   log "--- the verdict engine's own guard test (incl. mutation proof) ---"
+   python3 "$VERDICT_TEST" >"$OUT_DIR/verdict-guard-test.txt" 2>&1 \
+@@ -908,25 +961,36 @@ selftest() {
+     else log "  [BROKEN] drain device  — could not resolve the physical disk"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)); fi
+     # The paths the old self-test claimed and did not run (round-5 codex, HIGH):
+     gate_probe "purge         (sudo -n, or every run reads WARM)" hrun "$h" "sudo -n /usr/sbin/purge"
+     case "$(pgrep_state "$h" blit-daemon)" in
+       NONE)    log "  [OK]     stale daemon  (rc-aware probe: none running)" ;;
+       RUNNING) log "  [FIRED]  stale daemon  (one IS running — the gate would refuse)"; SELFTEST_FIRED=$((SELFTEST_FIRED+1)) ;;
+       *)       log "  [BROKEN] stale daemon  — the probe could not answer"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)) ;;
+     esac
++    # DRAIN-TIMEOUT is a genuinely busy disk (the gate WORKING); DRAIN-ERROR is a blind
++    # probe. Scoring them the same made the classification untrustworthy (grok r6, F7).
+     local dr; dr="$(drain_host "$h")"
+-    if [[ "$dr" == drained* ]]; then log "  [OK]     drain loop    ($dr)"
+-    else log "  [BROKEN] drain loop    — returned '$dr'"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)); fi
++    case "$dr" in
++      drained*)      log "  [OK]     drain loop    ($dr)" ;;
++      DRAIN-TIMEOUT) log "  [FIRED]  drain loop    — the disk is genuinely busy; the gate would void the pair"; SELFTEST_FIRED=$((SELFTEST_FIRED+1)) ;;
++      *)             log "  [BROKEN] drain loop    — the probe could not answer ('$dr')"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)) ;;
++    esac
+     selftest_fsync "$h"
+     log "  [--]     mac parse (no gawk strtonum): $(hmac "$h") -> $(hmac "$h" | norm_mac)"
+   done
+   SESSION_VOID_REASON=""; end_load_gate
+-  if [[ -z "$SESSION_VOID_REASON" ]]; then log "  [OK]     end-load gate (both Macs under $LOAD_MAX; it CAN void a session)"
+-  else log "  [FIRED]  end-load gate — $SESSION_VOID_REASON"; SELFTEST_FIRED=$((SELFTEST_FIRED+1)); fi
++  if [[ -z "$SESSION_VOID_REASON" ]]; then
++    log "  [OK]     end-load gate (both Macs under $LOAD_MAX; it CAN void a session)"
++  elif [[ "$SESSION_VOID_REASON" == *"could not be read"* ]]; then
++    # An UNREADABLE end-load is a blind probe, not a busy machine (grok r6, F7).
++    log "  [BROKEN] end-load gate — $SESSION_VOID_REASON"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1))
++  else
++    log "  [FIRED]  end-load gate — $SESSION_VOID_REASON"; SELFTEST_FIRED=$((SELFTEST_FIRED+1))
++  fi
+   measure_ssh_rtt
+   log ""
+   log "SELFTEST: $SELFTEST_FIRED gate(s) refused a genuinely unmet condition; $SELFTEST_BROKEN blind."
+   log "NOT exercised here (they need a real transfer): daemon start/lsof/teardown, the"
+   log "smoke transfer, the ABBA pair loop, pair-voiding, and the manifest. PREFLIGHT_ONLY=1"
+   log "covers the manifest and the build-provenance gates. This self-test does NOT claim"
+   log "to run every gate — the previous one did, and it was not true."
+   log "THIS IS NOT CLEARANCE TO TAKE DATA. The review is."
+@@ -951,19 +1015,21 @@ main() {
+     log "PREFLIGHT_ONLY: checks passed; no daemon started, nothing timed"
+     exit 0
+   fi
+   # "Once" means once: burn the escalation the moment it is used, so the same
+   # underpowered session cannot authorise a second, third, nth re-roll.
+   if [[ -n "$ESCALATED_FROM" ]]; then
+     echo "escalated to $SESSION_TAG (RUNS=$RUNS) on $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+       >> "$ESCALATED_FROM/ESCALATED"
++    # Bound to the DATA, so a copy of the session cannot buy a second re-roll.
++    echo "$PRIOR_RUNS_SHA $ESCALATED_FROM -> $SESSION_TAG" >> "$REPO_ROOT/logs/ESCALATED-SESSIONS"
+   fi
+   log "session $SESSION_TAG  build=$EXPECT_SHA  nagatha=$N_IP  q=$Q_IP"
+-  echo "cell,arm,build,initiator,run,ms,flush_ms,files,bytes,exit,drain,cold,valid" > "$CSV"
++  echo "cell,arm,build,initiator,run,ms,flush_ms,settled_ms,files,bytes,exit,drain,cold,valid" > "$CSV"
+   echo "cell,pairs_attempted,complete" > "$META"
+   daemon_start n; daemon_start q
+   smoke n; smoke q
+ 
+   local carrier w flag cell
+   for w in mixed large small; do
+     for carrier in tcp grpc; do
+       if [[ "$carrier" == grpc ]]; then flag="--force-grpc"; else flag=""; fi
+
+codex
+The official guard suite cannot allocate its temporary directories under this read-only review sandbox; syntax checks pass, but that is not a substitute for execution. I’m bypassing filesystem writes by feeding synthetic CSV/meta streams through file descriptors directly into the real verdict engine, so the decision rule itself can still be driven at HEAD.
+exec
+/bin/bash -c "set -euo pipefail
+ENGINE=scripts/otp12pf_mac_verdict.py
+MEAS='nq_tcp_mixed,qn_tcp_mixed'
+CTRLS='nq_grpc_mixed,qn_grpc_mixed,nq_tcp_large,qn_tcp_large'
+ALL=\""'$MEAS,$CTRLS"
+make_meta() {
+  printf '"'cell,pairs_attempted,complete\\n'
+  for c in "'${ALL//,/ }; do printf '"'%s,8,yes\\n' \""'$c"; done
+}
+make_runs() {
+  local dirty="${1:-no}" c i d s
+  printf '"'cell,arm,build,initiator,run,ms,flush_ms,settled_ms,files,bytes,exit,drain,cold,valid\\n'
+  for c in "'${ALL//,/ }; do
+    for i in 1 2 3 4 5 6 7 8; do
+      s=2000
+      case "$c" in
+        nq_tcp_mixed|qn_tcp_mixed)
+          case "$i" in 1)d=-4;;2)d=-2;;3)d=-1;;4|5)d=0;;6)d=1;;7)d=2;;8)d=3;; esac ;;
+        nq_grpc_mixed) d=5 ;;
+        *) if [[ "$dirty" == yes ]]; then d=230; s=1000; else d=5; s=1000; fi ;;
+      esac
+      printf '"'%s,srcinit,x,h,%d,%d,0,250,1,1,0,drained_1x2s,cold,yes\\n' \""'$c" "$i" "$s"
+      printf '"'%s,destinit,x,h,%d,%d,0,250,1,1,0,drained_1x2s,cold,yes\\n' \""'$c" "$i" "$((s+d))"
+    done
+  done
+}
+run_engine() {
+  local dirty="$1" ctrls="$2" registered="$3"
+  VERDICT_CELLS="$MEAS" CONTROL_CELLS="$ctrls" REGISTERED_CELLS="$registered" REQUIRED_PAIRS=8 '"\\
+    python3 \""'$ENGINE" <(make_runs "$dirty") <(make_meta) /dev/null /dev/null /dev/null /dev/stdout 2>&1 '"\\
+    | awk '/"'^SESSION VERDICT:/{print; exit}'"'
+}
+printf 'clean registered session: '
+run_engine no \""'$CTRLS" "$ALL"
+printf '"'dirty controls, registered roles: '
+run_engine yes \""'$CTRLS" "$ALL"
+printf '"'same dirty CSV, env omits 3 dirty controls: '
+run_engine yes 'nq_grpc_mixed' \""'$MEAS,nq_grpc_mixed"' in /Users/michael/Dev/blit_v2
+ exited 1 in 0ms:
+clean registered session: 
+exec
+/bin/bash -c "set -euo pipefail
+ENGINE=scripts/otp12pf_mac_verdict.py
+MEAS='nq_tcp_mixed,qn_tcp_mixed'
+CTRLS='nq_grpc_mixed,qn_grpc_mixed,nq_tcp_large,qn_tcp_large'
+ALL=\""'$MEAS,$CTRLS"
+make_meta() {
+  printf '"'cell,pairs_attempted,complete\\n'
+  for c in "'${ALL//,/ }; do printf '"'%s,8,yes\\n' \""'$c"; done
+}
+make_runs() {
+  local dirty="${1:-no}" c i d s
+  printf '"'cell,arm,build,initiator,run,ms,flush_ms,settled_ms,files,bytes,exit,drain,cold,valid\\n'
+  for c in "'${ALL//,/ }; do
+    for i in 1 2 3 4 5 6 7 8; do
+      s=2000
+      case "$c" in
+        nq_tcp_mixed|qn_tcp_mixed)
+          case "$i" in 1)d=-4;;2)d=-2;;3)d=-1;;4|5)d=0;;6)d=1;;7)d=2;;8)d=3;; esac ;;
+        nq_grpc_mixed) d=5; s=1000 ;;
+        *) if [[ "$dirty" == yes ]]; then d=230; s=1000; else d=5; s=1000; fi ;;
+      esac
+      printf '"'%s,srcinit,x,h,%d,%d,0,250,1,1,0,drained_1x2s,cold,yes\\n' \""'$c" "$i" "$s"
+      printf '"'%s,destinit,x,h,%d,%d,0,250,1,1,0,drained_1x2s,cold,yes\\n' \""'$c" "$i" "$((s+d))"
+    done
+  done
+}
+run_engine() {
+  local dirty="$1" ctrls="$2" registered="$3"
+  VERDICT_CELLS="$MEAS" CONTROL_CELLS="$ctrls" REGISTERED_CELLS="$registered" REQUIRED_PAIRS=8 '"\\
+    python3 \""'$ENGINE" <(make_runs "$dirty") <(make_meta) /dev/null /dev/null /dev/null /dev/stdout 2>&1 '"\\
+    | awk '/"'^SESSION VERDICT:/ && !seen {line=$0; seen=1} END{print line}'"'
+}
+printf 'clean registered session: '
+run_engine no \""'$CTRLS" "$ALL"
+printf '"'dirty controls, registered roles: '
+run_engine yes \""'$CTRLS" "$ALL"
+printf '"'same dirty CSV, env omits 3 dirty controls: '
+run_engine yes 'nq_grpc_mixed' \""'$MEAS,nq_grpc_mixed"' in /Users/michael/Dev/blit_v2
+ exited 1 in 0ms:
+clean registered session: 
+
+exec
+/bin/bash -c "set -euo pipefail
+ENGINE=scripts/otp12pf_mac_verdict.py
+MEAS='nq_tcp_mixed,qn_tcp_mixed'
+CTRLS='nq_grpc_mixed,qn_grpc_mixed,nq_tcp_large,qn_tcp_large'
+ALL=\""'$MEAS,$CTRLS"
+make_meta() {
+  printf '"'cell,pairs_attempted,complete\\n'
+  for c in "'${ALL//,/ }; do printf '"'%s,8,yes\\n' \""'$c"; done
+}
+make_runs() {
+  local dirty="${1:-no}" c i d s
+  printf '"'cell,arm,build,initiator,run,ms,flush_ms,settled_ms,files,bytes,exit,drain,cold,valid\\n'
+  for c in "'${ALL//,/ }; do
+    for i in 1 2 3 4 5 6 7 8; do
+      s=2000
+      case "$c" in
+        nq_tcp_mixed|qn_tcp_mixed)
+          case "$i" in 1)d=-4;;2)d=-2;;3)d=-1;;4|5)d=0;;6)d=1;;7)d=2;;8)d=3;; esac ;;
+        nq_grpc_mixed) d=5; s=1000 ;;
+        *) if [[ "$dirty" == yes ]]; then d=230; s=1000; else d=5; s=1000; fi ;;
+      esac
+      printf '"'%s,srcinit,x,h,%d,%d,0,250,1,1,0,drained_1x2s,cold,yes\\n' \""'$c" "$i" "$s"
+      printf '"'%s,destinit,x,h,%d,%d,0,250,1,1,0,drained_1x2s,cold,yes\\n' \""'$c" "$i" "$((s+d))"
+    done
+  done
+}
+run_engine() {
+  local dirty="$1" ctrls="$2" registered="$3"
+  VERDICT_CELLS="$MEAS" CONTROL_CELLS="$ctrls" REGISTERED_CELLS="$registered" REQUIRED_PAIRS=8 '"\\
+    python3 \""'$ENGINE" <(make_runs "$dirty") <(make_meta) /dev/null /dev/null /dev/null /dev/null 2>&1 '"\\
+    | awk '/"'^SESSION VERDICT:/ && !seen {line=$0; seen=1} END{print line}'"'
+}
+printf 'clean registered session: '
+run_engine no \""'$CTRLS" "$ALL"
+printf '"'dirty controls, registered roles: '
+run_engine yes \""'$CTRLS" "$ALL"
+printf '"'same dirty CSV, env omits 3 dirty controls: '
+run_engine yes 'nq_grpc_mixed' \""'$MEAS,nq_grpc_mixed"' in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+clean registered session: SESSION VERDICT: VANISHES
+dirty controls, registered roles: SESSION VERDICT: RIG-VOID
+same dirty CSV, env omits 3 dirty controls: SESSION VERDICT: VANISHES
+
+exec
+/bin/bash -c "set -euo pipefail
+ENGINE=scripts/otp12pf_mac_verdict.py
+MEAS='nq_tcp_mixed,qn_tcp_mixed'; CTRLS='nq_grpc_mixed,qn_grpc_mixed,nq_tcp_large,qn_tcp_large'; ALL=\""'$MEAS,$CTRLS"
+meta() { printf '"'cell,pairs_attempted,complete\\n'; for c in "'${ALL//,/ }; do printf '"'%s,16,yes\\n' \""'$c"; done; }
+runs() {
+  local c i d s j
+  printf '"'cell,arm,build,initiator,run,ms,flush_ms,settled_ms,files,bytes,exit,drain,cold,valid\\n'
+  for c in "'${ALL//,/ }; do
+    for i in $(seq 1 16); do
+      s=1000; d=5
+      case "$c" in
+        nq_tcp_mixed|qn_tcp_mixed)
+          j=$(( (i-1)%8 + 1 )); s=2000
+          case "$j" in 1)d=-4;;2)d=-2;;3)d=-1;;4|5)d=0;;6)d=1;;7)d=2;;8)d=3;; esac ;;
+        nq_grpc_mixed)
+          if (( i <= 8 )); then s=1000; else s=1200; fi
+          if (( i <= 3 )); then d=400; else d=5; fi ;;
+      esac
+      printf '"'%s,srcinit,x,h,%d,%d,0,250,1,1,0,drained_1x2s,cold,yes\\n' \""'$c" "$i" "$s"
+      printf '"'%s,destinit,x,h,%d,%d,0,250,1,1,0,drained_1x2s,cold,yes\\n' \""'$c" "$i" "$((s+d))"
+    done
+  done
+}
+VERDICT_CELLS="$MEAS" CONTROL_CELLS="$CTRLS" REGISTERED_CELLS="$ALL" REQUIRED_PAIRS=16 '"\\
+  python3 \""'$ENGINE" <(runs) <(meta) /dev/null /dev/null /dev/null /dev/null 2>&1 '"\\
+  | awk '/"'^SESSION VERDICT:/{if(!v++){print}} /''^  nq_grpc_mixed/{if(!c++){print}}'"'" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+SESSION VERDICT: CONTROLS-UNCERTIFIED
+  nq_grpc_mixed  PARTIAL                ratio=1.205 bar=FAIL  D=+5ms CI=[+5,+5] (97.9%) margin=[-91,+100] sign_p=0.0000 (16/16 pos)
+
+exec
+/bin/bash -c "set -euo pipefail
+ENGINE=scripts/otp12pf_mac_verdict.py
+MEAS='nq_tcp_mixed,qn_tcp_mixed'; CTRLS='nq_grpc_mixed,qn_grpc_mixed,nq_tcp_large,qn_tcp_large'; ALL=\""'$MEAS,$CTRLS"
+meta() { printf '"'cell,pairs_attempted,complete\\n'; for c in "'${ALL//,/ }; do printf '"'%s,16,yes\\n' \""'$c"; done; }
+runs() {
+  local c i d s
+  printf '"'cell,arm,build,initiator,run,ms,flush_ms,settled_ms,files,bytes,exit,drain,cold,valid\\n'
+  for c in "'${ALL//,/ }; do
+    for i in $(seq 1 16); do
+      s=1000; d=5
+      case "$c" in
+        nq_tcp_mixed|qn_tcp_mixed)
+          if (( i <= 8 )); then s=1000; else s=1200; fi
+          if (( i <= 3 )); then d=400
+          elif (( i <= 8 )); then d=-5
+          elif (( i <= 13 )); then d=5
+          else d=-5; fi ;;
+      esac
+      printf '"'%s,srcinit,x,h,%d,%d,0,250,1,1,0,drained_1x2s,cold,yes\\n' \""'$c" "$i" "$s"
+      printf '"'%s,destinit,x,h,%d,%d,0,250,1,1,0,drained_1x2s,cold,yes\\n' \""'$c" "$i" "$((s+d))"
+    done
+  done
+}
+VERDICT_CELLS="$MEAS" CONTROL_CELLS="$CTRLS" REGISTERED_CELLS="$ALL" REQUIRED_PAIRS=16 '"\\
+  python3 \""'$ENGINE" <(runs) <(meta) /dev/null /dev/null /dev/null /dev/null 2>&1 '"\\
+  | awk '/"'^SESSION VERDICT:/{if(!v++){print}} /''^  nq_tcp_mixed/{if(!c++){print}}'"'" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+SESSION VERDICT: BAR-FAIL-INCONSISTENT
+  nq_tcp_mixed   BAR-FAIL-INCONSISTENT  ratio=1.195 bar=FAIL  D=-5ms CI=[-5,+5] (97.9%) margin=[-91,+100] sign_p=1.0000 (8/16 pos)
+
+exec
+/bin/bash -c "set -o pipefail
+hrun() { printf 'drained_3x2s\\n'; return 255; }
+nocr() { tr -d '\\r'; }
+drain_host_shape() { hrun q 2>/dev/null | nocr | tail -1 || echo DRAIN-ERROR; }
+dr=\""'$(drain_host_shape)"
+printf '"'captured=%q\\n' \""'$dr"
+case "$dr" in drained*) echo '"'runtime gate: PASSED AS DRAINED';; *) echo 'runtime gate: refused';; esac
+case \""'$dr" in drained*) echo '"'SELFTEST classification: [OK]';; DRAIN-TIMEOUT) echo '[FIRED]';; *) echo '[BROKEN]';; esac" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+captured=$'drained_3x2s\nDRAIN-ERROR'
+runtime gate: PASSED AS DRAINED
+SELFTEST classification: [OK]
+
+exec
+/bin/zsh -lc "rg -n '\\|\\| true|\\|\\| echo|\\)\" \\|\\||\\)\""'$|head -1|tail -1|sed -n|touch |rm -rf|return 0|exit 0'"' scripts/bench_otp12pf_mac.sh scripts/otp12pf_mac_verdict.py scripts/otp12pf_mac_verdict_test.py" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+scripts/otp12pf_mac_verdict_test.py:325:    print("fuzz: %d/%d inputs produced a registered outcome (measurand AND controls fuzzed)"
+scripts/otp12pf_mac_verdict.py:221:        return 0, 0, 0.0
+scripts/otp12pf_mac_verdict.py:527:           % ", ".join("%s(%s, D=%+dms, CI=[%+d,%+d])"
+scripts/otp12pf_mac_verdict.py:630:            "margin=[%+d,%+d] sign_p=%.4f (%d/%d pos)"
+scripts/bench_otp12pf_mac.sh:66:#     that the data need never touch (grok); `die` inside $(...) exited only the
+scripts/bench_otp12pf_mac.sh:81:SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+scripts/bench_otp12pf_mac.sh:82:REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+scripts/bench_otp12pf_mac.sh:171:SETTLE_SEC="$(awk -v m="$SETTLE_MS" 'BEGIN{printf "%.3f", m/1000}')"
+scripts/bench_otp12pf_mac.sh:188:SESSION_TAG="$(date +%Y%m%dT%H%M%S)"
+scripts/bench_otp12pf_mac.sh:256:PYEOF" | nocr | sed -n 's/.*R:\(-\{0,1\}[0-9][0-9]*,[0-9][0-9]*\):R.*/\1/p' | head -1
+scripts/bench_otp12pf_mac.sh:263:  out="$(time_argv "$h" /bin/sleep 1)"
+scripts/bench_otp12pf_mac.sh:282:  # `|| echo X` turned a clean binary's legitimate "0" into "0\nX" and DIED.
+scripts/bench_otp12pf_mac.sh:286:    | nocr | sed -n 's/.*E:\([0-9]*\):\([0-9]*\):E.*/\1 \2/p' | head -1)" || return 1
+scripts/bench_otp12pf_mac.sh:294:  v="$(hrun "$h" "shasum -a 256 '$p' | cut -d' ' -f1" | nocr | tr -cd '0-9a-f')" || return 1
+scripts/bench_otp12pf_mac.sh:334:else echo 'G:BROKEN:G'; fi" | nocr | sed -n 's/.*G:\([A-Z]*\):G.*/\1/p' | head -1)" || raw=""
+scripts/bench_otp12pf_mac.sh:355:  running="$(hrun "$h" "tmutil status 2>/dev/null | awk '/Running/{print \$3}' | tr -d ';' | head -1" | nocr | tr -cd '0-9')" || running=""
+scripts/bench_otp12pf_mac.sh:356:  [[ "$running" =~ ^[0-9]+$ ]] || die_blind "$(hname "$h"): cannot read Time Machine status — refusing (a gate that cannot answer must not pass)"
+scripts/bench_otp12pf_mac.sh:358:  auto="$(hrun "$h" "defaults read /Library/Preferences/com.apple.TimeMachine AutoBackup 2>/dev/null | tr -cd '0-9' | head -1" | nocr | tr -cd '0-9')" || auto=""
+scripts/bench_otp12pf_mac.sh:359:  [[ "$auto" =~ ^[0-9]+$ ]] || die_blind "$(hname "$h"): cannot read Time Machine AutoBackup — refusing (a READ ERROR must never read as 'disabled')"
+scripts/bench_otp12pf_mac.sh:368:    | awk '/^mds_stores/{ if (\$2+0 > m) m = \$2+0 } END{ if (NR == 0) print \"ERR\"; else printf \"%d\", m+0 }'" | nocr)" || cpu="ERR"
+scripts/bench_otp12pf_mac.sh:376:  l="$(load1 "$h")" || l=""
+scripts/bench_otp12pf_mac.sh:378:  ok="$(awk -v l="$l" -v m="$LOAD_MAX" 'BEGIN{print (l+0 <= m+0) ? 1 : 0}')"
+scripts/bench_otp12pf_mac.sh:384:  o="$(other "$h")"; peer_ip="$(hip "$o")"; want="$(hmac "$o" | norm_mac)"; nic="$(hnic "$h")"
+scripts/bench_otp12pf_mac.sh:393:  got="$(hrun "$h" "arp -n '$peer_ip' 2>/dev/null | awk -v nic='$nic' '\$5 == \"on\" && \$6 == nic {print \$4}' | head -1" | nocr | norm_mac)"
+scripts/bench_otp12pf_mac.sh:397:  route_nic="$(hrun "$h" "route -n get '$peer_ip' 2>/dev/null | awk '/interface:/{print \$2}'" | nocr)"
+scripts/bench_otp12pf_mac.sh:411:  p="$(hmod "$h")"
+scripts/bench_otp12pf_mac.sh:419:[ -n \"\$d\" ] || { echo 'D:NO-DF:D'; exit 0; }
+scripts/bench_otp12pf_mac.sh:420:info=\$(diskutil info \"\$d\" 2>/dev/null) || { echo 'D:NO-DISKUTIL:D'; exit 0; }
+scripts/bench_otp12pf_mac.sh:421:[ -n \"\$info\" ] || { echo 'D:EMPTY-DISKUTIL:D'; exit 0; }
+scripts/bench_otp12pf_mac.sh:423:  ps=\$(echo \"\$info\" | awk -F: '/APFS Physical Store/{gsub(/[ \t]/, \"\", \$2); print \$2}' | head -1)
+scripts/bench_otp12pf_mac.sh:424:  [ -n \"\$ps\" ] || { echo 'D:APFS-NO-STORE:D'; exit 0; }
+scripts/bench_otp12pf_mac.sh:427:echo \"D:\$(echo \"\$d\" | sed -E 's/s[0-9]+\$//'):D\"" | nocr | sed -n 's/.*D:\([^:]*\):D.*/\1/p' | head -1)"
+scripts/bench_otp12pf_mac.sh:439:  probe="$(hrun "$h" "iostat -d -w 1 -c 2 '$dev' 2>/dev/null | tail -1 | awk '{print \$3}'" | nocr)" || probe=""
+scripts/bench_otp12pf_mac.sh:445:  log "  drain device on $(hname "$h"): $dev (backs $p, idle probe ${probe} MB/s)"
+scripts/bench_otp12pf_mac.sh:476:' ssh "${SSH_MUX[@]}" "$Q_SSH" true)"
+scripts/bench_otp12pf_mac.sh:481:  log "  ssh dispatch (warm mux, median of 5): ${SSH_RTT_MS} ms (max ${rtt_max}) — ENFORCED; it bounds the residual settle-gap asymmetry (the settle is ${SETTLE_MS} ms, EQUAL on both arms)"
+scripts/bench_otp12pf_mac.sh:516:    v="$(head -1 "$prior/session_verdict.txt" | sed -n 's/^SESSION VERDICT: *//p')"
+scripts/bench_otp12pf_mac.sh:523:    PRIOR_RUNS_SHA="$(shasum -a 256 "$prior/runs.csv" | cut -d' ' -f1)"
+scripts/bench_otp12pf_mac.sh:529:    log "  escalation: RUNS=16, triggered by $prior (verified INCONCLUSIVE-UNDERPOWERED, build $REGISTERED_BUILD, runs.csv $PRIOR_RUNS_SHA)"
+scripts/bench_otp12pf_mac.sh:544:  log "verdict-engine guard test passed ($(grep -cE ' ok$' "$OUT_DIR/verdict-guard-test.txt" || true) cases, $(grep -cE 'KILLED' "$OUT_DIR/verdict-mutations.txt" || true) mutations killed)"
+scripts/bench_otp12pf_mac.sh:552:      embeds_clean "$h" "$p" || die "$(hname "$h"): $p is not a CLEAN +$EXPECT_SHA (same-build rule D-2026-07-05-2; a read error also fails here, by design)"
+scripts/bench_otp12pf_mac.sh:566:      want="$(fix_count "$w")"; wantb="$(fix_bytes "$w")"
+scripts/bench_otp12pf_mac.sh:567:      got="$(hrun "$h" "find '$(hmod "$h")/src_$w' -type f 2>/dev/null | wc -l" | tr -cd '0-9')"
+scripts/bench_otp12pf_mac.sh:568:      gotb="$(hrun "$h" "find '$(hmod "$h")/src_$w' -type f -exec stat -f %z {} + 2>/dev/null | awk '{s+=\$1} END{printf \"%d\", s+0}'" | tr -cd '0-9')"
+scripts/bench_otp12pf_mac.sh:577:  log "  load1: nagatha=$(load1 n)  q=$(load1 q)"
+scripts/bench_otp12pf_mac.sh:585:  nd="$(sha256_of n "$N_DAEMON")" || die "nagatha: cannot hash $N_DAEMON"
+scripts/bench_otp12pf_mac.sh:587:  qd="$(sha256_of q "$Q_DAEMON")" || die "q: cannot hash $Q_DAEMON"
+scripts/bench_otp12pf_mac.sh:588:  vh="$(shasum -a 256 "$VERDICT_PY" | cut -d' ' -f1)"
+scripts/bench_otp12pf_mac.sh:589:  th="$(shasum -a 256 "$VERDICT_TEST" | cut -d' ' -f1)"
+scripts/bench_otp12pf_mac.sh:602:  log "staging manifest recorded (harness + verdict-engine + 4 binary hashes, every threshold)"
+scripts/bench_otp12pf_mac.sh:610:  # The daemon's OWN pid, from $! — not `pgrep | head -1`, which picks the first of
+scripts/bench_otp12pf_mac.sh:615:echo \"P:\$!:P\"" | nocr | sed -n 's/.*P:\([0-9][0-9]*\):P.*/\1/p' | head -1)"
+scripts/bench_otp12pf_mac.sh:616:  [[ "$pid" =~ ^[0-9]+$ ]] || die "$(hname "$h"): daemon did not report a pid (see $mod/mm-daemon.log)"
+scripts/bench_otp12pf_mac.sh:624:    || die "$(hname "$h"): daemon pid $pid is not alive (see $mod/mm-daemon.log)"
+scripts/bench_otp12pf_mac.sh:627:    || die "$(hname "$h"): daemon pid $pid is NOT LISTENING on $PORT (see $mod/mm-daemon.log)"
+scripts/bench_otp12pf_mac.sh:634:  o="$(other "$h")"
+scripts/bench_otp12pf_mac.sh:639:    || die "smoke to $(hname "$h") FAILED — the daemon is not serving blit (see blit-logs/smoke_$(hname "$h").err)"
+scripts/bench_otp12pf_mac.sh:640:  hrun "$h" "rm -rf '$(hmod "$h")/mm_smoke_${SESSION_TAG}'" >/dev/null 2>&1 || true
+scripts/bench_otp12pf_mac.sh:646:  [[ -n "$pid" ]] || return 0
+scripts/bench_otp12pf_mac.sh:647:  hrun "$h" "kill $pid 2>/dev/null || true
+scripts/bench_otp12pf_mac.sh:649:if ps -p $pid >/dev/null 2>&1; then kill -9 $pid 2>/dev/null || true; sleep 1; fi" >/dev/null 2>&1 || true
+scripts/bench_otp12pf_mac.sh:653:    | nocr | sed -n 's/.*S:\([A-Z]*\):S.*/\1/p' | head -1)" || state=""
+scripts/bench_otp12pf_mac.sh:657:    touch "$OUT_DIR/TEARDOWN-FAILED"
+scripts/bench_otp12pf_mac.sh:660:  log "$(hname "$h") daemon stopped (pid $pid, verified gone)"
+scripts/bench_otp12pf_mac.sh:663:  daemon_stop n || true
+scripts/bench_otp12pf_mac.sh:664:  daemon_stop q || true
+scripts/bench_otp12pf_mac.sh:665:  rm -rf "$MUX" 2>/dev/null || true
+scripts/bench_otp12pf_mac.sh:676:  dev="$(hdisk "$h")"
+scripts/bench_otp12pf_mac.sh:677:  [[ -n "$dev" ]] || { echo DRAIN-ERROR; return 0; }
+scripts/bench_otp12pf_mac.sh:684:  if [ \$rc -ne 0 ]; then echo DRAIN-ERROR; exit 0; fi
+scripts/bench_otp12pf_mac.sh:685:  w=\$(echo \"\$out\" | tail -1 | awk '{print \$3}')
+scripts/bench_otp12pf_mac.sh:687:    ''|*[!0-9.]*) echo DRAIN-ERROR; exit 0 ;;   # non-numeric must NEVER certify quiet
+scripts/bench_otp12pf_mac.sh:691:  if [ \$quiet -ge $DRAIN_QUIET ]; then echo \"drained_\${i}x2s\"; exit 0; fi
+scripts/bench_otp12pf_mac.sh:693:echo DRAIN-TIMEOUT" 2>/dev/null | nocr | tail -1 || echo DRAIN-ERROR
+scripts/bench_otp12pf_mac.sh:747:PYEOF" | nocr | sed -n 's/.*F:\([^:]*\):\([0-9]*\):\([0-9]*\):\([0-9]*\):F.*/\1 \2 \3 \4/p' | head -1)" || out=""
+scripts/bench_otp12pf_mac.sh:757:  bin="$(hblit "$ih")"
+scripts/bench_otp12pf_mac.sh:759:  out="$(time_argv "$ih" "$bin" copy "$src" "$dst" --yes $flag)"
+scripts/bench_otp12pf_mac.sh:761:  read -r RUN_FLUSH RUN_FILES RUN_BYTES RUN_SETTLED <<<"$(fsync_tree "$dh" "$landed")"
+scripts/bench_otp12pf_mac.sh:763:  wc="$(fix_count "$w")"; wb="$(fix_bytes "$w")"
+scripts/bench_otp12pf_mac.sh:773:    log "  VOID: fsync found no tree at $landed (a missing tree must never read as a fast flush)"
+scripts/bench_otp12pf_mac.sh:799:  hrun "$dh" "rm -rf '$(hmod "$dh")/$run'" >/dev/null 2>&1 || true
+scripts/bench_otp12pf_mac.sh:805:  hrun "$dh" "rm -rf '$(hmod "$dh")/$run'" >/dev/null 2>&1 || true
+scripts/bench_otp12pf_mac.sh:827:      log "  $cell/$aname slot $slot (att $attempts): ${RUN_MS}ms (dest-fsync ${RUN_FLUSH}ms, $RUN_FILES files, exit $RUN_EXIT, $RUN_DRAIN, $RUN_COLD)"
+scripts/bench_otp12pf_mac.sh:847:    l="$(load1 "$h")" || l=""
+scripts/bench_otp12pf_mac.sh:852:    ok="$(awk -v l="$l" -v m="$LOAD_MAX" 'BEGIN{print (l+0 <= m+0) ? 1 : 0}')"
+scripts/bench_otp12pf_mac.sh:890:# A REPORTER, never a gate: it must always return 0, or `set -e` aborts the sweep at
+scripts/bench_otp12pf_mac.sh:896:  err="$( { "$@"; } 2>&1 )" || rc=1
+scripts/bench_otp12pf_mac.sh:908:  return 0
+scripts/bench_otp12pf_mac.sh:917:  hrun "$h" "rm -rf '$d' && mkdir -p '$d' && printf 'aaaa' > '$d/a' && printf 'bb' > '$d/b'" \
+scripts/bench_otp12pf_mac.sh:919:  read -r ms files bytes settled <<<"$(fsync_tree "$h" "$d")"
+scripts/bench_otp12pf_mac.sh:920:  hrun "$h" "rm -rf '$d'" >/dev/null 2>&1 || true
+scripts/bench_otp12pf_mac.sh:942:    || die "the verdict guard test FAILS (see $OUT_DIR/verdict-guard-test.txt)"
+scripts/bench_otp12pf_mac.sh:943:  log "  $(grep -E '^[0-9]+/[0-9]+ cases passed' "$OUT_DIR/verdict-guard-test.txt")"
+scripts/bench_otp12pf_mac.sh:945:    || die "the verdict guard test is VACUOUS — a mutation SURVIVED (see $OUT_DIR/verdict-mutations.txt)"
+scripts/bench_otp12pf_mac.sh:960:    if resolve_disk "$h"; then log "  [OK]     drain device  (resolved via the APFS physical store)"
+scripts/bench_otp12pf_mac.sh:971:    local dr; dr="$(drain_host "$h")"
+scripts/bench_otp12pf_mac.sh:978:    log "  [--]     mac parse (no gawk strtonum): $(hmac "$h") -> $(hmac "$h" | norm_mac)"
+scripts/bench_otp12pf_mac.sh:982:    log "  [OK]     end-load gate (both Macs under $LOAD_MAX; it CAN void a session)"
+scripts/bench_otp12pf_mac.sh:1007:    HARNESS_HEAD="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+scripts/bench_otp12pf_mac.sh:1008:    HARNESS_SHA256="$(shasum -a 256 "$SELF" | cut -d' ' -f1)"
+scripts/bench_otp12pf_mac.sh:1010:    exit 0
+scripts/bench_otp12pf_mac.sh:1016:    exit 0
+scripts/bench_otp12pf_mac.sh:1043:  log "  load1 (end): nagatha=$(load1 n)  q=$(load1 q)"
+scripts/bench_otp12pf_mac.sh:1047:    touch "$OUT_DIR/SESSION-VOID"
+scripts/bench_otp12pf_mac.sh:1063:  HARNESS_HEAD="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+scripts/bench_otp12pf_mac.sh:1064:  HARNESS_SHA256="$(shasum -a 256 "$SELF" | cut -d' ' -f1)"
+
+exec
+/bin/bash -c "set -u
+OUT_DIR=/dev/null
+SELFTEST_FIRED=0
+SELFTEST_BROKEN=0
+log() { printf '%s\\n' \""'$*"; }
+eval "$(sed -n '"'893,909p' scripts/bench_otp12pf_mac.sh)\"
+blind_purge_probe() { command_that_does_not_exist; }
+gate_probe 'purge with missing executable' blind_purge_probe
+printf 'FIRED=%d BROKEN=%d\\n' \""'$SELFTEST_FIRED" "$SELFTEST_BROKEN"' in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+/bin/bash: line 11: cannot create temp file for here document: Operation not permitted
+  [FIRED]  purge with missing executable — the gate REFUSED a genuinely unmet condition. It works.
+/bin/bash: line 19: cannot create temp file for here document: Operation not permitted
+tee: /dev/null/bench.log: Not a directory
+FIRED=1 BROKEN=0
+
+codex
+A second branch-completeness failure is more serious than the stale prose: rev 7 created `CONTROLS-UNCERTIFIED` and explicitly tells the operator to buy power at `RUNS=16`, but the escalation gate still authorizes only `INCONCLUSIVE-UNDERPOWERED`. I’m reproducing a control that fails certification at n=8 and certifies clean at n=16; if confirmed, the registered recovery path is unreachable.
+exec
+/bin/bash -c "set -euo pipefail
+ENGINE=scripts/otp12pf_mac_verdict.py
+MEAS='nq_tcp_mixed,qn_tcp_mixed'; CTRLS='nq_grpc_mixed,qn_grpc_mixed,nq_tcp_large,qn_tcp_large'; ALL=\""'$MEAS,$CTRLS"
+meta() { local n="$1"; printf '"'cell,pairs_attempted,complete\\n'; for c in "'${ALL//,/ }; do printf '"'%s,%d,yes\\n' \""'$c" "$n"; done; }
+runs() {
+  local n="$1" c i d s j
+  printf '"'cell,arm,build,initiator,run,ms,flush_ms,settled_ms,files,bytes,exit,drain,cold,valid\\n'
+  for c in "'${ALL//,/ }; do
+    for i in $(seq 1 "$n"); do
+      s=1000; d=5
+      case "$c" in
+        nq_tcp_mixed|qn_tcp_mixed)
+          j=$(( (i-1)%8 + 1 )); s=2000
+          case "$j" in 1)d=-4;;2)d=-2;;3)d=-1;;4|5)d=0;;6)d=1;;7)d=2;;8)d=3;; esac ;;
+        nq_grpc_mixed)
+          if (( i == 1 || (n == 16 && i == 2) )); then d=60; fi ;;
+      esac
+      printf '"'%s,srcinit,x,h,%d,%d,0,250,1,1,0,drained_1x2s,cold,yes\\n' \""'$c" "$i" "$s"
+      printf '"'%s,destinit,x,h,%d,%d,0,250,1,1,0,drained_1x2s,cold,yes\\n' \""'$c" "$i" "$((s+d))"
+    done
+  done
+}
+for n in 8 16; do
+  printf '"'n=%d: ' \""'$n"
+  VERDICT_CELLS="$MEAS" CONTROL_CELLS="$CTRLS" REGISTERED_CELLS="$ALL" REQUIRED_PAIRS="$n" '"\\
+    python3 \""'$ENGINE" <(runs "$n") <(meta "$n") /dev/null /dev/null /dev/null /dev/null 2>&1 '"\\
+    | awk '/"'^SESSION VERDICT:/ && !seen {ver=$0; seen=1} /''^  nq_grpc_mixed/ && !cell {detail=$0; cell=1} END{print ver; print "      " detail}'"'
+done
+v=CONTROLS-UNCERTIFIED
+if [[ \""'$v" == INCONCLUSIVE-UNDERPOWERED ]]; then echo '"'escalation gate: ACCEPT'; else echo \"escalation gate: REFUSE ('"'$v'"' is not INCONCLUSIVE-UNDERPOWERED)\"; fi" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+n=8: SESSION VERDICT: CONTROLS-UNCERTIFIED
+        nq_grpc_mixed  PARTIAL                ratio=1.005 bar=PASS  D=+5ms CI=[+5,+60] (99.2%) margin=[-91,+100] sign_p=0.0078 (8/8 pos)
+n=16: SESSION VERDICT: VANISHES
+        nq_grpc_mixed  PARTIAL                ratio=1.005 bar=PASS  D=+5ms CI=[+5,+5] (97.9%) margin=[-91,+100] sign_p=0.0000 (16/16 pos)
+escalation gate: REFUSE ('CONTROLS-UNCERTIFIED' is not INCONCLUSIVE-UNDERPOWERED)
+
+exec
+/bin/zsh -lc "rg --files logs 2>/dev/null | rg 'otp12pf_mac|session_verdict|staging-manifest|ESCALATED' | sed -n '1,240p'" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+logs/otp12pf_mac_20260714T091956/verdict-mutations.txt
+logs/otp12pf_mac_20260714T091956/verdict-guard-test.txt
+logs/otp12_delegated_20260713T021001/staging-manifest.txt
+logs/otp12pf_mac_20260714T083401/verdict-mutations.txt
+logs/otp12pf_mac_20260714T083401/verdict-guard-test.txt
+logs/otp12_zoey_20260712T092910/staging-manifest.txt
+logs/otp12pf_mac_20260714T092324/verdict-mutations.txt
+logs/otp12pf_mac_20260714T092324/verdict-guard-test.txt
+logs/otp12_delegated_20260713T020723/staging-manifest.txt
+logs/otp12pf_mac_20260714T091909/verdict-mutations.txt
+logs/otp12pf_linux_20260713T135739/staging-manifest.txt
+logs/otp12pf_mac_20260714T091909/verdict-guard-test.txt
+logs/otp12_win_20260712T134956/staging-manifest.txt
+logs/otp12pf_mac_20260714T081523/verdict-mutations.txt
+logs/otp12pf_mac_20260714T081523/verdict-guard-test.txt
+logs/otp12_zoey_20260712T092853/staging-manifest.txt
+logs/otp12pf_mac_20260714T081343/verdict-mutations.txt
+logs/otp12pf_mac_20260714T081343/verdict-guard-test.txt
+logs/otp12pf_linux_20260713T133110/staging-manifest.txt
+logs/otp12pf_mac_20260714T100800/verdict-mutations.txt
+logs/otp12pf_mac_20260714T100800/verdict-guard-test.txt
+logs/otp12pf_linux_20260713T133039/staging-manifest.txt
+logs/otp12pf_mac_20260714T091845/verdict-mutations.txt
+logs/otp12pf_mac_20260714T091845/verdict-guard-test.txt
+logs/otp12pf_linux_20260713T134444/staging-manifest.txt
+logs/otp12pf_mac_20260714T024428/meta.csv
+logs/otp12pf_mac_20260714T024428/runs.csv
+logs/mtu_abba/S2_mtu1500/staging-manifest.txt
+logs/otp12_zoey_20260712T101739/staging-manifest.txt
+logs/mtu_abba2/S1_mtu9000/staging-manifest.txt
+logs/otp12_zoey_20260712T110110/staging-manifest.txt
+logs/otp12pf_mac_20260714T083414/verdict-mutations.txt
+logs/otp12pf_mac_20260714T083414/verdict-guard-test.txt
+logs/otp12_delegated_20260713T031155/staging-manifest.txt
+logs/otp12pf_mac_20260714T100546/verdict-mutations.txt
+logs/otp12pf_mac_20260714T100546/verdict-guard-test.txt
+logs/otp12_delegated_20260713T021026/staging-manifest.txt
+logs/mtu_abba/S1_mtu9000/staging-manifest.txt
+logs/otp12_win_20260712T132937/staging-manifest.txt
+logs/otp12_win_20260712T132954/staging-manifest.txt
+logs/mtu_abba/S4_mtu9000/staging-manifest.txt
+logs/mtu_abba/S3_mtu1500/staging-manifest.txt
+logs/otp12_win_20260712T135012/staging-manifest.txt
+
+exec
+/bin/zsh -lc "ls -lt logs/otp12pf_mac_*/verdict-guard-test.txt logs/otp12pf_mac_*/verdict-mutations.txt 2>/dev/null | sed -n '1,30p' && tail -n 8 logs/otp12pf_mac_20260714T100800/verdict-guard-test.txt && tail -n 24 logs/otp12pf_mac_20260714T100800/verdict-mutations.txt" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+-rw-r--r--@ 1 michael  staff  2111 Jul 14 10:08 logs/otp12pf_mac_20260714T100800/verdict-mutations.txt
+-rw-r--r--@ 1 michael  staff  2750 Jul 14 10:08 logs/otp12pf_mac_20260714T100800/verdict-guard-test.txt
+-rw-r--r--@ 1 michael  staff  2111 Jul 14 10:05 logs/otp12pf_mac_20260714T100546/verdict-mutations.txt
+-rw-r--r--@ 1 michael  staff  2750 Jul 14 10:05 logs/otp12pf_mac_20260714T100546/verdict-guard-test.txt
+-rw-r--r--@ 1 michael  staff  1781 Jul 14 09:23 logs/otp12pf_mac_20260714T092324/verdict-mutations.txt
+-rw-r--r--@ 1 michael  staff  2260 Jul 14 09:23 logs/otp12pf_mac_20260714T092324/verdict-guard-test.txt
+-rw-r--r--@ 1 michael  staff  1781 Jul 14 09:20 logs/otp12pf_mac_20260714T091956/verdict-mutations.txt
+-rw-r--r--@ 1 michael  staff  2260 Jul 14 09:20 logs/otp12pf_mac_20260714T091956/verdict-guard-test.txt
+-rw-r--r--@ 1 michael  staff  1781 Jul 14 09:19 logs/otp12pf_mac_20260714T091909/verdict-mutations.txt
+-rw-r--r--@ 1 michael  staff  2260 Jul 14 09:19 logs/otp12pf_mac_20260714T091909/verdict-guard-test.txt
+-rw-r--r--@ 1 michael  staff  1781 Jul 14 09:18 logs/otp12pf_mac_20260714T091845/verdict-mutations.txt
+-rw-r--r--@ 1 michael  staff  2260 Jul 14 09:18 logs/otp12pf_mac_20260714T091845/verdict-guard-test.txt
+-rw-r--r--@ 1 michael  staff  1327 Jul 14 08:34 logs/otp12pf_mac_20260714T083414/verdict-mutations.txt
+-rw-r--r--@ 1 michael  staff  1770 Jul 14 08:34 logs/otp12pf_mac_20260714T083414/verdict-guard-test.txt
+-rw-r--r--@ 1 michael  staff  1327 Jul 14 08:34 logs/otp12pf_mac_20260714T083401/verdict-mutations.txt
+-rw-r--r--@ 1 michael  staff  1770 Jul 14 08:34 logs/otp12pf_mac_20260714T083401/verdict-guard-test.txt
+-rw-r--r--@ 1 michael  staff   877 Jul 14 08:15 logs/otp12pf_mac_20260714T081523/verdict-mutations.txt
+-rw-r--r--@ 1 michael  staff  1248 Jul 14 08:15 logs/otp12pf_mac_20260714T081523/verdict-guard-test.txt
+-rw-r--r--@ 1 michael  staff   877 Jul 14 08:13 logs/otp12pf_mac_20260714T081343/verdict-mutations.txt
+-rw-r--r--@ 1 michael  staff  1248 Jul 14 08:13 logs/otp12pf_mac_20260714T081343/verdict-guard-test.txt
+codex r6: a control's marginal bar FAIL cannot certify, even wit -> CONTROLS-UNCERTIFIED       ok
+codex r6 (reproduced): a marginal bar FAIL cannot substitute for -> PARTIAL                    ok
+grok r5 (reproduced): 7/8 pairs at 99ms is NOT equivalence, what -> PARTIAL                    ok
+codex r5: DELTA_REF_MS is PINNED -- the rule is not tunable from -> ENGINE-REFUSED             ok
+
+fuzz: 300/300 inputs produced a registered outcome (measurand AND controls fuzzed)
+
+27/27 cases passed
+Reverting each fix in a copy of the engine; the guard must then FAIL.
+
+equivalence margin tied to the BAR alone (codex r2 + grok)     -> VANISHES               KILLED (guard is real)
+equivalence tested BEFORE effect detection, with the bar-tied  -> VANISHES               KILLED (guard is real)
+negative margin uses -0.10*src instead of -src/11 (codex r2)   -> VANISHES               KILLED (guard is real)
+a bar-FAIL control certifies the rig anyway (codex r6)         -> VANISHES               KILLED (guard is real)
+a missing registered cell is filtered away, not INCOMPLETE (co -> VANISHES               KILLED (guard is real)
+materiality requires a bar FAIL, so exact 1.10 is unreachable  -> PARTIAL                KILLED (guard is real)
+the sign test does not participate: direction asserted without -> PARTIAL                KILLED (guard is real)
+control void ignores absolute materiality -> a Delta_ref contr -> CONTROLS-UNCERTIFIED   KILLED (guard is real)
+engine trusts meta.complete and never checks n (grok r3)       -> VANISHES               KILLED (guard is real)
+UNSTABLE/BAR-FAIL-INCONSISTENT outrank REPRODUCES -> a clean r -> BAR-FAIL-INCONSISTENT  KILLED (guard is real)
+a harness-detected session void is ignored (grok r3)           -> VANISHES               KILLED (guard is real)
+`bar == FAIL` is direction-blind, so +1ms is 'material' (codex -> REPRODUCES             KILLED (guard is real)
+an UNCERTIFIED control can still support a null (codex r5 + gr -> VANISHES               KILLED (guard is real)
+the CI vetoes DIRECTION, so one zero pair turns 99ms into equi -> VANISHES               KILLED (guard is real)
+the MARGINAL bar substitutes for PAIRED magnitude (codex r6)   -> REPRODUCES             KILLED (guard is real)
+a control certifies clean at the SAME threshold as materiality -> VANISHES               KILLED (guard is real)
+uncertified controls block only the NULL, not a REPRODUCTION ( -> REPRODUCES             KILLED (guard is real)
+the registered DELTA_REF is taken from the environment again ( -> CONTROLS-UNCERTIFIED   KILLED (guard is real)
+
+18/18 mutations killed
+
+exec
+/bin/zsh -lc "git log --oneline --decorate --follow -- docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md | sed -n '1,12p'; git log --oneline 1e03063..HEAD -- scripts/bench_otp12pf_mac.sh scripts/otp12pf_mac_verdict.py scripts/otp12pf_mac_verdict_test.py docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md; git diff --stat 1e03063..HEAD -- scripts/bench_otp12pf_mac.sh scripts/otp12pf_mac_verdict.py scripts/otp12pf_mac_verdict_test.py docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md" in /Users/michael/Dev/blit_v2
+ succeeded in 339ms:
+b3d42b7 prereg: list the review rounds in chronological order (rev 7 was inserted out of sequence)
+1e03063 macmac round 6: stop patching branches — the bar no longer takes part in inference
+aebd50b macmac round 5: the settle NEVER RAN — and the same bug escaped a THIRD time (12/12)
+a9460ce macmac round 4: grok drove a clean VANISHES with EVERY control dirty — 9/9 accepted
+cae2e0f macmac round 3: rework the instrument (15 findings) — and EXECUTE the gates this time
+24660ae macmac-harness: address review (11 findings) — the instrument could have lied
+8375c0a macmac-prereg: address review (9 findings) — the experiment could not do what I claimed
+f0343f4 pre-register the Mac<->Mac rig BEFORE any data (queue 1(ii); discriminates H1)
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-TOdIC70e' (errno=Operation not permitted)
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-5aKs7bv9' (errno=Operation not permitted)
+b3d42b7 prereg: list the review rounds in chronological order (rev 7 was inserted out of sequence)
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-Ymp0ksgx' (errno=Operation not permitted)
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-AkQ1hFqv' (errno=Operation not permitted)
+ docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+exec
+/bin/zsh -lc 'git show --format= --unified=3 1e03063 -- docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md' in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-jXRQbgaH' (errno=Operation not permitted)
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-WmaxNedC' (errno=Operation not permitted)
+diff --git a/docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md b/docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md
+index 2e2e283..a2b3eb0 100644
+--- a/docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md
++++ b/docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md
+@@ -1,6 +1,18 @@
+ # otp-12 Mac↔Mac rig — PRE-REGISTRATION (written before any timed run)
+ 
+-**Status**: Pre-registered, **revision 6**. **NO DATA EXISTS YET.**
++**Status**: Pre-registered, **revision 7**. **NO DATA EXISTS YET.**
++
++> ## THE RULE IN ONE PARAGRAPH (rev 7)
++>
++> **All inference is PAIRED.** The 1.10 bar is computed on the *marginal medians*; it is
++> the project's **acceptance** criterion, it is reported in every row, and it takes **no
++> part in inference** — because the marginal and paired statistics can disagree in both
++> direction and magnitude, and every attempt to let the bar stand in for paired evidence
++> produced a false verdict (rounds 3–6). **Direction** is the sign test. **Magnitude** is
++> the paired CI. **Equivalence** is the CI against the margin. **The controls are a
++> precondition**: unless every control is certified to carry less than *half* the
++> material effect, **no verdict about the measurand may be read — not a null, and not a
++> reproduction.**
+ 
+ > ## ⛔ CORRECTION THAT THIS DOCUMENT OWES ITS READER
+ >
+@@ -36,6 +48,14 @@ measured anything, and **every review has found defects capable of a false claim
+   **drove the engine to a clean `VANISHES` while every control carried the full
+   rig-W effect** → **9 findings, 9 accepted** (1 BLOCKER, 3 HIGH, 4 MEDIUM, 1 LOW).
+   (`.review/results/macmac-harness-r3.grok-verdict.md`)
++- Round 6 (the round-5 rework, `aebd50b`): **NOT READY** — **codex** (3 BLOCKER) **and
++  grok** (2 BLOCKER), converging *again* on both hunted classes: the **marginal bar still
++  substituted for paired magnitude** (a **1 ms** paired effect reported `REPRODUCES` at
++  n=16), a control at **D=+229** — *one millisecond* under the reference effect —
++  **certified as clean**, uncertified controls **blocked only the null and not a
++  reproduction**, and the settle repair was **still not provable** (a no-op `sleep` would
++  have passed while the log narrated "settle included"). → **13 findings, 13 accepted.**
++  (`.review/results/macmac-harness-r6.{codex,grok}.md`)
+ - Round 5 (the round-4 rework, `a9460ce`): **NOT READY / NOT SAFE TO RUN** — **codex**
+   (3 BLOCKER, 6 HIGH, 2 MEDIUM) **and grok**, which converged on the **same BLOCKER
+   independently**: the materiality bug, **for the third round running**, in a branch
+@@ -43,7 +63,7 @@ measured anything, and **every review has found defects capable of a false claim
+   (above), which the review's finding exposed but did not itself find.
+   (`.review/results/macmac-harness-r5.verdict.md`)
+ 
+-**Five rounds. 56 findings. 56 accepted. 0 rejected. Still no datum taken** — which is
++**Six rounds. 69 findings. 69 accepted. 0 rejected. Still no datum taken** — which is
+ the only reason none of it became a retraction.
+ 
+ **The rule below has been amended in rev 4 and again in rev 5. That is legitimate
+
+exec
+/bin/bash -c 'set -euo pipefail
+python3() {
+  if [[ "${1:-}" == - && "${2:-}" == 0.250 ]]; then
+    /bin/cat >/dev/null
+    printf '"'F:0:2:6:250:F\\n'
+  else
+    command python3 \""'$@"
+  fi
+}
+export -f python3
+raw="$(printf '"'the real settle/fsync Python body would be stdin here\\n' | bash -c \"python3 - 0.250 /definitely/missing/tree\" | sed -n 's/.*F:\\(["'^:]*'"\\):\\([0-9]*\\):\\([0-9]*\\):\\([0-9]*\\):F.*/\\1 \\2 \\3 \\4/p' | head -1)\"
+printf 'parsed fsync sentinel: %s\\n' \""'$raw"
+set -- $raw
+ms=$1; files=$2; bytes=$3; settled=$4
+if [[ "$settled" =~ ''^[0-9]+$ ]] && (( settled >= 250 && settled < 1000 )); then echo '"'settle_ok: PASS'; fi
+if [[ \""'$files" == 2 && "$bytes" == 6 ]]; then echo '"'SELFTEST counts: PASS'; fi" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+parsed fsync sentinel: 0 2 6 250
+settle_ok: PASS
+SELFTEST counts: PASS
+
+exec
+/bin/bash -c "set +e
+DELTA_REF_MS=240 VERDICT_CELLS=x CONTROL_CELLS=y python3 scripts/otp12pf_mac_verdict.py /dev/null /dev/null /dev/null /dev/null /dev/null /dev/null >/dev/null 2> >(sed 's/"'^/engine: /'"')
+e="'$?
+SETTLE_MS=1 SELFTEST=1 bash scripts/bench_otp12pf_mac.sh >/dev/null 2> >(sed '"'s/"'^/harness: /'"')
+h="'$?
+printf '"'engine_rc=%d harness_rc=%d\\n' \""'$e" "$h"' in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+/bin/bash: line 1: /dev/fd/62: Operation not permitted
+/bin/bash: line 3: /dev/fd/62: Operation not permitted
+engine_rc=1 harness_rc=1
+
+exec
+/bin/bash -c 'set +e
+eout="$(DELTA_REF_MS=240 VERDICT_CELLS=x CONTROL_CELLS=y python3 scripts/otp12pf_mac_verdict.py /dev/null /dev/null /dev/null /dev/null /dev/null /dev/null 2>&1)"; e=$?
+hout="$(SETTLE_MS=1 SELFTEST=1 bash scripts/bench_otp12pf_mac.sh 2>&1)"; h=$?
+printf '"'%s\\n' \""'$eout" | tail -1
+printf '"'%s\\n' \""'$hout" | sed -n '"'1,5p'
+printf 'engine_rc=%d harness_rc=%d\\n' \""'$e" "$h"' in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+REFUSING: DELTA_REF_MS='240' but the PRE-REGISTERED reference effect is 230 ms. The decision rule is not tunable from the environment -- that is what pre-registration exists to prevent.
+REFUSING: the pre-registered constants are NOT tunable, and these are set in the
+environment: SETTLE_MS=1
+A rule the operator can retune after seeing the data is not a pre-registration.
+To change one, amend docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md and
+put it back through review. That is the entire point of the document.
+engine_rc=2 harness_rc=2
+
+exec
+/bin/bash -c 'set +e
+out="$(env -u VERDICT_CELLS -u CONTROL_CELLS python3 scripts/otp12pf_mac_verdict.py /dev/null /dev/null /dev/null /dev/null /dev/null /dev/null 2>&1)"; rc=$?
+printf '"'%s\\nrc=%d\\n' \""'$out" "$rc"' in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+python3: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+python3: error: couldn't create cache file '/tmp/xcrun_db-NIzKlf42' (errno=Operation not permitted)
+python3: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+python3: error: couldn't create cache file '/tmp/xcrun_db-pxydpMsC' (errno=Operation not permitted)
+REFUSING: VERDICT_CELLS and CONTROL_CELLS must both be set. The controls are a precondition for any verdict -- an engine with no controls cannot certify the rig, and must not pretend to.
+rc=2
+
+exec
+/bin/zsh -lc "ls -la logs/otp12pf_mac_20260714T100800 && sed -n '1,220p' logs/otp12pf_mac_20260714T100800/bench.log 2>/dev/null" in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+total 32
+drwxr-xr-x@  6 michael  staff   192 Jul 14 10:08 .
+drwxr-xr-x@ 66 michael  staff  2112 Jul 14 10:08 ..
+-rw-r--r--@  1 michael  staff  4607 Jul 14 10:10 bench.log
+drwxr-xr-x@  2 michael  staff    64 Jul 14 10:08 blit-logs
+-rw-r--r--@  1 michael  staff  2750 Jul 14 10:08 verdict-guard-test.txt
+-rw-r--r--@  1 michael  staff  2111 Jul 14 10:08 verdict-mutations.txt
+10:08:00 SELFTEST — exercising the gates for real. No transfer, NO DATA.
+10:08:00 instrument: harness=145e5198bb00cb97f5c84e47de1611ef7fcbaf55346898a465e770a1fd1bf91f
+10:08:00 --- the verdict engine's own guard test (incl. mutation proof) ---
+10:08:06   27/27 cases passed
+10:08:07   18/18 mutations killed — every reverted fix is caught
+10:08:07 --- nagatha ---
+10:08:08   timer ok on nagatha: a 1000 ms sleep measures 1007 ms
+10:08:08   [OK]     timer         (the measurand's clock) — answers, and the condition holds
+           | 10:08:08   timer ok on nagatha: a 1000 ms sleep measures 1007 ms
+10:08:08 FATAL: nagatha is NOT quiet (running: codex). BOTH Macs are bench ENDS — load inflates one arm and MANUFACTURES P1. Stop them (never blanket-kill the owner's sessions) and re-run.
+10:08:08   [FIRED]  quiescence    (codex/cargo/rustc) — the gate REFUSED a genuinely unmet condition. It works.
+           | 10:08:08 FATAL: nagatha is NOT quiet (running: codex). BOTH Macs are bench ENDS — load inflates one arm and MANUFACTURES P1. Stop them (never blanket-kill the owner's sessions) and re-run.
+10:08:08   [OK]     time machine  (running OR enabled) — answers, and the condition holds
+10:08:09   [OK]     spotlight     (mds_stores CPU) — answers, and the condition holds
+10:08:09 FATAL: nagatha: load1 is 7.39 (> 3.0) — a bench END must be quiet. Find what is running first.
+10:08:09   [FIRED]  load  start   (load1 <= 3.0) — the gate REFUSED a genuinely unmet condition. It works.
+           | 10:08:09 FATAL: nagatha: load1 is 7.39 (> 3.0) — a bench END must be quiet. Find what is running first.
+10:08:09   [OK]     link          (ARP on the egress NIC + 10GbE route) — answers, and the condition holds
+10:08:11   drain device on nagatha: disk0 (backs /Users/michael/blit-bench-work, idle probe 15.74 MB/s)
+10:08:11   [OK]     drain device  (resolved via the APFS physical store)
+10:08:11   [OK]     purge         (sudo -n, or every run reads WARM) — answers, and the condition holds
+10:08:11   [OK]     stale daemon  (rc-aware probe: none running)
+10:10:12   [FIRED]  drain loop    — the disk is genuinely busy; the gate would void the pair
+10:10:13   [OK]     fsync/settle — 2 files/6 bytes walked in 0ms; settle MEASURED at 260ms (>= 250ms), counts VERIFIED
+10:10:13   [--]     mac parse (no gawk strtonum): 00:e0:4d:01:4c:a3 -> 00:e0:4d:01:4c:a3
+10:10:13 --- q ---
+10:10:14   timer ok on q: a 1000 ms sleep measures 1012 ms
+10:10:14   [OK]     timer         (the measurand's clock) — answers, and the condition holds
+           | 10:10:14   timer ok on q: a 1000 ms sleep measures 1012 ms
+10:10:14   [OK]     quiescence    (codex/cargo/rustc) — answers, and the condition holds
+10:10:14   [OK]     time machine  (running OR enabled) — answers, and the condition holds
+10:10:15   [OK]     spotlight     (mds_stores CPU) — answers, and the condition holds
+10:10:15   [OK]     load  start   (load1 <= 3.0) — answers, and the condition holds
+10:10:15   [OK]     link          (ARP on the egress NIC + 10GbE route) — answers, and the condition holds
+10:10:16   drain device on q: disk0 (backs /Users/michael/blit-bench-work, idle probe 0.02 MB/s)
+10:10:16   [OK]     drain device  (resolved via the APFS physical store)
+10:10:17   [OK]     purge         (sudo -n, or every run reads WARM) — answers, and the condition holds
+10:10:17   [OK]     stale daemon  (rc-aware probe: none running)
+10:10:37   [OK]     drain loop    (drained_10x2s)
+10:10:38   [OK]     fsync/settle — 2 files/6 bytes walked in 0ms; settle MEASURED at 260ms (>= 250ms), counts VERIFIED
+10:10:38   [--]     mac parse (no gawk strtonum): 00:01:d2:19:04:a3 -> 00:01:d2:19:04:a3
+10:10:38   [FIRED]  end-load gate — end-load on nagatha is 4.65 (> 3.0) — the machine was NOT quiet at the end of the session, so a contaminant may have entered the timed windows
+10:10:38   ssh dispatch (warm mux, median of 5): 15 ms (max 62) — ENFORCED; it bounds the residual settle-gap asymmetry (the settle is 250 ms, EQUAL on both arms)
+10:10:38 
+10:10:38 SELFTEST: 4 gate(s) refused a genuinely unmet condition; 0 blind.
+10:10:38 NOT exercised here (they need a real transfer): daemon start/lsof/teardown, the
+10:10:38 smoke transfer, the ABBA pair loop, pair-voiding, and the manifest. PREFLIGHT_ONLY=1
+10:10:38 covers the manifest and the build-provenance gates. This self-test does NOT claim
+10:10:38 to run every gate — the previous one did, and it was not true.
+10:10:38 THIS IS NOT CLEARANCE TO TAKE DATA. The review is.
+10:10:38 SELFTEST PASSED: every gate exercised here can answer.
+
+exec
+/bin/zsh -lc 'shasum -a 256 scripts/bench_otp12pf_mac.sh scripts/otp12pf_mac_verdict.py scripts/otp12pf_mac_verdict_test.py' in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+145e5198bb00cb97f5c84e47de1611ef7fcbaf55346898a465e770a1fd1bf91f  scripts/bench_otp12pf_mac.sh
+17f7cde819e5953e3acfac50fd8ef666b09d799801d95e07d206df4d7632eeef  scripts/otp12pf_mac_verdict.py
+a8bc09b587c8a6345b3d27173610310b6896f379ca818bbf581bf66be3735603  scripts/otp12pf_mac_verdict_test.py
+
+codex
+The normal control precedence itself is sound when the harness supplies the registered roles: clean controls permit `VANISHES`, and dirty registered controls force `RIG-VOID`. The remaining failures are boundary failures around that rule—unreachable escalation, env-retunable roles in the standalone engine, and marginal-bar paths that still block paired-clean controls. I’m doing one final no-write status check and then will return only the actionable findings and reproductions.
+codex
+The shared worktree changed underneath this read-only audit: `master` advanced from the requested `b3d42b7` and the two review-result files are now modified by another process. I made no writes. I’m checking whether any of the four audited files changed; the findings remain pinned to `b3d42b7` as requested.
+exec
+/bin/zsh -lc 'git rev-parse HEAD; git log -5 --oneline --decorate; git diff --stat b3d42b7..HEAD -- scripts/bench_otp12pf_mac.sh scripts/otp12pf_mac_verdict.py scripts/otp12pf_mac_verdict_test.py docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md; git status --short' in /Users/michael/Dev/blit_v2
+ succeeded in 0ms:
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-lkrflrKk' (errno=Operation not permitted)
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-t7EzM4nY' (errno=Operation not permitted)
+325d06e86a4eac44d0825332a13bac924c22a8ea
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-anWMAmuo' (errno=Operation not permitted)
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-EX6I9OIV' (errno=Operation not permitted)
+325d06e (HEAD -> master) STATE: prune to the 200-line cap, gated on the EXIT STATUS this time
+cb6d134 STATE: prune to the 200-line cap — I committed dd778ae while check-docs was FAILING
+dd778ae handoff: Mac<->Mac instrument rounds 5+6 — the settle had never run; 69/69 accepted
+b3d42b7 prereg: list the review rounds in chronological order (rev 7 was inserted out of sequence)
+1e03063 macmac round 6: stop patching branches — the bar no longer takes part in inference
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-4Wk8o0sX' (errno=Operation not permitted)
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-48vJWYF6' (errno=Operation not permitted)
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-KTyKP6PT' (errno=Operation not permitted)
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-a0j3iTVC' (errno=Operation not permitted)
+ M .review/results/macmac-harness-r7.codex.md
+ M .review/results/macmac-harness-r7.grok.md
+
+codex
+## Findings
+
+- [scripts/bench_otp12pf_mac.sh:693](/Users/michael/Dev/blit_v2/scripts/bench_otp12pf_mac.sh:693) — **BLOCKER** — Drain still fails open. If `hrun` prints `drained_*` and then exits nonzero, `|| echo DRAIN-ERROR` creates a two-line value beginning with `drained`. Both runtime and SELFTEST classify it as success via `drained*`. A blind disk probe can therefore admit contaminated pairs.
+
+- [scripts/bench_otp12pf_mac.sh:725](/Users/michael/Dev/blit_v2/scripts/bench_otp12pf_mac.sh:725) — **BLOCKER** — The settle can still be shadowed. `python3` is PATH/function/BASH_ENV-resolved inside `bash -c`; an exported wrapper can swallow the Python body and emit a valid `F:...:settled_ms:F` sentinel without sleeping or fsyncing. SELFTEST trusts the same sentinel and can pass. This restores the artifact capable of manufacturing P1.
+
+- [scripts/bench_otp12pf_mac.sh:517](/Users/michael/Dev/blit_v2/scripts/bench_otp12pf_mac.sh:517) — **BLOCKER** — The new control outcome has no executable escalation path. The engine tells `CONTROLS-UNCERTIFIED` sessions to rerun at 16 pairs, but the harness authorizes 16 only after `INCONCLUSIVE-UNDERPOWERED`. A control that certifies at n=16 but not n=8 is permanently blocked.
+
+- [PREREGISTRATION.md:247](/Users/michael/Dev/blit_v2/docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md:247) — **BLOCKER** — Rev 7 contains incompatible decision rules. Lines 7–15 say the bar never participates and uncertified controls block every verdict; lines 256–270 still define bar-based magnitude, while lines 315–331 say bar failure contaminates and uncertified controls do not block reproduction. This is not a single preregistered rule.
+
+- [scripts/otp12pf_mac_verdict.py:477](/Users/michael/Dev/blit_v2/scripts/otp12pf_mac_verdict.py:477) — **HIGH** — The bar still changes verdicts. It blocks control certification here, creates `BAR-FAIL-INCONSISTENT` at line 361, and participates in `UNSTABLE` at line 350. No bar path to `REPRODUCES` remains, but the stronger “reported only, never consulted” claim is false. A paired-clean control with CI `[5,5]` was blocked solely by its marginal bar.
+
+- [scripts/otp12pf_mac_verdict.py:125](/Users/michael/Dev/blit_v2/scripts/otp12pf_mac_verdict.py:125) — **HIGH** — The standalone engine’s cell identities and roles remain environment-retunable. An operator can omit dirty controls—or provide an ungraded control name—and obtain `VANISHES` from the same CSV that yields `RIG-VOID` under the registered roles. Pinning only `DELTA_REF_MS` is insufficient.
+
+- [scripts/bench_otp12pf_mac.sh:512](/Users/michael/Dev/blit_v2/scripts/bench_otp12pf_mac.sh:512) — **HIGH** — RUNS=16 remains p-hackable. The gate checks filenames, mutable verdict prose, a build substring, and a new runs hash; it neither recomputes the prior verdict nor verifies `runs=8`. An underpowered n=16 session can authorize another n=16 session indefinitely, each with a new hash. The written `ESCALATED` marker is never read.
+
+- [scripts/bench_otp12pf_mac.sh:963](/Users/michael/Dev/blit_v2/scripts/bench_otp12pf_mac.sh:963) — **MEDIUM** — SELFTEST’s explicit marker is only honest where callers actually use `die_blind`. Any purge nonzero—including missing `purge`, broken sudo, or failed SSH—has no marker and is scored `[FIRED]`, so SELFTEST can exit zero on a broken probe. The drain defect above demonstrates a blind probe scoring `[OK]`.
+
+- [scripts/otp12pf_mac_verdict_test.py:343](/Users/michael/Dev/blit_v2/scripts/otp12pf_mac_verdict_test.py:343) — **MEDIUM** — The 18 mutations target live code and the case-failure kill criterion is honest, but coverage is not class-complete. There is no mutation for the negative magnitude/control branches, the no-controls refusal, cell-role pinning, escalation, drain status composition, or settle shadowing. The bar-control mutation actively guards the behavior that contradicts rev 7’s opening rule.
+
+## Reproductions
+
+Control escalation dead branch, using the real engine with synthetic streams:
+
+```sh
+for n in 8 16; do
+  REQUIRED_PAIRS=$n ... python3 scripts/otp12pf_mac_verdict.py \
+    <(runs "$n") <(meta "$n") /dev/null /dev/null /dev/null /dev/null
+done
+```
+
+```text
+n=8:  SESSION VERDICT: CONTROLS-UNCERTIFIED
+      nq_grpc_mixed ... CI=[+5,+60] ... bar=PASS
+n=16: SESSION VERDICT: VANISHES
+      nq_grpc_mixed ... CI=[+5,+5] ... bar=PASS
+escalation gate: REFUSE ('CONTROLS-UNCERTIFIED' is not INCONCLUSIVE-UNDERPOWERED)
+```
+
+Drain failure composition:
+
+```sh
+set -o pipefail
+hrun() { printf 'drained_3x2s\n'; return 255; }
+dr="$(hrun | tr -d '\r' | tail -1 || echo DRAIN-ERROR)"
+printf 'captured=%q\n' "$dr"
+[[ "$dr" == drained* ]] && echo "runtime gate: PASSED AS DRAINED"
+```
+
+```text
+captured=$'drained_3x2s\nDRAIN-ERROR'
+runtime gate: PASSED AS DRAINED
+SELFTEST classification: [OK]
+```
+
+Same dirty CSV, different engine role environment:
+
+```text
+clean registered session:                    SESSION VERDICT: VANISHES
+dirty controls, registered roles:            SESSION VERDICT: RIG-VOID
+same dirty CSV, env omits 3 dirty controls:  SESSION VERDICT: VANISHES
+```
+
+Interpreter shadow:
+
+```text
+parsed fsync sentinel: 0 2 6 250
+settle_ok: PASS
+SELFTEST counts: PASS
+```
+
+The numerical constant checks did refuse correctly with exit 2, and the engine refused an empty control configuration. The archived SELFTEST for the exact harness hash reports 27/27 cases, 18/18 mutations, and measured 260 ms settles; a fresh suite run was prevented only by this review sandbox’s read-only temporary directory.
+
+**VERDICT: NOT READY TO RUN**
+tokens used
+219,634
+## Findings
+
+- [scripts/bench_otp12pf_mac.sh:693](/Users/michael/Dev/blit_v2/scripts/bench_otp12pf_mac.sh:693) — **BLOCKER** — Drain still fails open. If `hrun` prints `drained_*` and then exits nonzero, `|| echo DRAIN-ERROR` creates a two-line value beginning with `drained`. Both runtime and SELFTEST classify it as success via `drained*`. A blind disk probe can therefore admit contaminated pairs.
+
+- [scripts/bench_otp12pf_mac.sh:725](/Users/michael/Dev/blit_v2/scripts/bench_otp12pf_mac.sh:725) — **BLOCKER** — The settle can still be shadowed. `python3` is PATH/function/BASH_ENV-resolved inside `bash -c`; an exported wrapper can swallow the Python body and emit a valid `F:...:settled_ms:F` sentinel without sleeping or fsyncing. SELFTEST trusts the same sentinel and can pass. This restores the artifact capable of manufacturing P1.
+
+- [scripts/bench_otp12pf_mac.sh:517](/Users/michael/Dev/blit_v2/scripts/bench_otp12pf_mac.sh:517) — **BLOCKER** — The new control outcome has no executable escalation path. The engine tells `CONTROLS-UNCERTIFIED` sessions to rerun at 16 pairs, but the harness authorizes 16 only after `INCONCLUSIVE-UNDERPOWERED`. A control that certifies at n=16 but not n=8 is permanently blocked.
+
+- [PREREGISTRATION.md:247](/Users/michael/Dev/blit_v2/docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md:247) — **BLOCKER** — Rev 7 contains incompatible decision rules. Lines 7–15 say the bar never participates and uncertified controls block every verdict; lines 256–270 still define bar-based magnitude, while lines 315–331 say bar failure contaminates and uncertified controls do not block reproduction. This is not a single preregistered rule.
+
+- [scripts/otp12pf_mac_verdict.py:477](/Users/michael/Dev/blit_v2/scripts/otp12pf_mac_verdict.py:477) — **HIGH** — The bar still changes verdicts. It blocks control certification here, creates `BAR-FAIL-INCONSISTENT` at line 361, and participates in `UNSTABLE` at line 350. No bar path to `REPRODUCES` remains, but the stronger “reported only, never consulted” claim is false. A paired-clean control with CI `[5,5]` was blocked solely by its marginal bar.
+
+- [scripts/otp12pf_mac_verdict.py:125](/Users/michael/Dev/blit_v2/scripts/otp12pf_mac_verdict.py:125) — **HIGH** — The standalone engine’s cell identities and roles remain environment-retunable. An operator can omit dirty controls—or provide an ungraded control name—and obtain `VANISHES` from the same CSV that yields `RIG-VOID` under the registered roles. Pinning only `DELTA_REF_MS` is insufficient.
+
+- [scripts/bench_otp12pf_mac.sh:512](/Users/michael/Dev/blit_v2/scripts/bench_otp12pf_mac.sh:512) — **HIGH** — RUNS=16 remains p-hackable. The gate checks filenames, mutable verdict prose, a build substring, and a new runs hash; it neither recomputes the prior verdict nor verifies `runs=8`. An underpowered n=16 session can authorize another n=16 session indefinitely, each with a new hash. The written `ESCALATED` marker is never read.
+
+- [scripts/bench_otp12pf_mac.sh:963](/Users/michael/Dev/blit_v2/scripts/bench_otp12pf_mac.sh:963) — **MEDIUM** — SELFTEST’s explicit marker is only honest where callers actually use `die_blind`. Any purge nonzero—including missing `purge`, broken sudo, or failed SSH—has no marker and is scored `[FIRED]`, so SELFTEST can exit zero on a broken probe. The drain defect above demonstrates a blind probe scoring `[OK]`.
+
+- [scripts/otp12pf_mac_verdict_test.py:343](/Users/michael/Dev/blit_v2/scripts/otp12pf_mac_verdict_test.py:343) — **MEDIUM** — The 18 mutations target live code and the case-failure kill criterion is honest, but coverage is not class-complete. There is no mutation for the negative magnitude/control branches, the no-controls refusal, cell-role pinning, escalation, drain status composition, or settle shadowing. The bar-control mutation actively guards the behavior that contradicts rev 7’s opening rule.
+
+## Reproductions
+
+Control escalation dead branch, using the real engine with synthetic streams:
+
+```sh
+for n in 8 16; do
+  REQUIRED_PAIRS=$n ... python3 scripts/otp12pf_mac_verdict.py \
+    <(runs "$n") <(meta "$n") /dev/null /dev/null /dev/null /dev/null
+done
+```
+
+```text
+n=8:  SESSION VERDICT: CONTROLS-UNCERTIFIED
+      nq_grpc_mixed ... CI=[+5,+60] ... bar=PASS
+n=16: SESSION VERDICT: VANISHES
+      nq_grpc_mixed ... CI=[+5,+5] ... bar=PASS
+escalation gate: REFUSE ('CONTROLS-UNCERTIFIED' is not INCONCLUSIVE-UNDERPOWERED)
+```
+
+Drain failure composition:
+
+```sh
+set -o pipefail
+hrun() { printf 'drained_3x2s\n'; return 255; }
+dr="$(hrun | tr -d '\r' | tail -1 || echo DRAIN-ERROR)"
+printf 'captured=%q\n' "$dr"
+[[ "$dr" == drained* ]] && echo "runtime gate: PASSED AS DRAINED"
+```
+
+```text
+captured=$'drained_3x2s\nDRAIN-ERROR'
+runtime gate: PASSED AS DRAINED
+SELFTEST classification: [OK]
+```
+
+Same dirty CSV, different engine role environment:
+
+```text
+clean registered session:                    SESSION VERDICT: VANISHES
+dirty controls, registered roles:            SESSION VERDICT: RIG-VOID
+same dirty CSV, env omits 3 dirty controls:  SESSION VERDICT: VANISHES
+```
+
+Interpreter shadow:
+
+```text
+parsed fsync sentinel: 0 2 6 250
+settle_ok: PASS
+SELFTEST counts: PASS
+```
+
+The numerical constant checks did refuse correctly with exit 2, and the engine refused an empty control configuration. The archived SELFTEST for the exact harness hash reports 27/27 cases, 18/18 mutations, and measured 260 ms settles; a fresh suite run was prevented only by this review sandbox’s read-only temporary directory.
+
+**VERDICT: NOT READY TO RUN**
