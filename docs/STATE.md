@@ -182,18 +182,18 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-14 (49th)** — **Mac↔Mac instrument, rounds 3–6: 48 more findings, 48
-  accepted, NO DATA TAKEN; the harness REFUSES a timed run.** Each cycle found a defect
-  capable of a **false claim**, each in a branch the previous fix had not covered (the
-  timer read a 1000 ms sleep as **−1 ms**; the **settle had NEVER RUN in any revision**;
-  the materiality bug escaped a **fourth** time). Rev 7 answered structurally: **the bar
-  takes no part in inference**, and **the controls are a precondition for any verdict**.
-  Blow-by-blow: **DEVLOG 2026-07-14 18:45Z** (not restated here).
-  **⚠ TRAILER CORRECTED BY `drift` 2026-07-14:** it claimed the round-7 review was in
-  flight and named round 7 as NEXT. **Rounds 7, 8, 9, 9b, 10 and 11 have all since
-  landed** (`1e03063..e65863c`; `.review/results/macmac-harness-r{7,8,9,9b,10,11}.*`),
-  still with **no datum taken**. Current position is the **NEXT ACTION at the top of
-  this file**. **DEVLOG OWES AN ENTRY FOR ROUNDS 7–11** — its newest is still
-  2026-07-14 18:45Z (rounds 5+6); the next `handoff` must write it.
+- **2026-07-14 (50th, `f933097`)** — **`drift`: STATE hygiene. No code, no rig time.**
+  The handoff log was **four rounds stale**: it said the round-7 review was in flight
+  while rounds 7–11 had all landed (`1e03063..e65863c`) — a cold session would have
+  re-adjudicated closed work. Also: `docs/history/state-archive.md` created (the landed
+  otp-1..11 record rotated into it), `Suite 1488` anchored **as of `bb28ddd`**, rig IPs →
+  `.agents/machines.md`, a stale push-state line deleted. **⚠ DEVLOG OWES AN ENTRY FOR
+  ROUNDS 7–11** — its newest is 18:45Z (rounds 5+6); the only record of those five rounds
+  is `.review/results/macmac-harness-r{7,8,9,9b,10,11}.*` + their commit messages.
+  **NEXT: fix round 11's findings (NEXT ACTION, top of this file) → re-review → run.**
+- **2026-07-14 (49th)** — **Mac↔Mac instrument, rounds 3–6: 48 findings, 48 accepted, NO
+  DATA TAKEN; the harness REFUSES a timed run.** Each cycle found a defect capable of a
+  **false claim**, in a branch the previous fix had not covered (the timer read a 1000 ms
+  sleep as **−1 ms**; the **settle had NEVER RUN in any revision**). Full: **DEVLOG 18:45Z**.
 - **2026-07-14 (48th)** — pf-0 ran; **MTU is KILLED as a cause of P1** (`r = −3.1%`, 256 runs). The fast arm is **BISTABLE**. Full: **DEVLOG 2026-07-14 06:20Z**.
 - *(47th and earlier pruned to the cap — see DEVLOG 2026-07-06..14.)*
