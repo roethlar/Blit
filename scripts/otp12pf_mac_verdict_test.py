@@ -47,7 +47,8 @@ MEASURANDS = ("nq_tcp_mixed", "qn_tcp_mixed")
 REGISTERED = MEASURANDS + CONTROLS
 OUTCOMES = {"REPRODUCES", "INVERSION", "PARTIAL", "VANISHES", "UNDERPOWERED",
             "BAR-FAIL-INCONSISTENT", "UNSTABLE", "INCOMPLETE", "MIXED-SIGN",
-            "RIG-VOID", "INCONCLUSIVE", "INCONCLUSIVE-UNDERPOWERED"}
+            "RIG-VOID", "INCONCLUSIVE", "INCONCLUSIVE-UNDERPOWERED",
+            "CONTROLS-UNCERTIFIED"}
 
 
 def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=(),
@@ -71,7 +72,7 @@ def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=
     present = [c for c in REGISTERED if c not in drop_cells]
     with open(runs, "w") as f:
         w = csv.writer(f)
-        w.writerow("cell,arm,build,initiator,run,ms,flush_ms,files,bytes,exit,drain,cold,valid".split(","))
+        w.writerow("cell,arm,build,initiator,run,ms,flush_ms,settled_ms,files,bytes,exit,drain,cold,valid".split(","))
         for cell in present:
             if cell in per_cell:
                 d, s = per_cell[cell]
@@ -81,8 +82,8 @@ def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=
                 d, s = control_d, control_src
             srcs = s if isinstance(s, list) else [s] * len(d)
             for i, (di, si) in enumerate(zip(d, srcs), 1):
-                w.writerow([cell, "srcinit", "x", "h", i, si, 0, 1, 1, 0, "drained_1x2s", "cold", "yes"])
-                w.writerow([cell, "destinit", "x", "h", i, si + di, 0, 1, 1, 0, "drained_1x2s", "cold", "yes"])
+                w.writerow([cell, "srcinit", "x", "h", i, si, 0, 250, 1, 1, 0, "drained_1x2s", "cold", "yes"])
+                w.writerow([cell, "destinit", "x", "h", i, si + di, 0, 250, 1, 1, 0, "drained_1x2s", "cold", "yes"])
     with open(meta, "w") as f:
         f.write("cell,pairs_attempted,complete\n")
         for cell in present:
@@ -139,10 +140,10 @@ CASES = [
      dict(measurand_d=[-20, 300, 310, 320, 330, 340, 350, 360], src=1000),
      "BAR-FAIL-INCONSISTENT", "REPRODUCES"),
 
-    ("grok (reproduced live): a bar-FAIL control whose CI crosses zero must VOID",
+    ("grok (reproduced live): a bar-FAIL control whose CI crosses zero blocks everything",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           control_d=[-100, -50, 300, 320, 340, 350, 360, 380], control_src=1000),
-     "RIG-VOID", "VANISHES"),
+     "CONTROLS-UNCERTIFIED", "VANISHES"),
 
     ("codex r2: a missing registered cell is INCOMPLETE, never filtered away",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
@@ -222,14 +223,53 @@ CASES = [
     ("codex r5 (reproduced): an UNDERPOWERED control carrying D=+230 blocks the null",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           control_d=[0] + [230] * 7, control_src=2500),
-     "INCONCLUSIVE-UNDERPOWERED", "VANISHES"),
+     "CONTROLS-UNCERTIFIED", "VANISHES"),
 
     # grok, same class, different shape: one NEGATIVE pair kills the sign test, so the
     # control is not even directional -- and it still must not support a null.
     ("grok r5 (reproduced): a non-directional but UNCERTIFIED control blocks the null",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           control_d=[230] * 7 + [-10], control_src=2500),
-     "INCONCLUSIVE-UNDERPOWERED", "VANISHES"),
+     "CONTROLS-UNCERTIFIED", "VANISHES"),
+
+    # --- ROUND 6 -------------------------------------------------------------
+    # grok BLOCKER: certification used the SAME threshold as materiality, so a control
+    # carrying D = +229 -- ONE MILLISECOND under the reference effect -- certified as
+    # "clean" and the session printed VANISHES, prose and all. A control must carry
+    # LESS THAN HALF the material effect, or "P1 is TCP-only" is not readable here.
+    ("grok r6 (reproduced): a control at D=+229 (Delta_ref - 1) must NOT certify clean",
+     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+          control_d=[229] * 8, control_src=2500),
+     "CONTROLS-UNCERTIFIED", "VANISHES"),
+
+    ("grok r6: ...nor at n=16 with zeros padding the CI down to [0,229]",
+     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3] * 2, src=2000,
+          control_d=[229] * 10 + [0] * 6, control_src=2500, pairs=16),
+     "CONTROLS-UNCERTIFIED", "VANISHES"),
+
+    # codex BLOCKER: uncertified controls blocked only the NULL. With every control at
+    # D=+230 the engine still confidently declared P1 REPRODUCED. Uncertainty about a
+    # rig-wide confound is not evidence that the confound is absent.
+    ("codex r6 (reproduced): uncertified controls must block a REPRODUCTION too",
+     dict(measurand_d=[300, 310, 320, 330, 340, 350, 360, 370], src=1000,
+          control_d=[0] + [230] * 7, control_src=2500),
+     "CONTROLS-UNCERTIFIED", "REPRODUCES"),
+
+    # A control whose MARGINAL bar fails while its PAIRED CI is tight (n=16, three
+    # outliers move the median) must not certify the rig.
+    ("codex r6: a control's marginal bar FAIL cannot certify, even with a tight CI",
+     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3] * 2, src=2000,
+          control_d=[400] * 3 + [5] * 13, control_src=[1000] * 8 + [1200] * 8, pairs=16),
+     "CONTROLS-UNCERTIFIED", "VANISHES"),
+
+    # codex BLOCKER: the MARGINAL-median bar bypassed the PAIRED magnitude test. Three
+    # outliers move the marginal median enough to fail the bar in the matching
+    # direction, while every pair in the CI is +1ms.
+    ("codex r6 (reproduced): a marginal bar FAIL cannot substitute for paired magnitude",
+     dict(measurand_d=[400] * 3 + [1] * 13,
+          src=[1000] * 8 + [1200] * 8,
+          control_d=[5] * 16, control_src=1000, pairs=16),
+     "PARTIAL", "REPRODUCES"),
 
     # grok BLOCKER: the zero-boundary null. A single zero pair vetoed `ci_lo > 0`, so
     # a 99ms effect on 7 of 8 pairs -- ONE MILLISECOND under the bar -- was "no effect"
@@ -324,13 +364,16 @@ MUTATIONS = [
      ["        breach_lo = -s_med / 11.0", "        breach_lo = -s_med / 10.0"],
      "negative bound", "VANISHES"),
 
-    # The round-2 fail-open, faithfully: the void ignored the BAR entirely.
-    ("RIG-VOID ignores the bar -> fails open (grok r2, reproduced live)",
-     ['    if dt.get("bar") == "FAIL" or cell_outcome[c] == "UNSTABLE":\n'
-      '        return True',
-      '    if cell_outcome[c] == "UNSTABLE":\n'
-      '        return True'],
-     "bar-FAIL control", "VANISHES"),
+    # A control whose MARGINAL bar fails cannot certify the rig, even when its PAIRED
+    # CI is tight. At n=8 that is provably unreachable (a CI inside +-half-margin bounds
+    # the median shift to <=5%), but at n=16 three outliers move the marginal median
+    # while the CI stays at [5,5] -- so the clause is load-bearing exactly there.
+    ("a bar-FAIL control certifies the rig anyway (codex r6)",
+     ['    if dt.get("bar") == "FAIL":\n'
+      '        return False            # a control breaching the acceptance bar certifies nothing',
+      '    if False:\n'
+      '        return False'],
+     "marginal bar FAIL cannot certify", "VANISHES"),
 
     # The fix is BOTH halves: the cell loop must walk the REGISTERED set (not merely
     # what turned up in the CSV), and absent cells must be marked INCOMPLETE rather
@@ -344,8 +387,8 @@ MUTATIONS = [
      "missing registered cell", "VANISHES"),
 
     ("materiality requires a bar FAIL, so exact 1.10 is unreachable (grok)",
-     ['        material = bar_fail_pos or (ci_lo >= breach_hi)',
-      '        material = bar_fail_pos'],
+     ['        material = ci_lo >= breach_hi                # MAGNITUDE  -- the paired CI, only',
+      '        material = (bar == "FAIL")'],
      "EXACT 1.10", "PARTIAL"),
 
     # The sign test no longer PARTICIPATES: direction is asserted regardless of it.
@@ -359,10 +402,8 @@ MUTATIONS = [
 
     # --- ROUND 3 (grok) -------------------------------------------------------
     ("control void ignores absolute materiality -> a Delta_ref control escapes (grok r3)",
-     ['    if dt.get("directional") and dt.get("ci_at_or_beyond_margin"):\n'
-      '        return True',
-      '    if False:\n'
-      '        return True'],
+     ['    return bool(dt.get("directional") and dt.get("ci_at_or_beyond_margin"))',
+      '    return False'],
      "Delta_ref-sized control effect", "VANISHES"),
 
     ("engine trusts meta.complete and never checks n (grok r3)",
@@ -388,21 +429,37 @@ MUTATIONS = [
 
     # --- ROUND 5 -------------------------------------------------------------
     ("`bar == FAIL` is direction-blind, so +1ms is 'material' (codex r5)",
-     ['        bar_fail_pos = (bar == "FAIL") and d_med > s_med     # the bar failed the SAME way\n'
-      '        bar_fail_neg = (bar == "FAIL") and d_med < s_med',
-      '        bar_fail_pos = (bar == "FAIL")\n'
-      '        bar_fail_neg = (bar == "FAIL")'],
+     ['        material = ci_lo >= breach_hi                # MAGNITUDE  -- the paired CI, only\n'
+      '        material_neg = ci_hi <= breach_lo',
+      '        material = (bar == "FAIL") or ci_lo >= breach_hi\n'
+      '        material_neg = (bar == "FAIL") or ci_hi <= breach_lo'],
      "INVERSE direction cannot make +1ms", "REPRODUCES"),
 
     ("an UNCERTIFIED control can still support a null (codex r5 + grok r5)",
-     ["    elif van and len(van) == len(verd) and ctrl_uncertified:",
-      "    elif False:"],
+     ["elif ctrl_uncertified:", "elif ctrl_uncertified and False:"],
      "UNDERPOWERED control carrying D=+230", "VANISHES"),
 
     ("the CI vetoes DIRECTION, so one zero pair turns 99ms into equivalence (grok r5)",
      ["        directional = p < 0.05",
       "        directional = p < 0.05 and ci_lo > 0 and ci_hi > 0"],
      "7/8 pairs at 99ms", "VANISHES"),
+
+    # --- ROUND 6 -------------------------------------------------------------
+    ("the MARGINAL bar substitutes for PAIRED magnitude (codex r6)",
+     ["        material = ci_lo >= breach_hi                # MAGNITUDE  -- the paired CI, only\n"
+      "        material_neg = ci_hi <= breach_lo",
+      "        material = ((bar == \"FAIL\") and d_med > s_med) or ci_lo >= breach_hi\n"
+      "        material_neg = ((bar == \"FAIL\") and d_med < s_med) or ci_hi <= breach_lo"],
+     "marginal bar FAIL cannot substitute", "REPRODUCES"),
+
+    ("a control certifies clean at the SAME threshold as materiality (grok r6)",
+     ["    return (lo > m_lo / 2.0) and (hi < m_hi / 2.0)",
+      "    return (lo > m_lo) and (hi < m_hi)"],
+     "D=+229 (Delta_ref - 1)", "VANISHES"),
+
+    ("uncertified controls block only the NULL, not a REPRODUCTION (codex r6)",
+     ["elif ctrl_uncertified:", "elif ctrl_uncertified and False:"],
+     "block a REPRODUCTION too", "REPRODUCES"),
 
     ("the registered DELTA_REF is taken from the environment again (codex r5)",
      ['DELTA_REF = REGISTERED_DELTA_REF_MS\n'

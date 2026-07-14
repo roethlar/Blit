@@ -1,6 +1,18 @@
 # otp-12 Mac↔Mac rig — PRE-REGISTRATION (written before any timed run)
 
-**Status**: Pre-registered, **revision 6**. **NO DATA EXISTS YET.**
+**Status**: Pre-registered, **revision 7**. **NO DATA EXISTS YET.**
+
+> ## THE RULE IN ONE PARAGRAPH (rev 7)
+>
+> **All inference is PAIRED.** The 1.10 bar is computed on the *marginal medians*; it is
+> the project's **acceptance** criterion, it is reported in every row, and it takes **no
+> part in inference** — because the marginal and paired statistics can disagree in both
+> direction and magnitude, and every attempt to let the bar stand in for paired evidence
+> produced a false verdict (rounds 3–6). **Direction** is the sign test. **Magnitude** is
+> the paired CI. **Equivalence** is the CI against the margin. **The controls are a
+> precondition**: unless every control is certified to carry less than *half* the
+> material effect, **no verdict about the measurand may be read — not a null, and not a
+> reproduction.**
 
 > ## ⛔ CORRECTION THAT THIS DOCUMENT OWES ITS READER
 >
@@ -36,6 +48,14 @@ measured anything, and **every review has found defects capable of a false claim
   **drove the engine to a clean `VANISHES` while every control carried the full
   rig-W effect** → **9 findings, 9 accepted** (1 BLOCKER, 3 HIGH, 4 MEDIUM, 1 LOW).
   (`.review/results/macmac-harness-r3.grok-verdict.md`)
+- Round 6 (the round-5 rework, `aebd50b`): **NOT READY** — **codex** (3 BLOCKER) **and
+  grok** (2 BLOCKER), converging *again* on both hunted classes: the **marginal bar still
+  substituted for paired magnitude** (a **1 ms** paired effect reported `REPRODUCES` at
+  n=16), a control at **D=+229** — *one millisecond* under the reference effect —
+  **certified as clean**, uncertified controls **blocked only the null and not a
+  reproduction**, and the settle repair was **still not provable** (a no-op `sleep` would
+  have passed while the log narrated "settle included"). → **13 findings, 13 accepted.**
+  (`.review/results/macmac-harness-r6.{codex,grok}.md`)
 - Round 5 (the round-4 rework, `a9460ce`): **NOT READY / NOT SAFE TO RUN** — **codex**
   (3 BLOCKER, 6 HIGH, 2 MEDIUM) **and grok**, which converged on the **same BLOCKER
   independently**: the materiality bug, **for the third round running**, in a branch
@@ -43,7 +63,7 @@ measured anything, and **every review has found defects capable of a false claim
   (above), which the review's finding exposed but did not itself find.
   (`.review/results/macmac-harness-r5.verdict.md`)
 
-**Five rounds. 56 findings. 56 accepted. 0 rejected. Still no datum taken** — which is
+**Six rounds. 69 findings. 69 accepted. 0 rejected. Still no datum taken** — which is
 the only reason none of it became a retraction.
 
 **The rule below has been amended in rev 4 and again in rev 5. That is legitimate

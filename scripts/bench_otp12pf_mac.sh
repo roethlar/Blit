@@ -188,6 +188,7 @@ CELLS="$REGISTERED_CELLS"
 SESSION_TAG="$(date +%Y%m%dT%H%M%S)"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/logs/otp12pf_mac_$SESSION_TAG}"
 ESCALATED_FROM=""          # set only by the verified RUNS=16 escalation
+PRIOR_RUNS_SHA=""          # the data hash the escalation is bound to
 
 MUX="$(mktemp -d /tmp/blit-mm-mux.XXXXXX)"   # /tmp: macOS TMPDIR busts ssh's 104b ControlPath cap
 SSH_MUX=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=20
@@ -197,6 +198,10 @@ qssh() { ssh "${SSH_MUX[@]}" "$Q_SSH" "$@"; }
 mkdir -p "$OUT_DIR/blit-logs"
 log() { echo "$(date +%H:%M:%S) $*" | tee -a "$OUT_DIR/bench.log" >&2; }
 die() { log "FATAL: $*"; exit 1; }
+# A gate that CANNOT ANSWER is BLIND, and blindness is what fails open on the night.
+# It is marked EXPLICITLY here, never inferred from the wording of a message —
+# inferring it from prose is how a blind timer came to be scored as a working gate.
+die_blind() { log "FATAL[PROBE-BLIND]: $*"; exit 1; }
 nocr() { tr -d '\r'; }
 
 # --- host abstraction: $1 = n (local) | q (remote) -----------------------------
@@ -256,9 +261,9 @@ PYEOF" | nocr | sed -n 's/.*R:\(-\{0,1\}[0-9][0-9]*,[0-9][0-9]*\):R.*/\1/p' | he
 timer_gate() {
   local h="$1" out ms rc lo hi
   out="$(time_argv "$h" /bin/sleep 1)"
-  [[ "$out" == *,* ]] || die "$(hname "$h"): the timer probe returned nothing — refusing"
+  [[ "$out" == *,* ]] || die_blind "$(hname "$h"): the timer probe returned nothing — refusing"
   ms="${out%%,*}"; rc="${out##*,}"
-  [[ "$rc" == 0 ]] || die "$(hname "$h"): the timer probe's own child exited $rc"
+  [[ "$rc" == 0 ]] || die_blind "$(hname "$h"): the timer probe's own child exited $rc"
   lo=$(( 1000 - TIMER_TOLERANCE_MS )); hi=$(( 1000 + TIMER_TOLERANCE_MS ))
   if (( ms < lo || ms > hi )); then
     die "$(hname "$h"): THE TIMER IS LYING — a 1000 ms sleep measured ${ms} ms (allowed ${lo}-${hi}).
@@ -339,7 +344,7 @@ quiescence_gate() {
     case "$(pgrep_state "$h" "$p")" in
       RUNNING) busy="$busy $p" ;;
       NONE)    : ;;
-      *)       die "$(hname "$h"): the quiescence probe for '$p' BROKE — refusing (a gate that cannot answer must not answer 'fine')" ;;
+      *)       die_blind "$(hname "$h"): the quiescence probe for '$p' BROKE — refusing (a gate that cannot answer must not answer 'fine')" ;;
     esac
   done
   [[ -z "$busy" ]] || die "$(hname "$h") is NOT quiet (running:$busy). BOTH Macs are bench ENDS — load inflates one arm and MANUFACTURES P1. Stop them (never blanket-kill the owner's sessions) and re-run."
@@ -348,10 +353,10 @@ quiescence_gate() {
 timemachine_gate() {   # FAIL-CLOSED on running OR merely ENABLED (the hole pf-0 found)
   local h="$1" running auto
   running="$(hrun "$h" "tmutil status 2>/dev/null | awk '/Running/{print \$3}' | tr -d ';' | head -1" | nocr | tr -cd '0-9')" || running=""
-  [[ "$running" =~ ^[0-9]+$ ]] || die "$(hname "$h"): cannot read Time Machine status — refusing (a gate that cannot answer must not pass)"
+  [[ "$running" =~ ^[0-9]+$ ]] || die_blind "$(hname "$h"): cannot read Time Machine status — refusing (a gate that cannot answer must not pass)"
   [[ "$running" -eq 0 ]] || die "$(hname "$h"): a Time Machine backup is RUNNING — it hammers CPU and disk on a bench end (one destination is on skippy, the same 10GbE fabric)."
   auto="$(hrun "$h" "defaults read /Library/Preferences/com.apple.TimeMachine AutoBackup 2>/dev/null | tr -cd '0-9' | head -1" | nocr | tr -cd '0-9')" || auto=""
-  [[ "$auto" =~ ^[0-9]+$ ]] || die "$(hname "$h"): cannot read Time Machine AutoBackup — refusing (a READ ERROR must never read as 'disabled')"
+  [[ "$auto" =~ ^[0-9]+$ ]] || die_blind "$(hname "$h"): cannot read Time Machine AutoBackup — refusing (a READ ERROR must never read as 'disabled')"
   [[ "$auto" -eq 0 ]] || die "$(hname "$h"): Time Machine AUTOBACKUP is ENABLED. macOS repeats hourly, so a backup can start INSIDE the window — pf-0's fired 1 minute before its run. Disable it for the session (\`sudo tmutil disable\`) and re-enable after."
 }
 
@@ -361,7 +366,7 @@ spotlight_gate() {
   # earlier busy one. NR==0 (top produced nothing) is an ERROR, not 0% CPU.
   cpu="$(hrun "$h" "top -l 2 -n 30 -o cpu -stats command,cpu 2>/dev/null \
     | awk '/^mds_stores/{ if (\$2+0 > m) m = \$2+0 } END{ if (NR == 0) print \"ERR\"; else printf \"%d\", m+0 }'" | nocr)" || cpu="ERR"
-  [[ "$cpu" =~ ^[0-9]+$ ]] || die "$(hname "$h"): cannot sample Spotlight CPU (got '$cpu') — refusing"
+  [[ "$cpu" =~ ^[0-9]+$ ]] || die_blind "$(hname "$h"): cannot sample Spotlight CPU (got '$cpu') — refusing"
   [[ "$cpu" -lt 20 ]] || die "$(hname "$h"): Spotlight (mds_stores) is indexing at ${cpu}% CPU — a recorded bench contaminant. Wait for it to settle."
 }
 
@@ -369,7 +374,7 @@ load1() { hrun "$1" "sysctl -n vm.loadavg" | nocr | awk '{print $2}'; }
 load_gate() {
   local h="$1" l ok
   l="$(load1 "$h")" || l=""
-  [[ "$l" =~ ^[0-9]+\.?[0-9]*$ ]] || die "$(hname "$h"): cannot read load1 (got '$l') — refusing"
+  [[ "$l" =~ ^[0-9]+\.?[0-9]*$ ]] || die_blind "$(hname "$h"): cannot read load1 (got '$l') — refusing"
   ok="$(awk -v l="$l" -v m="$LOAD_MAX" 'BEGIN{print (l+0 <= m+0) ? 1 : 0}')"
   [[ "$ok" == 1 ]] || die "$(hname "$h"): load1 is $l (> $LOAD_MAX) — a bench END must be quiet. Find what is running first."
 }
@@ -377,7 +382,7 @@ load_gate() {
 link_gate() {   # both directions; the peer's ARP must be the PEER's MAC, never our own
   local h="$1" o peer_ip want got route_nic nic
   o="$(other "$h")"; peer_ip="$(hip "$o")"; want="$(hmac "$o" | norm_mac)"; nic="$(hnic "$h")"
-  [[ -n "$want" ]] || die "$(hname "$o"): its configured MAC does not parse — refusing"
+  [[ -n "$want" ]] || die_blind "$(hname "$o"): its configured MAC does not parse — refusing"
   hrun "$h" "ping -c1 -W1 '$peer_ip' >/dev/null 2>&1" \
     || die "$(hname "$h") cannot ping $peer_ip — the link is down"
   # The ARP entry ON THE NIC THE TRAFFIC WILL EGRESS. `arp -n <ip>` prints one line
@@ -413,6 +418,7 @@ resolve_disk() {
   dev="$(hrun "$h" "d=\$(df '$p' 2>/dev/null | awk 'NR==2{print \$1}' | sed 's|^/dev/||')
 [ -n \"\$d\" ] || { echo 'D:NO-DF:D'; exit 0; }
 info=\$(diskutil info \"\$d\" 2>/dev/null) || { echo 'D:NO-DISKUTIL:D'; exit 0; }
+[ -n \"\$info\" ] || { echo 'D:EMPTY-DISKUTIL:D'; exit 0; }
 if echo \"\$info\" | grep -q 'APFS'; then
   ps=\$(echo \"\$info\" | awk -F: '/APFS Physical Store/{gsub(/[ \t]/, \"\", \$2); print \$2}' | head -1)
   [ -n \"\$ps\" ] || { echo 'D:APFS-NO-STORE:D'; exit 0; }
@@ -468,8 +474,11 @@ for _ in range(5):
     ts.append((time.monotonic() - t) * 1000.0)
 print(int(statistics.median(ts)))
 ' ssh "${SSH_MUX[@]}" "$Q_SSH" true)"
-  [[ "$SSH_RTT_MS" =~ ^[0-9]+$ ]] || die "cannot measure the ssh round trip (got '$SSH_RTT_MS') — refusing"
-  log "  ssh dispatch (warm mux, median of 5): ${SSH_RTT_MS} ms — this BOUNDS the residual settle-gap asymmetry (the settle itself is ${SETTLE_MS} ms, EQUAL on both arms)"
+  [[ "$SSH_RTT_MS" =~ ^[0-9]+$ ]] || die_blind "cannot measure the ssh round trip (got '$SSH_RTT_MS') — refusing"
+  local rtt_max=$(( SETTLE_MS / 4 ))
+  (( SSH_RTT_MS <= rtt_max )) \
+    || die "ssh dispatch is ${SSH_RTT_MS} ms (max ${rtt_max} ms) — the residual free-writeback asymmetry is bounded BY this number, and at that size it is no longer negligible against a ${SETTLE_MS} ms settle. A measured bound that is not ENFORCED is a note, not a protection."
+  log "  ssh dispatch (warm mux, median of 5): ${SSH_RTT_MS} ms (max ${rtt_max}) — ENFORCED; it bounds the residual settle-gap asymmetry (the settle is ${SETTLE_MS} ms, EQUAL on both arms)"
 }
 
 # =============================================================================
@@ -495,15 +504,29 @@ preflight() {
     local prior="${UNDERPOWERED_ESCALATION:-}" v
     [[ -n "$prior" ]] \
       || die "RUNS=16 is the escalation arm. Set UNDERPOWERED_ESCALATION=<path to the prior session dir> that returned INCONCLUSIVE-UNDERPOWERED. It buys POWER; it is NOT a re-roll."
-    [[ -f "$prior/session_verdict.txt" ]] \
-      || die "UNDERPOWERED_ESCALATION='$prior' has no session_verdict.txt — the escalation must name a REAL prior session"
+    # The trigger must be a REAL SESSION, not a directory that merely contains the right
+    # words (round-6, codex HIGH + grok F5: "any directory containing the expected first
+    # verdict line authorizes escalation; provenance, hashes, build and prior runs=8 are
+    # never checked"). So the prior session must carry its own DATA and MANIFEST, and
+    # the escalation is bound to the CONTENT of that data, not to its path.
+    for _f in session_verdict.txt runs.csv meta.csv staging-manifest.txt; do
+      [[ -f "$prior/$_f" ]] \
+        || die "UNDERPOWERED_ESCALATION='$prior' has no $_f — the escalation must name a REAL prior session, not a directory with the right words in it"
+    done
     v="$(head -1 "$prior/session_verdict.txt" | sed -n 's/^SESSION VERDICT: *//p')"
     [[ "$v" == "INCONCLUSIVE-UNDERPOWERED" ]] \
       || die "the prior session '$prior' returned '$v', not INCONCLUSIVE-UNDERPOWERED. RUNS=16 is triggered by a POWER FAILURE and by nothing else — re-running a result you dislike at higher n is p-hacking, and this gate exists to stop it."
-    [[ ! -f "$prior/ESCALATED" ]] \
-      || die "the prior session '$prior' has ALREADY been escalated once (see $prior/ESCALATED). 'Once' means once."
+    grep -q "binary_identity=$REGISTERED_BUILD" "$prior/staging-manifest.txt" \
+      || die "the prior session '$prior' was not run on the registered build $REGISTERED_BUILD — it cannot authorise an escalation"
+    # "Once" is bound to the DATA, not the directory: copying the session elsewhere does
+    # not buy a second re-roll, because the burn records the runs.csv hash.
+    PRIOR_RUNS_SHA="$(shasum -a 256 "$prior/runs.csv" | cut -d' ' -f1)"
+    if [[ -f "$REPO_ROOT/logs/ESCALATED-SESSIONS" ]] \
+       && grep -q "$PRIOR_RUNS_SHA" "$REPO_ROOT/logs/ESCALATED-SESSIONS"; then
+      die "this exact session's data (runs.csv $PRIOR_RUNS_SHA) has ALREADY authorised an escalation — see logs/ESCALATED-SESSIONS. 'Once' means once, and it is bound to the DATA, not the path."
+    fi
     ESCALATED_FROM="$prior"
-    log "  escalation: RUNS=16, triggered by $prior (verified INCONCLUSIVE-UNDERPOWERED)"
+    log "  escalation: RUNS=16, triggered by $prior (verified INCONCLUSIVE-UNDERPOWERED, build $REGISTERED_BUILD, runs.csv $PRIOR_RUNS_SHA)"
   fi
   [[ "$EXPECT_SHA" == "$REGISTERED_BUILD" ]] \
     || die "EXPECT_SHA='$EXPECT_SHA' but the PRE-REGISTERED build is $REGISTERED_BUILD — a run against another build is not the registered experiment"
@@ -683,21 +706,33 @@ prep_run() {   # $1 = dest host
 }
 
 # --- durability: DESTINATION host, both arms, and it VERIFIES WHAT IT FLUSHED --
-RUN_FLUSH=0; RUN_FILES=0; RUN_BYTES=0
-fsync_tree() {   # $1 = DEST host, $2 = landed path -> "ms files bytes" or "NA 0 0"
+RUN_FLUSH=0; RUN_FILES=0; RUN_BYTES=0; RUN_SETTLED=0
+fsync_tree() {   # $1 = DEST host, $2 = landed path -> "ms files bytes settled_ms" | "NA 0 0 0"
   local out
-  # THE SETTLE IS REQUIRED, SO ITS FAILURE MUST BE FATAL (round-5 codex, HIGH): the
-  # command status came from the python that followed, so a failed `sleep` was
-  # invisible and the row stayed VALID — with the direction-reversing free-writeback
-  # gap restored, which is the artifact the settle exists to equalize.
-  out="$(hrun "$1" "sleep $SETTLE_SEC || { echo 'F:NA:0:0:F'; exit 0; }
-python3 - '$2' <<'PYEOF'
+  # THE SETTLE IS PERFORMED AND **MEASURED** INSIDE THE SAME PROCESS AS THE WALK.
+  #
+  # It used to be a shell `sleep` before the python. Round 5 found the awk computing
+  # its duration had ALWAYS errored, so the sleep ALWAYS failed and THE SETTLE NEVER
+  # RAN. Round 6 then found the repair was still not provable: `sleep` is
+  # PATH/function-resolved, the walk's timer starts AFTER it, and the self-test only
+  # counted files — so a no-op `sleep` would pass while the log narrated "settle
+  # included" (codex + grok, BLOCKER, and grok measured a 44 ms "250 ms settle").
+  #
+  # A protection that cannot be OBSERVED is not a protection. The settle now happens
+  # in python, is timed by the same monotonic clock as the walk, and is REPORTED. The
+  # caller VOIDS the pair if it did not actually elapse. There is no shell sleep left
+  # to shadow, no exit status left to discard, and no narration left to trust.
+  out="$(hrun "$1" "python3 - '$SETTLE_SEC' '$2' <<'PYEOF'
 import os, sys, time
-p = sys.argv[1]
+settle = float(sys.argv[1])
+p = sys.argv[2]
+t0 = time.monotonic()
+time.sleep(settle)
+settled_ms = int((time.monotonic() - t0) * 1000)
 if not os.path.isdir(p):
-    print('F:NA:0:0:F')          # a MISSING tree must never read as a fast flush
+    print('F:NA:0:0:%d:F' % settled_ms)   # a MISSING tree must never read as a fast flush
     raise SystemExit
-t = time.monotonic()             # ONE process: this interval is measured by one clock
+t = time.monotonic()
 files = 0
 nbytes = 0
 for root, _d, fs in os.walk(p):
@@ -708,10 +743,12 @@ for root, _d, fs in os.walk(p):
         os.fsync(fd)
         os.close(fd)
         files += 1
-print('F:%d:%d:%d:F' % (int((time.monotonic() - t) * 1000), files, nbytes))
-PYEOF" | nocr | sed -n 's/.*F:\([^:]*\):\([0-9]*\):\([0-9]*\):F.*/\1 \2 \3/p' | head -1)" || out=""
-  echo "${out:-NA 0 0}"
+print('F:%d:%d:%d:%d:F' % (int((time.monotonic() - t) * 1000), files, nbytes, settled_ms))
+PYEOF" | nocr | sed -n 's/.*F:\([^:]*\):\([0-9]*\):\([0-9]*\):\([0-9]*\):F.*/\1 \2 \3 \4/p' | head -1)" || out=""
+  echo "${out:-NA 0 0 0}"
 }
+# The settle actually elapsed, on the destination's own clock. Anything else voids.
+settle_ok() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= SETTLE_MS && $1 < SETTLE_MS * 4 )); }
 
 # --- one timed run ------------------------------------------------------------
 RUN_MS=0; RUN_EXIT=0; RUN_VALID=yes
@@ -721,9 +758,17 @@ timed_run() {   # $1=init host $2=src $3=dst $4=DEST host $5=landed $6=flag $7=f
   prep_run "$dh"
   out="$(time_argv "$ih" "$bin" copy "$src" "$dst" --yes $flag)"
   if [[ "$out" == *,* ]]; then RUN_MS="${out%%,*}"; RUN_EXIT="${out##*,}"; else RUN_MS=0; RUN_EXIT=99; fi
-  read -r RUN_FLUSH RUN_FILES RUN_BYTES <<<"$(fsync_tree "$dh" "$landed")"
+  read -r RUN_FLUSH RUN_FILES RUN_BYTES RUN_SETTLED <<<"$(fsync_tree "$dh" "$landed")"
   RUN_VALID=yes
   wc="$(fix_count "$w")"; wb="$(fix_bytes "$w")"
+  # The equal settle is the ONLY thing standing between this rig and a free-writeback
+  # artifact that REVERSES SIGN WITH DIRECTION — i.e. that can manufacture P1 out of
+  # nothing. It has already been silently dead once. If it did not measurably elapse,
+  # the row is not a fast row; it is a VOID row.
+  if ! settle_ok "$RUN_SETTLED"; then
+    log "  VOID: the settle did not elapse (measured ${RUN_SETTLED}ms, want >= ${SETTLE_MS}ms) — the free-writeback gap is UNEQUALIZED and can manufacture a one-directional result"
+    RUN_VALID=no
+  fi
   if [[ "$RUN_FLUSH" == NA ]]; then
     log "  VOID: fsync found no tree at $landed (a missing tree must never read as a fast flush)"
     RUN_VALID=no; RUN_FLUSH=0
@@ -777,7 +822,7 @@ run_pair_loop() {
       if [[ "$aname" == srcinit ]]; then arm_srcinit "$sh" "$dh" "$run"
       else arm_destinit "$sh" "$dh" "$run"; fi
       [[ "$RUN_VALID" == yes ]] || pair=no
-      local row="$cell,$aname,$EXPECT_SHA,$init,$slot,$RUN_MS,$RUN_FLUSH,$RUN_FILES,$RUN_BYTES,$RUN_EXIT,$RUN_DRAIN,$RUN_COLD"
+      local row="$cell,$aname,$EXPECT_SHA,$init,$slot,$RUN_MS,$RUN_FLUSH,$RUN_SETTLED,$RUN_FILES,$RUN_BYTES,$RUN_EXIT,$RUN_DRAIN,$RUN_COLD"
       if [[ "$arm" == A ]]; then rowA="$row"; else rowB="$row"; fi
       log "  $cell/$aname slot $slot (att $attempts): ${RUN_MS}ms (dest-fsync ${RUN_FLUSH}ms, $RUN_FILES files, exit $RUN_EXIT, $RUN_DRAIN, $RUN_COLD)"
     done
@@ -851,7 +896,7 @@ gate_probe() {
   err="$( { "$@"; } 2>&1 )" || rc=1
   if (( rc == 0 )); then
     log "  [OK]     $label — answers, and the condition holds"
-  elif grep -qiE 'cannot (read|sample|probe|measure|resolve|answer)|BROKE|did not answer|no sentinel|refusing \(a gate' <<<"$err"; then
+  elif grep -q 'PROBE-BLIND' <<<"$err"; then
     SELFTEST_BROKEN=$(( SELFTEST_BROKEN + 1 ))
     log "  [BROKEN] $label — THE PROBE COULD NOT ANSWER. A blind gate fails open on the night."
   else
@@ -867,17 +912,25 @@ gate_probe() {
 # measurement AND the equal-settle window — the two things that once manufactured P1 —
 # and the self-test never touched them.
 selftest_fsync() {
-  local h="$1" d out ms files bytes
+  local h="$1" d ms files bytes settled
   d="$(hmod "$h")/selftest_${SESSION_TAG}"
   hrun "$h" "rm -rf '$d' && mkdir -p '$d' && printf 'aaaa' > '$d/a' && printf 'bb' > '$d/b'" \
     || { log "  [BROKEN] fsync/settle — cannot stage a probe tree"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)); return 1; }
-  read -r ms files bytes <<<"$(fsync_tree "$h" "$d")"
+  read -r ms files bytes settled <<<"$(fsync_tree "$h" "$d")"
   hrun "$h" "rm -rf '$d'" >/dev/null 2>&1 || true
   if [[ "$ms" == NA || "$files" != 2 || "$bytes" != 6 ]]; then
     log "  [BROKEN] fsync/settle — walk returned ms=$ms files=$files bytes=$bytes, want 2 files / 6 bytes"
     SELFTEST_BROKEN=$(( SELFTEST_BROKEN + 1 )); return 1
   fi
-  log "  [OK]     fsync/settle — walked 2 files/6 bytes in ${ms}ms (settle ${SETTLE_MS}ms included, counts VERIFIED)"
+  # THE SETTLE MUST BE PROVED, NOT NARRATED (round-6, both reviewers). The old check
+  # counted files and then LOGGED "settle included" — which is a sentence, not an
+  # assertion. It would have passed with the settle stone dead, which is precisely how
+  # the settle stayed dead for three revisions.
+  if ! settle_ok "$settled"; then
+    log "  [BROKEN] fsync/settle — THE SETTLE DID NOT ELAPSE: measured ${settled}ms, want >= ${SETTLE_MS}ms"
+    SELFTEST_BROKEN=$(( SELFTEST_BROKEN + 1 )); return 1
+  fi
+  log "  [OK]     fsync/settle — 2 files/6 bytes walked in ${ms}ms; settle MEASURED at ${settled}ms (>= ${SETTLE_MS}ms), counts VERIFIED"
 }
 
 selftest() {
@@ -913,15 +966,26 @@ selftest() {
       RUNNING) log "  [FIRED]  stale daemon  (one IS running — the gate would refuse)"; SELFTEST_FIRED=$((SELFTEST_FIRED+1)) ;;
       *)       log "  [BROKEN] stale daemon  — the probe could not answer"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)) ;;
     esac
+    # DRAIN-TIMEOUT is a genuinely busy disk (the gate WORKING); DRAIN-ERROR is a blind
+    # probe. Scoring them the same made the classification untrustworthy (grok r6, F7).
     local dr; dr="$(drain_host "$h")"
-    if [[ "$dr" == drained* ]]; then log "  [OK]     drain loop    ($dr)"
-    else log "  [BROKEN] drain loop    — returned '$dr'"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)); fi
+    case "$dr" in
+      drained*)      log "  [OK]     drain loop    ($dr)" ;;
+      DRAIN-TIMEOUT) log "  [FIRED]  drain loop    — the disk is genuinely busy; the gate would void the pair"; SELFTEST_FIRED=$((SELFTEST_FIRED+1)) ;;
+      *)             log "  [BROKEN] drain loop    — the probe could not answer ('$dr')"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)) ;;
+    esac
     selftest_fsync "$h"
     log "  [--]     mac parse (no gawk strtonum): $(hmac "$h") -> $(hmac "$h" | norm_mac)"
   done
   SESSION_VOID_REASON=""; end_load_gate
-  if [[ -z "$SESSION_VOID_REASON" ]]; then log "  [OK]     end-load gate (both Macs under $LOAD_MAX; it CAN void a session)"
-  else log "  [FIRED]  end-load gate — $SESSION_VOID_REASON"; SELFTEST_FIRED=$((SELFTEST_FIRED+1)); fi
+  if [[ -z "$SESSION_VOID_REASON" ]]; then
+    log "  [OK]     end-load gate (both Macs under $LOAD_MAX; it CAN void a session)"
+  elif [[ "$SESSION_VOID_REASON" == *"could not be read"* ]]; then
+    # An UNREADABLE end-load is a blind probe, not a busy machine (grok r6, F7).
+    log "  [BROKEN] end-load gate — $SESSION_VOID_REASON"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1))
+  else
+    log "  [FIRED]  end-load gate — $SESSION_VOID_REASON"; SELFTEST_FIRED=$((SELFTEST_FIRED+1))
+  fi
   measure_ssh_rtt
   log ""
   log "SELFTEST: $SELFTEST_FIRED gate(s) refused a genuinely unmet condition; $SELFTEST_BROKEN blind."
@@ -956,9 +1020,11 @@ main() {
   if [[ -n "$ESCALATED_FROM" ]]; then
     echo "escalated to $SESSION_TAG (RUNS=$RUNS) on $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       >> "$ESCALATED_FROM/ESCALATED"
+    # Bound to the DATA, so a copy of the session cannot buy a second re-roll.
+    echo "$PRIOR_RUNS_SHA $ESCALATED_FROM -> $SESSION_TAG" >> "$REPO_ROOT/logs/ESCALATED-SESSIONS"
   fi
   log "session $SESSION_TAG  build=$EXPECT_SHA  nagatha=$N_IP  q=$Q_IP"
-  echo "cell,arm,build,initiator,run,ms,flush_ms,files,bytes,exit,drain,cold,valid" > "$CSV"
+  echo "cell,arm,build,initiator,run,ms,flush_ms,settled_ms,files,bytes,exit,drain,cold,valid" > "$CSV"
   echo "cell,pairs_attempted,complete" > "$META"
   daemon_start n; daemon_start q
   smoke n; smoke q
