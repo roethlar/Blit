@@ -21,6 +21,16 @@ the accepted ones, then moves to the next slice. There is no second
 human/agent in the loop and no async sentinel hand-off — `codex` is
 called inline and its output is read in the same session.
 
+> **AMENDED by D-2026-07-14-2 (owner, 2026-07-14): a SECOND independent reviewer
+> (`grok`) may be added on high-stakes slices** — a benchmark instrument, a
+> decision rule that will be applied to data, or anything the owner flags. Codex
+> stays the **default and mandatory** reviewer; grok is **additive, never a
+> substitute**, and never runs alone. The rule below still forbids what it was
+> written to forbid: **the author's own model grading its own work**, so Claude
+> subagent reviewers remain out. First use paid for itself — grok independently
+> **confirmed both of codex's blockers** on the Mac↔Mac instrument and found three
+> defects codex missed, one of which it reproduced.
+
 **Codex is the only reviewer** (owner, 2026-07-04): do not add
 same-model self-review panels, Claude subagent reviewers, or any other
 substitute — the author's model grading its own work is what the
