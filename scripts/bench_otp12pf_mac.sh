@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ⛔ NOT CLEARED TO RUN — REWORKED IN ROUND 3, REVIEW NOT YET PASSED ⛔
+# ⛔ NOT CLEARED TO RUN — ROUND-11 FIXES APPLIED, ROUND-12 REVIEW NOT YET PASSED ⛔
 #
-# The round-3 rework (this file) addresses all 15 findings from codex round 2 and
-# grok's second opinion. It has NOT been reviewed. The review is the gate, not the
-# rework: three rounds running, every revision of this instrument has shipped a
-# defect capable of a false claim, and two of them were introduced BY THE REWORK
-# THAT FIXED THE PREVIOUS ONE.
+# This revision fixes round 11: the BLOCKER (the registered topology was NOT
+# enforced — NIC/IP/MAC were env-overridable and the MTU and link speed were never
+# checked AT ALL, so the run could go over the 1GbE NIC or at MTU 1500, after pf-0
+# spent 256 runs proving MTU moves wall time), four HIGHs and the MEDIUMs. It has
+# NOT been reviewed. THE REVIEW IS THE GATE, NOT THE REWORK: eleven rounds running,
+# every revision of this instrument has shipped a defect capable of a FALSE CLAIM,
+# and several were introduced BY THE REWORK THAT FIXED THE PREVIOUS ONE. (Writing
+# the round-11 topology fix immediately produced another: the pinned literals were
+# placed ABOVE the override check, so the harness refused EVERY run. Found by
+# running it. `bash -n` sees nothing.)
 #
-#   .review/results/macmac-harness-r2.gpt-verdict.md    (codex, 12 findings)
-#   .review/results/macmac-harness-r2.grok-verdict.md   (grok, +3 findings)
+#   .review/results/macmac-harness-r11.codex-engine.md   (the decision rule)
+#   .review/results/macmac-harness-r11.codex-harness.md  (this file: 1 BLOCKER, 4 HIGH)
+#   .review/results/macmac-harness-r11.grok.md           (second opinion, D-2026-07-14-2)
 #
-# Clearing it: land the round-3 review, adjudicate, and delete this block plus the
+# Clearing it: land the round-12 review, adjudicate, and delete this block plus the
 # CLEARED_BY_REVIEW guard below. Until then `SELFTEST=1` and `PREFLIGHT_ONLY=1`
 # work (they take NO data); a timed run refuses.
 # =============================================================================
 # bench_otp12pf_mac.sh — THE MAC<->MAC RIG (nagatha <-> q), the missing 2x2 cell
-# Design + decision rule: docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md (rev 4)
+# Design + decision rule: docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md (rev 11)
 # Parent plan: docs/plan/OTP12_PERF_FINDINGS.md (queue 1(ii)).
 #
 # WHY THIS RIG EXISTS
@@ -90,9 +96,9 @@ PREFLIGHT_ONLY="${PREFLIGHT_ONLY:-0}"
 # The review is the gate. A timed run refuses until round 3 is adjudicated; the
 # no-data modes stay available so the gates can be exercised.
 if [[ "$SELFTEST" != 1 && "$PREFLIGHT_ONLY" != 1 && "${CLEARED_BY_REVIEW:-0}" != 1 ]]; then
-  echo "REFUSING: this harness was reworked in round 3 and has NOT passed review." >&2
-  echo "Every previous revision shipped a defect capable of a false claim, and two" >&2
-  echo "were introduced by the rework that fixed the last one. Land the round-3" >&2
+  echo "REFUSING: this harness carries the round-11 fixes and has NOT passed round-12 review." >&2
+  echo "Every previous revision shipped a defect capable of a false claim, and several" >&2
+  echo "were introduced by the rework that fixed the last one. Land the round-12" >&2
   echo "review first. SELFTEST=1 and PREFLIGHT_ONLY=1 take no data and still run." >&2
   exit 2
 fi
@@ -101,27 +107,33 @@ fi
 # unregistered build is not the registered experiment.
 REGISTERED_BUILD="f35702a"
 
+# =============================================================================
+# THE REGISTERED TOPOLOGY. **NOT OVERRIDABLE** — literals, not `${VAR:-default}`.
+#
+# Round-11 (codex, BLOCKER): the NIC, IP and MAC were env-overridable and the MTU and the
+# link speed were NEVER CHECKED AT ALL. So the whole run could go over the 1GbE NIC, or at
+# MTU 1500, and every gate would still pass — while pf-0 spent 256 runs establishing that
+# MTU moves wall time on this fabric. THE RIG MUST PROVE IT IS ON THE FABRIC IT CLAIMS.
+# nagatha alone has EIGHT other 1500-MTU interfaces to fall onto, and macOS routes by
+# network SERVICE order, so this is not a hypothetical.
+#
+# The identity is pinned here; topology_gate() and mss_gate() below PROVE it on the wire.
+# =============================================================================
+# The HOST LAYOUT (paths). Overridable: a path is not a claim about the experiment, and the
+# BUILD PIN (EXPECT_SHA + embeds_clean) is what proves the binary is the registered one
+# wherever it lives. The TOPOLOGY — NIC, IP, MAC — is a claim about the experiment, and it is
+# pinned below, with the other registered constants, AFTER the override check.
 # --- nagatha: LOCAL end (driver) ---------------------------------------------
-N_IP="${N_IP:-10.1.10.92}"                       # 10GbE en11, MTU 9000
-N_NIC="${N_NIC:-en11}"
-N_MAC="${N_MAC:-00:e0:4d:01:4c:a3}"              # nagatha's OWN en11 MAC (measured)
 N_ROOT="${N_ROOT:-$HOME/Dev/blit_v2_f35702a}"
 N_BLIT="${N_BLIT:-$N_ROOT/target/release/blit}"
 N_DAEMON="${N_DAEMON:-$N_ROOT/target/release/blit-daemon}"
 N_MODULE="${N_MODULE:-$HOME/blit-bench-work}"
 
 # --- q: REMOTE end ------------------------------------------------------------
-Q_SSH="${Q_SSH:-michael@q}"
-Q_IP="${Q_IP:-10.1.10.54}"                       # 10GbE en8, MTU 9000
-Q_NIC="${Q_NIC:-en8}"
-Q_MAC="${Q_MAC:-00:01:d2:19:04:a3}"              # q's OWN en8 MAC (measured)
 Q_ROOT="${Q_ROOT:-/Users/michael/Dev/blit_v2_f35702a}"
 Q_BLIT="${Q_BLIT:-$Q_ROOT/target/release/blit}"
 Q_DAEMON="${Q_DAEMON:-$Q_ROOT/target/release/blit-daemon}"
 Q_MODULE="${Q_MODULE:-/Users/michael/blit-bench-work}"
-
-PORT="${PORT:-9031}"
-RUNS="${RUNS:-8}"
 
 # =============================================================================
 # THE REGISTERED CONSTANTS. **NOT OVERRIDABLE.**
@@ -138,7 +150,9 @@ RUNS="${RUNS:-8}"
 # very line meant to pin it.
 # =============================================================================
 _overrides=""
-for _v in SETTLE_MS LOAD_MAX DRAIN_ITERS DRAIN_QUIET DRAIN_MBPS DELTA_REF_MS TIMER_TOLERANCE_MS; do
+for _v in SETTLE_MS LOAD_MAX DRAIN_ITERS DRAIN_QUIET DRAIN_MBPS DELTA_REF_MS TIMER_TOLERANCE_MS \
+          N_IP N_NIC N_MAC Q_IP Q_NIC Q_MAC Q_SSH REGISTERED_MTU REGISTERED_MEDIA REGISTERED_MSS \
+          RUNS PORT; do
   [[ -n "${!_v+set}" ]] && _overrides="$_overrides $_v=${!_v}"
 done
 if [[ -n "$_overrides" ]]; then
@@ -176,6 +190,38 @@ DRAIN_QUIET=3
 DRAIN_MBPS=2               # destination disk must be below this to start a window
 DELTA_REF_MS=230           # rig W's measured Delta_P1 — THE reference effect
 TIMER_TOLERANCE_MS=120     # the timer self-test's allowed error on a 1000 ms sleep
+
+# THE REGISTERED TOPOLOGY. These are assigned HERE, BELOW the override check, for the same
+# reason SETTLE_MS is: assigned above it, the pinning line itself would set the variable and
+# the check would then see it as "present in the environment" and refuse EVERY run. (It did.
+# Caught by RUNNING it -- the first draft of this fix put them at the top of the file and the
+# harness refused to start. A protection that cannot PASS is as dead as one that cannot FAIL.)
+N_IP=10.1.10.92                       # nagatha, 10GbE en11
+N_NIC=en11
+N_MAC=00:e0:4d:01:4c:a3               # nagatha's OWN en11 MAC (measured)
+Q_SSH=michael@q
+Q_IP=10.1.10.54                       # q, 10GbE en8
+Q_NIC=en8
+Q_MAC=00:01:d2:19:04:a3               # q's OWN en8 MAC (measured)
+
+# RUNS and PORT are registered too (round-11 grok, LOW): RUNS was `${RUNS:-8}` and absent from
+# the refusal list above, so it was pinned only by a preflight check -- a weaker guarantee than
+# every other registered constant, for the one number the whole rule depends on (n is EXACTLY
+# 8; at any larger n the >=95% interval starts TRIMMING and a bimodal arm yields a false null).
+# The preflight check STAYS: it also guards a source edit, which this line cannot.
+RUNS=8
+PORT=9031
+
+# THE FABRIC (round-11 codex, BLOCKER). Measured on both hosts, 2026-07-14, before any data:
+#   nagatha en11: mtu 9000, media 10Gbase-T <full-duplex,flow-control>, status active
+#   q       en8 : mtu 9000, media 10Gbase-T <full-duplex>,              status active
+#   path    MSS : 8948 in BOTH directions (9000 - 20 IP - 20 TCP - 12 timestamps)
+REGISTERED_MTU=9000
+REGISTERED_MEDIA="10Gbase-T"   # the NEGOTIATED media. A 1GbE NIC reports 1000baseT.
+# The MSS is the ONLY one of these that proves the PATH rather than the local NIC: both ends
+# can sit at MTU 9000 while a 1500 hop between them clamps the segments. It is the gate pf-0
+# used (start AND end of every session) and it is the number that killed MTU as a cause of P1.
+REGISTERED_MSS=8948
 
 # The REGISTERED cell set. The verdict engine requires ALL of them present and
 # complete: a partial set that is merely filtered lets a ONE-CELL run emit
@@ -350,11 +396,23 @@ quiescence_gate() {
 
 timemachine_gate() {   # FAIL-CLOSED on running OR merely ENABLED (the hole pf-0 found)
   local h="$1" running auto
-  running="$(hrun "$h" "tmutil status 2>/dev/null | awk '/Running/{print \$3}' | tr -d ';' | head -1" | nocr | tr -cd '0-9')" || running=""
-  [[ "$running" =~ ^[0-9]+$ ]] || die_blind "$(hname "$h"): cannot read Time Machine status — refusing (a gate that cannot answer must not pass)"
+  # `tr -cd '0-9'` IS THE BUG (round-11 codex, HIGH): it does not VALIDATE a number, it
+  # MANUFACTURES one. Any malformed output CONTAINING a zero -- "0%", "0.0", "status: 0 of 5"
+  # -- was stripped down to a bare `0` and read as "not running" / "AUTOBACKUP DISABLED". The
+  # gate that is supposed to keep a Time Machine backup out of a timed window would have
+  # certified a Mac that was backing up. Both probes now carry their value in a SENTINEL and
+  # the value must be numeric AS PRINTED; nothing is stripped, and a read error stays an error.
+  running="$(hrun "$h" "s=\$(tmutil status 2>/dev/null); rc=\$?
+[ \$rc -eq 0 ] || { echo 'T:ERR:T'; exit 0; }
+v=\$(printf '%s\n' \"\$s\" | awk '/Running/{gsub(/[;\"]/, \"\", \$3); print \$3; exit}')
+[ -n \"\$v\" ] || { echo 'T:ERR:T'; exit 0; }
+echo \"T:\$v:T\"" | nocr | sed -n 's/.*T:\([^:]*\):T.*/\1/p' | head -1)" || running=""
+  [[ "$running" =~ ^[0-9]+$ ]] || die_blind "$(hname "$h"): cannot read Time Machine status (got '$running') — refusing (a gate that cannot answer must not pass, and a malformed reading must never be COERCED into a passing one)"
   [[ "$running" -eq 0 ]] || die "$(hname "$h"): a Time Machine backup is RUNNING — it hammers CPU and disk on a bench end (one destination is on skippy, the same 10GbE fabric)."
-  auto="$(hrun "$h" "defaults read /Library/Preferences/com.apple.TimeMachine AutoBackup 2>/dev/null | tr -cd '0-9' | head -1" | nocr | tr -cd '0-9')" || auto=""
-  [[ "$auto" =~ ^[0-9]+$ ]] || die_blind "$(hname "$h"): cannot read Time Machine AutoBackup — refusing (a READ ERROR must never read as 'disabled')"
+  auto="$(hrun "$h" "v=\$(defaults read /Library/Preferences/com.apple.TimeMachine AutoBackup 2>/dev/null); rc=\$?
+[ \$rc -eq 0 ] || { echo 'T:ERR:T'; exit 0; }
+echo \"T:\$v:T\"" | nocr | sed -n 's/.*T:\([^:]*\):T.*/\1/p' | head -1)" || auto=""
+  [[ "$auto" =~ ^[0-9]+$ ]] || die_blind "$(hname "$h"): cannot read Time Machine AutoBackup (got '$auto') — refusing (a READ ERROR must never read as 'disabled')"
   [[ "$auto" -eq 0 ]] || die "$(hname "$h"): Time Machine AUTOBACKUP is ENABLED. macOS repeats hourly, so a backup can start INSIDE the window — pf-0's fired 1 minute before its run. Disable it for the session (\`sudo tmutil disable\`) and re-enable after."
 }
 
@@ -381,7 +439,7 @@ load_gate() {
 }
 
 link_gate() {   # both directions; the peer's ARP must be the PEER's MAC, never our own
-  local h="$1" o peer_ip want got route_nic nic
+  local h="$1" o peer_ip want got raw route_nic nic
   o="$(other "$h")"; peer_ip="$(hip "$o")"; want="$(hmac "$o" | norm_mac)"; nic="$(hnic "$h")"
   [[ -n "$want" ]] || die_blind "$(hname "$o"): its configured MAC does not parse — refusing"
   hrun "$h" "ping -c1 -W1 '$peer_ip' >/dev/null 2>&1" \
@@ -391,13 +449,125 @@ link_gate() {   # both directions; the peer's ARP must be the PEER's MAC, never 
   # en8 — so an unfiltered $4 yields a MULTI-LINE string that can never equal a
   # single MAC. (Measured: this refused a perfectly good link. It is also the more
   # correct check: a stale entry on the 1GbE NIC is irrelevant to the 10GbE path.)
-  got="$(hrun "$h" "arp -n '$peer_ip' 2>/dev/null | awk -v nic='$nic' '\$5 == \"on\" && \$6 == nic {print \$4}' | head -1" | nocr | norm_mac)"
-  [[ -n "$got" ]] || die "$(hname "$h"): no ARP entry for $peer_ip ON $nic — the 10GbE path has not resolved the peer"
+  # A PROBE THAT COULD NOT RUN IS NOT AN ABSENT ARP ENTRY (round-11 codex, MEDIUM). Both of
+  # these read a command substitution whose status was discarded, so a broken ssh, a missing
+  # `arp`, or a failed `route` produced an EMPTY value and died with the message for a
+  # genuinely bad link — which the self-test then scores [FIRED] ("the gate works!") instead
+  # of [BROKEN] ("the gate is blind"). The refusal was right by luck; the classification was
+  # wrong, and a blind gate that looks like a working one is exactly what fails open at 3am.
+  # The sentinel distinguishes them: no `A:...:A` back at all means the probe never ran.
+  # The sentinel is `=`-delimited, NOT `:`-delimited: a MAC address is ALL colons, so a
+  # `A:<value>:A` frame can never be parsed back out and the gate reads BLIND on a perfectly
+  # good link. (Caught by running the self-test: [BROKEN] on both hosts. It failed CLOSED, so
+  # no wrong data — but a blind gate is the very thing this frame was added to prevent.)
+  raw="$(hrun "$h" "v=\$(arp -n '$peer_ip' 2>/dev/null | awk -v nic='$nic' '\$5 == \"on\" && \$6 == nic {print \$4}' | head -1)
+echo \"A=\${v:-NONE}=A\"" | nocr | sed -n 's/.*A=\([^=]*\)=A.*/\1/p' | head -1)" || raw=""
+  [[ -n "$raw" ]] \
+    || die_blind "$(hname "$h"): the ARP probe for $peer_ip could not run at all — refusing (a probe that cannot answer must not answer 'fine')"
+  [[ "$raw" != NONE ]] \
+    || die "$(hname "$h"): no ARP entry for $peer_ip ON $nic — the 10GbE path has not resolved the peer"
+  got="$(printf '%s\n' "$raw" | norm_mac)"
+  [[ -n "$got" ]] \
+    || die_blind "$(hname "$h"): the ARP entry for $peer_ip did not parse as a MAC (got '$raw') — refusing"
   [[ "$got" == "$want" ]] \
     || die "$(hname "$h"): ARP for $peer_ip is $got but the peer's real MAC is $want. If it equals OUR OWN NIC's MAC this is the documented BLACK HOLE (a host route on a directly-connected subnet) — 100% packet loss while \`route -n get\` still reports the right interface."
-  route_nic="$(hrun "$h" "route -n get '$peer_ip' 2>/dev/null | awk '/interface:/{print \$2}'" | nocr)"
+  route_nic="$(hrun "$h" "v=\$(route -n get '$peer_ip' 2>/dev/null | awk '/interface:/{print \$2}')
+echo \"R:\${v:-NONE}:R\"" | nocr | sed -n 's/.*R:\([^:]*\):R.*/\1/p' | head -1)" || route_nic=""
+  [[ -n "$route_nic" ]] \
+    || die_blind "$(hname "$h"): the route probe for $peer_ip could not run at all — refusing"
   [[ "$route_nic" == "$(hnic "$h")" ]] \
     || die "$(hname "$h"): route to $peer_ip egresses '$route_nic', not the 10GbE NIC '$(hnic "$h")' — the multi-NIC trap (macOS routes by network SERVICE order, so a 1GbE NIC can win and every run would go over gigabit)."
+}
+
+# THE REGISTERED FABRIC, PROVED ON THE WIRE (round-11 codex, BLOCKER: it never was).
+#
+# link_gate above proves the peer resolves on the right NIC and the route egresses it. That
+# says NOTHING about the NIC's SPEED or the path's MTU: a 1GbE interface, or a 9000-MTU NIC
+# behind a 1500 hop, passes every one of those checks. pf-0 spent 256 runs proving MTU moves
+# wall time on this fabric, so an unverified MTU is not a footnote -- it is a confound sitting
+# directly on the measurand.
+#
+# TWO gates, because they prove different things:
+#   topology_gate  the LOCAL NIC: its MTU, its NEGOTIATED media (a 1GbE link says 1000baseT),
+#                  and that the link is actually up.
+#   mss_gate       the PATH, end to end: a real TCP connection to the peer's registered IP,
+#                  and the MSS the two kernels agreed on. Both ends can sit at MTU 9000 while
+#                  a 1500 hop between them clamps segments to 1448 -- only the MSS sees that.
+#                  It also reports the LOCAL ADDRESS the kernel chose, which proves the
+#                  traffic EGRESSED the registered 10GbE IP and not one of the eight other
+#                  interfaces this Mac has.
+topology_gate() {
+  local h="$1" nic raw mtu media st
+  nic="$(hnic "$h")"
+  # The rc is carried in a sentinel: `$(ifconfig ...)` in a pipeline discards it, and an
+  # ifconfig that ERRORED must never read as a NIC that merely lacks the fields.
+  raw="$(hrun "$h" "ifconfig '$nic' 2>/dev/null; echo \"RC:\$?:RC\"" | nocr)" || raw=""
+  [[ "$raw" == *"RC:0:RC"* ]] \
+    || die_blind "$(hname "$h"): cannot read ifconfig $nic — refusing (a gate that cannot answer must not pass)"
+  mtu="$(printf '%s\n' "$raw"   | sed -n 's/.*[[:space:]]mtu[[:space:]]\([0-9][0-9]*\).*/\1/p' | head -1)"
+  media="$(printf '%s\n' "$raw" | sed -n 's/^[[:space:]]*media:[[:space:]]*\(.*\)$/\1/p'       | head -1)"
+  st="$(printf '%s\n' "$raw"    | sed -n 's/^[[:space:]]*status:[[:space:]]*\(.*\)$/\1/p'      | head -1)"
+  [[ "$mtu" =~ ^[0-9]+$ ]] \
+    || die_blind "$(hname "$h"): cannot parse the MTU of $nic (got '$mtu') — refusing"
+  [[ "$mtu" == "$REGISTERED_MTU" ]] \
+    || die "$(hname "$h"): $nic is at MTU $mtu, but the REGISTERED fabric is MTU $REGISTERED_MTU. pf-0 spent 256 runs establishing that MTU moves wall time on this rig — a run at the wrong MTU is not the registered experiment."
+  [[ -n "$media" ]] \
+    || die_blind "$(hname "$h"): $nic reports no negotiated media — refusing (an unknown link speed is not a 10GbE link)"
+  [[ "$media" == *"$REGISTERED_MEDIA"* ]] \
+    || die "$(hname "$h"): $nic negotiated '$media', not $REGISTERED_MEDIA. THE RUN WOULD BE OVER GIGABIT — this Mac has other interfaces and macOS routes by network SERVICE order."
+  [[ "$st" == active ]] \
+    || die "$(hname "$h"): $nic status is '$st', not active"
+  log "  fabric on $(hname "$h"): $nic mtu $mtu, media $media, status $st"
+}
+
+# ONE reader, TWO policies. THE recurring defect in this harness is the SAME PROBE WRITTEN
+# TWICE and fixed once (a fail-open pgrep lived on in its duplicate; the drain was fixed by
+# value and left failing by status). The path is checked at preflight (REFUSE, no data yet)
+# AND at the end of the session (VOID, the data exists) — pf-0's start-and-end rule — so the
+# probe itself exists exactly once and the two callers differ only in what they do about it.
+mss_read() {   # $1 = host -> "<mss> <local_ip>", or "" if the probe could not answer
+  local h="$1" peer
+  peer="$(hip "$(other "$h")")"
+  # ONE process: connect to the peer's REGISTERED ip and ask the kernel what MSS it agreed.
+  # Port 22 is sshd, up on both ends by definition (the harness itself got here over it).
+  hrun "$h" "$(hpy "$h") - '$peer' <<'PYEOF'
+import socket, sys
+s = socket.create_connection((sys.argv[1], 22), timeout=5)
+print('M:%d:%s:M' % (s.getsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG), s.getsockname()[0]))
+s.close()
+PYEOF" | nocr | sed -n 's/.*M:\([0-9][0-9]*\):\([0-9.][0-9.]*\):M.*/\1 \2/p' | head -1
+}
+
+mss_gate() {   # PREFLIGHT policy: no data has been taken, so REFUSE.
+  local h="$1" out mss local_ip peer
+  peer="$(hip "$(other "$h")")"
+  out="$(mss_read "$h")" || out=""
+  [[ -n "$out" ]] \
+    || die_blind "$(hname "$h"): cannot measure the negotiated MSS to $peer — refusing (an unproven path is not a proven one)"
+  read -r mss local_ip <<<"$out"
+  [[ "$mss" =~ ^[0-9]+$ ]] \
+    || die_blind "$(hname "$h"): the MSS probe returned '$mss' — refusing"
+  [[ "$mss" == "$REGISTERED_MSS" ]] \
+    || die "$(hname "$h"): the PATH to $peer negotiated MSS $mss, not the registered $REGISTERED_MSS. Both NICs can sit at MTU $REGISTERED_MTU while a 1500 hop between them clamps the segments (MSS 1448) — and THAT is the run pf-0 already measured as a DIFFERENT CONDITION."
+  [[ "$local_ip" == "$(hip "$h")" ]] \
+    || die "$(hname "$h"): the connection to $peer EGRESSED $local_ip, not the registered $(hip "$h") — the traffic is leaving on a DIFFERENT INTERFACE (this Mac has eight others, all at MTU 1500)."
+  log "  path from $(hname "$h") -> $(hname "$(other "$h")") ($peer): MSS $mss via $local_ip — the fabric is jumbo end-to-end"
+}
+
+end_mss_gate() {   # SESSION-END policy: the data exists, so VOID it rather than die.
+  local h out mss local_ip
+  for h in n q; do
+    out="$(mss_read "$h")" || out=""
+    if [[ -z "$out" ]]; then
+      SESSION_VOID_REASON="the path MSS on $(hname "$h") could not be read at the END of the session — a session whose fabric cannot be confirmed at both ends cannot be graded"
+      return
+    fi
+    read -r mss local_ip <<<"$out"
+    if [[ "$mss" != "$REGISTERED_MSS" || "$local_ip" != "$(hip "$h")" ]]; then
+      SESSION_VOID_REASON="the fabric CHANGED under the session: $(hname "$h") now negotiates MSS $mss via $local_ip (registered: $REGISTERED_MSS via $(hip "$h")). A link that flapped or re-routed mid-session may have carried some of the timed windows"
+      return
+    fi
+  done
 }
 
 # --- the drain device: RESOLVED, never hardcoded (grok) ------------------------
@@ -416,16 +586,29 @@ resolve_disk() {
   # it is not a harmless default, it is a FALSE QUIET that certifies drainage on a
   # device the data never touched. If the volume is APFS, the physical-store lookup
   # must SUCCEED or the gate refuses.
-  dev="$(hrun "$h" "d=\$(df '$p' 2>/dev/null | awk 'NR==2{print \$1}' | sed 's|^/dev/||')
+  # EVERY producer's STATUS, not just its value (round-11 codex, HIGH -- the same class as the
+  # drain, in the gate right next to it). The df PIPELINE's status was discarded, so a failed
+  # df that still printed something could name a synthesized device; and `grep -q 'APFS'` maps
+  # rc>=2 -- a BROKEN grep -- onto the same branch as "no match", i.e. "not APFS", which is
+  # exactly the fall-back-to-the-synthesized-disk path r5 closed for diskutil. On APFS the
+  # synthesized container can read IDLE while the physical store is saturated, so certifying
+  # the wrong device is a FALSE QUIET, not a harmless default.
+  dev="$(hrun "$h" "d=\$(df '$p' 2>/dev/null | awk 'NR==2{print \$1}' | sed 's|^/dev/||'); rc=\$?
+[ \$rc -eq 0 ] || { echo 'D:DF-FAILED:D'; exit 0; }
 [ -n \"\$d\" ] || { echo 'D:NO-DF:D'; exit 0; }
 info=\$(diskutil info \"\$d\" 2>/dev/null) || { echo 'D:NO-DISKUTIL:D'; exit 0; }
 [ -n \"\$info\" ] || { echo 'D:EMPTY-DISKUTIL:D'; exit 0; }
-if echo \"\$info\" | grep -q 'APFS'; then
-  ps=\$(echo \"\$info\" | awk -F: '/APFS Physical Store/{gsub(/[ \t]/, \"\", \$2); print \$2}' | head -1)
+echo \"\$info\" | grep -q 'APFS'; grc=\$?
+[ \$grc -le 1 ] || { echo 'D:GREP-BROKEN:D'; exit 0; }
+if [ \$grc -eq 0 ]; then
+  ps=\$(echo \"\$info\" | awk -F: '/APFS Physical Store/{gsub(/[ \t]/, \"\", \$2); print \$2}' | head -1); rc=\$?
+  [ \$rc -eq 0 ] || { echo 'D:APFS-AWK-FAILED:D'; exit 0; }
   [ -n \"\$ps\" ] || { echo 'D:APFS-NO-STORE:D'; exit 0; }
   d=\"\$ps\"
 fi
-echo \"D:\$(echo \"\$d\" | sed -E 's/s[0-9]+\$//'):D\"" | nocr | sed -n 's/.*D:\([^:]*\):D.*/\1/p' | head -1)"
+base=\$(echo \"\$d\" | sed -E 's/s[0-9]+\$//'); rc=\$?
+[ \$rc -eq 0 ] || { echo 'D:SED-FAILED:D'; exit 0; }
+echo \"D:\$base:D\"" | nocr | sed -n 's/.*D:\([^:]*\):D.*/\1/p' | head -1)"
   # Returns non-zero rather than dying, so the CALLER decides. (The self-test runs
   # each gate in a subshell to survive a refusal — and a `die` in there was invisible
   # while the global it sets was discarded, so the drain then had no device and
@@ -536,6 +719,8 @@ preflight() {
         || die "$(hname "$h"): src_$w is ${got:-0} files/${gotb:-0} bytes, want $want/$wantb — the arms must read identical trees"
     done
     link_gate "$h"
+    topology_gate "$h"          # the NIC: MTU + negotiated media (never checked before r11)
+    mss_gate "$h"               # the PATH: the MSS the two kernels actually agreed
     resolve_disk "$h" || die "$(hname "$h"): cannot establish the drain device — refusing"
   done
   measure_ssh_rtt
@@ -558,6 +743,11 @@ write_manifest() {
     echo "# binary_identity=$EXPECT_SHA runs=$RUNS settle_ms=$SETTLE_MS load_max=$LOAD_MAX"
     echo "# drain_mbps=$DRAIN_MBPS drain_quiet=$DRAIN_QUIET delta_ref_ms=$DELTA_REF_MS"
     echo "# drain_disk_nagatha=$N_DISK drain_disk_q=$Q_DISK ssh_rtt_ms=$SSH_RTT_MS"
+    # THE FABRIC, RECORDED — not just gated. pf-0's whole finding turns on which MTU a
+    # session ran at; a session that does not record its own fabric cannot be re-read later.
+    # Measured with the same single reader the gates use, never a second copy of the probe.
+    echo "# fabric_registered: nic_mtu=$REGISTERED_MTU media=$REGISTERED_MEDIA mss=$REGISTERED_MSS"
+    echo "# fabric_measured: nagatha=[$(mss_read n)] q=[$(mss_read q)]  (mss local_ip)"
     echo "# cells=$CELLS"
     echo "host,role,sha,sha256,path"
     echo "nagatha,client,$EXPECT_SHA,$nb,$N_BLIT"
@@ -631,7 +821,14 @@ if ps -p $pid >/dev/null 2>&1; then kill -9 $pid 2>/dev/null || true; sleep 1; f
   # called a FAILED ssh "GONE".
   # A BROKEN `ps` probe is not "GONE" (round-10 codex). The sentinel must come back, or the
   # teardown is unverified and the session says so.
-  state="$(hrun "$h" "if ps -p $pid >/dev/null 2>&1; then echo 'S:ALIVE:S'; else echo 'S:GONE:S'; fi" \
+  # `ps -p`: 0 = the pid EXISTS, 1 = it does NOT, anything else = THE PROBE IS BROKEN. The
+  # old form mapped every non-zero status onto "GONE" (round-11 codex, MEDIUM: r10 fixed the
+  # ssh-failure half and left the rc half), so a `ps` that could not run at all -- no PATH, a
+  # full process table -- certified the daemon dead and left it holding the port.
+  state="$(hrun "$h" "ps -p $pid >/dev/null 2>&1; rc=\$?
+if [ \$rc -eq 0 ]; then echo 'S:ALIVE:S'
+elif [ \$rc -eq 1 ]; then echo 'S:GONE:S'
+else echo 'S:BROKEN:S'; fi" \
     | nocr | sed -n 's/.*S:\([A-Z]*\):S.*/\1/p' | head -1)" || state="PROBE-FAILED"
   if [[ "$state" != GONE ]]; then
     log "ERROR: $(hname "$h") daemon pid $pid SURVIVED teardown or could not be probed (got '$state') — port $PORT may still be held"
@@ -665,13 +862,21 @@ drain_host() {   # $1 = host. Echoes drained_<n>x2s | DRAIN-TIMEOUT | DRAIN-ERRO
 for i in \$(seq 1 $DRAIN_ITERS); do
   out=\$(iostat -d -w 2 -c 2 '$dev' 2>/dev/null); rc=\$?
   if [ \$rc -ne 0 ]; then echo DRAIN-ERROR; exit 0; fi
-  w=\$(echo \"\$out\" | tail -1 | awk '{print \$3}')
+  # EVERY PRODUCER'S STATUS IS CHECKED, NOT JUST ITS VALUE (round-11 codex, HIGH). This is
+  # the THIRD time this one class has been found in this one function: r5 found the iostat
+  # status discarded; r8 found the drained_* VALUE validated while its STATUS was discarded;
+  # these three substitutions were STILL discarding theirs. The remote shell has no errexit,
+  # so an extractor that prints a passing value and THEN exits non-zero sails straight
+  # through. pipefail IS set (hrun), so a failure anywhere in these pipes surfaces in rc.
+  w=\$(echo \"\$out\" | tail -1 | awk '{print \$3}'); rc=\$?
+  if [ \$rc -ne 0 ]; then echo DRAIN-ERROR; exit 0; fi
   # A REAL number, not merely digits-and-dots: "." and ".." pass a shape test, read as 0,
   # and 0 < the threshold CERTIFIES QUIET (codex r9). awk decides, and it must see exactly
   # one numeric field.
-  ok_num=\$(echo \"\$w\" | awk '{ print (NF == 1 && \$1 ~ /^[0-9]+(\\.[0-9]+)?\$/) ? 1 : 0 }')
-  if [ \"\$ok_num\" != 1 ]; then echo DRAIN-ERROR; exit 0; fi
-  ok=\$(awk -v w=\"\$w\" -v t=$DRAIN_MBPS 'BEGIN{print (w+0 < t) ? 1 : 0}')
+  ok_num=\$(echo \"\$w\" | awk '{ print (NF == 1 && \$1 ~ /^[0-9]+(\\.[0-9]+)?\$/) ? 1 : 0 }'); rc=\$?
+  if [ \$rc -ne 0 ] || [ \"\$ok_num\" != 1 ]; then echo DRAIN-ERROR; exit 0; fi
+  ok=\$(awk -v w=\"\$w\" -v t=$DRAIN_MBPS 'BEGIN{print (w+0 < t) ? 1 : 0}'); rc=\$?
+  if [ \$rc -ne 0 ]; then echo DRAIN-ERROR; exit 0; fi
   if [ \"\$ok\" = 1 ]; then quiet=\$((quiet+1)); else quiet=0; fi
   if [ \$quiet -ge $DRAIN_QUIET ]; then echo \"drained_\${i}x2s\"; exit 0; fi
 done
@@ -991,7 +1196,16 @@ SELFTEST_FIRED=0; SELFTEST_BROKEN=0
 gate_probe() {
   local label="$1"; shift
   local err rc=0
-  err="$( { "$@"; } 2>&1 )" || rc=1
+  # `err="$(...)" || rc=1` put the gate's WHOLE CALL TREE inside an `||` context, which
+  # DISABLES errexit throughout it (round-11 codex, MEDIUM — the same defect r10 fixed in
+  # run_all_cells, surviving in its duplicate here). A failing command deep inside a gate
+  # would then not abort the gate, and the gate could report a value it never actually
+  # verified. errexit is suspended in THIS shell only, and re-armed INSIDE the subshell.
+  set +e
+  err="$( set -e; "$@" 2>&1 )"
+  rc=$?
+  set -e
+  (( rc == 0 )) || rc=1
   if (( rc == 0 )); then
     log "  [OK]     $label — answers, and the condition holds"
   elif grep -q 'PROBE-BLIND' <<<"$err"; then
@@ -1055,6 +1269,8 @@ selftest() {
     gate_probe "spotlight     (mds_stores CPU)"        spotlight_gate "$h"
     gate_probe "load  start   (load1 <= $LOAD_MAX)"      load_gate "$h"
     gate_probe "link          (ARP on the egress NIC + 10GbE route)" link_gate "$h"
+    gate_probe "fabric NIC    (MTU $REGISTERED_MTU + negotiated $REGISTERED_MEDIA)" topology_gate "$h"
+    gate_probe "fabric PATH   (negotiated MSS $REGISTERED_MSS, egress on the registered IP)" mss_gate "$h"
     # NOT through gate_probe: it runs its argument in a SUBSHELL (so a `die` cannot
     # abort the sweep), and resolve_disk's whole job is to SET a global. Called there,
     # the assignment was discarded and the drain loop below then had no device and
@@ -1089,6 +1305,17 @@ selftest() {
   else
     log "  [FIRED]  end-load gate — $SESSION_VOID_REASON"; SELFTEST_FIRED=$((SELFTEST_FIRED+1))
   fi
+  # The END-of-session fabric re-check, exercised for real. Same three-way scoring: a probe
+  # that cannot answer is BLIND, a fabric that genuinely changed is the gate WORKING.
+  SESSION_VOID_REASON=""; end_mss_gate
+  if [[ -z "$SESSION_VOID_REASON" ]]; then
+    log "  [OK]     end-fabric gate (MSS $REGISTERED_MSS on both ends; it CAN void a session)"
+  elif [[ "$SESSION_VOID_REASON" == *"could not be read"* ]]; then
+    log "  [BROKEN] end-fabric gate — $SESSION_VOID_REASON"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1))
+  else
+    log "  [FIRED]  end-fabric gate — $SESSION_VOID_REASON"; SELFTEST_FIRED=$((SELFTEST_FIRED+1))
+  fi
+  SESSION_VOID_REASON=""
   measure_ssh_rtt
   log ""
   log "SELFTEST: $SELFTEST_FIRED gate(s) refused a genuinely unmet condition; $SELFTEST_BROKEN blind."
@@ -1126,9 +1353,14 @@ main() {
 
   run_all_cells
 
-  # End-load BEFORE the verdict is computed, and it can VOID the session.
+  # End-load AND end-fabric, BEFORE the verdict is computed. Both can VOID the session.
+  # The fabric is re-proved at the END for the same reason pf-0 did it: a link that flapped
+  # or re-routed mid-session (onto the 1GbE NIC, or a 1500 hop) would have carried some of
+  # the timed windows, and a start-only check cannot see that. A gate measured once at the
+  # start is not a gate on a run taken an hour later.
   log "  load1 (end): nagatha=$(load1 n)  q=$(load1 q)"
   end_load_gate
+  [[ -n "$SESSION_VOID_REASON" ]] || end_mss_gate
   if [[ -n "$SESSION_VOID_REASON" ]]; then
     log "ERROR: SESSION VOID — $SESSION_VOID_REASON"
     touch "$OUT_DIR/SESSION-VOID"
