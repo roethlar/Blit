@@ -1,10 +1,17 @@
 # otp-12 Mac↔Mac rig — PRE-REGISTRATION (written before any timed run)
 
-**Status**: Pre-registered, **revision 2**. **No data exists yet.**
-Codex round 1 (of `f0343f4`): **NOT READY — 1 BLOCKER + 7 HIGH + 1 LOW → 9/9
-accepted.** Adjudication: `.review/results/macmac-prereg.gpt-verdict.md`.
-Committed BEFORE the data so the decision rule cannot be authored around the
-numbers (the pf-0 discipline).
+**Status**: Pre-registered, **revision 3**. **No data exists yet.**
+- Codex round 1 (of `f0343f4`, the design): NOT READY — 1 BLOCKER + 7 HIGH + 1 LOW
+  → **9/9 accepted** (`.review/results/macmac-prereg.gpt-verdict.md`).
+- Codex round 2 (of `e1e351d`, the **instrument**): NOT READY — **3 BLOCKER** +
+  6 HIGH + 1 MEDIUM + 1 LOW → **11/11 accepted**
+  (`.review/results/macmac-harness.gpt-verdict.md`).
+
+Committed BEFORE the data so the rule cannot be authored around the numbers.
+**Two rounds of review have now caught, between them, an invalid inference, a
+statistic that would have declared a real effect absent, a fail-open durability
+check, and a timing artifact that reverses sign with direction — all before a
+single timed run.**
 
 **Parent**: `docs/plan/OTP12_PERF_FINDINGS.md` (Active, D-2026-07-13-1).
 
@@ -26,15 +33,19 @@ The bad framing was inherited from `docs/STATE.md` ("H1 accuses the *Windows*
 accept branch") and copied without checking H1's text. **That is a repo error and
 it is corrected wherever it appears.**
 
-**What this rig CAN answer — and it is still decision-relevant:**
+**What this rig CAN answer — and revision 2 STILL overstated it (round-2 BLOCKER).**
+Rev 2 asked whether P1 is "a platform-general cost of the layout". A rig with two
+machines cannot license that. The claim is now scoped to **this pair**:
 
-> **Does P1 require the macOS↔Windows PAIRING, or is it a platform-general cost
-> of the destination-initiated layout?**
+> **Can P1 occur WITHOUT a Windows peer — on this pair of Macs?**
 
-| outcome | what it licenses |
+| outcome | what it licenses — and its limit |
 |---|---|
-| **P1 REPRODUCES macOS↔macOS** | The failure needs **no Windows peer**. P1 is **not platform residue** — it is a cost of the layout/code that survives with the Windows half removed. This **closes the "accept it as platform residue" escape** (the D-2026-07-12-1 shape) and **strengthens every code-level hypothesis, H1 included**. It does **not** name the mechanism. |
-| **P1 VANISHES macOS↔macOS** | The failure **requires the Windows peer**: it is pairing-dependent / platform-interacting. Code-only mechanisms that should bite on any OS are **weakened**; a Windows-specific cost, or a macOS↔Windows interaction, rises. It does **not** confirm H1 — H1's accept branch would then have to be *platform-conditionally* slow, which is a further claim needing pf-1's counterfactual. |
+| **P1 REPRODUCES** | P1 **does not require a Windows peer** (on this pair). It is therefore **not** "platform residue" that could be waived under the D-2026-07-12-1 shape, and every code-level hypothesis strengthens. **Limits**: it does **not** establish a platform-*general* cost (two Macs are not "all platforms"), it does **not** name the mechanism, and it does **not** kill H1 — the code H1 accuses runs here too, so a reproduction is *consistent with* H1. |
+| **P1 does NOT reproduce (null)** | P1 **did not occur on this pair**. That is **consistent with** "the Windows peer is required" — but does **not prove it**: it could equally be a property of *these two machines*, their disks, or this macOS version. It does **not** confirm H1 either. |
+
+A null is only reportable at all if the rig could have **seen** a rig-W-sized
+effect — see the POWER GATE. Otherwise it is `INCONCLUSIVE-UNDERPOWERED`.
 
 Either outcome materially reshapes the hypothesis space and bears directly on
 whether P1 **must be fixed in code** or **could be accepted as platform residue**.
@@ -80,89 +91,127 @@ directions differ in *which machine is the destination*, a one-directional resul
 is explicitly **not** dismissible as "machine asymmetry" (revision 1 did exactly
 that, which would have let a real reproduction be waved away).
 
-## The noise model — PAIRED and within-cell (round-1 HIGH; revision 1's was not a noise floor at all)
+## The paired statistic — and why revision 2's was BROKEN (round-2 BLOCKER)
 
-Revision 1 defined `N` = max |ratio−1| over the four control cells. That is **not
-a noise floor**: it is four point estimates drawn from different carriers,
-fixtures and destinations, so it conflates *genuine control-specific initiator
-effects* with *sampling noise*, and could equally mask a real effect or bless a
-fake one.
+Rev 1 used `N` = max |ratio−1| over four control cells: four point estimates from
+different carriers, fixtures and destinations — not a noise floor at all. Rev 2
+replaced it with the paired difference and `S = spread(d_i)` as the noise. **That
+is still broken**, because a *range* grows with n and is dominated by outliers, so
+a **large, consistent effect can hide under it**. Codex's counterexample, which
+rev 2's rule accepted:
 
-Replaced with the **paired within-cell** statistic — the same construction pf-0's
-review demanded of pf-1:
+    srcinit = 2000 ms (×8);   d = [0, 180, 180, 190, 190, 200, 200, 200]
+    -> D = 190, S = 200, bar PASSES, |D| <= S   =>   rev 2 says "VANISHES"
 
-    For each cell, each ABBA slot i yields a matched pair (srcinit_i, destinit_i).
-      d_i   = destinit_i − srcinit_i          (positive = P1's direction)
-      D     = median(d_i)                     <- the effect
-      S     = the spread of d_i               <- the PAIRED noise (report max−min AND IQR)
-      MDE   = the smallest |D| this cell can resolve, taken as S (conservative)
+…on **7/8 positive pairs** and an effect **83% the size of rig W's Δ_P1**. It
+would have reported "P1 requires the Windows peer" off an effect nearly as big as
+P1 itself.
 
-`D` and `S` come from the *same* slots, under the *same* conditions, so ABBA
-pairing is respected and between-session drift cannot enter. Every threshold below
-is expressed against `S`, the 1.10 bar, or rig W's measured `Δ_P1 ≈ 230 ms` — none
-is invented.
+**Replaced with a real paired inference** (computed by
+`scripts/otp12pf_mac_verdict.py`, and guarded by a test that asserts the
+counterexample above no longer returns VANISHES):
 
-## POWER GATE — evaluated BEFORE any "vanish" claim (round-1 HIGH; pf-0's exact error, pre-empted)
+    per ABBA slot i:  d_i = destinit_i − srcinit_i     (positive = P1's direction)
+      D    = median(d_i)
+      CI   = 95% BOOTSTRAP CI on the median (10k resamples, SEEDED -> deterministic)
+      sign = exact two-sided binomial test on the count of positive d_i
+      BAR_BREACH = 0.10 × srcinit_median   <- the effect that would reach the 1.10 bar
 
-pf-0 reported a KILL with an instrument that could not have resolved the effect it
-killed. That must not recur.
+The median convention is the **low median** for even n, stated once and applied
+everywhere (round-2 LOW).
 
-For each TCP×mixed cell, **before** reading a verdict:
+## POWER GATE — a null must be an EQUIVALENCE result, not an absence of evidence
 
-1. Compute `MDE` (above) and the effect size that a rig-W-scale P1 would have
-   here: `Δ_ref = 230 ms` (rig W's Δ_P1), and also in ratio terms against **this
-   rig's own fast arm** — because the 1.10 bar is a *ratio*, a 230 ms effect is
-   only visible if the fast arm is fast enough (at a 2.3 s fast arm, 230 ms is
-   exactly 1.10 and would sit **on** the bar).
-2. **If `MDE > Δ_ref`, or if `Δ_ref` on this cell's fast arm does not exceed the
-   1.10 bar, the cell is UNDERPOWERED and a PASS there is INCONCLUSIVE — it may
-   NOT be reported as "P1 vanishes".** The rig gets reported as unable to see the
-   effect, and the experiment does not close.
+pf-0 reported a KILL with an instrument that could not resolve the effect it
+killed. This design pre-empts that:
 
-A **reproduction** does not need this gate (an effect that is seen is seen); a
-**null** does.
+- A **null is only reportable** if the CI **excludes a bar-breaching effect** —
+  i.e. the whole CI lies strictly inside ±`BAR_BREACH`. That is a genuine
+  *equivalence* claim: "an effect big enough to matter is ruled out."
+- If the CI is **too wide** to exclude it, the cell is **UNDERPOWERED** and the
+  session verdict is **INCONCLUSIVE-UNDERPOWERED**. A PASS is then *not*
+  "P1 vanishes" — it is "this rig could not have seen it".
+- A **reproduction** needs no such gate: an effect that is seen is seen.
 
-## Decision rule — pre-registered, exhaustive, mutually exclusive, evaluated in order
+## Decision rule — computed BY THE HARNESS, exhaustive, in strict precedence
 
-Invariance uses the harness's **exact integer arithmetic** (`10·hi ≤ 11·lo`),
-never the printed ratio. Per TCP×mixed cell: `D` = median paired difference,
-`S` = paired spread.
+The harness emits `session_verdict.txt`. **The verdict is not applied by hand
+after the numbers are visible** (round-2 BLOCKER: rev 2's harness computed only
+PASS/FAIL, which would have left the rule to me, post-hoc).
 
-1. **RIG-VOID.** Any control cell FAILS the 1.10 bar → the rig is not measuring
-   cleanly and **no verdict is read**. (A rig whose gRPC control fails cannot
-   adjudicate a TCP-only claim.) Report and stop.
-2. **REPRODUCES (in a named direction).** A TCP×mixed cell FAILS the 1.10 bar with
-   `D > 0` **and** `D > S`. Reported per direction; **either direction suffices.**
-   → *P1 does not need a Windows peer.*
-3. **INVERSION (in a named direction).** A TCP×mixed cell FAILS with `D < 0` and
-   `|D| > S` (source-initiated is the slow arm). A **new finding**, reported as
-   such — never banked as "P1 absent" and never counted as a reproduction.
-4. **VANISHES.** *Both* TCP×mixed cells PASS the 1.10 bar, **and** `|D| ≤ S` in
-   both, **and both cells cleared the POWER GATE.** → *P1 requires the Windows
-   peer.* If the power gate was not cleared, this branch is unavailable and the
-   result is **INCONCLUSIVE-UNDERPOWERED**.
-5. **PARTIAL.** Any TCP×mixed cell PASSES the bar but has `|D| > S` in P1's
-   direction — a real, sub-bar asymmetry. Reported with `D` stated against
-   `Δ_ref = 230 ms`. Neither a reproduction nor a vanish; pf-1 owns it.
-6. **MIXED-SIGN.** One direction reproduces (case 2) and the other inverts
-   (case 3). Reported verbatim as a **host×role interaction**, which the rig
-   cannot decompose. Explicitly **inconclusive** for the pairing question.
+Per cell (integer-exact bar `10·hi ≤ 11·lo`, never the printed ratio):
 
-Cases 2/3/5/6 are read per direction and then combined by this order; the first
-matching case that applies to the *session* is the headline, with every cell's own
-outcome recorded. **No case is left unmapped, and no outcome may be reported that
-is not one of these.**
+| cell outcome | condition |
+|---|---|
+| **REPRODUCES** | bar **FAILS** and `CI_lo > 0` |
+| **INVERSION** | bar **FAILS** and `CI_hi < 0` |
+| **VANISHES** | bar **PASSES** and the CI lies strictly inside ±`BAR_BREACH` |
+| **UNDERPOWERED** | bar **PASSES** and the CI cannot exclude `BAR_BREACH` |
+| **PARTIAL** | bar **PASSES**, CI excludes 0, effect not excluded as small |
+| **UNSTABLE** | (override) an arm is bimodal *and* the bar verdict flips on pooled runs |
 
-**Bistability override, defined as a statistic, not a vibe (round-1 HIGH).** pf-0
-found the rig-W fast arm bimodal, where the mode *mixture* moved a median 72 ms at
-constant conditions. Here: if any arm's 8 runs split into two clusters separated by
-more than `S` **and** the cell's verdict would flip when graded on the pooled runs
-rather than the medians, the cell is reported **UNSTABLE**, not resolved. All 8
-runs of every arm are printed in `summary.csv` so this is checkable, not asserted.
+Session precedence (first match wins; every cell's own outcome is still recorded):
 
-## Gates — fail-closed (round-1 HIGH: revision 1 only *warned* on the one that bit pf-0)
+1. **INCOMPLETE** — any cell short of its pairs.
+2. **RIG-VOID** — any **control** cell FAILS the bar. A rig whose gRPC/large
+   control fails cannot adjudicate a TCP-only claim. No verdict is read.
+3. **UNSTABLE** — a bimodal arm whose verdict flips. Reported as unstable, not
+   resolved.
+4. **MIXED-SIGN** — one direction REPRODUCES and the other INVERTS: a host×role
+   interaction this rig **cannot decompose**. Inconclusive for the question.
+5. **REPRODUCES** — either direction. → *P1 can occur without a Windows peer, on
+   this pair.*
+6. **INVERSION** — a new finding; never banked as "P1 absent".
+7. **INCONCLUSIVE-UNDERPOWERED** — the null branch is unavailable.
+8. **VANISHES** — both TCP×mixed cells exclude a bar-breaching effect.
+9. **PARTIAL** — a real but sub-bar asymmetry; pf-1 owns it.
 
-A run that misses any of these is **VOID**, not "close enough":
+**No outcome may be reported that is not one of these.**
+
+**Bistability is a STATISTIC, not a vibe.** pf-0 found the rig-W fast arm bimodal,
+where the mode *mixture* moved a median 72 ms at constant conditions. Here: an arm
+whose runs split into two clusters separated by more than the paired spread, **and**
+whose bar verdict flips when graded on pooled runs rather than medians, is
+**UNSTABLE**. All 8 runs of every arm are printed in `summary.csv`, so this is
+checkable rather than asserted.
+
+## The instrument — two defects that could have MANUFACTURED the result (round-2 HIGH)
+
+**1. The durability check was fail-open.** `os.walk()` on a missing, unreadable or
+empty path returns **0 files in 0 ms** — a missing tree reads as a *fast,
+successful flush*. The two arms need **different** landed paths, because blit uses
+rsync-style slash semantics (verified empirically: a push to `/bench/RUNDIR/` lands
+the tree at `RUNDIR/src_<W>`; a pull into `RUNDIR` lands the files **directly in**
+`RUNDIR`). A wrong path would have charged one arm **zero** durability while the
+other paid full — the otp-2w bug that once manufactured P1.
+**Fixed**: the fsync walk returns its **file count and byte sum**, and the pair
+**VOIDs** unless both match the fixture exactly. An exit-0 zero-byte or partial
+transfer can no longer become a valid *fast* row.
+
+**2. The free-writeback gap REVERSED SIGN WITH DIRECTION.** Between a client
+exiting and the fsync starting, the OS writes back dirty pages **for free**, and
+that gap is longer for whichever arm ran over ssh:
+
+    cell nq (dest = q):        srcinit = LOCAL client,  destinit = REMOTE client
+    cell qn (dest = nagatha):  srcinit = REMOTE client, destinit = LOCAL client
+
+So the *favoured arm flips with the data direction*. Since P1's signature is
+**one-directional**, this artifact is capable of producing a one-directional
+"reproduction" **out of nothing**.
+**Measured before fixing** (the instrument is verified, not assumed): a pre-fsync
+delay of **10 / 20 / 200 ms produced no measurable change in fsync time**
+(72–94 ms, no trend) — APFS fsync here is per-file-metadata bound, not writeback
+bound. **Fixed anyway, structurally**: a fixed, equal `SETTLE_MS` (250 ms) precedes
+the fsync on **both** arms, so the asymmetry is removed by construction without
+weakening what durability charges.
+
+## Gates — fail-closed (round-1 HIGH: revision 1 only *warned*; round-2 HIGH: they all failed OPEN)
+
+A run that misses any of these is **VOID**, not "close enough". **Every gate fails
+CLOSED**: a gate that cannot answer must never answer "fine" (round 2 found
+`pgrep` errors reading as "quiet", a `tmutil` read error reading as "disabled",
+`top` failures reading as 0% — the same class as pf-0's `ps` decaying average that
+reported a *finished* backup as 255%).
 
 - **QUIESCENCE, BOTH MACS.** Refuse to start if `codex`/`cargo`/`rustc` runs on
   **either** Mac (both are bench **ends** here — nagatha is no longer just the
