@@ -386,6 +386,17 @@ never at risk.
   `InitiatorReceivePlaneRun.add_dialed_stream`). Suspect: per-epoch
   accept/dial round-trips or serialization in the accept branch that the
   dial branch does not pay.
+  **⚠ H1 ACCUSES CODE, NOT A PLATFORM (canonical; added 2026-07-14 after the
+  shorthand misled two sessions).** The word "Windows" appears nowhere above.
+  Windows is merely *who happens to be the accepting source* in P1's slow arm on
+  rig W, so other docs say "H1's Windows accept branch" as **shorthand for where
+  the accused code runs on that rig** — it is NOT a claim that H1 requires
+  Windows. Two consequences, both load-bearing: (a) **a reproduction of P1 on a
+  non-Windows pair does NOT kill H1** — the accused code runs there too, so it is
+  *consistent with* H1 (and "consistent with H1" is not confirmation, below);
+  (b) **a disappearance of P1 without Windows does not CONFIRM H1** either — it
+  would only mean the accused cost is platform-conditional, which is a further
+  claim. Only the dial/accept inversion counterfactual in pf-1 can settle H1.
   **H1's fixture rationale is FALSIFIED (review round 4)**: the claim
   was "mixed exercises resize hardest", but **all three fixtures target
   eight streams before clamping** (`src/dial.rs:474`) — so resize

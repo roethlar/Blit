@@ -323,10 +323,27 @@ timed_run() {   # $1=initiating host $2=src spec $3=dst spec $4=DEST host $5=lan
   # The window is self-timed ON the initiating host (locally for nagatha; inside a
   # SINGLE ssh for q), so dispatch/round-trip is outside it by construction.
   # NO sync in here — durability is charged to the destination, below.
-  out="$(hrun "$ih" "python3 -c 'import time;print(int(time.monotonic()*1000))' > /tmp/mm_t0
-'$bin' copy '$src' '$dst' --yes $flag >/dev/null 2>/tmp/mm-client.err; rc=\$?
-t1=\$(python3 -c 'import time;print(int(time.monotonic()*1000))'); t0=\$(cat /tmp/mm_t0)
-echo \"R:\$((t1-t0)),\${rc}:R\"" | nocr | sed -n 's/.*R:\([0-9][0-9]*,[0-9][0-9]*\):R.*/\1/p' | head -1)"
+  # ONE python process brackets the transfer. Two reasons, both load-bearing:
+  #   1. time.monotonic()'s REFERENCE POINT IS UNDEFINED ACROSS PROCESSES (python
+  #      docs; only same-process differences are valid). The first draft of this
+  #      function read t0 in one `python3 -c` and t1 in another and subtracted
+  #      them — which is meaningless, and measurably so: consecutive reads on this
+  #      rig returned -1 and -4 ms. It would have produced garbage timings that
+  #      still looked plausible.
+  #   2. Interpreter startup now falls OUTSIDE the timer. With a per-invocation
+  #      clock read, startup sat INSIDE the window — and since the two arms of a
+  #      cell are initiated by DIFFERENT Macs, any startup difference between them
+  #      is charged to one arm. That is the otp-2w failure mode (a cost billed to
+  #      one arm and not the other) in a new disguise.
+  out="$(hrun "$ih" "python3 - '$bin' '$src' '$dst' '$flag' <<'PYEOF'
+import subprocess, sys, time
+binp, src, dst, flag = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+cmd = [binp, 'copy', src, dst, '--yes'] + ([flag] if flag else [])
+err = open('/tmp/mm-client.err', 'wb')
+t = time.monotonic()
+rc = subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=err)
+print('R:%d,%d:R' % (int((time.monotonic() - t) * 1000), rc))
+PYEOF" | nocr | sed -n 's/.*R:\([0-9][0-9]*,[0-9][0-9]*\):R.*/\1/p' | head -1)"
   if [[ "$out" == *,* ]]; then RUN_MS="${out%%,*}"; RUN_EXIT="${out##*,}"; else RUN_MS=0; RUN_EXIT=99; fi
   RUN_FLUSH="$(fsync_tree_ms "$dh" "$landed")"
   RUN_VALID=yes
