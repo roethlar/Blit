@@ -1,0 +1,1 @@
+I'll review the instrument for confident-wrong-answer risks: start with `git show 1e03063`, read the four HEAD files, then drive the verdict engine and gates with synthetic cases.Shell was blocked by policy; I'll use the ptk MCP path and load the harness next.
