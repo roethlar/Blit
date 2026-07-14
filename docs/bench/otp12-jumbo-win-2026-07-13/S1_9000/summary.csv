@@ -1,0 +1,9 @@
+cell,arm,median_ms,avg_ms,best_ms,spread_pct,voided_runs,pairs_attempted
+mw_tcp_mixed,mac_init,1710,1705,1592,10.7,0,8
+mw_tcp_mixed,win_init,1641,1681,1585,16.5,0,8
+wm_grpc_mixed,mac_init,1121,1145,1112,8.8,0,8
+wm_grpc_mixed,win_init,1128,1130,1099,6.4,0,8
+wm_tcp_large,mac_init,908,914,907,2.9,0,8
+wm_tcp_large,win_init,908,909,904,1.9,0,8
+wm_tcp_mixed,mac_init,1035,1044,1020,7.1,0,8
+wm_tcp_mixed,win_init,760,768,699,20.7,0,8
