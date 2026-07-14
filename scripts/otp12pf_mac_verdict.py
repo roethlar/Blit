@@ -147,8 +147,31 @@ for r in rows:
 
 
 def med(v):
+    """The LOW median. Registered for the paired differences D -- and ONLY for them."""
     v = sorted(v)
     return v[(len(v) - 1) // 2]
+
+
+def med_arm(v):
+    """The conventional even-n median (mean of the two middle values), for the ARM medians.
+
+    Round-11 codex (MEDIUM): the low median was registered for the paired D and then reused
+    for srcinit_med -- which is not a reported number, it CONTROLS T, B and the bar. And it
+    is anti-conservative in exactly the case that matters: a BIMODAL arm pulls the low median
+    DOWN, T = src/10 shrinks with it, and an EFFECT gets EASIER. With an arm of 4x1000ms and
+    4x5000ms, the low median says the arm is 1000ms and a +100ms difference is a 10% effect;
+    the conventional median says 3000ms and the same difference is 3.3% -- below both bars.
+    The fast arm on rig W is ALREADY KNOWN to be bimodal (the ~730/~840ms mode mixture), so
+    this is not a synthetic worry.
+
+    D keeps the low median: it is REPORTED, never decided on (the states come from the CI and
+    the range, which no median convention can move).
+    """
+    v = sorted(v)
+    n = len(v)
+    if n % 2:
+        return float(v[n // 2])
+    return (v[n // 2 - 1] + v[n // 2]) / 2.0
 
 
 def paired(c):
@@ -236,7 +259,8 @@ for c in sorted(set(REGISTERED) | set(meta)):
         # (and therefore T, B and the bar) while the pair count still looked right.
         cell[c] = dict(state="INCOMPLETE", n=len(d))
         continue
-    s_med, d_med = med(by[(c, "srcinit")]), med(by[(c, "destinit")])
+    # The ARM medians (conventional even-n) -- these CONTROL T, B and the bar. Not med().
+    s_med, d_med = med_arm(by[(c, "srcinit")]), med_arm(by[(c, "destinit")])
     hi, lo = max(s_med, d_med), min(s_med, d_med)
     ci_lo, ci_hi, cov = ci
     p, k, n = sign_p(d)
@@ -338,8 +362,8 @@ with open(sum_p, "w") as f:
     f.write("cell,arm,median_ms,avg_ms,best_ms,worst_ms,voided,runs\n")
     for (c, a) in sorted(by):
         v = by[(c, a)]
-        f.write("%s,%s,%d,%d,%d,%d,%d,%s\n" % (c, a, med(v), sum(v) // len(v), min(v),
-                                               max(v), voided.get((c, a), 0),
+        f.write("%s,%s,%d,%d,%d,%d,%d,%s\n" % (c, a, round(med_arm(v)), sum(v) // len(v),
+                                               min(v), max(v), voided.get((c, a), 0),
                                                " ".join(map(str, v))))
 
 with open(pair_p, "w") as f:
@@ -351,7 +375,7 @@ with open(pair_p, "w") as f:
             f.write("%s,%d,,,,,,,,,,,,,,,INCOMPLETE,\n" % (c, x["n"]))
             continue
         f.write("%s,%d,%d,%d,%.3f,%s,%d,%d,%d,%d,%d,%.4f,%d,%d,%.4f,%d/%d,%s,%s\n" % (
-            c, x["n"], x["src"], x["dst"], x["ratio"], x["bar"], x["D"],
+            c, x["n"], round(x["src"]), round(x["dst"]), x["ratio"], x["bar"], x["D"],
             x["ci"][0], x["ci"][1], x["rng"][0], x["rng"][1], x["cov"],
             round(x["T"]), round(x.get("B", 0)), x["p"], x["k"], x["n"],
             x["state"], x["ctrl_state"]))
@@ -364,7 +388,7 @@ with open(ver_p, "w") as f:
             f.write("%s,invariance,,,,INCOMPLETE\n" % c)
         else:
             f.write("%s,invariance,%d,%d,%.3f,%s\n"
-                    % (c, x["src"], x["dst"], x["ratio"], x["bar"]))
+                    % (c, round(x["src"]), round(x["dst"]), x["ratio"], x["bar"]))
 
 # ---- THE SESSION VERDICT -----------------------------------------------------------
 incomplete = [c for c in REGISTERED if cell.get(c, {}).get("state") == "INCOMPLETE"]

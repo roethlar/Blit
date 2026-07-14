@@ -255,6 +255,15 @@ CASES = [
                     "qn_tcp_mixed": ([-20, 300, 310, 320, 330, 340, 350, 360], 1000)}),
      "REPRODUCES", "UNCLEAR"),
 
+    # codex r11, MEDIUM: the ARM median controls T, B and the bar -- and the LOW median (which
+    # is registered only for the paired D) is anti-conservative on a BIMODAL arm. Here the arm
+    # is 4x1000 + 4x5000: the low median calls it 1000ms, so +100 is "a 10% effect" -> EFFECT.
+    # The conventional median calls it 3000ms, where the same +100 is 3.3% -- below both bars.
+    # Rig W's fast arm is ALREADY bimodal (~730/~840), so this is not a synthetic worry.
+    ("codex r11: a BIMODAL arm must not shrink T (the arm median is conventional, not low)",
+     dict(measurand_d=[100] * 8, src=[1000] * 4 + [5000] * 4, control_d=[0] * 8),
+     "DOES-NOT-REPRODUCE", "REPRODUCES"),
+
     ("codex r8: a bimodal arm cannot hide from the RANGE (a null is judged on every pair)",
      dict(measurand_d=[-110, 0, -110, 110, 110, 0, -110, 0], src=730,
           control_d=[0] * 8),
@@ -309,6 +318,12 @@ MUTATIONS = [
     ("a permitted bias of HALF the threshold still grades -- B > T licenses a rig effect (codex r11)",
      ["    if t_pos > 0 and B >= t_pos / 2.0:", "    if False:"],
      "B >= T/2 is NOT a clean rig"),
+
+    ("the ARM median is the LOW median again, so a bimodal arm shrinks T (codex r11)",
+     ["    v = sorted(v)\n    n = len(v)\n    if n % 2:\n        return float(v[n // 2])\n"
+      "    return (v[n // 2 - 1] + v[n // 2]) / 2.0",
+      "    v = sorted(v)\n    return float(v[(len(v) - 1) // 2])"],
+     "BIMODAL arm must not shrink T"),
 
     ("MIXED is decided on the HARDENED states, so control noise upgrades it to REPRODUCES (codex r11)",
      ['elif "EFFECT" in m0.values() and "INVERTED" in m0.values():',
