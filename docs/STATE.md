@@ -2,7 +2,9 @@
 
 Last updated: 2026-07-13
 
-- **NEXT ACTION — run the MTU experiment BEFORE any code (Queue 1a).** Windows sat at **MTU 1500 for every benchmark ever recorded**, so jumbo was never once exercised; the fleet is now at **9000** and the negotiated MSS on the rig-W path is **8948 both directions** (measured — `getsockopt(TCP_MAXSEG)` + Linux `ss -ti`; 1448 at MTU 1500). Design + decision rule are PRE-REGISTERED: `docs/bench/otp12-jumbo-win-2026-07-13/PREREGISTRATION.md` (rev 2, codex 7/7 accepted). **Both MTU conditions get measured** (9000 and 1500, identical scope, RUNS=8, same NIC/sha) — a single jumbo run cannot attribute anything, because no prior session is a matched control and a FAIL would prove only that jumbo is *insufficient*, not that MTU contributes nothing. **CORRECTION (codex F6): `mixed` is NOT "the most packet-heavy fixture" — `large` is, by ~2× (~741k segments vs ~378k at MSS 1448).** `mixed` is P1's cell because that is where the failure was *observed*; `wm_tcp_large` is now the bulk-packet positive control.
+- **NEXT ACTION — run the A-B-B-A MTU experiment on rig `q` (Queue 1a).** Everything is staged and validated; it is ~55 min of unattended rig time. Exact command + design + decision rule: `docs/bench/otp12-jumbo-win-2026-07-13/PREREGISTRATION.md` (**rev 4**; codex rounds 1+2 = 15 findings, **15/15 accepted**). Four sessions **9000, 1500, 1500, 9000** on `q`, RUNS=8, `CELLS=wm_tcp_mixed,wm_tcp_large,mw_tcp_mixed,wm_grpc_mixed`; the same-MTU replicates supply the **measured noise floor** every threshold is expressed against.
+- **P1 REPRODUCES ON A SECOND MAC (2026-07-13, `docs/bench/otp12-q-baseline-2026-07-13/`).** `wm_tcp_mixed` = **1.385 FAIL** on `q`↔netwatch-01 **at MTU 9000**, while all three controls PASS at **1.002–1.043** in the same session (so rig noise is ~2–4% and P1 is 10× outside it). **P1 is a property of the macOS↔Windows PAIRING, not of one machine** — the assumption H1/H5/H6/H7 all rest on, never tested until now. **And jumbo does NOT dissolve P1.** What is still unmeasured is how much MTU *contributes* (a FAIL only proves jumbo is *insufficient*) — that needs the matched 1500 arm, i.e. the A-B-B-A run.
+- **THE MAC IS A BENCH END — the codex loop and a rig-W session CANNOT run concurrently** (`.agents/machines.md`). A 53-min A-B-B-A attempt was destroyed by codex load on the Mac and discarded; the contamination is *asymmetric* (it inflates `mac_init` and MANUFACTURES P1). **Rig-W now runs on `q`** (dedicated M4 mini, quiet, faster than nagatha), which decouples the two for good.
 - Recent sessions (2026-07-11/13, 44th–46th): **otp-10/otp-11 closed; otp-12c RECORDED (rig D 7/7); the perf plan is ACTIVE (D-2026-07-13-1).** Every transfer rides the ONE session (separate local orchestration gone, −6.2k lines at 11b; the unsound journal fast path died with it). Suite **1488**. SMALL_FILE_CEILING paused (D-2026-07-05-1).
 - **P1 (the headline invariance criterion) — the one thing between blit and shipping.** Fails rig W (`wm_tcp_mixed` 1.237 and 1.300 — do NOT read that as a regression, it is **two different Mac NICs**), but **PASSES 8/8 with Linux on both ends** (`docs/bench/otp12-perf-2026-07-13/`; P1's own cell 1.092/1.003). So it is **platform-INTERACTING, not pure layout** — yet **NOT exonerated**: a code path that only bites on one platform (H1's Windows accept branch) looks identical. **P1 HAS NO ESCAPE HATCH** (codex r5 F1): D-2026-07-12-1 waives only a *cross-direction* miss for a cell that ALREADY passes invariance — P1 *is* the invariance failure. So: **fix it to ≤1.10, or the owner amends acceptance criterion 1.** Neither is assumed.
 - **⚠ THREE of my claims were reported and RETRACTED on 2026-07-13**, all the same root cause — trusting an instrument I had not validated: (1) "P1 is code" (a harness that keyed durability to the *initiator*, not the destination); (2) "P1 is acceptable platform residue" (D-2026-07-12-1 does not cover it); (3) "macOS can't send jumbo / the switch is broken" (it was `net.inet.raw.maxdgram` capping *ping*; TCP was always fine — it cost the owner a pointless adapter swap). **Verify the instrument before believing the measurement.**
@@ -23,24 +25,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   cells. **D-2026-07-05-2: same-build peers only, refusal at session
   open.** Progress (each slice through the codex loop; per-slice
   detail lives in DEVLOG + `.review/`, NOT here):
-  - **Closed `[x]`: otp-1, otp-3 … otp-9** — the whole session machine
-    (contract, role drivers, daemon serving, both data planes + resize +
-    cancel, mirror/filters, resume, fallback carrier, delegated).
-    SizeMtime = data-safe skip. Detail: DEVLOG 2026-07-10.
-  - **otp-2 `[x]`** — baselines. zoey = per-direction reference;
-    Mac↔Windows = cross-direction rig (otp-2w). Evidence
-    `docs/bench/otp2{,w}-baseline-2026-07-10/`. Key reading: old push
-    trails old pull on BOTH rigs.
-  - **otp-10 `[x]`** — verb cutover + **THE CUTOVER DELETION**: 4
-    drivers + `Push`/`PullSync` + 13 messages out of tree AND proto
-    (−13.8k lines, no bridge); relay removed (D-2026-07-11-1).
-    Detail: DEVLOG 2026-07-11.
-  - **otp-11 `[x]`** — local transfers ride the session; **11b deleted
-    the whole old orchestration** (−6.2k lines: orchestrator, engine,
-    local_worker, auto_tune, change_journal — the last one an UNSOUND
-    fast path that silently lost data, repro in
-    `docs/bench/otp11-local-2026-07-11/`). The deletion-proof acceptance
-    line COMPLETES. Detail: DEVLOG 2026-07-12.
+  - **Closed `[x]`: otp-1 … otp-11** — the whole session machine, the
+    baselines (otp-2/2w), the **CUTOVER DELETION** (4 drivers +
+    `Push`/`PullSync` + 13 messages out of tree AND proto, −13.8k lines,
+    no bridge; relay removed D-2026-07-11-1), and **otp-11b's deletion of
+    the entire old orchestration** (−6.2k lines: orchestrator, engine,
+    local_worker, auto_tune, change_journal — the last an UNSOUND fast
+    path that silently lost data). The deletion-proof acceptance line
+    COMPLETES. Detail: DEVLOG 2026-07-10/11/12; evidence
+    `docs/bench/otp2{,w}-baseline-2026-07-10/`, `otp11-local-2026-07-11/`.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]`; **sf-3a+ blocked** until ONE_TRANSFER_PATH ships, then
   resume/re-derive on the unified baseline. Principle: ceiling-driven,
@@ -74,30 +67,28 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    (**ACTIVE**, D-2026-07-13-1 — owner: "just write the code and
    reviewloop slice by slice"; implementation proceeds, each slice
    through the codex loop).
-   **RUN THIS FIRST — the MTU experiment.** Design + decision rule are
-   PRE-REGISTERED before any data (the doc owns the detail; do not restate
-   it here): `docs/bench/otp12-jumbo-win-2026-07-13/PREREGISTRATION.md`
-   rev 2 — codex NOT READY (4 BLOCKER + 3 HIGH), **7/7 accepted**;
-   adjudication `.review/results/pf-0-prereg.gpt-verdict.md`. Headlines:
-   **both** MTU conditions get measured (9000 AND 1500, identical CELLS,
-   RUNS=8, same NIC + sha) — a lone jumbo run attributes nothing, since
-   12b differs by sha and 12c by NIC. **CORRECTION: `mixed` is NOT "the
-   packet-heaviest fixture" — `large` is, by ~2×** (~741k vs ~378k
-   segments at MSS 1448); that old rationale was factually wrong.
-   **P1 misses the plan's HEADLINE criterion on rig W** (initiator/verb
-   invariance): `wm_tcp_mixed` FAILs twice — 1.237 and 1.300 — on tight
-   spreads, so not re-runnable away. (Do NOT read 1.237→1.300 as a
-   regression: **different Mac NICs**, see machines.md.) **But it does
-   NOT reproduce on a same-OS rig**: Linux both ends = **8/8 PASS**, P1's
-   cell at 1.092/1.003 (`docs/bench/otp12-perf-2026-07-13/`) → it is
-   platform-INTERACTING, not pure layout. **P1 HAS NO ESCAPE HATCH**
-   (codex r5 F1): D-2026-07-12-1 waives only a *cross-direction* miss for
-   a cell that ALREADY passes invariance — P1 *is* the invariance
-   failure. So: **fix it to ≤1.10, or the owner amends acceptance
-   criterion 1.** Not assumed either way. P2 (`push_tcp_small` 1.105–
-   1.201, both rigs) is a converge bar vs the OLD build and is UNTESTED
-   on the Linux rig. Sequence: **jumbo re-run → pf-1 → fix → pf-final
-   (ALL THREE rigs) → otp-12d → otp-13.**
+   Two experiments come BEFORE any code; both docs own their detail.
+   **(i) The A-B-B-A MTU run on `q`** —
+   `docs/bench/otp12-jumbo-win-2026-07-13/PREREGISTRATION.md` (rev 4;
+   codex 15/15 accepted). Answers how much MTU *contributes*; we already
+   know jumbo does not FIX P1 (q baseline, 1.385 at 9000).
+   **(ii) THE MAC↔MAC RIG — the missing cell, and it discriminates the
+   hypotheses** (owner, 2026-07-13; UNTESTED, now possible: nagatha `.92`
+   + `q` `.54`, both 10GbE/MTU 9000). Linux↔Linux = **no P1** (8/8 PASS);
+   macOS↔Windows = **P1** (1.237/1.300/1.385); macOS↔macOS = **?**
+   - reproduces → P1 needs **no Windows peer**; it is macOS-side and
+     **H1 DIES** (H1 accuses the *Windows* accept branch);
+   - vanishes → P1 **requires** the Windows peer → H1 strongly supported.
+   Needs a 3rd harness variant (rig-W's is Windows-specific; the Linux
+   one is Linux-specific) — macOS durability (fsync walk) + `purge` both
+   ends; through the codex loop. **Schedule for nagatha idle time.**
+   **P1 HAS NO ESCAPE HATCH** (codex r5 F1): D-2026-07-12-1 waives only a
+   *cross-direction* miss for a cell that ALREADY passes invariance — P1
+   *is* the invariance failure. **Fix it to ≤1.10, or the owner amends
+   acceptance criterion 1.** Not assumed either way. P2
+   (`push_tcp_small` 1.105–1.201) is a converge bar vs the OLD build,
+   UNTESTED on the Linux rig. Sequence: **MTU run + Mac↔Mac → pf-1 → fix
+   → pf-final (ALL rigs) → otp-12d → otp-13.**
 1b. **AFTER otp-12 — the Windows/local pair, planned TOGETHER** (same tar
    path, opposite directions: a fidelity fix ADDS per-file work to a path
    already losing to robocopy, so planning them apart optimises one against
@@ -181,20 +172,25 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-13 (46th)** — **otp-12c closed** (rig D 7/7; codex 7/7
-  accepted). **Same-OS rig built** (magneto↔skippy): Linux both ends =
-  **8/8 PASS**, so P1 is platform-INTERACTING, not pure layout. Perf plan
-  → **ACTIVE** (D-2026-07-13-1). Also landed: mid-copy cancel e2e + the
-  D4 mid-record fault fix (`920c6a7`), CLI `./NAME` hint (`ace91de`), CI
-  fmt fix (`bb28ddd`, suite **1488**).
-  **THREE claims of mine were reported and RETRACTED this session** —
-  all from trusting an unvalidated instrument: (1) "P1 is code" (1.78),
-  from a harness that keyed durability to the *initiator*, not the
-  destination (fixed `2c0af86`); (2) "P1 is acceptable platform residue"
-  (D-2026-07-12-1 does not cover an invariance failure — codex r5 F1);
-  (3) "macOS can't send jumbo / the switch is broken" (it was
-  `net.inet.raw.maxdgram` capping *ping*; TCP was always fine — cost the
-  owner an adapter swap for nothing). **Verify the instrument before the
-  measurement.** In-flight: none; tree clean.
-  **Next**: the jumbo re-run (Queue 1a) → pf-1.
+- **2026-07-13/14 (47th)** — HEAD `0f52e6a` + this handoff. **P1 REPRODUCES ON
+  A SECOND MAC** (`q`, 1.385 FAIL at MTU 9000; three controls PASS 1.002–1.043
+  in-session → rig noise 2–4%): P1 is the macOS↔Windows **pairing**, not one
+  machine — the untested assumption under H1/H5/H6/H7 — and **jumbo does not
+  dissolve it**. **New dedicated bench Mac `q`** (M4 mini, quiet, 1.18 GB/s;
+  `.agents/machines.md`) — because **the Mac is a bench END and the codex loop
+  cannot run during a rig-W session**: a 53-min A-B-B-A run was contaminated by
+  codex on the Mac and DISCARDED (asymmetric — it inflates `mac_init` and
+  MANUFACTURES P1). Also landed: **a Windows correctness bug** (attrs + ADS
+  silently dropped, both routes, conditional on FILE COUNT — D-2026-07-13-3);
+  **the local blit-vs-robocopy headline was WRONG** (8-thread robocopy vs
+  1-worker blit — owner caught it; at equal concurrency blit WINS, and the real
+  defect is that blit does not SCALE — D-2026-07-13-2); MTU prereg rev 1→4
+  (codex 15/15 accepted; every threshold I first wrote was *invented* because
+  the design had no noise model).
+  **In-flight: none. Rigs clean, Windows MTU 9000, 4 commits unpushed.**
+  **NEXT: run the A-B-B-A on `q`** (~55 min; command in the prereg).
+- **2026-07-13 (46th)** — otp-12c closed (rig D 7/7); same-OS Linux rig built
+  (8/8 PASS → P1 is platform-INTERACTING); perf plan ACTIVE (D-2026-07-13-1);
+  **three claims retracted, all from trusting an unvalidated instrument**.
+  Full entry: **DEVLOG 2026-07-13 20:00Z**.
 - *(45th and earlier pruned to the cap — see DEVLOG 2026-07-06..13.)*

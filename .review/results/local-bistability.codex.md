@@ -5063,3 +5063,350 @@ exec
     25	19:01:19   mixed/blit slot 2 (attempt 2): 946ms (flush 167ms, exit 0, 5001 files, drained_8s)
 
 context compacted
+codex
+The CPU hypothesis is plausible, but “residual boost” alone is not yet convincing. The evidence proves that 1,390 ms is predecessor-conditioned; it does not yet prove that 2,225 ms is the uniquely honest idle cost. I could inspect the repo and logs but could not reach `netwatch-01` from this sandbox.
+
+## Ranked analysis
+
+1. **Windows CPU power/scheduler/CCD state — narrow favorite.** MT8 is the only observed trigger that reliably flips `small`, and an eight-thread workload can change package performance state, parking, and CCD/core selection. Robocopy MT8 would self-condition and hide the effect. Against the simple “hot boost” version: the harness gives it at least six seconds to decay, one runnable worker does not benefit directly from more unparked cores, and the 1.60× wall-time ratio is unusually large for clock alone. Look especially for different CCD/preferred-core placement or repeated deep-idle exits, not merely reported MHz.
+
+2. **Defender/minifilter or transient NTFS per-file state — close second.** The step is approximately `(2225−1390)/10000 = 84 µs/file`; the mixed results show a similar per-small-file step. That shape fits a serialized open/create/close/filter cost. MT8 could change Defender queuing, scan caching, or concurrency; MT1 may permit scans to stay inline. There is no basis yet to assert that Defender scans more when arrivals are slow—measure it. The transition is visible directly after the two MT8 arms in [session-2 bench.log:25-29](/Users/michael/Dev/blit_v2/logs/win_local_ab_20260713T183855/bench.log:25), while MT1 leaves the plateau unchanged in [session-A bench.log:7-19](/Users/michael/Dev/blit_v2/logs/fair_A_mt1_w1/bench.log:7).
+
+3. **Harness state leakage through verify/delete/drain.** Plausible as the carrier for #2 or another filesystem effect. Removal is untimed, errors are suppressed, and completion is not verified. The subsequent drain sees only write bandwidth, not low-bandwidth metadata IOPS, reads, TRIM/controller work, Defender CPU, or filter queues.
+
+4. **NVMe power state; SLC exhaustion or thermal throttling specifically unlikely.** APST/controller wake state could penalize serialized operations. SLC and thermal explanations have the wrong sign: `small` writes only roughly 40 MiB, the fast state follows heavier activity, there is no drift, MT8 remains stable, and flush times remain approximately 135–159 ms in [fast runs.csv:18](/Users/michael/Dev/blit_v2/logs/win_local_ab_20260713T183855/runs.csv:18) and [slow runs.csv:2](/Users/michael/Dev/blit_v2/logs/fair_A_mt1_w1/runs.csv:2).
+
+5. **Persistent MFT/free-space fragmentation.** Low likelihood. It should be persistent or progressively worsening, not flip immediately after MT8 inside one session. Failed silent teardown could accumulate old trees, however, so it is worth checking.
+
+6. **Fixture order alone.** Mostly contradicted: after `large`, the warmup and first timed `small` were still around 2,200 ms. Also, `large` is one file, so `/MT:8` cannot produce eight-way file concurrency there.
+
+7. **Unrelated maintenance, SearchIndexer, interrupts/DPCs.** Tight flat plateaus make random background activity unlikely.
+
+## CPU confirmation or kill checks
+
+Run this recorder in a second SSH session across both plateaus:
+
+```powershell
+powercfg /getactivescheme
+
+'PROCTHROTTLEMIN','PROCTHROTTLEMAX','PERFBOOSTMODE','PERFEPP',
+'PERFAUTONOMOUS','PERFINCTIME','PERFDECTIME',
+'CPMINCORES','CPMAXCORES','CPINCREASETIME','CPDECREASETIME' |
+  ForEach-Object { powercfg /qh SCHEME_CURRENT SUB_PROCESSOR $_ }
+
+Get-CimInstance Win32_Processor |
+  Format-List Name,CurrentClockSpeed,MaxClockSpeed,
+              NumberOfCores,NumberOfLogicalProcessors
+
+typeperf -qx "Processor Information" |
+  Select-String 'Frequency|Performance|Utility|Parking|C1|C2|C3|Idle|Limit'
+
+typeperf.exe `
+ '\Processor Information(*)\% Processor Time' `
+ '\Processor Information(*)\% Processor Performance' `
+ '\Processor Information(*)\Processor Frequency' `
+ '\Processor Information(*)\% of Maximum Frequency' `
+ '\Processor Information(*)\% Processor Utility' `
+ '\Processor Information(*)\Parking Status' `
+ '\Processor Information(*)\% Performance Limit' `
+ '\Processor Information(*)\% C1 Time' `
+ '\Processor Information(*)\% C2 Time' `
+ '\Processor Information(*)\% C3 Time' `
+ '\Processor Information(*)\Idle Break Events/sec' `
+ -si 1 -sc 180 -f CSV -o C:\Temp\blit-cpu.csv -y
+```
+
+Remove counters not listed by `typeperf -qx`; counter names can be localized. `Win32_Processor.CurrentClockSpeed` is only a coarse socket-level check, not reliable live per-core turbo data. Use the per-logical-processor counters for the actual comparison. These commands and settings are documented under [powercfg](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/powercfg-command-line-options), [processor boost mode](https://learn.microsoft.com/en-us/windows-hardware/customize/power-settings/options-for-perf-state-engine-perfboostmode), [core parking](https://learn.microsoft.com/en-us/windows-hardware/customize/power-settings/options-for-core-parking-cpmincores), and [typeperf](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/typeperf).
+
+CPU is confirmed if fast blit consistently receives materially higher delivered performance, different CCD/L3 placement, or lower deep-idle residency. It is strongly weakened if those remain equal and a CPU-only MT8 prime cannot flip the plateau.
+
+A stronger PPM kill test is a duplicated power plan with all cores unparked and boost disabled:
+
+```powershell
+powercfg /duplicatescheme SCHEME_CURRENT
+# Substitute the new GUID printed above:
+powercfg /setacvalueindex <test-guid> SUB_PROCESSOR CPMINCORES 100
+powercfg /setacvalueindex <test-guid> SUB_PROCESSOR PROCTHROTTLEMIN 100
+powercfg /setacvalueindex <test-guid> SUB_PROCESSOR PROCTHROTTLEMAX 100
+powercfg /setacvalueindex <test-guid> SUB_PROCESSOR PERFBOOSTMODE 0
+powercfg /setactive <test-guid>
+```
+
+Restore the original scheme afterward. If the two plateaus remain while blit is pinned to the same logical processor/CCD, ordinary boost and parking are killed.
+
+## Competing-cause measurements
+
+Defender:
+
+```powershell
+Get-MpComputerStatus |
+  Format-List AMRunningMode,RealTimeProtectionEnabled,
+              BehaviorMonitorEnabled,AntivirusSignatureVersion
+Get-MpPreference |
+  Format-List DisableRealtimeMonitoring,RealTimeScanDirection,
+              ExclusionPath,ExclusionProcess
+
+New-MpPerformanceRecording -RecordTo C:\Temp\slow.etl
+# Reproduce slow run; press Enter to stop.
+Get-MpPerformanceReport -Path C:\Temp\slow.etl `
+  -TopProcesses 10 -TopFiles 20 -TopScans 50
+```
+
+Repeat for fast. An additional ~800 ms attributed to blit/source/destination scans only in the slow trace supports Defender. No scan difference, followed by a scoped exclusion test that preserves the plateau, largely kills it. See Microsoft’s [Defender performance analyzer](https://learn.microsoft.com/en-us/defender-endpoint/performance-analyzer-reference).
+
+Filesystem, purge and teardown:
+
+```powershell
+typeperf -qx PhysicalDisk | Select-String 'D:|E:'
+
+Get-Counter `
+ '\Memory\Standby Cache Core Bytes',
+ '\Memory\Standby Cache Normal Priority Bytes',
+ '\Memory\Standby Cache Reserve Bytes',
+ '\Memory\Modified Page List Bytes',
+ '\Memory\System Cache Resident Bytes'
+
+# Replace <E-instance> with the instance discovered above.
+typeperf `
+ '\PhysicalDisk(<E-instance>)\Disk Writes/sec' `
+ '\PhysicalDisk(<E-instance>)\Disk Write Bytes/sec' `
+ '\PhysicalDisk(<E-instance>)\Disk Reads/sec' `
+ '\PhysicalDisk(<E-instance>)\Avg. Disk sec/Write' `
+ '\PhysicalDisk(<E-instance>)\Current Disk Queue Length' `
+ -si 1 -sc 30
+
+(Measure-Command { Write-VolumeCache -DriveLetter E }).TotalMilliseconds
+```
+
+Record memory counters before purge, after purge, and immediately before timing. Time file-count verification and `Remove-Item`, verify `Test-Path $dest` is false, then monitor E: for 30 seconds. A fixed monitored 30-second quiescence or deferring all deletes until the cell ends is the clean test: if the split disappears, teardown/drain state caused it.
+
+Persistent NTFS/NVMe state:
+
+```powershell
+Get-Volume E | Format-List Size,SizeRemaining,AllocationUnitSize,HealthStatus
+fsutil fsinfo ntfsinfo E:
+fsutil fsinfo statistics E:
+defrag E: /A /V
+fsutil behavior query DisableDeleteNotify
+
+Get-Partition -DriveLetter E | Get-Disk |
+  Format-List Number,FriendlyName,SerialNumber,HealthStatus
+
+Get-PhysicalDisk | Get-StorageReliabilityCounter |
+  Format-List DeviceId,Temperature,TemperatureMax,
+              ReadLatencyMax,WriteLatencyMax,FlushLatencyMax,
+              ReadErrorsTotal,WriteErrorsTotal
+
+powercfg /qh SCHEME_CURRENT SUB_DISK
+powercfg /qh SCHEME_CURRENT SUB_PCIEXPRESS
+```
+
+Compare snapshots before both plateaus. Fragmentation should alter `defrag /A /V` or allocation evidence; SLC/thermal/APST should correlate with temperature, queueing, or read/write latency. Reliability fields may be blank depending on the NVMe driver. See [defrag analysis](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/defrag) and [Get-StorageReliabilityCounter](https://learn.microsoft.com/en-us/powershell/module/storage/get-storagereliabilitycounter?view=windowsserver2025-ps).
+
+## Harness finding
+
+There is no evident stopwatch or flush-accounting error. Purge occurs at [local-ab-run.ps1:44](/Users/michael/Dev/blit_v2/scripts/windows/local-ab-run.ps1:44); the unlogged pre-run volume flush and three consecutive two-second samples are at [local-ab-run.ps1:47-55](/Users/michael/Dev/blit_v2/scripts/windows/local-ab-run.ps1:47). The destination directory is created *after* drain at [local-ab-run.ps1:57-65](/Users/michael/Dev/blit_v2/scripts/windows/local-ab-run.ps1:57), creating fresh metadata activity immediately before timing. Tool timing is isolated at [local-ab-run.ps1:67-84](/Users/michael/Dev/blit_v2/scripts/windows/local-ab-run.ps1:67), and the destination flush is separately measured at [local-ab-run.ps1:86-94](/Users/michael/Dev/blit_v2/scripts/windows/local-ab-run.ps1:86).
+
+The state reset is incomplete. File counting is after flush, and teardown is an unverified, error-suppressed `Remove-Item` at [local-ab-run.ps1:96-99](/Users/michael/Dev/blit_v2/scripts/windows/local-ab-run.ps1:96). The drain can therefore vary indirectly with predecessor duration and concurrency:
+
+- A slow producer gives Defender/writeback time to keep up; a bursty MT8 producer can leave a queue.
+- The initial `Write-VolumeCache` can consume a variable, unrecorded amount of time.
+- Three `<1 MiB/s` aggregate-write samples prove neither E:-specific quiet nor absence of metadata IOPS, reads, modified pages, TRIM, controller GC, or Defender work.
+- `_Total` can cause extra waits from unrelated disks but cannot characterize E: latency.
+
+Most importantly, ABBA deliberately preserves predecessor history at [bench_win_local_ab.sh:209-212](/Users/michael/Dev/blit_v2/scripts/bench_win_local_ab.sh:209): the observed slow first blit followed by `R,R` and then fast blit is exactly the confound the harness does not reset. Thus this is already a harness-conditioned result, though not necessarily a bogus measurement.
+
+For new runs, also inspect the generated command: current `ARM_N` starts at zero and is substituted into the selected arm at [bench_win_local_ab.sh:119-124](/Users/michael/Dev/blit_v2/scripts/bench_win_local_ab.sh:119), while the non-MULTI path reaches ABBA without assigning it at [bench_win_local_ab.sh:286-294](/Users/michael/Dev/blit_v2/scripts/bench_win_local_ab.sh:286). As written, it can construct `/MT:0`. Current MULTI rotation also preserves fixed adjacency at [bench_win_local_ab.sh:173-178](/Users/michael/Dev/blit_v2/scripts/bench_win_local_ab.sh:173). These cannot retroactively explain historical logs containing valid flags, but the current outer runner should not be used unchanged for the discriminator.
+
+## Single cheapest discriminating experiment
+
+Establish two consecutive slow default-blit runs using only MT1. Then substitute a one-second **CPU-only eight-thread predecessor**, followed by the unchanged normal purge/flush/drain/default-blit arm:
+
+```powershell
+1..8 | ForEach-Object -Parallel {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    [double]$x = 1
+    while ($sw.ElapsedMilliseconds -lt 1000) {
+        $x = [Math]::Sqrt($x + 12345.6789)
+    }
+    [GC]::KeepAlive($x)
+} -ThrottleLimit 8
+```
+
+Capture the CPU counters above. If this produces 2,225→1,390 ms without touching D: or E:, and performance/placement changes persist into blit, the CPU story wins. If it stays near 2,225 ms, immediately use one real MT8 small-file arm as the positive control: if that flips the following blit, CPU-only boost/parking is effectively killed and Defender/NTFS/harness residual state wins.
+
+**Top explanation: unreset Windows CPU PPM/CCD-scheduling state induced by the MT8 predecessor—a harness-conditioning artifact, not a timing bug.**
+tokens used
+267,846
+The CPU hypothesis is plausible, but “residual boost” alone is not yet convincing. The evidence proves that 1,390 ms is predecessor-conditioned; it does not yet prove that 2,225 ms is the uniquely honest idle cost. I could inspect the repo and logs but could not reach `netwatch-01` from this sandbox.
+
+## Ranked analysis
+
+1. **Windows CPU power/scheduler/CCD state — narrow favorite.** MT8 is the only observed trigger that reliably flips `small`, and an eight-thread workload can change package performance state, parking, and CCD/core selection. Robocopy MT8 would self-condition and hide the effect. Against the simple “hot boost” version: the harness gives it at least six seconds to decay, one runnable worker does not benefit directly from more unparked cores, and the 1.60× wall-time ratio is unusually large for clock alone. Look especially for different CCD/preferred-core placement or repeated deep-idle exits, not merely reported MHz.
+
+2. **Defender/minifilter or transient NTFS per-file state — close second.** The step is approximately `(2225−1390)/10000 = 84 µs/file`; the mixed results show a similar per-small-file step. That shape fits a serialized open/create/close/filter cost. MT8 could change Defender queuing, scan caching, or concurrency; MT1 may permit scans to stay inline. There is no basis yet to assert that Defender scans more when arrivals are slow—measure it. The transition is visible directly after the two MT8 arms in [session-2 bench.log:25-29](/Users/michael/Dev/blit_v2/logs/win_local_ab_20260713T183855/bench.log:25), while MT1 leaves the plateau unchanged in [session-A bench.log:7-19](/Users/michael/Dev/blit_v2/logs/fair_A_mt1_w1/bench.log:7).
+
+3. **Harness state leakage through verify/delete/drain.** Plausible as the carrier for #2 or another filesystem effect. Removal is untimed, errors are suppressed, and completion is not verified. The subsequent drain sees only write bandwidth, not low-bandwidth metadata IOPS, reads, TRIM/controller work, Defender CPU, or filter queues.
+
+4. **NVMe power state; SLC exhaustion or thermal throttling specifically unlikely.** APST/controller wake state could penalize serialized operations. SLC and thermal explanations have the wrong sign: `small` writes only roughly 40 MiB, the fast state follows heavier activity, there is no drift, MT8 remains stable, and flush times remain approximately 135–159 ms in [fast runs.csv:18](/Users/michael/Dev/blit_v2/logs/win_local_ab_20260713T183855/runs.csv:18) and [slow runs.csv:2](/Users/michael/Dev/blit_v2/logs/fair_A_mt1_w1/runs.csv:2).
+
+5. **Persistent MFT/free-space fragmentation.** Low likelihood. It should be persistent or progressively worsening, not flip immediately after MT8 inside one session. Failed silent teardown could accumulate old trees, however, so it is worth checking.
+
+6. **Fixture order alone.** Mostly contradicted: after `large`, the warmup and first timed `small` were still around 2,200 ms. Also, `large` is one file, so `/MT:8` cannot produce eight-way file concurrency there.
+
+7. **Unrelated maintenance, SearchIndexer, interrupts/DPCs.** Tight flat plateaus make random background activity unlikely.
+
+## CPU confirmation or kill checks
+
+Run this recorder in a second SSH session across both plateaus:
+
+```powershell
+powercfg /getactivescheme
+
+'PROCTHROTTLEMIN','PROCTHROTTLEMAX','PERFBOOSTMODE','PERFEPP',
+'PERFAUTONOMOUS','PERFINCTIME','PERFDECTIME',
+'CPMINCORES','CPMAXCORES','CPINCREASETIME','CPDECREASETIME' |
+  ForEach-Object { powercfg /qh SCHEME_CURRENT SUB_PROCESSOR $_ }
+
+Get-CimInstance Win32_Processor |
+  Format-List Name,CurrentClockSpeed,MaxClockSpeed,
+              NumberOfCores,NumberOfLogicalProcessors
+
+typeperf -qx "Processor Information" |
+  Select-String 'Frequency|Performance|Utility|Parking|C1|C2|C3|Idle|Limit'
+
+typeperf.exe `
+ '\Processor Information(*)\% Processor Time' `
+ '\Processor Information(*)\% Processor Performance' `
+ '\Processor Information(*)\Processor Frequency' `
+ '\Processor Information(*)\% of Maximum Frequency' `
+ '\Processor Information(*)\% Processor Utility' `
+ '\Processor Information(*)\Parking Status' `
+ '\Processor Information(*)\% Performance Limit' `
+ '\Processor Information(*)\% C1 Time' `
+ '\Processor Information(*)\% C2 Time' `
+ '\Processor Information(*)\% C3 Time' `
+ '\Processor Information(*)\Idle Break Events/sec' `
+ -si 1 -sc 180 -f CSV -o C:\Temp\blit-cpu.csv -y
+```
+
+Remove counters not listed by `typeperf -qx`; counter names can be localized. `Win32_Processor.CurrentClockSpeed` is only a coarse socket-level check, not reliable live per-core turbo data. Use the per-logical-processor counters for the actual comparison. These commands and settings are documented under [powercfg](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/powercfg-command-line-options), [processor boost mode](https://learn.microsoft.com/en-us/windows-hardware/customize/power-settings/options-for-perf-state-engine-perfboostmode), [core parking](https://learn.microsoft.com/en-us/windows-hardware/customize/power-settings/options-for-core-parking-cpmincores), and [typeperf](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/typeperf).
+
+CPU is confirmed if fast blit consistently receives materially higher delivered performance, different CCD/L3 placement, or lower deep-idle residency. It is strongly weakened if those remain equal and a CPU-only MT8 prime cannot flip the plateau.
+
+A stronger PPM kill test is a duplicated power plan with all cores unparked and boost disabled:
+
+```powershell
+powercfg /duplicatescheme SCHEME_CURRENT
+# Substitute the new GUID printed above:
+powercfg /setacvalueindex <test-guid> SUB_PROCESSOR CPMINCORES 100
+powercfg /setacvalueindex <test-guid> SUB_PROCESSOR PROCTHROTTLEMIN 100
+powercfg /setacvalueindex <test-guid> SUB_PROCESSOR PROCTHROTTLEMAX 100
+powercfg /setacvalueindex <test-guid> SUB_PROCESSOR PERFBOOSTMODE 0
+powercfg /setactive <test-guid>
+```
+
+Restore the original scheme afterward. If the two plateaus remain while blit is pinned to the same logical processor/CCD, ordinary boost and parking are killed.
+
+## Competing-cause measurements
+
+Defender:
+
+```powershell
+Get-MpComputerStatus |
+  Format-List AMRunningMode,RealTimeProtectionEnabled,
+              BehaviorMonitorEnabled,AntivirusSignatureVersion
+Get-MpPreference |
+  Format-List DisableRealtimeMonitoring,RealTimeScanDirection,
+              ExclusionPath,ExclusionProcess
+
+New-MpPerformanceRecording -RecordTo C:\Temp\slow.etl
+# Reproduce slow run; press Enter to stop.
+Get-MpPerformanceReport -Path C:\Temp\slow.etl `
+  -TopProcesses 10 -TopFiles 20 -TopScans 50
+```
+
+Repeat for fast. An additional ~800 ms attributed to blit/source/destination scans only in the slow trace supports Defender. No scan difference, followed by a scoped exclusion test that preserves the plateau, largely kills it. See Microsoft’s [Defender performance analyzer](https://learn.microsoft.com/en-us/defender-endpoint/performance-analyzer-reference).
+
+Filesystem, purge and teardown:
+
+```powershell
+typeperf -qx PhysicalDisk | Select-String 'D:|E:'
+
+Get-Counter `
+ '\Memory\Standby Cache Core Bytes',
+ '\Memory\Standby Cache Normal Priority Bytes',
+ '\Memory\Standby Cache Reserve Bytes',
+ '\Memory\Modified Page List Bytes',
+ '\Memory\System Cache Resident Bytes'
+
+# Replace <E-instance> with the instance discovered above.
+typeperf `
+ '\PhysicalDisk(<E-instance>)\Disk Writes/sec' `
+ '\PhysicalDisk(<E-instance>)\Disk Write Bytes/sec' `
+ '\PhysicalDisk(<E-instance>)\Disk Reads/sec' `
+ '\PhysicalDisk(<E-instance>)\Avg. Disk sec/Write' `
+ '\PhysicalDisk(<E-instance>)\Current Disk Queue Length' `
+ -si 1 -sc 30
+
+(Measure-Command { Write-VolumeCache -DriveLetter E }).TotalMilliseconds
+```
+
+Record memory counters before purge, after purge, and immediately before timing. Time file-count verification and `Remove-Item`, verify `Test-Path $dest` is false, then monitor E: for 30 seconds. A fixed monitored 30-second quiescence or deferring all deletes until the cell ends is the clean test: if the split disappears, teardown/drain state caused it.
+
+Persistent NTFS/NVMe state:
+
+```powershell
+Get-Volume E | Format-List Size,SizeRemaining,AllocationUnitSize,HealthStatus
+fsutil fsinfo ntfsinfo E:
+fsutil fsinfo statistics E:
+defrag E: /A /V
+fsutil behavior query DisableDeleteNotify
+
+Get-Partition -DriveLetter E | Get-Disk |
+  Format-List Number,FriendlyName,SerialNumber,HealthStatus
+
+Get-PhysicalDisk | Get-StorageReliabilityCounter |
+  Format-List DeviceId,Temperature,TemperatureMax,
+              ReadLatencyMax,WriteLatencyMax,FlushLatencyMax,
+              ReadErrorsTotal,WriteErrorsTotal
+
+powercfg /qh SCHEME_CURRENT SUB_DISK
+powercfg /qh SCHEME_CURRENT SUB_PCIEXPRESS
+```
+
+Compare snapshots before both plateaus. Fragmentation should alter `defrag /A /V` or allocation evidence; SLC/thermal/APST should correlate with temperature, queueing, or read/write latency. Reliability fields may be blank depending on the NVMe driver. See [defrag analysis](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/defrag) and [Get-StorageReliabilityCounter](https://learn.microsoft.com/en-us/powershell/module/storage/get-storagereliabilitycounter?view=windowsserver2025-ps).
+
+## Harness finding
+
+There is no evident stopwatch or flush-accounting error. Purge occurs at [local-ab-run.ps1:44](/Users/michael/Dev/blit_v2/scripts/windows/local-ab-run.ps1:44); the unlogged pre-run volume flush and three consecutive two-second samples are at [local-ab-run.ps1:47-55](/Users/michael/Dev/blit_v2/scripts/windows/local-ab-run.ps1:47). The destination directory is created *after* drain at [local-ab-run.ps1:57-65](/Users/michael/Dev/blit_v2/scripts/windows/local-ab-run.ps1:57), creating fresh metadata activity immediately before timing. Tool timing is isolated at [local-ab-run.ps1:67-84](/Users/michael/Dev/blit_v2/scripts/windows/local-ab-run.ps1:67), and the destination flush is separately measured at [local-ab-run.ps1:86-94](/Users/michael/Dev/blit_v2/scripts/windows/local-ab-run.ps1:86).
+
+The state reset is incomplete. File counting is after flush, and teardown is an unverified, error-suppressed `Remove-Item` at [local-ab-run.ps1:96-99](/Users/michael/Dev/blit_v2/scripts/windows/local-ab-run.ps1:96). The drain can therefore vary indirectly with predecessor duration and concurrency:
+
+- A slow producer gives Defender/writeback time to keep up; a bursty MT8 producer can leave a queue.
+- The initial `Write-VolumeCache` can consume a variable, unrecorded amount of time.
+- Three `<1 MiB/s` aggregate-write samples prove neither E:-specific quiet nor absence of metadata IOPS, reads, modified pages, TRIM, controller GC, or Defender work.
+- `_Total` can cause extra waits from unrelated disks but cannot characterize E: latency.
+
+Most importantly, ABBA deliberately preserves predecessor history at [bench_win_local_ab.sh:209-212](/Users/michael/Dev/blit_v2/scripts/bench_win_local_ab.sh:209): the observed slow first blit followed by `R,R` and then fast blit is exactly the confound the harness does not reset. Thus this is already a harness-conditioned result, though not necessarily a bogus measurement.
+
+For new runs, also inspect the generated command: current `ARM_N` starts at zero and is substituted into the selected arm at [bench_win_local_ab.sh:119-124](/Users/michael/Dev/blit_v2/scripts/bench_win_local_ab.sh:119), while the non-MULTI path reaches ABBA without assigning it at [bench_win_local_ab.sh:286-294](/Users/michael/Dev/blit_v2/scripts/bench_win_local_ab.sh:286). As written, it can construct `/MT:0`. Current MULTI rotation also preserves fixed adjacency at [bench_win_local_ab.sh:173-178](/Users/michael/Dev/blit_v2/scripts/bench_win_local_ab.sh:173). These cannot retroactively explain historical logs containing valid flags, but the current outer runner should not be used unchanged for the discriminator.
+
+## Single cheapest discriminating experiment
+
+Establish two consecutive slow default-blit runs using only MT1. Then substitute a one-second **CPU-only eight-thread predecessor**, followed by the unchanged normal purge/flush/drain/default-blit arm:
+
+```powershell
+1..8 | ForEach-Object -Parallel {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    [double]$x = 1
+    while ($sw.ElapsedMilliseconds -lt 1000) {
+        $x = [Math]::Sqrt($x + 12345.6789)
+    }
+    [GC]::KeepAlive($x)
+} -ThrottleLimit 8
+```
+
+Capture the CPU counters above. If this produces 2,225→1,390 ms without touching D: or E:, and performance/placement changes persist into blit, the CPU story wins. If it stays near 2,225 ms, immediately use one real MT8 small-file arm as the positive control: if that flips the following blit, CPU-only boost/parking is effectively killed and Defender/NTFS/harness residual state wins.
+
+**Top explanation: unreset Windows CPU PPM/CCD-scheduling state induced by the MT8 predecessor—a harness-conditioning artifact, not a timing bug.**

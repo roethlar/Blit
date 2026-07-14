@@ -97,6 +97,48 @@ every Linux target in play).
 - Local VM on the Mac — Ubuntu ARM (aarch64), per owner. Build-only
   fallback likewise.
 
+## `q` — THE DEDICATED BENCH MAC (new 2026-07-13; use this, not nagatha)
+
+`ssh michael@q` — Apple **M4 Mac mini**, 16 GB, macOS 26.5.2, arm64. It is now
+the rig-W Mac end: **quiet, dedicated, and faster than nagatha** (1 GiB in
+~908 ms ≈ 1.18 GB/s, vs nagatha's ~1.3–1.8 s). Using it **decouples the codex
+review loop from rig-W benchmarking** — the contention that destroyed a
+53-minute experiment (below).
+
+- **10GbE**: `en8` = **10.1.10.54**, MTU **9000**, media 10Gbase-T. This is the
+  **Aquantia adapter physically moved off nagatha**, so nagatha's 10GbE is now a
+  *different* NIC at **10.1.10.92** (also MTU 9000). Any doc naming
+  "Aquantia @ .54 on nagatha" is stale.
+- **⚠ THE MULTI-NIC ROUTING TRAP (cost ~1h).** `q` has THREE IPs on
+  10.1.10.0/24 — `en0` (1GbE, .221), `en1` (Wi-Fi, .108), `en8` (10GbE, .54) —
+  and macOS routes the subnet via the highest-ranked **network service**, not by
+  which IP "matches". `en0` outranked `en8`, so **every benchmark would have run
+  over gigabit**. Fixed by promoting the service that owns `en8` — confusingly
+  named **"Thunderbolt Ethernet Slot 3"** — to rank 1
+  (`sudo networksetup -ordernetworkservices …`). It has the same router
+  (10.1.10.1), so `q` keeps its internet.
+- **DO NOT "fix" this with a host route.**
+  `sudo route -n add -host 10.1.10.177 -interface en8` on a *directly-connected*
+  subnet installs a next hop of **the interface's own MAC** — a black hole. It
+  drops 100% of packets while `route -n get` still cheerfully reports
+  `interface: en8`. Verify with `arp -n <peer>`: the MAC must be the PEER's, not
+  `q`'s (`00:01:d2:19:04:a3`).
+- **An ssh transfer CANNOT verify this link.** ssh caps at ~79 MB/s on this path
+  (nagatha's known-good 10GbE scores the same 79), which is *below* the gigabit
+  ceiling — so a degraded link and a healthy one look identical through it. Use
+  `ifconfig en8 | grep media` (the PHY's negotiated rate) and blit's own
+  `wm_tcp_large` time (~908 ms for 1 GiB = 10GbE; ~10 s = 1GbE).
+- **Staged**: repo clone at `~/Dev/blit_v2_f35702a` (detached `f35702a`, cloned
+  from the LOCAL gitea — `q` *is* the gitea host); `target/release/{blit,blit-daemon}`
+  arm64 copied from nagatha (embed-verified `+f35702a`); old client at
+  `~/blit-bench-work/bins/blit-0f922de`; fixtures in `~/blit-bench-work`.
+  NOPASSWD `/usr/sbin/purge` granted (`/etc/sudoers.d/blit-bench`, mode 0440 —
+  `visudo -c` rejects any other mode). ssh key authorized on netwatch-01 in
+  **`C:\ProgramData\ssh\administrators_authorized_keys`** (michael is an admin
+  there, so the per-user file is ignored). macOS firewall is OFF on `q`.
+- **`q` RUNS GITEA** (it is `origin`, `http://q:3000`). It idles cheaply, but
+  **do not push to `origin` during a benchmark session**.
+
 ## THE MAC IS A BENCH END — keep it quiet (recorded 2026-07-13, learned the hard way)
 
 **A rig-W (Mac↔Windows) benchmark requires a QUIET Mac.** The Mac is not a

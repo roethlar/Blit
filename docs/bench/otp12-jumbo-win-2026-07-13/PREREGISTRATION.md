@@ -48,9 +48,30 @@ session-to-session noise** rather than assuming it.
   session-to-session variability of every quantity the decision rule uses,
   **with MTU held constant**. This is the "sham repeat" round 2 asked for.
 
-Held constant across all four: sha `f35702a` (worktree `blit_v2_f35702a`,
-binaries embed-verified), old arm `0f922de`, Mac NIC (Aquantia, 10.1.10.54),
-harness, fixtures, `CELLS`, `RUNS=8`.
+**⚠ RIG CHANGED (revision 4, 2026-07-13) — the Mac end is now `q`.** Revisions
+1–3 named nagatha with "Aquantia @ 10.1.10.54". **That adapter is physically in
+`q` now**; nagatha's 10GbE is a different NIC at 10.1.10.92. The rig-W Mac end
+is the **M4 Mac mini `q`** (10.1.10.54, MTU 9000, MSS 8948) — quiet and
+dedicated, which matters because **the Mac is a bench END and the codex review
+loop cannot run during a session** (`.agents/machines.md`; a 53-minute A-B-B-A
+attempt was destroyed exactly this way and discarded).
+
+**The design is rig-independent** — A-B-B-A compares MTU conditions *within one
+rig* and derives its noise floor from same-MTU replicates *on that rig* — so
+moving the Mac end does not weaken it. But the rig must be named honestly, and
+the four sessions must all run on `q`.
+
+**`q` is a VALID rig for this experiment, measured not assumed**
+(`docs/bench/otp12-q-baseline-2026-07-13/`): P1 **reproduces** there —
+`wm_tcp_mixed` **1.385 FAIL** at MTU 9000 — while all three control cells PASS
+at **1.002–1.043** in the same session, bounding the rig's asymmetry noise at
+~2–4%. That single-condition baseline is **not** this experiment (no same-MTU
+replicate, so no session-level noise floor); it establishes that the gap under
+study exists on this rig.
+
+Held constant across all four: sha `f35702a` (clone `~/Dev/blit_v2_f35702a` on
+`q`, binaries embed-verified), old arm `0f922de`, the **`q` Mac end**
+(10.1.10.54, `en8`), harness, fixtures, `CELLS`, `RUNS=8`.
 
 `CELLS=wm_tcp_mixed,wm_tcp_large,mw_tcp_mixed,wm_grpc_mixed`
 
