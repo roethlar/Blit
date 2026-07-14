@@ -73,7 +73,8 @@ PER-CELL OUTCOMES (exhaustive; no unreportable region)
   VANISHES              no effect AND null_excl -- a genuine EQUIVALENCE result
   UNDERPOWERED          no effect and the CI cannot exclude the margin -> a PASS
                         here is NOT "P1 vanishes"; the rig could not have seen it
-  BAR-FAIL-INCONSISTENT bar FAILS but the pairs do not agree in sign. The medians
+  BAR-FAIL-INCONSISTENT bar FAILS but the pairs establish NO consistent direction
+                        (the sign test does not reject). The medians
                         breach 1.10 while the paired evidence contradicts itself
                         (pf-0's bistability, in a new dress). NEVER a null.
   UNSTABLE              (override) an arm is bimodal AND the bar flips on pooled runs
@@ -83,7 +84,26 @@ import csv, os, sys
 from math import comb
 
 runs_p, meta_p, sum_p, pair_p, ver_p, sess_p = sys.argv[1:7]
-DELTA_REF = int(os.environ.get("DELTA_REF_MS", "230"))
+
+# ---- THE REGISTERED CONSTANTS ARE PINNED IN CODE, NOT TAKEN FROM THE ENVIRONMENT --
+# Round-5 (codex, BLOCKER): they were env-overridable, so `DELTA_REF_MS=240` turned a
+# RIG-VOID into a VANISHES -- i.e. the pre-registered decision rule could be edited
+# from the command line, by the same person who wants a particular answer, AFTER the
+# data existed. The whole point of pre-registration is that this is impossible.
+#
+# A deviation is not silently accepted and not silently ignored: it REFUSES.
+REGISTERED_DELTA_REF_MS = 230        # rig W's measured Delta_P1 (the reference effect)
+REGISTERED_PAIRS = (8, 16)           # 8 registered; 16 the UNDERPOWERED escalation
+MIN_COVERAGE = 0.95
+
+DELTA_REF = REGISTERED_DELTA_REF_MS
+_env_delta = os.environ.get("DELTA_REF_MS")
+if _env_delta is not None and _env_delta.strip() != str(REGISTERED_DELTA_REF_MS):
+    sys.stderr.write(
+        "REFUSING: DELTA_REF_MS=%r but the PRE-REGISTERED reference effect is %d ms. "
+        "The decision rule is not tunable from the environment -- that is what "
+        "pre-registration exists to prevent.\n" % (_env_delta, REGISTERED_DELTA_REF_MS))
+    raise SystemExit(2)
 
 
 def cells_env(name):
@@ -101,7 +121,11 @@ REGISTERED_CELLS = cells_env("REGISTERED_CELLS") or (VERDICT_CELLS + CONTROL_CEL
 # `meta.complete == yes` and never checked n, so a CSV with ONE pair and a lying
 # meta produced VANISHES at 0% CI coverage -- a confident false equivalence claim.
 REQUIRED_PAIRS = int(os.environ.get("REQUIRED_PAIRS", "8"))
-MIN_COVERAGE = 0.95
+if REQUIRED_PAIRS not in REGISTERED_PAIRS:
+    sys.stderr.write(
+        "REFUSING: REQUIRED_PAIRS=%d is not a registered pair count %s.\n"
+        % (REQUIRED_PAIRS, REGISTERED_PAIRS))
+    raise SystemExit(2)
 # A session-level void the HARNESS detected (e.g. end-load above the bar). The
 # engine must be able to refuse a verdict on evidence it cannot see itself.
 SESSION_VOID_REASON = os.environ.get("SESSION_VOID_REASON", "").strip()
@@ -249,11 +273,35 @@ with open(pair_p, "w") as f:
         margin_hi = min(breach_hi, float(DELTA_REF))
         margin_lo = max(breach_lo, -float(DELTA_REF))
 
-        pos_effect = ci_lo > 0 and p < 0.05
-        neg_effect = ci_hi < 0 and p < 0.05
-        material = (bar == "FAIL") or (ci_lo >= breach_hi)
-        material_neg = (bar == "FAIL") or (ci_hi <= breach_lo)
+        # THE THREE QUESTIONS, KEPT SEPARATE. Rounds 3, 4 and 5 all produced the same
+        # class of defect by tangling them together, so they are now disentangled and
+        # each is answered by the statistic that can actually answer it:
+        #
+        #   DIRECTION  -- the SIGN TEST. Is there a consistent direction at all?
+        #   MAGNITUDE  -- the CI. Is the effect big enough to matter, IN THAT DIRECTION?
+        #   EQUIVALENCE-- the CI vs the MARGIN. Is a material effect EXCLUDED?
+        #
+        # Round-5 (codex, BLOCKER): `bar == "FAIL"` carried NO DIRECTION, yet made an
+        # effect of EITHER sign "material" -- so at n=16, thirteen +1 ms pairs and three
+        # -110 ms pairs (marginal medians failing the bar in the INVERSE direction) gave
+        # a clean `REPRODUCES` for a ONE MILLISECOND effect. A bar failure is only
+        # material to a claim that points the SAME WAY as the bar failure.
+        #
+        # Round-5 (grok, BLOCKER): a single ZERO pair dragged `ci_lo` to 0, which killed
+        # the old `pos_effect` (it demanded `ci_lo > 0`) -- so `d = [0, 99x7]` at
+        # src=1000 was "no effect" AND null_excl (99 < margin 100) and reported
+        # `VANISHES`, while the sign test REJECTED at p = .0156. Seven of eight pairs
+        # carried a 99 ms effect, one millisecond under the bar, and it was called
+        # equivalence. DIRECTION is the sign test's job, not the CI's.
+        directional = p < 0.05
+        dir_pos = directional and k > (n - k)
+        dir_neg = directional and k < (n - k)
+        bar_fail_pos = (bar == "FAIL") and d_med > s_med     # the bar failed the SAME way
+        bar_fail_neg = (bar == "FAIL") and d_med < s_med
+        material = bar_fail_pos or (ci_lo >= breach_hi)
+        material_neg = bar_fail_neg or (ci_hi <= breach_lo)
         null_excl = (ci_lo > margin_lo) and (ci_hi < margin_hi)
+        pos_effect, neg_effect = dir_pos, dir_neg
 
         # UNSTABLE, as a STATISTIC not a vibe: an arm splits into two clusters
         # separated by more than the paired spread, AND the bar verdict flips when
@@ -269,15 +317,16 @@ with open(pair_p, "w") as f:
                 if bar_of(max(a_src, a_dst), min(a_src, a_dst)) != bar:
                     unstable = "yes"
 
-        if pos_effect and material:
+        if dir_pos and material:
             out = "REPRODUCES"
-        elif neg_effect and material_neg:
+        elif dir_neg and material_neg:
             out = "INVERSION"
-        elif pos_effect or neg_effect:
+        elif directional:
+            # A real, consistent direction that is NOT material. NEVER a null -- this
+            # is where grok's [0, 99x7] belongs, not in VANISHES.
             out = "PARTIAL"
         elif bar == "FAIL":
-            # The medians breach 1.10 but the pairs do not agree in sign. Never a
-            # null, never a clean reproduction -- report it as its own thing.
+            # The medians breach 1.10 but the pairs establish no consistent direction.
             out = "BAR-FAIL-INCONSISTENT"
         elif null_excl:
             out = "VANISHES"
@@ -287,10 +336,17 @@ with open(pair_p, "w") as f:
             out = "UNSTABLE"
 
         cell_outcome[c] = out
-        cell_detail[c] = dict(D=D, ci=(ci_lo, ci_hi), cov=cov, p=p, k=k, n=n, bar=bar,
-                              ratio=hi / lo if lo else 0.0,
-                              breach=(breach_hi, breach_lo),
-                              margin=(margin_hi, margin_lo), null_excl=null_excl)
+        cell_detail[c] = dict(
+            D=D, ci=(ci_lo, ci_hi), cov=cov, p=p, k=k, n=n, bar=bar,
+            ratio=hi / lo if lo else 0.0,
+            breach=(breach_hi, breach_lo),
+            margin=(margin_hi, margin_lo), null_excl=null_excl,
+            directional=directional,
+            # The whole CI sits at or beyond the margin, in the direction of the
+            # effect: the cell is CARRYING a material asymmetry, not merely failing to
+            # exclude one.
+            ci_at_or_beyond_margin=(dir_pos and ci_lo >= margin_hi)
+            or (dir_neg and ci_hi <= margin_lo))
         f.write("%s,%d,%d,%d,%.3f,%s,%d,%d,%d,%.4f,%.4f,%d/%d,%d,%d,%d,%d,%d,%s,%s,%s\n" % (
             c, len(d), s_med, d_med, (hi / lo if lo else 0.0), bar, D, ci_lo, ci_hi, cov,
             p, k, n, round(breach_hi), round(breach_lo), round(margin_hi), round(margin_lo),
@@ -337,21 +393,51 @@ verd = [c for c in VERDICT_CELLS if c in cell_outcome]
 # than the margin (null_excl) -- i.e. unless the control itself passes the
 # equivalence test. A tiny consistent asymmetry (host x role: q is the faster Mac)
 # is immaterial and does NOT void; a margin-sized one does.
-def _ctrl_dirty(c):
+# WHAT A CONTROL MUST PROVE -- expressed as the question, not as a list of labels.
+#
+# Three rounds running, this rule was written as "void if the outcome is one of
+# {...}", and three times an effect walked through a label that was not on the list:
+#   r3: a bar-FAIL control whose CI crossed zero was INCONCLUSIVE -> escaped.
+#   r4: a Delta_ref-sized control effect on a slow arm was PARTIAL -> escaped.
+#   r5: ONE zero pair made a 7/8 Delta_ref control UNDERPOWERED -> escaped, and the
+#       session printed VANISHES with every control carrying D=+230.
+# So it is no longer written that way. There are exactly two questions:
+#
+#   1. Is the control CONTAMINATING? -- it carries a directional effect whose whole
+#      CI sits at or beyond the margin, or it fails the bar, or it is bimodal.
+#      Nothing in this rig can be trusted; the session is RIG-VOID.
+#   2. Is the control CERTIFIED CLEAN? -- its effect is EXCLUDED as smaller than the
+#      margin (null_excl). If it is not, we cannot say the rig is free of a
+#      material arm asymmetry, so A NULL IS NOT AVAILABLE. (It does not void a
+#      REPRODUCTION: a merely NOISY control does not manufacture a consistent 8/8
+#      one-directional effect in the measurand, and voiding real evidence on that
+#      basis would be its own false negative -- grok, round-5 NEW-5, which is why
+#      an unproven control blocks the null rather than killing the session.)
+def _ctrl_contaminating(c):
     dt = cell_detail.get(c, {})
-    if dt.get("bar") == "FAIL":
+    if dt.get("bar") == "FAIL" or cell_outcome[c] == "UNSTABLE":
         return True
-    if cell_outcome[c] in ("UNSTABLE", "REPRODUCES", "INVERSION", "BAR-FAIL-INCONSISTENT"):
+    if cell_outcome[c] in ("REPRODUCES", "INVERSION"):
         return True
-    # A real effect that is NOT excluded as smaller than the margin.
-    return cell_outcome[c] == "PARTIAL" and not dt.get("null_excl", False)
+    # A directional effect whose magnitude reaches the margin: the rig itself is
+    # carrying the effect we are trying to measure.
+    if dt.get("directional") and dt.get("ci_at_or_beyond_margin"):
+        return True
+    return False
 
 
-ctrl_void = [c for c in ctrl if _ctrl_dirty(c)]
-# Controls that are noisy, or that carry a real but margin-excluded asymmetry, do
-# not void the rig -- but they are NEVER silent.
+def _ctrl_certified(c):
+    return bool(cell_detail.get(c, {}).get("null_excl"))
+
+
+ctrl_void = [c for c in ctrl if _ctrl_contaminating(c)]
+# A control that is not CONTAMINATING but is also not CERTIFIED cannot support a null.
+ctrl_uncertified = [c for c in ctrl if c not in ctrl_void and not _ctrl_certified(c)]
+# Controls carrying a real-but-margin-excluded asymmetry (host x role: q is faster)
+# do not void and do not block -- but they are NEVER silent.
 ctrl_caveat = [c for c in ctrl
-               if c not in ctrl_void and cell_outcome[c] in ("PARTIAL", "UNDERPOWERED")]
+               if c not in ctrl_void and c not in ctrl_uncertified
+               and cell_outcome[c] == "PARTIAL"]
 
 if incomplete:
     verdict = "INCOMPLETE"
@@ -431,13 +517,31 @@ else:
         why = ("cells cannot exclude an effect of size min(bar_breach, %d ms): %s. A "
                "PASS here is NOT 'P1 vanishes' -- the instrument could not have seen "
                "it (pf-0's error, pre-empted)." % (DELTA_REF, ", ".join(under)))
+    elif van and len(van) == len(verd) and ctrl_uncertified:
+        # A NULL REQUIRES CLEAN CONTROLS -- not merely non-voiding ones. If a control
+        # cannot be shown free of a material arm asymmetry, then "the measurand shows
+        # no effect" is not evidence of absence: the rig might be carrying one
+        # everywhere, and a cancellation would look exactly like this. Round-5, BOTH
+        # reviewers, reproduced: controls at d=[0, 230x7] (and at [230x7, -10]) were
+        # UNDERPOWERED rather than PARTIAL, escaped the void, and the session printed
+        # a clean VANISHES with every control carrying the full rig-W effect.
+        verdict = "INCONCLUSIVE-UNDERPOWERED"
+        why = ("the measurand cells look null, but the NULL IS NOT AVAILABLE: control "
+               "cell(s) %s could not be certified free of an effect of size "
+               "min(bar_breach, %d ms). A null is only meaningful when the controls "
+               "are PROVEN clean -- otherwise a rig-wide arm asymmetry could be "
+               "producing the same picture. Re-run with the registered RUNS=16 "
+               "escalation to buy the power to certify them."
+               % (", ".join("%s(%s)" % (c, cell_outcome[c]) for c in ctrl_uncertified),
+                  DELTA_REF))
     elif van and len(van) == len(verd):
         verdict = "VANISHES"
-        why = ("both TCP-mixed cells EXCLUDE an effect of size min(bar_breach, %d ms) "
-               "(a genuine equivalence result). Scoped to THIS pair: P1 did not "
-               "reproduce macOS<->macOS. That is CONSISTENT with 'the Windows peer is "
-               "required' but does NOT prove it -- it could equally be a property of "
-               "these two machines, their disks, or this macOS version." % DELTA_REF)
+        why = ("both TCP-mixed cells EXCLUDE an effect of size min(bar_breach, %d ms), "
+               "and every control is CERTIFIED clean (a genuine equivalence result). "
+               "Scoped to THIS pair: P1 did not reproduce macOS<->macOS. That is "
+               "CONSISTENT with 'the Windows peer is required' but does NOT prove it -- "
+               "it could equally be a property of these two machines, their disks, or "
+               "this macOS version." % DELTA_REF)
     elif part:
         verdict = "PARTIAL"
         why = ("a real but sub-bar asymmetry in: %s. Neither a reproduction nor a "

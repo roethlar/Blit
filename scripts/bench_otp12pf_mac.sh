@@ -122,12 +122,60 @@ Q_MODULE="${Q_MODULE:-/Users/michael/blit-bench-work}"
 
 PORT="${PORT:-9031}"
 RUNS="${RUNS:-8}"
-SETTLE_MS="${SETTLE_MS:-250}"     # equal pre-fsync window on BOTH arms
-LOAD_MAX="${LOAD_MAX:-3.0}"
-DRAIN_ITERS="${DRAIN_ITERS:-60}"; DRAIN_QUIET="${DRAIN_QUIET:-3}"
-DRAIN_MBPS="${DRAIN_MBPS:-2}"
-DELTA_REF_MS="${DELTA_REF_MS:-230}"   # rig W's measured Delta_P1 (the reference effect)
-TIMER_TOLERANCE_MS="${TIMER_TOLERANCE_MS:-120}"  # the timer self-test's allowed error
+
+# =============================================================================
+# THE REGISTERED CONSTANTS. **NOT OVERRIDABLE.**
+#
+# Round-5 (codex, BLOCKER): these were `${VAR:-default}`, so the pre-registered
+# decision rule could be edited FROM THE COMMAND LINE — `DELTA_REF_MS=240` turned a
+# RIG-VOID into a VANISHES. A pre-registration that the operator can retune, after
+# the data exists, in the direction of the answer they want, IS NOT A
+# PRE-REGISTRATION AT ALL.
+#
+# They are literals, and the harness REFUSES to start if one is merely PRESENT in the
+# environment — a deviation must be loud, never silently ignored. The check reads the
+# environment BEFORE the assignments below, or an override would be masked by the
+# very line meant to pin it.
+# =============================================================================
+_overrides=""
+for _v in SETTLE_MS LOAD_MAX DRAIN_ITERS DRAIN_QUIET DRAIN_MBPS DELTA_REF_MS TIMER_TOLERANCE_MS; do
+  [[ -n "${!_v+set}" ]] && _overrides="$_overrides $_v=${!_v}"
+done
+if [[ -n "$_overrides" ]]; then
+  echo "REFUSING: the pre-registered constants are NOT tunable, and these are set in the" >&2
+  echo "environment:$_overrides" >&2
+  echo "A rule the operator can retune after seeing the data is not a pre-registration." >&2
+  echo "To change one, amend docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md and" >&2
+  echo "put it back through review. That is the entire point of the document." >&2
+  exit 2
+fi
+
+SETTLE_MS=250              # equal pre-fsync window on BOTH arms
+# Computed ONCE, HERE, at top level — and this line is load-bearing history.
+#
+# It used to be computed inline as `sleep $(awk ... 'BEGIN{printf \"%.3f\", m/1000}')`
+# INSIDE the double-quoted hrun string. A command substitution is parsed FRESH by
+# bash, so those `\"` escapes — which are correct for hrun's two-level strings — were
+# literal backslashes to awk. **The awk errored on EVERY call, `sleep` got an empty
+# argument and FAILED, and the old code ignored its exit status because the python
+# walk that followed supplied the status.**
+#
+# So THE SETTLE HAS NEVER RUN — not once, in any revision, since 24660ae introduced
+# it. And 24660ae is the commit that added it TO FIX the free-writeback asymmetry
+# that reverses sign with direction — the artifact judged capable of MANUFACTURING a
+# one-directional P1 out of nothing. The pre-registration has claimed an equal settle
+# on both arms through revisions 3, 4 and 5. It was never applied.
+#
+# Found only by EXECUTING it (round-5 codex flagged the ignored exit status; running
+# it showed the status was ALWAYS failure). `bash -n` sees nothing here.
+SETTLE_SEC="$(awk -v m="$SETTLE_MS" 'BEGIN{printf "%.3f", m/1000}')"
+[[ "$SETTLE_SEC" =~ ^[0-9]+\.[0-9]+$ ]] || { echo "FATAL: settle seconds did not compute ('$SETTLE_SEC')" >&2; exit 1; }
+LOAD_MAX=3.0               # start AND end load1 bar on both Macs
+DRAIN_ITERS=60
+DRAIN_QUIET=3
+DRAIN_MBPS=2               # destination disk must be below this to start a window
+DELTA_REF_MS=230           # rig W's measured Delta_P1 — THE reference effect
+TIMER_TOLERANCE_MS=120     # the timer self-test's allowed error on a 1000 ms sleep
 
 # The REGISTERED cell set. The verdict engine requires ALL of them present and
 # complete: a partial set that is merely filtered lets a ONE-CELL run emit
@@ -139,6 +187,7 @@ CELLS="$REGISTERED_CELLS"
 
 SESSION_TAG="$(date +%Y%m%dT%H%M%S)"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/logs/otp12pf_mac_$SESSION_TAG}"
+ESCALATED_FROM=""          # set only by the verified RUNS=16 escalation
 
 MUX="$(mktemp -d /tmp/blit-mm-mux.XXXXXX)"   # /tmp: macOS TMPDIR busts ssh's 104b ControlPath cap
 SSH_MUX=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=20
@@ -268,22 +317,32 @@ norm_mac() {
     }'
 }
 
+# THE ONLY process probe in this harness. pgrep: 0 = found, 1 = none, >=2 = ERROR.
+# Echoes RUNNING | NONE | BROKEN. A probe that cannot answer must NEVER answer "fine",
+# and there must be exactly ONE of these -- round 5 found the fail-open surviving in a
+# duplicate site precisely because there were two.
+pgrep_state() {
+  local h="$1" pat="$2" raw
+  raw="$(hrun "$h" "pgrep -x '$pat' >/dev/null 2>&1; rc=\$?
+if [ \$rc -eq 0 ]; then echo 'G:RUNNING:G'
+elif [ \$rc -eq 1 ]; then echo 'G:NONE:G'
+else echo 'G:BROKEN:G'; fi" | nocr | sed -n 's/.*G:\([A-Z]*\):G.*/\1/p' | head -1)" || raw=""
+  case "$raw" in
+    RUNNING|NONE|BROKEN) echo "$raw" ;;
+    *)                   echo BROKEN ;;   # no sentinel back == a broken probe
+  esac
+}
+
 quiescence_gate() {
-  local h="$1" raw busy
-  # pgrep: 0 = found, 1 = none, >=2 = ERROR. The old probe could not tell an error
-  # from "quiet" — a gate that cannot answer must never answer "fine".
-  raw="$(hrun "$h" 'busy=""
-for p in codex cargo rustc; do
-  pgrep -x "$p" >/dev/null 2>&1; rc=$?
-  if [ $rc -eq 0 ]; then busy="$busy $p"
-  elif [ $rc -ne 1 ]; then echo "Q:PROBE-ERROR($p=$rc):Q"; exit 0
-  fi
-done
-echo "Q:OK:${busy# }:Q"' | nocr | sed -n 's/.*Q:OK:\(.*\):Q.*/BUSY=\1/p;s/.*Q:\(PROBE-ERROR[^:]*\):Q.*/ERR=\1/p' | head -1)" \
-    || die "$(hname "$h"): quiescence probe FAILED to execute"
-  [[ "$raw" == BUSY=* ]] || die "$(hname "$h"): quiescence probe did not answer ('$raw') — refusing"
-  busy="${raw#BUSY=}"
-  [[ -z "$busy" ]] || die "$(hname "$h") is NOT quiet (running: $busy). BOTH Macs are bench ENDS — load inflates one arm and MANUFACTURES P1. Stop them (never blanket-kill the owner's sessions) and re-run."
+  local h="$1" p busy=""
+  for p in codex cargo rustc; do
+    case "$(pgrep_state "$h" "$p")" in
+      RUNNING) busy="$busy $p" ;;
+      NONE)    : ;;
+      *)       die "$(hname "$h"): the quiescence probe for '$p' BROKE — refusing (a gate that cannot answer must not answer 'fine')" ;;
+    esac
+  done
+  [[ -z "$busy" ]] || die "$(hname "$h") is NOT quiet (running:$busy). BOTH Macs are bench ENDS — load inflates one arm and MANUFACTURES P1. Stop them (never blanket-kill the owner's sessions) and re-run."
 }
 
 timemachine_gate() {   # FAIL-CLOSED on running OR merely ENABLED (the hole pf-0 found)
@@ -345,18 +404,37 @@ hdisk() { if [[ "$1" == n ]]; then echo "$N_DISK"; else echo "$Q_DISK"; fi; }
 resolve_disk() {
   local h="$1" p dev
   p="$(hmod "$h")"
+  # A FAILED `diskutil` MUST NOT silently fall back to the synthesized disk (round-5
+  # codex, HIGH). On APFS the volume lives on a synthesized container whose iostat
+  # counters can read IDLE while the physical store is saturated — so falling back to
+  # it is not a harmless default, it is a FALSE QUIET that certifies drainage on a
+  # device the data never touched. If the volume is APFS, the physical-store lookup
+  # must SUCCEED or the gate refuses.
   dev="$(hrun "$h" "d=\$(df '$p' 2>/dev/null | awk 'NR==2{print \$1}' | sed 's|^/dev/||')
-[ -n \"\$d\" ] || { echo 'D:NONE:D'; exit 0; }
-ps=\$(diskutil info \"\$d\" 2>/dev/null | awk -F: '/APFS Physical Store/{gsub(/[ \t]/, \"\", \$2); print \$2}' | head -1)
-[ -n \"\$ps\" ] && d=\"\$ps\"
+[ -n \"\$d\" ] || { echo 'D:NO-DF:D'; exit 0; }
+info=\$(diskutil info \"\$d\" 2>/dev/null) || { echo 'D:NO-DISKUTIL:D'; exit 0; }
+if echo \"\$info\" | grep -q 'APFS'; then
+  ps=\$(echo \"\$info\" | awk -F: '/APFS Physical Store/{gsub(/[ \t]/, \"\", \$2); print \$2}' | head -1)
+  [ -n \"\$ps\" ] || { echo 'D:APFS-NO-STORE:D'; exit 0; }
+  d=\"\$ps\"
+fi
 echo \"D:\$(echo \"\$d\" | sed -E 's/s[0-9]+\$//'):D\"" | nocr | sed -n 's/.*D:\([^:]*\):D.*/\1/p' | head -1)"
-  [[ "$dev" =~ ^disk[0-9]+$ ]] || die "$(hname "$h"): cannot resolve the physical disk behind $p (got '$dev') — a drain that watches the wrong device certifies a disk the data never touched"
+  # Returns non-zero rather than dying, so the CALLER decides. (The self-test runs
+  # each gate in a subshell to survive a refusal — and a `die` in there was invisible
+  # while the global it sets was discarded, so the drain then had no device and
+  # reported DRAIN-ERROR. The self-test was breaking its own next gate.)
+  if [[ ! "$dev" =~ ^disk[0-9]+$ ]]; then
+    log "$(hname "$h"): cannot resolve the PHYSICAL disk behind $p (got '$dev') — a drain that watches the wrong device certifies a disk the data never touched, and on APFS a synthesized disk can read idle while the physical store saturates"
+    return 1
+  fi
   # It must actually REPORT: an iostat that emits nothing for this device would
   # make every sample non-numeric, and the drain must never read that as quiet.
   local probe
   probe="$(hrun "$h" "iostat -d -w 1 -c 2 '$dev' 2>/dev/null | tail -1 | awk '{print \$3}'" | nocr)" || probe=""
-  [[ "$probe" =~ ^[0-9]+\.?[0-9]*$ ]] \
-    || die "$(hname "$h"): iostat does not report numeric throughput for $dev (got '$probe') — refusing"
+  if [[ ! "$probe" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+    log "$(hname "$h"): iostat does not report numeric throughput for $dev (got '$probe') — cannot certify drainage"
+    return 1
+  fi
   if [[ "$h" == n ]]; then N_DISK="$dev"; else Q_DISK="$dev"; fi
   log "  drain device on $(hname "$h"): $dev (backs $p, idle probe ${probe} MB/s)"
 }
@@ -375,17 +453,22 @@ echo \"D:\$(echo \"\$d\" | sed -E 's/s[0-9]+\$//'):D\"" | nocr | sed -n 's/.*D:\
 # been wrong by 7x, in the direction that flatters nothing and confuses everything.
 SSH_RTT_MS=0
 measure_ssh_rtt() {
+  # A FAILED ssh must not contribute a plausible number (round-5 codex, MEDIUM): a
+  # fast-failing connection would report a small "bound" and flatter the settle claim.
   SSH_RTT_MS="$(python3 -c '
 import statistics, subprocess, sys, time
 argv = sys.argv[1:]
 ts = []
 for _ in range(5):
     t = time.monotonic()
-    subprocess.call(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    rc = subprocess.call(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if rc != 0:
+        print("SSH-FAILED")
+        raise SystemExit
     ts.append((time.monotonic() - t) * 1000.0)
 print(int(statistics.median(ts)))
 ' ssh "${SSH_MUX[@]}" "$Q_SSH" true)"
-  [[ "$SSH_RTT_MS" =~ ^[0-9]+$ ]] || die "cannot measure the ssh round trip — refusing"
+  [[ "$SSH_RTT_MS" =~ ^[0-9]+$ ]] || die "cannot measure the ssh round trip (got '$SSH_RTT_MS') — refusing"
   log "  ssh dispatch (warm mux, median of 5): ${SSH_RTT_MS} ms — this BOUNDS the residual settle-gap asymmetry (the settle itself is ${SETTLE_MS} ms, EQUAL on both arms)"
 }
 
@@ -403,8 +486,24 @@ preflight() {
   # [d(4), d(13)] (coverage 97.9%), which tolerates three outliers per side.
   [[ "$RUNS" == 8 || "$RUNS" == 16 ]] \
     || die "RUNS must be 8 (registered) or 16 (the registered escalation, valid ONLY after an INCONCLUSIVE-UNDERPOWERED session) — got '$RUNS'"
-  if [[ "$RUNS" == 16 && "${UNDERPOWERED_ESCALATION:-0}" != 1 ]]; then
-    die "RUNS=16 is the escalation arm: set UNDERPOWERED_ESCALATION=1 and name the prior session that returned INCONCLUSIVE-UNDERPOWERED. It exists to buy POWER, never to re-roll a result."
+  if [[ "$RUNS" == 16 ]]; then
+    # A FLAG IS NOT A JUSTIFICATION (round-5 codex, HIGH). `UNDERPOWERED_ESCALATION=1`
+    # was sufficient on its own: no prior session named, none verified, "once"
+    # unenforced. That is a re-roll button with a serious-sounding name. The
+    # escalation must now POINT AT the underpowered session and the harness READS ITS
+    # VERDICT — the trigger is evidence on disk, not an operator's assertion.
+    local prior="${UNDERPOWERED_ESCALATION:-}" v
+    [[ -n "$prior" ]] \
+      || die "RUNS=16 is the escalation arm. Set UNDERPOWERED_ESCALATION=<path to the prior session dir> that returned INCONCLUSIVE-UNDERPOWERED. It buys POWER; it is NOT a re-roll."
+    [[ -f "$prior/session_verdict.txt" ]] \
+      || die "UNDERPOWERED_ESCALATION='$prior' has no session_verdict.txt — the escalation must name a REAL prior session"
+    v="$(head -1 "$prior/session_verdict.txt" | sed -n 's/^SESSION VERDICT: *//p')"
+    [[ "$v" == "INCONCLUSIVE-UNDERPOWERED" ]] \
+      || die "the prior session '$prior' returned '$v', not INCONCLUSIVE-UNDERPOWERED. RUNS=16 is triggered by a POWER FAILURE and by nothing else — re-running a result you dislike at higher n is p-hacking, and this gate exists to stop it."
+    [[ ! -f "$prior/ESCALATED" ]] \
+      || die "the prior session '$prior' has ALREADY been escalated once (see $prior/ESCALATED). 'Once' means once."
+    ESCALATED_FROM="$prior"
+    log "  escalation: RUNS=16, triggered by $prior (verified INCONCLUSIVE-UNDERPOWERED)"
   fi
   [[ "$EXPECT_SHA" == "$REGISTERED_BUILD" ]] \
     || die "EXPECT_SHA='$EXPECT_SHA' but the PRE-REGISTERED build is $REGISTERED_BUILD — a run against another build is not the registered experiment"
@@ -430,9 +529,16 @@ preflight() {
       embeds_clean "$h" "$p" || die "$(hname "$h"): $p is not a CLEAN +$EXPECT_SHA (same-build rule D-2026-07-05-2; a read error also fails here, by design)"
     done
     hrun "$h" "sudo -n /usr/sbin/purge" || die "$(hname "$h") cannot purge without a password — every run would read WARM"
-    if hrun "$h" "pgrep -x blit-daemon >/dev/null 2>&1"; then
-      die "$(hname "$h"): a blit-daemon is already running — stop it first"
-    fi
+    # THE SAME pgrep FAIL-OPEN AS THE QUIESCENCE GATE, IN A DUPLICATE SITE I DID NOT
+    # TOUCH (round-5 codex, HIGH). `if hrun ... pgrep; then die; fi` reads rc>=2 (a
+    # BROKEN probe, or a failed ssh) as "no daemon is running" and sails on. Every
+    # process probe now goes through this one rc-aware helper -- there is no second
+    # site left to forget.
+    case "$(pgrep_state "$h" blit-daemon)" in
+      RUNNING) die "$(hname "$h"): a blit-daemon is already running — stop it first" ;;
+      NONE)    : ;;
+      *)       die "$(hname "$h"): cannot probe for a stale blit-daemon — refusing (a gate that cannot answer must not answer 'fine')" ;;
+    esac
     for w in large mixed small; do
       want="$(fix_count "$w")"; wantb="$(fix_bytes "$w")"
       got="$(hrun "$h" "find '$(hmod "$h")/src_$w' -type f 2>/dev/null | wc -l" | tr -cd '0-9')"
@@ -441,7 +547,7 @@ preflight() {
         || die "$(hname "$h"): src_$w is ${got:-0} files/${gotb:-0} bytes, want $want/$wantb — the arms must read identical trees"
     done
     link_gate "$h"
-    resolve_disk "$h"
+    resolve_disk "$h" || die "$(hname "$h"): cannot establish the drain device — refusing"
   done
   measure_ssh_rtt
   log "preflight OK  build=$EXPECT_SHA  harness=$HARNESS_HEAD  runs/arm=$RUNS  settle=${SETTLE_MS}ms"
@@ -463,6 +569,7 @@ write_manifest() {
     echo "# binary_identity=$EXPECT_SHA runs=$RUNS settle_ms=$SETTLE_MS load_max=$LOAD_MAX"
     echo "# drain_mbps=$DRAIN_MBPS drain_quiet=$DRAIN_QUIET delta_ref_ms=$DELTA_REF_MS"
     echo "# drain_disk_nagatha=$N_DISK drain_disk_q=$Q_DISK ssh_rtt_ms=$SSH_RTT_MS"
+    echo "# escalated_from=${ESCALATED_FROM:-none}"   # a RUNS=16 run must carry its trigger
     echo "# cells=$CELLS"
     echo "host,role,sha,sha256,path"
     echo "nagatha,client,$EXPECT_SHA,$nb,$N_BLIT"
@@ -484,13 +591,17 @@ printf '[daemon]\nbind = \"0.0.0.0\"\nport = $PORT\nno_mdns = true\n\n[[module]]
 nohup '$bin' --config '$cfg' > '$mod/mm-daemon.log' 2>&1 < /dev/null &
 echo \"P:\$!:P\"" | nocr | sed -n 's/.*P:\([0-9][0-9]*\):P.*/\1/p' | head -1)"
   [[ "$pid" =~ ^[0-9]+$ ]] || die "$(hname "$h"): daemon did not report a pid (see $mod/mm-daemon.log)"
+  # OWN THE PID BEFORE VALIDATING IT (round-5 codex, MEDIUM): the old code stored it
+  # only AFTER the alive/listening checks, so a daemon that started but failed
+  # validation was `die`d on while the EXIT trap did not yet know its pid — leaking a
+  # live daemon holding the port for the next session to trip over.
+  if [[ "$h" == n ]]; then N_PID="$pid"; else Q_PID="$pid"; fi
   sleep 2
   hrun "$h" "ps -p $pid -o comm= 2>/dev/null | grep -q blit-daemon" \
     || die "$(hname "$h"): daemon pid $pid is not alive (see $mod/mm-daemon.log)"
   # ALIVE is not SERVING: it must hold the port we are about to measure through.
   hrun "$h" "lsof -nP -a -p $pid -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1" \
     || die "$(hname "$h"): daemon pid $pid is NOT LISTENING on $PORT (see $mod/mm-daemon.log)"
-  if [[ "$h" == n ]]; then N_PID="$pid"; else Q_PID="$pid"; fi
   log "$(hname "$h") daemon up (pid $pid, listening) on $(hip "$h"):$PORT"
 }
 # Liveness proved by a REAL blit transfer, not `nc -z` (which only proves a
@@ -541,9 +652,14 @@ drain_host() {   # $1 = host. Echoes drained_<n>x2s | DRAIN-TIMEOUT | DRAIN-ERRO
   local h="$1" dev
   dev="$(hdisk "$h")"
   [[ -n "$dev" ]] || { echo DRAIN-ERROR; return 0; }
+  # A FAILED iostat must not certify quiet even when it printed a parseable line
+  # (round-5 codex, HIGH: a numeric line followed by a NONZERO EXIT still accumulated
+  # "quiet" samples). The exit code is now checked BEFORE the value is used.
   hrun "$h" "quiet=0
 for i in \$(seq 1 $DRAIN_ITERS); do
-  w=\$(iostat -d -w 2 -c 2 '$dev' 2>/dev/null | tail -1 | awk '{print \$3}')
+  out=\$(iostat -d -w 2 -c 2 '$dev' 2>/dev/null); rc=\$?
+  if [ \$rc -ne 0 ]; then echo DRAIN-ERROR; exit 0; fi
+  w=\$(echo \"\$out\" | tail -1 | awk '{print \$3}')
   case \"\$w\" in
     ''|*[!0-9.]*) echo DRAIN-ERROR; exit 0 ;;   # non-numeric must NEVER certify quiet
   esac
@@ -570,7 +686,11 @@ prep_run() {   # $1 = dest host
 RUN_FLUSH=0; RUN_FILES=0; RUN_BYTES=0
 fsync_tree() {   # $1 = DEST host, $2 = landed path -> "ms files bytes" or "NA 0 0"
   local out
-  out="$(hrun "$1" "sleep $(awk -v m="$SETTLE_MS" 'BEGIN{printf \"%.3f\", m/1000}')
+  # THE SETTLE IS REQUIRED, SO ITS FAILURE MUST BE FATAL (round-5 codex, HIGH): the
+  # command status came from the python that followed, so a failed `sleep` was
+  # invisible and the row stayed VALID — with the direction-reversing free-writeback
+  # gap restored, which is the artifact the settle exists to equalize.
+  out="$(hrun "$1" "sleep $SETTLE_SEC || { echo 'F:NA:0:0:F'; exit 0; }
 python3 - '$2' <<'PYEOF'
 import os, sys, time
 p = sys.argv[1]
@@ -708,24 +828,61 @@ compute_verdicts() {
 # shipped a preflight that COULD NOT SUCCEED (grep -c's exit 1, gawk's strtonum).
 # A syntax check is not an execution.
 # =============================================================================
-SELFTEST_FIRED=0
-# Each gate runs in a SUBSHELL so its `die` cannot abort the sweep. What the
-# selftest proves is that a gate EXECUTES and ANSWERS — a gate that fires because
-# the rig is genuinely dirty (a codex session running, Time Machine enabled) has
-# passed this test, not failed it. No bypass is added to the real path: preflight
-# still dies on the first refusal.
+SELFTEST_FIRED=0; SELFTEST_BROKEN=0
+# A gate can end in three states, and the old self-test collapsed two of them
+# (round-5 codex, HIGH: "every nonzero result — including a BROKEN probe — is labeled
+# [FIRED], and the self-test exits zero"). That is the same fail-open it exists to
+# hunt, committed by the hunter:
+#
+#   [OK]     the probe answered and the condition holds.
+#   [FIRED]  the probe answered and the condition is genuinely UNMET (codex is
+#            running, Time Machine is on). The gate WORKS. Not a self-test failure.
+#   [BROKEN] the probe could not answer at all. THE GATE IS BLIND, and the self-test
+#            FAILS (exit 1) — a blind gate is exactly what fails open on the night.
+#
+# The two are told apart by the refusal text: every "cannot answer" die() in this file
+# says so in the words below, and every genuine-condition die() does not.
+# A REPORTER, never a gate: it must always return 0, or `set -e` aborts the sweep at
+# the first refusal and the remaining gates go untested (which is exactly what it did
+# the first time it ran — the self-test could not even test itself).
 gate_probe() {
   local label="$1"; shift
-  if ( "$@" ); then
-    log "  [OK]    $label — answers, and the condition holds"
+  local err rc=0
+  err="$( { "$@"; } 2>&1 )" || rc=1
+  if (( rc == 0 )); then
+    log "  [OK]     $label — answers, and the condition holds"
+  elif grep -qiE 'cannot (read|sample|probe|measure|resolve|answer)|BROKE|did not answer|no sentinel|refusing \(a gate' <<<"$err"; then
+    SELFTEST_BROKEN=$(( SELFTEST_BROKEN + 1 ))
+    log "  [BROKEN] $label — THE PROBE COULD NOT ANSWER. A blind gate fails open on the night."
   else
     SELFTEST_FIRED=$(( SELFTEST_FIRED + 1 ))
-    log "  [FIRED] $label — the gate REFUSED (reason in the FATAL line above). It executes and fails CLOSED, which is what this proves."
+    log "  [FIRED]  $label — the gate REFUSED a genuinely unmet condition. It works."
   fi
+  # Never hide what the gate said — including its own evidence on success.
+  [[ -n "$err" ]] && sed 's/^/           | /' <<<"$err" | tee -a "$OUT_DIR/bench.log" >&2
+  return 0
 }
+
+# The fsync/settle path, exercised for real on a throwaway tree. It is the durability
+# measurement AND the equal-settle window — the two things that once manufactured P1 —
+# and the self-test never touched them.
+selftest_fsync() {
+  local h="$1" d out ms files bytes
+  d="$(hmod "$h")/selftest_${SESSION_TAG}"
+  hrun "$h" "rm -rf '$d' && mkdir -p '$d' && printf 'aaaa' > '$d/a' && printf 'bb' > '$d/b'" \
+    || { log "  [BROKEN] fsync/settle — cannot stage a probe tree"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)); return 1; }
+  read -r ms files bytes <<<"$(fsync_tree "$h" "$d")"
+  hrun "$h" "rm -rf '$d'" >/dev/null 2>&1 || true
+  if [[ "$ms" == NA || "$files" != 2 || "$bytes" != 6 ]]; then
+    log "  [BROKEN] fsync/settle — walk returned ms=$ms files=$files bytes=$bytes, want 2 files / 6 bytes"
+    SELFTEST_BROKEN=$(( SELFTEST_BROKEN + 1 )); return 1
+  fi
+  log "  [OK]     fsync/settle — walked 2 files/6 bytes in ${ms}ms (settle ${SETTLE_MS}ms included, counts VERIFIED)"
+}
+
 selftest() {
   local h
-  log "SELFTEST — running every gate for real. No daemon, no transfer, no data."
+  log "SELFTEST — exercising the gates for real. No transfer, NO DATA."
   log "instrument: harness=$HARNESS_SHA256"
   log "--- the verdict engine's own guard test (incl. mutation proof) ---"
   python3 "$VERDICT_TEST" >"$OUT_DIR/verdict-guard-test.txt" 2>&1 \
@@ -736,19 +893,48 @@ selftest() {
   log "  $(grep -E '^[0-9]+/[0-9]+ mutations killed' "$OUT_DIR/verdict-mutations.txt") — every reverted fix is caught"
   for h in n q; do
     log "--- $(hname "$h") ---"
-    gate_probe "timer        (the measurand's clock)" timer_gate "$h"
-    gate_probe "quiescence   (codex/cargo/rustc)"     quiescence_gate "$h"
-    gate_probe "time machine (running OR enabled)"    timemachine_gate "$h"
-    gate_probe "spotlight    (mds_stores CPU)"        spotlight_gate "$h"
-    gate_probe "load         (load1 <= $LOAD_MAX)"      load_gate "$h"
-    gate_probe "link         (ARP + 10GbE route)"     link_gate "$h"
-    gate_probe "drain device (resolved, not disk0)"   resolve_disk "$h"
-    log "  [--]    mac parse (no gawk strtonum): $(hmac "$h") -> $(hmac "$h" | norm_mac)"
-    log "  [--]    load1=$(load1 "$h")"
+    gate_probe "timer         (the measurand's clock)" timer_gate "$h"
+    gate_probe "quiescence    (codex/cargo/rustc)"     quiescence_gate "$h"
+    gate_probe "time machine  (running OR enabled)"    timemachine_gate "$h"
+    gate_probe "spotlight     (mds_stores CPU)"        spotlight_gate "$h"
+    gate_probe "load  start   (load1 <= $LOAD_MAX)"      load_gate "$h"
+    gate_probe "link          (ARP on the egress NIC + 10GbE route)" link_gate "$h"
+    # NOT through gate_probe: it runs its argument in a SUBSHELL (so a `die` cannot
+    # abort the sweep), and resolve_disk's whole job is to SET a global. Called there,
+    # the assignment was discarded and the drain loop below then had no device and
+    # reported DRAIN-ERROR — the self-test was breaking its own next gate and blaming
+    # the harness.
+    if resolve_disk "$h"; then log "  [OK]     drain device  (resolved via the APFS physical store)"
+    else log "  [BROKEN] drain device  — could not resolve the physical disk"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)); fi
+    # The paths the old self-test claimed and did not run (round-5 codex, HIGH):
+    gate_probe "purge         (sudo -n, or every run reads WARM)" hrun "$h" "sudo -n /usr/sbin/purge"
+    case "$(pgrep_state "$h" blit-daemon)" in
+      NONE)    log "  [OK]     stale daemon  (rc-aware probe: none running)" ;;
+      RUNNING) log "  [FIRED]  stale daemon  (one IS running — the gate would refuse)"; SELFTEST_FIRED=$((SELFTEST_FIRED+1)) ;;
+      *)       log "  [BROKEN] stale daemon  — the probe could not answer"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)) ;;
+    esac
+    local dr; dr="$(drain_host "$h")"
+    if [[ "$dr" == drained* ]]; then log "  [OK]     drain loop    ($dr)"
+    else log "  [BROKEN] drain loop    — returned '$dr'"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)); fi
+    selftest_fsync "$h"
+    log "  [--]     mac parse (no gawk strtonum): $(hmac "$h") -> $(hmac "$h" | norm_mac)"
   done
+  SESSION_VOID_REASON=""; end_load_gate
+  if [[ -z "$SESSION_VOID_REASON" ]]; then log "  [OK]     end-load gate (both Macs under $LOAD_MAX; it CAN void a session)"
+  else log "  [FIRED]  end-load gate — $SESSION_VOID_REASON"; SELFTEST_FIRED=$((SELFTEST_FIRED+1)); fi
   measure_ssh_rtt
-  log "SELFTEST COMPLETE — every gate executed. $SELFTEST_FIRED gate(s) refused (see above)."
-  log "This is NOT clearance to take data: the round-3 review is."
+  log ""
+  log "SELFTEST: $SELFTEST_FIRED gate(s) refused a genuinely unmet condition; $SELFTEST_BROKEN blind."
+  log "NOT exercised here (they need a real transfer): daemon start/lsof/teardown, the"
+  log "smoke transfer, the ABBA pair loop, pair-voiding, and the manifest. PREFLIGHT_ONLY=1"
+  log "covers the manifest and the build-provenance gates. This self-test does NOT claim"
+  log "to run every gate — the previous one did, and it was not true."
+  log "THIS IS NOT CLEARANCE TO TAKE DATA. The review is."
+  if (( SELFTEST_BROKEN > 0 )); then
+    log "SELFTEST FAILED: $SELFTEST_BROKEN gate(s) are BLIND."
+    exit 1
+  fi
+  log "SELFTEST PASSED: every gate exercised here can answer."
 }
 
 main() {
@@ -764,6 +950,12 @@ main() {
   if [[ "$PREFLIGHT_ONLY" == 1 ]]; then
     log "PREFLIGHT_ONLY: checks passed; no daemon started, nothing timed"
     exit 0
+  fi
+  # "Once" means once: burn the escalation the moment it is used, so the same
+  # underpowered session cannot authorise a second, third, nth re-roll.
+  if [[ -n "$ESCALATED_FROM" ]]; then
+    echo "escalated to $SESSION_TAG (RUNS=$RUNS) on $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      >> "$ESCALATED_FROM/ESCALATED"
   fi
   log "session $SESSION_TAG  build=$EXPECT_SHA  nagatha=$N_IP  q=$Q_IP"
   echo "cell,arm,build,initiator,run,ms,flush_ms,files,bytes,exit,drain,cold,valid" > "$CSV"

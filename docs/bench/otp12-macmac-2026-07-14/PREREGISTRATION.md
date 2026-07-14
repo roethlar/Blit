@@ -1,6 +1,24 @@
 # otp-12 Mac↔Mac rig — PRE-REGISTRATION (written before any timed run)
 
-**Status**: Pre-registered, **revision 5**. **NO DATA EXISTS YET.**
+**Status**: Pre-registered, **revision 6**. **NO DATA EXISTS YET.**
+
+> ## ⛔ CORRECTION THAT THIS DOCUMENT OWES ITS READER
+>
+> **Revisions 3, 4 and 5 of this document asserted that a fixed, equal `SETTLE_MS`
+> window precedes the fsync on both arms. THAT WAS NEVER TRUE.** The settle was
+> computed by an `awk` inside a command substitution whose quoting was wrong, so the
+> awk errored, `sleep` received an empty argument and failed, and the code discarded
+> its exit status. **The settle has never executed — not once, in any revision.**
+>
+> It was introduced in `24660ae` — **the commit that added it to fix the
+> free-writeback asymmetry that reverses sign with direction**, i.e. the artifact
+> judged capable of *manufacturing a one-directional P1 out of nothing*. **The fix for
+> that BLOCKER never ran.**
+>
+> Nothing is retracted, because **no data was ever taken**. It is fixed, it is
+> validated at preflight, and `SELFTEST=1` now proves it on a real tree. But this
+> document was wrong for three revisions, and it says so here rather than quietly
+> correcting the text below.
 
 Every revision of this document and its instrument has been reviewed before it
 measured anything, and **every review has found defects capable of a false claim**:
@@ -17,11 +35,16 @@ measured anything, and **every review has found defects capable of a false claim
 - Round 4 (the round-3 rework, `cae2e0f`): **NOT SAFE TO RUN** — **grok**, which
   **drove the engine to a clean `VANISHES` while every control carried the full
   rig-W effect** → **9 findings, 9 accepted** (1 BLOCKER, 3 HIGH, 4 MEDIUM, 1 LOW).
-  **Codex could not review this round — its credits are exhausted until 2026-07-19**
-  (`.review/results/macmac-harness-r3.codex.md` holds the usage-limit error, not a
-  review). **The slice is therefore NOT cleared: D-2026-07-14-2 makes codex the
-  mandatory reviewer and grok "never runs alone."**
   (`.review/results/macmac-harness-r3.grok-verdict.md`)
+- Round 5 (the round-4 rework, `a9460ce`): **NOT READY / NOT SAFE TO RUN** — **codex**
+  (3 BLOCKER, 6 HIGH, 2 MEDIUM) **and grok**, which converged on the **same BLOCKER
+  independently**: the materiality bug, **for the third round running**, in a branch
+  neither had been shown. → **12 findings, 12 accepted.** Plus **the dead settle**
+  (above), which the review's finding exposed but did not itself find.
+  (`.review/results/macmac-harness-r5.verdict.md`)
+
+**Five rounds. 56 findings. 56 accepted. 0 rejected. Still no datum taken** — which is
+the only reason none of it became a retraction.
 
 **The rule below has been amended in rev 4 and again in rev 5. That is legitimate
 only because NO DATA HAS BEEN TAKEN** — before the first run is the only honest time
@@ -199,18 +222,43 @@ grok: the old fuzz pinned the controls at a clean value, so every dirty-control 
 drifted is reported as **STALE**, not silently passed.)*
 
 **The bar is integer-exact (`10·hi ≤ 11·lo`) and `≤ 1.10` PASSES** — the project's
-acceptance semantics, unchanged. But **materiality is not the bar alone**:
+acceptance semantics, unchanged.
 
-    pos_effect   = CI_lo > 0  and sign_p < .05        (a real destination-slower effect)
-    neg_effect   = CI_hi < 0  and sign_p < .05        (a real source-slower effect)
-    material     = bar FAILS  or  CI_lo >= BREACH_HI
-    material_neg = bar FAILS  or  CI_hi <= BREACH_LO
-    null_excl    = CI lies STRICTLY inside (MARGIN_LO, MARGIN_HI)
+### THE THREE QUESTIONS, KEPT SEPARATE (rev 6)
 
-Materiality had to be decoupled from a bar *failure*, because `≤1.10` PASSES: a
-**precise 10% effect was unreportable by construction** — it could never
-`REPRODUCE` (grok). Now an effect whose CI reaches the 10% threshold is material
-even where the bar exactly holds.
+Rounds 3, 4 and 5 each produced the **same class of defect**, because direction,
+magnitude and equivalence were tangled into one expression: every patch closed the one
+path it was shown and left the others open. They are now three questions, each answered
+by the statistic that can actually answer it.
+
+    DIRECTION   -- the SIGN TEST.   directional = sign_p < .05  (zeros dropped)
+                                    dir_pos / dir_neg by the majority sign
+    MAGNITUDE   -- the CI.          material     = bar_fail_pos or CI_lo >= BREACH_HI
+                                    material_neg = bar_fail_neg or CI_hi <= BREACH_LO
+    EQUIVALENCE -- the CI vs MARGIN. null_excl   = CI strictly inside (MARGIN_LO, MARGIN_HI)
+
+    bar_fail_pos = bar FAILS **and** destinit_med > srcinit_med
+    bar_fail_neg = bar FAILS **and** destinit_med < srcinit_med
+
+**A bar failure carries a DIRECTION (round-5 codex, BLOCKER).** It did not, and the bar
+is computed on the **marginal medians** while the CI is computed on the **paired
+differences** — and those two can point *opposite ways*. Verified: at n=16, thirteen
+`+1 ms` pairs plus three pairs falling below the whole distribution make the marginal
+medians fail the bar in the **inverse** direction (1200 vs 1001, ratio 1.199) while
+every surviving pair is `+1 ms`. The old rule called that **`REPRODUCES`** — *P1
+reproducing off one millisecond.* A bar failure is now material only to a claim that
+points **the same way** as the failure.
+
+**DIRECTION IS THE SIGN TEST'S JOB, AND THE CI MUST NOT BE ABLE TO VETO IT (round-5 grok,
+BLOCKER).** The old `pos_effect` demanded `CI_lo > 0`, so **a single zero pair** vetoed
+it: `d = [0, 99×7]` at `src=1000` was "no effect" *and* `null_excl` (99 < margin 100) and
+reported **`VANISHES`** — while the sign test **rejected** at `p = .0156`. Seven of eight
+pairs carried a 99 ms effect, **one millisecond under the bar**, and it was called
+equivalence.
+
+Materiality is also decoupled from a bar *failure*, because `≤1.10` PASSES: a **precise
+10% effect was unreportable by construction** (grok). An effect whose CI reaches the 10%
+threshold is material even where the bar exactly holds.
 
 | cell outcome | condition |
 |---|---|
@@ -231,27 +279,36 @@ Session precedence (first match wins; every cell's own outcome is still recorded
    emitted **`VANISHES` at 0% CI coverage** — a confident false equivalence claim.
    The engine is separately executable and hashed into the manifest, so it must not
    depend on the harness telling it the truth: it now counts the pairs itself.)*
-2. **RIG-VOID** — **any control that is not CLEAN**, where clean means its own effect
-   is **excluded as smaller than the margin** (it passes the same equivalence test
-   the measurand must pass). A control voids if it **FAILS THE BAR**
-   (unconditionally), is **UNSTABLE / REPRODUCES / INVERSION / BAR-FAIL-INCONSISTENT**,
-   or carries a **real effect the margin does not exclude**. Also RIG-VOID if the
-   **harness** voided the session (end-load — see Gates).
-   - *Round-3 (grok, reproduced): a control with **bar FAIL** whose CI crossed zero
-     became `INCONCLUSIVE` and **escaped the void** — a session emitted `VANISHES`
-     with its gRPC controls at **ratio 1.200, bar FAIL**.*
-   - *Round-4 (grok, **reproduced** — the same hole one level down): a control with a
-     **real, 8/8, rig-W-sized effect** (`d_i = 230` in every pair) on a **slow** arm
-     (`src=2500` → ratio **1.092**, bar **PASS**) landed as `PARTIAL` and **escaped**,
-     so the session printed a clean **`VANISHES`** while **every control carried the
-     exact effect size the power gate is built around**. On a slow arm the bar is
-     WIDER than Δ_ref — which is precisely why the measurand's margin was fixed, and
-     the control rule was still using the bar. **Control materiality is now the same
-     absolute materiality as everything else.***
-   - A **tiny** consistent control asymmetry (host×role: `q` is the faster Mac) is
-     excluded by the margin and does **not** void — otherwise every session dies.
-     Controls that are `PARTIAL`-but-margin-excluded, or `UNDERPOWERED`, are **never
-     silent**: they print as a CONTROL CAVEAT against P1's TCP-only/mixed-only claim.
+2. **RIG-VOID / the controls.** Three rounds running, this rule was written as *"void
+   if the control's outcome is one of {…}"* — and **three times an effect walked through
+   a label that was not on the list**:
+   - *r3 (grok, reproduced): a **bar-FAIL** control whose CI crossed zero was
+     `INCONCLUSIVE` → escaped. Session emitted `VANISHES` with controls at ratio 1.200.*
+   - *r4 (grok, reproduced): a **Δ_ref-sized** control effect on a slow arm was
+     `PARTIAL` → escaped. Session emitted `VANISHES` with every control at `D=+230`.*
+   - *r5 (codex **and** grok, both reproduced): **one zero pair** demoted that same
+     control from `PARTIAL` to `UNDERPOWERED` → escaped **again**. Same headline.*
+
+   **So it is no longer written that way.** A control is not asked which label it got.
+   It is asked the two questions it exists to answer:
+
+   **(a) Is it CONTAMINATING?** — it carries a **directional** effect whose CI sits **at
+   or beyond the margin**, or it **fails the bar**, or it is **bimodal**. → **RIG-VOID**:
+   the rig is carrying the very effect we came to measure, and *nothing* here can be
+   trusted. (Also RIG-VOID if the **harness** voided the session — end-load, see Gates.)
+
+   **(b) Is it CERTIFIED CLEAN?** — is its effect **excluded** as smaller than the
+   margin (`null_excl`)? **If not, A NULL IS NOT AVAILABLE** → `INCONCLUSIVE-UNDERPOWERED`.
+   "The measurand shows nothing" is **not evidence of absence** when the rig cannot be
+   shown free of a material arm asymmetry — a rig-wide artifact plus a cancellation
+   looks *exactly* like a null.
+
+   An uncertified control **does not kill a REPRODUCTION**: a merely *noisy* control
+   cannot manufacture a consistent 8/8 one-directional effect in the measurand, and
+   voiding real evidence on that basis would be its own false negative *(grok r5: a
+   false void is also a broken instrument)*. A **tiny** consistent asymmetry (host×role
+   — `q` is the faster Mac) is margin-excluded, certifies clean, and is **never silent**:
+   it prints as a CONTROL CAVEAT against P1's TCP-only/mixed-only claim.
 3. **MIXED-SIGN** — one direction REPRODUCES and the other INVERTS: a host×role
    interaction this rig **cannot decompose**. Inconclusive for the question.
 4. **REPRODUCES** — **either direction**. → *P1 can occur without a Windows peer, on
@@ -282,12 +339,35 @@ instrument is also broken, just less dangerously*).
 
 **The one registered escalation**: a session that returns `INCONCLUSIVE-UNDERPOWERED`
 may be re-run **once** at `RUNS=16`, where the interval is `[d₍₄₎, d₍₁₃₎]` (coverage
-**97.9%**) and tolerates three outliers per side. The harness refuses `RUNS=16`
-unless `UNDERPOWERED_ESCALATION=1` names the prior underpowered session.
+**97.9%**) and tolerates three outliers per side.
 
-**It may be triggered by a POWER failure and by nothing else.** It must never be used
-to re-roll a result someone dislikes — that is the p-hacking this pre-registration
-exists to prevent. The decision rule is **unchanged** in the escalated run.
+**It may be triggered by a POWER failure and by nothing else**, and that is now
+**enforced, not merely asserted** (round-5 codex, HIGH: `UNDERPOWERED_ESCALATION=1` was
+sufficient on its own — no prior session named, none verified, "once" unenforced. *A
+re-roll button with a serious-sounding name.*):
+
+- `UNDERPOWERED_ESCALATION` must name the **prior session directory**;
+- the harness **reads its `session_verdict.txt`** and refuses unless it says
+  `INCONCLUSIVE-UNDERPOWERED`;
+- it **burns** the escalation (writes an `ESCALATED` marker), so one underpowered
+  session cannot authorise a second, third, nth re-roll. **"Once" means once.**
+- the trigger is recorded in the manifest (`escalated_from=`).
+
+The trigger is **evidence on disk**, not an operator's assertion. The decision rule is
+**unchanged** in the escalated run.
+
+### The registered constants are PINNED IN CODE
+
+`DELTA_REF_MS`, `SETTLE_MS`, `LOAD_MAX`, `DRAIN_MBPS`, `DRAIN_QUIET`, `DRAIN_ITERS` and
+the timer tolerance are **literals**, in both the harness and the engine. The harness
+**refuses to start** if one is merely *present* in the environment; the engine refuses a
+mismatched `DELTA_REF_MS`.
+
+*(Round-5 codex, BLOCKER: they were `${VAR:-default}`, and `DELTA_REF_MS=240` turned a
+`RIG-VOID` into a `VANISHES`. **A pre-registered rule the operator can retune from the
+command line, after the data exists, in the direction of the answer they want, is not a
+pre-registration at all.**)* To change one: amend this document and put it back through
+review. That is the entire point of the document.
 
 **Bistability is a STATISTIC, not a vibe.** pf-0 found the rig-W fast arm bimodal,
 where the mode *mixture* moved a median 72 ms at constant conditions. Here: an arm
@@ -334,15 +414,23 @@ without the instrument catching it on the rig.
    is longer for whichever arm ran over ssh — and *which arm that is flips with the
    data direction*. Since P1's signature is one-directional, this artifact could
    produce a one-directional "reproduction" **out of nothing**.
-   **Equalized, and BOUNDED — not "removed" (round-3 HIGH).** Rev 3 claimed
-   `SETTLE_MS` removed it *by construction*. It does not: it makes the settle window
-   **equal on both arms** (250 ms), and the residual is the ssh dispatch difference,
-   **measured at ~15 ms** (median of 5, warm mux, recorded in the manifest every
-   session). A pre-fsync delay of 10/20/200 ms produced **no measurable change** in
-   fsync time here (72–94 ms, no trend) — APFS fsync on this rig is
-   per-file-metadata bound, not writeback bound — so a 15 ms residual cannot
-   plausibly move it. **That is a bound from measurement, not a removal by
-   construction, and this document no longer claims otherwise.**
+   **⛔ AND UNTIL REV 6, THE SETTLE NEVER RAN AT ALL (see the correction at the top).**
+   The `awk` computing its duration sat in a command substitution with the wrong
+   quoting, so it errored, `sleep` got an empty argument and failed, and the exit
+   status was discarded. Revisions 3–5 asserted this fix while it was dead — including
+   the revision that *introduced* it to close this very BLOCKER.
+
+   **Now, and only now: equalized, and BOUNDED — not "removed" (round-3 HIGH).** The
+   settle window is **equal on both arms** (250 ms, computed once at top level,
+   validated at startup, and its failure **VOIDS the pair**). The residual is the ssh
+   dispatch difference, **measured at ~15 ms** (median of 5, warm mux, recorded in the
+   manifest every session; a failed ssh now refuses rather than contributing a
+   flattering number). A pre-fsync delay of 10/20/200 ms produced **no measurable
+   change** in fsync time here (72–94 ms, no trend) — APFS fsync on this rig is
+   per-file-metadata bound, not writeback bound — so a 15 ms residual cannot plausibly
+   move it. **That is a bound from measurement, not a removal by construction, and this
+   document no longer claims otherwise.** `SELFTEST=1` walks a real tree and proves the
+   settle actually executed.
 
 ## Gates — every one fails CLOSED, and every one is EXECUTED
 
@@ -351,12 +439,25 @@ execution): the preflight **could not succeed at all** — `grep -c` exits 1 on 
 match, so a **clean** binary tripped the dirty-marker probe and died, and `norm_mac`
 used gawk's `strtonum()`, absent from stock macOS awk.
 
-`SELFTEST=1` now **runs every gate for real, takes no data**, and is the evidence
-that they execute. (It immediately earned itself: it caught `link_gate` refusing a
-**perfectly good link**, because `arp -n <ip>` prints **one line per interface** —
-`q` holds entries for nagatha on en0, en1 *and* en8 — so the unfiltered MAC was a
-three-line string that could never equal one MAC. The gate now checks the ARP entry
-**on the NIC the traffic will egress**, which is also the more correct question.)
+`SELFTEST=1` **exercises the gates for real and takes no data.** It reports three
+states — `[OK]`, `[FIRED]` (a genuinely unmet condition: the gate *works*), and
+`[BROKEN]` (**the probe cannot answer at all**) — and **exits non-zero on any BROKEN**,
+because *a blind gate is precisely what fails open on the night*. It also **prints what
+it does NOT cover**.
+
+*(Round-5 codex, HIGH: the previous self-test labelled **every** nonzero result
+`[FIRED]` — including a probe that could not answer — exited zero, and claimed "every
+gate executes" while never touching drain, purge, daemon, fsync/settle, stale-daemon or
+end-load. **A self-test that overstates itself is the very fail-open it exists to
+hunt.**)*
+
+It has now earned itself three times: it caught `link_gate` **refusing a perfectly good
+link** (`arp -n <ip>` prints **one line per interface** — `q` holds entries for nagatha
+on en0, en1 *and* en8 — so the unfiltered MAC was a three-line string that could never
+equal one MAC; the gate now checks the entry **on the egress NIC**, the more correct
+question anyway); it caught **the dead settle**; and it caught **itself** breaking its
+own next gate (it ran `resolve_disk` in a subshell, which discarded the global that
+function exists to set, so the drain then had no device and blamed the harness).
 
 - **QUIESCENCE, BOTH MACS** — refuse if `codex`/`cargo`/`rustc` runs on **either**
   Mac. `pgrep` rc≥2 is an **error**, not "quiet" (rev 3 could not tell them apart).

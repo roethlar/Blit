@@ -51,13 +51,20 @@ OUTCOMES = {"REPRODUCES", "INVERSION", "PARTIAL", "VANISHES", "UNDERPOWERED",
 
 
 def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=(),
-            per_cell=None, void_reason=""):
+            per_cell=None, void_reason="", pairs=8, env_extra=None):
     """Run the engine on a synthetic session and return its SESSION VERDICT.
 
-    per_cell overrides individual cells with (d, src) so the two measurand
-    directions can differ -- without it, a one-direction result cannot be tested.
+    `src` (and `control_src`) may be an INT (a constant source arm) or a LIST giving
+    the srcinit of each pair. The constant-only helper could not express the case
+    that matters most -- the bar is computed on the MARGINAL medians while the CI is
+    computed on the PAIRED differences, and those two can disagree in DIRECTION only
+    when the source arm varies (round-5 codex, HIGH: "the helper hardcodes constant
+    source times", which is why the n=16 blocker was unguardable).
+
+    `per_cell` overrides individual cells with (d, src) so the two measurand
+    directions can differ; `pairs` drives the n=16 escalation arm.
     """
-    control_d = [5] * 8 if control_d is None else control_d
+    control_d = [5] * pairs if control_d is None else control_d
     per_cell = per_cell or {}
     tmp = tempfile.mkdtemp()
     runs, meta = os.path.join(tmp, "runs.csv"), os.path.join(tmp, "meta.csv")
@@ -72,27 +79,34 @@ def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=
                 d, s = measurand_d, src
             else:
                 d, s = control_d, control_src
-            for i, di in enumerate(d, 1):
-                w.writerow([cell, "srcinit", "x", "h", i, s, 0, 1, 1, 0, "drained_1x2s", "cold", "yes"])
-                w.writerow([cell, "destinit", "x", "h", i, s + di, 0, 1, 1, 0, "drained_1x2s", "cold", "yes"])
+            srcs = s if isinstance(s, list) else [s] * len(d)
+            for i, (di, si) in enumerate(zip(d, srcs), 1):
+                w.writerow([cell, "srcinit", "x", "h", i, si, 0, 1, 1, 0, "drained_1x2s", "cold", "yes"])
+                w.writerow([cell, "destinit", "x", "h", i, si + di, 0, 1, 1, 0, "drained_1x2s", "cold", "yes"])
     with open(meta, "w") as f:
         f.write("cell,pairs_attempted,complete\n")
         for cell in present:
             # `complete=yes` is asserted even when the cell is SHORT: the engine must
             # not believe it (grok drove VANISHES out of a 1-pair session at 0% CI
             # coverage because the engine trusted this column).
-            f.write("%s,8,yes\n" % cell)
-    env = dict(os.environ, DELTA_REF_MS="230",
+            f.write("%s,%d,yes\n" % (cell, pairs))
+    env = dict(os.environ,
                VERDICT_CELLS=",".join(MEASURANDS),
                CONTROL_CELLS=",".join(CONTROLS),
                REGISTERED_CELLS=",".join(REGISTERED),
-               REQUIRED_PAIRS="8", SESSION_VOID_REASON=void_reason)
+               REQUIRED_PAIRS=str(pairs), SESSION_VOID_REASON=void_reason)
+    env.pop("DELTA_REF_MS", None)          # it is PINNED in the engine now
+    env.update(env_extra or {})
     out = subprocess.run([sys.executable, engine(), runs, meta,
                           os.path.join(tmp, "s.csv"), os.path.join(tmp, "p.csv"),
                           os.path.join(tmp, "v.csv"), os.path.join(tmp, "sv.txt")],
                          env=env, capture_output=True, text=True)
+    if out.returncode == 2:
+        # A DELIBERATE refusal (a pinned constant was tampered with, a row is corrupt).
+        # Distinct from a crash: refusing is the engine working, not failing.
+        return "ENGINE-REFUSED"
     if out.returncode != 0:
-        return "ENGINE-CRASH: " + out.stderr.strip().splitlines()[-1]
+        return "ENGINE-CRASH: " + (out.stderr.strip().splitlines() or ["?"])[-1]
     return out.stdout.splitlines()[0].split(":", 1)[1].strip()
 
 
@@ -188,6 +202,50 @@ CASES = [
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           void_reason="end-load on q is 9.1 (> 3.0)"),
      "RIG-VOID", "VANISHES"),
+
+    # --- ROUND 5 -------------------------------------------------------------
+    # codex BLOCKER: `bar == FAIL` carried no DIRECTION, so a bar failure in the
+    # INVERSE direction made a positive effect "material". Thirteen +1ms pairs and
+    # three pairs that fall below the whole distribution => the marginal medians fail
+    # the bar the OTHER way (1200 vs 1001) while every surviving pair is +1ms.
+    # The old rule called that REPRODUCES -- P1 reproducing off ONE MILLISECOND.
+    ("codex r5: a bar FAIL in the INVERSE direction cannot make +1ms 'material'",
+     dict(measurand_d=[1] * 13 + [-4500] * 3,
+          src=[1000] * 7 + [1200] * 6 + [5000] * 3,
+          control_d=[5] * 16, control_src=1000, pairs=16),
+     "PARTIAL", "REPRODUCES"),
+
+    # codex BLOCKER: the SAME materiality bug, third branch. ONE zero pair drags
+    # ci_lo to 0, which demotes a control carrying the full rig-W effect from PARTIAL
+    # to UNDERPOWERED -- and UNDERPOWERED was not on the void list. Session printed a
+    # clean VANISHES with every control at D=+230.
+    ("codex r5 (reproduced): an UNDERPOWERED control carrying D=+230 blocks the null",
+     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+          control_d=[0] + [230] * 7, control_src=2500),
+     "INCONCLUSIVE-UNDERPOWERED", "VANISHES"),
+
+    # grok, same class, different shape: one NEGATIVE pair kills the sign test, so the
+    # control is not even directional -- and it still must not support a null.
+    ("grok r5 (reproduced): a non-directional but UNCERTIFIED control blocks the null",
+     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+          control_d=[230] * 7 + [-10], control_src=2500),
+     "INCONCLUSIVE-UNDERPOWERED", "VANISHES"),
+
+    # grok BLOCKER: the zero-boundary null. A single zero pair vetoed `ci_lo > 0`, so
+    # a 99ms effect on 7 of 8 pairs -- ONE MILLISECOND under the bar -- was "no effect"
+    # AND null_excl (99 < 100), and reported VANISHES while the sign test REJECTED.
+    # Direction is the sign test's job; the CI must not be able to veto it.
+    ("grok r5 (reproduced): 7/8 pairs at 99ms is NOT equivalence, whatever the CI says",
+     dict(measurand_d=[0] + [99] * 7, src=1000),
+     "PARTIAL", "VANISHES"),
+
+    # codex BLOCKER: the registered constants were env-tunable, so the operator could
+    # retune the decision rule after seeing the data. The engine must REFUSE.
+    ("codex r5: DELTA_REF_MS is PINNED -- the rule is not tunable from the environment",
+     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+          control_d=[230] * 8, control_src=2500,
+          env_extra={"DELTA_REF_MS": "240"}),
+     "ENGINE-REFUSED", "VANISHES"),
 ]
 
 
@@ -234,11 +292,14 @@ def fuzz(n=300):
 # one fix in a COPY of the engine; the named case must then produce the forbidden
 # verdict. `python3 scripts/otp12pf_mac_verdict_test.py --mutations`
 #
-# NOTE on the CI/sign-test pair: the exact order-statistic CI and the sign test are
-# mathematical DUALS -- at the >=95% level, "CI_lo > 0" and "the sign test rejects"
-# are the same statement. Either one alone blocks the 7/8 defect, so neither
-# mutation alone flips the verdict. The COMBINED mutation (bootstrap CI *and* no
-# sign test) is what proves the pair is load-bearing, and it is listed as such.
+# NOTE on the CI and the sign test. Rev 4 called them "mathematical duals". THAT WAS
+# WRONG once a zero difference exists (round-5): the sign test DROPS zeros, so
+# d = [0, 99x7] rejects at p = .0156 while the CI's lower bound is exactly 0. Rev 6
+# therefore gives each the job it can actually do -- the SIGN TEST establishes
+# DIRECTION, the CI establishes MAGNITUDE -- and the old conjunction (`ci_lo > 0 and
+# p < .05`) is gone, because it silently required the CI to answer a question about
+# direction that a single zero pair could veto. That veto is exactly how a 99 ms
+# effect on 7 of 8 pairs came to be reported as VANISHES.
 MUTATIONS = [
     ("equivalence margin tied to the BAR alone (codex r2 + grok)",
      ["        margin_hi = min(breach_hi, float(DELTA_REF))\n"
@@ -251,34 +312,23 @@ MUTATIONS = [
     # with a real effect that the bar forgave was called VANISHES rather than
     # PARTIAL. Restoring that order must resurrect codex's counterexample.
     ("equivalence tested BEFORE effect detection, with the bar-tied margin (codex r2)",
-     ['        if pos_effect and material:\n'
-      '            out = "REPRODUCES"\n'
-      '        elif neg_effect and material_neg:\n'
-      '            out = "INVERSION"\n'
-      '        elif pos_effect or neg_effect:\n'
-      '            out = "PARTIAL"',
+     ['        if dir_pos and material:\n'
+      '            out = "REPRODUCES"',
       '        if bar == "PASS" and ci_lo > -breach_hi and ci_hi < breach_hi:\n'
       '            out = "VANISHES"\n'
-      '        elif pos_effect and material:\n'
-      '            out = "REPRODUCES"\n'
-      '        elif neg_effect and material_neg:\n'
-      '            out = "INVERSION"\n'
-      '        elif pos_effect or neg_effect:\n'
-      '            out = "PARTIAL"'],
+      '        elif dir_pos and material:\n'
+      '            out = "REPRODUCES"'],
      "rig-W-sized effect", "VANISHES"),
 
     ("negative margin uses -0.10*src instead of -src/11 (codex r2)",
      ["        breach_lo = -s_med / 11.0", "        breach_lo = -s_med / 10.0"],
      "negative bound", "VANISHES"),
 
-    # The round-2 fail-open, faithfully: the void ignored the BAR and consulted only
-    # a set of outcomes that a bar-failing/CI-crossing control fell outside of.
+    # The round-2 fail-open, faithfully: the void ignored the BAR entirely.
     ("RIG-VOID ignores the bar -> fails open (grok r2, reproduced live)",
-     ['    if dt.get("bar") == "FAIL":\n'
-      '        return True\n'
-      '    if cell_outcome[c] in ("UNSTABLE", "REPRODUCES", "INVERSION", "BAR-FAIL-INCONSISTENT"):\n'
+     ['    if dt.get("bar") == "FAIL" or cell_outcome[c] == "UNSTABLE":\n'
       '        return True',
-      '    if cell_outcome[c] in ("UNSTABLE", "REPRODUCES", "INVERSION"):\n'
+      '    if cell_outcome[c] == "UNSTABLE":\n'
       '        return True'],
      "bar-FAIL control", "VANISHES"),
 
@@ -294,27 +344,25 @@ MUTATIONS = [
      "missing registered cell", "VANISHES"),
 
     ("materiality requires a bar FAIL, so exact 1.10 is unreachable (grok)",
-     ['        material = (bar == "FAIL") or (ci_lo >= breach_hi)',
-      '        material = (bar == "FAIL")'],
+     ['        material = bar_fail_pos or (ci_lo >= breach_hi)',
+      '        material = bar_fail_pos'],
      "EXACT 1.10", "PARTIAL"),
 
-    # The bootstrap claimed 95% while delivering [d2,d7]. The mutation must therefore
-    # ALSO claim >=95% coverage -- otherwise the round-3 coverage guard (a separate
-    # fix, with its own mutation below) kills it first and this mutation would prove
-    # something it does not name.
-    ("COMBINED: bootstrap-style CI [d2,d7] claiming 95% *and* no sign test (codex r2)",
-     ["    best = None\n"
-      "    for k in range(1, n // 2 + 1):",
-      "    best = (d[1], d[n - 2], 0.95) if n >= 4 else None\n"
-      "    for k in range(1, 1):",
-      "    pos_effect = ci_lo > 0 and p < 0.05",
-      "    pos_effect = ci_lo > 0"],
+    # The sign test no longer PARTICIPATES: direction is asserted regardless of it.
+    # (Rev 6 moved direction OUT of the CI and INTO the sign test, so the faithful
+    # revert is to stop consulting the sign test at all.) 7 positive + 1 negative
+    # then reports a clean REPRODUCES at p = .0703.
+    ("the sign test does not participate: direction asserted without it (codex r2)",
+     ["        directional = p < 0.05",
+      "        directional = True"],
      "sign test must PARTICIPATE", "REPRODUCES"),
 
     # --- ROUND 3 (grok) -------------------------------------------------------
     ("control void ignores absolute materiality -> a Delta_ref control escapes (grok r3)",
-     ['    return cell_outcome[c] == "PARTIAL" and not dt.get("null_excl", False)',
-      '    return False'],
+     ['    if dt.get("directional") and dt.get("ci_at_or_beyond_margin"):\n'
+      '        return True',
+      '    if False:\n'
+      '        return True'],
      "Delta_ref-sized control effect", "VANISHES"),
 
     ("engine trusts meta.complete and never checks n (grok r3)",
@@ -337,6 +385,31 @@ MUTATIONS = [
     ("a harness-detected session void is ignored (grok r3)",
      ['elif SESSION_VOID_REASON:', 'elif False:'],
      "session void (end-load)", "VANISHES"),
+
+    # --- ROUND 5 -------------------------------------------------------------
+    ("`bar == FAIL` is direction-blind, so +1ms is 'material' (codex r5)",
+     ['        bar_fail_pos = (bar == "FAIL") and d_med > s_med     # the bar failed the SAME way\n'
+      '        bar_fail_neg = (bar == "FAIL") and d_med < s_med',
+      '        bar_fail_pos = (bar == "FAIL")\n'
+      '        bar_fail_neg = (bar == "FAIL")'],
+     "INVERSE direction cannot make +1ms", "REPRODUCES"),
+
+    ("an UNCERTIFIED control can still support a null (codex r5 + grok r5)",
+     ["    elif van and len(van) == len(verd) and ctrl_uncertified:",
+      "    elif False:"],
+     "UNDERPOWERED control carrying D=+230", "VANISHES"),
+
+    ("the CI vetoes DIRECTION, so one zero pair turns 99ms into equivalence (grok r5)",
+     ["        directional = p < 0.05",
+      "        directional = p < 0.05 and ci_lo > 0 and ci_hi > 0"],
+     "7/8 pairs at 99ms", "VANISHES"),
+
+    ("the registered DELTA_REF is taken from the environment again (codex r5)",
+     ['DELTA_REF = REGISTERED_DELTA_REF_MS\n'
+      '_env_delta = os.environ.get("DELTA_REF_MS")',
+      'DELTA_REF = int(os.environ.get("DELTA_REF_MS", REGISTERED_DELTA_REF_MS))\n'
+      '_env_delta = None'],
+     "DELTA_REF_MS is PINNED", "VANISHES"),
 ]
 
 
@@ -364,7 +437,12 @@ def mutate():
         os.environ["VERDICT_PY"] = path
         got = session(**case[1])
         del os.environ["VERDICT_PY"]
-        killed = (got == forbidden)
+        # KILLED means THE CASE NOW FAILS -- by its own assertion, not by matching a
+        # verdict named here. Checking only for a specific forbidden verdict let a
+        # mutant "survive" merely by failing a DIFFERENT way than predicted, which is
+        # still a caught regression. The case's own contract is the arbiter.
+        _, _, must_be, must_not_be = case
+        killed = (must_be and got != must_be) or (must_not_be and got == must_not_be)
         print("%-62s -> %-22s %s" % (name[:62], got,
                                      "KILLED (guard is real)" if killed
                                      else "*** SURVIVED — GUARD IS VACUOUS ***"))
