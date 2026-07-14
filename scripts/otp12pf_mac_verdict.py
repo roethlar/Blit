@@ -47,6 +47,13 @@ THE CONTROLS ARE A PRECONDITION
     gRPC control carry all but 1 ms of P1 while we call the rig clean. If any control
     fails, NO verdict about the measurand is read: not a reproduction, and not a null.
 
+    AND passing at T/2 is not sufficient. The bias the controls could not EXCLUDE (B) is
+    carried into the measurand -- and if it reaches HALF that measurand's threshold, the rig
+    is not clean enough to read either, whatever the controls' own state says: T is CAPPED at
+    DELTA_REF while the permitted bias is a FRACTION of the arm, so on a slow enough measurand
+    B can exceed T outright (a null becomes impossible while an "effect" is mostly rig).
+    B >= T/2 on ANY measurand => CONTROLS-NOT-CLEAN. Owner, D-2026-07-14-4: "Refuse to grade."
+
 WHAT IS DELIBERATELY ABSENT
     * The 1.10 bar takes NO part in inference. It is the project's ACCEPTANCE criterion:
       computed on the marginal medians, reported in every row, and never consulted --
@@ -279,6 +286,19 @@ for c in CONTROLS:
         B_frac = max(B_frac, abs(x["rng"][0]) / x["src"], abs(x["rng"][1]) / x["src"])
 
 # ---- pass 3: grade the measurands, against thresholds widened by the control bias -----
+# B >= T/2 IS NOT A CLEAN RIG (D-2026-07-14-4; round-11 codex HIGH, grok found the same
+# dead-zone independently). T is CAPPED at DELTA_REF, but the bias a clean control is
+# permitted to carry is a FRACTION of its arm -- so on a SLOW measurand the two diverge:
+# clean controls at 4.9% of a 1000 ms arm give B = 490 ms on a 10000 ms measurand, while
+# T stays 230. Then T - B < 0 -- A NULL IS ARITHMETICALLY IMPOSSIBLE -- while T + B still
+# licenses an EFFECT of which up to 68% is PERMITTED RIG BIAS, at a ratio of 1.072, i.e.
+# inside the project's own invariance bar. A confidently wrong reproduction, off a rig
+# certified clean.
+#
+# The owner's rule (verbatim: "Refuse to grade"): if the rig's own permitted noise reaches
+# HALF the effect being hunted, nothing read off it can be attributed. Same principle as a
+# dirty control -- a noisy rig is fixed by a QUIETER RIG, not by grading it with an asterisk.
+bias_over = []
 for c in MEASURANDS:
     x = cell.get(c, {})
     if x.get("state") == "INCOMPLETE":
@@ -287,6 +307,12 @@ for c in MEASURANDS:
     B = B_frac * x["src"]                    # the control bias, on THIS cell's arm
     x["T"] = t_pos
     x["B"] = B
+    # `t_pos > 0` is NOT a fail-open: src_med is a POSITIVE integer by ms_of(), so t_pos is
+    # only zero in a mutant that accepts zero timings -- and the guard keeps THAT mutant's
+    # dangerous path (zeros -> EFFECT -> REPRODUCES) reachable, instead of masking it behind
+    # this refusal and killing the mutation for the wrong reason.
+    if t_pos > 0 and B >= t_pos / 2.0:
+        bias_over.append(c)
     # ONE call, and B moves every bound AGAINST the reader: an EFFECT must clear T + B, a
     # NULL must fit inside T - B. (It used to widen the NONE window on the way in and get
     # tightened again on the way out -- see classify().)
@@ -349,16 +375,31 @@ if incomplete:
 elif SESSION_VOID:
     verdict = "RIG-VOID"
     why = "the harness voided this session: %s. No verdict is read." % SESSION_VOID
-elif dirty:
+elif dirty or bias_over:
     verdict = "CONTROLS-NOT-CLEAN"
-    why = ("control cell(s) are not free of an arm asymmetry at T/2: %s. P1 is claimed "
-           "TCP-only and mixed-only; if the gRPC/large controls may be carrying the same "
-           "asymmetry, then NEITHER a reproduction NOR a null is readable off this rig. "
-           "There is no escalation: a noisy rig is fixed by a QUIETER RIG, not more pairs."
-           % ", ".join("%s(%s, D=%+dms, CI=[%+d,%+d], T/2=%d)"
-                       % (c, cell[c]["ctrl_state"], cell[c]["D"], cell[c]["ci"][0],
-                          cell[c]["ci"][1], round(cell[c]["T"] / 2))
-                       for c in dirty))
+    why = ""
+    if dirty:
+        why += ("control cell(s) are not free of an arm asymmetry at T/2: %s. P1 is claimed "
+                "TCP-only and mixed-only; if the gRPC/large controls may be carrying the same "
+                "asymmetry, then NEITHER a reproduction NOR a null is readable off this rig. "
+                % ", ".join("%s(%s, D=%+dms, CI=[%+d,%+d], T/2=%d)"
+                            % (c, cell[c]["ctrl_state"], cell[c]["D"], cell[c]["ci"][0],
+                               cell[c]["ci"][1], round(cell[c]["T"] / 2))
+                            for c in dirty))
+    if bias_over:
+        # The controls PASSED at T/2 and the rig is STILL not clean enough to read: their
+        # permitted residual bias, scaled onto this measurand's (slower) arm, is at least
+        # HALF the effect we came to measure. D-2026-07-14-4.
+        why += ("the controls are clean at T/2, but the residual bias they could NOT exclude "
+                "reaches HALF the effect threshold on: %s. The permitted rig bias is a "
+                "FRACTION of the arm while T is CAPPED at %d ms, so on an arm this slow a "
+                "null is impossible (T-B <= 0 or nearly so) and an 'effect' could be mostly "
+                "rig. NOTHING is readable off this rig -- not a reproduction, not a null. "
+                % (", ".join("%s(T=%dms, B=%dms, B/T=%.2f)"
+                             % (c, round(cell[c]["T"]), round(cell[c]["B"]),
+                                cell[c]["B"] / cell[c]["T"] if cell[c]["T"] else 0.0)
+                             for c in bias_over), DELTA_REF))
+    why += ("There is no escalation: a noisy rig is fixed by a QUIETER RIG, not more pairs.")
 elif "EFFECT" in m.values() and "INVERTED" in m.values():
     verdict = "MIXED"
     why = ("one direction shows the effect and the other INVERTS it -- a host x role "

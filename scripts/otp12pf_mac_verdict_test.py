@@ -10,7 +10,7 @@ price of that rewrite -- each asserts that the SIMPLER rule still refuses the wr
 the COMPLEX rule once gave.
 
 A mutation reverts one fix in a copy of the engine; the named case must then FAIL. NOT EVERY
-CASE HAS ONE: 15 of the 34 do. The rest are behavioural (the rig must be able to SAY each
+CASE HAS ONE: 16 of the 37 do. The rest are behavioural (the rig must be able to SAY each
 thing it can say) and have no single line to revert. Two more guards are asserted DIRECTLY
 rather than by mutation, because at n=8 no synthetic session can tell the CI from the RANGE
 -- they are the same two numbers -- and a mutation that cannot be killed is not a proof.
@@ -162,6 +162,17 @@ CASES = [
           control_d=[229] * 8, control_src=2500),
      "CONTROLS-NOT-CLEAN", "DOES-NOT-REPRODUCE"),
 
+    # THE CASE THAT ISOLATES THE T/2 CONTROL BAR. A SLOW control (5000ms arm) carrying 120ms
+    # is dirty at T/2 = 115 but would pass at the full T = 230, and its bias fraction (2.4%)
+    # is small enough on a 1000ms measurand (B = 24 vs T/2 = 50) that the B >= T/2 gate does
+    # NOT fire. So this is the ONLY case where certifying controls at T instead of T/2 changes
+    # the verdict -- every faster control that fails at T/2 is now ALSO caught by the bias
+    # gate, which silently made the old mutation for this fix VACUOUS (it survived).
+    ("grok r6: a control clean at T but DIRTY at T/2 blocks every verdict (T/2 is load-bearing)",
+     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=1000,
+          control_d=[120] * 8, control_src=5000),
+     "CONTROLS-NOT-CLEAN", "DOES-NOT-REPRODUCE"),
+
     ("codex r6: a dirty control blocks a REPRODUCTION too, not just a null",
      dict(measurand_d=[300, 310, 320, 330, 340, 350, 360, 370], src=1000,
           control_d=[0] + [230] * 7, control_src=2500),
@@ -199,6 +210,20 @@ CASES = [
     ("grok r9: a null must also survive the TIGHTER bound (bias could be MASKING an effect)",
      dict(measurand_d=[60] * 8, src=1000, control_d=[49] * 8),
      "UNCLEAR", "DOES-NOT-REPRODUCE"),
+
+    # codex r11, HIGH (grok found the same dead-zone): the controls PASS at T/2 and the rig is
+    # still unreadable. T is capped at 230; the permitted bias is 4.9% OF THE ARM. On a 10000ms
+    # measurand that is B=490 against T=230 -- a null is impossible (T-B < 0) and the "effect"
+    # at 720ms is up to 68% permitted rig bias, at a ratio of only 1.072. Owner: refuse to grade.
+    ("codex r11: B >= T/2 is NOT a clean rig, even when every control passes at T/2",
+     dict(measurand_d=[720] * 8, src=10000, control_d=[49] * 8, control_src=1000),
+     "CONTROLS-NOT-CLEAN", "REPRODUCES"),
+
+    # ...and the SAME control bias on a measurand whose arm it can actually bound still grades.
+    # The gate must bite on the DIVERGENCE (capped T vs fractional B), not on any bias at all.
+    ("codex r11: ...but a rig whose bias is small against T still answers",
+     dict(measurand_d=[300] * 8, src=1000, control_d=[10] * 8, control_src=1000),
+     "REPRODUCES", "CONTROLS-NOT-CLEAN"),
 
     ("codex r8: ...and the same effect IS one once the rig is bias-free",
      dict(measurand_d=[105] * 8, src=1000, control_d=[5] * 8),
@@ -264,12 +289,16 @@ MUTATIONS = [
     ("the control threshold is the SAME as the measurand's, not half (grok r6)",
      ['    c_pos, c_neg = thresholds(x["src"], 0.5)',
       '    c_pos, c_neg = thresholds(x["src"], 1.0)'],
-     "D=+229, ONE MS under"),
+     "clean at T but DIRTY at T/2"),
 
     ("dirty controls block only the null, not a reproduction (codex r6)",
-     ["elif dirty:",
-      "elif dirty and not any(s == 'EFFECT' for s in m.values()):"],
+     ["elif dirty or bias_over:",
+      "elif (dirty or bias_over) and not any(s == 'EFFECT' for s in m.values()):"],
      "blocks a REPRODUCTION too"),
+
+    ("a permitted bias of HALF the threshold still grades -- B > T licenses a rig effect (codex r11)",
+     ["    if t_pos > 0 and B >= t_pos / 2.0:", "    if False:"],
+     "B >= T/2 is NOT a clean rig"),
 
     ("the inverting threshold is -src/10, not -src/11 (codex r2)",
      ["            -min(s_med / 11.0, float(DELTA_REF)) * scale)",
