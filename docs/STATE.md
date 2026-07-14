@@ -1,9 +1,11 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-13
+Last updated: 2026-07-14
 
-- **NEXT ACTION — run the A-B-B-A MTU experiment on rig `q` (Queue 1a).** Everything is staged and validated; it is ~55 min of unattended rig time. Exact command + design + decision rule: `docs/bench/otp12-jumbo-win-2026-07-13/PREREGISTRATION.md` (**rev 4**; codex rounds 1+2 = 15 findings, **15/15 accepted**). Four sessions **9000, 1500, 1500, 9000** on `q`, RUNS=8, `CELLS=wm_tcp_mixed,wm_tcp_large,mw_tcp_mixed,wm_grpc_mixed`; the same-MTU replicates supply the **measured noise floor** every threshold is expressed against.
-- **P1 REPRODUCES ON A SECOND MAC (2026-07-13, `docs/bench/otp12-q-baseline-2026-07-13/`).** `wm_tcp_mixed` = **1.385 FAIL** on `q`↔netwatch-01 **at MTU 9000**, while all three controls PASS at **1.002–1.043** in the same session (so rig noise is ~2–4% and P1 is 10× outside it). **P1 is a property of the macOS↔Windows PAIRING, not of one machine** — the assumption H1/H5/H6/H7 all rest on, never tested until now. **And jumbo does NOT dissolve P1.** What is still unmeasured is how much MTU *contributes* (a FAIL only proves jumbo is *insufficient*) — that needs the matched 1500 arm, i.e. the A-B-B-A run.
+- **NEXT ACTION — an OWNER DECISION, and it blocks pf-final's assembly: the frozen committed baseline is MTU-mismatched.** The fabric now runs **MTU 9000**; the committed anti-drift ceiling `docs/bench/otp2w-baseline-2026-07-10/summary.csv` was recorded at **MTU 1500**, and acceptance requires **BOTH** references (`OTP12_ACCEPTANCE_RUN.md` D2/D5, frozen by design). pf-0 measured jumbo making **both arms 3–4% faster**, so a jumbo NEW arm graded against a 1500 ceiling is **LENIENT, not conservative** — the MTU gain flatters the ratio and could let a real regression pass. Ways out (re-record the baseline at 9000 / run pf-final at 1500 / an explicit MTU-mismatch rule) each change the frozen contract or the rig config, so **each needs the owner's amendment — no agent may pick one.** Full exposure: `docs/plan/OTP12_PERF_FINDINGS.md` §pf-0. Then: **pf-1**.
+- **pf-0 DONE — MTU is KILLED as a material cause of P1 (2026-07-14, `docs/bench/otp12-jumbo-win-2026-07-13/`).** A-B-B-A on `q` (9000/1500/1500/9000), **256 timed runs, 0 voided**, MSS gate held start AND end of every session. `Δ_9000 = 236`, `Δ_1500 = 229`, measured noise floor **N_Δ = 78 ms**, **r = −3.1% → KILLED**. The null is **not vacuous** — `wm_tcp_large` ran 3–4% faster at jumbo on **both** arms, so the manipulation reached the wire; the benefit is **symmetric**, which is why it cannot explain an **asymmetry**. codex NOT READY → **7/7 accepted** (`11f0c2a`): every finding was a *claim* outrunning the *data* (it recomputed and confirmed all the numbers). **Two limits that now bind pf-1**: (a) the run is **NOT powered** to exclude a *contributing*-size effect (20% of Δ = 46 ms < the 78 ms floor) — it excludes a DOMINANT one only; (b) 78 ms is **between**-session noise, so cross-session grading of a counterfactual is dead, and **pf-1 must measure its own paired within-session floor and register a resolution check before grading**.
+- **THE FAST ARM IS BISTABLE — a trap for pf-1.** `win_init` runs are **bimodal** (~730 ms and ~840 ms); S1 drew 6 low/2 high and S4 drew 2 low/6 high **at the same MTU**, and that mode mixture — not MTU — is what sets N_Δ. `mac_init` is stable to 5–6 ms. **A counterfactual that merely shifts the mixture would masquerade as a recovery: grade the run distribution, not the median.**
+- **P1 REPRODUCES ON A SECOND MAC (2026-07-13, `docs/bench/otp12-q-baseline-2026-07-13/`).** `wm_tcp_mixed` = **1.385 FAIL** on `q`↔netwatch-01 **at MTU 9000**, while all three controls PASS at **1.002–1.043** in the same session (so rig noise is ~2–4% and P1 is 10× outside it). **P1 is a property of the macOS↔Windows PAIRING, not of one machine** — the assumption **H1** rests on (corrected 2026-07-14: H5/H6/H7 are **P2** hypotheses; the earlier "H1/H5/H6/H7" was wrong), never tested until now. **And jumbo does NOT dissolve P1** — pf-0 has now measured the matched 1500 arm and killed MTU outright (above).
 - **THE MAC IS A BENCH END — the codex loop and a rig-W session CANNOT run concurrently** (`.agents/machines.md`). A 53-min A-B-B-A attempt was destroyed by codex load on the Mac and discarded; the contamination is *asymmetric* (it inflates `mac_init` and MANUFACTURES P1). **Rig-W now runs on `q`** (dedicated M4 mini, quiet, faster than nagatha), which decouples the two for good.
 - Recent sessions (2026-07-11/13, 44th–46th): **otp-10/otp-11 closed; otp-12c RECORDED (rig D 7/7); the perf plan is ACTIVE (D-2026-07-13-1).** Every transfer rides the ONE session (separate local orchestration gone, −6.2k lines at 11b; the unsound journal fast path died with it). Suite **1488**. SMALL_FILE_CEILING paused (D-2026-07-05-1).
 - **P1 (the headline invariance criterion) — the one thing between blit and shipping.** Fails rig W (`wm_tcp_mixed` 1.237 and 1.300 — do NOT read that as a regression, it is **two different Mac NICs**), but **PASSES 8/8 with Linux on both ends** (`docs/bench/otp12-perf-2026-07-13/`; P1's own cell 1.092/1.003). So it is **platform-INTERACTING, not pure layout** — yet **NOT exonerated**: a code path that only bites on one platform (H1's Windows accept branch) looks identical. **P1 HAS NO ESCAPE HATCH** (codex r5 F1): D-2026-07-12-1 waives only a *cross-direction* miss for a cell that ALREADY passes invariance — P1 *is* the invariance failure. So: **fix it to ≤1.10, or the owner amends acceptance criterion 1.** Neither is assumed.
@@ -172,24 +174,27 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-13/14 (47th)** — HEAD `0f52e6a` + this handoff. **P1 REPRODUCES ON
-  A SECOND MAC** (`q`, 1.385 FAIL at MTU 9000; three controls PASS 1.002–1.043
-  in-session → rig noise 2–4%): P1 is the macOS↔Windows **pairing**, not one
-  machine — the untested assumption under **H1** (corrected 2026-07-14: H5/H6/H7
-  are **P2** hypotheses; the earlier "H1/H5/H6/H7" was wrong) — and **jumbo does
-  not dissolve it**. **New dedicated bench Mac `q`** (M4 mini, quiet, 1.18 GB/s;
-  `.agents/machines.md`) — because **the Mac is a bench END and the codex loop
-  cannot run during a rig-W session**: a 53-min A-B-B-A run was contaminated by
-  codex on the Mac and DISCARDED (asymmetric — it inflates `mac_init` and
-  MANUFACTURES P1). Also landed: **a Windows correctness bug** (attrs + ADS
-  silently dropped, both routes, conditional on FILE COUNT — D-2026-07-13-3);
-  **the local blit-vs-robocopy headline was WRONG** (8-thread robocopy vs
-  1-worker blit — owner caught it; at equal concurrency blit WINS, and the real
-  defect is that blit does not SCALE — D-2026-07-13-2); MTU prereg rev 1→4
-  (codex 15/15 accepted; every threshold I first wrote was *invented* because
-  the design had no noise model).
-  **In-flight: none. Rigs clean, Windows MTU 9000, 4 commits unpushed.**
-  **NEXT: run the A-B-B-A on `q`** (~55 min; command in the prereg).
+- **2026-07-14 (48th)** — **pf-0 ran and MTU is KILLED as a cause of P1**
+  (`r = −3.1%`; A-B-B-A on `q`, 256 runs, 0 voided, MSS gate held every session;
+  `docs/bench/otp12-jumbo-win-2026-07-13/`). codex NOT READY → **7/7 accepted**
+  (`11f0c2a`) — it confirmed every number and killed every *claim* that outran
+  them: the run is **not powered** to exclude a *contributing*-size effect
+  (46 ms < the 78 ms floor), "P1 is code-shaped" was **not** established (MTU is
+  one variable; segment fill unmeasured), and declaring the frozen baseline VOID
+  was **not an agent's call**. **The fast arm is BISTABLE** (bimodal `win_init`;
+  the mode mixture, not MTU, sets the noise floor) — a pf-1 counterfactual that
+  shifts the mixture would fake a recovery. Rig: Time Machine on `q` fired 1 min
+  before the run (owner disabled it; **the harness's quiet-gate does not catch
+  it**), and three starts died on a **physically flapping `en8`** the owner
+  reseated — I chased three deterministic theories and falsified all three.
+  **In-flight: none. Rigs clean, Windows MTU 9000, TM still OFF on `q` (owner
+  re-enables), 4 + 4 commits unpushed.**
+  **NEXT: the owner's decision on the MTU-mismatched frozen baseline** (it gates
+  pf-final's assembly — see NEXT ACTION at the top), **then pf-1.**
+- **2026-07-13/14 (47th)** — P1 reproduces on a second Mac (`q`); new dedicated
+  bench Mac; Windows attrs+ADS correctness bug (D-2026-07-13-3); the local
+  robocopy headline was WRONG (D-2026-07-13-2); MTU prereg rev 1→4 (15/15).
+  Full entry: **DEVLOG 2026-07-14 00:15Z**.
 - **2026-07-13 (46th)** — otp-12c closed (rig D 7/7); same-OS Linux rig built
   (8/8 PASS → P1 is platform-INTERACTING); perf plan ACTIVE (D-2026-07-13-1);
   **three claims retracted, all from trusting an unvalidated instrument**.
