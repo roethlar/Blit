@@ -183,7 +183,7 @@ def thresholds(s_med, scale=1.0):
             -min(s_med / 11.0, float(DELTA_REF)) * scale)
 
 
-def classify(ci_lo, ci_hi, rng_lo, rng_hi, t_pos, t_neg):
+def classify(ci_lo, ci_hi, rng_lo, rng_hi, t_pos, t_neg, B=0.0):
     """THE RULE. Four states, mutually exclusive and exhaustive BY CONSTRUCTION.
 
     EFFECT/INVERTED use the >=95% CI on the median; NONE uses the FULL RANGE. At the
@@ -196,12 +196,20 @@ def classify(ci_lo, ci_hi, rng_lo, rng_hi, t_pos, t_neg):
     FALSE NULL (driven: CI = [1,1] from modes at +-110). An equivalence claim must never be
     reachable by trimming away the very pairs that contradict it. This is also why
     bimodality needs no special branch: it cannot hide from the range.
+
+    B IS APPLIED HERE, ONCE, AND IT ONLY EVER HARDENS (round-11 grok, MEDIUM). It used to be
+    folded into the thresholds by the CALLER -- which passed `t_pos + B` and so WIDENED the
+    NONE window -- and a second check downstream then tightened the null back to `T - B`. The
+    net effect was right and the intermediate call was wrong, which is a bug waiting for the
+    next person who "simplifies" it. Now every state reads the same B in the same direction:
+    an EFFECT must CLEAR T + B (the bias could be inflating it), and a NULL must FIT INSIDE
+    T - B (the bias could be masking one). Both bounds move AGAINST the reader.
     """
-    if ci_lo >= t_pos:
+    if ci_lo >= t_pos + B:
         return "EFFECT"
-    if ci_hi <= t_neg:
+    if ci_hi <= t_neg - B:
         return "INVERTED"
-    if t_neg < rng_lo and rng_hi < t_pos:
+    if t_neg + B < rng_lo and rng_hi < t_pos - B:
         return "NONE"
     return "UNCLEAR"
 
@@ -279,12 +287,10 @@ for c in MEASURANDS:
     B = B_frac * x["src"]                    # the control bias, on THIS cell's arm
     x["T"] = t_pos
     x["B"] = B
-    x["state"] = classify(x["ci"][0], x["ci"][1], x["rng"][0], x["rng"][1],
-                          t_pos + B, t_neg - B)          # an EFFECT must clear T + B
-    if x["state"] == "NONE":
-        # ...and a NULL must survive the TIGHTER bound: bias could be masking an effect.
-        if not (t_neg + B < x["rng"][0] and x["rng"][1] < t_pos - B):
-            x["state"] = "UNCLEAR"
+    # ONE call, and B moves every bound AGAINST the reader: an EFFECT must clear T + B, a
+    # NULL must fit inside T - B. (It used to widen the NONE window on the way in and get
+    # tightened again on the way out -- see classify().)
+    x["state"] = classify(x["ci"][0], x["ci"][1], x["rng"][0], x["rng"][1], t_pos, t_neg, B)
 
 # Controls also carry a state for the report; measurands carry a ctrl_state for symmetry.
 for c in cell:

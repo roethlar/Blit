@@ -10,7 +10,7 @@ price of that rewrite -- each asserts that the SIMPLER rule still refuses the wr
 the COMPLEX rule once gave.
 
 A mutation reverts one fix in a copy of the engine; the named case must then FAIL. NOT EVERY
-CASE HAS ONE: 14 of the 34 do. The rest are behavioural (the rig must be able to SAY each
+CASE HAS ONE: 15 of the 34 do. The rest are behavioural (the rig must be able to SAY each
 thing it can say) and have no single line to revert. Two more guards are asserted DIRECTLY
 rather than by mutation, because at n=8 no synthetic session can tell the CI from the RANGE
 -- they are the same two numbers -- and a mutation that cannot be killed is not a proof.
@@ -282,13 +282,17 @@ MUTATIONS = [
      "bar alone would forgive"),
 
     ("EFFECT is decided on the CI's MIDPOINT, not its lower bound (an outlier reproduces)",
-     ["    if ci_lo >= t_pos:", "    if (ci_lo + ci_hi) / 2.0 >= t_pos:"],
+     ["    if ci_lo >= t_pos + B:", "    if (ci_lo + ci_hi) / 2.0 >= t_pos + B:"],
      "one huge outlier"),
 
     ("the NULL is not tightened by the control bias -- a masked effect reads as a null (grok r9)",
-     ["        if not (t_neg + B < x[\"rng\"][0] and x[\"rng\"][1] < t_pos - B):",
-      "        if False:"],
+     ["    if t_neg + B < rng_lo and rng_hi < t_pos - B:",
+      "    if t_neg < rng_lo and rng_hi < t_pos:"],
      "null must also survive the TIGHTER bound"),
+
+    ("the EFFECT is not hardened by the control bias -- an effect of exactly T reproduces (codex r8)",
+     ["    if ci_lo >= t_pos + B:", "    if ci_lo >= t_pos:"],
+     "exactly T is NOT a reproduction"),
 
     ("B is carried as RAW MILLISECONDS across controls of different arm speeds (codex r9)",
      ['        B_frac = max(B_frac, abs(x["rng"][0]) / x["src"], abs(x["rng"][1]) / x["src"])',
