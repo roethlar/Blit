@@ -239,6 +239,16 @@ CASES = [
                     "qn_tcp_mixed": ([-300, -310, -320, -330, -340, -350, -360, -370], 1000)}),
      "MIXED", "REPRODUCES"),
 
+    # codex r11, HIGH: B hardens each CELL but could make the SESSION verdict EASIER. At
+    # +110 / -94 on a 1000ms arm, controls AT ZERO give MIXED; clean controls at +5 push the
+    # -94 cell out of INVERTED (it needs <= -95.9), the MIXED branch stops firing, and the
+    # session upgrades itself to REPRODUCES. A NOISIER RIG PRODUCED A STRONGER CLAIM.
+    ("codex r11: a NOISIER rig must not upgrade MIXED to REPRODUCES",
+     dict(measurand_d=[0] * 8, src=1000, control_d=[5] * 8, control_src=1000,
+          per_cell={"nq_tcp_mixed": ([110] * 8, 1000),
+                    "qn_tcp_mixed": ([-94] * 8, 1000)}),
+     "MIXED", "REPRODUCES"),
+
     ("a clean one-direction reproduction is NOT masked by a noisy sibling",
      dict(measurand_d=[0] * 8, src=1000,
           per_cell={"nq_tcp_mixed": ([300, 310, 320, 330, 340, 350, 360, 370], 1000),
@@ -299,6 +309,11 @@ MUTATIONS = [
     ("a permitted bias of HALF the threshold still grades -- B > T licenses a rig effect (codex r11)",
      ["    if t_pos > 0 and B >= t_pos / 2.0:", "    if False:"],
      "B >= T/2 is NOT a clean rig"),
+
+    ("MIXED is decided on the HARDENED states, so control noise upgrades it to REPRODUCES (codex r11)",
+     ['elif "EFFECT" in m0.values() and "INVERTED" in m0.values():',
+      'elif "EFFECT" in m.values() and "INVERTED" in m.values():'],
+     "NOISIER rig must not upgrade MIXED"),
 
     ("the inverting threshold is -src/10, not -src/11 (codex r2)",
      ["            -min(s_med / 11.0, float(DELTA_REF)) * scale)",

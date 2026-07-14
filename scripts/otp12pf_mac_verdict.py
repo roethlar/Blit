@@ -317,6 +317,9 @@ for c in MEASURANDS:
     # NULL must fit inside T - B. (It used to widen the NONE window on the way in and get
     # tightened again on the way out -- see classify().)
     x["state"] = classify(x["ci"][0], x["ci"][1], x["rng"][0], x["rng"][1], t_pos, t_neg, B)
+    # THE UNHARDENED STATE (B = 0), kept ONLY for the MIXED test below. B hardens each CELL,
+    # but through MIXED's precedence it could make the SESSION verdict EASIER -- see there.
+    x["state0"] = classify(x["ci"][0], x["ci"][1], x["rng"][0], x["rng"][1], t_pos, t_neg, 0.0)
 
 # Controls also carry a state for the report; measurands carry a ctrl_state for symmetry.
 for c in cell:
@@ -366,6 +369,8 @@ with open(ver_p, "w") as f:
 # ---- THE SESSION VERDICT -----------------------------------------------------------
 incomplete = [c for c in REGISTERED if cell.get(c, {}).get("state") == "INCOMPLETE"]
 m = {c: cell[c]["state"] for c in MEASURANDS if not incomplete}
+# The UNHARDENED states (B = 0). MIXED is decided on these -- see the MIXED branch.
+m0 = {c: cell[c]["state0"] for c in MEASURANDS if not incomplete}
 
 if incomplete:
     verdict = "INCOMPLETE"
@@ -400,10 +405,24 @@ elif dirty or bias_over:
                                 cell[c]["B"] / cell[c]["T"] if cell[c]["T"] else 0.0)
                              for c in bias_over), DELTA_REF))
     why += ("There is no escalation: a noisy rig is fixed by a QUIETER RIG, not more pairs.")
-elif "EFFECT" in m.values() and "INVERTED" in m.values():
+elif "EFFECT" in m0.values() and "INVERTED" in m0.values():
+    # DECIDED ON THE UNHARDENED STATES (round-11 codex, HIGH). B hardens each CELL, but
+    # through this branch's PRECEDENCE it could make the SESSION verdict EASIER: with
+    # measurands at +110 and -94 (src=1000), controls at zero give MIXED -- but clean
+    # controls at +5 push the -94 cell out of INVERTED (it needs <= -95.9), the MIXED branch
+    # stops firing, and the session reports REPRODUCES. A NOISIER RIG PRODUCED A STRONGER
+    # CLAIM. B must only ever HARDEN, so the two-directions-disagree test is taken on the
+    # states BEFORE B is applied: a cell whose CI clears -T on its own carries evidence of
+    # inversion no amount of control noise can un-say, and a session where one direction
+    # shows the effect and the other inverts it is inconclusive -- whatever B is.
+    #
+    # (EFFECT-at-B is a SUBSET of EFFECT-at-0, so this can only ever fire MORE often, never
+    # less. That is the direction it must move in.)
     verdict = "MIXED"
     why = ("one direction shows the effect and the other INVERTS it -- a host x role "
-           "interaction this rig cannot decompose. Inconclusive for the question.")
+           "interaction this rig cannot decompose. Inconclusive for the question. (Judged "
+           "on the UNHARDENED cell states: the control bias B may only ever HARDEN a "
+           "verdict, and it must not be able to dissolve a disagreement into a claim.)")
 elif "EFFECT" in m.values():
     verdict = "REPRODUCES"
     why = ("P1 reproduces WITHOUT a Windows peer, in: %s. Scoped to THIS pair: it shows "
