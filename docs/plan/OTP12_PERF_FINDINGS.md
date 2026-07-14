@@ -344,27 +344,33 @@ the `q` pairing give **Δ_P1 ≈ 230 ms** (229 at 1500, 236 at 9000).
   Δ_9000 = 232, Δ_1500 = 221.5, r = −4.7% — same KILLED grade.)
 
 **RESOLVED — the committed baselines are RE-RECORDED at MTU 9000
-(D-2026-07-14-1, owner, 2026-07-14).** The exposure pf-0 surfaced: the fabric now
-runs MTU 9000 while the committed anti-drift ceilings were recorded at **MTU
-1500**, and pf-0 measured jumbo making **both arms 3–4% faster** — so grading a
-jumbo NEW arm against a 1500-recorded ceiling is **LENIENT, not conservative**:
-the MTU gain flatters the ratio and a real regression could pass unseen.
+(D-2026-07-14-1, owner, 2026-07-14).** The exposure pf-0 surfaced: the committed
+anti-drift ceilings were recorded at **MTU 1500**, before the fabric went jumbo,
+and **a reference must share the MTU of the sessions graded against it.**
 
-The owner's resolution is to **re-record each rig's committed baseline with its
-ORIGINAL OLD build at MTU 9000**, then re-freeze it. The freeze principle is
-unchanged (a baseline is immutable once recorded; no run may re-point its own
-ceiling) — only the *pin* moves, once. The 2026-07-10 baselines are retained as
-historical MTU-1500 records.
+**Do not over-read pf-0 here** (codex, 2026-07-14): the "3–4% faster at jumbo"
+figure is **one cell (`wm_tcp_large`), one rig (W), both arms of the NEW build**.
+pf-0 measured **no** small cells, **no** rig-Z cells, and **no** OLD-build MTU
+response — so it does **not** quantify the leniency across the acceptance
+matrices. What it establishes is that the mismatch is **real** and that MTU moves
+wall time on at least one cell; a mismatched ceiling is therefore unsound in an
+**unknown** direction, and lenient in the one direction actually measured.
 
-**This is a prerequisite slice for `pf-final`, and it affects BOTH rigs** (each
-harness hardcodes its own reference, and both predate the fabric-wide jumbo
-raise): rig W `bench_otp12_win.sh:105` → `otp2w-baseline-2026-07-10/`; rig Z
-`bench_otp12_zoey.sh:102` → `otp2-baseline-2026-07-10/`. Rig D has no old
-baseline and is unaffected. Constraints (same old build per rig,
-manifest-verified; `BASELINE_SUMMARY` stays override-free and is re-pointed by a
-reviewed source edit; the pf-0 start-AND-end MSS gate applies, since a baseline
-recorded at an unverified MTU is the very defect being fixed) are in
-D-2026-07-14-1 and are not restated here.
+The resolution — re-record each rig's baseline at MTU 9000 and re-freeze —
+carries a **non-loosening guard**, because a re-record also re-rolls hardware and
+day state (rig W's Mac end is now `q`, not nagatha) and D2/F2 already forbids a
+slower old rerun from loosening the bar: **the reference is the per-cell MINIMUM
+of {2026-07-10 median, re-recorded 9000 median}; it can only tighten, and a cell
+whose re-record is slower is flagged, never silently adopted.**
+
+**This is a prerequisite slice for `pf-final`, and it affects BOTH rigs**: rig W
+`bench_otp12_win.sh:105` (re-records on `0f922de`); rig Z
+`bench_otp12_zoey.sh:102` (re-records on a **clean `e757dcc` pair** — its
+original daemon was a *dirty* `731023b` whose committed code is identical, so a
+clean rebuild is not a new reference build). Rig D has no old baseline and is
+unaffected. The remaining constraints (`BASELINE_SUMMARY` stays override-free and
+is re-pointed by a reviewed source edit; pf-0's start-AND-end MSS gate applies)
+live in D-2026-07-14-1 and are not restated here.
 
 Same-session references (`old_session`) are MTU-matched by construction and were
 never at risk.

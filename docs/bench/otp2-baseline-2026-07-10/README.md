@@ -1,6 +1,19 @@
 # otp-2 — OLD-path PER-DIRECTION disk-to-disk baseline (2026-07-10)
 
-**Status**: Recorded. **Scope (load-bearing)**: this rig's endpoints
+> **⚠ SUPERSEDED AS THE ACCEPTANCE REFERENCE (D-2026-07-14-1, 2026-07-14) —
+> retained as a HISTORICAL MTU-1500 record; the data below is unmodified.**
+> Verified 2026-07-14: zoey's pre-jumbo `systemd-networkd` configs (backed up as
+> `*.premtu`, dated 2026-04-30) carry **no `MTUBytes` stanza** — i.e. the default
+> **1500**; the MTU-9000 configs were written 2026-07-13. A reference must share
+> the MTU of the sessions graded against it, so rig Z re-records once at MTU 9000
+> on a **clean `e757dcc` pair** (the daemon that actually ran here was a *dirty*
+> `731023b`, whose committed code is byte-identical to `e757dcc` — see the Build
+> correction below), and the acceptance reference becomes the **per-cell minimum**
+> of {this median, the re-recorded 9000 median} — it can only tighten
+> (`OTP12_ACCEPTANCE_RUN.md` D2/F2). **Do not cite this file as the live
+> acceptance ceiling.**
+
+**Status**: Recorded (historical). **Scope (load-bearing)**: this rig's endpoints
 are hardware-asymmetric (client SSD vs daemon pool), and
 D-2026-07-05-1 rules that cross-direction performance comparisons are
 valid **only on symmetric endpoints**. This dataset therefore anchors

@@ -2,7 +2,7 @@
 
 Last updated: 2026-07-14
 
-- **NEXT ACTION — `pf-1` (the HARD GATE): instrumentation + the interleaved counterfactuals.** Two pf-0 results now BIND it: (a) **between-session grading is dead** (a 20% recovery = 46 ms sits under the 78 ms between-session floor), so pf-1 must **measure its own paired within-session noise floor on the unmodified build and register a resolution check** — smallest reportable recovery > that floor — *before* grading any hypothesis; (b) **the fast arm is BISTABLE**, so grade the run distribution, not the median. Design: `docs/plan/OTP12_PERF_FINDINGS.md` §Method + §pf-1 decision rule.
+- **NEXT ACTION — the MAC↔MAC RIG (Queue 1(ii)), the second of the two experiments that come BEFORE any pf code.** Experiment (i), the A-B-B-A MTU run, is **DONE** (pf-0 below). Mac↔Mac is now possible (nagatha 10.1.10.92 + `q` 10.1.10.54, both 10GbE/9000) and it **discriminates H1 outright**: the 2×2 is Linux↔Linux = NO P1 (8/8 PASS), macOS↔Windows = P1 (1.237/1.300/1.385), **macOS↔macOS = UNTESTED**. Reproduces ⇒ P1 needs no Windows peer, it is macOS-side and **H1 DIES** (H1 accuses the *Windows* accept branch); vanishes ⇒ P1 REQUIRES the Windows peer and H1 is strongly supported. Needs a 3rd harness variant (rig-W's is Windows-specific). **Then `pf-1`** (the HARD GATE), which two pf-0 results now BIND: (a) **between-session grading is dead** (a 20% recovery = 46 ms sits under the 78 ms between-session floor) — pf-1 must **measure its own paired within-session floor and register a resolution check** before grading; (b) **the fast arm is BISTABLE** — grade the run distribution, not the median.
 - **BASELINE RE-RECORD (D-2026-07-14-1, owner 2026-07-14) — a prerequisite slice for `pf-final`, NOT for pf-1.** Both committed ceilings were recorded at **MTU 1500** before the fabric went jumbo, and pf-0 showed jumbo makes both arms 3–4% faster — so a jumbo build graded against them is **LENIENT** and could let a regression pass. Each rig's baseline is **re-recorded once with its ORIGINAL old build at MTU 9000**, then re-frozen (rig W `bench_otp12_win.sh:105`; rig Z `bench_otp12_zoey.sh:102`; rig D unaffected). Constraints — same old build per rig, `BASELINE_SUMMARY` stays override-free, pf-0's start-AND-end MSS gate applies — in **D-2026-07-14-1**.
 - **pf-0 DONE — MTU is KILLED as a material cause of P1 (2026-07-14, `docs/bench/otp12-jumbo-win-2026-07-13/`).** A-B-B-A on `q` (9000/1500/1500/9000), **256 timed runs, 0 voided**, MSS gate held start AND end of every session. `Δ_9000 = 236`, `Δ_1500 = 229`, measured noise floor **N_Δ = 78 ms**, **r = −3.1% → KILLED**. The null is **not vacuous** — `wm_tcp_large` ran 3–4% faster at jumbo on **both** arms, so the manipulation reached the wire; the benefit is **symmetric**, which is why it cannot explain an **asymmetry**. codex NOT READY → **7/7 accepted** (`11f0c2a`): every finding was a *claim* outrunning the *data* (it recomputed and confirmed all the numbers). **Two limits that now bind pf-1**: (a) the run is **NOT powered** to exclude a *contributing*-size effect (20% of Δ = 46 ms < the 78 ms floor) — it excludes a DOMINANT one only; (b) 78 ms is **between**-session noise, so cross-session grading of a counterfactual is dead, and **pf-1 must measure its own paired within-session floor and register a resolution check before grading**.
 - **THE FAST ARM IS BISTABLE — the trap named in pf-1's gate above.** `win_init` runs are **bimodal** (~730/~840 ms): S1 drew 6 low/2 high and S4 drew 2 low/6 high **at the same MTU**, and that mode mixture — not MTU — is what sets N_Δ. `mac_init` is stable to 5–6 ms. A counterfactual that merely shifts the mixture would **fake a recovery**.
@@ -71,10 +71,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    reviewloop slice by slice"; implementation proceeds, each slice
    through the codex loop).
    Two experiments come BEFORE any code; both docs own their detail.
-   **(i) The A-B-B-A MTU run on `q`** —
-   `docs/bench/otp12-jumbo-win-2026-07-13/PREREGISTRATION.md` (rev 4;
-   codex 15/15 accepted). Answers how much MTU *contributes*; we already
-   know jumbo does not FIX P1 (q baseline, 1.385 at 9000).
+   **(i) The A-B-B-A MTU run on `q` — `[x]` DONE 2026-07-14: MTU KILLED**
+   (`r = −3.1%`; `docs/bench/otp12-jumbo-win-2026-07-13/`). See the pf-0
+   bullet at the top for the two limits it puts on pf-1.
    **(ii) THE MAC↔MAC RIG — the missing cell, and it discriminates the
    hypotheses** (owner, 2026-07-13; UNTESTED, now possible: nagatha `.92`
    + `q` `.54`, both 10GbE/MTU 9000). Linux↔Linux = **no P1** (8/8 PASS);
@@ -189,8 +188,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   reseated — I chased three deterministic theories and falsified all three.
   **In-flight: none. Rigs clean, Windows MTU 9000, TM still OFF on `q` (owner
   re-enables), 4 + 4 commits unpushed.**
-  **NEXT: the owner's decision on the MTU-mismatched frozen baseline** (it gates
-  pf-final's assembly — see NEXT ACTION at the top), **then pf-1.**
+  **NEXT: the MAC↔MAC rig** (Queue 1(ii) — the last experiment before any pf
+  code), **then pf-1.** The baseline re-record (D-2026-07-14-1) is a `pf-final`
+  prerequisite, not a pf-1 blocker.
 - **2026-07-13/14 (47th)** — P1 reproduces on a second Mac (`q`); new bench Mac;
   Windows attrs+ADS bug (D-2026-07-13-3); the robocopy headline was WRONG
   (D-2026-07-13-2); MTU prereg rev 1→4. Full: **DEVLOG 2026-07-14 00:15Z**.

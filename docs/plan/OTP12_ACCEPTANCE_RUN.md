@@ -167,9 +167,18 @@ a median over fewer than RUNS valid runs.
 
 - **Per-direction converge-up (rigs Z and W, hard bar)**: a clean PASS
   requires `new_median ≤ ×1.10` of **BOTH** references — the same-session
-  interleaved old arm AND the committed 2026-07-10 baseline median for
+  interleaved old arm AND the committed baseline median for
   that cell (codex design F2: the fixed pre-cutover bar must not be
-  loosened by a slower old rerun). A cell passing same-session but
+  loosened by a slower old rerun).
+  > **AMENDED by D-2026-07-14-1**: the committed reference is **no longer the
+  > 2026-07-10 median alone**. Those baselines were recorded at **MTU 1500**,
+  > before the fabric went jumbo, and a reference must share the MTU of the
+  > sessions graded against it. Each rig re-records once at **MTU 9000**, and —
+  > because a re-record also re-rolls hardware/day state and **F2 above forbids
+  > loosening the bar** — the reference is the **per-cell MINIMUM of {2026-07-10
+  > median, re-recorded 9000 median}**. It can only tighten. A cell whose
+  > re-record is *slower* is flagged for investigation, never silently adopted.
+  A cell passing same-session but
   failing the committed reference is recorded `FAIL-REFERENCE-DRIFT` and
   gets one pre-registered fresh-session re-run; a persisting drift stands
   as a recorded failure for the otp-13 walk. **Every unified arm of a

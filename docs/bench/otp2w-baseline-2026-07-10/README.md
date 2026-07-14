@@ -1,6 +1,16 @@
 # otp-2w — OLD-path baseline on the owner-designated cross-direction rig (2026-07-10)
 
-**Status**: Recorded. This is the rig the owner designated for the
+> **⚠ SUPERSEDED AS THE ACCEPTANCE REFERENCE (D-2026-07-14-1, 2026-07-14) —
+> retained as a HISTORICAL MTU-1500 record; the data below is unmodified.**
+> This baseline was recorded with **netwatch-01 at MTU 1500** (it ran at 1500 for
+> every benchmark ever recorded; raised to 9000 on 2026-07-13). A reference must
+> share the MTU of the sessions graded against it, so rig W re-records once at
+> MTU 9000 on `0f922de`, and the acceptance reference becomes the **per-cell
+> minimum** of {this median, the re-recorded 9000 median} — it can only tighten,
+> never loosen (`OTP12_ACCEPTANCE_RUN.md` D2/F2). **Do not cite this file as the
+> live acceptance ceiling.**
+
+**Status**: Recorded (historical). This is the rig the owner designated for the
 otp-12 acceptance bar's **cross-direction half** after the Mac↔zoey
 session established (per D-2026-07-05-1's symmetric-endpoint rule)
 that hardware-asymmetric pairs support per-direction verdicts only —
