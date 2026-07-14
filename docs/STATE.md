@@ -1,9 +1,9 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-14
+Last updated: 2026-07-14 (49th session)
 
-- **NEXT ACTION — the MAC↔MAC RUN (Queue 1(ii)) is BLOCKED ON THE ROUND-3 REVIEW. The harness REFUSES a timed run (`exit 2`) until that review is adjudicated.** **NO DATA TAKEN.** Round 3 (`cae2e0f`) reworked the instrument against **15 accepted findings** — codex r2 (12) + **grok**, the second reviewer (3 more; D-2026-07-14-2). **The round-2 killer was MINE and it was catastrophic**: the transfer timer captured `time.monotonic()` in **two separate `python3` processes**, and on macOS that clock is **process-relative** — a 1000 ms sleep measured **−1 ms on nagatha and 2 ms on q**. Every row would have been ≈ fsync time alone, and the invariance ratio — **the entire measurand** — would have been graded on **fsync noise**, producing a clean session with a confident, meaningless verdict. Now: ONE process times itself, and **preflight PROVES THE CLOCK on both hosts** against a known sleep before any data. The decision rule was also broken three ways (a rig-W-sized effect in *every* pair still reported `VANISHES`; RIG-VOID **failed open** — grok drove a session that emitted `VANISHES` with its controls at ratio 1.200/bar FAIL). Rule → **rev 4**, amended BEFORE any data (the only honest time). `SELFTEST=1` now **executes every gate** (round 1's "fixes" were never run — `bash -n` is not an execution) and immediately caught `link_gate` refusing a *good* link. **⚠ TO RUN IT THE OWNER MUST CLOSE THEIR CODEX SESSIONS** — nagatha is a bench **END** and the quiescence gate refuses while `codex`/`cargo`/`rustc` runs on **either** Mac (it fires correctly today). Time Machine OFF on both. Rig: nagatha `10.1.10.92` ↔ `q` `10.1.10.54`, 10GbE/9000, build pinned `f35702a`. **Then `pf-1`** (the HARD GATE), which two pf-0 results BIND: between-session grading is dead (a 20% recovery = 46 ms sits under the 78 ms floor), so pf-1 must **measure its own paired within-session floor** before grading; and the fast arm is **BISTABLE** — grade the distribution, not the median.
-- **THE INSTRUMENT IS THE RISK, and this is now the fourth demonstration.** Three claims have been retracted to harness bugs; this harness alone has taken **35 findings across three reviews**, and **two of its worst defects were introduced by the rework that fixed the previous one**. Standing rule, earned: **verify the instrument before believing the measurement — and READ THE EXISTING HARNESSES BEFORE WRITING A NEW ONE** (the zoey harness *already documented* why cross-process `monotonic()` is wrong; the timer bug was a re-introduction of a lesson the repo had written down).
+- **⛔ NEXT ACTION IS AN OWNER CALL, NOT A RUN. The Mac↔Mac rig (Queue 1(ii)) is BLOCKED: `codex` — the MANDATORY reviewer — is OUT OF CREDITS until 2026-07-19.** The instrument is reworked (`a9460ce`, prereg **rev 5**) but **NOT CLEARED**, and the harness **refuses a timed run** (`exit 2` without `CLEARED_BY_REVIEW=1`). **NO DATA TAKEN.** Round 4 was reviewed by **grok alone**, and D-2026-07-14-2 says grok is *"additive, never a substitute, and never runs alone"* — so **no agent may clear this**. **Owner: wait for codex (2026-07-19) / buy credits / amend the rule.** (Grok found 9 real defects including a BLOCKER, which is the argument *for* the second reviewer, not a reason to promote it.) When cleared: **⚠ THE OWNER MUST CLOSE THEIR CODEX SESSIONS** — nagatha is a bench **END** and the quiescence gate refuses while `codex`/`cargo`/`rustc` runs on **either** Mac (it fires correctly today). Time Machine OFF on both. Rig: nagatha `10.1.10.92` ↔ `q` `10.1.10.54`, 10GbE/9000, build pinned `f35702a`. **Then `pf-1`** (the HARD GATE), which two pf-0 results BIND: between-session grading is dead (a 20% recovery = 46 ms sits under the 78 ms floor), so pf-1 must **measure its own paired within-session floor** before grading; and the fast arm is **BISTABLE** — grade the distribution, not the median.
+- **THE INSTRUMENT IS THE RISK — 44 findings across FOUR reviews of this one harness, 44 accepted, 0 rejected.** Three project claims have already been retracted to harness bugs. **Every rework of this instrument has introduced a defect of its own**: round 3's killer (a timer reading a 1000 ms transfer as **−1 ms** — cross-process `monotonic()` is process-relative on macOS, so the entire measurand would have been **fsync noise**) was introduced by the round-2 rework; round 4's BLOCKER (grok **drove a clean `VANISHES` while every control carried the full rig-W effect**) was the *same* bar-vs-Δ_ref error as round 3, fixed for the measurand and left in the controls. Standing rules, earned the hard way: **verify the instrument before believing the measurement**; **READ THE EXISTING HARNESSES BEFORE WRITING A NEW ONE** (zoey *already documented* the monotonic trap); **`bash -n` is not an execution** (round 1's "fixes" had never been run — the preflight could not even succeed); and **fixing a bug in one place is not fixing its class.**
 - **⚠ THE MAC↔MAC RIG IS *NOT* AN H1 DISCRIMINATOR — retracted 2026-07-14.** The earlier claim ("reproduces ⇒ **H1 DIES**, H1 accuses the *Windows* accept branch") was **WRONG**: H1 accuses **blit's own code paths** (`SourceSockets` Dial/Accept, `add_dialed_stream`, the dial-before-ACK at `transfer_session/mod.rs:3113`) — **"Windows" appears nowhere in H1**, and that code runs on macOS too, so a reproduction is *consistent with* H1. H1 now carries a **canonical note** in the parent plan so the shorthand cannot mislead again. What the rig **does** answer, scoped to **this pair**: **can P1 occur WITHOUT a Windows peer?** Reproduces ⇒ P1 is **not** waivable "platform residue" and code hypotheses strengthen (it does **not** prove a platform-*general* cost). A null ⇒ P1 did not reproduce **on this pair** — consistent with "Windows required" but **not proof** of it, and only reportable at all if the run **excludes a bar-breaching effect** (else `INCONCLUSIVE-UNDERPOWERED`).
 - **BASELINE RE-RECORD (D-2026-07-14-1, owner 2026-07-14) — a prerequisite slice for `pf-final`, NOT for pf-1.** Both committed ceilings were recorded at **MTU 1500** before the fabric went jumbo, and pf-0 showed jumbo makes both arms 3–4% faster — so a jumbo build graded against them is **LENIENT** and could let a regression pass. Each rig's baseline is **re-recorded once with its ORIGINAL old build at MTU 9000**, then re-frozen (rig W `bench_otp12_win.sh:105`; rig Z `bench_otp12_zoey.sh:102`; rig D unaffected). Constraints — same old build per rig, `BASELINE_SUMMARY` stays override-free, pf-0's start-AND-end MSS gate applies — in **D-2026-07-14-1**.
 - **pf-0 DONE — MTU is KILLED as a material cause of P1 (2026-07-14, `docs/bench/otp12-jumbo-win-2026-07-13/`).** A-B-B-A on `q` (9000/1500/1500/9000), **256 timed runs, 0 voided**, MSS gate held start AND end of every session. `Δ_9000 = 236`, `Δ_1500 = 229`, measured noise floor **N_Δ = 78 ms**, **r = −3.1% → KILLED**. The null is **not vacuous** — `wm_tcp_large` ran 3–4% faster at jumbo on **both** arms, so the manipulation reached the wire; the benefit is **symmetric**, which is why it cannot explain an **asymmetry**. codex NOT READY → **7/7 accepted** (`11f0c2a`): every finding was a *claim* outrunning the *data* (it recomputed and confirmed all the numbers). **Two limits that now bind pf-1**: (a) the run is **NOT powered** to exclude a *contributing*-size effect (20% of Δ = 46 ms < the 78 ms floor) — it excludes a DOMINANT one only; (b) 78 ms is **between**-session noise, so cross-session grading of a counterfactual is dead, and **pf-1 must measure its own paired within-session floor and register a resolution check before grading**.
@@ -171,28 +171,30 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-14 (48th)** — **pf-0 ran and MTU is KILLED as a cause of P1**
-  (`r = −3.1%`; A-B-B-A on `q`, 256 runs, 0 voided, MSS gate held every session;
-  `docs/bench/otp12-jumbo-win-2026-07-13/`). codex NOT READY → **7/7 accepted**
-  (`11f0c2a`) — it confirmed every number and killed every *claim* that outran
-  them: the run is **not powered** to exclude a *contributing*-size effect
-  (46 ms < the 78 ms floor), "P1 is code-shaped" was **not** established (MTU is
-  one variable; segment fill unmeasured), and declaring the frozen baseline VOID
-  was **not an agent's call**. **The fast arm is BISTABLE** (bimodal `win_init`;
-  the mode mixture, not MTU, sets the noise floor) — a pf-1 counterfactual that
-  shifts the mixture would fake a recovery. Rig: Time Machine on `q` fired 1 min
-  before the run (owner disabled it; **the harness's quiet-gate does not catch
-  it**), and three starts died on a **physically flapping `en8`** the owner
-  reseated — I chased three deterministic theories and falsified all three.
-  **In-flight: none. Rigs clean, Windows MTU 9000, TM still OFF on `q` (owner
-  re-enables), 4 + 4 commits unpushed.**
-  **NEXT: the MAC↔MAC rig** (Queue 1(ii) — the last experiment before any pf
-  code), **then pf-1.** The baseline re-record (D-2026-07-14-1) is a `pf-final`
-  prerequisite, not a pf-1 blocker.
+- **2026-07-14 (49th)** — **Mac↔Mac instrument rounds 3 + 4: 24 more findings, 24
+  accepted, NO DATA; the harness now REFUSES a timed run.** R3 (`cae2e0f`, codex 12 +
+  grok 3): **my timer read a 1000 ms sleep as −1 ms** (cross-process `monotonic()` is
+  process-relative on macOS) — every row would have been fsync noise. Preflight now
+  **proves the clock on both hosts** first. R4 (`a9460ce`, grok alone, 9): it **drove a
+  clean `VANISHES` while every control carried the full rig-W effect** — the *same*
+  bar-vs-Δ_ref error as R3, fixed for the measurand, left in the controls. Also: the
+  engine trusted `meta.complete` (a 1-pair CSV graded at 0% CI coverage); precedence
+  **hid a clean one-direction REPRODUCES**; my own comment claimed end-load could void
+  a session when the code only logged it. Guard: 17 cases, **11/11 mutations killed**.
+  Full: **DEVLOG 2026-07-14 16:30Z**.
+  **⛔ BLOCKED — CODEX IS OUT OF CREDITS UNTIL 2026-07-19**, so R4 has no codex review
+  and D-2026-07-14-2 forbids clearing on grok alone. **OWNER CALL: wait / buy credits /
+  amend the rule.** In-flight: none; no rig time taken.
+  **NEXT: that call → round-5 review → the run → pf-1.**
+- **2026-07-14 (48th)** — **pf-0 ran; MTU is KILLED as a cause of P1** (`r = −3.1%`;
+  256 runs, 0 voided). codex NOT READY → **7/7 accepted** (`11f0c2a`): every *claim*
+  outran the data — the run is **not powered** for a *contributing*-size effect
+  (46 ms < the 78 ms floor), and declaring the frozen baseline VOID was **not an
+  agent's call**. **The fast arm is BISTABLE** (the mode mixture, not MTU, sets the
+  noise floor). TM on `q` fired 1 min before the run (owner disabled it; the quiet-gate
+  does not catch it); a **physically flapping `en8`** killed three starts.
+  Full: **DEVLOG 2026-07-14 06:20Z**.
 - **2026-07-13/14 (47th)** — P1 reproduces on a second Mac (`q`); new bench Mac;
   Windows attrs+ADS bug (D-2026-07-13-3); the robocopy headline was WRONG
   (D-2026-07-13-2); MTU prereg rev 1→4. Full: **DEVLOG 2026-07-14 00:15Z**.
-- **2026-07-13 (46th)** — otp-12c closed (rig D 7/7); same-OS Linux rig (8/8 PASS
-  → P1 is platform-INTERACTING); perf plan ACTIVE (D-2026-07-13-1); **three claims
-  retracted, all from unvalidated instruments**. Full: **DEVLOG 2026-07-13 20:00Z**.
-- *(45th and earlier pruned to the cap — see DEVLOG 2026-07-06..13.)*
+- *(46th and earlier pruned to the cap — see DEVLOG 2026-07-06..14.)*

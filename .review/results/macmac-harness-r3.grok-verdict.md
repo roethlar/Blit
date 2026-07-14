@@ -11,7 +11,7 @@ verdict engine, guard test) and pre-registration rev 4.
   contains the error, not a review.
 
 **grok's verdict: NOT SAFE TO RUN.**
-**Adjudication: 9 findings, 9 ACCEPTED, 0 rejected.** Fixed in `<fix-sha>`.
+**Adjudication: 9 findings, 9 ACCEPTED, 0 rejected.** Fixed in `a9460ce`.
 
 ## ⛔ THE SLICE IS NOT CLEARED, AND CANNOT BE BY THIS RECORD
 
