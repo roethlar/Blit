@@ -97,6 +97,35 @@ every Linux target in play).
 - Local VM on the Mac — Ubuntu ARM (aarch64), per owner. Build-only
   fallback likewise.
 
+## THE MAC IS A BENCH END — keep it quiet (recorded 2026-07-13, learned the hard way)
+
+**A rig-W (Mac↔Windows) benchmark requires a QUIET Mac.** The Mac is not a
+neutral driver: it runs the client in `mac_init` arms and serves the daemon in
+`win_init` arms. Any heavy Mac process contaminates the measurement — and
+**asymmetrically**, because `mac_init` runs the client locally while `win_init`
+runs it on Windows. CPU starvation therefore **inflates Δ and MANUFACTURES P1**,
+the very finding under test. (Same shape as the 2026-07-13 durability
+retraction: a cost billed to one arm and not the other.)
+
+- **This actually happened** (2026-07-13, first A-B-B-A attempt): codex jobs ran
+  on the Mac for the whole 53-minute window. The same-MTU replicates caught it —
+  `wm_tcp_large` read 911 ms in S1 and 1847 ms in S4 **at the same MTU**, and the
+  noise floor came out at 473 ms, larger than the 325 ms gap under test. The run
+  was discarded. Without the replicates it would have looked clean and been
+  reported.
+- **Offenders**: `codex` (the review loop!), `cargo`/`rustc`, Spotlight
+  reindexing, any build. **The review loop and a rig-W session cannot run at the
+  same time** — sequence them.
+- **The runner gates on this**: it refuses to start a session while
+  codex/cargo/rustc is running, and records `load1` per session so contamination
+  is visible in the evidence rather than hidden in the noise.
+- **NEVER blanket-kill to get quiet.** `pkill -f codex` killed the OWNER's own
+  codex sessions (2026-07-13). Ask the owner to clear the machine, or kill only
+  PIDs you can prove you launched.
+- The Linux rig (magneto↔skippy) does not involve the Mac and has no such
+  constraint — but P1's cell only exists on the Mac↔Windows pairing, so it
+  cannot substitute.
+
 ## Rig residue (recorded 2026-07-10)
 
 - **The Mac's 10GbE IP and NIC CHANGED 2026-07-13** — this is a live
