@@ -50,7 +50,7 @@ def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=
     present = [c for c in REGISTERED if c not in drop_cells]
     with open(runs, "w") as f:
         w = csv.writer(f)
-        w.writerow("cell,arm,build,initiator,run,ms,flush_ms,settled_ms,files,bytes,"
+        w.writerow("cell,arm,build,initiator,run,ms,flush_ms,settled_ms,rtt_ms,files,bytes,"
                    "exit,drain,cold,valid".split(","))
         for cell in present:
             if cell in per_cell:
@@ -61,9 +61,9 @@ def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=
                 d, s = control_d, control_src
             srcs = s if isinstance(s, list) else [s] * len(d)
             for i, (di, si) in enumerate(zip(d, srcs), 1):
-                w.writerow([cell, "srcinit", "x", "h", i, si, 0, 250, 1, 1, 0,
+                w.writerow([cell, "srcinit", "x", "h", i, si, 0, 250, 5, 1, 1, 0,
                             "drained_1x2s", "cold", "yes"])
-                w.writerow([cell, "destinit", "x", "h", i, si + di, 0, 250, 1, 1, 0,
+                w.writerow([cell, "destinit", "x", "h", i, si + di, 0, 250, 5, 1, 1, 0,
                             "drained_1x2s", "cold", "yes"])
     with open(meta, "w") as f:
         f.write("cell,pairs_attempted,complete\n")

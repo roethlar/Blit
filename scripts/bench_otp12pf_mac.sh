@@ -362,8 +362,11 @@ spotlight_gate() {
   local h="$1" cpu
   # The MAX across samples, not the last: a late idle sample could overwrite an
   # earlier busy one. NR==0 (top produced nothing) is an ERROR, not 0% CPU.
+  # `$2+0` coerced ANY non-numeric field to zero -- the same defect the drain had with "."
+  # (round-10 codex). A field that is not a number is an ERROR, not 0% CPU.
   cpu="$(hrun "$h" "top -l 2 -n 30 -o cpu -stats command,cpu 2>/dev/null \
-    | awk '/^mds_stores/{ if (\$2+0 > m) m = \$2+0 } END{ if (NR == 0) print \"ERR\"; else printf \"%d\", m+0 }'" | nocr)" || cpu="ERR"
+    | awk '/^mds_stores/{ if (\$2 !~ /^[0-9]+(\\.[0-9]+)?\$/) { bad = 1 } else if (\$2+0 > m) { m = \$2+0 } }
+           END{ if (NR == 0 || bad) print \"ERR\"; else printf \"%d\", m+0 }'" | nocr)" || cpu="ERR"
   [[ "$cpu" =~ ^[0-9]+$ ]] || die_blind "$(hname "$h"): cannot sample Spotlight CPU (got '$cpu') — refusing"
   [[ "$cpu" -lt 20 ]] || die "$(hname "$h"): Spotlight (mds_stores) is indexing at ${cpu}% CPU — a recorded bench contaminant. Wait for it to settle."
 }
@@ -486,6 +489,11 @@ preflight() {
   # UNCLEAR rig or certify a control -- and if you already have an EFFECT you do not need
   # it. Its p-hacking guard surface goes with it.
   [[ "$RUNS" == 8 ]] || die "RUNS must be 8 (the registered value) — got '$RUNS'"
+  # The build pin. This check was deleted by accident when the escalation block was cut out
+  # (adjacent lines), so ANY sha — including `f35702a.dirty` — was accepted (round-10 codex,
+  # BLOCKER). A run against an unregistered build is not the registered experiment.
+  [[ "$EXPECT_SHA" == "$REGISTERED_BUILD" ]] \
+    || die "EXPECT_SHA='$EXPECT_SHA' but the PRE-REGISTERED build is $REGISTERED_BUILD — a run against any other build (or a .dirty one) is not the registered experiment"
 
   # The instrument must be the REVIEWED instrument: a modified harness must not be
   # able to claim the reviewed commit.
@@ -621,8 +629,10 @@ for i in 1 2 3 4 5 6; do ps -p $pid >/dev/null 2>&1 || break; sleep 0.5; done
 if ps -p $pid >/dev/null 2>&1; then kill -9 $pid 2>/dev/null || true; sleep 1; fi" >/dev/null 2>&1 || true
   # A teardown that cannot be VERIFIED is a failure, not a success. The old probe
   # called a FAILED ssh "GONE".
+  # A BROKEN `ps` probe is not "GONE" (round-10 codex). The sentinel must come back, or the
+  # teardown is unverified and the session says so.
   state="$(hrun "$h" "if ps -p $pid >/dev/null 2>&1; then echo 'S:ALIVE:S'; else echo 'S:GONE:S'; fi" \
-    | nocr | sed -n 's/.*S:\([A-Z]*\):S.*/\1/p' | head -1)" || state=""
+    | nocr | sed -n 's/.*S:\([A-Z]*\):S.*/\1/p' | head -1)" || state="PROBE-FAILED"
   if [[ "$state" != GONE ]]; then
     log "ERROR: $(hname "$h") daemon pid $pid SURVIVED teardown or could not be probed (got '$state') — port $PORT may still be held"
     TEARDOWN_FAILED=1
@@ -679,10 +689,12 @@ prep_run() {   # $1 = dest host
   local dh="$1" cn=ok cq=ok out
   # Purge BOTH ends first — the purge itself dirties the disk, so a drain certified
   # BEFORE it proves nothing.
-  hrun n "sync; sudo -n /usr/sbin/purge" >/dev/null 2>&1 || cn=FAIL
-  hrun q "sync; sudo -n /usr/sbin/purge" >/dev/null 2>&1 || cq=FAIL
+  # `sync; purge` reported only PURGE's status — a failed sync then read as a clean cold
+  # cache (round-10 codex). Both must succeed.
+  hrun n "sync && sudo -n /usr/sbin/purge" >/dev/null 2>&1 || cn=FAIL
+  hrun q "sync && sudo -n /usr/sbin/purge" >/dev/null 2>&1 || cq=FAIL
   if [[ "$cn" == ok && "$cq" == ok ]]; then RUN_COLD=cold
-  else RUN_COLD="COLD-FAIL(nagatha=$cn,q=$cq)"; log "  WARNING: cold-cache FAILED ($RUN_COLD) — pair voids"; fi
+  else RUN_COLD="COLD-FAIL(nagatha=$cn;q=$cq)"; log "  WARNING: cold-cache FAILED ($RUN_COLD) — pair voids"; fi   # ';' not ',': this lands in a CSV
   out="$(drain_host "$dh")"; RUN_DRAIN="${out:-DRAIN-ERROR}"
   [[ "$RUN_DRAIN" == drained* ]] || log "  WARNING: dest($(hname "$dh")) UNDRAINED ($RUN_DRAIN) — pair voids"
   echo "$RUN_DRAIN $RUN_COLD" >> "$OUT_DIR/drain.log"
@@ -734,11 +746,33 @@ PYEOF" | nocr | sed -n 's/.*F:\([^:]*\):\([0-9]*\):\([0-9]*\):\([0-9]*\):F.*/\1 
 settle_ok() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= SETTLE_MS && $1 < SETTLE_MS * 4 )); }
 
 # --- one timed run ------------------------------------------------------------
+# The ssh dispatch, measured RIGHT NOW rather than assumed from preflight. The residual
+# free-writeback asymmetry between the arms is bounded BY this number, and a bound measured
+# once at the start is not a bound on a run taken twenty minutes later (round-10 codex).
+RUN_RTT=0
+rtt_now() {
+  local v
+  v="$(python3 -c '
+import statistics, subprocess, sys, time
+argv = sys.argv[1:]
+ts = []
+for _ in range(3):
+    t = time.monotonic()
+    if subprocess.call(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+        print(-1); raise SystemExit
+    ts.append((time.monotonic() - t) * 1000.0)
+print(int(statistics.median(ts)))
+' ssh "${SSH_MUX[@]}" "$Q_SSH" true 2>/dev/null)" || v=-1
+  [[ "$v" =~ ^-?[0-9]+$ ]] || v=-1
+  echo "$v"
+}
+
 RUN_MS=0; RUN_EXIT=0; RUN_VALID=yes
 timed_run() {   # $1=init host $2=src $3=dst $4=DEST host $5=landed $6=flag $7=fixture
   local ih="$1" src="$2" dst="$3" dh="$4" landed="$5" flag="${6:-}" w="$7" out bin wc wb
   bin="$(hblit "$ih")"
   prep_run "$dh"
+  RUN_RTT="$(rtt_now)"
   out="$(time_argv "$ih" "$bin" copy "$src" "$dst" --yes $flag)"
   if [[ "$out" == *,* ]]; then RUN_MS="${out%%,*}"; RUN_EXIT="${out##*,}"; else RUN_MS=0; RUN_EXIT=99; fi
   read -r RUN_FLUSH RUN_FILES RUN_BYTES RUN_SETTLED <<<"$(fsync_tree "$dh" "$landed")"
@@ -766,6 +800,12 @@ timed_run() {   # $1=init host $2=src $3=dst $4=DEST host $5=landed $6=flag $7=f
     RUN_VALID=no; RUN_MS=0
   fi
   RUN_MS=$(( RUN_MS + RUN_FLUSH ))
+  # The dispatch bound, enforced on THIS pair rather than assumed from preflight.
+  local rtt_max=$(( SETTLE_MS / 4 ))
+  if [[ ! "$RUN_RTT" =~ ^[0-9]+$ ]] || (( RUN_RTT > rtt_max )); then
+    log "  VOID: ssh dispatch measured ${RUN_RTT}ms (max ${rtt_max}ms) — the residual free-writeback asymmetry is bounded BY this number, and at that size it is no longer negligible"
+    RUN_VALID=no
+  fi
   [[ "$RUN_EXIT" == 0 && "$RUN_DRAIN" == drained* && "$RUN_COLD" == cold ]] || RUN_VALID=no
 }
 
@@ -779,13 +819,26 @@ arm_srcinit() {
   local sh="$1" dh="$2" run="$3"
   timed_run "$sh" "$(hmod "$sh")/src_$CUR_W" "$(hip "$dh"):$PORT:/bench/$run/" \
             "$dh" "$(hmod "$dh")/$run/src_$CUR_W" "$CUR_FLAG" "$CUR_W"
-  hrun "$dh" "rm -rf '$(hmod "$dh")/$run'" >/dev/null 2>&1 || true
+  clear_landed "$dh" "$(hmod "$dh")/$run"
 }
 arm_destinit() {
   local sh="$1" dh="$2" run="$3"
   timed_run "$dh" "$(hip "$sh"):$PORT:/bench/src_$CUR_W" "$(hmod "$dh")/$run" \
             "$dh" "$(hmod "$dh")/$run" "$CUR_FLAG" "$CUR_W"
-  hrun "$dh" "rm -rf '$(hmod "$dh")/$run'" >/dev/null 2>&1 || true
+  clear_landed "$dh" "$(hmod "$dh")/$run"
+}
+
+# A landed tree that SURVIVES its deletion makes the next run of that cell fast, or lets the
+# transfer skip work entirely (round-10 codex, HIGH: the failure was discarded with `|| true`).
+# Every timed run already writes to a FRESH, never-seen directory, so a survivor cannot
+# contaminate a later run -- but it CAN fill the disk and it means the rig is not behaving,
+# so it is recorded loudly rather than swallowed.
+clear_landed() {
+  local h="$1" path="$2"
+  if ! hrun "$h" "rm -rf '$path' && test ! -e '$path'" >/dev/null 2>&1; then
+    log "  ERROR: $(hname "$h") could not remove the landed tree at $path — it SURVIVED. The rig is not behaving; investigate before trusting this session."
+    touch "$OUT_DIR/LANDED-TREE-SURVIVED"
+  fi
 }
 
 CSV="$OUT_DIR/runs.csv"
@@ -817,7 +870,8 @@ CELL_TABLE=(
 # macOS ships bash 3.2, which has NO associative arrays. Parallel indexed arrays, keyed by
 # the cell's position in CELL_TABLE.
 CELL_VALID=(); CELL_ATTEMPTS=()
-run_one_pair() {   # $1=idx $2=cell $3=srchost $4=dsthost $5=fixture $6=flag $7=slot -> 0 if VALID
+PAIR_OK=0          # set by run_one_pair; NOT its exit status, see below
+run_one_pair() {   # $1=idx $2=cell $3=srchost $4=dsthost $5=fixture $6=flag $7=slot
   local i="$1" cell="$2" sh="$3" dh="$4" w="$5" flag="$6" slot="$7"
   local attempts=$(( ${CELL_ATTEMPTS[$i]:-0} + 1 ))
   CELL_ATTEMPTS[$i]=$attempts
@@ -830,17 +884,19 @@ run_one_pair() {   # $1=idx $2=cell $3=srchost $4=dsthost $5=fixture $6=flag $7=
     rid="${aname}_s${slot}a${attempts}"; run="${SESSION_TAG}_${cell}_${rid}"
     if [[ "$aname" == srcinit ]]; then arm_srcinit "$sh" "$dh" "$run"; else arm_destinit "$sh" "$dh" "$run"; fi
     [[ "$RUN_VALID" == yes ]] || pair=no
-    local row="$cell,$aname,$EXPECT_SHA,$init,$slot,$RUN_MS,$RUN_FLUSH,$RUN_SETTLED,$RUN_FILES,$RUN_BYTES,$RUN_EXIT,$RUN_DRAIN,$RUN_COLD"
+    local row="$cell,$aname,$EXPECT_SHA,$init,$slot,$RUN_MS,$RUN_FLUSH,$RUN_SETTLED,$RUN_RTT,$RUN_FILES,$RUN_BYTES,$RUN_EXIT,$RUN_DRAIN,$RUN_COLD"
     if [[ "$arm" == A ]]; then rowA="$row"; else rowB="$row"; fi
     log "  $cell/$aname slot $slot (att $attempts): ${RUN_MS}ms (fsync ${RUN_FLUSH}ms, settle ${RUN_SETTLED}ms, $RUN_FILES files, exit $RUN_EXIT, $RUN_DRAIN, $RUN_COLD)"
   done
   echo "$rowA,$pair" >> "$CSV"; echo "$rowB,$pair" >> "$CSV"
   if [[ "$pair" == yes ]]; then
     CELL_VALID[$i]=$(( ${CELL_VALID[$i]:-0} + 1 ))
+    PAIR_OK=1
     return 0
   fi
   log "  $cell: pair at slot $slot VOIDED"
-  return 1
+  PAIR_OK=0
+  return 0
 }
 
 run_all_cells() {
@@ -854,9 +910,14 @@ run_all_cells() {
     for (( j = 0; j < n; j++ )); do
       i=$(( (j + slot - 1) % n ))
       read -r cell sh dh w flag <<<"${CELL_TABLE[$i]}"
-      # a voided pair is retried IN PLACE, so the cell stays in step with its siblings
+      # a voided pair is retried IN PLACE, so the cell stays in step with its siblings.
+      # NOT `if run_one_pair ...`: a function called as a CONDITION runs with errexit
+      # DISABLED throughout its call tree (round-10 codex, HIGH), so a failing command deep
+      # inside it would no longer abort the run. It reports through PAIR_OK instead.
       while (( ${CELL_ATTEMPTS[$i]:-0} < max )); do
-        if run_one_pair "$i" "$cell" "$sh" "$dh" "$w" "${flag:-}" "$slot"; then break; fi
+        PAIR_OK=0
+        run_one_pair "$i" "$cell" "$sh" "$dh" "$w" "${flag:-}" "$slot"
+        (( PAIR_OK == 1 )) && break
       done
     done
   done
@@ -1058,7 +1119,7 @@ main() {
     exit 0
   fi
   log "session $SESSION_TAG  build=$EXPECT_SHA  nagatha=$N_IP  q=$Q_IP"
-  echo "cell,arm,build,initiator,run,ms,flush_ms,settled_ms,files,bytes,exit,drain,cold,valid" > "$CSV"
+  echo "cell,arm,build,initiator,run,ms,flush_ms,settled_ms,rtt_ms,files,bytes,exit,drain,cold,valid" > "$CSV"
   echo "cell,pairs_attempted,complete" > "$META"
   daemon_start n; daemon_start q
   smoke n; smoke q
