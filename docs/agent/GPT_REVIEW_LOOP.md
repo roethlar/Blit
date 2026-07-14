@@ -41,38 +41,6 @@ The owner is not a developer; per-slice code-quality sign-off is
 delegated to this loop plus the validation suite. Do **not** ask the
 owner whether the code "looks good" — that is theater (D-2026-06-20-6).
 
-## How to frame the FIRST review of anything (D-2026-07-14-5)
-
-**The first round asks "is this the best way to do this?", not "is this correct
-per the plan?"** Owner, 2026-07-14, verbatim: *"less 'is this code correct per
-the plan' and more 'is this the best way to do it'"*, and — on a plan the agent
-had written itself — *"You keep finding problems in the plan you wrote, so it's
-likely codex will have a more coherent idea."*
-
-The failure this closes is real and cost this repo eleven review rounds on one
-instrument: **a review prompt that says "verify these fixes closed the findings"
-can only ever return a longer list of findings.** It grants the plan, the design
-and the approach, and audits the diff against them — so a wrong *approach*
-survives every round while the *code* gets steadily more correct. The agent
-wrote the plan; asking the reviewer to grade the code against that plan is the
-author grading their own work with extra steps.
-
-So the first prompt on a slice, a plan, or an instrument states **the end goal
-in plain terms**, hands over the artefacts, and asks:
-
-- Will this actually achieve the goal? What would you do instead, or first?
-- What does each possible outcome buy? If no outcome changes the next action,
-  say the work is theatre.
-- Is the *shape* right — the design, the data structure, the schedule, the rule?
-- **Only then**: correctness bugs against the spec.
-
-Say explicitly that "this is a well-built thing pointed at the wrong question"
-is the most valuable answer available and will not offend. A reviewer told to
-find bugs will find bugs; a reviewer told to challenge the approach can still
-report that the approach is sound — and that is then worth something.
-
-Later rounds may narrow to correctness against the (now-reviewed) spec.
-
 ## Per-slice steps
 
 1. Implement one commit-sized unit of work from whatever queue governs:
