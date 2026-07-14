@@ -168,9 +168,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   NOTE 2026-07-12: the macOS `blit_utils` residual (pre-existing,
   reproduced at `6d37a22`) ran ELEVATED under heavy load (~3/12 vs 2/8
   historical) — own finding if it persists on a quiet machine.
-- *(Resolved 2026-07-12/13 — SizeMtime data-safe SKIP, the `725aa07`
-  snapshot, the CLI `./NAME` foot-gun, otp-5b-3 mid-copy cancel, the
-  change-journal premise: all landed; see DEVLOG.)*
+- *(Resolved 2026-07-12/13: SizeMtime SKIP, `725aa07`, the `./NAME` foot-gun,
+  otp-5b-3 cancel, the change-journal premise — all landed; see DEVLOG.)*
 
 ## Handoff log (newest first, keep ≤ 3)
 
@@ -191,10 +190,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   re-enables), 4 + 4 commits unpushed.**
   **NEXT: the owner's decision on the MTU-mismatched frozen baseline** (it gates
   pf-final's assembly — see NEXT ACTION at the top), **then pf-1.**
-- **2026-07-13/14 (47th)** — P1 reproduces on a second Mac (`q`); new dedicated
-  bench Mac; Windows attrs+ADS correctness bug (D-2026-07-13-3); the local
-  robocopy headline was WRONG (D-2026-07-13-2); MTU prereg rev 1→4 (15/15).
-  Full entry: **DEVLOG 2026-07-14 00:15Z**.
+- **2026-07-13/14 (47th)** — P1 reproduces on a second Mac (`q`); new bench Mac;
+  Windows attrs+ADS bug (D-2026-07-13-3); the robocopy headline was WRONG
+  (D-2026-07-13-2); MTU prereg rev 1→4. Full: **DEVLOG 2026-07-14 00:15Z**.
 - **2026-07-13 (46th)** — otp-12c closed (rig D 7/7); same-OS Linux rig built
   (8/8 PASS → P1 is platform-INTERACTING); perf plan ACTIVE (D-2026-07-13-1);
   **three claims retracted, all from trusting an unvalidated instrument**.
