@@ -273,7 +273,7 @@ measurand and be gone before the controls ran, and they would pronounce the rig 
 6. **INVERTED** — a new finding; never banked as "P1 absent".
 7. **DOES-NOT-REPRODUCE** — **both** measurand cells `NONE`, with clean controls. A
    genuine equivalence result.
-8. **UNCLEAR** — otherwise. **This is not a null.** The registered remedy is `RUNS=16`.
+8. **UNCLEAR** — otherwise. **This is not a null.** There is no remedy in more pairs: fix the rig.
 
 ### What is deliberately ABSENT, and why that is safe
 
