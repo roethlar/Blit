@@ -102,6 +102,28 @@ the ~300 ms tracks the resize ramp, the fix is to de-serialize the pull dial (pr
 dial-before-ack, fatal-on-failure, one-in-flight); if it does not, the suspect is exonerated and
 the search moves on. Do not write a behavior fix before that measurement.
 
+**⚠ RELATED FINDING ALREADY MEASURED — P1 is probably a face of it, not a new bug (2026-07-15,
+owner pointed at the data).** blit's **small-file throughput does not scale with concurrency**,
+and this is documented and robocopy-tested — do NOT re-derive it:
+- `docs/bench/win-local-ab-2026-07-13/`: local `mixed` blit `--workers 8` buys **1.19×** (930→784
+  ms) where robocopy `/MT:8` buys **2.16×** (1052→487); `small` blit **1.05×**, robocopy **2.2×**.
+  At EQUAL concurrency blit WINS; it loses only by not converting workers into throughput.
+- `docs/plan/LOCAL_SMALL_FILE_PATH.md`: the mechanism (single-worker, per-file-syscall-bound
+  apply — `local.rs:602`, `pipeline.rs:196-206`); **L3 (no scaling) is the prime suspect**.
+- `docs/bench/10gbe-2026-07-05/DIAGNOSIS.md`: over the wire, small/mixed **push already ran on ~1
+  stream** — so multi-stream ramp speed was never the small-file lever; the apply does not
+  parallelize regardless of stream count.
+- `docs/plan/MULTISTREAM_PULL.md`: pull was hardcoded 1 stream historically; **pull-vs-push
+  parity was an explicit open acceptance question** (line 62). **P1 IS that gap**, not a shock.
+
+So the resize-dial asymmetry above is a *secondary* suspect. The primary P1 question is the one
+`LOCAL_SMALL_FILE_PATH.md` Decision-1 already names: **does the unified REMOTE receive/apply give
+the pull destination (client-as-Initiator) fewer effective apply workers / streams than push
+(daemon-as-Responder), so the same non-scaling apply bottleneck bites harder on pull?** The rig
+run above answers both at once — read the per-stream **steady-state** throughput and stream count,
+not just the ramp. Test design + the corrected scope: `docs/bench/P1_DISCRIMINATION_TEST.md`
+(re-scoped 2026-07-15 after this data surfaced; its fixture matrix was reinventing L3).
+
 ## The two findings (evidence, both committed)
 
 **P1 — destination-initiated TCP mixed transfers pay ~25–30%**
