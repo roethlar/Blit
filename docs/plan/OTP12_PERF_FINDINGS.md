@@ -278,6 +278,65 @@ path shapes; the investigation must confirm or kill that lead. It is a
 lead, not an attribution (a precreated container is environmental and
 cannot attribute code — Method 3(a)).
 
+## pf-0 — the environmental control (MTU): **EXCLUDED** (recorded 2026-07-14)
+
+Executed exactly as pre-registered
+(`docs/bench/otp12-jumbo-win-2026-07-13/PREREGISTRATION.md` rev 4, committed
+before any datum existed); evidence + full adjudication in that directory's
+`README.md`. Counterbalanced **A-B-B-A** (9000, 1500, 1500, 9000) on rig W with
+the `q` Mac end, `RUNS=8`, **256 timed runs, 0 voided**, MSS gate held at the
+start AND end of every session (8948 jumbo / 1448 at 1500).
+
+    Δ_9000 = 236 ms    Δ_1500 = 229 ms    N_Δ (measured noise floor) = 78 ms
+    r = (Δ_1500 − Δ_9000) / Δ_1500 = −3.1%   →   KILLED (r < 20%, the scale below)
+
+**What this licenses.** The **environmental escape for P1 is closed**: MTU /
+packetization does not cause the destination-initiator gap, so H1/H5/H6/H7 keep
+the premise they all rest on — P1 is a property of the code, not of the wire.
+The null is **not vacuous**: the manipulation demonstrably reached the wire
+(`wm_tcp_large` ran **3–4% faster at jumbo on both arms**, and both
+`wm_tcp_mixed` arms sped up slightly) — the benefit is **symmetric**, which is
+exactly why it cannot explain an **asymmetry**. P1 FAILED in all four sessions
+(1.237–1.362) regardless of MTU; all controls passed in all four.
+
+**What it does NOT license.** It confirms no hypothesis — pf-1 still owns
+attribution. Segment *fill* is unmeasured (8948 is the MSS ceiling, not the
+fill), so the supported claim is "raising the MTU did not improve these cells
+under the observed packetization", not "per-packet cost is irrelevant to blit".
+
+**`Δ_P1(rig W)` is re-estimated, and the noise floor now constrains pf-1's
+grading.** The `282 ms` above comes from a single nagatha session; four sessions
+on the `q` pairing give **Δ_P1 ≈ 230 ms** (229 at 1500, 236 at 9000). More
+important, **N_Δ = 78 ms is the *between-session* noise on this rig** — and a
+20% recovery of Δ_P1 (~46 ms), the CONFIRMED-CONTRIBUTING threshold, is
+**smaller than that floor**. Consequence, load-bearing for pf-1: a
+counterfactual graded by comparing *separate sessions* cannot distinguish
+CONTRIBUTING from KILLED here. The interleaved same-session A/B the pf-1 rule
+already mandates is therefore **not a nicety — it is the only design with
+enough resolution**, and any pf-1 result that quotes a between-session delta
+below ~78 ms is uninterpretable. The noise is concentrated almost entirely in
+the **`win_init` (fast) arm** (same-MTU replicate spread 19 and 72 ms); the
+`mac_init` arm is remarkably stable (5 and 6 ms).
+
+**OPEN — the committed baseline is MTU-locked (owner's decision, not settled
+here).** The whole 10 GbE fabric now runs at MTU 9000, but the committed
+reference `docs/bench/otp2w-baseline-2026-07-10/summary.csv` was recorded at
+**MTU 1500**, and acceptance requires **both** references — the global rule
+(§Fix criteria: "EVERY arm … against BOTH its same-session reference AND the
+committed baseline") and P1's own bar both cite it. At jumbo, every
+`converge … old_committed`, `cross … min_old_committed`, and block-1 `combined`
+row is therefore **VOID**. Only two ways forward, and pf-final cannot be
+assembled until one is chosen:
+- **(A)** run `pf-final` at **MTU 1500**, matching the committed baseline — no
+  re-baseline, but the fleet is measured in a configuration it no longer runs;
+- **(B)** keep jumbo and **re-record the committed baseline** with the
+  `0f922de` build at 9000 — costs a baseline session on each affected rig AND a
+  harness change (`bench_otp12_win.sh:105` hardcodes `BASELINE_SUMMARY` with no
+  override, deliberately).
+
+Same-session references (`old_session`) are MTU-matched by construction and are
+unaffected either way.
+
 ## Hypotheses (H*, ranked; each cites the recorded mechanism it accuses)
 
 - **H1 (P1)**: data-plane socket-acquisition asymmetry on resize. The
@@ -500,10 +559,13 @@ decides. So ONE rule governs every hypothesis (H1, H4, H5, H6, H7):
   layout gap and P2's old/new gap, which are different quantities):
   - **`Δ_P1(rig)`** = `destinit_median − srcinit_median` for
     `wm_tcp_mixed` on THAT rig (an invariance gap: new-vs-new, no old
-    build involved). On rig W it is 1221 − 939 = **282 ms**. On
-    magneto↔skippy it is ~0 (8/8 pass) — so **P1 counterfactuals are
-    graded on rig W only**; a Linux-rig recovery is meaningless against a
-    gap that does not exist there.
+    build involved). On rig W it is 1221 − 939 = **282 ms** — a **single
+    nagatha session**; §pf-0 re-estimates it from four sessions on the `q`
+    pairing and, more importantly, **measures the between-session noise floor
+    that bounds what a counterfactual can resolve**. Read §pf-0 before grading
+    any recovery against `Δ_P1`. On magneto↔skippy it is ~0 (8/8 pass) — so
+    **P1 counterfactuals are graded on rig W only**; a Linux-rig recovery is
+    meaningless against a gap that does not exist there.
   - **`Δ_P2(rig)`** = `new_median − old_same_session_median` for
     `push_tcp_small` on THAT rig (a converge gap, requires the `0f922de`
     build on that rig). netwatch-01: 1975 − 1644 = **331 ms**; zoey:
