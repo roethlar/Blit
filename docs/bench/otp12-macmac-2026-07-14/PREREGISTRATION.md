@@ -1,18 +1,21 @@
 # otp-12 Mac↔Mac rig — PRE-REGISTRATION (written before any timed run)
 
-**Status**: Pre-registered, **revision 7**. **NO DATA EXISTS YET.**
+**Status**: Pre-registered, **revision 8**. **NO DATA EXISTS YET.**
 
-> ## THE RULE IN ONE PARAGRAPH (rev 7)
+> ## THE RULE IN ONE PARAGRAPH (rev 8 — D-2026-07-14-3, owner: "simplify")
 >
-> **All inference is PAIRED.** The 1.10 bar is computed on the *marginal medians*; it is
-> the project's **acceptance** criterion, it is reported in every row, and it takes **no
-> part in inference** — because the marginal and paired statistics can disagree in both
-> direction and magnitude, and every attempt to let the bar stand in for paired evidence
-> produced a false verdict (rounds 3–6). **Direction** is the sign test. **Magnitude** is
-> the paired CI. **Equivalence** is the CI against the margin. **The controls are a
-> precondition**: unless every control is certified to carry less than *half* the
-> material effect, **no verdict about the measurand may be read — not a null, and not a
-> reproduction.**
+> Per cell, take the **paired** ABBA differences, their median, and one **exact CI**.
+> Compare that CI against **one threshold** `T = min(10% of the source arm, 230 ms)`.
+> Four states, exhaustive by construction: **EFFECT** (CI clears +T), **INVERTED** (CI
+> clears −T), **NONE** (CI lies inside ±T — an effect of size T is *excluded*), **UNCLEAR**
+> (the CI spans a threshold). **Every control must be NONE at T/2, or no verdict about the
+> measurand is read at all** — not a reproduction, and not a null. The 1.10 bar is
+> reported and takes **no part** in this; the sign test is reported, not decided on.
+>
+> That is the whole rule. Seven review rounds found 80+ defects and **four of the last five
+> BLOCKERs were in the decision rule, not the measurement** — the complexity *was* the
+> defect. What pre-registration is actually for is kept: the question, the statistic and the
+> thresholds are fixed **before any data exists**, and the harness **computes** the verdict.
 
 > ## ⛔ CORRECTION THAT THIS DOCUMENT OWES ITS READER
 >
@@ -63,11 +66,17 @@ measured anything, and **every review has found defects capable of a false claim
   reproduction**, and the settle repair was **still not provable** (a no-op `sleep` would
   have passed while the log narrated "settle included"). → **13 findings, 13 accepted.**
   (`.review/results/macmac-harness-r6.{codex,grok}.md`)
-**Six rounds. 69 findings. 69 accepted. 0 rejected. Still no datum taken** — which is
+- Round 7 (`1e03063`): **NOT READY** from both again — the drain fails open (a
+  `drained_*` value followed by a non-zero exit), rev 7's text contradicted itself, and
+  the settle could still be shadowed. → **the owner chose to SIMPLIFY the rule rather than
+  harden it again (D-2026-07-14-3).** This document is the result.
+  (`.review/results/macmac-harness-r7.{codex,grok}.md`)
+
+**Seven rounds. 80+ findings, all accepted, none rejected. Still no datum taken** — which is
 the only reason none of it became a retraction.
 
-**The rule below has been amended in revisions 4, 5, 6 and 7. That is legitimate
-only because NO DATA HAS BEEN TAKEN** — before the first run is the only honest time
+**The rule below was rewritten in rev 8, and amended in 4–7 before that. That is
+legitimate only because NO DATA HAS EVER BEEN TAKEN** — before the first run is the only honest time
 to change a pre-registered rule, and every amendment is forced by a reviewer's
 finding, not by a number anyone has seen.
 
@@ -108,8 +117,8 @@ layout"; a rig with two machines cannot license that):
 | **P1 REPRODUCES** | P1 **does not require a Windows peer** (on this pair), so it is **not** waivable as "Windows residue", and every code-level hypothesis strengthens. **Limits**: it does **not** establish a platform-*general* cost (two Macs are not "all platforms"); it does **not** name the mechanism; it does **not** kill H1 (the code H1 accuses runs here too); and it leaves **macOS/APFS** and **host×role** explanations fully **OPEN** — "not Windows-specific" is not "not platform-specific" (round-3 BLOCKER). |
 | **P1 does NOT reproduce (null)** | P1 **did not occur on this pair**. That is **consistent with** "the Windows peer is required" — but does **not prove it**: it could equally be a property of *these two machines*, their disks, or this macOS version. It does **not** confirm H1 either. |
 
-A null is only reportable at all if the rig could have **seen** a rig-W-sized
-effect — see the POWER GATE. Otherwise it is `INCONCLUSIVE-UNDERPOWERED`.
+A null is only reportable at all if the rig could have **seen** an effect of size T —
+i.e. if the CI excludes one. Otherwise the verdict is `UNCLEAR`, which is **not** a null.
 
 **This run does NOT bear on an escape hatch for P1, because P1 HAS NONE**
 (round-3 BLOCKER; parent + codex r5 F1). D-2026-07-12-1 waives only a
@@ -162,239 +171,126 @@ directions differ in *which machine is the destination*, a one-directional resul
 is explicitly **not** dismissible as "machine asymmetry" (rev 1 did exactly that,
 which would have let a real reproduction be waved away).
 
-## The paired statistic (REV 4 — the rev-3 rule was broken three ways)
+## THE RULE (rev 8 — D-2026-07-14-3, owner: "simplify")
 
-    per ABBA slot i:  d_i = destinit_i − srcinit_i     (positive = P1's direction)
-      D    = median(d_i)                                (LOW median, applied everywhere)
-      CI   = EXACT distribution-free order-statistic interval on the median
-      sign = exact two-sided binomial test on the count of positive d_i
+Seven review rounds found 80+ defects, and **four of the last five BLOCKERs were in the
+DECISION RULE, not in the measurement**: a 1 ms effect reported as a reproduction; a
+control carrying 229 of 230 ms certified "clean"; a null printed while every control was
+dirty. The rule had ~10 outcomes, five thresholds, a certification tier and a precedence
+stack. **The complexity was the defect.** It is replaced by the smallest thing that still
+prevents post-hoc rationalization.
 
-**1. The CI is exact, not bootstrapped (round-3 HIGH).** Rev 3 used a 10k seeded
-bootstrap and called it 95%. At n=8 it resolves to ≈`[d₂, d₇]`, whose true
-coverage is **92.97%**, and the resamples add no information. Rev 4 uses the
-narrowest order-statistic interval `[d₍ₖ₎, d₍ₙ₊₁₋ₖ₎]` whose exact coverage
-`1 − 2·P(Bin(n,½) ≤ k−1)` is **≥ 95%**. At n=8 that is **k=1 → `[min(d), max(d)]`,
-coverage 99.22%**. n=8 admits **no** exact 95% interval; the conservative side is
-taken **deliberately**, and the true coverage is printed in every row.
+**What pre-registration is actually for, and what is kept:** the question, the statistic
+and the thresholds are fixed **before any data exists**, and the **harness computes the
+verdict** — so no one can look at the numbers and then invent a favourable reading.
 
-**2. The sign test now PARTICIPATES (round-3 HIGH).** Rev 3 computed it and never
-read it, so 7/8 positive pairs could report `REPRODUCES` while the registered
-two-sided test said `p = .0703`. An effect now requires **both** `CI` exclusion of
-zero **and** `sign_p < .05`. At n=8 that means **all eight pairs must agree in
-sign** (k=8 → p=.0078; k=7 → p=.0703, not significant).
+### The statistic (paired, because the design is paired)
 
-*Rev 4 called these two conditions mathematical **duals**. **That was wrong once a
-zero difference exists** (round-4, grok): the sign test **drops zeros**, so
-`d = [0, 300…360]` gives 7/7 positive → `p = .0156`, **significant** — while the CI's
-lower bound is exactly `0`, which is not `> 0`. The **CI is therefore strictly the
-more conservative** of the two, and it binds. They coincide only when no `d_i = 0`.
-The conjunction is kept deliberately: it is conservative in the direction that
-matters (against a false reproduction), and if `n` or the coverage level ever
-changes, neither condition silently weakens.*
+    per ABBA slot i:  d_i = destinit_i − srcinit_i      (positive = destination slower)
+      D  = median(d_i)                                  low median, even n
+      CI = EXACT distribution-free order-statistic interval on the population median —
+           the narrowest whose coverage is >= 95%.
+           n=8  -> [min(d), max(d)]   coverage 99.22%
+           n=16 -> [d(4), d(13)]      coverage 97.87%
 
-**3. The margins are the effect's, not the bar's (round-3 BLOCKER, both reviewers,
-both reproduced it).**
+No bootstrap (the old one claimed 95% and delivered 92.97%). No approximation.
 
-    BREACH_HI  = +src_med / 10     the effect that reaches ratio 1.10
-    BREACH_LO  = −src_med / 11     the effect that reaches the INVERSE 1.10
-                                   (NOT −src/10: the bar is symmetric in RATIO,
-                                    so the two boundaries are NOT symmetric in ms.
-                                    Rev 3 called a CI of [−190, 0] on src=2000
-                                    "VANISHES" though −190 IS an inversion of 1.105.)
+### The threshold (one)
 
-    MARGIN_HI  = min(BREACH_HI, Δ_ref)      Δ_ref = 230 ms, rig W's measured Δ_P1
-    MARGIN_LO  = max(BREACH_LO, −Δ_ref)
+    T_pos = min(srcinit_med / 10,  Δ_ref)        Δ_ref = 230 ms, rig W's measured effect
+    T_neg = −min(srcinit_med / 11, Δ_ref)
 
-Rev 3 tied the equivalence margin to the **bar alone**, and on a slow arm **the bar
-is WIDER than the effect it is supposed to exclude**. Codex's counterexample, which
-grok reproduced independently: `src = 2500` with **all eight `d_i = 230`** — a
-rig-W-sized effect **in every single pair** — gives ratio 1.092 (bar PASSES), CI
-`[230, 230]`, margin `0.10 × 2500 = 250` ⊃ CI → **rev 3 said `VANISHES`**.
+`src/10` is the project's own **1.10 invariance bar**; `Δ_ref` is the effect rig W
+actually measured. **The smaller of the two** — an effect must matter by *both* standards.
+The negative bound is `−src/11`, **not** `−src/10`, because the bar is symmetric in
+**ratio**, not in milliseconds.
 
-Δ_ref is an **absolute floor** on the margin, in ms, deliberately: a null must
-exclude an effect **the size of the one rig W actually measured**, however slow
-this rig's arms turn out to be. The margin is always the *tighter* of the two,
-i.e. the hardest to vanish.
+### The four cell states — mutually exclusive and exhaustive BY CONSTRUCTION
 
-## POWER GATE — a null must be an EQUIVALENCE result, not an absence of evidence
+They partition the CI's position relative to the thresholds. **There is no label here for
+a new case to walk past**, which is precisely what went wrong seven rounds running.
 
-pf-0 reported a KILL with an instrument that could not resolve the effect it
-killed. This design pre-empts that:
-
-- A **null is only reportable** if the CI lies **strictly inside** `(MARGIN_LO,
-  MARGIN_HI)`. That is a genuine *equivalence* claim: "an effect big enough to
-  matter is ruled out."
-- If the CI **cannot exclude** the margin, the cell is **UNDERPOWERED** and the
-  session verdict is **INCONCLUSIVE-UNDERPOWERED**. A PASS is then *not* "P1
-  vanishes" — it is "this rig could not have seen it".
-- A **reproduction** needs no such gate: an effect that is seen is seen.
-
-## Decision rule — computed BY THE HARNESS, exhaustive, in strict precedence
-
-`scripts/otp12pf_mac_verdict.py` emits `session_verdict.txt`. **The verdict is not
-applied by hand after the numbers are visible.** `scripts/otp12pf_mac_verdict_test.py`
-guards it: **17 cases, every one a defect a reviewer actually found**, each
-**mutation-proven** — reverting that fix in a copy of the engine makes exactly that
-case fail (**11/11 mutations killed**) — plus a **300-input fuzz over the measurand
-AND the controls** asserting the taxonomy has **no unreportable region**. *(Round-4,
-grok: the old fuzz pinned the controls at a clean value, so every dirty-control path
-— the one hiding the BLOCKER — went unexercised. A mutation whose target text has
-drifted is reported as **STALE**, not silently passed.)*
-
-**The bar is integer-exact (`10·hi ≤ 11·lo`) and `≤ 1.10` PASSES** — the project's
-acceptance semantics, unchanged.
-
-### THE THREE QUESTIONS, KEPT SEPARATE (rev 6)
-
-Rounds 3, 4 and 5 each produced the **same class of defect**, because direction,
-magnitude and equivalence were tangled into one expression: every patch closed the one
-path it was shown and left the others open. They are now three questions, each answered
-by the statistic that can actually answer it.
-
-    DIRECTION   -- the SIGN TEST.   directional = sign_p < .05  (zeros dropped)
-                                    dir_pos / dir_neg by the majority sign
-    MAGNITUDE   -- the CI.          material     = bar_fail_pos or CI_lo >= BREACH_HI
-                                    material_neg = bar_fail_neg or CI_hi <= BREACH_LO
-    EQUIVALENCE -- the CI vs MARGIN. null_excl   = CI strictly inside (MARGIN_LO, MARGIN_HI)
-
-    bar_fail_pos = bar FAILS **and** destinit_med > srcinit_med
-    bar_fail_neg = bar FAILS **and** destinit_med < srcinit_med
-
-**A bar failure carries a DIRECTION (round-5 codex, BLOCKER).** It did not, and the bar
-is computed on the **marginal medians** while the CI is computed on the **paired
-differences** — and those two can point *opposite ways*. Verified: at n=16, thirteen
-`+1 ms` pairs plus three pairs falling below the whole distribution make the marginal
-medians fail the bar in the **inverse** direction (1200 vs 1001, ratio 1.199) while
-every surviving pair is `+1 ms`. The old rule called that **`REPRODUCES`** — *P1
-reproducing off one millisecond.* A bar failure is now material only to a claim that
-points **the same way** as the failure.
-
-**DIRECTION IS THE SIGN TEST'S JOB, AND THE CI MUST NOT BE ABLE TO VETO IT (round-5 grok,
-BLOCKER).** The old `pos_effect` demanded `CI_lo > 0`, so **a single zero pair** vetoed
-it: `d = [0, 99×7]` at `src=1000` was "no effect" *and* `null_excl` (99 < margin 100) and
-reported **`VANISHES`** — while the sign test **rejected** at `p = .0156`. Seven of eight
-pairs carried a 99 ms effect, **one millisecond under the bar**, and it was called
-equivalence.
-
-Materiality is also decoupled from a bar *failure*, because `≤1.10` PASSES: a **precise
-10% effect was unreportable by construction** (grok). An effect whose CI reaches the 10%
-threshold is material even where the bar exactly holds.
-
-| cell outcome | condition |
+| state | condition |
 |---|---|
-| **REPRODUCES** | `pos_effect` **and** `material` |
-| **INVERSION** | `neg_effect` **and** `material_neg` |
-| **PARTIAL** | a real effect (either sign) that is **not** material |
-| **VANISHES** | no effect **and** `null_excl` — a genuine equivalence result |
-| **UNDERPOWERED** | no effect and the CI **cannot exclude** the margin |
-| **BAR-FAIL-INCONSISTENT** | the bar **FAILS** but the pairs do **not** agree in sign. The medians breach 1.10 while the paired evidence contradicts itself (pf-0's bistability, in a new dress). **Never a null, never a clean reproduction.** |
-| **UNSTABLE** | *(override)* an arm is bimodal **and** the bar verdict flips on pooled runs |
-| **INCOMPLETE** | the cell did not finish its registered pairs |
+| **EFFECT** | `CI_lo >= T_pos` — destination-initiated is slower, by at least T |
+| **INVERTED** | `CI_hi <= T_neg` — source-initiated is slower, by at least T |
+| **NONE** | `T_neg < CI_lo` and `CI_hi < T_pos` — an effect of size T is **EXCLUDED** (equivalence) |
+| **UNCLEAR** | anything else — the CI spans a threshold; the rig cannot answer |
 
-Session precedence (first match wins; every cell's own outcome is still recorded):
+### The controls are a PRECONDITION, at HALF the threshold
 
-1. **INCOMPLETE** — any registered cell missing, **short of its `RUNS` pairs**, or
-   graded on a **CI below 95% coverage**. *(Round-4, grok, **reproduced**: the engine
-   trusted `meta.complete == yes` and required only ≥1 pair, so a **one-pair** CSV
-   emitted **`VANISHES` at 0% CI coverage** — a confident false equivalence claim.
-   The engine is separately executable and hashed into the manifest, so it must not
-   depend on the harness telling it the truth: it now counts the pairs itself.)*
-2. **RIG-VOID / the controls.** Three rounds running, this rule was written as *"void
-   if the control's outcome is one of {…}"* — and **three times an effect walked through
-   a label that was not on the list**:
-   - *r3 (grok, reproduced): a **bar-FAIL** control whose CI crossed zero was
-     `INCONCLUSIVE` → escaped. Session emitted `VANISHES` with controls at ratio 1.200.*
-   - *r4 (grok, reproduced): a **Δ_ref-sized** control effect on a slow arm was
-     `PARTIAL` → escaped. Session emitted `VANISHES` with every control at `D=+230`.*
-   - *r5 (codex **and** grok, both reproduced): **one zero pair** demoted that same
-     control from `PARTIAL` to `UNDERPOWERED` → escaped **again**. Same headline.*
+**Every control must be `NONE` at `T/2`.** Half, because certifying a control with the
+very number that *defines* the effect is incoherent: it would let the gRPC control carry
+all but 1 ms of P1 while we call the rig clean (round 6 drove exactly that).
 
-   **So it is no longer written that way.** A control is not asked which label it got.
-   It is asked the two questions it exists to answer:
+**If any control fails, NO verdict about the measurand is read — not a reproduction, and
+not a null.** Uncertainty about a rig-wide confound is not evidence that the confound is
+absent, and P1's whole claim is that the effect is *specific* to TCP × mixed.
 
-   **(a) Is it CONTAMINATING?** — it carries a **directional** effect whose CI sits **at
-   or beyond the margin**, or it **fails the bar**, or it is **bimodal**. → **RIG-VOID**:
-   the rig is carrying the very effect we came to measure, and *nothing* here can be
-   trusted. (Also RIG-VOID if the **harness** voided the session — end-load, see Gates.)
+### The session verdict
 
-   **(b) Is it CERTIFIED CLEAN?** — is its effect **excluded** as smaller than the
-   margin (`null_excl`)? **If not, A NULL IS NOT AVAILABLE** → `INCONCLUSIVE-UNDERPOWERED`.
-   "The measurand shows nothing" is **not evidence of absence** when the rig cannot be
-   shown free of a material arm asymmetry — a rig-wide artifact plus a cancellation
-   looks *exactly* like a null.
+1. **INCOMPLETE** — any registered cell short of its `RUNS` pairs, or with a CI below 95%
+   coverage. (Checked against the **data**; `meta.complete` is not believed.)
+2. **RIG-VOID** — the harness voided the session (end-load; see Gates).
+3. **CONTROLS-NOT-CLEAN** — any control is not `NONE` at `T/2`.
+4. **MIXED** — one direction `EFFECT`, the other `INVERTED`: a host×role interaction this
+   rig cannot decompose.
+5. **REPRODUCES** — `EFFECT` in **either** direction. *(P1's rig-W signature is
+   one-directional, so demanding both would rewrite the finding. A messy sibling is
+   reported, never substituted.)*
+6. **INVERTED** — a new finding; never banked as "P1 absent".
+7. **DOES-NOT-REPRODUCE** — **both** measurand cells `NONE`, with clean controls. A
+   genuine equivalence result.
+8. **UNCLEAR** — otherwise. **This is not a null.** The registered remedy is `RUNS=16`.
 
-   An uncertified control **does not kill a REPRODUCTION**: a merely *noisy* control
-   cannot manufacture a consistent 8/8 one-directional effect in the measurand, and
-   voiding real evidence on that basis would be its own false negative *(grok r5: a
-   false void is also a broken instrument)*. A **tiny** consistent asymmetry (host×role
-   — `q` is the faster Mac) is margin-excluded, certifies clean, and is **never silent**:
-   it prints as a CONTROL CAVEAT against P1's TCP-only/mixed-only claim.
-3. **MIXED-SIGN** — one direction REPRODUCES and the other INVERTS: a host×role
-   interaction this rig **cannot decompose**. Inconclusive for the question.
-4. **REPRODUCES** — **either direction**. → *P1 can occur without a Windows peer, on
-   this pair* (with every limit in the table at the top). *(Round-4, grok,
-   **reproduced**: `UNSTABLE` and `BAR-FAIL-INCONSISTENT` outranked this, so a **clean
-   8/8 reproduction** in `nq` was reported as `BAR-FAIL-INCONSISTENT` merely because
-   `qn` was noisy — a **false NON-reproduction** against this document's own
-   "either direction" rule. A messy sibling is now **reported, not substituted**.
-   Demoting them cannot leak a null: `VANISHES` requires **all** measurand cells to
-   vanish, so a messy sibling still blocks it.)*
-5. **INVERSION** — a new finding; never banked as "P1 absent".
-6. **UNSTABLE** — a bimodal arm whose verdict flips. Reported as unstable, not resolved.
-7. **BAR-FAIL-INCONSISTENT** — self-contradictory measurand; report the runs verbatim.
-8. **INCONCLUSIVE-UNDERPOWERED** — the null branch is unavailable.
-9. **VANISHES** — **both** TCP×mixed cells exclude a `min(bar_breach, Δ_ref)`-sized effect.
-10. **PARTIAL** — a real but margin-excluded asymmetry; pf-1 owns it.
-11. **INCONCLUSIVE** — catch-all; report the cells verbatim. *(The fuzz shows it is
-    unreachable; it exists so no input can fall out of the taxonomy.)*
+### What is deliberately ABSENT, and why that is safe
 
-**No outcome may be reported that is not one of these.**
+- **The 1.10 bar takes NO part in inference.** It is computed on the *marginal medians*,
+  reported in every row as the project's **acceptance** criterion, and never consulted.
+  The marginal and paired statistics can disagree in **direction and magnitude**, and
+  every attempt to let one stand in for the other produced a false verdict.
+- **The sign test is reported, not decided on.** At n=8 the CI already implies it
+  (`CI_lo >= T > 0` means *every* pair clears T), so making it a second gate only added
+  an interaction to get wrong. It is printed per cell.
+- **No `UNSTABLE` / `PARTIAL` / `BAR-FAIL-INCONSISTENT` / `UNDERPOWERED` branches, and no
+  precedence stack.** A bimodal arm **widens the CI**, and a wide CI lands in `UNCLEAR` —
+  which is exactly what those branches were hand-coding. Every run of every arm is still
+  printed in `summary.csv`, so bimodality remains visible to the reader.
+- **A real but SUB-THRESHOLD effect is reported, not buried.** A cell can be `NONE` and
+  still carry a consistent effect below T (e.g. 99 ms on a 1000 ms arm, on 7 of 8 pairs).
+  The verdict prints a NOTE naming it. It does not change the outcome — the threshold was
+  registered in advance — but it is **not nothing**, and it does not hide inside the word
+  "none".
 
 ### The escalation, registered in advance
 
-At `n=8` the ≥95% order-statistic interval **is the full range** `[min, max]`, so a
-**single** noisy pair with `|d| ≥ margin` blocks a null **forever**: the rig can then
-only ever say `INCONCLUSIVE-UNDERPOWERED` (round-4, grok — *a null-incapable
-instrument is also broken, just less dangerously*).
+At n=8 the ≥95% interval **is the full range**, so one noisy pair can leave the rig
+`UNCLEAR`. A session returning **`UNCLEAR` or `CONTROLS-NOT-CLEAN`** — and *nothing else*
+— may be re-run **once** at `RUNS=16` (interval `[d(4), d(13)]`, coverage 97.9%, which
+tolerates three outliers per side).
 
-**The one registered escalation**: a session that returns `INCONCLUSIVE-UNDERPOWERED`
-may be re-run **once** at `RUNS=16`, where the interval is `[d₍₄₎, d₍₁₃₎]` (coverage
-**97.9%**) and tolerates three outliers per side.
-
-**It may be triggered by a POWER failure and by nothing else**, and that is now
-**enforced, not merely asserted** (round-5 codex, HIGH: `UNDERPOWERED_ESCALATION=1` was
-sufficient on its own — no prior session named, none verified, "once" unenforced. *A
-re-roll button with a serious-sounding name.*):
-
-- `UNDERPOWERED_ESCALATION` must name the **prior session directory**;
-- the harness **reads its `session_verdict.txt`** and refuses unless it says
-  `INCONCLUSIVE-UNDERPOWERED`;
-- it **burns** the escalation (writes an `ESCALATED` marker), so one underpowered
-  session cannot authorise a second, third, nth re-roll. **"Once" means once.**
-- the trigger is recorded in the manifest (`escalated_from=`).
-
-The trigger is **evidence on disk**, not an operator's assertion. The decision rule is
-**unchanged** in the escalated run.
+It is triggered by a **power failure and by nothing else**, and that is **enforced**: the
+harness reads the prior session's `session_verdict.txt`, requires its data and manifest on
+the registered build, and **burns the escalation against the prior `runs.csv` hash** — so
+copying the session elsewhere cannot buy a second re-roll. **A result you merely dislike
+is not a trigger.**
 
 ### The registered constants are PINNED IN CODE
 
-`DELTA_REF_MS`, `SETTLE_MS`, `LOAD_MAX`, `DRAIN_MBPS`, `DRAIN_QUIET`, `DRAIN_ITERS` and
-the timer tolerance are **literals**, in both the harness and the engine. The harness
-**refuses to start** if one is merely *present* in the environment; the engine refuses a
-mismatched `DELTA_REF_MS`.
+`DELTA_REF_MS`, `SETTLE_MS`, `LOAD_MAX`, `DRAIN_MBPS` and the rest are **literals** in
+both the harness and the engine. The harness **refuses to start** if one is merely
+*present* in the environment. *(They were once `${VAR:-default}`, and `DELTA_REF_MS=240`
+turned a void into a null — i.e. the rule could be retuned from the command line, after
+the data existed, in the direction of the answer you want. **That is not a
+pre-registration.**)* To change one: amend this document and put it back through review.
 
-*(Round-5 codex, BLOCKER: they were `${VAR:-default}`, and `DELTA_REF_MS=240` turned a
-`RIG-VOID` into a `VANISHES`. **A pre-registered rule the operator can retune from the
-command line, after the data exists, in the direction of the answer they want, is not a
-pre-registration at all.**)* To change one: amend this document and put it back through
-review. That is the entire point of the document.
+### The guard test
 
-**Bistability is a STATISTIC, not a vibe.** pf-0 found the rig-W fast arm bimodal,
-where the mode *mixture* moved a median 72 ms at constant conditions. Here: an arm
-whose runs split into two clusters separated by more than the paired spread, **and**
-whose bar verdict flips when graded on pooled runs rather than medians, is
-**UNSTABLE**. All 8 runs of every arm are printed in `summary.csv`, so this is
-checkable rather than asserted.
+`scripts/otp12pf_mac_verdict_test.py`: **26 cases — every one a defect a reviewer actually
+drove out of a previous revision** — each **mutation-proven** (reverting that fix in a copy
+of the engine makes exactly that case fail: **9/9 mutations killed**), plus a 300-input
+fuzz over the measurand **and** the controls. It runs at preflight, cases *and* mutations;
+a vacuous guard refuses the run.
 
 ## The instrument — what round 3 found, and what now guards it
 

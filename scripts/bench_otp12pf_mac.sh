@@ -244,7 +244,7 @@ time_argv() {   # $1 = host; rest = argv. Echoes "MS,RC" or "" on a broken probe
   local h="$1"; shift
   local qa="" a
   for a in "$@"; do qa="$qa $(printf '%q' "$a")"; done
-  hrun "$h" "python3 - $qa <<'PYEOF'
+  hrun "$h" "$(hpy "$h") - $qa <<'PYEOF'
 import subprocess, sys, time
 argv = [a for a in sys.argv[1:] if a]          # an empty flag must not become argv
 err = open('/tmp/mm-client.err', 'wb')
@@ -514,8 +514,12 @@ preflight() {
         || die "UNDERPOWERED_ESCALATION='$prior' has no $_f — the escalation must name a REAL prior session, not a directory with the right words in it"
     done
     v="$(head -1 "$prior/session_verdict.txt" | sed -n 's/^SESSION VERDICT: *//p')"
-    [[ "$v" == "INCONCLUSIVE-UNDERPOWERED" ]] \
-      || die "the prior session '$prior' returned '$v', not INCONCLUSIVE-UNDERPOWERED. RUNS=16 is triggered by a POWER FAILURE and by nothing else — re-running a result you dislike at higher n is p-hacking, and this gate exists to stop it."
+    # The two outcomes that mean "not enough power", and NOTHING else. A result you
+    # merely dislike (REPRODUCES, INVERTED, MIXED, DOES-NOT-REPRODUCE) is not a trigger.
+    case "$v" in
+      UNCLEAR|CONTROLS-NOT-CLEAN) : ;;
+      *) die "the prior session '$prior' returned '$v'. RUNS=16 is triggered ONLY by a POWER failure (UNCLEAR or CONTROLS-NOT-CLEAN) — re-running any other result at higher n is p-hacking, and this gate exists to stop it." ;;
+    esac
     grep -q "binary_identity=$REGISTERED_BUILD" "$prior/staging-manifest.txt" \
       || die "the prior session '$prior' was not run on the registered build $REGISTERED_BUILD — it cannot authorise an escalation"
     # "Once" is bound to the DATA, not the directory: copying the session elsewhere does
@@ -545,6 +549,7 @@ preflight() {
 
   local h p w want got wantb gotb
   for h in n q; do
+    resolve_python "$h" || die_blind "$(hname "$h"): cannot establish an absolute python3 — refusing"
     quiescence_gate "$h"; timemachine_gate "$h"; spotlight_gate "$h"; load_gate "$h"
     timer_gate "$h"                       # THE measurand's clock, proved on the rig
     for p in "$(hblit "$h")" "$(hdaemon "$h")"; do
@@ -603,6 +608,21 @@ write_manifest() {
 }
 
 # --- daemons ------------------------------------------------------------------
+N_PY=""; Q_PY=""
+hpy() { if [[ "$1" == n ]]; then echo "$N_PY"; else echo "$Q_PY"; fi; }
+resolve_python() {
+  local h="$1" p
+  p="$(hrun "$h" "command -v python3" | nocr)" || p=""
+  if [[ "$p" != /* ]]; then
+    log "$(hname "$h"): cannot resolve an absolute python3 (got '$p')"; return 1
+  fi
+  if ! hrun "$h" "test -x '$p'"; then
+    log "$(hname "$h"): python3 at '$p' is not executable"; return 1
+  fi
+  if [[ "$h" == n ]]; then N_PY="$p"; else Q_PY="$p"; fi
+  log "  python3 on $(hname "$h"): $p (absolute — a PATH entry or shell function cannot stand in for the interpreter that MEASURES the settle)"
+}
+
 N_PID=""; Q_PID=""; TEARDOWN_FAILED=0
 daemon_start() {
   local h="$1" cfg mod bin pid
@@ -672,9 +692,10 @@ trap cleanup EXIT
 # --- cold + drain (purge FIRST, then drain, then RE-CHECK) --------------------
 RUN_DRAIN=""; RUN_COLD=""
 drain_host() {   # $1 = host. Echoes drained_<n>x2s | DRAIN-TIMEOUT | DRAIN-ERROR
-  local h="$1" dev
+  local h="$1" dev out
   dev="$(hdisk "$h")"
   [[ -n "$dev" ]] || { echo DRAIN-ERROR; return 0; }
+  out="$(
   # A FAILED iostat must not certify quiet even when it printed a parseable line
   # (round-5 codex, HIGH: a numeric line followed by a NONZERO EXIT still accumulated
   # "quiet" samples). The exit code is now checked BEFORE the value is used.
@@ -690,7 +711,14 @@ for i in \$(seq 1 $DRAIN_ITERS); do
   if [ \"\$ok\" = 1 ]; then quiet=\$((quiet+1)); else quiet=0; fi
   if [ \$quiet -ge $DRAIN_QUIET ]; then echo \"drained_\${i}x2s\"; exit 0; fi
 done
-echo DRAIN-TIMEOUT" 2>/dev/null | nocr | tail -1 || echo DRAIN-ERROR
+echo DRAIN-TIMEOUT" 2>/dev/null | nocr | tail -1)"
+  # ONE token, or it is an error. A multi-line value whose FIRST line says "drained"
+  # must never satisfy the caller's `== drained*` test.
+  case "$out" in
+    drained_[0-9]*x2s) echo "$out" ;;
+    DRAIN-TIMEOUT)     echo DRAIN-TIMEOUT ;;
+    *)                 echo DRAIN-ERROR ;;
+  esac
 }
 prep_run() {   # $1 = dest host
   local dh="$1" cn=ok cq=ok out
@@ -722,7 +750,7 @@ fsync_tree() {   # $1 = DEST host, $2 = landed path -> "ms files bytes settled_m
   # in python, is timed by the same monotonic clock as the walk, and is REPORTED. The
   # caller VOIDS the pair if it did not actually elapse. There is no shell sleep left
   # to shadow, no exit status left to discard, and no narration left to trust.
-  out="$(hrun "$1" "python3 - '$SETTLE_SEC' '$2' <<'PYEOF'
+  out="$(hrun "$1" "$(hpy "$1") - '$SETTLE_SEC' '$2' <<'PYEOF'
 import os, sys, time
 settle = float(sys.argv[1])
 p = sys.argv[2]
@@ -946,6 +974,11 @@ selftest() {
   log "  $(grep -E '^[0-9]+/[0-9]+ mutations killed' "$OUT_DIR/verdict-mutations.txt") — every reverted fix is caught"
   for h in n q; do
     log "--- $(hname "$h") ---"
+    # NOT through gate_probe: it runs its argument in a SUBSHELL, and this function's
+    # whole job is to SET a global. (resolve_disk had the identical bug — the self-test
+    # was breaking its own next gate. Same class, and it caught itself this time.)
+    if resolve_python "$h"; then log "  [OK]     python3       (absolute, not PATH-resolved)"
+    else log "  [BROKEN] python3       — could not resolve an absolute interpreter"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)); fi
     gate_probe "timer         (the measurand's clock)" timer_gate "$h"
     gate_probe "quiescence    (codex/cargo/rustc)"     quiescence_gate "$h"
     gate_probe "time machine  (running OR enabled)"    timemachine_gate "$h"
