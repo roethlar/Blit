@@ -2,7 +2,11 @@
 
 Last updated: 2026-07-14 (49th session)
 
-- **NEXT ACTION — adjudicate ROUND 11 (running), then the run.** Instrument at `8997f92`, prereg **rev 10**, decision rule **rewritten and simplified** (D-2026-07-14-3, owner: "simplify"). **NO DATA HAS EVER BEEN TAKEN**; the harness refuses a timed run (`exit 2` without `CLEARED_BY_REVIEW=1`). **grok's round-10 verdict was READY TO RUN — the first clean verdict in ten rounds** — but codex then found more in a split review, all fixed in `0caca92` + `8997f92`, so round 11 is verifying those. Read `.review/results/macmac-harness-r11.*` first.
+- **NEXT ACTION — fix ROUND 11's findings (all documented, none started), then re-review, then run.** Instrument at `8997f92`, prereg **rev 10**, rule **rewritten and simplified** (D-2026-07-14-3, owner: "simplify"). **NO DATA HAS EVER BEEN TAKEN.** Read `.review/results/macmac-harness-r11.{codex-engine,codex-harness,grok}.md`.
+  **THE ENGINE HAS NO BLOCKERS FOR THE FIRST TIME IN ELEVEN ROUNDS.** Two HIGHs remain in it:
+  (a) **`B` can exceed `T`** on a slow measurand — `T` is capped at Δ_ref=230ms, but the controls' permitted bias is a *fraction* (≤5% of the arm), so at src>4600ms the permitted rig bias is larger than the effect threshold, and `T−B` goes negative (a null becomes impossible while `T+B` licenses an effect that is mostly rig). **Proposed fix: `B ≥ T/2` on any measurand ⇒ `CONTROLS-NOT-CLEAN`.**
+  (b) **`B` hardens each cell but can make the SESSION verdict easier via `MIXED` precedence** — if B pushes one cell out of `EFFECT`, the `MIXED` branch stops firing and the session reports `REPRODUCES` instead of the inconclusive `MIXED`.
+  **THE HARNESS HAS ONE BLOCKER**: **the registered topology is NOT enforced** — NIC/IP/MAC are env-overridable and **the MTU is never checked at all**, so the run could silently go over the 1GbE NIC or at MTU 1500. (pf-0 spent 256 runs on MTU; the rig must prove it is on the fabric it claims.) Plus four HIGHs: `resolve_disk` discards the `df` pipeline status; **both Time Machine gates use `tr -cd '0-9'`, so a malformed `"0%"` reads as "disabled"**; the new per-pair RTT gate is in the code but **not in the pre-registration**; and the drain still discards its producers' statuses.
   - **THE RULE, whole**: per cell, the paired ABBA differences (n is **exactly 8**), their median, one exact ≥95% CI (**at n=8 that IS `[min,max]`, so nothing can be trimmed** — the identity everything leans on), and the full range. One threshold `T = min(src/10, 230ms)`. Four states: **EFFECT** (CI clears +T+B), **INVERTED** (clears −T−B), **NONE** (the **full range** inside ±(T−B)), **UNCLEAR**. `B` = the arm bias the controls could not rule out, **relative to the arm**. **Every control must be NONE at T/2 or NO verdict is read — not a null, and not a reproduction.** The 1.10 bar is reported and takes **no part in inference**; the sign test is reported, not decided on. **No escalation**: a noisy rig is fixed by a quieter rig, not more pairs.
   - **⚠ TO RUN IT THE OWNER MUST CLOSE THEIR CODEX SESSIONS** — nagatha is a bench **END**; the quiescence gate refuses while `codex`/`cargo`/`rustc` runs on **either** Mac. Time Machine OFF on both. Rig: nagatha `10.1.10.92` ↔ `q` `10.1.10.54`, 10GbE/9000, build pinned `f35702a`. **Then `pf-1`.**
   - **CODEX'S CONTENT FILTER**: a whole-instrument review request gets **killed** ("flagged for possible cybersecurity risk") and produces **no review at all** — the "find the fail-open protection" framing reads as vulnerability scanning on top of ssh/sudo code. **Split it (engine / harness) and word it as plain measurement-correctness.** A killed run's file must never be mistaken for a review.
@@ -188,12 +192,5 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   **In-flight: the round-7 review (codex + grok) — results in
   `.review/results/macmac-harness-r7.*`. READ THEM FIRST.** No rig time taken.
   **NEXT: adjudicate round 7 → the run → pf-1.**
-- **2026-07-14 (48th)** — **pf-0 ran; MTU is KILLED as a cause of P1** (`r = −3.1%`;
-  256 runs, 0 voided). codex NOT READY → **7/7 accepted** (`11f0c2a`): every *claim*
-  outran the data — the run is **not powered** for a *contributing*-size effect
-  (46 ms < the 78 ms floor), and declaring the frozen baseline VOID was **not an
-  agent's call**. **The fast arm is BISTABLE** (the mode mixture, not MTU, sets the
-  noise floor). TM on `q` fired 1 min before the run (owner disabled it; the quiet-gate
-  does not catch it); a **physically flapping `en8`** killed three starts.
-  Full: **DEVLOG 2026-07-14 06:20Z**.
+- **2026-07-14 (48th)** — pf-0 ran; **MTU is KILLED as a cause of P1** (`r = −3.1%`, 256 runs). The fast arm is **BISTABLE**. Full: **DEVLOG 2026-07-14 06:20Z**.
 - *(47th and earlier pruned to the cap — see DEVLOG 2026-07-06..14.)*
