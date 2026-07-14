@@ -1,24 +1,39 @@
 # otp-12 Mac↔Mac rig — PRE-REGISTRATION (written before any timed run)
 
-**Status**: Pre-registered, **revision 4**. **NO DATA EXISTS YET.**
+**Status**: Pre-registered, **revision 5**. **NO DATA EXISTS YET.**
 
 Every revision of this document and its instrument has been reviewed before it
-measured anything, and every review found defects capable of a **false claim**:
+measured anything, and **every review has found defects capable of a false claim**:
 
 - Round 1 (design, `f0343f4`): NOT READY — 1 BLOCKER + 7 HIGH + 1 LOW → **9/9
   accepted** (`.review/results/macmac-prereg.gpt-verdict.md`).
 - Round 2 (instrument, `e1e351d`): NOT READY — 3 BLOCKER + 6 HIGH + 1 MEDIUM + 1
   LOW → **11/11 accepted** (`.review/results/macmac-harness.gpt-verdict.md`).
-- Round 3 (the reworked instrument, `24660ae`): **NOT READY** — codex: 5 BLOCKER +
-  6 HIGH + 1 MEDIUM → **12/12 accepted**; **grok** (second reviewer, D-2026-07-14-2)
-  independently **confirmed both blockers with its own measurements** and found
-  **3 more** → **15/15 accepted**.
+- Round 3 (reworked instrument, `24660ae`): **NOT READY** — codex: 5 BLOCKER + 6
+  HIGH + 1 MEDIUM → **12/12 accepted**; **grok** (second reviewer, D-2026-07-14-2)
+  independently **confirmed both blockers with its own measurements** and found **3
+  more** → **15/15 accepted**.
   (`.review/results/macmac-harness-r2.{gpt,grok}-verdict.md`)
+- Round 4 (the round-3 rework, `cae2e0f`): **NOT SAFE TO RUN** — **grok**, which
+  **drove the engine to a clean `VANISHES` while every control carried the full
+  rig-W effect** → **9 findings, 9 accepted** (1 BLOCKER, 3 HIGH, 4 MEDIUM, 1 LOW).
+  **Codex could not review this round — its credits are exhausted until 2026-07-19**
+  (`.review/results/macmac-harness-r3.codex.md` holds the usage-limit error, not a
+  review). **The slice is therefore NOT cleared: D-2026-07-14-2 makes codex the
+  mandatory reviewer and grok "never runs alone."**
+  (`.review/results/macmac-harness-r3.grok-verdict.md`)
 
-**The rule below is amended in rev 4. That is legitimate only because NO DATA HAS
-BEEN TAKEN** — before the first run is the only honest time to change a
-pre-registered rule, and every amendment here is forced by a reviewer's finding,
-not by a number anyone has seen.
+**The rule below has been amended in rev 4 and again in rev 5. That is legitimate
+only because NO DATA HAS BEEN TAKEN** — before the first run is the only honest time
+to change a pre-registered rule, and every amendment is forced by a reviewer's
+finding, not by a number anyone has seen.
+
+**The pattern to distrust: every rework has introduced a defect of its own.** Round
+2's killer (the timer) was introduced by the round-1 rework. Round 4's BLOCKER (the
+control void) is the *same structural error* as round 3's — the equivalence margin
+was fixed for the **measurand** and left bar-tied for the **controls**, so a control
+carrying a full rig-W-sized effect was labelled "sub-bar" and escaped the void.
+**Fixing a bug in one place is not fixing its class.**
 
 **Parent**: `docs/plan/OTP12_PERF_FINDINGS.md` (Active, D-2026-07-13-1).
 
@@ -123,11 +138,16 @@ taken **deliberately**, and the true coverage is printed in every row.
 read it, so 7/8 positive pairs could report `REPRODUCES` while the registered
 two-sided test said `p = .0703`. An effect now requires **both** `CI` exclusion of
 zero **and** `sign_p < .05`. At n=8 that means **all eight pairs must agree in
-sign** (k=8 → p=.0078; k=7 → p=.0703, not significant). *(These two conditions are
-mathematical **duals** at this level — the order-statistic CI **is** the inverted
-sign test. Both are stated because either alone is sufficient, and the redundancy
-is deliberate: if `n` or the coverage level ever changes, neither silently
-weakens.)*
+sign** (k=8 → p=.0078; k=7 → p=.0703, not significant).
+
+*Rev 4 called these two conditions mathematical **duals**. **That was wrong once a
+zero difference exists** (round-4, grok): the sign test **drops zeros**, so
+`d = [0, 300…360]` gives 7/7 positive → `p = .0156`, **significant** — while the CI's
+lower bound is exactly `0`, which is not `> 0`. The **CI is therefore strictly the
+more conservative** of the two, and it binds. They coincide only when no `d_i = 0`.
+The conjunction is kept deliberately: it is conservative in the direction that
+matters (against a false reproduction), and if `n` or the coverage level ever
+changes, neither condition silently weakens.*
 
 **3. The margins are the effect's, not the bar's (round-3 BLOCKER, both reviewers,
 both reproduced it).**
@@ -170,10 +190,13 @@ killed. This design pre-empts that:
 
 `scripts/otp12pf_mac_verdict.py` emits `session_verdict.txt`. **The verdict is not
 applied by hand after the numbers are visible.** `scripts/otp12pf_mac_verdict_test.py`
-guards it: 12 cases, **every one a defect a reviewer actually found**, each
-**mutation-proven** (reverting the fix in a copy of the engine makes exactly that
-case fail: 7/7 mutations killed), plus a 300-input fuzz asserting the taxonomy has
-**no unreportable region**.
+guards it: **17 cases, every one a defect a reviewer actually found**, each
+**mutation-proven** — reverting that fix in a copy of the engine makes exactly that
+case fail (**11/11 mutations killed**) — plus a **300-input fuzz over the measurand
+AND the controls** asserting the taxonomy has **no unreportable region**. *(Round-4,
+grok: the old fuzz pinned the controls at a clean value, so every dirty-control path
+— the one hiding the BLOCKER — went unexercised. A mutation whose target text has
+drifted is reported as **STALE**, not silently passed.)*
 
 **The bar is integer-exact (`10·hi ≤ 11·lo`) and `≤ 1.10` PASSES** — the project's
 acceptance semantics, unchanged. But **materiality is not the bar alone**:
@@ -202,31 +225,69 @@ even where the bar exactly holds.
 
 Session precedence (first match wins; every cell's own outcome is still recorded):
 
-1. **INCOMPLETE** — any registered cell missing or short of its pairs.
-2. **RIG-VOID** — **any control cell that FAILS THE BAR, unconditionally**, or that
-   is UNSTABLE / REPRODUCES / INVERSION / BAR-FAIL-INCONSISTENT. *(Round-3, grok,
-   **reproduced live**: rev 3 additionally required the control's outcome to fall
-   outside a set, so a control with **bar FAIL** whose CI crossed zero became
-   `INCONCLUSIVE` and **escaped the void** — grok drove a session that emitted
-   `VANISHES` while its gRPC controls sat at **ratio 1.200, bar FAIL**. No
-   secondary test may ever let a bar-failing control escape.)*
-   Controls that are merely `PARTIAL` or `UNDERPOWERED` do **not** void the rig,
-   but they are **never silent**: they are printed as a CONTROL CAVEAT against
-   P1's TCP-only/mixed-only claim.
-3. **UNSTABLE** — a bimodal arm whose verdict flips. Reported as unstable, not resolved.
-4. **BAR-FAIL-INCONSISTENT** — self-contradictory measurand; report the runs verbatim.
-5. **MIXED-SIGN** — one direction REPRODUCES and the other INVERTS: a host×role
+1. **INCOMPLETE** — any registered cell missing, **short of its `RUNS` pairs**, or
+   graded on a **CI below 95% coverage**. *(Round-4, grok, **reproduced**: the engine
+   trusted `meta.complete == yes` and required only ≥1 pair, so a **one-pair** CSV
+   emitted **`VANISHES` at 0% CI coverage** — a confident false equivalence claim.
+   The engine is separately executable and hashed into the manifest, so it must not
+   depend on the harness telling it the truth: it now counts the pairs itself.)*
+2. **RIG-VOID** — **any control that is not CLEAN**, where clean means its own effect
+   is **excluded as smaller than the margin** (it passes the same equivalence test
+   the measurand must pass). A control voids if it **FAILS THE BAR**
+   (unconditionally), is **UNSTABLE / REPRODUCES / INVERSION / BAR-FAIL-INCONSISTENT**,
+   or carries a **real effect the margin does not exclude**. Also RIG-VOID if the
+   **harness** voided the session (end-load — see Gates).
+   - *Round-3 (grok, reproduced): a control with **bar FAIL** whose CI crossed zero
+     became `INCONCLUSIVE` and **escaped the void** — a session emitted `VANISHES`
+     with its gRPC controls at **ratio 1.200, bar FAIL**.*
+   - *Round-4 (grok, **reproduced** — the same hole one level down): a control with a
+     **real, 8/8, rig-W-sized effect** (`d_i = 230` in every pair) on a **slow** arm
+     (`src=2500` → ratio **1.092**, bar **PASS**) landed as `PARTIAL` and **escaped**,
+     so the session printed a clean **`VANISHES`** while **every control carried the
+     exact effect size the power gate is built around**. On a slow arm the bar is
+     WIDER than Δ_ref — which is precisely why the measurand's margin was fixed, and
+     the control rule was still using the bar. **Control materiality is now the same
+     absolute materiality as everything else.***
+   - A **tiny** consistent control asymmetry (host×role: `q` is the faster Mac) is
+     excluded by the margin and does **not** void — otherwise every session dies.
+     Controls that are `PARTIAL`-but-margin-excluded, or `UNDERPOWERED`, are **never
+     silent**: they print as a CONTROL CAVEAT against P1's TCP-only/mixed-only claim.
+3. **MIXED-SIGN** — one direction REPRODUCES and the other INVERTS: a host×role
    interaction this rig **cannot decompose**. Inconclusive for the question.
-6. **REPRODUCES** — either direction. → *P1 can occur without a Windows peer, on
-   this pair* (with every limit in the table at the top).
-7. **INVERSION** — a new finding; never banked as "P1 absent".
+4. **REPRODUCES** — **either direction**. → *P1 can occur without a Windows peer, on
+   this pair* (with every limit in the table at the top). *(Round-4, grok,
+   **reproduced**: `UNSTABLE` and `BAR-FAIL-INCONSISTENT` outranked this, so a **clean
+   8/8 reproduction** in `nq` was reported as `BAR-FAIL-INCONSISTENT` merely because
+   `qn` was noisy — a **false NON-reproduction** against this document's own
+   "either direction" rule. A messy sibling is now **reported, not substituted**.
+   Demoting them cannot leak a null: `VANISHES` requires **all** measurand cells to
+   vanish, so a messy sibling still blocks it.)*
+5. **INVERSION** — a new finding; never banked as "P1 absent".
+6. **UNSTABLE** — a bimodal arm whose verdict flips. Reported as unstable, not resolved.
+7. **BAR-FAIL-INCONSISTENT** — self-contradictory measurand; report the runs verbatim.
 8. **INCONCLUSIVE-UNDERPOWERED** — the null branch is unavailable.
 9. **VANISHES** — **both** TCP×mixed cells exclude a `min(bar_breach, Δ_ref)`-sized effect.
-10. **PARTIAL** — a real but sub-bar asymmetry; pf-1 owns it.
+10. **PARTIAL** — a real but margin-excluded asymmetry; pf-1 owns it.
 11. **INCONCLUSIVE** — catch-all; report the cells verbatim. *(The fuzz shows it is
     unreachable; it exists so no input can fall out of the taxonomy.)*
 
 **No outcome may be reported that is not one of these.**
+
+### The escalation, registered in advance
+
+At `n=8` the ≥95% order-statistic interval **is the full range** `[min, max]`, so a
+**single** noisy pair with `|d| ≥ margin` blocks a null **forever**: the rig can then
+only ever say `INCONCLUSIVE-UNDERPOWERED` (round-4, grok — *a null-incapable
+instrument is also broken, just less dangerously*).
+
+**The one registered escalation**: a session that returns `INCONCLUSIVE-UNDERPOWERED`
+may be re-run **once** at `RUNS=16`, where the interval is `[d₍₄₎, d₍₁₃₎]` (coverage
+**97.9%**) and tolerates three outliers per side. The harness refuses `RUNS=16`
+unless `UNDERPOWERED_ESCALATION=1` names the prior underpowered session.
+
+**It may be triggered by a POWER failure and by nothing else.** It must never be used
+to re-roll a result someone dislikes — that is the p-hacking this pre-registration
+exists to prevent. The decision rule is **unchanged** in the escalated run.
 
 **Bistability is a STATISTIC, not a vibe.** pf-0 found the rig-W fast arm bimodal,
 where the mode *mixture* moved a median 72 ms at constant conditions. Here: an arm
@@ -305,8 +366,13 @@ three-line string that could never equal one MAC. The gate now checks the ARP en
 - **SPOTLIGHT, BOTH MACS** — `mds_stores` CPU, taken as the **MAX across samples**
   (rev 3 took the last, so a late idle sample could overwrite an earlier busy one);
   a failed `top` is an **error**, not 0%.
-- **LOAD** — `load1` on both Macs at start **and end**, recorded **before** the
-  verdict is computed (rev 3 logged it after, so a session could not void on it).
+- **LOAD** — `load1` on both Macs at start **and end**. A start `load1` above 3.0
+  refuses; an **end** `load1` above 3.0 **VOIDS THE SESSION** (`RIG-VOID`), because a
+  mid-session load spike is exactly the contamination the start gate exists to stop.
+  *(Round-4, grok: rev 4 moved the end-load logging before the verdict and its
+  comment claimed a session "can void on it" — but the code only **logged** it and
+  graded anyway. A doc claim the code did not honour: the very defect class this
+  review exists to kill.)*
 - **COLD CACHES** both ends every run (`sudo -n /usr/sbin/purge`); a failed purge
   **VOIDS the pair**.
 - **DRAIN** — destination disk quiet before each window (`< 2 MB/s`, 3 consecutive
@@ -333,8 +399,11 @@ three-line string that could never equal one MAC. The gate now checks the ARP en
   route on a directly-connected subnet installs a black hole that still reports the
   right interface), and the route egresses the 10GbE NIC (macOS routes by service
   order, so a 1GbE NIC can win and every run would go over gigabit).
-- **THE VERDICT ENGINE'S OWN GUARD TEST RUNS AT PREFLIGHT.** If the decision rule
-  fails its own cases, no data is taken.
+- **THE VERDICT ENGINE'S OWN GUARD TEST RUNS AT PREFLIGHT — cases AND mutations.**
+  If the decision rule fails its own cases, or if the proof that guards it turns out
+  to be **vacuous** (a mutation survives), **no data is taken**. *(Round-4, grok: rev
+  4's preflight ran only the cases, so a silently-reverted fix could still pass if
+  the cases happened to pass for another reason.)*
 
 ## What this does NOT establish
 

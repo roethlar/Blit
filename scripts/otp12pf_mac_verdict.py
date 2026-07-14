@@ -96,16 +96,39 @@ CONTROL_CELLS = cells_env("CONTROL_CELLS")
 # merely filtered lets a one-cell run emit VANISHES while claiming "both" cells
 # vanished (codex r2 BLOCKER 1).
 REGISTERED_CELLS = cells_env("REGISTERED_CELLS") or (VERDICT_CELLS + CONTROL_CELLS)
+# The engine is separately executable and is hashed into the manifest, so it must
+# not depend on the harness telling it the truth. Round-3 grok (HIGH): it trusted
+# `meta.complete == yes` and never checked n, so a CSV with ONE pair and a lying
+# meta produced VANISHES at 0% CI coverage -- a confident false equivalence claim.
+REQUIRED_PAIRS = int(os.environ.get("REQUIRED_PAIRS", "8"))
+MIN_COVERAGE = 0.95
+# A session-level void the HARNESS detected (e.g. end-load above the bar). The
+# engine must be able to refuse a verdict on evidence it cannot see itself.
+SESSION_VOID_REASON = os.environ.get("SESSION_VOID_REASON", "").strip()
 
 rows = list(csv.DictReader(open(runs_p)))
 meta = {r["cell"]: r for r in csv.DictReader(open(meta_p))}
+
+
+def ms_of(r):
+    """A corrupt row must stop the grading, LOUDLY. Mapping it to a soft outcome
+    would hide the corruption; a traceback would obscure it (round-3 grok, LOW)."""
+    try:
+        return int(r["ms"])
+    except (TypeError, ValueError):
+        sys.stderr.write(
+            "CORRUPT ROW: cell=%s arm=%s run=%s has non-numeric ms=%r. Refusing to "
+            "grade -- a benchmark whose rows do not parse has no verdict.\n"
+            % (r.get("cell"), r.get("arm"), r.get("run"), r.get("ms")))
+        raise SystemExit(2)
+
 
 by, slots, void = {}, {}, {}
 for r in rows:
     key = (r["cell"], r["arm"])
     if r["valid"] == "yes":
-        by.setdefault(key, []).append(int(r["ms"]))
-        slots.setdefault((r["cell"], r["run"]), {})[r["arm"]] = int(r["ms"])
+        by.setdefault(key, []).append(ms_of(r))
+        slots.setdefault((r["cell"], r["run"]), {})[r["arm"]] = ms_of(r)
     else:
         void[key] = void.get(key, 0) + 1
 
@@ -117,12 +140,19 @@ def med(v):
 
 
 def complete(c):
+    """COMPLETE is checked against the DATA, not against meta's say-so.
+
+    Round-3 (grok, HIGH): this trusted `meta.complete == yes` and required only
+    >= 1 pair, so a one-pair CSV with a lying meta graded as a full cell and
+    emitted VANISHES at 0% CI coverage. The pair count is now enforced here, and
+    the CI's coverage is enforced at the grading site.
+    """
     if c not in meta or meta[c].get("complete") != "yes":
         return False
     arms = [a for (cc, a) in by if cc == c]
     if "srcinit" not in arms or "destinit" not in arms:
         return False
-    return len(paired(c)) > 0
+    return len(paired(c)) >= REQUIRED_PAIRS
 
 
 def paired(c):
@@ -201,6 +231,14 @@ with open(pair_p, "w") as f:
         D = med(d)
         ci_lo, ci_hi, cov = median_ci(d)
         p, k, n = sign_p(d)
+
+        # A CI that does not reach the registered confidence level cannot ground
+        # ANY outcome -- least of all a null. Grading on it is how the n=1 session
+        # emitted VANISHES at 0% coverage.
+        if cov < MIN_COVERAGE:
+            cell_outcome[c] = "INCOMPLETE"
+            f.write("%s,%d,,,,,,,,%.4f,,,,,,,%d,,,INCOMPLETE\n" % (c, len(d), cov, DELTA_REF))
+            continue
 
         # The bar is symmetric in RATIO, so the two boundaries are NOT symmetric in
         # ms: +src/10 reaches 1.10, but only -src/11 reaches the INVERSE 1.10.
@@ -282,22 +320,50 @@ incomplete = [c for c in REGISTERED_CELLS if cell_outcome.get(c) == "INCOMPLETE"
 ctrl = [c for c in CONTROL_CELLS if c in cell_outcome]
 verd = [c for c in VERDICT_CELLS if c in cell_outcome]
 
-# RIG-VOID: a control that FAILS THE BAR voids the rig, unconditionally -- no
-# secondary outcome test may let it escape (grok reproduced the fail-open: gRPC
-# controls at ratio 1.200 / bar FAIL, session still emitted VANISHES). An UNSTABLE
-# control, or a control showing an effect it must not show, voids it too.
-ctrl_void = [c for c in ctrl
-             if cell_detail.get(c, {}).get("bar") == "FAIL"
-             or cell_outcome[c] in ("UNSTABLE", "REPRODUCES", "INVERSION",
-                                    "BAR-FAIL-INCONSISTENT")]
-# Controls that are merely noisy or sub-bar do not void, but they are NEVER silent.
-ctrl_caveat = [c for c in ctrl if cell_outcome[c] in ("PARTIAL", "UNDERPOWERED")]
+# RIG-VOID. A control must be CLEAN, and "clean" is measured by the SAME absolute
+# materiality the power gate uses -- not by the bar alone.
+#
+# Round 2 (grok): a control with bar FAIL whose CI crossed zero escaped the void,
+# and a session emitted VANISHES with its controls at ratio 1.200. Fixed.
+# Round 3 (grok, BLOCKER -- REPRODUCED): the SAME structural hole survived one level
+# down. A control with a real, 8/8, rig-W-sized effect (d_i = 230 in every pair) on
+# a SLOW arm (src=2500 -> ratio 1.092) is bar-PASS, lands as PARTIAL, and escaped
+# the void -- so the session printed a clean VANISHES while every control carried
+# the exact effect size the power gate is built around. On a slow arm the bar is
+# WIDER than DELTA_REF; that is the very thing the margin exists to fix, and the
+# control rule was still using the bar.
+#
+# A control therefore voids the rig unless its own effect is EXCLUDED as smaller
+# than the margin (null_excl) -- i.e. unless the control itself passes the
+# equivalence test. A tiny consistent asymmetry (host x role: q is the faster Mac)
+# is immaterial and does NOT void; a margin-sized one does.
+def _ctrl_dirty(c):
+    dt = cell_detail.get(c, {})
+    if dt.get("bar") == "FAIL":
+        return True
+    if cell_outcome[c] in ("UNSTABLE", "REPRODUCES", "INVERSION", "BAR-FAIL-INCONSISTENT"):
+        return True
+    # A real effect that is NOT excluded as smaller than the margin.
+    return cell_outcome[c] == "PARTIAL" and not dt.get("null_excl", False)
+
+
+ctrl_void = [c for c in ctrl if _ctrl_dirty(c)]
+# Controls that are noisy, or that carry a real but margin-excluded asymmetry, do
+# not void the rig -- but they are NEVER silent.
+ctrl_caveat = [c for c in ctrl
+               if c not in ctrl_void and cell_outcome[c] in ("PARTIAL", "UNDERPOWERED")]
 
 if incomplete:
     verdict = "INCOMPLETE"
-    why = ("registered cells missing or short of their pairs: %s. The full "
-           "registered set must complete before any verdict is read."
-           % ", ".join(incomplete))
+    why = ("registered cells missing, short of their %d pairs, or graded on a CI "
+           "below the registered %.0f%% coverage: %s. The full registered set must "
+           "complete before any verdict is read."
+           % (REQUIRED_PAIRS, 100 * MIN_COVERAGE, ", ".join(incomplete)))
+elif SESSION_VOID_REASON:
+    # Evidence the engine cannot see for itself (end-load, an operator abort).
+    verdict = "RIG-VOID"
+    why = ("the harness voided the session: %s. NO verdict may be read."
+           % SESSION_VOID_REASON)
 elif ctrl_void:
     verdict = "RIG-VOID"
     why = ("control cell(s) are not clean: %s. A rig whose gRPC/large control "
@@ -315,17 +381,17 @@ else:
     part = [c for c, o in outs.items() if o == "PARTIAL"]
     under = [c for c, o in outs.items() if o == "UNDERPOWERED"]
 
-    if unst:
-        verdict = "UNSTABLE"
-        why = ("bimodal arm(s) whose bar verdict flips on pooled runs: %s. Report as "
-               "unstable, NOT resolved." % ", ".join(unst))
-    elif barfi:
-        verdict = "BAR-FAIL-INCONSISTENT"
-        why = ("the medians breach the 1.10 bar in %s, but the paired differences do "
-               "not agree in sign. This is NOT a null and NOT a clean reproduction: "
-               "the cell is self-contradictory (pf-0's bistability shape). Report the "
-               "runs verbatim." % ", ".join(barfi))
-    elif repro and inv:
+    # PRECEDENCE. A clean reproduction in EITHER direction answers the registered
+    # question, and a messy SIBLING cell does not retract it (round-3 grok, HIGH:
+    # UNSTABLE and BAR-FAIL-INCONSISTENT outranked REPRODUCES, so a clean 8/8
+    # reproduction in nq was reported as BAR-FAIL-INCONSISTENT because qn was noisy
+    # -- a FALSE NON-REPRODUCTION against the pre-registration's "either direction"
+    # rule). MIXED-SIGN still outranks it: a reproduction in one direction and an
+    # INVERSION in the other is evidence of the host x role artifact itself.
+    #
+    # Demoting UNSTABLE below REPRODUCES cannot leak a null: VANISHES requires ALL
+    # measurand cells to VANISH, so any unstable sibling still blocks it.
+    if repro and inv:
         verdict = "MIXED-SIGN"
         why = ("reproduces in %s but INVERTS in %s -- a host x role interaction "
                "this rig cannot decompose. INCONCLUSIVE for the pairing question."
@@ -338,10 +404,28 @@ else:
                "does NOT name the mechanism, it does NOT kill H1 (H1 accuses code, and "
                "that code runs here too), and it leaves macOS/APFS and host x role "
                "explanations OPEN." % ", ".join(repro))
+        messy = [c for c in (unst + barfi)]
+        if messy:
+            why += ("\n\nSIBLING CAVEAT: the other direction is not clean (%s). The "
+                    "pre-registration answers the question on EITHER direction, so "
+                    "the reproduction stands -- but the sibling is reported, not "
+                    "buried, and it is NOT evidence of an inversion."
+                    % ", ".join("%s(%s)" % (c, cell_outcome[c]) for c in messy))
     elif inv:
         verdict = "INVERSION"
         why = ("source-initiated is the SLOW arm in: %s. A NEW finding; never bank "
                "this as 'P1 absent'." % ", ".join(inv))
+    elif unst:
+        verdict = "UNSTABLE"
+        why = ("bimodal arm(s) whose bar verdict flips on pooled runs: %s. Report as "
+               "unstable, NOT resolved." % ", ".join(unst))
+    elif barfi:
+        verdict = "BAR-FAIL-INCONSISTENT"
+        why = ("the medians breach the 1.10 bar in %s, but the paired evidence does "
+               "NOT establish a consistent effect (the CI includes 0, or the sign "
+               "test does not reject). This is NOT a null and NOT a clean "
+               "reproduction: the cell contradicts itself (pf-0's bistability shape). "
+               "Report the runs verbatim." % ", ".join(barfi))
     elif under:
         verdict = "INCONCLUSIVE-UNDERPOWERED"
         why = ("cells cannot exclude an effect of size min(bar_breach, %d ms): %s. A "
@@ -363,10 +447,16 @@ else:
         why = "no registered case matched cleanly; report the cells verbatim."
 
     if ctrl_caveat:
-        why += ("\n\nCONTROL CAVEAT (does not void the rig, and is not silent): %s "
-                "show a real sub-bar asymmetry or cannot exclude one. P1 is claimed "
-                "TCP-only and mixed-only; weigh this against that claim."
-                % ", ".join("%s(%s)" % (c, cell_outcome[c]) for c in ctrl_caveat))
+        # NOT "sub-bar": a Delta_ref-sized control effect is bar-sub only because the
+        # arm is slow, and those now VOID. What survives here is either excluded as
+        # smaller than the MARGIN, or undetectable. Say that, precisely.
+        why += ("\n\nCONTROL CAVEAT (does not void the rig, and is not silent): %s. A "
+                "PARTIAL control carries a real asymmetry that is EXCLUDED as smaller "
+                "than the margin (min(bar_breach, %d ms)); an UNDERPOWERED control "
+                "could not resolve one either way. P1 is claimed TCP-only and "
+                "mixed-only; weigh this against that claim."
+                % (", ".join("%s(%s)" % (c, cell_outcome[c]) for c in ctrl_caveat),
+                   DELTA_REF))
 
 lines.append("SESSION VERDICT: %s" % verdict)
 lines.append("")

@@ -50,9 +50,15 @@ OUTCOMES = {"REPRODUCES", "INVERSION", "PARTIAL", "VANISHES", "UNDERPOWERED",
             "RIG-VOID", "INCONCLUSIVE", "INCONCLUSIVE-UNDERPOWERED"}
 
 
-def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=()):
-    """Run the engine on a synthetic session and return its SESSION VERDICT."""
+def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=(),
+            per_cell=None, void_reason=""):
+    """Run the engine on a synthetic session and return its SESSION VERDICT.
+
+    per_cell overrides individual cells with (d, src) so the two measurand
+    directions can differ -- without it, a one-direction result cannot be tested.
+    """
     control_d = [5] * 8 if control_d is None else control_d
+    per_cell = per_cell or {}
     tmp = tempfile.mkdtemp()
     runs, meta = os.path.join(tmp, "runs.csv"), os.path.join(tmp, "meta.csv")
     present = [c for c in REGISTERED if c not in drop_cells]
@@ -60,18 +66,27 @@ def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=
         w = csv.writer(f)
         w.writerow("cell,arm,build,initiator,run,ms,flush_ms,files,bytes,exit,drain,cold,valid".split(","))
         for cell in present:
-            d, s = (measurand_d, src) if cell in MEASURANDS else (control_d, control_src)
+            if cell in per_cell:
+                d, s = per_cell[cell]
+            elif cell in MEASURANDS:
+                d, s = measurand_d, src
+            else:
+                d, s = control_d, control_src
             for i, di in enumerate(d, 1):
                 w.writerow([cell, "srcinit", "x", "h", i, s, 0, 1, 1, 0, "drained_1x2s", "cold", "yes"])
                 w.writerow([cell, "destinit", "x", "h", i, s + di, 0, 1, 1, 0, "drained_1x2s", "cold", "yes"])
     with open(meta, "w") as f:
         f.write("cell,pairs_attempted,complete\n")
         for cell in present:
+            # `complete=yes` is asserted even when the cell is SHORT: the engine must
+            # not believe it (grok drove VANISHES out of a 1-pair session at 0% CI
+            # coverage because the engine trusted this column).
             f.write("%s,8,yes\n" % cell)
     env = dict(os.environ, DELTA_REF_MS="230",
                VERDICT_CELLS=",".join(MEASURANDS),
                CONTROL_CELLS=",".join(CONTROLS),
-               REGISTERED_CELLS=",".join(REGISTERED))
+               REGISTERED_CELLS=",".join(REGISTERED),
+               REQUIRED_PAIRS="8", SESSION_VOID_REASON=void_reason)
     out = subprocess.run([sys.executable, engine(), runs, meta,
                           os.path.join(tmp, "s.csv"), os.path.join(tmp, "p.csv"),
                           os.path.join(tmp, "v.csv"), os.path.join(tmp, "sv.txt")],
@@ -139,6 +154,40 @@ CASES = [
     ("a null the rig could not have SEEN is UNDERPOWERED, not VANISHES",
      dict(measurand_d=[-400, -300, -100, 0, 0, 100, 300, 400], src=2000),
      "INCONCLUSIVE-UNDERPOWERED", "VANISHES"),
+
+    # --- ROUND 3 (grok) -------------------------------------------------------
+    # THE BLOCKER, reproduced live: the round-2 RIG-VOID fix was only half of the
+    # hole. A control carrying a real, 8/8, rig-W-sized effect on a SLOW arm is
+    # bar-PASS (ratio 1.092) and lands as PARTIAL -- and PARTIAL did not void. The
+    # session printed a clean VANISHES while EVERY control showed the exact effect
+    # size the power gate is built around.
+    ("grok r3 (reproduced): a Delta_ref-sized control effect must VOID the rig",
+     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+          control_d=[230] * 8, control_src=2500),
+     "RIG-VOID", "VANISHES"),
+
+    # ...but a TINY consistent control asymmetry is host x role (q is the faster
+    # Mac), is excluded as smaller than the margin, and must NOT void the rig --
+    # or every session dies.
+    ("grok r3: a margin-excluded control asymmetry must NOT void the rig",
+     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+          control_d=[5] * 8, control_src=1000),
+     "VANISHES", "RIG-VOID"),
+
+    ("grok r3 (reproduced): n=1 with complete=yes must not grade at 0% coverage",
+     dict(measurand_d=[0], src=2000, control_d=[5], control_src=1000),
+     "INCOMPLETE", "VANISHES"),
+
+    ("grok r3 (reproduced): a clean one-direction REPRODUCES must not be masked",
+     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+          per_cell={"nq_tcp_mixed": ([300, 310, 320, 330, 340, 350, 360, 370], 1000),
+                    "qn_tcp_mixed": ([-20, 300, 310, 320, 330, 340, 350, 360], 1000)}),
+     "REPRODUCES", "BAR-FAIL-INCONSISTENT"),
+
+    ("grok r3: a harness-detected session void (end-load) refuses a verdict",
+     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+          void_reason="end-load on q is 9.1 (> 3.0)"),
+     "RIG-VOID", "VANISHES"),
 ]
 
 
@@ -158,17 +207,25 @@ def run_cases():
 
 
 def fuzz(n=300):
-    """The taxonomy must be EXHAUSTIVE: no input may land outside the registered set."""
+    """The taxonomy must be EXHAUSTIVE: no input may land outside the registered set.
+
+    The CONTROLS are fuzzed too. Round-3 grok: the old fuzz perturbed only the
+    measurand and pinned the controls at [5]*8, so every dirty-control path -- the
+    one that hid the BLOCKER -- went unexercised.
+    """
     rng = random.Random(4242)
     bad = 0
     for _ in range(n):
         d = [rng.randint(-600, 600) for _ in range(8)]
+        cd = [rng.randint(-300, 300) for _ in range(8)]
         src = rng.choice([600, 1000, 2000, 2500, 5000])
-        got = session(measurand_d=d, src=src)
+        csrc = rng.choice([600, 1000, 2500, 5000])
+        got = session(measurand_d=d, src=src, control_d=cd, control_src=csrc)
         if got not in OUTCOMES:
-            print("*** UNREGISTERED OUTCOME %r for d=%s src=%d" % (got, d, src))
+            print("*** UNREGISTERED OUTCOME %r for d=%s src=%d ctrl=%s" % (got, d, src, cd))
             bad += 1
-    print("fuzz: %d/%d inputs produced a registered outcome" % (n - bad, n))
+    print("fuzz: %d/%d inputs produced a registered outcome (measurand AND controls fuzzed)"
+          % (n - bad, n))
     return bad
 
 
@@ -214,13 +271,15 @@ MUTATIONS = [
      ["        breach_lo = -s_med / 11.0", "        breach_lo = -s_med / 10.0"],
      "negative bound", "VANISHES"),
 
-    ("RIG-VOID ignores the bar -> fails open (grok, reproduced live)",
-     ['ctrl_void = [c for c in ctrl\n'
-      '             if cell_detail.get(c, {}).get("bar") == "FAIL"\n'
-      '             or cell_outcome[c] in ("UNSTABLE", "REPRODUCES", "INVERSION",\n'
-      '                                    "BAR-FAIL-INCONSISTENT")]',
-      'ctrl_void = [c for c in ctrl\n'
-      '             if cell_outcome[c] in ("UNSTABLE", "REPRODUCES", "INVERSION")]'],
+    # The round-2 fail-open, faithfully: the void ignored the BAR and consulted only
+    # a set of outcomes that a bar-failing/CI-crossing control fell outside of.
+    ("RIG-VOID ignores the bar -> fails open (grok r2, reproduced live)",
+     ['    if dt.get("bar") == "FAIL":\n'
+      '        return True\n'
+      '    if cell_outcome[c] in ("UNSTABLE", "REPRODUCES", "INVERSION", "BAR-FAIL-INCONSISTENT"):\n'
+      '        return True',
+      '    if cell_outcome[c] in ("UNSTABLE", "REPRODUCES", "INVERSION"):\n'
+      '        return True'],
      "bar-FAIL control", "VANISHES"),
 
     # The fix is BOTH halves: the cell loop must walk the REGISTERED set (not merely
@@ -239,14 +298,45 @@ MUTATIONS = [
       '        material = (bar == "FAIL")'],
      "EXACT 1.10", "PARTIAL"),
 
-    ("COMBINED: bootstrap-style CI [d2,d7] *and* no sign test (codex r2)",
+    # The bootstrap claimed 95% while delivering [d2,d7]. The mutation must therefore
+    # ALSO claim >=95% coverage -- otherwise the round-3 coverage guard (a separate
+    # fix, with its own mutation below) kills it first and this mutation would prove
+    # something it does not name.
+    ("COMBINED: bootstrap-style CI [d2,d7] claiming 95% *and* no sign test (codex r2)",
      ["    best = None\n"
       "    for k in range(1, n // 2 + 1):",
-      "    best = (d[1], d[n - 2], 0.9297) if n >= 4 else None\n"
+      "    best = (d[1], d[n - 2], 0.95) if n >= 4 else None\n"
       "    for k in range(1, 1):",
       "    pos_effect = ci_lo > 0 and p < 0.05",
       "    pos_effect = ci_lo > 0"],
      "sign test must PARTICIPATE", "REPRODUCES"),
+
+    # --- ROUND 3 (grok) -------------------------------------------------------
+    ("control void ignores absolute materiality -> a Delta_ref control escapes (grok r3)",
+     ['    return cell_outcome[c] == "PARTIAL" and not dt.get("null_excl", False)',
+      '    return False'],
+     "Delta_ref-sized control effect", "VANISHES"),
+
+    ("engine trusts meta.complete and never checks n (grok r3)",
+     ["    return len(paired(c)) >= REQUIRED_PAIRS",
+      "    return len(paired(c)) > 0",
+      "        if cov < MIN_COVERAGE:",
+      "        if False:"],
+     "n=1 with complete=yes", "VANISHES"),
+
+    ("UNSTABLE/BAR-FAIL-INCONSISTENT outrank REPRODUCES -> a clean repro is masked (grok r3)",
+     ["    if repro and inv:\n"
+      '        verdict = "MIXED-SIGN"',
+      "    if barfi:\n"
+      '        verdict = "BAR-FAIL-INCONSISTENT"\n'
+      '        why = "masked"\n'
+      "    elif repro and inv:\n"
+      '        verdict = "MIXED-SIGN"'],
+     "one-direction REPRODUCES", "BAR-FAIL-INCONSISTENT"),
+
+    ("a harness-detected session void is ignored (grok r3)",
+     ['elif SESSION_VOID_REASON:', 'elif False:'],
+     "session void (end-load)", "VANISHES"),
 ]
 
 

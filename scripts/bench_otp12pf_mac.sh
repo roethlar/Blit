@@ -391,17 +391,35 @@ print(int(statistics.median(ts)))
 
 # =============================================================================
 preflight() {
-  [[ "$RUNS" == 8 ]] || die "RUNS must be 8 (the registered value) — got '$RUNS'"
+  # RUNS=8 is the registered value. RUNS=16 is the ONLY registered escalation, and
+  # it may be used for exactly ONE reason: a prior session returned
+  # INCONCLUSIVE-UNDERPOWERED. It must NEVER be used to chase a result someone
+  # dislikes -- that is the p-hacking this pre-registration exists to prevent.
+  #
+  # Why it exists (round-3 grok, MEDIUM): at n=8 the >=95% order-statistic interval
+  # is the FULL RANGE [min,max], so ONE noisy pair with |d| >= margin blocks a null
+  # forever and the rig can only ever say UNDERPOWERED -- a null-incapable
+  # instrument is broken too, just less dangerously. At n=16 the interval is
+  # [d(4), d(13)] (coverage 97.9%), which tolerates three outliers per side.
+  [[ "$RUNS" == 8 || "$RUNS" == 16 ]] \
+    || die "RUNS must be 8 (registered) or 16 (the registered escalation, valid ONLY after an INCONCLUSIVE-UNDERPOWERED session) — got '$RUNS'"
+  if [[ "$RUNS" == 16 && "${UNDERPOWERED_ESCALATION:-0}" != 1 ]]; then
+    die "RUNS=16 is the escalation arm: set UNDERPOWERED_ESCALATION=1 and name the prior session that returned INCONCLUSIVE-UNDERPOWERED. It exists to buy POWER, never to re-roll a result."
+  fi
   [[ "$EXPECT_SHA" == "$REGISTERED_BUILD" ]] \
     || die "EXPECT_SHA='$EXPECT_SHA' but the PRE-REGISTERED build is $REGISTERED_BUILD — a run against another build is not the registered experiment"
   # The instrument must be the REVIEWED instrument: a modified harness must not be
   # able to claim the reviewed commit.
   git -C "$REPO_ROOT" diff --quiet HEAD -- "$SELF" "$VERDICT_PY" "$VERDICT_TEST" \
     || die "the instrument has UNCOMMITTED changes (harness/verdict/test) — it cannot claim the reviewed commit. Commit or stash first."
-  # The decision rule proves itself before it grades anything.
+  # The decision rule proves itself before it grades anything — AND proves the proof
+  # is not vacuous. Running only the cases would let a silently-reverted fix pass
+  # preflight if the cases still happen to pass for another reason (round-3 grok).
   python3 "$VERDICT_TEST" >"$OUT_DIR/verdict-guard-test.txt" 2>&1 \
     || die "the verdict engine's OWN guard test FAILS (see $OUT_DIR/verdict-guard-test.txt) — the decision rule is broken; refusing to take data"
-  log "verdict-engine guard test passed ($(grep -c ' ok$' "$OUT_DIR/verdict-guard-test.txt" || true) cases)"
+  python3 "$VERDICT_TEST" --mutations >"$OUT_DIR/verdict-mutations.txt" 2>&1 \
+    || die "the verdict guard test is VACUOUS — a mutation SURVIVED (see $OUT_DIR/verdict-mutations.txt); the rule is not actually guarded, refusing to take data"
+  log "verdict-engine guard test passed ($(grep -cE ' ok$' "$OUT_DIR/verdict-guard-test.txt" || true) cases, $(grep -cE 'KILLED' "$OUT_DIR/verdict-mutations.txt" || true) mutations killed)"
 
   local h p w want got wantb gotb
   for h in n q; do
@@ -651,9 +669,33 @@ run_pair_loop() {
   else echo "$cell,$attempts,yes" >> "$META"; fi
 }
 
+SESSION_VOID_REASON=""
+# The end-load is a CONDITION OF THE SESSION, not a log line. A mid-session load
+# spike is exactly the contamination the start gate exists to prevent, and until now
+# it could not void anything: the code logged `load1 (end)` and computed a verdict
+# anyway, while the comment claimed a session "can void on it" (round-3 grok, HIGH —
+# a doc claim the code did not honour, which is the defect class this whole review
+# exists to kill).
+end_load_gate() {
+  local h l ok
+  for h in n q; do
+    l="$(load1 "$h")" || l=""
+    if [[ ! "$l" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+      SESSION_VOID_REASON="end-load on $(hname "$h") could not be read (got '$l') — a session whose end conditions are unknown cannot be graded"
+      return
+    fi
+    ok="$(awk -v l="$l" -v m="$LOAD_MAX" 'BEGIN{print (l+0 <= m+0) ? 1 : 0}')"
+    if [[ "$ok" != 1 ]]; then
+      SESSION_VOID_REASON="end-load on $(hname "$h") is $l (> $LOAD_MAX) — the machine was NOT quiet at the end of the session, so a contaminant may have entered the timed windows"
+      return
+    fi
+  done
+}
+
 compute_verdicts() {
   DELTA_REF_MS="$DELTA_REF_MS" VERDICT_CELLS="$VERDICT_CELLS" \
   CONTROL_CELLS="$CONTROL_CELLS" REGISTERED_CELLS="$REGISTERED_CELLS" \
+  REQUIRED_PAIRS="$RUNS" SESSION_VOID_REASON="$SESSION_VOID_REASON" \
   python3 "$VERDICT_PY" \
     "$CSV" "$META" "$OUT_DIR/summary.csv" "$OUT_DIR/paired.csv" \
     "$OUT_DIR/verdicts.csv" "$OUT_DIR/session_verdict.txt"
@@ -739,9 +781,13 @@ main() {
     done
   done
 
-  # End-load BEFORE the verdict is computed: it is a condition OF the session, and
-  # a session whose end-load is only known afterwards cannot void on it.
+  # End-load BEFORE the verdict is computed, and it can VOID the session.
   log "  load1 (end): nagatha=$(load1 n)  q=$(load1 q)"
+  end_load_gate
+  if [[ -n "$SESSION_VOID_REASON" ]]; then
+    log "ERROR: SESSION VOID — $SESSION_VOID_REASON"
+    touch "$OUT_DIR/SESSION-VOID"
+  fi
   compute_verdicts
   log "=== SUMMARY (cold, drained, durable; ABBA) ==="
   column -t -s, "$OUT_DIR/summary.csv" | tee -a "$OUT_DIR/bench.log"
