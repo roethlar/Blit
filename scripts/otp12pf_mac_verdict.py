@@ -217,8 +217,10 @@ for c in sorted(set(REGISTERED) | set(meta)):
 # codex, BLOCKER). The bias the controls FAIL TO EXCLUDE is therefore carried into the
 # measurand's thresholds:
 #
-#     B = max over clean controls of the largest |CI bound|   -- the arm asymmetry that
-#                                                                could not be ruled out
+#     B = max over clean controls of the largest |RANGE bound| -- the arm asymmetry the
+#                                                                 controls could not rule out.
+#         The RANGE, not the CI: the CI is an interval for the MEDIAN and it TRIMS, and a
+#         bound on what the rig might be carrying must not be computed by trimming.
 #     an EFFECT must clear  T + B     (bias could be INFLATING it)
 #     a NULL   must fit in  T - B     (bias could be MASKING an effect)
 #
@@ -236,7 +238,7 @@ for c in CONTROLS:
     if x["ctrl_state"] != "NONE":
         dirty.append(c)
     else:
-        B = max(B, abs(x["ci"][0]), abs(x["ci"][1]))
+        B = max(B, abs(x["rng"][0]), abs(x["rng"][1]))
 
 # ---- pass 3: grade the measurands, against thresholds widened by the control bias -----
 for c in MEASURANDS:

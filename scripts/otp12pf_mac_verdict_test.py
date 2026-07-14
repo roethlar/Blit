@@ -180,6 +180,10 @@ CASES = [
      dict(measurand_d=[100] * 8, src=1000, control_d=[5] * 8),
      "UNCLEAR", "REPRODUCES"),
 
+    ("grok r9: a null must also survive the TIGHTER bound (bias could be MASKING an effect)",
+     dict(measurand_d=[60] * 8, src=1000, control_d=[49] * 8),
+     "UNCLEAR", "DOES-NOT-REPRODUCE"),
+
     ("codex r8: ...and the same effect IS one once the rig is bias-free",
      dict(measurand_d=[105] * 8, src=1000, control_d=[5] * 8),
      "REPRODUCES", "UNCLEAR"),
@@ -255,8 +259,13 @@ MUTATIONS = [
      ["    if ci_lo >= t_pos:", "    if (ci_lo + ci_hi) / 2.0 >= t_pos:"],
      "one huge outlier"),
 
+    ("the NULL is not tightened by the control bias -- a masked effect reads as a null (grok r9)",
+     ["        if not (t_neg + B < x[\"rng\"][0] and x[\"rng\"][1] < t_pos - B):",
+      "        if False:"],
+     "null must also survive the TIGHTER bound"),
+
     ("the control's residual bias is not carried into the measurand (codex r8)",
-     ["        B = max(B, abs(x[\"ci\"][0]), abs(x[\"ci\"][1]))", "        B = max(B, 0.0)"],
+     ['        B = max(B, abs(x["rng"][0]), abs(x["rng"][1]))', "        B = max(B, 0.0)"],
      "exactly T is NOT a reproduction"),
 
     ("the engine trusts meta.complete and never counts the pairs (grok r3)",
@@ -307,6 +316,27 @@ def rule_unit_tests():
         print("  %-46s -> %-8s %s" % (name, got, "ok" if ok else "*** FAIL (want %s) ***" % want))
         if not ok:
             bad += 1
+
+    # THE IDENTITY THE WHOLE RULE LEANS ON: at the registered n=8, the >=95% order-statistic
+    # interval IS [min, max]. That is why nothing can be trimmed -- not a null, not B. If
+    # this ever stops holding, the CI/RANGE distinctions above become live and the engine
+    # must refuse that n (it does).
+    ns2 = {}
+    src2 = open(DEFAULT_VERDICT).read()
+    st = src2.index("def median_ci(")
+    exec(src2[st:src2.index("\n\n", src2.index("return best", st))],
+         {"comb": __import__("math").comb, "MIN_COVERAGE": 0.95}, ns2)
+    import random as _r
+    rr = _r.Random(9)
+    for _ in range(200):
+        d = [rr.randint(-500, 500) for _ in range(8)]
+        lo, hi, cov = ns2["median_ci"](d)
+        if (lo, hi) != (min(d), max(d)) or cov < 0.95:
+            print("  *** FAIL: at n=8 the CI is NOT the full range: %s vs %s" % ((lo, hi), (min(d), max(d))))
+            bad += 1
+            break
+    else:
+        print("  %-46s -> %-8s ok" % ("n=8: the >=95% CI IS [min,max] (200 draws)", "identity"))
     return bad
 
 
