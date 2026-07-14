@@ -343,26 +343,31 @@ the `q` pairing give **Δ_P1 ≈ 230 ms** (229 at 1500, 236 at 9000).
   verdict is robust to this: pooling all 16 runs per condition gives
   Δ_9000 = 232, Δ_1500 = 221.5, r = −4.7% — same KILLED grade.)
 
-**OPEN — pf-final's committed reference is MTU-mismatched (owner's amendment,
-NOT decided here).** The fabric now runs MTU 9000; the committed reference
-`docs/bench/otp2w-baseline-2026-07-10/summary.csv` was recorded at **MTU 1500**
-and is deliberately **frozen** as an anti-drift ceiling
-(`OTP12_ACCEPTANCE_RUN.md` D2/D5). Acceptance requires **both** references, so
-this plan must not quietly reinterpret the contract — the following is the
-exposure, stated for the owner, and this plan asserts no void rule of its own:
+**RESOLVED — the committed baselines are RE-RECORDED at MTU 9000
+(D-2026-07-14-1, owner, 2026-07-14).** The exposure pf-0 surfaced: the fabric now
+runs MTU 9000 while the committed anti-drift ceilings were recorded at **MTU
+1500**, and pf-0 measured jumbo making **both arms 3–4% faster** — so grading a
+jumbo NEW arm against a 1500-recorded ceiling is **LENIENT, not conservative**:
+the MTU gain flatters the ratio and a real regression could pass unseen.
 
-- pf-0 measured jumbo making both arms **3–4% faster**. A jumbo NEW arm compared
-  against a **1500-recorded** ceiling is therefore **lenient, not conservative**
-  — the MTU gain flatters the ratio and could let a real regression pass. That
-  is the actual risk, and it argues the mismatch matters.
-- The ways out (re-recording the frozen baseline at 9000; running pf-final at
-  1500; or an explicit MTU-mismatch rule) each **change the frozen-baseline
-  contract or the rig configuration, and so require an owner amendment**.
-  Re-recording additionally needs a harness change (`bench_otp12_win.sh:105`
-  hardcodes `BASELINE_SUMMARY` with no override, by design).
+The owner's resolution is to **re-record each rig's committed baseline with its
+ORIGINAL OLD build at MTU 9000**, then re-freeze it. The freeze principle is
+unchanged (a baseline is immutable once recorded; no run may re-point its own
+ceiling) — only the *pin* moves, once. The 2026-07-10 baselines are retained as
+historical MTU-1500 records.
 
-Same-session references (`old_session`) are MTU-matched by construction and are
-unaffected either way.
+**This is a prerequisite slice for `pf-final`, and it affects BOTH rigs** (each
+harness hardcodes its own reference, and both predate the fabric-wide jumbo
+raise): rig W `bench_otp12_win.sh:105` → `otp2w-baseline-2026-07-10/`; rig Z
+`bench_otp12_zoey.sh:102` → `otp2-baseline-2026-07-10/`. Rig D has no old
+baseline and is unaffected. Constraints (same old build per rig,
+manifest-verified; `BASELINE_SUMMARY` stays override-free and is re-pointed by a
+reviewed source edit; the pf-0 start-AND-end MSS gate applies, since a baseline
+recorded at an unverified MTU is the very defect being fixed) are in
+D-2026-07-14-1 and are not restated here.
+
+Same-session references (`old_session`) are MTU-matched by construction and were
+never at risk.
 
 ## Hypotheses (H*, ranked; each cites the recorded mechanism it accuses)
 

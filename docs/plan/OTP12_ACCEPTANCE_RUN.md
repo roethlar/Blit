@@ -289,6 +289,16 @@ direction); bench modules writable, `delegation_allowed` not narrowed.
 
 ### D5 — three self-contained scripts; the frozen baselines stay frozen
 
+> **AMENDED by D-2026-07-14-1 (2026-07-14) — the *pin* moves once; the *freeze*
+> stands.** The committed baselines this section pins were recorded at **MTU
+> 1500**, before the fabric-wide jumbo raise. pf-0 measured jumbo making both
+> arms 3–4% faster, so grading a jumbo build against a 1500 ceiling is **lenient,
+> not conservative**. Each rig's committed baseline is therefore **re-recorded
+> once with its ORIGINAL old build at MTU 9000** and re-frozen; the 2026-07-10
+> baselines are retained as historical MTU-1500 records. Immutability and the
+> no-override rule on `BASELINE_SUMMARY` are unchanged — see D-2026-07-14-1 and
+> `OTP12_PERF_FINDINGS.md` §pf-0.
+
 `scripts/bench_otp12_zoey.sh`, `scripts/bench_otp12_win.sh`,
 `scripts/bench_otp12_delegated.sh` — each self-contained (the otp-2w
 precedent: duplicate the shape, don't refactor recorded evidence;
