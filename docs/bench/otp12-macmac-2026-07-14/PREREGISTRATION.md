@@ -1,21 +1,35 @@
 # otp-12 Mac↔Mac rig — PRE-REGISTRATION (written before any timed run)
 
-**Status**: Pre-registered, **revision 10**. **NO DATA EXISTS YET.**
+**Status**: Pre-registered, **revision 11**. **NO DATA EXISTS YET.**
 
-> ## THE RULE IN ONE PARAGRAPH (rev 8 — D-2026-07-14-3, owner: "simplify")
+> ## THE RULE IN ONE PARAGRAPH (rev 11 — D-2026-07-14-3 "simplify", amended by D-2026-07-14-4)
 >
-> Per cell, take the **paired** ABBA differences, their median, and one **exact CI**.
-> Compare that CI against **one threshold** `T = min(10% of the source arm, 230 ms)`.
-> Four states, exhaustive by construction: **EFFECT** (CI clears +T), **INVERTED** (CI
-> clears −T), **NONE** (CI lies inside ±T — an effect of size T is *excluded*), **UNCLEAR**
-> (the CI spans a threshold). **Every control must be NONE at T/2, or no verdict about the
-> measurand is read at all** — not a reproduction, and not a null. The 1.10 bar is
-> reported and takes **no part** in this; the sign test is reported, not decided on.
+> Per cell, take the **paired** ABBA differences (`n` is **exactly 8**), their median, one
+> **exact ≥95% order-statistic CI**, and the **full RANGE**. Compare against **one threshold**
+> `T = min(10% of the source arm, 230 ms)`, hardened by `B` — the arm bias the clean controls
+> could **not exclude**. Four states, exhaustive by construction: **EFFECT** (`CI_lo ≥ T+B`),
+> **INVERTED** (`CI_hi ≤ −T−B`), **NONE** (the **full range** inside `±(T−B)` — an effect of
+> size T is *excluded*), **UNCLEAR** (anything else). **Every control must be NONE at T/2, and
+> `B` must stay under `T/2` on every measurand, or no verdict about the measurand is read at
+> all** — not a reproduction, and not a null. The 1.10 bar is reported and takes **no part** in
+> this; the sign test is reported, not decided on.
 >
-> That is the whole rule. Seven review rounds found 80+ defects and **four of the last five
-> BLOCKERs were in the decision rule, not the measurement** — the complexity *was* the
-> defect. What pre-registration is actually for is kept: the question, the statistic and the
-> thresholds are fixed **before any data exists**, and the harness **computes** the verdict.
+> **A NULL is judged on the full RANGE, an EFFECT on the CI.** At the registered `n=8` these
+> are the same two numbers — the ≥95% interval **is** `[min, max]`, so nothing can be trimmed.
+> That identity is what the whole rule leans on, and the engine **refuses any other `n`**.
+>
+> **`B` may only ever HARDEN a verdict.** Every rule below that touches `B` exists because a
+> review round found a way for it to make some verdict *easier* instead.
+>
+> That is the whole rule. Eleven review rounds found ~110 defects and **most of the worst were
+> in the decision rule, not the measurement** — the complexity *was* the defect. What
+> pre-registration is actually for is kept: the question, the statistic and the thresholds are
+> fixed **before any data exists**, and the harness **computes** the verdict.
+>
+> *(Rev 11 rewrote this paragraph. Through rev 10 it still described the rev-8 rule — a NONE
+> judged on the CI, no `B`, no `−src/11` — while the body and the code had moved on. Two
+> reviewers flagged it independently: **the summary a reader trusts must not describe a rule
+> the code does not implement.**)*
 
 > ## ⛔ CORRECTION THAT THIS DOCUMENT OWES ITS READER
 >
@@ -214,8 +228,24 @@ a new case to walk past**, which is precisely what went wrong seven rounds runni
 |---|---|
 | **EFFECT** | `CI_lo >= T_pos + B` — destination-initiated is slower, by at least T |
 | **INVERTED** | `CI_hi <= T_neg − B` — source-initiated is slower, by at least T |
-| **NONE** | **the FULL RANGE** lies inside `(T_neg, T_pos)` — *every* pair, not just the median. An effect of size T is **EXCLUDED** (equivalence) |
+| **NONE** | **the FULL RANGE** lies inside `(T_neg + B, T_pos − B)` — *every* pair, not just the median. An effect of size T is **EXCLUDED** (equivalence) |
 | **UNCLEAR** | anything else — the CI spans a threshold; the rig cannot answer |
+
+**`B` appears in every row, and always with the sign that makes the verdict HARDER.** (Rev 11:
+this table used to show `NONE` against a bare `(T_neg, T_pos)` while the `B` section below and
+the code both tightened it to `T − B`. The rule was right and the table was wrong; a table a
+reader trusts is not a place to be casually wrong. In the code `B` is now applied **once**,
+inside `classify()`, rather than being folded into the thresholds by the caller and re-tightened
+afterwards — the old form widened the NONE window on the way in, which is a live bug waiting for
+whoever "simplifies" the redundant-looking second check.)
+
+**The ARM medians use the conventional even-`n` median** (the mean of the two middle values).
+The **low** median is registered for the paired differences `D` and **only** for them. `D` is
+*reported*, never decided on — but the **arm** median sets `T`, `B` and the bar, and the low
+median is anti-conservative in exactly the case that matters: on a **bimodal** arm it pulls the
+median *down*, `T = src/10` shrinks with it, and an EFFECT gets **easier**. Rig W's fast arm is
+already known to be bimodal (the ~730/~840 ms mode mixture that sets N_Δ), so this is not a
+synthetic worry (round-11, codex).
 
 **A NULL IS JUDGED ON THE RANGE, AN EFFECT ON THE CI — and that asymmetry is the point
 (round-8, codex, BLOCKER).** The ≥95% CI is the *narrowest* valid interval, so at n>8 it
@@ -258,6 +288,33 @@ license a measurand effect that is mostly rig.
 If the controls are genuinely clean, `B` is a few ms and this barely moves. If they are
 marginal, it bites — which is the point.
 
+### `B ≥ T/2` on ANY measurand ⇒ `CONTROLS-NOT-CLEAN` (rev 11 — D-2026-07-14-4, owner: "Refuse to grade")
+
+**Passing at `T/2` is necessary but NOT sufficient.** `T` is **capped** at Δ_ref = 230 ms, but
+the bias a *clean* control is permitted to carry is a **fraction of its arm** (< 5%), scaled onto
+whatever arm it is applied to. On a **slow** measurand the two diverge without limit:
+
+    clean controls at +49 ms on a 1000 ms arm  →  B_frac = 4.9%
+    a measurand whose arm is 10 000 ms         →  T = 230 ms,  B = 490 ms
+
+Then `T − B < 0`: **a null is arithmetically impossible.** And `T + B` still licenses an
+`EFFECT` of which **up to 68% is permitted rig bias** — at a ratio of 1.072, i.e. *inside* the
+project's own invariance bar. A confidently wrong reproduction, read off a rig its own controls
+certified clean (round-11, codex HIGH; grok found the same dead-zone independently).
+
+**So: if `B` reaches HALF the effect threshold on any measurand, the session is
+`CONTROLS-NOT-CLEAN` and no verdict is read.** The rig's own permitted noise is at least half
+the effect being hunted; nothing read off it can be attributed. This is the same principle
+already applied to a dirty control — *a noisy rig is fixed by a **quieter rig**, not by grading
+it with an asterisk*. **Cost accepted (owner): a marginal rig yields NO answer** and must be
+quietened and re-run.
+
+*(The gate is written `t_pos > 0 and B >= t_pos / 2`. The `t_pos > 0` term is not a fail-open:
+`src_med` is a **positive integer** by construction — the engine refuses a non-positive timing —
+so `t_pos` can only be zero in a **mutant** that accepts zeros, and the term keeps that mutant's
+dangerous path (zeros → EFFECT → REPRODUCES) reachable by the guard test instead of masking it
+behind this refusal.)*
+
 ### The controls are CONTEMPORANEOUS with the measurands
 
 The schedule is **slot-major**: within slot *i*, **every** cell takes one ABBA pair before
@@ -275,11 +332,24 @@ measurand and be gone before the controls ran, and they would pronounce the rig 
 ### The session verdict
 
 1. **INCOMPLETE** — any registered cell short of its `RUNS` pairs, or with a CI below 95%
-   coverage. (Checked against the **data**; `meta.complete` is not believed.)
-2. **RIG-VOID** — the harness voided the session (end-load; see Gates).
-3. **CONTROLS-NOT-CLEAN** — any control is not `NONE` at `T/2`.
+   coverage. (Checked against the **data**; `meta.complete` is not believed. **Exactly 8 paired
+   slots AND exactly 8 valid rows in EACH arm**: an unpaired or duplicate valid row would sit in
+   the arm's list and skew its **median** — and therefore `T`, `B` and the bar — while the pair
+   count still looked right.)
+2. **RIG-VOID** — the harness voided the session (end-load, or the **fabric changed** under it;
+   see Gates).
+3. **CONTROLS-NOT-CLEAN** — any control is not `NONE` at `T/2`, **or `B ≥ T/2` on any
+   measurand** (see above).
 4. **MIXED** — one direction `EFFECT`, the other `INVERTED`: a host×role interaction this
-   rig cannot decompose.
+   rig cannot decompose. **Decided on the UNHARDENED cell states (`B = 0`)** — rev 11,
+   round-11 codex HIGH. `B` hardens each *cell*, but through this branch's **precedence** it
+   could make the *session* verdict **easier**: with measurands at `+110` and `−94` on a 1000 ms
+   arm, controls at **zero** give `MIXED`, while clean controls at `+5` push the `−94` cell out
+   of `INVERTED`, the `MIXED` branch stops firing, and the session reports **`REPRODUCES`**. *A
+   noisier rig produced a stronger claim.* A cell whose CI clears `−T` on its own carries
+   evidence of inversion that control noise cannot un-say. (`EFFECT`-at-`B` is a subset of
+   `EFFECT`-at-0, so this branch can only ever fire **more** often — the direction it must move
+   in.)
 5. **REPRODUCES** — `EFFECT` in **either** direction. *(P1's rig-W signature is
    one-directional, so demanding both would rewrite the finding. A messy sibling is
    reported, never substituted.)*
@@ -478,6 +548,38 @@ function exists to set, so the drain then had no device and blamed the harness).
   route on a directly-connected subnet installs a black hole that still reports the
   right interface), and the route egresses the 10GbE NIC (macOS routes by service
   order, so a 1GbE NIC can win and every run would go over gigabit).
+- **THE REGISTERED FABRIC — the NIC *and* the PATH (rev 11; round-11 codex, BLOCKER).**
+  Until rev 11 the topology was **not enforced at all**: NIC/IP/MAC were env-overridable and
+  **the MTU and link speed were never checked**, so the whole run could have gone over the
+  **1GbE** NIC or at **MTU 1500** — after pf-0 spent **256 runs** establishing that MTU moves
+  wall time on this fabric. nagatha alone has **eight** other 1500-MTU interfaces. Now:
+  * the topology (`N_IP`/`N_NIC`/`N_MAC`/`Q_IP`/`Q_NIC`/`Q_MAC`/`Q_SSH`, plus `RUNS` and
+    `PORT`) is **pinned in code** and the harness **refuses to start** if any of those names is
+    merely *present* in the environment — the same rule the thresholds already had;
+  * **the NIC**: MTU **9000**, negotiated media **10Gbase-T** (a 1GbE link reports
+    `1000baseT`), status `active` — on **both** Macs;
+  * **the PATH**: a real TCP connection to the peer's **registered IP**, and the **MSS the two
+    kernels agreed** — **8948** (= 9000 − 20 IP − 20 TCP − 12 timestamps). *Both NICs can sit
+    at MTU 9000 while a 1500 hop between them clamps segments to 1448 — **only the MSS sees
+    that**.* This is the gate pf-0 used. The probe also reports the **local address the kernel
+    chose**, which proves the traffic **egressed the registered 10GbE IP** and not one of the
+    other interfaces.
+  * **start AND end.** The fabric is re-proved when the session finishes; a link that flapped
+    or re-routed mid-session **VOIDS the session** (`RIG-VOID`). A gate measured once at the
+    start is not a gate on a run taken an hour later.
+  * the **measured** fabric is written into the manifest, not just the registered one.
+  * *Measured on both hosts before the constants were written (2026-07-14, no data taken):
+    nagatha `en11` and q `en8`, both MTU 9000, both `10Gbase-T`, **MSS 8948 in both
+    directions**.*
+- **SSH DISPATCH, MEASURED BEFORE EVERY TIMED RUN — and it can VOID the pair (rev 11
+  registers it; round-11 codex, HIGH).** The residual free-writeback asymmetry between the arms
+  is bounded **by** the ssh round trip, and a bound measured once at preflight is **not** a
+  bound on a run taken twenty minutes later. So the dispatch is re-measured (**median of 3**)
+  immediately before each timed window, and a pair whose dispatch exceeds `SETTLE_MS / 4`
+  (= 62 ms) is **VOIDED and retried**. The preflight measurement (median of 5) stays, as a
+  refusal: a rig that cannot meet the bound at all does not start. *The code had this gate and
+  this document did not register it — a material row-exclusion rule that no reader could have
+  audited.*
 - **THE VERDICT ENGINE'S OWN GUARD TEST RUNS AT PREFLIGHT — cases AND mutations.**
   If the decision rule fails its own cases, or if the proof that guards it turns out
   to be **vacuous** (a mutation survives), **no data is taken**. *(Round-4, grok: rev

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guard test for otp12pf_mac_verdict.py (rev 8, D-2026-07-14-3).
+"""Guard test for otp12pf_mac_verdict.py (rev 11; D-2026-07-14-3, D-2026-07-14-4).
 
     python3 scripts/otp12pf_mac_verdict_test.py             # the cases
     python3 scripts/otp12pf_mac_verdict_test.py --mutations # prove they are not vacuous

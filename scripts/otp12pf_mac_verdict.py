@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The Mac<->Mac decision rule (PREREGISTRATION.md rev 8, D-2026-07-14-3).
+"""The Mac<->Mac decision rule (PREREGISTRATION.md rev 11; D-2026-07-14-3, D-2026-07-14-4).
 
 WHAT THIS IS FOR
     The harness COMPUTES the verdict, so no one can look at the numbers and then
@@ -35,11 +35,24 @@ THE THRESHOLD (one)
     The smaller of the two: an effect must matter by BOTH standards to count.
 
 THE FOUR CELL STATES (mutually exclusive BY CONSTRUCTION -- there is no label for a
-new case to walk past, because they partition the CI's position relative to +-T)
-    EFFECT    CI_lo >= +T                 destination-initiated is slower, by >= T
-    INVERTED  CI_hi <= -T                 source-initiated is slower, by >= T
-    NONE      -T < CI_lo and CI_hi < +T   an effect of size T is EXCLUDED (equivalence)
-    UNCLEAR   anything else               the CI spans the threshold: no answer
+new case to walk past, because they partition the interval's position relative to +-T)
+    EFFECT    CI_lo   >= +T + B                     destination-initiated is slower, by >= T
+    INVERTED  CI_hi   <= -T - B                     source-initiated is slower, by >= T
+    NONE      the FULL RANGE inside +-(T - B)       an effect of size T is EXCLUDED (equivalence)
+    UNCLEAR   anything else                         the interval spans a threshold: no answer
+
+    B = the arm bias the CLEAN controls could not exclude. IT ONLY EVER HARDENS: an EFFECT
+    must CLEAR T + B (the bias could be inflating it) and a NULL must FIT INSIDE T - B (the
+    bias could be masking one). If B reaches T/2 on any measurand the rig is not clean enough
+    to read at all -- CONTROLS-NOT-CLEAN, no verdict (D-2026-07-14-4, owner: "Refuse to grade").
+
+    A NULL is judged on the full RANGE, an EFFECT on the CI. At the registered n=8 those are
+    the same two numbers (the >=95% interval IS [min,max]), so nothing can be trimmed either
+    way -- and the engine REFUSES any other n.
+
+    (This block described the rev-8 rule -- a NONE judged on the CI, no B -- for three
+    revisions after the code had moved on. Round-11, grok. A docstring is not decoration: it
+    is what the next reader believes.)
 
 THE CONTROLS ARE A PRECONDITION
     Every control must be NONE at T/2 -- HALF the threshold. Half, because certifying a
