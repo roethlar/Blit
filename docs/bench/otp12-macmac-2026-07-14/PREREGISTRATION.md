@@ -337,11 +337,22 @@ pre-registration.**)* To change one: amend this document and put it back through
 
 ### The guard test
 
-`scripts/otp12pf_mac_verdict_test.py`: **26 cases — every one a defect a reviewer actually
-drove out of a previous revision** — each **mutation-proven** (reverting that fix in a copy
-of the engine makes exactly that case fail: **9/9 mutations killed**), plus a 300-input
-fuzz over the measurand **and** the controls. It runs at preflight, cases *and* mutations;
-a vacuous guard refuses the run.
+`scripts/otp12pf_mac_verdict_test.py`:
+
+- **34 cases** — nearly every one a defect a reviewer actually drove out of a previous
+  revision of this engine.
+- **14 mutations**, each reverting one fix in a copy of the engine; the named case must then
+  **fail** (14/14 killed). **Not every case has a mutation** — 14 of the 34 do. The rest are
+  behavioural cases (the rig must be able to *say* each thing it can say) with no single
+  line to revert. *(Round-10, codex: the previous wording claimed every case was
+  mutation-proven, which was not true. An overstated guard is a guard you trust too much.)*
+- **5 direct rule checks**, including the identity everything leans on: at n=8 the ≥95%
+  interval **is** `[min, max]` (verified over 200 random draws), so nothing can be trimmed.
+  Two guards live here rather than in a mutation **because at n=8 no synthetic session can
+  distinguish the CI from the RANGE** — a mutation that cannot be killed is not a proof.
+- a **300-input fuzz** over the measurand **and** the controls.
+
+It runs at preflight, cases *and* mutations; a vacuous guard refuses the run.
 
 ## The instrument — what round 3 found, and what now guards it
 

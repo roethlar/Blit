@@ -84,9 +84,19 @@ def cells_env(name):
     return [c for c in os.environ.get(name, "").split(",") if c]
 
 
-MEASURANDS = cells_env("VERDICT_CELLS")
-CONTROLS = cells_env("CONTROL_CELLS")
-REGISTERED = cells_env("REGISTERED_CELLS") or (MEASURANDS + CONTROLS)
+REGISTERED_MEASURANDS = ("nq_tcp_mixed", "qn_tcp_mixed")
+REGISTERED_CONTROLS = ("nq_grpc_mixed", "qn_grpc_mixed", "nq_tcp_large", "qn_tcp_large")
+
+MEASURANDS = list(REGISTERED_MEASURANDS)
+CONTROLS = list(REGISTERED_CONTROLS)
+REGISTERED = MEASURANDS + CONTROLS
+for _name, _want in (("VERDICT_CELLS", MEASURANDS), ("CONTROL_CELLS", CONTROLS),
+                     ("REGISTERED_CELLS", REGISTERED)):
+    _got = cells_env(_name)
+    if _got and _got != _want:
+        sys.exit("REFUSING: %s=%s but the registered set is %s. Which cells are CONTROLS is "
+                 "part of the pre-registration -- omitting one is how a dirty control gets "
+                 "dropped and the session grades anyway.\n" % (_name, _got, _want))
 PAIRS = int(os.environ.get("REQUIRED_PAIRS", "8"))
 # A harness-detected session void the engine cannot see for itself (end-load).
 SESSION_VOID = os.environ.get("SESSION_VOID_REASON", "").strip()
@@ -102,10 +112,16 @@ if PAIRS not in REGISTERED_PAIRS:
 def ms_of(r):
     """A corrupt row stops the grading, loudly. Soft-mapping it would hide it."""
     try:
-        return int(r["ms"])
+        v = int(r["ms"])
+        if v <= 0:
+            # A transfer cannot take zero time. With src_median = 0 the thresholds collapse
+            # to 0 and classify(0,0,0,0,0,0) returns EFFECT -- a session of zeros would
+            # report a REPRODUCTION (codex r10).
+            raise ValueError("non-positive")
+        return v
     except (TypeError, ValueError):
-        sys.stderr.write("CORRUPT ROW: cell=%s arm=%s run=%s ms=%r. A benchmark whose "
-                         "rows do not parse has no verdict.\n"
+        sys.stderr.write("CORRUPT ROW: cell=%s arm=%s run=%s ms=%r (must be a POSITIVE "
+                         "integer). A benchmark whose rows do not parse has no verdict.\n"
                          % (r.get("cell"), r.get("arm"), r.get("run"), r.get("ms")))
         raise SystemExit(2)
 
@@ -197,7 +213,12 @@ for c in sorted(set(REGISTERED) | set(meta)):
     ci = median_ci(d) if d else None
     # COMPLETE is checked against the DATA, never against meta's say-so: a one-pair CSV
     # with a lying meta once graded as a full cell and emitted a null at 0% coverage.
-    if meta.get(c, {}).get("complete") != "yes" or len(d) != PAIRS or ci is None:
+    if (meta.get(c, {}).get("complete") != "yes" or len(d) != PAIRS or ci is None
+            or len(by.get((c, "srcinit"), [])) != PAIRS
+            or len(by.get((c, "destinit"), [])) != PAIRS):
+        # EVERY arm must carry exactly the registered count too, not just the paired slots:
+        # a duplicate or unpaired valid row would sit in the arm's list and skew its MEDIAN
+        # (and therefore T, B and the bar) while the pair count still looked right.
         cell[c] = dict(state="INCOMPLETE", n=len(d))
         continue
     s_med, d_med = med(by[(c, "srcinit")]), med(by[(c, "destinit")])

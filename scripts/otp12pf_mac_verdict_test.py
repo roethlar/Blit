@@ -4,12 +4,17 @@
     python3 scripts/otp12pf_mac_verdict_test.py             # the cases
     python3 scripts/otp12pf_mac_verdict_test.py --mutations # prove they are not vacuous
 
-EVERY case is a defect a reviewer actually drove out of a previous revision of this
-engine, across seven review rounds. The rule has now been REWRITTEN and simplified;
-these cases are the price of that rewrite. Each one asserts that the SIMPLER rule still
-refuses the wrong answer the COMPLEX rule once gave.
+NEARLY every case is a defect a reviewer actually drove out of a previous revision of this
+engine, across ten review rounds. The rule was REWRITTEN and simplified; these cases are the
+price of that rewrite -- each asserts that the SIMPLER rule still refuses the wrong answer
+the COMPLEX rule once gave.
 
-A mutation reverts one fix in a copy of the engine; the named case must then FAIL.
+A mutation reverts one fix in a copy of the engine; the named case must then FAIL. NOT EVERY
+CASE HAS ONE: 14 of the 34 do. The rest are behavioural (the rig must be able to SAY each
+thing it can say) and have no single line to revert. Two more guards are asserted DIRECTLY
+rather than by mutation, because at n=8 no synthetic session can tell the CI from the RANGE
+-- they are the same two numbers -- and a mutation that cannot be killed is not a proof.
+(Round-10, codex: the previous docstring claimed every case was mutation-proven. It was not.)
 """
 import csv, os, random, subprocess, sys, tempfile
 
@@ -19,7 +24,11 @@ CONTROLS = ("nq_grpc_mixed", "qn_grpc_mixed", "nq_tcp_large", "qn_tcp_large")
 MEASURANDS = ("nq_tcp_mixed", "qn_tcp_mixed")
 REGISTERED = MEASURANDS + CONTROLS
 OUTCOMES = {"INCOMPLETE", "RIG-VOID", "CONTROLS-NOT-CLEAN", "MIXED", "REPRODUCES",
-            "INVERTED", "DOES-NOT-REPRODUCE", "UNCLEAR"}
+            "INVERTED", "DOES-NOT-REPRODUCE", "UNCLEAR",
+            # A deliberate REFUSAL is the engine working, not failing -- the fuzz can draw
+            # an impossible session (a destination time of zero when src=600 and d=-600),
+            # and refusing it is the correct answer.
+            "ENGINE-REFUSED"}
 
 
 def engine():
@@ -71,8 +80,10 @@ def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=
                           os.path.join(tmp, "s.csv"), os.path.join(tmp, "p.csv"),
                           os.path.join(tmp, "v.csv"), os.path.join(tmp, "sv.txt")],
                          env=env, capture_output=True, text=True)
-    if out.returncode != 0 and "REFUSING" in (out.stderr or ""):
-        return "ENGINE-REFUSED"          # a deliberate refusal is the engine WORKING
+    # A DELIBERATE refusal is the engine WORKING, not failing: exit 2 (a corrupt or
+    # impossible row) or an explicit REFUSING (a pinned constant or cell role tampered with).
+    if out.returncode == 2 or (out.returncode != 0 and "REFUSING" in (out.stderr or "")):
+        return "ENGINE-REFUSED"
     if out.returncode != 0:
         return "ENGINE-CRASH: " + (out.stderr.strip().splitlines() or ["?"])[-1]
     return out.stdout.splitlines()[0].split(":", 1)[1].strip()
@@ -233,6 +244,16 @@ CASES = [
           void_reason="end-load on q is 9.1 (> 3.0)"),
      "RIG-VOID", "DOES-NOT-REPRODUCE"),
 
+    ("codex r10: a session of ZERO timings must not report an EFFECT",
+     dict(measurand_d=[0] * 8, src=0, control_d=[0] * 8, control_src=0),
+     "ENGINE-REFUSED", "REPRODUCES"),
+
+    ("codex r10: the CELL ROLES are pinned -- a dirty control cannot be dropped from the set",
+     dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
+          control_d=[230] * 8, control_src=2500,
+          env_extra={"CONTROL_CELLS": "nq_grpc_mixed"}),
+     "ENGINE-REFUSED", "DOES-NOT-REPRODUCE"),
+
     ("codex r5: DELTA_REF_MS is PINNED -- the rule is not tunable from the environment",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           env_extra={"DELTA_REF_MS": "240"}),
@@ -282,7 +303,9 @@ MUTATIONS = [
      "exactly T is NOT a reproduction"),
 
     ("the engine trusts meta.complete and never counts the pairs (grok r3)",
-     ['    if meta.get(c, {}).get("complete") != "yes" or len(d) != PAIRS or ci is None:',
+     ['    if (meta.get(c, {}).get("complete") != "yes" or len(d) != PAIRS or ci is None\n'
+      '            or len(by.get((c, "srcinit"), [])) != PAIRS\n'
+      '            or len(by.get((c, "destinit"), [])) != PAIRS):',
       '    if meta.get(c, {}).get("complete") != "yes" or ci is None:'],
      "SHORT cell (6 of 8 pairs)"),
 
@@ -293,6 +316,14 @@ MUTATIONS = [
     ("a harness-detected session void is ignored (grok r3)",
      ["elif SESSION_VOID:", "elif False:"],
      "session void (end-load)"),
+
+    ("a non-positive timing is accepted, and zeros then report an EFFECT (codex r10)",
+     ["        if v <= 0:", "        if False:"],
+     "ZERO timings"),
+
+    ("the cell ROLES are taken from the environment again (codex r10)",
+     ["    if _got and _got != _want:", "    if False:"],
+     "CELL ROLES are pinned"),
 
     ("the registered DELTA_REF is taken from the environment again (codex r5)",
      ['_env = os.environ.get("DELTA_REF_MS")', "_env = None"],
