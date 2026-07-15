@@ -478,6 +478,8 @@ selftest() {
     local stamp_tag stamp_ms stamp_rc stamp_ns stamp_extra stamp_teardown_ns
     local cross_clock_before cross_clock_after cross_clock_delta clock_tmp
     local clock_mode clock_case clock_gate_output
+    local client_trace_tmp client_trace_probe client_trace_python client_trace_result
+    local probe_tag probe_ms probe_rc probe_ns probe_extra
     local launcher_tmp launcher_calls launcher_source main_source
     local win_recovery_tmp purge_contract_tmp purge_repo purge_head purge_blob
     local purge_hash purge_replacement_tree purge_replacement_head
@@ -1046,6 +1048,58 @@ for marker in (
     if marker not in win_client:
         raise SystemExit(f"missing streamed Windows completion marker: {marker}")
 PY
+
+    client_trace_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-client-trace.XXXXXX")
+    client_trace_python=$(command -v python3) || {
+        rm -rf "$client_trace_tmp"
+        die "python3 absent for q client trace-environment guard"
+    }
+    client_trace_probe='from pathlib import Path; import os, sys; Path(sys.argv[1]).write_text(os.environ.get("BLIT_TRACE_SESSION_PHASES", "unset") + "|" + os.environ.get("BLIT_TRACE_RUN_ID", "unset") + "\n", encoding="ascii")'
+    if ! client_trace_result=$(
+        export BLIT_TRACE_SESSION_PHASES=stale
+        export BLIT_TRACE_RUN_ID=stale
+        Q_BLIT="$client_trace_python"
+        q_client_run off g12-trace-off "$client_trace_tmp/off.err" \
+            -c "$client_trace_probe" "$client_trace_tmp/off.env"
+    ); then
+        rm -rf "$client_trace_tmp"
+        die "q trace-off client wrapper failed under Bash nounset"
+    fi
+    IFS='|' read -r probe_tag probe_ms probe_rc probe_ns probe_extra \
+        <<<"$client_trace_result"
+    [[ "$probe_tag" == R && "$probe_ms" =~ ^[0-9]+$ && "$probe_rc" == 0 \
+        && "$probe_ns" =~ ^[0-9]+$ && -z "$probe_extra" ]] \
+        || {
+            rm -rf "$client_trace_tmp"
+            die "q trace-off client wrapper returned '$client_trace_result'"
+        }
+    grep -Fqx 'unset|unset' "$client_trace_tmp/off.env" || {
+        rm -rf "$client_trace_tmp"
+        die "q trace-off client inherited stale trace environment"
+    }
+    if ! client_trace_result=$(
+        export BLIT_TRACE_SESSION_PHASES=stale
+        export BLIT_TRACE_RUN_ID=stale
+        Q_BLIT="$client_trace_python"
+        q_client_run on g12-trace-on "$client_trace_tmp/on.err" \
+            -c "$client_trace_probe" "$client_trace_tmp/on.env"
+    ); then
+        rm -rf "$client_trace_tmp"
+        die "q trace-on client wrapper failed under Bash nounset"
+    fi
+    IFS='|' read -r probe_tag probe_ms probe_rc probe_ns probe_extra \
+        <<<"$client_trace_result"
+    [[ "$probe_tag" == R && "$probe_ms" =~ ^[0-9]+$ && "$probe_rc" == 0 \
+        && "$probe_ns" =~ ^[0-9]+$ && -z "$probe_extra" ]] \
+        || {
+            rm -rf "$client_trace_tmp"
+            die "q trace-on client wrapper returned '$client_trace_result'"
+        }
+    grep -Fqx '1|g12-trace-on' "$client_trace_tmp/on.env" || {
+        rm -rf "$client_trace_tmp"
+        die "q trace-on client did not receive the exact trace environment"
+    }
+    rm -rf "$client_trace_tmp"
 
     win_stop_source=$(declare -f win_daemon_stop)
     win_start_source=$(declare -f win_daemon_start)
@@ -2871,11 +2925,11 @@ flush_verify_win() {
 
 q_client_run() {
     local state="$1" run_id="$2" err="$3"; shift 3
-    local trace_env=()
+    local trace_env=(env -u BLIT_TRACE_SESSION_PHASES -u BLIT_TRACE_RUN_ID)
     if [[ "$state" == on ]]; then
-        trace_env=(BLIT_TRACE_SESSION_PHASES=1 BLIT_TRACE_RUN_ID="$run_id")
+        trace_env+=(BLIT_TRACE_SESSION_PHASES=1 BLIT_TRACE_RUN_ID="$run_id")
     fi
-    env -u BLIT_TRACE_SESSION_PHASES -u BLIT_TRACE_RUN_ID "${trace_env[@]}" \
+    "${trace_env[@]}" \
         python3 - "$err" "$Q_BLIT" "$@" <<'PY'
 import os, subprocess, sys, time
 err, argv = sys.argv[1], sys.argv[2:]

@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-15 (pf-1 rig-W G11 accepted by independent Grok; exact live gates next; no accepted rig datum)
+Last updated: 2026-07-15 (pf-1 rig-W live G12 fixed/guard-proved; external review next; no accepted rig datum)
 
-- **NEXT ACTION — PF-1 RIG-W EXACT LIVE GATES:** round-11 independent Grok accepted G11 at exact candidate `aa0785c` after independently restoring the old three-SSH sampler red and the reviewed sampler green. The first unsupported six-second/no-tool response was discarded. Build and stage exact `aa0785c` additively, then drive q↔netwatch-01 launcher smoke, preflight, and the registered 128-arm run over SSH. The worker-count disparity is closed and is not a blocker; no datum has been accepted or graded.
+- **NEXT ACTION — PF-1 RIG-W G12 EXTERNAL REVIEW:** exact `aa0785c` passed q Bash 3.2 self-test, launcher, and preflight. The registered run completed one arm, then its paired trace-off q-client arm failed before client launch because Bash 3.2 nounset rejects an empty array expansion. The whole session is `SESSION-VOID`; its one provisional row was never analyzed or graded. G12 keeps the command array permanently nonempty and has an executed off/on Bash 3.2 red-to-green guard. Record its fix identity, run external Grok or Claude review, then stage a fresh exact candidate additively and retry. Worker parity remains closed and is not a blocker.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **WORKER PARITY IS CLOSED.** The identical 10,000-file fixture now reaches exactly 8 workers under both initiator layouts (old guard: 3 vs 2; destination-initiator `max_streams=0`: 1). Payload starts while resize ACKs are pending, refusal is terminal, and resize arbitration is atomic. Final Codex re-review: PASS; workspace gate: 1,490 passed, 2 ignored.
 - **WHY NO MAC↔MAC DATA YET:** the current verdict engine can label a 1.092 cell both `PASS` and `REPRODUCES`, and the end-fabric gate can grade after a 10GbE→1GbE renegotiation because it rechecks MSS/IP but not link speed. Those are measurement blockers, not transfer-path blockers. P1 remains real on macOS↔Windows; no Mac↔Mac data exists.
@@ -79,8 +79,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     fails closed on channel/process errors, and preflight-times the complete
     path against 750 ms headroom. Round-11 independent Grok discarded an
     unsupported no-tool response, then proved the old sampler red, restored
-    green, and accepted exact candidate `aa0785c`. Additive exact staging,
-    launcher smoke, preflight, and the registered retry are next. The phase report and
+    green, and accepted exact candidate `aa0785c`. Its launcher and preflight
+    passed at 396/403 ms. The registered run appended one completed-arm row,
+    then G12 failed before the paired trace-off q client launched because Bash
+    3.2 nounset rejects an empty array expansion. The entire session is void;
+    no row was analyzed or graded. G12 is fixed and Bash-3.2 guard-proved;
+    external review, a new exact candidate, and additive live retry are next. The phase report and
     `0f922de` historical control remain part of the
     pf-1 HARD GATE. No Mac↔Mac data has been taken, and worker parity is no
     longer a blocker. Then: pf-1 → pf-final (all rigs) → otp-12d → otp-13.

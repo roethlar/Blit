@@ -1,8 +1,8 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Verified — round-11 independent Grok accepted G11; exact candidate
-`aa0785c` is cleared for additive staging and live gates.
+**Status**: In progress — live-found G12 fixed and guard-proved; external Grok
+or Claude review remains.
 
 ## What
 
@@ -219,6 +219,12 @@ new two-endpoint trace uncorrelatable.
   wrappers carry the q completion stamp as the fourth result field consumed by
   `run_arm`, and live preflight proves the flushed Windows sentinel reaches q
   before the remote producer exits.
+- The real q client wrapper executes under deliberately stale trace variables
+  in both trace-off and trace-on self-test cases. Trace-off must remove both;
+  trace-on must install only `1` and the exact run ID; both must return an exact
+  successful completion sentinel. Restoring the empty trace-command array from
+  G12 turns the trace-off guard red under `/bin/bash` 3.2 nounset; restoring the
+  permanently nonempty command array returns the complete self-test green.
 - Every trace-on TCP session must prove the complete seven-epoch one-stream
   ramp from one to eight live sockets on both roles, including exact proposal,
   preparation, ACK, settlement, attachment, and role-local ordering evidence.
@@ -236,10 +242,10 @@ new two-endpoint trace uncorrelatable.
 ## Known gaps
 
 - No accepted or graded rig datum has been produced by this slice. Exact
-  candidate `5a7e7ec` is retired from further live use after G11. The full run
-  waits for external Grok or Claude review, a new exact immutable candidate,
-  additive isolated staging, a successful launcher smoke, and green endpoint
-  preflight.
+  candidate `aa0785c` is retired from further live use after G12. The full run
+  waits for the G12 fix identity, external Grok or Claude review, a new exact
+  immutable candidate, additive isolated staging, a successful launcher smoke,
+  and green endpoint preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
   small-fixture/P2 work, phase report, and `0f922de` historical control before
@@ -607,3 +613,35 @@ and accounting, and returned schema-valid `ACCEPTED` with exact SHAs and
 No endpoint was contacted. Exact candidate `aa0785c`, not the later review
 record, is the only build allowed into additive staging, launcher smoke,
 preflight, and the registered retry.
+
+Exact candidate `aa0785c` was built and staged additively from clean detached
+clones. q's real Bash 3.2 self-test passed; launcher smoke at
+`/Users/michael/Dev/blit_v2_aa0785c/logs/otp12pf-rigw-20260715T171555Z.15522`
+and standalone preflight at
+`/Users/michael/Dev/blit_v2_aa0785c/logs/otp12pf-rigw-20260715T171647Z-preflight`
+passed, with the complete batched clock path at 396 ms and 403 ms. The
+registered session at
+`/Users/michael/Dev/blit_v2_aa0785c/logs/otp12pf-rigw-20260715T171727Z`
+completed `b1_wm_tcp_mixed_p1_source_init` at transfer/settle/flush/total
+`1027/447/86/1310` ms and appended its provisional row. The paired
+trace-off q-client arm then completed drain and its three before-clock samples
+but failed before launching Python or blit: macOS Bash 3.2 with `set -u`
+rejects expansion of the empty `trace_env` array. The EXIT trap recorded
+`SESSION-VOID`; `runs.csv` contains one of 128 rows and `clock-samples.csv`
+contains nine of 768 samples. The analyzer and finalizer never ran, no
+`SESSION-COMPLETE` exists, and zero session data was accepted, analyzed, or
+graded. Both registered ports are closed, no benchmark process remains, and
+the q and Windows session evidence is retained under session tag
+`20260715T171727Z.16108`.
+
+G12 makes the invoked command array permanently nonempty by placing `env -u`
+and both trace-variable names in its fixed prefix; trace-on appends the two
+exact assignments. The executed Bash 3.2 guard poisons both parent variables,
+proves trace-off removes them and trace-on replaces them exactly, and checks
+the real wrapper sentinel and child status. Restoring only the live-failing
+empty-array implementation reproduces `trace_env[@]: unbound variable` and
+turns the new guard red; restoration returns syntax, the complete harness
+self-test, and all 23 analyzer tests green. A whole-script audit found no
+second empty user array; `SSH_MUX` is nonempty at every assignment. External
+Grok or Claude review remains before another live candidate. No retained
+evidence, Time Machine setting, or mount state was changed.
