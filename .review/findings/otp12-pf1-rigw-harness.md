@@ -43,7 +43,9 @@ new two-endpoint trace uncorrelatable.
   settle must remain in `[250,1000)` ms and is retained in `runs.csv`.
   Successful Windows client logs are retrieved only after durability and the
   current landed count/byte verification. Both caches are purged before every arm and
-  Windows disk writes must drain.
+  Windows disk writes must drain. The common first 250 ms of post-client
+  observation remains excluded, but every excess settle millisecond is charged
+  to the arm's durable total before comparison.
 - Compute paired differences `d_i = destination_init_i − source_init_i`, the
   registered split drifts, role-order drift, the full paired range that guards
   the known bimodal fast arm, trace observer bias, and conservative
@@ -88,11 +90,13 @@ new two-endpoint trace uncorrelatable.
   values outside `[250,1000)`. Synthetic evidence supplies the lower valid
   bound so every accepted arm proves the registered settle window.
 - The analyzer parses each timing component once, requires exact Decimal
-  `total_ms = transfer_ms + flush_ms`, and uses that durable total for every
-  paired median, delta, distribution, observer-bias, and resolution-floor
-  value. The fixed settle window remains excluded. Corrupt totals are rejected;
+  `total_ms = transfer_ms + (settled_ms - 250) + flush_ms`, and uses that
+  durable total for every paired median, delta, distribution, observer-bias,
+  and resolution-floor value. Only the common first 250 ms remains excluded;
+  excess observation latency is charged. Corrupt totals are rejected;
   role-specific flush mutations prove the summaries cannot fall back to the
-  pre-durability transfer time.
+  pre-durability transfer time, and an equal client-to-durability regression
+  proves asymmetric settle/flush partitioning cannot manufacture a role delta.
 - All asserted causal phase pairs are endpoint-local and require both producer
   order and nondecreasing monotonic elapsed time. Socket action completion must
   precede trace attachment; attached payload sockets must progress through

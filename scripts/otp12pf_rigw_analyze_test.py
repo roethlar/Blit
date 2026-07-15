@@ -218,6 +218,8 @@ class SyntheticSession:
                             if role == "source_init"
                             else source_ms + self._delta(block.trace_state, cell, pair)
                         )
+                        settled_ms = 250
+                        flush_ms = 1
                         client_log = (
                             f"client/b{block.number}-{cell}-p{pair}-{role}.log"
                         )
@@ -238,9 +240,14 @@ class SyntheticSession:
                                 "pair": str(pair),
                                 "role_order": str(role_order),
                                 "transfer_ms": str(transfer_ms),
-                                "settled_ms": "250",
-                                "flush_ms": "1",
-                                "total_ms": str(transfer_ms + 1),
+                                "settled_ms": str(settled_ms),
+                                "flush_ms": str(flush_ms),
+                                "total_ms": str(
+                                    transfer_ms
+                                    + settled_ms
+                                    - analyzer.SETTLE_MIN_MS
+                                    + flush_ms
+                                ),
                                 "exit": "0",
                                 "drain": "drained",
                                 "valid": "yes",
@@ -416,7 +423,12 @@ class RigWAnalyzerTests(unittest.TestCase):
         self.assertTrue(
             all(
                 row["total_ms"]
-                == str(int(row["transfer_ms"]) + int(row["flush_ms"]))
+                == str(
+                    int(row["transfer_ms"])
+                    + int(row["settled_ms"])
+                    - analyzer.SETTLE_MIN_MS
+                    + int(row["flush_ms"])
+                )
                 for row in phase_rows
             )
         )
@@ -526,7 +538,8 @@ class RigWAnalyzerTests(unittest.TestCase):
         session.rows[0]["total_ms"] = "999"
         session.write()
         with self.assertRaisesRegex(
-            analyzer.AnalysisError, "total_ms must equal transfer_ms \\+ flush_ms exactly"
+            analyzer.AnalysisError,
+            "total_ms must equal transfer_ms \\+ \\(settled_ms - 250\\) \\+ flush_ms",
         ):
             analyzer.analyze(session.root)
 
@@ -543,7 +556,12 @@ class RigWAnalyzerTests(unittest.TestCase):
                 else destination_flush[int(row["pair"]) - 1]
             )
             row["flush_ms"] = str(flush_ms)
-            row["total_ms"] = str(int(row["transfer_ms"]) + flush_ms)
+            row["total_ms"] = str(
+                int(row["transfer_ms"])
+                + int(row["settled_ms"])
+                - analyzer.SETTLE_MIN_MS
+                + flush_ms
+            )
         session.write()
 
         result = analyzer.analyze(session.root)
@@ -558,6 +576,52 @@ class RigWAnalyzerTests(unittest.TestCase):
         self.assertEqual(off["paired_delta_range_ms"], "56")
         self.assertEqual(off["n_pair_ms"], "56")
         self.assertEqual(str(result.n_resolution), "56")
+
+    def test_excess_settle_is_charged_without_false_role_delta(self) -> None:
+        temporary, session = self.make_session()
+        self.addCleanup(temporary.cleanup)
+        old_formula_totals: dict[str, set[int]] = {
+            "source_init": set(),
+            "destination_init": set(),
+        }
+        actual_elapsed: set[int] = set()
+        for row in session.rows:
+            if row["cell"] != analyzer.TARGET_CELL or row["trace_state"] != "off":
+                continue
+            transfer_ms = 100
+            if row["role"] == "source_init":
+                settled_ms, flush_ms = 999, 1
+            else:
+                settled_ms, flush_ms = 250, 750
+            row["transfer_ms"] = str(transfer_ms)
+            row["settled_ms"] = str(settled_ms)
+            row["flush_ms"] = str(flush_ms)
+            row["total_ms"] = str(
+                transfer_ms
+                + settled_ms
+                - analyzer.SETTLE_MIN_MS
+                + flush_ms
+            )
+            old_formula_totals[row["role"]].add(transfer_ms + flush_ms)
+            actual_elapsed.add(transfer_ms + settled_ms + flush_ms)
+        self.assertEqual(actual_elapsed, {1100})
+        self.assertEqual(old_formula_totals["source_init"], {101})
+        self.assertEqual(old_formula_totals["destination_init"], {850})
+        session.write()
+
+        result = analyzer.analyze(session.root)
+        with result.summary_csv.open(newline="") as handle:
+            rows = {
+                (row["cell"], row["trace_state"]): row
+                for row in csv.DictReader(handle)
+            }
+        off = rows[(analyzer.TARGET_CELL, "off")]
+        self.assertEqual(off["source_init_median_ms"], "850")
+        self.assertEqual(off["destination_init_median_ms"], "850")
+        self.assertEqual(off["delta_ms"], "0")
+        self.assertEqual(off["paired_delta_median_ms"], "0")
+        self.assertEqual(off["paired_delta_range_ms"], "0")
+        self.assertEqual(off["n_pair_ms"], "0")
 
     def test_landed_manifest_rejects_swapped_sizes_and_renamed_paths(self) -> None:
         mutations = (

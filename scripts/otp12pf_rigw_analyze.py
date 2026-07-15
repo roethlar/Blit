@@ -447,11 +447,15 @@ def load_runs(root: Path) -> list[RunRow]:
         transfer_ms = parse_decimal(raw["transfer_ms"], "transfer_ms", line)
         flush_ms = parse_decimal(raw["flush_ms"], "flush_ms", line)
         total_ms = parse_decimal(raw["total_ms"], "total_ms", line)
-        if total_ms != transfer_ms + flush_ms:
+        settle_excess_ms = Decimal(settled_ms - SETTLE_MIN_MS)
+        expected_total_ms = transfer_ms + settle_excess_ms + flush_ms
+        if total_ms != expected_total_ms:
             raise AnalysisError(
-                f"runs.csv line {line}: total_ms must equal transfer_ms + flush_ms "
+                f"runs.csv line {line}: total_ms must equal transfer_ms + "
+                f"(settled_ms - {SETTLE_MIN_MS}) + flush_ms "
                 f"exactly; got {decimal_text(total_ms)} != "
-                f"{decimal_text(transfer_ms)} + {decimal_text(flush_ms)}"
+                f"{decimal_text(transfer_ms)} + ({settled_ms} - "
+                f"{SETTLE_MIN_MS}) + {decimal_text(flush_ms)}"
             )
         shape = cell.rsplit("_", 1)[1]
         landed_root = raw["landed_root"]
@@ -1562,6 +1566,7 @@ EVENT_FIELDS = (
     "role",
     "role_order",
     "transfer_ms",
+    "settled_ms",
     "flush_ms",
     "total_ms",
     "run_id",
@@ -1596,6 +1601,7 @@ def _event_row(row: RunRow, event: TraceEvent) -> dict[str, str]:
         "role": row.role,
         "role_order": str(row.role_order),
         "transfer_ms": decimal_text(row.transfer_ms),
+        "settled_ms": str(row.settled_ms),
         "flush_ms": decimal_text(row.flush_ms),
         "total_ms": decimal_text(row.total_ms),
         "run_id": row.run_id,
@@ -1820,9 +1826,12 @@ def _markdown(
         [
             "",
             "The authoritative wall-time measurand is `total_ms = transfer_ms + "
-            "flush_ms`: client execution plus the destination durability probe. The fixed "
-            "`settled_ms` observation window is excluded from `total_ms` and from every "
-            "summary, delta, distribution, observer-bias, and resolution-floor value.",
+            f"(settled_ms - {SETTLE_MIN_MS}) + flush_ms`: client execution plus every "
+            f"millisecond beyond the common {SETTLE_MIN_MS} ms observation budget and "
+            "the destination durability "
+            f"probe. Only the common first {SETTLE_MIN_MS} ms is excluded from summaries, "
+            "deltas, "
+            "distributions, observer bias, and resolution floors.",
             "",
             "`Δ = median(destination_init total_ms) − median(source_init total_ms)`. "
             "Each paired `d_i = destination_init total_ms_i − source_init total_ms_i`. "
@@ -1872,8 +1881,8 @@ def _markdown(
             f"`phase_events.csv` contains {trace_event_count} structured events. "
             f"`phase_intervals.csv` contains {interval_count} local-clock intervals.",
             "",
-            "Each phase-event row carries the arm's validated `transfer_ms`, `flush_ms`, "
-            "and authoritative `total_ms`; `settled_ms` remains outside the measurand.",
+            "Each phase-event row carries the arm's validated `transfer_ms`, `settled_ms`, "
+            "`flush_ms`, and authoritative `total_ms`.",
             "",
             "Every interval uses `elapsed_ns` from one endpoint only. `unix_ns` is retained "
             "in the event export for provenance and is never used for cross-host subtraction.",

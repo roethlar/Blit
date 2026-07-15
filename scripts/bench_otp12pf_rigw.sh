@@ -276,6 +276,7 @@ markers = (
     'flush_out=$(flush_verify_win "$dest")',
     'arm_phase=durability_verified',
     'fetch_successful_windows_client_log "$arm_phase" "$remote_err" "$werr"',
+    'total=$((transfer_ms + settled_ms - SETTLE_MIN_MS + flush_ms))',
 )
 positions = []
 for marker in markers:
@@ -1605,8 +1606,9 @@ run_arm() {
     fi
 
     # Anchor all successful post-client work to the same q monotonic instant,
-    # regardless of which endpoint ran the client.  Clock probes consume the
-    # fixed 250 ms budget rather than adding role-dependent time ahead of it.
+    # regardless of which endpoint ran the client.  The first 250 ms is the
+    # common excluded observation budget; any probe overrun is charged to the
+    # durable total below.
     client_done_ns=$(q_monotonic_ns)
     settle_deadline_ns=$((client_done_ns + SETTLE_NS))
 
@@ -1678,7 +1680,7 @@ run_arm() {
             || session_void "$rid emitted TCP phase trace in state=$state carrier=$carrier"
     fi
 
-    total=$((transfer_ms + flush_ms))
+    total=$((transfer_ms + settled_ms - SETTLE_MIN_MS + flush_ms))
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$block" "$state" "$pass" "$cell" "$role" "$pair" "$role_order" \
         "$transfer_ms" "$settled_ms" "$flush_ms" "$total" "$landed_root" \
