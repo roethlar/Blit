@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Round-2 findings fixed; fresh mandatory review pending.
+**Status**: Round-3 Grok guard finding accepted; G3 fix pending.
 
 ## What
 
@@ -253,3 +253,15 @@ fixed at `454ebce`. The additive Grok second eye returned a schema-valid
 override the mandatory Codex findings. See the round-2 raw and adjudication
 records under `.review/results/otp12-pf1-rigw-harness-r2.*`. Fresh review of
 the complete fixed range is pending; no rig run is authorized yet.
+
+Round-3 Codex reviewed
+`4c7c7544db69289cf2e5fc0cf21093b40f00bc0d..53bb5e56a864abe0ee2d2b00c411846a1e7d24d5`
+and returned `PASS` with no findings. The additive Grok review of the same
+immutable range returned schema-valid `REOPENED`, `guard_confirmed=false`.
+G3 is accepted: production role-invariant path construction is correct, but
+the path-construction/parity assertions are bare `[[ ... ]]` commands that can
+survive failure under macOS Bash 3.2. Grok's role-in-path mutation produced
+different physical destinations while `SELFTEST=1` still exited zero. The
+timing-anchor and launcher-journal mutations independently went red-to-green.
+See `.review/results/otp12-pf1-rigw-harness-r3.*`. G3 must be fixed and the
+complete range reviewed again before any rig activity.
