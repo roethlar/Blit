@@ -71,13 +71,19 @@ new two-endpoint trace uncorrelatable.
   and platform behavior are exercised, not inferred from nagatha.
 - Mutation proof: removing role-order drift and the full paired-range term from
   `N_pair` makes the synthetic diagnostic fail (`N_resolution` falls from 70
-  ms to 40 ms); restoring them returns all nine analyzer tests to green.
+  ms to 40 ms); restoring them returns the analyzer suite to green.
 - Mutation proof: excluding successful client logs from trace discovery makes
   the synthetic diagnostic fail on a missing SOURCE/DESTINATION endpoint;
   restoring both client and daemon evidence roots returns all tests to green.
 - Mutation proof: reducing the clock-row formatter from 12 fields to 11 makes
   the harness self-test fail before analysis; restoring the exact 12-column
   schema returns the local and q/macOS self-tests to green.
+- Every trace-on TCP session must prove the complete seven-epoch one-stream
+  ramp from one to eight live sockets on both roles, including exact proposal,
+  preparation, ACK, settlement, attachment, and role-local ordering evidence.
+  Removing epoch 7 makes the targeted analyzer guard fail; disabling exact
+  target/live validation makes all four final-epoch SOURCE and DESTINATION
+  mutations fail. Restoring both guards returns the analyzer suite to green.
 - The build-identity self-test accepts the exact 12-character clean marker and
   mutation-proves that the same marker with `.dirty` is rejected. Live q and
   Windows gates apply that positive-and-negative check to both binaries.
@@ -88,10 +94,10 @@ new two-endpoint trace uncorrelatable.
 
 ## Known gaps
 
-- The independent harness audit found open fail-closed gaps in pinned
-  eight-stream settlement, post-client timing symmetry, durable-total analysis,
-  phase causal ordering, and landed relative-path identity. No live datum is
-  valid until each is fixed and reviewed.
+- The independent harness audit found open fail-closed gaps in post-client
+  timing symmetry, durable-total analysis, phase causal ordering, and landed
+  relative-path identity. No live datum is valid until each is fixed and
+  reviewed.
 - No rig datum is produced by this slice. The full live run waits for the
   committed harness, mandatory Codex adjudication, exact isolated builds, and
   a green endpoint preflight.

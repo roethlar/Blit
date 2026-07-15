@@ -67,120 +67,135 @@ class SyntheticSession:
             value.update(extra)
             return value
 
-        source = [
-            event("SOURCE", 0, 0, f"socket_{source_action}_begin", epoch=0, socket=0),
-            event("SOURCE", 1, 1, f"socket_{source_action}_end", epoch=0, socket=0),
-            event("SOURCE", 2, 2, "socket_trace_attached", epoch=0, socket=0),
-            event("SOURCE", 3, 3, "manifest_complete_send_begin"),
-            event("SOURCE", 4, 4, "manifest_complete_sent", count=1),
-            event("SOURCE", 5, 5, "resize_proposed", epoch=1, target_streams=2),
-            event("SOURCE", 6, 6, "resize_send_begin", epoch=1, target_streams=2),
-            event("SOURCE", 7, 7, "resize_sent", epoch=1, target_streams=2),
-            event("SOURCE", 8, 8, "need_batch_received", batch=0, count=1),
-            event("SOURCE", 9, 9, "planner_begin", batch=0, count=1),
-            event("SOURCE", 10, 10, "planner_end", batch=0, count=1),
-            event("SOURCE", 11, 11, "resize_ack_received", epoch=1, accepted=True),
-            event("SOURCE", 12, 12, f"socket_{source_action}_begin", epoch=1, socket=0),
-            event("SOURCE", 13, 13, f"socket_{source_action}_end", epoch=1, socket=0),
-            event("SOURCE", 14, 14, "socket_trace_attached", epoch=1, socket=0),
-            event("SOURCE", 15, 15, "source_settled", epoch=1, accepted=True),
-            event("SOURCE", 16, 16, "first_payload_queued"),
-            event("SOURCE", 17, 17, "socket_write_begin", epoch=0, socket=0),
-            event("SOURCE", 18, 18, "first_socket_write", epoch=0, socket=0),
-            event("SOURCE", 19, 19, "data_plane_complete"),
-            event("SOURCE", 20, 20, "summary_received"),
-        ]
-        destination = [
-            event(
-                "DESTINATION",
-                0,
-                0,
-                f"socket_{destination_action}_begin",
-                epoch=0,
-                socket=0,
-            ),
-            event(
-                "DESTINATION",
-                1,
-                1,
-                f"socket_{destination_action}_end",
-                epoch=0,
-                socket=0,
-            ),
-            event("DESTINATION", 2, 2, "socket_trace_attached", epoch=0, socket=0),
-            event("DESTINATION", 3, 3, "manifest_complete_received"),
-            event("DESTINATION", 4, 4, "need_batch_send_begin", batch=0, count=1),
-            event("DESTINATION", 5, 5, "need_batch_sent", batch=0, count=1),
-            event("DESTINATION", 6, 6, "resize_received", epoch=1, target_streams=2),
-        ]
-        if initiator == "SOURCE":
-            destination.extend(
-                [
-                    event("DESTINATION", 7, 7, "resize_arm_queue_begin", epoch=1),
-                    event(
-                        "DESTINATION",
-                        8,
-                        8,
-                        "destination_prepared",
-                        epoch=1,
-                        action="arm_queued",
-                    ),
-                    event("DESTINATION", 9, 9, "resize_ack_send_begin", epoch=1, accepted=True),
-                    event("DESTINATION", 10, 10, "resize_ack_sent", epoch=1, accepted=True),
-                    event("DESTINATION", 11, 11, "resize_arm_ready", epoch=1),
-                    event(
-                        "DESTINATION",
-                        12,
-                        12,
-                        "socket_accept_begin",
-                        epoch=1,
-                        socket=0,
-                    ),
-                    event(
-                        "DESTINATION",
-                        13,
-                        13,
-                        "socket_accept_end",
-                        epoch=1,
-                        socket=0,
-                    ),
-                    event("DESTINATION", 14, 14, "socket_trace_attached", epoch=1, socket=0),
-                ]
+        source: list[dict[str, object]] = []
+        destination: list[dict[str, object]] = []
+
+        def source_event(name: str, **extra: object) -> None:
+            seq = len(source)
+            source.append(event("SOURCE", seq, seq, name, **extra))
+
+        def destination_event(name: str, **extra: object) -> None:
+            seq = len(destination)
+            destination.append(event("DESTINATION", seq, seq, name, **extra))
+
+        source_event(f"socket_{source_action}_begin", epoch=0, socket=0)
+        source_event(f"socket_{source_action}_end", epoch=0, socket=0)
+        source_event("socket_trace_attached", epoch=0, socket=0)
+        source_event("manifest_complete_send_begin")
+        source_event("manifest_complete_sent", count=1)
+        source_event("need_batch_received", batch=0, count=1)
+        source_event("planner_begin", batch=0, count=1)
+        source_event("planner_end", batch=0, count=1)
+        for epoch in range(1, 8):
+            target = epoch + 1
+            source_event(
+                "resize_proposed",
+                epoch=epoch,
+                target_streams=target,
+                live_streams=epoch,
             )
-        else:
-            destination.extend(
-                [
-                    event("DESTINATION", 7, 7, "socket_dial_begin", epoch=1, socket=0),
-                    event("DESTINATION", 8, 8, "socket_dial_end", epoch=1, socket=0),
-                    event("DESTINATION", 9, 9, "socket_trace_attached", epoch=1, socket=0),
-                    event(
-                        "DESTINATION",
-                        10,
-                        10,
-                        "destination_prepared",
-                        epoch=1,
-                        action="dial_complete",
-                    ),
-                    event("DESTINATION", 11, 11, "resize_ack_send_begin", epoch=1, accepted=True),
-                    event("DESTINATION", 12, 12, "resize_ack_sent", epoch=1, accepted=True),
-                ]
+            source_event(
+                "resize_send_begin",
+                epoch=epoch,
+                target_streams=target,
+                live_streams=epoch,
             )
-        next_seq = len(destination)
-        destination.extend(
-            [
-                event(
-                    "DESTINATION",
-                    next_seq,
-                    next_seq,
-                    "first_payload_received",
-                    epoch=0,
-                    socket=0,
-                ),
-                event("DESTINATION", next_seq + 1, next_seq + 1, "data_plane_complete"),
-                event("DESTINATION", next_seq + 2, next_seq + 2, "summary_send_begin"),
-                event("DESTINATION", next_seq + 3, next_seq + 3, "summary_sent"),
-            ]
-        )
+            source_event(
+                "resize_sent",
+                epoch=epoch,
+                target_streams=target,
+                live_streams=epoch,
+            )
+            source_event(
+                "resize_ack_received",
+                epoch=epoch,
+                accepted=True,
+                live_streams=target,
+            )
+            source_event(f"socket_{source_action}_begin", epoch=epoch, socket=0)
+            source_event(f"socket_{source_action}_end", epoch=epoch, socket=0)
+            source_event("socket_trace_attached", epoch=epoch, socket=0)
+            source_event(
+                "source_settled",
+                epoch=epoch,
+                target_streams=target,
+                live_streams=target,
+                accepted=True,
+            )
+        source_event("first_payload_queued")
+        source_event("socket_write_begin", epoch=0, socket=0)
+        source_event("first_socket_write", epoch=0, socket=0)
+        source_event("data_plane_complete")
+        source_event("summary_received")
+
+        destination_event(f"socket_{destination_action}_begin", epoch=0, socket=0)
+        destination_event(f"socket_{destination_action}_end", epoch=0, socket=0)
+        destination_event("socket_trace_attached", epoch=0, socket=0)
+        destination_event("manifest_complete_received")
+        destination_event("need_batch_send_begin", batch=0, count=1)
+        destination_event("need_batch_sent", batch=0, count=1)
+        for epoch in range(1, 8):
+            target = epoch + 1
+            destination_event(
+                "resize_received",
+                epoch=epoch,
+                target_streams=target,
+                live_streams=epoch,
+            )
+            if initiator == "SOURCE":
+                destination_event(
+                    "resize_arm_queue_begin",
+                    epoch=epoch,
+                    target_streams=target,
+                )
+                destination_event(
+                    "destination_prepared",
+                    epoch=epoch,
+                    target_streams=target,
+                    action="arm_queued",
+                )
+                destination_event(
+                    "resize_ack_send_begin",
+                    epoch=epoch,
+                    accepted=True,
+                    live_streams=target,
+                )
+                destination_event(
+                    "resize_ack_sent",
+                    epoch=epoch,
+                    accepted=True,
+                    live_streams=target,
+                )
+                destination_event("resize_arm_ready", epoch=epoch)
+                destination_event("socket_accept_begin", epoch=epoch, socket=0)
+                destination_event("socket_accept_end", epoch=epoch, socket=0)
+                destination_event("socket_trace_attached", epoch=epoch, socket=0)
+            else:
+                destination_event("socket_dial_begin", epoch=epoch, socket=0)
+                destination_event("socket_dial_end", epoch=epoch, socket=0)
+                destination_event("socket_trace_attached", epoch=epoch, socket=0)
+                destination_event(
+                    "destination_prepared",
+                    epoch=epoch,
+                    target_streams=target,
+                    action="dial_complete",
+                )
+                destination_event(
+                    "resize_ack_send_begin",
+                    epoch=epoch,
+                    accepted=True,
+                    live_streams=target,
+                )
+                destination_event(
+                    "resize_ack_sent",
+                    epoch=epoch,
+                    accepted=True,
+                    live_streams=target,
+                )
+        destination_event("first_payload_received", epoch=0, socket=0)
+        destination_event("data_plane_complete")
+        destination_event("summary_send_begin")
+        destination_event("summary_sent")
         return source + destination
 
     def _build(self) -> None:
@@ -450,6 +465,64 @@ class RigWAnalyzerTests(unittest.TestCase):
         session.write()
         with self.assertRaisesRegex(analyzer.AnalysisError, "must be arm_queued"):
             analyzer.analyze(session.root)
+
+    def test_resize_ramp_requires_all_seven_epochs(self) -> None:
+        temporary, session = self.make_session()
+        self.addCleanup(temporary.cleanup)
+        first_session = next(event["session_id"] for event in session.events)
+        session.events = [
+            event
+            for event in session.events
+            if not (
+                event["session_id"] == first_session and event.get("epoch") == 7
+            )
+        ]
+        for endpoint_role in ("SOURCE", "DESTINATION"):
+            role_events = [
+                event
+                for event in session.events
+                if event["session_id"] == first_session
+                and event["endpoint_role"] == endpoint_role
+            ]
+            for producer_seq, event in enumerate(
+                sorted(role_events, key=lambda item: int(item["producer_seq"]))
+            ):
+                event["producer_seq"] = producer_seq
+        session.write()
+        with self.assertRaisesRegex(
+            analyzer.AnalysisError, "resize epochs must be exactly 1..7"
+        ):
+            analyzer.analyze(session.root)
+
+    def test_final_resize_target_and_live_fields_are_exact_on_both_roles(self) -> None:
+        mutations = (
+            ("SOURCE", "source_settled", "target_streams"),
+            ("SOURCE", "source_settled", "live_streams"),
+            ("DESTINATION", "resize_received", "target_streams"),
+            ("DESTINATION", "resize_ack_sent", "live_streams"),
+        )
+        for endpoint_role, event_name, field in mutations:
+            with self.subTest(
+                endpoint_role=endpoint_role, event=event_name, field=field
+            ):
+                temporary, session = self.make_session()
+                self.addCleanup(temporary.cleanup)
+                first_session = next(event["session_id"] for event in session.events)
+                marker = next(
+                    event
+                    for event in session.events
+                    if event["session_id"] == first_session
+                    and event["endpoint_role"] == endpoint_role
+                    and event["event"] == event_name
+                    and event.get("epoch") == 7
+                )
+                marker[field] = 7
+                session.write()
+                with self.assertRaisesRegex(
+                    analyzer.AnalysisError,
+                    f"{endpoint_role}/{event_name} epoch 7 {field} must be 8",
+                ):
+                    analyzer.analyze(session.root)
 
     def test_clock_inventory_and_midpoint_math_are_fail_closed(self) -> None:
         temporary, session = self.make_session()

@@ -632,6 +632,19 @@ def _assert_before(label: str, start: TraceEvent, end: TraceEvent) -> None:
         )
 
 
+def _assert_event_fields(
+    label: str, event: TraceEvent, expected: dict[str, Any]
+) -> None:
+    epoch = event.raw.get("epoch")
+    for field, wanted in expected.items():
+        actual = event.raw.get(field)
+        if actual != wanted:
+            raise AnalysisError(
+                f"{label}: {event.endpoint_role}/{event.event} epoch {epoch} "
+                f"{field} must be {wanted!r}, got {actual!r}"
+            )
+
+
 def validate_traces(
     rows: Sequence[RunRow], events: Sequence[TraceEvent]
 ) -> dict[tuple[str, str], list[TraceEvent]]:
@@ -789,13 +802,19 @@ def validate_traces(
             ),
         )
         resize_epochs = _assert_same_keys(label, resize_maps)
-        if resize_epochs != {(epoch,) for epoch in range(1, len(resize_epochs) + 1)}:
-            raise AnalysisError(f"{label}: resize epochs are not contiguous from one")
+        expected_resize_epochs = {(epoch,) for epoch in range(1, 8)}
+        if resize_epochs != expected_resize_epochs:
+            raise AnalysisError(
+                f"{label}: resize epochs must be exactly 1..7, got "
+                f"{sorted(epoch[0] for epoch in resize_epochs)}"
+            )
         resize = dict(resize_maps)
         expected_prepared_action = (
             "arm_queued" if expected_initiator == "SOURCE" else "dial_complete"
         )
-        for key in resize_epochs:
+        for key in sorted(resize_epochs):
+            epoch = key[0]
+            target = epoch + 1
             _assert_before(label, resize["resize_proposed"][key], resize["resize_send_begin"][key])
             _assert_before(label, resize["resize_send_begin"][key], resize["resize_sent"][key])
             _assert_before(
@@ -816,22 +835,58 @@ def validate_traces(
             _assert_before(
                 label, resize["resize_ack_received"][key], resize["source_settled"][key]
             )
-            accepted = {
-                resize[name][key].raw.get("accepted")
-                for name in (
-                    "resize_ack_send_begin",
-                    "resize_ack_sent",
-                    "resize_ack_received",
-                    "source_settled",
+            for name in ("resize_proposed", "resize_send_begin", "resize_sent"):
+                _assert_event_fields(
+                    label,
+                    resize[name][key],
+                    {"target_streams": target, "live_streams": epoch},
                 )
-            }
-            if accepted != {True}:
-                raise AnalysisError(f"{label}: resize epoch {key[0]} was not consistently accepted")
+            _assert_event_fields(
+                label,
+                resize["resize_received"][key],
+                {"target_streams": target, "live_streams": epoch},
+            )
+            _assert_event_fields(
+                label,
+                resize["destination_prepared"][key],
+                {"target_streams": target},
+            )
+            for name in ("resize_ack_send_begin", "resize_ack_sent"):
+                _assert_event_fields(
+                    label,
+                    resize[name][key],
+                    {"accepted": True, "live_streams": target},
+                )
+            _assert_event_fields(
+                label,
+                resize["resize_ack_received"][key],
+                {"accepted": True, "live_streams": target},
+            )
+            _assert_event_fields(
+                label,
+                resize["source_settled"][key],
+                {
+                    "accepted": True,
+                    "target_streams": target,
+                    "live_streams": target,
+                },
+            )
             if resize["destination_prepared"][key].raw.get("action") != expected_prepared_action:
                 raise AnalysisError(
                     f"{label}: resize epoch {key[0]} destination_prepared action must be "
                     f"{expected_prepared_action}"
                 )
+        for epoch in range(1, 7):
+            _assert_before(
+                label,
+                resize["source_settled"][(epoch,)],
+                resize["resize_proposed"][(epoch + 1,)],
+            )
+            _assert_before(
+                label,
+                resize["resize_ack_sent"][(epoch,)],
+                resize["resize_received"][(epoch + 1,)],
+            )
 
         source_complete = _one_event(group, "SOURCE", "data_plane_complete", label)
         source_summary = _one_event(group, "SOURCE", "summary_received", label)
@@ -863,6 +918,17 @@ def validate_traces(
                 f"{label}: socket attachment inventory {sorted(source_attached)} does not "
                 f"match epoch-0 plus accepted resize epochs {sorted(expected_attached)}"
             )
+        for endpoint_role, complete in (
+            ("SOURCE", source_complete),
+            ("DESTINATION", destination_complete),
+        ):
+            for attached in (
+                event
+                for event in group
+                if event.endpoint_role == endpoint_role
+                and event.event == "socket_trace_attached"
+            ):
+                _assert_before(label, attached, complete)
 
         source_action = "dial" if expected_initiator == "SOURCE" else "accept"
         destination_action = "accept" if expected_initiator == "SOURCE" else "dial"
@@ -928,6 +994,11 @@ def validate_traces(
             if arm_epochs != resize_epochs:
                 raise AnalysisError(f"{label}: destination resize-arm inventory mismatch")
             for arm_key in arm_epochs:
+                _assert_event_fields(
+                    label,
+                    arm_begin[arm_key],
+                    {"target_streams": arm_key[0] + 1},
+                )
                 _assert_before(label, arm_begin[arm_key], arm_ready[arm_key])
         elif arm_begin or arm_ready:
             raise AnalysisError(f"{label}: destination initiator unexpectedly emitted arm events")
