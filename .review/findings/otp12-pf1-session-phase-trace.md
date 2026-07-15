@@ -151,4 +151,12 @@ and adjudication:
 `.review/results/otp12-pf1-session-phase-trace.codex.md` and
 `.review/results/otp12-pf1-session-phase-trace.gpt-verdict.md`.
 
-Requested Grok second-eye review is pending.
+The requested Grok (`grok-4.5`, `grok 0.2.101`) second-eye review was attempted
+twice at the exact same base/head range in a clean detached worktree. Both
+responses failed the reviewloop contract: `structuredOutput` was null, the
+model concatenated four and then five payloads, and its free-form thought
+contradicted the payloads or admitted the mutation proof had not run. The
+schema retry also returned `guard_confirmed: false`. This is recorded
+fail-closed as a **CONTESTED reviewer-protocol outcome**, not a Grok PASS and
+not an admitted code finding. Adjudication and both raw envelopes:
+`.review/results/otp12-pf1-session-phase-trace.grok-verdict.md`.
