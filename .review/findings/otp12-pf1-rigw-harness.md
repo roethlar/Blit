@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Reopened — G5 fixed and guard-proved; fresh complete review pending.
+**Status**: Reopened — G5 reviewed; round-5 F1/G6 purge provenance fix pending.
 
 ## What
 
@@ -311,3 +311,17 @@ real three-interface shape in the Bash 3.2 self-test. No daemon started and no
 endpoint policy changed. Removing the interface predicate makes the self-test
 red on the three-row fixture; restoring it returns the complete self-test to
 green.
+
+Round-5 reviewed the complete immutable range through
+`06b33228d502c51da24bc2a78fba7eddcf6c0723`. Mandatory Codex independently
+confirmed G5, the exact 128-arm schedule, and role-invariant endpoint-local
+paths, then returned `NEEDS FIXES` with one separate High finding. G6 is
+accepted: the harness runs the endpoint's pre-existing
+`D:/blit-test/purge-standby.ps1` by existence and exit status only, rather
+than staging and hashing the reviewed repository helper. A stale or no-op
+helper could therefore make a warm-cache run look valid. Additive Grok
+returned schema-valid `ACCEPTED`, exact SHAs, and `guard_confirmed=true` for
+G5 after independently driving the ARP interface mutation red and restoring
+the Bash 3.2 self-test green. Its detached worktree ended clean and was
+removed. No endpoint was contacted. See the round-5 raw reviews and
+adjudications under `.review/results/otp12-pf1-rigw-harness-r5.*`.
