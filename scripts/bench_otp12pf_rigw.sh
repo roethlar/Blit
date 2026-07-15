@@ -48,6 +48,8 @@ WIN_TO_Q_MSS=8960
 PORT=9031
 PAIRS_PER_BLOCK=4
 LOAD1_MAX=3.0
+Q_LOAD_RECOVERY_MAX_S=120
+Q_LOAD_RECOVERY_POLL_S=5
 SPOTLIGHT_CPU_MAX=10.0
 WIN_CPU_MAX=20.0
 SETTLE_NS=250000000
@@ -485,7 +487,7 @@ selftest() {
     local purge_hash purge_replacement_tree purge_replacement_head
     local purge_replacement_blob purge_replacement_hash purge_replace_refs
     local purge_raw_status
-    local drained preflight_source
+    local drained preflight_source quiet_output
     reject_registered_overrides
     if (
         SELFTEST=1
@@ -548,6 +550,64 @@ selftest() {
         || die "q-to-Windows SOURCE-initiated destination argument changed"
     [[ "$(arm_destination_argument mw destination_init)" == "$WIN_MODULE/$destination_rel" ]] \
         || die "q-to-Windows DESTINATION-initiated destination argument changed"
+
+    (
+        local quiet_sleeps=0
+        Q_LOAD_RECOVERY_MAX_S=10
+        Q_LOAD_RECOVERY_POLL_S=5
+        ps() { :; }
+        q_time_machine_gate() { :; }
+        q_spotlight_cpu() { printf '%s\n' 0.0; }
+        q_load1() {
+            case "$quiet_sleeps" in
+                0) printf '%s\n' 3.19;;
+                1) printf '%s\n' 3.05;;
+                *) printf '%s\n' 2.95;;
+            esac
+        }
+        sleep() { quiet_sleeps=$((quiet_sleeps + 1)); }
+        log() { :; }
+        q_quiet_gate runtime
+        [[ "$quiet_sleeps" == 2 ]]
+    ) || die "runtime q load gate did not wait through self-generated load history"
+    if (
+        ps() { :; }
+        q_time_machine_gate() { :; }
+        q_spotlight_cpu() { printf '%s\n' 0.0; }
+        q_load1() { printf '%s\n' 3.19; }
+        sleep() { :; }
+        log() { :; }
+        q_quiet_gate immediate
+    ) >/dev/null 2>&1; then
+        die "preflight q load gate stopped failing immediately above the ceiling"
+    fi
+    if (
+        Q_LOAD_RECOVERY_MAX_S=10
+        Q_LOAD_RECOVERY_POLL_S=5
+        ps() { :; }
+        q_time_machine_gate() { :; }
+        q_spotlight_cpu() { printf '%s\n' 0.0; }
+        q_load1() { printf '%s\n' 3.19; }
+        sleep() { :; }
+        log() { :; }
+        q_quiet_gate runtime
+    ) >/dev/null 2>&1; then
+        die "persistent q load escaped the bounded runtime recovery gate"
+    fi
+    if quiet_output=$(
+        ps() { :; }
+        q_time_machine_gate() { :; }
+        q_spotlight_cpu() { printf '%s\n' 0.0; }
+        q_load1() { printf '%s\n' not-a-load; }
+        sleep() { printf '%s\n' unexpected-sleep; }
+        log() { printf '%s\n' "$*"; }
+        q_quiet_gate runtime
+    2>&1); then
+        die "malformed q load sample was accepted"
+    fi
+    [[ "$quiet_output" == *"cannot parse q load1 'not-a-load'"* \
+        && "$quiet_output" != *unexpected-sleep* ]] \
+        || die "malformed q load sample did not fail immediately"
     local arp_fixture
     arp_fixture=$'? (10.1.10.177) at 34:5a:60:3e:78:8b on en0 ifscope [ethernet]\n? (10.1.10.177) at 34:5a:60:3e:78:8b on en1 ifscope [ethernet]\n? (10.1.10.177) at 34:5a:60:3e:78:8b on en8 ifscope [ethernet]'
     [[ "$(q_peer_mac_from_arp en8 <<<"$arp_fixture")" == "34:5a:60:3e:78:8b" ]] \
@@ -760,7 +820,7 @@ markers = (
     "win_topology_gate",
     "mss_gate",
     "firewall_gate",
-    "q_quiet_gate",
+    "q_quiet_gate immediate",
     "win_quiet_gate",
     "timer_gate",
     "clock_batch_gate",
@@ -1512,7 +1572,11 @@ PY
         unset -v block state
         SESSION_TAG=g10
         PAIRS_PER_BLOCK=1
-        q_quiet_gate() { :; }
+        local q_quiet_calls=0
+        q_quiet_gate() {
+            [[ "$1" == runtime ]] || return 104
+            q_quiet_calls=$((q_quiet_calls + 1))
+        }
         win_quiet_gate() { :; }
         start_daemons() {
             [[ "$1|$2|$3" == '9|on|g10-b9-on' ]] || return 105
@@ -1525,6 +1589,7 @@ PY
         run_block 9 on forward 1 1
         [[ "$(wc -l < "$compound_tmp/run-block-arms" | tr -d ' ')" == 8 ]] \
             || exit 107
+        [[ "$q_quiet_calls" == 3 ]] || exit 108
         : > "$compound_tmp/run-block-complete"
     ) || {
         rm -rf "$compound_tmp"
@@ -1535,6 +1600,15 @@ PY
         die "run block did not complete with its argument identity"
     }
     rm -rf "$compound_tmp"
+    (
+        q_topology_gate() { :; }
+        win_topology_gate() { :; }
+        mss_gate() { :; }
+        q_quiet_gate() { [[ "$1" == runtime ]]; }
+        win_quiet_gate() { :; }
+        ports_closed() { :; }
+        end_gate
+    ) || die "end gate did not use bounded runtime q load recovery"
 
     freshness_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-freshness.XXXXXX")
     reserve_evidence_dir "$freshness_tmp/new-evidence" \
@@ -2136,23 +2210,39 @@ q_time_machine_gate() {
 }
 
 q_quiet_gate() {
-    local offenders load spot
-    offenders=$(ps -axo pid=,comm= | awk -v owned="${q_daemon_pid:-}" '
-        {
-          n=$2; sub(/^.*\//, "", n)
-          if ($1 != owned && (n == "cargo" || n == "rustc" || n == "blit-daemon" || n ~ /^codex($|-)/))
-            print $1 ":" n
-        }')
-    [[ -z "$offenders" ]] || die "q has benchmark-conflicting processes: $offenders"
-    q_time_machine_gate
-    load=$(q_load1)
-    [[ "$load" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "cannot parse q load1 '$load'"
-    float_le "$load" "$LOAD1_MAX" || die "q load1 $load exceeds $LOAD1_MAX"
-    spot=$(q_spotlight_cpu)
-    [[ "$spot" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "cannot parse Spotlight CPU '$spot'"
-    float_le "$spot" "$SPOTLIGHT_CPU_MAX" \
-        || die "q Spotlight CPU $spot% exceeds $SPOTLIGHT_CPU_MAX%"
-    log "quiet q: load1=$load Spotlight=${spot}% TimeMachine=disabled/stopped"
+    local mode="${1:-immediate}" offenders load spot waited=0
+    [[ "$mode" == immediate || "$mode" == runtime ]] \
+        || die "invalid q quiet-gate mode '$mode'"
+    while :; do
+        offenders=$(ps -axo pid=,comm= | awk -v owned="${q_daemon_pid:-}" '
+            {
+              n=$2; sub(/^.*\//, "", n)
+              if ($1 != owned && (n == "cargo" || n == "rustc" || n == "blit-daemon" || n ~ /^codex($|-)/))
+                print $1 ":" n
+            }')
+        [[ -z "$offenders" ]] \
+            || die "q has benchmark-conflicting processes: $offenders"
+        q_time_machine_gate
+        load=$(q_load1)
+        [[ "$load" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+            || die "cannot parse q load1 '$load'"
+        spot=$(q_spotlight_cpu)
+        [[ "$spot" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+            || die "cannot parse Spotlight CPU '$spot'"
+        float_le "$spot" "$SPOTLIGHT_CPU_MAX" \
+            || die "q Spotlight CPU $spot% exceeds $SPOTLIGHT_CPU_MAX%"
+        if float_le "$load" "$LOAD1_MAX"; then
+            log "quiet q: load1=$load Spotlight=${spot}% TimeMachine=disabled/stopped"
+            return
+        fi
+        [[ "$mode" == runtime ]] \
+            || die "q load1 $load exceeds $LOAD1_MAX"
+        (( waited < Q_LOAD_RECOVERY_MAX_S )) \
+            || die "q load1 $load still exceeds $LOAD1_MAX after ${waited}s runtime recovery"
+        log "q runtime load recovery: load1=$load exceeds $LOAD1_MAX; waiting ${Q_LOAD_RECOVERY_POLL_S}s"
+        sleep "$Q_LOAD_RECOVERY_POLL_S"
+        waited=$((waited + Q_LOAD_RECOVERY_POLL_S))
+    done
 }
 
 win_quiet_gate() {
@@ -2558,7 +2648,7 @@ preflight() {
     win_topology_gate
     mss_gate
     firewall_gate
-    q_quiet_gate
+    q_quiet_gate immediate
     win_quiet_gate
     timer_gate
     clock_batch_gate
@@ -3128,12 +3218,12 @@ run_block() {
     local block="$1" state="$2" pass="$3" first="$4" last="$5"
     local run_id="${SESSION_TAG}-b${block}-${state}"
     local round pair cells cell first_role second_role
-    q_quiet_gate; win_quiet_gate
+    q_quiet_gate runtime; win_quiet_gate
     start_daemons "$block" "$state" "$run_id"
     for ((round=1; round<=PAIRS_PER_BLOCK; round++)); do
         pair=$((first + round - 1))
         [[ "$pair" -le "$last" ]] || session_void "block $block pair schedule overflow"
-        q_quiet_gate
+        q_quiet_gate runtime
         case "$round" in
             1|4) first_role=source_init; second_role=destination_init;;
             2|3) first_role=destination_init; second_role=source_init;;
@@ -3149,14 +3239,14 @@ run_block() {
         IFS="$old_ifs"
     done
     stop_daemons "$block"
-    q_quiet_gate; win_quiet_gate
+    q_quiet_gate runtime; win_quiet_gate
 }
 
 end_gate() {
     q_topology_gate
     win_topology_gate
     mss_gate
-    q_quiet_gate
+    q_quiet_gate runtime
     win_quiet_gate
     ports_closed || session_void "end gate found a listener on port $PORT"
 }

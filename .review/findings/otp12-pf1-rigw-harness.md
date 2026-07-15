@@ -1,8 +1,8 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: In progress — round-12 Grok accepted exact `d5e9dda`; additive
-staging and live gates remain.
+**Status**: In progress — live-found G13 runtime load self-contamination fixed
+and Bash-3.2 guard-proved; Claude review remains before another exact build.
 
 ## What
 
@@ -242,10 +242,10 @@ new two-endpoint trace uncorrelatable.
 ## Known gaps
 
 - No accepted or graded rig datum has been produced by this slice. Exact
-  candidate `aa0785c` is retired from further live use after G12. The full run
-  waits for the G12 fix identity, external Grok or Claude review, a new exact
-  immutable candidate, additive isolated staging, a successful launcher smoke,
-  and green endpoint preflight.
+  candidate `d5e9dda` is retired from further live use after the G13 void. The
+  full run waits for an exact G13 identity, the required Claude Fable 5/max
+  review, a fresh additive isolated build and stage, a successful launcher
+  smoke, and green endpoint preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
   small-fixture/P2 work, phase report, and `0f922de` historical control before
@@ -663,3 +663,43 @@ was `5e3f3aa802b9b9bd92f9673b0b31ce7166046fa00e2e5d8cd9aef6a0f2559c95`.
 Exact candidate `d5e9dda`, not the later verdict-record commit, is cleared for
 additive build/staging and SSH-driven launcher, preflight, and registered-run
 gates.
+
+Exact candidate `d5e9dda` was bundled and built from a clean detached clone,
+then staged only under new SHA-named q and Windows paths. q's actual Bash 3.2
+self-test passed. Launcher smoke at
+`/Users/michael/Dev/blit_v2_d5e9dda/logs/otp12pf-rigw-20260715T180301Z.17538`
+and standalone preflight at
+`/Users/michael/Dev/blit_v2_d5e9dda/logs/otp12pf-rigw-20260715T180338Z-preflight`
+passed exact provenance, fabric, quietness, lifecycle, and fixture gates; the
+complete clock path took 414 ms and 404 ms.
+
+The registered run at
+`/Users/michael/Dev/blit_v2_d5e9dda/logs/otp12pf-rigw-20260715T180425Z`
+(session `20260715T180421Z.18113`) cleared G12 live: all eight pair-1 arms,
+including both q-client destination-initiated arms, completed with exit zero,
+verified drain/durability, and landed manifests. Immediately before pair 1,
+q load1 was 1.79 with Spotlight at 0.0%, Time Machine disabled/stopped, and no
+known conflicting process. The eight owned transfers then ran for 74 seconds;
+the pair-2 entry gate sampled the one-minute load history at 3.19 and killed
+the session against the fixed 3.0 ceiling. The session is `SESSION-VOID` with
+eight of 128 rows and 48 of 768 clock samples. No analyzer or finalizer product
+exists, no `SESSION-COMPLETE` exists, and nothing was accepted, analyzed, or
+graded. Both ports closed, the exact daemon PIDs are absent, and q plus both
+Windows evidence trees remain retained.
+
+G13 is an instrument defect: the same immediate one-minute load gate used in
+preflight was also called after every eight owned transfers, so it treated the
+benchmark's own runnable/I/O history as new external contamination. The fix
+keeps the registered 3.0 ceiling and every per-round check. Preflight still
+fails immediately above the ceiling; runtime checks now poll every five
+seconds for at most 120 seconds, rechecking conflicting processes, Time
+Machine, and Spotlight on every sample. Self-generated load history can decay
+outside every timed arm, while persistent load still fails closed at the same
+bar. Executed Bash 3.2 guards prove a 3.19→3.05→2.95 sequence takes exactly two
+polls, immediate mode rejects 3.19, persistent 3.19 exhausts the bound, every
+run-block quiet check requests runtime recovery, and the end gate does too.
+Restoring only the exact old one-shot `q_quiet_gate` body makes the transient
+recovery guard fail with `runtime q load gate did not wait through
+self-generated load history`; restoring the bounded implementation returns
+syntax and the complete self-test to green. Format, strict clippy, all
+workspace tests, all 23 analyzer tests, the docs gate, and diff checks pass.
