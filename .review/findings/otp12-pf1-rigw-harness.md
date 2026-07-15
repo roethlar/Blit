@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Verified — round-4 Codex PASS and Grok ACCEPTED; live gates pending.
+**Status**: Reopened — G5 fixed and guard-proved; fresh complete review pending.
 
 ## What
 
@@ -298,3 +298,16 @@ mutation plus G4 finalization, may-exist, and marker-removal mutations red
 before restoring every offline suite green. Its detached worktree ended clean
 and was removed. Review is closed; launcher smoke and endpoint preflight remain
 required before the registered run.
+
+The first live launcher-smoke attempt on q refused before launching a daemon
+or timing a transfer. G5 is accepted as a High instrument-correctness finding:
+q legitimately has the Windows peer cached on `en0`, `en1`, and registered
+`en8`, but the ARP gate concatenated all three MAC rows. It therefore rejected
+the correct peer even though `route -n get` selected `en8`. The failed attempt
+is retained as `SESSION-VOID` under
+`logs/otp12pf-rigw-20260715T113500Z-launcher` in the isolated q clone. The fix
+parses exactly the registered interface, requires one result, and pins the
+real three-interface shape in the Bash 3.2 self-test. No daemon started and no
+endpoint policy changed. Removing the interface predicate makes the self-test
+red on the three-row fixture; restoring it returns the complete self-test to
+green.

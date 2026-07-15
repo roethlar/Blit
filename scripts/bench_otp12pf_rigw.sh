@@ -355,6 +355,10 @@ selftest() {
         || die "q-to-Windows SOURCE-initiated destination argument changed"
     [[ "$(arm_destination_argument mw destination_init)" == "$WIN_MODULE/$destination_rel" ]] \
         || die "q-to-Windows DESTINATION-initiated destination argument changed"
+    local arp_fixture
+    arp_fixture=$'? (10.1.10.177) at 34:5a:60:3e:78:8b on en0 ifscope [ethernet]\n? (10.1.10.177) at 34:5a:60:3e:78:8b on en1 ifscope [ethernet]\n? (10.1.10.177) at 34:5a:60:3e:78:8b on en8 ifscope [ethernet]'
+    [[ "$(q_peer_mac_from_arp en8 <<<"$arp_fixture")" == "34:5a:60:3e:78:8b" ]] \
+        || die "q ARP parser did not select exactly the registered interface"
     clock_probe=$(append_clock_row 1 run cell 1 source_init before 1 10 11 12 2 0)
     [[ "$(awk -F, '{print NF}' <<<"$clock_probe")" == 12 ]] \
         || die "clock sample row is not exactly 12 columns"
@@ -1358,11 +1362,19 @@ q_topology_gate() {
         || die "q route to $WIN_IP reports MTU $route_mtu, expected $REGISTERED_MTU"
     /sbin/ping -c 1 -W 1000 "$WIN_IP" >/dev/null || die "q cannot ping $WIN_IP"
     arp=$(/usr/sbin/arp -n "$WIN_IP") || die "q ARP probe failed"
-    peer_mac=$(sed -n 's/.* at \([^ ]*\) on .*/\1/p' <<<"$arp" | tr 'A-F' 'a-f')
+    peer_mac=$(q_peer_mac_from_arp "$Q_NIC" <<<"$arp")
+    [[ -n "$peer_mac" && "$peer_mac" != *$'\n'* ]] \
+        || die "q ARP for $WIN_IP did not yield exactly one $Q_NIC entry: $peer_mac"
     [[ "$peer_mac" == "$(tr 'A-F' 'a-f' <<<"${WIN_MAC//-/:}")" ]] \
         || die "q ARP for $WIN_IP is $peer_mac, expected peer ${WIN_MAC//-/:}"
     [[ "$peer_mac" != "$Q_MAC" ]] || die "q ARP points at q's own MAC (black-hole host route)"
     log "fabric q: $Q_NIC $Q_IP mtu=$mtu media=$media route=$iface peer=$peer_mac"
+}
+
+q_peer_mac_from_arp() {
+    local nic="$1"
+    awk -v nic="$nic" \
+        '$3 == "at" && $5 == "on" && $6 == nic { print tolower($4) }'
 }
 
 win_topology_gate() {
