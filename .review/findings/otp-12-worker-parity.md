@@ -138,3 +138,13 @@ findings. It independently ran the guard 20 times in debug and 20 times in
 release, the exact target-8 role pins, the gated target-4/byte-identical-tree
 pin, refusal/tuning/cancellation checks, strict clippy, release compilation,
 and the full 1,490-pass workspace suite.
+
+Grok second-eye review (`grok 0.2.101`, model `grok-4.5`) returned
+**ACCEPTED** with `guard_confirmed=true` for the exact pinned range
+`6b0f01c..42b9b38`. It independently reran the role, gated-ACK, refusal,
+arbitration, and unknown-capacity guards. Its production mutation restored the
+destination-only zero-capacity bug and observed 1 versus 8 streams; restoring
+the reviewed head returned green. No material finding remained. Raw structured
+result and adjudication:
+`.review/results/otp-12-worker-parity.grok-second-eye.json` and
+`.review/results/otp-12-worker-parity.grok-verdict.md`.
