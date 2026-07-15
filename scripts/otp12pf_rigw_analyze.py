@@ -42,6 +42,7 @@ CSV_FIELDS = (
     "pair",
     "role_order",
     "transfer_ms",
+    "settled_ms",
     "flush_ms",
     "total_ms",
     "exit",
@@ -67,6 +68,8 @@ CLOCK_FIELDS = (
 )
 TRACE_PREFIX = "[session-phase] "
 SESSION_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+SETTLE_MIN_MS = 250
+SETTLE_MAX_MS = 1000
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,7 @@ class RunRow:
     pair: int
     role_order: int
     transfer_ms: Decimal
+    settled_ms: int
     flush_ms: Decimal
     total_ms: Decimal
     exit_code: int
@@ -337,6 +341,12 @@ def load_runs(root: Path) -> list[RunRow]:
                 f"runs.csv line {line}: session_id must be blank for trace-off or gRPC arms"
             )
         _safe_client_log(root, raw["client_log"], line)
+        settled_ms = parse_int(raw["settled_ms"], "settled_ms", line)
+        if not SETTLE_MIN_MS <= settled_ms < SETTLE_MAX_MS:
+            raise AnalysisError(
+                f"runs.csv line {line}: settled_ms must be in "
+                f"[{SETTLE_MIN_MS},{SETTLE_MAX_MS}), got {settled_ms}"
+            )
         rows.append(
             RunRow(
                 csv_line=line,
@@ -349,6 +359,7 @@ def load_runs(root: Path) -> list[RunRow]:
                 pair=pair,
                 role_order=role_order,
                 transfer_ms=parse_decimal(raw["transfer_ms"], "transfer_ms", line),
+                settled_ms=settled_ms,
                 flush_ms=parse_decimal(raw["flush_ms"], "flush_ms", line),
                 total_ms=parse_decimal(raw["total_ms"], "total_ms", line),
                 exit_code=exit_code,

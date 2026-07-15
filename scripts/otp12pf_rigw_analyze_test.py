@@ -235,6 +235,7 @@ class SyntheticSession:
                                 "pair": str(pair),
                                 "role_order": str(role_order),
                                 "transfer_ms": str(transfer_ms),
+                                "settled_ms": "250",
                                 "flush_ms": "1",
                                 "total_ms": str(transfer_ms + 1),
                                 "exit": "0",
@@ -434,6 +435,25 @@ class RigWAnalyzerTests(unittest.TestCase):
         session.rows[0]["cell"] = "wm_tcp_large"
         session.write()
         with self.assertRaisesRegex(analyzer.AnalysisError, "schedule mismatch"):
+            analyzer.analyze(session.root)
+
+    def test_settled_ms_schema_and_bounds_are_fail_closed(self) -> None:
+        for value in ("249", "1000", "not-an-integer"):
+            with self.subTest(settled_ms=value):
+                temporary, session = self.make_session()
+                self.addCleanup(temporary.cleanup)
+                session.rows[0]["settled_ms"] = value
+                session.write()
+                with self.assertRaisesRegex(analyzer.AnalysisError, "settled_ms"):
+                    analyzer.analyze(session.root)
+
+        temporary, session = self.make_session()
+        self.addCleanup(temporary.cleanup)
+        with (session.root / "runs.csv").open() as handle:
+            lines = handle.readlines()
+        lines[0] = lines[0].replace("settled_ms,", "")
+        (session.root / "runs.csv").write_text("".join(lines))
+        with self.assertRaisesRegex(analyzer.AnalysisError, "header mismatch"):
             analyzer.analyze(session.root)
 
     def test_sequence_gap_and_missing_terminal_are_rejected(self) -> None:

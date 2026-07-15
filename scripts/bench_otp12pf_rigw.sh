@@ -49,6 +49,9 @@ PAIRS_PER_BLOCK=4
 LOAD1_MAX=3.0
 SPOTLIGHT_CPU_MAX=10.0
 WIN_CPU_MAX=20.0
+SETTLE_NS=250000000
+SETTLE_MIN_MS=250
+SETTLE_MAX_MS=1000
 
 Q_MODULE="$HOME/blit-bench-work"
 Q_BLIT="$REPO_ROOT/target/release/blit"
@@ -126,6 +129,29 @@ win_destination_path() { printf '%s/rigw-sessions/%s/%s/container' "$WIN_MODULE"
 append_clock_row() {
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$@"
 }
+q_monotonic_ns() {
+    python3 -c 'import time; print(time.monotonic_ns())'
+}
+settle_until_deadline() {
+    python3 - "$1" <<'PY'
+import sys, time
+
+deadline_ns = int(sys.argv[1])
+remaining_ns = deadline_ns - time.monotonic_ns()
+if remaining_ns > 0:
+    time.sleep(remaining_ns / 1_000_000_000)
+print(time.monotonic_ns())
+PY
+}
+successful_windows_log_phase_ok() {
+    [[ "$1" == durability_verified ]]
+}
+fetch_successful_windows_client_log() {
+    local arm_phase="$1" remote_err="$2" local_err="$3"
+    successful_windows_log_phase_ok "$arm_phase" \
+        || session_void "refusing successful Windows client-log fetch before destination durability"
+    fetch_win_file "$remote_err" "$local_err"
+}
 embeds_clean_q() {
     local path="$1"
     LC_ALL=C grep -qa -- "+$HEAD_BUILD_ID" "$path" || return 1
@@ -135,6 +161,7 @@ embeds_clean_q() {
 
 selftest() {
     local got expected rows source_first destination_first clock_probe identity_file
+    local selftest_client_done selftest_deadline selftest_settle_done run_arm_source
     reject_registered_overrides
     got=$(emit_schedule)
     expected=$'1,off,forward,1,4\n2,on,reverse,1,4\n3,on,forward,5,8\n4,off,reverse,5,8'
@@ -163,6 +190,43 @@ selftest() {
     clock_probe=$(append_clock_row 1 run cell 1 source_init before 1 10 11 12 2 0)
     [[ "$(awk -F, '{print NF}' <<<"$clock_probe")" == 12 ]] \
         || die "clock sample row is not exactly 12 columns"
+    [[ "$SETTLE_NS" == 250000000 && "$SETTLE_MIN_MS" == 250 && "$SETTLE_MAX_MS" == 1000 ]] \
+        || die "registered post-client settle bounds changed"
+    selftest_client_done=$(q_monotonic_ns)
+    selftest_deadline=$((selftest_client_done + SETTLE_NS))
+    selftest_settle_done=$(settle_until_deadline "$selftest_deadline")
+    [[ "$selftest_settle_done" =~ ^[0-9]+$ && "$selftest_settle_done" -ge "$selftest_deadline" ]] \
+        || die "absolute post-client deadline wait returned early"
+    if successful_windows_log_phase_ok client_done; then
+        die "successful Windows client log was fetchable before durability"
+    fi
+    successful_windows_log_phase_ok durability_verified \
+        || die "successful Windows client log was blocked after durability"
+
+    run_arm_source=$(declare -f run_arm)
+    python3 - "$run_arm_source" <<'PY' || die "run_arm post-client ordering changed"
+import sys
+
+source = sys.argv[1]
+markers = (
+    'client_done_ns=$(q_monotonic_ns)',
+    'read -r _ transfer_ms rc',
+    'record_clock_samples "$block" "$run_id" "$cell" "$pair" "$role" after',
+    'settle_done_ns=$(settle_until_deadline "$settle_deadline_ns")',
+    'flush_out=$(flush_verify_q "$dest")',
+    'flush_out=$(flush_verify_win "$dest")',
+    'arm_phase=durability_verified',
+    'fetch_successful_windows_client_log "$arm_phase" "$remote_err" "$werr"',
+)
+positions = []
+for marker in markers:
+    try:
+        positions.append(source.index(marker))
+    except ValueError as exc:
+        raise SystemExit(f"missing run_arm ordering marker: {marker}") from exc
+if positions != sorted(positions):
+    raise SystemExit(f"run_arm ordering markers out of order: {positions}")
+PY
 
     HEAD_BUILD_ID=0123456789ab
     identity_file=$(mktemp "${TMPDIR:-/tmp}/blit-rigw-identity.XXXXXX")
@@ -739,6 +803,7 @@ PY
 run_arm() {
     local block="$1" state="$2" pass="$3" run_id="$4" cell="$5" pair="$6" role="$7" role_order="$8"
     local direction carrier shape flag="" dest rid qerr werr client_rel client_abs remote_err result transfer_ms rc flush_out flush_ms count bytes want drain session_id total
+    local windows_client=0 arm_phase=client_done client_done_ns settle_deadline_ns settle_done_ns settled_ms
     direction=${cell%%_*}
     carrier=${cell#*_}; carrier=${carrier%%_*}
     shape=${cell##*_}
@@ -760,37 +825,53 @@ run_arm() {
     record_clock_samples "$block" "$run_id" "$cell" "$pair" "$role" before
 
     if [[ "$direction/$role" == wm/source_init ]]; then
+        windows_client=1; client_abs="$werr"; client_rel="client/$rid.windows.err"
         result=$(win_client_run "$state" "$run_id" "$remote_err" \
             "$(win_source_path "$shape")" "$Q_IP:$PORT:/bench/rigw-sessions/$SESSION_TAG/$rid/container/" "$flag")
-        fetch_win_file "$remote_err" "$werr"
-        client_abs="$werr"; client_rel="client/$rid.windows.err"
     elif [[ "$direction/$role" == wm/destination_init ]]; then
+        client_abs="$qerr"; client_rel="client/$rid.err"
         result=$(q_client_run "$state" "$run_id" "$qerr" \
             copy "$WIN_IP:$PORT:/bench/src_$shape" "$dest" --yes ${flag:+$flag})
-        client_abs="$qerr"; client_rel="client/$rid.err"
     elif [[ "$direction/$role" == mw/source_init ]]; then
+        client_abs="$qerr"; client_rel="client/$rid.err"
         result=$(q_client_run "$state" "$run_id" "$qerr" \
             copy "$(q_source_path "$shape")" "$WIN_IP:$PORT:/bench/rigw-sessions/$SESSION_TAG/$rid/container/" --yes ${flag:+$flag})
-        client_abs="$qerr"; client_rel="client/$rid.err"
     elif [[ "$direction/$role" == mw/destination_init ]]; then
+        windows_client=1; client_abs="$werr"; client_rel="client/$rid.windows.err"
         result=$(win_client_run "$state" "$run_id" "$remote_err" \
             "$Q_IP:$PORT:/bench/src_$shape" "$dest" "$flag")
-        fetch_win_file "$remote_err" "$werr"
-        client_abs="$werr"; client_rel="client/$rid.windows.err"
     else
         session_void "unregistered arm $direction/$role"
     fi
-    record_clock_samples "$block" "$run_id" "$cell" "$pair" "$role" after
+
+    # Anchor all successful post-client work to the same q monotonic instant,
+    # regardless of which endpoint ran the client.  Clock probes consume the
+    # fixed 250 ms budget rather than adding role-dependent time ahead of it.
+    client_done_ns=$(q_monotonic_ns)
+    settle_deadline_ns=$((client_done_ns + SETTLE_NS))
 
     IFS='|' read -r _ transfer_ms rc <<<"$result"
-    [[ "$transfer_ms" =~ ^[0-9]+$ && "$rc" =~ ^[0-9]+$ ]] \
-        || session_void "$rid timer/client sentinel malformed: '$result'"
-    [[ "$rc" == 0 ]] || session_void "$rid client failed rc=$rc (see $client_rel)"
+    if [[ ! "$transfer_ms" =~ ^[0-9]+$ || ! "$rc" =~ ^[0-9]+$ ]]; then
+        [[ "$windows_client" == 0 ]] || fetch_win_file "$remote_err" "$werr"
+        session_void "$rid timer/client sentinel malformed: '$result'"
+    fi
+    if [[ "$rc" != 0 ]]; then
+        # A failed remote client is already SESSION-VOID.  Preserve its log
+        # now because teardown removes the remote session tree.
+        [[ "$windows_client" == 0 ]] || fetch_win_file "$remote_err" "$werr"
+        session_void "$rid client failed rc=$rc (see $client_rel)"
+    fi
 
-    # A fixed 250 ms post-client settle is outside the measured window and
-    # applies before either destination's durability probe.  The destination
-    # OS—not the initiator role—selects the flush implementation.
-    sleep 0.25
+    record_clock_samples "$block" "$run_id" "$cell" "$pair" "$role" after
+    settle_done_ns=$(settle_until_deadline "$settle_deadline_ns")
+    [[ "$settle_done_ns" =~ ^[0-9]+$ && "$settle_done_ns" -ge "$settle_deadline_ns" ]] \
+        || session_void "$rid absolute post-client settle returned early: '$settle_done_ns'"
+    settled_ms=$(((settle_done_ns - client_done_ns) / 1000000))
+    [[ "$settled_ms" -ge "$SETTLE_MIN_MS" && "$settled_ms" -lt "$SETTLE_MAX_MS" ]] \
+        || session_void "$rid post-client settle was ${settled_ms}ms, expected [$SETTLE_MIN_MS,$SETTLE_MAX_MS)"
+
+    # The destination OS—not the initiator role—selects the durability and
+    # landed-tree probe.  This remains outside transfer_ms.
     if [[ "$direction" == wm ]]; then
         flush_out=$(flush_verify_q "$dest") || session_void "$rid q durability probe failed"
         rm -rf "$Q_MODULE/rigw-sessions/$SESSION_TAG/$rid"
@@ -803,6 +884,11 @@ run_arm() {
     [[ "$count|$bytes" == "$want" ]] \
         || session_void "$rid landed $count files/$bytes bytes, expected $want"
     [[ "$flush_ms" =~ ^[0-9]+$ ]] || session_void "$rid flush timer malformed: '$flush_out'"
+    arm_phase=durability_verified
+
+    if [[ "$windows_client" == 1 ]]; then
+        fetch_successful_windows_client_log "$arm_phase" "$remote_err" "$werr"
+    fi
 
     session_id=$(session_id_from_log "$client_abs") \
         || session_void "$rid client trace is malformed"
@@ -815,11 +901,11 @@ run_arm() {
     fi
 
     total=$((transfer_ms + flush_ms))
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$block" "$state" "$pass" "$cell" "$role" "$pair" "$role_order" \
-        "$transfer_ms" "$flush_ms" "$total" "$rc" "$drain" yes \
+        "$transfer_ms" "$settled_ms" "$flush_ms" "$total" "$rc" "$drain" yes \
         "$run_id" "$session_id" "$client_rel" >> "$RUNS_CSV"
-    log "$rid: transfer=${transfer_ms}ms flush=${flush_ms}ms total=${total}ms session=${session_id:-none}"
+    log "$rid: transfer=${transfer_ms}ms settled=${settled_ms}ms flush=${flush_ms}ms total=${total}ms session=${session_id:-none}"
 }
 
 cell_order() {
@@ -902,7 +988,7 @@ main() {
         return
     fi
 
-    printf '%s\n' 'block,trace_state,pass,cell,role,pair,role_order,transfer_ms,flush_ms,total_ms,exit,drain,valid,run_id,session_id,client_log' > "$RUNS_CSV"
+    printf '%s\n' 'block,trace_state,pass,cell,role,pair,role_order,transfer_ms,settled_ms,flush_ms,total_ms,exit,drain,valid,run_id,session_id,client_log' > "$RUNS_CSV"
     printf '%s\n' 'block,run_id,cell,pair,role,phase,sample,q_before_ns,windows_ns,q_after_ns,rtt_ns,offset_windows_minus_q_ns' > "$CLOCK_CSV"
     emit_schedule > "$OUT_DIR/schedule.csv"
     wssh "New-Item -ItemType Directory -Force -Path '$WIN_SESSION' | Out-Null"

@@ -36,8 +36,13 @@ new two-endpoint trace uncorrelatable.
   inventory, or landed-tree mismatch. The harness never changes firewall,
   MTU, routing, Time Machine, Spotlight, or unrelated processes.
 - Use destination-keyed durability: q file fsync for Windows→q and Windows
-  volume flush for q→Windows, following the same fixed post-client settle.
-  Both caches are purged before every arm and Windows disk writes must drain.
+  volume flush for q→Windows. Both client locations capture the same q
+  monotonic completion anchor, take the same three after-clock samples, and
+  wait only to the absolute +250 ms deadline before durability. The measured
+  settle must remain in `[250,1000)` ms and is retained in `runs.csv`.
+  Successful Windows client logs are retrieved only after durability and the
+  current landed count/byte verification. Both caches are purged before every arm and
+  Windows disk writes must drain.
 - Compute paired differences `d_i = destination_init_i − source_init_i`, the
   registered split drifts, role-order drift, the full paired range that guards
   the known bimodal fast arm, trace observer bias, and conservative
@@ -78,6 +83,14 @@ new two-endpoint trace uncorrelatable.
 - Mutation proof: reducing the clock-row formatter from 12 fields to 11 makes
   the harness self-test fail before analysis; restoring the exact 12-column
   schema returns the local and q/macOS self-tests to green.
+- The analyzer rejects a missing `settled_ms` column, non-integer values, and
+  values outside `[250,1000)`. Synthetic evidence supplies the lower valid
+  bound so every accepted arm proves the registered settle window.
+- Mutation proof: replacing the absolute-deadline wait with a no-op makes the
+  harness self-test fail because it returns before +250 ms. Moving the
+  successful Windows client-log fetch ahead of the durability marker makes
+  the production-order self-test fail. Restoring both returns the harness and
+  analyzer self-tests to green.
 - Every trace-on TCP session must prove the complete seven-epoch one-stream
   ramp from one to eight live sockets on both roles, including exact proposal,
   preparation, ACK, settlement, attachment, and role-local ordering evidence.
@@ -94,9 +107,9 @@ new two-endpoint trace uncorrelatable.
 
 ## Known gaps
 
-- The independent harness audit found open fail-closed gaps in post-client
-  timing symmetry, durable-total analysis, phase causal ordering, and landed
-  relative-path identity. It also found that failure cleanup can discard the
+- The independent harness audit found open fail-closed gaps in durable-total
+  analysis, phase causal ordering, and landed relative-path identity. It also
+  found that failure cleanup can discard the
   current Windows logs or leave a completion marker before cleanup succeeds,
   the Windows launcher PID is not identity-checked before termination, and a
   reused output directory can retain stale terminal markers. No live datum is
