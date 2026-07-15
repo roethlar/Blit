@@ -110,6 +110,23 @@ new two-endpoint trace uncorrelatable.
   installs the EXIT trap or writes a byte. Existing paths are rejected
   unchanged, with explicit stale `SESSION-COMPLETE`/`SESSION-VOID` diagnostics;
   offline guards also pin rejection of unrelated retained content.
+- The failure handler removes any completion marker, stops only remembered
+  identity-checked daemons, appends teardown errors without replacing the
+  primary void reason, and never initiates session-tree deletion. HUP, INT,
+  and TERM enter that same bounded failure path. Offline process tests exercise
+  all three signals and prove both owned teardown paths run while remaining
+  evidence paths are reported for inspection.
+- Successful finalization first proves no remembered daemon or open port,
+  requires analyzer-accepted local evidence, removes and verifies both exact
+  Windows trees and the exact q tree, rechecks the port, and only then atomically
+  renames `SESSION-COMPLETE.tmp`. Cross-host deletion is not transactional: a
+  partial finalization failure keeps the complete local evidence and reports
+  remote paths as “may remain,” never as certainly preserved. A zero exit is
+  rejected unless the registered marker is a regular one-line file containing
+  the exact build SHA with no VOID or temporary marker; preflight-only runs
+  cannot create it. Mutations for failed Windows removal, a surviving q tree,
+  a pre/post-cleanup open port, missing/wrong completion markers, stale
+  preflight markers, and cleanup before completion all fail the self-test.
 - Windows launcher and daemon PIDs are numeric and identity-checked before any
   termination: exact executable/name, one anchored block-specific `cmd.exe`
   command line, and daemon parent PID when both processes exist. Startup also
@@ -137,12 +154,9 @@ new two-endpoint trace uncorrelatable.
 
 ## Known gaps
 
-- The independent harness audit found that failure cleanup can discard the
-  current Windows logs or leave a completion marker before cleanup succeeds.
-  No live datum is valid until that gap is fixed and reviewed.
 - No rig datum is produced by this slice. The full live run waits for the
-  committed harness, mandatory Codex adjudication, exact isolated builds, and
-  a green endpoint preflight.
+  committed harness, mandatory Codex adjudication, exact isolated builds, live
+  launcher smoke, and a green endpoint preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
   small-fixture/P2 work, phase report, and `0f922de` historical control before

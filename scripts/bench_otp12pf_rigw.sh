@@ -83,10 +83,13 @@ log() {
     fi
 }
 die() { LAST_ERROR="$*"; log "FATAL: $*"; exit 1; }
+append_void_line() {
+    printf '%s\n' "$1" >> "$OUT_DIR/SESSION-VOID"
+}
 session_void() {
     local reason="$1"
     LAST_ERROR="$reason"
-    printf '%s\n' "$reason" > "$OUT_DIR/SESSION-VOID"
+    append_void_line "$reason"
     log "SESSION-VOID: $reason"
     exit 1
 }
@@ -126,6 +129,7 @@ claim_output_dir() {
 }
 
 SSH_MUX=(-o BatchMode=yes -o ControlMaster=auto \
+    -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
     -o "ControlPath=$HOME/.ssh/cm-rigw-%r@%h-%p" -o ControlPersist=300)
 wssh() { ssh "${SSH_MUX[@]}" "$WIN_SSH" "$@"; }
 
@@ -135,6 +139,12 @@ win_cmd_pid=""
 current_block=""
 CLEANUP_MODE=0
 CLEANUP_ERROR=""
+REGISTERED_RUN_STARTED=0
+SESSION_FINALIZED=0
+STRICT_CLEANUP_VERIFIED=0
+Q_SESSION_MAY_EXIST=0
+WIN_SESSION_MAY_EXIST=0
+LOCAL_EVIDENCE_COMPLETE=0
 
 teardown_die() {
     local reason="$1"
@@ -207,7 +217,9 @@ selftest() {
     local selftest_client_done selftest_deadline selftest_settle_done run_arm_source
     local manifest_tmp canonical_manifest landed_manifest tree_digest
     local freshness_tmp freshness_case marker before analyzer_log
-    local win_stop_source win_start_source
+    local win_stop_source win_start_source finalize_tmp failure_tmp trap_calls trap_rc
+    local signal signal_dir signal_rc contract_tmp on_exit_source append_tmp
+    local cleanup_tmp remembered port_checks strict_cleanup_source
     reject_registered_overrides
     got=$(emit_schedule)
     expected=$'1,off,forward,1,4\n2,on,reverse,1,4\n3,on,forward,5,8\n4,off,reverse,5,8'
@@ -362,6 +374,437 @@ PY
             || die "stale output rejection modified $marker"
     done
     rm -rf "$freshness_tmp"
+
+    finalize_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-finalize.XXXXXX")
+    (
+        OUT_DIR="$finalize_tmp/fails"
+        mkdir "$OUT_DIR"
+        HEAD_FULL=0123456789abcdef
+        LOCAL_EVIDENCE_COMPLETE=1
+        strict_success_cleanup() { return 1; }
+        if finalize_registered_session; then
+            die "registered finalization accepted failed strict cleanup"
+        fi
+        [[ ! -e "$OUT_DIR/SESSION-COMPLETE" ]] \
+            || die "failed strict cleanup left SESSION-COMPLETE"
+    )
+    (
+        OUT_DIR="$finalize_tmp/incomplete-local"
+        mkdir "$OUT_DIR"
+        HEAD_FULL=0123456789abcdef
+        LOCAL_EVIDENCE_COMPLETE=0
+        strict_success_cleanup() {
+            die "finalization cleaned paths before local evidence was complete"
+        }
+        if finalize_registered_session; then
+            die "registered finalization accepted incomplete local evidence"
+        fi
+        [[ ! -e "$OUT_DIR/SESSION-COMPLETE" ]]
+    )
+    (
+        OUT_DIR="$finalize_tmp/succeeds"
+        mkdir "$OUT_DIR"
+        HEAD_FULL=0123456789abcdef
+        LOCAL_EVIDENCE_COMPLETE=1
+        strict_success_cleanup() {
+            [[ ! -e "$OUT_DIR/SESSION-COMPLETE" ]] || return 1
+            STRICT_CLEANUP_VERIFIED=1
+        }
+        finalize_registered_session \
+            || die "registered finalization rejected verified strict cleanup"
+        [[ "$SESSION_FINALIZED" == 1 ]]
+        [[ "$(< "$OUT_DIR/SESSION-COMPLETE")" == "$HEAD_FULL" ]]
+    )
+
+    cleanup_tmp="$finalize_tmp/strict"
+    mkdir -p "$cleanup_tmp/q/rigw-sessions/fail-remote"
+    printf 'retain me\n' > "$cleanup_tmp/q/rigw-sessions/fail-remote/sentinel"
+    (
+        Q_MODULE="$cleanup_tmp/q"
+        SESSION_TAG=fail-remote
+        Q_SESSION_MAY_EXIST=1
+        WIN_SESSION_MAY_EXIST=1
+        q_daemon_pid=""; win_daemon_pid=""; win_cmd_pid=""; current_block=""
+        ports_closed() { return 0; }
+        wssh() { return 1; }
+        if strict_success_cleanup; then
+            die "strict cleanup accepted a Windows deletion failure"
+        fi
+        [[ "$STRICT_CLEANUP_VERIFIED" == 0 ]]
+        [[ -d "$Q_MODULE/rigw-sessions/$SESSION_TAG" ]] \
+            || die "Windows cleanup failure deleted q evidence first"
+        [[ "$(< "$Q_MODULE/rigw-sessions/$SESSION_TAG/sentinel")" == 'retain me' ]] \
+            || die "Windows cleanup failure modified q evidence"
+    )
+    mkdir -p "$cleanup_tmp/q/rigw-sessions/open-port"
+    (
+        Q_MODULE="$cleanup_tmp/q"
+        SESSION_TAG=open-port
+        Q_SESSION_MAY_EXIST=1
+        WIN_SESSION_MAY_EXIST=1
+        q_daemon_pid=""; win_daemon_pid=""; win_cmd_pid=""; current_block=""
+        ports_closed() { return 1; }
+        wssh() { die "strict cleanup reached deletion with an open port"; }
+        if strict_success_cleanup; then
+            die "strict cleanup accepted an open port"
+        fi
+        [[ "$STRICT_CLEANUP_VERIFIED" == 0 ]]
+        [[ -d "$Q_MODULE/rigw-sessions/$SESSION_TAG" ]]
+    )
+    mkdir -p "$cleanup_tmp/q/rigw-sessions/surviving-q"
+    (
+        Q_MODULE="$cleanup_tmp/q"
+        SESSION_TAG=surviving-q
+        Q_SESSION_MAY_EXIST=1
+        WIN_SESSION_MAY_EXIST=1
+        q_daemon_pid=""; win_daemon_pid=""; win_cmd_pid=""; current_block=""
+        ports_closed() { return 0; }
+        wssh() { return 0; }
+        rm() { return 0; }
+        if strict_success_cleanup; then
+            die "strict cleanup accepted a surviving q session tree"
+        fi
+        [[ "$STRICT_CLEANUP_VERIFIED" == 0 ]]
+        [[ -d "$Q_MODULE/rigw-sessions/$SESSION_TAG" ]]
+    )
+    mkdir -p "$cleanup_tmp/q/rigw-sessions/succeeds"
+    (
+        Q_MODULE="$cleanup_tmp/q"
+        SESSION_TAG=succeeds
+        Q_SESSION_MAY_EXIST=1
+        WIN_SESSION_MAY_EXIST=1
+        q_daemon_pid=""; win_daemon_pid=""; win_cmd_pid=""; current_block=""
+        port_checks=0
+        ports_closed() { port_checks=$((port_checks + 1)); return 0; }
+        wssh() { return 0; }
+        strict_success_cleanup || die "strict cleanup rejected a clean session"
+        [[ "$STRICT_CLEANUP_VERIFIED" == 1 ]]
+        [[ "$port_checks" == 2 ]] || die "strict cleanup ran $port_checks port checks"
+        [[ "$Q_SESSION_MAY_EXIST" == 0 && "$WIN_SESSION_MAY_EXIST" == 0 ]]
+        [[ ! -e "$Q_MODULE/rigw-sessions/$SESSION_TAG" ]]
+    )
+    mkdir -p "$cleanup_tmp/q/rigw-sessions/late-port"
+    (
+        Q_MODULE="$cleanup_tmp/q"
+        SESSION_TAG=late-port
+        Q_SESSION_MAY_EXIST=1
+        WIN_SESSION_MAY_EXIST=1
+        q_daemon_pid=""; win_daemon_pid=""; win_cmd_pid=""; current_block=""
+        port_checks=0
+        ports_closed() {
+            port_checks=$((port_checks + 1))
+            [[ "$port_checks" == 1 ]]
+        }
+        wssh() { return 0; }
+        if strict_success_cleanup; then
+            die "strict cleanup accepted a listener appearing during deletion"
+        fi
+        [[ "$STRICT_CLEANUP_VERIFIED" == 0 && "$port_checks" == 2 ]]
+    )
+    for remembered in q daemon launcher block; do
+        (
+            Q_MODULE="$cleanup_tmp/q"
+            SESSION_TAG="remembered-$remembered"
+            q_daemon_pid=""; win_daemon_pid=""; win_cmd_pid=""; current_block=""
+            case "$remembered" in
+                q) q_daemon_pid=11;;
+                daemon) win_daemon_pid=22;;
+                launcher) win_cmd_pid=33;;
+                block) current_block=4;;
+            esac
+            ports_closed() { die "strict cleanup ignored remembered $remembered state"; }
+            if strict_success_cleanup; then
+                die "strict cleanup accepted remembered $remembered state"
+            fi
+            [[ "$STRICT_CLEANUP_VERIFIED" == 0 ]]
+        )
+    done
+    strict_cleanup_source=$(declare -f strict_success_cleanup)
+    python3 - "$strict_cleanup_source" <<'PY' \
+        || die "strict cleanup source contract changed"
+import sys
+
+source = sys.argv[1]
+for marker in (
+    "'$WIN_MODULE/rigw-sessions/$SESSION_TAG'",
+    "'$WIN_SESSION'",
+    r"Remove-Item -LiteralPath \$path -Recurse -Force -ErrorAction Stop",
+    r'if (Test-Path -LiteralPath \$path) { throw',
+):
+    if marker not in source:
+        raise SystemExit(f"missing strict Windows cleanup marker: {marker}")
+if source.count('ports_closed') != 2:
+    raise SystemExit("strict cleanup must check closed ports before and after deletion")
+if source.index('ports_closed') > source.index('Remove-Item -LiteralPath'):
+    raise SystemExit("strict cleanup deletes evidence before its first port check")
+if source.rindex('ports_closed') < source.index('rm -rf --'):
+    raise SystemExit("strict cleanup lacks a post-deletion port check")
+PY
+    rm -rf "$finalize_tmp"
+
+    failure_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-failure.XXXXXX")
+    trap_calls="$failure_tmp/remote-calls"
+    mkdir -p "$failure_tmp/q-module/rigw-sessions/$SESSION_TAG"
+    printf 'retain me\n' > "$failure_tmp/q-module/rigw-sessions/$SESSION_TAG/sentinel"
+    set +e
+    (
+        set +e
+        OUT_DIR="$failure_tmp/evidence"
+        mkdir "$OUT_DIR"
+        LOG="$OUT_DIR/bench.log"
+        OUTPUT_CLAIMED=1
+        printf 'primary failure\n' > "$OUT_DIR/SESSION-VOID"
+        printf 'must disappear\n' > "$OUT_DIR/SESSION-COMPLETE"
+        printf 'must disappear\n' > "$OUT_DIR/SESSION-COMPLETE.tmp"
+        REGISTERED_RUN_STARTED=1
+        SESSION_FINALIZED=0
+        STRICT_CLEANUP_VERIFIED=0
+        Q_SESSION_MAY_EXIST=1
+        WIN_SESSION_MAY_EXIST=1
+        Q_MODULE="$failure_tmp/q-module"
+        current_block=1
+        q_daemon_pid=""
+        win_daemon_pid=""
+        win_cmd_pid=""
+        wssh() {
+            printf '%s\n' "$*" >> "$trap_calls"
+            return 1
+        }
+        false
+        on_exit
+    )
+    trap_rc=$?
+    set -e
+    [[ "$trap_rc" == 1 ]] || die "failure trap returned $trap_rc, expected 1"
+    [[ ! -e "$failure_tmp/evidence/SESSION-COMPLETE" ]]
+    [[ ! -e "$failure_tmp/evidence/SESSION-COMPLETE.tmp" ]]
+    grep -Fxq 'primary failure' "$failure_tmp/evidence/SESSION-VOID" \
+        || die "failure trap discarded the primary reason"
+    grep -Fq 'cleanup errors: Windows PID recovery failed' "$failure_tmp/evidence/SESSION-VOID" \
+        || die "failure trap omitted its cleanup error"
+    grep -Fq "q session evidence may remain; inspect $failure_tmp/q-module/rigw-sessions/$SESSION_TAG" \
+        "$failure_tmp/evidence/SESSION-VOID" \
+        || die "failure trap omitted the q evidence path"
+    grep -Fq "Windows evidence may remain; inspect $WIN_SESSION and $WIN_MODULE/rigw-sessions/$SESSION_TAG" \
+        "$failure_tmp/evidence/SESSION-VOID" \
+        || die "failure trap omitted the Windows evidence path"
+    if grep -Fq 'Remove-Item' "$trap_calls"; then
+        die "failure trap issued destructive remote cleanup"
+    fi
+    [[ "$(< "$failure_tmp/q-module/rigw-sessions/$SESSION_TAG/sentinel")" == 'retain me' ]] \
+        || die "failure trap modified q session evidence"
+    on_exit_source=$(declare -f on_exit)
+    if [[ "$on_exit_source" == *'rm -rf'* \
+        || "$on_exit_source" == *'Remove-Item'* \
+        || "$on_exit_source" == *'strict_success_cleanup'* ]]; then
+        die "failure trap contains a destructive session-cleanup path"
+    fi
+
+    append_tmp="$failure_tmp/append-contract"
+    mkdir "$append_tmp"
+    printf 'original reason\n' > "$append_tmp/SESSION-VOID"
+    set +e
+    (
+        OUT_DIR="$append_tmp"
+        LOG="$OUT_DIR/bench.log"
+        OUTPUT_CLAIMED=1
+        session_void 'later context'
+    ) >/dev/null 2>&1
+    trap_rc=$?
+    set -e
+    [[ "$trap_rc" == 1 ]] || die "session_void append probe returned $trap_rc"
+    [[ "$(< "$append_tmp/SESSION-VOID")" == $'original reason\nlater context' ]] \
+        || die "session_void overwrote an earlier failure reason"
+
+    contract_tmp="$failure_tmp/exit-contract"
+    mkdir "$contract_tmp"
+    set +e
+    (
+        set +e
+        OUT_DIR="$contract_tmp"
+        LOG="$OUT_DIR/bench.log"
+        OUTPUT_CLAIMED=1
+        REGISTERED_RUN_STARTED=1
+        SESSION_FINALIZED=0
+        STRICT_CLEANUP_VERIFIED=0
+        WIN_SESSION_MAY_EXIST=0
+        true
+        on_exit
+    )
+    trap_rc=$?
+    set -e
+    [[ "$trap_rc" == 1 ]] \
+        || die "unfinalized registered zero-exit returned $trap_rc"
+    grep -Fq 'registered run returned without finalizing the session' \
+        "$contract_tmp/SESSION-VOID" \
+        || die "unfinalized registered zero-exit omitted its reason"
+
+    contract_tmp="$failure_tmp/marker-contract"
+    mkdir "$contract_tmp"
+    set +e
+    (
+        set +e
+        OUT_DIR="$contract_tmp"
+        LOG="$OUT_DIR/bench.log"
+        OUTPUT_CLAIMED=1
+        REGISTERED_RUN_STARTED=1
+        SESSION_FINALIZED=1
+        STRICT_CLEANUP_VERIFIED=1
+        LOCAL_EVIDENCE_COMPLETE=1
+        HEAD_FULL=0123456789abcdef
+        true
+        on_exit
+    )
+    trap_rc=$?
+    set -e
+    [[ "$trap_rc" == 1 ]] \
+        || die "finalized flags without a completion marker returned $trap_rc"
+    grep -Fq 'registered completion marker is absent or invalid' \
+        "$contract_tmp/SESSION-VOID" \
+        || die "missing registered completion marker omitted its reason"
+
+    contract_tmp="$failure_tmp/wrong-marker-contract"
+    mkdir "$contract_tmp"
+    printf 'wrong-build\n' > "$contract_tmp/SESSION-COMPLETE"
+    set +e
+    (
+        set +e
+        OUT_DIR="$contract_tmp"
+        LOG="$OUT_DIR/bench.log"
+        OUTPUT_CLAIMED=1
+        REGISTERED_RUN_STARTED=1
+        SESSION_FINALIZED=1
+        STRICT_CLEANUP_VERIFIED=1
+        LOCAL_EVIDENCE_COMPLETE=1
+        HEAD_FULL=0123456789abcdef
+        true
+        on_exit
+    )
+    trap_rc=$?
+    set -e
+    [[ "$trap_rc" == 1 ]] \
+        || die "wrong completion marker returned $trap_rc"
+    [[ ! -e "$contract_tmp/SESSION-COMPLETE" ]] \
+        || die "wrong completion marker survived failure handling"
+
+    contract_tmp="$failure_tmp/preflight-contract"
+    mkdir "$contract_tmp"
+    set +e
+    (
+        set +e
+        OUT_DIR="$contract_tmp"
+        LOG="$OUT_DIR/bench.log"
+        OUTPUT_CLAIMED=1
+        REGISTERED_RUN_STARTED=0
+        SESSION_FINALIZED=0
+        STRICT_CLEANUP_VERIFIED=0
+        true
+        on_exit
+    )
+    trap_rc=$?
+    set -e
+    [[ "$trap_rc" == 1 ]] \
+        || die "unclean preflight zero-exit returned $trap_rc"
+    grep -Fq 'successful exit lacked verified strict cleanup' \
+        "$contract_tmp/SESSION-VOID" \
+        || die "unclean preflight zero-exit omitted its reason"
+
+    contract_tmp="$failure_tmp/preflight-marker-contract"
+    mkdir "$contract_tmp"
+    printf 'not allowed\n' > "$contract_tmp/SESSION-COMPLETE"
+    set +e
+    (
+        set +e
+        OUT_DIR="$contract_tmp"
+        LOG="$OUT_DIR/bench.log"
+        OUTPUT_CLAIMED=1
+        REGISTERED_RUN_STARTED=0
+        SESSION_FINALIZED=0
+        STRICT_CLEANUP_VERIFIED=1
+        true
+        on_exit
+    )
+    trap_rc=$?
+    set -e
+    [[ "$trap_rc" == 1 ]] \
+        || die "preflight completion marker returned $trap_rc"
+    [[ ! -e "$contract_tmp/SESSION-COMPLETE" ]] \
+        || die "preflight completion marker survived failure handling"
+
+    for marker in SESSION-VOID SESSION-COMPLETE.tmp; do
+        contract_tmp="$failure_tmp/preflight-$marker-contract"
+        mkdir "$contract_tmp"
+        printf 'not allowed\n' > "$contract_tmp/$marker"
+        set +e
+        (
+            set +e
+            OUT_DIR="$contract_tmp"
+            LOG="$OUT_DIR/bench.log"
+            OUTPUT_CLAIMED=1
+            REGISTERED_RUN_STARTED=0
+            SESSION_FINALIZED=0
+            STRICT_CLEANUP_VERIFIED=1
+            true
+            on_exit
+        )
+        trap_rc=$?
+        set -e
+        [[ "$trap_rc" == 1 ]] \
+            || die "preflight $marker returned $trap_rc"
+        if [[ "$marker" == SESSION-VOID ]]; then
+            [[ "$(sed -n '1p' "$contract_tmp/SESSION-VOID")" == 'not allowed' ]] \
+                || die "preflight VOID rejection replaced its primary reason"
+        else
+            grep -Fq 'successful exit retained a failure or temporary marker' \
+                "$contract_tmp/SESSION-VOID" \
+                || die "preflight $marker omitted its rejection reason"
+        fi
+    done
+
+    for signal in HUP INT TERM; do
+        signal_dir="$failure_tmp/signal-$signal"
+        mkdir "$signal_dir"
+        set +e
+        bash -c '
+set -Eeuo pipefail
+source "$1"
+OUT_DIR="$2"
+LOG="$OUT_DIR/bench.log"
+OUTPUT_CLAIMED=1
+REGISTERED_RUN_STARTED=1
+SESSION_FINALIZED=0
+STRICT_CLEANUP_VERIFIED=0
+Q_SESSION_MAY_EXIST=1
+WIN_SESSION_MAY_EXIST=1
+current_block=1
+q_daemon_pid=111
+win_daemon_pid=222
+win_cmd_pid=333
+win_daemon_stop() {
+    printf "windows\n" >> "$OUT_DIR/stops"
+    win_daemon_pid=""; win_cmd_pid=""; current_block=""
+}
+q_daemon_stop() {
+    printf "q\n" >> "$OUT_DIR/stops"
+    q_daemon_pid=""
+}
+trap on_exit EXIT
+install_signal_traps
+kill -s "$3" "$$"
+sleep 2
+exit 99
+' _ "$SCRIPT_DIR/bench_otp12pf_rigw.sh" "$signal_dir" "$signal"
+        signal_rc=$?
+        set -e
+        [[ "$signal_rc" == 1 ]] \
+            || die "$signal cleanup returned $signal_rc, expected 1"
+        grep -Fxq "received $signal" "$signal_dir/SESSION-VOID" \
+            || die "$signal cleanup omitted its signal reason"
+        [[ "$(LC_ALL=C sort "$signal_dir/stops")" == $'q\nwindows' ]] \
+            || die "$signal cleanup did not invoke both exact-owned teardown paths"
+        [[ ! -e "$signal_dir/SESSION-COMPLETE" ]]
+    done
+    rm -rf "$failure_tmp"
 
     analyzer_log=$(mktemp "${TMPDIR:-/tmp}/blit-rigw-analyzer.XXXXXX")
     if ! python3 "$SCRIPT_DIR/otp12pf_rigw_analyze_test.py" \
@@ -668,6 +1111,7 @@ verify_fixtures() {
     local shape want qgot wgot qmanifest wmanifest qhash
     printf '%s\n' 'shape,sha256,q_manifest,windows_manifest' \
         > "$OUT_DIR/fixture-manifests.csv"
+    WIN_SESSION_MAY_EXIST=1
     wssh "New-Item -ItemType Directory -Force -Path '$WIN_SESSION/fixtures' | Out-Null" \
         || die "cannot create Windows fixture evidence directory"
     for shape in mixed large; do
@@ -1118,8 +1562,8 @@ run_arm() {
         session_void "$rid timer/client sentinel malformed: '$result'"
     fi
     if [[ "$rc" != 0 ]]; then
-        # A failed remote client is already SESSION-VOID.  Preserve its log
-        # now because teardown removes the remote session tree.
+        # Fetch this client log opportunistically; the failure trap also keeps
+        # the remote session tree intact for postmortem evidence.
         [[ "$windows_client" == 0 ]] || fetch_win_file "$remote_err" "$werr"
         session_void "$rid client failed rc=$rc (see $client_rel)"
     fi
@@ -1234,30 +1678,155 @@ end_gate() {
     ports_closed || session_void "end gate found a listener on port $PORT"
 }
 
-cleanup_session_paths() {
-    rm -rf "$Q_MODULE/rigw-sessions/$SESSION_TAG" 2>/dev/null || true
-    wssh "Remove-Item -LiteralPath '$WIN_MODULE/rigw-sessions/$SESSION_TAG','$WIN_SESSION' -Recurse -Force -ErrorAction SilentlyContinue" \
-        >/dev/null 2>&1 || true
+strict_success_cleanup() {
+    STRICT_CLEANUP_VERIFIED=0
+    [[ -z "$q_daemon_pid" ]] \
+        || { LAST_ERROR="strict cleanup found remembered q daemon PID $q_daemon_pid"; return 1; }
+    [[ -z "$win_daemon_pid" ]] \
+        || { LAST_ERROR="strict cleanup found remembered Windows daemon PID $win_daemon_pid"; return 1; }
+    [[ -z "$win_cmd_pid" ]] \
+        || { LAST_ERROR="strict cleanup found remembered Windows launcher PID $win_cmd_pid"; return 1; }
+    [[ -z "$current_block" ]] \
+        || { LAST_ERROR="strict cleanup found current block $current_block"; return 1; }
+
+    ports_closed \
+        || { LAST_ERROR="strict cleanup found port $PORT still listening"; return 1; }
+    wssh "
+\$ErrorActionPreference = 'Stop'
+\$paths = @('$WIN_MODULE/rigw-sessions/$SESSION_TAG', '$WIN_SESSION')
+foreach (\$path in \$paths) {
+  if (Test-Path -LiteralPath \$path) {
+    Remove-Item -LiteralPath \$path -Recurse -Force -ErrorAction Stop
+  }
+  if (Test-Path -LiteralPath \$path) { throw \"strict cleanup left \$path\" }
+}
+    " >/dev/null \
+        || { LAST_ERROR="strict cleanup could not remove and verify Windows session trees"; return 1; }
+    WIN_SESSION_MAY_EXIST=0
+    if [[ "$Q_SESSION_MAY_EXIST" == 1 ]]; then
+        rm -rf -- "$Q_MODULE/rigw-sessions/$SESSION_TAG" \
+            || { LAST_ERROR="strict cleanup could not remove q session tree"; return 1; }
+    fi
+    [[ ! -e "$Q_MODULE/rigw-sessions/$SESSION_TAG" \
+        && ! -L "$Q_MODULE/rigw-sessions/$SESSION_TAG" ]] \
+        || { LAST_ERROR="strict cleanup found a surviving or unexpected q session tree"; return 1; }
+    Q_SESSION_MAY_EXIST=0
+    ports_closed \
+        || { LAST_ERROR="strict cleanup found port $PORT reopened during deletion"; return 1; }
+    STRICT_CLEANUP_VERIFIED=1
+}
+
+finalize_registered_session() {
+    local complete_tmp="$OUT_DIR/SESSION-COMPLETE.tmp"
+    SESSION_FINALIZED=0
+    [[ "$LOCAL_EVIDENCE_COMPLETE" == 1 ]] \
+        || { LAST_ERROR="refusing cleanup before local evidence is complete"; return 1; }
+    strict_success_cleanup || return 1
+    [[ "$STRICT_CLEANUP_VERIFIED" == 1 ]] \
+        || { LAST_ERROR="strict cleanup returned without verification"; return 1; }
+    [[ ! -e "$OUT_DIR/SESSION-VOID" && ! -L "$OUT_DIR/SESSION-VOID" ]] \
+        || { LAST_ERROR="refusing to complete a void session"; return 1; }
+    [[ ! -e "$OUT_DIR/SESSION-COMPLETE" && ! -L "$OUT_DIR/SESSION-COMPLETE" ]] \
+        || { LAST_ERROR="refusing to replace an existing completion marker"; return 1; }
+    [[ ! -e "$complete_tmp" && ! -L "$complete_tmp" ]] \
+        || { LAST_ERROR="refusing to replace an existing completion temporary"; return 1; }
+    printf '%s\n' "$HEAD_FULL" > "$complete_tmp" || return 1
+    mv "$complete_tmp" "$OUT_DIR/SESSION-COMPLETE" || return 1
+    SESSION_FINALIZED=1
+}
+
+record_failure_evidence() {
+    append_void_line "local evidence preserved at $OUT_DIR"
+    if [[ "$Q_SESSION_MAY_EXIST" == 1 ]]; then
+        append_void_line "q session evidence may remain; inspect $Q_MODULE/rigw-sessions/$SESSION_TAG"
+    fi
+    if [[ "$WIN_SESSION_MAY_EXIST" == 1 ]]; then
+        append_void_line "Windows evidence may remain; inspect $WIN_SESSION and $WIN_MODULE/rigw-sessions/$SESSION_TAG"
+    fi
+}
+
+on_signal() {
+    local signal="$1" code="$2"
+    LAST_ERROR="received $signal"
+    trap '' HUP INT TERM
+    exit "$code"
+}
+
+install_signal_traps() {
+    trap 'on_signal HUP 129' HUP
+    trap 'on_signal INT 130' INT
+    trap 'on_signal TERM 143' TERM
+}
+
+registered_completion_marker_valid() {
+    local marker="$OUT_DIR/SESSION-COMPLETE" lines
+    [[ "$LOCAL_EVIDENCE_COMPLETE" == 1 \
+        && -n "${HEAD_FULL:-}" && -f "$marker" && ! -L "$marker" ]] || return 1
+    lines=$(LC_ALL=C wc -l < "$marker") || return 1
+    lines=${lines//[[:space:]]/}
+    [[ "$lines" == 1 && "$(< "$marker")" == "$HEAD_FULL" ]] || return 1
+    [[ ! -e "$OUT_DIR/SESSION-COMPLETE.tmp" \
+        && ! -L "$OUT_DIR/SESSION-COMPLETE.tmp" ]] || return 1
+    [[ ! -e "$OUT_DIR/SESSION-VOID" && ! -L "$OUT_DIR/SESSION-VOID" ]]
 }
 
 on_exit() {
     local rc=$?
     trap - EXIT
+    trap '' HUP INT TERM
     set +e
-    CLEANUP_MODE=1
-    if [[ -n "$win_daemon_pid" || -n "$win_cmd_pid" || -n "$current_block" ]]; then
-        win_daemon_stop || rc=1
-    fi
-    if [[ -n "$q_daemon_pid" ]]; then q_daemon_stop || rc=1; fi
-    cleanup_session_paths
-    if [[ -n "$CLEANUP_ERROR" ]]; then
-        printf '%s\n' "$CLEANUP_ERROR" > "$OUT_DIR/SESSION-VOID"
+    if [[ $rc -eq 0 && "$OUTPUT_CLAIMED" == 1 \
+        && ( -e "$OUT_DIR/SESSION-VOID" || -L "$OUT_DIR/SESSION-VOID" \
+            || -e "$OUT_DIR/SESSION-COMPLETE.tmp" \
+            || -L "$OUT_DIR/SESSION-COMPLETE.tmp" ) ]]; then
+        LAST_ERROR="successful exit retained a failure or temporary marker"
         rc=1
     fi
-    if [[ $rc -ne 0 && ! -f "$OUT_DIR/SESSION-VOID" ]]; then
-        printf '%s\n' "${LAST_ERROR:-unexpected harness failure rc=$rc}" > "$OUT_DIR/SESSION-VOID"
+    if [[ $rc -eq 0 && "$REGISTERED_RUN_STARTED" == 1 \
+        && "$SESSION_FINALIZED" != 1 ]]; then
+        LAST_ERROR="registered run returned without finalizing the session"
+        rc=1
     fi
-    exit "$rc"
+    if [[ $rc -eq 0 && "$REGISTERED_RUN_STARTED" == 1 ]] \
+        && ! registered_completion_marker_valid; then
+        LAST_ERROR="registered completion marker is absent or invalid"
+        rc=1
+    fi
+    if [[ $rc -eq 0 && "$REGISTERED_RUN_STARTED" == 0 \
+        && "$SESSION_FINALIZED" != 0 ]]; then
+        LAST_ERROR="non-registered run claimed registered finalization"
+        rc=1
+    fi
+    if [[ $rc -eq 0 && "$REGISTERED_RUN_STARTED" == 0 \
+        && ( -e "$OUT_DIR/SESSION-COMPLETE" \
+            || -L "$OUT_DIR/SESSION-COMPLETE" ) ]]; then
+        LAST_ERROR="non-registered run left a completion marker"
+        rc=1
+    fi
+    if [[ $rc -eq 0 && "$OUTPUT_CLAIMED" == 1 \
+        && "$STRICT_CLEANUP_VERIFIED" != 1 ]]; then
+        LAST_ERROR="successful exit lacked verified strict cleanup"
+        rc=1
+    fi
+
+    if [[ $rc -ne 0 ]]; then
+        rm -f -- "$OUT_DIR/SESSION-COMPLETE" "$OUT_DIR/SESSION-COMPLETE.tmp" \
+            || CLEANUP_ERROR="${CLEANUP_ERROR:+$CLEANUP_ERROR; }could not remove completion marker"
+        if [[ ! -s "$OUT_DIR/SESSION-VOID" ]]; then
+            append_void_line "${LAST_ERROR:-unexpected harness failure rc=$rc}"
+        fi
+        CLEANUP_MODE=1
+        if [[ -n "$win_daemon_pid" || -n "$win_cmd_pid" || -n "$current_block" ]]; then
+            win_daemon_stop || true
+        fi
+        if [[ -n "$q_daemon_pid" ]]; then q_daemon_stop || true; fi
+        if [[ -n "$CLEANUP_ERROR" ]]; then
+            append_void_line "cleanup errors: $CLEANUP_ERROR"
+        fi
+        record_failure_evidence
+        exit 1
+    fi
+    exit 0
 }
 
 main() {
@@ -1267,16 +1836,24 @@ main() {
         return 1
     fi
     trap on_exit EXIT
+    install_signal_traps
     preflight
     if [[ "$PREFLIGHT_ONLY" == 1 ]]; then
+        strict_success_cleanup || session_void "preflight cleanup failed: ${LAST_ERROR:-unknown error}"
         log "PREFLIGHT_ONLY: no daemon started and no transfer timed"
         return
     fi
 
+    REGISTERED_RUN_STARTED=1
+    Q_SESSION_MAY_EXIST=1
+    mkdir -p "$Q_MODULE/rigw-sessions/$SESSION_TAG" \
+        || session_void "cannot create registered q session directory"
     printf '%s\n' 'block,trace_state,pass,cell,role,pair,role_order,transfer_ms,settled_ms,flush_ms,total_ms,landed_root,tree_manifest_sha256,exit,drain,valid,run_id,session_id,client_log' > "$RUNS_CSV"
     printf '%s\n' 'block,run_id,cell,pair,role,phase,sample,q_before_ns,windows_ns,q_after_ns,rtt_ns,offset_windows_minus_q_ns' > "$CLOCK_CSV"
     emit_schedule > "$OUT_DIR/schedule.csv"
-    wssh "New-Item -ItemType Directory -Force -Path '$WIN_SESSION' | Out-Null"
+    WIN_SESSION_MAY_EXIST=1
+    wssh "New-Item -ItemType Directory -Force -Path '$WIN_SESSION' | Out-Null" \
+        || session_void "cannot create registered Windows session directory"
 
     local block state pass first last
     while IFS=, read -r block state pass first last; do
@@ -1288,8 +1865,12 @@ main() {
     end_gate
     python3 "$SCRIPT_DIR/otp12pf_rigw_analyze.py" "$OUT_DIR" \
         || session_void "phase/distribution analyzer rejected the session"
-    printf '%s\n' "$HEAD_FULL" > "$OUT_DIR/SESSION-COMPLETE"
-    log "SESSION COMPLETE: analyzer accepted exact inventory; results in $OUT_DIR"
+    LOCAL_EVIDENCE_COMPLETE=1
+    log "ANALYZER ACCEPTED: exact local evidence inventory; finalizing session"
+    finalize_registered_session \
+        || session_void "registered finalization failed: ${LAST_ERROR:-unknown error}"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
