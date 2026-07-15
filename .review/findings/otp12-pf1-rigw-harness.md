@@ -588,3 +588,4 @@ is green. Syntax, format, strict clippy, all workspace tests, all 23 analyzer
 tests, and diff checks pass. External Grok or Claude review remains before a
 new exact candidate can be staged. No retained evidence, Time Machine setting,
 or mount state was changed.
+G11 was fixed at `d1686a009a301e01c9253f055524708d0bbc9a11`.
