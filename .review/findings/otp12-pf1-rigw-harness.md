@@ -167,7 +167,17 @@ new two-endpoint trace uncorrelatable.
   command line, and daemon parent PID when both processes exist. Startup also
   verifies the same CIM identities immediately. Offline source-contract
   mutations fail if command-line, parent, or validate-before-stop guards move
-  or disappear; the live daemon smoke remains required to prove CIM quoting.
+  or disappear. If startup fails after CIM creation but before either PID file
+  is readable, the generated launcher waits on a bounded block-local gate and
+  cannot execute the daemon until its PID is atomically placed and read back;
+  without that gate it exits on its own. Teardown recovers only the unique
+  exact block-specific launcher command and its parented daemon; after stopping
+  the launcher it also finds, validates, and stops a child that raced the first
+  query. The live daemon smoke remains required to prove CIM quoting.
+  Mutations accepting any `cmd.exe`, accepting an unparented daemon, skipping
+  the bounded gate wait, opening the gate before PID placement/readback, or
+  skipping the late child's exact executable validation each turn the
+  self-test red.
 - `LAUNCHER_SMOKE=1` is a mutually exclusive standalone live mode. After the
   full provenance and endpoint preflight, it starts only the exact Windows CIM
   launcher and daemon, proves q can reach the registered port, identity-stops
