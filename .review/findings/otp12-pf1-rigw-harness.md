@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: G3 and G4 fixed; fresh complete review pending.
+**Status**: Verified — round-4 Codex PASS and Grok ACCEPTED; live gates pending.
 
 ## What
 
@@ -289,3 +289,12 @@ restoring all three returns it to green.
 G4 was fixed at `7e9d2d5`. The full workspace format, strict-clippy, and test
 gate; 23 analyzer tests; Bash syntax and self-test; documentation gate; and
 diff check are green for both G3 and G4. No endpoint was contacted.
+
+Round-4 mandatory Codex and additive Grok reviewed the complete immutable
+range through `6f517ea1bdbea2f7d83f15c086d2bf5f764cf524`. Codex returned
+`PASS` with no material finding. Grok returned schema-valid `ACCEPTED`,
+`guard_confirmed=true`, exact SHAs, and independently drove the G3 role-path
+mutation plus G4 finalization, may-exist, and marker-removal mutations red
+before restoring every offline suite green. Its detached worktree ended clean
+and was removed. Review is closed; launcher smoke and endpoint preflight remain
+required before the registered run.
