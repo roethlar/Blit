@@ -177,8 +177,38 @@ EOF
 
 q_source_path() { printf '%s/src_%s' "$Q_MODULE" "$1"; }
 win_source_path() { printf '%s/src_%s' "$WIN_MODULE" "$1"; }
-q_destination_path() { printf '%s/rigw-sessions/%s/%s/container' "$Q_MODULE" "$SESSION_TAG" "$1"; }
-win_destination_path() { printf '%s/rigw-sessions/%s/%s/container' "$WIN_MODULE" "$SESSION_TAG" "$1"; }
+destination_relative_path() {
+    # Accept the role so callers cannot accidentally omit the parity axis, but
+    # deliberately keep it out of the measured path.  Every arm in this
+    # registered session reuses this one endpoint-local destination.
+    case "$1" in source_init|destination_init);; *) return 2;; esac
+    printf 'rigw-sessions/%s/destination/container' "$SESSION_TAG"
+}
+q_destination_path() {
+    printf '%s/%s' "$Q_MODULE" "$(destination_relative_path "$1")"
+}
+win_destination_path() {
+    printf '%s/%s' "$WIN_MODULE" "$(destination_relative_path "$1")"
+}
+arm_destination_path() {
+    local direction="$1" role="$2"
+    case "$direction" in
+        wm) q_destination_path "$role";;
+        mw) win_destination_path "$role";;
+        *) return 2;;
+    esac
+}
+arm_destination_argument() {
+    local direction="$1" role="$2" relative
+    relative=$(destination_relative_path "$role") || return 2
+    case "$direction/$role" in
+        wm/source_init) printf '%s:%s:/bench/%s/' "$Q_IP" "$PORT" "$relative";;
+        wm/destination_init) q_destination_path "$role";;
+        mw/source_init) printf '%s:%s:/bench/%s/' "$WIN_IP" "$PORT" "$relative";;
+        mw/destination_init) win_destination_path "$role";;
+        *) return 2;;
+    esac
+}
 append_clock_row() {
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$@"
 }
@@ -244,8 +274,17 @@ selftest() {
         || die "schedule role-first balance changed"
     [[ "$(q_source_path mixed)" == "$Q_MODULE/src_mixed" ]]
     [[ "$(win_source_path mixed)" == "$WIN_MODULE/src_mixed" ]]
-    [[ "$(q_destination_path probe)" == "$Q_MODULE/rigw-sessions/$SESSION_TAG/probe/container" ]]
-    [[ "$(win_destination_path probe)" == "$WIN_MODULE/rigw-sessions/$SESSION_TAG/probe/container" ]]
+    local destination_rel="rigw-sessions/$SESSION_TAG/destination/container"
+    [[ "$(q_destination_path source_init)" == "$Q_MODULE/$destination_rel" ]]
+    [[ "$(q_destination_path destination_init)" == "$Q_MODULE/$destination_rel" ]]
+    [[ "$(win_destination_path source_init)" == "$WIN_MODULE/$destination_rel" ]]
+    [[ "$(win_destination_path destination_init)" == "$WIN_MODULE/$destination_rel" ]]
+    [[ "$(arm_destination_path wm source_init)" == "$(arm_destination_path wm destination_init)" ]]
+    [[ "$(arm_destination_path mw source_init)" == "$(arm_destination_path mw destination_init)" ]]
+    [[ "$(arm_destination_argument wm source_init)" == "$Q_IP:$PORT:/bench/$destination_rel/" ]]
+    [[ "$(arm_destination_argument wm destination_init)" == "$Q_MODULE/$destination_rel" ]]
+    [[ "$(arm_destination_argument mw source_init)" == "$WIN_IP:$PORT:/bench/$destination_rel/" ]]
+    [[ "$(arm_destination_argument mw destination_init)" == "$WIN_MODULE/$destination_rel" ]]
     clock_probe=$(append_clock_row 1 run cell 1 source_init before 1 10 11 12 2 0)
     [[ "$(awk -F, '{print NF}' <<<"$clock_probe")" == 12 ]] \
         || die "clock sample row is not exactly 12 columns"
@@ -268,6 +307,8 @@ import sys
 
 source = sys.argv[1]
 markers = (
+    'dest=$(arm_destination_path "$direction" "$role")',
+    'dest_arg=$(arm_destination_argument "$direction" "$role")',
     'client_done_ns=$(q_monotonic_ns)',
     'read -r _ transfer_ms rc',
     'record_clock_samples "$block" "$run_id" "$cell" "$pair" "$role" after',
@@ -286,6 +327,13 @@ for marker in markers:
         raise SystemExit(f"missing run_arm ordering marker: {marker}") from exc
 if positions != sorted(positions):
     raise SystemExit(f"run_arm ordering markers out of order: {positions}")
+for forbidden in (
+    'q_destination_path "$rid"',
+    'win_destination_path "$rid"',
+    '$SESSION_TAG/$rid/container',
+):
+    if forbidden in source:
+        raise SystemExit(f"role-bearing evidence id reached a measured destination: {forbidden}")
 PY
 
     win_stop_source=$(declare -f win_daemon_stop)
@@ -1562,7 +1610,7 @@ PY
 
 run_arm() {
     local block="$1" state="$2" pass="$3" run_id="$4" cell="$5" pair="$6" role="$7" role_order="$8"
-    local direction carrier shape flag="" dest rid qerr werr client_rel client_abs remote_err result transfer_ms rc flush_out flush_ms count bytes want drain session_id total
+    local direction carrier shape flag="" dest dest_arg rid qerr werr client_rel client_abs remote_err result transfer_ms rc flush_out flush_ms count bytes want drain session_id total
     local windows_client=0 arm_phase=client_done client_done_ns settle_deadline_ns settle_done_ns settled_ms
     local landed_root landed_manifest canonical_manifest remote_manifest tree_manifest_sha256
     direction=${cell%%_*}
@@ -1574,11 +1622,10 @@ run_arm() {
     remote_err="$WIN_SESSION/block_$block/$rid.client.err"
     werr="$OUT_DIR/client/$rid.windows.err"
 
-    if [[ "$direction" == wm ]]; then
-        dest=$(q_destination_path "$rid")
-    else
-        dest=$(win_destination_path "$rid")
-    fi
+    dest=$(arm_destination_path "$direction" "$role") \
+        || session_void "unregistered destination path for $direction/$role"
+    dest_arg=$(arm_destination_argument "$direction" "$role") \
+        || session_void "unregistered destination argument for $direction/$role"
     prepare_destination "$direction" "$dest" \
         || session_void "$rid could not precreate its destination container"
 
@@ -1588,19 +1635,19 @@ run_arm() {
     if [[ "$direction/$role" == wm/source_init ]]; then
         windows_client=1; client_abs="$werr"; client_rel="client/$rid.windows.err"
         result=$(win_client_run "$state" "$run_id" "$remote_err" \
-            "$(win_source_path "$shape")" "$Q_IP:$PORT:/bench/rigw-sessions/$SESSION_TAG/$rid/container/" "$flag")
+            "$(win_source_path "$shape")" "$dest_arg" "$flag")
     elif [[ "$direction/$role" == wm/destination_init ]]; then
         client_abs="$qerr"; client_rel="client/$rid.err"
         result=$(q_client_run "$state" "$run_id" "$qerr" \
-            copy "$WIN_IP:$PORT:/bench/src_$shape" "$dest" --yes ${flag:+$flag})
+            copy "$WIN_IP:$PORT:/bench/src_$shape" "$dest_arg" --yes ${flag:+$flag})
     elif [[ "$direction/$role" == mw/source_init ]]; then
         client_abs="$qerr"; client_rel="client/$rid.err"
         result=$(q_client_run "$state" "$run_id" "$qerr" \
-            copy "$(q_source_path "$shape")" "$WIN_IP:$PORT:/bench/rigw-sessions/$SESSION_TAG/$rid/container/" --yes ${flag:+$flag})
+            copy "$(q_source_path "$shape")" "$dest_arg" --yes ${flag:+$flag})
     elif [[ "$direction/$role" == mw/destination_init ]]; then
         windows_client=1; client_abs="$werr"; client_rel="client/$rid.windows.err"
         result=$(win_client_run "$state" "$run_id" "$remote_err" \
-            "$Q_IP:$PORT:/bench/src_$shape" "$dest" "$flag")
+            "$Q_IP:$PORT:/bench/src_$shape" "$dest_arg" "$flag")
     else
         session_void "unregistered arm $direction/$role"
     fi
@@ -1659,9 +1706,15 @@ run_arm() {
     [[ "$tree_manifest_sha256" =~ ^[0-9a-f]{64}$ ]] \
         || session_void "$rid tree manifest digest is malformed"
     if [[ "$direction" == wm ]]; then
-        rm -rf "$Q_MODULE/rigw-sessions/$SESSION_TAG/$rid"
+        rm -rf -- "$dest" || session_void "$rid failed to remove verified q destination"
+        [[ ! -e "$dest" && ! -L "$dest" ]] \
+            || session_void "$rid verified q destination survived removal"
     else
-        wssh "Remove-Item -LiteralPath '$WIN_MODULE/rigw-sessions/$SESSION_TAG/$rid' -Recurse -Force -ErrorAction Stop" \
+        wssh "
+\$ErrorActionPreference = 'Stop'
+Remove-Item -LiteralPath '$dest' -Recurse -Force -ErrorAction Stop
+if (Test-Path -LiteralPath '$dest') { throw 'verified destination survived removal' }
+" \
             || session_void "$rid failed to remove verified Windows destination"
     fi
     arm_phase=durability_verified

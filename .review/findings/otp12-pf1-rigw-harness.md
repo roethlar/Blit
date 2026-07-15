@@ -19,7 +19,11 @@ new two-endpoint trace uncorrelatable.
   endpoint initiates the one `Transfer` session.
 - Pin one canonical source tree per direction and fixture. Both roles read the
   same q or Windows physical path and land into a precreated container of the
-  same depth and shape. The harness requires the q and Windows canonical
+  same depth and shape. One session-scoped canonical destination path per
+  endpoint is reset and reused by all 128 arms; role-bearing run IDs are kept
+  only in evidence names and never enter a measured path. Session scoping
+  preserves failed-run endpoint evidence without reintroducing a within-run
+  path axis. The harness requires the q and Windows canonical
   relative-path/size manifests to match, pins the one exact `src_<shape>` root,
   and retains an identical manifest and digest for every accepted arm.
 - Run a fixed OFF–ON–ON–OFF four-block schedule over
@@ -135,6 +139,10 @@ new two-endpoint trace uncorrelatable.
   mutation makes removal fail under the production `||` call shape and must
   remain rejected; a Windows source-contract guard forbids suppressed removal
   errors and requires absence, directory, reparse, and emptiness checks.
+- SOURCE- and DESTINATION-initiated arms resolve to the same canonical
+  endpoint-local destination path and remote module-relative path. The
+  self-test pins both direction/role pairs and rejects any `run_arm` source
+  that lets the role-bearing evidence ID reach a measured destination.
 - The failure handler removes any completion marker, stops only remembered
   identity-checked daemons, appends teardown errors without replacing the
   primary void reason, and never initiates session-tree deletion. HUP, INT,
