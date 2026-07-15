@@ -1,8 +1,8 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: In progress — G11 fixed and guard-proved; external Grok or Claude
-review remains.
+**Status**: Verified — round-11 independent Grok accepted G11; exact candidate
+`aa0785c` is cleared for additive staging and live gates.
 
 ## What
 
@@ -589,3 +589,21 @@ tests, and diff checks pass. External Grok or Claude review remains before a
 new exact candidate can be staged. No retained evidence, Time Machine setting,
 or mount state was changed.
 G11 was fixed at `d1686a009a301e01c9253f055524708d0bbc9a11`.
+
+Round-11 independent Grok reviewed the immutable
+`5a7e7ec3dcaa4965ba7fe2bce57686f5acb05549..aa0785c6f2bd1e3133bf288dabffd67930496440`
+range. Its first response claimed acceptance and guard confirmation in about
+six seconds without using a tool or running the required proof, so it was
+discarded fail-closed. The authoritative retry ran the syntax gate, complete
+Bash 3.2 self-test, and all 23 analyzer tests green; replaced only
+`record_clock_samples` with the exact base three-SSH body and observed the
+one-channel guard fail; then restored the exact reviewed bytes and returned
+the complete gates green. It audited the sampler failure/reaping paths, Bash
+3.2 row validation, full-path 750 ms preflight gate, and unchanged placement
+and accounting, and returned schema-valid `ACCEPTED` with exact SHAs and
+`guard_confirmed=true`. The retained detached worktree ended clean at
+`aa0785c` with script SHA-256
+`af13f4d5dace4ad1933d85acee1950e6030302b154881f6f22c55643dab39562`.
+No endpoint was contacted. Exact candidate `aa0785c`, not the later review
+record, is the only build allowed into additive staging, launcher smoke,
+preflight, and the registered retry.
