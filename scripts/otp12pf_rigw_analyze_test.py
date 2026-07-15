@@ -326,6 +326,7 @@ class RigWAnalyzerTests(unittest.TestCase):
             }
         off = rows[(analyzer.TARGET_CELL, "off")]
         on = rows[(analyzer.TARGET_CELL, "on")]
+        self.assertEqual(off["measurand"], "durable_total_ms")
         self.assertEqual(off["delta_ms"], "45")
         self.assertEqual(off["paired_delta_median_ms"], "45")
         self.assertEqual(off["first4_delta_median_ms"], "25")
@@ -356,6 +357,13 @@ class RigWAnalyzerTests(unittest.TestCase):
         self.assertEqual(len(phase_rows), len(session.events))
         self.assertTrue(any(row["source_file"].startswith("client/") for row in phase_rows))
         self.assertTrue(any(row["source_file"].startswith("trace/") for row in phase_rows))
+        self.assertTrue(
+            all(
+                row["total_ms"]
+                == str(int(row["transfer_ms"]) + int(row["flush_ms"]))
+                for row in phase_rows
+            )
+        )
         with result.phase_intervals_csv.open(newline="") as handle:
             intervals = list(csv.DictReader(handle))
         self.assertTrue(intervals)
@@ -455,6 +463,45 @@ class RigWAnalyzerTests(unittest.TestCase):
         (session.root / "runs.csv").write_text("".join(lines))
         with self.assertRaisesRegex(analyzer.AnalysisError, "header mismatch"):
             analyzer.analyze(session.root)
+
+    def test_corrupt_total_is_rejected(self) -> None:
+        temporary, session = self.make_session()
+        self.addCleanup(temporary.cleanup)
+        session.rows[0]["total_ms"] = "999"
+        session.write()
+        with self.assertRaisesRegex(
+            analyzer.AnalysisError, "total_ms must equal transfer_ms \\+ flush_ms exactly"
+        ):
+            analyzer.analyze(session.root)
+
+    def test_role_specific_flush_is_included_in_delta_and_floor(self) -> None:
+        temporary, session = self.make_session()
+        self.addCleanup(temporary.cleanup)
+        destination_flush = (18, 16, 14, 12, 10, 8, 6, 4)
+        for row in session.rows:
+            if row["cell"] != analyzer.TARGET_CELL or row["trace_state"] != "off":
+                continue
+            flush_ms = (
+                10
+                if row["role"] == "source_init"
+                else destination_flush[int(row["pair"]) - 1]
+            )
+            row["flush_ms"] = str(flush_ms)
+            row["total_ms"] = str(int(row["transfer_ms"]) + flush_ms)
+        session.write()
+
+        result = analyzer.analyze(session.root)
+        with result.summary_csv.open(newline="") as handle:
+            rows = {
+                (row["cell"], row["trace_state"]): row
+                for row in csv.DictReader(handle)
+            }
+        off = rows[(analyzer.TARGET_CELL, "off")]
+        self.assertEqual(off["delta_ms"], "46")
+        self.assertEqual(off["paired_delta_median_ms"], "46")
+        self.assertEqual(off["paired_delta_range_ms"], "56")
+        self.assertEqual(off["n_pair_ms"], "56")
+        self.assertEqual(str(result.n_resolution), "56")
 
     def test_sequence_gap_and_missing_terminal_are_rejected(self) -> None:
         temporary, session = self.make_session()

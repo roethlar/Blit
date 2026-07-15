@@ -70,6 +70,7 @@ TRACE_PREFIX = "[session-phase] "
 SESSION_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 SETTLE_MIN_MS = 250
 SETTLE_MAX_MS = 1000
+MEASURAND = "durable_total_ms"
 
 
 @dataclass(frozen=True)
@@ -347,6 +348,15 @@ def load_runs(root: Path) -> list[RunRow]:
                 f"runs.csv line {line}: settled_ms must be in "
                 f"[{SETTLE_MIN_MS},{SETTLE_MAX_MS}), got {settled_ms}"
             )
+        transfer_ms = parse_decimal(raw["transfer_ms"], "transfer_ms", line)
+        flush_ms = parse_decimal(raw["flush_ms"], "flush_ms", line)
+        total_ms = parse_decimal(raw["total_ms"], "total_ms", line)
+        if total_ms != transfer_ms + flush_ms:
+            raise AnalysisError(
+                f"runs.csv line {line}: total_ms must equal transfer_ms + flush_ms "
+                f"exactly; got {decimal_text(total_ms)} != "
+                f"{decimal_text(transfer_ms)} + {decimal_text(flush_ms)}"
+            )
         rows.append(
             RunRow(
                 csv_line=line,
@@ -358,10 +368,10 @@ def load_runs(root: Path) -> list[RunRow]:
                 role=role,
                 pair=pair,
                 role_order=role_order,
-                transfer_ms=parse_decimal(raw["transfer_ms"], "transfer_ms", line),
+                transfer_ms=transfer_ms,
                 settled_ms=settled_ms,
-                flush_ms=parse_decimal(raw["flush_ms"], "flush_ms", line),
-                total_ms=parse_decimal(raw["total_ms"], "total_ms", line),
+                flush_ms=flush_ms,
+                total_ms=total_ms,
                 exit_code=exit_code,
                 drain=raw["drain"],
                 valid=raw["valid"],
@@ -1063,7 +1073,7 @@ def condition_stats(rows: Sequence[RunRow], cell: str, trace_state: str) -> Cond
             raise AnalysisError(
                 f"duplicate timing for {cell}/{trace_state}/pair {row.pair}/{row.role}"
             )
-        by_pair[row.pair][row.role] = row.transfer_ms
+        by_pair[row.pair][row.role] = row.total_ms
     if sorted(by_pair) != list(range(1, 9)):
         raise AnalysisError(
             f"{cell}/{trace_state}: expected paired observations 1..8, got {sorted(by_pair)}"
@@ -1173,6 +1183,7 @@ def _summary_rows(
             {
                 "cell": item.cell,
                 "trace_state": item.trace_state,
+                "measurand": MEASURAND,
                 "pairs": "8",
                 "source_init_median_ms": decimal_text(item.source_median),
                 "destination_init_median_ms": decimal_text(item.destination_median),
@@ -1219,6 +1230,7 @@ def _summary_rows(
 SUMMARY_FIELDS = (
     "cell",
     "trace_state",
+    "measurand",
     "pairs",
     "source_init_median_ms",
     "destination_init_median_ms",
@@ -1254,9 +1266,9 @@ def _distribution_rows(stats: Sequence[ConditionStats]) -> list[dict[str, str]]:
     output: list[dict[str, str]] = []
     for item in stats:
         for metric, values in (
-            ("source_init", item.source_values),
-            ("destination_init", item.destination_values),
-            ("paired_delta", item.paired_deltas),
+            ("source_init_total", item.source_values),
+            ("destination_init_total", item.destination_values),
+            ("paired_total_delta", item.paired_deltas),
         ):
             modes = largest_gap_modes(values)
             ordered = tuple(sorted(values))
@@ -1267,6 +1279,7 @@ def _distribution_rows(stats: Sequence[ConditionStats]) -> list[dict[str, str]]:
                     {
                         "cell": item.cell,
                         "trace_state": item.trace_state,
+                        "measurand": MEASURAND,
                         "metric": metric,
                         "rank": str(rank),
                         "value_ms": decimal_text(value),
@@ -1340,6 +1353,8 @@ EVENT_FIELDS = (
     "role",
     "role_order",
     "transfer_ms",
+    "flush_ms",
+    "total_ms",
     "run_id",
     "session_id",
     "endpoint_role",
@@ -1372,6 +1387,8 @@ def _event_row(row: RunRow, event: TraceEvent) -> dict[str, str]:
         "role": row.role,
         "role_order": str(row.role_order),
         "transfer_ms": decimal_text(row.transfer_ms),
+        "flush_ms": decimal_text(row.flush_ms),
+        "total_ms": decimal_text(row.total_ms),
         "run_id": row.run_id,
         "session_id": row.session_id,
         "endpoint_role": event.endpoint_role,
@@ -1566,9 +1583,9 @@ def _markdown(
         "cell and role ordering, 8 valid role pairs per trace state/cell, trace-off and "
         "gRPC trace absence, and correlated two-role TCP terminal traces.",
         "",
-        "## Conventional wall-time summaries",
+        "## Durable total wall-time summaries",
         "",
-        "| cell | trace | source median ms | destination median ms | Δ ms | paired d median ms | N_pair_split ms | role-order drift ms | paired range ms | N_pair ms |",
+        "| cell | trace | source total median ms | destination total median ms | Δ total ms | paired total d median ms | N_pair_split total ms | role-order drift total ms | paired range total ms | N_pair total ms |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for item in stats:
@@ -1593,8 +1610,13 @@ def _markdown(
     lines.extend(
         [
             "",
-            "`Δ = median(destination_init) − median(source_init)`. Each paired "
-            "`d_i = destination_init_i − source_init_i`. "
+            "The authoritative wall-time measurand is `total_ms = transfer_ms + "
+            "flush_ms`: client execution plus the destination durability probe. The fixed "
+            "`settled_ms` observation window is excluded from `total_ms` and from every "
+            "summary, delta, distribution, observer-bias, and resolution-floor value.",
+            "",
+            "`Δ = median(destination_init total_ms) − median(source_init total_ms)`. "
+            "Each paired `d_i = destination_init total_ms_i − source_init total_ms_i`. "
             "`N_pair_split = max(|median(d_1..d_4) − median(d_5..d_8)|, "
             "|median(d_odd) − median(d_even)|)`. The conservative operative "
             "The independent role-order drift is "
@@ -1623,9 +1645,9 @@ def _markdown(
     )
     for item in stats:
         for metric, values in (
-            ("source_init", item.source_values),
-            ("destination_init", item.destination_values),
-            ("paired d", item.paired_deltas),
+            ("source_init total_ms", item.source_values),
+            ("destination_init total_ms", item.destination_values),
+            ("paired total_ms d", item.paired_deltas),
         ):
             modes = largest_gap_modes(values)
             ordered = ";".join(decimal_text(value) for value in sorted(values))
@@ -1640,6 +1662,9 @@ def _markdown(
             "",
             f"`phase_events.csv` contains {trace_event_count} structured events. "
             f"`phase_intervals.csv` contains {interval_count} local-clock intervals.",
+            "",
+            "Each phase-event row carries the arm's validated `transfer_ms`, `flush_ms`, "
+            "and authoritative `total_ms`; `settled_ms` remains outside the measurand.",
             "",
             "Every interval uses `elapsed_ns` from one endpoint only. `unix_ns` is retained "
             "in the event export for provenance and is never used for cross-host subtraction.",
@@ -1690,6 +1715,7 @@ def analyze(root: Path | str) -> AnalysisResult:
         (
             "cell",
             "trace_state",
+            "measurand",
             "metric",
             "rank",
             "value_ms",

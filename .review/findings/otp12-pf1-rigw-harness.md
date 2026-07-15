@@ -86,6 +86,12 @@ new two-endpoint trace uncorrelatable.
 - The analyzer rejects a missing `settled_ms` column, non-integer values, and
   values outside `[250,1000)`. Synthetic evidence supplies the lower valid
   bound so every accepted arm proves the registered settle window.
+- The analyzer parses each timing component once, requires exact Decimal
+  `total_ms = transfer_ms + flush_ms`, and uses that durable total for every
+  paired median, delta, distribution, observer-bias, and resolution-floor
+  value. The fixed settle window remains excluded. Corrupt totals are rejected;
+  role-specific flush mutations prove the summaries cannot fall back to the
+  pre-durability transfer time.
 - Mutation proof: replacing the absolute-deadline wait with a no-op makes the
   harness self-test fail because it returns before +250 ms. Moving the
   successful Windows client-log fetch ahead of the durability marker makes
@@ -107,8 +113,8 @@ new two-endpoint trace uncorrelatable.
 
 ## Known gaps
 
-- The independent harness audit found open fail-closed gaps in durable-total
-  analysis, phase causal ordering, and landed relative-path identity. It also
+- The independent harness audit found open fail-closed gaps in phase causal
+  ordering and landed relative-path identity. It also
   found that failure cleanup can discard the
   current Windows logs or leave a completion marker before cleanup succeeds,
   the Windows launcher PID is not identity-checked before termination, and a
