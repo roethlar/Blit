@@ -1,0 +1,105 @@
+# otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
+
+**Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
+
+## What
+
+The acceptance harness cannot be reused unchanged for the phase diagnostic.
+It retains old/new and push/pull-shaped orchestration, drains Windows even
+when q is the destination, keeps one daemon alive across instrumentation-state
+changes, discards successful client stderr, and can create a firewall rule.
+Those properties either destroy the SOURCE/DESTINATION comparison or make the
+new two-endpoint trace uncorrelatable.
+
+## Approach
+
+- Use semantic `source_init` and `destination_init` arms. SOURCE sends and
+  DESTINATION receives in both arms; the varied property is only which
+  endpoint initiates the one `Transfer` session.
+- Pin one canonical source tree per direction and fixture. Both roles read the
+  same q or Windows physical path and land into a precreated container of the
+  same depth and shape. The harness verifies the complete landed file count
+  and byte sum before accepting each arm.
+- Run a fixed OFF–ON–ON–OFF four-block schedule over
+  `wm_tcp_mixed`, `mw_tcp_mixed`, `wm_grpc_mixed`, and `wm_tcp_large`.
+  Pair rounds traverse cells forward/reverse/reverse/forward and run the two
+  roles adjacently, producing eight pairs per trace state and cell with a
+  four/four role-first balance (128 timed transfers).
+- Stop and restart both exact daemons for every block, including ON→ON. Each
+  block has a common run ID; every TCP client log supplies the 16-hex session
+  fingerprint that correlates its peer daemon records. Windows logs are
+  retrieved through base64 with SHA-256 verification.
+- Fail closed on the exact build, route/interface/IP/MAC/MTU/link speeds,
+  direction-specific negotiated MSS, firewall-rule identity, timer
+  calibration, load, Time Machine, Spotlight, Windows CPU/disk drain, stale
+  processes, PID ownership, port teardown, trace leakage, incomplete trace
+  inventory, or landed-tree mismatch. The harness never changes firewall,
+  MTU, routing, Time Machine, Spotlight, or unrelated processes.
+- Use destination-keyed durability: q file fsync for Windows→q and Windows
+  volume flush for q→Windows, following the same fixed post-client settle.
+  Both caches are purged before every arm and Windows disk writes must drain.
+- Compute paired differences `d_i = destination_init_i − source_init_i`, the
+  registered split drifts, role-order drift, the full paired range that guards
+  the known bimodal fast arm, trace observer bias, and conservative
+  `N_resolution`. Reports retain every sorted arm/difference distribution and
+  use only per-endpoint monotonic clocks for phase intervals. Cross-host clock
+  samples quantify uncertainty and are never silently subtracted.
+
+## Files
+
+- `scripts/bench_otp12pf_rigw.sh` — q-side registered runner and endpoint
+  gates.
+- `scripts/otp12pf_rigw_analyze.py` — exact schedule, trace, clock, phase, and
+  resolution validator/reporter.
+- `scripts/otp12pf_rigw_analyze_test.py` — complete synthetic session and
+  fail-closed mutations.
+- `.agents/machines.md` — current direction-specific MSS and q SSH endpoint
+  fact.
+
+## Tests
+
+- `SELFTEST=1 bash scripts/bench_otp12pf_rigw.sh` proves the exact block/arm
+  inventory and canonical path construction without contacting either rig
+  endpoint.
+- `python3 scripts/otp12pf_rigw_analyze_test.py` builds complete synthetic
+  evidence (128 arms, 768 clock samples, split client/daemon phase logs) and
+  rejects missing clock rows, missing endpoint trace, trace-off leakage,
+  gRPC trace leakage, schedule drift, sequence gaps, and terminal/inventory
+  corruption. It pins the split/range/role-order/observer resolution math and
+  all exported reports.
+- The same self-test runs under q's actual macOS Bash and Python so Bash 3.2
+  and platform behavior are exercised, not inferred from nagatha.
+- Mutation proof: removing role-order drift and the full paired-range term from
+  `N_pair` makes the synthetic diagnostic fail (`N_resolution` falls from 70
+  ms to 40 ms); restoring them returns all nine analyzer tests to green.
+- Mutation proof: excluding successful client logs from trace discovery makes
+  the synthetic diagnostic fail on a missing SOURCE/DESTINATION endpoint;
+  restoring both client and daemon evidence roots returns all tests to green.
+- Mutation proof: reducing the clock-row formatter from 12 fields to 11 makes
+  the harness self-test fail before analysis; restoring the exact 12-column
+  schema returns the local and q/macOS self-tests to green.
+- The repository gate is green: `cargo fmt --all -- --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace`, the documentation gate, analyzer tests, and shell
+  syntax checks all passed.
+
+## Known gaps
+
+- The independent harness audit found open fail-closed gaps in exact clean-build
+  provenance, pinned eight-stream settlement, post-client timing symmetry,
+  durable-total analysis, phase causal ordering, and landed relative-path
+  identity. No live datum is valid until each is fixed and reviewed.
+- No rig datum is produced by this slice. The full live run waits for the
+  committed harness, mandatory Codex adjudication, exact isolated builds, and
+  a green endpoint preflight.
+- This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
+  hard gate. The active plan still requires the separately reviewed
+  small-fixture/P2 work, phase report, and `0f922de` historical control before
+  pf-1 closes.
+- q was not quiet during the first read-only readiness sample on 2026-07-15:
+  Time Machine AutoBackup was enabled and Spotlight was using substantial CPU.
+  The harness reports and refuses those conditions; it does not mutate them.
+
+## Reviewer comments
+
+Pending mandatory Codex review after commit.

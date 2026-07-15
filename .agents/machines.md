@@ -128,6 +128,13 @@ review loop from rig-W benchmarking** — the contention that destroyed a
   ceiling — so a degraded link and a healthy one look identical through it. Use
   `ifconfig en8 | grep media` (the PHY's negotiated rate) and blit's own
   `wm_tcp_large` time (~908 ms for 1 GiB = 10GbE; ~10 s = 1GbE).
+- **MSS is directional on this pair (rechecked 2026-07-15):** five live
+  `getsockopt(TCP_MAXSEG)` samples were **8948 q→netwatch-01** and five were
+  **8960 netwatch-01→q**, with local sources `.54` and `.177` respectively.
+  A rig gate must pin the observed value for each direction rather than repeat
+  the older shorthand “8948 both directions.” On q, the saved host key for the
+  bare `netwatch-01` name is stale; the pinned numeric `10.1.10.177` entry is
+  valid and is the benchmark control endpoint. Do not bypass host-key checking.
 - **Staged**: repo clone at `~/Dev/blit_v2_f35702a` (detached `f35702a`, cloned
   from the LOCAL gitea — `q` *is* the gitea host); `target/release/{blit,blit-daemon}`
   arm64 copied from nagatha (embed-verified `+f35702a`); old client at
