@@ -27,4 +27,6 @@ required afterward.
 
 No finding was rejected or deferred. No endpoint was contacted.
 
+Fix commit: `29d63b7ad45dff21d052a678fff795029b300e6d`.
+
 reviewer: gpt-5.6-sol

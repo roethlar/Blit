@@ -429,3 +429,4 @@ Format, strict clippy, all workspace tests, Bash syntax/self-test, all 23
 analyzer tests, the docs gate, and diff checks passed. No endpoint was
 contacted. Fresh complete Codex plus additive Grok review remains required
 before rebuild or launcher retry.
+G8 was fixed at `29d63b7ad45dff21d052a678fff795029b300e6d`.
