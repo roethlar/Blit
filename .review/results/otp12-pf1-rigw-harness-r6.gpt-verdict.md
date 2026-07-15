@@ -28,4 +28,6 @@ guard red. Fresh complete review is required afterward.
 
 No finding was rejected or deferred. No endpoint was contacted.
 
+Fix commit: `47aaaf0e7784f8cefa3e84d757849bf243bea70a`.
+
 reviewer: gpt-5.6-sol

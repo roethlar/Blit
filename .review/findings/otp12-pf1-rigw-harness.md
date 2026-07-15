@@ -381,6 +381,7 @@ restoration returns the complete self-test green. A second fixture changes the
 working file during remote-session reservation, after binding; the adjacent
 pre-SCP recheck refuses it before the copy mock is reached. Removing that
 comparison turns the copy-reached guard red, and restoration returns green.
+G7 was fixed at `47aaaf0e7784f8cefa3e84d757849bf243bea70a`.
 Format, strict clippy, all workspace tests, Bash syntax/self-test, all 23
 analyzer tests, the docs gate, and diff checks passed. No endpoint was
 contacted. The first final workspace attempt hit the recorded macOS
