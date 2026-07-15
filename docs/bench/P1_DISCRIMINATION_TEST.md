@@ -5,6 +5,31 @@ data — most of the "hypotheses" below were already answered and this doc was r
 Read the box first; the matrix that follows is retained only for the ONE question the existing
 data does not close.
 
+## ✅ MEASURED (loopback, 2026-07-15) — pull ramps to FEWER streams than push
+
+First run of the `BLIT_PHASE_TRACE` instrument (built dirty at `e328fcf`), mixed fixture (512 MB +
+5000 × 2 KB), loopback daemon on nagatha, both destinations inside one module dir (same APFS),
+`sudo purge` before each transfer, ABBA-interleaved, 6 push + 6 pull:
+
+- **PUSH reaches `full_streams=4`** (4,3,4,4,4,4); **PULL reaches `full_streams=2`** (2,2,2,2,2,2).
+  **Consistent.** Pull ramps to half push's parallelism on the identical workload. This is a real
+  pull/push difference on the P1 axis (fewer streams → less parallelism on the stream-limited
+  small-file work), and it is what the resize/ramp path controls.
+- **⚠ Two hard caveats.** (1) **Warm cache hides it** — with the page cache hot, BOTH reached 4;
+  the asymmetry only appears cold. (2) **Loopback timing is bistable** (pull totals swung
+  762↔1377 ms across runs — the same bimodality the rig-W notes warn about) so loopback gives
+  **no clean wall-time** for P1, and loopback erases the NIC/RTT/MTU. Per this plan's own rule a
+  loopback result is **inconclusive for the wall-time magnitude** — it shows the ramp asymmetry
+  EXISTS, not that it is the 300 ms.
+- **This partially un-refutes the ramp suspect.** codex's `P1_FIX_NOTES.md` refutation was correct
+  that the resize dial does not *starve need-flow*; but it reasoned from the state machine without
+  the cold-cache ramp dynamics, and the ramp DOES reach a different stream count. The live
+  question is now sharp and measurable: **why does pull stop at 2 streams where push reaches 4,
+  and on the real macOS↔Windows rig does that gap track the 300 ms?**
+- **The definitive run** is this same instrument on the macOS↔Windows rig (netwatch-01) or at
+  minimum a real-network Mac↔Mac (nagatha↔q, RTT present): read `full_streams` and per-stream
+  `steady mib_s` push vs pull. Logs from the loopback run: `/tmp/p1logs/`.
+
 ## ⛔ STOP — what is ALREADY MEASURED (do not re-derive it)
 
 **blit's small-file throughput does not scale with concurrency. This is measured, documented,
