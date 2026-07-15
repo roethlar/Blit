@@ -26,8 +26,8 @@
 //! is the dial's default ceiling, and everything between is reached by
 //! ramping on evidence instead of guessing from `total_bytes`.
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::generated::CapacityProfile;
 
@@ -93,6 +93,17 @@ pub fn receiver_stream_ceiling(profile: Option<&CapacityProfile>) -> usize {
         .clamp(1, DIAL_CEILING_MAX_STREAMS)
 }
 
+/// Serialized wire-epoch state. Resize proposals are rare (at most one per
+/// control-lane round trip), so one short critical section is preferable to
+/// a split-atomic check/CAS sequence that can reopen a refused transfer or
+/// reuse an epoch after an intervening settlement.
+#[derive(Debug, Default)]
+struct ResizeEpochState {
+    settled_epoch: u32,
+    pending_epoch: Option<u32>,
+    refused: bool,
+}
+
 /// The one mutable tuning object for a transfer.
 #[derive(Debug)]
 pub struct TransferDial {
@@ -108,16 +119,10 @@ pub struct TransferDial {
     /// `set_negotiated_streams`; later writes come from
     /// `resize_settled` on an accepted epoch.
     live_streams: AtomicUsize,
-    /// Last settled epoch (0 until the first accepted resize).
-    resize_epoch: AtomicU32,
-    /// In-flight proposal's epoch; 0 = none. While non-zero no new
-    /// proposal is produced (the wire is idempotent but overlapping
-    /// epochs would complicate sub-token registration).
-    pending_epoch: AtomicU32,
-    /// A matching refusal is terminal for this transfer's resize policy.
-    /// Retrying an unhonored target would either reuse an epoch or spin
-    /// through fresh epochs without changing the live set.
-    resize_refused: AtomicBool,
+    /// Last settled epoch, in-flight proposal, and terminal-refusal bit.
+    /// These fields form one arbitration state: observing/claiming them
+    /// separately permits an ABA race across a concurrent settlement.
+    resize_epochs: Mutex<ResizeEpochState>,
     /// Resize-eligible ticks since the last settle (cooldown clock).
     ticks_since_settle: AtomicU32,
     /// Consecutive same-direction tick counter: positive = "pipe clean
@@ -187,9 +192,7 @@ impl TransferDial {
             initial_streams: AtomicUsize::new(DIAL_FLOOR_INITIAL_STREAMS.min(ceiling_streams)),
             max_streams: AtomicUsize::new(DIAL_FLOOR_MAX_STREAMS.clamp(1, ceiling_streams.max(1))),
             live_streams: AtomicUsize::new(DIAL_FLOOR_INITIAL_STREAMS.min(ceiling_streams)),
-            resize_epoch: AtomicU32::new(0),
-            pending_epoch: AtomicU32::new(0),
-            resize_refused: AtomicBool::new(false),
+            resize_epochs: Mutex::new(ResizeEpochState::default()),
             ticks_since_settle: AtomicU32::new(0),
             resize_sustain: AtomicI32::new(0),
             ceiling_chunk_bytes: ceiling_chunk,
@@ -250,12 +253,19 @@ impl TransferDial {
 
     /// Last settled resize epoch (0 = only the initial stream set).
     pub fn resize_epoch(&self) -> u32 {
-        self.resize_epoch.load(Ordering::Relaxed)
+        self.resize_epochs
+            .lock()
+            .expect("resize epoch state poisoned")
+            .settled_epoch
     }
 
     /// True while a proposal is awaiting `resize_settled`.
     pub fn resize_pending(&self) -> bool {
-        self.pending_epoch.load(Ordering::Relaxed) != 0
+        self.resize_epochs
+            .lock()
+            .expect("resize epoch state poisoned")
+            .pending_epoch
+            .is_some()
     }
 
     fn cheap_dials_maxed(&self) -> bool {
@@ -285,11 +295,14 @@ impl TransferDial {
     /// call [`Self::resize_settled`] with the outcome; until then
     /// every subsequent tick returns `None`.
     pub fn resize_tick(&self, delta_bytes: u64, blocked_ratio: f64) -> Option<ResizeProposal> {
-        if self.resize_refused.load(Ordering::Acquire) {
-            return None;
-        }
-        if self.pending_epoch.load(Ordering::Relaxed) != 0 {
-            return None;
+        {
+            let state = self
+                .resize_epochs
+                .lock()
+                .expect("resize epoch state poisoned");
+            if state.refused || state.pending_epoch.is_some() {
+                return None;
+            }
         }
         let ticks = self
             .ticks_since_settle
@@ -299,7 +312,6 @@ impl TransferDial {
             self.resize_sustain.store(0, Ordering::Relaxed);
             return None;
         }
-        let live = self.live_streams.load(Ordering::Relaxed).max(1);
         let sustain = if blocked_ratio < DIAL_STEP_UP_BLOCKED_RATIO && self.cheap_dials_maxed() {
             let prev = self.resize_sustain.load(Ordering::Relaxed).max(0);
             let next = prev.saturating_add(1);
@@ -317,29 +329,36 @@ impl TransferDial {
         if ticks < RESIZE_COOLDOWN_TICKS {
             return None;
         }
-        let target = if sustain >= RESIZE_SUSTAIN_TICKS {
-            (live + 1).min(self.ceiling_max_streams.max(1))
+        let add = if sustain >= RESIZE_SUSTAIN_TICKS {
+            true
         } else if sustain <= -RESIZE_SUSTAIN_TICKS {
-            live.saturating_sub(1).max(1)
+            false
         } else {
             return None;
+        };
+        // Re-enter the serialized state after computing the signal. A
+        // proposal may have settled (or been refused) meanwhile, so derive
+        // live/target/epoch together from the state this claim actually wins.
+        let mut state = self
+            .resize_epochs
+            .lock()
+            .expect("resize epoch state poisoned");
+        if state.refused || state.pending_epoch.is_some() {
+            return None;
+        }
+        let live = self.live_streams.load(Ordering::Relaxed).max(1);
+        let target = if add {
+            (live + 1).min(self.ceiling_max_streams.max(1))
+        } else {
+            live.saturating_sub(1).max(1)
         };
         if target == live {
             // Already at the bound in the wanted direction.
             self.resize_sustain.store(0, Ordering::Relaxed);
             return None;
         }
-        let epoch = self.resize_epoch.load(Ordering::Relaxed).saturating_add(1);
-        // CAS, not store: `propose_shape_resize` (sf-2) allocates from
-        // another task, and a plain store here could stack two live
-        // proposals onto one epoch number.
-        if self
-            .pending_epoch
-            .compare_exchange(0, epoch, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            return None;
-        }
+        let epoch = state.settled_epoch.checked_add(1)?;
+        state.pending_epoch = Some(epoch);
         self.resize_sustain.store(0, Ordering::Relaxed);
         Some(ResizeProposal {
             epoch,
@@ -364,22 +383,20 @@ impl TransferDial {
     /// REMOVE: shrinking below a live count is throughput evidence and
     /// stays the tuner's call.
     pub fn propose_shape_resize(&self, desired_streams: usize) -> Option<ResizeProposal> {
-        if self.resize_refused.load(Ordering::Acquire) {
+        let desired = desired_streams.clamp(1, self.ceiling_max_streams.max(1));
+        let mut state = self
+            .resize_epochs
+            .lock()
+            .expect("resize epoch state poisoned");
+        if state.refused || state.pending_epoch.is_some() {
             return None;
         }
-        let desired = desired_streams.clamp(1, self.ceiling_max_streams.max(1));
         let live = self.live_streams.load(Ordering::Relaxed).max(1);
         if desired <= live {
             return None;
         }
-        let epoch = self.resize_epoch.load(Ordering::Relaxed).saturating_add(1);
-        if self
-            .pending_epoch
-            .compare_exchange(0, epoch, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            return None;
-        }
+        let epoch = state.settled_epoch.checked_add(1)?;
+        state.pending_epoch = Some(epoch);
         Some(ResizeProposal {
             epoch,
             target_streams: live + 1,
@@ -395,26 +412,26 @@ impl TransferDial {
     /// further proposals on this transfer. Stale epochs (not the pending
     /// one) are ignored. Either way the cooldown clock restarts.
     pub fn resize_settled(&self, epoch: u32, effective_streams: usize, accepted: bool) {
-        if self.pending_epoch.load(Ordering::Acquire) != epoch || epoch == 0 {
+        let mut state = self
+            .resize_epochs
+            .lock()
+            .expect("resize epoch state poisoned");
+        if state.pending_epoch != Some(epoch) || epoch == 0 {
             return;
-        }
-        // Publish the complete settlement before releasing the pending
-        // slot. In particular a refusal must become terminal before another
-        // producer can observe `pending_epoch == 0` and retry it.
-        if !accepted {
-            self.resize_refused.store(true, Ordering::Release);
         }
         self.ticks_since_settle.store(0, Ordering::Relaxed);
         self.resize_sustain.store(0, Ordering::Relaxed);
         if accepted {
             let clamped = effective_streams.clamp(1, self.ceiling_max_streams.max(1));
             self.live_streams.store(clamped, Ordering::Relaxed);
+        } else {
+            state.refused = true;
         }
         // A refused request was still an observed wire epoch. Consuming it
         // keeps future/duplicate traffic monotonic even though live count
         // remains unchanged.
-        self.resize_epoch.store(epoch, Ordering::Relaxed);
-        self.pending_epoch.store(0, Ordering::Release);
+        state.settled_epoch = epoch;
+        state.pending_epoch = None;
     }
 
     /// Raise max_streams toward the ceiling (used when a peer's
@@ -952,6 +969,74 @@ mod tests {
         assert_eq!(dial.resize_epoch(), proposal.epoch);
         assert_eq!(dial.live_streams(), 4);
         assert_eq!(dial.propose_shape_resize(8), None);
+    }
+
+    #[test]
+    fn resize_refusal_is_atomic_against_concurrent_producers() {
+        const PRODUCERS: usize = 8;
+
+        let dial = Arc::new(TransferDial::conservative());
+        while dial.step_up_cheap_dials() {}
+        burn_cooldown(&dial);
+        let proposal = dial
+            .propose_shape_resize(8)
+            .expect("initial proposal holds the epoch slot");
+
+        let start = Arc::new(std::sync::Barrier::new(PRODUCERS + 1));
+        let ready = Arc::new(AtomicUsize::new(0));
+        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let escaped = Arc::new(AtomicUsize::new(0));
+
+        std::thread::scope(|scope| {
+            for producer in 0..PRODUCERS {
+                let dial = Arc::clone(&dial);
+                let start = Arc::clone(&start);
+                let ready = Arc::clone(&ready);
+                let settled = Arc::clone(&settled);
+                let escaped = Arc::clone(&escaped);
+                scope.spawn(move || {
+                    start.wait();
+                    ready.fetch_add(1, Ordering::Release);
+                    while !settled.load(Ordering::Acquire) {
+                        let next = if producer % 2 == 0 {
+                            dial.propose_shape_resize(8)
+                        } else {
+                            dial.resize_tick(1024, 0.0)
+                        };
+                        if next.is_some() {
+                            escaped.fetch_add(1, Ordering::Relaxed);
+                            return;
+                        }
+                        std::thread::yield_now();
+                    }
+                    // Exercise both APIs after settlement too. The terminal
+                    // bit and epoch slot are one locked state, so neither a
+                    // waiter nor a fresh producer can reopen the transfer.
+                    for _ in 0..128 {
+                        let next = if producer % 2 == 0 {
+                            dial.propose_shape_resize(8)
+                        } else {
+                            dial.resize_tick(1024, 0.0)
+                        };
+                        if next.is_some() {
+                            escaped.fetch_add(1, Ordering::Relaxed);
+                            return;
+                        }
+                    }
+                });
+            }
+
+            start.wait();
+            while ready.load(Ordering::Acquire) != PRODUCERS {
+                std::thread::yield_now();
+            }
+            dial.resize_settled(proposal.epoch, dial.live_streams(), false);
+            settled.store(true, Ordering::Release);
+        });
+
+        assert_eq!(escaped.load(Ordering::Relaxed), 0);
+        assert!(!dial.resize_pending());
+        assert_eq!(dial.resize_epoch(), proposal.epoch);
     }
 
     #[test]

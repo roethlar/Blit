@@ -65,9 +65,13 @@ interpreted the wire value as unknown/default. That was a role-specific cap.
   leaves live workers unchanged, and every later shape/tuner proposal is
   `None`. Mutation proof: omitting the terminal record immediately returns a
   new shape proposal and fails the pin.
+- Re-review guard for atomic terminal refusal: eight concurrent shape/tuner
+  producers race the matching refusal and cannot claim another epoch. The
+  guard passed 51 consecutive runs; deleting the terminal state made it fail
+  with one escaped proposal.
 - Full workspace gate passes: `cargo fmt --all -- --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and
-  `cargo test --workspace` (1,489 passed, 2 ignored; 1,491 test functions,
+  `cargo test --workspace` (1,490 passed, 2 ignored; 1,492 test functions,
   no failures).
 
 ## Known gaps
@@ -94,3 +98,9 @@ Codex (`gpt-5.6-sol`, xhigh) returned **FAIL** with two findings, both accepted:
 - **MEDIUM**: refusal was only locally terminal; a later batch could repropose
   the same target/epoch with a fresh token. Fixed by consuming the refused epoch
   and recording terminal refusal in the shared `TransferDial`; mutation-guarded.
+
+The independent fix review returned **FAIL** with one additional MEDIUM,
+accepted: the split `resize_refused` check and `pending_epoch` CAS left a
+multi-producer race in which a waiter could claim the slot after refusal.
+Epoch, pending, and refusal arbitration now share one short mutex-protected
+state, which also prevents epoch ABA across an intervening accepted settle.
