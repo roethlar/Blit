@@ -137,7 +137,7 @@ claim_output_dir() {
 SSH_MUX=(-o BatchMode=yes -o ControlMaster=auto \
     -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
     -o "ControlPath=$HOME/.ssh/cm-rigw-%r@%h-%p" -o ControlPersist=300)
-wssh() { ssh "${SSH_MUX[@]}" "$WIN_SSH" "$@"; }
+wssh() { ssh -n "${SSH_MUX[@]}" "$WIN_SSH" "$@"; }
 wscp() { scp "${SSH_MUX[@]}" "$@"; }
 
 q_daemon_pid=""
@@ -469,6 +469,7 @@ embeds_clean_q() {
 
 selftest() {
     local got expected rows source_first destination_first clock_probe identity_file
+    local schedule_probe
     local selftest_client_done selftest_deadline selftest_settle_done run_arm_source
     local manifest_tmp canonical_manifest landed_manifest tree_digest
     local win_manifest_tmp win_manifest_payload fetch_tmp compound_tmp
@@ -509,8 +510,24 @@ selftest() {
     expected=$'1,off,forward,1,4\n2,on,reverse,1,4\n3,on,forward,5,8\n4,off,reverse,5,8'
     [[ "$got" == "$expected" ]] || die "registered block schedule changed"
 
-    rows=0; source_first=0; destination_first=0
     local block state pass first last round pair first_role
+    schedule_probe=$(
+        ssh() {
+            local arg
+            for arg in "$@"; do
+                [[ "$arg" == -n ]] && return 0
+            done
+            cat >/dev/null
+        }
+        while IFS=, read -r block state pass first last; do
+            printf '%s\n' "$block"
+            wssh 'schedule-stdin-selftest'
+        done < <(emit_schedule)
+    )
+    [[ "$schedule_probe" == $'1\n2\n3\n4' ]] \
+        || die "noninteractive Windows SSH consumed the registered block schedule"
+
+    rows=0; source_first=0; destination_first=0
     while IFS=, read -r block state pass first last; do
         for ((round=1; round<=PAIRS_PER_BLOCK; round++)); do
             pair=$((first + round - 1))
