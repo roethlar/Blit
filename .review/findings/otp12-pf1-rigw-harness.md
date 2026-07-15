@@ -491,3 +491,4 @@ gate, and diff checks passed. The first workspace run hit the recorded macOS
 daemon-start race once in `test_utils_find`; that isolated test passed and the
 complete quiet rerun passed with two expected ignores. Fresh independent Grok
 or Claude review is required before rebuilding or retrying the launcher.
+G9 was fixed at `f7ef1d7184574639adb823513c17ebf94f720292`.
