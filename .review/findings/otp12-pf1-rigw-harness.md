@@ -243,8 +243,8 @@ new two-endpoint trace uncorrelatable.
 
 - No accepted or graded rig datum has been produced by this slice. Exact
   candidates `d5e9dda` and `d7345f1` are retired from further live use after
-  G13 and G14 voids. The full run waits for an exact G14 identity, required
-  Claude Fable 5/max review, fresh additive isolated build/stage, successful
+  G13 and G14 voids. The full run waits for required Claude Fable 5/max review
+  of the immutable G14 identity, fresh additive isolated build/stage, successful
   launcher smoke, and green endpoint preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
@@ -775,3 +775,4 @@ returns syntax and the complete self-test green. No
 role, endpoint-local path, worker, schedule, measured-arm timing, trace schema,
 analyzer math, threshold, retained evidence, Time Machine setting, or mount
 state changed.
+G14 was fixed at `942c88e601ea2d27f0a1da52aa5408b763ee61f4`.
