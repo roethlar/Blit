@@ -1,8 +1,8 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: In progress — live-found G13 runtime load self-contamination fixed
-and Bash-3.2 guard-proved; Claude review remains before another exact build.
+**Status**: In progress — round-13 Claude accepted exact `d7345f1`; additive
+build/staging and live gates remain.
 
 ## What
 
@@ -242,10 +242,10 @@ new two-endpoint trace uncorrelatable.
 ## Known gaps
 
 - No accepted or graded rig datum has been produced by this slice. Exact
-  candidate `d5e9dda` is retired from further live use after the G13 void. The
-  full run waits for an exact G13 identity, the required Claude Fable 5/max
-  review, a fresh additive isolated build and stage, a successful launcher
-  smoke, and green endpoint preflight.
+  candidate `d5e9dda` is retired from further live use after the G13 void.
+  Claude accepted exact G13 candidate `d7345f1`; the full run now waits for a
+  fresh additive isolated build and stage, successful launcher smoke, and
+  green endpoint preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
   small-fixture/P2 work, phase report, and `0f922de` historical control before
@@ -704,3 +704,19 @@ self-generated load history`; restoring the bounded implementation returns
 syntax and the complete self-test to green. Format, strict clippy, all
 workspace tests, all 23 analyzer tests, the docs gate, and diff checks pass.
 G13 was fixed at `0cbb16a295dd7a2104355af1799cb35b3c325701`.
+
+Round-13 Claude Fable 5/max reviewed exact immutable range
+`2c8e8d9284fc9ab5d6511f506de3b611c5b12e40..d7345f19299e1d90af0325894f4de497b0a1e88c`
+in retained detached worktree `/tmp/blit-review-g13-d7345f1` and returned a
+schema-valid `accepted` verdict with exact SHAs and `guard_confirmed=true`.
+Syntax, the complete Bash 3.2 self-test, all 23 analyzer tests, docs, and diff
+checks were green. Claude kept every new G13 test and replaced only
+`q_quiet_gate` with the byte-exact base implementation; the complete self-test
+failed on the targeted `runtime q load gate did not wait through self-generated
+load history` guard. It restored exact reviewed bytes, verified script
+SHA-256 `febc195282feafd9e6bd25fe8a00aec153e8a515d3f8aa809590d4f8d1ab3a9c`,
+reran syntax and the complete self-test green, and ended clean at `d7345f1`.
+No benchmark endpoint was contacted. Exact candidate `d7345f1`, not the later
+verdict-record commit, is the only build allowed into additive staging and the
+live retry. Full record:
+`.review/results/otp12-pf1-rigw-harness-r13.claude.json`.

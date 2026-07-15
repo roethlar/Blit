@@ -1,0 +1,52 @@
+{
+  "record_type": "review_orchestrator_record",
+  "reviewer": {
+    "provider": "Anthropic",
+    "model": "claude-fable-5",
+    "cli": "Claude Code 2.1.210",
+    "reasoning_effort": "max"
+  },
+  "review_contract": {
+    "finding": "otp12-pf1-rigw-harness",
+    "base_sha": "2c8e8d9284fc9ab5d6511f506de3b611c5b12e40",
+    "reviewed_sha": "d7345f19299e1d90af0325894f4de497b0a1e88c",
+    "code_fix_sha": "0cbb16a295dd7a2104355af1799cb35b3c325701",
+    "worktree": "/tmp/blit-review-g13-d7345f1"
+  },
+  "attempts": [
+    {
+      "session_id": "74e116b2-bd7a-4cb8-901c-2ff7a78eb10c",
+      "exit_code": 0,
+      "is_error": false,
+      "duration_ms": 1172761,
+      "num_turns": 49,
+      "stop_reason": "tool_use",
+      "terminal_reason": "completed",
+      "structured_output": {
+        "verdict": "accepted",
+        "guard_confirmed": true,
+        "reviewed_sha": "d7345f19299e1d90af0325894f4de497b0a1e88c",
+        "base_sha": "2c8e8d9284fc9ab5d6511f506de3b611c5b12e40",
+        "comments": [
+          "Identity verified: detached worktree at exact reviewed HEAD d7345f19299e1d90af0325894f4de497b0a1e88c; base 2c8e8d9284fc9ab5d6511f506de3b611c5b12e40 is an ancestor; code-fix 0cbb16a295dd7a2104355af1799cb35b3c325701 is in range; starting tree clean.",
+          "Implementation audit: preflight retains immediate failure above load1 3.0; runtime recovery is outside timed arms, bounded at 120 seconds in five-second polls; conflicting processes, Time Machine, load parsing, and Spotlight are rechecked every sample; persistent and malformed load fail closed. Every run-block entry, per-round, post-block, and end-gate q check uses runtime mode; preflight uses immediate mode.",
+          "Scope audit: roles and semantic SOURCE/DESTINATION behavior, endpoint-local paths, worker policy, four-block/128-arm schedule, measured-arm timing, trace schema, and analyzer math are unchanged. The new constructs are Bash 3.2 compatible.",
+          "Green baseline: Bash syntax and complete SELFTEST passed, all 23 analyzer tests passed, scripts/agent/check-docs.sh passed, and git diff --check was clean.",
+          "Guard proof: only q_quiet_gate was replaced with the byte-exact one-shot implementation from base while every new G13 test remained. Mutant syntax was valid and the complete self-test failed exit 1 on the targeted FATAL: runtime q load gate did not wait through self-generated load history.",
+          "Exact restoration: reviewed script SHA-256 febc195282feafd9e6bd25fe8a00aec153e8a515d3f8aa809590d4f8d1ab3a9c matched HEAD byte-for-byte; Bash syntax and complete SELFTEST returned green.",
+          "Final state clean at exact reviewed HEAD with empty worktree and index diffs; no branch, commit, push, main-worktree change, benchmark-endpoint contact, or retained-artifact modification."
+        ]
+      },
+      "adjudication": "accepted",
+      "artifacts": {
+        "script_blob": "eb0db172399c696d5338ce05bf1f19e6151c7661",
+        "script_sha256": "febc195282feafd9e6bd25fe8a00aec153e8a515d3f8aa809590d4f8d1ab3a9c",
+        "prompt": "/tmp/blit-review-g13-d7345f1.prompt.md",
+        "prompt_sha256": "5c755ceaf6bab586611a37f9a052a6ffbcbc47959a61f872d9e2a23919fc56af",
+        "debug_log": "/tmp/claude-fable5-g13-review-20260715T1848Z.debug.log",
+        "debug_log_sha256_after_completion": "fc6622b8856a80a7a5850a0a2ace6ee1c6a63d51b64ab17984367a3141f1fee7"
+      }
+    }
+  ],
+  "authoritative_attempt": 1
+}
