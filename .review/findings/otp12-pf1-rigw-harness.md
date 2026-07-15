@@ -1,6 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
+**Status**: Initial Codex findings fixed; mandatory re-review pending.
 
 ## What
 
@@ -191,4 +192,12 @@ new two-endpoint trace uncorrelatable.
 
 ## Reviewer comments
 
-Pending mandatory Codex review after commit.
+Initial Codex review (`gpt-5.6-sol`, `xhigh`, codex-cli 0.144.4) reviewed
+`4c7c7544db69289cf2e5fc0cf21093b40f00bc0d..0fb8237c2e6f63feb9cfc613d8af1602730061b0`
+and returned `NEEDS FIXES` with three High findings. All three were accepted
+and fixed independently: destination reset fail-closed at `661cf75`, excess
+settle accounting at `1617546`, and the complete resize causal-edge audit plus
+emitter alignment at `2dd977e`. See the raw review and adjudication under
+`.review/results/otp12-pf1-rigw-harness.*`. A fresh mandatory Codex review of
+the complete fixed range is pending; the row remains in progress until that
+review and adjudication close.

@@ -19,8 +19,11 @@ branch separately uses `Remove-Item -ErrorAction SilentlyContinue` before a
 successful `New-Item`, which has the same fail-open shape. A stale canonical
 tree could therefore be accepted while the current transfer skips work.
 
-Fix: pending. Make both exact deletion and post-deletion absence explicit,
-then prove the newly created destination is an empty plain directory.
+Fix: `661cf75`. q deletion failures now propagate explicitly and are followed
+by an absence check plus creation of a plain empty directory. The Windows
+branch uses terminating removal, then proves absence, directory type, no
+reparse point, and emptiness. The shell self-test mutation-proves both prior
+fail-open shapes.
 
 ### F2 — uncharged post-client delay can bias durability
 
@@ -32,9 +35,13 @@ only `transfer_ms + flush_ms`. A synthetic 128-arm session with every
 That delay is neither fixed nor charged and can reduce the subsequent flush
 differently between adjacent role arms.
 
-Fix: pending. Remove observer work from the pre-flush interval and fail closed
-on excess uncharged settle latency, with mutations for both ordering and the
-upper bound.
+Fix: `1617546`. The registered first 250 ms remains common excluded time, but
+every excess settle millisecond is now charged:
+`total_ms = transfer_ms + (settled_ms - 250) + flush_ms`. The analyzer verifies
+that exact Decimal identity and exports `settled_ms`; mutations of the harness
+formula, analyzer formula, and export all fail. An equal client-to-durability
+regression proves differing settle/flush partitions cannot create a role
+delta.
 
 ### F3 — two resize prerequisites are not causal guards
 
@@ -44,8 +51,17 @@ upper bound.
 `resize_arm_ready`. The Rust emitter establishes both prerequisite chains, so
 the analyzer must require them before using the phase trace for attribution.
 
-Fix: pending. Add the two endpoint-local causal assertions and mutation tests
-that reverse each edge.
+Fix: `2dd977e`. A complete audit found eight deterministic local resize edge
+families, including the two reported by the reviewer; the analyzer now asserts
+all eight under both applicable initiator layouts. Mutation cases reverse each
+edge while preserving valid local producer sequences. The audit also found
+that both SOURCE dial emitters attached the socket trace before
+`socket_dial_end`; runtime emission now matches the causal contract, with a
+Rust mutation proof at epoch zero and resize epoch one. Concurrent send/ACK
+and all cross-endpoint orderings remain deliberately unasserted.
+
+Fresh Codex review of the fixes is pending; these accepted fixes do not by
+themselves close the review row.
 
 ## Validation context
 
