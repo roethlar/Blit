@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Reopened — G6 fixed and guard-proved; fresh complete review pending.
+**Status**: Reopened — round-6 F1/G7 Git-blob binding fix pending.
 
 ## What
 
@@ -351,3 +351,17 @@ recorded macOS `blit_utils::test_utils_list_modules` daemon-start race once;
 the isolated test then passed, and a complete quiet rerun passed with two
 expected ignores. Fresh complete Codex plus additive Grok review is still
 required before any build or endpoint contact.
+
+Round-6 reviewed the complete immutable range through
+`75a9a33ce600e4707438ed885de2ce0cdf27d946`. Additive Grok returned
+schema-valid `ACCEPTED`, exact SHAs, and `guard_confirmed=true` after
+independently driving both G6 hash mutations red and restoring the Bash 3.2
+self-test and worktree clean. Mandatory Codex returned `NEEDS FIXES` with one
+new High finding, accepted as G7: G6 derives its expected helper hash from the
+working file only after several gates. A concurrent replacement after the
+clean-tree check can therefore be adopted as the expected helper rather than
+rejected. The expected hash must instead come from the helper blob addressed
+by the immutable reviewed commit, with the working file rechecked against it
+immediately before copy. No endpoint was contacted. See the round-6 raw
+reviews and adjudications under
+`.review/results/otp12-pf1-rigw-harness-r6.*`.
