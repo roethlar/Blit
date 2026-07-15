@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-15 (pf-1 rig-W instrumentation authorized; no new rig data taken)
+Last updated: 2026-07-15 (pf-1 rig-W live-found G9 fixed; independent review pending; no new rig data)
 
-- **NEXT ACTION — PF-1 RIG-W INSTRUMENTATION IS ACTIVE:** review the wire-neutral TCP phase trace and its reduced q↔netwatch-01 harness, then run the preregistered paired diagnostic. The owner selected this path on 2026-07-15. The worker-count disparity is closed and is not a blocker; no new hardware data has been taken.
+- **NEXT ACTION — PF-1 RIG-W INSTRUMENTATION IS ACTIVE:** obtain independent Grok or Claude review of live-found G9, then retry launcher smoke, preflight, and the preregistered paired q↔netwatch-01 diagnostic. G9 replaces Bash-interpreted PowerShell newline backticks with `[char]10` and is mutation-proved. The worker-count disparity is closed and is not a blocker; no new hardware data has been taken.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **WORKER PARITY IS CLOSED.** The identical 10,000-file fixture now reaches exactly 8 workers under both initiator layouts (old guard: 3 vs 2; destination-initiator `max_streams=0`: 1). Payload starts while resize ACKs are pending, refusal is terminal, and resize arbitration is atomic. Final Codex re-review: PASS; workspace gate: 1,490 passed, 2 ignored.
 - **WHY NO MAC↔MAC DATA YET:** the current verdict engine can label a 1.092 cell both `PASS` and `REPRODUCES`, and the end-fabric gate can grade after a 10GbE→1GbE renegotiation because it rechecks MSS/IP but not link speed. Those are measurement blockers, not transfer-path blockers. P1 remains real on macOS↔Windows; no Mac↔Mac data exists.
@@ -72,7 +72,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     pf-0 is complete: MTU was killed as a dominant cause. **The owner selected
     pf-1 instrumentation on rig W on 2026-07-15.** The TCP phase-trace slice
     and reduced paired q↔netwatch-01 harness must each clear review before rig
-    time; the phase report and `0f922de` historical control remain part of the
+    time. A live launcher retry exposed G9 in the Windows manifest payload;
+    the fix is guard-proved and awaits independent review. The phase report and
+    `0f922de` historical control remain part of the
     pf-1 HARD GATE. No Mac↔Mac data has been taken, and worker parity is no
     longer a blocker. Then: pf-1 → pf-final (all rigs) → otp-12d → otp-13.
 1b. **AFTER otp-12 — the Windows/local pair, planned TOGETHER** (same tar

@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Verified — round-8 independent Grok accepted; live gates pending.
+**Status**: Reopened — live-found G9 fixed and guard-proved; fresh independent review pending.
 
 ## What
 
@@ -225,15 +225,17 @@ new two-endpoint trace uncorrelatable.
 ## Known gaps
 
 - No rig datum is produced by this slice. The full live run waits for fresh
-  mandatory Codex adjudication, exact isolated builds, a successful live
-  launcher smoke, and a green endpoint preflight.
+  independent Grok or Claude review of G9, exact isolated builds, a successful
+  live launcher smoke, and a green endpoint preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
   small-fixture/P2 work, phase report, and `0f922de` historical control before
   pf-1 closes.
 - q was not quiet during the first read-only readiness sample on 2026-07-15:
   Time Machine AutoBackup was enabled and Spotlight was using substantial CPU.
-  The harness reports and refuses those conditions; it does not mutate them.
+  The owner later set Time Machine to manual; both live G9 attempts reported
+  `AutoBackup=0`, `Running=0`, and passed the quiet gate. The harness did not
+  mutate that policy.
 
 ## Reviewer comments
 
@@ -457,3 +459,35 @@ daemon was absent afterward. A read-only follow-up found no second current
 quietness blocker: Time Machine was stopped, q load1 was 1.35, Spotlight was
 0.0%, Windows CPU was 2.3%, and neither endpoint had a conflicting process.
 The harness did not mutate Time Machine or any other endpoint policy.
+
+After the owner set q Time Machine to manual, live gates resumed against exact
+candidate `6fb369e3d70f7633ad1d697afeda35abf5e276cb`. q's previously staged
+tree and both endpoints' `rigw-module` fixture paths were absent, so fresh q
+staging was recreated from the retained immutable bundle and reviewed arm64
+binaries without overwriting an existing path; Windows reused the exact
+registered fixtures still present under `bench-module/pull_src_*`. q and
+Windows canonical shapes were again `5001/547110912` and `1/1073741824`.
+
+The first retained retry at
+`logs/otp12pf-rigw-20260715T152231Z-launcher` refused while discovering the
+missing Windows canonical source. After the guarded fixture copy, the second
+retained retry at `logs/otp12pf-rigw-20260715T152457Z-launcher` passed build,
+fabric, direction-specific MSS, firewall, quiet-host, timer, and streamed
+Windows-result gates, then exposed G9 before helper staging or daemon launch.
+`write_win_tree_manifest` embedded PowerShell `` `n`` escapes inside a Bash
+double-quoted `wssh` payload. Bash therefore treated them as command
+substitution, emitted `n) + : command not found`, and delivered a syntactically
+corrupt manifest program to Windows. No transfer was timed.
+
+G9 emits LF with `[string][char]10` and joins/appends that literal PowerShell
+variable, leaving no Bash command-substitution delimiter in the rendered
+payload. The Bash 3.2 self-test now executes `write_win_tree_manifest` through
+a capturing `wssh` mock, requires the exact rendered LF expression, and rejects
+any grave accent in the payload. Restoring the exact live-failing backtick
+expression reproduces Bash's command-not-found error and turns the new guard
+red; restoring G9 returns the complete self-test green. Format, strict clippy,
+all workspace tests, Bash syntax/self-test, all 23 analyzer tests, the docs
+gate, and diff checks passed. The first workspace run hit the recorded macOS
+daemon-start race once in `test_utils_find`; that isolated test passed and the
+complete quiet rerun passed with two expected ignores. Fresh independent Grok
+or Claude review is required before rebuilding or retrying the launcher.

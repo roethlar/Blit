@@ -288,6 +288,7 @@ selftest() {
     local got expected rows source_first destination_first clock_probe identity_file
     local selftest_client_done selftest_deadline selftest_settle_done run_arm_source
     local manifest_tmp canonical_manifest landed_manifest tree_digest
+    local win_manifest_tmp win_manifest_payload
     local freshness_tmp freshness_case marker before analyzer_log
     local win_stop_source win_start_source finalize_tmp failure_tmp trap_calls trap_rc
     local signal signal_dir signal_rc contract_tmp on_exit_source append_tmp
@@ -989,6 +990,34 @@ PY
         die "wrong landed root wrapper was accepted"
     fi
     rm -rf "$manifest_tmp"
+
+    win_manifest_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-win-manifest.XXXXXX")
+    (
+        wssh() {
+            printf '%s\n' "$1" > "$win_manifest_tmp/payload"
+        }
+        fetch_win_file() {
+            printf 'stub\n' > "$2"
+        }
+        write_win_tree_manifest \
+            'C:/fixture' 'C:/session/fixture.manifest' \
+            "$win_manifest_tmp/local.manifest"
+    ) || {
+        rm -rf "$win_manifest_tmp"
+        die "Windows manifest payload could not be rendered offline"
+    }
+    win_manifest_payload=$(< "$win_manifest_tmp/payload")
+    [[ "$win_manifest_payload" == *'$lf = [string][char]10'* \
+        && "$win_manifest_payload" == *'$text = if ($ordered.Count) { ($ordered -join $lf) + $lf }'* ]] \
+        || {
+            rm -rf "$win_manifest_tmp"
+            die "Windows manifest payload lost its literal LF expression"
+        }
+    if LC_ALL=C grep -q $'\x60' "$win_manifest_tmp/payload"; then
+        rm -rf "$win_manifest_tmp"
+        die "Windows manifest payload contains a Bash command-substitution delimiter"
+    fi
+    rm -rf "$win_manifest_tmp"
 
     freshness_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-freshness.XXXXXX")
     reserve_evidence_dir "$freshness_tmp/new-evidence" \
@@ -1865,7 +1894,8 @@ foreach (\$item in @(Get-ChildItem -LiteralPath \$root -Recurse -Force -ErrorAct
 }
 \$ordered = [string[]]\$lines.ToArray()
 [Array]::Sort(\$ordered, [StringComparer]::Ordinal)
-\$text = if (\$ordered.Count) { (\$ordered -join \"`n\") + \"`n\" } else { '' }
+\$lf = [string][char]10
+\$text = if (\$ordered.Count) { (\$ordered -join \$lf) + \$lf } else { '' }
 [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName('$remote_out')) | Out-Null
 [IO.File]::WriteAllText('$remote_out', \$text, [Text.UTF8Encoding]::new(\$false))
 " || return 1
