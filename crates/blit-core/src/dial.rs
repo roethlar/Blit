@@ -1047,6 +1047,19 @@ mod tests {
             accepted.resize_epochs.try_lock(),
             Err(std::sync::TryLockError::WouldBlock)
         );
+        // Start the matching accepted settlement while the tuner is paused.
+        // It must remain queued on the same mutex until the tuner has claimed
+        // epoch 1; settling only after `join` would miss the stale-decision
+        // interleaving this test exists to guard.
+        let (settle_started_tx, settle_started_rx) = std::sync::mpsc::channel();
+        let settler = {
+            let accepted = Arc::clone(&accepted);
+            std::thread::spawn(move || {
+                settle_started_tx.send(()).unwrap();
+                accepted.resize_settled(1, 2, true);
+            })
+        };
+        settle_started_rx.recv().unwrap();
         hook.release.wait();
         *accepted
             .resize_tick_test_hook
@@ -1054,7 +1067,10 @@ mod tests {
             .expect("resize tick test hook poisoned") = None;
         assert!(lock_spans_tick, "tuner released arbitration before claim");
         let first = tuner.join().unwrap().expect("tuner owns epoch 1");
-        accepted.resize_settled(first.epoch, 2, true);
+        assert_eq!(first.epoch, 1);
+        settler.join().unwrap();
+        assert_eq!(accepted.live_streams(), 2, "accepted settlement applied");
+        assert!(!accepted.resize_pending(), "accepted epoch settled");
         assert_eq!(
             accepted.resize_tick(1024, 0.0),
             None,

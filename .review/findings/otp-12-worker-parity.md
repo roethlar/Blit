@@ -65,11 +65,13 @@ interpreted the wire value as unknown/default. That was a role-specific cap.
   leaves live workers unchanged, and every later shape/tuner proposal is
   `None`. Mutation proof: omitting the terminal record immediately returns a
   new shape proposal and fails the pin.
-- Re-review guard for resize arbitration: a deterministic hook proves the
-  tuner holds the epoch lock from eligibility through proposal claim, then
-  crosses the same production settlement helper with both accepted and
-  refused outcomes. Releasing the lock before the tuner claim fails the guard;
-  omitting terminal refusal deterministically lets epoch 2 escape and fails it.
+- Re-review guard for resize arbitration: a deterministic hook pauses the
+  tuner while it owns the epoch lock, then starts the matching accepted
+  settlement before allowing the tuner to claim epoch 1. The settlement must
+  apply only after that claim; the same test crosses a refused settlement with
+  a waiting shape producer. Dropping the lock after the hook makes the accepted
+  settlement miss and fails the guard; omitting terminal refusal lets epoch 2
+  escape and fails it.
 - Release guard: the same arbitration test passes under `cargo test --release`.
   Mutation proof: moving the state mutation inside `debug_assert!` makes the
   optimized test fail because release compilation removes the assertion and
@@ -117,3 +119,10 @@ shape settlement and immediately claim the next epoch. The stress guard also
 depended on scheduler luck and did not cross accepted settlement. The tuner
 decision and claim now share the settlement lock, and the replacement guard
 forces both accepted and refused interleavings deterministically.
+
+The review of the arbitration repair returned **FAIL** with one LOW, accepted:
+the first replacement guard observed the lock at the hook but joined the tuner
+before accepted settlement, so it inferred rather than forced the exact race.
+The accepted settler now starts while the tuner is paused. Mutation-proven:
+dropping the epoch guard after the hook makes settlement miss epoch 1 and fails
+the live-count assertion; restoring continuous arbitration returns green.

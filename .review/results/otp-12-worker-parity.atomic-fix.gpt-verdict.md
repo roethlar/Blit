@@ -39,6 +39,6 @@ fails the exact test under `cargo test --release`; the unconditional call passes
 Full workspace fmt, strict clippy, and tests are green: 1,490 passed, 2
 ignored, no failures. Documentation checks are green.
 
-Fix commit: pending.
+Fix commit: `641916e`.
 
 reviewer: gpt-5.6-sol
