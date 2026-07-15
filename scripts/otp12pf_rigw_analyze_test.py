@@ -519,6 +519,91 @@ class RigWAnalyzerTests(unittest.TestCase):
         with self.assertRaisesRegex(analyzer.AnalysisError, "producer_seq"):
             analyzer.analyze(session.root)
 
+    def test_payload_write_must_precede_source_completion(self) -> None:
+        temporary, session = self.make_session()
+        self.addCleanup(temporary.cleanup)
+        first_session = next(event["session_id"] for event in session.events)
+        write = next(
+            event
+            for event in session.events
+            if event["session_id"] == first_session
+            and event["endpoint_role"] == "SOURCE"
+            and event["event"] == "first_socket_write"
+        )
+        complete = next(
+            event
+            for event in session.events
+            if event["session_id"] == first_session
+            and event["endpoint_role"] == "SOURCE"
+            and event["event"] == "data_plane_complete"
+        )
+        for field in ("producer_seq", "elapsed_ns", "unix_ns"):
+            write[field], complete[field] = complete[field], write[field]
+        session.write()
+        with self.assertRaisesRegex(
+            analyzer.AnalysisError,
+            "SOURCE/first_socket_write -> SOURCE/data_plane_complete",
+        ):
+            analyzer.analyze(session.root)
+
+    def test_socket_action_end_must_precede_trace_attachment(self) -> None:
+        temporary, session = self.make_session()
+        self.addCleanup(temporary.cleanup)
+        first_session = next(event["session_id"] for event in session.events)
+        action_end = next(
+            event
+            for event in session.events
+            if event["session_id"] == first_session
+            and event["endpoint_role"] == "SOURCE"
+            and event.get("epoch") == 0
+            and str(event["event"]).startswith("socket_")
+            and str(event["event"]).endswith("_end")
+        )
+        attached = next(
+            event
+            for event in session.events
+            if event["session_id"] == first_session
+            and event["endpoint_role"] == "SOURCE"
+            and event["event"] == "socket_trace_attached"
+            and event.get("epoch") == 0
+        )
+        for field in ("producer_seq", "elapsed_ns", "unix_ns"):
+            action_end[field], attached[field] = attached[field], action_end[field]
+        session.write()
+        with self.assertRaisesRegex(
+            analyzer.AnalysisError,
+            "SOURCE/socket_.*_end -> SOURCE/socket_trace_attached",
+        ):
+            analyzer.analyze(session.root)
+
+    def test_causal_elapsed_time_cannot_run_backwards(self) -> None:
+        temporary, session = self.make_session()
+        self.addCleanup(temporary.cleanup)
+        first_session = next(event["session_id"] for event in session.events)
+        attached = next(
+            event
+            for event in session.events
+            if event["session_id"] == first_session
+            and event["endpoint_role"] == "SOURCE"
+            and event["event"] == "socket_trace_attached"
+            and event.get("epoch") == 0
+        )
+        write_begin = next(
+            event
+            for event in session.events
+            if event["session_id"] == first_session
+            and event["endpoint_role"] == "SOURCE"
+            and event["event"] == "socket_write_begin"
+            and event.get("epoch") == 0
+        )
+        write_begin["elapsed_ns"] = int(attached["elapsed_ns"]) - 1
+        session.write()
+        with self.assertRaisesRegex(
+            analyzer.AnalysisError,
+            "SOURCE/socket_trace_attached -> SOURCE/socket_write_begin",
+        ):
+            analyzer.analyze(session.root)
+
     def test_destination_preparation_action_is_role_correlated(self) -> None:
         temporary, session = self.make_session()
         self.addCleanup(temporary.cleanup)

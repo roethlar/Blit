@@ -646,7 +646,11 @@ def _assert_same_keys(
 
 
 def _assert_before(label: str, start: TraceEvent, end: TraceEvent) -> None:
-    if start.endpoint_role != end.endpoint_role or start.producer_seq >= end.producer_seq:
+    if (
+        start.endpoint_role != end.endpoint_role
+        or start.producer_seq >= end.producer_seq
+        or start.elapsed_ns > end.elapsed_ns
+    ):
         raise AnalysisError(
             f"{label}: invalid local sequence {start.endpoint_role}/{start.event} "
             f"-> {end.endpoint_role}/{end.event}"
@@ -787,6 +791,10 @@ def validate_traces(
             raise AnalysisError(f"{label}: planner batch correlation is not contiguous from zero")
         for key in planner_keys:
             _assert_before(label, planner_begin[key], planner_end[key])
+        earliest_planner_end = min(
+            planner_end.values(), key=lambda event: event.producer_seq
+        )
+        _assert_before(label, earliest_planner_end, first_queued)
 
         resize_maps = (
             ("resize_proposed", _marker_map(group, "SOURCE", "resize_proposed", ("epoch",), label)),
@@ -925,12 +933,22 @@ def validate_traces(
         ):
             raise AnalysisError(f"{label}: DESTINATION terminal inventory is out of sequence")
 
-        source_attached = _correlation_keys(
-            group, "SOURCE", "socket_trace_attached", label
+        source_attachment_events = _marker_map(
+            group,
+            "SOURCE",
+            "socket_trace_attached",
+            ("epoch", "socket"),
+            label,
         )
-        destination_attached = _correlation_keys(
-            group, "DESTINATION", "socket_trace_attached", label
+        destination_attachment_events = _marker_map(
+            group,
+            "DESTINATION",
+            "socket_trace_attached",
+            ("epoch", "socket"),
+            label,
         )
+        source_attached = set(source_attachment_events)
+        destination_attached = set(destination_attachment_events)
         if not source_attached or source_attached != destination_attached:
             raise AnalysisError(f"{label}: two-role socket attachment correlation mismatch")
         expected_attached = {(0, 0)} | {(epoch[0], 0) for epoch in resize_epochs}
@@ -953,6 +971,9 @@ def validate_traces(
 
         source_action = "dial" if expected_initiator == "SOURCE" else "accept"
         destination_action = "accept" if expected_initiator == "SOURCE" else "dial"
+        action_events: dict[
+            str, tuple[dict[tuple[int, ...], TraceEvent], dict[tuple[int, ...], TraceEvent]]
+        ] = {}
         for endpoint_role, action in (
             ("SOURCE", source_action),
             ("DESTINATION", destination_action),
@@ -989,8 +1010,32 @@ def validate_traces(
                 raise AnalysisError(
                     f"{label}: {endpoint_role} unexpectedly mixed dial and accept actions"
                 )
+            attachments = (
+                source_attachment_events
+                if endpoint_role == "SOURCE"
+                else destination_attachment_events
+            )
             for action_key in action_keys:
                 _assert_before(label, begins[action_key], ends[action_key])
+                _assert_before(label, ends[action_key], attachments[action_key])
+            action_events[endpoint_role] = (begins, ends)
+
+        source_action_begins, source_action_ends = action_events["SOURCE"]
+        destination_action_begins, destination_action_ends = action_events[
+            "DESTINATION"
+        ]
+        for (epoch,) in sorted(resize_epochs):
+            action_key = (epoch, 0)
+            _assert_before(
+                label,
+                resize["resize_ack_received"][(epoch,)],
+                source_action_begins[action_key],
+            )
+            _assert_before(
+                label,
+                source_action_ends[action_key],
+                resize["source_settled"][(epoch,)],
+            )
 
         arm_begin = _marker_map(
             group,
@@ -1020,46 +1065,68 @@ def validate_traces(
                     arm_begin[arm_key],
                     {"target_streams": arm_key[0] + 1},
                 )
+                _assert_before(
+                    label,
+                    arm_begin[arm_key],
+                    resize["destination_prepared"][arm_key],
+                )
                 _assert_before(label, arm_begin[arm_key], arm_ready[arm_key])
+                _assert_before(
+                    label,
+                    arm_begin[arm_key],
+                    destination_action_begins[(arm_key[0], 0)],
+                )
         elif arm_begin or arm_ready:
             raise AnalysisError(f"{label}: destination initiator unexpectedly emitted arm events")
-        write_begins = _correlation_keys(group, "SOURCE", "socket_write_begin", label)
-        writes = _correlation_keys(group, "SOURCE", "first_socket_write", label)
-        receives = _correlation_keys(group, "DESTINATION", "first_payload_received", label)
+        else:
+            for (epoch,) in sorted(resize_epochs):
+                _assert_before(
+                    label,
+                    destination_action_ends[(epoch, 0)],
+                    resize["destination_prepared"][(epoch,)],
+                )
+        write_begin_events = _marker_map(
+            group,
+            "SOURCE",
+            "socket_write_begin",
+            ("epoch", "socket"),
+            label,
+        )
+        write_events = _marker_map(
+            group,
+            "SOURCE",
+            "first_socket_write",
+            ("epoch", "socket"),
+            label,
+        )
+        receive_events = _marker_map(
+            group,
+            "DESTINATION",
+            "first_payload_received",
+            ("epoch", "socket"),
+            label,
+        )
+        write_begins = set(write_begin_events)
+        writes = set(write_events)
+        receives = set(receive_events)
         if not writes or write_begins != writes or writes != receives:
             raise AnalysisError(f"{label}: payload socket correlation mismatch")
         if not writes.issubset(source_attached):
             raise AnalysisError(f"{label}: SOURCE payload socket was not trace-attached")
         if not receives.issubset(destination_attached):
             raise AnalysisError(f"{label}: DESTINATION payload socket was not trace-attached")
-        source_by_seq = {
-            event.producer_seq: event
-            for event in group
-            if event.endpoint_role == "SOURCE"
-        }
-        for epoch, socket in writes:
-            begin = next(
-                event
-                for event in group
-                if event.endpoint_role == "SOURCE"
-                and event.event == "socket_write_begin"
-                and event.raw.get("epoch") == epoch
-                and event.raw.get("socket") == socket
+        for action_key in writes:
+            begin = write_begin_events[action_key]
+            write = write_events[action_key]
+            received = receive_events[action_key]
+            _assert_before(label, first_queued, write)
+            _assert_before(label, source_attachment_events[action_key], begin)
+            _assert_before(label, begin, write)
+            _assert_before(label, write, source_complete)
+            _assert_before(
+                label, destination_attachment_events[action_key], received
             )
-            write = next(
-                event
-                for event in group
-                if event.endpoint_role == "SOURCE"
-                and event.event == "first_socket_write"
-                and event.raw.get("epoch") == epoch
-                and event.raw.get("socket") == socket
-            )
-            if begin.producer_seq >= write.producer_seq:
-                raise AnalysisError(f"{label}: socket write marker is out of sequence")
-            # Keep the mapping live as an explicit proof that the checked
-            # sequence belongs to this endpoint, not to a merged host clock.
-            if begin.producer_seq not in source_by_seq or write.producer_seq not in source_by_seq:
-                raise AnalysisError(f"{label}: internal SOURCE sequence correlation failure")
+            _assert_before(label, received, destination_complete)
     return grouped
 
 

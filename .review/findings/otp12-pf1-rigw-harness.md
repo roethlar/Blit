@@ -92,6 +92,13 @@ new two-endpoint trace uncorrelatable.
   value. The fixed settle window remains excluded. Corrupt totals are rejected;
   role-specific flush mutations prove the summaries cannot fall back to the
   pre-durability transfer time.
+- All asserted causal phase pairs are endpoint-local and require both producer
+  order and nondecreasing monotonic elapsed time. Socket action completion must
+  precede trace attachment; attached payload sockets must progress through
+  first write/receive before their role's data-plane completion; resize and
+  planner prerequisite chains are also pinned. Swapping completion ahead of a
+  first write, swapping attachment ahead of action completion, or reversing a
+  causal elapsed interval makes the analyzer suite fail.
 - Mutation proof: replacing the absolute-deadline wait with a no-op makes the
   harness self-test fail because it returns before +250 ms. Moving the
   successful Windows client-log fetch ahead of the durability marker makes
@@ -113,9 +120,8 @@ new two-endpoint trace uncorrelatable.
 
 ## Known gaps
 
-- The independent harness audit found open fail-closed gaps in phase causal
-  ordering and landed relative-path identity. It also
-  found that failure cleanup can discard the
+- The independent harness audit found an open fail-closed gap in landed
+  relative-path identity. It also found that failure cleanup can discard the
   current Windows logs or leave a completion marker before cleanup succeeds,
   the Windows launcher PID is not identity-checked before termination, and a
   reused output directory can retain stale terminal markers. No live datum is
