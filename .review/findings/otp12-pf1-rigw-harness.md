@@ -343,3 +343,11 @@ turns it red before the mocked purge can pass; restoring it returns green. A
 separate order guard pins the first remote write after provenance, port,
 topology, MSS, firewall, quietness, timer, and result-stream checks. No endpoint
 was contacted by the fix or its mutation proofs.
+
+G6 was fixed at `888be4754387311e28e14d687721fd3d1315f82c`.
+Format, strict clippy, Bash syntax/self-test, all 23 analyzer tests, the docs
+gate, and diff checks passed. The first full workspace test attempt hit the
+recorded macOS `blit_utils::test_utils_list_modules` daemon-start race once;
+the isolated test then passed, and a complete quiet rerun passed with two
+expected ignores. Fresh complete Codex plus additive Grok review is still
+required before any build or endpoint contact.

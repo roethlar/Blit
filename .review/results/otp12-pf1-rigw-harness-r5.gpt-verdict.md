@@ -31,4 +31,6 @@ red. Fresh complete review is required afterward.
 
 No finding was rejected or deferred. No endpoint was contacted.
 
+Fix commit: `888be4754387311e28e14d687721fd3d1315f82c`.
+
 reviewer: gpt-5.6-sol
