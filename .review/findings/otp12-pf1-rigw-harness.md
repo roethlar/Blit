@@ -1,8 +1,8 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: In progress — round-15 Claude accepted exact `8e019ef`; fresh
-additive build/staging and live gates remain.
+**Status**: Verified — round-15 Claude accepted exact `8e019ef`; its fresh
+additive live run completed all 128 arms and the analyzer accepted the session.
 
 ## What
 
@@ -241,15 +241,15 @@ new two-endpoint trace uncorrelatable.
 
 ## Known gaps
 
-- No accepted or graded rig datum has been produced by this slice. Exact
-  candidates `d5e9dda`, `d7345f1`, and `1f62ce5` are retired from further live
-  use after G13, G14, and G15 voids. Claude accepted the immutable G15
-  identity; the full run waits for fresh additive isolated build/stage,
-  successful launcher smoke, and green endpoint preflight.
+- Exact candidates `d5e9dda`, `d7345f1`, and `1f62ce5` remain retired after
+  their G13, G14, and G15 voids. Exact `8e019ef` produced the sole accepted
+  live session. Its probe record is under
+  `docs/bench/otp12-pf1-rigw-2026-07-15/` and is reviewed separately.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
-  hard gate. The active plan still requires the separately reviewed
-  small-fixture/P2 work, phase report, and `0f922de` historical control before
-  pf-1 closes.
+  hard gate. It supplies the P1 two-layout descriptive phase report, but the
+  active plan still requires the separately reviewed small-fixture/P2 work,
+  wall-time counterfactuals, and `0f922de` historical control before pf-1
+  closes.
 - q was not quiet during the first read-only readiness sample on 2026-07-15:
   Time Machine AutoBackup was enabled and Spotlight was using substantial CPU.
   The owner later set Time Machine to manual; both live G9 attempts reported
@@ -861,3 +861,35 @@ and ended clean at exact `8e019ef`. No endpoint was contacted and no retained
 artifact was deleted. Exact candidate `8e019ef`, not the later verdict-record
 commit, is the only build allowed into additive staging and the live retry.
 Full record: `.review/results/otp12-pf1-rigw-harness-r15.claude.json`.
+
+Exact Claude-accepted candidate `8e019ef` was then bundled, built, and staged
+only under fresh additive local, q, and Windows paths. Bundle SHA-256
+`9721a652b0960c4493123e610d5296aab349ccfbae82fd3691120556b920f25c`
+matched on all three hosts. Every clone was clean at the exact SHA with no
+replacement refs; all four staged binaries embedded clean `+8e019ef5e948`.
+q's actual Bash 3.2 self-test passed. SSH-driven launcher smoke
+`20260715T211635Z.29953` and standalone preflight `20260715T211714Z.30253`
+passed provenance, 10 GbE/MTU/MSS, firewall, quietness, fixture, clock, and
+lifecycle gates.
+
+Registered session `20260715T211759Z.30531` completed the exact
+OFF–ON–ON–OFF schedule and exited zero. Its sole terminal marker is
+`SESSION-COMPLETE` containing the full exact candidate SHA; no VOID or
+temporary marker exists. The analyzer accepted 128 unique valid,
+exit-zero, drained arms, 768 clock samples, 128 client logs, 128 matching
+landed manifests, 48 correlated trace-on TCP sessions, 11,392 phase events,
+and 14,964 endpoint-local intervals. Both endpoint session trees were removed
+by the successful finalizer, both 9031 listeners are closed, and no benchmark
+process remains. All staging and every earlier evidence tree remain retained.
+
+For target `wm_tcp_mixed`, both initiator layouts reached accepted
+`target_streams=live_streams=8` on both endpoint traces in every trace-on arm.
+The historical P1 direction did not reproduce: durable-total medians were
+1469.5/1368.5 ms (SOURCE/DESTINATION initiation) with trace off and
+1494.5/1367 ms with trace on. Those point ratios are within 1.10, but the
+registered `N_resolution=329 ms` exceeds the historical gap and the gRPC
+control fails invariance. The run therefore proves live worker/stream parity
+and a valid current-build P1 non-reproduction, but it does not grade a cause or
+close P1. The complete immutable payload and bounded interpretation are in
+`docs/bench/otp12-pf1-rigw-2026-07-15/`; their separate Claude review is the
+next record gate.

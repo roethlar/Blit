@@ -1,0 +1,3 @@
+shape,sha256,q_manifest,windows_manifest
+mixed,7a65eb041da50fe0d51a4e2b1ff2c3960e93b19fa19f6ede54c7e9e73cff9035,fixtures/src_mixed.manifest,fixtures/windows-src_mixed.manifest
+large,53d97ba62b210d01239d23ef1dc2acbd3f86b295285d4d2a9f195956f6597b47,fixtures/src_large.manifest,fixtures/windows-src_large.manifest

@@ -1,0 +1,8 @@
+[daemon]
+bind = "0.0.0.0"
+port = 9031
+no_mdns = true
+
+[[module]]
+name = "bench"
+path = "/Users/michael/blit-bench-work"

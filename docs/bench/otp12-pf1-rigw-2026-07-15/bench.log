@@ -1,0 +1,226 @@
+21:18:02Z fabric q: en8 10.1.10.54 mtu=9000 media=10Gbase-T <full-duplex> route=en8 peer=34:5a:60:3e:78:8b
+21:18:03Z fabric Windows: Ethernet 10.1.10.177 mtu=9000 link=10Gbps route/source pinned
+21:18:03Z path MSS: q→Windows=8948 via 10.1.10.54; Windows→q=8960 via 10.1.10.177
+21:18:04Z firewall verified only: existing inbound allow is scoped to D:/blit-test/bins/active/blit-daemon.exe
+21:18:04Z quiet q: load1=1.60 Spotlight=0.1% TimeMachine=disabled/stopped
+21:18:11Z quiet Windows: CPU=2.7% and no cargo/rustc/blit-daemon
+21:18:13Z timer calibration: q=1005ms Windows=992ms
+21:18:13Z batched clock calibration: 3 samples in 397ms (<750ms headroom)
+21:18:14Z Windows result stream reaches q before remote teardown
+21:18:19Z canonical fixtures verified byte-for-byte by relative path and size on both hosts
+21:18:19Z PREFLIGHT OK: registered rig, exact binaries/helper, canonical paths, quiet endpoints
+21:18:20Z quiet q: load1=1.68 Spotlight=5.0% TimeMachine=disabled/stopped
+21:18:26Z quiet Windows: CPU=2.7% and no cargo/rustc/blit-daemon
+21:18:32Z block 1 daemons up, trace=off, run_id=20260715T211759Z.30531-b1-off
+21:18:32Z quiet q: load1=1.53 Spotlight=0.0% TimeMachine=disabled/stopped
+21:18:43Z b1_wm_tcp_mixed_p1_source_init: transfer=1158ms settled=457ms flush=86ms total=1451ms session=none
+21:18:51Z b1_wm_tcp_mixed_p1_destination_init: transfer=1335ms settled=407ms flush=86ms total=1578ms session=none
+21:19:02Z b1_mw_tcp_mixed_p1_source_init: transfer=1100ms settled=389ms flush=1134ms total=2373ms session=none
+21:19:15Z b1_mw_tcp_mixed_p1_destination_init: transfer=943ms settled=432ms flush=1129ms total=2254ms session=none
+21:19:23Z b1_wm_grpc_mixed_p1_source_init: transfer=1288ms settled=450ms flush=89ms total=1577ms session=none
+21:19:32Z b1_wm_grpc_mixed_p1_destination_init: transfer=1178ms settled=407ms flush=88ms total=1423ms session=none
+21:19:41Z b1_wm_tcp_large_p1_source_init: transfer=1353ms settled=467ms flush=0ms total=1570ms session=none
+21:19:49Z b1_wm_tcp_large_p1_destination_init: transfer=1257ms settled=414ms flush=0ms total=1421ms session=none
+21:19:50Z q runtime quiet recovery: load1=4.68 (max 3.0), Spotlight=3.2% (max 10.0%); waiting 5s
+21:19:55Z q runtime quiet recovery: load1=4.47 (max 3.0), Spotlight=0.4% (max 10.0%); waiting 5s
+21:20:00Z q runtime quiet recovery: load1=4.19 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:20:05Z q runtime quiet recovery: load1=3.93 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:20:10Z q runtime quiet recovery: load1=3.70 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:20:15Z q runtime quiet recovery: load1=3.48 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:20:20Z q runtime quiet recovery: load1=3.28 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:20:25Z q runtime quiet recovery: load1=3.10 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:20:30Z q runtime quiet recovery: load1=3.01 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:20:36Z quiet q: load1=2.85 Spotlight=0.0% TimeMachine=disabled/stopped
+21:20:46Z b1_wm_tcp_large_p2_destination_init: transfer=1258ms settled=419ms flush=0ms total=1427ms session=none
+21:20:54Z b1_wm_tcp_large_p2_source_init: transfer=1276ms settled=460ms flush=0ms total=1486ms session=none
+21:21:02Z b1_wm_grpc_mixed_p2_destination_init: transfer=1136ms settled=406ms flush=103ms total=1395ms session=none
+21:21:12Z b1_wm_grpc_mixed_p2_source_init: transfer=1405ms settled=454ms flush=87ms total=1696ms session=none
+21:21:23Z b1_mw_tcp_mixed_p2_destination_init: transfer=1016ms settled=426ms flush=1135ms total=2327ms session=none
+21:21:35Z b1_mw_tcp_mixed_p2_source_init: transfer=1052ms settled=399ms flush=1129ms total=2330ms session=none
+21:21:43Z b1_wm_tcp_mixed_p2_destination_init: transfer=1138ms settled=416ms flush=85ms total=1389ms session=none
+21:21:53Z b1_wm_tcp_mixed_p2_source_init: transfer=1173ms settled=452ms flush=86ms total=1461ms session=none
+21:21:53Z q runtime quiet recovery: load1=3.59 (max 3.0), Spotlight=38.6% (max 10.0%); waiting 5s
+21:21:58Z q runtime quiet recovery: load1=3.38 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:22:03Z q runtime quiet recovery: load1=3.19 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:22:08Z q runtime quiet recovery: load1=3.02 (max 3.0), Spotlight=1.4% (max 10.0%); waiting 5s
+21:22:14Z q runtime quiet recovery: load1=3.02 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:22:19Z q runtime quiet recovery: load1=3.01 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:22:24Z q runtime quiet recovery: load1=3.09 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:22:29Z quiet q: load1=2.93 Spotlight=0.0% TimeMachine=disabled/stopped
+21:22:36Z b1_wm_tcp_large_p3_destination_init: transfer=1261ms settled=421ms flush=0ms total=1432ms session=none
+21:22:46Z b1_wm_tcp_large_p3_source_init: transfer=1352ms settled=467ms flush=0ms total=1569ms session=none
+21:22:53Z b1_wm_grpc_mixed_p3_destination_init: transfer=1177ms settled=411ms flush=87ms total=1425ms session=none
+21:23:03Z b1_wm_grpc_mixed_p3_source_init: transfer=1385ms settled=460ms flush=88ms total=1683ms session=none
+21:23:15Z b1_mw_tcp_mixed_p3_destination_init: transfer=988ms settled=427ms flush=1126ms total=2291ms session=none
+21:23:26Z b1_mw_tcp_mixed_p3_source_init: transfer=974ms settled=390ms flush=1131ms total=2245ms session=none
+21:23:35Z b1_wm_tcp_mixed_p3_destination_init: transfer=1137ms settled=412ms flush=87ms total=1386ms session=none
+21:23:43Z b1_wm_tcp_mixed_p3_source_init: transfer=1194ms settled=449ms flush=85ms total=1478ms session=none
+21:23:43Z q runtime quiet recovery: load1=2.59 (max 3.0), Spotlight=76.1% (max 10.0%); waiting 5s
+21:23:49Z quiet q: load1=2.62 Spotlight=0.0% TimeMachine=disabled/stopped
+21:23:58Z b1_wm_tcp_mixed_p4_source_init: transfer=1048ms settled=457ms flush=87ms total=1342ms session=none
+21:24:06Z b1_wm_tcp_mixed_p4_destination_init: transfer=1145ms settled=408ms flush=74ms total=1377ms session=none
+21:24:18Z b1_mw_tcp_mixed_p4_source_init: transfer=1039ms settled=382ms flush=1128ms total=2299ms session=none
+21:24:31Z b1_mw_tcp_mixed_p4_destination_init: transfer=877ms settled=455ms flush=1121ms total=2203ms session=none
+21:24:40Z b1_wm_grpc_mixed_p4_source_init: transfer=1255ms settled=477ms flush=87ms total=1569ms session=none
+21:24:49Z b1_wm_grpc_mixed_p4_destination_init: transfer=1193ms settled=401ms flush=74ms total=1418ms session=none
+21:24:57Z b1_wm_tcp_large_p4_source_init: transfer=1274ms settled=483ms flush=0ms total=1507ms session=none
+21:25:04Z b1_wm_tcp_large_p4_destination_init: transfer=1260ms settled=419ms flush=0ms total=1429ms session=none
+21:25:07Z quiet q: load1=2.03 Spotlight=1.3% TimeMachine=disabled/stopped
+21:25:14Z quiet Windows: CPU=1.3% and no cargo/rustc/blit-daemon
+21:25:14Z quiet q: load1=2.11 Spotlight=0.0% TimeMachine=disabled/stopped
+21:25:20Z quiet Windows: CPU=2.3% and no cargo/rustc/blit-daemon
+21:25:26Z block 2 daemons up, trace=on, run_id=20260715T211759Z.30531-b2-on
+21:25:26Z quiet q: load1=2.08 Spotlight=0.0% TimeMachine=disabled/stopped
+21:25:35Z b2_wm_tcp_large_p1_source_init: transfer=1362ms settled=468ms flush=0ms total=1580ms session=e4cd0283c7f410c9
+21:25:44Z b2_wm_tcp_large_p1_destination_init: transfer=1272ms settled=419ms flush=0ms total=1441ms session=49828d81566c4b9d
+21:25:54Z b2_wm_grpc_mixed_p1_source_init: transfer=1380ms settled=457ms flush=85ms total=1672ms session=none
+21:26:01Z b2_wm_grpc_mixed_p1_destination_init: transfer=1178ms settled=410ms flush=85ms total=1423ms session=none
+21:26:13Z b2_mw_tcp_mixed_p1_source_init: transfer=942ms settled=386ms flush=1135ms total=2213ms session=b2512a83c1da119e
+21:26:25Z b2_mw_tcp_mixed_p1_destination_init: transfer=1126ms settled=455ms flush=1130ms total=2461ms session=79c6cadc5bb83af6
+21:26:35Z b2_wm_tcp_mixed_p1_source_init: transfer=1272ms settled=452ms flush=75ms total=1549ms session=01ad7ea9bbe4c53b
+21:26:44Z b2_wm_tcp_mixed_p1_destination_init: transfer=1136ms settled=418ms flush=85ms total=1389ms session=8cb96baae5bfb211
+21:26:44Z q runtime quiet recovery: load1=2.48 (max 3.0), Spotlight=247.7% (max 10.0%); waiting 5s
+21:26:49Z quiet q: load1=2.44 Spotlight=0.0% TimeMachine=disabled/stopped
+21:26:59Z b2_wm_tcp_mixed_p2_destination_init: transfer=1090ms settled=410ms flush=74ms total=1324ms session=e1ddf844463d4b65
+21:27:08Z b2_wm_tcp_mixed_p2_source_init: transfer=1156ms settled=454ms flush=93ms total=1453ms session=67e39c65a676067d
+21:27:20Z b2_mw_tcp_mixed_p2_destination_init: transfer=975ms settled=431ms flush=1143ms total=2299ms session=77f71e2d23f6dd91
+21:27:32Z b2_mw_tcp_mixed_p2_source_init: transfer=808ms settled=422ms flush=1145ms total=2125ms session=ff194a93bb6170e9
+21:27:40Z b2_wm_grpc_mixed_p2_destination_init: transfer=1208ms settled=414ms flush=76ms total=1448ms session=none
+21:27:50Z b2_wm_grpc_mixed_p2_source_init: transfer=1356ms settled=448ms flush=75ms total=1629ms session=none
+21:27:58Z b2_wm_tcp_large_p2_destination_init: transfer=1262ms settled=416ms flush=0ms total=1428ms session=0ba675f095c14bee
+21:28:08Z b2_wm_tcp_large_p2_source_init: transfer=1359ms settled=473ms flush=0ms total=1582ms session=78005ae840eca239
+21:28:08Z quiet q: load1=1.88 Spotlight=8.3% TimeMachine=disabled/stopped
+21:28:17Z b2_wm_tcp_mixed_p3_destination_init: transfer=1098ms settled=405ms flush=87ms total=1340ms session=476f47eda028148f
+21:28:25Z b2_wm_tcp_mixed_p3_source_init: transfer=1215ms settled=452ms flush=81ms total=1498ms session=c5c6ff020b51bf49
+21:28:37Z b2_mw_tcp_mixed_p3_destination_init: transfer=944ms settled=480ms flush=686ms total=1860ms session=e2c161801341f085
+21:28:49Z b2_mw_tcp_mixed_p3_source_init: transfer=1023ms settled=399ms flush=1122ms total=2294ms session=79d83ced37525b46
+21:28:57Z b2_wm_grpc_mixed_p3_destination_init: transfer=1204ms settled=412ms flush=87ms total=1453ms session=none
+21:29:06Z b2_wm_grpc_mixed_p3_source_init: transfer=1356ms settled=461ms flush=87ms total=1654ms session=none
+21:29:15Z b2_wm_tcp_large_p3_destination_init: transfer=1262ms settled=428ms flush=0ms total=1440ms session=4ab87ba0d49a3f65
+21:29:24Z b2_wm_tcp_large_p3_source_init: transfer=1355ms settled=467ms flush=0ms total=1572ms session=71b1a2fe8a14ffd6
+21:29:24Z quiet q: load1=2.46 Spotlight=7.3% TimeMachine=disabled/stopped
+21:29:34Z b2_wm_tcp_large_p4_source_init: transfer=1354ms settled=465ms flush=0ms total=1569ms session=405e09b4f52ae71c
+21:29:42Z b2_wm_tcp_large_p4_destination_init: transfer=1260ms settled=420ms flush=0ms total=1430ms session=912b500284e9c7ea
+21:29:52Z b2_wm_grpc_mixed_p4_source_init: transfer=1367ms settled=459ms flush=87ms total=1663ms session=none
+21:30:01Z b2_wm_grpc_mixed_p4_destination_init: transfer=1217ms settled=417ms flush=85ms total=1469ms session=none
+21:30:11Z b2_mw_tcp_mixed_p4_source_init: transfer=1007ms settled=389ms flush=1132ms total=2278ms session=f096f8dfc021bf2e
+21:30:23Z b2_mw_tcp_mixed_p4_destination_init: transfer=975ms settled=463ms flush=1135ms total=2323ms session=942b15755f2f5459
+21:30:31Z b2_wm_tcp_mixed_p4_source_init: transfer=1259ms settled=456ms flush=85ms total=1550ms session=2568df6e16763514
+21:30:40Z b2_wm_tcp_mixed_p4_destination_init: transfer=1117ms settled=417ms flush=85ms total=1369ms session=dd9ef6ad1709387a
+21:30:43Z q runtime quiet recovery: load1=4.96 (max 3.0), Spotlight=4.1% (max 10.0%); waiting 5s
+21:30:48Z q runtime quiet recovery: load1=4.72 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:30:53Z q runtime quiet recovery: load1=4.58 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:30:58Z q runtime quiet recovery: load1=4.30 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:31:03Z q runtime quiet recovery: load1=4.11 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:31:08Z q runtime quiet recovery: load1=3.86 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:31:13Z q runtime quiet recovery: load1=3.63 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:31:19Z q runtime quiet recovery: load1=3.42 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:31:24Z q runtime quiet recovery: load1=3.23 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:31:29Z q runtime quiet recovery: load1=3.21 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:31:34Z q runtime quiet recovery: load1=3.11 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:31:39Z quiet q: load1=2.94 Spotlight=0.4% TimeMachine=disabled/stopped
+21:31:45Z quiet Windows: CPU=1.7% and no cargo/rustc/blit-daemon
+21:31:46Z quiet q: load1=2.87 Spotlight=0.0% TimeMachine=disabled/stopped
+21:31:52Z quiet Windows: CPU=1% and no cargo/rustc/blit-daemon
+21:31:58Z block 3 daemons up, trace=on, run_id=20260715T211759Z.30531-b3-on
+21:31:58Z quiet q: load1=2.58 Spotlight=0.0% TimeMachine=disabled/stopped
+21:32:07Z b3_wm_tcp_mixed_p5_source_init: transfer=1156ms settled=454ms flush=86ms total=1446ms session=39d353451b6b4b4c
+21:32:16Z b3_wm_tcp_mixed_p5_destination_init: transfer=1109ms settled=419ms flush=87ms total=1365ms session=9c0d57fa9f97c59c
+21:32:27Z b3_mw_tcp_mixed_p5_source_init: transfer=848ms settled=425ms flush=1129ms total=2152ms session=58682f17b3499670
+21:32:40Z b3_mw_tcp_mixed_p5_destination_init: transfer=994ms settled=455ms flush=1136ms total=2335ms session=f1312ba5220e3f1f
+21:32:49Z b3_wm_grpc_mixed_p5_source_init: transfer=1370ms settled=458ms flush=87ms total=1665ms session=none
+21:32:56Z b3_wm_grpc_mixed_p5_destination_init: transfer=1205ms settled=409ms flush=87ms total=1451ms session=none
+21:33:06Z b3_wm_tcp_large_p5_source_init: transfer=1353ms settled=471ms flush=0ms total=1574ms session=51af54f86de4d32b
+21:33:14Z b3_wm_tcp_large_p5_destination_init: transfer=1266ms settled=415ms flush=0ms total=1431ms session=03475cc4b11f3653
+21:33:14Z q runtime quiet recovery: load1=3.47 (max 3.0), Spotlight=4.6% (max 10.0%); waiting 5s
+21:33:19Z q runtime quiet recovery: load1=3.27 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:33:24Z q runtime quiet recovery: load1=3.09 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:33:29Z quiet q: load1=2.92 Spotlight=0.0% TimeMachine=disabled/stopped
+21:33:40Z b3_wm_tcp_large_p6_destination_init: transfer=1259ms settled=407ms flush=0ms total=1416ms session=a13fccb05f1ae7ad
+21:33:49Z b3_wm_tcp_large_p6_source_init: transfer=1353ms settled=468ms flush=0ms total=1571ms session=fe585a3d1e77436a
+21:33:58Z b3_wm_grpc_mixed_p6_destination_init: transfer=1162ms settled=401ms flush=88ms total=1401ms session=none
+21:34:07Z b3_wm_grpc_mixed_p6_source_init: transfer=1379ms settled=467ms flush=87ms total=1683ms session=none
+21:34:19Z b3_mw_tcp_mixed_p6_destination_init: transfer=934ms settled=469ms flush=1136ms total=2289ms session=7b06250205ddbc95
+21:34:31Z b3_mw_tcp_mixed_p6_source_init: transfer=911ms settled=391ms flush=1184ms total=2236ms session=29943cf6f2565c8a
+21:34:38Z b3_wm_tcp_mixed_p6_destination_init: transfer=1138ms settled=428ms flush=87ms total=1403ms session=298ba3d02509d9ba
+21:34:48Z b3_wm_tcp_mixed_p6_source_init: transfer=1234ms settled=450ms flush=86ms total=1520ms session=425061c6f6cd7ce4
+21:34:48Z q runtime quiet recovery: load1=3.48 (max 3.0), Spotlight=60.8% (max 10.0%); waiting 5s
+21:34:53Z q runtime quiet recovery: load1=3.28 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:34:58Z q runtime quiet recovery: load1=3.09 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:35:03Z q runtime quiet recovery: load1=3.09 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:35:09Z quiet q: load1=2.92 Spotlight=0.0% TimeMachine=disabled/stopped
+21:35:19Z b3_wm_tcp_large_p7_destination_init: transfer=1264ms settled=413ms flush=0ms total=1427ms session=89647b5cd025a058
+21:35:28Z b3_wm_tcp_large_p7_source_init: transfer=1354ms settled=466ms flush=0ms total=1570ms session=6e6149016ac8f50a
+21:35:37Z b3_wm_grpc_mixed_p7_destination_init: transfer=1159ms settled=408ms flush=88ms total=1405ms session=none
+21:35:46Z b3_wm_grpc_mixed_p7_source_init: transfer=1388ms settled=458ms flush=87ms total=1683ms session=none
+21:35:58Z b3_mw_tcp_mixed_p7_destination_init: transfer=965ms settled=429ms flush=1133ms total=2277ms session=a520311e81907843
+21:36:09Z b3_mw_tcp_mixed_p7_source_init: transfer=815ms settled=404ms flush=1147ms total=2116ms session=be925ac1b1515ba3
+21:36:17Z b3_wm_tcp_mixed_p7_destination_init: transfer=1131ms settled=417ms flush=86ms total=1384ms session=a69f408f26e92594
+21:36:27Z b3_wm_tcp_mixed_p7_source_init: transfer=1203ms settled=451ms flush=87ms total=1491ms session=bf1333b7310bb7b7
+21:36:27Z q runtime quiet recovery: load1=2.90 (max 3.0), Spotlight=77.2% (max 10.0%); waiting 5s
+21:36:32Z quiet q: load1=2.66 Spotlight=0.0% TimeMachine=disabled/stopped
+21:36:42Z b3_wm_tcp_mixed_p8_source_init: transfer=1197ms settled=453ms flush=79ms total=1479ms session=6ab61bc1b3b0b803
+21:36:50Z b3_wm_tcp_mixed_p8_destination_init: transfer=1107ms settled=407ms flush=77ms total=1341ms session=03a50fb692c9ae8b
+21:37:01Z b3_mw_tcp_mixed_p8_source_init: transfer=979ms settled=385ms flush=999ms total=2113ms session=95d483d292bdb987
+21:37:13Z b3_mw_tcp_mixed_p8_destination_init: transfer=976ms settled=478ms flush=1127ms total=2331ms session=1a7d96fb08f534d2
+21:37:23Z b3_wm_grpc_mixed_p8_source_init: transfer=1381ms settled=458ms flush=86ms total=1675ms session=none
+21:37:31Z b3_wm_grpc_mixed_p8_destination_init: transfer=1210ms settled=404ms flush=75ms total=1439ms session=none
+21:37:40Z b3_wm_tcp_large_p8_source_init: transfer=1355ms settled=475ms flush=0ms total=1580ms session=df400c397358ed0c
+21:37:48Z b3_wm_tcp_large_p8_destination_init: transfer=1262ms settled=421ms flush=0ms total=1433ms session=8310aeda07face7c
+21:37:51Z q runtime quiet recovery: load1=2.01 (max 3.0), Spotlight=14.2% (max 10.0%); waiting 5s
+21:37:56Z quiet q: load1=1.93 Spotlight=0.0% TimeMachine=disabled/stopped
+21:38:02Z quiet Windows: CPU=1.3% and no cargo/rustc/blit-daemon
+21:38:02Z quiet q: load1=2.01 Spotlight=0.0% TimeMachine=disabled/stopped
+21:38:09Z quiet Windows: CPU=2.3% and no cargo/rustc/blit-daemon
+21:38:14Z block 4 daemons up, trace=off, run_id=20260715T211759Z.30531-b4-off
+21:38:14Z quiet q: load1=2.02 Spotlight=0.0% TimeMachine=disabled/stopped
+21:38:23Z b4_wm_tcp_large_p5_source_init: transfer=1358ms settled=467ms flush=0ms total=1575ms session=none
+21:38:30Z b4_wm_tcp_large_p5_destination_init: transfer=1275ms settled=417ms flush=0ms total=1442ms session=none
+21:38:40Z b4_wm_grpc_mixed_p5_source_init: transfer=1326ms settled=448ms flush=87ms total=1611ms session=none
+21:38:49Z b4_wm_grpc_mixed_p5_destination_init: transfer=1213ms settled=416ms flush=85ms total=1464ms session=none
+21:38:59Z b4_mw_tcp_mixed_p5_source_init: transfer=996ms settled=388ms flush=1128ms total=2262ms session=none
+21:39:12Z b4_mw_tcp_mixed_p5_destination_init: transfer=967ms settled=484ms flush=1137ms total=2338ms session=none
+21:39:21Z b4_wm_tcp_mixed_p5_source_init: transfer=1266ms settled=450ms flush=87ms total=1553ms session=none
+21:39:30Z b4_wm_tcp_mixed_p5_destination_init: transfer=1129ms settled=406ms flush=75ms total=1360ms session=none
+21:39:30Z q runtime quiet recovery: load1=1.94 (max 3.0), Spotlight=179.1% (max 10.0%); waiting 5s
+21:39:35Z quiet q: load1=1.87 Spotlight=0.0% TimeMachine=disabled/stopped
+21:39:43Z b4_wm_tcp_mixed_p6_destination_init: transfer=1092ms settled=407ms flush=75ms total=1324ms session=none
+21:39:53Z b4_wm_tcp_mixed_p6_source_init: transfer=1159ms settled=452ms flush=87ms total=1448ms session=none
+21:40:05Z b4_mw_tcp_mixed_p6_destination_init: transfer=976ms settled=485ms flush=1138ms total=2349ms session=none
+21:40:16Z b4_mw_tcp_mixed_p6_source_init: transfer=798ms settled=417ms flush=1143ms total=2108ms session=none
+21:40:25Z b4_wm_grpc_mixed_p6_destination_init: transfer=1197ms settled=403ms flush=75ms total=1425ms session=none
+21:40:34Z b4_wm_grpc_mixed_p6_source_init: transfer=1392ms settled=463ms flush=87ms total=1692ms session=none
+21:40:42Z b4_wm_tcp_large_p6_destination_init: transfer=1259ms settled=414ms flush=0ms total=1423ms session=none
+21:40:51Z b4_wm_tcp_large_p6_source_init: transfer=1357ms settled=469ms flush=0ms total=1576ms session=none
+21:40:52Z quiet q: load1=2.85 Spotlight=6.5% TimeMachine=disabled/stopped
+21:41:00Z b4_wm_tcp_mixed_p7_destination_init: transfer=1108ms settled=391ms flush=90ms total=1339ms session=none
+21:41:10Z b4_wm_tcp_mixed_p7_source_init: transfer=1220ms settled=450ms flush=85ms total=1505ms session=none
+21:41:21Z b4_mw_tcp_mixed_p7_destination_init: transfer=1012ms settled=444ms flush=615ms total=1821ms session=none
+21:41:32Z b4_mw_tcp_mixed_p7_source_init: transfer=811ms settled=392ms flush=1165ms total=2118ms session=none
+21:41:41Z b4_wm_grpc_mixed_p7_destination_init: transfer=1210ms settled=402ms flush=86ms total=1448ms session=none
+21:41:51Z b4_wm_grpc_mixed_p7_source_init: transfer=1359ms settled=455ms flush=84ms total=1648ms session=none
+21:41:59Z b4_wm_tcp_large_p7_destination_init: transfer=1258ms settled=401ms flush=0ms total=1409ms session=none
+21:42:07Z b4_wm_tcp_large_p7_source_init: transfer=1351ms settled=464ms flush=0ms total=1565ms session=none
+21:42:07Z quiet q: load1=2.24 Spotlight=9.3% TimeMachine=disabled/stopped
+21:42:17Z b4_wm_tcp_large_p8_source_init: transfer=1359ms settled=467ms flush=0ms total=1576ms session=none
+21:42:25Z b4_wm_tcp_large_p8_destination_init: transfer=1260ms settled=419ms flush=0ms total=1429ms session=none
+21:42:35Z b4_wm_grpc_mixed_p8_source_init: transfer=1383ms settled=454ms flush=85ms total=1672ms session=none
+21:42:43Z b4_wm_grpc_mixed_p8_destination_init: transfer=1174ms settled=412ms flush=89ms total=1425ms session=none
+21:42:54Z b4_mw_tcp_mixed_p8_source_init: transfer=946ms settled=386ms flush=1029ms total=2111ms session=none
+21:43:06Z b4_mw_tcp_mixed_p8_destination_init: transfer=997ms settled=443ms flush=1130ms total=2320ms session=none
+21:43:15Z b4_wm_tcp_mixed_p8_source_init: transfer=1269ms settled=447ms flush=85ms total=1551ms session=none
+21:43:24Z b4_wm_tcp_mixed_p8_destination_init: transfer=1101ms settled=410ms flush=88ms total=1349ms session=none
+21:43:26Z q runtime quiet recovery: load1=3.90 (max 3.0), Spotlight=1.5% (max 10.0%); waiting 5s
+21:43:32Z q runtime quiet recovery: load1=3.67 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:43:37Z q runtime quiet recovery: load1=3.54 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:43:42Z q runtime quiet recovery: load1=3.33 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:43:47Z q runtime quiet recovery: load1=3.23 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:43:52Z q runtime quiet recovery: load1=3.05 (max 3.0), Spotlight=0.0% (max 10.0%); waiting 5s
+21:43:57Z quiet q: load1=2.96 Spotlight=0.0% TimeMachine=disabled/stopped
+21:44:04Z quiet Windows: CPU=1.3% and no cargo/rustc/blit-daemon
+21:44:04Z fabric q: en8 10.1.10.54 mtu=9000 media=10Gbase-T <full-duplex> route=en8 peer=34:5a:60:3e:78:8b
+21:44:05Z fabric Windows: Ethernet 10.1.10.177 mtu=9000 link=10Gbps route/source pinned
+21:44:05Z path MSS: q→Windows=8948 via 10.1.10.54; Windows→q=8960 via 10.1.10.177
+21:44:05Z quiet q: load1=2.89 Spotlight=0.1% TimeMachine=disabled/stopped
+21:44:12Z quiet Windows: CPU=2.7% and no cargo/rustc/blit-daemon
+21:44:14Z ANALYZER ACCEPTED: exact local evidence inventory; finalizing session
