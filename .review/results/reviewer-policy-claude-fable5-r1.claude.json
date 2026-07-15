@@ -1,0 +1,49 @@
+{
+  "record_type": "review_orchestrator_record",
+  "reviewer": {
+    "provider": "Anthropic",
+    "model": "claude-fable-5",
+    "cli": "Claude Code 2.1.210",
+    "reasoning_effort": "max"
+  },
+  "review_contract": {
+    "finding": "reviewer-policy-claude-fable5",
+    "base_sha": "50fcf316bbe75e7a1ce32e0ae298b82b641ba74f",
+    "reviewed_sha": "2c8e8d9284fc9ab5d6511f506de3b611c5b12e40",
+    "worktree": "/tmp/blit-review-policy-2c8e8d9"
+  },
+  "attempts": [
+    {
+      "session_id": "e664e433-82d9-411e-8488-ebf32179d652",
+      "exit_code": 0,
+      "is_error": false,
+      "duration_ms": 628984,
+      "num_turns": 26,
+      "stop_reason": "tool_use",
+      "terminal_reason": "completed",
+      "structured_output": {
+        "verdict": "accepted",
+        "guard_confirmed": true,
+        "reviewed_sha": "2c8e8d9284fc9ab5d6511f506de3b611c5b12e40",
+        "base_sha": "50fcf316bbe75e7a1ce32e0ae298b82b641ba74f",
+        "comments": [
+          "Identity verified: detached review worktree at exact HEAD 2c8e8d9284fc9ab5d6511f506de3b611c5b12e40, exact base 50fcf316bbe75e7a1ce32e0ae298b82b641ba74f is an ancestor, the range contains one commit touching eight declared files, and the starting tree was clean.",
+          "D-2026-07-15-1 faithfully records the owner rule: only the already-in-flight G12 Grok review was grandfathered; every later dispatch uses Claude CLI with --model claude-fable-5 --effort max, and Codex or Grok is not a substitute absent later explicit owner instruction.",
+          "Current normative guidance consistently points to .agents/playbooks/reviewloop.md and the exact Claude flags. docs/agent/GPT_REVIEW_LOOP.md is unmistakably Historical/do-not-execute, while its body remains as rationale.",
+          "Historical outcomes were not misleadingly rewritten: DEVLOG.md and docs/DECISIONS.md are append-only in the range, and surviving Codex nouns in current state are historical results or filenames.",
+          "Validation green: scripts/agent/check-docs.sh returned check-docs: OK and git diff --check returned zero.",
+          "Guard proof: a 23-assertion semantic checker passed on reviewed bytes; restoring docs/agent/PROTOCOL.md to the exact base blob af9c02b64be1384a3f8e6d833b1b93f2f7e3c2b9 made it fail on five independent current-policy requirements; restoring exact reviewed blob 8010b862d4eea34b63bda8fe6ded1275ed20e477 returned SEMCHECK_GREEN.",
+          "Final state clean: HEAD and all reviewed bytes were restored exactly, index and worktree diffs were empty, and no branch, commit, push, main-worktree change, endpoint contact, or retained-artifact deletion occurred."
+        ]
+      },
+      "adjudication": "accepted",
+      "artifacts": {
+        "prompt": "/tmp/blit-review-policy-2c8e8d9.prompt.md",
+        "prompt_sha256": "2247c9ff3349728ffff553d06315182ca0fc197a5efcc9d67e10269318b98589",
+        "debug_log": "/tmp/claude-fable5-policy-review-20260715T1838Z.debug.log",
+        "debug_log_sha256_after_completion": "c144c5679889d99c46252c2edbbf5684cacef2ee959d5b3086ec75e860c772bb"
+      }
+    }
+  ],
+  "authoritative_attempt": 1
+}

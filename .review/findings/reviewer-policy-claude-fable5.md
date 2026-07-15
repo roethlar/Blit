@@ -1,6 +1,7 @@
 # reviewer-policy-claude-fable5 — use the owner-selected external reviewer
 
-**Status**: In progress — docs committed for independent Claude review.
+**Status**: Verified — Claude Fable 5/max accepted exact `2c8e8d9` with the
+semantic guard confirmed.
 
 ## What
 
@@ -39,4 +40,12 @@ normative plan boilerplate; historical outcomes are not rewritten.
 
 ## Reviewer comments
 
-Pending independent Claude review of the exact committed SHA.
+Claude Fable 5 via Claude Code 2.1.210, effort max, reviewed exact range
+`50fcf316bbe75e7a1ce32e0ae298b82b641ba74f..2c8e8d9284fc9ab5d6511f506de3b611c5b12e40`
+in retained detached worktree `/tmp/blit-review-policy-2c8e8d9`. It returned a
+schema-valid `accepted` verdict with exact SHAs and `guard_confirmed=true`.
+The docs gate and diff check passed. A 23-assertion semantic check passed on
+reviewed bytes, failed in five ways when only `docs/agent/PROTOCOL.md` was
+restored to its exact base blob, and passed after exact reviewed-byte
+restoration. The worktree ended clean at the reviewed SHA. Full record:
+`.review/results/reviewer-policy-claude-fable5-r1.claude.json`.
