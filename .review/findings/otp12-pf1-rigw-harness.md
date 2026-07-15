@@ -80,7 +80,8 @@ new two-endpoint trace uncorrelatable.
 
 - `SELFTEST=1 bash scripts/bench_otp12pf_rigw.sh` proves the exact block/arm
   inventory and canonical path construction without contacting either rig
-  endpoint.
+  endpoint. Every path assertion has an explicit failure path because macOS
+  Bash 3.2 does not reliably apply `set -e` to bare `[[ ... ]]` commands.
 - `python3 scripts/otp12pf_rigw_analyze_test.py` builds complete synthetic
   evidence (128 arms, 768 clock samples, split client/daemon phase logs) and
   rejects missing clock rows, missing endpoint trace, trace-off leakage,
@@ -143,8 +144,12 @@ new two-endpoint trace uncorrelatable.
   errors and requires absence, directory, reparse, and emptiness checks.
 - SOURCE- and DESTINATION-initiated arms resolve to the same canonical
   endpoint-local destination path and remote module-relative path. The
-  self-test pins both direction/role pairs and rejects any `run_arm` source
-  that lets the role-bearing evidence ID reach a measured destination.
+  self-test pins both direction/role pairs with explicit `|| die` guards and
+  rejects any `run_arm` source that lets the role-bearing evidence ID reach a
+  measured destination. Adding the initiator role to
+  `destination_relative_path` now turns the Bash 3.2 self-test red at the first
+  q destination-path assertion; restoring the role-invariant path returns it
+  to green.
 - The failure handler removes any completion marker, stops only remembered
   identity-checked daemons, appends teardown errors without replacing the
   primary void reason, and never initiates session-tree deletion. HUP, INT,

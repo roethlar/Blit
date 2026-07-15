@@ -330,19 +330,31 @@ selftest() {
     [[ "$rows" == 128 ]] || die "schedule emitted $rows arms, expected 128"
     [[ "$source_first" == 32 && "$destination_first" == 32 ]] \
         || die "schedule role-first balance changed"
-    [[ "$(q_source_path mixed)" == "$Q_MODULE/src_mixed" ]]
-    [[ "$(win_source_path mixed)" == "$WIN_MODULE/src_mixed" ]]
+    [[ "$(q_source_path mixed)" == "$Q_MODULE/src_mixed" ]] \
+        || die "q source path construction changed"
+    [[ "$(win_source_path mixed)" == "$WIN_MODULE/src_mixed" ]] \
+        || die "Windows source path construction changed"
     local destination_rel="rigw-sessions/$SESSION_TAG/destination/container"
-    [[ "$(q_destination_path source_init)" == "$Q_MODULE/$destination_rel" ]]
-    [[ "$(q_destination_path destination_init)" == "$Q_MODULE/$destination_rel" ]]
-    [[ "$(win_destination_path source_init)" == "$WIN_MODULE/$destination_rel" ]]
-    [[ "$(win_destination_path destination_init)" == "$WIN_MODULE/$destination_rel" ]]
-    [[ "$(arm_destination_path wm source_init)" == "$(arm_destination_path wm destination_init)" ]]
-    [[ "$(arm_destination_path mw source_init)" == "$(arm_destination_path mw destination_init)" ]]
-    [[ "$(arm_destination_argument wm source_init)" == "$Q_IP:$PORT:/bench/$destination_rel/" ]]
-    [[ "$(arm_destination_argument wm destination_init)" == "$Q_MODULE/$destination_rel" ]]
-    [[ "$(arm_destination_argument mw source_init)" == "$WIN_IP:$PORT:/bench/$destination_rel/" ]]
-    [[ "$(arm_destination_argument mw destination_init)" == "$WIN_MODULE/$destination_rel" ]]
+    [[ "$(q_destination_path source_init)" == "$Q_MODULE/$destination_rel" ]] \
+        || die "q SOURCE-initiated destination path changed"
+    [[ "$(q_destination_path destination_init)" == "$Q_MODULE/$destination_rel" ]] \
+        || die "q DESTINATION-initiated destination path changed"
+    [[ "$(win_destination_path source_init)" == "$WIN_MODULE/$destination_rel" ]] \
+        || die "Windows SOURCE-initiated destination path changed"
+    [[ "$(win_destination_path destination_init)" == "$WIN_MODULE/$destination_rel" ]] \
+        || die "Windows DESTINATION-initiated destination path changed"
+    [[ "$(arm_destination_path wm source_init)" == "$(arm_destination_path wm destination_init)" ]] \
+        || die "Windows-to-q physical destination depends on initiator role"
+    [[ "$(arm_destination_path mw source_init)" == "$(arm_destination_path mw destination_init)" ]] \
+        || die "q-to-Windows physical destination depends on initiator role"
+    [[ "$(arm_destination_argument wm source_init)" == "$Q_IP:$PORT:/bench/$destination_rel/" ]] \
+        || die "Windows-to-q SOURCE-initiated destination argument changed"
+    [[ "$(arm_destination_argument wm destination_init)" == "$Q_MODULE/$destination_rel" ]] \
+        || die "Windows-to-q DESTINATION-initiated destination argument changed"
+    [[ "$(arm_destination_argument mw source_init)" == "$WIN_IP:$PORT:/bench/$destination_rel/" ]] \
+        || die "q-to-Windows SOURCE-initiated destination argument changed"
+    [[ "$(arm_destination_argument mw destination_init)" == "$WIN_MODULE/$destination_rel" ]] \
+        || die "q-to-Windows DESTINATION-initiated destination argument changed"
     clock_probe=$(append_clock_row 1 run cell 1 source_init before 1 10 11 12 2 0)
     [[ "$(awk -F, '{print NF}' <<<"$clock_probe")" == 12 ]] \
         || die "clock sample row is not exactly 12 columns"
