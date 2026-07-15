@@ -1,8 +1,8 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Verified — round-10 independent Grok accepted G10; live gates
-remain.
+**Status**: In progress — G11 fixed and guard-proved; external Grok or Claude
+review remains.
 
 ## What
 
@@ -45,9 +45,11 @@ new two-endpoint trace uncorrelatable.
 - Use destination-keyed durability: q file fsync for Windows→q and Windows
   volume flush for q→Windows. Both client locations capture the same q
   monotonic completion anchor: immediate subprocess return on q, or the
-  streamed Windows result line as q receives it before SSH teardown. They take
-  the same three after-clock samples and wait only to the absolute +250 ms
-  deadline before durability. The measured
+  streamed Windows result line as q receives it before SSH teardown. Each
+  before/after phase takes the same three independently q-bracketed clock
+  samples through one persistent SSH/PowerShell channel, with exact indexed
+  request/response handshakes. The after phase then waits only to the absolute
+  +250 ms deadline before durability. The measured
   settle must remain in `[250,1000)` ms and is retained in `runs.csv`.
   Successful Windows client logs are retrieved only after durability and the
   current landed count/byte verification. Both caches are purged before every arm and
@@ -200,6 +202,14 @@ new two-endpoint trace uncorrelatable.
   successful Windows client-log fetch ahead of the durability marker makes
   the production-order self-test fail. Restoring both returns the harness and
   analyzer self-tests to green.
+- One fake SSH process must serve exactly `P|1`→`C|1|<ns>` through
+  `P|3`→`C|3|<ns>`, produce three exact 12-column rows, exit, and be reaped.
+  Wrong indices, malformed or extra output, a nonzero exit, a partial-line
+  timeout, and early EOF all fail closed without a surviving child. Restoring
+  the old three-sequential-SSH implementation turns the one-launch guard red;
+  restoration returns the complete Bash 3.2 self-test green. Live preflight
+  times the complete sample/parse/CSV path and requires all three samples in
+  less than the registered 750 ms settle headroom before any daemon starts.
 - A delayed fake Windows-result producer emits its exact sentinel and then
   holds the pipe open; the q arrival stamp must predate producer teardown by a
   broad bound. Moving the stamp to EOF or restoring a fresh post-return q
@@ -225,10 +235,11 @@ new two-endpoint trace uncorrelatable.
 
 ## Known gaps
 
-- No rig datum is produced by this slice. Exact candidate `d57a86e` is retired
-  from further live use after G10; the full run waits for new exact isolated
-  builds of reviewed candidate `5a7e7ec`, a successful launcher smoke, and a
-  green endpoint preflight.
+- No accepted or graded rig datum has been produced by this slice. Exact
+  candidate `5a7e7ec` is retired from further live use after G11. The full run
+  waits for external Grok or Claude review, a new exact immutable candidate,
+  additive isolated staging, a successful launcher smoke, and green endpoint
+  preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
   small-fixture/P2 work, phase report, and `0f922de` historical control before
@@ -546,3 +557,34 @@ final syntax/self-test passed and the worktree ended clean at the reviewed SHA.
 Review is closed; exact candidate `5a7e7ec`, not the later verdict-record
 commit, is the only build allowed into launcher smoke, endpoint preflight, and
 the registered run. No endpoint was contacted during review.
+
+Exact candidate `5a7e7ec` then passed launcher smoke at
+`/Users/michael/Dev/blit_v2_5a7e7ec/logs/otp12pf-rigw-20260715T162815Z-launcher`
+and complete preflight at
+`/Users/michael/Dev/blit_v2_5a7e7ec/logs/otp12pf-rigw-20260715T162853Z-preflight`.
+The registered session at
+`/Users/michael/Dev/blit_v2_5a7e7ec/logs/otp12pf-rigw-20260715T162938Z`
+started exact block-1 daemons and executed its first arm,
+`b1_wm_tcp_mixed_p1_source_init`, but voided before durability or a
+`runs.csv` append: its post-client settle was 1247 ms, outside `[250,1000)`.
+The CSV remains header-only, so no datum was accepted, analyzed, or graded.
+Identity-scoped teardown closed both registered ports and left no benchmark
+process. Failure evidence remains at that q path, q module session
+`/Users/michael/blit-bench-work/rigw-sessions/20260715T162944Z.13808`, and
+Windows session `D:/blit-test/rigw-pf1/20260715T162944Z.13808`.
+
+G11 is instrument overhead, not transfer behavior. The three sequential
+after-clock SSH/PowerShell probes each took roughly 360–400 ms RTT and consumed
+about 1.1 seconds after the client anchor by themselves. G11 keeps three
+independent q-before/Windows-clock/q-after samples but carries them over one
+indexed persistent channel per phase. Binary nonblocking reads enforce one
+overall deadline and bounded output while draining stderr; exact EOF, clean
+exit, and child reaping are required. The preflight gate now times the complete
+recording path and refuses it unless all three samples fit the 750 ms settle
+headroom. Bash 3.2 self-tests reject wrong indices, malformed/extra output,
+nonzero exit, partial-line timeout, early EOF, and surviving children. Restoring
+the exact three-SSH implementation turns the one-launch guard red; restoration
+is green. Syntax, format, strict clippy, all workspace tests, all 23 analyzer
+tests, and diff checks pass. External Grok or Claude review remains before a
+new exact candidate can be staged. No retained evidence, Time Machine setting,
+or mount state was changed.

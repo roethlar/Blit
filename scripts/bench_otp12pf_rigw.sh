@@ -246,6 +246,187 @@ if remaining_ns > 0:
 print(clock_ns())
 PY
 }
+clock_sample_batch() {
+    python3 - "$WIN_SSH" "${SSH_MUX[@]}" <<'PY'
+import os
+import re
+import selectors
+import subprocess
+import sys
+import time
+
+target = sys.argv[1]
+ssh_args = sys.argv[2:]
+remote = (
+    "$ErrorActionPreference = 'Stop'; "
+    "for ($i=1; $i -le 3; $i++) { "
+    "$token = [Console]::In.ReadLine(); "
+    "if ($null -eq $token -or $token -cne \"P|$i\") { "
+    "[Console]::Error.WriteLine(\"unexpected clock token at $i\"); exit 91 }; "
+    "$ticks = ([DateTime]::UtcNow.Ticks - 621355968000000000) * 100; "
+    "[Console]::Out.WriteLine(\"C|$i|$ticks\"); "
+    "[Console]::Out.Flush() }"
+)
+deadline = time.monotonic() + 5.0
+process = None
+selector = None
+rows = []
+stdout_buffer = bytearray()
+stderr_buffer = bytearray()
+stdout_eof = False
+stderr_eof = False
+MAX_STDOUT_BYTES = 4096
+MAX_STDERR_BYTES = 65536
+
+
+def display(data):
+    return bytes(data[:512]).decode("utf-8", "replace")
+
+
+def pump_once():
+    global stdout_eof, stderr_eof
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("clock sampler timed out")
+    events = selector.select(remaining)
+    if not events:
+        raise RuntimeError("clock sampler timed out")
+    for key, _ in events:
+        try:
+            chunk = os.read(key.fileobj.fileno(), 4096)
+        except BlockingIOError:
+            continue
+        if not chunk:
+            selector.unregister(key.fileobj)
+            if key.data == "stdout":
+                stdout_eof = True
+            else:
+                stderr_eof = True
+            continue
+        if key.data == "stdout":
+            stdout_buffer.extend(chunk)
+            if len(stdout_buffer) > MAX_STDOUT_BYTES:
+                raise RuntimeError("clock sampler stdout exceeded limit")
+        else:
+            stderr_buffer.extend(chunk)
+            if len(stderr_buffer) > MAX_STDERR_BYTES:
+                raise RuntimeError("clock sampler stderr exceeded limit")
+
+
+def receive_response(sample):
+    while True:
+        newline = stdout_buffer.find(b"\n")
+        if newline >= 0:
+            raw = bytes(stdout_buffer[:newline])
+            del stdout_buffer[: newline + 1]
+            received = time.time_ns()
+            if raw.endswith(b"\r"):
+                raw = raw[:-1]
+            match = re.fullmatch(
+                rb"C\|" + str(sample).encode("ascii") + rb"\|([0-9]+)", raw
+            )
+            if match is None:
+                raise RuntimeError(
+                    f"clock sample {sample} returned {display(raw)!r}"
+                )
+            return int(match.group(1)), received
+        if stdout_eof:
+            raise RuntimeError(f"clock sample {sample} reached early EOF")
+        pump_once()
+
+
+def finish_process():
+    if process.stdin is None:
+        raise RuntimeError("clock sampler stdin pipe is unavailable")
+    process.stdin.close()
+    while selector.get_map():
+        if stdout_buffer:
+            raise RuntimeError(
+                f"clock sampler returned extra output: {display(stdout_buffer)!r}"
+            )
+        pump_once()
+    if stdout_buffer:
+        raise RuntimeError(
+            f"clock sampler returned extra output: {display(stdout_buffer)!r}"
+        )
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("clock sampler did not exit before deadline")
+    try:
+        rc = process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("clock sampler did not exit before deadline") from exc
+    if rc != 0:
+        raise RuntimeError(
+            f"clock sampler exited {rc}: {display(stderr_buffer).strip()}"
+        )
+
+try:
+    process = subprocess.Popen(
+        ["ssh", *ssh_args, target, remote],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+    if process.stdin is None or process.stdout is None or process.stderr is None:
+        raise RuntimeError("clock sampler pipes are unavailable")
+    selector = selectors.DefaultSelector()
+    os.set_blocking(process.stdout.fileno(), False)
+    os.set_blocking(process.stderr.fileno(), False)
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    for sample in range(1, 4):
+        if stdout_buffer or stdout_eof:
+            raise RuntimeError(f"clock sampler emitted output before request {sample}")
+        token = f"P|{sample}\n".encode("ascii")
+        before = time.time_ns()
+        written = process.stdin.write(token)
+        process.stdin.flush()
+        if written != len(token):
+            raise RuntimeError(f"clock sample {sample} request was truncated")
+        remote_ns, after = receive_response(sample)
+        if after <= before:
+            raise RuntimeError(f"clock sample {sample} has a non-positive bracket")
+        rows.append((sample, before, remote_ns, after))
+    finish_process()
+except Exception as exc:
+    failure = str(exc)
+else:
+    failure = None
+finally:
+    if selector is not None:
+        selector.close()
+    if process is not None:
+        if process.stdin is not None and not process.stdin.closed:
+            try:
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
+        if process.poll() is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+
+if failure is not None:
+    detail = display(stderr_buffer).strip()
+    suffix = f"; stderr={detail!r}" if detail else ""
+    print(f"clock sample batch failed: {failure}{suffix}", file=sys.stderr)
+    raise SystemExit(1)
+
+for row in rows:
+    print("|".join(map(str, row)))
+PY
+}
 stamp_result_arrival_on_q() {
     python3 -c '
 import sys, time
@@ -295,7 +476,8 @@ selftest() {
     local cleanup_tmp remembered port_checks strict_cleanup_source
     local destination_tmp prepare_destination_source stamped_result stamp_before stamp_after
     local stamp_tag stamp_ms stamp_rc stamp_ns stamp_extra stamp_teardown_ns
-    local cross_clock_before cross_clock_after cross_clock_delta
+    local cross_clock_before cross_clock_after cross_clock_delta clock_tmp
+    local clock_mode clock_case clock_gate_output
     local launcher_tmp launcher_calls launcher_source main_source
     local win_recovery_tmp purge_contract_tmp purge_repo purge_head purge_blob
     local purge_hash purge_replacement_tree purge_replacement_head
@@ -579,6 +761,7 @@ markers = (
     "q_quiet_gate",
     "win_quiet_gate",
     "timer_gate",
+    "clock_batch_gate",
     "windows_result_stream_gate",
     "stage_purge_helper",
     "write_manifest",
@@ -591,6 +774,187 @@ PY
     clock_probe=$(append_clock_row 1 run cell 1 source_init before 1 10 11 12 2 0)
     [[ "$(awk -F, '{print NF}' <<<"$clock_probe")" == 12 ]] \
         || die "clock sample row is not exactly 12 columns"
+    clock_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-clock-batch.XXXXXX")
+    mkdir -p "$clock_tmp/bin"
+    cat > "$clock_tmp/bin/ssh" <<'PY'
+#!/usr/bin/env python3
+import os
+import sys
+import time
+
+root = os.environ["CLOCK_MOCK_DIR"]
+mode = os.environ["CLOCK_MOCK_MODE"]
+pid = os.getpid()
+with open(os.path.join(root, "launches"), "a", encoding="ascii") as handle:
+    handle.write("launch\n")
+with open(os.path.join(root, "pids"), "a", encoding="ascii") as handle:
+    handle.write(f"{pid}\n")
+
+for sample in range(1, 4):
+    raw = sys.stdin.buffer.readline()
+    with open(os.path.join(root, "requests"), "ab") as handle:
+        handle.write(f"{sample}|".encode("ascii") + raw)
+    if raw != f"P|{sample}\n".encode("ascii"):
+        raise SystemExit(72)
+    if mode == "early_eof" and sample == 1:
+        raise SystemExit(0)
+    if mode == "timeout" and sample == 1:
+        sys.stdout.buffer.write(b"C|1|1700000000000001000")
+        sys.stdout.buffer.flush()
+        time.sleep(30)
+        raise SystemExit(75)
+    if mode == "wrong_index" and sample == 2:
+        response = b"C|9|1700000000000002000\n"
+    elif mode == "malformed" and sample == 2:
+        response = b"C|2|not-a-clock\n"
+    else:
+        remote = 1700000000000000000 + sample * 1000
+        response = f"C|{sample}|{remote}\n".encode("ascii")
+    sys.stdout.buffer.write(response)
+    sys.stdout.buffer.flush()
+
+if mode == "extra":
+    sys.stdout.buffer.write(b"EXTRA\n")
+    sys.stdout.buffer.flush()
+if mode == "nonzero":
+    print("mock nonzero", file=sys.stderr)
+    raise SystemExit(73)
+if mode not in {
+    "success", "wrong_index", "malformed", "extra", "nonzero", "timeout",
+    "early_eof",
+}:
+    raise SystemExit(74)
+PY
+    chmod 755 "$clock_tmp/bin/ssh"
+    mkdir -p "$clock_tmp/success"
+    if ! (
+        export PATH="$clock_tmp/bin:$PATH"
+        export CLOCK_MOCK_DIR="$clock_tmp/success"
+        export CLOCK_MOCK_MODE=success
+        SSH_MUX=(--clock-selftest)
+        WIN_SSH='selftest@windows'
+        CLOCK_CSV="$clock_tmp/success/clock.csv"
+        : > "$CLOCK_CSV"
+        wssh() {
+            printf '%s\n' launch >> "$CLOCK_MOCK_DIR/launches"
+            printf '%s\n' 1700000000000001000
+        }
+        record_clock_samples 1 run cell 1 source_init after || exit 125
+        [[ "$(wc -l < "$CLOCK_MOCK_DIR/launches" | tr -d ' ')" == 1 ]] \
+            || exit 126
+        python3 - "$CLOCK_CSV" "$CLOCK_MOCK_DIR/requests" \
+            "$CLOCK_MOCK_DIR/pids" <<'PY'
+import csv
+import os
+import sys
+
+with open(sys.argv[1], newline="") as handle:
+    rows = list(csv.reader(handle))
+if len(rows) != 3 or any(len(row) != 12 for row in rows):
+    raise SystemExit("batched clock rows changed shape")
+expected_meta = ["1", "run", "cell", "1", "source_init", "after"]
+expected_remote = [1700000000000001000, 1700000000000002000, 1700000000000003000]
+for sample, row in enumerate(rows, 1):
+    if row[:6] != expected_meta or row[6] != str(sample):
+        raise SystemExit(f"batched clock row {sample} metadata changed: {row}")
+    before, remote, after, rtt, offset = map(int, row[7:12])
+    if remote != expected_remote[sample - 1] or after <= before:
+        raise SystemExit(f"batched clock row {sample} bracket changed: {row}")
+    if rtt != after - before:
+        raise SystemExit(f"batched clock row {sample} RTT is wrong: {row}")
+    if offset != remote - (before + rtt // 2):
+        raise SystemExit(f"batched clock row {sample} offset is wrong: {row}")
+with open(sys.argv[2], encoding="ascii") as handle:
+    requests = handle.read().splitlines()
+if requests != ["1|P|1", "2|P|2", "3|P|3"]:
+    raise SystemExit(f"clock handshakes changed: {requests}")
+with open(sys.argv[3], encoding="ascii") as handle:
+    pids = [int(line) for line in handle]
+if len(pids) != 1:
+    raise SystemExit(f"clock sampler launched {len(pids)} mock processes")
+try:
+    os.kill(pids[0], 0)
+except ProcessLookupError:
+    pass
+else:
+    raise SystemExit(f"clock sampler child {pids[0]} was not reaped")
+PY
+    ); then
+        rm -rf "$clock_tmp"
+        die "three clock samples did not share one exact reaped SSH/PowerShell channel"
+    fi
+    for clock_mode in wrong_index malformed extra nonzero timeout early_eof; do
+        clock_case="$clock_tmp/$clock_mode"
+        mkdir -p "$clock_case"
+        if (
+            export PATH="$clock_tmp/bin:$PATH"
+            export CLOCK_MOCK_DIR="$clock_case"
+            export CLOCK_MOCK_MODE="$clock_mode"
+            SSH_MUX=(--clock-selftest)
+            WIN_SSH='selftest@windows'
+            clock_sample_batch > "$clock_case/stdout" 2> "$clock_case/stderr"
+        ); then
+            rm -rf "$clock_tmp"
+            die "batched clock sampler accepted $clock_mode mock output"
+        fi
+        [[ ! -s "$clock_case/stdout" \
+            && "$(wc -l < "$clock_case/launches" | tr -d ' ')" == 1 \
+            && -s "$clock_case/stderr" ]] \
+            || {
+                rm -rf "$clock_tmp"
+                die "batched clock sampler did not fail closed for $clock_mode"
+            }
+    done
+    mkdir -p "$clock_tmp/headroom"
+    if clock_gate_output=$(
+        (
+            OUT_DIR="$clock_tmp/headroom"
+            record_clock_samples() {
+                local sample before remote after rtt offset
+                for sample in 1 2 3; do
+                    before=$((1000 + sample * 10))
+                    remote=$((2000 + sample * 10))
+                    after=$((before + 2))
+                    rtt=$((after - before))
+                    offset=$((remote - (before + rtt / 2)))
+                    append_clock_row \
+                        0 preflight clock_batch 0 source_init preflight "$sample" \
+                        "$before" "$remote" "$after" "$rtt" "$offset" \
+                        >> "$CLOCK_CSV"
+                done
+                sleep 1
+            }
+            clock_batch_gate
+        ) 2>&1
+    ); then
+        rm -rf "$clock_tmp"
+        die "clock preflight accepted a full recording path beyond settle headroom"
+    fi
+    [[ "$clock_gate_output" == *"exceeding the 750ms settle headroom"* ]] \
+        || {
+            rm -rf "$clock_tmp"
+            die "clock preflight did not time the complete recording path"
+        }
+    if ! python3 - "$clock_tmp" <<'PY'
+import glob
+import os
+import sys
+
+for path in glob.glob(os.path.join(sys.argv[1], "*", "pids")):
+    with open(path, encoding="ascii") as handle:
+        for raw in handle:
+            pid = int(raw)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            raise SystemExit(f"mock clock process {pid} is still alive")
+PY
+    then
+        rm -rf "$clock_tmp"
+        die "batched clock sampler left a mock process alive"
+    fi
+    rm -rf "$clock_tmp"
     [[ "$SETTLE_NS" == 250000000 && "$SETTLE_MIN_MS" == 250 && "$SETTLE_MAX_MS" == 1000 ]] \
         || die "registered post-client settle bounds changed"
     cross_clock_before=$(q_monotonic_ns)
@@ -1889,6 +2253,44 @@ PY
     log "timer calibration: q=${qms}ms Windows=${wms}ms"
 }
 
+clock_batch_gate() {
+    local started finished elapsed_ms budget_ms gate_csv
+    gate_csv="$OUT_DIR/clock-batch-gate.csv"
+    local CLOCK_CSV="$gate_csv"
+    printf '%s\n' 'block,run_id,cell,pair,role,phase,sample,q_before_ns,windows_ns,q_after_ns,rtt_ns,offset_windows_minus_q_ns' \
+        > "$CLOCK_CSV" || die "cannot create batched clock calibration evidence"
+    started=$(q_monotonic_ns)
+    record_clock_samples 0 preflight clock_batch 0 source_init preflight \
+        || die "batched Windows clock calibration failed"
+    finished=$(q_monotonic_ns)
+    python3 - "$CLOCK_CSV" <<'PY' \
+        || die "batched Windows clock calibration evidence is malformed"
+import csv
+import sys
+
+header = [
+    "block", "run_id", "cell", "pair", "role", "phase", "sample",
+    "q_before_ns", "windows_ns", "q_after_ns", "rtt_ns",
+    "offset_windows_minus_q_ns",
+]
+with open(sys.argv[1], newline="") as handle:
+    rows = list(csv.reader(handle))
+if not rows or rows[0] != header or len(rows) != 4:
+    raise SystemExit("clock calibration CSV shape changed")
+for sample, row in enumerate(rows[1:], 1):
+    if len(row) != 12 or row[:7] != [
+        "0", "preflight", "clock_batch", "0", "source_init", "preflight",
+        str(sample),
+    ]:
+        raise SystemExit(f"clock calibration row {sample} changed: {row}")
+PY
+    elapsed_ms=$(((finished - started) / 1000000))
+    budget_ms=$((SETTLE_MAX_MS - SETTLE_MIN_MS))
+    [[ "$elapsed_ms" -lt "$budget_ms" ]] \
+        || die "three clock samples took ${elapsed_ms}ms, exceeding the ${budget_ms}ms settle headroom"
+    log "batched clock calibration: 3 samples in ${elapsed_ms}ms (<${budget_ms}ms headroom)"
+}
+
 windows_result_stream_gate() {
     local before after result tag ms rc stamp extra teardown_ns
     before=$(q_monotonic_ns)
@@ -2093,6 +2495,7 @@ preflight() {
     command -v python3 >/dev/null || die "python3 required"
     command -v lsof >/dev/null || die "lsof required"
     command -v nc >/dev/null || die "nc required"
+    command -v ssh >/dev/null || die "ssh required"
     command -v scp >/dev/null || die "scp required"
     sudo -n /usr/sbin/purge >/dev/null || die "q NOPASSWD purge grant is absent"
     provenance_gate
@@ -2104,6 +2507,7 @@ preflight() {
     q_quiet_gate
     win_quiet_gate
     timer_gate
+    clock_batch_gate
     windows_result_stream_gate
     stage_purge_helper
     write_manifest
@@ -2366,17 +2770,29 @@ start_daemons() {
 }
 
 record_clock_samples() {
-    local block="$1" run_id="$2" cell="$3" pair="$4" role="$5" phase="$6" sample before after remote rtt midpoint offset
-    for sample in 1 2 3; do
-        before=$(python3 -c 'import time; print(time.time_ns())')
-        remote=$(wssh '([DateTime]::UtcNow.Ticks - 621355968000000000) * 100' | tr -cd '0-9')
-        after=$(python3 -c 'import time; print(time.time_ns())')
-        [[ "$remote" =~ ^[0-9]+$ ]] || session_void "clock probe returned '$remote'"
-        rtt=$((after - before)); midpoint=$((before + rtt / 2)); offset=$((remote - midpoint))
-        append_clock_row \
+    local block="$1" run_id="$2" cell="$3" pair="$4" role="$5" phase="$6"
+    local rows row row_pattern sample before remote after rtt midpoint offset line
+    local count=0 csv_rows=""
+    rows=$(clock_sample_batch) || return 1
+    row_pattern='^([0-9]+)\|([0-9]+)\|([0-9]+)\|([0-9]+)$'
+    while IFS= read -r row; do
+        [[ "$row" =~ $row_pattern ]] || return 1
+        sample=${BASH_REMATCH[1]}
+        before=${BASH_REMATCH[2]}
+        remote=${BASH_REMATCH[3]}
+        after=${BASH_REMATCH[4]}
+        count=$((count + 1))
+        [[ "$sample" == "$count" && "$after" -gt "$before" ]] || return 1
+        rtt=$((after - before))
+        midpoint=$((before + rtt / 2))
+        offset=$((remote - midpoint))
+        line=$(append_clock_row \
             "$block" "$run_id" "$cell" "$pair" "$role" "$phase" "$sample" \
-            "$before" "$remote" "$after" "$rtt" "$offset" >> "$CLOCK_CSV"
-    done
+            "$before" "$remote" "$after" "$rtt" "$offset") || return 1
+        csv_rows="${csv_rows}${line}"$'\n'
+    done <<<"$rows"
+    [[ "$count" == 3 ]] || return 1
+    printf '%s' "$csv_rows" >> "$CLOCK_CSV"
 }
 
 drain_both() {
@@ -2524,7 +2940,8 @@ run_arm() {
         || session_void "$rid could not precreate its destination container"
 
     drain=$(drain_both) || session_void "$rid cache/drain gate failed"
-    record_clock_samples "$block" "$run_id" "$cell" "$pair" "$role" before
+    record_clock_samples "$block" "$run_id" "$cell" "$pair" "$role" before \
+        || session_void "$rid before clock-sample batch failed"
 
     if [[ "$direction/$role" == wm/source_init ]]; then
         windows_client=1; client_abs="$werr"; client_rel="client/$rid.windows.err"
@@ -2572,7 +2989,8 @@ run_arm() {
         || session_void "$rid client wrapper teardown already exceeded the settle bound"
     settle_deadline_ns=$((client_done_ns + SETTLE_NS))
 
-    record_clock_samples "$block" "$run_id" "$cell" "$pair" "$role" after
+    record_clock_samples "$block" "$run_id" "$cell" "$pair" "$role" after \
+        || session_void "$rid after clock-sample batch failed"
     settle_done_ns=$(settle_until_deadline "$settle_deadline_ns")
     [[ "$settle_done_ns" =~ ^[0-9]+$ && "$settle_done_ns" -ge "$settle_deadline_ns" ]] \
         || session_void "$rid absolute post-client settle returned early: '$settle_done_ns'"
