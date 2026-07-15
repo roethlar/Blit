@@ -126,9 +126,15 @@ win_destination_path() { printf '%s/rigw-sessions/%s/%s/container' "$WIN_MODULE"
 append_clock_row() {
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$@"
 }
+embeds_clean_q() {
+    local path="$1"
+    LC_ALL=C grep -qa -- "+$HEAD_BUILD_ID" "$path" || return 1
+    LC_ALL=C grep -qa -- "+$HEAD_BUILD_ID.dirty" "$path" && return 1
+    return 0
+}
 
 selftest() {
-    local got expected rows source_first destination_first clock_probe
+    local got expected rows source_first destination_first clock_probe identity_file
     reject_registered_overrides
     got=$(emit_schedule)
     expected=$'1,off,forward,1,4\n2,on,reverse,1,4\n3,on,forward,5,8\n4,off,reverse,5,8'
@@ -157,6 +163,17 @@ selftest() {
     clock_probe=$(append_clock_row 1 run cell 1 source_init before 1 10 11 12 2 0)
     [[ "$(awk -F, '{print NF}' <<<"$clock_probe")" == 12 ]] \
         || die "clock sample row is not exactly 12 columns"
+
+    HEAD_BUILD_ID=0123456789ab
+    identity_file=$(mktemp "${TMPDIR:-/tmp}/blit-rigw-identity.XXXXXX")
+    printf 'blit+%s\0' "$HEAD_BUILD_ID" > "$identity_file"
+    embeds_clean_q "$identity_file" || die "clean 12-character build identity was rejected"
+    printf 'blit+%s.dirty.ffffffffffff\0' "$HEAD_BUILD_ID" > "$identity_file"
+    if embeds_clean_q "$identity_file"; then
+        rm -f "$identity_file"
+        die "dirty build identity was accepted"
+    fi
+    rm -f "$identity_file"
 
     python3 "$SCRIPT_DIR/otp12pf_rigw_analyze_test.py" \
         >> "$LOG" 2>&1 || die "analyzer self-tests failed"
@@ -407,19 +424,24 @@ provenance_gate() {
     [[ -n "$EXPECT_SHA" ]] || die "EXPECT_SHA=<full reviewed commit> is required"
     HEAD_FULL=$(git -C "$REPO_ROOT" rev-parse HEAD)
     HEAD_SHORT=$(git -C "$REPO_ROOT" rev-parse --short=7 HEAD)
+    HEAD_BUILD_ID=$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)
     [[ "$EXPECT_SHA" == "$HEAD_FULL" ]] \
         || die "EXPECT_SHA=$EXPECT_SHA but isolated clone is $HEAD_FULL"
     [[ -z $(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal) ]] \
         || die "isolated q clone is dirty"
     [[ -x "$Q_BLIT" && -x "$Q_DAEMON" ]] || die "q release binaries are absent"
-    LC_ALL=C grep -qa "+$HEAD_SHORT" "$Q_BLIT" || die "q client does not embed +$HEAD_SHORT"
-    LC_ALL=C grep -qa "+$HEAD_SHORT" "$Q_DAEMON" || die "q daemon does not embed +$HEAD_SHORT"
+    embeds_clean_q "$Q_BLIT" \
+        || die "q client does not embed a clean +$HEAD_BUILD_ID"
+    embeds_clean_q "$Q_DAEMON" \
+        || die "q daemon does not embed a clean +$HEAD_BUILD_ID"
     wssh "
 if (-not (Test-Path -LiteralPath '$WIN_BINS/$HEAD_SHORT/blit.exe')) { exit 2 }
 if (-not (Test-Path -LiteralPath '$WIN_BINS/$HEAD_SHORT/blit-daemon.exe')) { exit 3 }
-if (-not (Select-String -LiteralPath '$WIN_BINS/$HEAD_SHORT/blit.exe' -SimpleMatch -Quiet -Pattern '+$HEAD_SHORT')) { exit 4 }
-if (-not (Select-String -LiteralPath '$WIN_BINS/$HEAD_SHORT/blit-daemon.exe' -SimpleMatch -Quiet -Pattern '+$HEAD_SHORT')) { exit 5 }
-" || die "Windows binaries are missing or do not embed +$HEAD_SHORT"
+if (-not (Select-String -LiteralPath '$WIN_BINS/$HEAD_SHORT/blit.exe' -SimpleMatch -Quiet -Pattern '+$HEAD_BUILD_ID')) { exit 4 }
+if (-not (Select-String -LiteralPath '$WIN_BINS/$HEAD_SHORT/blit-daemon.exe' -SimpleMatch -Quiet -Pattern '+$HEAD_BUILD_ID')) { exit 5 }
+if (Select-String -LiteralPath '$WIN_BINS/$HEAD_SHORT/blit.exe' -SimpleMatch -Quiet -Pattern '+$HEAD_BUILD_ID.dirty') { exit 6 }
+if (Select-String -LiteralPath '$WIN_BINS/$HEAD_SHORT/blit-daemon.exe' -SimpleMatch -Quiet -Pattern '+$HEAD_BUILD_ID.dirty') { exit 7 }
+" || die "Windows binaries are missing or do not embed a clean +$HEAD_BUILD_ID"
     write_manifest
     log "provenance exact: $HEAD_FULL on q and Windows"
 }

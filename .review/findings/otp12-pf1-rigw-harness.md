@@ -78,6 +78,9 @@ new two-endpoint trace uncorrelatable.
 - Mutation proof: reducing the clock-row formatter from 12 fields to 11 makes
   the harness self-test fail before analysis; restoring the exact 12-column
   schema returns the local and q/macOS self-tests to green.
+- The build-identity self-test accepts the exact 12-character clean marker and
+  mutation-proves that the same marker with `.dirty` is rejected. Live q and
+  Windows gates apply that positive-and-negative check to both binaries.
 - The repository gate is green: `cargo fmt --all -- --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace`, the documentation gate, analyzer tests, and shell
@@ -85,10 +88,10 @@ new two-endpoint trace uncorrelatable.
 
 ## Known gaps
 
-- The independent harness audit found open fail-closed gaps in exact clean-build
-  provenance, pinned eight-stream settlement, post-client timing symmetry,
-  durable-total analysis, phase causal ordering, and landed relative-path
-  identity. No live datum is valid until each is fixed and reviewed.
+- The independent harness audit found open fail-closed gaps in pinned
+  eight-stream settlement, post-client timing symmetry, durable-total analysis,
+  phase causal ordering, and landed relative-path identity. No live datum is
+  valid until each is fixed and reviewed.
 - No rig datum is produced by this slice. The full live run waits for the
   committed harness, mandatory Codex adjudication, exact isolated builds, and
   a green endpoint preflight.
