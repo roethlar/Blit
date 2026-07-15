@@ -1,8 +1,8 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: In progress — round-13 Claude accepted exact `d7345f1`; additive
-build/staging and live gates remain.
+**Status**: In progress — live-found G14 post-transfer Spotlight recovery gap
+fixed and Bash-3.2 guard-proved; Claude review remains before another build.
 
 ## What
 
@@ -242,10 +242,10 @@ new two-endpoint trace uncorrelatable.
 ## Known gaps
 
 - No accepted or graded rig datum has been produced by this slice. Exact
-  candidate `d5e9dda` is retired from further live use after the G13 void.
-  Claude accepted exact G13 candidate `d7345f1`; the full run now waits for a
-  fresh additive isolated build and stage, successful launcher smoke, and
-  green endpoint preflight.
+  candidates `d5e9dda` and `d7345f1` are retired from further live use after
+  G13 and G14 voids. The full run waits for an exact G14 identity, required
+  Claude Fable 5/max review, fresh additive isolated build/stage, successful
+  launcher smoke, and green endpoint preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
   small-fixture/P2 work, phase report, and `0f922de` historical control before
@@ -720,3 +720,58 @@ No benchmark endpoint was contacted. Exact candidate `d7345f1`, not the later
 verdict-record commit, is the only build allowed into additive staging and the
 live retry. Full record:
 `.review/results/otp12-pf1-rigw-harness-r13.claude.json`.
+
+Exact accepted candidate `d7345f1` was bundled and cloned only under fresh
+additive paths. Bundle SHA-256 was
+`6600f2fe1e5c121d36e4dee0781d452fdf0803304b7a08bef95692b9bea12509`
+on local, q, and Windows. Local/q arm64 binaries matched at
+`afc075131192d76e88f0bb67a03fd46ecdbc1821f9e74cbc629547efcf4ed6cd`
+and `0054ad7575d4318108c5e430b642a4224172c938869e367222d9a787afe69377`;
+native Windows staged binaries were
+`293af62459a900b61ca7ced375538cead4f837f213ad144c9cc5c6df6e9396c3`
+and `7224a5e49ba26718bcf105d34d10c32d5d681ee5abaff3ba4b28f1af52ab13ef`.
+Every clone was clean at exact HEAD with no replacement ref, all binaries
+embedded clean `+d7345f19299e`, and Windows' CRLF checkout filtered back to
+the exact reviewed script blob `eb0db17`.
+
+q's real Bash 3.2 self-test passed. Launcher smoke at
+`/Users/michael/Dev/blit_v2_d7345f1/logs/otp12pf-rigw-20260715T191455Z.20128`
+and standalone preflight at
+`/Users/michael/Dev/blit_v2_d7345f1/logs/otp12pf-rigw-20260715T191532Z.20431`
+passed exact provenance, fabric, lifecycle, quietness, fixtures, and 397/401
+ms clock batches.
+
+Two fresh registered sessions then reproduced a second runtime gate defect at
+the same boundary. Session `20260715T191605Z.20751` completed pairs 1 and 2,
+with q Spotlight at 0.0% before pair 1 and 1.0% before pair 2, then voided at
+pair 3 on 58.7%. After teardown, six consecutive five-second samples were
+0.0–0.1% Spotlight with load1 1.62–1.76. Fresh session
+`20260715T192044Z.22145` again completed exactly pairs 1 and 2, with Spotlight
+0.0% then 1.2%, and voided at pair 3 on 87.3%. Each retained `SESSION-VOID`
+has 16 of 128 rows and 96 of 768 clock samples; no analyzer/finalizer ran and
+nothing was accepted, analyzed, or graded. Both teardowns closed both ports
+and left no daemon/cargo/rustc process; all q and Windows evidence trees remain.
+
+G14 is the runtime recovery gap exposed by delayed Spotlight work following
+the harness's own q destination-tree writes. The repeated schedule boundary
+and direct filesystem mechanism make
+that operational classification high-confidence; the retained logs do not
+provide per-path attribution or an exhaustive unrelated-process inventory, so
+they do not prove exclusive causality. The fixed 10% ceiling remains unchanged.
+Preflight still rejects an above-ceiling sample immediately; runtime checks
+outside timed arms may now
+use the same existing five-second/120-second recovery budget when either load
+history or Spotlight is high. Conflicting processes, Time Machine, load
+parsing, and Spotlight are rechecked every sample, and persistent or malformed
+contamination still fails closed. Bash 3.2 guards separately cover transient
+Spotlight, staggered load/Spotlight, immediate rejection, malformed samples,
+exact bounded persistence, exact poll cadence, and Time Machine or conflicting
+processes emerging on a recovery poll. Restoring the exact G13
+immediate-Spotlight gate while keeping the new tests makes the complete
+self-test fail on `runtime q Spotlight gate did not wait through post-transfer
+indexing`; delaying process checks past the next poll and over-advancing
+elapsed recovery time each make their targeted guards fail. Exact restoration
+returns syntax and the complete self-test green. No
+role, endpoint-local path, worker, schedule, measured-arm timing, trace schema,
+analyzer math, threshold, retained evidence, Time Machine setting, or mount
+state changed.

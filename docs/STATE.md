@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-15 (pf-1 rig-W G13 accepted; exact d7345f1 live gates next; no accepted rig datum)
+Last updated: 2026-07-15 (pf-1 rig-W G14 recovery fixed/guard-proved; immutable identity and Claude review next; no accepted rig datum)
 
-- **NEXT ACTION — PF-1 RIG-W EXACT `d7345f1` LIVE GATES:** exact `d5e9dda` was built/staged additively and passed q Bash 3.2 self-test, launcher, and preflight. Its registered run cleared G12 by completing all eight pair-1 arms, then became `SESSION-VOID` before pair 2 because the mid-run one-minute q load gate counted 74 seconds of the benchmark's own work (1.79 before, 3.19 after) as external load. G13 at `0cbb16a` keeps the fixed 3.0 ceiling and every check, adds bounded runtime recovery outside timed arms, leaves preflight immediate, and guard-proves persistent load still fails closed. Claude Fable 5/max accepted exact candidate `d7345f1`. Build and stage only that candidate under fresh additive paths, then run SSH-driven launcher smoke, preflight, and the registered retry. Worker parity remains closed and is not a blocker.
+- **NEXT ACTION — PF-1 RIG-W G14 IDENTITY + CLAUDE REVIEW:** Claude-accepted exact `d7345f1` passed q Bash 3.2 self-test, launcher, and preflight after fresh additive staging. Two fresh registered sessions each completed exactly 16 arms, then became `SESSION-VOID` at the pair-3 entry gate when delayed Spotlight work following q destination-tree writes spiked from quiet pre-round samples to 58.7% and 87.3%. G14 keeps the fixed 10% ceiling: preflight stays immediate, while runtime checks outside timed arms may use the existing 5 s × 24 recovery budget for either owned load history or Spotlight; every contaminant is rechecked and persistent/malformed states fail closed. Current-byte validation and three targeted mutation proofs are green; commit the exact identity, then run the required Claude Fable 5/max review before a fresh additive build/stage and retry. Worker parity remains closed and is not a blocker.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **WORKER PARITY IS CLOSED.** The identical 10,000-file fixture now reaches exactly 8 workers under both initiator layouts (old guard: 3 vs 2; destination-initiator `max_streams=0`: 1). Payload starts while resize ACKs are pending, refusal is terminal, and resize arbitration is atomic. Final Codex re-review: PASS; workspace gate: 1,490 passed, 2 ignored.
 - **WHY NO MAC↔MAC DATA YET:** the current verdict engine can label a 1.092 cell both `PASS` and `REPRODUCES`, and the end-fabric gate can grade after a 10GbE→1GbE renegotiation because it rechecks MSS/IP but not link speed. Those are measurement blockers, not transfer-path blockers. P1 remains real on macOS↔Windows; no Mac↔Mac data exists.
@@ -91,8 +91,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     benchmark's own one-minute load history; that session is also void. G13 at
     `0cbb16a` keeps the
     fixed load ceiling with bounded runtime recovery and is Bash-3.2 guard-proved.
-    Claude Fable 5/max accepted exact `d7345f1`; additive build/staging and live
-    gates are next. The phase report and
+    Claude Fable 5/max accepted exact `d7345f1`. Two additive live sessions
+    cleared G13 through 16 arms, then G14 exposed delayed Spotlight work at the
+    same pair-3 gate; both sessions are void. G14 preserves the 10% bar with
+    bounded runtime recovery and is Bash-3.2 guard-proved; immutable identity
+    and Claude review are next. The phase report and
     `0f922de` historical control remain part of the
     pf-1 HARD GATE. No Mac↔Mac data has been taken, and worker parity is no
     longer a blocker. Then: pf-1 → pf-final (all rigs) → otp-12d → otp-13.

@@ -565,7 +565,11 @@ selftest() {
                 *) printf '%s\n' 2.95;;
             esac
         }
-        sleep() { quiet_sleeps=$((quiet_sleeps + 1)); }
+        sleep() {
+            [[ "$1" == "$Q_LOAD_RECOVERY_POLL_S" ]] \
+                || die "runtime q load gate changed its poll cadence"
+            quiet_sleeps=$((quiet_sleeps + 1))
+        }
         log() { :; }
         q_quiet_gate runtime
         [[ "$quiet_sleeps" == 2 ]]
@@ -581,19 +585,31 @@ selftest() {
     ) >/dev/null 2>&1; then
         die "preflight q load gate stopped failing immediately above the ceiling"
     fi
-    if (
+    if quiet_output=$(
+        local quiet_sleeps=0
         Q_LOAD_RECOVERY_MAX_S=10
         Q_LOAD_RECOVERY_POLL_S=5
         ps() { :; }
         q_time_machine_gate() { :; }
         q_spotlight_cpu() { printf '%s\n' 0.0; }
         q_load1() { printf '%s\n' 3.19; }
-        sleep() { :; }
-        log() { :; }
+        sleep() {
+            [[ "$1" == "$Q_LOAD_RECOVERY_POLL_S" ]] \
+                || die "persistent q load gate changed its poll cadence"
+            quiet_sleeps=$((quiet_sleeps + 1))
+            (( quiet_sleeps <= 2 )) \
+                || die "persistent q load exceeded its exact recovery poll bound"
+            printf '%s\n' "SELFTEST-Q-LOAD-POLL|$quiet_sleeps"
+        }
+        log() { printf '%s\n' "$*"; }
         q_quiet_gate runtime
-    ) >/dev/null 2>&1; then
+    2>&1); then
         die "persistent q load escaped the bounded runtime recovery gate"
     fi
+    [[ "$(awk '/^SELFTEST-Q-LOAD-POLL[|]/ { n++ } END { print n + 0 }' \
+        <<<"$quiet_output")" == 2 \
+        && "$quiet_output" == *"after 10s runtime recovery"* ]] \
+        || die "persistent q load did not stop at the exact recovery bound"
     if quiet_output=$(
         ps() { :; }
         q_time_machine_gate() { :; }
@@ -608,6 +624,154 @@ selftest() {
     [[ "$quiet_output" == *"cannot parse q load1 'not-a-load'"* \
         && "$quiet_output" != *unexpected-sleep* ]] \
         || die "malformed q load sample did not fail immediately"
+    (
+        local quiet_sleeps=0
+        Q_LOAD_RECOVERY_MAX_S=10
+        Q_LOAD_RECOVERY_POLL_S=5
+        ps() { :; }
+        q_time_machine_gate() { :; }
+        q_load1() { printf '%s\n' 2.0; }
+        q_spotlight_cpu() {
+            case "$quiet_sleeps" in
+                0) printf '%s\n' 87.3;;
+                1) printf '%s\n' 18.4;;
+                *) printf '%s\n' 0.5;;
+            esac
+        }
+        sleep() {
+            [[ "$1" == "$Q_LOAD_RECOVERY_POLL_S" ]] \
+                || die "runtime q Spotlight gate changed its poll cadence"
+            quiet_sleeps=$((quiet_sleeps + 1))
+        }
+        log() { :; }
+        q_quiet_gate runtime
+        [[ "$quiet_sleeps" == 2 ]]
+    ) || die "runtime q Spotlight gate did not wait through post-transfer indexing"
+    (
+        local quiet_sleeps=0
+        Q_LOAD_RECOVERY_MAX_S=10
+        Q_LOAD_RECOVERY_POLL_S=5
+        ps() { :; }
+        q_time_machine_gate() { :; }
+        q_load1() {
+            [[ "$quiet_sleeps" == 0 ]] \
+                && printf '%s\n' 3.19 \
+                || printf '%s\n' 2.0
+        }
+        q_spotlight_cpu() {
+            [[ "$quiet_sleeps" == 1 ]] \
+                && printf '%s\n' 87.3 \
+                || printf '%s\n' 0.0
+        }
+        sleep() {
+            [[ "$1" == "$Q_LOAD_RECOVERY_POLL_S" ]] \
+                || die "runtime q quiet gate changed its poll cadence"
+            quiet_sleeps=$((quiet_sleeps + 1))
+        }
+        log() { :; }
+        q_quiet_gate runtime
+        [[ "$quiet_sleeps" == 2 ]]
+    ) || die "runtime q quiet gate returned before load and Spotlight were both quiet"
+    if quiet_output=$(
+        local quiet_sleeps=0
+        Q_LOAD_RECOVERY_MAX_S=10
+        Q_LOAD_RECOVERY_POLL_S=5
+        ps() { :; }
+        q_time_machine_gate() {
+            [[ "$quiet_sleeps" == 0 ]] \
+                || die "synthetic Time Machine activity reached a recovery poll"
+        }
+        q_load1() { printf '%s\n' 2.0; }
+        q_spotlight_cpu() { printf '%s\n' 87.3; }
+        sleep() {
+            [[ "$1" == "$Q_LOAD_RECOVERY_POLL_S" ]] \
+                || die "runtime q quiet gate changed its poll cadence"
+            [[ "$quiet_sleeps" == 0 ]] \
+                || die "runtime q quiet gate missed Time Machine on the next recovery poll"
+            quiet_sleeps=$((quiet_sleeps + 1))
+        }
+        log() { printf '%s\n' "$*"; }
+        q_quiet_gate runtime
+    2>&1); then
+        die "runtime q quiet gate stopped rechecking Time Machine"
+    fi
+    [[ "$quiet_output" == *"synthetic Time Machine activity reached a recovery poll"* ]] \
+        || die "runtime q quiet gate did not surface recovery-poll Time Machine activity"
+    if quiet_output=$(
+        local quiet_sleeps=0
+        Q_LOAD_RECOVERY_MAX_S=10
+        Q_LOAD_RECOVERY_POLL_S=5
+        ps() {
+            [[ "$quiet_sleeps" == 0 ]] \
+                || printf '%s\n' '4242 cargo'
+        }
+        q_time_machine_gate() { :; }
+        q_load1() { printf '%s\n' 2.0; }
+        q_spotlight_cpu() { printf '%s\n' 87.3; }
+        sleep() {
+            [[ "$1" == "$Q_LOAD_RECOVERY_POLL_S" ]] \
+                || die "runtime q offender gate changed its poll cadence"
+            [[ "$quiet_sleeps" == 0 ]] \
+                || die "runtime q quiet gate missed an offender on the next recovery poll"
+            quiet_sleeps=$((quiet_sleeps + 1))
+        }
+        log() { printf '%s\n' "$*"; }
+        q_quiet_gate runtime
+    2>&1); then
+        die "runtime q quiet gate ignored a recovery-poll offender"
+    fi
+    [[ "$quiet_output" == *"q has benchmark-conflicting processes: 4242:cargo"* ]] \
+        || die "runtime q quiet gate did not surface a recovery-poll offender"
+    if (
+        ps() { :; }
+        q_time_machine_gate() { :; }
+        q_load1() { printf '%s\n' 2.0; }
+        q_spotlight_cpu() { printf '%s\n' 87.3; }
+        sleep() { :; }
+        log() { :; }
+        q_quiet_gate immediate
+    ) >/dev/null 2>&1; then
+        die "preflight q Spotlight gate stopped failing immediately above the ceiling"
+    fi
+    if quiet_output=$(
+        local quiet_sleeps=0
+        Q_LOAD_RECOVERY_MAX_S=10
+        Q_LOAD_RECOVERY_POLL_S=5
+        ps() { :; }
+        q_time_machine_gate() { :; }
+        q_load1() { printf '%s\n' 2.0; }
+        q_spotlight_cpu() { printf '%s\n' 87.3; }
+        sleep() {
+            [[ "$1" == "$Q_LOAD_RECOVERY_POLL_S" ]] \
+                || die "persistent q Spotlight gate changed its poll cadence"
+            quiet_sleeps=$((quiet_sleeps + 1))
+            (( quiet_sleeps <= 2 )) \
+                || die "persistent q Spotlight exceeded its exact recovery poll bound"
+            printf '%s\n' "SELFTEST-Q-SPOTLIGHT-POLL|$quiet_sleeps"
+        }
+        log() { printf '%s\n' "$*"; }
+        q_quiet_gate runtime
+    2>&1); then
+        die "persistent q Spotlight escaped the bounded runtime recovery gate"
+    fi
+    [[ "$(awk '/^SELFTEST-Q-SPOTLIGHT-POLL[|]/ { n++ } END { print n + 0 }' \
+        <<<"$quiet_output")" == 2 \
+        && "$quiet_output" == *"after 10s runtime recovery"* ]] \
+        || die "persistent q Spotlight did not stop at the exact recovery bound"
+    if quiet_output=$(
+        ps() { :; }
+        q_time_machine_gate() { :; }
+        q_load1() { printf '%s\n' 2.0; }
+        q_spotlight_cpu() { printf '%s\n' not-a-cpu; }
+        sleep() { printf '%s\n' unexpected-sleep; }
+        log() { printf '%s\n' "$*"; }
+        q_quiet_gate runtime
+    2>&1); then
+        die "malformed Spotlight sample was accepted"
+    fi
+    [[ "$quiet_output" == *"cannot parse Spotlight CPU 'not-a-cpu'"* \
+        && "$quiet_output" != *unexpected-sleep* ]] \
+        || die "malformed Spotlight sample did not fail immediately"
     local arp_fixture
     arp_fixture=$'? (10.1.10.177) at 34:5a:60:3e:78:8b on en0 ifscope [ethernet]\n? (10.1.10.177) at 34:5a:60:3e:78:8b on en1 ifscope [ethernet]\n? (10.1.10.177) at 34:5a:60:3e:78:8b on en8 ifscope [ethernet]'
     [[ "$(q_peer_mac_from_arp en8 <<<"$arp_fixture")" == "34:5a:60:3e:78:8b" ]] \
@@ -2210,7 +2374,7 @@ q_time_machine_gate() {
 }
 
 q_quiet_gate() {
-    local mode="${1:-immediate}" offenders load spot waited=0
+    local mode="${1:-immediate}" offenders load spot load_ok spot_ok waited=0
     [[ "$mode" == immediate || "$mode" == runtime ]] \
         || die "invalid q quiet-gate mode '$mode'"
     while :; do
@@ -2229,17 +2393,26 @@ q_quiet_gate() {
         spot=$(q_spotlight_cpu)
         [[ "$spot" =~ ^[0-9]+([.][0-9]+)?$ ]] \
             || die "cannot parse Spotlight CPU '$spot'"
-        float_le "$spot" "$SPOTLIGHT_CPU_MAX" \
-            || die "q Spotlight CPU $spot% exceeds $SPOTLIGHT_CPU_MAX%"
+        load_ok=0
+        spot_ok=0
         if float_le "$load" "$LOAD1_MAX"; then
+            load_ok=1
+        fi
+        if float_le "$spot" "$SPOTLIGHT_CPU_MAX"; then
+            spot_ok=1
+        fi
+        if [[ "$load_ok" == 1 && "$spot_ok" == 1 ]]; then
             log "quiet q: load1=$load Spotlight=${spot}% TimeMachine=disabled/stopped"
             return
         fi
-        [[ "$mode" == runtime ]] \
-            || die "q load1 $load exceeds $LOAD1_MAX"
+        if [[ "$mode" != runtime ]]; then
+            [[ "$spot_ok" == 1 ]] \
+                || die "q Spotlight CPU $spot% exceeds $SPOTLIGHT_CPU_MAX%"
+            die "q load1 $load exceeds $LOAD1_MAX"
+        fi
         (( waited < Q_LOAD_RECOVERY_MAX_S )) \
-            || die "q load1 $load still exceeds $LOAD1_MAX after ${waited}s runtime recovery"
-        log "q runtime load recovery: load1=$load exceeds $LOAD1_MAX; waiting ${Q_LOAD_RECOVERY_POLL_S}s"
+            || die "q quiet state still exceeds limits after ${waited}s runtime recovery: load1=$load (max $LOAD1_MAX), Spotlight=${spot}% (max ${SPOTLIGHT_CPU_MAX}%)"
+        log "q runtime quiet recovery: load1=$load (max $LOAD1_MAX), Spotlight=${spot}% (max ${SPOTLIGHT_CPU_MAX}%); waiting ${Q_LOAD_RECOVERY_POLL_S}s"
         sleep "$Q_LOAD_RECOVERY_POLL_S"
         waited=$((waited + Q_LOAD_RECOVERY_POLL_S))
     done
