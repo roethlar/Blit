@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Round-2 Codex findings accepted; fixes in progress.
+**Status**: Round-2 findings fixed; fresh mandatory review pending.
 
 ## What
 
@@ -219,8 +219,8 @@ new two-endpoint trace uncorrelatable.
 
 ## Known gaps
 
-- No rig datum is produced by this slice. The full live run waits for the
-  committed harness, mandatory Codex adjudication, exact isolated builds, live
+- No rig datum is produced by this slice. The full live run waits for fresh
+  mandatory Codex adjudication, exact isolated builds, a successful live
   launcher smoke, and a green endpoint preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
@@ -238,18 +238,18 @@ and returned `NEEDS FIXES` with three High findings. All three were accepted
 and fixed independently: destination reset fail-closed at `661cf75`, excess
 settle accounting at `1617546`, and the complete resize causal-edge audit plus
 emitter alignment at `2dd977e`. See the raw review and adjudication under
-`.review/results/otp12-pf1-rigw-harness.*`. A fresh mandatory Codex review of
-the complete fixed range is pending; the row remains in progress until that
-review and adjudication close.
+`.review/results/otp12-pf1-rigw-harness.*`.
 
 Round-2 Codex reviewed the complete immutable range through `8fbd486` and
 returned `NEEDS FIXES`: it independently confirmed F1–F3 closed, then found two
 new High defects. F4 is an uncharged Windows-client interval before q captures
 the settle anchor. F5 is the role-bearing `rid` selecting different physical
 destination paths for paired arms, contrary to the only-initiator-varies
-contract. Both are accepted; F5 is first in order. A separate runbook audit
-also confirmed that the required live Windows launcher smoke has no standalone
-mode. The additive Grok second eye returned a schema-valid `ACCEPTED` verdict
-with three independent red-to-green guards, but it does not override the
-mandatory Codex findings. See the round-2 raw and adjudication records under
-`.review/results/otp12-pf1-rigw-harness-r2.*`.
+contract. Both were accepted and fixed in order: F5 at `1231e42`, then F4 at
+`6ba5408`. A separate runbook audit found the missing standalone launcher mode,
+fixed at `18d3cde`; follow-up safety audit found the pre-PID-journal CIM race,
+fixed at `454ebce`. The additive Grok second eye returned a schema-valid
+`ACCEPTED` verdict with three independent red-to-green guards, but it does not
+override the mandatory Codex findings. See the round-2 raw and adjudication
+records under `.review/results/otp12-pf1-rigw-harness-r2.*`. Fresh review of
+the complete fixed range is pending; no rig run is authorized yet.
