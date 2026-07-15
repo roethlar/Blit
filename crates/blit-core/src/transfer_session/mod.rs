@@ -1413,10 +1413,25 @@ async fn source_send_half(
                 Some(dp) => {
                     // sf-2: correct the stream count toward the shape the
                     // accumulated need list implies before queueing this
-                    // batch (one ADD per epoch; a no-op while one is in
-                    // flight or the shape wants no more).
+                    // batch. Settle the whole shape-derived target before
+                    // handing payloads to the pipeline: otherwise the
+                    // one-ADD-per-epoch ramp races NeedComplete/payload
+                    // drain, so a fast transfer can finish at a different
+                    // worker count depending on which endpoint initiated.
                     maybe_propose_resize(dp, tx, needed_bytes, needed_count, &mut pending_resize)
                         .await?;
+                    settle_shape_resizes(
+                        &mut events,
+                        &mut pending,
+                        &mut resume,
+                        &mut need_complete,
+                        &mut needed_bytes,
+                        &mut needed_count,
+                        dp,
+                        tx,
+                        &mut pending_resize,
+                    )
+                    .await?;
                     let payloads =
                         diff_planner::plan_push_payloads(batch, source.root(), plan_options)?;
                     // A cancel while earlier batches are actively moving
@@ -1475,6 +1490,18 @@ async fn source_send_half(
                     // zero-knowledge single stream.
                     maybe_propose_resize(dp, tx, needed_bytes, needed_count, &mut pending_resize)
                         .await?;
+                    settle_shape_resizes(
+                        &mut events,
+                        &mut pending,
+                        &mut resume,
+                        &mut need_complete,
+                        &mut needed_bytes,
+                        &mut needed_count,
+                        dp,
+                        tx,
+                        &mut pending_resize,
+                    )
+                    .await?;
                     let payloads = ready
                         .into_iter()
                         .map(|(header, hashes)| TransferPayload::ResumeFile {
@@ -1772,12 +1799,16 @@ async fn process_source_event(
                 dp.add_stream(&pending_r.sub_token).await?;
                 dp.dial()
                     .resize_settled(pending_r.epoch, pending_r.target_streams as usize, true);
+                // Ramp one stream per accepted epoch: propose the next ADD.
+                maybe_propose_resize(dp, tx, *needed_bytes, *needed_count, pending_resize).await
             } else {
                 dp.dial()
                     .resize_settled(pending_r.epoch, dp.dial().live_streams(), false);
+                // A refusal is terminal for this shape ramp. Retrying the
+                // same unattainable target under a fresh epoch would loop
+                // forever; the settled live set still carries the transfer.
+                Ok(())
             }
-            // Ramp one stream per accepted epoch: propose the next ADD.
-            maybe_propose_resize(dp, tx, *needed_bytes, *needed_count, pending_resize).await
         }
         SourceEvent::Summary(_) => Err(eyre::Report::new(SessionFault::protocol_violation(
             "TransferSummary before SourceDone",
@@ -1810,6 +1841,46 @@ async fn maybe_propose_resize(
         })))
         .await?;
         *pending_resize = Some(proposal);
+    }
+    Ok(())
+}
+
+/// Drive the one-stream-per-epoch shape ramp to its currently known target
+/// before payload dispatch. Needs and resume hashes may continue arriving
+/// while an ack is in flight, so process the shared SOURCE event lane rather
+/// than waiting for only an ack. Each accepted ack proposes the next epoch
+/// from the latest accumulated shape; the loop ends only when no proposal is
+/// outstanding (target reached or the destination refused growth).
+#[allow(clippy::too_many_arguments)]
+async fn settle_shape_resizes(
+    events: &mut mpsc::UnboundedReceiver<SourceEvent>,
+    pending: &mut Vec<FileHeader>,
+    resume: &mut ResumeSendState,
+    need_complete: &mut bool,
+    needed_bytes: &mut u64,
+    needed_count: &mut usize,
+    data_plane: &data_plane::SourceDataPlane,
+    tx: &mut Box<dyn FrameTx>,
+    pending_resize: &mut Option<data_plane::PendingResize>,
+) -> Result<()> {
+    while pending_resize.is_some() {
+        let event = events.recv().await.ok_or_else(|| {
+            eyre::Report::new(SessionFault::internal(
+                "source receive half ended during data-plane shape resize",
+            ))
+        })?;
+        process_source_event(
+            event,
+            pending,
+            resume,
+            need_complete,
+            needed_bytes,
+            needed_count,
+            Some(data_plane),
+            tx,
+            pending_resize,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -2729,13 +2800,9 @@ async fn destination_session(
                     // host's fresh local reading (codex otp-5b-2 F1). On a
                     // Resize frame the initiator dials the epoch-N socket (vs
                     // the responder path's arm).
-                    let ceiling = negotiated
-                        .open
-                        .receiver_capacity
-                        .as_ref()
-                        .map(|c| c.max_streams)
-                        .unwrap_or(0)
-                        .max(1) as usize;
+                    let ceiling = crate::dial::receiver_stream_ceiling(
+                        negotiated.open.receiver_capacity.as_ref(),
+                    );
                     (
                         Some(data_plane::DestRecvPlane::Initiator(run)),
                         initial,

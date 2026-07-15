@@ -81,6 +81,18 @@ pub fn local_receiver_capacity() -> CapacityProfile {
     }
 }
 
+/// Resolve the receiver's advertised stream ceiling with the wire
+/// contract's `0 = unknown` semantics. Both the SOURCE-owned dial and the
+/// DESTINATION's resize admission must call this one function; otherwise a
+/// destination-initiated session can interpret the same profile as a
+/// one-stream cap while its source interprets it as the default ceiling.
+pub fn receiver_stream_ceiling(profile: Option<&CapacityProfile>) -> usize {
+    profile
+        .and_then(|capacity| (capacity.max_streams > 0).then_some(capacity.max_streams as usize))
+        .unwrap_or(DIAL_CEILING_MAX_STREAMS)
+        .clamp(1, DIAL_CEILING_MAX_STREAMS)
+}
+
 /// The one mutable tuning object for a transfer.
 #[derive(Debug)]
 pub struct TransferDial {
@@ -144,14 +156,11 @@ impl TransferDial {
     pub fn conservative_within(profile: Option<&CapacityProfile>) -> Self {
         let mut ceiling_chunk = DIAL_CEILING_CHUNK_BYTES;
         let mut ceiling_prefetch = DIAL_CEILING_PREFETCH;
-        let mut ceiling_streams = DIAL_CEILING_MAX_STREAMS;
+        let ceiling_streams = receiver_stream_ceiling(profile);
         let ceiling_tcp = DIAL_CEILING_TCP_BUFFER_BYTES;
         if let Some(profile) = profile {
             if profile.max_chunk_bytes > 0 {
                 ceiling_chunk = ceiling_chunk.min(profile.max_chunk_bytes as usize);
-            }
-            if profile.max_streams > 0 {
-                ceiling_streams = ceiling_streams.min(profile.max_streams as usize);
             }
             if profile.max_inflight_bytes > 0 {
                 // The in-flight budget bounds the CHUNK ceiling first

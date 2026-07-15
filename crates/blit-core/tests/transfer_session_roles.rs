@@ -17,9 +17,10 @@ use std::time::Duration;
 
 use blit_core::generated::transfer_frame::Frame;
 use blit_core::generated::{
-    session_error, BlockHashList, ComparisonMode, FileData, FileHeader, FilterSpec,
-    ManifestComplete, MirrorMode, NeedBatch, NeedComplete, NeedEntry, ResumeSettings, SessionError,
-    SessionHello, SessionOpen, SourceDone, TransferFrame, TransferRole, TransferSummary,
+    session_error, BlockHashList, CapacityProfile, ComparisonMode, FileData, FileHeader,
+    FilterSpec, ManifestComplete, MirrorMode, NeedBatch, NeedComplete, NeedEntry, ResumeSettings,
+    SessionError, SessionHello, SessionOpen, SourceDone, TransferFrame, TransferRole,
+    TransferSummary,
 };
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::transfer::{PreparedPayload, TransferPayload};
@@ -1157,7 +1158,7 @@ async fn block_hashes_without_a_held_resume_need_fault_the_source() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn many_tiny_files_shape_correct_to_more_than_one_stream() {
+async fn many_tiny_files_reach_shape_target_when_source_initiates() {
     // sf-2 pin ported onto the unified session (otp-4b-2). The responder
     // grants the zero-knowledge single stream (no manifest seen at
     // SessionAccept); a 10k-tiny-file transfer over the TCP data plane
@@ -1219,10 +1220,10 @@ async fn many_tiny_files_shape_correct_to_more_than_one_stream() {
     let streams = outcome
         .data_plane_streams
         .expect("data plane ran, stream count recorded");
-    assert!(
-        streams > 1,
-        "a {FILE_COUNT}-file transfer must correct the single-stream grant \
-         upward via shape resize; settled at {streams}"
+    assert_eq!(
+        streams, 8,
+        "a {FILE_COUNT}-file transfer must reach the shape policy's eight-stream \
+         target regardless of which endpoint initiated the session"
     );
     assert_trees_identical(&src_root, &dst_root);
 }
@@ -1238,7 +1239,7 @@ async fn pull_data_plane_single_stream_lands_bytes() {
     // 127.0.0.1). Single-stream because this 4-file tree's shape wants only
     // one stream — the pull data plane CAN resize (otp-5b-2), but a small
     // need list never crosses the shape threshold; the resize itself is
-    // pinned by `pull_data_plane_shape_corrects_to_more_than_one_stream`.
+    // pinned by `many_tiny_files_reach_shape_target_when_destination_initiates`.
     let tmp = tempfile::tempdir().unwrap();
     let src_root = tmp.path().join("src");
     let dst_root = tmp.path().join("dst");
@@ -1307,9 +1308,9 @@ async fn pull_data_plane_single_stream_lands_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pull_data_plane_shape_corrects_to_more_than_one_stream() {
+async fn many_tiny_files_reach_shape_target_when_destination_initiates() {
     // otp-5b-2: the sf-2 shape correction in the PULL direction — the
-    // mirror of `many_tiny_files_shape_correct_to_more_than_one_stream`
+    // mirror of `many_tiny_files_reach_shape_target_when_source_initiates`
     // (push). Here the DESTINATION is the *initiator* (dials the epoch-N
     // sockets it grows to) and the SOURCE is the *responder* (accepts them
     // off its bound listener). The control-lane `DataPlaneResize{ADD}` /
@@ -1332,6 +1333,13 @@ async fn pull_data_plane_shape_corrects_to_more_than_one_stream() {
         initiator_role: TransferRole::Destination as i32,
         compare_mode: ComparisonMode::SizeMtime as i32,
         in_stream_bytes: false,
+        // Wire contract: zero means unknown, not a one-stream cap. Pin it
+        // on the destination-initiator orientation, where this end both
+        // advertises and enforces the receiver ceiling.
+        receiver_capacity: Some(CapacityProfile {
+            max_streams: 0,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let source_cfg = SourceSessionConfig {
@@ -1369,10 +1377,10 @@ async fn pull_data_plane_shape_corrects_to_more_than_one_stream() {
     let streams = outcome
         .data_plane_streams
         .expect("data plane ran, stream count recorded");
-    assert!(
-        streams > 1,
-        "a {FILE_COUNT}-file PULL transfer must correct the single-stream \
-         grant upward via shape resize; settled at {streams}"
+    assert_eq!(
+        streams, 8,
+        "a {FILE_COUNT}-file transfer must reach the shape policy's eight-stream \
+         target regardless of which endpoint initiated the session"
     );
     assert_trees_identical(&src_root, &dst_root);
 }
