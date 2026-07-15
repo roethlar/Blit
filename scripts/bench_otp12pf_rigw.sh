@@ -27,6 +27,7 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
 SELFTEST=${SELFTEST:-0}
 PREFLIGHT_ONLY=${PREFLIGHT_ONLY:-0}
+LAUNCHER_SMOKE=${LAUNCHER_SMOKE:-0}
 EXPECT_SHA=${EXPECT_SHA:-}
 
 # The experiment identity is deliberately not configurable.  In particular,
@@ -166,6 +167,20 @@ reject_registered_overrides() {
     done
 }
 
+validate_mode_selection() {
+    local name value enabled=0
+    for name in SELFTEST PREFLIGHT_ONLY LAUNCHER_SMOKE; do
+        value=${!name}
+        [[ "$value" == 0 || "$value" == 1 ]] \
+            || die "$name must be exactly 0 or 1"
+        if [[ "$value" == 1 ]]; then
+            enabled=$((enabled + 1))
+        fi
+    done
+    [[ "$enabled" -le 1 ]] \
+        || die "SELFTEST, PREFLIGHT_ONLY, and LAUNCHER_SMOKE are mutually exclusive"
+}
+
 emit_schedule() {
     cat <<'EOF'
 1,off,forward,1,4
@@ -276,7 +291,24 @@ selftest() {
     local destination_tmp prepare_destination_source stamped_result stamp_before stamp_after
     local stamp_tag stamp_ms stamp_rc stamp_ns stamp_extra stamp_teardown_ns
     local cross_clock_before cross_clock_after cross_clock_delta
+    local launcher_tmp launcher_calls launcher_source main_source
     reject_registered_overrides
+    if (
+        SELFTEST=1
+        PREFLIGHT_ONLY=1
+        LAUNCHER_SMOKE=0
+        validate_mode_selection
+    ) >/dev/null 2>&1; then
+        die "multiple harness modes were accepted"
+    fi
+    if (
+        SELFTEST=2
+        PREFLIGHT_ONLY=0
+        LAUNCHER_SMOKE=0
+        validate_mode_selection
+    ) >/dev/null 2>&1; then
+        die "invalid harness mode value was accepted"
+    fi
     got=$(emit_schedule)
     expected=$'1,off,forward,1,4\n2,on,reverse,1,4\n3,on,forward,5,8\n4,off,reverse,5,8'
     [[ "$got" == "$expected" ]] || die "registered block schedule changed"
@@ -433,6 +465,153 @@ for marker in (
     if marker not in start:
         raise SystemExit(f"missing start identity marker: {marker}")
 PY
+
+    launcher_source=$(declare -f launcher_smoke)
+    main_source=$(declare -f main)
+    python3 - "$launcher_source" "$main_source" <<'PY' \
+        || die "standalone launcher-smoke control flow changed"
+import sys
+
+smoke, main = sys.argv[1:]
+smoke_markers = (
+    "WIN_SESSION_MAY_EXIST=1",
+    "current_block=launcher-smoke",
+    "ports_closed",
+    'win_daemon_start "$current_block" off "$run_id"',
+    'nc -z -w 3 "$WIN_IP" "$PORT"',
+    'stop_daemons "$current_block"',
+    'current_block=""',
+    "strict_success_cleanup || session_void",
+)
+positions = []
+for marker in smoke_markers:
+    try:
+        positions.append(smoke.index(marker))
+    except ValueError as exc:
+        raise SystemExit(f"missing launcher-smoke marker: {marker}") from exc
+if positions != sorted(positions):
+    raise SystemExit(f"launcher-smoke markers out of order: {positions}")
+for forbidden in (
+    "REGISTERED_RUN_STARTED",
+    "SESSION_FINALIZED",
+    "SESSION-COMPLETE",
+    "q_daemon_start",
+    "start_daemons",
+    "run_arm",
+    "run_block",
+    "RUNS_CSV",
+    "CLOCK_CSV",
+    "emit_schedule",
+    "schedule.csv",
+    "otp12pf_rigw_analyze.py",
+    "finalize_registered_session",
+    "LOCAL_EVIDENCE_COMPLETE",
+    "Q_SESSION_MAY_EXIST",
+):
+    if forbidden in smoke:
+        raise SystemExit(f"launcher smoke reached registered work: {forbidden}")
+mode_check = main.index("validate_mode_selection")
+preflight = main.index("preflight;")
+branch_start = main.index('if [[ "$LAUNCHER_SMOKE" == 1 ]]')
+registered = main.index("REGISTERED_RUN_STARTED=1", branch_start)
+if not mode_check < preflight < branch_start < registered:
+    raise SystemExit("main launcher-smoke gate moved around preflight or registration")
+branch = main[branch_start:registered]
+branch_markers = ('if [[ "$LAUNCHER_SMOKE" == 1 ]]', "launcher_smoke;", "return;", "fi;")
+branch_positions = [branch.index(marker) for marker in branch_markers]
+if branch_positions != sorted(branch_positions) or branch.count("return;") != 1:
+    raise SystemExit(f"launcher-smoke branch can fall through: {branch_positions}")
+PY
+
+    launcher_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-launcher-smoke.XXXXXX")
+    launcher_calls="$launcher_tmp/calls"
+    (
+        OUT_DIR="$launcher_tmp/evidence"
+        mkdir "$OUT_DIR"
+        LOG="$OUT_DIR/bench.log"
+        OUTPUT_CLAIMED=1
+        SESSION_TAG=offline-smoke
+        REGISTERED_RUN_STARTED=0
+        SESSION_FINALIZED=0
+        STRICT_CLEANUP_VERIFIED=0
+        Q_SESSION_MAY_EXIST=0
+        WIN_SESSION_MAY_EXIST=0
+        LOCAL_EVIDENCE_COMPLETE=0
+        current_block=""
+        q_daemon_pid=""; win_daemon_pid=""; win_cmd_pid=""
+        port_checks=0
+        log() { :; }
+        win_daemon_start() {
+            [[ "$1" == launcher-smoke && "$2" == off \
+                && "$3" == offline-smoke-launcher-smoke \
+                && "$WIN_SESSION_MAY_EXIST" == 1 \
+                && "$current_block" == launcher-smoke ]] \
+                || die "offline launcher smoke started with wrong identity"
+            printf 'start\n' >> "$launcher_calls"
+            win_cmd_pid=22; win_daemon_pid=33
+        }
+        nc() {
+            [[ "$*" == "-z -w 3 $WIN_IP $PORT" \
+                && "$win_cmd_pid" == 22 && "$win_daemon_pid" == 33 ]] \
+                || die "offline launcher smoke reachability ran out of order"
+            printf 'reach\n' >> "$launcher_calls"
+        }
+        win_daemon_stop() {
+            [[ "$current_block" == launcher-smoke \
+                && "$win_cmd_pid" == 22 && "$win_daemon_pid" == 33 ]] \
+                || die "offline launcher smoke stopped the wrong daemon"
+            printf 'stop\n' >> "$launcher_calls"
+            win_cmd_pid=""; win_daemon_pid=""
+        }
+        q_daemon_stop() {
+            [[ -z "$q_daemon_pid" ]] \
+                || die "offline launcher smoke unexpectedly owned a q daemon"
+            printf 'q-stop-empty\n' >> "$launcher_calls"
+        }
+        collect_block_logs() {
+            [[ "$1" == launcher-smoke && -z "$win_cmd_pid" \
+                && -z "$win_daemon_pid" ]] \
+                || die "offline launcher smoke collected before exact stop"
+            printf 'collect\n' >> "$launcher_calls"
+        }
+        ports_closed() {
+            port_checks=$((port_checks + 1))
+            if [[ "$port_checks" == 1 ]]; then
+                [[ "$current_block" == launcher-smoke \
+                    && -z "$win_cmd_pid" && -z "$win_daemon_pid" ]] \
+                    || die "offline launcher smoke skipped its pre-start port check"
+                printf 'closed-pre\n' >> "$launcher_calls"
+            else
+                [[ "$port_checks" == 2 && "$current_block" == launcher-smoke \
+                    && -z "$win_cmd_pid" && -z "$win_daemon_pid" ]] \
+                    || die "offline launcher smoke checked ports before exact stop"
+                printf 'closed-post\n' >> "$launcher_calls"
+            fi
+        }
+        strict_success_cleanup() {
+            [[ "$WIN_SESSION_MAY_EXIST" == 1 && -z "$current_block" \
+                && -z "$q_daemon_pid" && -z "$win_cmd_pid" && -z "$win_daemon_pid" ]] \
+                || die "offline launcher smoke cleaned before exact stop"
+            printf 'cleanup\n' >> "$launcher_calls"
+            WIN_SESSION_MAY_EXIST=0
+            STRICT_CLEANUP_VERIFIED=1
+        }
+        launcher_smoke
+        [[ "$(< "$launcher_calls")" == \
+            $'closed-pre\nstart\nreach\nstop\nq-stop-empty\ncollect\nclosed-post\ncleanup' ]] \
+            || die "offline launcher-smoke call order changed"
+        [[ "$REGISTERED_RUN_STARTED" == 0 && "$SESSION_FINALIZED" == 0 \
+            && "$STRICT_CLEANUP_VERIFIED" == 1 \
+            && "$Q_SESSION_MAY_EXIST" == 0 \
+            && "$WIN_SESSION_MAY_EXIST" == 0 \
+            && "$LOCAL_EVIDENCE_COMPLETE" == 0 ]] \
+            || die "offline launcher smoke changed registered state"
+        [[ ! -e "$OUT_DIR/SESSION-COMPLETE" \
+            && ! -e "$OUT_DIR/SESSION-COMPLETE.tmp" \
+            && ! -e "$OUT_DIR/SESSION-VOID" ]] \
+            || die "offline launcher smoke left a session marker"
+    )
+    rm -rf "$launcher_tmp"
 
     HEAD_BUILD_ID=0123456789ab
     identity_file=$(mktemp "${TMPDIR:-/tmp}/blit-rigw-identity.XXXXXX")
@@ -1925,6 +2104,22 @@ foreach (\$path in \$paths) {
     STRICT_CLEANUP_VERIFIED=1
 }
 
+launcher_smoke() {
+    local run_id="${SESSION_TAG}-launcher-smoke"
+    WIN_SESSION_MAY_EXIST=1
+    current_block=launcher-smoke
+    ports_closed \
+        || session_void "port $PORT occupied before launcher smoke"
+    win_daemon_start "$current_block" off "$run_id"
+    nc -z -w 3 "$WIN_IP" "$PORT" \
+        || session_void "q cannot reach Windows daemon in launcher smoke"
+    stop_daemons "$current_block"
+    current_block=""
+    strict_success_cleanup \
+        || session_void "launcher smoke cleanup failed: ${LAST_ERROR:-unknown error}"
+    log "LAUNCHER_SMOKE OK: exact Windows CIM launcher started, reached, identity-stopped, and cleaned; no transfer timed"
+}
+
 finalize_registered_session() {
     local complete_tmp="$OUT_DIR/SESSION-COMPLETE.tmp"
     SESSION_FINALIZED=0
@@ -2039,6 +2234,7 @@ on_exit() {
 }
 
 main() {
+    validate_mode_selection
     if [[ "$SELFTEST" == 1 ]]; then selftest; return; fi
     if ! claim_output_dir; then
         printf '%s\n' "FATAL: $OUTPUT_CLAIM_ERROR" >&2
@@ -2050,6 +2246,10 @@ main() {
     if [[ "$PREFLIGHT_ONLY" == 1 ]]; then
         strict_success_cleanup || session_void "preflight cleanup failed: ${LAST_ERROR:-unknown error}"
         log "PREFLIGHT_ONLY: no daemon started and no transfer timed"
+        return
+    fi
+    if [[ "$LAUNCHER_SMOKE" == 1 ]]; then
+        launcher_smoke
         return
     fi
 

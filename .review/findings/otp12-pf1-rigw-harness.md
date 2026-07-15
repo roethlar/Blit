@@ -168,6 +168,17 @@ new two-endpoint trace uncorrelatable.
   verifies the same CIM identities immediately. Offline source-contract
   mutations fail if command-line, parent, or validate-before-stop guards move
   or disappear; the live daemon smoke remains required to prove CIM quoting.
+- `LAUNCHER_SMOKE=1` is a mutually exclusive standalone live mode. After the
+  full provenance and endpoint preflight, it starts only the exact Windows CIM
+  launcher and daemon, proves q can reach the registered port, identity-stops
+  both processes, proves both endpoint ports closed, and completes strict
+  session-tree cleanup. It never registers a run, starts q's daemon, times a
+  transfer, invokes the analyzer, or writes `SESSION-COMPLETE`. An offline
+  call-order test and source guard pin the start/reach/stop/closed/cleanup
+  sequence and keep the smoke branch ahead of registered-run state. Mutations
+  removing its pre-start port gate, start, reachability probe, exact stop/log
+  collection, block clear, strict cleanup/failure path, or main-branch return,
+  and a mutation setting registered state, each turn the self-test red.
 - Mutation proof: replacing the absolute-deadline wait with a no-op makes the
   harness self-test fail because it returns before +250 ms. Moving the
   successful Windows client-log fetch ahead of the durability marker makes
