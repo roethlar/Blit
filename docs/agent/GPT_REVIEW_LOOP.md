@@ -1,6 +1,6 @@
 # GPT review loop (code → review → fix)
 
-**Status**: Active
+**Status**: Historical — superseded by D-2026-07-15-1
 **Created**: 2026-06-20
 **Decision**: D-2026-06-20-6 (created, `ue-r2-*` scope);
 **D-2026-07-04-1** (widened: this loop now governs **all code changes and
@@ -11,6 +11,12 @@ as the grading mechanism (D-2026-07-04-1); this loop reuses its
 `findings/` + `results/` records and the `REVIEW.md` status index.
 **Precedence**: where this loop conflicts with `AGENTS.md`,
 `docs/STATE.md`, or `docs/DECISIONS.md`, governance wins (AGENTS.md §1).
+
+> **Do not execute this document's Codex commands.** The current synchronous
+> workflow is `.agents/playbooks/reviewloop.md`. D-2026-07-15-1 requires every
+> review dispatched after the grandfathered in-flight G12 Grok review to use
+> Claude CLI with `--model claude-fable-5 --effort max`. The body below is
+> retained as historical rationale and prior operating procedure.
 
 ## Shape
 

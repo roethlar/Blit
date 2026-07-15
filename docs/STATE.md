@@ -44,13 +44,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   resume/re-derive on the unified baseline. Principle: ceiling-driven,
   never competitor-relative (D-2026-07-04-4 — do not re-litigate).
 - **Background**: REV4 code-complete, gates DATA-COMPLETE (declarations
-  in Blocked); the codex loop governs all changes (D-2026-07-04-1).
+  in Blocked); the synchronous reviewloop governs all changes
+  (D-2026-07-04-1), with Claude Fable 5/max selected by D-2026-07-15-1.
 
 ## Queue (ordered)
 
 1. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4) —
    the only work item until it ships**: slices otp-1..13 through the
-   codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
+   synchronous reviewloop per slice (reviewer selection D-2026-07-15-1).
+   otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7 (a, b-1,
    b-2), otp-8, otp-9 (a/b), otp-2 (+ otp-2w), otp-10 (a, b-1/2,
    c-1/2), **otp-11 (a + b)**, **otp-12a (zoey)**, **otp-12b
@@ -128,10 +130,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   sf-2) and **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** (code-
   complete; measurement gates remain). REV4 superseded v1/REV2/REV3
   (history only).
-- Process: `docs/agent/GPT_REVIEW_LOOP.md` (Active) — the codex loop
-  for **all code and plan changes** (D-2026-07-04-1); `.review/README.md`
-  is retired as the grading mechanism (its `findings/`/`results/`
-  records and the REVIEW.md index remain live).
+- Process: `.agents/playbooks/reviewloop.md` — the synchronous loop for
+  **all code and plan changes** (D-2026-07-04-1), using Claude CLI
+  `--model claude-fable-5 --effort max` for current dispatches
+  (D-2026-07-15-1). `docs/agent/GPT_REVIEW_LOOP.md` is historical;
+  `.review/README.md` is retired as the grading mechanism (its
+  `findings/`/`results/` records and the REVIEW.md index remain live).
 - Review loop: `REVIEW.md` (all `ue-r2-*` rows `[x]`; design-queue
   rows) + `.review/findings/` + `.review/results/`.
 - Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (module delete ratified

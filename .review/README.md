@@ -1,10 +1,11 @@
 # Blit review workflow
 
 > **Superseded as the grading mechanism (2026-07-04, D-2026-07-04-1).**
-> All code and plan changes now go through the synchronous codex loop in
-> `docs/agent/GPT_REVIEW_LOOP.md` — no exceptions. That loop reuses this
-> directory's `findings/` + `results/` records and the `REVIEW.md` status
-> index, which remain live. The async parts below — `ready/` sentinels,
+> All code and plan changes now go through the synchronous reviewloop in
+> `.agents/playbooks/reviewloop.md`; D-2026-07-15-1 selects Claude CLI with
+> `--model claude-fable-5 --effort max` for current review dispatches. That
+> loop reuses this directory's `findings/` + `results/` records and the
+> `REVIEW.md` status index, which remain live. The async parts below — `ready/` sentinels,
 > `reviewer-wait.sh`, the separate Reviewer agent, WIP limits — are
 > historical; do not write new sentinels. The Identity section (sign the
 > `reviewer` field honestly) still applies to verdict records.

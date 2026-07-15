@@ -52,10 +52,11 @@ Turn a talked-through idea into a durable plan before any implementation.
    each) in the doc's Slices section.
 4. Add the doc to STATE.md's Queue (and to "Authoritative docs" if it will be the
    active plan).
-5. Commit the plan doc and run the commit through the codex review loop
-   (`docs/agent/GPT_REVIEW_LOOP.md`, D-2026-07-04-1 — plan changes included;
-   docs gate is `bash scripts/agent/check-docs.sh`). Adjudicate and fix the
-   accepted findings before surfacing the draft to the owner.
+5. Commit the plan doc and run the commit through the synchronous reviewloop
+   (`.agents/playbooks/reviewloop.md`; D-2026-07-04-1 includes plan changes and
+   D-2026-07-15-1 selects Claude CLI with `--model claude-fable-5 --effort
+   max`; docs gate is `bash scripts/agent/check-docs.sh`). Adjudicate and fix
+   the accepted findings before surfacing the draft to the owner.
 6. **Stop.** No implementation until the owner approves; record approval by
    flipping `**Status**: Draft` → `Active` and adding a DECISIONS.md entry.
 
@@ -125,11 +126,12 @@ Pick up the next unit of review-queue work.
 
 1. Run `catchup` first if you haven't this session.
 2. Pick the highest-priority `[ ]` item in `REVIEW.md` and run it through
-   the codex review loop in `docs/agent/GPT_REVIEW_LOOP.md`
-   (D-2026-07-04-1 — all code and plan changes, no exceptions): implement
-   with tests on `master` (no agent branches), pass the validation suite,
-   commit, write the finding doc, invoke codex on the commit, adjudicate
-   every finding, fix the accepted ones, record
-   `.review/results/<id>.codex.md` + `<id>.gpt-verdict.md`, update the
+   the synchronous reviewloop in `.agents/playbooks/reviewloop.md`
+   (D-2026-07-04-1 — all code and plan changes, no exceptions;
+   D-2026-07-15-1 — invoke Claude CLI with `--model claude-fable-5 --effort
+   max`): implement with tests on `master` (no agent branches), pass the
+   validation suite, commit, write the finding doc, invoke Claude on the exact
+   commit, adjudicate every finding, fix the accepted ones, record the
+   harness-identified verdict under `.review/results/`, and update the
    `REVIEW.md` row. No sentinel — the async hand-off is retired.
 3. Finish with the `handoff` procedure.

@@ -55,17 +55,22 @@ execute it exactly:
 - `drift [scope]` → audit a doc against code; fix docs, file findings, raise
   questions.
 - `slice` (repo-specific, no generic-template equivalent) → pick up the next
-  review finding and run it through the codex review loop
-  (`docs/agent/GPT_REVIEW_LOOP.md`).
+  review finding and run it through the synchronous reviewloop playbook
+  (`.agents/playbooks/reviewloop.md`).
 
-**Review policy (D-2026-07-04-1): every code change and every plan change
-goes through the codex review loop in `docs/agent/GPT_REVIEW_LOOP.md` — no
-exceptions.** The `.review/README.md` async sentinel hand-off is retired;
-its `findings/`/`results/` records and `REVIEW.md` remain the record store.
+**Review policy (D-2026-07-04-1, reviewer amended by D-2026-07-15-1): every
+code change and every plan change goes through the synchronous reviewloop in
+`.agents/playbooks/reviewloop.md` — no exceptions.** For every review dispatched
+after the already-in-flight G12 Grok review, invoke Claude CLI with
+`--model claude-fable-5 --effort max`; Codex or Grok is not a substitute absent
+a later explicit owner instruction. The `.review/README.md` async sentinel
+hand-off is retired; its `findings/`/`results/` records and `REVIEW.md` remain
+the record store.
 
 Claude Code exposes these as `/catchup`, `/plan`, … via `.claude/commands/`;
 Antigravity exposes `catchup`/`handoff` as workspace skills in
-`.agents/skills/`. This repo drafts `.agents/playbooks/reviewloop.md` as a template, but the codex review loop and `docs/agent/PROTOCOL.md` already cover that role for review-loop work.
+`.agents/skills/`. `docs/agent/PROTOCOL.md` defines the repo-specific trigger
+steps; `.agents/playbooks/reviewloop.md` is the current review workflow.
 
 ## Verification
 
