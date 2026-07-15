@@ -1,0 +1,13 @@
+{
+  "text": "{\n  \"verdict\": \"accepted\",\n  \"guard_confirmed\": true,\n  \"reviewed_sha\": \"d57a86ef4070a8852067ae0b8c6bad91010ec98e\",\n  \"base_sha\": \"6fb369e3d70f7633ad1d697afeda35abf5e276cb\",\n  \"comments\": []\n}",
+  "stopReason": "EndTurn",
+  "sessionId": "019f666d-becc-77f1-b15d-6042d1fcba62",
+  "requestId": "3fae0bb3-2564-4972-93f2-7e7aeef70f53",
+  "structuredOutput": {
+    "verdict": "accepted",
+    "guard_confirmed": true,
+    "reviewed_sha": "d57a86ef4070a8852067ae0b8c6bad91010ec98e",
+    "base_sha": "6fb369e3d70f7633ad1d697afeda35abf5e276cb",
+    "comments": []
+  }
+}

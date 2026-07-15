@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Reopened — live-found G9 fixed and guard-proved; fresh independent review pending.
+**Status**: Verified — round-9 independent Grok accepted G9; live gates pending.
 
 ## What
 
@@ -489,6 +489,17 @@ red; restoring G9 returns the complete self-test green. Format, strict clippy,
 all workspace tests, Bash syntax/self-test, all 23 analyzer tests, the docs
 gate, and diff checks passed. The first workspace run hit the recorded macOS
 daemon-start race once in `test_utils_find`; that isolated test passed and the
-complete quiet rerun passed with two expected ignores. Fresh independent Grok
-or Claude review is required before rebuilding or retrying the launcher.
-G9 was fixed at `f7ef1d7184574639adb823513c17ebf94f720292`.
+complete quiet rerun passed with two expected ignores. G9 was fixed at
+`f7ef1d7184574639adb823513c17ebf94f720292`.
+
+Round-9 independent Grok reviewed the immutable
+`6fb369e3d70f7633ad1d697afeda35abf5e276cb..d57a86ef4070a8852067ae0b8c6bad91010ec98e`
+range and returned schema-valid `ACCEPTED`, exact SHAs, and
+`guard_confirmed=true`. In its detached worktree it ran the Bash 3.2 self-test
+green, restored the exact live-failing backtick expression and reproduced both
+the Bash command-substitution error and the literal-LF guard failure, then
+restored the reviewed bytes and returned the complete self-test green. The
+worktree ended clean at the exact reviewed SHA and was removed. Review is
+closed; the exact reviewed candidate `d57a86e`, not the later verdict-record
+commit, is the only build allowed into launcher smoke, endpoint preflight, and
+the registered run. No endpoint was contacted during review.
