@@ -443,3 +443,17 @@ and its partial output discarded on the owner's identity correction; it was
 not counted as review evidence. No endpoint was contacted. The immutable
 reviewed SHA, not this later verdict-record commit, is the only build allowed
 into launcher smoke, endpoint preflight, and the registered run.
+
+The exact reviewed candidate `6fb369e3d70f7633ad1d697afeda35abf5e276cb`
+was then built from fresh detached clones on the owner Mac and natively on
+Windows, staged into new `6fb369e` paths, and verified by embedded clean build
+identity plus source/stage SHA-256 equality. q did not build. q's actual Bash
+3.2 self-test passed. The live launcher smoke at
+`/Users/michael/Dev/blit_v2_6fb369e/logs/otp12pf-rigw-20260715T140346Z-launcher`
+then refused before helper staging or daemon launch because q still reported
+Time Machine `AutoBackup=1`. The retained `SESSION-VOID` records that exact
+reason; both registered ports were closed and the active Windows benchmark
+daemon was absent afterward. A read-only follow-up found no second current
+quietness blocker: Time Machine was stopped, q load1 was 1.35, Spotlight was
+0.0%, Windows CPU was 2.3%, and neither endpoint had a conflicting process.
+The harness did not mutate Time Machine or any other endpoint policy.
