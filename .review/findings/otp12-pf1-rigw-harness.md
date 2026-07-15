@@ -1,8 +1,8 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Reopened — live-found G10 is fixed and guard-proved; fresh
-independent review is pending.
+**Status**: Verified — round-10 independent Grok accepted G10; live gates
+remain.
 
 ## What
 
@@ -226,9 +226,9 @@ new two-endpoint trace uncorrelatable.
 ## Known gaps
 
 - No rig datum is produced by this slice. Exact candidate `d57a86e` is retired
-  from further live use after G10; the full run waits for fresh independent
-  Grok or Claude review of the G10 candidate, new exact isolated builds, a
-  successful launcher smoke, and a green endpoint preflight.
+  from further live use after G10; the full run waits for new exact isolated
+  builds of reviewed candidate `5a7e7ec`, a successful launcher smoke, and a
+  green endpoint preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
   small-fixture/P2 work, phase report, and `0f922de` historical control before
@@ -520,7 +520,7 @@ The Windows session and q evidence remain retained by the registered failure
 policy; no cleanup or endpoint-policy mutation was attempted.
 
 G10 splits argument assignment from the following dependent declaration in
-`fetch_win_file`. A class-wide audit of all 84 `local` declarations found and
+`fetch_win_file`. A class-wide audit of all production `local` declarations found and
 fixed the only three additional same-command dependencies: block-log path,
 q-daemon block path, and run-block identity. Those three happened to inherit
 caller variables through Bash dynamic scope in current call chains, which could
@@ -530,6 +530,19 @@ pins exact output/path/identity behavior. Rejoining each of the four declaration
 individually turns its targeted guard red with the expected unbound-variable or
 wrong-derivation failure; restoring each split returns the complete self-test
 green. Bash syntax, format, strict clippy, all workspace tests, all 23 analyzer
-tests, the docs gate, and diff checks passed. The G10 fix commit and exact
-review candidate identity are pending.
-G10 was fixed at `b1cfde74a5ffbd8413aa9dc69e4b1abe9b9118e9`.
+tests, the docs gate, and diff checks passed. G10 was fixed at
+`b1cfde74a5ffbd8413aa9dc69e4b1abe9b9118e9`.
+
+Round-10 independent Grok reviewed the immutable
+`d57a86ef4070a8852067ae0b8c6bad91010ec98e..5a7e7ec3dcaa4965ba7fe2bce57686f5acb05549`
+range and returned schema-valid `ACCEPTED`, exact SHAs, and
+`guard_confirmed=true`. In its detached worktree it ran syntax and the complete
+Bash 3.2 self-test green, then independently rejoined each of the four local
+declarations. The executed guards failed respectively on unset `local_path`,
+block-log `block`, q-daemon `block`, and run-block `block`. It restored the
+exact reviewed bytes and reran the complete self-test green after every
+mutation. A final lexical audit found no remaining same-command dependency;
+final syntax/self-test passed and the worktree ended clean at the reviewed SHA.
+Review is closed; exact candidate `5a7e7ec`, not the later verdict-record
+commit, is the only build allowed into launcher smoke, endpoint preflight, and
+the registered run. No endpoint was contacted during review.

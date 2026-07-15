@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-15 (pf-1 rig-W G10 fixed and guard-proved; independent review next; no new rig data)
+Last updated: 2026-07-15 (pf-1 rig-W G10 independently accepted; exact live gates next; no new rig data)
 
-- **NEXT ACTION — PF-1 RIG-W INSTRUMENTATION IS ACTIVE:** send the live-found G10 Bash 3.2 fix through independent Grok or Claude review, build and stage that new exact candidate, then retry launcher smoke, preflight, and the preregistered paired q↔netwatch-01 diagnostic. Exact `d57a86e` passed the live fabric/quiet/timer/result gates but failed pre-daemon preflight because a compound `local` derived a path before its argument assignment; all four same-class declarations are split and independently mutation-guarded. The worker-count disparity is closed and is not a blocker; no new hardware data has been taken.
+- **NEXT ACTION — PF-1 RIG-W INSTRUMENTATION IS ACTIVE:** build and stage exact independently reviewed candidate `5a7e7ec`, then retry launcher smoke, preflight, and the preregistered paired q↔netwatch-01 diagnostic. Round-10 Grok independently rejoined all four Bash 3.2 local dependencies one at a time, observed every targeted guard fail, restored each to green, found no remaining same-command dependency, and accepted the immutable candidate. The worker-count disparity is closed and is not a blocker; no new hardware data has been taken.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **WORKER PARITY IS CLOSED.** The identical 10,000-file fixture now reaches exactly 8 workers under both initiator layouts (old guard: 3 vs 2; destination-initiator `max_streams=0`: 1). Payload starts while resize ACKs are pending, refusal is terminal, and resize arbitration is atomic. Final Codex re-review: PASS; workspace gate: 1,490 passed, 2 ignored.
 - **WHY NO MAC↔MAC DATA YET:** the current verdict engine can label a 1.092 cell both `PASS` and `REPRODUCES`, and the end-fabric gate can grade after a 10GbE→1GbE renegotiation because it rechecks MSS/IP but not link speed. Those are measurement blockers, not transfer-path blockers. P1 remains real on macOS↔Windows; no Mac↔Mac data exists.
@@ -74,8 +74,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     and reduced paired q↔netwatch-01 harness must each clear review before rig
     time. Round-9 independent Grok accepted G9 at exact candidate `d57a86e`;
     its live launcher passed endpoint gates and then exposed G10 in pre-daemon
-    preflight. The Bash 3.2 local-derivation class is fixed and guard-proved;
-    fresh independent review and a new exact candidate are next. The phase report and
+    preflight. The Bash 3.2 local-derivation class is fixed; round-10
+    independent Grok mutation-proved all four guards and accepted exact
+    candidate `5a7e7ec`. New exact builds and live gates are next. The phase report and
     `0f922de` historical control remain part of the
     pf-1 HARD GATE. No Mac↔Mac data has been taken, and worker parity is no
     longer a blocker. Then: pf-1 → pf-final (all rigs) → otp-12d → otp-13.

@@ -1,0 +1,13 @@
+{
+  "text": "{\"verdict\":\"accepted\",\"guard_confirmed\":true,\"reviewed_sha\":\"5a7e7ec3dcaa4965ba7fe2bce57686f5acb05549\",\"base_sha\":\"d57a86ef4070a8852067ae0b8c6bad91010ec98e\",\"comments\":[]}{\"verdict\":\"accepted\",\"guard_confirmed\":true,\"reviewed_sha\":\"5a7e7ec3dcaa4965ba7fe2bce57686f5acb05549\",\"base_sha\":\"d57a86ef4070a8852067ae0b8c6bad91010ec98e\",\"comments\":[]}{\"verdict\":\"accepted\",\"guard_confirmed\":true,\"reviewed_sha\":\"5a7e7ec3dcaa4965ba7fe2bce57686f5acb05549\",\"base_sha\":\"d57a86ef4070a8852067ae0b8c6bad91010ec98e\",\"comments\":[]}{\"verdict\":\"accepted\",\"guard_confirmed\":true,\"reviewed_sha\":\"5a7e7ec3dcaa4965ba7fe2bce57686f5acb05549\",\"base_sha\":\"d57a86ef4070a8852067ae0b8c6bad91010ec98e\",\"comments\":[]}{\"verdict\":\"accepted\",\"guard_confirmed\":true,\"reviewed_sha\":\"5a7e7ec3dcaa4965ba7fe2bce57686f5acb05549\",\"base_sha\":\"d57a86ef4070a8852067ae0b8c6bad91010ec98e\",\"comments\":[]}{\"verdict\":\"accepted\",\"guard_confirmed\":true,\"reviewed_sha\":\"5a7e7ec3dcaa4965ba7fe2bce57686f5acb05549\",\"base_sha\":\"d57a86ef4070a8852067ae0b8c6bad91010ec98e\",\"comments\":[]}{\"verdict\":\"accepted\",\"guard_confirmed\":true,\"reviewed_sha\":\"5a7e7ec3dcaa4965ba7fe2bce57686f5acb05549\",\"base_sha\":\"d57a86ef4070a8852067ae0b8c6bad91010ec98e\",\"comments\":[]}{\n  \"verdict\": \"accepted\",\n  \"guard_confirmed\": true,\n  \"reviewed_sha\": \"5a7e7ec3dcaa4965ba7fe2bce57686f5acb05549\",\n  \"base_sha\": \"d57a86ef4070a8852067ae0b8c6bad91010ec98e\",\n  \"comments\": []\n}",
+  "stopReason": "EndTurn",
+  "sessionId": "019f6690-24c2-77a1-8bcc-79d390670f35",
+  "requestId": "650a78cb-98e8-46c3-b5e7-ce8d655b784b",
+  "structuredOutput": {
+    "verdict": "accepted",
+    "guard_confirmed": true,
+    "reviewed_sha": "5a7e7ec3dcaa4965ba7fe2bce57686f5acb05549",
+    "base_sha": "d57a86ef4070a8852067ae0b8c6bad91010ec98e",
+    "comments": []
+  }
+}
