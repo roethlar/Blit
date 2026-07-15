@@ -1,8 +1,8 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: In progress — live-found G12 fixed and guard-proved; external Grok
-or Claude review remains.
+**Status**: In progress — round-12 Grok accepted exact `d5e9dda`; additive
+staging and live gates remain.
 
 ## What
 
@@ -642,7 +642,24 @@ the real wrapper sentinel and child status. Restoring only the live-failing
 empty-array implementation reproduces `trace_env[@]: unbound variable` and
 turns the new guard red; restoration returns syntax, the complete harness
 self-test, and all 23 analyzer tests green. A whole-script audit found no
-second empty user array; `SSH_MUX` is nonempty at every assignment. External
-Grok or Claude review remains before another live candidate. No retained
+second empty user array; `SSH_MUX` is nonempty at every assignment. No retained
 evidence, Time Machine setting, or mount state was changed.
 G12 was fixed at `cd78ab945372c8fd3bfeed8f2502c13b6a919d5c`.
+
+Round-12 independent Grok reviewed exact immutable range
+`aa0785c6f2bd1e3133bf288dabffd67930496440..d5e9ddadc766534cdb498a9f55a550dbf22bc5e8`.
+The first invocation was mistakenly interrupted after completing its green,
+red-mutation, restoration, and final green/clean proof but before returning a
+verdict. At the owner's direction the same retained session resumed and
+returned a schema-valid `ACCEPTED` with exact SHAs and
+`guard_confirmed=true`. It reproduced the Bash 3.2 nounset failure by
+restoring only the exact old empty-array body, restored the reviewed bytes,
+and returned syntax, the complete self-test, and all 23 analyzer tests green.
+It audited the whole-script array class and found no second empty expansion,
+and confirmed the range does not alter roles, endpoint-local measured paths,
+workers, schedule, timing, trace schema, or analyzer math. The detached
+worktree ended clean at `d5e9dda`; script Git blob was `d3f2fb3` and SHA-256
+was `5e3f3aa802b9b9bd92f9673b0b31ce7166046fa00e2e5d8cd9aef6a0f2559c95`.
+Exact candidate `d5e9dda`, not the later verdict-record commit, is cleared for
+additive build/staging and SSH-driven launcher, preflight, and registered-run
+gates.

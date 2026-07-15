@@ -1,0 +1,59 @@
+{
+  "record_type": "review_orchestrator_record",
+  "reviewer": {
+    "provider": "xAI",
+    "model": "grok-4.5",
+    "cli": "grok 0.2.101 (5bc4b5dfadcf)",
+    "reasoning_effort": "high"
+  },
+  "review_contract": {
+    "base_sha": "aa0785c6f2bd1e3133bf288dabffd67930496440",
+    "reviewed_sha": "d5e9ddadc766534cdb498a9f55a550dbf22bc5e8",
+    "code_fix_sha": "cd78ab945372c8fd3bfeed8f2502c13b6a919d5c",
+    "worktree": "/tmp/blit-review-g12-d5e9dda"
+  },
+  "attempts": [
+    {
+      "session_id": "019f66d7-e2fe-7963-99f1-61dd95b5de3d",
+      "created_at": "2026-07-15T17:34:12.307602Z",
+      "initial_request_id": "47d97526-064a-459a-9967-ced70184eaa3",
+      "interruption": {
+        "interrupted_at": "2026-07-15T17:37:12.563252Z",
+        "exit_code": 130,
+        "verdict_returned": false,
+        "reason": "The orchestrator mistakenly interrupted the in-flight review after the required green gates, red mutation, exact restoration, and clean-worktree proof had completed."
+      },
+      "resume_request_id": "796aad71-77c9-48d6-9925-f6e1486a5ad8",
+      "resume_started_at": "2026-07-15T17:38:56.911Z",
+      "updated_at": "2026-07-15T17:39:15.561280Z",
+      "resume_model_turns": 3,
+      "stop_reason": "EndTurn",
+      "structured_output": {
+          "verdict": "accepted",
+          "guard_confirmed": true,
+          "reviewed_sha": "d5e9ddadc766534cdb498a9f55a550dbf22bc5e8",
+          "base_sha": "aa0785c6f2bd1e3133bf288dabffd67930496440",
+          "comments": [
+            "Identity: HEAD d5e9dda, base aa0785c ancestor, worktree clean before and after; script blob d3f2fb3 / SHA-256 5e3f3aa802b9b9bd92f9673b0b31ce7166046fa00e2e5d8cd9aef6a0f2559c95 matches HEAD.",
+            "Scope: range aa0785c..d5e9dda code fix is cd78ab9 only on scripts/bench_otp12pf_rigw.sh (q_client_run + offline guard); no transfer roles, measured paths, workers, schedule, timing, trace schema, or analyzer math changes.",
+            "q_client_run Bash 3.2: fixed nonempty prefix env -u BLIT_TRACE_SESSION_PHASES -u BLIT_TRACE_RUN_ID; trace-on appends BLIT_TRACE_SESSION_PHASES=1 and BLIT_TRACE_RUN_ID=$run_id only; quoted array expansion; stale parent vars cannot leak past env -u.",
+            "Guard: invokes real wrapper under exported stale=stale off/on; requires R|<ms>|0|<ns> sentinel and child rc 0; child env unset|unset vs 1|g12-trace-on; local declarations are name-only; no Bash-4-only features.",
+            "Array class audit: only user-array expansions are SSH_MUX and trace_env; SSH_MUX is always nonempty at assignment; no second empty-array expansion site.",
+            "Green at HEAD: /bin/bash -n succeeded; SELFTEST=1 exited 0; otp12pf_rigw_analyze_test.py passed 23/23.",
+            "Guard proof: restored the base empty-array body only, which exited 1 at trace_env[@]: unbound variable and then FATAL q trace-off client wrapper failed under Bash nounset; restored exact reviewed bytes, then syntax and self-test passed and the worktree was clean.",
+            "Retained live row is described only as provisional evidence from a SESSION-VOID incomplete session: 1/128 runs, 9/768 clocks, no SESSION-COMPLETE, and zero accepted, analyzed, or graded data."
+          ]
+      },
+      "adjudication": "authoritative",
+      "note": "At the owner's direction, the same interrupted Grok session was resumed and allowed to finish. Only the final schema-valid structuredOutput was adjudicated; interim invalid payloads in outer text were ignored.",
+      "independent_worktree_verification": {
+        "head": "d5e9ddadc766534cdb498a9f55a550dbf22bc5e8",
+        "status_short": "",
+        "script_blob": "d3f2fb3b605bc7655ee4f7243dae9f69f8bbf588",
+        "script_sha256": "5e3f3aa802b9b9bd92f9673b0b31ce7166046fa00e2e5d8cd9aef6a0f2559c95",
+        "script_diff_from_head": "clean"
+      }
+    }
+  ],
+  "authoritative_attempt": 1
+}
