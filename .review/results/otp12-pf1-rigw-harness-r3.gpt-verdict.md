@@ -20,3 +20,8 @@ The requested additive Grok review of the same immutable range separately
 reopened a mutation-guard defect. Codex's PASS therefore closes the mandatory
 reviewer pass for this snapshot but does not authorize a rig run; the accepted
 G3 guard finding must be fixed and the complete range reviewed again.
+
+Follow-up: G3 was fixed at `27c94b0`. A systematic Bash 3.2 audit then
+admitted and fixed the separate G4 lifecycle-guard gap at `7e9d2d5`. Both
+commits are mutation-proved and pass the full repository gate; a fresh review
+of the complete range remains required.

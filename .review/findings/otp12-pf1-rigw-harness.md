@@ -268,8 +268,8 @@ the path-construction/parity assertions are bare `[[ ... ]]` commands that can
 survive failure under macOS Bash 3.2. Grok's role-in-path mutation produced
 different physical destinations while `SELFTEST=1` still exited zero. The
 timing-anchor and launcher-journal mutations independently went red-to-green.
-See `.review/results/otp12-pf1-rigw-harness-r3.*`. G3 must be fixed and the
-complete range reviewed again before any rig activity.
+See `.review/results/otp12-pf1-rigw-harness-r3.*`. G3 was fixed at `27c94b0`;
+the complete range still requires fresh review before any rig activity.
 
 Coder follow-up audit admitted G4 as a separate High instrument-correctness
 finding. Destination-type, finalization-state, strict-cleanup-state,
@@ -285,3 +285,7 @@ intentional predicate returns are unchanged. Removing the production
 cleanup, or conditionally skipping completion-marker removal for a received
 signal each turns the Bash 3.2 self-test red at the intended assertion;
 restoring all three returns it to green.
+
+G4 was fixed at `7e9d2d5`. The full workspace format, strict-clippy, and test
+gate; 23 analyzer tests; Bash syntax and self-test; documentation gate; and
+diff check are green for both G3 and G4. No endpoint was contacted.

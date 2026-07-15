@@ -38,4 +38,10 @@ No rig run is authorized. G3 must make every path-construction/parity assertion
 fail explicitly, prove the role-in-path mutation red-to-green on Bash 3.2, and
 receive fresh complete Codex and additive Grok review.
 
+Fix: `27c94b0`. Every path construction, role equality, and CLI destination
+assertion now fails explicitly. Adding the initiator role to the physical path
+turns the macOS Bash 3.2 self-test red; restoring the one canonical path returns
+it to green. The follow-up systematic audit admitted the separate G4 lifecycle
+guard finding, fixed at `7e9d2d5`; fresh review must cover both commits.
+
 reviewer: grok-4.5
