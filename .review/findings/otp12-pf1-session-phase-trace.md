@@ -142,4 +142,13 @@ waits on its real threaded flush barrier, and parses the resulting prefixed JSON
 
 ## Reviewer comments
 
-(pending Codex review and requested Grok second eye)
+Codex (`gpt-5.6-sol`, xhigh; `codex-cli 0.144.4`) returned **PASS** with no
+findings for the exact range `4dba35a..5b8cc29`. It independently reran the
+focused phase guard, production environment/writer/flush guards, all 41 role
+tests, strict clippy/docs checks, and a corrected out-of-tree full workspace
+suite. It confirmed the +3 test inventory and the mutation logic. Raw review
+and adjudication:
+`.review/results/otp12-pf1-session-phase-trace.codex.md` and
+`.review/results/otp12-pf1-session-phase-trace.gpt-verdict.md`.
+
+Requested Grok second-eye review is pending.
