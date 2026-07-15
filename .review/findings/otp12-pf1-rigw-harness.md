@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Reopened — G7 fixed and guard-proved; fresh complete review pending.
+**Status**: Reopened — G8 accepted; fix pending.
 
 ## What
 
@@ -389,3 +389,18 @@ contacted. The first final workspace attempt hit the recorded macOS
 isolated test passed, then a complete quiet workspace rerun passed with two
 expected ignores. Fresh complete Codex plus additive Grok review remains
 required before rebuild or launcher retry.
+
+Round-7 reviewed the complete immutable range through
+`a53971574a8badb2ddf4ab952168fc7b2739ff89`. Additive Grok returned
+schema-valid `ACCEPTED`, exact SHAs, and `guard_confirmed=true` after
+independently driving both G7 worktree-comparison mutations red and restoring
+the Bash 3.2 self-test and all 23 analyzer tests green. It also reconfirmed one
+`Transfer` RPC, SOURCE-send/DESTINATION-receive semantics, role-invariant
+physical paths, and the shared eight-worker target under both initiator
+layouts. Mandatory Codex returned `NEEDS FIXES` with one new High finding,
+accepted as G8: ordinary Git object lookup honors replacement refs, so a
+replacement commit can preserve `HEAD_FULL` and a clean status while making
+the reviewed path resolve to substituted helper bytes. G7 would bless that
+substituted digest as reviewed. No endpoint was contacted. See the round-7
+raw reviews and adjudications under
+`.review/results/otp12-pf1-rigw-harness-r7.*`.
