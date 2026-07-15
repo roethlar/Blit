@@ -288,7 +288,7 @@ selftest() {
     local got expected rows source_first destination_first clock_probe identity_file
     local selftest_client_done selftest_deadline selftest_settle_done run_arm_source
     local manifest_tmp canonical_manifest landed_manifest tree_digest
-    local win_manifest_tmp win_manifest_payload
+    local win_manifest_tmp win_manifest_payload fetch_tmp compound_tmp
     local freshness_tmp freshness_case marker before analyzer_log
     local win_stop_source win_start_source finalize_tmp failure_tmp trap_calls trap_rc
     local signal signal_dir signal_rc contract_tmp on_exit_source append_tmp
@@ -1018,6 +1018,105 @@ PY
         die "Windows manifest payload contains a Bash command-substitution delimiter"
     fi
     rm -rf "$win_manifest_tmp"
+
+    fetch_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-win-fetch.XXXXXX")
+    printf 'G10\n' > "$fetch_tmp/expected"
+    (
+        unset -v local_path
+        wssh() { printf '%s' 'RzEwCg=='; }
+        sha256_win() { printf '%s\n' 'selftest-hash'; }
+        sha256_q() { printf '%s\n' 'selftest-hash'; }
+        session_void() { return 97; }
+        fetch_win_file 'C:/session/fixture.manifest' "$fetch_tmp/fetched"
+        cmp -s "$fetch_tmp/expected" "$fetch_tmp/fetched" || exit 98
+        [[ ! -e "$fetch_tmp/fetched.base64" ]] || exit 99
+        : > "$fetch_tmp/complete"
+    ) || {
+        rm -rf "$fetch_tmp"
+        die "Windows file fetch failed its executed Bash 3.2 contract"
+    }
+    [[ -f "$fetch_tmp/complete" ]] || {
+        rm -rf "$fetch_tmp"
+        die "Windows file fetch did not complete after deriving its local path"
+    }
+    rm -rf "$fetch_tmp"
+
+    compound_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-local-derivation.XXXXXX")
+    (
+        unset -v block
+        OUT_DIR="$compound_tmp/collect"
+        WIN_SESSION='D:/blit-test/rigw-pf1/selftest-local-derivation'
+        mkdir -p "$OUT_DIR"
+        fetch_win_file() {
+            [[ "$1" == "$WIN_SESSION/block_7/daemon.err" \
+                && "$2" == "$OUT_DIR/trace/block_7/windows-daemon.err" ]] \
+                || return 101
+            printf 'daemon log\n' > "$2"
+        }
+        wssh() {
+            [[ "$1" == *"Remove-Item -LiteralPath '$WIN_SESSION/block_7'"* ]]
+        }
+        collect_block_logs 7
+        [[ -f "$OUT_DIR/trace/block_7/windows-daemon.err" ]] || exit 102
+        : > "$compound_tmp/collect-complete"
+    ) || {
+        rm -rf "$compound_tmp"
+        die "Windows block-log path derivation failed under Bash 3.2"
+    }
+    [[ -f "$compound_tmp/collect-complete" ]] || {
+        rm -rf "$compound_tmp"
+        die "Windows block-log collection did not complete with its argument block"
+    }
+    (
+        unset -v block
+        OUT_DIR="$compound_tmp/q-start"
+        Q_MODULE="$compound_tmp/q-module"
+        Q_DAEMON="$compound_tmp/fake-daemon"
+        q_daemon_pid=""
+        nohup() { command sleep 30; }
+        nc() { return 0; }
+        session_void() { return 103; }
+        q_daemon_start 8 on g10-q-start
+        [[ -f "$OUT_DIR/trace/block_8/q-daemon.toml" ]] || exit 104
+        kill "$q_daemon_pid" 2>/dev/null || true
+        wait "$q_daemon_pid" 2>/dev/null || true
+        q_daemon_pid=""
+        : > "$compound_tmp/q-start-complete"
+    ) || {
+        rm -rf "$compound_tmp"
+        die "q daemon block-path derivation failed under Bash 3.2"
+    }
+    [[ -f "$compound_tmp/q-start-complete" ]] || {
+        rm -rf "$compound_tmp"
+        die "q daemon start did not complete with its argument block"
+    }
+    (
+        unset -v block state
+        SESSION_TAG=g10
+        PAIRS_PER_BLOCK=1
+        q_quiet_gate() { :; }
+        win_quiet_gate() { :; }
+        start_daemons() {
+            [[ "$1|$2|$3" == '9|on|g10-b9-on' ]] || return 105
+        }
+        run_arm() {
+            [[ "$1|$2|$4" == '9|on|g10-b9-on' ]] || return 106
+            printf '%s\n' "$5" >> "$compound_tmp/run-block-arms"
+        }
+        stop_daemons() { [[ "$1" == 9 ]]; }
+        run_block 9 on forward 1 1
+        [[ "$(wc -l < "$compound_tmp/run-block-arms" | tr -d ' ')" == 8 ]] \
+            || exit 107
+        : > "$compound_tmp/run-block-complete"
+    ) || {
+        rm -rf "$compound_tmp"
+        die "run-block identity derivation failed under Bash 3.2"
+    }
+    [[ -f "$compound_tmp/run-block-complete" ]] || {
+        rm -rf "$compound_tmp"
+        die "run block did not complete with its argument identity"
+    }
+    rm -rf "$compound_tmp"
 
     freshness_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-freshness.XXXXXX")
     reserve_evidence_dir "$freshness_tmp/new-evidence" \
@@ -2127,7 +2226,8 @@ if (\$cmd0 -and (@(Get-CimInstance Win32_Process -Filter \"Name='blit-daemon.exe
 }
 
 fetch_win_file() {
-    local remote="$1" local_path="$2" tmp="$local_path.base64" remote_hash local_hash
+    local remote="$1" local_path="$2"
+    local tmp="$local_path.base64" remote_hash local_hash
     wssh "
 \$b = [IO.File]::ReadAllBytes('$remote')
 [Convert]::ToBase64String(\$b)
@@ -2145,7 +2245,8 @@ PY
 }
 
 collect_block_logs() {
-    local block="$1" dir="$OUT_DIR/trace/block_$block"
+    local block="$1"
+    local dir="$OUT_DIR/trace/block_$block"
     mkdir -p "$dir"
     fetch_win_file "$WIN_SESSION/block_$block/daemon.err" "$dir/windows-daemon.err"
     wssh "Remove-Item -LiteralPath '$WIN_SESSION/block_$block' -Recurse -Force -ErrorAction Stop" \
@@ -2161,7 +2262,8 @@ stop_daemons() {
 }
 
 q_daemon_start() {
-    local block="$1" state="$2" run_id="$3" dir="$OUT_DIR/trace/block_$block"
+    local block="$1" state="$2" run_id="$3"
+    local dir="$OUT_DIR/trace/block_$block"
     mkdir -p "$dir"
     cat > "$dir/q-daemon.toml" <<EOF
 [daemon]
@@ -2551,7 +2653,8 @@ cell_order() {
 }
 
 run_block() {
-    local block="$1" state="$2" pass="$3" first="$4" last="$5" run_id="${SESSION_TAG}-b${block}-${state}"
+    local block="$1" state="$2" pass="$3" first="$4" last="$5"
+    local run_id="${SESSION_TAG}-b${block}-${state}"
     local round pair cells cell first_role second_role
     q_quiet_gate; win_quiet_gate
     start_daemons "$block" "$state" "$run_id"

@@ -1,7 +1,8 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Verified — round-9 independent Grok accepted G9; live gates pending.
+**Status**: Reopened — live-found G10 is fixed and guard-proved; fresh
+independent review is pending.
 
 ## What
 
@@ -224,9 +225,10 @@ new two-endpoint trace uncorrelatable.
 
 ## Known gaps
 
-- No rig datum is produced by this slice. The full live run waits for fresh
-  independent Grok or Claude review of G9, exact isolated builds, a successful
-  live launcher smoke, and a green endpoint preflight.
+- No rig datum is produced by this slice. Exact candidate `d57a86e` is retired
+  from further live use after G10; the full run waits for fresh independent
+  Grok or Claude review of the G10 candidate, new exact isolated builds, a
+  successful launcher smoke, and a green endpoint preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
   small-fixture/P2 work, phase report, and `0f922de` historical control before
@@ -503,3 +505,30 @@ worktree ended clean at the exact reviewed SHA and was removed. Review is
 closed; the exact reviewed candidate `d57a86e`, not the later verdict-record
 commit, is the only build allowed into launcher smoke, endpoint preflight, and
 the registered run. No endpoint was contacted during review.
+
+The exact `d57a86e` launcher smoke at
+`/Users/michael/Dev/blit_v2_d57a86e/logs/otp12pf-rigw-20260715T155415Z-launcher`
+passed build identity, fabric, direction-specific MSS, firewall, quiet-host,
+timer, and streamed Windows-result gates. It then exposed G10 in preflight,
+before helper staging, daemon launch, run registration, or a timed transfer:
+under macOS Bash 3.2 with `set -u`, `fetch_win_file` declared `local_path` and
+derived `tmp="$local_path.base64"` in the same `local` command, so the right-hand
+side expanded before `local_path` existed. Bash 3.2 passed status zero to the
+EXIT trap for this nounset failure; the harness correctly rejected that
+impossible success because strict success cleanup had not run and exited one.
+The Windows session and q evidence remain retained by the registered failure
+policy; no cleanup or endpoint-policy mutation was attempted.
+
+G10 splits argument assignment from the following dependent declaration in
+`fetch_win_file`. A class-wide audit of all 84 `local` declarations found and
+fixed the only three additional same-command dependencies: block-log path,
+q-daemon block path, and run-block identity. Those three happened to inherit
+caller variables through Bash dynamic scope in current call chains, which could
+hide the defect or substitute stale caller state. The Bash 3.2 self-test now
+executes each real function in isolation with the inherited names unset and
+pins exact output/path/identity behavior. Rejoining each of the four declarations
+individually turns its targeted guard red with the expected unbound-variable or
+wrong-derivation failure; restoring each split returns the complete self-test
+green. Bash syntax, format, strict clippy, all workspace tests, all 23 analyzer
+tests, the docs gate, and diff checks passed. The G10 fix commit and exact
+review candidate identity are pending.
