@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Reopened — round-6 F1/G7 Git-blob binding fix pending.
+**Status**: Reopened — G7 fixed and guard-proved; fresh complete review pending.
 
 ## What
 
@@ -365,3 +365,26 @@ by the immutable reviewed commit, with the working file rechecked against it
 immediately before copy. No endpoint was contacted. See the round-6 raw
 reviews and adjudications under
 `.review/results/otp12-pf1-rigw-harness-r6.*`.
+
+G7 derives the expected purge-helper SHA-256 from the blob addressed by
+`HEAD_FULL:scripts/windows/purge-standby.ps1`, records that blob identity, and
+requires the working file to match it. `stage_purge_helper` rechecks the
+working file immediately before SCP; the existing post-move and per-arm checks
+therefore compare against the Git-derived value rather than bytes adopted from
+the mutable working tree.
+
+The Bash 3.2 self-test commits one helper in a temporary repository, changes
+the working file, and requires the binding gate to reject it. Restoring the
+committed bytes pins both blob identity and SHA through the staging mock.
+Removing the blob/worktree comparison turns the mutable-file guard red;
+restoration returns the complete self-test green. A second fixture changes the
+working file during remote-session reservation, after binding; the adjacent
+pre-SCP recheck refuses it before the copy mock is reached. Removing that
+comparison turns the copy-reached guard red, and restoration returns green.
+Format, strict clippy, all workspace tests, Bash syntax/self-test, all 23
+analyzer tests, the docs gate, and diff checks passed. No endpoint was
+contacted. The first final workspace attempt hit the recorded macOS
+`blit_utils` daemon-start race once in `test_utils_find_dirs_only`; that
+isolated test passed, then a complete quiet workspace rerun passed with two
+expected ignores. Fresh complete Codex plus additive Grok review remains
+required before rebuild or launcher retry.

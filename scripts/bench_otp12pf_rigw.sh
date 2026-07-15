@@ -67,6 +67,7 @@ SESSION_TAG=$(date -u +%Y%m%dT%H%M%SZ).$$
 OUT_DIR=${OUT_DIR:-$REPO_ROOT/logs/otp12pf-rigw-$SESSION_TAG}
 WIN_SESSION="$WIN_ROOT/rigw-pf1/$SESSION_TAG"
 WIN_PURGE="$WIN_SESSION/purge-standby.ps1"
+WIN_PURGE_BLOB=""
 WIN_PURGE_HASH=""
 
 LOG="$OUT_DIR/bench.log"
@@ -295,7 +296,8 @@ selftest() {
     local stamp_tag stamp_ms stamp_rc stamp_ns stamp_extra stamp_teardown_ns
     local cross_clock_before cross_clock_after cross_clock_delta
     local launcher_tmp launcher_calls launcher_source main_source
-    local win_recovery_tmp purge_contract_tmp purge_hash drained preflight_source
+    local win_recovery_tmp purge_contract_tmp purge_repo purge_head purge_blob
+    local purge_hash drained preflight_source
     reject_registered_overrides
     if (
         SELFTEST=1
@@ -363,12 +365,79 @@ selftest() {
     [[ "$(q_peer_mac_from_arp en8 <<<"$arp_fixture")" == "34:5a:60:3e:78:8b" ]] \
         || die "q ARP parser did not select exactly the registered interface"
     purge_contract_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-purge-contract.XXXXXX")
-    printf '%s\n' '# reviewed purge helper fixture' > "$purge_contract_tmp/purge-standby.ps1"
-    purge_hash=$(sha256_q "$purge_contract_tmp/purge-standby.ps1")
+    purge_repo="$purge_contract_tmp/repo"
+    mkdir -p "$purge_repo/scripts/windows"
+    git -C "$purge_repo" init -q
+    printf '%s\n' '# reviewed purge helper fixture' \
+        > "$purge_repo/scripts/windows/purge-standby.ps1"
+    git -C "$purge_repo" add scripts/windows/purge-standby.ps1
+    git -C "$purge_repo" \
+        -c user.name='rig-W selftest' \
+        -c user.email='rigw-selftest@invalid' \
+        -c commit.gpgSign=false \
+        commit -q -m 'Record purge helper fixture'
+    purge_head=$(git -C "$purge_repo" rev-parse HEAD)
+    purge_blob=$(git -C "$purge_repo" \
+        rev-parse "$purge_head:scripts/windows/purge-standby.ps1")
+    purge_hash=$(git -C "$purge_repo" cat-file blob "$purge_blob" \
+        | shasum -a 256 | awk '{print $1}')
+
+    printf '%s\n' '# mutable working purge helper replacement' \
+        > "$purge_repo/scripts/windows/purge-standby.ps1"
+    if (
+        REPO_ROOT="$purge_repo"
+        HEAD_FULL="$purge_head"
+        WIN_PURGE_SOURCE="$purge_repo/scripts/windows/purge-standby.ps1"
+        WIN_PURGE_BLOB=""
+        WIN_PURGE_HASH=""
+        bind_purge_helper_to_reviewed_blob
+    ) >/dev/null 2>&1; then
+        rm -rf "$purge_contract_tmp"
+        die "mutable working purge helper was accepted as reviewed content"
+    fi
+    printf '%s\n' '# reviewed purge helper fixture' \
+        > "$purge_repo/scripts/windows/purge-standby.ps1"
+    rm -f "$purge_contract_tmp/wscp-reached"
+    if (
+        REPO_ROOT="$purge_repo"
+        HEAD_FULL="$purge_head"
+        WIN_PURGE_SOURCE="$purge_repo/scripts/windows/purge-standby.ps1"
+        WIN_SESSION='D:/blit-test/rigw-pf1/selftest-mutated'
+        WIN_PURGE="$WIN_SESSION/purge-standby.ps1"
+        WIN_PURGE_BLOB=""
+        WIN_PURGE_HASH=""
+        wscp() {
+            : > "$purge_contract_tmp/wscp-reached"
+        }
+        wssh() {
+            local command="$1"
+            if [[ "$command" == *"refusing existing Windows session tree"* ]]; then
+                printf '%s\n' '# helper changed after reviewed-blob binding' \
+                    > "$WIN_PURGE_SOURCE"
+                return 0
+            fi
+            return 90
+        }
+        bind_purge_helper_to_reviewed_blob
+        stage_purge_helper
+    ) >/dev/null 2>&1; then
+        rm -rf "$purge_contract_tmp"
+        die "working purge helper changed after binding but was accepted"
+    fi
+    [[ ! -e "$purge_contract_tmp/wscp-reached" ]] \
+        || {
+            rm -rf "$purge_contract_tmp"
+            die "purge-helper copy was reached after a post-binding change"
+        }
+    printf '%s\n' '# reviewed purge helper fixture' \
+        > "$purge_repo/scripts/windows/purge-standby.ps1"
     if ! (
-        WIN_PURGE_SOURCE="$purge_contract_tmp/purge-standby.ps1"
+        REPO_ROOT="$purge_repo"
+        HEAD_FULL="$purge_head"
+        WIN_PURGE_SOURCE="$purge_repo/scripts/windows/purge-standby.ps1"
         WIN_SESSION='D:/blit-test/rigw-pf1/selftest'
         WIN_PURGE="$WIN_SESSION/purge-standby.ps1"
+        WIN_PURGE_BLOB=""
         WIN_PURGE_HASH=""
         wscp() {
             [[ "$#" == 2 && "$1" == "$WIN_PURGE_SOURCE" \
@@ -391,8 +460,10 @@ selftest() {
             [[ "$command" == *"if (\$finalHash -cne '$purge_hash')"* ]] || return 97
             printf 'H|%s\n' "$purge_hash"
         }
+        bind_purge_helper_to_reviewed_blob
         stage_purge_helper
-        [[ "$WIN_PURGE_HASH" == "$purge_hash" ]] || exit 98
+        [[ "$WIN_PURGE_BLOB" == "$purge_blob" \
+            && "$WIN_PURGE_HASH" == "$purge_hash" ]] || exit 98
     ); then
         rm -rf "$purge_contract_tmp"
         die "reviewed Windows purge helper was not staged and hash-verified"
@@ -1363,21 +1434,46 @@ sha256_win() {
         | tr -d '\r' | tail -1
 }
 
-stage_purge_helper() {
-    local staged_tmp="$WIN_PURGE.tmp" remote_hash
+bind_purge_helper_to_reviewed_blob() {
+    local tracked_path='scripts/windows/purge-standby.ps1' blob_type working_hash
+    [[ -n "${HEAD_FULL:-}" ]] || die "cannot bind purge helper before reviewed commit identity"
+    [[ "$WIN_PURGE_SOURCE" == "$REPO_ROOT/$tracked_path" ]] \
+        || die "purge helper source is not the reviewed repository path"
     [[ -f "$WIN_PURGE_SOURCE" && ! -L "$WIN_PURGE_SOURCE" ]] \
         || die "reviewed Windows purge helper is absent or not a plain file"
-    WIN_PURGE_HASH=$(sha256_q "$WIN_PURGE_SOURCE") \
-        || die "cannot hash reviewed Windows purge helper"
-    [[ "$WIN_PURGE_HASH" =~ ^[0-9a-f]{64}$ ]] \
-        || die "reviewed Windows purge helper hash is malformed: $WIN_PURGE_HASH"
 
+    WIN_PURGE_BLOB=$(git -C "$REPO_ROOT" rev-parse "$HEAD_FULL:$tracked_path") \
+        || die "reviewed commit does not contain the Windows purge helper"
+    blob_type=$(git -C "$REPO_ROOT" cat-file -t "$WIN_PURGE_BLOB") \
+        || die "cannot inspect reviewed Windows purge helper blob"
+    [[ "$blob_type" == blob ]] || die "reviewed Windows purge helper object is $blob_type, not a blob"
+    WIN_PURGE_HASH=$(git -C "$REPO_ROOT" cat-file blob "$WIN_PURGE_BLOB" \
+        | shasum -a 256 | awk '{print $1}') \
+        || die "cannot hash reviewed Windows purge helper blob"
+    [[ "$WIN_PURGE_HASH" =~ ^[0-9a-f]{64}$ ]] \
+        || die "reviewed Windows purge helper blob hash is malformed: $WIN_PURGE_HASH"
+    working_hash=$(sha256_q "$WIN_PURGE_SOURCE") \
+        || die "cannot hash working Windows purge helper"
+    [[ "$working_hash" == "$WIN_PURGE_HASH" ]] \
+        || die "working Windows purge helper differs from reviewed blob $WIN_PURGE_BLOB"
+}
+
+stage_purge_helper() {
+    local staged_tmp="$WIN_PURGE.tmp" remote_hash working_hash
+    [[ -f "$WIN_PURGE_SOURCE" && ! -L "$WIN_PURGE_SOURCE" ]] \
+        || die "reviewed Windows purge helper is absent or not a plain file"
+    [[ -n "$WIN_PURGE_BLOB" && "$WIN_PURGE_HASH" =~ ^[0-9a-f]{64}$ ]] \
+        || die "reviewed Windows purge helper blob identity was not bound"
     WIN_SESSION_MAY_EXIST=1
     wssh "
 \$ErrorActionPreference = 'Stop'
 if (Test-Path -LiteralPath '$WIN_SESSION') { throw 'refusing existing Windows session tree' }
 New-Item -ItemType Directory -Path '$WIN_SESSION' -ErrorAction Stop | Out-Null
 " || die "cannot reserve fresh Windows session tree for reviewed purge helper"
+    working_hash=$(sha256_q "$WIN_PURGE_SOURCE") \
+        || die "cannot re-hash working Windows purge helper immediately before staging"
+    [[ "$working_hash" == "$WIN_PURGE_HASH" ]] \
+        || die "working Windows purge helper changed after reviewed-blob binding"
     wscp "$WIN_PURGE_SOURCE" "$WIN_SSH:$staged_tmp" \
         || die "cannot stage reviewed Windows purge helper"
     remote_hash=$(wssh "
@@ -1769,6 +1865,7 @@ provenance_gate() {
         || die "EXPECT_SHA=$EXPECT_SHA but isolated clone is $HEAD_FULL"
     [[ -z $(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal) ]] \
         || die "isolated q clone is dirty"
+    bind_purge_helper_to_reviewed_blob
     [[ -x "$Q_BLIT" && -x "$Q_DAEMON" ]] || die "q release binaries are absent"
     embeds_clean_q "$Q_BLIT" \
         || die "q client does not embed a clean +$HEAD_BUILD_ID"
