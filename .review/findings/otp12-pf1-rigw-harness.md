@@ -645,3 +645,4 @@ self-test, and all 23 analyzer tests green. A whole-script audit found no
 second empty user array; `SSH_MUX` is nonempty at every assignment. External
 Grok or Claude review remains before another live candidate. No retained
 evidence, Time Machine setting, or mount state was changed.
+G12 was fixed at `cd78ab945372c8fd3bfeed8f2502c13b6a919d5c`.
