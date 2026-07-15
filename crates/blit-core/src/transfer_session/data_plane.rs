@@ -39,7 +39,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
@@ -53,7 +53,8 @@ use crate::buffer::BufferPool;
 use crate::dial::{initial_stream_proposal, local_receiver_capacity, TransferDial};
 use crate::generated::{session_error::Code, CapacityProfile, DataPlaneGrant, FileHeader};
 use crate::remote::transfer::payload::{PreparedPayload, TransferPayload};
-use crate::remote::transfer::pipeline::execute_receive_pipeline;
+use crate::remote::transfer::pipeline::execute_receive_pipeline_with_phase;
+use crate::remote::transfer::session_phase::{BoundSessionPhaseTrace, SessionPhaseFields};
 use crate::remote::transfer::sink::{DataPlaneSink, SinkOutcome, TransferSink};
 use crate::remote::transfer::socket::{
     configure_data_socket, dial_data_plane, DATA_PLANE_ACCEPT_TIMEOUT, DATA_PLANE_TOKEN_TIMEOUT,
@@ -185,7 +186,7 @@ pub(super) struct ReceiveTotals {
 /// resize credentials through [`Self::arm`] and joins the accept loop at
 /// `SourceDone` via [`Self::finish`].
 pub(super) struct ResponderDataPlaneRun {
-    arm_tx: mpsc::UnboundedSender<Vec<u8>>,
+    arm_tx: mpsc::UnboundedSender<ResizeArm>,
     task: AbortOnDrop<Result<ReceiveTotals>>,
     /// The `session_token` half of every socket credential (the control
     /// loop does not need it, but keeping it here documents the shape).
@@ -197,7 +198,16 @@ pub(super) struct ResponderDataPlaneRun {
     pub(super) ceiling: usize,
 }
 
+struct ResizeArm {
+    epoch: u32,
+    sub_token: Vec<u8>,
+}
+
 impl ResponderDataPlane {
+    pub(super) fn session_token(&self) -> &[u8] {
+        &self.session_token
+    }
+
     /// The `DataPlaneGrant` this responder advertises in `SessionAccept`.
     pub(super) fn grant(&self) -> DataPlaneGrant {
         DataPlaneGrant {
@@ -225,11 +235,17 @@ impl ResponderDataPlane {
         self,
         sink: Arc<dyn TransferSink>,
         progress: Option<RemoteTransferProgress>,
+        phase_trace: Option<BoundSessionPhaseTrace>,
     ) -> ResponderDataPlaneRun {
         let ceiling = local_receiver_capacity().max_streams.max(1) as usize;
         let session_token = self.session_token.clone();
-        let (arm_tx, arm_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let task = AbortOnDrop::new(tokio::spawn(self.accept_loop(sink, progress, arm_rx)));
+        let (arm_tx, arm_rx) = mpsc::unbounded_channel::<ResizeArm>();
+        let task = AbortOnDrop::new(tokio::spawn(self.accept_loop(
+            sink,
+            progress,
+            phase_trace,
+            arm_rx,
+        )));
         ResponderDataPlaneRun {
             arm_tx,
             task,
@@ -242,7 +258,8 @@ impl ResponderDataPlane {
         self,
         sink: Arc<dyn TransferSink>,
         progress: Option<RemoteTransferProgress>,
-        arm_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+        phase_trace: Option<BoundSessionPhaseTrace>,
+        arm_rx: mpsc::UnboundedReceiver<ResizeArm>,
     ) -> Result<ReceiveTotals> {
         // Epoch-0 socket credential: session_token ‖ epoch0_sub_token.
         let mut epoch0 = self.session_token.clone();
@@ -254,10 +271,38 @@ impl ResponderDataPlane {
 
         // Accept the initial epoch-0 socket(s) first (the zero-knowledge
         // grant is always 1; the loop handles N for symmetry).
-        for _ in 0..self.initial_streams {
+        for socket_id in 0..self.initial_streams {
+            if let Some(trace) = &phase_trace {
+                trace.event(
+                    "socket_accept_begin",
+                    SessionPhaseFields {
+                        epoch: Some(0),
+                        socket: Some(socket_id),
+                        ..Default::default()
+                    },
+                );
+            }
             let socket = accept_authenticated(&self.listener, &epoch0).await?;
+            if let Some(trace) = &phase_trace {
+                trace.event(
+                    "socket_accept_end",
+                    SessionPhaseFields {
+                        epoch: Some(0),
+                        socket: Some(socket_id),
+                        ..Default::default()
+                    },
+                );
+            }
             streams += 1;
-            spawn_receive(&mut receives, socket, &sink, progress.clone());
+            spawn_receive(
+                &mut receives,
+                socket,
+                &sink,
+                progress.clone(),
+                phase_trace.clone(),
+                0,
+                socket_id,
+            );
         }
 
         // Resize ADDs: each arms a `session_token ‖ sub_token` credential
@@ -267,7 +312,7 @@ impl ResponderDataPlane {
         // the SOURCE only dials a credential it was acked for (and a dial
         // failure faults the whole session, aborting this task via
         // AbortOnDrop), an armed slot is always consumed — no orphan hang.
-        let mut armed: Vec<Vec<u8>> = Vec::new();
+        let mut armed: Vec<ResizeArm> = Vec::new();
         let mut arm_rx = Some(arm_rx);
         let mut no_more = false;
         loop {
@@ -292,7 +337,26 @@ impl ResponderDataPlane {
                 // loop sends right after arming), so the accept arm below
                 // always sees a populated `armed` set.
                 arm = arm_recv => match arm {
-                    Some(sub_token) => armed.push(sub_token),
+                    Some(arm) => {
+                        if let Some(trace) = &phase_trace {
+                            trace.event(
+                                "resize_arm_ready",
+                                SessionPhaseFields {
+                                    epoch: Some(arm.epoch),
+                                    ..Default::default()
+                                },
+                            );
+                            trace.event(
+                                "socket_accept_begin",
+                                SessionPhaseFields {
+                                    epoch: Some(arm.epoch),
+                                    socket: Some(0),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        armed.push(arm);
+                    }
                     // Arm sender dropped at SourceDone: no more resizes.
                     None => {
                         arm_rx = None;
@@ -306,10 +370,28 @@ impl ResponderDataPlane {
                 // select cancel can never truncate a half-read socket.
                 accepted = accept_raw(&self.listener), if !armed.is_empty() => {
                     let socket = accepted?;
-                    let socket =
+                    let (socket, epoch) =
                         authenticate_resize(socket, &self.session_token, &mut armed).await?;
+                    if let Some(trace) = &phase_trace {
+                        trace.event(
+                            "socket_accept_end",
+                            SessionPhaseFields {
+                                epoch: Some(epoch),
+                                socket: Some(0),
+                                ..Default::default()
+                            },
+                        );
+                    }
                     streams += 1;
-                    spawn_receive(&mut receives, socket, &sink, progress.clone());
+                    spawn_receive(
+                        &mut receives,
+                        socket,
+                        &sink,
+                        progress.clone(),
+                        phase_trace.clone(),
+                        epoch,
+                        0,
+                    );
                 }
                 joined = receives.join_next(), if !receives.is_empty() => {
                     let outcome = joined
@@ -332,8 +414,8 @@ impl ResponderDataPlaneRun {
     /// `session_token ‖ sub_token` is accepted. Returns false if the
     /// accept loop is gone (its receiver dropped) — the control loop then
     /// acks the resize as refused.
-    pub(super) fn arm(&self, sub_token: Vec<u8>) -> bool {
-        self.arm_tx.send(sub_token).is_ok()
+    pub(super) fn arm(&self, epoch: u32, sub_token: Vec<u8>) -> bool {
+        self.arm_tx.send(ResizeArm { epoch, sub_token }).is_ok()
     }
 
     /// Signal `SourceDone` (no more resizes) and join the accept loop for
@@ -358,11 +440,32 @@ fn spawn_receive(
     socket: TcpStream,
     sink: &Arc<dyn TransferSink>,
     progress: Option<RemoteTransferProgress>,
+    phase_trace: Option<BoundSessionPhaseTrace>,
+    epoch: u32,
+    socket_id: u32,
 ) {
+    if let Some(trace) = &phase_trace {
+        trace.event(
+            "socket_trace_attached",
+            SessionPhaseFields {
+                epoch: Some(epoch),
+                socket: Some(socket_id),
+                ..Default::default()
+            },
+        );
+    }
     let sink = Arc::clone(sink);
     receives.spawn(async move {
         let mut guarded = StallGuard::new(socket, TRANSFER_STALL_TIMEOUT);
-        execute_receive_pipeline(&mut guarded, sink, progress.as_ref()).await
+        execute_receive_pipeline_with_phase(
+            &mut guarded,
+            sink,
+            progress.as_ref(),
+            phase_trace,
+            epoch,
+            socket_id,
+        )
+        .await
     });
 }
 
@@ -421,8 +524,8 @@ async fn accept_authenticated(listener: &TcpListener, expected: &[u8]) -> Result
 async fn authenticate_resize(
     socket: TcpStream,
     session_token: &[u8],
-    armed: &mut Vec<Vec<u8>>,
-) -> Result<TcpStream> {
+    armed: &mut Vec<ResizeArm>,
+) -> Result<(TcpStream, u32)> {
     let mut socket = socket;
     let mut buf = vec![0u8; session_token.len() + SUB_TOKEN_LEN];
     let read = tokio::time::timeout(DATA_PLANE_TOKEN_TIMEOUT, socket.read_exact(&mut buf)).await;
@@ -445,10 +548,10 @@ async fn authenticate_resize(
         ));
     }
     let sub = &buf[session_token.len()..];
-    match armed.iter().position(|t| t.as_slice() == sub) {
+    match armed.iter().position(|arm| arm.sub_token.as_slice() == sub) {
         Some(idx) => {
-            armed.swap_remove(idx);
-            Ok(socket)
+            let epoch = armed.swap_remove(idx).epoch;
+            Ok((socket, epoch))
         }
         None => Err(dp_fault(
             "resize data socket presented an unarmed credential",
@@ -487,6 +590,7 @@ pub(super) struct InitiatorReceivePlaneRun {
     /// otp-10b-2). Applied to the epoch-0 dials at construction and to
     /// each epoch-N resize dial in [`Self::add_dialed_stream`].
     trace: bool,
+    phase_trace: Option<BoundSessionPhaseTrace>,
 }
 
 /// Dial the granted epoch-0 socket(s) and spawn one receive worker per
@@ -501,6 +605,7 @@ pub(super) async fn dial_destination_data_plane(
     sink: Arc<dyn TransferSink>,
     progress: Option<RemoteTransferProgress>,
     trace: bool,
+    phase_trace: Option<BoundSessionPhaseTrace>,
 ) -> Result<InitiatorReceivePlaneRun> {
     let initial = grant.initial_streams.max(1) as usize;
     // Epoch-0 handshake: session_token ‖ epoch0_sub_token.
@@ -510,13 +615,23 @@ pub(super) async fn dial_destination_data_plane(
 
     let mut receives: JoinSet<Result<SinkOutcome>> = JoinSet::new();
     let mut streams = 0usize;
-    for _ in 0..initial {
+    for socket_id in 0..initial {
         // `dial_data_plane` connects, applies the data-socket policy, and
         // writes the handshake credential — the same bounded dial the
         // SOURCE initiator uses (design-3: one owner for every client-side
         // data-plane dial, both directions).
         if trace {
             eprintln!("[data-plane-client] connecting to {addr} (receive)");
+        }
+        if let Some(phase) = &phase_trace {
+            phase.event(
+                "socket_dial_begin",
+                SessionPhaseFields {
+                    epoch: Some(0),
+                    socket: Some(socket_id as u32),
+                    ..Default::default()
+                },
+            );
         }
         let socket = dial_data_plane(&addr, &handshake, None)
             .await
@@ -526,8 +641,26 @@ pub(super) async fn dial_destination_data_plane(
                     format!("dialing session data plane (receive): {err:#}"),
                 )
             })?;
+        if let Some(phase) = &phase_trace {
+            phase.event(
+                "socket_dial_end",
+                SessionPhaseFields {
+                    epoch: Some(0),
+                    socket: Some(socket_id as u32),
+                    ..Default::default()
+                },
+            );
+        }
         streams += 1;
-        spawn_receive(&mut receives, socket, &sink, progress.clone());
+        spawn_receive(
+            &mut receives,
+            socket,
+            &sink,
+            progress.clone(),
+            phase_trace.clone(),
+            0,
+            socket_id as u32,
+        );
     }
     Ok(InitiatorReceivePlaneRun {
         receives,
@@ -538,6 +671,7 @@ pub(super) async fn dial_destination_data_plane(
         sink,
         progress,
         trace,
+        phase_trace,
     })
 }
 
@@ -550,12 +684,22 @@ impl InitiatorReceivePlaneRun {
     /// is a transport fault worth surfacing (the DESTINATION dials before
     /// it acks, so a failure faults the session before the SOURCE
     /// responder commits to accepting the socket).
-    pub(super) async fn add_dialed_stream(&mut self, sub_token: &[u8]) -> Result<()> {
+    pub(super) async fn add_dialed_stream(&mut self, epoch: u32, sub_token: &[u8]) -> Result<()> {
         let mut handshake = self.session_token.clone();
         handshake.extend_from_slice(sub_token);
         let addr = format!("{}:{}", self.host, self.tcp_port);
         if self.trace {
             eprintln!("[data-plane-client] connecting to {addr} (receive resize)");
+        }
+        if let Some(phase) = &self.phase_trace {
+            phase.event(
+                "socket_dial_begin",
+                SessionPhaseFields {
+                    epoch: Some(epoch),
+                    socket: Some(0),
+                    ..Default::default()
+                },
+            );
         }
         let socket = dial_data_plane(&addr, &handshake, None)
             .await
@@ -565,12 +709,25 @@ impl InitiatorReceivePlaneRun {
                     format!("dialing resize data plane (receive): {err:#}"),
                 )
             })?;
+        if let Some(phase) = &self.phase_trace {
+            phase.event(
+                "socket_dial_end",
+                SessionPhaseFields {
+                    epoch: Some(epoch),
+                    socket: Some(0),
+                    ..Default::default()
+                },
+            );
+        }
         self.streams += 1;
         spawn_receive(
             &mut self.receives,
             socket,
             &self.sink,
             self.progress.clone(),
+            self.phase_trace.clone(),
+            epoch,
+            0,
         );
         Ok(())
     }
@@ -675,6 +832,8 @@ pub(super) struct SourceDataPlane {
     /// mid-transfer in both cases; the control-lane resize choreography is
     /// identical — only this transport action flips (otp-5b-2).
     sockets: SourceSockets,
+    phase_trace: Option<BoundSessionPhaseTrace>,
+    queue_trace_armed: AtomicBool,
 }
 
 /// Dial the granted data plane and start the elastic send pipeline.
@@ -690,6 +849,7 @@ pub(super) async fn dial_source_data_plane(
     receiver_capacity: Option<&CapacityProfile>,
     source: Arc<dyn TransferSource>,
     instruments: &SourceInstruments,
+    phase_trace: Option<BoundSessionPhaseTrace>,
 ) -> Result<SourceDataPlane> {
     let initial = grant.initial_streams.max(1) as usize;
     // The byte sender's dial, bounded by the receiver's advertised
@@ -711,7 +871,17 @@ pub(super) async fn dial_source_data_plane(
     ));
     let trace = instruments.trace_data_plane;
     let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(initial);
-    for _ in 0..initial {
+    for socket_id in 0..initial {
+        if let Some(phase) = &phase_trace {
+            phase.event(
+                "socket_dial_begin",
+                SessionPhaseFields {
+                    epoch: Some(0),
+                    socket: Some(socket_id as u32),
+                    ..Default::default()
+                },
+            );
+        }
         let session = DataPlaneSession::connect(
             host,
             grant.tcp_port,
@@ -723,7 +893,18 @@ pub(super) async fn dial_source_data_plane(
             Arc::clone(&pool),
         )
         .await
-        .map_err(|err| dp_fault_io(&err, format!("dialing session data plane: {err:#}")))?;
+        .map_err(|err| dp_fault_io(&err, format!("dialing session data plane: {err:#}")))?
+        .with_session_phase_trace(phase_trace.clone(), 0, socket_id as u32);
+        if let Some(phase) = &phase_trace {
+            phase.event(
+                "socket_dial_end",
+                SessionPhaseFields {
+                    epoch: Some(0),
+                    socket: Some(socket_id as u32),
+                    ..Default::default()
+                },
+            );
+        }
         // The source-side sink never reads its dst_root (it only sends);
         // `root()` is consulted by the relay/receive case, not here.
         sinks.push(Arc::new(DataPlaneSink::new(
@@ -751,6 +932,7 @@ pub(super) async fn dial_source_data_plane(
         )
         .await
     }));
+    let queue_trace_armed = phase_trace.is_some();
     Ok(SourceDataPlane {
         payload_tx: Some(payload_tx),
         control_tx,
@@ -766,6 +948,8 @@ pub(super) async fn dial_source_data_plane(
             host: host.to_string(),
             tcp_port: grant.tcp_port,
         },
+        phase_trace,
+        queue_trace_armed: AtomicBool::new(queue_trace_armed),
     })
 }
 
@@ -787,6 +971,7 @@ pub(super) async fn accept_source_data_plane(
     receiver_capacity: Option<&CapacityProfile>,
     source: Arc<dyn TransferSource>,
     instruments: &SourceInstruments,
+    phase_trace: Option<BoundSessionPhaseTrace>,
 ) -> Result<SourceDataPlane> {
     let initial = bound.initial_streams.max(1) as usize;
     // The byte sender's dial, bounded by the receiver's advertised
@@ -807,8 +992,28 @@ pub(super) async fn accept_source_data_plane(
     ));
     let trace = instruments.trace_data_plane;
     let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(initial);
-    for _ in 0..initial {
+    for socket_id in 0..initial {
+        if let Some(phase) = &phase_trace {
+            phase.event(
+                "socket_accept_begin",
+                SessionPhaseFields {
+                    epoch: Some(0),
+                    socket: Some(socket_id as u32),
+                    ..Default::default()
+                },
+            );
+        }
         let socket = accept_authenticated(&bound.listener, &epoch0).await?;
+        if let Some(phase) = &phase_trace {
+            phase.event(
+                "socket_accept_end",
+                SessionPhaseFields {
+                    epoch: Some(0),
+                    socket: Some(socket_id as u32),
+                    ..Default::default()
+                },
+            );
+        }
         let session = DataPlaneSession::from_stream(
             socket,
             trace,
@@ -816,7 +1021,8 @@ pub(super) async fn accept_source_data_plane(
             dial.prefetch_count(),
             Arc::clone(&pool),
         )
-        .await;
+        .await
+        .with_session_phase_trace(phase_trace.clone(), 0, socket_id as u32);
         sinks.push(Arc::new(DataPlaneSink::new(
             session,
             Arc::clone(&source),
@@ -840,6 +1046,7 @@ pub(super) async fn accept_source_data_plane(
         )
         .await
     }));
+    let queue_trace_armed = phase_trace.is_some();
     Ok(SourceDataPlane {
         payload_tx: Some(payload_tx),
         control_tx,
@@ -854,10 +1061,16 @@ pub(super) async fn accept_source_data_plane(
         sockets: SourceSockets::Accept {
             listener: bound.listener,
         },
+        phase_trace,
+        queue_trace_armed: AtomicBool::new(queue_trace_armed),
     })
 }
 
 impl SourceDataPlane {
+    pub(super) fn phase_trace(&self) -> Option<&BoundSessionPhaseTrace> {
+        self.phase_trace.as_ref()
+    }
+
     /// The live dial (the byte sender owns it). The driver reads
     /// `live_streams()` for observability and calls `resize_settled` as
     /// each proposal completes.
@@ -908,12 +1121,22 @@ impl SourceDataPlane {
     /// flight (the driver's `pending_resize`) and epoch-0 is already
     /// accepted, so the next connection off the listener is exactly this
     /// resize's socket — verified against `session_token ‖ sub_token`.
-    pub(super) async fn add_stream(&self, sub_token: &[u8]) -> Result<()> {
+    pub(super) async fn add_stream(&self, epoch: u32, sub_token: &[u8]) -> Result<()> {
         let session = match &self.sockets {
             SourceSockets::Dial { host, tcp_port } => {
                 let mut handshake = self.session_token.clone();
                 handshake.extend_from_slice(sub_token);
-                DataPlaneSession::connect(
+                if let Some(phase) = &self.phase_trace {
+                    phase.event(
+                        "socket_dial_begin",
+                        SessionPhaseFields {
+                            epoch: Some(epoch),
+                            socket: Some(0),
+                            ..Default::default()
+                        },
+                    );
+                }
+                let session = DataPlaneSession::connect(
                     host,
                     *tcp_port,
                     &handshake,
@@ -925,11 +1148,43 @@ impl SourceDataPlane {
                 )
                 .await
                 .map_err(|err| dp_fault_io(&err, format!("dialing resize data socket: {err:#}")))?
+                .with_session_phase_trace(self.phase_trace.clone(), epoch, 0);
+                if let Some(phase) = &self.phase_trace {
+                    phase.event(
+                        "socket_dial_end",
+                        SessionPhaseFields {
+                            epoch: Some(epoch),
+                            socket: Some(0),
+                            ..Default::default()
+                        },
+                    );
+                }
+                session
             }
             SourceSockets::Accept { listener } => {
                 let mut expected = self.session_token.clone();
                 expected.extend_from_slice(sub_token);
+                if let Some(phase) = &self.phase_trace {
+                    phase.event(
+                        "socket_accept_begin",
+                        SessionPhaseFields {
+                            epoch: Some(epoch),
+                            socket: Some(0),
+                            ..Default::default()
+                        },
+                    );
+                }
                 let socket = accept_authenticated(listener, &expected).await?;
+                if let Some(phase) = &self.phase_trace {
+                    phase.event(
+                        "socket_accept_end",
+                        SessionPhaseFields {
+                            epoch: Some(epoch),
+                            socket: Some(0),
+                            ..Default::default()
+                        },
+                    );
+                }
                 DataPlaneSession::from_stream(
                     socket,
                     self.trace,
@@ -938,6 +1193,7 @@ impl SourceDataPlane {
                     Arc::clone(&self.pool),
                 )
                 .await
+                .with_session_phase_trace(self.phase_trace.clone(), epoch, 0)
             }
         };
         let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
@@ -960,9 +1216,31 @@ impl SourceDataPlane {
         let tx = self.payload_tx.as_ref().ok_or_else(|| {
             eyre::Report::new(SessionFault::internal("data plane already finished"))
         })?;
-        tx.send(payload)
+        if self.phase_trace.is_none() || !self.queue_trace_armed.load(Ordering::Relaxed) {
+            return tx
+                .send(payload)
+                .await
+                .map_err(|_| dp_fault("data-plane send pipeline closed before all payloads sent"));
+        }
+        let permit = tx
+            .reserve()
             .await
-            .map_err(|_| dp_fault("data-plane send pipeline closed before all payloads sent"))
+            .map_err(|_| dp_fault("data-plane send pipeline closed before all payloads sent"))?;
+        let queued_at = if self.queue_trace_armed.load(Ordering::Relaxed)
+            && self
+                .queue_trace_armed
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
+            self.phase_trace.as_ref().map(BoundSessionPhaseTrace::stamp)
+        } else {
+            None
+        };
+        permit.send(payload);
+        if let (Some(trace), Some(queued_at)) = (&self.phase_trace, queued_at) {
+            trace.first_payload_queued_at(queued_at);
+        }
+        Ok(())
     }
 
     /// Declare that every payload has been queued without waiting for the
@@ -986,10 +1264,14 @@ impl SourceDataPlane {
             .pipeline
             .take()
             .expect("SourceDataPlane::finish called once");
-        pipeline
+        let outcome = pipeline
             .join()
             .await
-            .map_err(|err| dp_fault(format!("data-plane send pipeline panicked: {err}")))?
+            .map_err(|err| dp_fault(format!("data-plane send pipeline panicked: {err}")))??;
+        if let Some(trace) = &self.phase_trace {
+            trace.event("data_plane_complete", SessionPhaseFields::default());
+        }
+        Ok(outcome)
     }
 }
 

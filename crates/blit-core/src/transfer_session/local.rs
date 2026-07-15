@@ -617,6 +617,7 @@ pub async fn run_local_session(
             progress: None,
             unreadable: Some(Arc::clone(&unreadable)),
             trace_data_plane: false,
+            session_phase_trace: Default::default(),
         },
     };
     let dest_cfg = DestinationSessionConfig {
@@ -890,6 +891,7 @@ mod tests {
                 progress: None,
                 unreadable: Some(Arc::clone(&unreadable)),
                 trace_data_plane: false,
+                session_phase_trace: Default::default(),
             },
         };
         let dest_cfg = DestinationSessionConfig {

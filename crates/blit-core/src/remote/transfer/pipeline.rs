@@ -437,7 +437,19 @@ pub async fn execute_receive_pipeline<R: AsyncRead + Unpin + Send>(
     sink: Arc<dyn TransferSink>,
     progress: Option<&RemoteTransferProgress>,
 ) -> Result<SinkOutcome> {
+    execute_receive_pipeline_with_phase(socket, sink, progress, None, 0, 0).await
+}
+
+pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + Send>(
+    socket: &mut R,
+    sink: Arc<dyn TransferSink>,
+    progress: Option<&RemoteTransferProgress>,
+    phase_trace: Option<crate::remote::transfer::session_phase::BoundSessionPhaseTrace>,
+    epoch: u32,
+    socket_id: u32,
+) -> Result<SinkOutcome> {
     let mut total = SinkOutcome::default();
+    let mut phase_armed = phase_trace.is_some();
 
     loop {
         let mut tag = [0u8; 1];
@@ -445,6 +457,13 @@ pub async fn execute_receive_pipeline<R: AsyncRead + Unpin + Send>(
             .read_exact(&mut tag)
             .await
             .context("reading data-plane record tag")?;
+
+        if phase_armed && tag[0] != DATA_PLANE_RECORD_END {
+            phase_armed = false;
+            if let Some(trace) = &phase_trace {
+                trace.socket_first_payload_received(epoch, socket_id);
+            }
+        }
 
         match tag[0] {
             DATA_PLANE_RECORD_END => break,

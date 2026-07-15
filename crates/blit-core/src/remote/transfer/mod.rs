@@ -8,6 +8,7 @@ pub mod pipeline;
 pub mod progress;
 pub mod resume_diff;
 pub mod session_client;
+pub mod session_phase;
 pub mod sink;
 pub mod socket;
 pub mod source;
@@ -37,6 +38,7 @@ pub use progress::{
     RemoteTransferProgress, StreamId, StreamProbe, StreamState, StreamTelemetry,
     StreamTelemetrySnapshot,
 };
+pub use session_phase::{SessionPhaseEvent, SessionPhaseRole, SessionPhaseTrace};
 pub use sink::{DataPlaneSink, FsSinkConfig, FsTransferSink, NullSink, SinkOutcome, TransferSink};
 pub use socket::{configure_data_socket, DATA_PLANE_ACCEPT_TIMEOUT, DATA_PLANE_TOKEN_TIMEOUT};
 pub use tcp_info::{sample_stream as sample_tcp_info, TcpInfoSample};

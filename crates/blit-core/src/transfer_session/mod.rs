@@ -46,6 +46,9 @@ use crate::generated::{
 use crate::manifest::{header_transfer_status, CompareMode, CompareOptions, FileStatus};
 use crate::remote::transfer::diff_planner;
 use crate::remote::transfer::payload::{PreparedPayload, TransferPayload};
+use crate::remote::transfer::session_phase::{
+    BoundSessionPhaseTrace, SessionPhaseFields, SessionPhaseRole, SessionPhaseTrace,
+};
 use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
 use crate::remote::transfer::source::{FsTransferSource, TransferSource};
 use crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT;
@@ -195,8 +198,9 @@ pub struct SourceSessionConfig {
 
 /// Observability hooks a SOURCE-side caller can attach to its session
 /// (otp-10a — the push-shaped verb's progress line and `blit move`'s
-/// unreadable-scan gate ride these). Everything defaults to off; the
-/// session's behavior on the wire is identical either way.
+/// unreadable-scan gate ride these). Everything is inactive by default
+/// unless an explicit process-level probe flag enables it; the session's
+/// behavior on the wire is identical either way.
 #[derive(Clone, Default)]
 pub struct SourceInstruments {
     /// w6-1 progress events, reported exactly where the old push driver
@@ -214,6 +218,10 @@ pub struct SourceInstruments {
     /// Emit `[data-plane-client]` connect traces on the data-plane
     /// sockets this SOURCE acquires (`--trace-data-plane`).
     pub trace_data_plane: bool,
+    /// Low-frequency, structured session timing events used by pf-1.
+    /// Disabled by default; production probes may also enable it with
+    /// `BLIT_TRACE_SESSION_PHASES=1` on each endpoint.
+    pub session_phase_trace: SessionPhaseTrace,
 }
 
 pub struct DestinationSessionConfig {
@@ -244,8 +252,9 @@ pub struct DestinationSessionConfig {
 
 /// Observability hooks a DESTINATION-side caller can attach to its
 /// session (otp-10b-2 — the pull-shaped verb's progress line rides
-/// these; `byte_progress` predates them, otp-9a). Everything defaults
-/// to off; the session's behavior on the wire is identical either way.
+/// these; `byte_progress` predates them, otp-9a). Everything is inactive
+/// by default unless an explicit process-level probe flag enables it; the
+/// session's behavior on the wire is identical either way.
 #[derive(Clone, Default)]
 pub struct DestinationInstruments {
     /// w6-1 progress events from this end's receive side:
@@ -265,6 +274,10 @@ pub struct DestinationInstruments {
     /// A DESTINATION responder accepts rather than dials; the flag is
     /// inert there.
     pub trace_data_plane: bool,
+    /// Low-frequency, structured session timing events used by pf-1.
+    /// Kept separate from the per-file `trace_data_plane` output so the
+    /// observer does not dominate a small-file timing run.
+    pub session_phase_trace: SessionPhaseTrace,
 }
 
 /// A session-terminating fault: either end refusing, aborting, or
@@ -653,6 +666,39 @@ struct Negotiated {
     responder_data_plane: Option<data_plane::ResponderDataPlane>,
 }
 
+fn bind_session_phase_trace(
+    trace: SessionPhaseTrace,
+    negotiated: &Negotiated,
+    endpoint_role: SessionPhaseRole,
+) -> Option<BoundSessionPhaseTrace> {
+    let session_token = negotiated
+        .responder_data_plane
+        .as_ref()
+        .map(data_plane::ResponderDataPlane::session_token)
+        .or_else(|| {
+            negotiated
+                .accept
+                .data_plane
+                .as_ref()
+                .map(|grant| grant.session_token.as_slice())
+        })?;
+    let initiator_role = match TransferRole::try_from(negotiated.open.initiator_role).ok()? {
+        TransferRole::Source => SessionPhaseRole::Source,
+        TransferRole::Destination => SessionPhaseRole::Destination,
+        TransferRole::Unspecified => return None,
+    };
+    trace
+        .or_from_env()
+        .bind(session_token, endpoint_role, initiator_role)
+}
+
+async fn flush_session_phase_trace(trace: Option<&BoundSessionPhaseTrace>) {
+    let Some(trace) = trace.cloned() else {
+        return;
+    };
+    let _ = tokio::task::spawn_blocking(move || trace.flush()).await;
+}
+
 /// HELLO both ways, exact match (D-2026-07-05-2). First frame each
 /// direction; no ordering between the two directions. Factored out so a
 /// serving end (`run_responder`) can exchange HELLO, then read the OPEN
@@ -1030,6 +1076,11 @@ async fn drive_source(
     transport: FrameTransport,
     source: Arc<dyn TransferSource>,
 ) -> Result<TransferSummary> {
+    let phase_trace = bind_session_phase_trace(
+        instruments.session_phase_trace.clone(),
+        &negotiated,
+        SessionPhaseRole::Source,
+    );
     // A SOURCE responder (pull, otp-5b) carries a bound listener to accept
     // its send sockets on; a SOURCE initiator (push) has none and dials the
     // grant it received instead. Take it here so the send half owns it.
@@ -1058,6 +1109,7 @@ async fn drive_source(
         // push-direction progress denominator (contract on
         // `ProgressEvent::ManifestBatch`: "push: need-list batches").
         instruments.progress.clone(),
+        phase_trace.clone(),
         SourceEventSender {
             tx: event_tx,
             fault_signal: fault_tx,
@@ -1076,6 +1128,7 @@ async fn drive_source(
         &manifest_sent,
         event_rx,
         fault_rx,
+        phase_trace,
     )
     .await
     {
@@ -1101,8 +1154,10 @@ async fn source_recv_half(
     manifest_sent: Arc<AtomicBool>,
     resume_session: bool,
     progress: Option<RemoteTransferProgress>,
+    phase_trace: Option<BoundSessionPhaseTrace>,
     events: SourceEventSender,
 ) {
+    let mut need_batch_seq = 0u64;
     loop {
         let received = match rx.recv().await {
             Ok(Some(f)) => f,
@@ -1121,6 +1176,17 @@ async fn source_recv_half(
         };
         match received.frame {
             Some(Frame::NeedBatch(batch)) => {
+                if let Some(trace) = &phase_trace {
+                    trace.event(
+                        "need_batch_received",
+                        SessionPhaseFields {
+                            batch: Some(need_batch_seq),
+                            count: Some(batch.entries.len() as u64),
+                            ..Default::default()
+                        },
+                    );
+                    need_batch_seq += 1;
+                }
                 // otp-10a: the need list is the push-direction progress
                 // denominator ("N of M files"). Entries are unique by
                 // contract (a duplicate need faults below), so every
@@ -1196,6 +1262,17 @@ async fn source_recv_half(
                 // The destination's response to a shape-resize proposal
                 // (otp-4b-2). Forward it to the send half, which owns the
                 // dial and dials the epoch-N socket on `accepted`.
+                if let Some(trace) = &phase_trace {
+                    trace.event(
+                        "resize_ack_received",
+                        SessionPhaseFields {
+                            epoch: Some(ack.epoch),
+                            live_streams: Some(ack.effective_stream_count),
+                            accepted: Some(ack.accepted),
+                            ..Default::default()
+                        },
+                    );
+                }
                 let _ = events.send(SourceEvent::ResizeAck(ack));
             }
             Some(Frame::Summary(summary)) => {
@@ -1239,6 +1316,7 @@ async fn source_send_half(
     manifest_sent: &AtomicBool,
     mut events: mpsc::UnboundedReceiver<SourceEvent>,
     mut fault_signal: watch::Receiver<Option<SessionFault>>,
+    phase_trace: Option<BoundSessionPhaseTrace>,
 ) -> Result<TransferSummary> {
     let mut pending: Vec<FileHeader> = Vec::new();
     let mut resume: ResumeSendState = ResumeSendState::default();
@@ -1264,6 +1342,7 @@ async fn source_send_half(
                 negotiated.open.receiver_capacity.as_ref(),
                 Arc::clone(&source),
                 &instruments,
+                phase_trace.clone(),
             )
             .await?,
         ),
@@ -1283,6 +1362,7 @@ async fn source_send_half(
                         negotiated.accept.receiver_capacity.as_ref(),
                         Arc::clone(&source),
                         &instruments,
+                        phase_trace.clone(),
                     )
                     .await?,
                 )
@@ -1376,10 +1456,25 @@ async fn source_send_half(
         .expect("unreadable list lock poisoned")
         .is_empty();
     log::debug!("session source manifest complete: {scanned} entries, complete={scan_complete}");
+    if let Some(trace) = &phase_trace {
+        trace.event(
+            "manifest_complete_send_begin",
+            SessionPhaseFields::default(),
+        );
+    }
     tx.send(frame(Frame::ManifestComplete(ManifestComplete {
         scan_complete,
     })))
     .await?;
+    if let Some(trace) = &phase_trace {
+        trace.event(
+            "manifest_complete_sent",
+            SessionPhaseFields {
+                count: Some(scanned as u64),
+                ..Default::default()
+            },
+        );
+    }
     manifest_sent.store(true, Ordering::Release);
 
     // Payload phase. The byte carrier is either the TCP data plane
@@ -1394,6 +1489,7 @@ async fn source_send_half(
     } else {
         Vec::new()
     };
+    let mut planner_batch_seq = 0u64;
     loop {
         drain_ready_source_events(
             &mut events,
@@ -1418,8 +1514,30 @@ async fn source_send_half(
                     // the one-RTT-per-epoch ramp on the first-byte path.
                     maybe_propose_resize(dp, tx, needed_bytes, needed_count, &mut pending_resize)
                         .await?;
+                    let batch_count = batch.len() as u64;
+                    if let Some(trace) = &phase_trace {
+                        trace.event(
+                            "planner_begin",
+                            SessionPhaseFields {
+                                batch: Some(planner_batch_seq),
+                                count: Some(batch_count),
+                                ..Default::default()
+                            },
+                        );
+                    }
                     let payloads =
                         diff_planner::plan_push_payloads(batch, source.root(), plan_options)?;
+                    if let Some(trace) = &phase_trace {
+                        trace.event(
+                            "planner_end",
+                            SessionPhaseFields {
+                                batch: Some(planner_batch_seq),
+                                count: Some(payloads.len() as u64),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    planner_batch_seq += 1;
                     queue_payloads_while_servicing_events(
                         payloads,
                         &mut events,
@@ -1624,7 +1742,13 @@ async fn source_send_half(
     // CLOSING: the destination is the scorer; the next event must be
     // its summary (the receive half ends after forwarding it).
     match events.recv().await {
-        Some(SourceEvent::Summary(summary)) => Ok(summary),
+        Some(SourceEvent::Summary(summary)) => {
+            if let Some(trace) = &phase_trace {
+                trace.event("summary_received", SessionPhaseFields::default());
+            }
+            flush_session_phase_trace(phase_trace.as_ref()).await;
+            Ok(summary)
+        }
         Some(SourceEvent::Fault(fault)) => Err(eyre::Report::new(fault)),
         Some(SourceEvent::Need(h) | SourceEvent::ResumeNeed(h)) => {
             Err(eyre::Report::new(SessionFault::protocol_violation(
@@ -1803,14 +1927,38 @@ async fn process_source_event(
                 }
             };
             if ack.accepted {
-                dp.add_stream(&pending_r.sub_token).await?;
+                dp.add_stream(pending_r.epoch, &pending_r.sub_token).await?;
                 dp.dial()
                     .resize_settled(pending_r.epoch, pending_r.target_streams as usize, true);
+                if let Some(trace) = dp.phase_trace() {
+                    trace.event(
+                        "source_settled",
+                        SessionPhaseFields {
+                            epoch: Some(pending_r.epoch),
+                            target_streams: Some(pending_r.target_streams),
+                            live_streams: Some(dp.dial().live_streams() as u32),
+                            accepted: Some(true),
+                            ..Default::default()
+                        },
+                    );
+                }
                 // Ramp one stream per accepted epoch: propose the next ADD.
                 maybe_propose_resize(dp, tx, *needed_bytes, *needed_count, pending_resize).await
             } else {
                 dp.dial()
                     .resize_settled(pending_r.epoch, dp.dial().live_streams(), false);
+                if let Some(trace) = dp.phase_trace() {
+                    trace.event(
+                        "source_settled",
+                        SessionPhaseFields {
+                            epoch: Some(pending_r.epoch),
+                            target_streams: Some(pending_r.target_streams),
+                            live_streams: Some(dp.dial().live_streams() as u32),
+                            accepted: Some(false),
+                            ..Default::default()
+                        },
+                    );
+                }
                 // A refusal is terminal for this shape ramp. Retrying the
                 // same unattainable target under a fresh epoch would loop
                 // forever; the settled live set still carries the transfer.
@@ -1840,6 +1988,28 @@ async fn maybe_propose_resize(
         return Ok(());
     }
     if let Some(proposal) = dp.propose_resize(needed_bytes, needed_count)? {
+        if let Some(trace) = dp.phase_trace() {
+            trace.event(
+                "resize_proposed",
+                SessionPhaseFields {
+                    epoch: Some(proposal.epoch),
+                    target_streams: Some(proposal.target_streams),
+                    live_streams: Some(dp.dial().live_streams() as u32),
+                    ..Default::default()
+                },
+            );
+        }
+        if let Some(trace) = dp.phase_trace() {
+            trace.event(
+                "resize_send_begin",
+                SessionPhaseFields {
+                    epoch: Some(proposal.epoch),
+                    target_streams: Some(proposal.target_streams),
+                    live_streams: Some(dp.dial().live_streams() as u32),
+                    ..Default::default()
+                },
+            );
+        }
         tx.send(frame(Frame::Resize(DataPlaneResize {
             op: DataPlaneResizeOp::Add as i32,
             epoch: proposal.epoch,
@@ -1847,6 +2017,17 @@ async fn maybe_propose_resize(
             sub_token: proposal.sub_token.clone(),
         })))
         .await?;
+        if let Some(trace) = dp.phase_trace() {
+            trace.event(
+                "resize_sent",
+                SessionPhaseFields {
+                    epoch: Some(proposal.epoch),
+                    target_streams: Some(proposal.target_streams),
+                    live_streams: Some(dp.dial().live_streams() as u32),
+                    ..Default::default()
+                },
+            );
+        }
         *pending_resize = Some(proposal);
     }
     Ok(())
@@ -2636,6 +2817,11 @@ async fn destination_session(
     instruments: DestinationInstruments,
     local_apply: Option<local::LocalApply>,
 ) -> Result<DestinationOutcome> {
+    let phase_trace = bind_session_phase_trace(
+        instruments.session_phase_trace.clone(),
+        &negotiated,
+        SessionPhaseRole::Destination,
+    );
     // otp-10b-2: the receive side's w6-1 progress lane. Need batches are
     // the denominator (reported where they're emitted, below); per-file
     // events ride each carrier's record handling.
@@ -2773,7 +2959,7 @@ async fn destination_session(
             // DESTINATION responder (push, otp-4b): accept + receive.
             Some(rdp) => {
                 let initial = rdp.initial_streams() as usize;
-                let run = rdp.spawn(recv_sink, progress.clone());
+                let run = rdp.spawn(recv_sink, progress.clone(), phase_trace.clone());
                 let ceiling = run.ceiling;
                 (
                     Some(data_plane::DestRecvPlane::Responder(run)),
@@ -2792,6 +2978,7 @@ async fn destination_session(
                         recv_sink,
                         progress.clone(),
                         instruments.trace_data_plane,
+                        phase_trace.clone(),
                     )
                     .await?;
                     // otp-5b-2: the pull data plane resizes too. Seed
@@ -2860,6 +3047,7 @@ async fn destination_session(
     let mut manifest_complete = false;
     let mut files_written: u64 = 0;
     let mut bytes_written: u64 = 0;
+    let mut need_batch_seq = 0u64;
 
     // otp-11: the LOCAL carrier's apply pipeline — spawned before the
     // loop so applies run concurrent with the diff, exactly as the
@@ -2918,12 +3106,17 @@ async fn destination_session(
                             &outstanding,
                             &mut needed_paths,
                             progress.as_ref(),
+                            phase_trace.as_ref(),
+                            &mut need_batch_seq,
                         )
                         .await?;
                     }
                 }
             }
             Some(Frame::ManifestComplete(complete)) => {
+                if let Some(trace) = &phase_trace {
+                    trace.event("manifest_complete_received", SessionPhaseFields::default());
+                }
                 if manifest_complete {
                     return Err(violation("duplicate ManifestComplete".into()));
                 }
@@ -2982,6 +3175,8 @@ async fn destination_session(
                         &outstanding,
                         &mut needed_paths,
                         progress.as_ref(),
+                        phase_trace.as_ref(),
+                        &mut need_batch_seq,
                     )
                     .await?;
                 }
@@ -3147,6 +3342,17 @@ async fn destination_session(
                 }
             }
             Some(Frame::Resize(resize)) => {
+                if let Some(trace) = &phase_trace {
+                    trace.event(
+                        "resize_received",
+                        SessionPhaseFields {
+                            epoch: Some(resize.epoch),
+                            target_streams: Some(resize.target_stream_count),
+                            live_streams: Some(resize_live as u32),
+                            ..Default::default()
+                        },
+                    );
+                }
                 // sf-2 shape correction (otp-4b-2 push, otp-5b-2 pull): the
                 // SOURCE proposes one ADD; the DESTINATION grows its receive
                 // set (bump `resize_live`) and acks so the SOURCE completes
@@ -3189,10 +3395,46 @@ async fn destination_session(
                         .expect("data plane present (checked above)")
                     {
                         data_plane::DestRecvPlane::Responder(run) => {
-                            run.arm(resize.sub_token.clone())
+                            if let Some(trace) = &phase_trace {
+                                trace.event(
+                                    "resize_arm_queue_begin",
+                                    SessionPhaseFields {
+                                        epoch: Some(resize.epoch),
+                                        target_streams: Some(resize.target_stream_count),
+                                        ..Default::default()
+                                    },
+                                );
+                            }
+                            let armed = run.arm(resize.epoch, resize.sub_token.clone());
+                            if armed {
+                                if let Some(trace) = &phase_trace {
+                                    trace.event(
+                                        "destination_prepared",
+                                        SessionPhaseFields {
+                                            action: Some("arm_queued"),
+                                            epoch: Some(resize.epoch),
+                                            target_streams: Some(resize.target_stream_count),
+                                            ..Default::default()
+                                        },
+                                    );
+                                }
+                            }
+                            armed
                         }
                         data_plane::DestRecvPlane::Initiator(run) => {
-                            run.add_dialed_stream(&resize.sub_token).await?;
+                            run.add_dialed_stream(resize.epoch, &resize.sub_token)
+                                .await?;
+                            if let Some(trace) = &phase_trace {
+                                trace.event(
+                                    "destination_prepared",
+                                    SessionPhaseFields {
+                                        action: Some("dial_complete"),
+                                        epoch: Some(resize.epoch),
+                                        target_streams: Some(resize.target_stream_count),
+                                        ..Default::default()
+                                    },
+                                );
+                            }
                             true
                         }
                     }
@@ -3207,6 +3449,17 @@ async fn destination_session(
                 } else {
                     resize_live as u32
                 };
+                if let Some(trace) = &phase_trace {
+                    trace.event(
+                        "resize_ack_send_begin",
+                        SessionPhaseFields {
+                            epoch: Some(resize.epoch),
+                            live_streams: Some(effective),
+                            accepted: Some(accepted),
+                            ..Default::default()
+                        },
+                    );
+                }
                 transport
                     .send(frame(Frame::ResizeAck(DataPlaneResizeAck {
                         epoch: resize.epoch,
@@ -3214,6 +3467,17 @@ async fn destination_session(
                         accepted,
                     })))
                     .await?;
+                if let Some(trace) = &phase_trace {
+                    trace.event(
+                        "resize_ack_sent",
+                        SessionPhaseFields {
+                            epoch: Some(resize.epoch),
+                            live_streams: Some(effective),
+                            accepted: Some(accepted),
+                            ..Default::default()
+                        },
+                    );
+                }
             }
             Some(Frame::SourceDone(_)) => {
                 if !manifest_complete {
@@ -3263,6 +3527,9 @@ async fn destination_session(
                 let (in_stream_carrier_used, data_plane_streams) = match data_plane_recv.take() {
                     Some(run) => {
                         let totals = run.finish().await?;
+                        if let Some(trace) = &phase_trace {
+                            trace.event("data_plane_complete", SessionPhaseFields::default());
+                        }
                         files_written = totals.outcome.files_written as u64;
                         bytes_written = totals.outcome.bytes_written;
                         (false, Some(totals.streams))
@@ -3395,7 +3662,14 @@ async fn destination_session(
                     in_stream_carrier_used,
                     files_resumed: files_resumed.load(Ordering::Relaxed),
                 };
+                if let Some(trace) = &phase_trace {
+                    trace.event("summary_send_begin", SessionPhaseFields::default());
+                }
                 transport.send(frame(Frame::Summary(summary))).await?;
+                if let Some(trace) = &phase_trace {
+                    trace.event("summary_sent", SessionPhaseFields::default());
+                }
+                flush_session_phase_trace(phase_trace.as_ref()).await;
                 return Ok(DestinationOutcome {
                     summary,
                     needed_paths,
@@ -3527,6 +3801,8 @@ async fn diff_chunk_and_send_needs(
     // ManifestBatch (files this DESTINATION requested), mirroring what
     // the push SOURCE reports per NeedBatch received.
     progress: Option<&RemoteTransferProgress>,
+    phase_trace: Option<&BoundSessionPhaseTrace>,
+    need_batch_seq: &mut u64,
 ) -> Result<()> {
     if chunk.is_empty() {
         return Ok(());
@@ -3570,9 +3846,32 @@ async fn diff_chunk_and_send_needs(
     if let Some(p) = progress {
         p.report_manifest_batch(entries.len());
     }
+    let batch = *need_batch_seq;
+    let count = entries.len() as u64;
+    if let Some(trace) = phase_trace {
+        trace.event(
+            "need_batch_send_begin",
+            SessionPhaseFields {
+                batch: Some(batch),
+                count: Some(count),
+                ..Default::default()
+            },
+        );
+    }
     transport
         .send(frame(Frame::NeedBatch(NeedBatch { entries })))
         .await?;
+    if let Some(trace) = phase_trace {
+        trace.event(
+            "need_batch_sent",
+            SessionPhaseFields {
+                batch: Some(batch),
+                count: Some(count),
+                ..Default::default()
+            },
+        );
+    }
+    *need_batch_seq += 1;
     // otp-7a: each resume-flagged grant's hash list follows its batch on
     // the same ordered lane — the source HOLDS the need until the list
     // arrives, and ordered delivery guarantees every list precedes this

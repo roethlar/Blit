@@ -10,10 +10,10 @@
 //! this suite pins that the one code path really is
 //! initiator-indifferent.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use blit_core::generated::transfer_frame::Frame;
@@ -25,14 +25,15 @@ use blit_core::generated::{
 };
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::transfer::{
-    PreparedPayload, ProgressEvent, RemoteTransferProgress, TransferPayload,
+    PreparedPayload, ProgressEvent, RemoteTransferProgress, SessionPhaseEvent, SessionPhaseRole,
+    SessionPhaseTrace, TransferPayload,
 };
 use blit_core::transfer_plan::PlanOptions;
 use blit_core::transfer_session::transport::{in_process_pair, FrameRx, FrameTransport};
 use blit_core::transfer_session::{
-    run_destination, run_source, DestinationOutcome, DestinationSessionConfig, DestinationTarget,
-    HelloConfig, SessionEndpoint, SessionFault, SourceInstruments, SourceSessionConfig,
-    CONTRACT_VERSION,
+    run_destination, run_source, DestinationInstruments, DestinationOutcome,
+    DestinationSessionConfig, DestinationTarget, HelloConfig, SessionEndpoint, SessionFault,
+    SourceInstruments, SourceSessionConfig, CONTRACT_VERSION,
 };
 
 const SUITE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -1394,6 +1395,467 @@ async fn payload_does_not_wait_for_shape_ramp_under_either_initiator() {
         assert_eq!(summary.files_transferred, FILE_COUNT as u64);
         assert_eq!(outcome.data_plane_streams, Some(TARGET_STREAMS));
         assert_trees_identical(&src_root, &dst_root);
+    }
+}
+
+struct PhaseTraceCase {
+    summary: TransferSummary,
+    needed_paths: Vec<String>,
+    data_plane_streams: Option<usize>,
+    tree: BTreeMap<String, Vec<u8>>,
+    events: Vec<SessionPhaseEvent>,
+}
+
+async fn run_phase_trace_case(initiator_role: TransferRole, trace_enabled: bool) -> PhaseTraceCase {
+    const FILE_COUNT: usize = 256;
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&src_root).unwrap();
+    std::fs::create_dir_all(&dst_root).unwrap();
+    for i in 0..FILE_COUNT {
+        std::fs::write(src_root.join(format!("f{i:04}.bin")), b"x").unwrap();
+    }
+
+    let captured: Arc<Mutex<Vec<SessionPhaseEvent>>> = Arc::default();
+    let phase_trace = if trace_enabled {
+        let sink = Arc::clone(&captured);
+        SessionPhaseTrace::capture("phase-guard", move |event| {
+            sink.lock()
+                .expect("phase capture lock poisoned")
+                .push(event);
+        })
+    } else {
+        SessionPhaseTrace::disabled()
+    };
+
+    let open = SessionOpen {
+        initiator_role: initiator_role as i32,
+        compare_mode: ComparisonMode::SizeMtime as i32,
+        in_stream_bytes: false,
+        ..Default::default()
+    };
+    let (source_endpoint, dest_endpoint, source_host, dest_host) = match initiator_role {
+        TransferRole::Source => (
+            SessionEndpoint::initiator(open),
+            SessionEndpoint::Responder,
+            Some("127.0.0.1".into()),
+            None,
+        ),
+        TransferRole::Destination => (
+            SessionEndpoint::Responder,
+            SessionEndpoint::initiator(open),
+            None,
+            Some("127.0.0.1".into()),
+        ),
+        TransferRole::Unspecified => unreachable!(),
+    };
+    let source_cfg = SourceSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: source_endpoint,
+        plan_options: PlanOptions::default(),
+        data_plane_host: source_host,
+        instruments: SourceInstruments {
+            session_phase_trace: phase_trace.clone(),
+            ..Default::default()
+        },
+    };
+    let dest_cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: dest_endpoint,
+        data_plane_host: dest_host,
+        instruments: DestinationInstruments {
+            session_phase_trace: phase_trace,
+            ..Default::default()
+        },
+        local_apply: None,
+    };
+    let (source_transport, dest_transport) = in_process_pair();
+    let source = Arc::new(FsTransferSource::new(src_root.clone()));
+    let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, async {
+        tokio::join!(
+            run_source(source_cfg, source_transport, source),
+            run_destination(
+                dest_cfg,
+                dest_transport,
+                DestinationTarget::Fixed(dst_root.clone()),
+            ),
+        )
+    })
+    .await
+    .expect("phase trace session timed out");
+
+    let summary = source_result.expect("source succeeds");
+    let mut outcome = dest_result.expect("destination succeeds");
+    assert_eq!(summary, outcome.summary);
+    assert_trees_identical(&src_root, &dst_root);
+    outcome.needed_paths.sort();
+    let events = captured
+        .lock()
+        .expect("phase capture lock poisoned")
+        .clone();
+    PhaseTraceCase {
+        summary,
+        needed_paths: outcome.needed_paths,
+        data_plane_streams: outcome.data_plane_streams,
+        tree: collect_tree(&dst_root),
+        events,
+    }
+}
+
+fn one_phase_event<'a>(
+    events: &'a [SessionPhaseEvent],
+    role: SessionPhaseRole,
+    name: &str,
+    epoch: Option<u32>,
+) -> &'a SessionPhaseEvent {
+    let found: Vec<_> = events
+        .iter()
+        .filter(|event| event.endpoint_role == role && event.event == name && event.epoch == epoch)
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "expected one {role:?}/{name}/epoch={epoch:?}, got {}",
+        found.len()
+    );
+    found[0]
+}
+
+fn one_phase_batch<'a>(
+    events: &'a [SessionPhaseEvent],
+    role: SessionPhaseRole,
+    name: &str,
+    batch: u64,
+) -> &'a SessionPhaseEvent {
+    let found: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event.endpoint_role == role && event.event == name && event.batch == Some(batch)
+        })
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "expected one {role:?}/{name}/batch={batch}, got {}",
+        found.len()
+    );
+    found[0]
+}
+
+fn phase_position(
+    events: &[SessionPhaseEvent],
+    role: SessionPhaseRole,
+    name: &str,
+    epoch: Option<u32>,
+    batch: Option<u64>,
+) -> usize {
+    events
+        .iter()
+        .position(|event| {
+            event.endpoint_role == role
+                && event.event == name
+                && event.epoch == epoch
+                && event.batch == batch
+        })
+        .unwrap_or_else(|| panic!("missing {role:?}/{name}/epoch={epoch:?}/batch={batch:?}"))
+}
+
+fn phase_socket_position(
+    events: &[SessionPhaseEvent],
+    role: SessionPhaseRole,
+    name: &str,
+    epoch: Option<u32>,
+    socket: Option<u32>,
+) -> usize {
+    events
+        .iter()
+        .position(|event| {
+            event.endpoint_role == role
+                && event.event == name
+                && event.epoch == epoch
+                && event.socket == socket
+        })
+        .unwrap_or_else(|| panic!("missing {role:?}/{name}/epoch={epoch:?}/socket={socket:?}"))
+}
+
+fn assert_phase_trace_partial_order(events: &[SessionPhaseEvent], initiator: TransferRole) {
+    let source = SessionPhaseRole::Source;
+    let destination = SessionPhaseRole::Destination;
+
+    let manifest_begin = one_phase_event(events, source, "manifest_complete_send_begin", None);
+    let manifest = one_phase_event(events, source, "manifest_complete_sent", None);
+    one_phase_event(events, destination, "manifest_complete_received", None);
+    let queued = one_phase_event(events, source, "first_payload_queued", None);
+    let first_write = events
+        .iter()
+        .filter(|event| event.endpoint_role == source && event.event == "first_socket_write")
+        .min_by_key(|event| event.elapsed_ns)
+        .expect("at least one source socket writes payload");
+    assert!(manifest_begin.elapsed_ns <= manifest.elapsed_ns);
+    assert!(manifest.elapsed_ns < queued.elapsed_ns);
+    assert!(queued.elapsed_ns <= first_write.elapsed_ns);
+    assert!(
+        phase_position(events, source, "manifest_complete_send_begin", None, None,)
+            < phase_position(
+                events,
+                destination,
+                "manifest_complete_received",
+                None,
+                None,
+            )
+    );
+
+    let write_keys: Vec<_> = events
+        .iter()
+        .filter(|event| event.endpoint_role == source && event.event == "first_socket_write")
+        .map(|event| (event.epoch, event.socket))
+        .collect();
+    let write_begin_keys: Vec<_> = events
+        .iter()
+        .filter(|event| event.endpoint_role == source && event.event == "socket_write_begin")
+        .map(|event| (event.epoch, event.socket))
+        .collect();
+    let receive_keys: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event.endpoint_role == destination && event.event == "first_payload_received"
+        })
+        .map(|event| (event.epoch, event.socket))
+        .collect();
+    for keys in [&write_keys, &write_begin_keys, &receive_keys] {
+        assert!(
+            keys.iter()
+                .all(|(epoch, socket)| epoch.is_some() && socket.is_some()),
+            "per-socket phase marker lost epoch/socket correlation"
+        );
+        assert_eq!(
+            keys.len(),
+            keys.iter().copied().collect::<BTreeSet<_>>().len(),
+            "duplicate per-socket phase marker"
+        );
+    }
+    let writes: BTreeSet<_> = write_keys.into_iter().collect();
+    let write_begins: BTreeSet<_> = write_begin_keys.into_iter().collect();
+    let receives: BTreeSet<_> = receive_keys.into_iter().collect();
+    assert_eq!(write_begins, writes);
+    assert_eq!(writes, receives);
+    for (epoch, socket) in writes {
+        assert!(
+            phase_socket_position(events, source, "socket_write_begin", epoch, socket,)
+                < phase_socket_position(
+                    events,
+                    destination,
+                    "first_payload_received",
+                    epoch,
+                    socket,
+                )
+        );
+    }
+
+    let expected_attached = BTreeSet::from([(Some(0), Some(0)), (Some(1), Some(0))]);
+    for role in [source, destination] {
+        let attached_keys: Vec<_> = events
+            .iter()
+            .filter(|event| event.endpoint_role == role && event.event == "socket_trace_attached")
+            .map(|event| (event.epoch, event.socket))
+            .collect();
+        assert!(attached_keys
+            .iter()
+            .all(|(epoch, socket)| epoch.is_some() && socket.is_some()));
+        assert_eq!(
+            attached_keys.len(),
+            attached_keys.iter().copied().collect::<BTreeSet<_>>().len(),
+            "duplicate {role:?} socket trace attachment"
+        );
+        assert_eq!(
+            attached_keys.into_iter().collect::<BTreeSet<_>>(),
+            expected_attached,
+            "every acquired {role:?} socket must carry the phase trace"
+        );
+    }
+
+    let need_begin = one_phase_batch(events, destination, "need_batch_send_begin", 0);
+    let need_sent = one_phase_batch(events, destination, "need_batch_sent", 0);
+    one_phase_batch(events, source, "need_batch_received", 0);
+    assert!(need_begin.elapsed_ns <= need_sent.elapsed_ns);
+    assert!(
+        phase_position(events, destination, "need_batch_send_begin", None, Some(0),)
+            < phase_position(events, source, "need_batch_received", None, Some(0),)
+    );
+    let planner_begin = one_phase_batch(events, source, "planner_begin", 0);
+    let planner_end = one_phase_batch(events, source, "planner_end", 0);
+    assert!(planner_begin.elapsed_ns <= planner_end.elapsed_ns);
+
+    let proposed = one_phase_event(events, source, "resize_proposed", Some(1));
+    let resize_send_begin = one_phase_event(events, source, "resize_send_begin", Some(1));
+    let resize_sent = one_phase_event(events, source, "resize_sent", Some(1));
+    let resize_received = one_phase_event(events, destination, "resize_received", Some(1));
+    let prepared = one_phase_event(events, destination, "destination_prepared", Some(1));
+    let ack_send_begin = one_phase_event(events, destination, "resize_ack_send_begin", Some(1));
+    let ack_sent = one_phase_event(events, destination, "resize_ack_sent", Some(1));
+    let ack_received = one_phase_event(events, source, "resize_ack_received", Some(1));
+    let settled = one_phase_event(events, source, "source_settled", Some(1));
+    assert!(proposed.elapsed_ns <= resize_send_begin.elapsed_ns);
+    assert!(resize_send_begin.elapsed_ns <= resize_sent.elapsed_ns);
+    assert!(
+        phase_position(events, source, "resize_send_begin", Some(1), None,)
+            < phase_position(events, destination, "resize_received", Some(1), None,)
+    );
+    assert!(resize_received.elapsed_ns <= prepared.elapsed_ns);
+    assert!(prepared.elapsed_ns <= ack_send_begin.elapsed_ns);
+    assert!(ack_send_begin.elapsed_ns <= ack_sent.elapsed_ns);
+    assert!(
+        phase_position(events, destination, "resize_ack_send_begin", Some(1), None,)
+            < phase_position(events, source, "resize_ack_received", Some(1), None,)
+    );
+    assert!(ack_received.elapsed_ns <= settled.elapsed_ns);
+    assert_eq!(prepared.accepted, None);
+    assert_eq!(settled.accepted, Some(true));
+
+    let (source_epoch0, destination_epoch0, source_epoch1, destination_epoch1) = match initiator {
+        TransferRole::Source => {
+            assert_eq!(prepared.action, Some("arm_queued"));
+            let arm_queue_begin =
+                one_phase_event(events, destination, "resize_arm_queue_begin", Some(1));
+            let arm_ready = one_phase_event(events, destination, "resize_arm_ready", Some(1));
+            let accept_begin = one_phase_event(events, destination, "socket_accept_begin", Some(1));
+            assert!(arm_queue_begin.elapsed_ns <= prepared.elapsed_ns);
+            assert!(
+                phase_position(events, destination, "resize_arm_queue_begin", Some(1), None,)
+                    < phase_position(events, destination, "resize_arm_ready", Some(1), None,)
+            );
+            assert!(arm_ready.elapsed_ns <= accept_begin.elapsed_ns);
+            ("dial", "accept", "dial", "accept")
+        }
+        TransferRole::Destination => {
+            assert_eq!(prepared.action, Some("dial_complete"));
+            let dial_end = one_phase_event(events, destination, "socket_dial_end", Some(1));
+            assert!(dial_end.elapsed_ns <= prepared.elapsed_ns);
+            ("accept", "dial", "accept", "dial")
+        }
+        TransferRole::Unspecified => unreachable!(),
+    };
+
+    for (role, action, epoch) in [
+        (source, source_epoch0, 0),
+        (destination, destination_epoch0, 0),
+        (source, source_epoch1, 1),
+        (destination, destination_epoch1, 1),
+    ] {
+        let begin = one_phase_event(events, role, &format!("socket_{action}_begin"), Some(epoch));
+        let end = one_phase_event(events, role, &format!("socket_{action}_end"), Some(epoch));
+        assert!(begin.elapsed_ns <= end.elapsed_ns);
+    }
+    let socket_begin = one_phase_event(
+        events,
+        source,
+        &format!("socket_{source_epoch1}_begin"),
+        Some(1),
+    );
+    let socket_end = one_phase_event(
+        events,
+        source,
+        &format!("socket_{source_epoch1}_end"),
+        Some(1),
+    );
+    assert!(ack_received.elapsed_ns <= socket_begin.elapsed_ns);
+    assert!(socket_begin.elapsed_ns <= socket_end.elapsed_ns);
+    assert!(socket_end.elapsed_ns <= settled.elapsed_ns);
+
+    let source_complete = one_phase_event(events, source, "data_plane_complete", None);
+    let destination_complete = one_phase_event(events, destination, "data_plane_complete", None);
+    let summary_begin = one_phase_event(events, destination, "summary_send_begin", None);
+    let summary_sent = one_phase_event(events, destination, "summary_sent", None);
+    one_phase_event(events, source, "summary_received", None);
+    assert!(
+        source_complete.elapsed_ns
+            <= one_phase_event(events, source, "summary_received", None).elapsed_ns
+    );
+    assert!(destination_complete.elapsed_ns <= summary_begin.elapsed_ns);
+    assert!(summary_begin.elapsed_ns <= summary_sent.elapsed_ns);
+    assert!(
+        phase_position(events, destination, "summary_send_begin", None, None)
+            < phase_position(events, source, "summary_received", None, None)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_phase_trace_is_complete_and_inert_under_both_initiators() {
+    let source_off = run_phase_trace_case(TransferRole::Source, false).await;
+    let source_on = run_phase_trace_case(TransferRole::Source, true).await;
+    let destination_off = run_phase_trace_case(TransferRole::Destination, false).await;
+    let destination_on = run_phase_trace_case(TransferRole::Destination, true).await;
+
+    assert!(source_off.events.is_empty());
+    assert!(destination_off.events.is_empty());
+    for (off, on) in [
+        (&source_off, &source_on),
+        (&destination_off, &destination_on),
+    ] {
+        assert_eq!(off.summary, on.summary);
+        assert_eq!(off.needed_paths, on.needed_paths);
+        assert_eq!(off.data_plane_streams, on.data_plane_streams);
+        assert_eq!(off.tree, on.tree);
+        assert_eq!(on.data_plane_streams, Some(2));
+    }
+    assert_eq!(source_on.summary, destination_on.summary);
+    assert_eq!(source_on.needed_paths, destination_on.needed_paths);
+    assert_eq!(source_on.tree, destination_on.tree);
+
+    let source_session_id = source_on.events[0].session_id.clone();
+    let destination_session_id = destination_on.events[0].session_id.clone();
+    assert_ne!(
+        source_session_id, destination_session_id,
+        "independent sessions need distinct correlation fingerprints"
+    );
+
+    for (case, initiator, initiator_phase_role) in [
+        (&source_on, TransferRole::Source, SessionPhaseRole::Source),
+        (
+            &destination_on,
+            TransferRole::Destination,
+            SessionPhaseRole::Destination,
+        ),
+    ] {
+        let session_ids: BTreeSet<_> = case
+            .events
+            .iter()
+            .map(|event| event.session_id.as_str())
+            .collect();
+        assert_eq!(session_ids.len(), 1);
+        let session_id = *session_ids.first().unwrap();
+        assert_eq!(session_id.len(), 16);
+        assert!(session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert!(case
+            .events
+            .iter()
+            .all(|event| event.schema == 1 && event.run_id == "phase-guard"));
+        assert!(case
+            .events
+            .iter()
+            .all(|event| event.initiator_role == initiator_phase_role));
+        assert_eq!(
+            case.events
+                .iter()
+                .map(|event| event.endpoint_role)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([SessionPhaseRole::Source, SessionPhaseRole::Destination])
+        );
+        for role in [SessionPhaseRole::Source, SessionPhaseRole::Destination] {
+            let mut sequences: Vec<_> = case
+                .events
+                .iter()
+                .filter(|event| event.endpoint_role == role)
+                .map(|event| event.producer_seq)
+                .collect();
+            let expected: Vec<_> = (0..sequences.len() as u64).collect();
+            sequences.sort_unstable();
+            assert_eq!(sequences, expected, "{role:?} sequence has gaps/duplicates");
+        }
+        assert_phase_trace_partial_order(&case.events, initiator);
     }
 }
 

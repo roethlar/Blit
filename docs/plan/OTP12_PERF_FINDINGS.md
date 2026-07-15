@@ -188,7 +188,8 @@ the time. On any two-host rig, host identity remains welded to role, so
   the epoch-0 topology **simultaneously**, so a positive result implicates
   *the topology pair*, not H1 specifically. It cannot distinguish
   source-accept serialization from synchronous destination dialing
-  (`transfer_session/mod.rs:3113`), nor prove the resize-specific claim.
+  (the `destination_session` `Frame::Resize` /
+  `DestRecvPlane::Initiator` branch), nor prove the resize-specific claim.
   pf-1 therefore runs **three ablations, not one**, each varying ONE thing:
   1. **dial/accept inversion** — same direction, same hosts, same fixture;
      only who dials changes. Implicates the topology pair (or exonerates it).
@@ -405,7 +406,8 @@ never at risk.
   interleaving with the big-file stream at the moment epochs fire?) or
   be killed. **H1 also names the wrong half without proof**: it accuses
   `Accept` while the destination's **synchronous dial-before-ACK** path
-  (`transfer_session/mod.rs:3113`) is an equally good suspect. pf-1 must
+  (`destination_session`'s `Frame::Resize` /
+  `DestRecvPlane::Initiator` branch) is an equally good suspect. pf-1 must
   separate them with the dial/accept inversion counterfactual below —
   "consistent with H1" is not confirmation.
 - **H2 (P1) — CONTRADICTED by code (review 2026-07-12)**: the claimed
@@ -457,8 +459,9 @@ never at risk.
 - **H6 (P2; added by review round 2, 2026-07-12)**: per-member
   need-claim locking on the TCP receive plane — TCP receive
   (`NeedListSink`) takes a separate mutex/hash-set claim per member
-  (`transfer_session/data_plane.rs:1167`), while the gRPC path claims
-  a whole shard under one lock (`transfer_session/mod.rs:3047`).
+  (`NeedListSink::claim`, called per member by its tar-shard
+  `write_payload` arm), while the gRPC path claims a whole shard under one
+  lock (the `destination_session` `TarShardHeader` arm).
   TCP-only and per-member (so small-file-heavy) — matches the P2
   signature independently of H5. Discriminated by the pf-1 per-member
   locking timings (Method 3(e), now unconditional).
@@ -510,15 +513,20 @@ never at risk.
 ## Method (the investigation slice — no behavior changes)
 
 1. **Reproduce locally-instrumented, not on the rigs**: two-daemon
-   in-process/two-process rigs on the Mac with the otp-2 fixture
-   shapes; `--trace-data-plane` + targeted `tracing` spans (added
-   behind a debug flag, kept) around: resize epochs (arm→accept/dial→
-   ack), need-batch emission times, per-file sink open/write/close in
-   the receive path, shard planner in/out timestamps.
-2. **A/B the role layouts in one process**: the role suite already
-   runs both initiator layouts over identical fixtures (otp-3) — but
-   it forces the in-stream carrier (`transfer_session_roles.rs`), so
-   the timing-harness variant MUST add a TCP-carrier mode; it reports
+   in-process/two-process rigs on the Mac with the otp-2 fixture shapes.
+   P1 uses the wire-neutral, low-frequency structured timeline enabled by
+   `BLIT_TRACE_SESSION_PHASES=1` on both processes (same
+   `BLIT_TRACE_RUN_ID`): resize epochs (arm queue→ready→accept/dial→ack),
+   need-batch emission, planner in/out, per-socket first write/receive, and
+   completion. The older `--trace-data-plane` output is NOT a timing input:
+   it is initiator-only and may emit per file. P2's per-member sink
+   open/write/close, claim-lock, and tar-shard timings are a separate
+   high-volume probe slice so they cannot perturb the focused P1 observer.
+   This P1 trace slice alone does not satisfy the pf-1 HARD GATE below.
+2. **A/B the role layouts in one process**: the generic otp-3 role helper
+   forces the in-stream carrier, but `transfer_session_roles.rs` already
+   contains real loopback-TCP tests for both initiator layouts. The
+   timing-harness variant MUST reuse or factor that TCP harness; it reports
    phase timings per layout for mixed and small fixtures. A positive
    layout-dependent delta in a named phase confirms; local ABSENCE
    does not kill H1 (loopback removes the Windows↔Mac topology). So
@@ -678,9 +686,9 @@ decides. So ONE rule governs every hypothesis (H1, H4, H5, H6, H7):
   the registered platform-residue discriminator — invariance plus the
   per-direction bars alone would pass if a "fix" slowed BOTH layouts
   equally, violating converge-up.
-- No suite regressions; the floor is ≥ the CURRENT count (1484 —
-  ≥1483 would permit silently losing a test); any new pins carry
-  guard proofs (temporary revert) per the loop.
+- No suite regressions; the test count may not drop from the immediately
+  preceding reviewed workspace baseline recorded by the repo. Any new pins
+  carry guard proofs (temporary revert) per the loop.
 - If investigation attributes part of a gap to something the plan's
   Non-goals exclude (e.g. NTFS directory semantics no code can dodge),
   that residue is RECORDED with its experiment and goes to the owner's

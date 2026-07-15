@@ -63,6 +63,10 @@ pub struct DataPlaneSession<P: Probe = NoProbe> {
     payload_prefetch: usize,
     bytes_sent: u64,
     probe: P,
+    phase_trace: Option<super::session_phase::BoundSessionPhaseTrace>,
+    phase_epoch: u32,
+    phase_socket: u32,
+    phase_write_armed: bool,
 }
 
 macro_rules! trace_client {
@@ -180,7 +184,53 @@ impl<P: Probe> DataPlaneSession<P> {
             payload_prefetch,
             bytes_sent: 0,
             probe,
+            phase_trace: None,
+            phase_epoch: 0,
+            phase_socket: 0,
+            phase_write_armed: false,
         }
+    }
+
+    pub(crate) fn with_session_phase_trace(
+        mut self,
+        trace: Option<super::session_phase::BoundSessionPhaseTrace>,
+        epoch: u32,
+        socket: u32,
+    ) -> Self {
+        if let Some(trace) = &trace {
+            trace.event(
+                "socket_trace_attached",
+                super::session_phase::SessionPhaseFields {
+                    epoch: Some(epoch),
+                    socket: Some(socket),
+                    ..Default::default()
+                },
+            );
+        }
+        self.phase_write_armed = trace.is_some();
+        self.phase_trace = trace;
+        self.phase_epoch = epoch;
+        self.phase_socket = socket;
+        self
+    }
+
+    fn take_first_payload_write_trace(
+        &mut self,
+    ) -> Option<super::session_phase::BoundSessionPhaseTrace> {
+        if !self.phase_write_armed {
+            return None;
+        }
+        self.phase_write_armed = false;
+        let trace = self.phase_trace.clone()?;
+        trace.event(
+            "socket_write_begin",
+            super::session_phase::SessionPhaseFields {
+                epoch: Some(self.phase_epoch),
+                socket: Some(self.phase_socket),
+                ..Default::default()
+            },
+        );
+        Some(trace)
     }
 
     pub async fn send_payloads(
@@ -282,10 +332,14 @@ impl<P: Probe> DataPlaneSession<P> {
             bail!("relative path too long for transfer: {}", rel);
         }
 
+        let phase_write = self.take_first_payload_write_trace();
         self.stream
             .write_all(&[DATA_PLANE_RECORD_FILE])
             .await
             .context("writing data-plane record tag")?;
+        if let Some(trace) = phase_write {
+            trace.socket_first_write(self.phase_epoch, self.phase_socket);
+        }
         self.stream
             .write_all(&(path_bytes.len() as u32).to_be_bytes())
             .await
@@ -460,10 +514,14 @@ impl<P: Probe> DataPlaneSession<P> {
             data.len(),
             preview
         );
+        let phase_write = self.take_first_payload_write_trace();
         self.stream
             .write_all(&[DATA_PLANE_RECORD_TAR_SHARD])
             .await
             .context("writing tar shard record tag")?;
+        if let Some(trace) = phase_write {
+            trace.socket_first_write(self.phase_epoch, self.phase_socket);
+        }
         self.stream
             .write_all(&(headers.len() as u32).to_be_bytes())
             .await
@@ -554,10 +612,14 @@ impl<P: Probe> DataPlaneSession<P> {
             content.len()
         );
 
+        let phase_write = self.take_first_payload_write_trace();
         self.stream
             .write_all(&[DATA_PLANE_RECORD_BLOCK])
             .await
             .context("writing block record tag")?;
+        if let Some(trace) = phase_write {
+            trace.socket_first_write(self.phase_epoch, self.phase_socket);
+        }
         self.stream
             .write_all(&(path_bytes.len() as u32).to_be_bytes())
             .await
@@ -610,10 +672,14 @@ impl<P: Probe> DataPlaneSession<P> {
             total_size
         );
 
+        let phase_write = self.take_first_payload_write_trace();
         self.stream
             .write_all(&[DATA_PLANE_RECORD_BLOCK_COMPLETE])
             .await
             .context("writing block complete record tag")?;
+        if let Some(trace) = phase_write {
+            trace.socket_first_write(self.phase_epoch, self.phase_socket);
+        }
         self.stream
             .write_all(&(path_bytes.len() as u32).to_be_bytes())
             .await
