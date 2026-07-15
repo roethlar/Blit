@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Round-3 Grok guard finding accepted; G3 fix pending.
+**Status**: G3 and G4 fixed; fresh complete review pending.
 
 ## What
 
@@ -270,3 +270,18 @@ different physical destinations while `SELFTEST=1` still exited zero. The
 timing-anchor and launcher-journal mutations independently went red-to-green.
 See `.review/results/otp12-pf1-rigw-harness-r3.*`. G3 must be fixed and the
 complete range reviewed again before any rig activity.
+
+Coder follow-up audit admitted G4 as a separate High instrument-correctness
+finding. Destination-type, finalization-state, strict-cleanup-state,
+completion-marker-removal, and signal-cleanup checks still used bare
+`[[ ... ]]` assertions that macOS Bash 3.2 can let fall through to a later
+successful command. A regression could therefore leave an unsafe destination
+type, false cleanup state, or stale completion marker while the offline
+self-test still exited zero. G4 gives each material lifecycle assertion an
+explicit failure path and seeds the signal test with a completion marker, so
+that its absence check is not vacuous. Final-command subshell predicates and
+intentional predicate returns are unchanged. Removing the production
+`SESSION_FINALIZED=1`, retaining `Q_SESSION_MAY_EXIST=1` after successful
+cleanup, or conditionally skipping completion-marker removal for a received
+signal each turns the Bash 3.2 self-test red at the intended assertion;
+restoring all three returns it to green.

@@ -788,7 +788,8 @@ PY
         || die "failed q destination reset modified retained evidence"
     prepare_destination wm "$destination_tmp/container" \
         || die "q destination reset rejected a removable tree"
-    [[ -d "$destination_tmp/container" && ! -L "$destination_tmp/container" ]]
+    [[ -d "$destination_tmp/container" && ! -L "$destination_tmp/container" ]] \
+        || die "q destination reset did not leave a plain directory"
     [[ -z "$(find "$destination_tmp/container" -mindepth 1 -maxdepth 1 -print -quit)" ]] \
         || die "q destination reset left stale content"
     rm -rf "$destination_tmp"
@@ -850,7 +851,8 @@ PY
         }
         finalize_registered_session \
             || die "registered finalization rejected verified strict cleanup"
-        [[ "$SESSION_FINALIZED" == 1 ]]
+        [[ "$SESSION_FINALIZED" == 1 ]] \
+            || die "registered finalization did not set SESSION_FINALIZED"
         [[ "$(< "$OUT_DIR/SESSION-COMPLETE")" == "$HEAD_FULL" ]]
     )
 
@@ -868,7 +870,8 @@ PY
         if strict_success_cleanup; then
             die "strict cleanup accepted a Windows deletion failure"
         fi
-        [[ "$STRICT_CLEANUP_VERIFIED" == 0 ]]
+        [[ "$STRICT_CLEANUP_VERIFIED" == 0 ]] \
+            || die "Windows cleanup failure was marked strictly verified"
         [[ -d "$Q_MODULE/rigw-sessions/$SESSION_TAG" ]] \
             || die "Windows cleanup failure deleted q evidence first"
         [[ "$(< "$Q_MODULE/rigw-sessions/$SESSION_TAG/sentinel")" == 'retain me' ]] \
@@ -886,7 +889,8 @@ PY
         if strict_success_cleanup; then
             die "strict cleanup accepted an open port"
         fi
-        [[ "$STRICT_CLEANUP_VERIFIED" == 0 ]]
+        [[ "$STRICT_CLEANUP_VERIFIED" == 0 ]] \
+            || die "open-port cleanup failure was marked strictly verified"
         [[ -d "$Q_MODULE/rigw-sessions/$SESSION_TAG" ]]
     )
     mkdir -p "$cleanup_tmp/q/rigw-sessions/surviving-q"
@@ -902,7 +906,8 @@ PY
         if strict_success_cleanup; then
             die "strict cleanup accepted a surviving q session tree"
         fi
-        [[ "$STRICT_CLEANUP_VERIFIED" == 0 ]]
+        [[ "$STRICT_CLEANUP_VERIFIED" == 0 ]] \
+            || die "surviving q session tree was marked strictly verified"
         [[ -d "$Q_MODULE/rigw-sessions/$SESSION_TAG" ]]
     )
     mkdir -p "$cleanup_tmp/q/rigw-sessions/succeeds"
@@ -916,9 +921,11 @@ PY
         ports_closed() { port_checks=$((port_checks + 1)); return 0; }
         wssh() { return 0; }
         strict_success_cleanup || die "strict cleanup rejected a clean session"
-        [[ "$STRICT_CLEANUP_VERIFIED" == 1 ]]
+        [[ "$STRICT_CLEANUP_VERIFIED" == 1 ]] \
+            || die "successful strict cleanup did not set verification state"
         [[ "$port_checks" == 2 ]] || die "strict cleanup ran $port_checks port checks"
-        [[ "$Q_SESSION_MAY_EXIST" == 0 && "$WIN_SESSION_MAY_EXIST" == 0 ]]
+        [[ "$Q_SESSION_MAY_EXIST" == 0 && "$WIN_SESSION_MAY_EXIST" == 0 ]] \
+            || die "successful strict cleanup retained may-exist state"
         [[ ! -e "$Q_MODULE/rigw-sessions/$SESSION_TAG" ]]
     )
     mkdir -p "$cleanup_tmp/q/rigw-sessions/late-port"
@@ -1014,8 +1021,10 @@ PY
     trap_rc=$?
     set -e
     [[ "$trap_rc" == 1 ]] || die "failure trap returned $trap_rc, expected 1"
-    [[ ! -e "$failure_tmp/evidence/SESSION-COMPLETE" ]]
-    [[ ! -e "$failure_tmp/evidence/SESSION-COMPLETE.tmp" ]]
+    [[ ! -e "$failure_tmp/evidence/SESSION-COMPLETE" ]] \
+        || die "failure trap left SESSION-COMPLETE"
+    [[ ! -e "$failure_tmp/evidence/SESSION-COMPLETE.tmp" ]] \
+        || die "failure trap left SESSION-COMPLETE.tmp"
     grep -Fxq 'primary failure' "$failure_tmp/evidence/SESSION-VOID" \
         || die "failure trap discarded the primary reason"
     grep -Fq 'cleanup errors: Windows PID recovery failed' "$failure_tmp/evidence/SESSION-VOID" \
@@ -1226,6 +1235,7 @@ q_daemon_stop() {
     printf "q\n" >> "$OUT_DIR/stops"
     q_daemon_pid=""
 }
+printf "must disappear\n" > "$OUT_DIR/SESSION-COMPLETE"
 trap on_exit EXIT
 install_signal_traps
 kill -s "$3" "$$"
@@ -1240,7 +1250,8 @@ exit 99
             || die "$signal cleanup omitted its signal reason"
         [[ "$(LC_ALL=C sort "$signal_dir/stops")" == $'q\nwindows' ]] \
             || die "$signal cleanup did not invoke both exact-owned teardown paths"
-        [[ ! -e "$signal_dir/SESSION-COMPLETE" ]]
+        [[ ! -e "$signal_dir/SESSION-COMPLETE" ]] \
+            || die "$signal cleanup left SESSION-COMPLETE"
     done
     rm -rf "$failure_tmp"
 
