@@ -1411,16 +1411,17 @@ async fn source_send_half(
             let batch = std::mem::take(&mut pending);
             match &mut data_plane {
                 Some(dp) => {
-                    // sf-2: correct the stream count toward the shape the
-                    // accumulated need list implies before queueing this
-                    // batch. Settle the whole shape-derived target before
-                    // handing payloads to the pipeline: otherwise the
-                    // one-ADD-per-epoch ramp races NeedComplete/payload
-                    // drain, so a fast transfer can finish at a different
-                    // worker count depending on which endpoint initiated.
+                    // sf-2: propose toward the accumulated shape, then put
+                    // payload onto the floor worker immediately. The bounded
+                    // queue is selected against SOURCE events below, so ACKs
+                    // grow this SAME work-stealing pipeline without placing
+                    // the one-RTT-per-epoch ramp on the first-byte path.
                     maybe_propose_resize(dp, tx, needed_bytes, needed_count, &mut pending_resize)
                         .await?;
-                    settle_shape_resizes(
+                    let payloads =
+                        diff_planner::plan_push_payloads(batch, source.root(), plan_options)?;
+                    queue_payloads_while_servicing_events(
+                        payloads,
                         &mut events,
                         &mut pending,
                         &mut resume,
@@ -1432,8 +1433,6 @@ async fn source_send_half(
                         &mut pending_resize,
                     )
                     .await?;
-                    let payloads =
-                        diff_planner::plan_push_payloads(batch, source.root(), plan_options)?;
                     // A cancel while earlier batches are actively moving
                     // closes the send pipeline under backpressure, so this
                     // queue fails with a data-plane error — prefer the
@@ -1441,9 +1440,6 @@ async fn source_send_half(
                     // finish() drain does (otp-4b-3 codex F1). Not raced
                     // against events like finish(): live `Need`s still
                     // arrive here, and `recv_peer_fault` would consume them.
-                    if let Err(dp_err) = dp.queue(payloads).await {
-                        return Err(prefer_peer_fault(&mut events, dp_err).await);
-                    }
                 }
                 None => {
                     // codex otp-8 F1: race the record sends against the
@@ -1490,7 +1486,16 @@ async fn source_send_half(
                     // zero-knowledge single stream.
                     maybe_propose_resize(dp, tx, needed_bytes, needed_count, &mut pending_resize)
                         .await?;
-                    settle_shape_resizes(
+                    let payloads = ready
+                        .into_iter()
+                        .map(|(header, hashes)| TransferPayload::ResumeFile {
+                            header,
+                            block_size: hashes.block_size,
+                            dest_hashes: hashes.hashes,
+                        })
+                        .collect();
+                    queue_payloads_while_servicing_events(
+                        payloads,
                         &mut events,
                         &mut pending,
                         &mut resume,
@@ -1502,20 +1507,9 @@ async fn source_send_half(
                         &mut pending_resize,
                     )
                     .await?;
-                    let payloads = ready
-                        .into_iter()
-                        .map(|(header, hashes)| TransferPayload::ResumeFile {
-                            header,
-                            block_size: hashes.block_size,
-                            dest_hashes: hashes.hashes,
-                        })
-                        .collect();
                     // Same cancel posture as the plain-batch queue above:
                     // prefer the peer's framed reason over the transport
                     // break a cancel also causes (otp-4b-3 codex F1).
-                    if let Err(dp_err) = dp.queue(payloads).await {
-                        return Err(prefer_peer_fault(&mut events, dp_err).await);
-                    }
                 }
                 None => {
                     for (header, hashes) in ready {
@@ -1569,15 +1563,28 @@ async fn source_send_half(
         }
     }
 
-    // A resize proposed on the last batch may still be in flight. Resolve
-    // it BEFORE finishing so the destination's armed slot is consumed by
-    // the dialed socket — an armed-but-never-dialed credential would hang
-    // its accept loop (which waits for every arm to be claimed). We do not
-    // propose further here: exactly the one in-flight resize is drained.
-    if let Some(dp) = &data_plane {
-        if let Some(pending) = pending_resize.take() {
-            resolve_in_flight_resize(&mut events, dp, pending).await?;
-        }
+    // Every need is now planned and queued. Close the payload input first:
+    // existing workers keep draining, idle workers emit END, and any late
+    // ADD either joins remaining work or immediately emits END. Then drive
+    // the residual one-stream-per-epoch ramp to the full, now-stable shape
+    // target. This guarantees initiator-independent final worker count
+    // without delaying first byte or leaving a receiver idle across the
+    // serialized control RTTs.
+    if let Some(dp) = &mut data_plane {
+        dp.close_payloads();
+        maybe_propose_resize(dp, tx, needed_bytes, needed_count, &mut pending_resize).await?;
+        settle_shape_resizes(
+            &mut events,
+            &mut pending,
+            &mut resume,
+            &mut need_complete,
+            &mut needed_bytes,
+            &mut needed_count,
+            dp,
+            tx,
+            &mut pending_resize,
+        )
+        .await?;
     }
 
     // Close the data plane BEFORE SourceDone so the destination's receive
@@ -1845,12 +1852,66 @@ async fn maybe_propose_resize(
     Ok(())
 }
 
-/// Drive the one-stream-per-epoch shape ramp to its currently known target
-/// before payload dispatch. Needs and resume hashes may continue arriving
-/// while an ack is in flight, so process the shared SOURCE event lane rather
-/// than waiting for only an ack. Each accepted ack proposes the next epoch
-/// from the latest accumulated shape; the loop ends only when no proposal is
-/// outstanding (target reached or the destination refused growth).
+/// Feed one planned batch into the shared bounded data-plane queue while
+/// continuing to service the SOURCE control lane. Queue readiness is biased
+/// first so epoch-0 work starts immediately; once backpressure applies,
+/// resize ACKs add workers to that same queue and newly arriving needs are
+/// retained for the next planner batch.
+#[allow(clippy::too_many_arguments)]
+async fn queue_payloads_while_servicing_events(
+    payloads: Vec<TransferPayload>,
+    events: &mut mpsc::UnboundedReceiver<SourceEvent>,
+    pending: &mut Vec<FileHeader>,
+    resume: &mut ResumeSendState,
+    need_complete: &mut bool,
+    needed_bytes: &mut u64,
+    needed_count: &mut usize,
+    data_plane: &data_plane::SourceDataPlane,
+    tx: &mut Box<dyn FrameTx>,
+    pending_resize: &mut Option<data_plane::PendingResize>,
+) -> Result<()> {
+    for payload in payloads {
+        let queued = data_plane.queue(payload);
+        tokio::pin!(queued);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut queued => {
+                    if let Err(dp_err) = result {
+                        return Err(prefer_peer_fault(events, dp_err).await);
+                    }
+                    break;
+                }
+                event = events.recv() => {
+                    let event = event.ok_or_else(|| {
+                        eyre::Report::new(SessionFault::internal(
+                            "source receive half ended while queueing data-plane payloads",
+                        ))
+                    })?;
+                    process_source_event(
+                        event,
+                        pending,
+                        resume,
+                        need_complete,
+                        needed_bytes,
+                        needed_count,
+                        Some(data_plane),
+                        tx,
+                        pending_resize,
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Drive the one-stream-per-epoch shape ramp to its final known target after
+/// the payload input has closed. Queued payloads continue moving while ACKs
+/// settle; workers with no work emit END instead of idling through the ramp.
+/// Each accepted ACK proposes the next epoch, and the loop ends only when no
+/// proposal is outstanding (target reached or the destination refused).
 #[allow(clippy::too_many_arguments)]
 async fn settle_shape_resizes(
     events: &mut mpsc::UnboundedReceiver<SourceEvent>,
@@ -1885,71 +1946,13 @@ async fn settle_shape_resizes(
     Ok(())
 }
 
-/// Block for the ack of the one in-flight resize and dial its socket (or
-/// settle it refused). Does NOT propose further — it resolves exactly the
-/// pending proposal so the destination's armed slot is consumed before we
-/// finish the data plane.
-async fn resolve_in_flight_resize(
-    events: &mut mpsc::UnboundedReceiver<SourceEvent>,
-    dp: &data_plane::SourceDataPlane,
-    pending: data_plane::PendingResize,
-) -> Result<()> {
-    loop {
-        match events.recv().await {
-            Some(SourceEvent::ResizeAck(ack)) if ack.epoch == pending.epoch => {
-                if ack.accepted {
-                    dp.add_stream(&pending.sub_token).await?;
-                    dp.dial()
-                        .resize_settled(pending.epoch, pending.target_streams as usize, true);
-                } else {
-                    dp.dial()
-                        .resize_settled(pending.epoch, dp.dial().live_streams(), false);
-                }
-                return Ok(());
-            }
-            // A stale ack for an already-settled epoch: ignore, keep
-            // waiting for ours.
-            Some(SourceEvent::ResizeAck(_)) => continue,
-            Some(SourceEvent::Fault(fault)) => return Err(eyre::Report::new(fault)),
-            Some(SourceEvent::Need(h) | SourceEvent::ResumeNeed(h)) => {
-                return Err(eyre::Report::new(SessionFault::protocol_violation(
-                    format!("need for '{}' after NeedComplete", h.relative_path),
-                )))
-            }
-            Some(SourceEvent::BlockHashes(l)) => {
-                return Err(eyre::Report::new(SessionFault::protocol_violation(
-                    format!(
-                        "BlockHashList for '{}' after NeedComplete resolved every resume need",
-                        l.relative_path
-                    ),
-                )))
-            }
-            Some(SourceEvent::NeedComplete) => {
-                return Err(eyre::Report::new(SessionFault::protocol_violation(
-                    "duplicate NeedComplete",
-                )))
-            }
-            Some(SourceEvent::Summary(_)) => {
-                return Err(eyre::Report::new(SessionFault::protocol_violation(
-                    "TransferSummary before SourceDone",
-                )))
-            }
-            None => {
-                return Err(eyre::Report::new(SessionFault::internal(
-                    "source receive half ended with a resize in flight",
-                )))
-            }
-        }
-    }
-}
-
 /// Await the next terminal signal the receive half forwards while the
 /// data-plane drain is in progress (otp-4b-3). Used to race the drain: a
 /// mid-transfer `SessionError` (e.g. a `CancelJob` → `CANCELLED`) must
 /// abort the send and surface as the fault.
 ///
-/// The drain runs after `resolve_in_flight_resize` and before `SourceDone`
-/// goes out, so the event channel is drained and the peer sends nothing
+/// The drain runs after the final shape ramp and before `SourceDone` goes
+/// out, so the event channel is drained and the peer sends nothing
 /// but (possibly) an abort frame — no `Need`, `NeedComplete`, `ResizeAck`,
 /// or `Summary` is legitimate here. So a `Fault` is returned as-is and any
 /// OTHER event is surfaced as a protocol violation rather than silently

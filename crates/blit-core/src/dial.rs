@@ -26,7 +26,7 @@
 //! is the dial's default ceiling, and everything between is reached by
 //! ramping on evidence instead of guessing from `total_bytes`.
 
-use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::generated::CapacityProfile;
@@ -114,6 +114,10 @@ pub struct TransferDial {
     /// proposal is produced (the wire is idempotent but overlapping
     /// epochs would complicate sub-token registration).
     pending_epoch: AtomicU32,
+    /// A matching refusal is terminal for this transfer's resize policy.
+    /// Retrying an unhonored target would either reuse an epoch or spin
+    /// through fresh epochs without changing the live set.
+    resize_refused: AtomicBool,
     /// Resize-eligible ticks since the last settle (cooldown clock).
     ticks_since_settle: AtomicU32,
     /// Consecutive same-direction tick counter: positive = "pipe clean
@@ -185,6 +189,7 @@ impl TransferDial {
             live_streams: AtomicUsize::new(DIAL_FLOOR_INITIAL_STREAMS.min(ceiling_streams)),
             resize_epoch: AtomicU32::new(0),
             pending_epoch: AtomicU32::new(0),
+            resize_refused: AtomicBool::new(false),
             ticks_since_settle: AtomicU32::new(0),
             resize_sustain: AtomicI32::new(0),
             ceiling_chunk_bytes: ceiling_chunk,
@@ -280,6 +285,9 @@ impl TransferDial {
     /// call [`Self::resize_settled`] with the outcome; until then
     /// every subsequent tick returns `None`.
     pub fn resize_tick(&self, delta_bytes: u64, blocked_ratio: f64) -> Option<ResizeProposal> {
+        if self.resize_refused.load(Ordering::Acquire) {
+            return None;
+        }
         if self.pending_epoch.load(Ordering::Relaxed) != 0 {
             return None;
         }
@@ -356,6 +364,9 @@ impl TransferDial {
     /// REMOVE: shrinking below a live count is throughput evidence and
     /// stays the tuner's call.
     pub fn propose_shape_resize(&self, desired_streams: usize) -> Option<ResizeProposal> {
+        if self.resize_refused.load(Ordering::Acquire) {
+            return None;
+        }
         let desired = desired_streams.clamp(1, self.ceiling_max_streams.max(1));
         let live = self.live_streams.load(Ordering::Relaxed).max(1);
         if desired <= live {
@@ -380,20 +391,30 @@ impl TransferDial {
     /// `effective_streams` is the live count now in effect (from the
     /// peer's ack, or the local count if a post-ack dial failed and
     /// nothing changed). `accepted = false` leaves the live count
-    /// untouched. Stale epochs (not the pending one) are ignored.
-    /// Either way the cooldown clock restarts.
+    /// untouched, consumes the refused epoch, and permanently disables
+    /// further proposals on this transfer. Stale epochs (not the pending
+    /// one) are ignored. Either way the cooldown clock restarts.
     pub fn resize_settled(&self, epoch: u32, effective_streams: usize, accepted: bool) {
-        if self.pending_epoch.load(Ordering::Relaxed) != epoch || epoch == 0 {
+        if self.pending_epoch.load(Ordering::Acquire) != epoch || epoch == 0 {
             return;
         }
-        self.pending_epoch.store(0, Ordering::Relaxed);
+        // Publish the complete settlement before releasing the pending
+        // slot. In particular a refusal must become terminal before another
+        // producer can observe `pending_epoch == 0` and retry it.
+        if !accepted {
+            self.resize_refused.store(true, Ordering::Release);
+        }
         self.ticks_since_settle.store(0, Ordering::Relaxed);
         self.resize_sustain.store(0, Ordering::Relaxed);
         if accepted {
             let clamped = effective_streams.clamp(1, self.ceiling_max_streams.max(1));
             self.live_streams.store(clamped, Ordering::Relaxed);
-            self.resize_epoch.store(epoch, Ordering::Relaxed);
         }
+        // A refused request was still an observed wire epoch. Consuming it
+        // keeps future/duplicate traffic monotonic even though live count
+        // remains unchanged.
+        self.resize_epoch.store(epoch, Ordering::Relaxed);
+        self.pending_epoch.store(0, Ordering::Release);
     }
 
     /// Raise max_streams toward the ceiling (used when a peer's
@@ -896,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_refusal_keeps_live_count_and_stale_settles_are_ignored() {
+    fn resize_refusal_is_terminal_consumes_epoch_and_ignores_stale_settles() {
         let dial = TransferDial::conservative();
         dial.set_negotiated_streams(4);
         while dial.step_up_cheap_dials() {}
@@ -908,11 +929,29 @@ mod tests {
         dial.resize_settled(proposal.epoch + 7, 9, true);
         assert!(dial.resize_pending(), "stale settle ignored");
 
-        // Refusal: pending clears, live count and epoch stay put.
+        // Refusal: pending clears and live count stays put, but the wire
+        // epoch is consumed and every resize producer becomes terminal.
         dial.resize_settled(proposal.epoch, dial.live_streams(), false);
         assert!(!dial.resize_pending());
         assert_eq!(dial.live_streams(), 4);
-        assert_eq!(dial.resize_epoch(), 0, "refused epoch never settles");
+        assert_eq!(dial.resize_epoch(), proposal.epoch);
+        assert_eq!(
+            dial.resize_tick(1024, 0.0),
+            None,
+            "the tuner must not retry a refused resize"
+        );
+        assert_eq!(
+            dial.propose_shape_resize(8),
+            None,
+            "shape correction must not retry a refused resize"
+        );
+
+        // Duplicate/stale settlements cannot reopen the terminal policy or
+        // rewrite the consumed epoch/live count.
+        dial.resize_settled(proposal.epoch, 5, true);
+        assert_eq!(dial.resize_epoch(), proposal.epoch);
+        assert_eq!(dial.live_streams(), 4);
+        assert_eq!(dial.propose_shape_resize(8), None);
     }
 
     #[test]
@@ -989,14 +1028,14 @@ mod tests {
         assert_eq!(dial.live_streams(), 3);
         assert_eq!(dial.propose_shape_resize(3), None, "target reached");
 
-        // A refused epoch leaves live untouched; the next call retries.
+        // A refused epoch leaves live untouched, consumes the epoch, and is
+        // terminal for every later shape/tuner proposal on this transfer.
         let p3 = dial.propose_shape_resize(4).expect("live 3 → target 4");
         dial.resize_settled(p3.epoch, dial.live_streams(), false);
         assert_eq!(dial.live_streams(), 3);
-        assert!(
-            dial.propose_shape_resize(4).is_some(),
-            "retry after refusal"
-        );
+        assert_eq!(dial.resize_epoch(), p3.epoch);
+        assert_eq!(dial.propose_shape_resize(4), None, "refusal is terminal");
+        assert_eq!(dial.resize_tick(1024, 0.0), None, "tuner is terminal too");
     }
 
     #[test]

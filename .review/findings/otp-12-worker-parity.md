@@ -19,13 +19,19 @@ interpreted the wire value as unknown/default. That was a role-specific cap.
 
 ## Approach
 
-- Before each payload batch enters the shared elastic send pipeline, drive
-  the existing one-stream-per-epoch resize protocol until the currently known
-  shape target is settled. Needs and resume hashes continue to be processed
-  while acknowledgements are in flight, so the target incorporates all work
-  learned during the ramp.
-- Stop a refused ramp instead of retrying the same unattainable target under
-  fresh epochs forever.
+- Queue each planned payload onto the existing bounded elastic pipeline while
+  selecting that send against SOURCE control events. Queue readiness is biased
+  first, so the floor worker starts useful work immediately; resize ACKs then
+  add workers to that same work-stealing queue under backpressure.
+- After `NeedComplete` and the final planned payload, close the payload input
+  before settling the residual one-stream-per-epoch ramp. Existing workers
+  drain and emit END; late workers either join remaining work or see the closed
+  queue and emit END immediately. Final worker count reaches the full stable
+  shape target without putting serialized resize RTTs before first byte or
+  holding idle receive workers under StallGuard.
+- Make a refused resize terminal for that transfer: it consumes the wire epoch,
+  preserves the live worker count, and blocks both shape and tuner proposals.
+  A later plain or resume batch therefore cannot retry it with another token.
 - Centralize receiver stream-ceiling resolution in `dial.rs` and use it on
   both the SOURCE dial and destination-initiator admission path. Wire value
   zero remains unknown/default, never one.
@@ -36,8 +42,10 @@ interpreted the wire value as unknown/default. That was a role-specific cap.
 ## Files
 
 - `crates/blit-core/src/dial.rs`
+- `crates/blit-core/src/transfer_session/data_plane.rs`
 - `crates/blit-core/src/transfer_session/mod.rs`
 - `crates/blit-core/tests/transfer_session_roles.rs`
+- `docs/TRANSFER_SESSION.md`
 
 ## Tests
 
@@ -46,10 +54,21 @@ interpreted the wire value as unknown/default. That was a role-specific cap.
 - Separate zero-capacity guard proof: after the ramp fix but before the
   shared ceiling fix, the DESTINATION-initiator pin failed at 1 stream.
 - After both fixes: the two exact-target pins pass at 8 and the complete
-  `transfer_session_roles` integration target passes 39/39.
+  `transfer_session_roles` integration target passed 39/39 before review.
+- Review guard for nonblocking convergence: with resize ACK #2 held, both
+  initiator layouts send all 2,000 one-byte files before the ACK reaches the
+  SOURCE, then settle at the same exact target of 4 with identical trees.
+  Mutation proof: restoring the pre-dispatch settle makes the test fail after
+  10 seconds with payload stalled behind ACK #2; restoring the fix passes in
+  about 1.5 seconds.
+- Review guard for terminal refusal: the dial consumes the refused epoch,
+  leaves live workers unchanged, and every later shape/tuner proposal is
+  `None`. Mutation proof: omitting the terminal record immediately returns a
+  new shape proposal and fails the pin.
 - Full workspace gate passes: `cargo fmt --all -- --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and
-  `cargo test --workspace` (1488 tests, 2 ignored; no failures).
+  `cargo test --workspace` (1,489 passed, 2 ignored; 1,491 test functions,
+  no failures).
 
 ## Known gaps
 
@@ -60,7 +79,18 @@ interpreted the wire value as unknown/default. That was a role-specific cap.
   it does not invert that network topology.
 - No hardware benchmark is part of this code slice. The existing otp-12
   acceptance rigs remain the performance proof after review.
+- The singular-token wire contract still grows one socket per epoch. On a very
+  short/high-latency transfer, tail epochs may open workers only to close them;
+  a bulk jump would require a separately reviewed multi-token wire change.
 
 ## Reviewer comments
 
-(appended after the codex round)
+Codex (`gpt-5.6-sol`, xhigh) returned **FAIL** with two findings, both accepted:
+
+- **HIGH**: settling every resize epoch before payload dispatch serialized up
+  to 31 control RTTs ahead of first byte while receive StallGuards were already
+  active. Fixed by bounded queue/control concurrency plus close-before-tail
+  convergence; deterministic gated-ACK guard added.
+- **MEDIUM**: refusal was only locally terminal; a later batch could repropose
+  the same target/epoch with a fresh token. Fixed by consuming the refused epoch
+  and recording terminal refusal in the shared `TransferDial`; mutation-guarded.

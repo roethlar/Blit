@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,12 +24,15 @@ use blit_core::generated::{
     TransferSummary,
 };
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
-use blit_core::remote::transfer::{PreparedPayload, TransferPayload};
+use blit_core::remote::transfer::{
+    PreparedPayload, ProgressEvent, RemoteTransferProgress, TransferPayload,
+};
 use blit_core::transfer_plan::PlanOptions;
-use blit_core::transfer_session::transport::{in_process_pair, FrameTransport};
+use blit_core::transfer_session::transport::{in_process_pair, FrameRx, FrameTransport};
 use blit_core::transfer_session::{
     run_destination, run_source, DestinationOutcome, DestinationSessionConfig, DestinationTarget,
-    HelloConfig, SessionEndpoint, SessionFault, SourceSessionConfig, CONTRACT_VERSION,
+    HelloConfig, SessionEndpoint, SessionFault, SourceInstruments, SourceSessionConfig,
+    CONTRACT_VERSION,
 };
 
 const SUITE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -1226,6 +1230,171 @@ async fn many_tiny_files_reach_shape_target_when_source_initiates() {
          target regardless of which endpoint initiated the session"
     );
     assert_trees_identical(&src_root, &dst_root);
+}
+
+/// Hold one resize ACK in the SOURCE receive half. The data-plane payload
+/// lane is independent, so a correct nonblocking ramp can keep moving work
+/// while this control frame waits; a pre-dispatch settle cannot.
+struct GateNthResizeAckRx {
+    inner: Box<dyn FrameRx>,
+    gate_at: usize,
+    seen: Arc<AtomicUsize>,
+    delivered: Arc<AtomicUsize>,
+    waiting: Arc<AtomicBool>,
+    reached: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl FrameRx for GateNthResizeAckRx {
+    async fn recv(&mut self) -> eyre::Result<Option<TransferFrame>> {
+        let frame = self.inner.recv().await?;
+        let is_resize_ack = frame
+            .as_ref()
+            .is_some_and(|frame| matches!(frame.frame.as_ref(), Some(Frame::ResizeAck(_))));
+        if is_resize_ack {
+            let ordinal = self.seen.fetch_add(1, Ordering::SeqCst) + 1;
+            if ordinal == self.gate_at {
+                self.waiting.store(true, Ordering::SeqCst);
+                self.reached.notify_one();
+                self.release.notified().await;
+            }
+            self.delivered.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(frame)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn payload_does_not_wait_for_shape_ramp_under_either_initiator() {
+    // 2,000 one-byte files produce shape target 4. Gate ACK #2 (the 2→3
+    // epoch), require ALL payloads to finish sending while it remains held,
+    // then release it and require the same exact final target under both
+    // connection-role layouts. This deterministically guards first-byte /
+    // useful-work progress without relying on wall-clock RTT assumptions.
+    const FILE_COUNT: usize = 2_000;
+    const TARGET_STREAMS: usize = 4;
+
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        for i in 0..FILE_COUNT {
+            std::fs::write(src_root.join(format!("f{i:05}.bin")), b"x").unwrap();
+        }
+
+        let open = SessionOpen {
+            initiator_role: initiator_role as i32,
+            compare_mode: ComparisonMode::SizeMtime as i32,
+            in_stream_bytes: false,
+            ..Default::default()
+        };
+        let (source_endpoint, dest_endpoint, source_host, dest_host) = match initiator_role {
+            TransferRole::Source => (
+                SessionEndpoint::initiator(open),
+                SessionEndpoint::Responder,
+                Some("127.0.0.1".into()),
+                None,
+            ),
+            TransferRole::Destination => (
+                SessionEndpoint::Responder,
+                SessionEndpoint::initiator(open),
+                None,
+                Some("127.0.0.1".into()),
+            ),
+            TransferRole::Unspecified => unreachable!(),
+        };
+
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let source_cfg = SourceSessionConfig {
+            instruments: SourceInstruments {
+                progress: Some(RemoteTransferProgress::new(progress_tx)),
+                ..Default::default()
+            },
+            hello: HelloConfig::default(),
+            endpoint: source_endpoint,
+            plan_options: PlanOptions::default(),
+            data_plane_host: source_host,
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: dest_endpoint,
+            data_plane_host: dest_host,
+            instruments: Default::default(),
+            local_apply: None,
+        };
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let waiting = Arc::new(AtomicBool::new(false));
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (source_transport, dest_transport) = in_process_pair();
+        let (source_tx, source_rx) = source_transport.split();
+        let source_transport = FrameTransport::new(
+            source_tx,
+            Box::new(GateNthResizeAckRx {
+                inner: source_rx,
+                gate_at: 2,
+                seen: Arc::clone(&seen),
+                delivered: Arc::clone(&delivered),
+                waiting: Arc::clone(&waiting),
+                reached: Arc::clone(&reached),
+                release: Arc::clone(&release),
+            }),
+        );
+
+        let source = Arc::new(FsTransferSource::new(src_root.clone()));
+        let session = tokio::spawn({
+            let dst_root = dst_root.clone();
+            async move {
+                tokio::join!(
+                    run_source(source_cfg, source_transport, source),
+                    run_destination(dest_cfg, dest_transport, DestinationTarget::Fixed(dst_root)),
+                )
+            }
+        });
+
+        let proof = tokio::time::timeout(Duration::from_secs(10), async {
+            let payload_complete = async {
+                let mut files = 0usize;
+                while files < FILE_COUNT {
+                    match progress_rx.recv().await.expect("progress lane stays open") {
+                        ProgressEvent::FileComplete { .. } => files += 1,
+                        ProgressEvent::ManifestBatch { .. } | ProgressEvent::Payload { .. } => {}
+                    }
+                }
+            };
+            tokio::join!(payload_complete, reached.notified());
+        })
+        .await;
+        if proof.is_err() {
+            release.notify_one();
+            let _ = session.await;
+            panic!("payload stalled behind resize ACK #2 with initiator {initiator_role:?}");
+        }
+        assert!(waiting.load(Ordering::SeqCst), "ACK #2 is held");
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "exactly two ACKs seen");
+        assert_eq!(
+            delivered.load(Ordering::SeqCst),
+            1,
+            "all payload completed before gated ACK #2 reached the SOURCE"
+        );
+
+        release.notify_one();
+        let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, session)
+            .await
+            .expect("session run timed out")
+            .expect("session task panicked");
+        let summary = source_result.expect("source succeeds");
+        let outcome = dest_result.expect("destination succeeds");
+        assert_eq!(summary, outcome.summary);
+        assert_eq!(summary.files_transferred, FILE_COUNT as u64);
+        assert_eq!(outcome.data_plane_streams, Some(TARGET_STREAMS));
+        assert_trees_identical(&src_root, &dst_root);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

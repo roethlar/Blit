@@ -73,7 +73,10 @@ count grew by 4, fmt + clippy clean.
 - `shape_resize_ramps_one_epoch_at_a_time_toward_the_target`,
   `shape_resize_clamps_to_the_profile_ceiling` — proposal semantics:
   no-op at/below live, one-in-flight blocks both proposers, no
-  cooldown, refusal retries, receiver-ceiling clamp.
+  cooldown, receiver-ceiling clamp. ~~Refusal retries~~ was superseded by
+  `otp-12-worker-parity`: a refusal now consumes its epoch and is terminal for
+  the transfer, because retrying from a later batch reused the epoch/token
+  contract and could loop without changing the live set.
 - `many_tiny_file_push_opens_more_than_one_data_plane_connection`
   (blit-daemon, in-process loopback e2e): REAL push service served via
   `production_server_builder`, REAL `RemotePushClient` pushes 10,000

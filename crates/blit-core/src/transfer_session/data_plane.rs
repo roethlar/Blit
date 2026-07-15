@@ -953,19 +953,25 @@ impl SourceDataPlane {
         Ok(())
     }
 
-    /// Feed one planned batch into the send pipeline. The pipeline
-    /// prepares each payload (tar-shard/file) and writes it through the
-    /// data-plane record framing across the live socket(s).
-    pub(super) async fn queue(&mut self, payloads: Vec<TransferPayload>) -> Result<()> {
+    /// Feed one planned payload into the bounded send pipeline. The caller
+    /// selects this send against control events so resize acknowledgements
+    /// keep growing the same work-stealing queue under backpressure.
+    pub(super) async fn queue(&self, payload: TransferPayload) -> Result<()> {
         let tx = self.payload_tx.as_ref().ok_or_else(|| {
             eyre::Report::new(SessionFault::internal("data plane already finished"))
         })?;
-        for payload in payloads {
-            tx.send(payload).await.map_err(|_| {
-                dp_fault("data-plane send pipeline closed before all payloads sent")
-            })?;
-        }
-        Ok(())
+        tx.send(payload)
+            .await
+            .map_err(|_| dp_fault("data-plane send pipeline closed before all payloads sent"))
+    }
+
+    /// Declare that every payload has been queued without waiting for the
+    /// elastic workers to finish. Closing the input lets idle workers emit
+    /// END promptly while the control lane settles any remaining resize
+    /// epochs; a late ADD likewise sees a closed queue and emits END rather
+    /// than waiting under the receiver's StallGuard.
+    pub(super) fn close_payloads(&mut self) {
+        self.payload_tx = None;
     }
 
     /// Signal end-of-stream, drain the pipeline (each worker emits its
@@ -975,7 +981,7 @@ impl SourceDataPlane {
     pub(super) async fn finish(mut self) -> Result<SinkOutcome> {
         // Drop the sender: workers observe the closed queue, drain what
         // is left, then `finish()` (END record) and exit.
-        self.payload_tx = None;
+        self.close_payloads();
         let pipeline = self
             .pipeline
             .take()

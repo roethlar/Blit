@@ -184,6 +184,10 @@ push/pull-specific message.
   session); armed slots that go unclaimed expire, as today's resize
   wiring already does. A socket presenting anything else is closed
   without response.
+  A matching `DataPlaneResizeAck{accepted:false}` consumes that monotonic
+  epoch and is terminal for further resize proposals in the session; the
+  settled live workers continue the transfer. Retrying an unhonored target
+  under a reused or fresh epoch is forbidden.
   **Resume on the data plane (otp-7b):** in a resume session, block
   records ride the sockets as the binary `BLOCK`/`BLOCK_COMPLETE`
   record shapes (the receive pipeline's existing tags), while the
