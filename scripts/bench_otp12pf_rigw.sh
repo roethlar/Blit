@@ -297,7 +297,10 @@ selftest() {
     local cross_clock_before cross_clock_after cross_clock_delta
     local launcher_tmp launcher_calls launcher_source main_source
     local win_recovery_tmp purge_contract_tmp purge_repo purge_head purge_blob
-    local purge_hash drained preflight_source
+    local purge_hash purge_replacement_tree purge_replacement_head
+    local purge_replacement_blob purge_replacement_hash purge_replace_refs
+    local purge_raw_status
+    local drained preflight_source
     reject_registered_overrides
     if (
         SELFTEST=1
@@ -394,6 +397,73 @@ selftest() {
     ) >/dev/null 2>&1; then
         rm -rf "$purge_contract_tmp"
         die "mutable working purge helper was accepted as reviewed content"
+    fi
+    rm -f "$purge_contract_tmp/replacement-accepted"
+    if ! (
+        unset GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE
+        git -C "$purge_repo" add scripts/windows/purge-standby.ps1 \
+            || exit 106
+        purge_replacement_blob=$(git -C "$purge_repo" \
+            rev-parse ':scripts/windows/purge-standby.ps1') \
+            || exit 107
+        purge_replacement_hash=$(sha256_q \
+            "$purge_repo/scripts/windows/purge-standby.ps1") \
+            || exit 108
+        purge_replacement_tree=$(git -C "$purge_repo" write-tree) \
+            || exit 109
+        purge_replacement_head=$(git -C "$purge_repo" \
+            -c user.name='rig-W selftest' \
+            -c user.email='rigw-selftest@invalid' \
+            -c commit.gpgSign=false \
+            commit-tree "$purge_replacement_tree" \
+            -m 'Replacement purge helper fixture') \
+            || exit 110
+        git -C "$purge_repo" replace "$purge_head" "$purge_replacement_head" \
+            || exit 111
+        git -C "$purge_repo" replace "$purge_blob" "$purge_replacement_blob" \
+            || exit 112
+        [[ "$(git -C "$purge_repo" rev-parse HEAD)" == "$purge_head" ]] \
+            || exit 113
+        purge_raw_status=$(git -C "$purge_repo" \
+            status --porcelain --untracked-files=normal) \
+            || exit 114
+        [[ -z "$purge_raw_status" ]] || exit 115
+        [[ "$(git -C "$purge_repo" \
+            rev-parse "$purge_head:scripts/windows/purge-standby.ps1")" \
+            == "$purge_replacement_blob" ]] || exit 116
+        [[ "$(git -C "$purge_repo" cat-file blob "$purge_blob" \
+            | shasum -a 256 | awk '{print $1}')" == "$purge_replacement_hash" ]] \
+            || exit 117
+        if (
+            REPO_ROOT="$purge_repo"
+            HEAD_FULL="$purge_head"
+            WIN_PURGE_SOURCE="$purge_repo/scripts/windows/purge-standby.ps1"
+            WIN_PURGE_BLOB=""
+            WIN_PURGE_HASH=""
+            bind_purge_helper_to_reviewed_blob
+        ) >/dev/null 2>&1; then
+            : > "$purge_contract_tmp/replacement-accepted"
+            exit 118
+        fi
+        git -C "$purge_repo" replace -d "$purge_head" "$purge_blob" >/dev/null \
+            || exit 119
+        purge_replace_refs=$(git -C "$purge_repo" replace -l) \
+            || exit 120
+        [[ -z "$purge_replace_refs" ]] || exit 121
+        git -C "$purge_repo" checkout -q "$purge_head" -- \
+            scripts/windows/purge-standby.ps1 \
+            || exit 122
+        purge_raw_status=$(git -C "$purge_repo" \
+            status --porcelain --untracked-files=normal) \
+            || exit 123
+        [[ -z "$purge_raw_status" ]] || exit 124
+    ); then
+        if [[ -e "$purge_contract_tmp/replacement-accepted" ]]; then
+            rm -rf "$purge_contract_tmp"
+            die "Git replacement object was accepted as reviewed helper provenance"
+        fi
+        rm -rf "$purge_contract_tmp"
+        die "Git replacement-object self-test fixture failed"
     fi
     printf '%s\n' '# reviewed purge helper fixture' \
         > "$purge_repo/scripts/windows/purge-standby.ps1"
@@ -1433,6 +1503,9 @@ sha256_win() {
     wssh "(Get-FileHash -Algorithm SHA256 -LiteralPath '$1').Hash.ToLower()" \
         | tr -d '\r' | tail -1
 }
+reviewed_git() {
+    GIT_NO_REPLACE_OBJECTS=1 command git -C "$REPO_ROOT" "$@"
+}
 
 bind_purge_helper_to_reviewed_blob() {
     local tracked_path='scripts/windows/purge-standby.ps1' blob_type working_hash
@@ -1442,12 +1515,12 @@ bind_purge_helper_to_reviewed_blob() {
     [[ -f "$WIN_PURGE_SOURCE" && ! -L "$WIN_PURGE_SOURCE" ]] \
         || die "reviewed Windows purge helper is absent or not a plain file"
 
-    WIN_PURGE_BLOB=$(git -C "$REPO_ROOT" rev-parse "$HEAD_FULL:$tracked_path") \
+    WIN_PURGE_BLOB=$(reviewed_git rev-parse "$HEAD_FULL:$tracked_path") \
         || die "reviewed commit does not contain the Windows purge helper"
-    blob_type=$(git -C "$REPO_ROOT" cat-file -t "$WIN_PURGE_BLOB") \
+    blob_type=$(reviewed_git cat-file -t "$WIN_PURGE_BLOB") \
         || die "cannot inspect reviewed Windows purge helper blob"
     [[ "$blob_type" == blob ]] || die "reviewed Windows purge helper object is $blob_type, not a blob"
-    WIN_PURGE_HASH=$(git -C "$REPO_ROOT" cat-file blob "$WIN_PURGE_BLOB" \
+    WIN_PURGE_HASH=$(reviewed_git cat-file blob "$WIN_PURGE_BLOB" \
         | shasum -a 256 | awk '{print $1}') \
         || die "cannot hash reviewed Windows purge helper blob"
     [[ "$WIN_PURGE_HASH" =~ ^[0-9a-f]{64}$ ]] \
@@ -1857,14 +1930,19 @@ EOF
 }
 
 provenance_gate() {
+    local worktree_status
     [[ -n "$EXPECT_SHA" ]] || die "EXPECT_SHA=<full reviewed commit> is required"
-    HEAD_FULL=$(git -C "$REPO_ROOT" rev-parse HEAD)
-    HEAD_SHORT=$(git -C "$REPO_ROOT" rev-parse --short=7 HEAD)
-    HEAD_BUILD_ID=$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)
+    HEAD_FULL=$(reviewed_git rev-parse HEAD) \
+        || die "cannot resolve isolated q clone HEAD"
+    HEAD_SHORT=$(reviewed_git rev-parse --short=7 HEAD) \
+        || die "cannot resolve isolated q clone short HEAD"
+    HEAD_BUILD_ID=$(reviewed_git rev-parse --short=12 HEAD) \
+        || die "cannot resolve isolated q clone build identity"
     [[ "$EXPECT_SHA" == "$HEAD_FULL" ]] \
         || die "EXPECT_SHA=$EXPECT_SHA but isolated clone is $HEAD_FULL"
-    [[ -z $(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal) ]] \
-        || die "isolated q clone is dirty"
+    worktree_status=$(reviewed_git status --porcelain --untracked-files=normal) \
+        || die "cannot inspect isolated q clone status"
+    [[ -z "$worktree_status" ]] || die "isolated q clone is dirty"
     bind_purge_helper_to_reviewed_blob
     [[ -x "$Q_BLIT" && -x "$Q_DAEMON" ]] || die "q release binaries are absent"
     embeds_clean_q "$Q_BLIT" \

@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Reopened — G8 accepted; fix pending.
+**Status**: Reopened — G8 fixed and guard-proved; fresh complete review pending.
 
 ## What
 
@@ -404,3 +404,28 @@ the reviewed path resolve to substituted helper bytes. G7 would bless that
 substituted digest as reviewed. No endpoint was contacted. See the round-7
 raw reviews and adjudications under
 `.review/results/otp12-pf1-rigw-harness-r7.*`.
+
+G8 disables Git replacement-object interpretation for every reviewed helper
+object operation: commit/path resolution, object-type inspection, and
+blob-content reads. The provenance HEAD, short build identities, and clean
+status use the same command-scoped protection. The expected SHA therefore
+derives from the literal object graph named by `HEAD_FULL`; the existing
+working-file, pre-SCP, post-move, and per-arm comparisons remain downstream
+checks of that immutable value.
+
+The Bash 3.2 self-test installs both commit and blob replacement refs while
+leaving the visible HEAD unchanged and ordinary status clean. It proves that
+ordinary Git resolves the substituted path and bytes, then requires the
+reviewed-object binding to refuse them. Removing only the no-replacement
+setting, routing only the commit/path lookup through ordinary Git, or routing
+only the blob-content read through ordinary Git each turns the exact
+replacement-provenance guard red. Restoration returns the complete self-test
+green. An independent audit reproduced the wrapper mutation red-to-green and
+found one conditional-context cleanup gap; explicit replacement deletion,
+empty-list, checkout, and clean-status checks closed it, and the focused
+re-audit passed.
+
+Format, strict clippy, all workspace tests, Bash syntax/self-test, all 23
+analyzer tests, the docs gate, and diff checks passed. No endpoint was
+contacted. Fresh complete Codex plus additive Grok review remains required
+before rebuild or launcher retry.
