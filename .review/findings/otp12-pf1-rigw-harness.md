@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Initial Codex findings fixed; mandatory re-review pending.
+**Status**: Round-2 Codex findings accepted; fixes in progress.
 
 ## What
 
@@ -201,3 +201,15 @@ emitter alignment at `2dd977e`. See the raw review and adjudication under
 `.review/results/otp12-pf1-rigw-harness.*`. A fresh mandatory Codex review of
 the complete fixed range is pending; the row remains in progress until that
 review and adjudication close.
+
+Round-2 Codex reviewed the complete immutable range through `8fbd486` and
+returned `NEEDS FIXES`: it independently confirmed F1–F3 closed, then found two
+new High defects. F4 is an uncharged Windows-client interval before q captures
+the settle anchor. F5 is the role-bearing `rid` selecting different physical
+destination paths for paired arms, contrary to the only-initiator-varies
+contract. Both are accepted; F5 is first in order. A separate runbook audit
+also confirmed that the required live Windows launcher smoke has no standalone
+mode. The additive Grok second eye returned a schema-valid `ACCEPTED` verdict
+with three independent red-to-green guards, but it does not override the
+mandatory Codex findings. See the round-2 raw and adjudication records under
+`.review/results/otp12-pf1-rigw-harness-r2.*`.
