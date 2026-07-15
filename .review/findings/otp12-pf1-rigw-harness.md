@@ -532,3 +532,4 @@ wrong-derivation failure; restoring each split returns the complete self-test
 green. Bash syntax, format, strict clippy, all workspace tests, all 23 analyzer
 tests, the docs gate, and diff checks passed. The G10 fix commit and exact
 review candidate identity are pending.
+G10 was fixed at `b1cfde74a5ffbd8413aa9dc69e4b1abe9b9118e9`.
