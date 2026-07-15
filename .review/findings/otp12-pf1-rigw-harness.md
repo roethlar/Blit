@@ -703,3 +703,4 @@ recovery guard fail with `runtime q load gate did not wait through
 self-generated load history`; restoring the bounded implementation returns
 syntax and the complete self-test to green. Format, strict clippy, all
 workspace tests, all 23 analyzer tests, the docs gate, and diff checks pass.
+G13 was fixed at `0cbb16a295dd7a2104355af1799cb35b3c325701`.
