@@ -61,11 +61,13 @@ WIN_ROOT='D:/blit-test'
 WIN_MODULE="$WIN_ROOT/rigw-module"
 WIN_BINS="$WIN_ROOT/bins"
 WIN_ACTIVE="$WIN_BINS/active/blit-daemon.exe"
-WIN_PURGE="$WIN_ROOT/purge-standby.ps1"
+WIN_PURGE_SOURCE="$SCRIPT_DIR/windows/purge-standby.ps1"
 
 SESSION_TAG=$(date -u +%Y%m%dT%H%M%SZ).$$
 OUT_DIR=${OUT_DIR:-$REPO_ROOT/logs/otp12pf-rigw-$SESSION_TAG}
 WIN_SESSION="$WIN_ROOT/rigw-pf1/$SESSION_TAG"
+WIN_PURGE="$WIN_SESSION/purge-standby.ps1"
+WIN_PURGE_HASH=""
 
 LOG="$OUT_DIR/bench.log"
 RUNS_CSV="$OUT_DIR/runs.csv"
@@ -133,6 +135,7 @@ SSH_MUX=(-o BatchMode=yes -o ControlMaster=auto \
     -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
     -o "ControlPath=$HOME/.ssh/cm-rigw-%r@%h-%p" -o ControlPersist=300)
 wssh() { ssh "${SSH_MUX[@]}" "$WIN_SSH" "$@"; }
+wscp() { scp "${SSH_MUX[@]}" "$@"; }
 
 q_daemon_pid=""
 win_daemon_pid=""
@@ -292,7 +295,7 @@ selftest() {
     local stamp_tag stamp_ms stamp_rc stamp_ns stamp_extra stamp_teardown_ns
     local cross_clock_before cross_clock_after cross_clock_delta
     local launcher_tmp launcher_calls launcher_source main_source
-    local win_recovery_tmp
+    local win_recovery_tmp purge_contract_tmp purge_hash drained preflight_source
     reject_registered_overrides
     if (
         SELFTEST=1
@@ -359,6 +362,90 @@ selftest() {
     arp_fixture=$'? (10.1.10.177) at 34:5a:60:3e:78:8b on en0 ifscope [ethernet]\n? (10.1.10.177) at 34:5a:60:3e:78:8b on en1 ifscope [ethernet]\n? (10.1.10.177) at 34:5a:60:3e:78:8b on en8 ifscope [ethernet]'
     [[ "$(q_peer_mac_from_arp en8 <<<"$arp_fixture")" == "34:5a:60:3e:78:8b" ]] \
         || die "q ARP parser did not select exactly the registered interface"
+    purge_contract_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-purge-contract.XXXXXX")
+    printf '%s\n' '# reviewed purge helper fixture' > "$purge_contract_tmp/purge-standby.ps1"
+    purge_hash=$(sha256_q "$purge_contract_tmp/purge-standby.ps1")
+    if ! (
+        WIN_PURGE_SOURCE="$purge_contract_tmp/purge-standby.ps1"
+        WIN_SESSION='D:/blit-test/rigw-pf1/selftest'
+        WIN_PURGE="$WIN_SESSION/purge-standby.ps1"
+        WIN_PURGE_HASH=""
+        wscp() {
+            [[ "$#" == 2 && "$1" == "$WIN_PURGE_SOURCE" \
+                && "$2" == "$WIN_SSH:$WIN_PURGE.tmp" ]] || return 91
+        }
+        wssh() {
+            local command="$1"
+            if [[ "$command" == *"refusing existing Windows session tree"* ]]; then
+                [[ "$command" == *"New-Item -ItemType Directory -Path '$WIN_SESSION'"* ]] \
+                    || return 92
+                return 0
+            fi
+            [[ "$command" == *"Get-FileHash -Algorithm SHA256 -LiteralPath '$WIN_PURGE.tmp'"* ]] \
+                || return 93
+            [[ "$command" == *"if (\$tmpHash -cne '$purge_hash')"* ]] || return 94
+            [[ "$command" == *"Move-Item -LiteralPath '$WIN_PURGE.tmp' -Destination '$WIN_PURGE'"* ]] \
+                || return 95
+            [[ "$command" == *"Get-FileHash -Algorithm SHA256 -LiteralPath '$WIN_PURGE'"* ]] \
+                || return 96
+            [[ "$command" == *"if (\$finalHash -cne '$purge_hash')"* ]] || return 97
+            printf 'H|%s\n' "$purge_hash"
+        }
+        stage_purge_helper
+        [[ "$WIN_PURGE_HASH" == "$purge_hash" ]] || exit 98
+    ); then
+        rm -rf "$purge_contract_tmp"
+        die "reviewed Windows purge helper was not staged and hash-verified"
+    fi
+    if ! (
+        WIN_PURGE='D:/blit-test/rigw-pf1/selftest/purge-standby.ps1'
+        WIN_PURGE_HASH="$purge_hash"
+        sync() { return 0; }
+        sudo() { return 0; }
+        wssh() {
+            local command="$1"
+            [[ "$command" == *"Get-FileHash -Algorithm SHA256 -LiteralPath '$WIN_PURGE'"* ]] \
+                || return 101
+            [[ "$command" == *"if (\$purgeHash -cne '$WIN_PURGE_HASH')"* ]] \
+                || return 102
+            [[ "$command" == *"\$purgeOutput = @(& pwsh -NoProfile -File '$WIN_PURGE')"* ]] \
+                || return 103
+            [[ "$command" == *"\$purgeOutput.Count -ne 1"* \
+                && "$command" == *"[string]\$purgeOutput[0] -cne 'standby-purged'"* ]] \
+                || return 104
+        }
+        drained=$(drain_both)
+        [[ "$drained" == drained ]] || exit 105
+    ); then
+        rm -rf "$purge_contract_tmp"
+        die "Windows purge helper was not hash-verified per arm with exact success output"
+    fi
+    rm -rf "$purge_contract_tmp"
+    preflight_source=$(declare -f preflight)
+    python3 - "$preflight_source" <<'PY' \
+        || die "purge-helper staging moved ahead of read-only endpoint gates"
+import sys
+
+source = sys.argv[1]
+markers = (
+    "provenance_gate",
+    "ports_closed",
+    "q_topology_gate",
+    "win_topology_gate",
+    "mss_gate",
+    "firewall_gate",
+    "q_quiet_gate",
+    "win_quiet_gate",
+    "timer_gate",
+    "windows_result_stream_gate",
+    "stage_purge_helper",
+    "write_manifest",
+    "verify_fixtures",
+)
+positions = [source.index(marker) for marker in markers]
+if positions != sorted(positions) or source.count("stage_purge_helper") != 1:
+    raise SystemExit(f"preflight marker order changed: {positions}")
+PY
     clock_probe=$(append_clock_row 1 run cell 1 source_init before 1 10 11 12 2 0)
     [[ "$(awk -F, '{print NF}' <<<"$clock_probe")" == 12 ]] \
         || die "clock sample row is not exactly 12 columns"
@@ -1276,6 +1363,40 @@ sha256_win() {
         | tr -d '\r' | tail -1
 }
 
+stage_purge_helper() {
+    local staged_tmp="$WIN_PURGE.tmp" remote_hash
+    [[ -f "$WIN_PURGE_SOURCE" && ! -L "$WIN_PURGE_SOURCE" ]] \
+        || die "reviewed Windows purge helper is absent or not a plain file"
+    WIN_PURGE_HASH=$(sha256_q "$WIN_PURGE_SOURCE") \
+        || die "cannot hash reviewed Windows purge helper"
+    [[ "$WIN_PURGE_HASH" =~ ^[0-9a-f]{64}$ ]] \
+        || die "reviewed Windows purge helper hash is malformed: $WIN_PURGE_HASH"
+
+    WIN_SESSION_MAY_EXIST=1
+    wssh "
+\$ErrorActionPreference = 'Stop'
+if (Test-Path -LiteralPath '$WIN_SESSION') { throw 'refusing existing Windows session tree' }
+New-Item -ItemType Directory -Path '$WIN_SESSION' -ErrorAction Stop | Out-Null
+" || die "cannot reserve fresh Windows session tree for reviewed purge helper"
+    wscp "$WIN_PURGE_SOURCE" "$WIN_SSH:$staged_tmp" \
+        || die "cannot stage reviewed Windows purge helper"
+    remote_hash=$(wssh "
+\$ErrorActionPreference = 'Stop'
+\$tmpItem = Get-Item -LiteralPath '$staged_tmp' -Force -ErrorAction Stop
+if ((\$tmpItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'staged purge helper is a reparse point' }
+\$tmpHash = (Get-FileHash -Algorithm SHA256 -LiteralPath '$staged_tmp').Hash.ToLower()
+if (\$tmpHash -cne '$WIN_PURGE_HASH') { throw \"staged purge helper hash mismatch: \$tmpHash\" }
+Move-Item -LiteralPath '$staged_tmp' -Destination '$WIN_PURGE' -ErrorAction Stop
+\$finalItem = Get-Item -LiteralPath '$WIN_PURGE' -Force -ErrorAction Stop
+if ((\$finalItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'final purge helper is a reparse point' }
+\$finalHash = (Get-FileHash -Algorithm SHA256 -LiteralPath '$WIN_PURGE').Hash.ToLower()
+if (\$finalHash -cne '$WIN_PURGE_HASH') { throw \"final purge helper hash mismatch: \$finalHash\" }
+\"H|\$finalHash\"
+" | tr -d '\r') || die "cannot verify reviewed Windows purge helper"
+    [[ "$remote_hash" == "H|$WIN_PURGE_HASH" ]] \
+        || die "Windows purge helper verification returned '$remote_hash'"
+}
+
 float_le() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a <= b) }'; }
 
 q_load1() {
@@ -1634,6 +1755,7 @@ q,client,$HEAD_FULL,$qbh,$Q_BLIT
 q,daemon,$HEAD_FULL,$qdh,$Q_DAEMON
 windows,client,$HEAD_FULL,$wbh,$WIN_BINS/$HEAD_SHORT/blit.exe
 windows,daemon,$HEAD_FULL,$wdh,$WIN_BINS/$HEAD_SHORT/blit-daemon.exe
+windows,cache-helper,$HEAD_FULL,$WIN_PURGE_HASH,$WIN_PURGE
 EOF
     WIN_DAEMON_HASH=$wdh
 }
@@ -1660,8 +1782,6 @@ if (-not (Select-String -LiteralPath '$WIN_BINS/$HEAD_SHORT/blit-daemon.exe' -Si
 if (Select-String -LiteralPath '$WIN_BINS/$HEAD_SHORT/blit.exe' -SimpleMatch -Quiet -Pattern '+$HEAD_BUILD_ID.dirty') { exit 6 }
 if (Select-String -LiteralPath '$WIN_BINS/$HEAD_SHORT/blit-daemon.exe' -SimpleMatch -Quiet -Pattern '+$HEAD_BUILD_ID.dirty') { exit 7 }
 " || die "Windows binaries are missing or do not embed a clean +$HEAD_BUILD_ID"
-    write_manifest
-    log "provenance exact: $HEAD_FULL on q and Windows"
 }
 
 preflight() {
@@ -1669,6 +1789,7 @@ preflight() {
     command -v python3 >/dev/null || die "python3 required"
     command -v lsof >/dev/null || die "lsof required"
     command -v nc >/dev/null || die "nc required"
+    command -v scp >/dev/null || die "scp required"
     sudo -n /usr/sbin/purge >/dev/null || die "q NOPASSWD purge grant is absent"
     provenance_gate
     ports_closed || die "port $PORT already has a listener on q or Windows"
@@ -1680,8 +1801,10 @@ preflight() {
     win_quiet_gate
     timer_gate
     windows_result_stream_gate
+    stage_purge_helper
+    write_manifest
     verify_fixtures
-    log "PREFLIGHT OK: registered rig, exact binaries, canonical paths, quiet endpoints"
+    log "PREFLIGHT OK: registered rig, exact binaries/helper, canonical paths, quiet endpoints"
 }
 
 q_daemon_stop() {
@@ -1962,9 +2085,14 @@ for (\$i=0; \$i -lt 30; \$i++) {
   if (\$quiet -ge 3) { break }
 }
 if (\$quiet -lt 3) { throw 'DRAIN-TIMEOUT' }
-if (-not (Test-Path -LiteralPath '$WIN_PURGE')) { throw 'purge helper absent' }
-& pwsh -NoProfile -File '$WIN_PURGE'
-if (\$LASTEXITCODE -ne 0) { throw \"purge helper rc \$LASTEXITCODE\" }
+\$purgeItem = Get-Item -LiteralPath '$WIN_PURGE' -Force -ErrorAction Stop
+if ((\$purgeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'purge helper is a reparse point' }
+\$purgeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath '$WIN_PURGE').Hash.ToLower()
+if (\$purgeHash -cne '$WIN_PURGE_HASH') { throw \"purge helper hash mismatch: \$purgeHash\" }
+\$purgeOutput = @(& pwsh -NoProfile -File '$WIN_PURGE')
+\$purgeRc = \$LASTEXITCODE
+if (\$purgeRc -ne 0) { throw \"purge helper rc \$purgeRc\" }
+if (\$purgeOutput.Count -ne 1 -or [string]\$purgeOutput[0] -cne 'standby-purged') { throw \"purge helper output mismatch: \$(\$purgeOutput -join '|')\" }
 'drained'
 " >/dev/null || return 1
     printf drained

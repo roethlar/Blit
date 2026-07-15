@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Reopened — G5 reviewed; round-5 F1/G6 purge provenance fix pending.
+**Status**: Reopened — G6 fixed and guard-proved; fresh complete review pending.
 
 ## What
 
@@ -325,3 +325,21 @@ G5 after independently driving the ARP interface mutation red and restoring
 the Bash 3.2 self-test green. Its detached worktree ended clean and was
 removed. No endpoint was contacted. See the round-5 raw reviews and
 adjudications under `.review/results/otp12-pf1-rigw-harness-r5.*`.
+
+G6 now takes the purge helper only from the exact clean q checkout. After all
+read-only endpoint/fabric/quiet gates pass, the harness reserves a fresh
+per-session Windows tree, copies the reviewed helper to a temporary path,
+rejects reparse points, verifies SHA-256 before and after the atomic move, and
+records the helper hash/path alongside the four executable hashes. Every arm
+rechecks that same hash immediately before invocation and requires exactly one
+`standby-purged` success line in addition to exit zero. The helper is therefore
+covered by the executable snapshot and strict session-tree cleanup rather than
+trusted as endpoint state.
+
+The Bash 3.2 self-test functionally mocks both stage and per-arm commands.
+Removing the final post-move hash comparison turns it red at the staging
+contract; restoring it returns green. Removing the per-arm hash comparison
+turns it red before the mocked purge can pass; restoring it returns green. A
+separate order guard pins the first remote write after provenance, port,
+topology, MSS, firewall, quietness, timer, and result-stream checks. No endpoint
+was contacted by the fix or its mutation proofs.
