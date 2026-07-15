@@ -11,7 +11,10 @@ but is never subtracted across hosts.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import csv
+import hashlib
 import json
 import os
 import re
@@ -19,7 +22,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from statistics import median
 from typing import Any, Iterable, Sequence
 
@@ -45,6 +48,8 @@ CSV_FIELDS = (
     "settled_ms",
     "flush_ms",
     "total_ms",
+    "landed_root",
+    "tree_manifest_sha256",
     "exit",
     "drain",
     "valid",
@@ -68,6 +73,7 @@ CLOCK_FIELDS = (
 )
 TRACE_PREFIX = "[session-phase] "
 SESSION_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SETTLE_MIN_MS = 250
 SETTLE_MAX_MS = 1000
 MEASURAND = "durable_total_ms"
@@ -109,6 +115,8 @@ class RunRow:
     settled_ms: int
     flush_ms: Decimal
     total_ms: Decimal
+    landed_root: str
+    tree_manifest_sha256: str
     exit_code: int
     drain: str
     valid: str
@@ -273,7 +281,95 @@ def _safe_client_log(root: Path, value: str, line: int) -> None:
         raise AnalysisError(f"runs.csv line {line}: client_log does not exist: {value!r}")
 
 
+def _read_tree_manifest(path: Path, label: str) -> tuple[bytes, str]:
+    if not path.is_file():
+        raise AnalysisError(f"missing {label}: {path}")
+    data = path.read_bytes()
+    if not data or not data.endswith(b"\n"):
+        raise AnalysisError(f"{label}: manifest must be non-empty and newline-terminated")
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise AnalysisError(f"{label}: manifest is not ASCII") from exc
+    lines = text.splitlines()
+    if lines != sorted(lines) or len(lines) != len(set(lines)):
+        raise AnalysisError(f"{label}: manifest lines are not exact sorted unique inventory")
+    for line_number, line in enumerate(lines, start=1):
+        try:
+            encoded, size_text = line.split(",", 1)
+        except ValueError as exc:
+            raise AnalysisError(
+                f"{label} line {line_number}: expected base64_path,decimal_size"
+            ) from exc
+        if not size_text.isascii() or not size_text.isdecimal():
+            raise AnalysisError(f"{label} line {line_number}: invalid decimal size")
+        try:
+            relative = base64.b64decode(encoded, validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+            raise AnalysisError(f"{label} line {line_number}: invalid UTF-8 base64 path") from exc
+        parsed = PurePosixPath(relative)
+        if (
+            not relative
+            or parsed.is_absolute()
+            or relative != parsed.as_posix()
+            or any(part in ("", ".", "..") for part in parsed.parts)
+        ):
+            raise AnalysisError(f"{label} line {line_number}: unsafe/noncanonical path")
+    return data, hashlib.sha256(data).hexdigest()
+
+
+def _load_fixture_manifests(root: Path) -> dict[str, tuple[bytes, str]]:
+    index_path = root / "fixture-manifests.csv"
+    if not index_path.is_file():
+        raise AnalysisError(f"missing {index_path}")
+    with index_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fields = ("shape", "sha256", "q_manifest", "windows_manifest")
+        if tuple(reader.fieldnames or ()) != fields:
+            raise AnalysisError("fixture-manifests.csv header mismatch")
+        rows = list(reader)
+    if [row["shape"] for row in rows] != ["mixed", "large"]:
+        raise AnalysisError("fixture-manifests.csv must contain mixed,large exactly")
+    fixture_dir = root / "fixtures"
+    expected_files = {
+        f"src_{shape}.manifest" for shape in ("mixed", "large")
+    } | {f"windows-src_{shape}.manifest" for shape in ("mixed", "large")}
+    actual_files = (
+        {
+            path.relative_to(fixture_dir).as_posix()
+            for path in fixture_dir.rglob("*")
+            if path.is_file()
+        }
+        if fixture_dir.is_dir()
+        else set()
+    )
+    if actual_files != expected_files:
+        raise AnalysisError(
+            "fixture manifest file inventory mismatch: expected "
+            f"{sorted(expected_files)}, got {sorted(actual_files)}"
+        )
+
+    result: dict[str, tuple[bytes, str]] = {}
+    for row in rows:
+        shape = row["shape"]
+        q_relative = f"fixtures/src_{shape}.manifest"
+        win_relative = f"fixtures/windows-src_{shape}.manifest"
+        if row["q_manifest"] != q_relative or row["windows_manifest"] != win_relative:
+            raise AnalysisError(f"fixture-manifests.csv {shape}: path mapping mismatch")
+        q_data, q_digest = _read_tree_manifest(root / q_relative, f"q src_{shape}")
+        win_data, win_digest = _read_tree_manifest(
+            root / win_relative, f"Windows src_{shape}"
+        )
+        if q_data != win_data or q_digest != win_digest:
+            raise AnalysisError(f"canonical q/Windows src_{shape} manifests differ")
+        if row["sha256"] != q_digest:
+            raise AnalysisError(f"fixture-manifests.csv {shape}: digest mismatch")
+        result[shape] = (q_data, q_digest)
+    return result
+
+
 def load_runs(root: Path) -> list[RunRow]:
+    fixture_manifests = _load_fixture_manifests(root)
     runs_path = root / "runs.csv"
     if not runs_path.is_file():
         raise AnalysisError(f"missing {runs_path}")
@@ -357,6 +453,30 @@ def load_runs(root: Path) -> list[RunRow]:
                 f"exactly; got {decimal_text(total_ms)} != "
                 f"{decimal_text(transfer_ms)} + {decimal_text(flush_ms)}"
             )
+        shape = cell.rsplit("_", 1)[1]
+        landed_root = raw["landed_root"]
+        expected_root = f"src_{shape}"
+        if landed_root != expected_root:
+            raise AnalysisError(
+                f"runs.csv line {line}: landed_root must be {expected_root!r}"
+            )
+        recorded_digest = raw["tree_manifest_sha256"]
+        if not SHA256_RE.fullmatch(recorded_digest):
+            raise AnalysisError(
+                f"runs.csv line {line}: tree_manifest_sha256 must be 64 lowercase hex"
+            )
+        rid = f"b{block_spec.number}_{cell}_p{pair}_{role}"
+        landed_data, landed_digest = _read_tree_manifest(
+            root / "landed" / f"{rid}.manifest", f"landed manifest {rid}"
+        )
+        canonical_data, canonical_digest = fixture_manifests[shape]
+        if landed_digest != recorded_digest:
+            raise AnalysisError(f"runs.csv line {line}: landed manifest digest mismatch")
+        if landed_data != canonical_data or landed_digest != canonical_digest:
+            raise AnalysisError(
+                f"runs.csv line {line}: landed relative-path/size manifest "
+                f"does not match canonical src_{shape}"
+            )
         rows.append(
             RunRow(
                 csv_line=line,
@@ -372,6 +492,8 @@ def load_runs(root: Path) -> list[RunRow]:
                 settled_ms=settled_ms,
                 flush_ms=flush_ms,
                 total_ms=total_ms,
+                landed_root=landed_root,
+                tree_manifest_sha256=recorded_digest,
                 exit_code=exit_code,
                 drain=raw["drain"],
                 valid=raw["valid"],
@@ -379,6 +501,26 @@ def load_runs(root: Path) -> list[RunRow]:
                 session_id=session_id,
                 client_log=raw["client_log"],
             )
+        )
+
+    landed_dir = root / "landed"
+    expected_landed = {
+        f"b{row.block}_{row.cell}_p{row.pair}_{row.role}.manifest"
+        for row in rows
+    }
+    actual_landed = (
+        {
+            path.relative_to(landed_dir).as_posix()
+            for path in landed_dir.rglob("*")
+            if path.is_file()
+        }
+        if landed_dir.is_dir()
+        else set()
+    )
+    if actual_landed != expected_landed:
+        raise AnalysisError(
+            "landed manifest file inventory mismatch: expected exactly 128 registered "
+            f"files, got {len(actual_landed)}"
         )
 
     block_ids: dict[int, set[str]] = {}

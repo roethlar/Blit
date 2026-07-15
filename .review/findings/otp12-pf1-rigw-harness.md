@@ -18,8 +18,9 @@ new two-endpoint trace uncorrelatable.
   endpoint initiates the one `Transfer` session.
 - Pin one canonical source tree per direction and fixture. Both roles read the
   same q or Windows physical path and land into a precreated container of the
-  same depth and shape. The harness verifies the complete landed file count
-  and byte sum before accepting each arm.
+  same depth and shape. The harness requires the q and Windows canonical
+  relative-path/size manifests to match, pins the one exact `src_<shape>` root,
+  and retains an identical manifest and digest for every accepted arm.
 - Run a fixed OFF–ON–ON–OFF four-block schedule over
   `wm_tcp_mixed`, `mw_tcp_mixed`, `wm_grpc_mixed`, and `wm_tcp_large`.
   Pair rounds traverse cells forward/reverse/reverse/forward and run the two
@@ -99,6 +100,12 @@ new two-endpoint trace uncorrelatable.
   planner prerequisite chains are also pinned. Swapping completion ahead of a
   first write, swapping attachment ahead of action completion, or reversing a
   causal elapsed interval makes the analyzer suite fail.
+- Fixture and landed manifests encode each UTF-8 POSIX relative path in base64
+  beside its decimal file size, sort under ordinal/C locale rules, and reject
+  nonregular or reparse entries. The analyzer recomputes all digests, requires
+  exact q/Windows canonical equality and exactly 128 landed manifest files,
+  and rejects swapped per-file sizes, renamed paths, wrong root layout, or a
+  forged recorded digest even when file count and total bytes are unchanged.
 - Mutation proof: replacing the absolute-deadline wait with a no-op makes the
   harness self-test fail because it returns before +250 ms. Moving the
   successful Windows client-log fetch ahead of the durability marker makes
@@ -120,8 +127,7 @@ new two-endpoint trace uncorrelatable.
 
 ## Known gaps
 
-- The independent harness audit found an open fail-closed gap in landed
-  relative-path identity. It also found that failure cleanup can discard the
+- The independent harness audit found that failure cleanup can discard the
   current Windows logs or leave a completion marker before cleanup succeeds,
   the Windows launcher PID is not identity-checked before termination, and a
   reused output directory can retain stale terminal markers. No live datum is

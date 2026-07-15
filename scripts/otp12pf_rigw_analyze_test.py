@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import base64
 import csv
+import hashlib
 import importlib.util
 import json
 import sys
@@ -28,6 +30,7 @@ class SyntheticSession:
         self.clock_rows: list[dict[str, str]] = []
         self._session_counter = 1
         self._build()
+        self._build_manifest_evidence()
         self._build_clock_samples()
         self.write()
 
@@ -276,6 +279,59 @@ class SyntheticSession:
                     )
                     q_clock = q_after + 100
 
+    @staticmethod
+    def _manifest_data(shape: str) -> bytes:
+        entries = (
+            (("a.txt", 1), ("sub/b.txt", 2))
+            if shape == "mixed"
+            else (("large.bin", 3),)
+        )
+        lines = sorted(
+            f"{base64.b64encode(path.encode()).decode()},{size}"
+            for path, size in entries
+        )
+        return "".join(f"{line}\n" for line in lines).encode("ascii")
+
+    def _build_manifest_evidence(self) -> None:
+        fixtures = self.root / "fixtures"
+        landed = self.root / "landed"
+        fixtures.mkdir()
+        landed.mkdir()
+        index_rows: list[dict[str, str]] = []
+        fixture_data: dict[str, tuple[bytes, str]] = {}
+        for shape in ("mixed", "large"):
+            data = self._manifest_data(shape)
+            digest = hashlib.sha256(data).hexdigest()
+            q_relative = f"fixtures/src_{shape}.manifest"
+            win_relative = f"fixtures/windows-src_{shape}.manifest"
+            (self.root / q_relative).write_bytes(data)
+            (self.root / win_relative).write_bytes(data)
+            index_rows.append(
+                {
+                    "shape": shape,
+                    "sha256": digest,
+                    "q_manifest": q_relative,
+                    "windows_manifest": win_relative,
+                }
+            )
+            fixture_data[shape] = (data, digest)
+        with (self.root / "fixture-manifests.csv").open("w", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=("shape", "sha256", "q_manifest", "windows_manifest"),
+            )
+            writer.writeheader()
+            writer.writerows(index_rows)
+        for row in self.rows:
+            shape = row["cell"].rsplit("_", 1)[1]
+            data, digest = fixture_data[shape]
+            row["landed_root"] = f"src_{shape}"
+            row["tree_manifest_sha256"] = digest
+            rid = (
+                f"b{row['block']}_{row['cell']}_p{row['pair']}_{row['role']}"
+            )
+            (landed / f"{rid}.manifest").write_bytes(data)
+
     def write(self) -> None:
         with (self.root / "runs.csv").open("w", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=analyzer.CSV_FIELDS)
@@ -502,6 +558,55 @@ class RigWAnalyzerTests(unittest.TestCase):
         self.assertEqual(off["paired_delta_range_ms"], "56")
         self.assertEqual(off["n_pair_ms"], "56")
         self.assertEqual(str(result.n_resolution), "56")
+
+    def test_landed_manifest_rejects_swapped_sizes_and_renamed_paths(self) -> None:
+        mutations = (
+            (("a.txt", 2), ("sub/b.txt", 1)),
+            (("renamed.txt", 1), ("sub/b.txt", 2)),
+        )
+        for entries in mutations:
+            with self.subTest(entries=entries):
+                temporary, session = self.make_session()
+                self.addCleanup(temporary.cleanup)
+                row = next(
+                    row
+                    for row in session.rows
+                    if row["cell"].endswith("_mixed")
+                )
+                lines = sorted(
+                    f"{base64.b64encode(path.encode()).decode()},{size}"
+                    for path, size in entries
+                )
+                data = "".join(f"{line}\n" for line in lines).encode("ascii")
+                digest = hashlib.sha256(data).hexdigest()
+                rid = (
+                    f"b{row['block']}_{row['cell']}_p{row['pair']}_{row['role']}"
+                )
+                (session.root / "landed" / f"{rid}.manifest").write_bytes(data)
+                row["tree_manifest_sha256"] = digest
+                session.write()
+                with self.assertRaisesRegex(
+                    analyzer.AnalysisError,
+                    "landed relative-path/size manifest does not match canonical",
+                ):
+                    analyzer.analyze(session.root)
+
+    def test_landed_root_and_recorded_manifest_digest_are_exact(self) -> None:
+        temporary, session = self.make_session()
+        self.addCleanup(temporary.cleanup)
+        session.rows[0]["landed_root"] = "wrapper/src_large"
+        session.write()
+        with self.assertRaisesRegex(analyzer.AnalysisError, "landed_root must be"):
+            analyzer.analyze(session.root)
+
+        temporary_digest, digest_session = self.make_session()
+        self.addCleanup(temporary_digest.cleanup)
+        digest_session.rows[0]["tree_manifest_sha256"] = "0" * 64
+        digest_session.write()
+        with self.assertRaisesRegex(
+            analyzer.AnalysisError, "landed manifest digest mismatch"
+        ):
+            analyzer.analyze(digest_session.root)
 
     def test_sequence_gap_and_missing_terminal_are_rejected(self) -> None:
         temporary, session = self.make_session()

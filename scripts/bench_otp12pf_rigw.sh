@@ -66,7 +66,7 @@ SESSION_TAG=$(date -u +%Y%m%dT%H%M%SZ).$$
 OUT_DIR=${OUT_DIR:-$REPO_ROOT/logs/otp12pf-rigw-$SESSION_TAG}
 WIN_SESSION="$WIN_ROOT/rigw-pf1/$SESSION_TAG"
 
-mkdir -p "$OUT_DIR/trace" "$OUT_DIR/client"
+mkdir -p "$OUT_DIR/trace" "$OUT_DIR/client" "$OUT_DIR/fixtures" "$OUT_DIR/landed"
 LOG="$OUT_DIR/bench.log"
 RUNS_CSV="$OUT_DIR/runs.csv"
 CLOCK_CSV="$OUT_DIR/clock-samples.csv"
@@ -162,6 +162,7 @@ embeds_clean_q() {
 selftest() {
     local got expected rows source_first destination_first clock_probe identity_file
     local selftest_client_done selftest_deadline selftest_settle_done run_arm_source
+    local manifest_tmp canonical_manifest landed_manifest tree_digest
     reject_registered_overrides
     got=$(emit_schedule)
     expected=$'1,off,forward,1,4\n2,on,reverse,1,4\n3,on,forward,5,8\n4,off,reverse,5,8'
@@ -238,6 +239,38 @@ PY
         die "dirty build identity was accepted"
     fi
     rm -f "$identity_file"
+
+    manifest_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-manifest.XXXXXX")
+    mkdir -p "$manifest_tmp/source/sub" "$manifest_tmp/container/src_mixed/sub"
+    printf 'a' > "$manifest_tmp/source/a"
+    printf 'bc' > "$manifest_tmp/source/sub/b"
+    printf 'a' > "$manifest_tmp/container/src_mixed/a"
+    printf 'bc' > "$manifest_tmp/container/src_mixed/sub/b"
+    canonical_manifest="$manifest_tmp/canonical.manifest"
+    landed_manifest="$manifest_tmp/landed.manifest"
+    write_q_tree_manifest "$manifest_tmp/source" "$canonical_manifest"
+    write_q_tree_manifest \
+        "$manifest_tmp/container" "$landed_manifest" src_mixed
+    tree_digest=$(matching_manifest_digest "$canonical_manifest" "$landed_manifest") \
+        || die "identical relative-path/size manifests did not match"
+    [[ "$tree_digest" =~ ^[0-9a-f]{64}$ ]] \
+        || die "tree manifest digest is malformed"
+    printf 'aa' > "$manifest_tmp/container/src_mixed/a"
+    printf 'b' > "$manifest_tmp/container/src_mixed/sub/b"
+    write_q_tree_manifest \
+        "$manifest_tmp/container" "$landed_manifest" src_mixed
+    if matching_manifest_digest "$canonical_manifest" "$landed_manifest" >/dev/null; then
+        rm -rf "$manifest_tmp"
+        die "same-count/same-byte tree with swapped file sizes was accepted"
+    fi
+    rm -rf "$manifest_tmp/container/src_mixed"
+    mkdir -p "$manifest_tmp/container/wrapper/src_mixed"
+    if write_q_tree_manifest \
+        "$manifest_tmp/container" "$landed_manifest" src_mixed 2>/dev/null; then
+        rm -rf "$manifest_tmp"
+        die "wrong landed root wrapper was accepted"
+    fi
+    rm -rf "$manifest_tmp"
 
     python3 "$SCRIPT_DIR/otp12pf_rigw_analyze_test.py" \
         >> "$LOG" 2>&1 || die "analyzer self-tests failed"
@@ -454,8 +487,92 @@ fixture_shape_win() {
 " | tr -d '\r' | sed -n 's/^S|//p' | tr '|' ',' | tail -1
 }
 
+write_q_tree_manifest() {
+    python3 - "$1" "$2" "${3:-}" <<'PY'
+import base64, os, pathlib, stat, sys
+
+root = pathlib.Path(sys.argv[1])
+output = pathlib.Path(sys.argv[2])
+expected_root = sys.argv[3]
+if not root.is_dir() or root.is_symlink():
+    raise SystemExit(f"manifest root is not a plain directory: {root}")
+if expected_root:
+    entries = list(root.iterdir())
+    if (
+        len(entries) != 1
+        or entries[0].name != expected_root
+        or not entries[0].is_dir()
+        or entries[0].is_symlink()
+    ):
+        raise SystemExit(
+            f"landed container must contain exactly plain directory {expected_root}"
+        )
+    root = entries[0]
+
+lines = []
+def walk_error(error):
+    raise error
+
+for current, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
+    for name in dirs:
+        path = pathlib.Path(current, name)
+        mode = path.lstat().st_mode
+        if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+            raise SystemExit(f"non-directory/reparse entry in manifest: {path}")
+    for name in files:
+        path = pathlib.Path(current, name)
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise SystemExit(f"non-regular entry in manifest: {path}")
+        relative = path.relative_to(root).as_posix()
+        encoded = base64.b64encode(relative.encode("utf-8")).decode("ascii")
+        lines.append(f"{encoded},{info.st_size}")
+lines.sort()
+output.write_text("".join(f"{line}\n" for line in lines), encoding="ascii")
+PY
+}
+
+write_win_tree_manifest() {
+    local root="$1" remote_out="$2" local_out="$3" expected_root="${4:-}"
+    wssh "
+\$ErrorActionPreference = 'Stop'
+\$root = (Resolve-Path -LiteralPath '$root').Path.TrimEnd([char]92,[char]47)
+if ('$expected_root') {
+  \$entries = @(Get-ChildItem -LiteralPath \$root -Force -ErrorAction Stop)
+  if (\$entries.Count -ne 1 -or -not \$entries[0].PSIsContainer -or \$entries[0].Name -cne '$expected_root' -or ((\$entries[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'landed root layout mismatch' }
+  \$root = \$entries[0].FullName.TrimEnd([char]92,[char]47)
+}
+\$lines = [Collections.Generic.List[string]]::new()
+foreach (\$item in @(Get-ChildItem -LiteralPath \$root -Recurse -Force -ErrorAction Stop)) {
+  if ((\$item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw \"reparse entry in manifest: \$(\$item.FullName)\" }
+  if (\$item.PSIsContainer) { continue }
+  if (-not (\$item -is [IO.FileInfo])) { throw \"non-regular entry in manifest: \$(\$item.FullName)\" }
+  \$rel = \$item.FullName.Substring(\$root.Length).TrimStart([char]92,[char]47).Replace([char]92,[char]47)
+  \$b64 = [Convert]::ToBase64String([Text.UTF8Encoding]::new(\$false,\$true).GetBytes(\$rel))
+  \$lines.Add(\"\$b64,\$([uint64]\$item.Length)\")
+}
+\$ordered = [string[]]\$lines.ToArray()
+[Array]::Sort(\$ordered, [StringComparer]::Ordinal)
+\$text = if (\$ordered.Count) { (\$ordered -join \"`n\") + \"`n\" } else { '' }
+[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName('$remote_out')) | Out-Null
+[IO.File]::WriteAllText('$remote_out', \$text, [Text.UTF8Encoding]::new(\$false))
+" || return 1
+    fetch_win_file "$remote_out" "$local_out" || return 1
+    LC_ALL=C sort -o "$local_out" "$local_out"
+}
+
+matching_manifest_digest() {
+    local canonical="$1" landed="$2"
+    cmp -s "$canonical" "$landed" || return 1
+    sha256_q "$landed"
+}
+
 verify_fixtures() {
-    local shape want qgot wgot
+    local shape want qgot wgot qmanifest wmanifest qhash
+    printf '%s\n' 'shape,sha256,q_manifest,windows_manifest' \
+        > "$OUT_DIR/fixture-manifests.csv"
+    wssh "New-Item -ItemType Directory -Force -Path '$WIN_SESSION/fixtures' | Out-Null" \
+        || die "cannot create Windows fixture evidence directory"
     for shape in mixed large; do
         case "$shape" in
             mixed) want=5001,547110912;;
@@ -465,8 +582,22 @@ verify_fixtures() {
         wgot=$(fixture_shape_win "$(win_source_path "$shape")")
         [[ "$qgot" == "$want" ]] || die "q src_$shape is $qgot, expected $want"
         [[ "$wgot" == "$want" ]] || die "Windows canonical src_$shape is $wgot, expected $want"
+        qmanifest="$OUT_DIR/fixtures/src_$shape.manifest"
+        wmanifest="$OUT_DIR/fixtures/windows-src_$shape.manifest"
+        write_q_tree_manifest "$(q_source_path "$shape")" "$qmanifest" \
+            || die "q src_$shape manifest failed"
+        write_win_tree_manifest \
+            "$(win_source_path "$shape")" \
+            "$WIN_SESSION/fixtures/src_$shape.manifest" "$wmanifest" \
+            || die "Windows src_$shape manifest failed"
+        qhash=$(matching_manifest_digest "$qmanifest" "$wmanifest") \
+            || die "q and Windows src_$shape relative-path/size manifests differ"
+        printf '%s,%s,%s,%s\n' \
+            "$shape" "$qhash" "fixtures/src_$shape.manifest" \
+            "fixtures/windows-src_$shape.manifest" \
+            >> "$OUT_DIR/fixture-manifests.csv"
     done
-    log "canonical fixtures verified on both hosts (same paths for both initiator roles)"
+    log "canonical fixtures verified byte-for-byte by relative path and size on both hosts"
 }
 
 write_manifest() {
@@ -804,6 +935,7 @@ run_arm() {
     local block="$1" state="$2" pass="$3" run_id="$4" cell="$5" pair="$6" role="$7" role_order="$8"
     local direction carrier shape flag="" dest rid qerr werr client_rel client_abs remote_err result transfer_ms rc flush_out flush_ms count bytes want drain session_id total
     local windows_client=0 arm_phase=client_done client_done_ns settle_deadline_ns settle_done_ns settled_ms
+    local landed_root landed_manifest canonical_manifest remote_manifest tree_manifest_sha256
     direction=${cell%%_*}
     carrier=${cell#*_}; carrier=${carrier%%_*}
     shape=${cell##*_}
@@ -872,18 +1004,36 @@ run_arm() {
 
     # The destination OS—not the initiator role—selects the durability and
     # landed-tree probe.  This remains outside transfer_ms.
+    landed_root="src_$shape"
+    landed_manifest="$OUT_DIR/landed/$rid.manifest"
+    canonical_manifest="$OUT_DIR/fixtures/src_$shape.manifest"
     if [[ "$direction" == wm ]]; then
         flush_out=$(flush_verify_q "$dest") || session_void "$rid q durability probe failed"
-        rm -rf "$Q_MODULE/rigw-sessions/$SESSION_TAG/$rid"
+        write_q_tree_manifest "$dest" "$landed_manifest" "$landed_root" \
+            || session_void "$rid q landed root/manifest verification failed"
     else
         flush_out=$(flush_verify_win "$dest") || session_void "$rid Windows durability probe failed"
-        wssh "Remove-Item -LiteralPath '$WIN_MODULE/rigw-sessions/$SESSION_TAG/$rid' -Recurse -Force -ErrorAction SilentlyContinue"
+        remote_manifest="$WIN_SESSION/block_$block/$rid.tree.manifest"
+        write_win_tree_manifest \
+            "$dest" "$remote_manifest" "$landed_manifest" "$landed_root" \
+            || session_void "$rid Windows landed root/manifest verification failed"
     fi
     IFS='|' read -r _ flush_ms count bytes <<<"$flush_out"
     case "$shape" in mixed) want='5001|547110912';; large) want='1|1073741824';; esac
     [[ "$count|$bytes" == "$want" ]] \
         || session_void "$rid landed $count files/$bytes bytes, expected $want"
     [[ "$flush_ms" =~ ^[0-9]+$ ]] || session_void "$rid flush timer malformed: '$flush_out'"
+    tree_manifest_sha256=$(matching_manifest_digest \
+        "$canonical_manifest" "$landed_manifest") \
+        || session_void "$rid landed relative-path/size manifest differs from canonical"
+    [[ "$tree_manifest_sha256" =~ ^[0-9a-f]{64}$ ]] \
+        || session_void "$rid tree manifest digest is malformed"
+    if [[ "$direction" == wm ]]; then
+        rm -rf "$Q_MODULE/rigw-sessions/$SESSION_TAG/$rid"
+    else
+        wssh "Remove-Item -LiteralPath '$WIN_MODULE/rigw-sessions/$SESSION_TAG/$rid' -Recurse -Force -ErrorAction Stop" \
+            || session_void "$rid failed to remove verified Windows destination"
+    fi
     arm_phase=durability_verified
 
     if [[ "$windows_client" == 1 ]]; then
@@ -901,10 +1051,11 @@ run_arm() {
     fi
 
     total=$((transfer_ms + flush_ms))
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$block" "$state" "$pass" "$cell" "$role" "$pair" "$role_order" \
-        "$transfer_ms" "$settled_ms" "$flush_ms" "$total" "$rc" "$drain" yes \
-        "$run_id" "$session_id" "$client_rel" >> "$RUNS_CSV"
+        "$transfer_ms" "$settled_ms" "$flush_ms" "$total" "$landed_root" \
+        "$tree_manifest_sha256" "$rc" "$drain" yes "$run_id" "$session_id" \
+        "$client_rel" >> "$RUNS_CSV"
     log "$rid: transfer=${transfer_ms}ms settled=${settled_ms}ms flush=${flush_ms}ms total=${total}ms session=${session_id:-none}"
 }
 
@@ -988,7 +1139,7 @@ main() {
         return
     fi
 
-    printf '%s\n' 'block,trace_state,pass,cell,role,pair,role_order,transfer_ms,settled_ms,flush_ms,total_ms,exit,drain,valid,run_id,session_id,client_log' > "$RUNS_CSV"
+    printf '%s\n' 'block,trace_state,pass,cell,role,pair,role_order,transfer_ms,settled_ms,flush_ms,total_ms,landed_root,tree_manifest_sha256,exit,drain,valid,run_id,session_id,client_log' > "$RUNS_CSV"
     printf '%s\n' 'block,run_id,cell,pair,role,phase,sample,q_before_ns,windows_ns,q_after_ns,rtt_ns,offset_windows_minus_q_ns' > "$CLOCK_CSV"
     emit_schedule > "$OUT_DIR/schedule.csv"
     wssh "New-Item -ItemType Directory -Force -Path '$WIN_SESSION' | Out-Null"
