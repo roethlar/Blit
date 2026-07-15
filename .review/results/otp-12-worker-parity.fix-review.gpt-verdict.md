@@ -21,13 +21,16 @@ updates it atomically. This also closes the adjacent accepted-settlement ABA
 case, where a stale producer could otherwise reuse an epoch and stale live
 count after a complete proposal/settle cycle.
 
-Guard: eight concurrent shape/tuner producers race a matching refusal. It
-passed 51 consecutive runs. Removing the terminal state made the new test fail
-with one escaped proposal; restoring it returned green.
+The initial guard raced eight shape/tuner producers against refusal and passed
+51 consecutive runs; removing terminal state made one proposal escape. The
+next independent review correctly found that guard scheduler-dependent and
+not protective of accepted settlement. It was replaced by the deterministic
+lock/settlement guard recorded in
+`.review/results/otp-12-worker-parity.atomic-fix.gpt-verdict.md`.
 
 Full workspace fmt, strict clippy, and tests are green: 1,490 passed, 2
 ignored, no failures. Documentation checks are green.
 
-Fix commit: pending.
+Fix commit: `8e993aa`.
 
 reviewer: gpt-5.6-sol

@@ -104,6 +104,43 @@ struct ResizeEpochState {
     refused: bool,
 }
 
+impl ResizeEpochState {
+    fn settle(&mut self, epoch: u32, accepted: bool) -> bool {
+        if self.pending_epoch != Some(epoch) || epoch == 0 {
+            return false;
+        }
+        if !accepted {
+            self.refused = true;
+        }
+        self.settled_epoch = epoch;
+        self.pending_epoch = None;
+        true
+    }
+}
+
+#[cfg(test)]
+struct ResizeTickTestHook {
+    entered: std::sync::Barrier,
+    release: std::sync::Barrier,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for ResizeTickTestHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ResizeTickTestHook")
+    }
+}
+
+#[cfg(test)]
+impl ResizeTickTestHook {
+    fn new() -> Self {
+        Self {
+            entered: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        }
+    }
+}
+
 /// The one mutable tuning object for a transfer.
 #[derive(Debug)]
 pub struct TransferDial {
@@ -123,6 +160,8 @@ pub struct TransferDial {
     /// These fields form one arbitration state: observing/claiming them
     /// separately permits an ABA race across a concurrent settlement.
     resize_epochs: Mutex<ResizeEpochState>,
+    #[cfg(test)]
+    resize_tick_test_hook: Mutex<Option<Arc<ResizeTickTestHook>>>,
     /// Resize-eligible ticks since the last settle (cooldown clock).
     ticks_since_settle: AtomicU32,
     /// Consecutive same-direction tick counter: positive = "pipe clean
@@ -193,6 +232,8 @@ impl TransferDial {
             max_streams: AtomicUsize::new(DIAL_FLOOR_MAX_STREAMS.clamp(1, ceiling_streams.max(1))),
             live_streams: AtomicUsize::new(DIAL_FLOOR_INITIAL_STREAMS.min(ceiling_streams)),
             resize_epochs: Mutex::new(ResizeEpochState::default()),
+            #[cfg(test)]
+            resize_tick_test_hook: Mutex::new(None),
             ticks_since_settle: AtomicU32::new(0),
             resize_sustain: AtomicI32::new(0),
             ceiling_chunk_bytes: ceiling_chunk,
@@ -295,14 +336,26 @@ impl TransferDial {
     /// call [`Self::resize_settled`] with the outcome; until then
     /// every subsequent tick returns `None`.
     pub fn resize_tick(&self, delta_bytes: u64, blocked_ratio: f64) -> Option<ResizeProposal> {
+        // Keep eligibility, direction, live count, and epoch claim in the
+        // same critical section as settlement. Otherwise a shape resize can
+        // settle/reset cooldown between signal calculation and claim, and a
+        // stale tuner decision can immediately open the next epoch.
+        let mut state = self
+            .resize_epochs
+            .lock()
+            .expect("resize epoch state poisoned");
+        if state.refused || state.pending_epoch.is_some() {
+            return None;
+        }
+        #[cfg(test)]
+        if let Some(hook) = self
+            .resize_tick_test_hook
+            .lock()
+            .expect("resize tick test hook poisoned")
+            .clone()
         {
-            let state = self
-                .resize_epochs
-                .lock()
-                .expect("resize epoch state poisoned");
-            if state.refused || state.pending_epoch.is_some() {
-                return None;
-            }
+            hook.entered.wait();
+            hook.release.wait();
         }
         let ticks = self
             .ticks_since_settle
@@ -336,16 +389,6 @@ impl TransferDial {
         } else {
             return None;
         };
-        // Re-enter the serialized state after computing the signal. A
-        // proposal may have settled (or been refused) meanwhile, so derive
-        // live/target/epoch together from the state this claim actually wins.
-        let mut state = self
-            .resize_epochs
-            .lock()
-            .expect("resize epoch state poisoned");
-        if state.refused || state.pending_epoch.is_some() {
-            return None;
-        }
         let live = self.live_streams.load(Ordering::Relaxed).max(1);
         let target = if add {
             (live + 1).min(self.ceiling_max_streams.max(1))
@@ -416,22 +459,31 @@ impl TransferDial {
             .resize_epochs
             .lock()
             .expect("resize epoch state poisoned");
+        self.resize_settled_locked(&mut state, epoch, effective_streams, accepted);
+    }
+
+    fn resize_settled_locked(
+        &self,
+        state: &mut ResizeEpochState,
+        epoch: u32,
+        effective_streams: usize,
+        accepted: bool,
+    ) -> bool {
         if state.pending_epoch != Some(epoch) || epoch == 0 {
-            return;
+            return false;
         }
         self.ticks_since_settle.store(0, Ordering::Relaxed);
         self.resize_sustain.store(0, Ordering::Relaxed);
         if accepted {
             let clamped = effective_streams.clamp(1, self.ceiling_max_streams.max(1));
             self.live_streams.store(clamped, Ordering::Relaxed);
-        } else {
-            state.refused = true;
         }
         // A refused request was still an observed wire epoch. Consuming it
         // keeps future/duplicate traffic monotonic even though live count
         // remains unchanged.
-        state.settled_epoch = epoch;
-        state.pending_epoch = None;
+        let settled = state.settle(epoch, accepted);
+        debug_assert!(settled);
+        settled
     }
 
     /// Raise max_streams toward the ceiling (used when a peer's
@@ -972,71 +1024,67 @@ mod tests {
     }
 
     #[test]
-    fn resize_refusal_is_atomic_against_concurrent_producers() {
-        const PRODUCERS: usize = 8;
+    fn resize_epoch_lock_serializes_producers_across_settlement() {
+        // The tuner lock spans eligibility, direction, live count, and claim:
+        // pause after it acquires the lock and prove the arbitration mutex is
+        // unavailable until the tick continues. This deterministically guards
+        // the stale-decision window the re-review found.
+        let accepted = Arc::new(TransferDial::conservative());
+        while accepted.step_up_cheap_dials() {}
+        burn_cooldown(&accepted);
+        assert_eq!(accepted.resize_tick(1024, 0.0), None, "sustain tick 1");
+        let hook = Arc::new(ResizeTickTestHook::new());
+        *accepted
+            .resize_tick_test_hook
+            .lock()
+            .expect("resize tick test hook poisoned") = Some(Arc::clone(&hook));
+        let tuner = {
+            let accepted = Arc::clone(&accepted);
+            std::thread::spawn(move || accepted.resize_tick(1024, 0.0))
+        };
+        hook.entered.wait();
+        let lock_spans_tick = matches!(
+            accepted.resize_epochs.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        );
+        hook.release.wait();
+        *accepted
+            .resize_tick_test_hook
+            .lock()
+            .expect("resize tick test hook poisoned") = None;
+        assert!(lock_spans_tick, "tuner released arbitration before claim");
+        let first = tuner.join().unwrap().expect("tuner owns epoch 1");
+        accepted.resize_settled(first.epoch, 2, true);
+        assert_eq!(
+            accepted.resize_tick(1024, 0.0),
+            None,
+            "accepted settlement resets cooldown"
+        );
 
-        let dial = Arc::new(TransferDial::conservative());
-        while dial.step_up_cheap_dials() {}
-        burn_cooldown(&dial);
-        let proposal = dial
-            .propose_shape_resize(8)
-            .expect("initial proposal holds the epoch slot");
-
-        let start = Arc::new(std::sync::Barrier::new(PRODUCERS + 1));
-        let ready = Arc::new(AtomicUsize::new(0));
-        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let escaped = Arc::new(AtomicUsize::new(0));
-
-        std::thread::scope(|scope| {
-            for producer in 0..PRODUCERS {
-                let dial = Arc::clone(&dial);
-                let start = Arc::clone(&start);
-                let ready = Arc::clone(&ready);
-                let settled = Arc::clone(&settled);
-                let escaped = Arc::clone(&escaped);
-                scope.spawn(move || {
-                    start.wait();
-                    ready.fetch_add(1, Ordering::Release);
-                    while !settled.load(Ordering::Acquire) {
-                        let next = if producer % 2 == 0 {
-                            dial.propose_shape_resize(8)
-                        } else {
-                            dial.resize_tick(1024, 0.0)
-                        };
-                        if next.is_some() {
-                            escaped.fetch_add(1, Ordering::Relaxed);
-                            return;
-                        }
-                        std::thread::yield_now();
-                    }
-                    // Exercise both APIs after settlement too. The terminal
-                    // bit and epoch slot are one locked state, so neither a
-                    // waiter nor a fresh producer can reopen the transfer.
-                    for _ in 0..128 {
-                        let next = if producer % 2 == 0 {
-                            dial.propose_shape_resize(8)
-                        } else {
-                            dial.resize_tick(1024, 0.0)
-                        };
-                        if next.is_some() {
-                            escaped.fetch_add(1, Ordering::Relaxed);
-                            return;
-                        }
-                    }
-                });
-            }
-
-            start.wait();
-            while ready.load(Ordering::Acquire) != PRODUCERS {
-                std::thread::yield_now();
-            }
-            dial.resize_settled(proposal.epoch, dial.live_streams(), false);
-            settled.store(true, Ordering::Release);
-        });
-
-        assert_eq!(escaped.load(Ordering::Relaxed), 0);
-        assert!(!dial.resize_pending());
-        assert_eq!(dial.resize_epoch(), proposal.epoch);
+        // Refusal crossing: a shape producer begins while the settlement
+        // lock is held. Once the same production helper records refusal and
+        // releases the lock, the waiter must observe terminal state and may
+        // not claim epoch 2.
+        let refused = Arc::new(TransferDial::conservative());
+        let first = refused.propose_shape_resize(8).expect("shape owns epoch 1");
+        let mut refused_state = refused
+            .resize_epochs
+            .lock()
+            .expect("resize epoch state poisoned");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let shape = {
+            let refused = Arc::clone(&refused);
+            std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                refused.propose_shape_resize(8)
+            })
+        };
+        started_rx.recv().unwrap();
+        assert!(refused.resize_settled_locked(&mut refused_state, first.epoch, 1, false));
+        drop(refused_state);
+        assert_eq!(shape.join().unwrap(), None, "refusal is terminal");
+        assert_eq!(refused.resize_epoch(), first.epoch);
+        assert!(!refused.resize_pending());
     }
 
     #[test]

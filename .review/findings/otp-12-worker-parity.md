@@ -65,10 +65,15 @@ interpreted the wire value as unknown/default. That was a role-specific cap.
   leaves live workers unchanged, and every later shape/tuner proposal is
   `None`. Mutation proof: omitting the terminal record immediately returns a
   new shape proposal and fails the pin.
-- Re-review guard for atomic terminal refusal: eight concurrent shape/tuner
-  producers race the matching refusal and cannot claim another epoch. The
-  guard passed 51 consecutive runs; deleting the terminal state made it fail
-  with one escaped proposal.
+- Re-review guard for resize arbitration: a deterministic hook proves the
+  tuner holds the epoch lock from eligibility through proposal claim, then
+  crosses the same production settlement helper with both accepted and
+  refused outcomes. Releasing the lock before the tuner claim fails the guard;
+  omitting terminal refusal deterministically lets epoch 2 escape and fails it.
+- Release guard: the same arbitration test passes under `cargo test --release`.
+  Mutation proof: moving the state mutation inside `debug_assert!` makes the
+  optimized test fail because release compilation removes the assertion and
+  its side effect; evaluating the mutation unconditionally restores green.
 - Full workspace gate passes: `cargo fmt --all -- --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and
   `cargo test --workspace` (1,490 passed, 2 ignored; 1,492 test functions,
@@ -104,3 +109,11 @@ accepted: the split `resize_refused` check and `pending_epoch` CAS left a
 multi-producer race in which a waiter could claim the slot after refusal.
 Epoch, pending, and refusal arbitration now share one short mutex-protected
 state, which also prevents epoch ABA across an intervening accepted settle.
+
+The independent review of that repair returned **FAIL** with one MEDIUM and
+one LOW, both accepted. Tuner cooldown, sustain, and direction were still
+computed outside the epoch lock, so a decision could survive an accepted
+shape settlement and immediately claim the next epoch. The stress guard also
+depended on scheduler luck and did not cross accepted settlement. The tuner
+decision and claim now share the settlement lock, and the replacement guard
+forces both accepted and refused interleavings deterministically.
