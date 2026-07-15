@@ -2,7 +2,7 @@
 
 Last updated: 2026-07-15 (otp-12 worker parity closed at `42b9b38`; no Mac↔Mac data taken)
 
-- **NEXT ACTION — repair and re-review the remaining round-12 Mac↔Mac instrument findings, then run the missing cell.** The worker-count disparity is closed and is not a blocker.
+- **NEXT ACTION — OWNER CHOICE REMAINS:** either repair/re-review the round-12 Mac↔Mac instrument before running that missing cell, or instrument the P1 dial/accept path on rig W as the round-12 reviewers recommended. The worker-count disparity is closed and is not a blocker; this session does not choose the next hardware experiment.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **WORKER PARITY IS CLOSED.** The identical 10,000-file fixture now reaches exactly 8 workers under both initiator layouts (old guard: 3 vs 2; destination-initiator `max_streams=0`: 1). Payload starts while resize ACKs are pending, refusal is terminal, and resize arbitration is atomic. Final Codex re-review: PASS; workspace gate: 1,490 passed, 2 ignored.
 - **WHY NO MAC↔MAC DATA YET:** the current verdict engine can label a 1.092 cell both `PASS` and `REPRODUCES`, and the end-fabric gate can grade after a 10GbE→1GbE renegotiation because it rechecks MSS/IP but not link speed. Those are measurement blockers, not transfer-path blockers. P1 remains real on macOS↔Windows; no Mac↔Mac data exists.
@@ -69,11 +69,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    pre-fix new arms for acceptance. Assembling the acceptance matrix now
    would build otp-13's artifact from void rows.
 1a. **`docs/plan/OTP12_PERF_FINDINGS.md` (ACTIVE, D-2026-07-13-1).**
-    pf-0 is complete: MTU was killed as a dominant cause. **Mac↔Mac is the
-    next hardware cell after the remaining round-12 harness findings are fixed
-    and reviewed.** It is the missing 2×2 cell; no data has been taken, and
-    worker parity is no longer a blocker. Sequence: instrument fixes/review →
-    Mac↔Mac → pf-1 → pf-final (all rigs) → otp-12d → otp-13.
+    pf-0 is complete: MTU was killed as a dominant cause. **The owner has not
+    chosen the next hardware experiment:** repair/re-review the round-12
+    Mac↔Mac instrument before filling the missing 2×2 cell, or instrument P1's
+    dial/accept path on rig W as both round-12 reviewers recommended. No
+    Mac↔Mac data has been taken, and worker parity is no longer a blocker.
+    After that choice is resolved: pf-1 → pf-final (all rigs) → otp-12d →
+    otp-13.
 1b. **AFTER otp-12 — the Windows/local pair, planned TOGETHER** (same tar
    path, opposite directions: a fidelity fix ADDS per-file work to a path
    already losing to robocopy, so planning them apart optimises one against
