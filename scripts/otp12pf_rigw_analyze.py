@@ -1078,6 +1078,8 @@ def validate_traces(
             < destination_summary.producer_seq
         ):
             raise AnalysisError(f"{label}: DESTINATION terminal inventory is out of sequence")
+        _assert_before(label, resize["source_settled"][(7,)], source_complete)
+        _assert_before(label, resize["resize_ack_sent"][(7,)], destination_complete)
 
         source_attachment_events = _marker_map(
             group,
@@ -1174,12 +1176,22 @@ def validate_traces(
             action_key = (epoch, 0)
             _assert_before(
                 label,
+                resize["resize_sent"][(epoch,)],
+                source_action_begins[action_key],
+            )
+            _assert_before(
+                label,
                 resize["resize_ack_received"][(epoch,)],
                 source_action_begins[action_key],
             )
             _assert_before(
                 label,
                 source_action_ends[action_key],
+                resize["source_settled"][(epoch,)],
+            )
+            _assert_before(
+                label,
+                source_attachment_events[action_key],
                 resize["source_settled"][(epoch,)],
             )
 
@@ -1213,10 +1225,20 @@ def validate_traces(
                 )
                 _assert_before(
                     label,
+                    resize["resize_received"][arm_key],
+                    arm_begin[arm_key],
+                )
+                _assert_before(
+                    label,
                     arm_begin[arm_key],
                     resize["destination_prepared"][arm_key],
                 )
                 _assert_before(label, arm_begin[arm_key], arm_ready[arm_key])
+                _assert_before(
+                    label,
+                    arm_ready[arm_key],
+                    destination_action_begins[(arm_key[0], 0)],
+                )
                 _assert_before(
                     label,
                     arm_begin[arm_key],
@@ -1228,7 +1250,17 @@ def validate_traces(
             for (epoch,) in sorted(resize_epochs):
                 _assert_before(
                     label,
+                    resize["resize_received"][(epoch,)],
+                    destination_action_begins[(epoch, 0)],
+                )
+                _assert_before(
+                    label,
                     destination_action_ends[(epoch, 0)],
+                    resize["destination_prepared"][(epoch,)],
+                )
+                _assert_before(
+                    label,
+                    destination_attachment_events[(epoch, 0)],
                     resize["destination_prepared"][(epoch,)],
                 )
         write_begin_events = _marker_map(

@@ -55,6 +55,11 @@ new two-endpoint trace uncorrelatable.
 
 ## Files
 
+- `crates/blit-core/src/transfer_session/data_plane.rs` — SOURCE dial
+  trace attachment now follows the matching dial-end marker at epoch zero
+  and every resize epoch.
+- `crates/blit-core/tests/transfer_session_roles.rs` — both initiator layouts
+  pin action-end before attachment on both endpoint roles.
 - `scripts/bench_otp12pf_rigw.sh` — q-side registered runner and endpoint
   gates.
 - `scripts/otp12pf_rigw_analyze.py` — exact schedule, trace, clock, phase, and
@@ -101,9 +106,18 @@ new two-endpoint trace uncorrelatable.
   order and nondecreasing monotonic elapsed time. Socket action completion must
   precede trace attachment; attached payload sockets must progress through
   first write/receive before their role's data-plane completion; resize and
-  planner prerequisite chains are also pinned. Swapping completion ahead of a
-  first write, swapping attachment ahead of action completion, or reversing a
-  causal elapsed interval makes the analyzer suite fail.
+  planner prerequisite chains are also pinned. The resize DAG additionally
+  requires sent proposal before SOURCE socket acquisition, attachment before
+  SOURCE settlement, final settlement/ACK before role-local completion, and
+  the exact receive→arm→ready→accept or receive→dial→attach→prepared chain on
+  the DESTINATION. Mutations reverse every one of those edges while preserving
+  exact contiguous producer sequences and must fail. Swapping completion ahead
+  of a first write, swapping attachment ahead of action completion, or
+  reversing a causal elapsed interval also makes the analyzer suite fail.
+- Mutation proof: restoring SOURCE dial attachment ahead of `socket_dial_end`
+  makes the two-initiator Rust phase test fail at epoch zero and resize epoch
+  one; restoring end-before-attachment returns it to green. No cross-endpoint
+  or concurrent send/ACK ordering is asserted.
 - Fixture and landed manifests encode each UTF-8 POSIX relative path in base64
   beside its decimal file size, sort under ordinal/C locale rules, and reject
   nonregular or reparse entries. The analyzer recomputes all digests, requires

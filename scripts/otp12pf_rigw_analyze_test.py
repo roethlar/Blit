@@ -376,6 +376,46 @@ class RigWAnalyzerTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         return temporary, SyntheticSession(Path(temporary.name))
 
+    @staticmethod
+    def traced_session_id(session: SyntheticSession, initiator_role: str) -> str:
+        return str(
+            next(
+                event["session_id"]
+                for event in session.events
+                if event["initiator_role"] == initiator_role
+            )
+        )
+
+    @staticmethod
+    def phase_event(
+        session: SyntheticSession,
+        session_id: str,
+        endpoint_role: str,
+        event_name: str,
+        epoch: int | None,
+    ) -> dict[str, object]:
+        return next(
+            event
+            for event in session.events
+            if event["session_id"] == session_id
+            and event["endpoint_role"] == endpoint_role
+            and event["event"] == event_name
+            and event.get("epoch") == epoch
+        )
+
+    @staticmethod
+    def reorder_local_events(desired_order: list[dict[str, object]]) -> None:
+        fields = ("producer_seq", "elapsed_ns", "unix_ns")
+        assert len({event["session_id"] for event in desired_order}) == 1
+        assert len({event["endpoint_role"] for event in desired_order}) == 1
+        slots = sorted(
+            (tuple(event[field] for field in fields) for event in desired_order),
+            key=lambda slot: int(slot[0]),
+        )
+        for event, slot in zip(desired_order, slots):
+            for field, value in zip(fields, slot):
+                event[field] = value
+
     def test_complete_schedule_exact_floor_bias_and_exports(self) -> None:
         temporary, session = self.make_session()
         self.addCleanup(temporary.cleanup)
@@ -772,6 +812,171 @@ class RigWAnalyzerTests(unittest.TestCase):
             "SOURCE/socket_trace_attached -> SOURCE/socket_write_begin",
         ):
             analyzer.analyze(session.root)
+
+    def test_destination_resize_prerequisites_are_causal(self) -> None:
+        cases = (
+            (
+                "SOURCE",
+                "resize_received",
+                "resize_arm_queue_begin",
+            ),
+            (
+                "SOURCE",
+                "resize_arm_ready",
+                "socket_accept_begin",
+            ),
+            (
+                "DESTINATION",
+                "resize_received",
+                "socket_dial_begin",
+            ),
+            (
+                "DESTINATION",
+                "socket_trace_attached",
+                "destination_prepared",
+            ),
+        )
+        for initiator_role, start_name, end_name in cases:
+            with self.subTest(
+                initiator_role=initiator_role,
+                edge=f"{start_name}->{end_name}",
+            ):
+                temporary, session = self.make_session()
+                self.addCleanup(temporary.cleanup)
+                session_id = self.traced_session_id(session, initiator_role)
+                start = self.phase_event(
+                    session, session_id, "DESTINATION", start_name, 1
+                )
+                end = self.phase_event(
+                    session, session_id, "DESTINATION", end_name, 1
+                )
+                self.reorder_local_events([end, start])
+                session.write()
+                with self.assertRaisesRegex(
+                    analyzer.AnalysisError,
+                    f"DESTINATION/{start_name} -> DESTINATION/{end_name}",
+                ):
+                    analyzer.analyze(session.root)
+
+    def test_source_resize_prerequisites_are_causal(self) -> None:
+        for initiator_role, source_action in (
+            ("SOURCE", "dial"),
+            ("DESTINATION", "accept"),
+        ):
+            with self.subTest(
+                initiator_role=initiator_role,
+                edge=f"resize_sent->socket_{source_action}_begin",
+            ):
+                temporary, session = self.make_session()
+                self.addCleanup(temporary.cleanup)
+                session_id = self.traced_session_id(session, initiator_role)
+                sent = self.phase_event(
+                    session, session_id, "SOURCE", "resize_sent", 1
+                )
+                ack = self.phase_event(
+                    session, session_id, "SOURCE", "resize_ack_received", 1
+                )
+                action_begin = self.phase_event(
+                    session,
+                    session_id,
+                    "SOURCE",
+                    f"socket_{source_action}_begin",
+                    1,
+                )
+                self.reorder_local_events([ack, action_begin, sent])
+                session.write()
+                with self.assertRaisesRegex(
+                    analyzer.AnalysisError,
+                    f"SOURCE/resize_sent -> SOURCE/socket_{source_action}_begin",
+                ):
+                    analyzer.analyze(session.root)
+
+            with self.subTest(
+                initiator_role=initiator_role,
+                edge="socket_trace_attached->source_settled",
+            ):
+                temporary, session = self.make_session()
+                self.addCleanup(temporary.cleanup)
+                session_id = self.traced_session_id(session, initiator_role)
+                attached = self.phase_event(
+                    session, session_id, "SOURCE", "socket_trace_attached", 1
+                )
+                settled = self.phase_event(
+                    session, session_id, "SOURCE", "source_settled", 1
+                )
+                self.reorder_local_events([settled, attached])
+                session.write()
+                with self.assertRaisesRegex(
+                    analyzer.AnalysisError,
+                    "SOURCE/socket_trace_attached -> SOURCE/source_settled",
+                ):
+                    analyzer.analyze(session.root)
+
+    def test_final_resize_settlement_precedes_data_plane_completion(self) -> None:
+        for initiator_role in ("SOURCE", "DESTINATION"):
+            with self.subTest(
+                initiator_role=initiator_role,
+                edge="SOURCE/source_settled->data_plane_complete",
+            ):
+                temporary, session = self.make_session()
+                self.addCleanup(temporary.cleanup)
+                session_id = self.traced_session_id(session, initiator_role)
+                settled = self.phase_event(
+                    session, session_id, "SOURCE", "source_settled", 7
+                )
+                first_queued = self.phase_event(
+                    session, session_id, "SOURCE", "first_payload_queued", None
+                )
+                write_begin = self.phase_event(
+                    session, session_id, "SOURCE", "socket_write_begin", 0
+                )
+                first_write = self.phase_event(
+                    session, session_id, "SOURCE", "first_socket_write", 0
+                )
+                complete = self.phase_event(
+                    session, session_id, "SOURCE", "data_plane_complete", None
+                )
+                self.reorder_local_events(
+                    [first_queued, write_begin, first_write, complete, settled]
+                )
+                session.write()
+                with self.assertRaisesRegex(
+                    analyzer.AnalysisError,
+                    "SOURCE/source_settled -> SOURCE/data_plane_complete",
+                ):
+                    analyzer.analyze(session.root)
+
+            with self.subTest(
+                initiator_role=initiator_role,
+                edge="DESTINATION/resize_ack_sent->data_plane_complete",
+            ):
+                temporary, session = self.make_session()
+                self.addCleanup(temporary.cleanup)
+                session_id = self.traced_session_id(session, initiator_role)
+                ack_sent = self.phase_event(
+                    session, session_id, "DESTINATION", "resize_ack_sent", 7
+                )
+                first_received = self.phase_event(
+                    session,
+                    session_id,
+                    "DESTINATION",
+                    "first_payload_received",
+                    0,
+                )
+                complete = self.phase_event(
+                    session,
+                    session_id,
+                    "DESTINATION",
+                    "data_plane_complete",
+                    None,
+                )
+                self.reorder_local_events([first_received, complete, ack_sent])
+                session.write()
+                with self.assertRaisesRegex(
+                    analyzer.AnalysisError,
+                    "DESTINATION/resize_ack_sent -> DESTINATION/data_plane_complete",
+                ):
+                    analyzer.analyze(session.root)
 
     def test_destination_preparation_action_is_role_correlated(self) -> None:
         temporary, session = self.make_session()

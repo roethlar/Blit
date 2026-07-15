@@ -1745,7 +1745,10 @@ fn assert_phase_trace_partial_order(events: &[SessionPhaseEvent], initiator: Tra
     ] {
         let begin = one_phase_event(events, role, &format!("socket_{action}_begin"), Some(epoch));
         let end = one_phase_event(events, role, &format!("socket_{action}_end"), Some(epoch));
+        let attached = one_phase_event(events, role, "socket_trace_attached", Some(epoch));
         assert!(begin.elapsed_ns <= end.elapsed_ns);
+        assert!(end.producer_seq < attached.producer_seq);
+        assert!(end.elapsed_ns <= attached.elapsed_ns);
     }
     let socket_begin = one_phase_event(
         events,

@@ -893,8 +893,7 @@ pub(super) async fn dial_source_data_plane(
             Arc::clone(&pool),
         )
         .await
-        .map_err(|err| dp_fault_io(&err, format!("dialing session data plane: {err:#}")))?
-        .with_session_phase_trace(phase_trace.clone(), 0, socket_id as u32);
+        .map_err(|err| dp_fault_io(&err, format!("dialing session data plane: {err:#}")))?;
         if let Some(phase) = &phase_trace {
             phase.event(
                 "socket_dial_end",
@@ -905,6 +904,7 @@ pub(super) async fn dial_source_data_plane(
                 },
             );
         }
+        let session = session.with_session_phase_trace(phase_trace.clone(), 0, socket_id as u32);
         // The source-side sink never reads its dst_root (it only sends);
         // `root()` is consulted by the relay/receive case, not here.
         sinks.push(Arc::new(DataPlaneSink::new(
@@ -1147,8 +1147,7 @@ impl SourceDataPlane {
                     Arc::clone(&self.pool),
                 )
                 .await
-                .map_err(|err| dp_fault_io(&err, format!("dialing resize data socket: {err:#}")))?
-                .with_session_phase_trace(self.phase_trace.clone(), epoch, 0);
+                .map_err(|err| dp_fault_io(&err, format!("dialing resize data socket: {err:#}")))?;
                 if let Some(phase) = &self.phase_trace {
                     phase.event(
                         "socket_dial_end",
@@ -1159,7 +1158,7 @@ impl SourceDataPlane {
                         },
                     );
                 }
-                session
+                session.with_session_phase_trace(self.phase_trace.clone(), epoch, 0)
             }
             SourceSockets::Accept { listener } => {
                 let mut expected = self.session_token.clone();
