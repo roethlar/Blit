@@ -66,12 +66,12 @@ interpreted the wire value as unknown/default. That was a role-specific cap.
   `None`. Mutation proof: omitting the terminal record immediately returns a
   new shape proposal and fails the pin.
 - Re-review guard for resize arbitration: a deterministic hook pauses the
-  tuner while it owns the epoch lock, then starts the matching accepted
-  settlement before allowing the tuner to claim epoch 1. The settlement must
-  apply only after that claim; the same test crosses a refused settlement with
-  a waiting shape producer. Dropping the lock after the hook makes the accepted
-  settlement miss and fails the guard; omitting terminal refusal lets epoch 2
-  escape and fails it.
+  tuner while it owns the epoch lock. The accepted-settlement hook reports only
+  after a real `try_lock` observes contention, and a guard-owned acquisition
+  token must be identical at tuner entry and epoch claim. Dropping/reacquiring
+  arbitration after the hook therefore fails deterministically on token 11 vs
+  12, independent of which waiter the scheduler runs first. The same test
+  crosses refused settlement; omitting terminal refusal lets epoch 2 escape.
 - Release guard: the same arbitration test passes under `cargo test --release`.
   Mutation proof: moving the state mutation inside `debug_assert!` makes the
   optimized test fail because release compilation removes the assertion and
@@ -123,6 +123,12 @@ forces both accepted and refused interleavings deterministically.
 The review of the arbitration repair returned **FAIL** with one LOW, accepted:
 the first replacement guard observed the lock at the hook but joined the tuner
 before accepted settlement, so it inferred rather than forced the exact race.
-The accepted settler now starts while the tuner is paused. Mutation-proven:
-dropping the epoch guard after the hook makes settlement miss epoch 1 and fails
-the live-count assertion; restoring continuous arbitration returns green.
+The accepted settler was moved before tuner release.
+
+The review of that test repair returned **FAIL** with one LOW, accepted: its
+channel signal still fired immediately before `resize_settled`, so scheduler
+order could let a guard-drop mutation pass. The signal now comes from inside
+`resize_settled` after its real `try_lock` result, and the tuner guard carries a
+test-only acquisition token recorded at entry and claim. Dropping/reacquiring
+the guard changes that token and fails deterministically; restoring one
+continuous acquisition passes in debug and release.

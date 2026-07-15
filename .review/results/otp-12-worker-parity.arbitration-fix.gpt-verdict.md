@@ -24,6 +24,6 @@ optimized builds.
 Full workspace fmt, strict clippy, and tests are green: 1,490 passed, 2
 ignored, no failures. Documentation checks are green.
 
-Fix commit: pending.
+Fix commit: `f7f12ec`.
 
 reviewer: gpt-5.6-sol

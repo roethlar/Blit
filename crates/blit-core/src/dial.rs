@@ -118,10 +118,39 @@ impl ResizeEpochState {
     }
 }
 
+struct ResizeEpochGuard<'a> {
+    inner: std::sync::MutexGuard<'a, ResizeEpochState>,
+    #[cfg(test)]
+    acquisition: usize,
+}
+
+impl std::ops::Deref for ResizeEpochGuard<'_> {
+    type Target = ResizeEpochState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for ResizeEpochGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+#[cfg(test)]
+impl ResizeEpochGuard<'_> {
+    fn acquisition(&self) -> usize {
+        self.acquisition
+    }
+}
+
 #[cfg(test)]
 struct ResizeTickTestHook {
     entered: std::sync::Barrier,
     release: std::sync::Barrier,
+    entered_acquisition: AtomicUsize,
+    claimed_acquisition: AtomicUsize,
 }
 
 #[cfg(test)]
@@ -137,6 +166,31 @@ impl ResizeTickTestHook {
         Self {
             entered: std::sync::Barrier::new(2),
             release: std::sync::Barrier::new(2),
+            entered_acquisition: AtomicUsize::new(0),
+            claimed_acquisition: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[cfg(test)]
+struct ResizeSettleTestHook {
+    observed: std::sync::Barrier,
+    contended: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for ResizeSettleTestHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ResizeSettleTestHook")
+    }
+}
+
+#[cfg(test)]
+impl ResizeSettleTestHook {
+    fn new() -> Self {
+        Self {
+            observed: std::sync::Barrier::new(2),
+            contended: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -162,6 +216,10 @@ pub struct TransferDial {
     resize_epochs: Mutex<ResizeEpochState>,
     #[cfg(test)]
     resize_tick_test_hook: Mutex<Option<Arc<ResizeTickTestHook>>>,
+    #[cfg(test)]
+    resize_settle_test_hook: Mutex<Option<Arc<ResizeSettleTestHook>>>,
+    #[cfg(test)]
+    resize_lock_sequence: AtomicUsize,
     /// Resize-eligible ticks since the last settle (cooldown clock).
     ticks_since_settle: AtomicU32,
     /// Consecutive same-direction tick counter: positive = "pipe clean
@@ -191,6 +249,20 @@ pub struct ResizeProposal {
 }
 
 impl TransferDial {
+    fn lock_resize_epochs(&self) -> ResizeEpochGuard<'_> {
+        ResizeEpochGuard {
+            inner: self
+                .resize_epochs
+                .lock()
+                .expect("resize epoch state poisoned"),
+            #[cfg(test)]
+            acquisition: self
+                .resize_lock_sequence
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1),
+        }
+    }
+
     /// Conservative start with default ceilings (no receiver profile).
     pub fn conservative() -> Self {
         Self::conservative_within(None)
@@ -234,6 +306,10 @@ impl TransferDial {
             resize_epochs: Mutex::new(ResizeEpochState::default()),
             #[cfg(test)]
             resize_tick_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            resize_settle_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            resize_lock_sequence: AtomicUsize::new(0),
             ticks_since_settle: AtomicU32::new(0),
             resize_sustain: AtomicI32::new(0),
             ceiling_chunk_bytes: ceiling_chunk,
@@ -340,20 +416,20 @@ impl TransferDial {
         // same critical section as settlement. Otherwise a shape resize can
         // settle/reset cooldown between signal calculation and claim, and a
         // stale tuner decision can immediately open the next epoch.
-        let mut state = self
-            .resize_epochs
-            .lock()
-            .expect("resize epoch state poisoned");
+        let mut state = self.lock_resize_epochs();
         if state.refused || state.pending_epoch.is_some() {
             return None;
         }
         #[cfg(test)]
-        if let Some(hook) = self
+        let test_hook = self
             .resize_tick_test_hook
             .lock()
             .expect("resize tick test hook poisoned")
-            .clone()
-        {
+            .clone();
+        #[cfg(test)]
+        if let Some(hook) = test_hook.as_ref() {
+            hook.entered_acquisition
+                .store(state.acquisition(), Ordering::SeqCst);
             hook.entered.wait();
             hook.release.wait();
         }
@@ -402,6 +478,11 @@ impl TransferDial {
         }
         let epoch = state.settled_epoch.checked_add(1)?;
         state.pending_epoch = Some(epoch);
+        #[cfg(test)]
+        if let Some(hook) = test_hook.as_ref() {
+            hook.claimed_acquisition
+                .store(state.acquisition(), Ordering::SeqCst);
+        }
         self.resize_sustain.store(0, Ordering::Relaxed);
         Some(ResizeProposal {
             epoch,
@@ -455,6 +536,38 @@ impl TransferDial {
     /// further proposals on this transfer. Stale epochs (not the pending
     /// one) are ignored. Either way the cooldown clock restarts.
     pub fn resize_settled(&self, epoch: u32, effective_streams: usize, accepted: bool) {
+        #[cfg(test)]
+        let mut state = {
+            let hook = self
+                .resize_settle_test_hook
+                .lock()
+                .expect("resize settle test hook poisoned")
+                .clone();
+            if let Some(hook) = hook {
+                match self.resize_epochs.try_lock() {
+                    Ok(state) => {
+                        hook.contended.store(false, Ordering::SeqCst);
+                        hook.observed.wait();
+                        state
+                    }
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        hook.contended.store(true, Ordering::SeqCst);
+                        hook.observed.wait();
+                        self.resize_epochs
+                            .lock()
+                            .expect("resize epoch state poisoned")
+                    }
+                    Err(std::sync::TryLockError::Poisoned(_)) => {
+                        panic!("resize epoch state poisoned")
+                    }
+                }
+            } else {
+                self.resize_epochs
+                    .lock()
+                    .expect("resize epoch state poisoned")
+            }
+        };
+        #[cfg(not(test))]
         let mut state = self
             .resize_epochs
             .lock()
@@ -1048,18 +1161,20 @@ mod tests {
             Err(std::sync::TryLockError::WouldBlock)
         );
         // Start the matching accepted settlement while the tuner is paused.
-        // It must remain queued on the same mutex until the tuner has claimed
-        // epoch 1; settling only after `join` would miss the stale-decision
-        // interleaving this test exists to guard.
-        let (settle_started_tx, settle_started_rx) = std::sync::mpsc::channel();
+        // The settlement hook reports only after `try_lock` has actually
+        // observed epoch arbitration, so this does not rely on a pre-call
+        // channel signal or scheduler timing.
+        let settle_hook = Arc::new(ResizeSettleTestHook::new());
+        *accepted
+            .resize_settle_test_hook
+            .lock()
+            .expect("resize settle test hook poisoned") = Some(Arc::clone(&settle_hook));
         let settler = {
             let accepted = Arc::clone(&accepted);
-            std::thread::spawn(move || {
-                settle_started_tx.send(()).unwrap();
-                accepted.resize_settled(1, 2, true);
-            })
+            std::thread::spawn(move || accepted.resize_settled(1, 2, true))
         };
-        settle_started_rx.recv().unwrap();
+        settle_hook.observed.wait();
+        let settlement_contended = settle_hook.contended.load(Ordering::SeqCst);
         hook.release.wait();
         *accepted
             .resize_tick_test_hook
@@ -1067,8 +1182,23 @@ mod tests {
             .expect("resize tick test hook poisoned") = None;
         assert!(lock_spans_tick, "tuner released arbitration before claim");
         let first = tuner.join().unwrap().expect("tuner owns epoch 1");
+        let entered_acquisition = hook.entered_acquisition.load(Ordering::SeqCst);
+        let claimed_acquisition = hook.claimed_acquisition.load(Ordering::SeqCst);
+        assert_ne!(entered_acquisition, 0, "tuner acquisition was recorded");
+        assert_eq!(
+            claimed_acquisition, entered_acquisition,
+            "tuner released and reacquired arbitration before claim"
+        );
         assert_eq!(first.epoch, 1);
         settler.join().unwrap();
+        *accepted
+            .resize_settle_test_hook
+            .lock()
+            .expect("resize settle test hook poisoned") = None;
+        assert!(
+            settlement_contended,
+            "accepted settlement reached arbitration without contention"
+        );
         assert_eq!(accepted.live_streams(), 2, "accepted settlement applied");
         assert!(!accepted.resize_pending(), "accepted epoch settled");
         assert_eq!(
