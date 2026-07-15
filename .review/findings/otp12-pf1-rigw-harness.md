@@ -110,6 +110,12 @@ new two-endpoint trace uncorrelatable.
   installs the EXIT trap or writes a byte. Existing paths are rejected
   unchanged, with explicit stale `SESSION-COMPLETE`/`SESSION-VOID` diagnostics;
   offline guards also pin rejection of unrelated retained content.
+- Every arm resets its exact destination with explicit error propagation,
+  verifies deletion landed, and proves the replacement is an empty plain
+  directory before draining caches or starting the timer. The q self-test
+  mutation makes removal fail under the production `||` call shape and must
+  remain rejected; a Windows source-contract guard forbids suppressed removal
+  errors and requires absence, directory, reparse, and emptiness checks.
 - The failure handler removes any completion marker, stops only remembered
   identity-checked daemons, appends teardown errors without replacing the
   primary void reason, and never initiates session-tree deletion. HUP, INT,

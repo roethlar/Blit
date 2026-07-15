@@ -220,6 +220,7 @@ selftest() {
     local win_stop_source win_start_source finalize_tmp failure_tmp trap_calls trap_rc
     local signal signal_dir signal_rc contract_tmp on_exit_source append_tmp
     local cleanup_tmp remembered port_checks strict_cleanup_source
+    local destination_tmp prepare_destination_source
     reject_registered_overrides
     got=$(emit_schedule)
     expected=$'1,off,forward,1,4\n2,on,reverse,1,4\n3,on,forward,5,8\n4,off,reverse,5,8'
@@ -374,6 +375,44 @@ PY
             || die "stale output rejection modified $marker"
     done
     rm -rf "$freshness_tmp"
+
+    destination_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-destination.XXXXXX")
+    mkdir -p "$destination_tmp/container/src_mixed"
+    printf 'stale\n' > "$destination_tmp/container/src_mixed/stale"
+    (
+        rm() { return 73; }
+        if prepare_destination wm "$destination_tmp/container"; then
+            die "q destination reset masked a failed removal"
+        fi
+    )
+    [[ "$(< "$destination_tmp/container/src_mixed/stale")" == stale ]] \
+        || die "failed q destination reset modified retained evidence"
+    prepare_destination wm "$destination_tmp/container" \
+        || die "q destination reset rejected a removable tree"
+    [[ -d "$destination_tmp/container" && ! -L "$destination_tmp/container" ]]
+    [[ -z "$(find "$destination_tmp/container" -mindepth 1 -maxdepth 1 -print -quit)" ]] \
+        || die "q destination reset left stale content"
+    rm -rf "$destination_tmp"
+
+    prepare_destination_source=$(declare -f prepare_destination)
+    python3 - "$prepare_destination_source" <<'PY' \
+        || die "Windows destination reset source contract changed"
+import sys
+
+source = sys.argv[1]
+for marker in (
+    r"\$ErrorActionPreference = 'Stop'",
+    r"Remove-Item -LiteralPath '$dest' -Recurse -Force -ErrorAction Stop",
+    r"Test-Path -LiteralPath '$dest' -PathType Container",
+    r"Get-ChildItem -LiteralPath '$dest' -Force -ErrorAction Stop",
+    'ReparsePoint',
+):
+    if marker not in source:
+        raise SystemExit(f"missing Windows destination reset marker: {marker}")
+windows = source.split('else', 1)[1]
+if 'SilentlyContinue' in windows:
+    raise SystemExit("Windows destination reset suppresses removal errors")
+PY
 
     finalize_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-finalize.XXXXXX")
     (
@@ -1426,12 +1465,27 @@ if (\$LASTEXITCODE -ne 0) { throw \"purge helper rc \$LASTEXITCODE\" }
 }
 
 prepare_destination() {
-    local direction="$1" dest="$2"
+    local direction="$1" dest="$2" first
     if [[ "$direction" == wm ]]; then
-        rm -rf "$dest"
-        mkdir -p "$dest"
+        rm -rf -- "$dest" || return 1
+        [[ ! -e "$dest" && ! -L "$dest" ]] || return 1
+        mkdir -p -- "$dest" || return 1
+        [[ -d "$dest" && ! -L "$dest" ]] || return 1
+        first=$(find "$dest" -mindepth 1 -maxdepth 1 -print -quit) || return 1
+        [[ -z "$first" ]] || return 1
     else
-        wssh "Remove-Item -LiteralPath '$dest' -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path '$dest' | Out-Null"
+        wssh "
+\$ErrorActionPreference = 'Stop'
+if (Test-Path -LiteralPath '$dest') {
+  Remove-Item -LiteralPath '$dest' -Recurse -Force -ErrorAction Stop
+}
+if (Test-Path -LiteralPath '$dest') { throw 'destination removal did not land' }
+New-Item -ItemType Directory -Force -Path '$dest' -ErrorAction Stop | Out-Null
+if (-not (Test-Path -LiteralPath '$dest' -PathType Container)) { throw 'destination is not a directory' }
+\$item = Get-Item -LiteralPath '$dest' -Force -ErrorAction Stop
+if ((\$item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'destination is a reparse point' }
+if (@(Get-ChildItem -LiteralPath '$dest' -Force -ErrorAction Stop).Count -ne 0) { throw 'destination is not empty' }
+" || return 1
     fi
 }
 
