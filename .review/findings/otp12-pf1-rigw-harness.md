@@ -96,8 +96,11 @@ new two-endpoint trace uncorrelatable.
 
 - The independent harness audit found open fail-closed gaps in post-client
   timing symmetry, durable-total analysis, phase causal ordering, and landed
-  relative-path identity. No live datum is valid until each is fixed and
-  reviewed.
+  relative-path identity. It also found that failure cleanup can discard the
+  current Windows logs or leave a completion marker before cleanup succeeds,
+  the Windows launcher PID is not identity-checked before termination, and a
+  reused output directory can retain stale terminal markers. No live datum is
+  valid until each gap is fixed and reviewed.
 - No rig datum is produced by this slice. The full live run waits for the
   committed harness, mandatory Codex adjudication, exact isolated builds, and
   a green endpoint preflight.
