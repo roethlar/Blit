@@ -1,8 +1,8 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: In progress — round-14 Claude accepted exact `1f62ce5`; fresh
-additive build/staging and live gates remain.
+**Status**: In progress — G15 is fixed and guard-proved at `7bdaf8b`; required
+Claude Fable 5/max review of the immutable candidate remains.
 
 ## What
 
@@ -242,10 +242,10 @@ new two-endpoint trace uncorrelatable.
 ## Known gaps
 
 - No accepted or graded rig datum has been produced by this slice. Exact
-  candidates `d5e9dda` and `d7345f1` are retired from further live use after
-  G13 and G14 voids. Claude accepted the immutable G14 identity; the full run
-  waits for fresh additive isolated build/stage, successful launcher smoke,
-  and green endpoint preflight.
+  candidates `d5e9dda`, `d7345f1`, and `1f62ce5` are retired from further live
+  use after G13, G14, and G15 voids. The full run waits for required Claude
+  Fable 5/max review of the immutable G15 identity, fresh additive isolated
+  build/stage, successful launcher smoke, and green endpoint preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
   small-fixture/P2 work, phase report, and `0f922de` historical control before
@@ -800,3 +800,42 @@ endpoint was contacted and no retained artifact was deleted. Exact candidate
 `1f62ce5`, not the later verdict-record commit, is the only build allowed
 into additive staging and the live retry. Full record:
 `.review/results/otp12-pf1-rigw-harness-r14.claude.json`.
+
+Exact Claude-accepted candidate `1f62ce5` was bundled and staged under fresh,
+additive q and Windows paths. q's real Bash 3.2 self-test, SSH-driven launcher
+smoke, and standalone preflight all passed exact provenance, 10 GbE/MTU/MSS,
+quietness, lifecycle, fixture, and clock gates. Registered session
+`20260715T203809Z.25897` then completed all 32 block-1 arms with exit zero,
+verified drain and durability, matching landed manifests, and all 192 expected
+clock samples. G14 worked live: it recovered once from 44.1% Spotlight and
+again from load1 4.61 plus 51.5% Spotlight, holding until both values were
+simultaneously below the unchanged ceilings. The end fabric and quiet gates
+passed.
+
+The session nevertheless became `SESSION-VOID` when the analyzer correctly
+rejected 32 rows against the registered 128-row schedule. The controller fed
+the four-line block schedule to a `while` loop through standard input, while
+ordinary noninteractive `wssh` calls inherited that same descriptor. The
+first Windows quiet probe in block 1 therefore consumed the three remaining
+schedule records; the loop reached EOF normally and invoked the full-session
+analyzer after only block 1. This stdin-ownership bug originated with the
+initial harness commit and every prior registered candidate carried it, but
+all earlier live sessions stopped before the first block boundary. The
+analyzer remained correctly fail closed. No `SESSION-COMPLETE` or analyzer
+report exists, and nothing was accepted, analyzed, or graded. Local evidence
+and both endpoint session trees remain retained; both ports are closed and no
+benchmark process remains.
+
+G15 makes the ordinary Windows command wrapper invoke `ssh -n`, detaching
+stdin without changing the separately batched clock sampler's intentional
+pipe or `scp`. Its executed Bash 3.2 guard runs a main-shaped four-record loop
+against an SSH shim that drains stdin unless `-n` is present and requires
+blocks 1, 2, 3, and 4 to survive. Removing only `-n` makes the guard fail on
+`noninteractive Windows SSH consumed the registered block schedule`; exact
+restoration returns syntax and the complete self-test green. Format, strict
+clippy, the full workspace suite, all 23 analyzer tests, docs, and diff checks
+pass. No transfer role, endpoint-local path, worker policy, schedule, measured
+arm, trace schema, analyzer rule, threshold, retained artifact, Time Machine
+setting, or mount state changed. Final script blob is `ae60920`; SHA-256 is
+`85cda14fbeecb9446b1ad2462f938e5cf397f2f042a0d106690b6332c295a05d`.
+G15 was fixed at `7bdaf8bda5919f2ed03a17709baf6d4aefabe8e0`.

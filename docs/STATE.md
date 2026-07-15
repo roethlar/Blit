@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-15 (pf-1 rig-W G14 Claude accepted; exact 1f62ce5 live gates next; no accepted rig datum)
+Last updated: 2026-07-15 (pf-1 rig-W G15 schedule-stdin fix guard-proved; Claude review next; no accepted rig datum)
 
-- **NEXT ACTION — PF-1 RIG-W EXACT `1f62ce5` LIVE GATES:** Claude-accepted exact `d7345f1` passed q Bash 3.2 self-test, launcher, and preflight after fresh additive staging. Two fresh registered sessions each completed exactly 16 arms, then became `SESSION-VOID` at the pair-3 entry gate when delayed Spotlight work following q destination-tree writes spiked from quiet pre-round samples to 58.7% and 87.3%. G14 at `942c88e` keeps the fixed 10% ceiling: preflight stays immediate, while runtime checks outside timed arms may use the existing 5 s × 24 recovery budget for either owned load history or Spotlight; every contaminant is rechecked and persistent/malformed states fail closed. Round-14 Claude Fable 5/max accepted exact immutable candidate `1f62ce5` after three independent red mutations and exact restored-green proof. Build and stage only that candidate under fresh additive paths, then run q Bash 3.2 self-test, SSH-driven launcher smoke, preflight, and the registered retry. Worker parity remains closed and is not a blocker.
+- **NEXT ACTION — PF-1 RIG-W G15 CLAUDE REVIEW:** Round-14 Claude-accepted exact `1f62ce5` passed fresh additive staging, q Bash 3.2 self-test, SSH-driven launcher smoke, and preflight. Registered session `20260715T203809Z.25897` completed all 32 block-1 arms valid; G14 recovered live from Spotlight-only and combined load/Spotlight spikes, and the end gates passed. The session then became `SESSION-VOID`: the full-session analyzer correctly required 128 rows, but ordinary Windows SSH inherited the schedule loop's stdin and consumed blocks 2–4. G15 at `7bdaf8b` adds `ssh -n` only to the noninteractive Windows command wrapper. Its executed Bash 3.2 guard reproduces the one-block truncation when `-n` is removed and exact restoration is green; format, clippy, full workspace tests, 23 analyzer tests, docs, and diff checks pass. Run the required Claude Fable 5/max review of the immutable G15 identity, then build/stage only that accepted candidate under fresh additive paths and repeat launcher, preflight, and registered gates. No datum has been accepted; worker parity remains closed and is not a blocker.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **WORKER PARITY IS CLOSED.** The identical 10,000-file fixture now reaches exactly 8 workers under both initiator layouts (old guard: 3 vs 2; destination-initiator `max_streams=0`: 1). Payload starts while resize ACKs are pending, refusal is terminal, and resize arbitration is atomic. Final Codex re-review: PASS; workspace gate: 1,490 passed, 2 ignored.
 - **WHY NO MAC↔MAC DATA YET:** the current verdict engine can label a 1.092 cell both `PASS` and `REPRODUCES`, and the end-fabric gate can grade after a 10GbE→1GbE renegotiation because it rechecks MSS/IP but not link speed. Those are measurement blockers, not transfer-path blockers. P1 remains real on macOS↔Windows; no Mac↔Mac data exists.
@@ -88,17 +88,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     no row was analyzed or graded. G12 is fixed at `cd78ab9`, Bash-3.2 guard-proved,
     and accepted by round-12 Grok at exact identity `d5e9dda`. Its additive live run
     completed eight arms, then G13 exposed the mid-run load gate counting the
-    benchmark's own one-minute load history; that session is also void. G13 at
-    `0cbb16a` keeps the
-    fixed load ceiling with bounded runtime recovery and is Bash-3.2 guard-proved.
+    benchmark's own one-minute load history; that session is also void. G13 at `0cbb16a`
+    keeps the fixed load ceiling with bounded runtime recovery and is Bash-3.2 guard-proved.
     Claude Fable 5/max accepted exact `d7345f1`. Two additive live sessions
     cleared G13 through 16 arms, then G14 exposed delayed Spotlight work at the
     same pair-3 gate; both sessions are void. G14 preserves the 10% bar with
     bounded runtime recovery and is Bash-3.2 guard-proved at `942c88e`.
-    Round-14 Claude accepted exact `1f62ce5`; fresh additive staging and live
-    gates are next. The phase report and
-    `0f922de` historical control remain part of the
-    pf-1 HARD GATE. No Mac↔Mac data has been taken, and worker parity is no
+    Round-14 Claude accepted exact `1f62ce5`. Its additive run completed all 32
+    block-1 arms and exercised G14, then G15 exposed Windows SSH consuming
+    blocks 2–4 from the loop's stdin; the analyzer correctly voided 32/128.
+    G15 isolates SSH stdin and is mutation-proved at `7bdaf8b`; Claude review is next.
+    The phase report and `0f922de` historical control remain part of the pf-1 HARD GATE; no Mac↔Mac data has been taken, and worker parity is no
     longer a blocker. Then: pf-1 → pf-final (all rigs) → otp-12d → otp-13.
 1b. **AFTER otp-12 — the Windows/local pair, planned TOGETHER** (same tar
    path, opposite directions: a fidelity fix ADDS per-file work to a path
