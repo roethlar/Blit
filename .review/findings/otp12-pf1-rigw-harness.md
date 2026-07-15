@@ -1,7 +1,7 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: Reopened — G8 fixed and guard-proved; fresh complete review pending.
+**Status**: Verified — round-8 independent Grok accepted; live gates pending.
 
 ## What
 
@@ -427,6 +427,19 @@ re-audit passed.
 
 Format, strict clippy, all workspace tests, Bash syntax/self-test, all 23
 analyzer tests, the docs gate, and diff checks passed. No endpoint was
-contacted. Fresh complete Codex plus additive Grok review remains required
-before rebuild or launcher retry.
+contacted.
 G8 was fixed at `29d63b7ad45dff21d052a678fff795029b300e6d`.
+
+Round-8 independent Grok reviewed the complete immutable range through
+`6fb369e3d70f7633ad1d697afeda35abf5e276cb` and returned schema-valid
+`ACCEPTED`, exact SHAs, and `guard_confirmed=true`. It independently drove the
+wrapper, commit/path-only, and blob-content-only replacement mutations red and
+restored the Bash 3.2 self-test green after each. It reconfirmed the G8 object
+coverage and cleanup, one `Transfer` RPC, SOURCE-send/DESTINATION-receive
+semantics, role-invariant endpoint-local paths, and the shared 1→8 worker
+target under both initiator layouts. Its detached worktree ended clean at the
+reviewed SHA and was removed. An attempted same-model Codex review was stopped
+and its partial output discarded on the owner's identity correction; it was
+not counted as review evidence. No endpoint was contacted. The immutable
+reviewed SHA, not this later verdict-record commit, is the only build allowed
+into launcher smoke, endpoint preflight, and the registered run.
