@@ -213,18 +213,41 @@ append_clock_row() {
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$@"
 }
 q_monotonic_ns() {
-    python3 -c 'import time; print(time.monotonic_ns())'
+    python3 -c 'import time; print(time.clock_gettime_ns(time.CLOCK_MONOTONIC))'
 }
 settle_until_deadline() {
     python3 - "$1" <<'PY'
 import sys, time
 
 deadline_ns = int(sys.argv[1])
-remaining_ns = deadline_ns - time.monotonic_ns()
+clock_ns = lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+remaining_ns = deadline_ns - clock_ns()
 if remaining_ns > 0:
     time.sleep(remaining_ns / 1_000_000_000)
-print(time.monotonic_ns())
+print(clock_ns())
 PY
+}
+stamp_result_arrival_on_q() {
+    python3 -c '
+import sys, time
+
+result = None
+stamp_ns = None
+for raw in sys.stdin:
+    line = raw.rstrip("\r\n")
+    if not line.startswith("R|"):
+        continue
+    if result is not None:
+        raise SystemExit("multiple Windows client result sentinels")
+    fields = line.split("|")
+    if len(fields) != 3:
+        raise SystemExit("malformed Windows client result sentinel")
+    result = line
+    stamp_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+if result is None or stamp_ns is None:
+    raise SystemExit("missing Windows client result sentinel")
+print(f"{result}|{stamp_ns}")
+'
 }
 successful_windows_log_phase_ok() {
     [[ "$1" == durability_verified ]]
@@ -250,7 +273,9 @@ selftest() {
     local win_stop_source win_start_source finalize_tmp failure_tmp trap_calls trap_rc
     local signal signal_dir signal_rc contract_tmp on_exit_source append_tmp
     local cleanup_tmp remembered port_checks strict_cleanup_source
-    local destination_tmp prepare_destination_source
+    local destination_tmp prepare_destination_source stamped_result stamp_before stamp_after
+    local stamp_tag stamp_ms stamp_rc stamp_ns stamp_extra stamp_teardown_ns
+    local cross_clock_before cross_clock_after cross_clock_delta
     reject_registered_overrides
     got=$(emit_schedule)
     expected=$'1,off,forward,1,4\n2,on,reverse,1,4\n3,on,forward,5,8\n4,off,reverse,5,8'
@@ -290,11 +315,31 @@ selftest() {
         || die "clock sample row is not exactly 12 columns"
     [[ "$SETTLE_NS" == 250000000 && "$SETTLE_MIN_MS" == 250 && "$SETTLE_MAX_MS" == 1000 ]] \
         || die "registered post-client settle bounds changed"
+    cross_clock_before=$(q_monotonic_ns)
+    sleep 0.05
+    cross_clock_after=$(q_monotonic_ns)
+    cross_clock_delta=$((cross_clock_after - cross_clock_before))
+    [[ "$cross_clock_delta" -ge 40000000 && "$cross_clock_delta" -lt 500000000 ]] \
+        || die "q monotonic clock is not comparable across processes"
     selftest_client_done=$(q_monotonic_ns)
     selftest_deadline=$((selftest_client_done + SETTLE_NS))
     selftest_settle_done=$(settle_until_deadline "$selftest_deadline")
     [[ "$selftest_settle_done" =~ ^[0-9]+$ && "$selftest_settle_done" -ge "$selftest_deadline" ]] \
         || die "absolute post-client deadline wait returned early"
+    stamp_before=$(q_monotonic_ns)
+    stamped_result=$(
+        { printf '%s\n' 'R|17|0'; sleep 0.35; } | stamp_result_arrival_on_q
+    ) || die "q result-arrival stamper rejected one exact sentinel"
+    stamp_after=$(q_monotonic_ns)
+    IFS='|' read -r stamp_tag stamp_ms stamp_rc stamp_ns stamp_extra <<<"$stamped_result"
+    [[ "$stamp_tag" == R && "$stamp_ms" == 17 && "$stamp_rc" == 0 \
+        && "$stamp_ns" =~ ^[0-9]+$ && -z "$stamp_extra" ]] \
+        || die "q result-arrival stamper returned '$stamped_result'"
+    [[ "$stamp_ns" -ge "$stamp_before" && "$stamp_ns" -le "$stamp_after" ]] \
+        || die "q result-arrival stamp is outside the producer lifetime"
+    stamp_teardown_ns=$((stamp_after - stamp_ns))
+    [[ "$stamp_teardown_ns" -ge 250000000 ]] \
+        || die "q result-arrival stamp moved after producer teardown"
     if successful_windows_log_phase_ok client_done; then
         die "successful Windows client log was fetchable before durability"
     fi
@@ -309,8 +354,8 @@ source = sys.argv[1]
 markers = (
     'dest=$(arm_destination_path "$direction" "$role")',
     'dest_arg=$(arm_destination_argument "$direction" "$role")',
-    'client_done_ns=$(q_monotonic_ns)',
-    'read -r _ transfer_ms rc',
+    "read -r result_tag transfer_ms rc client_done_ns result_extra",
+    'settle_deadline_ns=$((client_done_ns + SETTLE_NS))',
     'record_clock_samples "$block" "$run_id" "$cell" "$pair" "$role" after',
     'settle_done_ns=$(settle_until_deadline "$settle_deadline_ns")',
     'flush_out=$(flush_verify_q "$dest")',
@@ -331,9 +376,33 @@ for forbidden in (
     'q_destination_path "$rid"',
     'win_destination_path "$rid"',
     '$SESSION_TAG/$rid/container',
+    'client_done_ns=$(q_monotonic_ns)',
 ):
     if forbidden in source:
-        raise SystemExit(f"role-bearing evidence id reached a measured destination: {forbidden}")
+        raise SystemExit(f"forbidden run_arm pattern returned: {forbidden}")
+PY
+
+    python3 - "$(declare -f q_client_run)" "$(declare -f win_client_run)" <<'PY' \
+        || die "client completion-anchor contract changed"
+import sys
+
+q_client, win_client = sys.argv[1:]
+q_markers = (
+    "clock_ns = lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC)",
+    "p=subprocess.run(",
+    "done_ns=clock_ns()",
+    'print(f"R|{ms}|{p.returncode}|{done_ns}")',
+)
+q_positions = [q_client.index(marker) for marker in q_markers]
+if q_positions != sorted(q_positions):
+    raise SystemExit(f"q completion markers out of order: {q_positions}")
+for marker in (
+    "[Console]::Out.WriteLine(",
+    "[Console]::Out.Flush()",
+    "| stamp_result_arrival_on_q",
+):
+    if marker not in win_client:
+        raise SystemExit(f"missing streamed Windows completion marker: {marker}")
 PY
 
     win_stop_source=$(declare -f win_daemon_stop)
@@ -1086,7 +1155,8 @@ timer_gate() {
     local qms wout wms
     qms=$(python3 - <<'PY'
 import time
-t=time.monotonic_ns(); time.sleep(1); print(round((time.monotonic_ns()-t)/1_000_000))
+clock_ns=lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+t=clock_ns(); time.sleep(1); print(round((clock_ns()-t)/1_000_000))
 PY
 )
     [[ "$qms" -ge 950 && "$qms" -le 1050 ]] || die "q one-second timer calibrated to ${qms}ms"
@@ -1095,6 +1165,26 @@ PY
     wout=${wout//$'\r'/}; wms=${wout##*|}
     [[ "$wms" -ge 950 && "$wms" -le 1050 ]] || die "Windows one-second timer calibrated to ${wms}ms"
     log "timer calibration: q=${qms}ms Windows=${wms}ms"
+}
+
+windows_result_stream_gate() {
+    local before after result tag ms rc stamp extra teardown_ns
+    before=$(q_monotonic_ns)
+    result=$(wssh \
+        '[Console]::Out.WriteLine("R|17|0"); [Console]::Out.Flush(); Start-Sleep -Milliseconds 350' \
+        | stamp_result_arrival_on_q) \
+        || die "Windows result-stream probe failed"
+    after=$(q_monotonic_ns)
+    IFS='|' read -r tag ms rc stamp extra <<<"$result"
+    [[ "$tag" == R && "$ms" == 17 && "$rc" == 0 \
+        && "$stamp" =~ ^[0-9]+$ && -z "$extra" ]] \
+        || die "Windows result-stream probe returned '$result'"
+    [[ "$stamp" -ge "$before" && "$stamp" -le "$after" ]] \
+        || die "Windows result-stream q stamp is outside the probe lifetime"
+    teardown_ns=$((after - stamp))
+    [[ "$teardown_ns" -ge 250000000 ]] \
+        || die "Windows result stream was not observable before remote teardown"
+    log "Windows result stream reaches q before remote teardown"
 }
 
 fixture_shape_q() {
@@ -1285,6 +1375,7 @@ preflight() {
     q_quiet_gate
     win_quiet_gate
     timer_gate
+    windows_result_stream_gate
     verify_fixtures
     log "PREFLIGHT OK: registered rig, exact binaries, canonical paths, quiet endpoints"
 }
@@ -1571,11 +1662,13 @@ q_client_run() {
         python3 - "$err" "$Q_BLIT" "$@" <<'PY'
 import os, subprocess, sys, time
 err, argv = sys.argv[1], sys.argv[2:]
+clock_ns = lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC)
 with open(err, "wb") as e:
-    t=time.monotonic_ns()
+    t=clock_ns()
     p=subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=e, env=os.environ.copy())
-    ms=round((time.monotonic_ns()-t)/1_000_000)
-print(f"R|{ms}|{p.returncode}")
+    done_ns=clock_ns()
+    ms=round((done_ns-t)/1_000_000)
+print(f"R|{ms}|{p.returncode}|{done_ns}")
 PY
 }
 
@@ -1589,10 +1682,10 @@ else { Remove-Item Env:BLIT_TRACE_SESSION_PHASES,Env:BLIT_TRACE_RUN_ID -ErrorAct
 \$sw=[Diagnostics.Stopwatch]::StartNew()
 & '$WIN_BINS/$HEAD_SHORT/blit.exe' copy '$src' '$dst' --yes $flag > \$null 2> '$remote_err'
 \$rc=\$LASTEXITCODE; \$sw.Stop()
-\"R|\$([int]\$sw.Elapsed.TotalMilliseconds)|\${rc}\"
-") || true
-    out=${out//$'\r'/}
-    grep '^R|' <<<"$out" | tail -1
+[Console]::Out.WriteLine(\"R|\$([int]\$sw.Elapsed.TotalMilliseconds)|\${rc}\")
+[Console]::Out.Flush()
+" | stamp_result_arrival_on_q) || true
+    printf '%s\n' "$out"
 }
 
 session_id_from_log() {
@@ -1610,7 +1703,7 @@ PY
 
 run_arm() {
     local block="$1" state="$2" pass="$3" run_id="$4" cell="$5" pair="$6" role="$7" role_order="$8"
-    local direction carrier shape flag="" dest dest_arg rid qerr werr client_rel client_abs remote_err result transfer_ms rc flush_out flush_ms count bytes want drain session_id total
+    local direction carrier shape flag="" dest dest_arg rid qerr werr client_rel client_abs remote_err result result_tag result_extra transfer_ms rc flush_out flush_ms count bytes want drain session_id total anchor_now_ns
     local windows_client=0 arm_phase=client_done client_done_ns settle_deadline_ns settle_done_ns settled_ms
     local landed_root landed_manifest canonical_manifest remote_manifest tree_manifest_sha256
     direction=${cell%%_*}
@@ -1652,15 +1745,15 @@ run_arm() {
         session_void "unregistered arm $direction/$role"
     fi
 
-    # Anchor all successful post-client work to the same q monotonic instant,
-    # regardless of which endpoint ran the client.  The first 250 ms is the
-    # common excluded observation budget; any probe overrun is charged to the
-    # durable total below.
-    client_done_ns=$(q_monotonic_ns)
-    settle_deadline_ns=$((client_done_ns + SETTLE_NS))
-
-    IFS='|' read -r _ transfer_ms rc <<<"$result"
-    if [[ ! "$transfer_ms" =~ ^[0-9]+$ || ! "$rc" =~ ^[0-9]+$ ]]; then
+    # Both wrappers carry a q-monotonic completion anchor: immediate child
+    # return for a q client, and result-line arrival for a Windows client.
+    # Wrapper/SSH teardown after that anchor is therefore inside the absolute
+    # settle interval.  The first 250 ms is the common excluded observation
+    # budget; every overrun remains charged to the durable total below.
+    IFS='|' read -r result_tag transfer_ms rc client_done_ns result_extra <<<"$result"
+    if [[ "$result_tag" != R || ! "$transfer_ms" =~ ^[0-9]+$ \
+        || ! "$rc" =~ ^[0-9]+$ || ! "$client_done_ns" =~ ^[0-9]+$ \
+        || -n "$result_extra" ]]; then
         [[ "$windows_client" == 0 ]] || fetch_win_file "$remote_err" "$werr"
         session_void "$rid timer/client sentinel malformed: '$result'"
     fi
@@ -1670,6 +1763,13 @@ run_arm() {
         [[ "$windows_client" == 0 ]] || fetch_win_file "$remote_err" "$werr"
         session_void "$rid client failed rc=$rc (see $client_rel)"
     fi
+
+    anchor_now_ns=$(q_monotonic_ns)
+    [[ "$client_done_ns" -le "$anchor_now_ns" ]] \
+        || session_void "$rid client completion anchor is in the future"
+    [[ $((anchor_now_ns - client_done_ns)) -lt $((SETTLE_MAX_MS * 1000000)) ]] \
+        || session_void "$rid client wrapper teardown already exceeded the settle bound"
+    settle_deadline_ns=$((client_done_ns + SETTLE_NS))
 
     record_clock_samples "$block" "$run_id" "$cell" "$pair" "$role" after
     settle_done_ns=$(settle_until_deadline "$settle_deadline_ns")

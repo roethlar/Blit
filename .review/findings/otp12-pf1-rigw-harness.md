@@ -43,8 +43,10 @@ new two-endpoint trace uncorrelatable.
   MTU, routing, Time Machine, Spotlight, or unrelated processes.
 - Use destination-keyed durability: q file fsync for Windows→q and Windows
   volume flush for q→Windows. Both client locations capture the same q
-  monotonic completion anchor, take the same three after-clock samples, and
-  wait only to the absolute +250 ms deadline before durability. The measured
+  monotonic completion anchor: immediate subprocess return on q, or the
+  streamed Windows result line as q receives it before SSH teardown. They take
+  the same three after-clock samples and wait only to the absolute +250 ms
+  deadline before durability. The measured
   settle must remain in `[250,1000)` ms and is retained in `runs.csv`.
   Successful Windows client logs are retrieved only after durability and the
   current landed count/byte verification. Both caches are purged before every arm and
@@ -171,6 +173,15 @@ new two-endpoint trace uncorrelatable.
   successful Windows client-log fetch ahead of the durability marker makes
   the production-order self-test fail. Restoring both returns the harness and
   analyzer self-tests to green.
+- A delayed fake Windows-result producer emits its exact sentinel and then
+  holds the pipe open; the q arrival stamp must predate producer teardown by a
+  broad bound. Moving the stamp to EOF or restoring a fresh post-return q
+  anchor makes the self-test fail. Reverting q to Python's process-relative
+  macOS `time.monotonic_ns()` also fails an explicit cross-process clock guard;
+  every carried q timestamp uses `clock_gettime(CLOCK_MONOTONIC)`. Both client
+  wrappers carry the q completion stamp as the fourth result field consumed by
+  `run_arm`, and live preflight proves the flushed Windows sentinel reaches q
+  before the remote producer exits.
 - Every trace-on TCP session must prove the complete seven-epoch one-stream
   ramp from one to eight live sockets on both roles, including exact proposal,
   preparation, ACK, settlement, attachment, and role-local ordering evidence.
