@@ -106,6 +106,10 @@ new two-endpoint trace uncorrelatable.
   exact q/Windows canonical equality and exactly 128 landed manifest files,
   and rejects swapped per-file sizes, renamed paths, wrong root layout, or a
   forged recorded digest even when file count and total bytes are unchanged.
+- The harness atomically claims a never-existing evidence directory before it
+  installs the EXIT trap or writes a byte. Existing paths are rejected
+  unchanged, with explicit stale `SESSION-COMPLETE`/`SESSION-VOID` diagnostics;
+  offline guards also pin rejection of unrelated retained content.
 - Mutation proof: replacing the absolute-deadline wait with a no-op makes the
   harness self-test fail because it returns before +250 ms. Moving the
   successful Windows client-log fetch ahead of the durability marker makes
@@ -129,9 +133,8 @@ new two-endpoint trace uncorrelatable.
 
 - The independent harness audit found that failure cleanup can discard the
   current Windows logs or leave a completion marker before cleanup succeeds,
-  the Windows launcher PID is not identity-checked before termination, and a
-  reused output directory can retain stale terminal markers. No live datum is
-  valid until each gap is fixed and reviewed.
+  and the Windows launcher PID is not identity-checked before termination. No
+  live datum is valid until each gap is fixed and reviewed.
 - No rig datum is produced by this slice. The full live run waits for the
   committed harness, mandatory Codex adjudication, exact isolated builds, and
   a green endpoint preflight.

@@ -66,13 +66,22 @@ SESSION_TAG=$(date -u +%Y%m%dT%H%M%SZ).$$
 OUT_DIR=${OUT_DIR:-$REPO_ROOT/logs/otp12pf-rigw-$SESSION_TAG}
 WIN_SESSION="$WIN_ROOT/rigw-pf1/$SESSION_TAG"
 
-mkdir -p "$OUT_DIR/trace" "$OUT_DIR/client" "$OUT_DIR/fixtures" "$OUT_DIR/landed"
 LOG="$OUT_DIR/bench.log"
 RUNS_CSV="$OUT_DIR/runs.csv"
 CLOCK_CSV="$OUT_DIR/clock-samples.csv"
 
 LAST_ERROR=""
-log() { printf '%s %s\n' "$(date -u +%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
+OUTPUT_CLAIMED=0
+OUTPUT_CLAIM_ERROR=""
+log() {
+    local line
+    line="$(date -u +%H:%M:%SZ) $*"
+    if [[ "$OUTPUT_CLAIMED" == 1 ]]; then
+        printf '%s\n' "$line" | tee -a "$LOG"
+    else
+        printf '%s\n' "$line" >&2
+    fi
+}
 die() { LAST_ERROR="$*"; log "FATAL: $*"; exit 1; }
 session_void() {
     local reason="$1"
@@ -80,6 +89,40 @@ session_void() {
     printf '%s\n' "$reason" > "$OUT_DIR/SESSION-VOID"
     log "SESSION-VOID: $reason"
     exit 1
+}
+
+reserve_evidence_dir() {
+    local target="$1" parent
+    OUTPUT_CLAIM_ERROR=""
+    if [[ -e "$target" || -L "$target" ]]; then
+        if [[ -f "$target/SESSION-COMPLETE" ]]; then
+            OUTPUT_CLAIM_ERROR="refusing output directory with stale SESSION-COMPLETE: $target"
+        elif [[ -f "$target/SESSION-VOID" ]]; then
+            OUTPUT_CLAIM_ERROR="refusing output directory with stale SESSION-VOID: $target"
+        else
+            OUTPUT_CLAIM_ERROR="refusing existing output path (must be fresh): $target"
+        fi
+        return 1
+    fi
+    parent=$(dirname "$target")
+    mkdir -p "$parent" || {
+        OUTPUT_CLAIM_ERROR="cannot create output parent: $parent"
+        return 1
+    }
+    mkdir "$target" || {
+        OUTPUT_CLAIM_ERROR="cannot atomically claim output directory: $target"
+        return 1
+    }
+    mkdir "$target/trace" "$target/client" "$target/fixtures" "$target/landed" || {
+        OUTPUT_CLAIM_ERROR="cannot initialize output directory: $target"
+        rm -rf "$target"
+        return 1
+    }
+}
+
+claim_output_dir() {
+    reserve_evidence_dir "$OUT_DIR" || return 1
+    OUTPUT_CLAIMED=1
 }
 
 SSH_MUX=(-o BatchMode=yes -o ControlMaster=auto \
@@ -163,6 +206,7 @@ selftest() {
     local got expected rows source_first destination_first clock_probe identity_file
     local selftest_client_done selftest_deadline selftest_settle_done run_arm_source
     local manifest_tmp canonical_manifest landed_manifest tree_digest
+    local freshness_tmp freshness_case marker before analyzer_log
     reject_registered_overrides
     got=$(emit_schedule)
     expected=$'1,off,forward,1,4\n2,on,reverse,1,4\n3,on,forward,5,8\n4,off,reverse,5,8'
@@ -272,8 +316,31 @@ PY
     fi
     rm -rf "$manifest_tmp"
 
-    python3 "$SCRIPT_DIR/otp12pf_rigw_analyze_test.py" \
-        >> "$LOG" 2>&1 || die "analyzer self-tests failed"
+    freshness_tmp=$(mktemp -d "${TMPDIR:-/tmp}/blit-rigw-freshness.XXXXXX")
+    reserve_evidence_dir "$freshness_tmp/new-evidence" \
+        || die "fresh evidence directory was rejected: $OUTPUT_CLAIM_ERROR"
+    for marker in SESSION-COMPLETE SESSION-VOID unrelated.txt; do
+        freshness_case="$freshness_tmp/$marker"
+        mkdir "$freshness_case"
+        printf 'preserve-me\n' > "$freshness_case/$marker"
+        before=$(sha256_q "$freshness_case/$marker")
+        if reserve_evidence_dir "$freshness_case"; then
+            rm -rf "$freshness_tmp"
+            die "stale output directory containing $marker was accepted"
+        fi
+        [[ "$(sha256_q "$freshness_case/$marker")" == "$before" ]] \
+            || die "stale output rejection modified $marker"
+    done
+    rm -rf "$freshness_tmp"
+
+    analyzer_log=$(mktemp "${TMPDIR:-/tmp}/blit-rigw-analyzer.XXXXXX")
+    if ! python3 "$SCRIPT_DIR/otp12pf_rigw_analyze_test.py" \
+        > "$analyzer_log" 2>&1; then
+        cat "$analyzer_log" >&2
+        rm -f "$analyzer_log"
+        die "analyzer self-tests failed"
+    fi
+    rm -f "$analyzer_log"
     log "SELFTEST OK: exact four-block/128-arm schedule and analyzer guards"
 }
 
@@ -1132,6 +1199,10 @@ on_exit() {
 
 main() {
     if [[ "$SELFTEST" == 1 ]]; then selftest; return; fi
+    if ! claim_output_dir; then
+        printf '%s\n' "FATAL: $OUTPUT_CLAIM_ERROR" >&2
+        return 1
+    fi
     trap on_exit EXIT
     preflight
     if [[ "$PREFLIGHT_ONLY" == 1 ]]; then
