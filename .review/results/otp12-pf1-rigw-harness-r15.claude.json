@@ -1,0 +1,56 @@
+{
+  "record_type": "review_orchestrator_record",
+  "reviewer": {
+    "provider": "Anthropic",
+    "model": "claude-fable-5",
+    "cli": "Claude Code 2.1.210",
+    "reasoning_effort": "max"
+  },
+  "review_contract": {
+    "finding": "otp12-pf1-rigw-harness",
+    "base_sha": "af2ffb5fb4c57bfd4b4f18371fd9ace5d7431b39",
+    "reviewed_sha": "8e019ef5e948b94a7aca7cb3a8d0be41204742af",
+    "code_fix_sha": "7bdaf8bda5919f2ed03a17709baf6d4aefabe8e0",
+    "authoritative_worktree": "/tmp/blit-review-g15-8e019ef"
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "session_id": "3d10dd6f-c046-4dc5-8c29-5ee1185e3623",
+      "exit_code": 0,
+      "is_error": false,
+      "duration_ms": 711745,
+      "num_turns": 58,
+      "stop_reason": "tool_use",
+      "terminal_reason": "completed",
+      "structured_output": {
+        "verdict": "accepted",
+        "guard_confirmed": true,
+        "reviewed_sha": "8e019ef5e948b94a7aca7cb3a8d0be41204742af",
+        "base_sha": "af2ffb5fb4c57bfd4b4f18371fd9ace5d7431b39",
+        "comments": [
+          "scripts/bench_otp12pf_rigw.sh:140 — G15 adds -n only to the ordinary noninteractive wssh wrapper; wscp (line 141) is byte-identical; range af2ffb5..8e019ef contains exactly code-fix 7bdaf8b (script only, +19/−2) and records-only 8e019ef; ancestry and detached clean worktree at reviewed HEAD verified.",
+          "scripts/bench_otp12pf_rigw.sh:3647 — diagnosis confirmed: main drives the four-line schedule through the while loop's stdin via < <(emit_schedule); base wssh invoked ssh without -n, and the first in-loop wssh is win_quiet_gate at run_block start (line 3411; the line-3639 wssh precedes the redirection), so the block-1 Windows quiet probe drained rows 2–4 and the loop EOFed after block 1, matching the retained session 20260715T203809Z.25897 record (32/128 rows, 192/192 clocks, live G14 recoveries, end gates green, SESSION-VOID).",
+          "scripts/otp12pf_rigw_analyze.py:257 — analyzer correctness confirmed: expected_schedule() registers 128 rows (4 blocks × 4 pairs × 4 cells × 2 roles) and load rejects any count mismatch ('runs.csv schedule incomplete'), so voiding the 32-row partial session was correct fail-closed behavior; analyzer and its test file are unchanged in the range.",
+          "scripts/bench_otp12pf_rigw.sh:367-373 — the separately batched clock sampler still launches ssh directly via subprocess.Popen with stdin=subprocess.PIPE, preserving its intentional indexed P|i/C|i protocol; no wssh call site pipes or redirects stdin into wssh and no wssh remote payload reads stdin ([Console]::In.ReadLine appears only in the sampler).",
+          "scripts/bench_otp12pf_rigw.sh:513-528 — new Bash 3.2 guard is genuine: a subshell ssh shim returns immediately when any argument equals -n and otherwise drains stdin (cat >/dev/null), driving the real wssh inside a main-shaped 'while IFS=, read … done < <(emit_schedule)' loop and requiring exactly $'1\\n2\\n3\\n4'; full loop-body stdin audit found no other schedule-stdin consumer (heredocs/here-strings/pipes/file args throughout; backgrounded daemons get /dev/null stdin; nc -z is zero-I/O).",
+          "Green gates in this worktree: /bin/bash -n OK (Bash 3.2.57); SELFTEST=1 /bin/bash scripts/bench_otp12pf_rigw.sh exit 0 ('SELFTEST OK: exact four-block/128-arm schedule and analyzer guards'); python3 scripts/otp12pf_rigw_analyze_test.py 23 tests OK; scripts/agent/check-docs.sh OK; git diff --check clean.",
+          "Mandatory guard proof performed: with every G15 test kept, removing only the production -n from wssh made the complete Bash 3.2 self-test exit 1 with exactly 'FATAL: noninteractive Windows SSH consumed the registered block schedule'; git checkout restored the exact reviewed bytes (blob ae60920a45322f6ad4fa550408118d4d17cb56dc; SHA-256 85cda14fbeecb9446b1ad2462f938e5cf397f2f042a0d106690b6332c295a05d, byte-for-byte at reviewed HEAD), syntax and the complete self-test reran green, and the worktree finished clean at 8e019ef5e948b94a7aca7cb3a8d0be41204742af.",
+          "Scope invariants confirmed untouched in the range: transfer roles and SOURCE/DESTINATION semantics, role-invariant endpoint-local destination paths (destination_relative_path), worker policy, schedule contents (emit_schedule), measured-arm timing (total = transfer + (settled−250) + flush), trace schema, analyzer rules and thresholds, Time Machine (read-only defaults/tmutil gates only; no mutation commands present), and mounts; docs commits (DEVLOG.md, REVIEW.md, docs/STATE.md, finding doc) record G15 consistently without altering earlier round records. No endpoint was contacted and no retained artifact, worktree, or evidence was deleted."
+        ]
+      },
+      "adjudication": "accepted",
+      "artifacts": {
+        "script_blob": "ae60920a45322f6ad4fa550408118d4d17cb56dc",
+        "script_sha256": "85cda14fbeecb9446b1ad2462f938e5cf397f2f042a0d106690b6332c295a05d",
+        "prompt": "/tmp/blit-review-g15-8e019ef.prompt.md",
+        "prompt_sha256": "39fbc5ab3f9901300a61b89cab527d5a495ddeb2e4cff5e1dc38d6c59eb0471e",
+        "debug_log": "/tmp/claude-fable5-g15-review-20260715T2056Z.debug.log",
+        "debug_log_sha256_after_completion": "cea82d0b9158ca1c10559ebc121647d9450b3718418c19b6d14f7e4a0f151d27",
+        "debug_log_utc_window": "2026-07-15T20:57:34Z..2026-07-15T21:09:26Z",
+        "proxy_environment_check": "no matching proxy variables"
+      }
+    }
+  ],
+  "authoritative_attempt": 1
+}

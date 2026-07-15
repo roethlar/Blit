@@ -1,8 +1,8 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: In progress — G15 is fixed and guard-proved at `7bdaf8b`; required
-Claude Fable 5/max review of the immutable candidate remains.
+**Status**: In progress — round-15 Claude accepted exact `8e019ef`; fresh
+additive build/staging and live gates remain.
 
 ## What
 
@@ -243,9 +243,9 @@ new two-endpoint trace uncorrelatable.
 
 - No accepted or graded rig datum has been produced by this slice. Exact
   candidates `d5e9dda`, `d7345f1`, and `1f62ce5` are retired from further live
-  use after G13, G14, and G15 voids. The full run waits for required Claude
-  Fable 5/max review of the immutable G15 identity, fresh additive isolated
-  build/stage, successful launcher smoke, and green endpoint preflight.
+  use after G13, G14, and G15 voids. Claude accepted the immutable G15
+  identity; the full run waits for fresh additive isolated build/stage,
+  successful launcher smoke, and green endpoint preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
   small-fixture/P2 work, phase report, and `0f922de` historical control before
@@ -839,3 +839,25 @@ arm, trace schema, analyzer rule, threshold, retained artifact, Time Machine
 setting, or mount state changed. Final script blob is `ae60920`; SHA-256 is
 `85cda14fbeecb9446b1ad2462f938e5cf397f2f042a0d106690b6332c295a05d`.
 G15 was fixed at `7bdaf8bda5919f2ed03a17709baf6d4aefabe8e0`.
+
+Round-15 Claude Fable 5/max reviewed exact immutable range
+`af2ffb5fb4c57bfd4b4f18371fd9ace5d7431b39..8e019ef5e948b94a7aca7cb3a8d0be41204742af`
+in retained detached worktree `/tmp/blit-review-g15-8e019ef` and returned exit
+zero plus a schema-valid `accepted` verdict with exact SHAs and
+`guard_confirmed=true`. It confirmed the schedule-stdin diagnosis, the
+analyzer's correct 32/128 fail-closed rejection, and that `-n` applies only to
+ordinary noninteractive `wssh`; `wscp` and the separately piped batched clock
+sampler are unchanged. Its whole-loop audit found no second schedule-stdin
+consumer.
+
+Syntax, the complete Bash 3.2 self-test, all 23 analyzer tests, docs, and diff
+checks were green. Keeping every G15 test, Claude removed only the production
+`-n`; the complete self-test failed exactly on `noninteractive Windows SSH
+consumed the registered block schedule`. It restored exact reviewed bytes,
+reran syntax and the complete self-test green, verified script blob
+`ae60920a45322f6ad4fa550408118d4d17cb56dc` and SHA-256
+`85cda14fbeecb9446b1ad2462f938e5cf397f2f042a0d106690b6332c295a05d`,
+and ended clean at exact `8e019ef`. No endpoint was contacted and no retained
+artifact was deleted. Exact candidate `8e019ef`, not the later verdict-record
+commit, is the only build allowed into additive staging and the live retry.
+Full record: `.review/results/otp12-pf1-rigw-harness-r15.claude.json`.
