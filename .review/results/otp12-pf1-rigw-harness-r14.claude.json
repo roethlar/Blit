@@ -1,0 +1,74 @@
+{
+  "record_type": "review_orchestrator_record",
+  "reviewer": {
+    "provider": "Anthropic",
+    "model": "claude-fable-5",
+    "cli": "Claude Code 2.1.210",
+    "reasoning_effort": "max"
+  },
+  "review_contract": {
+    "finding": "otp12-pf1-rigw-harness",
+    "base_sha": "35f160f03d6dedc6beb841a3033076dab2b6e07c",
+    "reviewed_sha": "1f62ce564f127e18f5e0f044dd9fd4605f3a610c",
+    "code_fix_sha": "942c88e601ea2d27f0a1da52aa5408b763ee61f4",
+    "authoritative_worktree": "/tmp/blit-review-g14-1f62ce5-r2"
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "worktree": "/tmp/blit-review-g14-1f62ce5",
+      "exit_code": null,
+      "verdict_returned": false,
+      "adjudication": "non-authoritative",
+      "orchestrator_disposition": {
+        "termination_signal": "SIGTERM",
+        "reason": "The owner identified the request proxy as the cause of the stalled invocation, removed it from the loop, and explicitly instructed a retry. The exact stale Claude PID was terminated; no verdict had been returned."
+      },
+      "artifacts": {
+        "prompt": "/tmp/blit-review-g14-1f62ce5.prompt.md",
+        "prompt_sha256": "dd812b6666e19709ffeecdb44cc24fec3fe8ed973ef707306cf709fb486bbfa0",
+        "debug_log": "/tmp/claude-fable5-g14-review-20260715T1949Z.debug.log",
+        "debug_log_sha256_after_termination": "fb0858bbfb6428c7a91e1684c599de5ee95abab4c9599180176233045b0b6ca2",
+        "debug_log_utc_window": "2026-07-15T19:52:07Z..2026-07-15T20:12:08Z"
+      }
+    },
+    {
+      "attempt": 2,
+      "session_id": "65ad0c70-0100-4b55-8cd3-2989c1c6ed45",
+      "exit_code": 0,
+      "is_error": false,
+      "duration_ms": 634555,
+      "num_turns": 57,
+      "stop_reason": "tool_use",
+      "terminal_reason": "completed",
+      "structured_output": {
+        "verdict": "accepted",
+        "guard_confirmed": true,
+        "reviewed_sha": "1f62ce564f127e18f5e0f044dd9fd4605f3a610c",
+        "base_sha": "35f160f03d6dedc6beb841a3033076dab2b6e07c",
+        "comments": [
+          "Identity: HEAD=1f62ce564f127e18f5e0f044dd9fd4605f3a610c on a clean detached worktree; base 35f160f03d6dedc6beb841a3033076dab2b6e07c verified as ancestor; range contains exactly code-fix 942c88e601ea2d27f0a1da52aa5408b763ee61f4 plus the identity-record commit; changes confined to scripts/bench_otp12pf_rigw.sh (selftest quiet section + q_quiet_gate) and record docs (.review/findings/otp12-pf1-rigw-harness.md, DEVLOG.md, REVIEW.md, docs/STATE.md).",
+          "scripts/bench_otp12pf_rigw.sh:53,2376-2418 — fixed Spotlight ceiling SPOTLIGHT_CPU_MAX=10.0 unchanged; immediate (preflight) mode still dies on the first over-ceiling load or Spotlight sample; runtime mode may wait for either high load or high Spotlight for at most Q_LOAD_RECOVERY_MAX_S=120s in exact Q_LOAD_RECOVERY_POLL_S=5s polls; success requires load_ok && spot_ok from the same sample; offenders, Time Machine, load parsing, and Spotlight parsing recheck on every sample; bound exhaustion and malformed samples fail closed. Runtime calls sit only at run_block entry/per-round/exit (lines 3394/3399/3415) and end_gate (3422), outside timed arms; roles, endpoint-local paths, workers, schedule, measured-arm timing, trace schema, analyzer math, thresholds, Time Machine settings, and mounts are untouched by the range.",
+          "Green gates on reviewed bytes: /bin/bash -n OK; SELFTEST=1 /bin/bash scripts/bench_otp12pf_rigw.sh exit 0 (SELFTEST OK); python3 scripts/otp12pf_rigw_analyze_test.py 23/23 OK; scripts/agent/check-docs.sh OK; git diff --check clean for worktree and 35f160f..1f62ce5. New Bash 3.2 guards verified present: exact poll cadence pinned in every mocked sleep, exact two-poll bound with 'after 10s runtime recovery', transient Spotlight (87.3→18.4→0.5), staggered load-then-Spotlight, next-poll Time Machine and offender emergence, immediate load and Spotlight rejection, and malformed load/Spotlight failing without a sleep.",
+          "Red mutation 1 (all G14 tests kept): replaced only q_quiet_gate with the byte-exact BASE G13 implementation; complete self-test failed at 'runtime q Spotlight gate did not wait through post-transfer indexing' (exit 1).",
+          "Red mutation 2: after byte-exact restoration (blob f3a6195e121eaae74eb715a798e5e2d1aef70edb), gated offender polling to run at t=0 and every 10 seconds while retaining 5-second sleeps; complete self-test failed at 'runtime q quiet gate did not surface a recovery-poll offender' (exit 1).",
+          "Red mutation 3: after byte-exact restoration, over-advanced elapsed recovery time after the first poll (first poll +5s, later polls +10s) while retaining the actual sleep \"$Q_LOAD_RECOVERY_POLL_S\" line; complete self-test failed at 'persistent q load did not stop at the exact recovery bound' (exit 1). No test was removed or weakened during any red mutation; every mutation diff was confined to the production q_quiet_gate.",
+          "Final state: exact reviewed bytes restored; syntax and complete self-test green (exit 0); scripts/bench_otp12pf_rigw.sh byte-identical to HEAD via cmp against git show (blob f3a6195e121eaae74eb715a798e5e2d1aef70edb, SHA-256 21f4b686fdcd5ddfb47e8478a8666e5d10d0f9e838db2bf2f7227d0da75852d8, matching the DEVLOG record); worktree clean at 1f62ce564f127e18f5e0f044dd9fd4605f3a610c.",
+          "Evidence: the two retained d7345f1 SESSION-VOIDs (16/128 arms, 96/768 clock samples, pair-3 boundary at Spotlight 58.7% and 87.3% after q-destination mixed-tree arms) are internally consistent with the per-round runtime gate and with G13's immediate runtime-Spotlight death; the record correctly treats harness-triggered indexing as a high-confidence operational classification, not proof of exclusive causality. No benchmark endpoint was contacted, no retained artifact/worktree/evidence deleted, no Time Machine or mount change, no branch/commit/push."
+        ]
+      },
+      "adjudication": "accepted",
+      "artifacts": {
+        "script_blob": "f3a6195e121eaae74eb715a798e5e2d1aef70edb",
+        "script_sha256": "21f4b686fdcd5ddfb47e8478a8666e5d10d0f9e838db2bf2f7227d0da75852d8",
+        "prompt": "/tmp/blit-review-g14-1f62ce5.prompt.md",
+        "prompt_sha256": "dd812b6666e19709ffeecdb44cc24fec3fe8ed973ef707306cf709fb486bbfa0",
+        "debug_log": "/tmp/claude-fable5-g14-review-r2-20260715T201216Z.debug.log",
+        "debug_log_sha256_after_completion": "bf080605729b07d9d69381cbd68dd27880e4fd60df5df4b383dcd3a78e5bb90a",
+        "debug_log_utc_window": "2026-07-15T20:12:37Z..2026-07-15T20:23:12Z",
+        "proxy_environment_check": "no matching proxy variables"
+      }
+    }
+  ],
+  "authoritative_attempt": 2
+}

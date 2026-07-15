@@ -1,8 +1,8 @@
 # otp12-pf1-rigw-harness — reduced paired P1 diagnostic on q ↔ Windows
 
 **Slice**: OTP12 performance-finding pf-1, P1 rig harness only.
-**Status**: In progress — live-found G14 post-transfer Spotlight recovery gap
-fixed and Bash-3.2 guard-proved; Claude review remains before another build.
+**Status**: In progress — round-14 Claude accepted exact `1f62ce5`; fresh
+additive build/staging and live gates remain.
 
 ## What
 
@@ -243,9 +243,9 @@ new two-endpoint trace uncorrelatable.
 
 - No accepted or graded rig datum has been produced by this slice. Exact
   candidates `d5e9dda` and `d7345f1` are retired from further live use after
-  G13 and G14 voids. The full run waits for required Claude Fable 5/max review
-  of the immutable G14 identity, fresh additive isolated build/stage, successful
-  launcher smoke, and green endpoint preflight.
+  G13 and G14 voids. Claude accepted the immutable G14 identity; the full run
+  waits for fresh additive isolated build/stage, successful launcher smoke,
+  and green endpoint preflight.
 - This four-cell run is the reduced P1 phase diagnostic, not the entire pf-1
   hard gate. The active plan still requires the separately reviewed
   small-fixture/P2 work, phase report, and `0f922de` historical control before
@@ -776,3 +776,27 @@ role, endpoint-local path, worker, schedule, measured-arm timing, trace schema,
 analyzer math, threshold, retained evidence, Time Machine setting, or mount
 state changed.
 G14 was fixed at `942c88e601ea2d27f0a1da52aa5408b763ee61f4`.
+
+Round-14 Claude Fable 5/max reviewed exact immutable range
+`35f160f03d6dedc6beb841a3033076dab2b6e07c..1f62ce564f127e18f5e0f044dd9fd4605f3a610c`.
+The first proxy-routed invocation returned no verdict. At the owner's
+instruction, the exact stale process was terminated after the proxy was
+removed; its worktree, prompt, and debug log remain retained as
+non-authoritative evidence. A fresh invocation in retained detached worktree
+`/tmp/blit-review-g14-1f62ce5-r2` returned exit zero and a schema-valid
+`accepted` verdict with the exact SHAs and `guard_confirmed=true`.
+
+Syntax, the complete Bash 3.2 self-test, all 23 analyzer tests, docs, and diff
+checks were green. Claude kept every new G14 test through three independent
+production-only mutations: exact G13 `q_quiet_gate` failed the post-transfer
+Spotlight guard; ten-second offender polling failed the next-poll offender
+guard; and over-advanced elapsed accounting failed the exact-bound guard.
+Exact restoration after each mutation returned syntax and the complete
+self-test green. Final script blob
+`f3a6195e121eaae74eb715a798e5e2d1aef70edb`, SHA-256
+`21f4b686fdcd5ddfb47e8478a8666e5d10d0f9e838db2bf2f7227d0da75852d8`,
+matched reviewed HEAD byte-for-byte; the worktree ended clean. No benchmark
+endpoint was contacted and no retained artifact was deleted. Exact candidate
+`1f62ce5`, not the later verdict-record commit, is the only build allowed
+into additive staging and the live retry. Full record:
+`.review/results/otp12-pf1-rigw-harness-r14.claude.json`.
