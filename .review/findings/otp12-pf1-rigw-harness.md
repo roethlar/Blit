@@ -110,6 +110,12 @@ new two-endpoint trace uncorrelatable.
   installs the EXIT trap or writes a byte. Existing paths are rejected
   unchanged, with explicit stale `SESSION-COMPLETE`/`SESSION-VOID` diagnostics;
   offline guards also pin rejection of unrelated retained content.
+- Windows launcher and daemon PIDs are numeric and identity-checked before any
+  termination: exact executable/name, one anchored block-specific `cmd.exe`
+  command line, and daemon parent PID when both processes exist. Startup also
+  verifies the same CIM identities immediately. Offline source-contract
+  mutations fail if command-line, parent, or validate-before-stop guards move
+  or disappear; the live daemon smoke remains required to prove CIM quoting.
 - Mutation proof: replacing the absolute-deadline wait with a no-op makes the
   harness self-test fail because it returns before +250 ms. Moving the
   successful Windows client-log fetch ahead of the durability marker makes
@@ -132,9 +138,8 @@ new two-endpoint trace uncorrelatable.
 ## Known gaps
 
 - The independent harness audit found that failure cleanup can discard the
-  current Windows logs or leave a completion marker before cleanup succeeds,
-  and the Windows launcher PID is not identity-checked before termination. No
-  live datum is valid until each gap is fixed and reviewed.
+  current Windows logs or leave a completion marker before cleanup succeeds.
+  No live datum is valid until that gap is fixed and reviewed.
 - No rig datum is produced by this slice. The full live run waits for the
   committed harness, mandatory Codex adjudication, exact isolated builds, and
   a green endpoint preflight.

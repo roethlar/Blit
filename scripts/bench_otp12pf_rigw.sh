@@ -207,6 +207,7 @@ selftest() {
     local selftest_client_done selftest_deadline selftest_settle_done run_arm_source
     local manifest_tmp canonical_manifest landed_manifest tree_digest
     local freshness_tmp freshness_case marker before analyzer_log
+    local win_stop_source win_start_source
     reject_registered_overrides
     got=$(emit_schedule)
     expected=$'1,off,forward,1,4\n2,on,reverse,1,4\n3,on,forward,5,8\n4,off,reverse,5,8'
@@ -271,6 +272,35 @@ for marker in markers:
         raise SystemExit(f"missing run_arm ordering marker: {marker}") from exc
 if positions != sorted(positions):
     raise SystemExit(f"run_arm ordering markers out of order: {positions}")
+PY
+
+    win_stop_source=$(declare -f win_daemon_stop)
+    win_start_source=$(declare -f win_daemon_start)
+    python3 - "$win_stop_source" "$win_start_source" <<'PY' \
+        || die "Windows launcher/daemon identity contract changed"
+import sys
+
+stop, start = sys.argv[1:]
+stop_markers = (
+    r"\$c.Name -ine 'cmd.exe'",
+    r"\$actualLauncher -ine \$expectedLauncher",
+    r"\$d.ParentProcessId -ne \$cmd0",
+    r"Stop-Process -Id \$pid0",
+    r"Stop-Process -Id \$cmd0",
+)
+try:
+    positions = [stop.index(marker) for marker in stop_markers]
+except ValueError as exc:
+    raise SystemExit(f"missing exact stop identity marker: {exc}") from exc
+if max(positions[:3]) >= min(positions[3:]):
+    raise SystemExit("a Windows process can be stopped before all identities validate")
+for marker in (
+    r"\$actualLauncher -ine \$launcherCommand",
+    r"\$actualDaemon -ine '$WIN_ACTIVE'",
+    r"\$d.ParentProcessId -ne \$r.ProcessId",
+):
+    if marker not in start:
+        raise SystemExit(f"missing start identity marker: {marker}")
 PY
 
     HEAD_BUILD_ID=0123456789ab
@@ -749,27 +779,54 @@ q_daemon_stop() {
 win_daemon_stop() {
     local pid="$win_daemon_pid" cmdpid="$win_cmd_pid" out pid_probe
     if [[ -z "$pid" && -z "$cmdpid" && -n "$current_block" ]]; then
-        pid_probe=$(wssh "
+        if ! pid_probe=$(wssh "
 \$d = Get-Content -LiteralPath '$WIN_SESSION/block_$current_block/daemon.pid' -ErrorAction SilentlyContinue
 \$c = Get-Content -LiteralPath '$WIN_SESSION/block_$current_block/launcher.pid' -ErrorAction SilentlyContinue
 \"P|\$c|\$d\"
-" 2>/dev/null | tr -d '\r' | tail -1) || true
+" 2>/dev/null | tr -d '\r' | tail -1); then
+            teardown_die "Windows PID recovery failed for block $current_block"
+            return 1
+        fi
         IFS='|' read -r _ cmdpid pid <<<"$pid_probe"
     fi
-    [[ -z "$pid" && -z "$cmdpid" ]] && return 0
+    if [[ -z "$pid" && -z "$cmdpid" ]]; then
+        if [[ -n "$current_block" ]] && ! wssh \
+            "if (Get-NetTCPConnection -State Listen -LocalPort $PORT -ErrorAction SilentlyContinue) { exit 9 }" \
+            >/dev/null 2>&1; then
+            teardown_die "Windows PID files are empty but port $PORT may still be open"
+            return 1
+        fi
+        return 0
+    fi
+    [[ -z "$pid" || "$pid" =~ ^[0-9]+$ ]] \
+        || { teardown_die "invalid remembered Windows daemon PID '$pid'"; return 1; }
+    [[ -z "$cmdpid" || "$cmdpid" =~ ^[0-9]+$ ]] \
+        || { teardown_die "invalid remembered Windows launcher PID '$cmdpid'"; return 1; }
+    [[ -n "$current_block" ]] \
+        || { teardown_die "cannot verify Windows launcher without a current block"; return 1; }
     out=$(wssh "
 \$ErrorActionPreference = 'Stop'
 \$pid0 = if ('$pid' -match '^[0-9]+$') { [int]'$pid' } else { \$null }
 \$cmd0 = if ('$cmdpid' -match '^[0-9]+$') { [int]'$cmdpid' } else { \$null }
+\$expectedLauncher = 'cmd.exe /d /c \"\"$WIN_SESSION/block_$current_block/start.cmd\"\"'
+\$d = if (\$pid0) { Get-CimInstance Win32_Process -Filter \"ProcessId=\$pid0\" -ErrorAction SilentlyContinue } else { \$null }
+\$c = if (\$cmd0) { Get-CimInstance Win32_Process -Filter \"ProcessId=\$cmd0\" -ErrorAction SilentlyContinue } else { \$null }
+if (\$d) {
+  \$actual = if (\$d.ExecutablePath) { \$d.ExecutablePath.Replace([char]92,[char]47) } else { '' }
+  if (\$d.Name -ine 'blit-daemon.exe' -or \$actual -ine '$WIN_ACTIVE') { throw \"daemon PID identity mismatch: \$(\$d.Name) \$(\$d.ExecutablePath)\" }
+  if (\$c -and \$d.ParentProcessId -ne \$cmd0) { throw \"daemon parent mismatch: \$(\$d.ParentProcessId) != \$cmd0\" }
+}
+if (\$c) {
+  \$actualLauncher = if (\$c.CommandLine) { \$c.CommandLine.Replace([char]92,[char]47).Trim() } else { '' }
+  if (\$c.Name -ine 'cmd.exe' -or \$actualLauncher -ine \$expectedLauncher) { throw \"launcher command mismatch: \$(\$c.Name) \$actualLauncher\" }
+}
+# Every identity is validated before either remembered PID is stopped.
 if (\$pid0) {
-  \$p = Get-CimInstance Win32_Process -Filter \"ProcessId=\$pid0\" -ErrorAction SilentlyContinue
-  if (\$p) {
-    \$actual = \$p.ExecutablePath.Replace([char]92,[char]47)
-    if (\$p.Name -ne 'blit-daemon.exe' -or \$actual -ne '$WIN_ACTIVE') { throw \"PID identity mismatch: \$(\$p.Name) \$(\$p.ExecutablePath)\" }
+  if (\$d) {
     Stop-Process -Id \$pid0 -Force
   }
 }
-if (\$cmd0 -and (Get-Process -Id \$cmd0 -ErrorAction SilentlyContinue)) { Stop-Process -Id \$cmd0 -Force }
+if (\$c) { Stop-Process -Id \$cmd0 -Force }
 Start-Sleep -Milliseconds 250
 if (\$pid0 -and (Get-Process -Id \$pid0 -ErrorAction SilentlyContinue)) { throw 'daemon survived teardown' }
 if (\$cmd0 -and (Get-Process -Id \$cmd0 -ErrorAction SilentlyContinue)) { throw 'launcher survived teardown' }
@@ -856,12 +913,18 @@ Set-Content -LiteralPath '$WIN_SESSION/block_$block/start.cmd' -Value @(
   '@echo off', \$trace[0], \$trace[1],
   '\"$WIN_ACTIVE\" --config \"$WIN_SESSION/block_$block/daemon.toml\" > \"$WIN_SESSION/block_$block/daemon.out\" 2> \"$WIN_SESSION/block_$block/daemon.err\"'
 )
-\$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = 'cmd.exe /d /c \"\"$WIN_SESSION/block_$block/start.cmd\"\"' }
+\$launcherCommand = 'cmd.exe /d /c \"\"$WIN_SESSION/block_$block/start.cmd\"\"'
+\$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = \$launcherCommand }
 if (\$r.ReturnValue -ne 0) { throw \"launcher return \$(\$r.ReturnValue)\" }
 Set-Content -LiteralPath '$WIN_SESSION/block_$block/launcher.pid' -Value \$r.ProcessId
 Start-Sleep -Seconds 1
+\$c = Get-CimInstance Win32_Process -Filter \"ProcessId=\$(\$r.ProcessId)\" -ErrorAction SilentlyContinue
+\$actualLauncher = if (\$c -and \$c.CommandLine) { \$c.CommandLine.Replace([char]92,[char]47).Trim() } else { '' }
+if (-not \$c -or \$c.Name -ine 'cmd.exe' -or \$actualLauncher -ine \$launcherCommand) { throw \"launcher identity mismatch: \$(\$c.Name) \$actualLauncher\" }
 \$d = Get-CimInstance Win32_Process -Filter \"Name='blit-daemon.exe'\" | Where-Object ParentProcessId -eq \$r.ProcessId | Select-Object -First 1
 if (-not \$d) { Get-Content -LiteralPath '$WIN_SESSION/block_$block/daemon.err' -ErrorAction SilentlyContinue; throw 'daemon child absent' }
+\$actualDaemon = if (\$d.ExecutablePath) { \$d.ExecutablePath.Replace([char]92,[char]47) } else { '' }
+if (\$actualDaemon -ine '$WIN_ACTIVE' -or \$d.ParentProcessId -ne \$r.ProcessId) { throw \"daemon identity mismatch: \$(\$d.ExecutablePath) parent=\$(\$d.ParentProcessId)\" }
 Set-Content -LiteralPath '$WIN_SESSION/block_$block/daemon.pid' -Value \$d.ProcessId
 \"P|\$(\$r.ProcessId)|\$(\$d.ProcessId)\"
 ") || session_void "Windows daemon failed to start in block $block: $out"
