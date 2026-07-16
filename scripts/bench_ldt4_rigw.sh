@@ -927,7 +927,7 @@ PY
     [[ "$win_mss" == 8960 && "$win_mss_ip" == "$WIN_IP" ]] \
         || session_void "$phase: Windows-to-q MSS/source is $win_mss/$win_mss_ip"
     exclusive_line "$OUT_DIR/environment-$phase.txt" \
-        "phase=$phase q_ip=$Q_IP q_nic=$Q_NIC q_mtu=$q_mtu q_media=$q_media q_route=$q_route q_route_mtu=$q_route_mtu q_mac=$q_mac q_peer=$q_peer q_free=$q_free $quiet_q time_machine_auto=$auto time_machine_running=$tm_running q_to_windows_mss=$q_mss windows_to_q_mss=$win_mss windows_powershell=$win_ps windows=$win_topology $quiet_win"
+        "phase=$phase q_ip=$Q_IP q_nic=$Q_NIC q_mtu=$q_mtu q_media=$q_media q_route=$q_route q_route_mtu=$q_route_mtu q_mac=$q_mac q_peer=$q_peer q_free=$q_free $quiet_q q_to_windows_mss=$q_mss windows_to_q_mss=$win_mss windows_powershell=$win_ps windows=$win_topology $quiet_win"
 }
 
 prepare_windows_runtime() {
@@ -2357,6 +2357,13 @@ if '$Q_STAGE_ROOT/fixtures/src_small' not in q_paths:
     raise SystemExit("q small fixture disappeared from boundary path guards")
 if '$WIN_FIXTURE_STAGE/fixtures/src_small' not in windows_paths:
     raise SystemExit("Windows small fixture disappeared from boundary path guards")
+environment = text[text.index("environment_gate() {"):text.index("prepare_windows_runtime() {")]
+evidence_start = environment.index('exclusive_line "$OUT_DIR/environment-$phase.txt"')
+environment_evidence = environment[evidence_start:environment.index("\n}", evidence_start)]
+if environment_evidence.count("$quiet_q") != 1:
+    raise SystemExit("environment evidence does not include exactly one canonical q quiet record")
+if "time_machine_auto=$auto" in environment_evidence or "time_machine_running=$tm_running" in environment_evidence:
+    raise SystemExit("environment evidence duplicates Time Machine fields outside q quiet record")
 record_flush = prepare.index(r"\$recordStream.Flush(\$true)")
 record_barrier = prepare.index("Write-VolumeCache D", record_flush)
 runtime_mutation = min(
