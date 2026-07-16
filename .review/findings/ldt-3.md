@@ -4,12 +4,13 @@
 all transfer helpers, and expose a default-off aggregate dial observer whose
 sample and lifecycle records are exact without changing policy or the wire.
 
-**Status**: Review-fix candidate — the one admitted Low observer-ordering
-defect is fixed and mutation-proved; neutral re-review is pending.
+**Status**: Accepted — the one admitted Low observer-ordering defect is fixed
+and mutation-proved; neutral Claude Fable 5/max r2 returned clean.
 
 **Branch**: `master`
 
-**Commit**: `436e1bb5f29ca9ea1dece6eb2c5656a63bce7564` + review fix pending
+**Commit**: `436e1bb5f29ca9ea1dece6eb2c5656a63bce7564` + review fix
+`406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77`
 
 ## What
 
@@ -130,3 +131,12 @@ first formal call was a server-side 529 before any reviewer turn; the one
 allowed retry produced the authoritative result. Records:
 `.review/results/ldt-3-r1.claude.json` and
 `.review/results/ldt-3-r1.claude-verdict.md`.
+
+Round two reviewed exact whole-change range
+`e863ef073698b27519ccda07e8907c053d4cc7df..406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77`
+under the same neutral question and returned schema-valid `clean`, exact SHAs,
+an empty findings array, and `guard_confirmed=true`. Its first call was another
+server-side 529 before any reviewer turn; the one allowed retry is the
+authoritative result. Direct checks found both primary and retained worktrees
+clean at the exact head. Records: `.review/results/ldt-3-r2.claude.json` and
+`.review/results/ldt-3-r2.claude-verdict.md`.

@@ -101,9 +101,9 @@ no second code path to differ.
   `docs/plan/LIVE_DIAL_TUNING.md` (D-2026-07-16-2) owns the reviewed
   correction. Its ldt-2 cutover removed sf-2's static ADD-only shape target
   and put the same telemetry-driven ADD/REMOVE controller behind both SOURCE
-  socket layouts. ldt-3 supplies lifecycle/observer closure; review of candidate
-  `436e1bb` admitted one Low observer-ordering defect whose isolated fix is
-  mutation-proved and awaits re-review. Hardware evidence remains ldt-4.
+  socket layouts. ldt-3 lifecycle/observer closure is accepted at `406a7e5`
+  after its one Low observer-ordering fix and clean neutral re-review. Hardware
+  evidence remains ldt-4.
 - Wire contract discipline (REV4 rule): the unified session's proto —
   messages, field numbers, capability negotiation, transport
   selection — is a reviewed doc+proto slice **before** any behavior

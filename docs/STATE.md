@@ -1,18 +1,18 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-16 (ldt-3 Low fixed and guard-proved; re-review next)
+Last updated: 2026-07-16 (ldt-1..3 accepted; ldt-4 endpoint evidence next)
 
-- **NEXT ACTION — COMMIT + RE-REVIEW ldt-3:** the admitted Low is fixed: settlement notification follows observer emission, and the old order fails its deterministic guard. Commit this one fix and re-run neutral Claude Fable 5/max review.
+- **NEXT ACTION — RUN ldt-4 QUIET MAC↔MAC EVIDENCE:** ldt-1..3 are independently accepted. Stage exact clean `406a7e5` artifacts, verify both endpoints remain quiet, then run the plan's identical adaptive fixtures in both initiator layouts.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
-- **WHY NO MAC↔MAC DATA YET:** endpoints are ready, but ldt-3's admitted Low fix still needs fixed-SHA re-review. Existing verdict-resolution/fabric controls also remain required afterward. No Mac↔Mac data exists.
+- **WHY NO MAC↔MAC DATA YET:** ldt-3 is now accepted, so the code gate is cleared; ldt-4 staging/quietness checks and existing verdict-resolution/fabric controls come next. No Mac↔Mac data exists yet.
 
 - **BASELINE RE-RECORD (D-2026-07-14-1, owner 2026-07-14) — a prerequisite slice for `pf-final`, NOT for pf-1.** Both committed ceilings were recorded at **MTU 1500** before the fabric went jumbo, and pf-0 showed jumbo makes both arms 3–4% faster — so a jumbo build graded against them is **LENIENT** and could let a regression pass. Each rig's baseline is **re-recorded once with its ORIGINAL old build at MTU 9000**, then re-frozen (rig W `bench_otp12_win.sh:105`; rig Z `bench_otp12_zoey.sh:102`; rig D unaffected). Constraints — same old build per rig, `BASELINE_SUMMARY` stays override-free, pf-0's start-AND-end MSS gate applies — in **D-2026-07-14-1**.
 - **pf-0 DONE — MTU is KILLED as a material cause of P1 (2026-07-14, `docs/bench/otp12-jumbo-win-2026-07-13/`).** A-B-B-A on `q` (9000/1500/1500/9000), **256 timed runs, 0 voided**, MSS gate held start AND end of every session. `Δ_9000 = 236`, `Δ_1500 = 229`, measured noise floor **N_Δ = 78 ms**, **r = −3.1% → KILLED**. The null is **not vacuous** — `wm_tcp_large` ran 3–4% faster at jumbo on **both** arms, so the manipulation reached the wire; the benefit is **symmetric**, which is why it cannot explain an **asymmetry**. codex NOT READY → **7/7 accepted** (`11f0c2a`): every finding was a *claim* outrunning the *data* (it recomputed and confirmed all the numbers). **Two limits that now bind pf-1**: (a) the run is **NOT powered** to exclude a *contributing*-size effect (20% of Δ = 46 ms < the 78 ms floor) — it excludes a DOMINANT one only; (b) 78 ms is **between**-session noise, so cross-session grading of a counterfactual is dead, and **pf-1 must measure its own paired within-session floor and register a resolution check before grading**.
 - **THE FAST ARM IS BISTABLE — the trap named in pf-1's gate above.** `win_init` runs are **bimodal** (~730/~840 ms): S1 drew 6 low/2 high and S4 drew 2 low/6 high **at the same MTU**, and that mode mixture — not MTU — is what sets N_Δ. `mac_init` is stable to 5–6 ms. A counterfactual that merely shifts the mixture would **fake a recovery**.
 - **P1 REPRODUCES ON A SECOND MAC (2026-07-13, `docs/bench/otp12-q-baseline-2026-07-13/`).** `wm_tcp_mixed` = **1.385 FAIL** on `q`↔netwatch-01 **at MTU 9000**, while all three controls PASS at **1.002–1.043** in the same session (so rig noise is ~2–4% and P1 is 10× outside it). **P1 is a property of the macOS↔Windows PAIRING, not of one machine** — the assumption **H1** rests on (corrected 2026-07-14: H5/H6/H7 are **P2** hypotheses; the earlier "H1/H5/H6/H7" was wrong), never tested until now. **And jumbo does NOT dissolve P1** — pf-0 has now measured the matched 1500 arm and killed MTU outright (above).
 - **THE MAC IS A BENCH END — the codex loop and a rig-W session CANNOT run concurrently** (`.agents/machines.md`). A 53-min A-B-B-A attempt was destroyed by codex load on the Mac and discarded; the contamination is *asymmetric* (it inflates `mac_init` and MANUFACTURES P1). **Rig-W now runs on `q`** (dedicated M4 mini, quiet, faster than nagatha), which decouples the two for good.
-- Recent code state: every transfer rides the ONE session. ldt-2 is accepted at `65a0f9f`; ldt-3 candidate `436e1bb` passed local gates, and its one admitted Low observer-ordering fix is mutation-proved pending commit/re-review (`.review/findings/ldt-3.md`).
+- Recent code state: every transfer rides the ONE session. ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at review fix `406a7e5` after clean neutral r2 (`.review/findings/ldt-3.md`).
 - **P1 (the headline invariance criterion) — the one thing between blit and shipping.** Historical acceptance sessions fail rig W (`wm_tcp_mixed` 1.237 and 1.300 — do NOT read that as a regression, it is **two different Mac NICs**), but **PASS 8/8 with Linux on both ends** (`docs/bench/otp12-perf-2026-07-13/`; P1's own cell 1.092/1.003). Exact current-build `8e019ef` reverses and point-passes in the reduced rig-W diagnostic, but its 329 ms floor and failing gRPC control make that non-reproduction non-acceptance evidence. P1 remains **platform-INTERACTING, not pure layout**, and **NOT exonerated**. **P1 HAS NO ESCAPE HATCH** (codex r5 F1): D-2026-07-12-1 waives only a *cross-direction* miss for a cell that ALREADY passes invariance. So: meet the formal ≤1.10 bar on a gradeable run, or the owner amends acceptance criterion 1. Neither is assumed.
 - **⚠ THREE of my claims were reported and RETRACTED on 2026-07-13**, all the same root cause — trusting an instrument I had not validated: (1) "P1 is code" (a harness that keyed durability to the *initiator*, not the destination); (2) "P1 is acceptable platform residue" (D-2026-07-12-1 does not cover it); (3) "macOS can't send jumbo / the switch is broken" (it was `net.inet.raw.maxdgram` capping *ping*; TCP was always fine — it cost the owner a pointless adapter swap). **Verify the instrument before believing the measurement.**
 
@@ -20,7 +20,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3's one admitted Low observer-ordering fix is mutation-proved and locally green pending commit/re-review.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`. ldt-4 quiet Mac↔Mac evidence is next.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -48,7 +48,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1 and ldt-2 are accepted; commit and independently re-review ldt-3's mutation-proved Low observer-ordering fix before quiet Mac↔Mac evidence.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted; execute ldt-4 exact-build quiet Mac↔Mac adaptive and role-invariance evidence under the existing instrument controls.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 through the
    synchronous neutral `openreview` per slice (reviewer selection D-2026-07-15-1).
@@ -155,7 +155,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **Mac↔Mac measurement waits for ldt-1..3.** The plan is Active and endpoints are quiet/ready; ldt-2 is accepted and ldt-3's one admitted Low is fixed pending commit/re-review. Existing instrument controls still apply afterward. No data exists.
+- **Mac↔Mac measurement code gate is cleared.** ldt-1..3 are accepted and the endpoints were reported quiet/ready; ldt-4 must still re-verify quietness and apply the existing instrument controls before measurement. No data exists yet.
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):
