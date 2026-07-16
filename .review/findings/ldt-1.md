@@ -4,12 +4,11 @@
 pipeline to settle each resize from the exact worker membership that actually
 took effect, including payload-closing races.
 
-**Status**: In progress — implementation and coder guard proofs are green;
-neutral Claude Fable 5/max review is pending.
+**Status**: Verified — neutral Claude Fable 5/max accepted the exact candidate.
 
 **Branch**: `master`
 
-**Commit**: candidate commit pending
+**Commit**: `f8f3c517f5f0a12857c4b027f76043dc97bc58e6`
 
 ## What
 
@@ -107,4 +106,23 @@ so it could not prove exact non-tail removal.
 
 ## Reviewer comments
 
-Pending neutral Claude Fable 5/max review of the exact committed candidate.
+Claude Code `2.1.211`, model `claude-fable-5`, effort `max`, reviewed exact
+range `2ed3ead9603e7e7dd0a55e995a82c632cd214e77..f8f3c517f5f0a12857c4b027f76043dc97bc58e6`
+in retained worktree `/tmp/blit-review-ldt1-f8f3c51-r1` and returned
+`accepted` with `guard_confirmed=true` at `2026-07-16T14:46:58Z`.
+
+It found no material issue. Its first independent mutation leaked the named
+worker's retire authority and turned all three retirement/END guards red; its
+second selected FIFO instead of LIFO and returned member 10 instead of member
+99. Exact restoration made both guard sets green, and the worktree ended clean
+at the reviewed head. It also ran fmt, strict workspace clippy, and the full
+workspace suite green.
+
+Claude recorded four non-blocking observations: ldt-3 should add an independent
+terminal-ADD private-queue discriminator; ldt-3 should audit the currently
+unreachable missing-control ordering in `close_payloads`; ldt-2 should correct
+one stale `add_stream` cleanup comment; and ledger extraction is optional style
+work. None predicts a reachable ldt-1 failure, so no fix is admitted from this
+accepted round. Raw result and adjudication:
+`.review/results/ldt-1-r1.claude.json` and
+`.review/results/ldt-1-r1.claude-verdict.md`.
