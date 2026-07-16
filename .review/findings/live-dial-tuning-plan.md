@@ -3,7 +3,7 @@
 **Severity**: HIGH — production transfers cannot adapt stream count to live
 conditions and cannot scale down, contrary to the settled transfer design.
 **Status**: In progress — Claude Fable 5/max round 1 reopened two plan details;
-fix and re-review pending.
+both are corrected and round-2 re-review is pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `554d080839e1419c2242921e444d40d02c947815` (round-1 candidate)
 
@@ -129,3 +129,21 @@ Raw record:
 `.review/results/live-dial-tuning-plan-r1.claude.json`. Adjudication:
 `.review/results/live-dial-tuning-plan-r1.claude-verdict.md`. The earlier
 proxy-routed error is retained separately and is non-authoritative.
+
+### Round 1 response
+
+- The MEDIUM is corrected by `a78d553`: accepted versus unaccepted operations
+  are distinct at need completion; accepted ADD completes authentication then
+  immediately follows normal no-payload END retirement, accepted REMOVE may be
+  satisfied only by the named member's normal retirement, and only a live
+  pipeline refusal/error faults. The plan now requires a terminal member ledger
+  and no socket/probe/member/receive-task leak in either layout.
+- The LOW is corrected by `41dcb4d`: the deterministic role guard must use a
+  receiver ceiling of at least 17, emit the same sequence through target 17,
+  and turn red under either an 8- or 16-worker production clamp.
+- The source-bound observation remains a bounded policy characteristic. The
+  existing observer and hardware evidence criteria expose its sample/reason/
+  count trace; it is not silently promoted into a correctness failure.
+
+Round 2 reviews the complete corrected Draft and the incremental range from the
+round-1 reviewed SHA.

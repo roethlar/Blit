@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-16 (live-dial design correction drafted; Claude review pending)
+Last updated: 2026-07-16 (live-dial Draft corrected after Claude round 1; re-review pending)
 
-- **NEXT ACTION — REVIEW THE LIVE-DIAL CORRECTION:** `docs/plan/LIVE_DIAL_TUNING.md` restores D-2026-06-20-1/-2's telemetry-driven ADD/REMOVE design and removes static workload shape as worker-count authority. Claude Fable 5/max review is pending; no implementation begins before owner Draft→Active approval.
+- **NEXT ACTION — RE-REVIEW THE LIVE-DIAL CORRECTION:** `docs/plan/LIVE_DIAL_TUNING.md` restores D-2026-06-20-1/-2's telemetry-driven ADD/REMOVE design and removes static workload shape as worker-count authority. Claude round 1 reopened the need-completion race and weak >8 guard; both are corrected. Claude Fable 5/max round 2 is pending; no implementation begins before owner Draft→Active approval.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **STATIC ORIENTATION PARITY IS CLOSED; ADAPTIVE WORKER PARITY IS NOT.** The identical 10,000-file fixture reaches 8 in both layouts because both now finish the same hardcoded shape-table ramp. Production does not start the existing telemetry tuner and rejects REMOVE. Exact 8 is not an adaptive acceptance target.
 - **WHY NO MAC↔MAC DATA YET:** endpoints are ready, but running the current static ADD-only policy would measure the wrong design. The live-dial plan must be approved, implemented, and reviewed first. Existing verdict-resolution/fabric controls also remain required. No Mac↔Mac data exists.
@@ -20,7 +20,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING DRAFT:** correct the cutover drift before more acceptance work: one SOURCE-owned controller tunes TCP workers up/down from telemetry in both connection layouts; shape is not a target. Claude Fable 5/max reviews; implementation remains owner-gated.
+- **LIVE_DIAL_TUNING DRAFT:** correct the cutover drift before more acceptance work: one SOURCE-owned controller tunes TCP workers up/down from telemetry in both connection layouts; shape is not a target. Round-1 fixes define healthy terminal resize settlement and prove both legacy caps absent; Claude round 2 and owner activation remain pending.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
