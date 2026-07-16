@@ -349,7 +349,9 @@ one-finding-per-commit review fixes.
    convergence. Land deterministic identical-trace role guards that grow
    through target 17 and kill both 8- and 16-clamp mutations,
    below-floor-start shrink, capacity/refusal/stale-frame guards, and update the
-   session contract in the same slice.
+   session contract in the same slice. Accepted at `65a0f9f` after neutral
+   Claude Fable 5/max openreview; its sole Low suggestion predicted no runtime
+   failure and was declined at intake as cleanup-only.
 3. **ldt-3 — lifecycle and observer closure.** Prove tuner/pipeline teardown,
    accepted and unaccepted ADD/REMOVE at need-complete in both layouts (no
    healthy fault, false unchanged settlement, duplicate retirement, or leaked

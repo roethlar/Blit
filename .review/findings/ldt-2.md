@@ -4,12 +4,13 @@
 target with one SOURCE-owned telemetry controller that adjusts the same elastic
 membership in both connection layouts.
 
-**Status**: Candidate — local guard proofs and all workspace gates are green;
-neutral Claude Fable 5/max openreview is pending.
+**Status**: Accepted — all local guards/gates are green; neutral Claude Fable
+5/max openreview returned one Low cleanup suggestion declined at intake because
+it predicted no observable failure.
 
 **Branch**: `master`
 
-**Commit**: pending
+**Commit**: `65a0f9f0bb3225a2b81f8c668f6bda41545f5efa`
 
 ## What
 
@@ -138,5 +139,17 @@ old exact-eight parity result proved only symmetry of a static target.
 
 ## Reviewer comments
 
-Pending neutral whole-change Claude openreview of the exact committed
-base/head range with an independently chosen isolated guard proof.
+Claude Fable 5/max reviewed exact range
+`602941f2aa1194b4fe12faa3b9c7d049f99c8343..65a0f9f0bb3225a2b81f8c668f6bda41545f5efa`
+in retained detached worktree `/tmp/blit-openreview-ldt2-65a0f9f-r1` under the
+neutral best-way question. The result was schema-valid with exact SHAs and
+`guard_confirmed=true`.
+
+Claude returned one Low candidate: `settle_inflight_resize` still accepts and
+immediately discards an unused `FrameTx`. The evidence is correct, but the
+predicted-failure field explicitly says “No runtime failure” and describes only
+a possible future-reader misunderstanding. It is therefore DECLINED at intake
+as style/maintainability without a current observable failure; no code change
+is admitted. The slice has no material finding and is accepted. Full record:
+`.review/results/ldt-2-r1.claude-verdict.md` (raw
+`.review/results/ldt-2-r1.claude.json`).
