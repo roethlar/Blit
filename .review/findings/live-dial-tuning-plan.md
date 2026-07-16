@@ -2,12 +2,13 @@
 
 **Severity**: HIGH — production transfers cannot adapt stream count to live
 conditions and cannot scale down, contrary to the settled transfer design.
-**Status**: Reopened — D-2026-07-16-2 activated the reviewed plan; activation
-round 1 found three stale secondary references to correct before ldt-1.
+**Status**: Verified — D-2026-07-16-2 activated the reviewed plan; activation
+round 2 accepted the corrected records and cleared ldt-1 to begin.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `554d080839e1419c2242921e444d40d02c947815` (round-1 candidate),
 `a78d553` and `41dcb4d` (fixes), `b99637f` (round-2 candidate),
-`acd368f` (activation candidate)
+`acd368f` (activation candidate), `5012c27` (activation r1 record),
+`63d94ac` (activation fix and r2 candidate)
 
 ## Evidence
 
@@ -200,3 +201,21 @@ base, locally red on six plan assertions after restoring only the plan, and
 green/clean after exact restoration. Raw result:
 `.review/results/live-dial-activation-r1.claude.json`. Adjudication:
 `.review/results/live-dial-activation-r1.claude-verdict.md`.
+
+### Activation round 2 — accepted
+
+Claude Code `2.1.211`, `claude-fable-5`, effort `max`; reviewed
+`acd368f338089a32e8d810fcecd4f580f572816a..63d94ac6cb87a0a00fa770aa1accabbf0d3bdf6a`;
+`guard_confirmed=true`; verdict `ACCEPTED`; recorded
+`2026-07-16T13:39:33Z`. The prompt was neutral under D-2026-07-16-1.
+
+Claude found no remaining live reference that calls the plan Draft or leaves
+owner approval pending. It verified that ldt-1 is the topmost open review item
+and the repository's stated next action, and accepted the verdict-record then
+fix commit shape. Its 15-assertion proof was green, turned exactly 14 range
+assertions red under full base restoration and exactly five correction
+assertions red under fix-only restoration, then returned green and clean at
+the reviewed SHA.
+
+Raw result: `.review/results/live-dial-activation-r2.claude.json`.
+Adjudication: `.review/results/live-dial-activation-r2.claude-verdict.md`.
