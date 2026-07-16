@@ -1,11 +1,11 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-16 (live-dial Draft accepted by neutral Claude review; owner activation pending)
+Last updated: 2026-07-16 (live-dial plan Active under D-2026-07-16-2; ldt-1 next)
 
-- **NEXT ACTION — OWNER DRAFT→ACTIVE DECISION:** `docs/plan/LIVE_DIAL_TUNING.md` restores D-2026-06-20-1/-2's telemetry-driven ADD/REMOVE design and removes static workload shape as worker-count authority. Claude round 1 reopened two details; both were corrected, and a neutral D-2026-07-16-1 Claude Fable 5/max round 2 accepted the Draft. No implementation begins before owner approval.
+- **NEXT ACTION — IMPLEMENT ldt-1:** `docs/plan/LIVE_DIAL_TUNING.md` is Active under D-2026-07-16-2. Add acknowledged elastic ADD/REMOVE membership with exact member identity and terminal outcomes, guard it, commit it, and run neutral Claude Fable 5/max review before ldt-2.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **STATIC ORIENTATION PARITY IS CLOSED; ADAPTIVE WORKER PARITY IS NOT.** The identical 10,000-file fixture reaches 8 in both layouts because both now finish the same hardcoded shape-table ramp. Production does not start the existing telemetry tuner and rejects REMOVE. Exact 8 is not an adaptive acceptance target.
-- **WHY NO MAC↔MAC DATA YET:** endpoints are ready, but running the current static ADD-only policy would measure the wrong design. The live-dial plan must be approved, implemented, and reviewed first. Existing verdict-resolution/fabric controls also remain required. No Mac↔Mac data exists.
+- **WHY NO MAC↔MAC DATA YET:** endpoints are ready, but running the current static ADD-only policy would measure the wrong design. The Active live-dial plan's ldt-1..3 code must be implemented and independently reviewed first. Existing verdict-resolution/fabric controls also remain required. No Mac↔Mac data exists.
 
 - **BASELINE RE-RECORD (D-2026-07-14-1, owner 2026-07-14) — a prerequisite slice for `pf-final`, NOT for pf-1.** Both committed ceilings were recorded at **MTU 1500** before the fabric went jumbo, and pf-0 showed jumbo makes both arms 3–4% faster — so a jumbo build graded against them is **LENIENT** and could let a regression pass. Each rig's baseline is **re-recorded once with its ORIGINAL old build at MTU 9000**, then re-frozen (rig W `bench_otp12_win.sh:105`; rig Z `bench_otp12_zoey.sh:102`; rig D unaffected). Constraints — same old build per rig, `BASELINE_SUMMARY` stays override-free, pf-0's start-AND-end MSS gate applies — in **D-2026-07-14-1**.
 - **pf-0 DONE — MTU is KILLED as a material cause of P1 (2026-07-14, `docs/bench/otp12-jumbo-win-2026-07-13/`).** A-B-B-A on `q` (9000/1500/1500/9000), **256 timed runs, 0 voided**, MSS gate held start AND end of every session. `Δ_9000 = 236`, `Δ_1500 = 229`, measured noise floor **N_Δ = 78 ms**, **r = −3.1% → KILLED**. The null is **not vacuous** — `wm_tcp_large` ran 3–4% faster at jumbo on **both** arms, so the manipulation reached the wire; the benefit is **symmetric**, which is why it cannot explain an **asymmetry**. codex NOT READY → **7/7 accepted** (`11f0c2a`): every finding was a *claim* outrunning the *data* (it recomputed and confirmed all the numbers). **Two limits that now bind pf-1**: (a) the run is **NOT powered** to exclude a *contributing*-size effect (20% of Δ = 46 ms < the 78 ms floor) — it excludes a DOMINANT one only; (b) 78 ms is **between**-session noise, so cross-session grading of a counterfactual is dead, and **pf-1 must measure its own paired within-session floor and register a resolution check before grading**.
@@ -20,7 +20,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING DRAFT — REVIEWED:** correct the cutover drift before more acceptance work: one SOURCE-owned controller tunes TCP workers up/down from telemetry in both connection layouts; shape is not a target. Round-1 fixes define healthy terminal resize settlement and prove both legacy caps absent; neutral Claude round 2 accepted. Owner activation remains pending.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** one SOURCE-owned controller tunes TCP workers up/down from telemetry in both connection layouts; shape is not a target. The reviewed plan is accepted; ldt-1 acknowledged elastic membership is next.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -48,7 +48,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (DRAFT, REVIEWED).** Restore telemetry-driven ADD/REMOVE, receiver-bounded startup, exact membership settlement, role guards, and quiet Mac↔Mac evidence. Neutral Claude round 2 accepted; owner activation is the next checkpoint.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** Restore telemetry-driven ADD/REMOVE, receiver-bounded startup, exact membership settlement, role guards, and quiet Mac↔Mac evidence. Execute ldt-1 next; each slice gets neutral Claude review.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 through the
    synchronous reviewloop per slice (reviewer selection D-2026-07-15-1).
@@ -133,7 +133,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
   D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
   D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b).
-- Draft correction: **`docs/plan/LIVE_DIAL_TUNING.md`** — restore live telemetry ADD/REMOVE before further transfer acceptance measurements.
+- Active correction: **`docs/plan/LIVE_DIAL_TUNING.md` (D-2026-07-16-2)** — restore live telemetry ADD/REMOVE before further transfer acceptance measurements.
 - Active plans: `docs/plan/SMALL_FILE_CEILING.md` (**paused** at
   sf-2) and **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** (code-
   complete; measurement gates remain). REV4 superseded v1/REV2/REV3
@@ -154,7 +154,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **Mac↔Mac measurement waits for the live-dial correction.** Endpoints are quiet/ready, but HEAD has only static ADD-only parity; existing instrument controls still apply afterward. No data exists.
+- **Mac↔Mac measurement waits for ldt-1..3.** The plan is Active and endpoints are quiet/ready, but HEAD still has only static ADD-only parity; existing instrument controls still apply afterward. No data exists.
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):

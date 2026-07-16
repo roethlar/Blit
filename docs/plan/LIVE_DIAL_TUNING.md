@@ -1,12 +1,12 @@
 # Restore live dial tuning to TransferSession
 
-**Status**: Draft
+**Status**: Active
 **Created**: 2026-07-16
-**Supersedes**: Upon activation, the shape-only stream-policy wording in
+**Supersedes**: The shape-only stream-policy wording in
 `docs/plan/ONE_TRANSFER_PATH.md` and `docs/TRANSFER_SESSION.md`; restores the
 still-binding D-2026-06-20-1/-2 design
 **Decision ref**: D-2026-06-20-1, D-2026-06-20-2, D-2026-06-20-5;
-Draft→Active approval pending
+D-2026-07-16-2 (owner activated after neutral Claude review)
 
 ## Goal
 
@@ -368,4 +368,4 @@ Each slice is one reviewloop finding and one commit before review fixes.
 
 - None. Controller ownership, live-from-first-byte tuning, bidirectional
   resize, and receiver-bounded authority are already settled by
-  D-2026-06-20-1/-2. Draft→Active remains an owner checkpoint after review.
+  D-2026-06-20-1/-2. The owner activated this plan in D-2026-07-16-2.

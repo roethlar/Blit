@@ -270,3 +270,18 @@ Format:
   correctness exception. It preserves only that decision's underlying
   best-way-not-plan-conformance question. D-2026-07-15-1's Claude Fable 5/max
   reviewer selection and every fixed-SHA/guard/adjudication safety rule stand.
+
+## D-2026-07-16-2 — Activate the live dial tuning correction
+- Decision: `docs/plan/LIVE_DIAL_TUNING.md` moves from Draft to Active. Implement
+  its ldt-1 through ldt-4 slices in order through the synchronous reviewloop;
+  the owner's activation instruction was **"go"** after the reviewed Draft and
+  neutral Claude acceptance were presented.
+- Why: production still follows a static ADD-only shape ramp even though the
+  settled design requires one SOURCE-owned controller to adjust TCP workers up
+  and down from live telemetry in both connection layouts. Claude round 1
+  reopened two details, both were corrected one per commit, and a neutral
+  D-2026-07-16-1 Claude Fable 5/max round 2 accepted the complete Draft with an
+  independent red/green guard.
+- Supersedes: only the Draft status and owner-activation checkpoint in
+  `docs/plan/LIVE_DIAL_TUNING.md`. The reviewed design, no-push rule, fixed-SHA
+  review contract, and any plan-defined endpoint safety gates remain unchanged.

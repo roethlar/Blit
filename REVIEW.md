@@ -13,14 +13,18 @@ See `.review/findings/<id>.md` for per-finding details.
   rows graded before 2026-07-04 carry `<id>.verified.json` from the
   retired async loop)
 
-## Live dial tuning correction — plan review
+## Live dial tuning correction — plan and implementation review
 
-Plan: `docs/plan/LIVE_DIAL_TUNING.md` (Draft). Reviewer: Claude CLI with
+Plan: `docs/plan/LIVE_DIAL_TUNING.md` (Active, D-2026-07-16-2). Reviewer: Claude CLI with
 `--model claude-fable-5 --effort max` per D-2026-07-15-1.
 
 | ID | Title | Status | Commit(s) |
 |----|-------|--------|-----------|
 | live-dial-tuning-plan | Restore one SOURCE-owned telemetry controller with live ADD/REMOVE; retire static shape as worker-count authority | `[x]` | `554d080` (r1 reopened), `a78d553`, `41dcb4d`, `b99637f` (neutral r2 accepted) |
+| ldt-1 | Acknowledged elastic membership with exact member and terminal outcomes | `[ ]` | — |
+| ldt-2 | Live controller cutover; delete shape worker authority; shared ADD/REMOVE | `[ ]` | — |
+| ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[ ]` | — |
+| ldt-4 | Quiet Mac↔Mac adaptive and role-invariance evidence | `[ ]` | — |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 
