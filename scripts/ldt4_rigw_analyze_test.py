@@ -567,6 +567,11 @@ class SyntheticSession:
                 accepted=True,
             )
 
+        add(source, "SOURCE", "first_payload_queued")
+        add(source, "SOURCE", "socket_write_begin", epoch=0, socket=0)
+        add(source, "SOURCE", "first_socket_write", epoch=0, socket=0)
+        add(destination, "DESTINATION", "first_payload_received", epoch=0, socket=0)
+
         completion = {"live_streams": 4, "receiver_ceiling": 32, "peak_streams": 5}
         add(source, "SOURCE", "membership_sealed", **completion)
         add(source, "SOURCE", "data_plane_complete", **completion)
@@ -1409,10 +1414,17 @@ class AnalyzerTests(unittest.TestCase):
             event for event in events if event["event"] == "data_plane_complete"
         )
         events.remove(completion)
+        payload = [
+            event
+            for event in events
+            if event["event"]
+            in {"first_payload_queued", "socket_write_begin", "first_socket_write"}
+        ]
+        events = [event for event in events if event not in payload]
         first_dial = next(
             index for index, event in enumerate(events) if event["event"].startswith("dial_")
         )
-        events.insert(first_dial, completion)
+        events[first_dial:first_dial] = payload + [completion]
         self.session.write_events(row, events)
         with self.assertRaisesRegex(analyzer.AnalysisError, "after SOURCE completion"):
             self.analyze()
@@ -1508,6 +1520,93 @@ class AnalyzerTests(unittest.TestCase):
         ]
         self.session.write_events(row, events, "destination")
         with self.assertRaisesRegex(analyzer.AnalysisError, "receive_task_stopped"):
+            self.analyze()
+
+    def test_payload_socket_markers_are_required(self) -> None:
+        row = self.session.run_rows[0]
+        source = [
+            event
+            for event in self.session.read_events(row)
+            if event["event"] not in {"socket_write_begin", "first_socket_write"}
+        ]
+        destination = [
+            event
+            for event in self.session.read_events(row, "destination")
+            if event["event"] != "first_payload_received"
+        ]
+        self.session.write_events(row, source)
+        self.session.write_events(row, destination, "destination")
+        with self.assertRaisesRegex(analyzer.AnalysisError, "no payload socket markers"):
+            self.analyze()
+
+    def test_payload_marker_for_unknown_socket_is_rejected(self) -> None:
+        row = self.session.run_rows[0]
+        events = self.session.read_events(row)
+        complete_index = next(
+            index
+            for index, event in enumerate(events)
+            if event["event"] == "data_plane_complete"
+        )
+        unknown = self.session._event(
+            row["run_id"],
+            row["session_id"],
+            "SOURCE",
+            "SOURCE",
+            "socket_write_begin",
+            epoch=0,
+            socket=99,
+        )
+        unknown["elapsed_ns"] = events[complete_index]["elapsed_ns"] + 1
+        events.insert(complete_index + 1, unknown)
+        self.session.write_events(row, events)
+        with self.assertRaisesRegex(analyzer.AnalysisError, "marker keys differ"):
+            self.analyze()
+
+    def test_payload_marker_duplicate_is_rejected(self) -> None:
+        row = self.session.run_rows[0]
+        events = self.session.read_events(row)
+        index = next(
+            index
+            for index, event in enumerate(events)
+            if event["event"] == "first_socket_write"
+        )
+        events.insert(index + 1, dict(events[index]))
+        self.session.write_events(row, events)
+        with self.assertRaisesRegex(analyzer.AnalysisError, "duplicate first_socket_write"):
+            self.analyze()
+
+    def test_payload_write_must_precede_source_completion(self) -> None:
+        row = self.session.run_rows[0]
+        events = self.session.read_events(row)
+        write = next(event for event in events if event["event"] == "first_socket_write")
+        events.remove(write)
+        complete_index = next(
+            index
+            for index, event in enumerate(events)
+            if event["event"] == "data_plane_complete"
+        )
+        events.insert(complete_index + 1, write)
+        self.session.write_events(row, events)
+        with self.assertRaisesRegex(analyzer.AnalysisError, "payload write ordering"):
+            self.analyze()
+
+    def test_payload_receive_must_precede_receive_task_stop(self) -> None:
+        row = self.session.run_rows[0]
+        events = self.session.read_events(row, "destination")
+        received = next(
+            event for event in events if event["event"] == "first_payload_received"
+        )
+        events.remove(received)
+        stop_index = next(
+            index
+            for index, event in enumerate(events)
+            if event["event"] == "receive_task_stopped"
+            and event.get("epoch") == 0
+            and event.get("socket") == 0
+        )
+        events.insert(stop_index + 1, received)
+        self.session.write_events(row, events, "destination")
+        with self.assertRaisesRegex(analyzer.AnalysisError, "payload receive ordering"):
             self.analyze()
 
     def test_destination_initiator_attaches_add_socket_before_prepared_ack(self) -> None:

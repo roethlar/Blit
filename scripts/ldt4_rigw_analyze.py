@@ -1809,6 +1809,92 @@ def _validate_membership_observation(
             )
 
 
+def _payload_event_map(
+    events: Sequence[dict[str, Any]], name: str, context: str
+) -> dict[tuple[int, int], dict[str, Any]]:
+    found: dict[tuple[int, int], dict[str, Any]] = {}
+    for event in events:
+        if event["event"] != name:
+            continue
+        _event_exact(event, {"epoch", "socket"}, context)
+        key = (
+            _int(event["epoch"], "epoch", context),
+            _int(event["socket"], "socket", context),
+        )
+        if key in found:
+            raise AnalysisError(f"{context}: duplicate {name} for member {key}")
+        found[key] = event
+    return found
+
+
+def _validate_payload_socket_observation(
+    source_events: Sequence[dict[str, Any]],
+    destination_events: Sequence[dict[str, Any]],
+    source_sockets: Sequence[dict[str, Any]],
+    destination_sockets: Sequence[dict[str, Any]],
+    operations: Sequence[tuple[int, str, int]],
+    source_complete: dict[str, Any],
+    destination_complete: dict[str, Any],
+    context: str,
+) -> None:
+    write_begins = _payload_event_map(
+        source_events, "socket_write_begin", f"{context} SOURCE"
+    )
+    first_writes = _payload_event_map(
+        source_events, "first_socket_write", f"{context} SOURCE"
+    )
+    first_receives = _payload_event_map(
+        destination_events, "first_payload_received", f"{context} DESTINATION"
+    )
+    used_members = set(write_begins)
+    if not used_members:
+        raise AnalysisError(f"{context}: transfer has no payload socket markers")
+    if used_members != set(first_writes) or used_members != set(first_receives):
+        raise AnalysisError(f"{context}: payload socket marker keys differ")
+
+    admitted_members = {(0, socket_id) for socket_id in range(EXPECTED_FLOOR)}
+    admitted_members.update(
+        (epoch, 0) for epoch, action, _target in operations if action == "ADD"
+    )
+    if not used_members.issubset(admitted_members):
+        raise AnalysisError(f"{context}: payload marker belongs to an unadmitted member")
+
+    source_attachments = {
+        (event["epoch"], event["socket"]): event
+        for event in source_sockets
+        if event["event"] == "socket_trace_attached"
+    }
+    destination_attachments = {
+        (event["epoch"], event["socket"]): event
+        for event in destination_sockets
+        if event["event"] == "socket_trace_attached"
+    }
+    destination_stops = {
+        (event["epoch"], event["socket"]): event
+        for event in destination_events
+        if event["event"] == "receive_task_stopped"
+    }
+    for key in used_members:
+        if not (
+            source_attachments[key]["producer_seq"]
+            < write_begins[key]["producer_seq"]
+            < first_writes[key]["producer_seq"]
+            < source_complete["producer_seq"]
+        ):
+            raise AnalysisError(
+                f"{context} SOURCE: payload write ordering is invalid for {key}"
+            )
+        if not (
+            destination_attachments[key]["producer_seq"]
+            < first_receives[key]["producer_seq"]
+            < destination_stops[key]["producer_seq"]
+            < destination_complete["producer_seq"]
+        ):
+            raise AnalysisError(
+                f"{context} DESTINATION: payload receive ordering is invalid for {key}"
+            )
+
+
 def _validate_control_lane(
     source: Sequence[dict[str, Any]],
     destination: Sequence[dict[str, Any]],
@@ -2148,6 +2234,16 @@ def _validate_arm(
         source_sockets,
         destination_sockets,
         dial.operations,
+        destination_complete,
+        context,
+    )
+    _validate_payload_socket_observation(
+        source,
+        destination,
+        source_sockets,
+        destination_sockets,
+        dial.operations,
+        source_complete,
         destination_complete,
         context,
     )
