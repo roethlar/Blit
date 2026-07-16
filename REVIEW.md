@@ -25,7 +25,7 @@ Plan: `docs/plan/LIVE_DIAL_TUNING.md` (Active, D-2026-07-16-2). Reviewer: Claude
 | ldt-1 | Acknowledged elastic membership with exact member and terminal outcomes | `[x]` | `f8f3c51` (neutral Claude accepted) |
 | ldt-2 | Live controller cutover; delete shape worker authority; shared ADD/REMOVE | `[x]` | `65a0f9f` (neutral Claude; one non-failing Low declined at intake) |
 | ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[x]` | `436e1bb` + review fix `406a7e5`; Claude r2 clean with independent guard |
-| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | endpoint correction `9926bf7`; Claude r1 returned two 529 envelopes and no verdict |
+| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | endpoint correction `9926bf7` accepted by clean Claude r2; harness next |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 
