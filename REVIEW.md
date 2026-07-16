@@ -20,7 +20,7 @@ Plan: `docs/plan/LIVE_DIAL_TUNING.md` (Draft). Reviewer: Claude CLI with
 
 | ID | Title | Status | Commit(s) |
 |----|-------|--------|-----------|
-| live-dial-tuning-plan | Restore one SOURCE-owned telemetry controller with live ADD/REMOVE; retire static shape as worker-count authority | `[~]` | `554d080` (r1 reopened), `a78d553`, `41dcb4d` (neutral r2 pending) |
+| live-dial-tuning-plan | Restore one SOURCE-owned telemetry controller with live ADD/REMOVE; retire static shape as worker-count authority | `[x]` | `554d080` (r1 reopened), `a78d553`, `41dcb4d`, `b99637f` (neutral r2 accepted) |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 

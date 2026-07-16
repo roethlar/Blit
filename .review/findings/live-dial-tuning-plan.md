@@ -2,10 +2,11 @@
 
 **Severity**: HIGH — production transfers cannot adapt stream count to live
 conditions and cannot scale down, contrary to the settled transfer design.
-**Status**: In progress — Claude Fable 5/max round 1 reopened two plan details;
-both are corrected and round-2 re-review is pending.
+**Status**: Verified — both round-1 findings corrected; neutral Claude Fable
+5/max round 2 accepted the Draft; owner Draft→Active approval pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: `554d080839e1419c2242921e444d40d02c947815` (round-1 candidate)
+**Commit**: `554d080839e1419c2242921e444d40d02c947815` (round-1 candidate),
+`a78d553` and `41dcb4d` (fixes), `b99637f` (round-2 candidate)
 
 ## Evidence
 
@@ -158,3 +159,23 @@ The exact CLI error envelope is retained at
 `.review/results/live-dial-tuning-plan-r2.claude-attempt1-steered-error.json`;
 the prompt and worktree remain retained under `/tmp`. Round 2 restarts from the
 same immutable plan candidate with a neutral best-way prompt.
+
+### Round 2 — accepted
+
+Claude Code `2.1.211`, `claude-fable-5`, effort `max`; reviewed
+`554d080839e1419c2242921e444d40d02c947815..b99637fe34eff5407a50f8f07bf0d2a6b67525ad`;
+`guard_confirmed=true`; verdict `ACCEPTED`; recorded
+`2026-07-16T06:40:21Z`. The prompt followed D-2026-07-16-1: one neutral goal
+and the best-way question, with no prior finding, expected fix, checklist, or
+preferred outcome supplied.
+
+Claude independently found both round-1 corrections coherent and sufficient,
+verified the plan uses existing repository substrate, found the slice order and
+scope sound, and reported no new material issue. Its self-chosen 35-assertion
+guard was green on reviewed bytes, red on 23 correction assertions when only
+the plan was restored to the round-1 blob, and green after exact restoration.
+The retained worktree ended clean at exact reviewed SHA.
+
+Raw record: `.review/results/live-dial-tuning-plan-r2.claude.json`.
+Adjudication:
+`.review/results/live-dial-tuning-plan-r2.claude-verdict.md`.
