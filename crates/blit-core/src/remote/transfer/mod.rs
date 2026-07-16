@@ -30,14 +30,15 @@ pub use payload::{
 };
 pub use pipeline::{
     execute_sink_pipeline, execute_sink_pipeline_elastic, execute_sink_pipeline_streaming,
-    SinkControl,
+    ElasticPipelineCommands, ElasticPipelineControl, ElasticPipelineOutcome, MembershipOutcome,
+    SinkMember,
 };
 pub use resume_diff::ResumeBlockDiff;
 
 pub use progress::{
     ByteProgressSink, LiveProbe, NoProbe, Probe, ProgressEvent, ProgressTotals,
-    RemoteTransferProgress, StreamId, StreamProbe, StreamState, StreamTelemetry,
-    StreamTelemetrySnapshot,
+    RemoteTransferProgress, SharedStreamProbes, StreamId, StreamProbe, StreamProbeRegistry,
+    StreamState, StreamTelemetry, StreamTelemetrySnapshot,
 };
 pub use session_phase::{SessionPhaseEvent, SessionPhaseRole, SessionPhaseTrace};
 pub use sink::{DataPlaneSink, FsSinkConfig, FsTransferSink, NullSink, SinkOutcome, TransferSink};

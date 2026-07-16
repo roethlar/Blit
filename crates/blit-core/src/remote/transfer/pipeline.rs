@@ -6,13 +6,17 @@
 //! produced ([`execute_sink_pipeline_streaming`]). The one-shot form is a
 //! thin wrapper that sends every payload on a channel and delegates.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use eyre::{Context, Result};
-use tokio::sync::mpsc;
+use eyre::{eyre, Context, Result};
+use tokio::sync::{mpsc, oneshot};
 
 use super::payload::{PreparedPayload, TransferPayload};
-use super::progress::RemoteTransferProgress;
+use super::progress::{
+    RemoteTransferProgress, SharedStreamProbes, StreamId, StreamProbe, StreamProbeRegistry,
+};
 use super::sink::{SinkOutcome, TransferSink};
 use super::source::TransferSource;
 
@@ -81,25 +85,196 @@ pub async fn execute_sink_pipeline_streaming(
     prefetch: usize,
     progress: Option<&RemoteTransferProgress>,
 ) -> Result<SinkOutcome> {
-    execute_sink_pipeline_elastic(source, sinks, payload_rx, prefetch, progress, None).await
+    let mut members = Vec::with_capacity(sinks.len());
+    for (index, sink) in sinks.into_iter().enumerate() {
+        let id = u32::try_from(index).map_err(|_| eyre!("too many sink pipeline members"))?;
+        members.push(SinkMember::new(StreamId(id), sink));
+    }
+    let probes = Arc::new(std::sync::Mutex::new(StreamProbeRegistry::default()));
+    Ok(execute_sink_pipeline_elastic(
+        source, members, payload_rx, prefetch, progress, None, probes,
+    )
+    .await?
+    .outcome)
 }
 
-/// Control commands for a RUNNING pipeline (`ue-r2-2` stream resize).
-pub enum SinkControl {
-    /// Spawn a worker for this sink, pulling from the shared work
-    /// queue like every other worker. Safe at any time: a worker added
-    /// after end-of-stream sees the closed queue immediately and just
-    /// runs `finish()`.
-    Add(Arc<dyn TransferSink>),
-    /// Retire one worker: it stops pulling new payloads at the next
-    /// payload boundary, emits its sink's per-stream END record via
-    /// `finish()`, and exits — the receiving end's worker terminates
-    /// normally on that END, so a REMOVE needs no receiver-side
-    /// coordination. Refused (no-op) when only one live worker
-    /// remains: with zero workers the forwarder's queue send fails and
-    /// it treats that as shutdown, silently dropping the rest of the
-    /// payload stream.
-    RetireOne,
+/// One identified elastic pipeline member. The optional probe has the
+/// same [`StreamId`] and is registered or removed in the same supervisor
+/// turn as membership changes, so telemetry cannot drift from the worker
+/// set that is eligible to claim payloads.
+pub struct SinkMember {
+    id: StreamId,
+    sink: Arc<dyn TransferSink>,
+    probe: Option<StreamProbe>,
+}
+
+impl SinkMember {
+    pub fn new(id: StreamId, sink: Arc<dyn TransferSink>) -> Self {
+        Self {
+            id,
+            sink,
+            probe: None,
+        }
+    }
+
+    pub fn with_probe(id: StreamId, sink: Arc<dyn TransferSink>, probe: StreamProbe) -> Self {
+        Self {
+            id,
+            sink,
+            probe: Some(probe),
+        }
+    }
+
+    pub fn id(&self) -> StreamId {
+        self.id
+    }
+}
+
+/// The exact membership transition applied by the elastic supervisor.
+/// Logical count is authoritative; physical workers may already have
+/// emitted END after payload admission is sealed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MembershipOutcome {
+    Joined {
+        member_id: StreamId,
+        logical_count: usize,
+    },
+    RetireMarked {
+        member_id: StreamId,
+        logical_count: usize,
+    },
+    JoinedThenEnded {
+        member_id: StreamId,
+        logical_count: usize,
+    },
+    AlreadyEnded {
+        member_id: StreamId,
+        logical_count: usize,
+    },
+    RefusedAtFloor {
+        logical_count: usize,
+    },
+}
+
+impl MembershipOutcome {
+    pub fn member_id(self) -> Option<StreamId> {
+        match self {
+            Self::Joined { member_id, .. }
+            | Self::RetireMarked { member_id, .. }
+            | Self::JoinedThenEnded { member_id, .. }
+            | Self::AlreadyEnded { member_id, .. } => Some(member_id),
+            Self::RefusedAtFloor { .. } => None,
+        }
+    }
+
+    pub fn logical_count(self) -> usize {
+        match self {
+            Self::Joined { logical_count, .. }
+            | Self::RetireMarked { logical_count, .. }
+            | Self::JoinedThenEnded { logical_count, .. }
+            | Self::AlreadyEnded { logical_count, .. }
+            | Self::RefusedAtFloor { logical_count } => logical_count,
+        }
+    }
+}
+
+type MembershipReply = oneshot::Sender<std::result::Result<MembershipOutcome, String>>;
+
+enum SinkCommand {
+    Add {
+        member: SinkMember,
+        reply: MembershipReply,
+    },
+    RetireOne {
+        reply: MembershipReply,
+    },
+    Seal,
+}
+
+/// The single, non-cloneable command endpoint for an elastic pipeline.
+/// ADD and REMOVE complete only when the supervisor names the transition
+/// it actually applied. [`Self::seal`] is ordered with those commands and
+/// changes later operations to terminal membership settlement.
+pub struct ElasticPipelineControl {
+    tx: mpsc::UnboundedSender<SinkCommand>,
+    sealed: AtomicBool,
+}
+
+/// Opaque receiver half consumed by [`execute_sink_pipeline_elastic`].
+pub struct ElasticPipelineCommands {
+    rx: mpsc::UnboundedReceiver<SinkCommand>,
+}
+
+impl ElasticPipelineControl {
+    pub fn channel() -> (Self, ElasticPipelineCommands) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            Self {
+                tx,
+                sealed: AtomicBool::new(false),
+            },
+            ElasticPipelineCommands { rx },
+        )
+    }
+
+    pub async fn add(&self, member: SinkMember) -> Result<MembershipOutcome> {
+        let (reply, response) = oneshot::channel();
+        if let Err(returned) = self.tx.send(SinkCommand::Add { member, reply }) {
+            let SinkCommand::Add { member, .. } = returned.0 else {
+                unreachable!("failed ADD returned a different command")
+            };
+            let cleanup = member.sink.finish().await;
+            return match cleanup {
+                Ok(()) => Err(eyre!("elastic pipeline closed before ADD was admitted")),
+                Err(err) => Err(err).context(
+                    "elastic pipeline closed before ADD was admitted; finishing rejected sink",
+                ),
+            };
+        }
+        response
+            .await
+            .map_err(|_| eyre!("elastic pipeline dropped ADD acknowledgement"))?
+            .map_err(eyre::Report::msg)
+    }
+
+    pub async fn retire_one(&self) -> Result<MembershipOutcome> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(SinkCommand::RetireOne { reply })
+            .map_err(|_| eyre!("elastic pipeline closed before REMOVE was admitted"))?;
+        response
+            .await
+            .map_err(|_| eyre!("elastic pipeline dropped REMOVE acknowledgement"))?
+            .map_err(eyre::Report::msg)
+    }
+
+    /// Order the terminal membership boundary before any later ADD or
+    /// REMOVE. Idempotent because source completion closes payloads once
+    /// before settling a late epoch and again while consuming the plane.
+    pub fn seal(&self) -> Result<()> {
+        if self.sealed.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        if self.tx.send(SinkCommand::Seal).is_err() {
+            self.sealed.store(false, Ordering::Release);
+            return Err(eyre!("elastic pipeline closed before it was sealed"));
+        }
+        Ok(())
+    }
+}
+
+/// Aggregate transfer totals plus the supervisor's final logical member
+/// count. A clean caller can cross-check this against its settled dial.
+#[derive(Clone, Debug)]
+pub struct ElasticPipelineOutcome {
+    pub outcome: SinkOutcome,
+    pub logical_count: usize,
+}
+
+fn record_first_error(first: &mut Option<eyre::Report>, error: eyre::Report) {
+    if first.is_none() {
+        *first = Some(error);
+    }
 }
 
 /// `ue-r2-2`: [`execute_sink_pipeline_streaming`] plus a control
@@ -109,22 +284,51 @@ pub enum SinkControl {
 /// bound is a back-pressure property, not a correctness one).
 pub async fn execute_sink_pipeline_elastic(
     source: Arc<dyn TransferSource>,
-    sinks: Vec<Arc<dyn TransferSink>>,
+    members: Vec<SinkMember>,
     mut payload_rx: mpsc::Receiver<TransferPayload>,
     prefetch: usize,
     progress: Option<&RemoteTransferProgress>,
-    control_rx: Option<mpsc::UnboundedReceiver<SinkControl>>,
-) -> Result<SinkOutcome> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    if sinks.is_empty() {
+    control_rx: Option<ElasticPipelineCommands>,
+    probes: SharedStreamProbes,
+) -> Result<ElasticPipelineOutcome> {
+    if members.is_empty() && control_rx.is_none() {
         // Drain incoming channel so the producer isn't left dangling.
         while payload_rx.recv().await.is_some() {}
-        return Ok(SinkOutcome::default());
+        return Ok(ElasticPipelineOutcome {
+            outcome: SinkOutcome::default(),
+            logical_count: 0,
+        });
     }
 
-    let sink_count = sinks.len();
-    let capacity = prefetch.max(1) * sink_count;
+    let mut ids = HashSet::with_capacity(members.len());
+    let mut invalid = None;
+    for member in &members {
+        if !ids.insert(member.id) {
+            invalid = Some(format!("duplicate initial sink member {:?}", member.id));
+            break;
+        }
+        if let Some(probe) = &member.probe {
+            if probe.id() != member.id {
+                invalid = Some(format!(
+                    "sink member {:?} carries probe {:?}",
+                    member.id,
+                    probe.id()
+                ));
+                break;
+            }
+        }
+    }
+    if invalid.is_none() && !probes.lock().expect("probe registry poisoned").is_empty() {
+        invalid = Some("initial probe registry must be empty".to_string());
+    }
+    if let Some(reason) = invalid {
+        for member in members {
+            let _ = member.sink.finish().await;
+        }
+        return Err(eyre!(reason));
+    }
+
+    let capacity = prefetch.max(1) * members.len().max(1);
     let total = Arc::new(std::sync::Mutex::new(SinkOutcome::default()));
 
     // Single shared work queue. Each worker owns exactly one sink but
@@ -143,31 +347,52 @@ pub async fn execute_sink_pipeline_elastic(
     let cancelled = Arc::new(AtomicBool::new(false));
 
     // Dynamic worker membership (`ue-r2-2`): a JoinSet instead of a
-    // fixed Vec of handles, plus a per-worker retire flag so a REMOVE
-    // can drain exactly one worker. `retire_flags` holds the workers
-    // that are live and not yet asked to retire — its length is the
-    // count the retire floor checks.
-    let mut join_set: tokio::task::JoinSet<(usize, Result<()>)> = tokio::task::JoinSet::new();
-    let mut retire_flags: Vec<(usize, tokio::sync::watch::Sender<bool>)> = Vec::new();
-    let mut next_slot = 0usize;
+    // fixed Vec of handles, plus exact per-worker admission and retire
+    // authorities. A worker announces that its task is running, then
+    // stays behind its admission gate until the supervisor has made its
+    // probe visible. REMOVE signals the named worker while holding the
+    // same registry lock the sampler uses, so probe visibility and work
+    // eligibility change as one sampled transition.
+    let mut join_set: tokio::task::JoinSet<(StreamId, Result<()>)> = tokio::task::JoinSet::new();
+    let mut task_members: HashMap<tokio::task::Id, StreamId> = HashMap::new();
+
+    struct WorkerAdmission {
+        ready: oneshot::Receiver<()>,
+        start: oneshot::Sender<()>,
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn spawn_sink_worker(
-        join_set: &mut tokio::task::JoinSet<(usize, Result<()>)>,
-        slot: usize,
+        join_set: &mut tokio::task::JoinSet<(StreamId, Result<()>)>,
+        task_members: &mut HashMap<tokio::task::Id, StreamId>,
+        id: StreamId,
         sink: Arc<dyn TransferSink>,
         work_rx: flume::Receiver<TransferPayload>,
         source: Arc<dyn TransferSource>,
         progress: Option<RemoteTransferProgress>,
         total: Arc<std::sync::Mutex<SinkOutcome>>,
         cancelled: Arc<std::sync::atomic::AtomicBool>,
-        mut retire: tokio::sync::watch::Receiver<bool>,
-    ) {
-        use std::sync::atomic::Ordering;
-        join_set.spawn(async move {
+        mut retire: oneshot::Receiver<()>,
+    ) -> WorkerAdmission {
+        let (ready_tx, ready) = oneshot::channel();
+        let (start, start_rx) = oneshot::channel();
+        let abort = join_set.spawn(async move {
+            // Admission is two-phase: prove the task has started, then
+            // wait until the supervisor has registered its probe. The
+            // start token is released under the registry mutex.
+            let _ = ready_tx.send(());
             // Wrap the body so any early-return error trips the shared
             // cancel flag before the `?` unwinds the task.
             let run = async {
+                if start_rx.await.is_err() {
+                    let reason = eyre!("admission authority for member {:?} was dropped", id);
+                    return match sink.finish().await {
+                        Ok(()) => Err(reason),
+                        Err(error) => {
+                            Err(error).context(format!("finishing unadmitted sink member {:?}", id))
+                        }
+                    };
+                }
                 loop {
                     // Stop pulling queued work once a sibling worker has
                     // errored: first-error-wins should surface without the
@@ -188,7 +413,13 @@ pub async fn execute_sink_pipeline_elastic(
                     // teardown signal.
                     let payload = tokio::select! {
                         biased;
-                        _ = retire.changed() => break,
+                        retired = &mut retire => match retired {
+                            Ok(()) => break,
+                            Err(_) => Err(eyre!(
+                                "retirement authority for member {:?} was dropped",
+                                id
+                            ))?,
+                        },
                         recv = work_rx.recv_async() => match recv {
                             Ok(p) => p,
                             Err(_) => break, // queue closed and drained
@@ -253,18 +484,76 @@ pub async fn execute_sink_pipeline_elastic(
                 // once the queue closes) to stop feeding new work.
                 cancelled.store(true, Ordering::Relaxed);
             }
-            (slot, run)
+            (id, run)
         });
+        task_members.insert(abort.id(), id);
+        WorkerAdmission { ready, start }
     }
 
-    for sink in sinks {
-        let (retire_tx, retire_rx) = tokio::sync::watch::channel(false);
-        let slot = next_slot;
-        next_slot += 1;
-        retire_flags.push((slot, retire_tx));
-        spawn_sink_worker(
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum PipelinePhase {
+        Live,
+        Sealed,
+        Failing,
+    }
+
+    enum MemberState {
+        Running { retire: Option<oneshot::Sender<()>> },
+        RetireMarked,
+        Ended,
+        Failed,
+    }
+
+    enum PendingKind {
+        Add { logical_count: usize },
+        RemoveAlreadyEnded { logical_count: usize },
+    }
+
+    struct PendingReply {
+        kind: PendingKind,
+        reply: MembershipReply,
+    }
+
+    struct MemberRecord {
+        state: MemberState,
+        probe_registered: bool,
+        pending: Vec<PendingReply>,
+    }
+
+    struct MembershipLedger {
+        phase: PipelinePhase,
+        logical_lifo: Vec<StreamId>,
+        members: HashMap<StreamId, MemberRecord>,
+        seen: HashSet<StreamId>,
+    }
+
+    fn fail_pending_membership(ledger: &mut MembershipLedger, reason: &str) {
+        for record in ledger.members.values_mut() {
+            for pending in std::mem::take(&mut record.pending) {
+                let _ = pending.reply.send(Err(reason.to_string()));
+            }
+        }
+    }
+
+    let mut ledger = MembershipLedger {
+        phase: if control_rx.is_some() {
+            PipelinePhase::Live
+        } else {
+            PipelinePhase::Sealed
+        },
+        logical_lifo: Vec::with_capacity(members.len()),
+        members: HashMap::with_capacity(members.len()),
+        seen: HashSet::with_capacity(members.len()),
+    };
+
+    for member in members {
+        let SinkMember { id, sink, probe } = member;
+        let (retire_tx, retire_rx) = oneshot::channel();
+        let probe_registered = probe.is_some();
+        let admission = spawn_sink_worker(
             &mut join_set,
-            slot,
+            &mut task_members,
+            id,
             sink,
             work_rx.clone(),
             source.clone(),
@@ -273,6 +562,38 @@ pub async fn execute_sink_pipeline_elastic(
             cancelled.clone(),
             retire_rx,
         );
+        admission
+            .ready
+            .await
+            .map_err(|_| eyre!("sink member {:?} ended before admission", id))?;
+
+        ledger.seen.insert(id);
+        ledger.logical_lifo.push(id);
+        ledger.members.insert(
+            id,
+            MemberRecord {
+                state: MemberState::Running {
+                    retire: Some(retire_tx),
+                },
+                probe_registered,
+                pending: Vec::new(),
+            },
+        );
+        let started = {
+            let mut registry = probes.lock().expect("probe registry poisoned");
+            if let Some(probe) = probe {
+                let registered = registry.register(probe);
+                debug_assert!(registered, "initial probe ids were prevalidated");
+            }
+            let started = admission.start.send(()).is_ok();
+            if !started && probe_registered {
+                let _ = registry.unregister(id);
+            }
+            started
+        };
+        if !started {
+            return Err(eyre!("sink member {:?} ended during admission", id));
+        }
     }
 
     // Forwarder: move payloads from the incoming channel onto the shared
@@ -308,9 +629,13 @@ pub async fn execute_sink_pipeline_elastic(
     // — initial and added — has finished, which only happens once the
     // queue closed and drained (or errored/retired), so control is
     // moot beyond that point.
-    let mut control_rx = control_rx;
+    let mut control_rx = control_rx.map(|commands| commands.rx);
+    let mut control_open = control_rx.is_some();
     let mut first_err: Option<eyre::Report> = None;
     loop {
+        if join_set.is_empty() && !control_open {
+            break;
+        }
         let control_recv = async {
             match control_rx.as_mut() {
                 Some(rx) => rx.recv().await,
@@ -328,71 +653,407 @@ pub async fn execute_sink_pipeline_elastic(
 
             cmd = control_recv => {
                 match cmd {
-                    Some(SinkControl::Add(sink)) => {
-                        if !cancelled.load(Ordering::Relaxed) {
-                            let (retire_tx, retire_rx) = tokio::sync::watch::channel(false);
-                            let slot = next_slot;
-                            next_slot += 1;
-                            retire_flags.push((slot, retire_tx));
-                            spawn_sink_worker(
-                                &mut join_set,
-                                slot,
-                                sink,
-                                work_rx.clone(),
-                                source.clone(),
-                                progress.cloned(),
-                                total.clone(),
-                                cancelled.clone(),
-                                retire_rx,
-                            );
+                    Some(SinkCommand::Seal) => {
+                        if ledger.phase == PipelinePhase::Live {
+                            ledger.phase = PipelinePhase::Sealed;
                         }
-                        // On a failing transfer the added sink is dropped
-                        // unused; its socket closes and the peer's worker
-                        // errors into the already-failing teardown.
                     }
-                    Some(SinkControl::RetireOne) => {
-                        // Floor at one live worker (see SinkControl docs).
-                        if retire_flags.len() > 1 {
-                            if let Some((_, retire_tx)) = retire_flags.pop() {
-                                let _ = retire_tx.send(true);
+                    Some(SinkCommand::Add { member, reply }) => {
+                        let mut reply = Some(reply);
+                        let reject = if ledger.phase == PipelinePhase::Failing
+                            || cancelled.load(Ordering::Relaxed)
+                        {
+                            Some("elastic pipeline is failing".to_string())
+                        } else if ledger.seen.contains(&member.id) {
+                            Some(format!("duplicate sink member {:?}", member.id))
+                        } else if member
+                            .probe
+                            .as_ref()
+                            .is_some_and(|probe| probe.id() != member.id)
+                        {
+                            Some(format!("sink member {:?} carries a mismatched probe", member.id))
+                        } else if member.probe.as_ref().is_some_and(|probe| {
+                            probes
+                                .lock()
+                                .expect("probe registry poisoned")
+                                .contains(probe.id())
+                        }) {
+                            Some(format!("duplicate probe for sink member {:?}", member.id))
+                        } else {
+                            None
+                        };
+                        if let Some(mut reason) = reject {
+                            if let Err(err) = member.sink.finish().await {
+                                reason.push_str(&format!("; rejected sink finish failed: {err:#}"));
+                            }
+                            let _ = reply
+                                .take()
+                                .expect("ADD reply is still owned")
+                                .send(Err(reason));
+                            continue;
+                        }
+
+                        let terminal = ledger.phase == PipelinePhase::Sealed;
+                        let SinkMember { id, sink, probe } = member;
+                        let probe_registered = probe.is_some();
+                        let (retire_tx, retire_rx) = oneshot::channel();
+                        ledger.seen.insert(id);
+                        ledger.logical_lifo.push(id);
+                        let logical_count = ledger.logical_lifo.len();
+                        ledger.members.insert(
+                            id,
+                            MemberRecord {
+                                state: MemberState::Running {
+                                    retire: Some(retire_tx),
+                                },
+                                probe_registered: false,
+                                pending: Vec::new(),
+                            },
+                        );
+                        let member_work_rx = if terminal {
+                            // Terminal ADD is still a real admitted member,
+                            // but it must not steal payloads that were already
+                            // assigned before the ordered Seal boundary. A
+                            // private disconnected queue drives the ordinary
+                            // no-payload finish/END path immediately.
+                            let (terminal_tx, terminal_rx) = flume::bounded(1);
+                            drop(terminal_tx);
+                            terminal_rx
+                        } else {
+                            work_rx.clone()
+                        };
+                        let admission = spawn_sink_worker(
+                            &mut join_set,
+                            &mut task_members,
+                            id,
+                            sink,
+                            member_work_rx,
+                            source.clone(),
+                            progress.cloned(),
+                            total.clone(),
+                            cancelled.clone(),
+                            retire_rx,
+                        );
+                        if admission.ready.await.is_err() {
+                            let message = format!(
+                                "sink member {:?} ended before ADD admission",
+                                id
+                            );
+                            let _ = reply
+                                .take()
+                                .expect("ADD reply is still owned")
+                                .send(Err(message.clone()));
+                            record_first_error(&mut first_err, eyre!(message));
+                            ledger.phase = PipelinePhase::Failing;
+                            cancelled.store(true, Ordering::Relaxed);
+                            forwarder.abort();
+                            if let Some(rx) = control_rx.as_mut() {
+                                rx.close();
+                            }
+                            fail_pending_membership(
+                                &mut ledger,
+                                "elastic pipeline membership failed",
+                            );
+                            continue;
+                        }
+
+                        // The registry mutex is also the sampler barrier:
+                        // the probe becomes visible before the blocked worker
+                        // is released, and no sample can land between those
+                        // two changes.
+                        let started = {
+                            let mut registry = probes.lock().expect("probe registry poisoned");
+                            let registered = match probe {
+                                Some(probe) => registry.register(probe),
+                                None => true,
+                            };
+                            if registered {
+                                ledger
+                                    .members
+                                    .get_mut(&id)
+                                    .expect("ADD member has ledger record")
+                                    .probe_registered = probe_registered;
+                            }
+                            let started = registered && admission.start.send(()).is_ok();
+                            if !started && registered && probe_registered {
+                                let _ = registry.unregister(id);
+                                ledger
+                                    .members
+                                    .get_mut(&id)
+                                    .expect("ADD member has ledger record")
+                                    .probe_registered = false;
+                            }
+                            started
+                        };
+                        if !started {
+                            let message = format!(
+                                "elastic pipeline failed while admitting sink member {:?}",
+                                id
+                            );
+                            let _ = reply
+                                .take()
+                                .expect("ADD reply is still owned")
+                                .send(Err(message.clone()));
+                            record_first_error(&mut first_err, eyre!(message));
+                            ledger.phase = PipelinePhase::Failing;
+                            cancelled.store(true, Ordering::Relaxed);
+                            forwarder.abort();
+                            if let Some(rx) = control_rx.as_mut() {
+                                rx.close();
+                            }
+                            fail_pending_membership(
+                                &mut ledger,
+                                "elastic pipeline membership failed",
+                            );
+                            continue;
+                        }
+
+                        if terminal {
+                            ledger
+                                .members
+                                .get_mut(&id)
+                                .expect("terminal ADD member has ledger record")
+                                .pending
+                                .push(PendingReply {
+                                    kind: PendingKind::Add { logical_count },
+                                    reply: reply.take().expect("terminal ADD owns its reply"),
+                                });
+                        } else {
+                            let _ = reply
+                                .take()
+                                .expect("live ADD owns its reply")
+                                .send(Ok(MembershipOutcome::Joined {
+                                    member_id: id,
+                                    logical_count,
+                                }));
+                        }
+                    }
+                    Some(SinkCommand::RetireOne { reply }) => {
+                        if ledger.phase == PipelinePhase::Failing
+                            || cancelled.load(Ordering::Relaxed)
+                        {
+                            let _ = reply.send(Err("elastic pipeline is failing".to_string()));
+                            continue;
+                        }
+                        if ledger.logical_lifo.len() <= 1 {
+                            let _ = reply.send(Ok(MembershipOutcome::RefusedAtFloor {
+                                logical_count: ledger.logical_lifo.len(),
+                            }));
+                            continue;
+                        }
+                        let id = *ledger
+                            .logical_lifo
+                            .last()
+                            .expect("retire floor guaranteed one member");
+                        enum RemoveSettlement {
+                            Marked,
+                            AwaitAlreadyEnded,
+                            AlreadyEnded,
+                            Fault(String),
+                        }
+
+                        // The sampler takes this same mutex. Hold it while
+                        // the exact worker becomes ineligible and its exact
+                        // probe leaves the registry; a sample can observe
+                        // either complete membership, never half of each.
+                        let (logical_count, settlement) = {
+                            let mut registry = probes.lock().expect("probe registry poisoned");
+                            ledger.logical_lifo.pop();
+                            let logical_count = ledger.logical_lifo.len();
+                            let record = ledger
+                                .members
+                                .get_mut(&id)
+                                .expect("logical member has ledger record");
+                            let settlement = match &mut record.state {
+                                MemberState::Running { retire } => {
+                                    let retire = retire
+                                        .take()
+                                        .expect("logical member has one retire authority");
+                                    record.state = MemberState::RetireMarked;
+                                    let marked = retire.send(()).is_ok();
+                                    let registry_ok = if record.probe_registered {
+                                        registry.unregister(id).is_some()
+                                    } else {
+                                        true
+                                    };
+                                    record.probe_registered = false;
+                                    if !registry_ok {
+                                        RemoveSettlement::Fault(format!(
+                                            "probe registry lost logical sink member {:?}",
+                                            id
+                                        ))
+                                    } else if marked {
+                                        RemoveSettlement::Marked
+                                    } else {
+                                        // The worker ended but its ready join has
+                                        // not been reaped. Wait for that exact ID
+                                        // instead of retiring a second member.
+                                        RemoveSettlement::AwaitAlreadyEnded
+                                    }
+                                }
+                                MemberState::Ended => RemoveSettlement::AlreadyEnded,
+                                MemberState::RetireMarked | MemberState::Failed => {
+                                    RemoveSettlement::Fault(format!(
+                                        "logical sink member {:?} is not retireable",
+                                        id
+                                    ))
+                                }
+                            };
+                            (logical_count, settlement)
+                        };
+
+                        match settlement {
+                            RemoveSettlement::Marked => {
+                                let _ = reply.send(Ok(MembershipOutcome::RetireMarked {
+                                    member_id: id,
+                                    logical_count,
+                                }));
+                            }
+                            RemoveSettlement::AwaitAlreadyEnded => {
+                                ledger
+                                    .members
+                                    .get_mut(&id)
+                                    .expect("REMOVE member has ledger record")
+                                    .pending
+                                    .push(PendingReply {
+                                        kind: PendingKind::RemoveAlreadyEnded { logical_count },
+                                        reply,
+                                    });
+                            }
+                            RemoveSettlement::AlreadyEnded => {
+                                let _ = reply.send(Ok(MembershipOutcome::AlreadyEnded {
+                                    member_id: id,
+                                    logical_count,
+                                }));
+                            }
+                            RemoveSettlement::Fault(message) => {
+                                let _ = reply.send(Err(message.clone()));
+                                record_first_error(&mut first_err, eyre!(message));
+                                ledger.phase = PipelinePhase::Failing;
+                                cancelled.store(true, Ordering::Relaxed);
+                                forwarder.abort();
+                                if let Some(rx) = control_rx.as_mut() {
+                                    rx.close();
+                                }
+                                fail_pending_membership(
+                                    &mut ledger,
+                                    "elastic pipeline membership failed",
+                                );
                             }
                         }
                     }
-                    None => control_rx = None, // controller gone; keep draining
+                    None => {
+                        control_open = false;
+                        control_rx = None;
+                    }
                 }
             }
-            joined = join_set.join_next() => {
+            joined = join_set.join_next_with_id(), if !join_set.is_empty() => {
                 match joined {
-                    None => break,
-                    Some(Ok((slot, res))) => {
-                        retire_flags.retain(|(s, _)| *s != slot);
-                        if let Err(e) = res {
-                            if first_err.is_none() {
-                                first_err = Some(e);
+                    None => {}
+                    Some(Ok((task_id, (id, res)))) => {
+                        let mapped = task_members.remove(&task_id);
+                        debug_assert_eq!(mapped, Some(id));
+                        let record = ledger
+                            .members
+                            .get_mut(&id)
+                            .expect("joined worker has ledger record");
+                        if record.probe_registered {
+                            record.probe_registered = false;
+                            if probes
+                                .lock()
+                                .expect("probe registry poisoned")
+                                .unregister(id)
+                                .is_none()
+                            {
+                                record_first_error(
+                                    &mut first_err,
+                                    eyre!("probe registry lost ended sink member {:?}", id),
+                                );
                             }
+                        }
+                        match res {
+                            Ok(()) if first_err.is_none() => {
+                                record.state = MemberState::Ended;
+                                for pending in std::mem::take(&mut record.pending) {
+                                    let outcome = match pending.kind {
+                                        PendingKind::Add { logical_count } => {
+                                            MembershipOutcome::JoinedThenEnded {
+                                                member_id: id,
+                                                logical_count,
+                                            }
+                                        }
+                                        PendingKind::RemoveAlreadyEnded { logical_count } => {
+                                            MembershipOutcome::AlreadyEnded {
+                                                member_id: id,
+                                                logical_count,
+                                            }
+                                        }
+                                    };
+                                    let _ = pending.reply.send(Ok(outcome));
+                                }
+                            }
+                            Ok(()) => {
+                                record.state = MemberState::Ended;
+                                for pending in std::mem::take(&mut record.pending) {
+                                    let _ = pending.reply.send(Err(
+                                        "elastic pipeline failed while settling membership"
+                                            .to_string(),
+                                    ));
+                                }
+                            }
+                            Err(error) => {
+                                record.state = MemberState::Failed;
+                                record_first_error(&mut first_err, error);
+                            }
+                        }
+                        if first_err.is_some() && ledger.phase != PipelinePhase::Failing {
+                            ledger.phase = PipelinePhase::Failing;
+                            cancelled.store(true, Ordering::Relaxed);
+                            forwarder.abort();
+                            if let Some(rx) = control_rx.as_mut() {
+                                rx.close();
+                            }
+                            fail_pending_membership(
+                                &mut ledger,
+                                "elastic pipeline failed while settling membership",
+                            );
                         }
                     }
                     Some(Err(join)) => {
-                        if first_err.is_none() {
-                            first_err = Some(eyre::eyre!("sink worker panicked: {}", join));
+                        if let Some(id) = task_members.remove(&join.id()) {
+                            if let Some(record) = ledger.members.get_mut(&id) {
+                                record.state = MemberState::Failed;
+                                if record.probe_registered {
+                                    record.probe_registered = false;
+                                    let _ = probes
+                                        .lock()
+                                        .expect("probe registry poisoned")
+                                        .unregister(id);
+                                }
+                            }
                         }
+                        record_first_error(
+                            &mut first_err,
+                            eyre!("sink worker panicked: {}", join),
+                        );
+                        ledger.phase = PipelinePhase::Failing;
+                        cancelled.store(true, Ordering::Relaxed);
+                        forwarder.abort();
+                        if let Some(rx) = control_rx.as_mut() {
+                            rx.close();
+                        }
+                        fail_pending_membership(
+                            &mut ledger,
+                            "elastic pipeline failed while settling membership",
+                        );
                     }
                 }
-            }
-        }
-    }
-    // ue-r2-2 review (panel F2, second half): an Add can still be
-    // queued in the instant between the last join and the break.
-    // Close its sink cleanly — the END record is what keeps the
-    // already-authorized peer worker from dying on a reset.
-    if let Some(rx) = control_rx.as_mut() {
-        while let Ok(cmd) = rx.try_recv() {
-            if let SinkControl::Add(sink) = cmd {
-                let _ = sink.finish().await;
             }
         }
     }
     drop(work_rx);
+    forwarder.abort();
     let _ = forwarder.await;
 
     if let Some(err) = first_err {
@@ -400,7 +1061,10 @@ pub async fn execute_sink_pipeline_elastic(
     }
 
     let result = total.lock().unwrap().clone();
-    Ok(result)
+    Ok(ElasticPipelineOutcome {
+        outcome: result,
+        logical_count: ledger.logical_lifo.len(),
+    })
 }
 
 // =====================================================================
@@ -1688,6 +2352,49 @@ mod workqueue_tests {
         }
     }
 
+    /// Deterministic membership test sink: signals entry before blocking at
+    /// a payload boundary and signals its single normal END from `finish`.
+    struct SignaledGatedSink {
+        count: Arc<AtomicU64>,
+        finished: Arc<AtomicU64>,
+        entered_signal: Arc<tokio::sync::Notify>,
+        finished_signal: Arc<tokio::sync::Notify>,
+        gate: Option<Arc<tokio::sync::Semaphore>>,
+        root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl TransferSink for SignaledGatedSink {
+        async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
+            self.entered_signal.notify_one();
+            if let Some(gate) = &self.gate {
+                let permit = gate.acquire().await.expect("gate open");
+                permit.forget();
+            }
+            self.count.fetch_add(1, Ordering::Relaxed);
+            Ok(SinkOutcome {
+                files_written: 1,
+                bytes_written: 0,
+            })
+        }
+
+        async fn finish(&self) -> Result<()> {
+            self.finished.fetch_add(1, Ordering::Relaxed);
+            self.finished_signal.notify_one();
+            Ok(())
+        }
+
+        fn root(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    async fn wait_for_signal(signal: &tokio::sync::Notify, what: &str) {
+        tokio::time::timeout(Duration::from_secs(5), signal.notified())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
     async fn scan_headers(
         src: &Path,
         n: usize,
@@ -1708,6 +2415,225 @@ mod workqueue_tests {
         (source, headers)
     }
 
+    fn test_probe_registry() -> SharedStreamProbes {
+        Arc::new(std::sync::Mutex::new(StreamProbeRegistry::default()))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn elastic_busy_retire_acks_exact_lifo_member_at_payload_boundary() {
+        let tmp = tempdir().unwrap();
+        let (source, mut headers) = scan_headers(&tmp.path().join("src"), 3).await;
+        let third = headers.pop().unwrap();
+        let second = headers.pop().unwrap();
+        let first_header = headers.pop().unwrap();
+
+        let keep_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let keep_entered = Arc::new(tokio::sync::Notify::new());
+        let keep_finished_signal = Arc::new(tokio::sync::Notify::new());
+        let keep_count = Arc::new(AtomicU64::new(0));
+        let keep_finished = Arc::new(AtomicU64::new(0));
+        let keep: Arc<dyn TransferSink> = Arc::new(SignaledGatedSink {
+            count: Arc::clone(&keep_count),
+            finished: Arc::clone(&keep_finished),
+            entered_signal: Arc::clone(&keep_entered),
+            finished_signal: keep_finished_signal,
+            gate: Some(Arc::clone(&keep_gate)),
+            root: PathBuf::from("/keep"),
+        });
+
+        let victim_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let victim_entered = Arc::new(tokio::sync::Notify::new());
+        let victim_finished_signal = Arc::new(tokio::sync::Notify::new());
+        let victim_count = Arc::new(AtomicU64::new(0));
+        let victim_finished = Arc::new(AtomicU64::new(0));
+        let victim: Arc<dyn TransferSink> = Arc::new(SignaledGatedSink {
+            count: Arc::clone(&victim_count),
+            finished: Arc::clone(&victim_finished),
+            entered_signal: Arc::clone(&victim_entered),
+            finished_signal: Arc::clone(&victim_finished_signal),
+            gate: Some(Arc::clone(&victim_gate)),
+            root: PathBuf::from("/victim"),
+        });
+
+        let (tx, rx) = mpsc::channel::<TransferPayload>(2);
+        tx.send(TransferPayload::File(first_header)).await.unwrap();
+        let (control, commands) = ElasticPipelineControl::channel();
+        let probes = test_probe_registry();
+        let pipeline = tokio::spawn(async move {
+            execute_sink_pipeline_elastic(
+                source,
+                vec![SinkMember::new(StreamId(10), keep)],
+                rx,
+                1,
+                None,
+                Some(commands),
+                probes,
+            )
+            .await
+        });
+
+        wait_for_signal(&keep_entered, "initial worker to claim its payload").await;
+        assert_eq!(
+            control
+                .add(SinkMember::new(StreamId(99), victim))
+                .await
+                .expect("ADD acknowledged"),
+            MembershipOutcome::Joined {
+                member_id: StreamId(99),
+                logical_count: 2,
+            }
+        );
+        tx.send(TransferPayload::File(second)).await.unwrap();
+        wait_for_signal(&victim_entered, "added worker to claim its payload").await;
+        tx.send(TransferPayload::File(third)).await.unwrap();
+
+        assert_eq!(
+            control.retire_one().await.expect("REMOVE acknowledged"),
+            MembershipOutcome::RetireMarked {
+                member_id: StreamId(99),
+                logical_count: 1,
+            }
+        );
+        victim_gate.add_permits(1);
+        wait_for_signal(&victim_finished_signal, "retired worker END").await;
+        assert_eq!(victim_count.load(Ordering::Relaxed), 1);
+        assert_eq!(victim_finished.load(Ordering::Relaxed), 1);
+
+        drop(tx);
+        keep_gate.add_permits(4);
+        drop(control);
+        let outcome = pipeline.await.unwrap().expect("pipeline ok");
+        assert_eq!(outcome.outcome.files_written, 3);
+        assert_eq!(outcome.logical_count, 1);
+        assert_eq!(keep_count.load(Ordering::Relaxed), 2);
+        assert_eq!(keep_finished.load(Ordering::Relaxed), 1);
+        assert_eq!(victim_finished.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn elastic_idle_retire_wakes_exact_member_and_unregisters_its_probe() {
+        let tmp = tempdir().unwrap();
+        let (source, headers) = scan_headers(&tmp.path().join("src"), 0).await;
+        assert!(headers.is_empty());
+
+        let keep_finished_signal = Arc::new(tokio::sync::Notify::new());
+        let keep_finished = Arc::new(AtomicU64::new(0));
+        let keep: Arc<dyn TransferSink> = Arc::new(SignaledGatedSink {
+            count: Arc::new(AtomicU64::new(0)),
+            finished: Arc::clone(&keep_finished),
+            entered_signal: Arc::new(tokio::sync::Notify::new()),
+            finished_signal: Arc::clone(&keep_finished_signal),
+            gate: None,
+            root: PathBuf::from("/keep"),
+        });
+        let victim_finished_signal = Arc::new(tokio::sync::Notify::new());
+        let victim_finished = Arc::new(AtomicU64::new(0));
+        let victim: Arc<dyn TransferSink> = Arc::new(SignaledGatedSink {
+            count: Arc::new(AtomicU64::new(0)),
+            finished: Arc::clone(&victim_finished),
+            entered_signal: Arc::new(tokio::sync::Notify::new()),
+            finished_signal: Arc::clone(&victim_finished_signal),
+            gate: None,
+            root: PathBuf::from("/victim"),
+        });
+
+        let (tx, rx) = mpsc::channel::<TransferPayload>(1);
+        let (control, commands) = ElasticPipelineControl::channel();
+        let probes = test_probe_registry();
+        let observed_probes = Arc::clone(&probes);
+        let pipeline = tokio::spawn(async move {
+            execute_sink_pipeline_elastic(
+                source,
+                vec![
+                    SinkMember::with_probe(StreamId(10), keep, StreamProbe::new(StreamId(10))),
+                    SinkMember::with_probe(StreamId(20), victim, StreamProbe::new(StreamId(20))),
+                ],
+                rx,
+                1,
+                None,
+                Some(commands),
+                probes,
+            )
+            .await
+        });
+
+        assert_eq!(
+            control.retire_one().await.expect("REMOVE acknowledged"),
+            MembershipOutcome::RetireMarked {
+                member_id: StreamId(20),
+                logical_count: 1,
+            }
+        );
+        wait_for_signal(&victim_finished_signal, "idle retired worker END").await;
+        assert_eq!(victim_finished.load(Ordering::Relaxed), 1);
+        assert_eq!(keep_finished.load(Ordering::Relaxed), 0);
+        {
+            let probes = observed_probes.lock().expect("probe registry");
+            assert!(probes.contains(StreamId(10)));
+            assert!(!probes.contains(StreamId(20)));
+            assert_eq!(probes.len(), 1);
+        }
+
+        drop(tx);
+        drop(control);
+        wait_for_signal(&keep_finished_signal, "survivor END").await;
+        let outcome = pipeline.await.unwrap().expect("pipeline ok");
+        assert_eq!(outcome.logical_count, 1);
+        assert!(observed_probes.lock().expect("probe registry").is_empty());
+    }
+
+    #[tokio::test]
+    async fn membership_delivery_failures_are_errors_and_finish_unadmitted_sink_once() {
+        let finished = Arc::new(AtomicU64::new(0));
+        let sink: Arc<dyn TransferSink> = Arc::new(GatedSink {
+            count: Arc::new(AtomicU64::new(0)),
+            finished: Arc::clone(&finished),
+            gate: None,
+            root: PathBuf::from("/closed-command-channel"),
+        });
+        let (closed_control, closed_commands) = ElasticPipelineControl::channel();
+        drop(closed_commands);
+        let err = closed_control
+            .add(SinkMember::new(StreamId(41), sink))
+            .await
+            .expect_err("closed command delivery cannot report success");
+        assert!(format!("{err:#}").contains("closed before ADD"));
+        assert_eq!(finished.load(Ordering::Relaxed), 1);
+
+        let finished = Arc::new(AtomicU64::new(0));
+        let sink: Arc<dyn TransferSink> = Arc::new(GatedSink {
+            count: Arc::new(AtomicU64::new(0)),
+            finished: Arc::clone(&finished),
+            gate: None,
+            root: PathBuf::from("/lost-ack"),
+        });
+        let (control, mut commands) = ElasticPipelineControl::channel();
+        let request =
+            tokio::spawn(async move { control.add(SinkMember::new(StreamId(73), sink)).await });
+        let command = commands.rx.recv().await.expect("ADD command delivered");
+        let SinkCommand::Add { member, reply } = command else {
+            panic!("expected ADD command")
+        };
+        member.sink.finish().await.expect("receiver owns cleanup");
+        drop(reply);
+        let err = request
+            .await
+            .expect("request task")
+            .expect_err("lost acknowledgement cannot report success");
+        assert!(format!("{err:#}").contains("dropped ADD acknowledgement"));
+        assert_eq!(finished.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn first_error_slot_keeps_the_original_failure() {
+        let mut first = None;
+        record_first_error(&mut first, eyre!("first failure"));
+        record_first_error(&mut first, eyre!("second failure"));
+        let rendered = format!("{:#}", first.expect("first error recorded"));
+        assert!(rendered.contains("first failure"));
+        assert!(!rendered.contains("second failure"));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn elastic_add_puts_a_new_worker_on_the_running_queue() {
         // One worker blocks on its first payload; the queue holds the
@@ -1718,19 +2644,25 @@ mod workqueue_tests {
         let (source, headers) = scan_headers(&tmp.path().join("src"), 2).await;
 
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let first_entered = Arc::new(tokio::sync::Notify::new());
         let c1 = Arc::new(AtomicU64::new(0));
         let f1 = Arc::new(AtomicU64::new(0));
-        let first: Arc<dyn TransferSink> = Arc::new(GatedSink {
+        let first: Arc<dyn TransferSink> = Arc::new(SignaledGatedSink {
             count: c1.clone(),
             finished: f1.clone(),
+            entered_signal: Arc::clone(&first_entered),
+            finished_signal: Arc::new(tokio::sync::Notify::new()),
             gate: Some(gate.clone()),
             root: PathBuf::from("/one"),
         });
         let c2 = Arc::new(AtomicU64::new(0));
         let f2 = Arc::new(AtomicU64::new(0));
-        let second: Arc<dyn TransferSink> = Arc::new(GatedSink {
+        let second_finished_signal = Arc::new(tokio::sync::Notify::new());
+        let second: Arc<dyn TransferSink> = Arc::new(SignaledGatedSink {
             count: c2.clone(),
             finished: f2.clone(),
+            entered_signal: Arc::new(tokio::sync::Notify::new()),
+            finished_signal: Arc::clone(&second_finished_signal),
             gate: None,
             root: PathBuf::from("/two"),
         });
@@ -1740,31 +2672,42 @@ mod workqueue_tests {
             tx.send(TransferPayload::File(h)).await.unwrap();
         }
         drop(tx);
-        let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
+        let (control, commands) = ElasticPipelineControl::channel();
+        let probes = test_probe_registry();
         let pipeline = tokio::spawn(async move {
-            execute_sink_pipeline_elastic(source, vec![first], rx, 2, None, Some(ctl_rx)).await
+            execute_sink_pipeline_elastic(
+                source,
+                vec![SinkMember::new(StreamId(0), first)],
+                rx,
+                2,
+                None,
+                Some(commands),
+                probes,
+            )
+            .await
         });
 
-        // Give worker 1 time to dequeue payload 1 and park inside its
-        // gated write (the count stays 0 while parked).
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_signal(&first_entered, "initial ADD-test payload claim").await;
         assert_eq!(
             c1.load(Ordering::Relaxed),
             0,
             "worker 1 is parked in the gate"
         );
 
-        ctl_tx
-            .send(SinkControl::Add(second))
+        let joined = control
+            .add(SinkMember::new(StreamId(1), second))
+            .await
             .expect("pipeline alive");
+        assert_eq!(
+            joined,
+            MembershipOutcome::Joined {
+                member_id: StreamId(1),
+                logical_count: 2,
+            }
+        );
         // The added worker must drain the queued payload while worker 1
         // is still gated.
-        for _ in 0..200 {
-            if c2.load(Ordering::Relaxed) == 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        wait_for_signal(&second_finished_signal, "added worker END").await;
         assert_eq!(
             c2.load(Ordering::Relaxed),
             1,
@@ -1772,8 +2715,12 @@ mod workqueue_tests {
         );
 
         gate.add_permits(8);
+        drop(control);
         let outcome = pipeline.await.unwrap().expect("pipeline ok");
-        assert_eq!(outcome.files_written, 2, "exactly-once across both workers");
+        assert_eq!(
+            outcome.outcome.files_written, 2,
+            "exactly-once across both workers"
+        );
         assert_eq!(c1.load(Ordering::Relaxed), 1);
         assert_eq!(f1.load(Ordering::Relaxed), 1, "original sink finished");
         assert_eq!(f2.load(Ordering::Relaxed), 1, "added sink finished");
@@ -1812,23 +2759,46 @@ mod workqueue_tests {
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }
         });
-        let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
+        let (control, commands) = ElasticPipelineControl::channel();
+        let probes = test_probe_registry();
         let pipeline = tokio::spawn(async move {
             // Retire targets the most recently added live worker —
             // `victim` here.
-            execute_sink_pipeline_elastic(source, vec![keep, victim], rx, 2, None, Some(ctl_rx))
-                .await
+            execute_sink_pipeline_elastic(
+                source,
+                vec![
+                    SinkMember::new(StreamId(0), keep),
+                    SinkMember::new(StreamId(1), victim),
+                ],
+                rx,
+                2,
+                None,
+                Some(commands),
+                probes,
+            )
+            .await
         });
 
         // Let both workers move some payloads, then retire one.
         tokio::time::sleep(Duration::from_millis(15)).await;
-        ctl_tx.send(SinkControl::RetireOne).expect("pipeline alive");
+        let retired = control.retire_one().await.expect("pipeline alive");
+        assert_eq!(
+            retired,
+            MembershipOutcome::RetireMarked {
+                member_id: StreamId(1),
+                logical_count: 1,
+            }
+        );
 
+        drop(control);
         let outcome = pipeline.await.unwrap().expect("pipeline ok");
         let _ = feeder.await;
         let kept = c1.load(Ordering::Relaxed);
         let retired = c2.load(Ordering::Relaxed);
-        assert_eq!(outcome.files_written, n, "no payload lost on retire");
+        assert_eq!(
+            outcome.outcome.files_written, n,
+            "no payload lost on retire"
+        );
         assert_eq!(kept + retired, n as u64, "exactly-once across the resize");
         assert_eq!(
             f2.load(Ordering::Relaxed),
@@ -1863,10 +2833,26 @@ mod workqueue_tests {
         });
 
         let (tx, rx) = mpsc::channel::<TransferPayload>(2);
-        let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
+        let (control, commands) = ElasticPipelineControl::channel();
+        let probes = test_probe_registry();
+        let pipeline = tokio::spawn(async move {
+            execute_sink_pipeline_elastic(
+                source,
+                vec![SinkMember::new(StreamId(0), only)],
+                rx,
+                2,
+                None,
+                Some(commands),
+                probes,
+            )
+            .await
+        });
         // Ask for the impossible before any payload flows: the floor
         // must hold and every payload still lands.
-        ctl_tx.send(SinkControl::RetireOne).unwrap();
+        assert_eq!(
+            control.retire_one().await.expect("pipeline alive"),
+            MembershipOutcome::RefusedAtFloor { logical_count: 1 }
+        );
         let feeder = tokio::spawn(async move {
             for h in headers {
                 if tx.send(TransferPayload::File(h)).await.is_err() {
@@ -1874,13 +2860,91 @@ mod workqueue_tests {
                 }
             }
         });
-        let outcome = execute_sink_pipeline_elastic(source, vec![only], rx, 2, None, Some(ctl_rx))
-            .await
-            .expect("pipeline ok");
         let _ = feeder.await;
-        assert_eq!(outcome.files_written, n, "retire floor held at one worker");
+        drop(control);
+        let outcome = pipeline.await.unwrap().expect("pipeline ok");
+        assert_eq!(
+            outcome.outcome.files_written, n,
+            "retire floor held at one worker"
+        );
         assert_eq!(count.load(Ordering::Relaxed), n as u64);
         assert_eq!(finished.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sealed_running_remove_is_retire_marked_not_already_ended() {
+        let tmp = tempdir().unwrap();
+        let (source, headers) = scan_headers(&tmp.path().join("src"), 0).await;
+        assert!(headers.is_empty());
+
+        let keep_finished_signal = Arc::new(tokio::sync::Notify::new());
+        let keep_finished = Arc::new(AtomicU64::new(0));
+        let keep: Arc<dyn TransferSink> = Arc::new(SignaledGatedSink {
+            count: Arc::new(AtomicU64::new(0)),
+            finished: Arc::clone(&keep_finished),
+            entered_signal: Arc::new(tokio::sync::Notify::new()),
+            finished_signal: Arc::clone(&keep_finished_signal),
+            gate: None,
+            root: PathBuf::from("/keep"),
+        });
+        let victim_finished_signal = Arc::new(tokio::sync::Notify::new());
+        let victim_finished = Arc::new(AtomicU64::new(0));
+        let victim: Arc<dyn TransferSink> = Arc::new(SignaledGatedSink {
+            count: Arc::new(AtomicU64::new(0)),
+            finished: Arc::clone(&victim_finished),
+            entered_signal: Arc::new(tokio::sync::Notify::new()),
+            finished_signal: Arc::clone(&victim_finished_signal),
+            gate: None,
+            root: PathBuf::from("/victim"),
+        });
+
+        let (tx, rx) = mpsc::channel::<TransferPayload>(1);
+        let (control, commands) = ElasticPipelineControl::channel();
+        let probes = test_probe_registry();
+        let observed_probes = Arc::clone(&probes);
+        let pipeline = tokio::spawn(async move {
+            execute_sink_pipeline_elastic(
+                source,
+                vec![
+                    SinkMember::with_probe(StreamId(10), keep, StreamProbe::new(StreamId(10))),
+                    SinkMember::with_probe(StreamId(20), victim, StreamProbe::new(StreamId(20))),
+                ],
+                rx,
+                1,
+                None,
+                Some(commands),
+                probes,
+            )
+            .await
+        });
+
+        // Seal is ordered before REMOVE, but the idle member is still a
+        // running worker because payload admission has not closed yet.
+        // This operation marks that exact worker; it is not an
+        // already-completed retirement.
+        control.seal().expect("pipeline accepts terminal marker");
+        assert_eq!(
+            control.retire_one().await.expect("terminal REMOVE settles"),
+            MembershipOutcome::RetireMarked {
+                member_id: StreamId(20),
+                logical_count: 1,
+            }
+        );
+        wait_for_signal(&victim_finished_signal, "sealed retired worker END").await;
+        assert_eq!(victim_finished.load(Ordering::Relaxed), 1);
+        assert_eq!(keep_finished.load(Ordering::Relaxed), 0);
+        {
+            let probes = observed_probes.lock().expect("probe registry");
+            assert!(probes.contains(StreamId(10)));
+            assert!(!probes.contains(StreamId(20)));
+        }
+
+        drop(tx);
+        drop(control);
+        wait_for_signal(&keep_finished_signal, "sealed survivor END").await;
+        let outcome = pipeline.await.unwrap().expect("pipeline ok");
+        assert_eq!(outcome.logical_count, 1);
+        assert!(observed_probes.lock().expect("probe registry").is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1893,11 +2957,14 @@ mod workqueue_tests {
         let (source, headers) = scan_headers(&tmp.path().join("src"), 1).await;
 
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let first_entered = Arc::new(tokio::sync::Notify::new());
         let c1 = Arc::new(AtomicU64::new(0));
         let f1 = Arc::new(AtomicU64::new(0));
-        let first: Arc<dyn TransferSink> = Arc::new(GatedSink {
+        let first: Arc<dyn TransferSink> = Arc::new(SignaledGatedSink {
             count: c1.clone(),
             finished: f1.clone(),
+            entered_signal: Arc::clone(&first_entered),
+            finished_signal: Arc::new(tokio::sync::Notify::new()),
             gate: Some(gate.clone()),
             root: PathBuf::from("/one"),
         });
@@ -1914,24 +2981,46 @@ mod workqueue_tests {
         for h in headers {
             tx.send(TransferPayload::File(h)).await.unwrap();
         }
-        drop(tx); // end-of-stream
-        let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
+        let (control, commands) = ElasticPipelineControl::channel();
+        let probes = test_probe_registry();
         let pipeline = tokio::spawn(async move {
-            execute_sink_pipeline_elastic(source, vec![first], rx, 2, None, Some(ctl_rx)).await
+            execute_sink_pipeline_elastic(
+                source,
+                vec![SinkMember::new(StreamId(0), first)],
+                rx,
+                2,
+                None,
+                Some(commands),
+                probes,
+            )
+            .await
         });
+        control.seal().expect("pipeline accepts terminal marker");
+        drop(tx); // end-of-stream, ordered after Seal
 
         // Wait until worker 1 has dequeued the payload and parked.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_signal(&first_entered, "initial terminal worker payload claim").await;
         assert_eq!(c1.load(Ordering::Relaxed), 0, "worker 1 is parked");
 
-        ctl_tx.send(SinkControl::Add(late)).expect("pipeline alive");
-        // The late worker sees the drained closed queue and finishes.
-        for _ in 0..200 {
-            if f2.load(Ordering::Relaxed) == 1 {
-                break;
+        let joined = control
+            .add(SinkMember::new(StreamId(1), late))
+            .await
+            .expect("terminal ADD settles");
+        assert_eq!(
+            joined,
+            MembershipOutcome::JoinedThenEnded {
+                member_id: StreamId(1),
+                logical_count: 2,
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        );
+        let removed = control.retire_one().await.expect("terminal REMOVE settles");
+        assert_eq!(
+            removed,
+            MembershipOutcome::AlreadyEnded {
+                member_id: StreamId(1),
+                logical_count: 1,
+            }
+        );
         assert_eq!(
             f2.load(Ordering::Relaxed),
             1,
@@ -1944,8 +3033,10 @@ mod workqueue_tests {
         );
 
         gate.add_permits(4);
+        drop(control);
         let outcome = pipeline.await.unwrap().expect("pipeline ok");
-        assert_eq!(outcome.files_written, 1);
+        assert_eq!(outcome.outcome.files_written, 1);
+        assert_eq!(outcome.logical_count, 1);
         assert_eq!(f1.load(Ordering::Relaxed), 1);
     }
 

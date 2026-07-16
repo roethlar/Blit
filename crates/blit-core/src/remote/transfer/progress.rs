@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// One progress observation from a transfer producer.
@@ -462,6 +463,72 @@ impl StreamProbe {
     }
 }
 
+/// Exact live-membership registry for per-stream telemetry.
+///
+/// Stream identity, rather than insertion order, is the contract: an
+/// elastic-pipeline retirement names the [`StreamId`] whose probe must leave
+/// the tuner view. Duplicate registration is refused without replacing the
+/// probe already bound to that member.
+#[derive(Debug, Default)]
+pub struct StreamProbeRegistry {
+    probes: HashMap<StreamId, StreamProbe>,
+}
+
+impl StreamProbeRegistry {
+    /// Build a registry from a fixed initial stream set.
+    ///
+    /// Initial member IDs are an internal invariant, so a duplicate is a
+    /// construction bug and fails immediately instead of silently replacing
+    /// the first stream's telemetry.
+    pub fn from_probes(probes: Vec<StreamProbe>) -> Self {
+        let mut registry = Self::default();
+        for probe in probes {
+            let id = probe.id();
+            assert!(registry.register(probe), "duplicate stream probe id {id:?}");
+        }
+        registry
+    }
+
+    /// Register one live member. Returns `false` on a duplicate and leaves
+    /// the existing probe untouched.
+    pub fn register(&mut self, probe: StreamProbe) -> bool {
+        let id = probe.id();
+        match self.probes.entry(id) {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(probe);
+                true
+            }
+        }
+    }
+
+    /// Remove exactly the named member's probe.
+    pub fn unregister(&mut self, id: StreamId) -> Option<StreamProbe> {
+        self.probes.remove(&id)
+    }
+
+    pub fn contains(&self, id: StreamId) -> bool {
+        self.probes.contains_key(&id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.probes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.probes.is_empty()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &StreamProbe> {
+        self.probes.values()
+    }
+}
+
+/// Growable per-transfer probe registry shared by the sampler and elastic
+/// membership controller. The mutex is held only for a snapshot fold or one
+/// exact membership update.
+pub type SharedStreamProbes = Arc<Mutex<StreamProbeRegistry>>;
+
 /// Zero-cost telemetry abstraction for the byte-copy hot path.
 ///
 /// The send loop is generic over `P: Probe`. The associated
@@ -598,5 +665,50 @@ mod stream_telemetry_tests {
         // The telemetry Arc is shared.
         let tel = probe.telemetry();
         assert!(Arc::strong_count(&tel) >= 2);
+    }
+
+    #[test]
+    fn registry_refuses_duplicate_without_replacing_existing_probe() {
+        let existing = StreamProbe::new(StreamId(7));
+        existing.record_bytes(11);
+        let duplicate = StreamProbe::new(StreamId(7));
+        duplicate.record_bytes(99);
+
+        let mut registry = StreamProbeRegistry::default();
+        assert!(registry.is_empty());
+        assert!(registry.register(existing));
+        assert!(!registry.register(duplicate));
+        assert_eq!(registry.len(), 1);
+
+        let retained = registry
+            .unregister(StreamId(7))
+            .expect("the first probe remains registered");
+        assert_eq!(retained.snapshot().bytes_sent, 11);
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn registry_unregisters_exact_non_tail_member() {
+        let mut registry = StreamProbeRegistry::from_probes(vec![
+            StreamProbe::new(StreamId(10)),
+            StreamProbe::new(StreamId(20)),
+            StreamProbe::new(StreamId(30)),
+        ]);
+
+        let removed = registry
+            .unregister(StreamId(20))
+            .expect("middle member is present");
+        assert_eq!(removed.id(), StreamId(20));
+        assert!(registry.contains(StreamId(10)));
+        assert!(!registry.contains(StreamId(20)));
+        assert!(registry.contains(StreamId(30)));
+        assert_eq!(registry.len(), 2);
+
+        let remaining: std::collections::HashSet<_> =
+            registry.values().map(StreamProbe::id).collect();
+        assert_eq!(
+            remaining,
+            std::collections::HashSet::from([StreamId(10), StreamId(30)])
+        );
     }
 }

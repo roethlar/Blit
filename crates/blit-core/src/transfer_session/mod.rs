@@ -57,7 +57,7 @@ use crate::remote::transfer::source::{FsTransferSource, TransferSource};
 use crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT;
 use crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES;
 use crate::remote::transfer::{
-    AbortOnDrop, FaultedPath, RemoteTransferProgress, CONTROL_PLANE_CHUNK_SIZE,
+    AbortOnDrop, FaultedPath, MembershipOutcome, RemoteTransferProgress, CONTROL_PLANE_CHUNK_SIZE,
 };
 use crate::transfer_plan::PlanOptions;
 use transport::{FrameRx, FrameTransport, FrameTx};
@@ -1801,7 +1801,7 @@ async fn source_send_half(
     // without delaying first byte or leaving a receiver idle across the
     // serialized control RTTs.
     if let Some(dp) = &mut data_plane {
-        dp.close_payloads();
+        dp.close_payloads()?;
         maybe_propose_resize(dp, tx, needed_bytes, needed_count, &mut pending_resize).await?;
         settle_shape_resizes(
             &mut events,
@@ -2060,7 +2060,22 @@ async fn process_source_event(
                 }
             };
             if ack.accepted {
-                dp.add_stream(pending_r.epoch, &pending_r.sub_token).await?;
+                let membership = dp.add_stream(pending_r.epoch, &pending_r.sub_token).await?;
+                let logical_count = match membership {
+                    MembershipOutcome::Joined { logical_count, .. }
+                    | MembershipOutcome::JoinedThenEnded { logical_count, .. } => logical_count,
+                    other => {
+                        return Err(eyre::Report::new(SessionFault::internal(format!(
+                            "accepted ADD produced unexpected membership outcome {other:?}"
+                        ))))
+                    }
+                };
+                if logical_count != pending_r.target_streams as usize {
+                    return Err(eyre::Report::new(SessionFault::internal(format!(
+                        "accepted ADD settled {logical_count} members, expected {}",
+                        pending_r.target_streams
+                    ))));
+                }
                 dp.dial()
                     .resize_settled(pending_r.epoch, pending_r.target_streams as usize, true);
                 if let Some(trace) = dp.phase_trace() {

@@ -34,12 +34,12 @@
 //! the DESTINATION **responder** arms+accepts it; in pull the DESTINATION
 //! **initiator** dials and the SOURCE **responder** accepts. Either way
 //! the SOURCE hands its new send socket to the running elastic pipeline
-//! via [`SinkControl::Add`]. The cheap-dial live tuner (chunk/prefetch) is
+//! through acknowledged member admission. The cheap-dial live tuner (chunk/prefetch) is
 //! still future work — the resize moves only the stream count.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
@@ -64,7 +64,8 @@ use crate::remote::transfer::source::TransferSource;
 use crate::remote::transfer::stall_guard::{StallGuard, TRANSFER_STALL_TIMEOUT};
 use crate::remote::transfer::{
     execute_sink_pipeline_elastic, generate_sub_token, AbortOnDrop, DataPlaneSession,
-    RemoteTransferProgress, SinkControl, SUB_TOKEN_LEN,
+    ElasticPipelineControl, ElasticPipelineOutcome, MembershipOutcome, RemoteTransferProgress,
+    SinkMember, StreamId, StreamProbeRegistry, SUB_TOKEN_LEN,
 };
 
 use super::{SessionFault, SourceInstruments};
@@ -818,21 +819,22 @@ enum SourceSockets {
 }
 
 /// A running source-side data plane: the dialed/accepted socket(s) wrapped
-/// as an ELASTIC sink pipeline that `SinkControl::Add` grows mid-run (the
-/// sf-2 shape correction). Planned payloads are fed via [`Self::queue`];
+/// as an ELASTIC sink pipeline whose acknowledged membership control grows
+/// it mid-run (the sf-2 shape correction). Planned payloads are fed via [`Self::queue`];
 /// closing via [`Self::finish`] drains the pipeline, emits each socket's
 /// END record, and returns the bytes this end sent.
 pub(super) struct SourceDataPlane {
     payload_tx: Option<mpsc::Sender<TransferPayload>>,
-    control_tx: mpsc::UnboundedSender<SinkControl>,
+    control: Option<ElasticPipelineControl>,
     // `AbortOnDrop<T>` wraps a `JoinHandle<T>`; the task's output is
-    // `Result<SinkOutcome>`, so `T` is that (not the JoinHandle).
-    pipeline: Option<AbortOnDrop<Result<SinkOutcome>>>,
+    // `Result<ElasticPipelineOutcome>`, so `T` is that (not the JoinHandle).
+    pipeline: Option<AbortOnDrop<Result<ElasticPipelineOutcome>>>,
     // The byte SENDER owns the live dial, bounded by the byte RECEIVER's
     // advertised capacity (contract §Invariants 5). The resize drives only
     // its shape-correction stream count; the cheap-dial tuner is future
     // work, so `chunk_bytes()`/`prefetch_count()` stay at the floor.
     dial: Arc<TransferDial>,
+    next_member_id: AtomicU32,
     source: Arc<dyn TransferSource>,
     session_token: Vec<u8>,
     pool: Arc<BufferPool>,
@@ -885,7 +887,7 @@ pub(super) async fn dial_source_data_plane(
         dial.ceiling_max_streams().max(1),
     ));
     let trace = instruments.trace_data_plane;
-    let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(initial);
+    let mut sinks = Vec::with_capacity(initial);
     for socket_id in 0..initial {
         if let Some(phase) = &phase_trace {
             phase.event(
@@ -922,16 +924,18 @@ pub(super) async fn dial_source_data_plane(
         let session = session.with_session_phase_trace(phase_trace.clone(), 0, socket_id as u32);
         // The source-side sink never reads its dst_root (it only sends);
         // `root()` is consulted by the relay/receive case, not here.
-        sinks.push(Arc::new(DataPlaneSink::new(
+        let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
             session,
             Arc::clone(&source),
             PathBuf::new(),
-        )));
+        ));
+        sinks.push(SinkMember::new(StreamId(socket_id as u32), sink));
     }
 
     let prefetch = dial.prefetch_count().max(1);
     let (payload_tx, payload_rx) = mpsc::channel::<TransferPayload>(prefetch);
-    let (control_tx, control_rx) = mpsc::unbounded_channel::<SinkControl>();
+    let (control, commands) = ElasticPipelineControl::channel();
+    let probes = Arc::new(StdMutex::new(StreamProbeRegistry::default()));
     let pipe_source = Arc::clone(&source);
     let pipe_progress = instruments.progress.clone();
     // Bounded by AbortOnDrop: a fault on the control lane that drops the
@@ -943,16 +947,18 @@ pub(super) async fn dial_source_data_plane(
             payload_rx,
             prefetch,
             pipe_progress.as_ref(),
-            Some(control_rx),
+            Some(commands),
+            probes,
         )
         .await
     }));
     let queue_trace_armed = phase_trace.is_some();
     Ok(SourceDataPlane {
         payload_tx: Some(payload_tx),
-        control_tx,
+        control: Some(control),
         pipeline: Some(pipeline),
         dial,
+        next_member_id: AtomicU32::new(initial as u32),
         source,
         session_token: grant.session_token.clone(),
         pool,
@@ -1008,7 +1014,7 @@ pub(super) async fn accept_source_data_plane(
         dial.ceiling_max_streams().max(1),
     ));
     let trace = instruments.trace_data_plane;
-    let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(initial);
+    let mut sinks = Vec::with_capacity(initial);
     for socket_id in 0..initial {
         if let Some(phase) = &phase_trace {
             phase.event(
@@ -1040,16 +1046,18 @@ pub(super) async fn accept_source_data_plane(
         )
         .await
         .with_session_phase_trace(phase_trace.clone(), 0, socket_id as u32);
-        sinks.push(Arc::new(DataPlaneSink::new(
+        let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
             session,
             Arc::clone(&source),
             PathBuf::new(),
-        )));
+        ));
+        sinks.push(SinkMember::new(StreamId(socket_id as u32), sink));
     }
 
     let prefetch = dial.prefetch_count().max(1);
     let (payload_tx, payload_rx) = mpsc::channel::<TransferPayload>(prefetch);
-    let (control_tx, control_rx) = mpsc::unbounded_channel::<SinkControl>();
+    let (control, commands) = ElasticPipelineControl::channel();
+    let probes = Arc::new(StdMutex::new(StreamProbeRegistry::default()));
     let pipe_source = Arc::clone(&source);
     let pipe_progress = instruments.progress.clone();
     let pipeline = AbortOnDrop::new(tokio::spawn(async move {
@@ -1059,16 +1067,18 @@ pub(super) async fn accept_source_data_plane(
             payload_rx,
             prefetch,
             pipe_progress.as_ref(),
-            Some(control_rx),
+            Some(commands),
+            probes,
         )
         .await
     }));
     let queue_trace_armed = phase_trace.is_some();
     Ok(SourceDataPlane {
         payload_tx: Some(payload_tx),
-        control_tx,
+        control: Some(control),
         pipeline: Some(pipeline),
         dial,
+        next_member_id: AtomicU32::new(initial as u32),
         source,
         session_token: bound.session_token,
         pool,
@@ -1122,7 +1132,7 @@ impl SourceDataPlane {
     }
 
     /// Acquire the epoch-N data socket for an accepted resize and hand it
-    /// to the running pipeline (`SinkControl::Add`). The SOURCE initiator
+    /// to the running pipeline through acknowledged membership. The SOURCE initiator
     /// (push) DIALS it; the SOURCE responder (pull, otp-5b-2) ACCEPTS the
     /// socket the DESTINATION initiator dials after its ack, off the same
     /// listener epoch-0 came in on. A dial/accept failure is FATAL
@@ -1139,7 +1149,21 @@ impl SourceDataPlane {
     /// flight (the driver's `pending_resize`) and epoch-0 is already
     /// accepted, so the next connection off the listener is exactly this
     /// resize's socket — verified against `session_token ‖ sub_token`.
-    pub(super) async fn add_stream(&self, epoch: u32, sub_token: &[u8]) -> Result<()> {
+    pub(super) async fn add_stream(
+        &self,
+        epoch: u32,
+        sub_token: &[u8],
+    ) -> Result<MembershipOutcome> {
+        // Allocate before transport acquisition. A failed socket burns the
+        // identity rather than reusing it for a different authenticated
+        // connection later in the session.
+        let member_id = StreamId(
+            self.next_member_id
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                    next.checked_add(1)
+                })
+                .map_err(|_| dp_fault("data-plane stream member id exhausted"))?,
+        );
         let session = match &self.sockets {
             SourceSockets::Dial { host, tcp_port } => {
                 let mut handshake = self.session_token.clone();
@@ -1218,12 +1242,12 @@ impl SourceDataPlane {
             Arc::clone(&self.source),
             PathBuf::new(),
         ));
-        if let Err(returned) = self.control_tx.send(SinkControl::Add(sink)) {
-            if let SinkControl::Add(sink) = returned.0 {
-                let _ = sink.finish().await;
-            }
-        }
-        Ok(())
+        self.control
+            .as_ref()
+            .ok_or_else(|| dp_fault("data-plane membership control already closed"))?
+            .add(SinkMember::new(member_id, sink))
+            .await
+            .map_err(|err| dp_fault(format!("admitting data-plane member: {err:#}")))
     }
 
     /// Feed one planned payload into the bounded send pipeline. The caller
@@ -1278,8 +1302,18 @@ impl SourceDataPlane {
     /// END promptly while the control lane settles any remaining resize
     /// epochs; a late ADD likewise sees a closed queue and emits END rather
     /// than waiting under the receiver's StallGuard.
-    pub(super) fn close_payloads(&mut self) {
+    pub(super) fn close_payloads(&mut self) -> Result<()> {
+        // The control command is sent first. Because this handle is the
+        // sole command producer, every accepted late membership operation
+        // is ordered after Seal even if its worker races the payload sender
+        // being dropped below.
+        let sealed = self
+            .control
+            .as_ref()
+            .ok_or_else(|| dp_fault("data-plane membership control already closed"))?
+            .seal();
         self.payload_tx = None;
+        sealed.map_err(|err| dp_fault(format!("sealing data-plane membership: {err:#}")))
     }
 
     /// Signal end-of-stream, drain the pipeline (each worker emits its
@@ -1287,21 +1321,37 @@ impl SourceDataPlane {
     /// awaited before `SourceDone` goes out so the destination's receive
     /// pipeline sees END and completes.
     pub(super) async fn finish(mut self) -> Result<SinkOutcome> {
-        // Drop the sender: workers observe the closed queue, drain what
-        // is left, then `finish()` (END record) and exit.
-        self.close_payloads();
+        // Seal before dropping the payload sender, then drop the sole
+        // command endpoint before joining. Retaining it here would keep a
+        // zero-worker terminal supervisor alive forever.
+        let close_result = self.close_payloads();
+        let resize_pending = self.dial.resize_pending();
+        drop(self.control.take());
         let pipeline = self
             .pipeline
             .take()
             .expect("SourceDataPlane::finish called once");
-        let outcome = pipeline
+        let elastic = pipeline
             .join()
             .await
             .map_err(|err| dp_fault(format!("data-plane send pipeline panicked: {err}")))??;
+        close_result?;
+        if resize_pending {
+            return Err(dp_fault(
+                "data-plane membership sealed with a resize epoch still pending",
+            ));
+        }
+        if elastic.logical_count != self.dial.live_streams() {
+            return Err(dp_fault(format!(
+                "data-plane membership ended at {} but dial settled {}",
+                elastic.logical_count,
+                self.dial.live_streams()
+            )));
+        }
         if let Some(trace) = &self.phase_trace {
             trace.event("data_plane_complete", SessionPhaseFields::default());
         }
-        Ok(outcome)
+        Ok(elastic.outcome)
     }
 }
 

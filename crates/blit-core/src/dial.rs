@@ -30,6 +30,8 @@ use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::generated::CapacityProfile;
+pub use crate::remote::transfer::progress::SharedStreamProbes;
+use crate::remote::transfer::progress::{StreamProbe, StreamProbeRegistry};
 
 const MIB: usize = 1024 * 1024;
 
@@ -721,13 +723,6 @@ pub(crate) fn blocked_ratio(
     (delta_blocked_nanos as f64 / denom as f64).clamp(0.0, 1.0)
 }
 
-/// Growable per-transfer probe registry (`ue-r2-2`): resize adds a
-/// probe when a stream joins and removes it when one retires, and the
-/// tuner samples whatever is live each tick. Plain std mutex — locked
-/// only for a snapshot fold every 500ms and on resize events.
-pub type SharedStreamProbes =
-    Arc<std::sync::Mutex<Vec<crate::remote::transfer::progress::StreamProbe>>>;
-
 /// Spawn the live tuner for one transfer (ue-r2-1e): every
 /// [`DIAL_TUNER_TICK`] it sums the PR1 per-stream `write_blocked`
 /// telemetry and steps the dial's cheap dials. Holds only a `Weak` to
@@ -736,8 +731,9 @@ pub type SharedStreamProbes =
 /// shutdown (`MultiStreamSender::finish` does).
 pub fn spawn_dial_tuner(
     dial: &Arc<TransferDial>,
-    probes: Vec<crate::remote::transfer::progress::StreamProbe>,
+    probes: Vec<StreamProbe>,
 ) -> tokio::task::JoinHandle<()> {
+    let probes = StreamProbeRegistry::from_probes(probes);
     spawn_dial_tuner_with_resize(dial, Arc::new(std::sync::Mutex::new(probes)), None)
 }
 
@@ -763,7 +759,7 @@ pub fn spawn_dial_tuner_with_resize(
             let Some(dial) = weak.upgrade() else { return };
             let (blocked, bytes, streams) = {
                 let probes = probes.lock().expect("probe registry poisoned");
-                let (b, n) = probes.iter().fold((0u64, 0u64), |(b, n), p| {
+                let (b, n) = probes.values().fold((0u64, 0u64), |(b, n), p| {
                     let snap = p.snapshot();
                     (b + snap.write_blocked_nanos, n + snap.bytes_sent)
                 });
@@ -1341,10 +1337,9 @@ mod tests {
         while dial.step_up_cheap_dials() {}
         let probe = StreamProbe::new(StreamId(0));
         let registry: SharedStreamProbes =
-            Arc::new(std::sync::Mutex::new(vec![StreamProbe::from_telemetry(
-                probe.id(),
-                probe.telemetry(),
-            )]));
+            Arc::new(std::sync::Mutex::new(StreamProbeRegistry::from_probes(
+                vec![StreamProbe::from_telemetry(probe.id(), probe.telemetry())],
+            )));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let handle = spawn_dial_tuner_with_resize(&dial, Arc::clone(&registry), Some(tx));
         tokio::task::yield_now().await;
