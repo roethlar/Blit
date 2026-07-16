@@ -179,6 +179,8 @@ pub async fn run_push_session(
             trace_data_plane: options.trace_data_plane,
             session_phase_trace: Default::default(),
             small_file_probe: Default::default(),
+            #[cfg(test)]
+            dial_test_samples: None,
         },
     };
     let summary = run_source(cfg, transport, source).await?;
@@ -337,6 +339,7 @@ pub async fn run_pull_session_with_client(
         // The initiator dials the data plane on the same host it reached
         // the control plane on (contract §Transport: initiator dials).
         data_plane_host: Some(endpoint.host.clone()),
+        receiver_capacity: None,
         instruments: DestinationInstruments {
             progress: options.progress,
             byte_progress: options.byte_progress,

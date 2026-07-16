@@ -60,11 +60,9 @@ doc explains the state machine the proto cannot.
    terminal worker count. The DESTINATION's advertised capacity is a
    safety ceiling, not a target.
 
-**Implementation drift, 2026-07-16:** current `TransferSession` still runs
-sf-2's static ADD-only shape correction, does not start the existing live
-tuner, and rejects REMOVE. Active `docs/plan/LIVE_DIAL_TUNING.md`
-(D-2026-07-16-2) owns the correction. Exact-8 parity tests prove both
-connection layouts share that static target; they do not satisfy invariant 6.
+`docs/plan/LIVE_DIAL_TUNING.md` is the implementation and evidence record for
+invariant 6. Its ldt-2 cutover removed sf-2's static shape target and made the
+same SOURCE-owned ADD/REMOVE controller operational in both socket layouts.
 
 ## Phase state machine
 
@@ -174,28 +172,32 @@ push/pull-specific message.
   dials (NAT/firewall reality — connection topology, not
   choreography). Byte direction on the sockets is set by role:
   SOURCE writes, DESTINATION reads.
-  **`initial_streams` is an ACCEPT ceiling, not a dial order**
-  (D-2026-06-20-1/-2 preserved): it is the number of epoch-0 accept
-  slots the responder arms, computed as min(engine dial floor,
-  DESTINATION's capacity ceiling). SOURCE — wherever it sits — owns
-  the dial and may use fewer epoch-0 sockets than armed; unclaimed
-  slots expire harmlessly. Growth beyond epoch 0 happens only via
-  SOURCE-initiated live resize, one armed accept per ADD epoch. REMOVE
-  needs no new credential: SOURCE retires one worker at a payload boundary
-  and its normal `END` closes the matching receive worker.
+  **`initial_streams` is the exact epoch-0 logical membership:**
+  `min(DIAL_FLOOR_INITIAL_STREAMS, receiver_stream_ceiling)`. The
+  responder arms exactly that many accepts and the initiator opens exactly
+  that many sockets. A zero/absent receiver maximum resolves to the documented
+  default safety limit; it is not a one-stream cap. Later membership changes
+  only through SOURCE-initiated live resize. Each target is absolute and must
+  be exactly the current settled count plus one for ADD or minus one for
+  REMOVE. REMOVE opens no socket: SOURCE retires one worker at a payload
+  boundary and its normal `END` closes the matching receive worker.
   **Socket auth, exact:** every epoch-0 socket opens with
   `session_token` (16 bytes) immediately followed by
   `epoch0_sub_token` (16 bytes); every resize-ADD socket opens with
   `session_token` followed by that epoch's `sub_token` from the
-  `DataPlaneResize` frame. Tokens are single-session; each armed
-  accept slot admits exactly one socket (no replay within a
-  session); armed slots that go unclaimed expire, as today's resize
-  wiring already does. A socket presenting anything else is closed
-  without response.
-  A matching `DataPlaneResizeAck{accepted:false}` consumes that monotonic
-  epoch and is terminal for further resize proposals in the session; the
-  settled live workers continue the transfer. Retrying an unhonored target
-  under a reused or fresh epoch is forbidden.
+  `DataPlaneResize` frame. Every ADD epoch uses a fresh 16-byte token;
+  REMOVE's token is empty. Tokens are single-session: the shared epoch-0
+  credential authenticates each of the exact `initial_streams` sockets, while
+  each fresh ADD credential admits exactly one socket. A socket presenting
+  anything else is closed without response. The DESTINATION validates the next monotonic epoch,
+  one-step target, token shape, floor/ceiling, and current settled count
+  before ACKing. An exact duplicate request replays the prior ACK without a
+  second membership change; changed, stale, or future frames are protocol
+  violations. A matching `DataPlaneResizeAck{accepted:false}` consumes that
+  epoch and is terminal for further resize proposals; settled workers
+  continue. An accepted ADD/REMOVE settles only after SOURCE membership
+  actually joins/retires; a post-accept live-membership failure faults the
+  session rather than publishing a false effective count.
   **Resume on the data plane (otp-7b):** in a resume session, block
   records ride the sockets as the binary `BLOCK`/`BLOCK_COMPLETE`
   record shapes (the receive pipeline's existing tags), while the

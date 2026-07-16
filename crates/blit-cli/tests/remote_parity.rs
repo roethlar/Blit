@@ -93,18 +93,12 @@ fn test_pull_tcp_negotiation() {
     assert_eq!(bytes, b"pull-tcp-test");
 }
 
-/// ue-r2-1g: a many-file pull against a new daemon negotiates >1
-/// stream (MULTISTREAM_PULL acceptance: observable, not assumed) and
-/// lands byte-identical content. 300 files clears the engine shape
-/// table's 256-file tier, so the SOURCE's shape correction grows the
-/// data plane past the zero-knowledge single-stream grant (sf-2); with
-/// `--trace-data-plane` each receive-socket dial prints a
-/// `[data-plane-client] connecting to` line, so ≥2 of them prove the
-/// fan-out actually happened. (Ported at otp-10b-2: the old driver's
-/// unconditional `[pull-data-plane]` per-stream line died with it —
-/// dial traces are the session's equivalent observable.)
+/// A many-file pull uses the TCP multisocket data plane and lands
+/// byte-identical content. Adaptive decisions are pinned with deterministic
+/// telemetry in blit-core; this CLI integration only proves that more than
+/// one destination-initiated socket is opened and carries the fixture.
 #[test]
-fn test_pull_multistream_many_files() {
+fn test_pull_multisocket_many_files() {
     let ctx = TestContext::new();
     let dest_dir = ctx.workspace.join("dest");
 
@@ -142,8 +136,8 @@ fn test_pull_multistream_many_files() {
     let receive_dials = stderr.matches("[data-plane-client] connecting to").count();
     assert!(
         receive_dials >= 2,
-        "expected >1 receive-socket dial for 300 files (epoch-0 plus a \
-         shape-correction resize), got {receive_dials}; stderr:\n{}",
+        "expected >1 receive-socket dial for the TCP data plane, got \
+         {receive_dials}; stderr:\n{}",
         stderr
     );
 

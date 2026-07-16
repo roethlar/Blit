@@ -17,25 +17,15 @@
 //! receives via [`dial_destination_data_plane`]). The byte machinery is
 //! shared — send is `DataPlaneSession`/`DataPlaneSink`/the elastic
 //! pipeline, receive is `execute_receive_pipeline` — only socket
-//! acquisition differs per byte role. Because the grant is issued before
-//! any manifest is seen, the zero-knowledge `initial_stream_proposal` is
-//! 1 — the session data plane always starts single-stream (otp-4b-1) and
-//! grows via resize in BOTH directions (push otp-4b-2, pull otp-5b-2).
+//! acquisition differs per byte role.
 //!
-//! Mid-transfer growth (otp-4b-2 push, otp-5b-2 pull): the SOURCE owns a
-//! [`TransferDial`] (bounded by the receiver's advertised capacity) and
-//! drives the sf-2 shape correction — as the need list accumulates it
-//! re-runs the shape table and proposes `DataPlaneResize{ADD}` (one stream
-//! per epoch) on the control lane; the DESTINATION replies
-//! `DataPlaneResizeAck` and grows its receive set. The control-lane frames
-//! are identical in both directions — only the transport action flips
-//! (the connection-initiating end always dials, the responder always
-//! accepts): in push the SOURCE **initiator** dials the epoch-N socket and
-//! the DESTINATION **responder** arms+accepts it; in pull the DESTINATION
-//! **initiator** dials and the SOURCE **responder** accepts. Either way
-//! the SOURCE hands its new send socket to the running elastic pipeline
-//! through acknowledged member admission. The cheap-dial live tuner (chunk/prefetch) is
-//! still future work — the resize moves only the stream count.
+//! Every TCP SOURCE starts at the same conservative floor clamped by the
+//! DESTINATION's advertised receiver ceiling. One [`TransferDial`], one
+//! probe registry, and one telemetry tuner then propose one-step ADD or
+//! REMOVE epochs. The control records and membership settlement are
+//! identical in both layouts; only the transport action flips (the
+//! connection initiator dials and the responder accepts). Workload shape
+//! selects payload strategy, never a worker target.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -50,8 +40,13 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::buffer::BufferPool;
-use crate::dial::{initial_stream_proposal, local_receiver_capacity, TransferDial};
-use crate::generated::{session_error::Code, CapacityProfile, DataPlaneGrant, FileHeader};
+use crate::dial::{
+    receiver_initial_streams, receiver_stream_ceiling, spawn_dial_tuner_with_resize,
+    ResizeProposal, TransferDial,
+};
+use crate::generated::{
+    session_error::Code, CapacityProfile, DataPlaneGrant, DataPlaneResizeOp, FileHeader,
+};
 use crate::remote::transfer::payload::{PreparedPayload, TransferPayload};
 use crate::remote::transfer::pipeline::execute_receive_pipeline_with_phase;
 use crate::remote::transfer::session_phase::{BoundSessionPhaseTrace, SessionPhaseFields};
@@ -64,8 +59,9 @@ use crate::remote::transfer::source::TransferSource;
 use crate::remote::transfer::stall_guard::{StallGuard, TRANSFER_STALL_TIMEOUT};
 use crate::remote::transfer::{
     execute_sink_pipeline_elastic, generate_sub_token, AbortOnDrop, DataPlaneSession,
-    ElasticPipelineControl, ElasticPipelineOutcome, MembershipOutcome, RemoteTransferProgress,
-    SinkMember, StreamId, StreamProbeRegistry, SUB_TOKEN_LEN,
+    ElasticPipelineControl, ElasticPipelineOutcome, LiveProbe, MembershipOutcome,
+    RemoteTransferProgress, SharedStreamProbes, SinkMember, StreamId, StreamProbe,
+    StreamProbeRegistry, SUB_TOKEN_LEN,
 };
 
 use super::{SessionFault, SourceInstruments};
@@ -108,6 +104,21 @@ fn dp_fault_io(err: &eyre::Report, msg: impl Into<String>) -> eyre::Report {
     eyre::Report::new(SessionFault::refusal(Code::DataPlaneFailed, msg).with_io_kind_from(err))
 }
 
+pub(super) fn validate_epoch0_streams(
+    granted: u32,
+    receiver_capacity: Option<&CapacityProfile>,
+) -> Result<usize> {
+    let expected = receiver_initial_streams(receiver_capacity);
+    if granted as usize != expected {
+        return Err(eyre::Report::new(SessionFault::protocol_violation(
+            format!(
+                "data-plane grant initial_streams {granted}, expected receiver-bounded floor {expected}"
+            ),
+        )));
+    }
+    Ok(expected)
+}
+
 // ---------------------------------------------------------------------------
 // Responder (DESTINATION) — bind, grant, accept, receive
 // ---------------------------------------------------------------------------
@@ -120,6 +131,7 @@ pub(super) struct ResponderDataPlane {
     session_token: Vec<u8>,
     epoch0_sub_token: Vec<u8>,
     initial_streams: u32,
+    ceiling: usize,
     port: u16,
 }
 
@@ -128,7 +140,9 @@ pub(super) struct ResponderDataPlane {
 /// issues a grant-less `SessionAccept` and the session falls back to the
 /// in-stream carrier (contract §Transport selection: a responder that
 /// cannot bind grants no data plane).
-pub(super) async fn prepare_responder_data_plane() -> Option<ResponderDataPlane> {
+pub(super) async fn prepare_responder_data_plane(
+    receiver_capacity: Option<&CapacityProfile>,
+) -> Option<ResponderDataPlane> {
     let listener = match TcpListener::bind(("0.0.0.0", 0)).await {
         Ok(listener) => listener,
         Err(err) => {
@@ -161,27 +175,25 @@ pub(super) async fn prepare_responder_data_plane() -> Option<ResponderDataPlane>
             return None;
         }
     };
-    // The grant is issued before any manifest is seen, so the proposal
-    // has zero knowledge: initial_streams == 1. All growth is via resize
-    // (otp-4b-2). The ceiling is this end's own advertised max_streams.
-    let ceiling = local_receiver_capacity().max_streams.max(1) as usize;
-    let initial_streams = initial_stream_proposal(0, 0, ceiling).max(1);
+    // Epoch 0 is the one conservative floor, bounded by the actual byte
+    // receiver's advertised limit. It never depends on manifest shape.
+    let ceiling = receiver_stream_ceiling(receiver_capacity);
+    let initial_streams = receiver_initial_streams(receiver_capacity) as u32;
     Some(ResponderDataPlane {
         listener,
         session_token,
         epoch0_sub_token,
         initial_streams,
+        ceiling,
         port,
     })
 }
 
-/// Aggregated destination-side receive result: the write outcome plus
-/// the number of data sockets accepted (epoch-0 + accepted resizes),
-/// which IS the settled live stream count this end observed. The sf-2
-/// pin reads it through [`super::DestinationOutcome::data_plane_streams`].
+/// Aggregated destination-side receive result. Logical membership belongs to
+/// the control-lane resize state; counting sockets opened is wrong after a
+/// REMOVE.
 pub(super) struct ReceiveTotals {
     pub(super) outcome: SinkOutcome,
-    pub(super) streams: usize,
 }
 
 /// Live handle to a running responder data plane. The control loop arms
@@ -220,9 +232,8 @@ impl ResponderDataPlane {
         }
     }
 
-    /// The epoch-0 stream count this responder granted (always 1 — the
-    /// zero-knowledge proposal). The control loop seeds its `resize_live`
-    /// counter from it.
+    /// The receiver-bounded epoch-0 floor this responder granted. The
+    /// control loop seeds its logical resize count from this exact value.
     pub(super) fn initial_streams(&self) -> u32 {
         self.initial_streams
     }
@@ -240,7 +251,7 @@ impl ResponderDataPlane {
         phase_trace: Option<BoundSessionPhaseTrace>,
         small_file_probe: Option<BoundSmallFileProbe>,
     ) -> ResponderDataPlaneRun {
-        let ceiling = local_receiver_capacity().max_streams.max(1) as usize;
+        let ceiling = self.ceiling;
         let session_token = self.session_token.clone();
         let (arm_tx, arm_rx) = mpsc::unbounded_channel::<ResizeArm>();
         let task = AbortOnDrop::new(tokio::spawn(self.accept_loop(
@@ -272,10 +283,7 @@ impl ResponderDataPlane {
 
         let mut receives: JoinSet<Result<SinkOutcome>> = JoinSet::new();
         let mut total = SinkOutcome::default();
-        let mut streams = 0usize;
-
-        // Accept the initial epoch-0 socket(s) first (the zero-knowledge
-        // grant is always 1; the loop handles N for symmetry).
+        // Accept the receiver-bounded epoch-0 floor first.
         for socket_id in 0..self.initial_streams {
             if let Some(trace) = &phase_trace {
                 trace.event(
@@ -298,7 +306,6 @@ impl ResponderDataPlane {
                     },
                 );
             }
-            streams += 1;
             spawn_receive(
                 &mut receives,
                 socket,
@@ -388,7 +395,6 @@ impl ResponderDataPlane {
                             },
                         );
                     }
-                    streams += 1;
                     spawn_receive(
                         &mut receives,
                         socket,
@@ -409,10 +415,7 @@ impl ResponderDataPlane {
                 }
             }
         }
-        Ok(ReceiveTotals {
-            outcome: total,
-            streams,
-        })
+        Ok(ReceiveTotals { outcome: total })
     }
 }
 
@@ -580,10 +583,9 @@ async fn authenticate_resize(
 /// the control loop dials one more epoch-N socket via
 /// [`Self::add_dialed_stream`] (the pull mirror of the SOURCE responder's
 /// accept). [`Self::finish`] joins the workers for the aggregated write
-/// outcome + settled stream count.
+/// outcome.
 pub(super) struct InitiatorReceivePlaneRun {
     receives: JoinSet<Result<SinkOutcome>>,
-    streams: usize,
     /// The responder host+port and session token, retained so a resize can
     /// dial another receive socket to the same listener (otp-5b-2). The
     /// DESTINATION initiator always dials; the SOURCE responder accepts.
@@ -612,20 +614,20 @@ pub(super) struct InitiatorReceivePlaneRun {
 pub(super) async fn dial_destination_data_plane(
     host: &str,
     grant: &DataPlaneGrant,
+    receiver_capacity: Option<&CapacityProfile>,
     sink: Arc<dyn TransferSink>,
     progress: Option<RemoteTransferProgress>,
     trace: bool,
     phase_trace: Option<BoundSessionPhaseTrace>,
     small_file_probe: Option<BoundSmallFileProbe>,
 ) -> Result<InitiatorReceivePlaneRun> {
-    let initial = grant.initial_streams.max(1) as usize;
+    let initial = validate_epoch0_streams(grant.initial_streams, receiver_capacity)?;
     // Epoch-0 handshake: session_token ‖ epoch0_sub_token.
     let mut handshake = grant.session_token.clone();
     handshake.extend_from_slice(&grant.epoch0_sub_token);
     let addr = format!("{host}:{}", grant.tcp_port);
 
     let mut receives: JoinSet<Result<SinkOutcome>> = JoinSet::new();
-    let mut streams = 0usize;
     for socket_id in 0..initial {
         // `dial_data_plane` connects, applies the data-socket policy, and
         // writes the handshake credential — the same bounded dial the
@@ -662,7 +664,6 @@ pub(super) async fn dial_destination_data_plane(
                 },
             );
         }
-        streams += 1;
         spawn_receive(
             &mut receives,
             socket,
@@ -676,7 +677,6 @@ pub(super) async fn dial_destination_data_plane(
     }
     Ok(InitiatorReceivePlaneRun {
         receives,
-        streams,
         host: host.to_string(),
         tcp_port: grant.tcp_port,
         session_token: grant.session_token.clone(),
@@ -732,7 +732,6 @@ impl InitiatorReceivePlaneRun {
                 },
             );
         }
-        self.streams += 1;
         spawn_receive(
             &mut self.receives,
             socket,
@@ -757,29 +756,26 @@ impl InitiatorReceivePlaneRun {
             total.files_written += outcome.files_written;
             total.bytes_written += outcome.bytes_written;
         }
-        Ok(ReceiveTotals {
-            outcome: total,
-            streams: self.streams,
-        })
+        Ok(ReceiveTotals { outcome: total })
     }
 }
 
 /// The DESTINATION end's receive data plane, tagged by connection role.
 /// Both drain socket bytes into the sink through the same receive
 /// pipeline; they differ only in how sockets are obtained (accept vs dial)
-/// and whether resize is armable (push only, otp-4b-2).
+/// for epoch 0 and ADD. REMOVE is a shared logical membership transition.
 pub(super) enum DestRecvPlane {
-    /// DESTINATION **responder** (push, otp-4b): accepts sockets; resize
-    /// grows the set by arming a credential its accept loop then accepts.
+    /// DESTINATION responder: accepts epoch-0 sockets; ADD arms a credential
+    /// for one more accept, while REMOVE changes only logical membership.
     Responder(ResponderDataPlaneRun),
-    /// DESTINATION **initiator** (pull, otp-5b): dials sockets; resize grows
-    /// the set by dialing one more epoch-N socket (otp-5b-2).
+    /// DESTINATION initiator: dials epoch-0 sockets; ADD dials one more
+    /// epoch-N socket, while REMOVE changes only logical membership.
     Initiator(InitiatorReceivePlaneRun),
 }
 
 impl DestRecvPlane {
-    /// Drain the data plane to completion and report the settled stream
-    /// count + write outcome (the DESTINATION is the scorer).
+    /// Drain the data plane to completion and report its write outcome. The
+    /// shared control-lane resize state owns final logical membership.
     pub(super) async fn finish(self) -> Result<ReceiveTotals> {
         match self {
             DestRecvPlane::Responder(run) => run.finish().await,
@@ -792,22 +788,19 @@ impl DestRecvPlane {
 // Initiator (SOURCE) — dial, authenticate, send, resize
 // ---------------------------------------------------------------------------
 
-/// A resize the SOURCE has proposed and minted a credential for but not
-/// yet completed: the driver has sent (or will send) the matching
-/// `DataPlaneResize{ADD}` on the control lane and, on the peer's
-/// `DataPlaneResizeAck`, dials the epoch-N socket. At most one is in
-/// flight (the dial's `pending_epoch` enforces it; this is the
-/// driver-side record the ack is matched against).
+/// One SOURCE proposal awaiting the peer's ACK and local membership
+/// settlement. ADD alone carries a fresh socket credential; REMOVE carries
+/// none. At most one epoch is in flight.
 pub(super) struct PendingResize {
     pub(super) epoch: u32,
     pub(super) target_streams: u32,
-    pub(super) sub_token: Vec<u8>,
+    pub(super) op: DataPlaneResizeOp,
+    pub(super) sub_token: Option<Vec<u8>>,
 }
 
-/// How the SOURCE acquires each epoch-N data socket for a shape resize —
-/// the two connection roles of otp-5b. Byte direction is identical (the
-/// SOURCE sends), and `propose_resize` is the same either way; only socket
-/// acquisition flips.
+/// How the SOURCE acquires epoch-0 and ADD data sockets. Byte direction,
+/// tuning policy, pipeline, and settlement are identical; only socket
+/// acquisition follows connection topology.
 enum SourceSockets {
     /// SOURCE **initiator** (push, otp-4b-2): dials each epoch-N socket to
     /// the granted host:port.
@@ -818,21 +811,22 @@ enum SourceSockets {
     Accept { listener: TcpListener },
 }
 
-/// A running source-side data plane: the dialed/accepted socket(s) wrapped
-/// as an ELASTIC sink pipeline whose acknowledged membership control grows
-/// it mid-run (the sf-2 shape correction). Planned payloads are fed via [`Self::queue`];
-/// closing via [`Self::finish`] drains the pipeline, emits each socket's
-/// END record, and returns the bytes this end sent.
+/// A running source-side data plane: dialed or accepted sockets wrapped in
+/// one elastic sink pipeline whose acknowledged membership grows or shrinks
+/// from SOURCE telemetry. Planned payloads are fed via [`Self::queue`];
+/// closing via [`Self::finish`] drains the pipeline, emits each socket's END,
+/// and returns the bytes this end sent.
 pub(super) struct SourceDataPlane {
     payload_tx: Option<mpsc::Sender<TransferPayload>>,
     control: Option<ElasticPipelineControl>,
     // `AbortOnDrop<T>` wraps a `JoinHandle<T>`; the task's output is
     // `Result<ElasticPipelineOutcome>`, so `T` is that (not the JoinHandle).
     pipeline: Option<AbortOnDrop<Result<ElasticPipelineOutcome>>>,
+    tuner: Option<AbortOnDrop<()>>,
+    resize_rx: Option<mpsc::UnboundedReceiver<ResizeProposal>>,
     // The byte SENDER owns the live dial, bounded by the byte RECEIVER's
-    // advertised capacity (contract §Invariants 5). The resize drives only
-    // its shape-correction stream count; the cheap-dial tuner is future
-    // work, so `chunk_bytes()`/`prefetch_count()` stay at the floor.
+    // advertised capacity (contract §Invariants 5). Cheap values are read
+    // when queues/sockets are built; live stream membership is settled here.
     dial: Arc<TransferDial>,
     next_member_id: AtomicU32,
     source: Arc<dyn TransferSource>,
@@ -852,6 +846,210 @@ pub(super) struct SourceDataPlane {
     queue_trace_armed: AtomicBool,
 }
 
+fn start_source_tuner(
+    _instruments: &SourceInstruments,
+    dial: &Arc<TransferDial>,
+    probes: SharedStreamProbes,
+    resize_tx: mpsc::UnboundedSender<ResizeProposal>,
+) -> Result<AbortOnDrop<()>> {
+    #[cfg(test)]
+    if let Some(samples) = &_instruments.dial_test_samples {
+        let mut samples = samples
+            .lock()
+            .expect("dial test sample source lock poisoned")
+            .take()
+            .ok_or_else(|| dp_fault("dial test sample source already consumed"))?;
+        let dial = Arc::clone(dial);
+        let handle = tokio::spawn(async move {
+            while let Some(sample) = samples.recv().await {
+                // The injected values replace only the clock/kernel read. The
+                // real registry still has to match settled membership, so a
+                // constructor or ADD accidentally changed back to NoProbe
+                // makes the role guard stop producing decisions.
+                let membership_aligned =
+                    probes.lock().expect("probe registry poisoned").len() == dial.live_streams();
+                let proposal = if membership_aligned {
+                    dial.apply_sample(sample.delta_bytes, sample.blocked_ratio)
+                } else {
+                    dial.apply_sample(0, 0.0);
+                    None
+                };
+                if let Some(proposal) = proposal {
+                    if resize_tx.send(proposal).is_err() {
+                        dial.resize_settled(proposal.epoch, dial.live_streams(), false);
+                    } else {
+                        dial.wait_for_resize_settlement(proposal.epoch).await;
+                    }
+                }
+                let refused = dial.resize_refused();
+                let _ = sample.reply.send(super::DialTestObservation {
+                    proposal,
+                    live_streams: dial.live_streams(),
+                    settled_epoch: dial.resize_epoch(),
+                });
+                if refused {
+                    return;
+                }
+            }
+        });
+        return Ok(AbortOnDrop::new(handle));
+    }
+
+    let handle = spawn_dial_tuner_with_resize(dial, probes, Some(resize_tx));
+    Ok(AbortOnDrop::new(handle))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_source_data_plane(
+    sockets: SourceSockets,
+    session_token: Vec<u8>,
+    epoch0_sub_token: Vec<u8>,
+    granted_initial: u32,
+    receiver_capacity: Option<&CapacityProfile>,
+    source: Arc<dyn TransferSource>,
+    instruments: &SourceInstruments,
+    phase_trace: Option<BoundSessionPhaseTrace>,
+    small_file_probe: Option<BoundSmallFileProbe>,
+) -> Result<SourceDataPlane> {
+    let initial = validate_epoch0_streams(granted_initial, receiver_capacity)?;
+    let dial = TransferDial::conservative_within(receiver_capacity).shared();
+    dial.set_negotiated_streams(initial);
+
+    let mut epoch0_handshake = session_token.clone();
+    epoch0_handshake.extend_from_slice(&epoch0_sub_token);
+    let pool = Arc::new(BufferPool::for_data_plane(
+        dial.chunk_bytes(),
+        dial.ceiling_max_streams().max(1),
+    ));
+    let trace = instruments.trace_data_plane;
+    let probes: SharedStreamProbes = Arc::new(StdMutex::new(StreamProbeRegistry::default()));
+    let mut sinks = Vec::with_capacity(initial);
+
+    for socket_id in 0..initial {
+        let member_id = StreamId(socket_id as u32);
+        let probe = StreamProbe::new(member_id);
+        let (begin_event, end_event) = match &sockets {
+            SourceSockets::Dial { .. } => ("socket_dial_begin", "socket_dial_end"),
+            SourceSockets::Accept { .. } => ("socket_accept_begin", "socket_accept_end"),
+        };
+        if let Some(phase) = &phase_trace {
+            phase.event(
+                begin_event,
+                SessionPhaseFields {
+                    epoch: Some(0),
+                    socket: Some(socket_id as u32),
+                    ..Default::default()
+                },
+            );
+        }
+
+        // The explicit type is a structural guard: every TransferSession
+        // SOURCE socket must carry real telemetry. Replacing any dial or
+        // accept branch with the probe-free constructor must not compile.
+        let session: DataPlaneSession<LiveProbe> = match &sockets {
+            SourceSockets::Dial { host, tcp_port } => DataPlaneSession::connect_with_probe(
+                host,
+                *tcp_port,
+                &epoch0_handshake,
+                dial.chunk_bytes(),
+                dial.prefetch_count(),
+                trace,
+                dial.tcp_buffer_bytes(),
+                Arc::clone(&pool),
+                LiveProbe(probe.clone()),
+            )
+            .await
+            .map_err(|err| dp_fault_io(&err, format!("dialing session data plane: {err:#}")))?,
+            SourceSockets::Accept { listener } => {
+                let socket = accept_authenticated(listener, &epoch0_handshake).await?;
+                configure_data_socket(&socket, dial.tcp_buffer_bytes()).map_err(|err| {
+                    dp_fault(format!("configuring accepted source socket: {err}"))
+                })?;
+                DataPlaneSession::from_stream_with_probe(
+                    socket,
+                    trace,
+                    dial.chunk_bytes(),
+                    dial.prefetch_count(),
+                    Arc::clone(&pool),
+                    LiveProbe(probe.clone()),
+                )
+                .await
+            }
+        };
+        debug_assert!(
+            session.uses_probe(&probe),
+            "epoch-0 session and member registry must share one probe"
+        );
+
+        if let Some(phase) = &phase_trace {
+            phase.event(
+                end_event,
+                SessionPhaseFields {
+                    epoch: Some(0),
+                    socket: Some(socket_id as u32),
+                    ..Default::default()
+                },
+            );
+        }
+        let session = session.with_session_phase_trace(phase_trace.clone(), 0, socket_id as u32);
+        let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
+            session,
+            Arc::clone(&source),
+            PathBuf::new(),
+        ));
+        sinks.push(SinkMember::with_probe(member_id, sink, probe));
+    }
+
+    let prefetch = dial.prefetch_count().max(1);
+    let (payload_tx, payload_rx) = mpsc::channel::<TransferPayload>(prefetch);
+    let (control, commands) = ElasticPipelineControl::channel();
+    let pipe_source = Arc::clone(&source);
+    let pipe_progress = instruments.progress.clone();
+    let pipeline_probes = Arc::clone(&probes);
+    let pipeline = AbortOnDrop::new(tokio::spawn(async move {
+        execute_sink_pipeline_elastic(
+            pipe_source,
+            sinks,
+            payload_rx,
+            prefetch,
+            pipe_progress.as_ref(),
+            Some(commands),
+            pipeline_probes,
+        )
+        .await
+    }));
+    let admitted = control
+        .logical_count()
+        .await
+        .map_err(|err| dp_fault(format!("awaiting epoch-0 member admission: {err:#}")))?;
+    if admitted != initial {
+        return Err(dp_fault(format!(
+            "epoch-0 pipeline admitted {admitted} members, expected {initial}"
+        )));
+    }
+
+    let (resize_tx, resize_rx) = mpsc::unbounded_channel();
+    let tuner = start_source_tuner(instruments, &dial, Arc::clone(&probes), resize_tx)?;
+    let queue_trace_armed = phase_trace.is_some();
+    Ok(SourceDataPlane {
+        payload_tx: Some(payload_tx),
+        control: Some(control),
+        pipeline: Some(pipeline),
+        tuner: Some(tuner),
+        resize_rx: Some(resize_rx),
+        dial,
+        next_member_id: AtomicU32::new(initial as u32),
+        source,
+        session_token,
+        pool,
+        trace,
+        sockets,
+        phase_trace,
+        small_file_probe,
+        queue_trace_armed: AtomicBool::new(queue_trace_armed),
+    })
+}
+
 /// Dial the granted data plane and start the elastic send pipeline.
 /// `host` is the responder's host (the initiator connected the control
 /// plane to it; the data plane rides the same host on the granted port —
@@ -868,111 +1066,21 @@ pub(super) async fn dial_source_data_plane(
     phase_trace: Option<BoundSessionPhaseTrace>,
     small_file_probe: Option<BoundSmallFileProbe>,
 ) -> Result<SourceDataPlane> {
-    let initial = grant.initial_streams.max(1) as usize;
-    // The byte sender's dial, bounded by the receiver's advertised
-    // capacity. Seed the settled live count to the granted epoch-0
-    // streams — every shape-resize proposal steps from here.
-    let dial = TransferDial::conservative_within(receiver_capacity).shared();
-    dial.set_negotiated_streams(initial);
-
-    // Epoch-0 handshake: session_token ‖ epoch0_sub_token.
-    let mut handshake = grant.session_token.clone();
-    handshake.extend_from_slice(&grant.epoch0_sub_token);
-
-    // Provision the pool for the dial ceiling so resize-added sockets
-    // draw buffers from the same pool without re-pooling (as old push
-    // does — a shared pool sized for the maximum stream count).
-    let pool = Arc::new(BufferPool::for_data_plane(
-        dial.chunk_bytes(),
-        dial.ceiling_max_streams().max(1),
-    ));
-    let trace = instruments.trace_data_plane;
-    let mut sinks = Vec::with_capacity(initial);
-    for socket_id in 0..initial {
-        if let Some(phase) = &phase_trace {
-            phase.event(
-                "socket_dial_begin",
-                SessionPhaseFields {
-                    epoch: Some(0),
-                    socket: Some(socket_id as u32),
-                    ..Default::default()
-                },
-            );
-        }
-        let session = DataPlaneSession::connect(
-            host,
-            grant.tcp_port,
-            &handshake,
-            dial.chunk_bytes(),
-            dial.prefetch_count(),
-            trace,
-            dial.tcp_buffer_bytes(),
-            Arc::clone(&pool),
-        )
-        .await
-        .map_err(|err| dp_fault_io(&err, format!("dialing session data plane: {err:#}")))?;
-        if let Some(phase) = &phase_trace {
-            phase.event(
-                "socket_dial_end",
-                SessionPhaseFields {
-                    epoch: Some(0),
-                    socket: Some(socket_id as u32),
-                    ..Default::default()
-                },
-            );
-        }
-        let session = session.with_session_phase_trace(phase_trace.clone(), 0, socket_id as u32);
-        // The source-side sink never reads its dst_root (it only sends);
-        // `root()` is consulted by the relay/receive case, not here.
-        let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
-            session,
-            Arc::clone(&source),
-            PathBuf::new(),
-        ));
-        sinks.push(SinkMember::new(StreamId(socket_id as u32), sink));
-    }
-
-    let prefetch = dial.prefetch_count().max(1);
-    let (payload_tx, payload_rx) = mpsc::channel::<TransferPayload>(prefetch);
-    let (control, commands) = ElasticPipelineControl::channel();
-    let probes = Arc::new(StdMutex::new(StreamProbeRegistry::default()));
-    let pipe_source = Arc::clone(&source);
-    let pipe_progress = instruments.progress.clone();
-    // Bounded by AbortOnDrop: a fault on the control lane that drops the
-    // SourceDataPlane aborts the pipeline task instead of leaking it.
-    let pipeline = AbortOnDrop::new(tokio::spawn(async move {
-        execute_sink_pipeline_elastic(
-            pipe_source,
-            sinks,
-            payload_rx,
-            prefetch,
-            pipe_progress.as_ref(),
-            Some(commands),
-            probes,
-        )
-        .await
-    }));
-    let queue_trace_armed = phase_trace.is_some();
-    Ok(SourceDataPlane {
-        payload_tx: Some(payload_tx),
-        control: Some(control),
-        pipeline: Some(pipeline),
-        dial,
-        next_member_id: AtomicU32::new(initial as u32),
-        source,
-        session_token: grant.session_token.clone(),
-        pool,
-        trace,
-        // SOURCE initiator: each epoch-N resize socket is dialed to the
-        // granted host:port.
-        sockets: SourceSockets::Dial {
+    start_source_data_plane(
+        SourceSockets::Dial {
             host: host.to_string(),
             tcp_port: grant.tcp_port,
         },
+        grant.session_token.clone(),
+        grant.epoch0_sub_token.clone(),
+        grant.initial_streams,
+        receiver_capacity,
+        source,
+        instruments,
         phase_trace,
         small_file_probe,
-        queue_trace_armed: AtomicBool::new(queue_trace_armed),
-    })
+    )
+    .await
 }
 
 /// Accept the granted epoch-0 socket(s) off a bound responder listener and
@@ -996,102 +1104,20 @@ pub(super) async fn accept_source_data_plane(
     phase_trace: Option<BoundSessionPhaseTrace>,
     small_file_probe: Option<BoundSmallFileProbe>,
 ) -> Result<SourceDataPlane> {
-    let initial = bound.initial_streams.max(1) as usize;
-    // The byte sender's dial, bounded by the receiver's advertised
-    // capacity; seed the live count to the granted epoch-0 streams. Growth
-    // is via resize (otp-5b-2): the accept-based epoch-N socket steps from
-    // here, one stream per epoch, same as the SOURCE initiator.
-    let dial = TransferDial::conservative_within(receiver_capacity).shared();
-    dial.set_negotiated_streams(initial);
-
-    // Epoch-0 credential the dialing DESTINATION presents:
-    // session_token ‖ epoch0_sub_token (contract §Transport).
-    let mut epoch0 = bound.session_token.clone();
-    epoch0.extend_from_slice(&bound.epoch0_sub_token);
-
-    let pool = Arc::new(BufferPool::for_data_plane(
-        dial.chunk_bytes(),
-        dial.ceiling_max_streams().max(1),
-    ));
-    let trace = instruments.trace_data_plane;
-    let mut sinks = Vec::with_capacity(initial);
-    for socket_id in 0..initial {
-        if let Some(phase) = &phase_trace {
-            phase.event(
-                "socket_accept_begin",
-                SessionPhaseFields {
-                    epoch: Some(0),
-                    socket: Some(socket_id as u32),
-                    ..Default::default()
-                },
-            );
-        }
-        let socket = accept_authenticated(&bound.listener, &epoch0).await?;
-        if let Some(phase) = &phase_trace {
-            phase.event(
-                "socket_accept_end",
-                SessionPhaseFields {
-                    epoch: Some(0),
-                    socket: Some(socket_id as u32),
-                    ..Default::default()
-                },
-            );
-        }
-        let session = DataPlaneSession::from_stream(
-            socket,
-            trace,
-            dial.chunk_bytes(),
-            dial.prefetch_count(),
-            Arc::clone(&pool),
-        )
-        .await
-        .with_session_phase_trace(phase_trace.clone(), 0, socket_id as u32);
-        let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
-            session,
-            Arc::clone(&source),
-            PathBuf::new(),
-        ));
-        sinks.push(SinkMember::new(StreamId(socket_id as u32), sink));
-    }
-
-    let prefetch = dial.prefetch_count().max(1);
-    let (payload_tx, payload_rx) = mpsc::channel::<TransferPayload>(prefetch);
-    let (control, commands) = ElasticPipelineControl::channel();
-    let probes = Arc::new(StdMutex::new(StreamProbeRegistry::default()));
-    let pipe_source = Arc::clone(&source);
-    let pipe_progress = instruments.progress.clone();
-    let pipeline = AbortOnDrop::new(tokio::spawn(async move {
-        execute_sink_pipeline_elastic(
-            pipe_source,
-            sinks,
-            payload_rx,
-            prefetch,
-            pipe_progress.as_ref(),
-            Some(commands),
-            probes,
-        )
-        .await
-    }));
-    let queue_trace_armed = phase_trace.is_some();
-    Ok(SourceDataPlane {
-        payload_tx: Some(payload_tx),
-        control: Some(control),
-        pipeline: Some(pipeline),
-        dial,
-        next_member_id: AtomicU32::new(initial as u32),
-        source,
-        session_token: bound.session_token,
-        pool,
-        trace,
-        // SOURCE responder: each epoch-N resize socket is accepted off the
-        // same listener epoch-0 came in on (otp-5b-2).
-        sockets: SourceSockets::Accept {
+    start_source_data_plane(
+        SourceSockets::Accept {
             listener: bound.listener,
         },
+        bound.session_token,
+        bound.epoch0_sub_token,
+        bound.initial_streams,
+        receiver_capacity,
+        source,
+        instruments,
         phase_trace,
         small_file_probe,
-        queue_trace_armed: AtomicBool::new(queue_trace_armed),
-    })
+    )
+    .await
 }
 
 impl SourceDataPlane {
@@ -1106,29 +1132,85 @@ impl SourceDataPlane {
         &self.dial
     }
 
-    /// sf-2 shape correction: propose one ADD toward the stream count the
-    /// accumulated need list implies, if none is in flight and the shape
-    /// wants more than the current live count. Mints the resize
-    /// credential; the driver sends the `DataPlaneResize{ADD}` and hands
-    /// the record back on the matching ack.
-    pub(super) fn propose_resize(
-        &self,
-        needed_bytes: u64,
-        needed_count: usize,
-    ) -> Result<Option<PendingResize>> {
-        let desired =
-            initial_stream_proposal(needed_bytes, needed_count, self.dial.ceiling_max_streams())
-                as usize;
-        let Some(proposal) = self.dial.propose_shape_resize(desired) else {
-            return Ok(None);
+    pub(super) fn take_resize_proposals(
+        &mut self,
+    ) -> Result<mpsc::UnboundedReceiver<ResizeProposal>> {
+        self.resize_rx
+            .take()
+            .ok_or_else(|| dp_fault("data-plane resize proposal receiver already consumed"))
+    }
+
+    pub(super) async fn stop_tuner(&mut self) -> Result<()> {
+        let Some(tuner) = self.tuner.take() else {
+            return Ok(());
         };
-        let sub_token = generate_sub_token()
-            .map_err(|err| dp_fault(format!("minting resize sub-token: {err:#}")))?;
+        match tuner.abort_and_join().await {
+            Ok(()) => Ok(()),
+            Err(err) if err.is_cancelled() => Ok(()),
+            Err(err) => Err(dp_fault(format!("live dial tuner panicked: {err}"))),
+        }
+    }
+
+    /// Turn one claimed dial proposal into its wire record. ADD alone mints
+    /// a socket credential. If credential generation fails before anything
+    /// reaches the peer, settle unchanged and stop resizing while the
+    /// already-live workers continue the transfer.
+    pub(super) fn prepare_resize(&self, proposal: ResizeProposal) -> Result<Option<PendingResize>> {
+        let live = self.dial.live_streams();
+        let expected_target = if proposal.add {
+            live.checked_add(1)
+        } else {
+            live.checked_sub(1)
+        };
+        if expected_target != Some(proposal.target_streams) || proposal.epoch == 0 {
+            self.dial
+                .resize_settled(proposal.epoch, self.dial.live_streams(), false);
+            return Err(dp_fault(format!(
+                "dial proposed inconsistent resize epoch={} live={live} target={} add={}",
+                proposal.epoch, proposal.target_streams, proposal.add
+            )));
+        }
+        let target_streams = u32::try_from(proposal.target_streams)
+            .map_err(|_| dp_fault("data-plane resize target exceeds the wire range"))?;
+        let op = if proposal.add {
+            DataPlaneResizeOp::Add
+        } else {
+            DataPlaneResizeOp::Remove
+        };
+        let sub_token = if proposal.add {
+            match generate_sub_token() {
+                Ok(token) => Some(token),
+                Err(err) => {
+                    log::warn!(
+                        "data-plane resize disabled after sub-token generation failed: {err:#}"
+                    );
+                    self.dial.resize_settled(proposal.epoch, live, false);
+                    return Ok(None);
+                }
+            }
+        } else {
+            None
+        };
         Ok(Some(PendingResize {
             epoch: proposal.epoch,
-            target_streams: proposal.target_streams as u32,
+            target_streams,
+            op,
             sub_token,
         }))
+    }
+
+    pub(super) fn refuse_unsent_resize(&self, proposal: ResizeProposal) {
+        self.dial
+            .resize_settled(proposal.epoch, self.dial.live_streams(), false);
+    }
+
+    pub(super) async fn retire_stream(&self) -> Result<MembershipOutcome> {
+        self.control
+            .as_ref()
+            .ok_or_else(|| dp_fault("data-plane membership control already closed"))?
+            .retire_one()
+            .await
+            .map_err(|err| dp_fault(format!("retiring data-plane member: {err:#}")))
     }
 
     /// Acquire the epoch-N data socket for an accepted resize and hand it
@@ -1164,7 +1246,8 @@ impl SourceDataPlane {
                 })
                 .map_err(|_| dp_fault("data-plane stream member id exhausted"))?,
         );
-        let session = match &self.sockets {
+        let probe = StreamProbe::new(member_id);
+        let session: DataPlaneSession<LiveProbe> = match &self.sockets {
             SourceSockets::Dial { host, tcp_port } => {
                 let mut handshake = self.session_token.clone();
                 handshake.extend_from_slice(sub_token);
@@ -1178,7 +1261,7 @@ impl SourceDataPlane {
                         },
                     );
                 }
-                let session = DataPlaneSession::connect(
+                let session = DataPlaneSession::connect_with_probe(
                     host,
                     *tcp_port,
                     &handshake,
@@ -1187,6 +1270,7 @@ impl SourceDataPlane {
                     self.trace,
                     self.dial.tcp_buffer_bytes(),
                     Arc::clone(&self.pool),
+                    LiveProbe(probe.clone()),
                 )
                 .await
                 .map_err(|err| dp_fault_io(&err, format!("dialing resize data socket: {err:#}")))?;
@@ -1216,6 +1300,9 @@ impl SourceDataPlane {
                     );
                 }
                 let socket = accept_authenticated(listener, &expected).await?;
+                configure_data_socket(&socket, self.dial.tcp_buffer_bytes()).map_err(|err| {
+                    dp_fault(format!("configuring accepted resize source socket: {err}"))
+                })?;
                 if let Some(phase) = &self.phase_trace {
                     phase.event(
                         "socket_accept_end",
@@ -1226,17 +1313,22 @@ impl SourceDataPlane {
                         },
                     );
                 }
-                DataPlaneSession::from_stream(
+                DataPlaneSession::from_stream_with_probe(
                     socket,
                     self.trace,
                     self.dial.chunk_bytes(),
                     self.dial.prefetch_count(),
                     Arc::clone(&self.pool),
+                    LiveProbe(probe.clone()),
                 )
                 .await
                 .with_session_phase_trace(self.phase_trace.clone(), epoch, 0)
             }
         };
+        debug_assert!(
+            session.uses_probe(&probe),
+            "ADD session and member registry must share one probe"
+        );
         let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
             session,
             Arc::clone(&self.source),
@@ -1245,7 +1337,7 @@ impl SourceDataPlane {
         self.control
             .as_ref()
             .ok_or_else(|| dp_fault("data-plane membership control already closed"))?
-            .add(SinkMember::new(member_id, sink))
+            .add(SinkMember::with_probe(member_id, sink, probe))
             .await
             .map_err(|err| dp_fault(format!("admitting data-plane member: {err:#}")))
     }
@@ -1321,6 +1413,13 @@ impl SourceDataPlane {
     /// awaited before `SourceDone` goes out so the destination's receive
     /// pipeline sees END and completes.
     pub(super) async fn finish(mut self) -> Result<SinkOutcome> {
+        self.stop_tuner().await?;
+        if let Some(mut proposals) = self.resize_rx.take() {
+            proposals.close();
+            while let Ok(proposal) = proposals.try_recv() {
+                self.refuse_unsent_resize(proposal);
+            }
+        }
         // Seal before dropping the payload sender, then drop the sole
         // command endpoint before joining. Retaining it here would keep a
         // zero-worker terminal supervisor alive forever.
@@ -1657,20 +1756,18 @@ impl TransferSink for NeedListSink {
 mod tests {
     use super::*;
 
-    /// The otp-4b-1 grant invariant: the responder always grants a
-    /// single epoch-0 stream (the zero-knowledge proposal — no manifest
-    /// has been seen when SessionAccept goes out) with two independent
-    /// 16-byte credentials on a real port. Multi-stream is resize-only
-    /// (otp-4b-2).
+    /// The grant starts at the canonical receiver-bounded floor without
+    /// consulting manifest shape and carries two independent credentials.
     #[tokio::test]
-    async fn responder_grant_is_single_stream_with_16_byte_tokens() {
-        let rdp = prepare_responder_data_plane()
+    async fn responder_grant_uses_receiver_bounded_floor_with_16_byte_tokens() {
+        let rdp = prepare_responder_data_plane(None)
             .await
             .expect("bind loopback data plane");
         let grant = rdp.grant();
         assert_eq!(
-            grant.initial_streams, 1,
-            "zero-knowledge grant starts single-stream (otp-4b-1)"
+            grant.initial_streams as usize,
+            receiver_initial_streams(None),
+            "epoch 0 is the conservative default floor"
         );
         assert_eq!(grant.session_token.len(), SUB_TOKEN_LEN);
         assert_eq!(grant.epoch0_sub_token.len(), SUB_TOKEN_LEN);

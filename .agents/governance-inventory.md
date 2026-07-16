@@ -99,3 +99,14 @@ Ran bootstrap updater on 2026-07-05 to reconcile the governance files to version
 - New hooks drafted: `.agents/hooks.json` (agy), `.codex/hooks.json` & `.codex/agents-md-tripwire.py` (codex), `.grok/hooks/reground.json` (grok).
 - New playbook drafted: `.agents/playbooks/reviewloop.md`.
 - `.agents/repo-map.json` and `.agents/artifact-manifest.json` updated to record the new stamps (HEAD `1ff36c712de9f8372238b5608227a0cd6f9ad232`).
+
+## 2026-07-16 review-workflow refresh note
+
+The governance refresh at `602941f` replaced the historical
+`.agents/playbooks/reviewloop.md` entry above with two installed workflows:
+`.agents/playbooks/openreview.md` for unprimed whole-change review and
+`.agents/playbooks/codereview.md` for finding-focused machinery. Blit's
+repo-specific D-2026-07-16-1 rule routes every Claude dispatch, including
+re-review, through neutral `openreview`; `codereview` supplies intake and
+record mechanics without its primed reviewer prompt. The historical inventory
+rows remain unchanged because they accurately describe their dated runs.

@@ -1,11 +1,11 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-16 (ldt-1 accepted at f8f3c51; ldt-2 next)
+Last updated: 2026-07-16 (ldt-2 candidate ready for fixed-SHA review)
 
-- **NEXT ACTION — IMPLEMENT ldt-2:** ldt-1 acknowledged membership is accepted at `f8f3c51`. Cut production over to the receiver-bounded epoch-0 floor; attach `LiveProbe` and one tuner in both SOURCE socket layouts; consume shared one-step ADD/REMOVE proposals; delete shape-table worker authority and forced convergence; land identical-trace role guards, then run neutral Claude Fable 5/max review.
+- **NEXT ACTION — COMMIT + REVIEW ldt-2:** the candidate now has one shared SOURCE constructor, receiver-bounded epoch 0, real probes/tuner, one-step ADD/REMOVE, exact settlement, and no shape worker target. Mutation and complete workspace gates are green; commit, then run the neutral Claude Fable 5/max review before ldt-3.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
-- **STATIC ORIENTATION PARITY IS CLOSED; ADAPTIVE WORKER PARITY IS NOT.** The identical 10,000-file fixture reaches 8 in both layouts because both now finish the same hardcoded shape-table ramp. Production does not start the existing telemetry tuner and rejects REMOVE. Exact 8 is not an adaptive acceptance target.
-- **WHY NO MAC↔MAC DATA YET:** endpoints are ready, but running the current static ADD-only policy would measure the wrong design. ldt-1 membership is accepted; production probes/tuner, REMOVE wire policy, shape-authority deletion, and lifecycle closure remain ldt-2..3. Existing verdict-resolution/fabric controls also remain required. No Mac↔Mac data exists.
+- **ADAPTIVE ROLE PARITY EXISTS IN THE ldt-2 CANDIDATE, NOT YET ACCEPTED.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
+- **WHY NO MAC↔MAC DATA YET:** endpoints are ready, but ldt-2 still needs independent review and ldt-3 owns lifecycle/observer closure. Existing verdict-resolution/fabric controls also remain required afterward. No Mac↔Mac data exists.
 
 - **BASELINE RE-RECORD (D-2026-07-14-1, owner 2026-07-14) — a prerequisite slice for `pf-final`, NOT for pf-1.** Both committed ceilings were recorded at **MTU 1500** before the fabric went jumbo, and pf-0 showed jumbo makes both arms 3–4% faster — so a jumbo build graded against them is **LENIENT** and could let a regression pass. Each rig's baseline is **re-recorded once with its ORIGINAL old build at MTU 9000**, then re-frozen (rig W `bench_otp12_win.sh:105`; rig Z `bench_otp12_zoey.sh:102`; rig D unaffected). Constraints — same old build per rig, `BASELINE_SUMMARY` stays override-free, pf-0's start-AND-end MSS gate applies — in **D-2026-07-14-1**.
 - **pf-0 DONE — MTU is KILLED as a material cause of P1 (2026-07-14, `docs/bench/otp12-jumbo-win-2026-07-13/`).** A-B-B-A on `q` (9000/1500/1500/9000), **256 timed runs, 0 voided**, MSS gate held start AND end of every session. `Δ_9000 = 236`, `Δ_1500 = 229`, measured noise floor **N_Δ = 78 ms**, **r = −3.1% → KILLED**. The null is **not vacuous** — `wm_tcp_large` ran 3–4% faster at jumbo on **both** arms, so the manipulation reached the wire; the benefit is **symmetric**, which is why it cannot explain an **asymmetry**. codex NOT READY → **7/7 accepted** (`11f0c2a`): every finding was a *claim* outrunning the *data* (it recomputed and confirmed all the numbers). **Two limits that now bind pf-1**: (a) the run is **NOT powered** to exclude a *contributing*-size effect (20% of Δ = 46 ms < the 78 ms floor) — it excludes a DOMINANT one only; (b) 78 ms is **between**-session noise, so cross-session grading of a counterfactual is dead, and **pf-1 must measure its own paired within-session floor and register a resolution check before grading**.
@@ -20,7 +20,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** one SOURCE-owned controller tunes TCP workers up/down from telemetry in both connection layouts; shape is not a target. ldt-1 acknowledged membership is independently accepted at `f8f3c51`. Production remains static until ldt-2 attaches probes/tuner and cuts over shared ADD/REMOVE.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2's unreviewed, fully gated candidate now runs one SOURCE-owned telemetry controller in both layouts and removes shape as worker authority. ldt-3 lifecycle/observer closure follows only after ldt-2 acceptance.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -37,21 +37,21 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
     (2026-07-14 drift); per-slice detail lives in DEVLOG + `.review/`.
   - **Open: otp-12d and otp-13** — both DEFERRED behind pf-final, see
     Queue 2.
-  - **otp-12 worker-parity repair `[x]`** — both initiator layouts reach the same exact target; zero receiver capacity means unknown/default in both; payload proceeds while resize ACKs are pending; resize refusal is terminal. Final Codex re-review PASS. This is code/integration proof, not hardware acceptance.
+  - **otp-12 worker-parity repair `[x]` (historical static-policy proof)** — both initiator layouts reached the same then-current target; zero receiver capacity meant unknown/default in both; payload proceeded while resize ACKs were pending; resize refusal was terminal. ldt-2 replaces that target with one live controller. This remains code/integration history, not adaptive hardware acceptance.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]`; **sf-3a+ blocked** until ONE_TRANSFER_PATH ships, then
   resume/re-derive on the unified baseline. Principle: ceiling-driven,
   never competitor-relative (D-2026-07-04-4 — do not re-litigate).
 - **Background**: REV4 code-complete, gates DATA-COMPLETE (declarations
-  in Blocked); the synchronous reviewloop governs all changes
+  in Blocked); synchronous neutral `openreview` governs all changes
   (D-2026-07-04-1), with Claude Fable 5/max selected by D-2026-07-15-1.
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** Restore telemetry-driven ADD/REMOVE, receiver-bounded startup, exact membership settlement, role guards, and quiet Mac↔Mac evidence. ldt-1 is accepted; implement ldt-2 next, then review it before ldt-3.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1 is accepted; validate and independently review the ldt-2 live-controller candidate, then implement ldt-3 lifecycle/observer closure before quiet Mac↔Mac evidence.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 through the
-   synchronous reviewloop per slice (reviewer selection D-2026-07-15-1).
+   synchronous neutral `openreview` per slice (reviewer selection D-2026-07-15-1).
    otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7 (a, b-1,
    b-2), otp-8, otp-9 (a/b), otp-2 (+ otp-2w), otp-10 (a, b-1/2,
@@ -97,7 +97,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
     Round-14 Claude accepted exact `1f62ce5`. Its additive run completed all 32
     block-1 arms and exercised G14, then G15 exposed Windows SSH consuming
     blocks 2–4 from the loop's stdin; the analyzer correctly voided 32/128.
-    G15 isolates SSH stdin and is mutation-proved at `7bdaf8b`; round-15 Claude accepted exact `8e019ef`. Its additive registered run completed all 128 arms and the analyzer accepted the exact evidence now recorded under `docs/bench/otp12-pf1-rigw-2026-07-15/`. Live target traces prove 8/8 stream parity under both initiator layouts. The target's historical P1 direction did not reproduce, but the 329 ms resolution floor and failing gRPC control forbid a causal grade. Grok supplementary and Claude Fable 5/max authoritative reviews accepted exact record `7ecc2f9`. Continue the separately required P2 small-fixture instrumentation and `0f922de` historical control. Further P1 rig work requires a plan amendment; no Mac↔Mac data has been taken, and worker parity is no longer a blocker. Then: pf-1 → pf-final (all rigs) → otp-12d → otp-13.
+    G15 isolates SSH stdin and is mutation-proved at `7bdaf8b`; round-15 Claude accepted exact `8e019ef`. Its additive registered run completed all 128 arms and the analyzer accepted the exact evidence now recorded under `docs/bench/otp12-pf1-rigw-2026-07-15/`. Its pre-ldt-2 target traces prove historical 8/8 static stream parity under both initiator layouts. The target's historical P1 direction did not reproduce, but the 329 ms resolution floor and failing gRPC control forbid a causal grade. Grok supplementary and Claude Fable 5/max authoritative reviews accepted exact record `7ecc2f9`. Continue the separately required P2 small-fixture instrumentation and `0f922de` historical control. Further P1 rig work requires a plan amendment; no Mac↔Mac data has been taken, and worker parity is no longer a blocker. Then: pf-1 → pf-final (all rigs) → otp-12d → otp-13.
 2b. **AFTER otp-12 — the Windows/local pair, planned TOGETHER** (same tar
    path, opposite directions: a fidelity fix ADDS per-file work to a path
    already losing to robocopy, so planning them apart optimises one against
@@ -138,10 +138,11 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   sf-2) and **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** (code-
   complete; measurement gates remain). REV4 superseded v1/REV2/REV3
   (history only).
-- Process: `.agents/playbooks/reviewloop.md` — the synchronous loop for
+- Process: `.agents/playbooks/openreview.md` — the synchronous unprimed review for
   **all code and plan changes** (D-2026-07-04-1), using Claude CLI
   `--model claude-fable-5 --effort max` for current dispatches
-  (D-2026-07-15-1). `docs/agent/GPT_REVIEW_LOOP.md` is historical;
+  (D-2026-07-15-1); `.agents/playbooks/codereview.md` supplies finding intake
+  and triage only. `docs/agent/GPT_REVIEW_LOOP.md` is historical;
   `.review/README.md` is retired as the grading mechanism (its
   `findings/`/`results/` records and the REVIEW.md index remain live).
 - Review loop: `REVIEW.md` (all `ue-r2-*` rows `[x]`; design-queue
@@ -154,7 +155,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **Mac↔Mac measurement waits for ldt-1..3.** The plan is Active and endpoints are quiet/ready, but HEAD still has only static ADD-only parity; existing instrument controls still apply afterward. No data exists.
+- **Mac↔Mac measurement waits for ldt-1..3.** The plan is Active and endpoints are quiet/ready; ldt-2 is an unreviewed candidate and ldt-3 lifecycle/observer closure remains. Existing instrument controls still apply afterward. No data exists.
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):

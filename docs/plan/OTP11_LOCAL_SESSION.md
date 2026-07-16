@@ -10,6 +10,11 @@ surface; the local byte-carrier is process-local by construction).
 deletion list; this doc records how it dies without regressing local behavior
 or the local perf pins.
 
+**Historical worker-policy note (ldt-2, 2026-07-16):** references below to
+sf-2 shape correction describe the implementation at otp-11. TCP
+`TransferSession` now uses the telemetry-only controller in
+`LIVE_DIAL_TUNING.md`; local filesystem-worker policy remains separate.
+
 ## Why this doc
 
 otp-11 deletes the largest surviving old-path block (~4.8k LOC: `orchestrator/`,

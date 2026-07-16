@@ -52,8 +52,8 @@ Turn a talked-through idea into a durable plan before any implementation.
    each) in the doc's Slices section.
 4. Add the doc to STATE.md's Queue (and to "Authoritative docs" if it will be the
    active plan).
-5. Commit the plan doc and run the commit through the synchronous reviewloop
-   (`.agents/playbooks/reviewloop.md`; D-2026-07-04-1 includes plan changes and
+5. Commit the plan doc and run the commit through synchronous unprimed
+   `openreview` (`.agents/playbooks/openreview.md`; D-2026-07-04-1 includes plan changes and
    D-2026-07-15-1 selects Claude CLI with `--model claude-fable-5 --effort
    max`; D-2026-07-16-1 requires a neutral best-way question with no framing or
    steering; docs gate is `bash scripts/agent/check-docs.sh`). Adjudicate and
@@ -126,15 +126,20 @@ Audit one document against reality. Never run unscoped.
 Pick up the next unit of review-queue work.
 
 1. Run `catchup` first if you haven't this session.
-2. Pick the highest-priority `[ ]` item in `REVIEW.md` and run it through
-   the synchronous reviewloop in `.agents/playbooks/reviewloop.md`
+2. Pick the highest-priority `[ ]` item in `REVIEW.md` and run its complete
+   committed change through synchronous unprimed `openreview` in
+   `.agents/playbooks/openreview.md`
    (D-2026-07-04-1 — all code and plan changes, no exceptions;
    D-2026-07-15-1 — invoke Claude CLI with `--model claude-fable-5 --effort
    max`; D-2026-07-16-1 — ask only whether the implementation is the best way
-   to achieve the neutral goal, with no framing or steering): implement with
+   to achieve the neutral goal, with no framing or steering, while retaining
+   fixed base/head identity and a reviewer-chosen isolated red/green guard with
+   fail-closed `guard_confirmed: true`): implement with
    tests on `master` (no agent branches), pass the
-   validation suite, commit, write the finding doc, invoke Claude on the exact
-   commit, adjudicate every finding, fix the accepted ones, record the
+   validation suite, commit, write the slice record, invoke Claude on the exact
+   commit, adjudicate every returned finding through `codereview` intake, fix
+   admitted findings one commit at a time on `master`, neutrally re-run
+   `openreview`, record the
    harness-identified verdict under `.review/results/`, and update the
    `REVIEW.md` row. No sentinel — the async hand-off is retired.
 3. Finish with the `handoff` procedure.

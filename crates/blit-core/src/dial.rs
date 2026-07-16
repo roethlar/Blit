@@ -16,36 +16,35 @@
 //! - **Connect-time dials** — `tcp_buffer_bytes`, buffer-pool sizing:
 //!   read when a socket/pool is built; changes affect sockets opened
 //!   afterwards (no setsockopt on live sockets this slice).
-//! - **Negotiated once** — `initial_streams`/`max_streams`: stream
-//!   count becomes live at `ue-r2-2` (DataPlaneResize); until then the
-//!   dial only carries the negotiation-time value and the
-//!   profile-clamped ceiling.
+//! - **Stream membership** — epoch 0 starts at the receiver-bounded
+//!   floor; later epochs move the live count one stream at a time from
+//!   production telemetry, always within the profile-clamped safety
+//!   limit.
 //!
 //! This replaces the size-keyed `determine_remote_tuning` static
-//! ladder: the ladder's floor tier is the dial's start, its top tier
-//! is the dial's default ceiling, and everything between is reached by
-//! ramping on evidence instead of guessing from `total_bytes`.
+//! ladder: byte and stream concurrency both start conservatively and
+//! ramp on evidence instead of guessing from workload shape.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::generated::CapacityProfile;
 pub use crate::remote::transfer::progress::SharedStreamProbes;
-use crate::remote::transfer::progress::{StreamProbe, StreamProbeRegistry};
+use crate::remote::transfer::progress::{StreamId, StreamProbe, StreamProbeRegistry};
 
 const MIB: usize = 1024 * 1024;
 
-/// Floor (conservative start) values — the old ladder's smallest tier.
+/// Conservative epoch-0 values.
 pub const DIAL_FLOOR_CHUNK_BYTES: usize = 16 * MIB;
 pub const DIAL_FLOOR_PREFETCH: usize = 4;
 pub const DIAL_FLOOR_INITIAL_STREAMS: usize = 4;
-pub const DIAL_FLOOR_MAX_STREAMS: usize = 8;
 
-/// Default ceilings — the old ladder's top tier (a fully ramped dial
-/// matches today's best static behavior).
+/// Default byte-dial ceilings. Stream concurrency has a separate
+/// receiver safety limit; it is a bound, not a tuning target.
 pub const DIAL_CEILING_CHUNK_BYTES: usize = 64 * MIB;
 pub const DIAL_CEILING_PREFETCH: usize = 32;
-pub const DIAL_CEILING_MAX_STREAMS: usize = 32;
+pub const DIAL_DEFAULT_STREAM_LIMIT: usize = 32;
 pub const DIAL_CEILING_TCP_BUFFER_BYTES: usize = 8 * MIB;
 
 /// Tuner policy (initial, deliberately simple): sampled every
@@ -76,7 +75,7 @@ pub fn local_receiver_capacity() -> CapacityProfile {
         cpu_cores: num_cpus::get() as u32,
         drain_class: 0,
         load_percent: 0,
-        max_streams: DIAL_CEILING_MAX_STREAMS as u32,
+        max_streams: DIAL_DEFAULT_STREAM_LIMIT as u32,
         drain_rate_bytes_per_sec: 0,
         max_chunk_bytes: DIAL_CEILING_CHUNK_BYTES as u64,
         max_inflight_bytes: (DIAL_CEILING_CHUNK_BYTES * DIAL_CEILING_PREFETCH) as u64,
@@ -87,12 +86,18 @@ pub fn local_receiver_capacity() -> CapacityProfile {
 /// contract's `0 = unknown` semantics. Both the SOURCE-owned dial and the
 /// DESTINATION's resize admission must call this one function; otherwise a
 /// destination-initiated session can interpret the same profile as a
-/// one-stream cap while its source interprets it as the default ceiling.
+/// one-stream cap while its source interprets it as the default safety limit.
 pub fn receiver_stream_ceiling(profile: Option<&CapacityProfile>) -> usize {
     profile
         .and_then(|capacity| (capacity.max_streams > 0).then_some(capacity.max_streams as usize))
-        .unwrap_or(DIAL_CEILING_MAX_STREAMS)
-        .clamp(1, DIAL_CEILING_MAX_STREAMS)
+        .unwrap_or(DIAL_DEFAULT_STREAM_LIMIT)
+        .clamp(1, DIAL_DEFAULT_STREAM_LIMIT)
+}
+
+/// Canonical epoch-0 stream count: the conservative floor, lowered only
+/// when the byte receiver advertises a smaller non-zero safety limit.
+pub fn receiver_initial_streams(profile: Option<&CapacityProfile>) -> usize {
+    DIAL_FLOOR_INITIAL_STREAMS.min(receiver_stream_ceiling(profile))
 }
 
 /// Serialized wire-epoch state. Resize proposals are rare (at most one per
@@ -205,7 +210,6 @@ pub struct TransferDial {
     /// 0 = unset (kernel default), matching the old `Option<usize>`.
     tcp_buffer_bytes: AtomicUsize,
     initial_streams: AtomicUsize,
-    max_streams: AtomicUsize,
     // ── ue-r2-2 resize state (all epochs are the wire's monotonic
     // resize ids; 0 is reserved for the initial stream set) ──────────
     /// Settled live stream count. Epoch-0 write is
@@ -228,6 +232,8 @@ pub struct TransferDial {
     /// AND cheap dials maxed" streak, negative = "blocked AND cheap
     /// dials floored" streak. Any other tick resets it.
     resize_sustain: AtomicI32,
+    /// Wakes deterministic drivers after a valid resize settlement.
+    resize_settlement_notify: tokio::sync::Notify,
     // Profile-clamped bounds, fixed at construction.
     ceiling_chunk_bytes: usize,
     ceiling_prefetch: usize,
@@ -265,7 +271,7 @@ impl TransferDial {
         }
     }
 
-    /// Conservative start with default ceilings (no receiver profile).
+    /// Conservative start with default byte ceilings and stream safety limit.
     pub fn conservative() -> Self {
         Self::conservative_within(None)
     }
@@ -273,12 +279,13 @@ impl TransferDial {
     /// Conservative start bounded by the receiver's advertised
     /// capacity profile. Per the `ue-r2-1b` contract, `0`/absent
     /// fields mean UNKNOWN and keep the (already conservative)
-    /// default ceiling — never "unlimited". A profile can only lower
-    /// ceilings, never raise them above the defaults this slice.
+    /// default safety bound — never "unlimited". A profile can only lower
+    /// bounds, never raise them above the defaults this slice.
     pub fn conservative_within(profile: Option<&CapacityProfile>) -> Self {
         let mut ceiling_chunk = DIAL_CEILING_CHUNK_BYTES;
         let mut ceiling_prefetch = DIAL_CEILING_PREFETCH;
         let ceiling_streams = receiver_stream_ceiling(profile);
+        let initial_streams = receiver_initial_streams(profile);
         let ceiling_tcp = DIAL_CEILING_TCP_BUFFER_BYTES;
         if let Some(profile) = profile {
             if profile.max_chunk_bytes > 0 {
@@ -302,9 +309,8 @@ impl TransferDial {
             chunk_bytes: AtomicUsize::new(DIAL_FLOOR_CHUNK_BYTES.min(ceiling_chunk)),
             prefetch_count: AtomicUsize::new(DIAL_FLOOR_PREFETCH.min(ceiling_prefetch)),
             tcp_buffer_bytes: AtomicUsize::new(0),
-            initial_streams: AtomicUsize::new(DIAL_FLOOR_INITIAL_STREAMS.min(ceiling_streams)),
-            max_streams: AtomicUsize::new(DIAL_FLOOR_MAX_STREAMS.clamp(1, ceiling_streams.max(1))),
-            live_streams: AtomicUsize::new(DIAL_FLOOR_INITIAL_STREAMS.min(ceiling_streams)),
+            initial_streams: AtomicUsize::new(initial_streams),
+            live_streams: AtomicUsize::new(initial_streams),
             resize_epochs: Mutex::new(ResizeEpochState::default()),
             #[cfg(test)]
             resize_tick_test_hook: Mutex::new(None),
@@ -314,6 +320,7 @@ impl TransferDial {
             resize_lock_sequence: AtomicUsize::new(0),
             ticks_since_settle: AtomicU32::new(0),
             resize_sustain: AtomicI32::new(0),
+            resize_settlement_notify: tokio::sync::Notify::new(),
             ceiling_chunk_bytes: ceiling_chunk,
             ceiling_prefetch,
             ceiling_max_streams: ceiling_streams,
@@ -342,10 +349,6 @@ impl TransferDial {
     }
     pub fn initial_streams(&self) -> usize {
         self.initial_streams.load(Ordering::Relaxed)
-    }
-    /// Ceiling on the negotiated stream count (profile-clamped).
-    pub fn max_streams(&self) -> usize {
-        self.max_streams.load(Ordering::Relaxed)
     }
     pub fn ceiling_max_streams(&self) -> usize {
         self.ceiling_max_streams
@@ -387,6 +390,13 @@ impl TransferDial {
             .is_some()
     }
 
+    pub(crate) fn resize_refused(&self) -> bool {
+        self.resize_epochs
+            .lock()
+            .expect("resize epoch state poisoned")
+            .refused
+    }
+
     fn cheap_dials_maxed(&self) -> bool {
         self.chunk_bytes.load(Ordering::Relaxed) >= self.ceiling_chunk_bytes
             && self.prefetch_count.load(Ordering::Relaxed) >= self.ceiling_prefetch
@@ -415,7 +425,7 @@ impl TransferDial {
     /// every subsequent tick returns `None`.
     pub fn resize_tick(&self, delta_bytes: u64, blocked_ratio: f64) -> Option<ResizeProposal> {
         // Keep eligibility, direction, live count, and epoch claim in the
-        // same critical section as settlement. Otherwise a shape resize can
+        // same critical section as settlement. Otherwise a resize can
         // settle/reset cooldown between signal calculation and claim, and a
         // stale tuner decision can immediately open the next epoch.
         let mut state = self.lock_resize_epochs();
@@ -493,43 +503,6 @@ impl TransferDial {
         })
     }
 
-    /// sf-2: shape-correction proposal. On push the daemon proposes the
-    /// epoch-0 stream count from whatever manifest prefix it has seen at
-    /// the early flush (`FILE_LIST_EARLY_FLUSH_ENTRIES`), so a
-    /// many-tiny-file push can negotiate far fewer streams than
-    /// [`initial_stream_proposal`] assigns the full workload. As the
-    /// need list accumulates client-side, the client re-runs the shape
-    /// table and corrects upward through the normal resize wire.
-    ///
-    /// Unlike [`Self::resize_tick`] this is a definite signal — the
-    /// shape is known, not inferred from throughput — so there is no
-    /// sustain/cooldown discipline. It still honors one-in-flight and
-    /// the receiver-profile ceiling, still moves ONE stream per epoch
-    /// (the wire carries one `sub_token` per ADD), and never proposes
-    /// REMOVE: shrinking below a live count is throughput evidence and
-    /// stays the tuner's call.
-    pub fn propose_shape_resize(&self, desired_streams: usize) -> Option<ResizeProposal> {
-        let desired = desired_streams.clamp(1, self.ceiling_max_streams.max(1));
-        let mut state = self
-            .resize_epochs
-            .lock()
-            .expect("resize epoch state poisoned");
-        if state.refused || state.pending_epoch.is_some() {
-            return None;
-        }
-        let live = self.live_streams.load(Ordering::Relaxed).max(1);
-        if desired <= live {
-            return None;
-        }
-        let epoch = state.settled_epoch.checked_add(1)?;
-        state.pending_epoch = Some(epoch);
-        Some(ResizeProposal {
-            epoch,
-            target_streams: live + 1,
-            add: true,
-        })
-    }
-
     /// Settle the in-flight proposal with what ACTUALLY happened:
     /// `effective_streams` is the live count now in effect (from the
     /// peer's ack, or the local count if a post-ack dial failed and
@@ -598,14 +571,23 @@ impl TransferDial {
         // remains unchanged.
         let settled = state.settle(epoch, accepted);
         debug_assert!(settled);
+        self.resize_settlement_notify.notify_waiters();
         settled
     }
 
-    /// Raise max_streams toward the ceiling (used when a peer's
-    /// negotiation allows more than the floor; still profile-bounded).
-    pub fn allow_streams_up_to(&self, streams: usize) {
-        let clamped = streams.clamp(1, self.ceiling_max_streams.max(1));
-        self.max_streams.store(clamped, Ordering::Relaxed);
+    /// Wait until `epoch` has settled. Registering the notification before
+    /// checking the monotonic settled epoch avoids missing a settlement in
+    /// the check-to-await window.
+    pub(crate) async fn wait_for_resize_settlement(&self, epoch: u32) {
+        loop {
+            let notified = self.resize_settlement_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.resize_epoch() >= epoch {
+                return;
+            }
+            notified.await;
+        }
     }
 
     // ── tuner steps ──────────────────────────────────────────────────
@@ -670,41 +652,22 @@ impl TransferDial {
             false
         }
     }
-}
 
-/// Workload-shape-aware initial stream proposal (`ue-r2-1f`): the
-/// end that KNOWS the workload shape proposes a starting stream
-/// count — file count matters as much as bytes (many small files
-/// parallelize on per-file overhead even at low byte totals). On push
-/// that is the receiving daemon (it has the manifest) clamped to its
-/// own advertised ceiling; on pull_sync it is the sending daemon (it
-/// enumerated the source) clamped to the CLIENT's advertised
-/// `receiver_capacity.max_streams` (`ue-r2-1g`) — either way the byte
-/// receiver's profile is the bound. Table carried over verbatim from
-/// the daemon push `desired_streams` ladder it retires (the ladder
-/// the old `tuning.rs` doc said "wins"), now engine-owned. The
-/// sender's dial clamps again on its side (`set_negotiated_streams`).
-/// Live mid-transfer stream changes arrive with `ue-r2-2` resize.
-pub fn initial_stream_proposal(total_bytes: u64, file_count: usize, ceiling: usize) -> u32 {
-    if file_count == 0 {
-        return 1;
+    /// Apply one already-aggregated production sample. Busy samples step
+    /// cheap dials before evaluating stream resize; idle samples are no
+    /// signal but still reset resize sustain. Timed sampling and
+    /// deterministic test injection share this exact policy path.
+    pub(crate) fn apply_sample(
+        &self,
+        delta_bytes: u64,
+        blocked_ratio: f64,
+    ) -> Option<ResizeProposal> {
+        if delta_bytes == 0 {
+            return self.resize_tick(0, 0.0);
+        }
+        self.apply_tick(blocked_ratio);
+        self.resize_tick(delta_bytes, blocked_ratio)
     }
-    let proposal: u32 = if total_bytes >= 32 * 1024 * 1024 * 1024 || file_count >= 200_000 {
-        16
-    } else if total_bytes >= 8 * 1024 * 1024 * 1024 || file_count >= 80_000 {
-        12
-    } else if total_bytes >= 2 * 1024 * 1024 * 1024 || file_count >= 50_000 {
-        10
-    } else if total_bytes >= 512 * 1024 * 1024 || file_count >= 10_000 {
-        8
-    } else if total_bytes >= 128 * 1024 * 1024 || file_count >= 2_000 {
-        4
-    } else if total_bytes >= 32 * 1024 * 1024 || file_count >= 256 {
-        2
-    } else {
-        1
-    };
-    proposal.min(ceiling.max(1) as u32)
 }
 
 /// Blocked-time ratio for one tuner tick: the share of the tick's
@@ -721,6 +684,71 @@ pub(crate) fn blocked_ratio(
         return 0.0;
     }
     (delta_blocked_nanos as f64 / denom as f64).clamp(0.0, 1.0)
+}
+
+#[derive(Clone, Copy)]
+struct ProbeCounters {
+    bytes_sent: u64,
+    write_blocked_nanos: u64,
+}
+
+fn probe_counters(probes: &StreamProbeRegistry) -> HashMap<StreamId, ProbeCounters> {
+    probes
+        .values()
+        .map(|probe| {
+            let snapshot = probe.snapshot();
+            (
+                snapshot.id,
+                ProbeCounters {
+                    bytes_sent: snapshot.bytes_sent,
+                    write_blocked_nanos: snapshot.write_blocked_nanos,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Return one valid per-stream delta sample and replace the baseline.
+/// Membership changes, individual counter resets, and disagreement with
+/// the dial's settled live count are all no-signal ticks. Per-stream
+/// baselines prevent survivor progress from masking a removed/reset member.
+fn sample_probe_deltas(
+    probes: &StreamProbeRegistry,
+    baselines: &mut HashMap<StreamId, ProbeCounters>,
+    expected_streams: usize,
+) -> Option<(u64, u64, usize)> {
+    let current = probe_counters(probes);
+    let membership_matches = current.len() == expected_streams
+        && current.len() == baselines.len()
+        && current.keys().all(|id| baselines.contains_key(id));
+    let counters_monotonic = membership_matches
+        && current.iter().all(|(id, now)| {
+            let before = baselines
+                .get(id)
+                .expect("matching membership must have a baseline");
+            now.bytes_sent >= before.bytes_sent
+                && now.write_blocked_nanos >= before.write_blocked_nanos
+        });
+    let sample = counters_monotonic.then(|| {
+        current.iter().fold(
+            (0u64, 0u64, current.len()),
+            |(blocked, bytes, streams), (id, now)| {
+                let before = baselines
+                    .get(id)
+                    .expect("matching membership must have a baseline");
+                (
+                    blocked.saturating_add(
+                        now.write_blocked_nanos
+                            .saturating_sub(before.write_blocked_nanos),
+                    ),
+                    bytes.saturating_add(now.bytes_sent.saturating_sub(before.bytes_sent)),
+                    streams,
+                )
+            },
+        )
+    });
+    *baselines = current;
+    sample
 }
 
 /// Spawn the live tuner for one transfer (ue-r2-1e): every
@@ -750,39 +778,27 @@ pub fn spawn_dial_tuner_with_resize(
     resize_tx: Option<tokio::sync::mpsc::UnboundedSender<ResizeProposal>>,
 ) -> tokio::task::JoinHandle<()> {
     let weak = Arc::downgrade(dial);
+    let mut baselines = {
+        let probes = probes.lock().expect("probe registry poisoned");
+        probe_counters(&probes)
+    };
     tokio::spawn(async move {
-        let mut last_blocked: u64 = 0;
-        let mut last_bytes: u64 = 0;
         let mut last_tick = tokio::time::Instant::now();
         loop {
             tokio::time::sleep(DIAL_TUNER_TICK).await;
             let Some(dial) = weak.upgrade() else { return };
-            let (blocked, bytes, streams) = {
+            let sample = {
                 let probes = probes.lock().expect("probe registry poisoned");
-                let (b, n) = probes.values().fold((0u64, 0u64), |(b, n), p| {
-                    let snap = p.snapshot();
-                    (b + snap.write_blocked_nanos, n + snap.bytes_sent)
-                });
-                (b, n, probes.len())
+                sample_probe_deltas(&probes, &mut baselines, dial.live_streams())
             };
             let elapsed = last_tick.elapsed();
             last_tick = tokio::time::Instant::now();
-            // A retired stream leaves the registry, so the monotonic
-            // sums can shrink across a REMOVE. Re-baseline and treat
-            // the tick as no-signal rather than reading a bogus delta.
-            if blocked < last_blocked || bytes < last_bytes {
-                last_blocked = blocked;
-                last_bytes = bytes;
-                if let Some(tx) = &resize_tx {
-                    let _ = tx; // no proposal possible on a no-signal tick
-                    dial.resize_tick(0, 0.0);
+            let Some((delta_blocked, delta_bytes, streams)) = sample else {
+                if resize_tx.is_some() {
+                    let _ = dial.apply_sample(0, 0.0);
                 }
                 continue;
-            }
-            let delta_blocked = blocked.saturating_sub(last_blocked);
-            let delta_bytes = bytes.saturating_sub(last_bytes);
-            last_blocked = blocked;
-            last_bytes = bytes;
+            };
             // codex ue-r2-1e F2: an idle tick (no bytes moved) is NO
             // SIGNAL, not a clean pipe — stepping up during manifest /
             // preparation stalls would ramp without evidence and break
@@ -790,23 +806,23 @@ pub fn spawn_dial_tuner_with_resize(
             // F3): the idle tick must still reach `resize_tick` so a
             // sustain streak cannot survive a stall — "consecutive
             // busy ticks" means consecutive.
-            if delta_bytes == 0 {
-                if resize_tx.is_some() {
-                    dial.resize_tick(0, 0.0);
-                }
-                continue;
-            }
             let ratio = blocked_ratio(delta_blocked, elapsed, streams);
-            dial.apply_tick(ratio);
             if let Some(tx) = &resize_tx {
-                if let Some(proposal) = dial.resize_tick(delta_bytes, ratio) {
+                if let Some(proposal) = dial.apply_sample(delta_bytes, ratio) {
                     if tx.send(proposal).is_err() {
                         // Controller gone (transfer tearing down):
                         // release the pending slot so the dial state
                         // stays honest for late readers.
                         dial.resize_settled(proposal.epoch, dial.live_streams(), false);
+                        return;
+                    }
+                    dial.wait_for_resize_settlement(proposal.epoch).await;
+                    if dial.resize_refused() {
+                        return;
                     }
                 }
+            } else if delta_bytes > 0 {
+                dial.apply_tick(ratio);
             }
         }
     })
@@ -829,13 +845,18 @@ mod tests {
     }
 
     #[test]
-    fn conservative_start_is_the_old_floor_tier() {
+    fn conservative_start_uses_the_receiver_bounded_floor() {
         let dial = TransferDial::conservative();
         assert_eq!(dial.chunk_bytes(), 16 * MIB);
         assert_eq!(dial.prefetch_count(), 4);
         assert_eq!(dial.tcp_buffer_bytes(), None);
         assert_eq!(dial.initial_streams(), 4);
-        assert_eq!(dial.max_streams(), 8);
+        assert_eq!(receiver_initial_streams(None), 4);
+        assert_eq!(receiver_initial_streams(Some(&profile(2, 0, 0))), 2);
+        assert_eq!(receiver_initial_streams(Some(&profile(0, 0, 0))), 4);
+        let bounded = TransferDial::conservative_within(Some(&profile(2, 0, 0)));
+        assert_eq!(bounded.initial_streams(), 2);
+        assert_eq!(bounded.live_streams(), 2);
     }
 
     #[test]
@@ -847,7 +868,7 @@ mod tests {
         assert_eq!(dial.chunk_bytes(), DIAL_CEILING_CHUNK_BYTES);
         assert_eq!(dial.prefetch_count(), DIAL_CEILING_PREFETCH);
         assert_eq!(dial.tcp_buffer_bytes(), Some(DIAL_CEILING_TCP_BUFFER_BYTES));
-        assert_eq!(dial.ceiling_max_streams(), DIAL_CEILING_MAX_STREAMS);
+        assert_eq!(dial.ceiling_max_streams(), DIAL_DEFAULT_STREAM_LIMIT);
     }
 
     #[test]
@@ -871,7 +892,7 @@ mod tests {
         while generous.step_up_cheap_dials() {}
         assert_eq!(generous.chunk_bytes(), DIAL_CEILING_CHUNK_BYTES);
         assert_eq!(generous.prefetch_count(), DIAL_CEILING_PREFETCH);
-        assert_eq!(generous.ceiling_max_streams(), DIAL_CEILING_MAX_STREAMS);
+        assert_eq!(generous.ceiling_max_streams(), DIAL_DEFAULT_STREAM_LIMIT);
     }
 
     #[test]
@@ -892,39 +913,6 @@ mod tests {
     }
 
     #[test]
-    fn initial_stream_proposal_matches_the_retired_daemon_table() {
-        const MIB64: u64 = 1024 * 1024;
-        const GIB: u64 = 1024 * MIB64;
-        // Empty need-list → 1 (the old ladder's empty-guard).
-        assert_eq!(initial_stream_proposal(0, 0, 32), 1);
-        // Byte-keyed tiers: exact lower boundaries AND just-below each
-        // (codex ue-r2-1f: representative values would miss a doubled
-        // threshold).
-        assert_eq!(initial_stream_proposal(32 * MIB64 - 1, 10, 32), 1);
-        assert_eq!(initial_stream_proposal(32 * MIB64, 10, 32), 2);
-        assert_eq!(initial_stream_proposal(128 * MIB64 - 1, 10, 32), 2);
-        assert_eq!(initial_stream_proposal(128 * MIB64, 10, 32), 4);
-        assert_eq!(initial_stream_proposal(512 * MIB64 - 1, 10, 32), 4);
-        assert_eq!(initial_stream_proposal(512 * MIB64, 10, 32), 8);
-        assert_eq!(initial_stream_proposal(2 * GIB - 1, 10, 32), 8);
-        assert_eq!(initial_stream_proposal(2 * GIB, 10, 32), 10);
-        assert_eq!(initial_stream_proposal(8 * GIB - 1, 10, 32), 10);
-        assert_eq!(initial_stream_proposal(8 * GIB, 10, 32), 12);
-        assert_eq!(initial_stream_proposal(32 * GIB - 1, 10, 32), 12);
-        assert_eq!(initial_stream_proposal(32 * GIB, 10, 32), 16);
-        // File-count keys fire independently of bytes.
-        assert_eq!(initial_stream_proposal(1, 256, 32), 2);
-        assert_eq!(initial_stream_proposal(1, 2_000, 32), 4);
-        assert_eq!(initial_stream_proposal(1, 10_000, 32), 8);
-        assert_eq!(initial_stream_proposal(1, 50_000, 32), 10);
-        assert_eq!(initial_stream_proposal(1, 80_000, 32), 12);
-        assert_eq!(initial_stream_proposal(1, 200_000, 32), 16);
-        // Ceiling clamps the proposal (receiver profile authority).
-        assert_eq!(initial_stream_proposal(32 * GIB, 10, 6), 6);
-        assert_eq!(initial_stream_proposal(32 * GIB, 10, 0), 1, "floor 1");
-    }
-
-    #[test]
     fn blocked_ratio_handles_edges() {
         use std::time::Duration;
         assert_eq!(blocked_ratio(0, Duration::from_millis(500), 4), 0.0);
@@ -939,10 +927,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sampler_rebaselines_on_membership_change_even_when_totals_increase() {
+        use crate::remote::transfer::progress::{StreamId, StreamProbe};
+
+        let retired = StreamProbe::new(StreamId(0));
+        let survivor = StreamProbe::new(StreamId(1));
+        retired.record_bytes(1_000);
+        survivor.record_bytes(1_000);
+        let mut registry = StreamProbeRegistry::from_probes(vec![retired, survivor.clone()]);
+        let mut baselines = probe_counters(&registry);
+
+        // Survivor progress is larger than the retired member's total, so
+        // aggregate counters would still rise and hide the membership swap.
+        survivor.record_bytes(10_000);
+        assert!(registry.unregister(StreamId(0)).is_some());
+        let added = StreamProbe::new(StreamId(2));
+        added.record_bytes(1);
+        assert!(registry.register(added.clone()));
+        assert_eq!(
+            sample_probe_deltas(&registry, &mut baselines, 2),
+            None,
+            "identity change is a no-signal rebaseline"
+        );
+
+        survivor.record_bytes(5);
+        added.record_bytes(7);
+        survivor.add_write_blocked(13);
+        added.add_write_blocked(17);
+        assert_eq!(
+            sample_probe_deltas(&registry, &mut baselines, 2),
+            Some((30, 12, 2)),
+            "the next stable interval is measured per member"
+        );
+    }
+
+    #[test]
+    fn sampler_rebaselines_while_registry_and_live_counts_disagree() {
+        use crate::remote::transfer::progress::{StreamId, StreamProbe};
+
+        let probe = StreamProbe::new(StreamId(0));
+        let registry = StreamProbeRegistry::from_probes(vec![probe.clone()]);
+        let mut baselines = probe_counters(&registry);
+        probe.record_bytes(10);
+        assert_eq!(sample_probe_deltas(&registry, &mut baselines, 2), None);
+        probe.record_bytes(7);
+        assert_eq!(
+            sample_probe_deltas(&registry, &mut baselines, 1),
+            Some((0, 7, 1)),
+            "matching membership resumes from the mismatch baseline"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn tuner_steps_up_on_clean_telemetry_and_exits_when_dial_drops() {
         use crate::remote::transfer::progress::{StreamId, StreamProbe};
         let dial = TransferDial::conservative().shared();
+        dial.set_negotiated_streams(2);
         let probes = [StreamProbe::new(StreamId(0)), StreamProbe::new(StreamId(1))];
         let tuner_view: Vec<StreamProbe> = probes
             .iter()
@@ -980,11 +1021,50 @@ mod tests {
             .expect("tuner does not panic");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn production_tuner_folds_blocked_telemetry_into_remove() {
+        use crate::remote::transfer::progress::{StreamId, StreamProbe};
+
+        let dial = TransferDial::conservative().shared();
+        dial.set_negotiated_streams(2);
+        let first = StreamProbe::new(StreamId(0));
+        let second = StreamProbe::new(StreamId(1));
+        let registry = Arc::new(std::sync::Mutex::new(StreamProbeRegistry::from_probes(
+            vec![first.clone(), second],
+        )));
+        let (resize_tx, mut resize_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_dial_tuner_with_resize(&dial, registry, Some(resize_tx));
+        tokio::task::yield_now().await;
+
+        for _ in 0..RESIZE_COOLDOWN_TICKS {
+            first.record_bytes(1024);
+            first.add_write_blocked(1_000_000_000);
+            tokio::time::advance(DIAL_TUNER_TICK + std::time::Duration::from_millis(10)).await;
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        let proposal = resize_rx
+            .try_recv()
+            .expect("sustained production blocked telemetry proposes REMOVE");
+        assert_eq!(
+            proposal,
+            ResizeProposal {
+                epoch: 1,
+                target_streams: 1,
+                add: false,
+            }
+        );
+        dial.resize_settled(proposal.epoch, proposal.target_streams, true);
+        drop(dial);
+        tokio::time::advance(DIAL_TUNER_TICK + std::time::Duration::from_millis(10)).await;
+        handle.await.expect("production tuner exits cleanly");
+    }
+
     #[test]
     fn negotiated_streams_clamp_to_the_profile_ceiling() {
         let dial = TransferDial::conservative_within(Some(&profile(6, 0, 0)));
-        dial.allow_streams_up_to(32);
-        assert_eq!(dial.max_streams(), 6, "peer cannot exceed the profile");
         assert_eq!(dial.set_negotiated_streams(16), 6);
         assert_eq!(dial.set_negotiated_streams(3), 3);
         assert_eq!(dial.live_streams(), 3, "negotiation seeds the live count");
@@ -1085,13 +1165,13 @@ mod tests {
 
         // clean → idle → clean: the idle tick resets the streak, so
         // the second clean tick is streak 1, not 2.
-        assert_eq!(dial.resize_tick(1024, 0.0), None);
-        assert_eq!(dial.resize_tick(0, 0.0), None, "idle resets");
-        assert_eq!(dial.resize_tick(1024, 0.0), None, "streak restarted");
+        assert_eq!(dial.apply_sample(1024, 0.0), None);
+        assert_eq!(dial.apply_sample(0, 0.0), None, "idle resets");
+        assert_eq!(dial.apply_sample(1024, 0.0), None, "streak restarted");
         // clean → in-band → clean: same reset.
-        assert_eq!(dial.resize_tick(1024, 0.15), None, "in-band resets");
-        assert_eq!(dial.resize_tick(1024, 0.0), None, "streak restarted");
-        assert!(dial.resize_tick(1024, 0.0).is_some(), "streak completes");
+        assert_eq!(dial.apply_sample(1024, 0.15), None, "in-band resets");
+        assert_eq!(dial.apply_sample(1024, 0.0), None, "streak restarted");
+        assert!(dial.apply_sample(1024, 0.0).is_some(), "streak completes");
     }
 
     #[test]
@@ -1108,20 +1188,15 @@ mod tests {
         assert!(dial.resize_pending(), "stale settle ignored");
 
         // Refusal: pending clears and live count stays put, but the wire
-        // epoch is consumed and every resize producer becomes terminal.
+        // epoch is consumed and the sample controller becomes terminal.
         dial.resize_settled(proposal.epoch, dial.live_streams(), false);
         assert!(!dial.resize_pending());
         assert_eq!(dial.live_streams(), 4);
         assert_eq!(dial.resize_epoch(), proposal.epoch);
         assert_eq!(
-            dial.resize_tick(1024, 0.0),
+            dial.apply_sample(1024, 0.0),
             None,
             "the tuner must not retry a refused resize"
-        );
-        assert_eq!(
-            dial.propose_shape_resize(8),
-            None,
-            "shape correction must not retry a refused resize"
         );
 
         // Duplicate/stale settlements cannot reopen the terminal policy or
@@ -1129,7 +1204,25 @@ mod tests {
         dial.resize_settled(proposal.epoch, 5, true);
         assert_eq!(dial.resize_epoch(), proposal.epoch);
         assert_eq!(dial.live_streams(), 4);
-        assert_eq!(dial.propose_shape_resize(8), None);
+        assert_eq!(dial.apply_sample(1024, 0.0), None);
+    }
+
+    #[tokio::test]
+    async fn settlement_wait_does_not_miss_an_already_settled_epoch() {
+        let dial = TransferDial::conservative();
+        dial.set_negotiated_streams(4);
+        while dial.step_up_cheap_dials() {}
+        burn_cooldown(&dial);
+        assert_eq!(dial.resize_tick(1024, 0.0), None);
+        let proposal = dial.resize_tick(1024, 0.0).expect("proposes");
+        dial.resize_settled(proposal.epoch, proposal.target_streams, true);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            dial.wait_for_resize_settlement(proposal.epoch),
+        )
+        .await
+        .expect("settled-before-wait cannot miss the notification");
     }
 
     #[test]
@@ -1203,28 +1296,30 @@ mod tests {
             "accepted settlement resets cooldown"
         );
 
-        // Refusal crossing: a shape producer begins while the settlement
-        // lock is held. Once the same production helper records refusal and
-        // releases the lock, the waiter must observe terminal state and may
-        // not claim epoch 2.
+        // Refusal crossing: another sample begins while the settlement lock
+        // is held. Once refusal is recorded and the lock is released, the
+        // waiter must observe terminal state and may not claim epoch 2.
         let refused = Arc::new(TransferDial::conservative());
-        let first = refused.propose_shape_resize(8).expect("shape owns epoch 1");
+        while refused.step_up_cheap_dials() {}
+        burn_cooldown(&refused);
+        assert_eq!(refused.resize_tick(1024, 0.0), None, "sustain tick 1");
+        let first = refused.resize_tick(1024, 0.0).expect("tuner owns epoch 1");
         let mut refused_state = refused
             .resize_epochs
             .lock()
             .expect("resize epoch state poisoned");
         let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let shape = {
+        let sample = {
             let refused = Arc::clone(&refused);
             std::thread::spawn(move || {
                 started_tx.send(()).unwrap();
-                refused.propose_shape_resize(8)
+                refused.apply_sample(1024, 0.0)
             })
         };
         started_rx.recv().unwrap();
         assert!(refused.resize_settled_locked(&mut refused_state, first.epoch, 1, false));
         drop(refused_state);
-        assert_eq!(shape.join().unwrap(), None, "refusal is terminal");
+        assert_eq!(sample.join().unwrap(), None, "refusal is terminal");
         assert_eq!(refused.resize_epoch(), first.epoch);
         assert!(!refused.resize_pending());
     }
@@ -1244,101 +1339,19 @@ mod tests {
         }
     }
 
-    // ── sf-2 shape-correction resize ─────────────────────────────────
-
-    /// The plan's three measured 10 GbE cells mapped through the shape
-    /// table (`docs/plan/SMALL_FILE_CEILING.md`): the small and mixed
-    /// cells must NOT ride the byte tiers alone.
-    #[test]
-    fn shape_table_covers_the_small_file_ceiling_cells() {
-        const KIB: u64 = 1024;
-        const MIB64: u64 = 1024 * KIB;
-        const GIB: u64 = 1024 * MIB64;
-        // push/pull 10k × 4 KiB: 40 MiB is the 2-stream byte tier, but
-        // 10_000 files must key the 8-stream file-count tier.
-        assert_eq!(initial_stream_proposal(10_000 * 4 * KIB, 10_000, 32), 8);
-        // 1 × 1 GiB: byte-keyed, file count is irrelevant — unchanged.
-        assert_eq!(initial_stream_proposal(GIB, 1, 32), 8);
-        // mixed 512 MiB + 5k × 2 KiB: the byte tier already reaches 8;
-        // the 5_001 files alone would say 4 — bytes win.
-        assert_eq!(
-            initial_stream_proposal(512 * MIB64 + 5_000 * 2 * KIB, 5_001, 32),
-            8
-        );
-        // sf-1 loopback probe evidence: 1_000 tiny files must propose 2
-        // (the measured transfer rode 1 — the input, not this table,
-        // was wrong).
-        assert_eq!(initial_stream_proposal(1_000 * 4 * KIB, 1_000, 32), 2);
-    }
-
-    #[test]
-    fn shape_resize_ramps_one_epoch_at_a_time_toward_the_target() {
-        let dial = TransferDial::conservative();
-        dial.set_negotiated_streams(1);
-
-        // At or below live: nothing to correct.
-        assert_eq!(dial.propose_shape_resize(0), None);
-        assert_eq!(dial.propose_shape_resize(1), None);
-
-        // Target 3 from live 1: epoch 1 proposes 2 (one per epoch),
-        // and the in-flight epoch blocks both proposers.
-        let p1 = dial.propose_shape_resize(3).expect("live 1 → target 3");
-        assert_eq!(
-            p1,
-            ResizeProposal {
-                epoch: 1,
-                target_streams: 2,
-                add: true
-            }
-        );
-        assert_eq!(dial.propose_shape_resize(3), None, "one in flight");
-        assert_eq!(dial.resize_tick(1024, 0.0), None, "tuner blocked too");
-
-        // Settle → next step; no cooldown for the definite shape signal.
-        dial.resize_settled(1, 2, true);
-        let p2 = dial.propose_shape_resize(3).expect("live 2 → target 3");
-        assert_eq!(p2.epoch, 2);
-        assert_eq!(p2.target_streams, 3);
-        dial.resize_settled(2, 3, true);
-        assert_eq!(dial.live_streams(), 3);
-        assert_eq!(dial.propose_shape_resize(3), None, "target reached");
-
-        // A refused epoch leaves live untouched, consumes the epoch, and is
-        // terminal for every later shape/tuner proposal on this transfer.
-        let p3 = dial.propose_shape_resize(4).expect("live 3 → target 4");
-        dial.resize_settled(p3.epoch, dial.live_streams(), false);
-        assert_eq!(dial.live_streams(), 3);
-        assert_eq!(dial.resize_epoch(), p3.epoch);
-        assert_eq!(dial.propose_shape_resize(4), None, "refusal is terminal");
-        assert_eq!(dial.resize_tick(1024, 0.0), None, "tuner is terminal too");
-    }
-
-    #[test]
-    fn shape_resize_clamps_to_the_profile_ceiling() {
-        let dial = TransferDial::conservative_within(Some(&profile(2, 0, 0)));
-        dial.set_negotiated_streams(1);
-        let p = dial
-            .propose_shape_resize(100)
-            .expect("clamped, not refused");
-        assert_eq!(p.target_streams, 2);
-        dial.resize_settled(p.epoch, 2, true);
-        assert_eq!(
-            dial.propose_shape_resize(100),
-            None,
-            "at the receiver's advertised ceiling"
-        );
-    }
-
     #[tokio::test(start_paused = true)]
     async fn tuner_forwards_resize_proposals_over_the_shared_registry() {
         use crate::remote::transfer::progress::{StreamId, StreamProbe};
         let dial = TransferDial::conservative().shared();
         dial.set_negotiated_streams(2);
         while dial.step_up_cheap_dials() {}
-        let probe = StreamProbe::new(StreamId(0));
+        let probes = [StreamProbe::new(StreamId(0)), StreamProbe::new(StreamId(1))];
         let registry: SharedStreamProbes =
             Arc::new(std::sync::Mutex::new(StreamProbeRegistry::from_probes(
-                vec![StreamProbe::from_telemetry(probe.id(), probe.telemetry())],
+                probes
+                    .iter()
+                    .map(|probe| StreamProbe::from_telemetry(probe.id(), probe.telemetry()))
+                    .collect(),
             )));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let handle = spawn_dial_tuner_with_resize(&dial, Arc::clone(&registry), Some(tx));
@@ -1348,7 +1361,7 @@ mod tests {
         // records fresh bytes with zero blocked time.
         let mut proposal = None;
         for _ in 0..(RESIZE_COOLDOWN_TICKS + RESIZE_SUSTAIN_TICKS as u32 + 2) {
-            probe.record_bytes(1024);
+            probes[0].record_bytes(1024);
             tokio::time::advance(DIAL_TUNER_TICK + std::time::Duration::from_millis(10)).await;
             for _ in 0..16 {
                 tokio::task::yield_now().await;
@@ -1363,6 +1376,7 @@ mod tests {
         assert!(proposal.add);
         assert!(dial.resize_pending());
 
+        dial.resize_settled(proposal.epoch, proposal.target_streams, true);
         drop(dial);
         tokio::time::advance(DIAL_TUNER_TICK + std::time::Duration::from_millis(10)).await;
         tokio::time::timeout(std::time::Duration::from_secs(5), handle)

@@ -619,12 +619,15 @@ pub async fn run_local_session(
             trace_data_plane: false,
             session_phase_trace: Default::default(),
             small_file_probe: SmallFileProbe::disabled(),
+            #[cfg(test)]
+            dial_test_samples: None,
         },
     };
     let dest_cfg = DestinationSessionConfig {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
+        receiver_capacity: None,
         instruments: DestinationInstruments {
             small_file_probe: SmallFileProbe::disabled(),
             ..Default::default()
@@ -897,12 +900,15 @@ mod tests {
                 trace_data_plane: false,
                 session_phase_trace: Default::default(),
                 small_file_probe: SmallFileProbe::disabled(),
+                #[cfg(test)]
+                dial_test_samples: None,
             },
         };
         let dest_cfg = DestinationSessionConfig {
             hello: HelloConfig::default(),
             endpoint: SessionEndpoint::Responder,
             data_plane_host: None,
+            receiver_capacity: None,
             instruments: DestinationInstruments {
                 small_file_probe: SmallFileProbe::disabled(),
                 ..Default::default()
@@ -1243,6 +1249,7 @@ mod tests {
             hello: HelloConfig::default(),
             endpoint: SessionEndpoint::Responder,
             data_plane_host: None,
+            receiver_capacity: None,
             instruments: DestinationInstruments::default(),
             local_apply: Some(local_apply),
         };

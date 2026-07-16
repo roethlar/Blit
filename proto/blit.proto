@@ -148,8 +148,9 @@ message CapacityProfile {
   // or idle — senders must not distinguish the two.
   uint32 load_percent = 3;
   // Maximum parallel data-plane streams the receiver will accept for
-  // this transfer (the dial's hard ceiling; floor is always 1).
-  // 0 = unknown → sender stays at today's negotiated stream_count.
+  // this transfer (the dial's hard safety ceiling). Settled membership may
+  // shrink to 1; epoch 0 starts at the engine floor (currently 4) clamped to
+  // this ceiling. 0 = unknown → use the documented default safety limit.
   uint32 max_streams = 4;
   // Estimated sustainable drain (write-to-storage) rate in bytes/sec.
   uint64 drain_rate_bytes_per_sec = 5;
@@ -171,12 +172,10 @@ enum DrainClass {
   DRAIN_CLASS_MEMORY = 5;     // tmpfs/ramdisk-class target
 }
 
-// ── ue-r2-1b: mid-transfer stream resize (consumed at ue-r2-2) ──────
+// ── Mid-transfer stream resize ──────────────────────────────────────
 // Control-plane request to grow/shrink the live data-plane stream set.
-// Carried on the transfer control streams (never as a blind TCP
-// data-plane record), and only when the session negotiated resize
-// support at open.
-// Shape carried over from the adaptive-streams PR3 prior art (d9d4ec7).
+// Carried on the transfer control stream, never as a blind TCP record.
+// Same-build TransferSession peers always share this contract.
 enum DataPlaneResizeOp {
   DATA_PLANE_RESIZE_OP_UNSPECIFIED = 0;
   DATA_PLANE_RESIZE_OP_ADD = 1;
@@ -184,12 +183,13 @@ enum DataPlaneResizeOp {
 }
 
 // Controller → peer request to resize the live stream set. `epoch` is a
-// monotonic resize id (0 is reserved for the initial streams);
-// `target_stream_count` is the absolute desired live count (idempotent),
-// bounded by CapacityProfile.max_streams. For ADD, `sub_token` is the
-// 16-byte credential the newly dialed data socket must present after
-// the one_time_token; the accepting side registers it before the dialer
-// dials. For REMOVE, sub_token is empty.
+// monotonic resize id (0 is reserved for epoch-0 membership);
+// `target_stream_count` is absolute and must be exactly settled+1 for ADD
+// or settled-1 for REMOVE, within 1..=CapacityProfile.max_streams. For ADD,
+// `sub_token` is one fresh 16-byte credential the new data socket presents
+// after the session token. REMOVE carries an empty token and opens no socket.
+// An exact duplicate epoch/request replays the prior ACK without applying
+// membership twice; changed, stale, or future requests are violations.
 message DataPlaneResize {
   DataPlaneResizeOp op = 1;
   uint32 epoch = 2;
@@ -197,10 +197,9 @@ message DataPlaneResize {
   bytes sub_token = 4;
 }
 
-// Ack of a DataPlaneResize. `accepted` is false if the peer could not
-// honor it (e.g. registration refused, dial failed);
-// `effective_stream_count` is the live count the acking side now
-// believes is in effect.
+// Ack of a DataPlaneResize. `effective_stream_count` is the receiver's
+// resulting logical membership. A refusal reports the unchanged count,
+// consumes the epoch, and is terminal for later resize in the session.
 message DataPlaneResizeAck {
   uint32 epoch = 1;
   uint32 effective_stream_count = 2;
@@ -358,13 +357,11 @@ message TransferOperationSpec {
   //   2: added `require_complete_scan` (R49-F2). Bumped so v1
   //      daemons fail closed when receiving a v2 spec instead of
   //      silently ignoring the safety-critical field.
-  //   2 (unchanged, ue-r2-1b): added `receiver_capacity` WITHOUT a
-  //      bump. Receivers enforce spec_version by exact match, so a
-  //      bump would make old daemons reject new clients outright.
-  //      The field is a pure optimization hint: an old daemon
-  //      skipping it keeps today's static behavior, which is the
-  //      intended mixed-version outcome — nothing safety-critical
-  //      is lost, unlike the v2 case.
+  //   2 (unchanged, historical ue-r2-1b): briefly added
+  //      `receiver_capacity` without a bump. otp-10c-2 later deleted that
+  //      field and reserved tag 12 because capacity belongs to the session
+  //      handshake. The service now requires same-build peers, so the old
+  //      mixed-version rationale is no longer an active contract.
   uint32 spec_version = 1;
 
   // Origin-side module name. Empty means "use default root export".
@@ -992,18 +989,18 @@ message SessionAccept {
 message DataPlaneGrant {
   uint32 tcp_port = 1;
   bytes session_token = 2;
-  // ACCEPT ceiling, not a dial order (D-2026-06-20-1/-2: the SENDER
-  // owns the dial): the number of epoch-0 accept slots the responder
-  // arms — min(engine dial floor, DESTINATION capacity ceiling).
-  // SOURCE may dial fewer; unclaimed slots expire. Growth happens
-  // only via SOURCE-initiated resize (sf-2 shape correction), one
-  // armed accept per ADD epoch.
+  // Exact epoch-0 logical membership and socket count:
+  // min(engine dial floor, resolved DESTINATION capacity ceiling).
+  // The responder arms this many accepts and the initiator opens this many
+  // sockets. Later ADD/REMOVE membership is SOURCE-controlled telemetry,
+  // never a workload-shape target.
   uint32 initial_streams = 3;
   // Epoch-0 socket credential. Auth handshake per socket
   // (docs/TRANSFER_SESSION.md §Transport): session_token (16 bytes)
   // then epoch0_sub_token (16 bytes) for epoch-0 sockets;
   // session_token then the epoch's sub_token for resize-ADD sockets.
-  // One socket per armed slot; unclaimed slots expire.
+  // Every exact epoch-0 slot must authenticate; each ADD token admits one
+  // additional socket. A missing required socket faults/cleans up the session.
   bytes epoch0_sub_token = 4;
 }
 

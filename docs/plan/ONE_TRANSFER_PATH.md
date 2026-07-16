@@ -97,18 +97,18 @@ no second code path to differ.
   unlimited). The session's role model must express this — profile
   travels DESTINATION→SOURCE at setup regardless of who initiated —
   and otp-1's contract names it explicitly.
-- **Current implementation drift (2026-07-16):** cutover retained only
-  sf-2's static, ADD-only shape correction; production `TransferSession`
-  does not start the existing telemetry tuner or accept REMOVE. Active
+- **Live dial correction (2026-07-16):**
   `docs/plan/LIVE_DIAL_TUNING.md` (D-2026-07-16-2) owns the reviewed
-  correction. Until it
-  lands, exact-8 role parity is static-policy parity, not live-dial
-  completion.
+  correction. Its ldt-2 cutover removed sf-2's static ADD-only shape target
+  and put the same telemetry-driven ADD/REMOVE controller behind both SOURCE
+  socket layouts. Lifecycle/observer closure and hardware evidence remain its
+  later slices.
 - Wire contract discipline (REV4 rule): the unified session's proto —
   messages, field numbers, capability negotiation, transport
   selection — is a reviewed doc+proto slice **before** any behavior
   depends on it.
-- Every slice through the codex loop (D-2026-07-04-1); tree green
+- Every slice through neutral Claude openreview (D-2026-07-04-1,
+  D-2026-07-16-1); tree green
   after every slice; transitional coexistence of old+new paths is
   scaffolding only — the plan is not Shipped until the deletion slice
   lands and the deletion proof is recorded.

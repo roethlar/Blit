@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Tripwire + stream-scaling harness (SMALL_FILE_CEILING sf-1).
+# Tripwire + historical socket-completion diagnostic (SMALL_FILE_CEILING sf-1).
 #
 # Re-runs the 2026-07-05 tool-comparison matrix against any daemon host
-# in one command, plus a stream-scaling probe (files/s vs negotiated
-# stream count). Derived from scripts/bench_10gbe.sh and the ad-hoc
+# in one command, plus a historical files/s vs cumulative completed-socket
+# diagnostic. It does not observe settled/peak live membership and therefore
+# cannot grade adaptive worker policy. Derived from scripts/bench_10gbe.sh and the ad-hoc
 # session runner behind docs/bench/10gbe-2026-07-05/tool_comparison.csv
 # (same CSV schema, so runs are directly comparable to the committed
 # baseline).
@@ -40,10 +41,10 @@
 #                      the shared root; rsyncd cells are probed and
 #                      skipped if no daemon answers). Set BLIT_PORT/
 #                      BLIT_MODULE/RSYNCD_PORT to match, and BLITD_LOG
-#                      for scale-mode stream counts.
+#                      for scale-mode socket-completion counts.
 #   BLIT_PORT=9031  BLIT_MODULE=default  RSYNCD_PORT=8730
 #   BLITD_LOG          remote path of blitd's stderr log (scale mode
-#                      stream counting when SPIN_DAEMONS=0)
+#                      completion counting when SPIN_DAEMONS=0)
 #   RUNS=2             timed runs per cell (baseline was best-of-2)
 #   TIMEOUT_S=600      per-run cap (a wedged tool records status 124)
 #   RCLONE_TRANSFERS=16  rclone best-config concurrency (fairness flags
@@ -51,8 +52,9 @@
 #                      docs/bench/10gbe-2026-07-05/DIAGNOSIS.md)
 #   SIZE_MB=1024 SMALL_COUNT=10000 SMALL_SIZE=4096   workload knobs
 #   SCALE_COUNTS="200 1000 5000 10000 25000 50000"   probe file counts
-#                      (chosen to cross engine::initial_stream_proposal
-#                      tiers: expected proposals 1/2/4/8/8/10)
+#                      (historical spread retained for comparable scaling
+#                      diagnostics; live telemetry, not file count, now
+#                      chooses stream membership)
 #   BASELINE_CSV       committed baseline to diff blit cells against
 #                      (default docs/bench/10gbe-2026-07-05/tool_comparison.csv)
 #
@@ -307,16 +309,13 @@ run_matrix() {
 }
 
 # ── stream-scaling probe ─────────────────────────────────────────────
-# files/s vs the stream count the transfer ACTUALLY ran with, measured
-# from the daemon's per-stream completion lines ("stream complete",
-# data_plane.rs) — not from what the proposal table says it should be.
-# The plan's acceptance curve: files/s rises with streams until a named
-# hardware limiter binds; flattening at a policy-chosen count is the
-# sf-2 finding.
+# Historical scale diagnostic. Its log count is cumulative socket completions,
+# not settled, peak, or final logical membership under live ADD/REMOVE, so it
+# cannot grade adaptive worker policy without re-derived instrumentation.
 run_scale() {
     [[ -n "$DAEMON_HOST" ]] || { log "scale mode needs DAEMON_HOST"; return; }
-    echo "files,bytes,ms,files_per_sec,streams,status" > "$SCALE_CSV"
-    local count src target before streams start end ms status
+    echo "files,bytes,ms,files_per_sec,completed_sockets,status" > "$SCALE_CSV"
+    local count src target before completed_sockets start end ms status
     for count in $SCALE_COUNTS; do
         src="$WORK/scale_src_$count"
         log "=== scale probe: $count x ${SMALL_SIZE}B ==="
@@ -330,15 +329,15 @@ run_scale() {
         timeout "$TIMEOUT_S" "$BLIT" copy "$src/" "${BLIT_EP}${REL}push/scale_$count/" --yes >/dev/null 2>&1 || status=$?
         end=$(date +%s%N)
         ms=$(( (end - start) / 1000000 ))
-        streams=""
-        [[ -n "$BLITD_LOG" ]] && streams=$(rssh "tail -n +$(( before + 1 )) '$BLITD_LOG' 2>/dev/null | grep -c 'stream complete'" || echo "")
+        completed_sockets=""
+        [[ -n "$BLITD_LOG" ]] && completed_sockets=$(rssh "tail -n +$(( before + 1 )) '$BLITD_LOG' 2>/dev/null | grep -c 'stream complete'" || echo "")
         local fps
         fps=$(awk -v c="$count" -v ms="$ms" 'BEGIN { if (ms > 0) printf "%.1f", c * 1000 / ms; else printf "0" }')
-        log "  $count files: ${ms}ms  ${fps} files/s  streams=${streams:-?} (status $status)"
-        echo "$count,$(( count * SMALL_SIZE )),$ms,$fps,${streams},$status" >> "$SCALE_CSV"
+        log "  $count files: ${ms}ms  ${fps} files/s  completed_sockets=${completed_sockets:-?} (status $status)"
+        echo "$count,$(( count * SMALL_SIZE )),$ms,$fps,${completed_sockets},$status" >> "$SCALE_CSV"
         rm -rf "$src"
     done
-    [[ -n "$BLITD_LOG" ]] || log "NOTE: no BLITD_LOG — streams column empty (set it, or use SPIN_DAEMONS=1)"
+    [[ -n "$BLITD_LOG" ]] || log "NOTE: no BLITD_LOG — completed_sockets column empty (set it, or use SPIN_DAEMONS=1)"
 }
 
 # ── summary: best-of per cell, tripwire verdict, baseline delta ─────

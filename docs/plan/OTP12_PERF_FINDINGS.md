@@ -16,6 +16,12 @@ factual claim was settled by *measurement* (the same-OS rig refuted a
 claim four review rounds had left standing). pf-1 exists to generate
 ground truth; it starts now.
 
+**Historical worker-policy boundary (ldt-2, 2026-07-16):** every target-eight
+trace and conclusion in this document is anchored to the pre-ldt-2 static
+policy, including reviewed build `8e019ef`. Preserve those measurements as
+historical controls; they do not describe or prove the current adaptive
+ADD/REMOVE controller.
+
 **⚠ THE DECISION P1 NEEDS (surfaced round 5, owner's to make — NOT
 assumed by this plan):** P1 has **no escape hatch on the books**.
 D-2026-07-12-1 waives a cross-direction converge-up miss only for a cell

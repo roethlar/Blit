@@ -299,13 +299,13 @@ final worker count alone are not evidence that the tuner ran correctly.
 
 ### 6. Durable contract correction
 
-The active parent plan and session contract must say, before implementation,
-that live telemetry is the intended authority and that current HEAD is in
-drift. When the cutover slice lands, remove the drift warning and update
-`docs/STATE.md`, `REVIEW.md`, and the obsolete sf-2/exact-8 records with
-pointers to this plan and its reviewed evidence. Historical findings remain
+The ldt-2 cutover makes the active parent plan and session contract name live
+telemetry as the worker authority, removes the pre-cutover drift warning, and
+updates `docs/STATE.md`, `REVIEW.md`, and the obsolete sf-2/exact-8 records with
+pointers to this plan and its candidate evidence. Historical findings remain
 historical; they are annotated, not rewritten to pretend they proved adaptive
-tuning.
+tuning. Acceptance and reviewed evidence are recorded only after the fixed-SHA
+review passes.
 
 ## Affected files
 
@@ -332,7 +332,8 @@ tuning.
 
 ## Slices
 
-Each slice is one reviewloop finding and one commit before review fixes.
+Each slice is one committed whole-change openreview candidate before any
+one-finding-per-commit review fixes.
 
 1. **ldt-1 — acknowledged elastic membership.** Make pipeline ADD/REMOVE
    return exact membership outcomes; bind probes to member IDs; preserve the

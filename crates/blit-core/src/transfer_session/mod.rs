@@ -37,11 +37,11 @@ use tokio::sync::{mpsc, watch};
 use crate::copy::DEFAULT_BLOCK_SIZE;
 use crate::generated::transfer_frame::Frame;
 use crate::generated::{
-    session_error, BlockHashList, BlockTransfer, BlockTransferComplete, ComparisonMode,
-    DataPlaneResize, DataPlaneResizeAck, DataPlaneResizeOp, FileData, FileHeader, FilterSpec,
-    ManifestComplete, MirrorMode, NeedBatch, NeedComplete, NeedEntry, SessionAccept, SessionError,
-    SessionHello, SessionOpen, SourceDone, TarShardComplete, TarShardHeader, TransferFrame,
-    TransferRole, TransferSummary,
+    session_error, BlockHashList, BlockTransfer, BlockTransferComplete, CapacityProfile,
+    ComparisonMode, DataPlaneResize, DataPlaneResizeAck, DataPlaneResizeOp, FileData, FileHeader,
+    FilterSpec, ManifestComplete, MirrorMode, NeedBatch, NeedComplete, NeedEntry, SessionAccept,
+    SessionError, SessionHello, SessionOpen, SourceDone, TarShardComplete, TarShardHeader,
+    TransferFrame, TransferRole, TransferSummary,
 };
 use crate::manifest::{header_transfer_status, CompareMode, CompareOptions, FileStatus};
 use crate::remote::transfer::diff_planner;
@@ -204,6 +204,24 @@ pub struct SourceSessionConfig {
 /// unreadable-scan gate ride these). Everything is inactive by default
 /// unless an explicit process-level probe flag enables it; the session's
 /// behavior on the wire is identical either way.
+#[cfg(test)]
+pub(crate) struct DialTestSample {
+    delta_bytes: u64,
+    blocked_ratio: f64,
+    reply: tokio::sync::oneshot::Sender<DialTestObservation>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DialTestObservation {
+    proposal: Option<crate::dial::ResizeProposal>,
+    live_streams: usize,
+    settled_epoch: u32,
+}
+
+#[cfg(test)]
+pub(crate) type DialTestSamples = Arc<StdMutex<Option<mpsc::UnboundedReceiver<DialTestSample>>>>;
+
 #[derive(Clone, Default)]
 pub struct SourceInstruments {
     /// w6-1 progress events, reported exactly where the old push driver
@@ -228,6 +246,10 @@ pub struct SourceInstruments {
     /// High-volume aggregate observer for otp-12 small-file attribution.
     /// Separate from the low-frequency phase trace and disabled by default.
     pub small_file_probe: SmallFileProbe,
+    /// Deterministic sample source used only by in-crate role guards. The
+    /// production build has no such field and always samples live probes.
+    #[cfg(test)]
+    pub(crate) dial_test_samples: Option<DialTestSamples>,
 }
 
 pub struct DestinationSessionConfig {
@@ -241,6 +263,12 @@ pub struct DestinationSessionConfig {
     /// rather than dials — falls back to the in-stream carrier. Symmetric
     /// with [`SourceSessionConfig::data_plane_host`].
     pub data_plane_host: Option<String>,
+    /// Capacity this byte receiver advertises and enforces. `None` snapshots
+    /// [`crate::dial::local_receiver_capacity`] once at session start. Tests
+    /// and constrained callers may supply a lower honest receiver limit; the
+    /// same profile drives the wire advertisement, epoch-0 floor, and resize
+    /// admission in either connection layout.
+    pub receiver_capacity: Option<CapacityProfile>,
     /// Caller-side observability hooks (otp-10b-2). All default-off; the
     /// daemon DESTINATION responder runs with the defaults. Symmetric
     /// with [`SourceSessionConfig::instruments`].
@@ -807,6 +835,7 @@ async fn responder_finish(
     validate_open: &OpenValidator,
     resolve_open: Option<&OpenResolver>,
     policy: &ResponderPolicy,
+    local_receiver_capacity: Option<&CapacityProfile>,
 ) -> Result<Negotiated> {
     // The initiator declares ITS role; this responder end must
     // hold the complement.
@@ -880,20 +909,21 @@ async fn responder_finish(
     // travel as binary BLOCK/BLOCK_COMPLETE records on the sockets (the
     // otp-7a in-stream frames remain the fallback carrier), so the grant
     // is no longer suppressed for a resume session.
+    let receiver_capacity = if local_role == TransferRole::Destination {
+        local_receiver_capacity
+    } else {
+        open.receiver_capacity.as_ref()
+    };
     let responder_data_plane = if open.in_stream_bytes || policy.force_in_stream {
         None
     } else {
-        data_plane::prepare_responder_data_plane().await
+        data_plane::prepare_responder_data_plane(receiver_capacity).await
     };
     let accept = SessionAccept {
         // The byte RECEIVER advertises capacity at session
         // open (D-2026-06-20-1/-2); consumed by the dial when
         // the data plane lands (otp-4b).
-        receiver_capacity: if local_role == TransferRole::Destination {
-            Some(crate::dial::local_receiver_capacity())
-        } else {
-            None
-        },
+        receiver_capacity: local_receiver_capacity.cloned(),
         // Grant present ⇒ TCP data plane; absent ⇒ in-stream.
         data_plane: responder_data_plane.as_ref().map(|dp| dp.grant()),
     };
@@ -919,6 +949,7 @@ async fn establish(
     // passes `validate_open` and before SessionAccept. `None` = the
     // caller supplies the root itself (Initiator, or fixed-root test).
     resolve_open: Option<&OpenResolver>,
+    local_receiver_capacity: Option<&CapacityProfile>,
 ) -> Result<Negotiated> {
     exchange_hello(transport, hello).await?;
 
@@ -969,6 +1000,7 @@ async fn establish(
                 validate_open,
                 resolve_open,
                 &ResponderPolicy::default(),
+                local_receiver_capacity,
             )
             .await
         }
@@ -1019,8 +1051,9 @@ enum SourceEvent {
     /// The destination's block hashes for a held resume need (otp-7a).
     BlockHashes(BlockHashList),
     NeedComplete,
-    /// The destination's ack of a `DataPlaneResize{ADD}` (otp-4b-2). The
-    /// send half dials the epoch-N socket on `accepted`.
+    /// The destination's acknowledgement of one ADD or REMOVE epoch. The
+    /// send half applies the accepted membership change through the common
+    /// SOURCE data plane and settles the live dial from the actual count.
     ResizeAck(DataPlaneResizeAck),
     Summary(TransferSummary),
     Fault(SessionFault),
@@ -1095,6 +1128,7 @@ pub async fn run_source(
         // (the in-process role suite) is handed a Fixed source. The
         // daemon SOURCE responder resolves module→root inside
         // `run_responder`, not here (otp-5).
+        None,
         None,
     )
     .await?;
@@ -1339,9 +1373,8 @@ async fn source_recv_half(
                 let _ = events.send(SourceEvent::NeedComplete);
             }
             Some(Frame::ResizeAck(ack)) => {
-                // The destination's response to a shape-resize proposal
-                // (otp-4b-2). Forward it to the send half, which owns the
-                // dial and dials the epoch-N socket on `accepted`.
+                // Forward the destination's resize response to the SOURCE
+                // send half, which owns dial and membership settlement.
                 if let Some(trace) = &phase_trace {
                     trace.event(
                         "resize_ack_received",
@@ -1383,6 +1416,62 @@ struct ResumeSendState {
     ready: Vec<(FileHeader, BlockHashList)>,
 }
 
+struct SourceResizeState {
+    proposals: Option<mpsc::UnboundedReceiver<crate::dial::ResizeProposal>>,
+    pending: Option<data_plane::PendingResize>,
+    last_ack: Option<DataPlaneResizeAck>,
+}
+
+impl SourceResizeState {
+    fn take_pending_for_ack(
+        &mut self,
+        ack: &DataPlaneResizeAck,
+    ) -> Result<Option<data_plane::PendingResize>> {
+        if self.last_ack.as_ref().is_some_and(|settled| settled == ack) {
+            return Ok(None);
+        }
+        match self.pending.take() {
+            Some(pending) if pending.epoch == ack.epoch => Ok(Some(pending)),
+            Some(pending) => {
+                let expected = pending.epoch;
+                self.pending = Some(pending);
+                Err(eyre::Report::new(SessionFault::protocol_violation(
+                    format!(
+                        "DataPlaneResizeAck epoch {} while epoch {expected} is pending",
+                        ack.epoch
+                    ),
+                )))
+            }
+            None => Err(eyre::Report::new(SessionFault::protocol_violation(
+                format!("unsolicited DataPlaneResizeAck epoch {}", ack.epoch),
+            ))),
+        }
+    }
+}
+
+fn validate_source_resize_ack(
+    pending: &data_plane::PendingResize,
+    current_streams: usize,
+    ack: &DataPlaneResizeAck,
+) -> Result<()> {
+    let effective = ack.effective_stream_count as usize;
+    let expected = if ack.accepted {
+        pending.target_streams as usize
+    } else {
+        current_streams
+    };
+    if effective != expected {
+        let disposition = if ack.accepted { "accepted" } else { "refused" };
+        return Err(eyre::Report::new(SessionFault::protocol_violation(
+            format!(
+                "{disposition} resize epoch {} reported effective {effective}, expected {expected}",
+                pending.epoch
+            ),
+        )));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn source_send_half(
     plan_options: PlanOptions,
@@ -1413,10 +1502,10 @@ async fn source_send_half(
     // `SourceDataPlane` driven identically below. `None` on both ⇒ the
     // in-stream carrier (fallback), which needs no early setup.
     let mut data_plane = match responder_data_plane {
-        // SOURCE responder (pull, otp-5b): accept + send. The DESTINATION
-        // initiator advertised its capacity in the open (byte RECEIVER
-        // advertises, wherever it initiates); the accept plane is single-
-        // stream (otp-5b-1).
+        // SOURCE responder: accept + send. The DESTINATION initiator
+        // advertised its capacity in the open (the byte RECEIVER advertises,
+        // wherever it initiates); epoch 0 uses the same receiver-bounded
+        // floor as the dial layout and later epochs use the same controller.
         Some(bound) => Some(
             data_plane::accept_source_data_plane(
                 bound,
@@ -1454,14 +1543,15 @@ async fn source_send_half(
         },
     };
 
-    // sf-2 shape correction (otp-4b-2): running totals of the need list,
-    // fed to the shape table so the SOURCE grows the data-plane stream
-    // count as the workload's shape becomes known. Append-only (a need is
-    // counted once, when it arrives), and the in-flight resize record the
-    // ack is matched against (at most one — the dial enforces it).
-    let mut needed_bytes: u64 = 0;
-    let mut needed_count: usize = 0;
-    let mut pending_resize: Option<data_plane::PendingResize> = None;
+    let proposals = match data_plane.as_mut() {
+        Some(dp) => Some(dp.take_resize_proposals()?),
+        None => None,
+    };
+    let mut resize = SourceResizeState {
+        proposals,
+        pending: None,
+        last_ack: None,
+    };
 
     // Streaming manifest: entries go out as enumeration produces them
     // (immediate start in every direction — plan §Design 2). The open
@@ -1526,19 +1616,17 @@ async fn source_send_half(
                 .insert(header.relative_path.clone(), header.clone());
         }
         tx.send(frame(Frame::ManifestEntry(header))).await?;
-        // Faults detected by the receive half abort the stream now,
-        // not after the full scan; needs just accumulate. (Resize acks
-        // cannot arrive yet — none is proposed before the payload phase.)
+        // Faults detected by the receive half abort the stream now, not after
+        // the full scan. A deterministic or unusually early live sample is
+        // serviced through the same SOURCE controller here as during payloads.
         drain_ready_source_events(
             &mut events,
             &mut pending,
             &mut resume,
             &mut need_complete,
-            &mut needed_bytes,
-            &mut needed_count,
             data_plane.as_ref(),
             tx,
-            &mut pending_resize,
+            &mut resize,
             small_file_probe.as_ref(),
         )
         .await?;
@@ -1591,11 +1679,9 @@ async fn source_send_half(
             &mut pending,
             &mut resume,
             &mut need_complete,
-            &mut needed_bytes,
-            &mut needed_count,
             data_plane.as_ref(),
             tx,
-            &mut pending_resize,
+            &mut resize,
             small_file_probe.as_ref(),
         )
         .await?;
@@ -1603,13 +1689,6 @@ async fn source_send_half(
             let batch = std::mem::take(&mut pending);
             match &mut data_plane {
                 Some(dp) => {
-                    // sf-2: propose toward the accumulated shape, then put
-                    // payload onto the floor worker immediately. The bounded
-                    // queue is selected against SOURCE events below, so ACKs
-                    // grow this SAME work-stealing pipeline without placing
-                    // the one-RTT-per-epoch ramp on the first-byte path.
-                    maybe_propose_resize(dp, tx, needed_bytes, needed_count, &mut pending_resize)
-                        .await?;
                     let batch_count = batch.len() as u64;
                     if let Some(trace) = &phase_trace {
                         trace.event(
@@ -1652,11 +1731,9 @@ async fn source_send_half(
                         &mut pending,
                         &mut resume,
                         &mut need_complete,
-                        &mut needed_bytes,
-                        &mut needed_count,
                         dp,
                         tx,
-                        &mut pending_resize,
+                        &mut resize,
                         small_file_probe.as_ref(),
                     )
                     .await?;
@@ -1708,12 +1785,6 @@ async fn source_send_half(
             let ready = std::mem::take(&mut resume.ready);
             match &mut data_plane {
                 Some(dp) => {
-                    // codex 7b-1 F4: resume batches drive the sf-2 shape
-                    // correction exactly as plain batches do — a
-                    // resume-heavy need list must not stay pinned to the
-                    // zero-knowledge single stream.
-                    maybe_propose_resize(dp, tx, needed_bytes, needed_count, &mut pending_resize)
-                        .await?;
                     let payloads = ready
                         .into_iter()
                         .map(|(header, hashes)| TransferPayload::ResumeFile {
@@ -1728,11 +1799,9 @@ async fn source_send_half(
                         &mut pending,
                         &mut resume,
                         &mut need_complete,
-                        &mut needed_bytes,
-                        &mut needed_count,
                         dp,
                         tx,
-                        &mut pending_resize,
+                        &mut resize,
                         small_file_probe.as_ref(),
                     )
                     .await?;
@@ -1769,50 +1838,35 @@ async fn source_send_half(
         if need_complete {
             break;
         }
-        match events.recv().await {
-            Some(event) => {
-                process_source_event(
-                    event,
-                    &mut pending,
-                    &mut resume,
-                    &mut need_complete,
-                    &mut needed_bytes,
-                    &mut needed_count,
-                    data_plane.as_ref(),
-                    tx,
-                    &mut pending_resize,
-                    small_file_probe.as_ref(),
-                )
-                .await?;
-            }
-            None => {
-                return Err(eyre::Report::new(SessionFault::internal(
-                    "source receive half ended before NeedComplete",
-                )))
-            }
-        }
-    }
-
-    // Every need is now planned and queued. Close the payload input first:
-    // existing workers keep draining, idle workers emit END, and any late
-    // ADD either joins remaining work or immediately emits END. Then drive
-    // the residual one-stream-per-epoch ramp to the full, now-stable shape
-    // target. This guarantees initiator-independent final worker count
-    // without delaying first byte or leaving a receiver idle across the
-    // serialized control RTTs.
-    if let Some(dp) = &mut data_plane {
-        dp.close_payloads()?;
-        maybe_propose_resize(dp, tx, needed_bytes, needed_count, &mut pending_resize).await?;
-        settle_shape_resizes(
+        wait_for_source_input(
             &mut events,
             &mut pending,
             &mut resume,
             &mut need_complete,
-            &mut needed_bytes,
-            &mut needed_count,
+            data_plane.as_ref(),
+            tx,
+            &mut resize,
+            small_file_probe.as_ref(),
+        )
+        .await?;
+    }
+
+    // Demand is complete. Stop sampling and decline a proposal that was
+    // claimed locally but never sent; then seal payload admission. A request
+    // already on the wire still settles through ldt-1's terminal membership
+    // outcomes, but no tail convergence opens idle sockets.
+    if let Some(dp) = &mut data_plane {
+        dp.stop_tuner().await?;
+        stop_resize_intake(dp, &mut resize);
+        dp.close_payloads()?;
+        settle_inflight_resize(
+            &mut events,
+            &mut pending,
+            &mut resume,
+            &mut need_complete,
             dp,
             tx,
-            &mut pending_resize,
+            &mut resize,
             small_file_probe.as_ref(),
         )
         .await?;
@@ -1886,54 +1940,118 @@ async fn source_send_half(
     }
 }
 
-/// Process every event ready right now (needs accumulating, resize acks
-/// dialing their epoch-N socket) without blocking. Called between
-/// manifest sends and at the top of the payload loop.
+/// Drain ready peer events and live-dial proposals without blocking. Peer
+/// events go first so an ACK always clears its epoch before the next sample
+/// can be forwarded.
 #[allow(clippy::too_many_arguments)]
 async fn drain_ready_source_events(
     events: &mut mpsc::UnboundedReceiver<SourceEvent>,
     pending: &mut Vec<FileHeader>,
     resume: &mut ResumeSendState,
     need_complete: &mut bool,
-    needed_bytes: &mut u64,
-    needed_count: &mut usize,
     data_plane: Option<&data_plane::SourceDataPlane>,
     tx: &mut Box<dyn FrameTx>,
-    pending_resize: &mut Option<data_plane::PendingResize>,
+    resize: &mut SourceResizeState,
     small_file_probe: Option<&BoundSmallFileProbe>,
 ) -> Result<()> {
-    while let Ok(event) = events.try_recv() {
-        process_source_event(
-            event,
-            pending,
-            resume,
-            need_complete,
-            needed_bytes,
-            needed_count,
-            data_plane,
-            tx,
-            pending_resize,
-            small_file_probe,
-        )
-        .await?;
+    loop {
+        if let Ok(event) = events.try_recv() {
+            process_source_event(
+                event,
+                pending,
+                resume,
+                need_complete,
+                data_plane,
+                resize,
+                small_file_probe,
+            )
+            .await?;
+            continue;
+        }
+        let proposal = match resize.proposals.as_mut() {
+            Some(proposals) => match proposals.try_recv() {
+                Ok(proposal) => Some(proposal),
+                Err(mpsc::error::TryRecvError::Empty) => None,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    resize.proposals = None;
+                    None
+                }
+            },
+            None => None,
+        };
+        let Some(proposal) = proposal else { break };
+        let dp = data_plane.ok_or_else(|| {
+            eyre::Report::new(SessionFault::internal(
+                "live dial proposed a resize without a TCP data plane",
+            ))
+        })?;
+        send_resize_proposal(dp, tx, proposal, resize).await?;
     }
     Ok(())
 }
 
-/// Handle one source event. Needs accumulate into `pending` and the
-/// shape totals; a resize ack dials its epoch-N socket and proposes the
-/// next ADD (the one-per-epoch ramp).
 #[allow(clippy::too_many_arguments)]
+async fn wait_for_source_input(
+    events: &mut mpsc::UnboundedReceiver<SourceEvent>,
+    pending: &mut Vec<FileHeader>,
+    resume: &mut ResumeSendState,
+    need_complete: &mut bool,
+    data_plane: Option<&data_plane::SourceDataPlane>,
+    tx: &mut Box<dyn FrameTx>,
+    resize: &mut SourceResizeState,
+    small_file_probe: Option<&BoundSmallFileProbe>,
+) -> Result<()> {
+    loop {
+        let proposal = async {
+            match resize.proposals.as_mut() {
+                Some(proposals) => proposals.recv().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            biased;
+            event = events.recv() => {
+                let event = event.ok_or_else(|| {
+                    eyre::Report::new(SessionFault::internal(
+                        "source receive half ended before NeedComplete",
+                    ))
+                })?;
+                return process_source_event(
+                    event,
+                    pending,
+                    resume,
+                    need_complete,
+                    data_plane,
+                    resize,
+                    small_file_probe,
+                ).await;
+            }
+            proposal = proposal => {
+                match proposal {
+                    Some(proposal) => {
+                        let dp = data_plane.ok_or_else(|| {
+                            eyre::Report::new(SessionFault::internal(
+                                "live dial proposed a resize without a TCP data plane",
+                            ))
+                        })?;
+                        return send_resize_proposal(dp, tx, proposal, resize).await;
+                    }
+                    None => resize.proposals = None,
+                }
+            }
+        }
+    }
+}
+
+/// Handle one SOURCE control event. Need shape affects planning only; worker
+/// count changes exclusively through the live dial proposal stream.
 async fn process_source_event(
     event: SourceEvent,
     pending: &mut Vec<FileHeader>,
     resume: &mut ResumeSendState,
     need_complete: &mut bool,
-    needed_bytes: &mut u64,
-    needed_count: &mut usize,
     data_plane: Option<&data_plane::SourceDataPlane>,
-    tx: &mut Box<dyn FrameTx>,
-    pending_resize: &mut Option<data_plane::PendingResize>,
+    resize: &mut SourceResizeState,
     small_file_probe: Option<&BoundSmallFileProbe>,
 ) -> Result<()> {
     match event {
@@ -1948,8 +2066,6 @@ async fn process_source_event(
                     format!("need for '{}' after NeedComplete", header.relative_path),
                 )));
             }
-            *needed_bytes = needed_bytes.saturating_add(header.size);
-            *needed_count += 1;
             pending.push(header);
             if let (Some(probe), Some(started)) = (small_file_probe, process_started) {
                 probe.note_need_handler_work(started.elapsed());
@@ -1970,11 +2086,6 @@ async fn process_source_event(
                     ),
                 )));
             }
-            // Shape totals count the whole file — the diff hasn't run
-            // yet, so the need list's implied workload is the honest
-            // upper bound (same accounting a plain need gets).
-            *needed_bytes = needed_bytes.saturating_add(header.size);
-            *needed_count += 1;
             // HELD until its BlockHashList arrives; no duplicate is
             // possible (the receive half's sent-map removal already
             // faults a second need for the same path).
@@ -2049,69 +2160,80 @@ async fn process_source_event(
                     "DataPlaneResizeAck on a session with no data plane",
                 ))
             })?;
-            // Match the ack to the in-flight proposal; stale/unsolicited
-            // acks (wrong epoch, or none pending) are ignored, matching
-            // old push. `take()` + restore keeps the borrow simple.
-            let pending_r = match pending_resize.take() {
-                Some(p) if p.epoch == ack.epoch => p,
-                restored => {
-                    *pending_resize = restored;
-                    return Ok(());
-                }
+            let Some(pending_r) = resize.take_pending_for_ack(&ack)? else {
+                return Ok(());
             };
+            let current = dp.dial().live_streams();
+            validate_source_resize_ack(&pending_r, current, &ack)?;
             if ack.accepted {
-                let membership = dp.add_stream(pending_r.epoch, &pending_r.sub_token).await?;
-                let logical_count = match membership {
-                    MembershipOutcome::Joined { logical_count, .. }
-                    | MembershipOutcome::JoinedThenEnded { logical_count, .. } => logical_count,
-                    other => {
+                let membership = match pending_r.op {
+                    DataPlaneResizeOp::Add => {
+                        let token = pending_r.sub_token.as_deref().ok_or_else(|| {
+                            eyre::Report::new(SessionFault::internal(
+                                "pending ADD has no sub-token",
+                            ))
+                        })?;
+                        dp.add_stream(pending_r.epoch, token).await?
+                    }
+                    DataPlaneResizeOp::Remove => {
+                        if pending_r.sub_token.is_some() {
+                            return Err(eyre::Report::new(SessionFault::internal(
+                                "pending REMOVE carries a sub-token",
+                            )));
+                        }
+                        dp.retire_stream().await?
+                    }
+                    DataPlaneResizeOp::Unspecified => {
+                        return Err(eyre::Report::new(SessionFault::internal(
+                            "pending resize has unspecified operation",
+                        )))
+                    }
+                };
+                let logical_count = match (pending_r.op, membership) {
+                    (
+                        DataPlaneResizeOp::Add,
+                        MembershipOutcome::Joined { logical_count, .. }
+                        | MembershipOutcome::JoinedThenEnded { logical_count, .. },
+                    ) => logical_count,
+                    (
+                        DataPlaneResizeOp::Remove,
+                        MembershipOutcome::RetireMarked { logical_count, .. }
+                        | MembershipOutcome::AlreadyEnded { logical_count, .. },
+                    ) => logical_count,
+                    (_, other) => {
                         return Err(eyre::Report::new(SessionFault::internal(format!(
-                            "accepted ADD produced unexpected membership outcome {other:?}"
+                            "accepted {} produced unexpected membership outcome {other:?}",
+                            pending_r.op.as_str_name()
                         ))))
                     }
                 };
                 if logical_count != pending_r.target_streams as usize {
                     return Err(eyre::Report::new(SessionFault::internal(format!(
-                        "accepted ADD settled {logical_count} members, expected {}",
+                        "accepted {} settled {logical_count} members, expected {}",
+                        pending_r.op.as_str_name(),
                         pending_r.target_streams
                     ))));
                 }
                 dp.dial()
                     .resize_settled(pending_r.epoch, pending_r.target_streams as usize, true);
-                if let Some(trace) = dp.phase_trace() {
-                    trace.event(
-                        "source_settled",
-                        SessionPhaseFields {
-                            epoch: Some(pending_r.epoch),
-                            target_streams: Some(pending_r.target_streams),
-                            live_streams: Some(dp.dial().live_streams() as u32),
-                            accepted: Some(true),
-                            ..Default::default()
-                        },
-                    );
-                }
-                // Ramp one stream per accepted epoch: propose the next ADD.
-                maybe_propose_resize(dp, tx, *needed_bytes, *needed_count, pending_resize).await
             } else {
-                dp.dial()
-                    .resize_settled(pending_r.epoch, dp.dial().live_streams(), false);
-                if let Some(trace) = dp.phase_trace() {
-                    trace.event(
-                        "source_settled",
-                        SessionPhaseFields {
-                            epoch: Some(pending_r.epoch),
-                            target_streams: Some(pending_r.target_streams),
-                            live_streams: Some(dp.dial().live_streams() as u32),
-                            accepted: Some(false),
-                            ..Default::default()
-                        },
-                    );
-                }
-                // A refusal is terminal for this shape ramp. Retrying the
-                // same unattainable target under a fresh epoch would loop
-                // forever; the settled live set still carries the transfer.
-                Ok(())
+                dp.dial().resize_settled(pending_r.epoch, current, false);
             }
+            if let Some(trace) = dp.phase_trace() {
+                trace.event(
+                    "source_settled",
+                    SessionPhaseFields {
+                        action: Some(pending_r.op.as_str_name()),
+                        epoch: Some(pending_r.epoch),
+                        target_streams: Some(pending_r.target_streams),
+                        live_streams: Some(dp.dial().live_streams() as u32),
+                        accepted: Some(ack.accepted),
+                        ..Default::default()
+                    },
+                );
+            }
+            resize.last_ack = Some(ack);
+            Ok(())
         }
         SourceEvent::Summary(_) => Err(eyre::Report::new(SessionFault::protocol_violation(
             "TransferSummary before SourceDone",
@@ -2120,28 +2242,26 @@ async fn process_source_event(
     }
 }
 
-/// Propose one shape-correction resize (`DataPlaneResize{ADD}`) toward
-/// the stream count the accumulated need list implies, if none is in
-/// flight. A no-op when the shape wants no more than the live count (the
-/// dial returns `None`). Sends the frame and records the in-flight
-/// proposal for the ack to match.
-async fn maybe_propose_resize(
+async fn send_resize_proposal(
     dp: &data_plane::SourceDataPlane,
     tx: &mut Box<dyn FrameTx>,
-    needed_bytes: u64,
-    needed_count: usize,
-    pending_resize: &mut Option<data_plane::PendingResize>,
+    proposal: crate::dial::ResizeProposal,
+    resize: &mut SourceResizeState,
 ) -> Result<()> {
-    if pending_resize.is_some() {
-        return Ok(());
+    if resize.pending.is_some() {
+        dp.refuse_unsent_resize(proposal);
+        return Err(eyre::Report::new(SessionFault::internal(
+            "live dial emitted a second proposal while one is in flight",
+        )));
     }
-    if let Some(proposal) = dp.propose_resize(needed_bytes, needed_count)? {
+    if let Some(pending) = dp.prepare_resize(proposal)? {
         if let Some(trace) = dp.phase_trace() {
             trace.event(
                 "resize_proposed",
                 SessionPhaseFields {
-                    epoch: Some(proposal.epoch),
-                    target_streams: Some(proposal.target_streams),
+                    action: Some(pending.op.as_str_name()),
+                    epoch: Some(pending.epoch),
+                    target_streams: Some(pending.target_streams),
                     live_streams: Some(dp.dial().live_streams() as u32),
                     ..Default::default()
                 },
@@ -2151,32 +2271,38 @@ async fn maybe_propose_resize(
             trace.event(
                 "resize_send_begin",
                 SessionPhaseFields {
-                    epoch: Some(proposal.epoch),
-                    target_streams: Some(proposal.target_streams),
+                    action: Some(pending.op.as_str_name()),
+                    epoch: Some(pending.epoch),
+                    target_streams: Some(pending.target_streams),
                     live_streams: Some(dp.dial().live_streams() as u32),
                     ..Default::default()
                 },
             );
         }
-        tx.send(frame(Frame::Resize(DataPlaneResize {
-            op: DataPlaneResizeOp::Add as i32,
-            epoch: proposal.epoch,
-            target_stream_count: proposal.target_streams,
-            sub_token: proposal.sub_token.clone(),
-        })))
-        .await?;
+        let wire = DataPlaneResize {
+            op: pending.op as i32,
+            epoch: pending.epoch,
+            target_stream_count: pending.target_streams,
+            sub_token: pending.sub_token.clone().unwrap_or_default(),
+        };
+        if let Err(err) = tx.send(frame(Frame::Resize(wire))).await {
+            dp.dial()
+                .resize_settled(pending.epoch, dp.dial().live_streams(), false);
+            return Err(err);
+        }
         if let Some(trace) = dp.phase_trace() {
             trace.event(
                 "resize_sent",
                 SessionPhaseFields {
-                    epoch: Some(proposal.epoch),
-                    target_streams: Some(proposal.target_streams),
+                    action: Some(pending.op.as_str_name()),
+                    epoch: Some(pending.epoch),
+                    target_streams: Some(pending.target_streams),
                     live_streams: Some(dp.dial().live_streams() as u32),
                     ..Default::default()
                 },
             );
         }
-        *pending_resize = Some(proposal);
+        resize.pending = Some(pending);
     }
     Ok(())
 }
@@ -2184,8 +2310,8 @@ async fn maybe_propose_resize(
 /// Feed one planned batch into the shared bounded data-plane queue while
 /// continuing to service the SOURCE control lane. Queue readiness is biased
 /// first so epoch-0 work starts immediately; once backpressure applies,
-/// resize ACKs add workers to that same queue and newly arriving needs are
-/// retained for the next planner batch.
+/// resize ACKs apply ADD or REMOVE to that same queue and newly arriving needs
+/// are retained for the next planner batch.
 #[allow(clippy::too_many_arguments)]
 async fn queue_payloads_while_servicing_events(
     payloads: Vec<TransferPayload>,
@@ -2193,11 +2319,9 @@ async fn queue_payloads_while_servicing_events(
     pending: &mut Vec<FileHeader>,
     resume: &mut ResumeSendState,
     need_complete: &mut bool,
-    needed_bytes: &mut u64,
-    needed_count: &mut usize,
     data_plane: &data_plane::SourceDataPlane,
     tx: &mut Box<dyn FrameTx>,
-    pending_resize: &mut Option<data_plane::PendingResize>,
+    resize: &mut SourceResizeState,
     small_file_probe: Option<&BoundSmallFileProbe>,
 ) -> Result<()> {
     for payload in payloads {
@@ -2223,14 +2347,24 @@ async fn queue_payloads_while_servicing_events(
                         pending,
                         resume,
                         need_complete,
-                        needed_bytes,
-                        needed_count,
                         Some(data_plane),
-                        tx,
-                        pending_resize,
+                        resize,
                         small_file_probe,
                     )
                     .await?;
+                }
+                proposal = async {
+                    match resize.proposals.as_mut() {
+                        Some(proposals) => proposals.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match proposal {
+                        Some(proposal) => {
+                            send_resize_proposal(data_plane, tx, proposal, resize).await?;
+                        }
+                        None => resize.proposals = None,
+                    }
                 }
             }
         }
@@ -2238,28 +2372,31 @@ async fn queue_payloads_while_servicing_events(
     Ok(())
 }
 
-/// Drive the one-stream-per-epoch shape ramp to its final known target after
-/// the payload input has closed. Queued payloads continue moving while ACKs
-/// settle; workers with no work emit END instead of idling through the ramp.
-/// Each accepted ACK proposes the next epoch, and the loop ends only when no
-/// proposal is outstanding (target reached or the destination refused).
+fn stop_resize_intake(data_plane: &data_plane::SourceDataPlane, resize: &mut SourceResizeState) {
+    if let Some(mut proposals) = resize.proposals.take() {
+        proposals.close();
+        while let Ok(proposal) = proposals.try_recv() {
+            data_plane.refuse_unsent_resize(proposal);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn settle_shape_resizes(
+async fn settle_inflight_resize(
     events: &mut mpsc::UnboundedReceiver<SourceEvent>,
     pending: &mut Vec<FileHeader>,
     resume: &mut ResumeSendState,
     need_complete: &mut bool,
-    needed_bytes: &mut u64,
-    needed_count: &mut usize,
     data_plane: &data_plane::SourceDataPlane,
     tx: &mut Box<dyn FrameTx>,
-    pending_resize: &mut Option<data_plane::PendingResize>,
+    resize: &mut SourceResizeState,
     small_file_probe: Option<&BoundSmallFileProbe>,
 ) -> Result<()> {
-    while pending_resize.is_some() {
+    let _ = tx;
+    while resize.pending.is_some() {
         let event = events.recv().await.ok_or_else(|| {
             eyre::Report::new(SessionFault::internal(
-                "source receive half ended during data-plane shape resize",
+                "source receive half ended during data-plane resize",
             ))
         })?;
         process_source_event(
@@ -2267,11 +2404,8 @@ async fn settle_shape_resizes(
             pending,
             resume,
             need_complete,
-            needed_bytes,
-            needed_count,
             Some(data_plane),
-            tx,
-            pending_resize,
+            resize,
             small_file_probe,
         )
         .await?;
@@ -2284,7 +2418,7 @@ async fn settle_shape_resizes(
 /// mid-transfer `SessionError` (e.g. a `CancelJob` → `CANCELLED`) must
 /// abort the send and surface as the fault.
 ///
-/// The drain runs after the final shape ramp and before `SourceDone` goes
+/// The drain runs after proposal intake stops and before `SourceDone` goes
 /// out, so the event channel is drained and the peer sends nothing
 /// but (possibly) an abort frame — no `Need`, `NeedComplete`, `ResizeAck`,
 /// or `Summary` is legitimate here. So a `Fault` is returned as-is and any
@@ -2604,11 +2738,152 @@ pub struct DestinationOutcome {
     /// role suite pins these identical across role assignments — the
     /// executable form of the owner's invariance requirement.
     pub needed_paths: Vec<String>,
-    /// The settled data-plane stream count this end observed (epoch-0 +
-    /// accepted resizes), or `None` for the in-stream carrier. The sf-2
-    /// pin (otp-4b-2) reads it to assert shape correction grew the
-    /// stream set past the zero-knowledge single-stream grant.
+    /// Final settled logical data-plane membership (epoch 0 plus accepted
+    /// ADD/REMOVE epochs), or `None` for the in-stream carrier. This is not
+    /// the cumulative number of sockets ever opened.
     pub data_plane_streams: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum DestinationResizeDecision {
+    Apply(DataPlaneResizeOp),
+    Refuse,
+    Replay(DataPlaneResizeAck),
+}
+
+/// Receiver-side logical membership authority shared by both connection
+/// layouts. Socket acquisition remains role-specific, but epoch validation,
+/// bounds, duplicate replay, terminal refusal, and the exposed final count do
+/// not know which end opened the control connection.
+#[derive(Debug)]
+struct DestinationResizeState {
+    settled_epoch: u32,
+    live_streams: usize,
+    ceiling: usize,
+    refused: bool,
+    last_request: Option<DataPlaneResize>,
+    last_ack: Option<DataPlaneResizeAck>,
+}
+
+impl DestinationResizeState {
+    fn new(live_streams: usize, ceiling: usize) -> Self {
+        debug_assert!((1..=ceiling).contains(&live_streams));
+        Self {
+            settled_epoch: 0,
+            live_streams,
+            ceiling,
+            refused: false,
+            last_request: None,
+            last_ack: None,
+        }
+    }
+
+    fn classify(&self, request: &DataPlaneResize) -> Result<DestinationResizeDecision> {
+        if request.epoch == self.settled_epoch {
+            return match (&self.last_request, &self.last_ack) {
+                (Some(last_request), Some(last_ack)) if last_request == request => {
+                    Ok(DestinationResizeDecision::Replay(*last_ack))
+                }
+                _ => Err(violation(format!(
+                    "changed or unsolicited duplicate DataPlaneResize epoch {}",
+                    request.epoch
+                ))),
+            };
+        }
+
+        if request.epoch < self.settled_epoch {
+            return Err(violation(format!(
+                "stale DataPlaneResize epoch {} after settled epoch {}",
+                request.epoch, self.settled_epoch
+            )));
+        }
+        let expected_epoch = self
+            .settled_epoch
+            .checked_add(1)
+            .ok_or_else(|| violation("data-plane resize epoch space exhausted".to_string()))?;
+        if request.epoch != expected_epoch {
+            return Err(violation(format!(
+                "DataPlaneResize epoch {} while next epoch is {expected_epoch}",
+                request.epoch
+            )));
+        }
+        if self.refused {
+            return Err(violation(format!(
+                "DataPlaneResize epoch {} after terminal refusal",
+                request.epoch
+            )));
+        }
+
+        let op = DataPlaneResizeOp::try_from(request.op).map_err(|_| {
+            violation(format!(
+                "unsupported data-plane resize op value {}",
+                request.op
+            ))
+        })?;
+        match op {
+            DataPlaneResizeOp::Add => {
+                if request.sub_token.len() != crate::remote::transfer::SUB_TOKEN_LEN {
+                    return Err(violation(
+                        "DataPlaneResize ADD sub_token must be 16 bytes".to_string(),
+                    ));
+                }
+                let expected_target = self
+                    .live_streams
+                    .checked_add(1)
+                    .ok_or_else(|| violation("data-plane stream count overflow".to_string()))?;
+                if request.target_stream_count as usize != expected_target {
+                    return Err(violation(format!(
+                        "DataPlaneResize ADD target {} from live {} must be {expected_target}",
+                        request.target_stream_count, self.live_streams
+                    )));
+                }
+                if expected_target > self.ceiling {
+                    Ok(DestinationResizeDecision::Refuse)
+                } else {
+                    Ok(DestinationResizeDecision::Apply(op))
+                }
+            }
+            DataPlaneResizeOp::Remove => {
+                if !request.sub_token.is_empty() {
+                    return Err(violation(
+                        "DataPlaneResize REMOVE sub_token must be empty".to_string(),
+                    ));
+                }
+                let expected_target = self.live_streams.saturating_sub(1);
+                if request.target_stream_count as usize != expected_target {
+                    return Err(violation(format!(
+                        "DataPlaneResize REMOVE target {} from live {} must be {expected_target}",
+                        request.target_stream_count, self.live_streams
+                    )));
+                }
+                if expected_target < 1 {
+                    Ok(DestinationResizeDecision::Refuse)
+                } else {
+                    Ok(DestinationResizeDecision::Apply(op))
+                }
+            }
+            DataPlaneResizeOp::Unspecified => Err(violation(
+                "unsupported data-plane resize op DATA_PLANE_RESIZE_OP_UNSPECIFIED".to_string(),
+            )),
+        }
+    }
+
+    fn settle(&mut self, request: DataPlaneResize, accepted: bool) -> DataPlaneResizeAck {
+        if accepted {
+            self.live_streams = request.target_stream_count as usize;
+        } else {
+            self.refused = true;
+        }
+        self.settled_epoch = request.epoch;
+        let ack = DataPlaneResizeAck {
+            epoch: request.epoch,
+            effective_stream_count: self.live_streams as u32,
+            accepted,
+        };
+        self.last_request = Some(request);
+        self.last_ack = Some(ack);
+        ack
+    }
 }
 
 /// Run the DESTINATION role of one transfer session over `transport`,
@@ -2628,6 +2903,9 @@ pub async fn run_destination(
     target: DestinationTarget,
 ) -> Result<DestinationOutcome> {
     let mut transport = transport;
+    let mut receiver_capacity = cfg
+        .receiver_capacity
+        .unwrap_or_else(crate::dial::local_receiver_capacity);
     let endpoint = match cfg.endpoint {
         SessionEndpoint::Initiator { mut open } => {
             let declared = TransferRole::try_from(open.initiator_role);
@@ -2641,8 +2919,10 @@ pub async fn run_destination(
             }
             // Dial contract: the byte receiver advertises capacity in
             // its open when it is the initiator (contract §Invariants 5).
-            if open.receiver_capacity.is_none() {
-                open.receiver_capacity = Some(crate::dial::local_receiver_capacity());
+            if let Some(advertised) = &open.receiver_capacity {
+                receiver_capacity = *advertised;
+            } else {
+                open.receiver_capacity = Some(receiver_capacity);
             }
             SessionEndpoint::Initiator { open }
         }
@@ -2661,6 +2941,7 @@ pub async fn run_destination(
         TransferRole::Destination,
         &destination_open_validator,
         resolve_open,
+        Some(&receiver_capacity),
     )
     .await?;
 
@@ -2763,6 +3044,7 @@ pub async fn run_responder(
     match declared {
         // Initiator SOURCE ⇒ this end is DESTINATION (push-equivalent).
         TransferRole::Source => {
+            let receiver_capacity = crate::dial::local_receiver_capacity();
             let resolve = match &dest_target {
                 DestinationTarget::Resolve(resolver) => Some(resolver.as_ref()),
                 DestinationTarget::Fixed(_) => None,
@@ -2774,6 +3056,7 @@ pub async fn run_responder(
                 &destination_open_validator,
                 resolve,
                 &policy,
+                Some(&receiver_capacity),
             )
             .await?;
             let dst_root = match negotiated.resolved_root.clone() {
@@ -2819,6 +3102,7 @@ pub async fn run_responder(
                 &source_open_validator,
                 resolve,
                 &policy,
+                None,
             )
             .await?;
             let source: Arc<dyn TransferSource> = match source_target {
@@ -3119,11 +3403,9 @@ async fn destination_session(
     // direction is the same either way (DESTINATION receives). The
     // NeedListSink gives the socket receive the same need-list strictness
     // the in-stream control loop applies inline; AbortOnDrop (inside the
-    // responder run) bounds the accept task to this future. `resize_live`
-    // tracks the stream count this end has grown to (epoch-0 plus each
-    // accepted resize ADD) and `resize_ceiling` the receiver's advertised
-    // max_streams — both directions resize (push arms+accepts, otp-4b-2;
-    // pull dials, otp-5b-2), so both seed these from their epoch-0 streams.
+    // responder run) bounds the accept task to this future. The shared resize
+    // state below owns logical membership and the receiver's advertised
+    // ceiling for both connection layouts; only socket acquisition differs.
     let recv_sink: Arc<dyn TransferSink> = Arc::new(data_plane::NeedListSink::new(
         Arc::clone(&sink),
         Arc::clone(&outstanding),
@@ -3136,7 +3418,7 @@ async fn destination_session(
         }),
         small_file_probe.clone(),
     ));
-    let (mut data_plane_recv, mut resize_live, resize_ceiling) =
+    let (mut data_plane_recv, resize_initial, resize_ceiling) =
         match negotiated.responder_data_plane {
             // DESTINATION responder (push, otp-4b): accept + receive.
             Some(rdp) => {
@@ -3158,10 +3440,11 @@ async fn destination_session(
             // SOURCE responder granted a data plane and we have a host to dial.
             None => match (&negotiated.accept.data_plane, data_plane_host) {
                 (Some(grant), Some(host)) => {
-                    let initial = grant.initial_streams.max(1) as usize;
+                    let initial = grant.initial_streams as usize;
                     let run = data_plane::dial_destination_data_plane(
                         host,
                         grant,
+                        negotiated.open.receiver_capacity.as_ref(),
                         recv_sink,
                         progress.clone(),
                         instruments.trace_data_plane,
@@ -3169,15 +3452,13 @@ async fn destination_session(
                         small_file_probe.clone(),
                     )
                     .await?;
-                    // otp-5b-2: the pull data plane resizes too. Seed
-                    // `resize_live` from the epoch-0 streams dialed and bound
-                    // growth by the capacity THIS end advertised in its open
-                    // (it is the byte receiver) — the exact ceiling the SOURCE
-                    // responder's dial already clamps to, so both ends agree
-                    // even when the caller advertised a max_streams below this
-                    // host's fresh local reading (codex otp-5b-2 F1). On a
-                    // Resize frame the initiator dials the epoch-N socket (vs
-                    // the responder path's arm).
+                    // The DESTINATION initiator seeds the same logical resize
+                    // state from the exact epoch-0 sockets it dialed and uses
+                    // the capacity it advertised in SessionOpen. The SOURCE
+                    // responder's dial resolves that same ceiling, so both
+                    // ends admit identical ADD/REMOVE targets even when the
+                    // advertised limit is below this host's fresh local read.
+                    // ADD dials an epoch-N socket here; REMOVE opens none.
                     let ceiling = crate::dial::receiver_stream_ceiling(
                         negotiated.open.receiver_capacity.as_ref(),
                     );
@@ -3206,6 +3487,9 @@ async fn destination_session(
                 (None, _) => (None, 0usize, 0usize),
             },
         };
+    let mut resize_state = data_plane_recv
+        .as_ref()
+        .map(|_| DestinationResizeState::new(resize_initial, resize_ceiling));
 
     // otp-7a/7b: the DESTINATION chooses the resume block size (plan D5
     // — it hashes first; the SOURCE reads the size from each
@@ -3557,138 +3841,113 @@ async fn destination_session(
                 }
             }
             Some(Frame::Resize(resize)) => {
+                let state = resize_state.as_mut().ok_or_else(|| {
+                    violation("DataPlaneResize on a session with no data plane".into())
+                })?;
                 if let Some(trace) = &phase_trace {
                     trace.event(
                         "resize_received",
                         SessionPhaseFields {
                             epoch: Some(resize.epoch),
                             target_streams: Some(resize.target_stream_count),
-                            live_streams: Some(resize_live as u32),
+                            live_streams: Some(state.live_streams as u32),
                             ..Default::default()
                         },
                     );
                 }
-                // sf-2 shape correction (otp-4b-2 push, otp-5b-2 pull): the
-                // SOURCE proposes one ADD; the DESTINATION grows its receive
-                // set (bump `resize_live`) and acks so the SOURCE completes
-                // the epoch-N socket. The control-lane frames are identical
-                // in both directions — only the transport action flips: a
-                // DESTINATION **responder** (push) ARMS a credential its
-                // accept loop then accepts; a DESTINATION **initiator**
-                // (pull) DIALS the epoch-N socket itself. Only ADD occurs
-                // (REMOVE is a tuner concern, future work); anything else
-                // fails fast.
-                if data_plane_recv.is_none() {
-                    return Err(violation(
-                        "DataPlaneResize on a session with no data plane".into(),
-                    ));
-                }
-                let op = DataPlaneResizeOp::try_from(resize.op)
-                    .unwrap_or(DataPlaneResizeOp::Unspecified);
-                if op != DataPlaneResizeOp::Add {
-                    return Err(violation(format!(
-                        "unsupported data-plane resize op {}",
-                        op.as_str_name()
-                    )));
-                }
-                if resize.sub_token.len() != crate::remote::transfer::SUB_TOKEN_LEN {
-                    return Err(violation(
-                        "DataPlaneResize sub_token must be 16 bytes".into(),
-                    ));
-                }
-                // Cumulative ceiling bound (defense in depth — the source's
-                // dial already clamps to the same profile). Under the
-                // ceiling, grow per connection role: arm the credential
-                // (responder) or dial the epoch-N socket (initiator). A
-                // dial failure is fatal (`add_dialed_stream`); a gone accept
-                // loop returns false (arm). The initiator dials BEFORE the
-                // ack so the SOURCE responder — which accepts on the ack —
-                // never commits to an accept the DESTINATION did not dial.
-                let accepted = if resize_live < resize_ceiling {
-                    match data_plane_recv
-                        .as_mut()
-                        .expect("data plane present (checked above)")
-                    {
-                        data_plane::DestRecvPlane::Responder(run) => {
-                            if let Some(trace) = &phase_trace {
-                                trace.event(
-                                    "resize_arm_queue_begin",
-                                    SessionPhaseFields {
-                                        epoch: Some(resize.epoch),
-                                        target_streams: Some(resize.target_stream_count),
-                                        ..Default::default()
-                                    },
-                                );
-                            }
-                            let armed = run.arm(resize.epoch, resize.sub_token.clone());
-                            if armed {
+                let decision = state.classify(&resize)?;
+                let (ack, action) = match decision {
+                    DestinationResizeDecision::Replay(ack) => (ack, "replay"),
+                    DestinationResizeDecision::Refuse => {
+                        (state.settle(resize, false), "bound_refused")
+                    }
+                    DestinationResizeDecision::Apply(DataPlaneResizeOp::Remove) => {
+                        // The SOURCE retires the logical worker and emits that
+                        // stream's ordinary END. The DESTINATION closes no
+                        // socket here; its receive worker drains END normally.
+                        (state.settle(resize, true), "logical_remove")
+                    }
+                    DestinationResizeDecision::Apply(DataPlaneResizeOp::Add) => {
+                        // ADD is the sole role-specific transport step. A
+                        // responder arms an authenticated accept; an initiator
+                        // dials and starts its receive worker before ACK. A
+                        // preparation failure is a refusal because acceptance
+                        // has not yet crossed the wire.
+                        let accepted = match data_plane_recv
+                            .as_mut()
+                            .expect("resize state exists only with a data plane")
+                        {
+                            data_plane::DestRecvPlane::Responder(run) => {
                                 if let Some(trace) = &phase_trace {
                                     trace.event(
-                                        "destination_prepared",
+                                        "resize_arm_queue_begin",
                                         SessionPhaseFields {
-                                            action: Some("arm_queued"),
                                             epoch: Some(resize.epoch),
                                             target_streams: Some(resize.target_stream_count),
                                             ..Default::default()
                                         },
                                     );
                                 }
+                                run.arm(resize.epoch, resize.sub_token.clone())
                             }
-                            armed
-                        }
-                        data_plane::DestRecvPlane::Initiator(run) => {
-                            run.add_dialed_stream(resize.epoch, &resize.sub_token)
-                                .await?;
-                            if let Some(trace) = &phase_trace {
-                                trace.event(
-                                    "destination_prepared",
-                                    SessionPhaseFields {
-                                        action: Some("dial_complete"),
-                                        epoch: Some(resize.epoch),
-                                        target_streams: Some(resize.target_stream_count),
-                                        ..Default::default()
-                                    },
-                                );
+                            data_plane::DestRecvPlane::Initiator(run) => {
+                                match run.add_dialed_stream(resize.epoch, &resize.sub_token).await {
+                                    Ok(()) => true,
+                                    Err(err) => {
+                                        if instruments.trace_data_plane {
+                                            eprintln!(
+                                                "[data-plane-client] refusing resize epoch {}: {err:#}",
+                                                resize.epoch
+                                            );
+                                        }
+                                        false
+                                    }
+                                }
                             }
-                            true
+                        };
+                        if let Some(trace) = &phase_trace {
+                            trace.event(
+                                "destination_prepared",
+                                SessionPhaseFields {
+                                    action: Some(if accepted {
+                                        "add_prepared"
+                                    } else {
+                                        "add_refused"
+                                    }),
+                                    epoch: Some(resize.epoch),
+                                    target_streams: Some(resize.target_stream_count),
+                                    accepted: Some(accepted),
+                                    ..Default::default()
+                                },
+                            );
                         }
+                        (state.settle(resize, accepted), "add")
                     }
-                } else {
-                    false
-                };
-                if accepted {
-                    resize_live += 1;
-                }
-                let effective = if accepted {
-                    resize.target_stream_count
-                } else {
-                    resize_live as u32
+                    DestinationResizeDecision::Apply(DataPlaneResizeOp::Unspecified) => {
+                        unreachable!("classify rejects unspecified resize operations")
+                    }
                 };
                 if let Some(trace) = &phase_trace {
                     trace.event(
                         "resize_ack_send_begin",
                         SessionPhaseFields {
-                            epoch: Some(resize.epoch),
-                            live_streams: Some(effective),
-                            accepted: Some(accepted),
+                            action: Some(action),
+                            epoch: Some(ack.epoch),
+                            live_streams: Some(ack.effective_stream_count),
+                            accepted: Some(ack.accepted),
                             ..Default::default()
                         },
                     );
                 }
-                transport
-                    .send(frame(Frame::ResizeAck(DataPlaneResizeAck {
-                        epoch: resize.epoch,
-                        effective_stream_count: effective,
-                        accepted,
-                    })))
-                    .await?;
+                transport.send(frame(Frame::ResizeAck(ack))).await?;
                 if let Some(trace) = &phase_trace {
                     trace.event(
                         "resize_ack_sent",
                         SessionPhaseFields {
-                            epoch: Some(resize.epoch),
-                            live_streams: Some(effective),
-                            accepted: Some(accepted),
+                            action: Some(action),
+                            epoch: Some(ack.epoch),
+                            live_streams: Some(ack.effective_stream_count),
+                            accepted: Some(ack.accepted),
                             ..Default::default()
                         },
                     );
@@ -3706,8 +3965,10 @@ async fn destination_session(
                 // surfaces any receive error / stall). Set membership —
                 // not a file count — is the contract (codex F1: a count
                 // proxy let a peer substitute or duplicate paths).
-                // `finish()` drops the arm sender (no more resizes), joins
-                // the accept loop, and reports the settled stream count.
+                // `finish()` drops the arm sender (no more ADD sockets) and
+                // joins every receive worker. The shared resize state below,
+                // not cumulative socket completions, reports final logical
+                // membership.
                 //
                 // otp-11: the LOCAL carrier joins its apply pipeline with
                 // the same discipline (drain every write, surface its
@@ -3739,6 +4000,7 @@ async fn destination_session(
                         }
                     }
                 }
+                let final_logical_streams = resize_state.as_ref().map(|state| state.live_streams);
                 let (in_stream_carrier_used, data_plane_streams) = match data_plane_recv.take() {
                     Some(run) => {
                         let totals = run.finish().await?;
@@ -3747,7 +4009,11 @@ async fn destination_session(
                         }
                         files_written = totals.outcome.files_written as u64;
                         bytes_written = totals.outcome.bytes_written;
-                        (false, Some(totals.streams))
+                        debug_assert!(
+                            final_logical_streams.is_some(),
+                            "receive data plane must have logical resize state"
+                        );
+                        (false, final_logical_streams)
                     }
                     None => (true, None),
                 };
@@ -4722,6 +4988,713 @@ async fn receive_tar_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resize_request(
+        op: DataPlaneResizeOp,
+        epoch: u32,
+        target_stream_count: u32,
+    ) -> DataPlaneResize {
+        DataPlaneResize {
+            op: op as i32,
+            epoch,
+            target_stream_count,
+            sub_token: if op == DataPlaneResizeOp::Add {
+                vec![7; crate::remote::transfer::SUB_TOKEN_LEN]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    fn pending_resize(
+        op: DataPlaneResizeOp,
+        epoch: u32,
+        target_streams: u32,
+    ) -> data_plane::PendingResize {
+        data_plane::PendingResize {
+            epoch,
+            target_streams,
+            op,
+            sub_token: (op == DataPlaneResizeOp::Add)
+                .then(|| vec![9; crate::remote::transfer::SUB_TOKEN_LEN]),
+        }
+    }
+
+    #[test]
+    fn source_resize_ack_state_replays_exact_and_rejects_inconsistent_frames() {
+        let settled = DataPlaneResizeAck {
+            epoch: 1,
+            effective_stream_count: 5,
+            accepted: true,
+        };
+        let mut replay = SourceResizeState {
+            proposals: None,
+            pending: None,
+            last_ack: Some(settled),
+        };
+        assert!(replay
+            .take_pending_for_ack(&settled)
+            .expect("exact duplicate replays")
+            .is_none());
+        let changed_duplicate = DataPlaneResizeAck {
+            effective_stream_count: 4,
+            ..settled
+        };
+        assert!(replay.take_pending_for_ack(&changed_duplicate).is_err());
+
+        let mut pending = SourceResizeState {
+            proposals: None,
+            pending: Some(pending_resize(DataPlaneResizeOp::Add, 2, 6)),
+            last_ack: None,
+        };
+        let future = DataPlaneResizeAck {
+            epoch: 3,
+            effective_stream_count: 6,
+            accepted: true,
+        };
+        assert!(pending.take_pending_for_ack(&future).is_err());
+        assert_eq!(pending.pending.as_ref().map(|resize| resize.epoch), Some(2));
+        let accepted = DataPlaneResizeAck {
+            epoch: 2,
+            effective_stream_count: 6,
+            accepted: true,
+        };
+        let taken = pending
+            .take_pending_for_ack(&accepted)
+            .expect("matching epoch")
+            .expect("pending resize returned");
+        assert_eq!(taken.epoch, 2);
+        assert!(pending.pending.is_none());
+    }
+
+    #[test]
+    fn source_resize_ack_effective_count_matches_acceptance() {
+        let pending = pending_resize(DataPlaneResizeOp::Add, 1, 5);
+        let accepted = DataPlaneResizeAck {
+            epoch: 1,
+            effective_stream_count: 5,
+            accepted: true,
+        };
+        assert!(validate_source_resize_ack(&pending, 4, &accepted).is_ok());
+        assert!(validate_source_resize_ack(
+            &pending,
+            4,
+            &DataPlaneResizeAck {
+                effective_stream_count: 4,
+                ..accepted
+            }
+        )
+        .is_err());
+
+        let refused = DataPlaneResizeAck {
+            epoch: 1,
+            effective_stream_count: 4,
+            accepted: false,
+        };
+        assert!(validate_source_resize_ack(&pending, 4, &refused).is_ok());
+        assert!(validate_source_resize_ack(
+            &pending,
+            4,
+            &DataPlaneResizeAck {
+                effective_stream_count: 5,
+                ..refused
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn epoch0_grant_must_equal_receiver_bounded_floor() {
+        assert_eq!(data_plane::validate_epoch0_streams(4, None).unwrap(), 4);
+        assert!(data_plane::validate_epoch0_streams(1, None).is_err());
+
+        let limited = CapacityProfile {
+            max_streams: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            data_plane::validate_epoch0_streams(2, Some(&limited)).unwrap(),
+            2
+        );
+        assert!(data_plane::validate_epoch0_streams(4, Some(&limited)).is_err());
+
+        let unknown = CapacityProfile {
+            max_streams: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            data_plane::validate_epoch0_streams(4, Some(&unknown)).unwrap(),
+            4
+        );
+    }
+
+    #[test]
+    fn destination_resize_state_applies_add_remove_and_replays_exact_duplicate() {
+        let mut state = DestinationResizeState::new(4, 17);
+        let add = resize_request(DataPlaneResizeOp::Add, 1, 5);
+        assert_eq!(
+            state.classify(&add).expect("valid ADD"),
+            DestinationResizeDecision::Apply(DataPlaneResizeOp::Add)
+        );
+        let add_ack = state.settle(add.clone(), true);
+        assert_eq!(add_ack.effective_stream_count, 5);
+        assert_eq!(state.live_streams, 5);
+
+        assert_eq!(
+            state.classify(&add).expect("exact duplicate replays"),
+            DestinationResizeDecision::Replay(add_ack)
+        );
+        assert_eq!(state.live_streams, 5, "duplicate has no second effect");
+        assert_eq!(state.settled_epoch, 1);
+
+        let remove = resize_request(DataPlaneResizeOp::Remove, 2, 4);
+        assert_eq!(
+            state.classify(&remove).expect("valid REMOVE"),
+            DestinationResizeDecision::Apply(DataPlaneResizeOp::Remove)
+        );
+        let remove_ack = state.settle(remove.clone(), true);
+        assert_eq!(remove_ack.effective_stream_count, 4);
+        assert_eq!(state.live_streams, 4);
+        assert_eq!(
+            state.classify(&remove).expect("REMOVE duplicate replays"),
+            DestinationResizeDecision::Replay(remove_ack)
+        );
+        assert_eq!(state.live_streams, 4, "REMOVE duplicate retires nothing");
+    }
+
+    #[test]
+    fn destination_resize_state_rejects_inconsistent_epochs_targets_ops_and_tokens() {
+        let mut settled = DestinationResizeState::new(4, 17);
+        let first = resize_request(DataPlaneResizeOp::Add, 1, 5);
+        settled.settle(first.clone(), true);
+
+        let mut changed_duplicate = first;
+        changed_duplicate.sub_token[0] ^= 1;
+        assert!(settled.classify(&changed_duplicate).is_err());
+        assert!(settled
+            .classify(&resize_request(DataPlaneResizeOp::Remove, 0, 4))
+            .is_err());
+
+        let fresh = DestinationResizeState::new(4, 17);
+        assert!(fresh
+            .classify(&resize_request(DataPlaneResizeOp::Add, 0, 5))
+            .is_err());
+        assert!(fresh
+            .classify(&resize_request(DataPlaneResizeOp::Add, 2, 5))
+            .is_err());
+        assert!(fresh
+            .classify(&resize_request(DataPlaneResizeOp::Add, 1, 4))
+            .is_err());
+        assert!(fresh
+            .classify(&resize_request(DataPlaneResizeOp::Add, 1, 6))
+            .is_err());
+        assert!(fresh
+            .classify(&resize_request(DataPlaneResizeOp::Remove, 1, 2))
+            .is_err());
+        assert!(fresh
+            .classify(&resize_request(DataPlaneResizeOp::Remove, 1, 4))
+            .is_err());
+
+        let mut bad_add_token = resize_request(DataPlaneResizeOp::Add, 1, 5);
+        bad_add_token.sub_token.pop();
+        assert!(fresh.classify(&bad_add_token).is_err());
+        let mut long_add_token = resize_request(DataPlaneResizeOp::Add, 1, 5);
+        long_add_token.sub_token.push(1);
+        assert!(fresh.classify(&long_add_token).is_err());
+        let mut bad_remove_token = resize_request(DataPlaneResizeOp::Remove, 1, 3);
+        bad_remove_token.sub_token.push(1);
+        assert!(fresh.classify(&bad_remove_token).is_err());
+        let mut unspecified = resize_request(DataPlaneResizeOp::Add, 1, 5);
+        unspecified.op = DataPlaneResizeOp::Unspecified as i32;
+        assert!(fresh.classify(&unspecified).is_err());
+        let mut bad_op = resize_request(DataPlaneResizeOp::Add, 1, 5);
+        bad_op.op = 99;
+        assert!(fresh.classify(&bad_op).is_err());
+    }
+
+    #[test]
+    fn destination_resize_refusal_consumes_epoch_and_is_terminal() {
+        let mut ceiling = DestinationResizeState::new(4, 4);
+        let above = resize_request(DataPlaneResizeOp::Add, 1, 5);
+        assert_eq!(
+            ceiling.classify(&above).expect("bound is a refusal"),
+            DestinationResizeDecision::Refuse
+        );
+        let refused = ceiling.settle(above.clone(), false);
+        assert_eq!(refused.effective_stream_count, 4);
+        assert!(!refused.accepted);
+        assert_eq!(
+            ceiling.classify(&above).expect("refusal duplicate replays"),
+            DestinationResizeDecision::Replay(refused)
+        );
+        assert!(ceiling
+            .classify(&resize_request(DataPlaneResizeOp::Remove, 2, 3))
+            .is_err());
+
+        let floor = DestinationResizeState::new(1, 17);
+        assert_eq!(
+            floor
+                .classify(&resize_request(DataPlaneResizeOp::Remove, 1, 0))
+                .expect("floor is a refusal"),
+            DestinationResizeDecision::Refuse
+        );
+    }
+
+    struct PayloadGate {
+        permits: tokio::sync::Semaphore,
+        entered: std::sync::atomic::AtomicUsize,
+        changed: tokio::sync::Notify,
+    }
+
+    impl PayloadGate {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                permits: tokio::sync::Semaphore::new(0),
+                entered: std::sync::atomic::AtomicUsize::new(0),
+                changed: tokio::sync::Notify::new(),
+            })
+        }
+
+        async fn wait_for_entered(&self, minimum: usize) {
+            loop {
+                let changed = self.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if self.entered.load(Ordering::SeqCst) >= minimum {
+                    return;
+                }
+                changed.await;
+            }
+        }
+
+        fn release(&self, count: usize) {
+            self.permits.add_permits(count);
+        }
+    }
+
+    struct GatedTransferSource {
+        inner: FsTransferSource,
+        gate: Arc<PayloadGate>,
+    }
+
+    #[async_trait::async_trait]
+    impl TransferSource for GatedTransferSource {
+        fn scan(
+            &self,
+            filter: Option<crate::fs_enum::FileFilter>,
+            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        ) -> (
+            mpsc::Receiver<FileHeader>,
+            tokio::task::JoinHandle<Result<u64>>,
+        ) {
+            self.inner.scan(filter, unreadable_paths)
+        }
+
+        async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
+            self.gate.entered.fetch_add(1, Ordering::SeqCst);
+            self.gate.changed.notify_waiters();
+            let permit = self
+                .gate
+                .permits
+                .acquire()
+                .await
+                .map_err(|_| eyre::eyre!("payload test gate closed"))?;
+            permit.forget();
+            self.inner.prepare_payload(payload).await
+        }
+
+        async fn check_availability(
+            &self,
+            headers: Vec<FileHeader>,
+            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        ) -> Result<Vec<FileHeader>> {
+            self.inner
+                .check_availability(headers, unreadable_paths)
+                .await
+        }
+
+        async fn open_file(
+            &self,
+            header: &FileHeader,
+        ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+            self.inner.open_file(header).await
+        }
+
+        fn root(&self) -> &Path {
+            self.inner.root()
+        }
+    }
+
+    struct ResizeCaptureTx {
+        inner: Box<dyn FrameTx>,
+        frames: Arc<StdMutex<Vec<DataPlaneResize>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl FrameTx for ResizeCaptureTx {
+        async fn send(&mut self, frame: TransferFrame) -> Result<()> {
+            if let Some(Frame::Resize(resize)) = frame.frame.as_ref() {
+                self.frames
+                    .lock()
+                    .expect("resize capture lock poisoned")
+                    .push(resize.clone());
+            }
+            self.inner.send(frame).await
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct WireResizeStep {
+        epoch: u32,
+        op: DataPlaneResizeOp,
+        target: u32,
+        token_len: usize,
+    }
+
+    struct DialTraceRun {
+        steps: Vec<WireResizeStep>,
+        add_tokens: Vec<Vec<u8>>,
+        final_streams: usize,
+        summary: TransferSummary,
+        needed_paths: Vec<String>,
+    }
+
+    async fn submit_dial_sample(
+        samples: &mpsc::UnboundedSender<DialTestSample>,
+        delta_bytes: u64,
+        blocked_ratio: f64,
+    ) -> DialTestObservation {
+        let (reply, observation) = tokio::sync::oneshot::channel();
+        samples
+            .send(DialTestSample {
+                delta_bytes,
+                blocked_ratio,
+                reply,
+            })
+            .expect("test tuner remains alive");
+        tokio::time::timeout(std::time::Duration::from_secs(10), observation)
+            .await
+            .expect("dial sample timed out")
+            .expect("test tuner dropped the sample reply")
+    }
+
+    async fn run_dial_trace(
+        initiator_role: TransferRole,
+        receiver_capacity: CapacityProfile,
+        target_streams: usize,
+        delta_bytes: u64,
+        blocked_ratio: f64,
+        hold_samples: usize,
+    ) -> DialTraceRun {
+        run_dial_trace_with_fixture(
+            initiator_role,
+            receiver_capacity,
+            target_streams,
+            delta_bytes,
+            blocked_ratio,
+            hold_samples,
+            31,
+            129 * 1024,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_dial_trace_with_fixture(
+        initiator_role: TransferRole,
+        receiver_capacity: CapacityProfile,
+        target_streams: usize,
+        delta_bytes: u64,
+        blocked_ratio: f64,
+        hold_samples: usize,
+        file_count: usize,
+        file_bytes: usize,
+    ) -> DialTraceRun {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("source dir");
+        std::fs::create_dir_all(&dst_root).expect("destination dir");
+        let content = vec![0x5a; file_bytes];
+        for i in 0..file_count {
+            std::fs::write(src_root.join(format!("f{i:02}.bin")), &content).expect("write fixture");
+        }
+
+        let open = SessionOpen {
+            initiator_role: initiator_role as i32,
+            compare_mode: ComparisonMode::SizeMtime as i32,
+            in_stream_bytes: false,
+            ..Default::default()
+        };
+        let (source_endpoint, dest_endpoint, source_host, dest_host) = match initiator_role {
+            TransferRole::Source => (
+                SessionEndpoint::initiator(open),
+                SessionEndpoint::Responder,
+                Some("127.0.0.1".to_string()),
+                None,
+            ),
+            TransferRole::Destination => (
+                SessionEndpoint::Responder,
+                SessionEndpoint::initiator(open),
+                None,
+                Some("127.0.0.1".to_string()),
+            ),
+            TransferRole::Unspecified => panic!("test must select an initiator role"),
+        };
+
+        let (sample_tx, sample_rx) = mpsc::unbounded_channel();
+        let source_cfg = SourceSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: source_endpoint,
+            plan_options: PlanOptions::default(),
+            data_plane_host: source_host,
+            instruments: SourceInstruments {
+                dial_test_samples: Some(Arc::new(StdMutex::new(Some(sample_rx)))),
+                ..Default::default()
+            },
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: dest_endpoint,
+            data_plane_host: dest_host,
+            receiver_capacity: Some(receiver_capacity),
+            instruments: DestinationInstruments::default(),
+            local_apply: None,
+        };
+
+        let gate = PayloadGate::new();
+        let source: Arc<dyn TransferSource> = Arc::new(GatedTransferSource {
+            inner: FsTransferSource::new(src_root.clone()),
+            gate: Arc::clone(&gate),
+        });
+        let captured: Arc<StdMutex<Vec<DataPlaneResize>>> = Arc::default();
+        let (source_transport, dest_transport) = transport::in_process_pair();
+        let (source_tx, source_rx) = source_transport.split();
+        let source_transport = FrameTransport::new(
+            Box::new(ResizeCaptureTx {
+                inner: source_tx,
+                frames: Arc::clone(&captured),
+            }),
+            source_rx,
+        );
+
+        let destination_root = dst_root.clone();
+        let session = tokio::spawn(async move {
+            tokio::join!(
+                run_source(source_cfg, source_transport, source),
+                run_destination(
+                    dest_cfg,
+                    dest_transport,
+                    DestinationTarget::Fixed(destination_root)
+                ),
+            )
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), gate.wait_for_entered(1))
+            .await
+            .expect("payload demand never reached the gated source");
+
+        let mut live = crate::dial::receiver_initial_streams(Some(&receiver_capacity));
+        let mut attempts = 0usize;
+        while live != target_streams {
+            attempts += 1;
+            assert!(attempts <= 256, "dial trace did not reach {target_streams}");
+            let observed = submit_dial_sample(&sample_tx, delta_bytes, blocked_ratio).await;
+            if let Some(proposal) = observed.proposal {
+                assert_eq!(proposal.epoch, observed.settled_epoch);
+                assert_eq!(proposal.target_streams, observed.live_streams);
+            }
+            live = observed.live_streams;
+        }
+        for _ in 0..hold_samples {
+            let observed = submit_dial_sample(&sample_tx, delta_bytes, blocked_ratio).await;
+            assert_eq!(observed.proposal, None, "bound/hold sample resized");
+            assert_eq!(observed.live_streams, target_streams);
+            assert_eq!(
+                observed.settled_epoch,
+                captured.lock().unwrap().len() as u32
+            );
+        }
+
+        gate.release(file_count + 8);
+        let (source_result, destination_result) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), session)
+                .await
+                .expect("dial trace session timed out")
+                .expect("dial trace session task panicked");
+        let source_summary = source_result.expect("source session succeeds");
+        let destination = destination_result.expect("destination session succeeds");
+        assert_eq!(source_summary, destination.summary);
+        assert_eq!(source_summary.files_transferred, file_count as u64);
+        assert!(!source_summary.in_stream_carrier_used);
+        let final_streams = destination
+            .data_plane_streams
+            .expect("data plane ran, final logical count recorded");
+        assert_eq!(final_streams, target_streams);
+        let mut needed_paths = destination.needed_paths;
+        needed_paths.sort();
+        for i in 0..file_count {
+            assert_eq!(
+                std::fs::read(dst_root.join(format!("f{i:02}.bin"))).expect("read destination"),
+                content
+            );
+        }
+
+        let frames = captured.lock().expect("resize capture lock poisoned");
+        let add_tokens = frames
+            .iter()
+            .filter(|resize| resize.op == DataPlaneResizeOp::Add as i32)
+            .map(|resize| resize.sub_token.clone())
+            .collect();
+        let steps = frames
+            .iter()
+            .map(|resize| WireResizeStep {
+                epoch: resize.epoch,
+                op: DataPlaneResizeOp::try_from(resize.op).expect("known resize op"),
+                target: resize.target_stream_count,
+                token_len: resize.sub_token.len(),
+            })
+            .collect();
+        DialTraceRun {
+            steps,
+            add_tokens,
+            final_streams,
+            summary: source_summary,
+            needed_paths,
+        }
+    }
+
+    fn constrained_profile(max_streams: u32) -> CapacityProfile {
+        CapacityProfile {
+            max_streams,
+            max_chunk_bytes: crate::buffer::DATA_PLANE_BUFFER_FLOOR as u64,
+            max_inflight_bytes: crate::buffer::DATA_PLANE_BUFFER_FLOOR as u64,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn live_dial_clean_trace_grows_both_layouts_through_seventeen() {
+        let mut expected = Vec::new();
+        for (offset, target) in (5u32..=17).enumerate() {
+            expected.push(WireResizeStep {
+                epoch: offset as u32 + 1,
+                op: DataPlaneResizeOp::Add,
+                target,
+                token_len: crate::remote::transfer::SUB_TOKEN_LEN,
+            });
+        }
+        let source_initiator = run_dial_trace(
+            TransferRole::Source,
+            constrained_profile(17),
+            17,
+            1024,
+            0.0,
+            8,
+        )
+        .await;
+        let destination_initiator = run_dial_trace(
+            TransferRole::Destination,
+            constrained_profile(17),
+            17,
+            1024,
+            0.0,
+            8,
+        )
+        .await;
+        assert_eq!(source_initiator.steps, expected);
+        assert_eq!(destination_initiator.steps, expected);
+        assert_eq!(source_initiator.summary, destination_initiator.summary);
+        assert_eq!(
+            source_initiator.needed_paths,
+            destination_initiator.needed_paths
+        );
+        for run in [&source_initiator, &destination_initiator] {
+            assert_eq!(run.add_tokens.len(), 13);
+            assert!(run
+                .add_tokens
+                .iter()
+                .all(|token| token.len() == crate::remote::transfer::SUB_TOKEN_LEN));
+            let distinct: HashSet<_> = run.add_tokens.iter().collect();
+            assert_eq!(
+                distinct.len(),
+                run.add_tokens.len(),
+                "ADD tokens must be fresh"
+            );
+        }
+        assert_eq!(source_initiator.final_streams, 17);
+        assert_eq!(destination_initiator.final_streams, 17);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn live_dial_blocked_trace_shrinks_both_layouts_to_one() {
+        let expected = vec![
+            WireResizeStep {
+                epoch: 1,
+                op: DataPlaneResizeOp::Remove,
+                target: 3,
+                token_len: 0,
+            },
+            WireResizeStep {
+                epoch: 2,
+                op: DataPlaneResizeOp::Remove,
+                target: 2,
+                token_len: 0,
+            },
+            WireResizeStep {
+                epoch: 3,
+                op: DataPlaneResizeOp::Remove,
+                target: 1,
+                token_len: 0,
+            },
+        ];
+        let mut runs = Vec::new();
+        for role in [TransferRole::Source, TransferRole::Destination] {
+            let run = run_dial_trace(role, constrained_profile(17), 1, 1024, 1.0, 8).await;
+            assert_eq!(run.steps, expected, "initiator role {role:?}");
+            assert_eq!(run.final_streams, 1);
+            runs.push(run);
+        }
+        assert_eq!(runs[0].summary, runs[1].summary);
+        assert_eq!(runs[0].needed_paths, runs[1].needed_paths);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn live_dial_idle_and_hysteresis_traces_hold_both_layouts() {
+        for role in [TransferRole::Source, TransferRole::Destination] {
+            let idle = run_dial_trace(role, constrained_profile(17), 4, 0, 0.0, 12).await;
+            assert!(idle.steps.is_empty(), "idle resized for {role:?}");
+            let hysteresis = run_dial_trace(role, constrained_profile(17), 4, 1024, 0.15, 12).await;
+            assert!(
+                hysteresis.steps.is_empty(),
+                "hysteresis resized for {role:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn workload_shape_has_no_resize_authority_in_either_layout() {
+        for role in [TransferRole::Source, TransferRole::Destination] {
+            let run =
+                run_dial_trace_with_fixture(role, constrained_profile(17), 4, 0, 0.0, 8, 10_000, 1)
+                    .await;
+            assert!(run.steps.is_empty(), "workload shape resized for {role:?}");
+            assert_eq!(run.final_streams, 4);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn receiver_bounds_seed_both_layouts_identically() {
+        for role in [TransferRole::Source, TransferRole::Destination] {
+            let bounded = run_dial_trace(role, constrained_profile(2), 2, 1024, 0.0, 8).await;
+            assert!(bounded.steps.is_empty());
+            assert_eq!(bounded.final_streams, 2);
+
+            let unknown = run_dial_trace(role, constrained_profile(0), 17, 1024, 0.0, 0).await;
+            assert_eq!(unknown.steps.len(), 13);
+            assert_eq!(unknown.final_streams, 17);
+        }
+    }
 
     /// otp-10c-2 codex F4: the mirror delete pass containment-checks
     /// every planned target against the canonical destination root

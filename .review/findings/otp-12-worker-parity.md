@@ -4,6 +4,11 @@
 requires one sender-owned, receiver-bounded stream policy for both role
 assignments; initiator/verb may not change the realized worker count.
 
+**Historical as of ldt-2 (2026-07-16):** the exact target-eight repair below
+proved static orientation parity at its reviewed commit. ldt-2 removed that
+target and replaced it with role-identical telemetry traces through growth and
+shrink; this record is not adaptive-policy evidence.
+
 ## What
 
 The unified session computed the same shape target in both orientations but

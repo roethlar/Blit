@@ -188,6 +188,9 @@ enum SinkCommand {
     RetireOne {
         reply: MembershipReply,
     },
+    Inspect {
+        reply: oneshot::Sender<usize>,
+    },
     Seal,
 }
 
@@ -246,6 +249,20 @@ impl ElasticPipelineControl {
             .await
             .map_err(|_| eyre!("elastic pipeline dropped REMOVE acknowledgement"))?
             .map_err(eyre::Report::msg)
+    }
+
+    /// Return the supervisor's current logical membership count. Because
+    /// commands are serviced only after every epoch-0 worker has crossed its
+    /// admission gate, the first inspection is also the explicit startup
+    /// barrier used before the live sampler begins observing probes.
+    pub async fn logical_count(&self) -> Result<usize> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(SinkCommand::Inspect { reply })
+            .map_err(|_| eyre!("elastic pipeline closed before membership inspection"))?;
+        response
+            .await
+            .map_err(|_| eyre!("elastic pipeline dropped membership inspection"))
     }
 
     /// Order the terminal membership boundary before any later ADD or
@@ -941,6 +958,9 @@ pub async fn execute_sink_pipeline_elastic(
                                 );
                             }
                         }
+                    }
+                    Some(SinkCommand::Inspect { reply }) => {
+                        let _ = reply.send(ledger.logical_lifo.len());
                     }
                     None => {
                         control_open = false;

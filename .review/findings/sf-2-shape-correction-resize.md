@@ -4,6 +4,10 @@
 **Status**: landed + graded — `c70c2ac` + review fix `7627e7b` (codex
 1/1 accepted; verdict in `.review/results/`).
 
+**Historical as of ldt-2 (2026-07-16):** this finding accurately records the
+then-current static shape correction. `LIVE_DIAL_TUNING.md` retires it as
+worker-count authority; live SOURCE telemetry now owns ADD and REMOVE.
+
 ## What
 
 Makes a many-tiny-file push actually run at the stream count the

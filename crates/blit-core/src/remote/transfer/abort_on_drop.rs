@@ -51,6 +51,21 @@ impl<T> AbortOnDrop<T> {
         self.0 = None;
         result
     }
+
+    /// Request cancellation and await the task while retaining the RAII
+    /// guard. Awaiting matters on a multi-thread runtime: `abort()` can race
+    /// an already-running poll, so callers that must observe all effects from
+    /// that final poll cannot safely abort and continue immediately.
+    pub async fn abort_and_join(mut self) -> std::result::Result<T, tokio::task::JoinError> {
+        let handle = self
+            .0
+            .as_mut()
+            .expect("AbortOnDrop already consumed (programming error)");
+        handle.abort();
+        let result = handle.await;
+        self.0 = None;
+        result
+    }
 }
 
 impl<T> Drop for AbortOnDrop<T> {
@@ -127,6 +142,38 @@ mod tests {
         let value = guard.join().await.expect("task succeeds");
         assert_eq!(value, 42);
         assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn abort_and_join_observes_task_cleanup_before_returning() {
+        struct Cleanup(Arc<AtomicBool>);
+
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let task_cleaned = Arc::clone(&cleaned);
+        let task_started = Arc::clone(&started);
+        let guard = AbortOnDrop::new(tokio::spawn(async move {
+            let _cleanup = Cleanup(task_cleaned);
+            task_started.notify_one();
+            std::future::pending::<()>().await;
+        }));
+
+        started.notified().await;
+        let err = guard
+            .abort_and_join()
+            .await
+            .expect_err("aborted task reports cancellation");
+        assert!(err.is_cancelled());
+        assert!(
+            cleaned.load(Ordering::SeqCst),
+            "task cleanup must finish before abort_and_join returns"
+        );
     }
 
     #[tokio::test]

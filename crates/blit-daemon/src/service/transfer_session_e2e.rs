@@ -27,8 +27,8 @@
 //! otp-10c-2), proving the one served RPC handles both directions by
 //! the declared role, not a second code path.
 //!
-//! Harness mirrors `push/shape_resize_e2e.rs`: a real in-process
-//! `BlitService` on loopback + a real client. Only in-crate tests can
+//! Harness: a real in-process `BlitService` on loopback plus a real session
+//! client, with both semantic role orientations exercised here. Only in-crate tests can
 //! build `ModuleConfig`/`BlitService::with_modules`, so this lives in
 //! blit-daemon.
 
@@ -1214,10 +1214,12 @@ async fn pull_session_lands_bytes_over_the_data_plane() {
         !outcome.summary.in_stream_carrier_used,
         "otp-5b pull default rides the TCP data plane, not the in-stream carrier"
     );
-    assert_eq!(
-        outcome.data_plane_streams,
-        Some(1),
-        "otp-5b-1 pull is single-stream (no resize until otp-5b-2)"
+    let final_streams = outcome
+        .data_plane_streams
+        .expect("TCP data plane reports final logical membership");
+    assert!(
+        (1..=blit_core::dial::DIAL_DEFAULT_STREAM_LIMIT).contains(&final_streams),
+        "live data-plane membership stays within the receiver safety range"
     );
     assert_trees_identical(&daemon.dest_root, dest.path());
     daemon.stop().await;

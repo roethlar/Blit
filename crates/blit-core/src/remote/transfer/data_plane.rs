@@ -7,7 +7,7 @@ use crate::buffer::BufferPool;
 use crate::generated::FileHeader;
 
 use super::payload::{prepared_payload_stream, PreparedPayload, TransferPayload};
-use super::progress::{NoProbe, Probe};
+use super::progress::{LiveProbe, NoProbe, Probe, StreamProbe};
 use super::stall_guard::{StallGuardWriter, TRANSFER_STALL_TIMEOUT};
 use crate::remote::transfer::source::TransferSource;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ pub const DATA_PLANE_RECORD_END: u8 = 0xFF;
 
 /// ue-r2-2: length of the per-epoch resize credential a data socket
 /// echoes after the one-time token when resize was negotiated
-/// (`DataTransferNegotiation.epoch0_sub_token` for the initial
+/// (`DataPlaneGrant.epoch0_sub_token` for the initial
 /// sockets, `DataPlaneResize.sub_token` for an ADD epoch's socket).
 pub const SUB_TOKEN_LEN: usize = 16;
 
@@ -41,10 +41,10 @@ pub fn generate_sub_token() -> eyre::Result<Vec<u8>> {
 ///
 /// Generic over a [`Probe`] so the byte-copy hot path can carry
 /// per-stream telemetry under adaptive mode at **zero cost** when the
-/// probe is [`NoProbe`] (the default): the instrumented branches are
+/// probe is [`NoProbe`] (the default type parameter): the instrumented branches are
 /// gated on `P::ACTIVE`, a compile-time constant, so they fold away
 /// entirely for `DataPlaneSession<NoProbe>`. Existing callers name the
-/// bare type and get the `NoProbe` default; the adaptive controller
+/// bare type and get the `NoProbe` default; every live SOURCE session
 /// constructs `DataPlaneSession<LiveProbe>` via
 /// [`from_stream_with_probe`](DataPlaneSession::from_stream_with_probe).
 ///
@@ -85,9 +85,8 @@ impl DataPlaneSession<NoProbe> {
     /// [`StallGuardWriter`] (inside `from_stream_with_probe`) so a
     /// stalled peer trips after [`TRANSFER_STALL_TIMEOUT`] of no
     /// observable write progress instead of pinning the worker for
-    /// OS-level TCP retransmit exhaustion. The production call sites
-    /// (`daemon/service/pull.rs`, `daemon/service/pull_sync.rs`, and the
-    /// resume path) inherit the guard without code changes.
+    /// OS-level TCP retransmit exhaustion. Both NoProbe callers and live
+    /// SOURCE sessions inherit the same guard through the shared constructor.
     pub async fn from_stream(
         stream: TcpStream,
         trace: bool,
@@ -126,9 +125,19 @@ impl DataPlaneSession<NoProbe> {
     }
 }
 
+impl DataPlaneSession<LiveProbe> {
+    /// True when the session's hot-path probe and a membership-registry
+    /// probe share the exact telemetry allocation, not merely a StreamId.
+    pub(crate) fn uses_probe(&self, probe: &StreamProbe) -> bool {
+        let session_telemetry = self.probe.0.telemetry();
+        let registry_telemetry = probe.telemetry();
+        Arc::ptr_eq(&session_telemetry, &registry_telemetry)
+    }
+}
+
 impl<P: Probe> DataPlaneSession<P> {
     /// `connect` with an explicit probe (ue-r2-1e: the dial tuner
-    /// attaches `LiveProbe` telemetry to the push data plane; the
+    /// attaches `LiveProbe` telemetry to every SOURCE data plane; the
     /// probe-free path monomorphizes to `NoProbe` and reads no clock).
     #[allow(clippy::too_many_arguments)]
     pub async fn connect_with_probe(
@@ -152,7 +161,7 @@ impl<P: Probe> DataPlaneSession<P> {
         // directions.
         let stream = super::socket::dial_data_plane(&addr, token, tcp_buffer_size)
             .await
-            .context("dialing push data plane")?;
+            .context("dialing session data plane")?;
 
         Ok(
             Self::from_stream_with_probe(stream, trace, chunk_bytes, payload_prefetch, pool, probe)
@@ -636,10 +645,22 @@ impl<P: Probe> DataPlaneSession<P> {
             .write_all(&(content.len() as u32).to_be_bytes())
             .await
             .context("writing block length")?;
+        // Resume blocks are payload bytes just like file and tar chunks. Time
+        // only their socket write so a backpressured resume transfer cannot
+        // look like a clean pipe and drive the live dial in the wrong
+        // direction. `P::ACTIVE` keeps the clock read out of NoProbe codegen.
+        let started = if P::ACTIVE {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         self.stream
             .write_all(content)
             .await
             .context("writing block content")?;
+        if let Some(t) = started {
+            self.probe.note_write_blocked(t.elapsed().as_nanos() as u64);
+        }
         crate::remote::instrumentation::record_cli_data_plane_outbound_bytes(content.len() as u64);
         self.probe.record_bytes(content.len() as u64);
 
@@ -822,6 +843,57 @@ where
         .await
         .context("reading from data plane stream")?;
     Ok(n)
+}
+
+#[cfg(test)]
+mod block_telemetry_tests {
+    use super::*;
+    use crate::remote::transfer::progress::StreamId;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn resume_block_records_bytes_and_socket_write_time() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let drain = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Let the single large block write encounter ordinary socket
+            // backpressure before draining it. The assertion needs only a
+            // non-zero timed write, not a scheduler-specific duration.
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            let mut bytes = Vec::new();
+            socket.read_to_end(&mut bytes).await.unwrap();
+            bytes.len()
+        });
+        let client = TcpStream::connect(addr).await.unwrap();
+        let probe = StreamProbe::new(StreamId(41));
+        let pool = Arc::new(BufferPool::new(64 * 1024, 4, None));
+        let mut session = DataPlaneSession::from_stream_with_probe(
+            client,
+            false,
+            64 * 1024,
+            1,
+            pool,
+            LiveProbe(probe.clone()),
+        )
+        .await;
+        let content = vec![0xA5; 8 * 1024 * 1024];
+
+        session
+            .send_block("resume.bin", 0, &content)
+            .await
+            .expect("resume block sends");
+        let snapshot = probe.snapshot();
+        assert_eq!(snapshot.bytes_sent, content.len() as u64);
+        assert!(
+            snapshot.write_blocked_nanos > 0,
+            "resume payload must contribute socket-write telemetry"
+        );
+
+        drop(session);
+        assert!(drain.await.unwrap() > content.len());
+    }
 }
 
 #[cfg(test)]

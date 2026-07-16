@@ -12,10 +12,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use blit_core::dial::DIAL_DEFAULT_STREAM_LIMIT;
 use blit_core::generated::transfer_frame::Frame;
 use blit_core::generated::{
     session_error, BlockHashList, CapacityProfile, ComparisonMode, FileData, FileHeader,
@@ -30,7 +30,7 @@ use blit_core::remote::transfer::{
     TransferPayload,
 };
 use blit_core::transfer_plan::PlanOptions;
-use blit_core::transfer_session::transport::{in_process_pair, FrameRx, FrameTransport};
+use blit_core::transfer_session::transport::{in_process_pair, FrameTransport};
 use blit_core::transfer_session::{
     run_destination, run_source, DestinationInstruments, DestinationOutcome,
     DestinationSessionConfig, DestinationTarget, HelloConfig, SessionEndpoint, SessionFault,
@@ -152,6 +152,7 @@ async fn run_session_with_open(
         hello: HelloConfig::default(),
         endpoint: dest_endpoint,
         data_plane_host: None,
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
@@ -480,6 +481,7 @@ async fn assert_resume_data_plane_invariant_across_roles(
             hello: HelloConfig::default(),
             endpoint: dest_endpoint,
             data_plane_host: dest_host,
+            receiver_capacity: None,
             instruments: Default::default(),
             local_apply: None,
         };
@@ -841,6 +843,7 @@ async fn file_record_for_resume_flagged_path_is_protocol_violation() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
@@ -1034,6 +1037,7 @@ async fn mid_resume_source_fault_surfaces_cleanly_to_both_ends() {
             hello: HelloConfig::default(),
             endpoint: dest_endpoint,
             data_plane_host: None,
+            receiver_capacity: None,
             instruments: Default::default(),
             local_apply: None,
         };
@@ -1164,14 +1168,10 @@ async fn block_hashes_without_a_held_resume_need_fault_the_source() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn many_tiny_files_reach_shape_target_when_source_initiates() {
-    // sf-2 pin ported onto the unified session (otp-4b-2). The responder
-    // grants the zero-knowledge single stream (no manifest seen at
-    // SessionAccept); a 10k-tiny-file transfer over the TCP data plane
-    // must re-run the shape table over the accumulated need list and grow
-    // the stream count past 1 via `DataPlaneResize{ADD}`. Mirrors the old
-    // push sf-2 pin (`shape_resize_e2e.rs`), now on the session: the
-    // settled count is read from the destination's `data_plane_streams`.
+async fn many_tiny_files_transfer_with_live_workers_when_source_initiates() {
+    // Workload shape no longer selects a worker target. Production telemetry
+    // may adapt while this 10k-file transfer runs, so deterministic worker
+    // sequences are pinned by the in-crate ldt-2 role guard instead.
     let tmp = tempfile::tempdir().unwrap();
     let src_root = tmp.path().join("src");
     let dst_root = tmp.path().join("dst");
@@ -1202,6 +1202,7 @@ async fn many_tiny_files_reach_shape_target_when_source_initiates() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
@@ -1220,62 +1221,22 @@ async fn many_tiny_files_reach_shape_target_when_source_initiates() {
     let outcome = dest_result.expect("destination succeeds");
     assert!(
         !summary.in_stream_carrier_used,
-        "the sf-2 pin must ride the TCP data plane"
+        "the adaptive guard must ride the TCP data plane"
     );
     assert_eq!(summary.files_transferred, FILE_COUNT as u64);
     let streams = outcome
         .data_plane_streams
         .expect("data plane ran, stream count recorded");
-    assert_eq!(
-        streams, 8,
-        "a {FILE_COUNT}-file transfer must reach the shape policy's eight-stream \
-         target regardless of which endpoint initiated the session"
-    );
+    assert!((1..=DIAL_DEFAULT_STREAM_LIMIT).contains(&streams));
     assert_trees_identical(&src_root, &dst_root);
 }
 
-/// Hold one resize ACK in the SOURCE receive half. The data-plane payload
-/// lane is independent, so a correct nonblocking ramp can keep moving work
-/// while this control frame waits; a pre-dispatch settle cannot.
-struct GateNthResizeAckRx {
-    inner: Box<dyn FrameRx>,
-    gate_at: usize,
-    seen: Arc<AtomicUsize>,
-    delivered: Arc<AtomicUsize>,
-    waiting: Arc<AtomicBool>,
-    reached: Arc<tokio::sync::Notify>,
-    release: Arc<tokio::sync::Notify>,
-}
-
-#[async_trait::async_trait]
-impl FrameRx for GateNthResizeAckRx {
-    async fn recv(&mut self) -> eyre::Result<Option<TransferFrame>> {
-        let frame = self.inner.recv().await?;
-        let is_resize_ack = frame
-            .as_ref()
-            .is_some_and(|frame| matches!(frame.frame.as_ref(), Some(Frame::ResizeAck(_))));
-        if is_resize_ack {
-            let ordinal = self.seen.fetch_add(1, Ordering::SeqCst) + 1;
-            if ordinal == self.gate_at {
-                self.waiting.store(true, Ordering::SeqCst);
-                self.reached.notify_one();
-                self.release.notified().await;
-            }
-            self.delivered.fetch_add(1, Ordering::SeqCst);
-        }
-        Ok(frame)
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn payload_does_not_wait_for_shape_ramp_under_either_initiator() {
-    // 2,000 one-byte files produce shape target 4. Gate ACK #2 (the 2→3
-    // epoch), require ALL payloads to finish sending while it remains held,
-    // then release it and require the same exact final target under both
-    // connection-role layouts. This deterministically guards first-byte /
-    // useful-work progress without relying on wall-clock RTT assumptions.
+async fn payload_completion_does_not_wait_for_a_tuner_decision_under_either_initiator() {
+    // The retired shape ramp delayed SourceDone until a predetermined target
+    // was reached. With live-only authority, useful work and completion need
+    // no predetermined resize target at all.
     const FILE_COUNT: usize = 2_000;
-    const TARGET_STREAMS: usize = 4;
 
     for initiator_role in [TransferRole::Source, TransferRole::Destination] {
         let tmp = tempfile::tempdir().unwrap();
@@ -1324,30 +1285,12 @@ async fn payload_does_not_wait_for_shape_ramp_under_either_initiator() {
             hello: HelloConfig::default(),
             endpoint: dest_endpoint,
             data_plane_host: dest_host,
+            receiver_capacity: None,
             instruments: Default::default(),
             local_apply: None,
         };
 
-        let seen = Arc::new(AtomicUsize::new(0));
-        let delivered = Arc::new(AtomicUsize::new(0));
-        let waiting = Arc::new(AtomicBool::new(false));
-        let reached = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
         let (source_transport, dest_transport) = in_process_pair();
-        let (source_tx, source_rx) = source_transport.split();
-        let source_transport = FrameTransport::new(
-            source_tx,
-            Box::new(GateNthResizeAckRx {
-                inner: source_rx,
-                gate_at: 2,
-                seen: Arc::clone(&seen),
-                delivered: Arc::clone(&delivered),
-                waiting: Arc::clone(&waiting),
-                reached: Arc::clone(&reached),
-                release: Arc::clone(&release),
-            }),
-        );
-
         let source = Arc::new(FsTransferSource::new(src_root.clone()));
         let session = tokio::spawn({
             let dst_root = dst_root.clone();
@@ -1359,33 +1302,6 @@ async fn payload_does_not_wait_for_shape_ramp_under_either_initiator() {
             }
         });
 
-        let proof = tokio::time::timeout(Duration::from_secs(10), async {
-            let payload_complete = async {
-                let mut files = 0usize;
-                while files < FILE_COUNT {
-                    match progress_rx.recv().await.expect("progress lane stays open") {
-                        ProgressEvent::FileComplete { .. } => files += 1,
-                        ProgressEvent::ManifestBatch { .. } | ProgressEvent::Payload { .. } => {}
-                    }
-                }
-            };
-            tokio::join!(payload_complete, reached.notified());
-        })
-        .await;
-        if proof.is_err() {
-            release.notify_one();
-            let _ = session.await;
-            panic!("payload stalled behind resize ACK #2 with initiator {initiator_role:?}");
-        }
-        assert!(waiting.load(Ordering::SeqCst), "ACK #2 is held");
-        assert_eq!(seen.load(Ordering::SeqCst), 2, "exactly two ACKs seen");
-        assert_eq!(
-            delivered.load(Ordering::SeqCst),
-            1,
-            "all payload completed before gated ACK #2 reached the SOURCE"
-        );
-
-        release.notify_one();
         let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, session)
             .await
             .expect("session run timed out")
@@ -1394,7 +1310,17 @@ async fn payload_does_not_wait_for_shape_ramp_under_either_initiator() {
         let outcome = dest_result.expect("destination succeeds");
         assert_eq!(summary, outcome.summary);
         assert_eq!(summary.files_transferred, FILE_COUNT as u64);
-        assert_eq!(outcome.data_plane_streams, Some(TARGET_STREAMS));
+        let streams = outcome
+            .data_plane_streams
+            .expect("data plane ran, final logical count recorded");
+        assert!((1..=DIAL_DEFAULT_STREAM_LIMIT).contains(&streams));
+        let mut completed = 0usize;
+        while let Ok(event) = progress_rx.try_recv() {
+            if matches!(event, ProgressEvent::FileComplete { .. }) {
+                completed += 1;
+            }
+        }
+        assert_eq!(completed, FILE_COUNT, "every payload reported completion");
         assert_trees_identical(&src_root, &dst_root);
     }
 }
@@ -1465,6 +1391,7 @@ async fn run_phase_trace_case(initiator_role: TransferRole, trace_enabled: bool)
         hello: HelloConfig::default(),
         endpoint: dest_endpoint,
         data_plane_host: dest_host,
+        receiver_capacity: None,
         instruments: DestinationInstruments {
             session_phase_trace: phase_trace,
             ..Default::default()
@@ -1654,7 +1581,12 @@ fn assert_phase_trace_partial_order(events: &[SessionPhaseEvent], initiator: Tra
         );
     }
 
-    let expected_attached = BTreeSet::from([(Some(0), Some(0)), (Some(1), Some(0))]);
+    let expected_attached = BTreeSet::from([
+        (Some(0), Some(0)),
+        (Some(0), Some(1)),
+        (Some(0), Some(2)),
+        (Some(0), Some(3)),
+    ]);
     for role in [source, destination] {
         let attached_keys: Vec<_> = events
             .iter()
@@ -1688,85 +1620,32 @@ fn assert_phase_trace_partial_order(events: &[SessionPhaseEvent], initiator: Tra
     let planner_end = one_phase_batch(events, source, "planner_end", 0);
     assert!(planner_begin.elapsed_ns <= planner_end.elapsed_ns);
 
-    let proposed = one_phase_event(events, source, "resize_proposed", Some(1));
-    let resize_send_begin = one_phase_event(events, source, "resize_send_begin", Some(1));
-    let resize_sent = one_phase_event(events, source, "resize_sent", Some(1));
-    let resize_received = one_phase_event(events, destination, "resize_received", Some(1));
-    let prepared = one_phase_event(events, destination, "destination_prepared", Some(1));
-    let ack_send_begin = one_phase_event(events, destination, "resize_ack_send_begin", Some(1));
-    let ack_sent = one_phase_event(events, destination, "resize_ack_sent", Some(1));
-    let ack_received = one_phase_event(events, source, "resize_ack_received", Some(1));
-    let settled = one_phase_event(events, source, "source_settled", Some(1));
-    assert!(proposed.elapsed_ns <= resize_send_begin.elapsed_ns);
-    assert!(resize_send_begin.elapsed_ns <= resize_sent.elapsed_ns);
-    assert!(
-        phase_position(events, source, "resize_send_begin", Some(1), None,)
-            < phase_position(events, destination, "resize_received", Some(1), None,)
-    );
-    assert!(resize_received.elapsed_ns <= prepared.elapsed_ns);
-    assert!(prepared.elapsed_ns <= ack_send_begin.elapsed_ns);
-    assert!(ack_send_begin.elapsed_ns <= ack_sent.elapsed_ns);
-    assert!(
-        phase_position(events, destination, "resize_ack_send_begin", Some(1), None,)
-            < phase_position(events, source, "resize_ack_received", Some(1), None,)
-    );
-    assert!(ack_received.elapsed_ns <= settled.elapsed_ns);
-    assert_eq!(prepared.accepted, None);
-    assert_eq!(settled.accepted, Some(true));
-
-    let (source_epoch0, destination_epoch0, source_epoch1, destination_epoch1) = match initiator {
-        TransferRole::Source => {
-            assert_eq!(prepared.action, Some("arm_queued"));
-            let arm_queue_begin =
-                one_phase_event(events, destination, "resize_arm_queue_begin", Some(1));
-            let arm_ready = one_phase_event(events, destination, "resize_arm_ready", Some(1));
-            let accept_begin = one_phase_event(events, destination, "socket_accept_begin", Some(1));
-            assert!(arm_queue_begin.elapsed_ns <= prepared.elapsed_ns);
-            assert!(
-                phase_position(events, destination, "resize_arm_queue_begin", Some(1), None,)
-                    < phase_position(events, destination, "resize_arm_ready", Some(1), None,)
-            );
-            assert!(arm_ready.elapsed_ns <= accept_begin.elapsed_ns);
-            ("dial", "accept", "dial", "accept")
-        }
-        TransferRole::Destination => {
-            assert_eq!(prepared.action, Some("dial_complete"));
-            let dial_end = one_phase_event(events, destination, "socket_dial_end", Some(1));
-            assert!(dial_end.elapsed_ns <= prepared.elapsed_ns);
-            ("accept", "dial", "accept", "dial")
-        }
+    let (source_action, destination_action) = match initiator {
+        TransferRole::Source => ("dial", "accept"),
+        TransferRole::Destination => ("accept", "dial"),
         TransferRole::Unspecified => unreachable!(),
     };
-
-    for (role, action, epoch) in [
-        (source, source_epoch0, 0),
-        (destination, destination_epoch0, 0),
-        (source, source_epoch1, 1),
-        (destination, destination_epoch1, 1),
-    ] {
-        let begin = one_phase_event(events, role, &format!("socket_{action}_begin"), Some(epoch));
-        let end = one_phase_event(events, role, &format!("socket_{action}_end"), Some(epoch));
-        let attached = one_phase_event(events, role, "socket_trace_attached", Some(epoch));
-        assert!(begin.elapsed_ns <= end.elapsed_ns);
-        assert!(end.producer_seq < attached.producer_seq);
-        assert!(end.elapsed_ns <= attached.elapsed_ns);
+    for (role, action) in [(source, source_action), (destination, destination_action)] {
+        for socket in 0..4 {
+            let begin = phase_socket_position(
+                events,
+                role,
+                &format!("socket_{action}_begin"),
+                Some(0),
+                Some(socket),
+            );
+            let end = phase_socket_position(
+                events,
+                role,
+                &format!("socket_{action}_end"),
+                Some(0),
+                Some(socket),
+            );
+            let attached =
+                phase_socket_position(events, role, "socket_trace_attached", Some(0), Some(socket));
+            assert!(begin < end && end < attached);
+        }
     }
-    let socket_begin = one_phase_event(
-        events,
-        source,
-        &format!("socket_{source_epoch1}_begin"),
-        Some(1),
-    );
-    let socket_end = one_phase_event(
-        events,
-        source,
-        &format!("socket_{source_epoch1}_end"),
-        Some(1),
-    );
-    assert!(ack_received.elapsed_ns <= socket_begin.elapsed_ns);
-    assert!(socket_begin.elapsed_ns <= socket_end.elapsed_ns);
-    assert!(socket_end.elapsed_ns <= settled.elapsed_ns);
-
     let source_complete = one_phase_event(events, source, "data_plane_complete", None);
     let destination_complete = one_phase_event(events, destination, "data_plane_complete", None);
     let summary_begin = one_phase_event(events, destination, "summary_send_begin", None);
@@ -1799,9 +1678,9 @@ async fn session_phase_trace_is_complete_and_inert_under_both_initiators() {
     ] {
         assert_eq!(off.summary, on.summary);
         assert_eq!(off.needed_paths, on.needed_paths);
-        assert_eq!(off.data_plane_streams, on.data_plane_streams);
+        assert!(off.data_plane_streams.is_some());
         assert_eq!(off.tree, on.tree);
-        assert_eq!(on.data_plane_streams, Some(2));
+        assert!(on.data_plane_streams.is_some());
     }
     assert_eq!(source_on.summary, destination_on.summary);
     assert_eq!(source_on.needed_paths, destination_on.needed_paths);
@@ -1979,6 +1858,7 @@ async fn run_small_file_probe_case(
         hello: HelloConfig::default(),
         endpoint: dest_endpoint,
         data_plane_host: dest_host,
+        receiver_capacity: None,
         instruments: DestinationInstruments {
             small_file_probe: probe,
             ..Default::default()
@@ -2258,15 +2138,22 @@ async fn small_file_probe_is_complete_and_inert_across_roles_and_carriers() {
         ] {
             assert_eq!(off.summary, on.summary);
             assert_eq!(off.needed_paths, on.needed_paths);
-            assert_eq!(off.data_plane_streams, on.data_plane_streams);
+            assert_eq!(
+                off.data_plane_streams.is_some(),
+                carrier == SmallFileCarrier::Tcp
+            );
+            assert_eq!(
+                on.data_plane_streams.is_some(),
+                carrier == SmallFileCarrier::Tcp
+            );
             assert_eq!(off.tree, on.tree);
             assert_eq!(off.metadata, on.metadata);
         }
         assert_eq!(source_on.summary, destination_on.summary);
         assert_eq!(source_on.needed_paths, destination_on.needed_paths);
         assert_eq!(
-            source_on.data_plane_streams,
-            destination_on.data_plane_streams
+            source_on.data_plane_streams.is_some(),
+            destination_on.data_plane_streams.is_some()
         );
         assert_eq!(source_on.tree, destination_on.tree);
         assert_eq!(source_on.metadata, destination_on.metadata);
@@ -2306,17 +2193,15 @@ async fn small_file_probe_is_complete_and_inert_across_roles_and_carriers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pull_data_plane_single_stream_lands_bytes() {
+async fn pull_data_plane_lands_bytes() {
     // otp-5b-1: the transport/role decoupling in the PULL direction — the
     // mirror of the push data-plane test above. Here the DESTINATION is the
     // *initiator* (dials + receives) and the SOURCE is the *responder*
     // (binds + accepts + sends). Control frames ride the in-process
     // transport; the data-plane socket rides loopback TCP (the SOURCE
     // responder binds 0.0.0.0:0, the DESTINATION initiator dials
-    // 127.0.0.1). Single-stream because this 4-file tree's shape wants only
-    // one stream — the pull data plane CAN resize (otp-5b-2), but a small
-    // need list never crosses the shape threshold; the resize itself is
-    // pinned by `many_tiny_files_reach_shape_target_when_destination_initiates`.
+    // 127.0.0.1). The deterministic ldt-2 role guard separately pins the
+    // receiver-bounded epoch-0 floor.
     let tmp = tempfile::tempdir().unwrap();
     let src_root = tmp.path().join("src");
     let dst_root = tmp.path().join("dst");
@@ -2351,6 +2236,7 @@ async fn pull_data_plane_single_stream_lands_bytes() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(open), // dials + receives
         data_plane_host: Some("127.0.0.1".into()),
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
@@ -2376,24 +2262,16 @@ async fn pull_data_plane_single_stream_lands_bytes() {
         "both ends must hold the same summary"
     );
     assert_eq!(outcome.summary.files_transferred, 4);
-    assert_eq!(
-        outcome.data_plane_streams,
-        Some(1),
-        "a 4-file need list stays single-stream (below the shape threshold)"
-    );
+    assert!(outcome.data_plane_streams.is_some());
     assert_trees_identical(&src_root, &dst_root);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn many_tiny_files_reach_shape_target_when_destination_initiates() {
-    // otp-5b-2: the sf-2 shape correction in the PULL direction — the
-    // mirror of `many_tiny_files_reach_shape_target_when_source_initiates`
-    // (push). Here the DESTINATION is the *initiator* (dials the epoch-N
-    // sockets it grows to) and the SOURCE is the *responder* (accepts them
-    // off its bound listener). The control-lane `DataPlaneResize{ADD}` /
-    // `DataPlaneResizeAck` frames are identical to push; only the transport
-    // action flips. A 10k-tiny-file transfer must re-run the shape table
-    // over the accumulated need list and grow the stream count past 1.
+async fn many_tiny_files_transfer_with_live_workers_when_destination_initiates() {
+    // The mirror of the SOURCE-initiator guard: connection topology changes
+    // which end opens sockets, never the worker policy. File count alone is
+    // not a static worker target; live telemetry may still resize while the
+    // fixture runs.
     let tmp = tempfile::tempdir().unwrap();
     let src_root = tmp.path().join("src");
     let dst_root = tmp.path().join("dst");
@@ -2405,7 +2283,7 @@ async fn many_tiny_files_reach_shape_target_when_destination_initiates() {
     }
 
     // DESTINATION initiator; SOURCE responder — roles flipped from the push
-    // shape test, the data plane following connection role.
+    // data-plane test, the data plane following connection role.
     let open = SessionOpen {
         initiator_role: TransferRole::Destination as i32,
         compare_mode: ComparisonMode::SizeMtime as i32,
@@ -2430,6 +2308,7 @@ async fn many_tiny_files_reach_shape_target_when_destination_initiates() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(open), // dials + receives
         data_plane_host: Some("127.0.0.1".into()),
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
@@ -2448,17 +2327,13 @@ async fn many_tiny_files_reach_shape_target_when_destination_initiates() {
     let outcome = dest_result.expect("destination initiator succeeds");
     assert!(
         !summary.in_stream_carrier_used,
-        "the pull sf-2 pin must ride the TCP data plane"
+        "the adaptive guard must ride the TCP data plane"
     );
     assert_eq!(summary.files_transferred, FILE_COUNT as u64);
     let streams = outcome
         .data_plane_streams
         .expect("data plane ran, stream count recorded");
-    assert_eq!(
-        streams, 8,
-        "a {FILE_COUNT}-file transfer must reach the shape policy's eight-stream \
-         target regardless of which endpoint initiated the session"
-    );
+    assert!((1..=DIAL_DEFAULT_STREAM_LIMIT).contains(&streams));
     assert_trees_identical(&src_root, &dst_root);
 }
 
@@ -2527,6 +2402,7 @@ async fn build_mismatch_refused_under_both_initiators() {
             },
             endpoint: dest_endpoint,
             data_plane_host: None,
+            receiver_capacity: None,
             instruments: Default::default(),
             local_apply: None,
         };
@@ -2586,6 +2462,7 @@ async fn contract_version_mismatch_is_refused() {
         },
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
@@ -2629,6 +2506,7 @@ async fn mirror_enabled_without_scope_is_refused() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
@@ -2820,6 +2698,7 @@ async fn mirror_refused_when_source_scan_incomplete() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
@@ -2898,6 +2777,7 @@ async fn cancel_frame_during_mirror_purge_aborts_the_deletions() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
@@ -2975,6 +2855,7 @@ async fn cancel_mid_file_record_surfaces_the_peers_fault() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
@@ -3081,6 +2962,7 @@ async fn incomplete_scan_refused_when_completeness_required() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
@@ -3277,6 +3159,7 @@ async fn session_filters_via_chokepoint_not_scan_arg() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
@@ -3339,6 +3222,7 @@ async fn payload_record_before_manifest_complete_is_protocol_violation() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
@@ -3577,6 +3461,7 @@ async fn manifest_entry_after_manifest_complete_is_protocol_violation() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
+        receiver_capacity: None,
         instruments: Default::default(),
         local_apply: None,
     };
