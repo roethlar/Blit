@@ -26,7 +26,8 @@ use blit_core::generated::{
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::transfer::{
     PreparedPayload, ProgressEvent, RemoteTransferProgress, SessionPhaseEvent, SessionPhaseRole,
-    SessionPhaseTrace, TransferPayload,
+    SessionPhaseTrace, SmallFileCarrier, SmallFileProbe, SmallFileProbeReport, TimingAggregate,
+    TransferPayload,
 };
 use blit_core::transfer_plan::PlanOptions;
 use blit_core::transfer_session::transport::{in_process_pair, FrameRx, FrameTransport};
@@ -1859,6 +1860,448 @@ async fn session_phase_trace_is_complete_and_inert_under_both_initiators() {
             assert_eq!(sequences, expected, "{role:?} sequence has gaps/duplicates");
         }
         assert_phase_trace_partial_order(&case.events, initiator);
+    }
+}
+
+struct SmallFileProbeCase {
+    summary: TransferSummary,
+    needed_paths: Vec<String>,
+    data_plane_streams: Option<usize>,
+    tree: BTreeMap<String, Vec<u8>>,
+    metadata: BTreeMap<String, FileMetadataSnapshot>,
+    reports: Vec<SmallFileProbeReport>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct FileMetadataSnapshot {
+    len: u64,
+    mtime_seconds: i64,
+    readonly: bool,
+    #[cfg(unix)]
+    mode: u32,
+}
+
+fn collect_file_metadata(root: &Path) -> BTreeMap<String, FileMetadataSnapshot> {
+    collect_tree(root)
+        .into_keys()
+        .map(|relative_path| {
+            let metadata = std::fs::metadata(root.join(&relative_path)).unwrap();
+            let snapshot = FileMetadataSnapshot {
+                len: metadata.len(),
+                mtime_seconds: filetime::FileTime::from_last_modification_time(&metadata)
+                    .unix_seconds(),
+                readonly: metadata.permissions().readonly(),
+                #[cfg(unix)]
+                mode: {
+                    use std::os::unix::fs::PermissionsExt;
+                    metadata.permissions().mode() & 0o777
+                },
+            };
+            (relative_path, snapshot)
+        })
+        .collect()
+}
+
+async fn run_small_file_probe_case(
+    initiator_role: TransferRole,
+    carrier: SmallFileCarrier,
+    probe_enabled: bool,
+) -> SmallFileProbeCase {
+    const FILE_COUNT: usize = 256;
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&src_root).unwrap();
+    std::fs::create_dir_all(&dst_root).unwrap();
+    for i in 0..FILE_COUNT {
+        let path = src_root.join(format!("f{i:04}.bin"));
+        std::fs::write(&path, vec![i as u8; 4 * 1024]).unwrap();
+        filetime::set_file_mtime(
+            &path,
+            filetime::FileTime::from_unix_time(1_650_000_000 + i as i64, 0),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+    }
+
+    let captured: Arc<Mutex<Vec<SmallFileProbeReport>>> = Arc::default();
+    let probe = if probe_enabled {
+        let sink = Arc::clone(&captured);
+        SmallFileProbe::capture(
+            format!("p2-guard-{initiator_role:?}-{carrier:?}"),
+            move |report| sink.lock().unwrap().push(report),
+        )
+    } else {
+        SmallFileProbe::disabled()
+    };
+
+    let tcp = carrier == SmallFileCarrier::Tcp;
+    let open = SessionOpen {
+        initiator_role: initiator_role as i32,
+        compare_mode: ComparisonMode::SizeMtime as i32,
+        in_stream_bytes: !tcp,
+        ..Default::default()
+    };
+    let (source_endpoint, dest_endpoint, source_host, dest_host) = match initiator_role {
+        TransferRole::Source => (
+            SessionEndpoint::initiator(open),
+            SessionEndpoint::Responder,
+            tcp.then(|| "127.0.0.1".into()),
+            None,
+        ),
+        TransferRole::Destination => (
+            SessionEndpoint::Responder,
+            SessionEndpoint::initiator(open),
+            None,
+            tcp.then(|| "127.0.0.1".into()),
+        ),
+        TransferRole::Unspecified => unreachable!(),
+    };
+    let source_cfg = SourceSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: source_endpoint,
+        plan_options: PlanOptions {
+            force_tar: true,
+            small_count_target: Some(128),
+            ..Default::default()
+        },
+        data_plane_host: source_host,
+        instruments: SourceInstruments {
+            small_file_probe: probe.clone(),
+            ..Default::default()
+        },
+    };
+    let dest_cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: dest_endpoint,
+        data_plane_host: dest_host,
+        instruments: DestinationInstruments {
+            small_file_probe: probe,
+            ..Default::default()
+        },
+        local_apply: None,
+    };
+    let (source_transport, dest_transport) = in_process_pair();
+    let source = Arc::new(FsTransferSource::new(src_root.clone()));
+    let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, async {
+        tokio::join!(
+            run_source(source_cfg, source_transport, source),
+            run_destination(
+                dest_cfg,
+                dest_transport,
+                DestinationTarget::Fixed(dst_root.clone()),
+            ),
+        )
+    })
+    .await
+    .expect("small-file probe session timed out");
+
+    let summary = source_result.expect("source succeeds");
+    let mut outcome = dest_result.expect("destination succeeds");
+    assert_eq!(summary, outcome.summary);
+    assert_trees_identical(&src_root, &dst_root);
+    outcome.needed_paths.sort();
+    let reports = captured.lock().unwrap().clone();
+    SmallFileProbeCase {
+        summary,
+        needed_paths: outcome.needed_paths,
+        data_plane_streams: outcome.data_plane_streams,
+        tree: collect_tree(&dst_root),
+        metadata: collect_file_metadata(&dst_root),
+        reports,
+    }
+}
+
+fn assert_timing_observed(timing: &TimingAggregate, samples: u64) {
+    assert_eq!(timing.samples, samples);
+    assert!(timing.total_ns > 0, "timing aggregate is vacuously zero");
+    assert!(timing.max_ns > 0, "timing max is vacuously zero");
+    assert!(timing.max_ns <= timing.total_ns);
+}
+
+fn assert_small_file_probe_inventory(
+    case: &SmallFileProbeCase,
+    initiator_role: TransferRole,
+    carrier: SmallFileCarrier,
+) {
+    const FILE_COUNT: u64 = 256;
+    assert_eq!(case.reports.len(), 2, "one summary per semantic endpoint");
+    let source = case
+        .reports
+        .iter()
+        .find(|report| report.endpoint_role == SessionPhaseRole::Source)
+        .expect("source report");
+    let destination = case
+        .reports
+        .iter()
+        .find(|report| report.endpoint_role == SessionPhaseRole::Destination)
+        .expect("destination report");
+    let expected_initiator = match initiator_role {
+        TransferRole::Source => SessionPhaseRole::Source,
+        TransferRole::Destination => SessionPhaseRole::Destination,
+        TransferRole::Unspecified => unreachable!(),
+    };
+    let expected_run_id = format!("p2-guard-{initiator_role:?}-{carrier:?}");
+    for report in [&source, &destination] {
+        assert_eq!(report.schema, 1);
+        assert_eq!(report.run_id, expected_run_id);
+        assert!(report.success);
+        assert_eq!(report.event, "summary");
+        assert_eq!(report.initiator_role, expected_initiator);
+        assert_eq!(report.carrier, carrier);
+        assert_eq!(report.shard_receive_dropped, 0);
+        assert_eq!(report.shard_sink_dropped, 0);
+        assert_eq!(report.correlation_id.len(), 16);
+        assert!(report
+            .correlation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+    }
+    assert_eq!(source.correlation_id, destination.correlation_id);
+    assert_eq!(destination.source_bookkeeping, Default::default());
+    assert_eq!(source.tcp_claims, Default::default());
+    assert_eq!(source.in_stream_claims, Default::default());
+    assert!(source.shard_receive.is_empty());
+    assert!(source.shard_sink.is_empty());
+    assert_eq!(source.shard_receive_dropped, 0);
+    assert_eq!(source.shard_sink_dropped, 0);
+
+    let bookkeeping = &source.source_bookkeeping;
+    assert_eq!(bookkeeping.manifest_entries_inserted, FILE_COUNT);
+    assert_eq!(bookkeeping.manifest_insert_sync_wait.samples, FILE_COUNT);
+    assert_eq!(bookkeeping.manifest_insert_map_op.samples, FILE_COUNT);
+    assert_eq!(bookkeeping.need_entries_resolved, FILE_COUNT);
+    assert_eq!(bookkeeping.need_resolve_sync_wait.samples, FILE_COUNT);
+    assert_eq!(bookkeeping.need_resolve_map_op.samples, FILE_COUNT);
+    assert_eq!(bookkeeping.need_event_send.samples, FILE_COUNT);
+    assert_eq!(bookkeeping.need_event_hop.samples, FILE_COUNT);
+    assert_eq!(bookkeeping.need_handler_work.samples, FILE_COUNT);
+    for timing in [
+        &bookkeeping.manifest_insert_sync_wait,
+        &bookkeeping.manifest_insert_map_op,
+        &bookkeeping.need_resolve_sync_wait,
+        &bookkeeping.need_resolve_map_op,
+        &bookkeeping.need_event_send,
+        &bookkeeping.need_event_hop,
+        &bookkeeping.need_handler_work,
+    ] {
+        assert_timing_observed(timing, FILE_COUNT);
+    }
+    assert_eq!(bookkeeping.planner_input_entries, FILE_COUNT);
+    assert!(bookkeeping.planned_tar_shards > 0);
+    assert_eq!(bookkeeping.planned_tar_members, FILE_COUNT);
+    assert!(bookkeeping.planner.samples > 0);
+    assert_timing_observed(&bookkeeping.planner, bookkeeping.planner.samples);
+    let shard_count = destination.shard_receive.len() as u64;
+    assert!(shard_count > 0);
+
+    let (claims, absent_claims) = match carrier {
+        SmallFileCarrier::Tcp => (&destination.tcp_claims, &destination.in_stream_claims),
+        SmallFileCarrier::InStream => (&destination.in_stream_claims, &destination.tcp_claims),
+    };
+    assert_eq!(claims.members, FILE_COUNT);
+    assert_eq!(claims.successful_removes, FILE_COUNT);
+    assert_eq!(
+        claims.lock_acquisitions,
+        if carrier == SmallFileCarrier::Tcp {
+            FILE_COUNT
+        } else {
+            shard_count
+        }
+    );
+    assert_eq!(claims.lock_wait.samples, claims.lock_acquisitions);
+    assert_eq!(claims.lock_hold.samples, claims.lock_acquisitions);
+    assert_timing_observed(&claims.lock_wait, claims.lock_acquisitions);
+    assert_timing_observed(&claims.lock_hold, claims.lock_acquisitions);
+    assert_eq!(absent_claims, &Default::default());
+
+    assert_eq!(destination.shard_receive.len() as u64, shard_count);
+    assert_eq!(
+        destination
+            .shard_receive
+            .iter()
+            .map(|shard| shard.members)
+            .sum::<u64>(),
+        FILE_COUNT
+    );
+    assert_eq!(destination.shard_sink.len() as u64, shard_count);
+    assert_eq!(
+        destination
+            .shard_sink
+            .iter()
+            .map(|shard| shard.members)
+            .sum::<u64>(),
+        FILE_COUNT
+    );
+    let receive_shards: BTreeMap<_, _> = destination
+        .shard_receive
+        .iter()
+        .map(|shard| {
+            (
+                shard.shard_id.as_str(),
+                (shard.members, shard.archive_bytes),
+            )
+        })
+        .collect();
+    let sink_shards: BTreeMap<_, _> = destination
+        .shard_sink
+        .iter()
+        .map(|shard| {
+            (
+                shard.shard_id.as_str(),
+                (shard.members, shard.archive_bytes),
+            )
+        })
+        .collect();
+    assert_eq!(receive_shards.len() as u64, shard_count);
+    assert_eq!(receive_shards, sink_shards);
+    for (seq, shard) in destination.shard_receive.iter().enumerate() {
+        assert_eq!(shard.seq, seq as u64);
+        assert_eq!(shard.carrier, carrier);
+        assert!(shard.start_elapsed_ns > 0);
+        assert_eq!(shard.total_ns, shard.record_receive_ns + shard.sink_ns);
+        assert!(shard.record_receive_ns > 0);
+        assert!(shard.correlation_ns > 0);
+        assert!(shard.sink_ns > 0);
+        assert!(shard.total_ns > 0);
+    }
+    let mut blocking_pool_wait_total = 0u64;
+    for (seq, shard) in destination.shard_sink.iter().enumerate() {
+        assert_eq!(shard.seq, seq as u64);
+        assert_eq!(shard.carrier, carrier);
+        assert!(shard.start_elapsed_ns > 0);
+        assert!(shard.parse_validate_ns > 0);
+        assert!(shard.member_parallel_wall_ns > 0);
+        assert!(shard.total_ns > 0);
+        assert!(
+            shard.total_ns
+                >= shard
+                    .blocking_pool_wait_ns
+                    .saturating_add(shard.parse_validate_ns)
+                    .saturating_add(shard.member_parallel_wall_ns)
+        );
+        blocking_pool_wait_total =
+            blocking_pool_wait_total.saturating_add(shard.blocking_pool_wait_ns);
+        for timing in [
+            &shard.member.mkdir,
+            &shard.member.open,
+            &shard.member.write,
+            &shard.member.close,
+            &shard.member.metadata,
+            &shard.member.total,
+        ] {
+            assert_timing_observed(timing, shard.members);
+        }
+        assert!(
+            shard.member.total.total_ns
+                >= shard
+                    .member
+                    .mkdir
+                    .total_ns
+                    .saturating_add(shard.member.open.total_ns)
+                    .saturating_add(shard.member.write.total_ns)
+                    .saturating_add(shard.member.close.total_ns)
+                    .saturating_add(shard.member.metadata.total_ns)
+        );
+    }
+    assert!(blocking_pool_wait_total > 0);
+    let member_sample_totals =
+        destination
+            .shard_sink
+            .iter()
+            .fold([0u64; 6], |mut totals, shard| {
+                totals[0] += shard.member.mkdir.samples;
+                totals[1] += shard.member.open.samples;
+                totals[2] += shard.member.write.samples;
+                totals[3] += shard.member.close.samples;
+                totals[4] += shard.member.metadata.samples;
+                totals[5] += shard.member.total.samples;
+                totals
+            });
+    for samples in member_sample_totals {
+        assert_eq!(samples, FILE_COUNT);
+    }
+
+    match carrier {
+        SmallFileCarrier::Tcp => {
+            assert_eq!(bookkeeping.tar_shards_queued, shard_count);
+            assert_eq!(bookkeeping.tar_members_queued, FILE_COUNT);
+            assert_timing_observed(&bookkeeping.tar_queue, shard_count);
+        }
+        SmallFileCarrier::InStream => {
+            assert_eq!(bookkeeping.tar_shards_queued, 0);
+            assert_eq!(bookkeeping.tar_members_queued, 0);
+            assert_eq!(bookkeeping.tar_queue, Default::default());
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn small_file_probe_is_complete_and_inert_across_roles_and_carriers() {
+    for carrier in [SmallFileCarrier::Tcp, SmallFileCarrier::InStream] {
+        let source_off = run_small_file_probe_case(TransferRole::Source, carrier, false).await;
+        let source_on = run_small_file_probe_case(TransferRole::Source, carrier, true).await;
+        let destination_off =
+            run_small_file_probe_case(TransferRole::Destination, carrier, false).await;
+        let destination_on =
+            run_small_file_probe_case(TransferRole::Destination, carrier, true).await;
+
+        assert!(source_off.reports.is_empty());
+        assert!(destination_off.reports.is_empty());
+        for (off, on) in [
+            (&source_off, &source_on),
+            (&destination_off, &destination_on),
+        ] {
+            assert_eq!(off.summary, on.summary);
+            assert_eq!(off.needed_paths, on.needed_paths);
+            assert_eq!(off.data_plane_streams, on.data_plane_streams);
+            assert_eq!(off.tree, on.tree);
+            assert_eq!(off.metadata, on.metadata);
+        }
+        assert_eq!(source_on.summary, destination_on.summary);
+        assert_eq!(source_on.needed_paths, destination_on.needed_paths);
+        assert_eq!(
+            source_on.data_plane_streams,
+            destination_on.data_plane_streams
+        );
+        assert_eq!(source_on.tree, destination_on.tree);
+        assert_eq!(source_on.metadata, destination_on.metadata);
+        assert_eq!(
+            source_on.summary.in_stream_carrier_used,
+            carrier == SmallFileCarrier::InStream
+        );
+        assert_small_file_probe_inventory(&source_on, TransferRole::Source, carrier);
+        assert_small_file_probe_inventory(&destination_on, TransferRole::Destination, carrier);
+
+        let source_report = source_on
+            .reports
+            .iter()
+            .find(|report| report.endpoint_role == SessionPhaseRole::Destination)
+            .unwrap();
+        let destination_report = destination_on
+            .reports
+            .iter()
+            .find(|report| report.endpoint_role == SessionPhaseRole::Destination)
+            .unwrap();
+        assert_ne!(
+            source_report.correlation_id,
+            destination_report.correlation_id
+        );
+        let source_ids: BTreeSet<_> = source_report
+            .shard_receive
+            .iter()
+            .map(|shard| shard.shard_id.as_str())
+            .collect();
+        let destination_ids: BTreeSet<_> = destination_report
+            .shard_receive
+            .iter()
+            .map(|shard| shard.shard_id.as_str())
+            .collect();
+        assert!(source_ids.is_disjoint(&destination_ids));
     }
 }
 

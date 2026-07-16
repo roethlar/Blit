@@ -10,6 +10,7 @@ pub mod resume_diff;
 pub mod session_client;
 pub mod session_phase;
 pub mod sink;
+pub mod small_file_probe;
 pub mod socket;
 pub mod source;
 pub mod stall_guard;
@@ -40,5 +41,9 @@ pub use progress::{
 };
 pub use session_phase::{SessionPhaseEvent, SessionPhaseRole, SessionPhaseTrace};
 pub use sink::{DataPlaneSink, FsSinkConfig, FsTransferSink, NullSink, SinkOutcome, TransferSink};
+pub use small_file_probe::{
+    ClaimReport, MemberTimingReport, ShardReceiveReport, ShardSinkReport, SmallFileCarrier,
+    SmallFileProbe, SmallFileProbeReport, SourceBookkeepingReport, TimingAggregate,
+};
 pub use socket::{configure_data_socket, DATA_PLANE_ACCEPT_TIMEOUT, DATA_PLANE_TOKEN_TIMEOUT};
 pub use tcp_info::{sample_stream as sample_tcp_info, TcpInfoSample};

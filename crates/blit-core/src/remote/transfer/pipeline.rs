@@ -437,7 +437,7 @@ pub async fn execute_receive_pipeline<R: AsyncRead + Unpin + Send>(
     sink: Arc<dyn TransferSink>,
     progress: Option<&RemoteTransferProgress>,
 ) -> Result<SinkOutcome> {
-    execute_receive_pipeline_with_phase(socket, sink, progress, None, 0, 0).await
+    execute_receive_pipeline_with_phase(socket, sink, progress, None, None, 0, 0).await
 }
 
 pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + Send>(
@@ -445,6 +445,7 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
     sink: Arc<dyn TransferSink>,
     progress: Option<&RemoteTransferProgress>,
     phase_trace: Option<crate::remote::transfer::session_phase::BoundSessionPhaseTrace>,
+    small_file_probe: Option<crate::remote::transfer::small_file_probe::BoundSmallFileProbe>,
     epoch: u32,
     socket_id: u32,
 ) -> Result<SinkOutcome> {
@@ -491,18 +492,53 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                 total.merge(&outcome);
             }
             DATA_PLANE_RECORD_TAR_SHARD => {
+                let receive_started = small_file_probe.as_ref().map(|probe| probe.start());
                 let (headers, data) = read_tar_shard(socket).await?;
+                let decoded = receive_started.map(|_| std::time::Instant::now());
+                let members = headers.len();
                 let bytes = data.len() as u64;
+                let shard_id = small_file_probe
+                    .as_ref()
+                    .map(|probe| probe.shard_id(&headers));
+                let correlated = receive_started.map(|_| std::time::Instant::now());
                 // Capture member paths for the per-file lane before the
                 // payload takes ownership; skip the allocation when no
                 // one is listening (the daemon receive path).
                 let member_paths: Option<Vec<String>> =
                     progress.map(|_| headers.iter().map(|h| h.relative_path.clone()).collect());
                 let payload = PreparedPayload::TarShard { headers, data };
+                let sink_started = receive_started.map(|_| std::time::Instant::now());
                 let outcome = sink
                     .write_payload(payload)
                     .await
                     .context("writing payload")?;
+                if let (
+                    Some(probe),
+                    Some(shard_id),
+                    Some(started),
+                    Some(decoded),
+                    Some(correlated),
+                    Some(sink_started),
+                ) = (
+                    &small_file_probe,
+                    shard_id,
+                    receive_started,
+                    decoded,
+                    correlated,
+                    sink_started,
+                ) {
+                    probe.note_shard_receive(
+                        shard_id,
+                        crate::remote::transfer::small_file_probe::SmallFileCarrier::Tcp,
+                        members,
+                        bytes,
+                        started,
+                        decoded,
+                        correlated,
+                        sink_started,
+                        std::time::Instant::now(),
+                    );
+                }
                 if let Some(p) = progress {
                     p.report_payload(0, bytes);
                     for path in member_paths.unwrap_or_default() {

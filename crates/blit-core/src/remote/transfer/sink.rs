@@ -17,6 +17,7 @@ use crate::generated::{ComparisonMode, FileHeader};
 use crate::logger::NoopLogger;
 use crate::remote::transfer::payload::PreparedPayload;
 use crate::remote::transfer::progress::{ByteProgressSink, NoProbe, Probe};
+use crate::remote::transfer::small_file_probe::{BoundSmallFileProbe, MemberTimingReport};
 use crate::remote::transfer::source::TransferSource;
 
 // Re-export for consumers.
@@ -132,6 +133,9 @@ pub struct FsTransferSink {
     /// [`FsTransferSink::with_byte_progress`] from
     /// `ActiveJobGuard::bytes_counter()`.
     byte_progress: Option<ByteProgressSink>,
+    /// Separate otp-12 high-volume observer. `None` is the exact normal
+    /// sink path: no clocks, per-member timing, or output.
+    small_file_probe: Option<BoundSmallFileProbe>,
 }
 
 impl FsTransferSink {
@@ -151,6 +155,7 @@ impl FsTransferSink {
             canonical_dst_root,
             config,
             byte_progress: None,
+            small_file_probe: None,
         }
     }
 
@@ -161,6 +166,11 @@ impl FsTransferSink {
     /// tracks live progress; CLI-side callers omit it.
     pub fn with_byte_progress(mut self, sink: ByteProgressSink) -> Self {
         self.byte_progress = Some(sink);
+        self
+    }
+
+    pub(crate) fn with_small_file_probe(mut self, probe: Option<BoundSmallFileProbe>) -> Self {
+        self.small_file_probe = probe;
         self
     }
 
@@ -239,6 +249,16 @@ impl TransferSink for FsTransferSink {
                 let dst_root = self.dst_root.clone();
                 let canonical_dst_root = self.canonical_dst_root.clone();
                 let config = self.config.clone();
+                let tar_probe = self
+                    .small_file_probe
+                    .as_ref()
+                    .and_then(|probe| match &payload {
+                        PreparedPayload::TarShard { headers, .. } => {
+                            let shard_id = probe.shard_id(headers);
+                            Some((probe.clone(), shard_id, probe.start()))
+                        }
+                        _ => None,
+                    });
                 let outcome = tokio::task::spawn_blocking(move || match payload {
                     PreparedPayload::File(header) => write_file_payload(
                         &src_root,
@@ -247,13 +267,24 @@ impl TransferSink for FsTransferSink {
                         &header,
                         &config,
                     ),
-                    PreparedPayload::TarShard { headers, data } => write_tar_shard_payload(
-                        &dst_root,
-                        canonical_dst_root.as_deref(),
-                        &headers,
-                        &data,
-                        &config,
-                    ),
+                    PreparedPayload::TarShard { headers, data } => {
+                        let worker_started = tar_probe.as_ref().map(|_| std::time::Instant::now());
+                        let blocking_pool_wait = tar_probe.as_ref().zip(worker_started).map(
+                            |((_, _, queued), worker)| worker.saturating_duration_since(*queued),
+                        );
+                        write_tar_shard_payload(
+                            &dst_root,
+                            canonical_dst_root.as_deref(),
+                            &headers,
+                            &data,
+                            &config,
+                            tar_probe.as_ref().zip(blocking_pool_wait).map(
+                                |((probe, shard_id, queued), wait)| {
+                                    (probe, shard_id.as_str(), *queued, wait)
+                                },
+                            ),
+                        )
+                    }
                     _ => unreachable!("outer match guarantees File or TarShard"),
                 })
                 .await
@@ -531,6 +562,12 @@ fn write_tar_shard_payload(
     headers: &[FileHeader],
     data: &[u8],
     config: &FsSinkConfig,
+    probe: Option<(
+        &BoundSmallFileProbe,
+        &str,
+        std::time::Instant,
+        std::time::Duration,
+    )>,
 ) -> Result<SinkOutcome> {
     if config.dry_run {
         return Ok(SinkOutcome {
@@ -555,6 +592,7 @@ fn write_tar_shard_payload(
 
     use super::tar_safety::{safe_extract_tar_shard, ExtractedFile, TarShardExtractOptions};
 
+    let parse_started = probe.map(|_| std::time::Instant::now());
     let opts = TarShardExtractOptions::default();
     let mut extracted = safe_extract_tar_shard(data, headers.to_vec(), dst_root, &opts)?;
 
@@ -589,19 +627,87 @@ fn write_tar_shard_payload(
         }
     }
 
+    let parse_validate = parse_started.map(|started| started.elapsed());
+
     // Write in parallel. Each closure does its own create_dir_all +
     // fs::write + best-effort mtime/permission application — same
     // policy as `tar_safety::write_extracted_file` but inlined so we
     // can return per-file byte counts for the SinkOutcome.
-    let results: Vec<Result<u64>> = extracted
+    if probe.is_none() {
+        let results: Vec<Result<u64>> = extracted
+            .into_par_iter()
+            .map(|f: ExtractedFile| -> Result<u64> {
+                if let Some(parent) = f.dest_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("create dir {}", parent.display()))?;
+                }
+                std::fs::write(&f.dest_path, &f.contents)
+                    .with_context(|| format!("write {}", f.dest_path.display()))?;
+                if let Some(ft) = f.mtime {
+                    if let Err(e) = filetime::set_file_mtime(&f.dest_path, ft) {
+                        log::warn!("set mtime on {}: {}", f.dest_path.display(), e);
+                    }
+                }
+                #[cfg(unix)]
+                if let Some(perms) = f.permissions {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Err(e) = std::fs::set_permissions(
+                        &f.dest_path,
+                        std::fs::Permissions::from_mode(perms),
+                    ) {
+                        log::warn!("set permissions on {}: {}", f.dest_path.display(), e);
+                    }
+                }
+                Ok(f.size)
+            })
+            .collect();
+        let mut files_written = 0usize;
+        let mut bytes_written = 0u64;
+        for result in results {
+            bytes_written += result?;
+            files_written += 1;
+        }
+        return Ok(SinkOutcome {
+            files_written,
+            bytes_written,
+        });
+    }
+
+    type MemberSample = (
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    );
+    let members_started = probe.map(|_| std::time::Instant::now());
+    let results: Vec<Result<(u64, Option<MemberSample>)>> = extracted
         .into_par_iter()
-        .map(|f: ExtractedFile| -> Result<u64> {
+        .map(|f: ExtractedFile| -> Result<(u64, Option<MemberSample>)> {
+            use std::io::Write as _;
+
+            let total_started = std::time::Instant::now();
+            let mkdir_started = std::time::Instant::now();
             if let Some(parent) = f.dest_path.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create dir {}", parent.display()))?;
             }
-            std::fs::write(&f.dest_path, &f.contents)
+            let mkdir = mkdir_started.elapsed();
+
+            let open_started = std::time::Instant::now();
+            let mut file = std::fs::File::create(&f.dest_path)
+                .with_context(|| format!("open {}", f.dest_path.display()))?;
+            let open = open_started.elapsed();
+            let write_started = std::time::Instant::now();
+            file.write_all(&f.contents)
                 .with_context(|| format!("write {}", f.dest_path.display()))?;
+            let write = write_started.elapsed();
+            let close_started = std::time::Instant::now();
+            drop(file);
+            let close = close_started.elapsed();
+
+            let metadata_started = std::time::Instant::now();
             if let Some(ft) = f.mtime {
                 if let Err(e) = filetime::set_file_mtime(&f.dest_path, ft) {
                     log::warn!("set mtime on {}: {}", f.dest_path.display(), e);
@@ -616,15 +722,40 @@ fn write_tar_shard_payload(
                     log::warn!("set permissions on {}: {}", f.dest_path.display(), e);
                 }
             }
-            Ok(f.size)
+            let metadata = metadata_started.elapsed();
+            Ok((
+                f.size,
+                Some((mkdir, open, write, close, metadata, total_started.elapsed())),
+            ))
         })
         .collect();
+    let member_parallel_wall = members_started.map(|started| started.elapsed());
 
     let mut files_written = 0usize;
     let mut bytes_written = 0u64;
+    let mut member_timings = MemberTimingReport::default();
     for r in results {
-        bytes_written += r?;
+        let (bytes, sample) = r?;
+        bytes_written += bytes;
         files_written += 1;
+        if let Some((mkdir, open, write, close, metadata, total)) = sample {
+            member_timings.record(mkdir, open, write, close, metadata, total);
+        }
+    }
+
+    if let Some((probe, shard_id, started, blocking_pool_wait)) = probe {
+        probe.note_shard_sink(
+            shard_id.to_owned(),
+            probe.carrier(),
+            headers.len(),
+            data.len() as u64,
+            started,
+            blocking_pool_wait,
+            parse_validate.unwrap_or_default(),
+            member_parallel_wall.unwrap_or_default(),
+            started.elapsed(),
+            member_timings,
+        );
     }
 
     Ok(SinkOutcome {

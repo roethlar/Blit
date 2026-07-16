@@ -56,6 +56,7 @@ use crate::remote::transfer::payload::{PreparedPayload, TransferPayload};
 use crate::remote::transfer::pipeline::execute_receive_pipeline_with_phase;
 use crate::remote::transfer::session_phase::{BoundSessionPhaseTrace, SessionPhaseFields};
 use crate::remote::transfer::sink::{DataPlaneSink, SinkOutcome, TransferSink};
+use crate::remote::transfer::small_file_probe::{BoundSmallFileProbe, SmallFileCarrier};
 use crate::remote::transfer::socket::{
     configure_data_socket, dial_data_plane, DATA_PLANE_ACCEPT_TIMEOUT, DATA_PLANE_TOKEN_TIMEOUT,
 };
@@ -236,6 +237,7 @@ impl ResponderDataPlane {
         sink: Arc<dyn TransferSink>,
         progress: Option<RemoteTransferProgress>,
         phase_trace: Option<BoundSessionPhaseTrace>,
+        small_file_probe: Option<BoundSmallFileProbe>,
     ) -> ResponderDataPlaneRun {
         let ceiling = local_receiver_capacity().max_streams.max(1) as usize;
         let session_token = self.session_token.clone();
@@ -244,6 +246,7 @@ impl ResponderDataPlane {
             sink,
             progress,
             phase_trace,
+            small_file_probe,
             arm_rx,
         )));
         ResponderDataPlaneRun {
@@ -259,6 +262,7 @@ impl ResponderDataPlane {
         sink: Arc<dyn TransferSink>,
         progress: Option<RemoteTransferProgress>,
         phase_trace: Option<BoundSessionPhaseTrace>,
+        small_file_probe: Option<BoundSmallFileProbe>,
         arm_rx: mpsc::UnboundedReceiver<ResizeArm>,
     ) -> Result<ReceiveTotals> {
         // Epoch-0 socket credential: session_token ‖ epoch0_sub_token.
@@ -300,6 +304,7 @@ impl ResponderDataPlane {
                 &sink,
                 progress.clone(),
                 phase_trace.clone(),
+                small_file_probe.clone(),
                 0,
                 socket_id,
             );
@@ -389,6 +394,7 @@ impl ResponderDataPlane {
                         &sink,
                         progress.clone(),
                         phase_trace.clone(),
+                        small_file_probe.clone(),
                         epoch,
                         0,
                     );
@@ -441,6 +447,7 @@ fn spawn_receive(
     sink: &Arc<dyn TransferSink>,
     progress: Option<RemoteTransferProgress>,
     phase_trace: Option<BoundSessionPhaseTrace>,
+    small_file_probe: Option<BoundSmallFileProbe>,
     epoch: u32,
     socket_id: u32,
 ) {
@@ -462,6 +469,7 @@ fn spawn_receive(
             sink,
             progress.as_ref(),
             phase_trace,
+            small_file_probe,
             epoch,
             socket_id,
         )
@@ -591,6 +599,7 @@ pub(super) struct InitiatorReceivePlaneRun {
     /// each epoch-N resize dial in [`Self::add_dialed_stream`].
     trace: bool,
     phase_trace: Option<BoundSessionPhaseTrace>,
+    small_file_probe: Option<BoundSmallFileProbe>,
 }
 
 /// Dial the granted epoch-0 socket(s) and spawn one receive worker per
@@ -606,6 +615,7 @@ pub(super) async fn dial_destination_data_plane(
     progress: Option<RemoteTransferProgress>,
     trace: bool,
     phase_trace: Option<BoundSessionPhaseTrace>,
+    small_file_probe: Option<BoundSmallFileProbe>,
 ) -> Result<InitiatorReceivePlaneRun> {
     let initial = grant.initial_streams.max(1) as usize;
     // Epoch-0 handshake: session_token ‖ epoch0_sub_token.
@@ -658,6 +668,7 @@ pub(super) async fn dial_destination_data_plane(
             &sink,
             progress.clone(),
             phase_trace.clone(),
+            small_file_probe.clone(),
             0,
             socket_id as u32,
         );
@@ -672,6 +683,7 @@ pub(super) async fn dial_destination_data_plane(
         progress,
         trace,
         phase_trace,
+        small_file_probe,
     })
 }
 
@@ -726,6 +738,7 @@ impl InitiatorReceivePlaneRun {
             &self.sink,
             self.progress.clone(),
             self.phase_trace.clone(),
+            self.small_file_probe.clone(),
             epoch,
             0,
         );
@@ -833,6 +846,7 @@ pub(super) struct SourceDataPlane {
     /// identical — only this transport action flips (otp-5b-2).
     sockets: SourceSockets,
     phase_trace: Option<BoundSessionPhaseTrace>,
+    small_file_probe: Option<BoundSmallFileProbe>,
     queue_trace_armed: AtomicBool,
 }
 
@@ -850,6 +864,7 @@ pub(super) async fn dial_source_data_plane(
     source: Arc<dyn TransferSource>,
     instruments: &SourceInstruments,
     phase_trace: Option<BoundSessionPhaseTrace>,
+    small_file_probe: Option<BoundSmallFileProbe>,
 ) -> Result<SourceDataPlane> {
     let initial = grant.initial_streams.max(1) as usize;
     // The byte sender's dial, bounded by the receiver's advertised
@@ -949,6 +964,7 @@ pub(super) async fn dial_source_data_plane(
             tcp_port: grant.tcp_port,
         },
         phase_trace,
+        small_file_probe,
         queue_trace_armed: AtomicBool::new(queue_trace_armed),
     })
 }
@@ -972,6 +988,7 @@ pub(super) async fn accept_source_data_plane(
     source: Arc<dyn TransferSource>,
     instruments: &SourceInstruments,
     phase_trace: Option<BoundSessionPhaseTrace>,
+    small_file_probe: Option<BoundSmallFileProbe>,
 ) -> Result<SourceDataPlane> {
     let initial = bound.initial_streams.max(1) as usize;
     // The byte sender's dial, bounded by the receiver's advertised
@@ -1062,6 +1079,7 @@ pub(super) async fn accept_source_data_plane(
             listener: bound.listener,
         },
         phase_trace,
+        small_file_probe,
         queue_trace_armed: AtomicBool::new(queue_trace_armed),
     })
 }
@@ -1212,34 +1230,47 @@ impl SourceDataPlane {
     /// selects this send against control events so resize acknowledgements
     /// keep growing the same work-stealing queue under backpressure.
     pub(super) async fn queue(&self, payload: TransferPayload) -> Result<()> {
+        let tar_probe = self.small_file_probe.as_ref().and_then(|probe| {
+            if let TransferPayload::TarShard { headers } = &payload {
+                Some((probe, headers.len(), probe.start()))
+            } else {
+                None
+            }
+        });
         let tx = self.payload_tx.as_ref().ok_or_else(|| {
             eyre::Report::new(SessionFault::internal("data plane already finished"))
         })?;
-        if self.phase_trace.is_none() || !self.queue_trace_armed.load(Ordering::Relaxed) {
-            return tx
-                .send(payload)
-                .await
-                .map_err(|_| dp_fault("data-plane send pipeline closed before all payloads sent"));
+        let result =
+            if self.phase_trace.is_none() || !self.queue_trace_armed.load(Ordering::Relaxed) {
+                tx.send(payload).await.map_err(|_| {
+                    dp_fault("data-plane send pipeline closed before all payloads sent")
+                })
+            } else {
+                let permit = tx.reserve().await.map_err(|_| {
+                    dp_fault("data-plane send pipeline closed before all payloads sent")
+                })?;
+                let queued_at = if self.queue_trace_armed.load(Ordering::Relaxed)
+                    && self
+                        .queue_trace_armed
+                        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    self.phase_trace.as_ref().map(BoundSessionPhaseTrace::stamp)
+                } else {
+                    None
+                };
+                permit.send(payload);
+                if let (Some(trace), Some(queued_at)) = (&self.phase_trace, queued_at) {
+                    trace.first_payload_queued_at(queued_at);
+                }
+                Ok(())
+            };
+        if result.is_ok() {
+            if let Some((probe, members, started)) = tar_probe {
+                probe.note_tar_queue(started.elapsed(), members);
+            }
         }
-        let permit = tx
-            .reserve()
-            .await
-            .map_err(|_| dp_fault("data-plane send pipeline closed before all payloads sent"))?;
-        let queued_at = if self.queue_trace_armed.load(Ordering::Relaxed)
-            && self
-                .queue_trace_armed
-                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-        {
-            self.phase_trace.as_ref().map(BoundSessionPhaseTrace::stamp)
-        } else {
-            None
-        };
-        permit.send(payload);
-        if let (Some(trace), Some(queued_at)) = (&self.phase_trace, queued_at) {
-            trace.first_payload_queued_at(queued_at);
-        }
-        Ok(())
+        result
     }
 
     /// Declare that every payload has been queued without waiting for the
@@ -1295,6 +1326,7 @@ impl SourceDataPlane {
 pub(super) struct NeedListSink {
     inner: Arc<dyn TransferSink>,
     outstanding: OutstandingNeeds,
+    small_file_probe: Option<BoundSmallFileProbe>,
     /// `Some` iff the session negotiated resume (otp-7b): the shared
     /// grant map + resumed counter block records are validated and
     /// claimed against. `None` ⇒ any block record is a violation.
@@ -1306,23 +1338,46 @@ impl NeedListSink {
         inner: Arc<dyn TransferSink>,
         outstanding: OutstandingNeeds,
         resume: Option<ResumeRecv>,
+        small_file_probe: Option<BoundSmallFileProbe>,
     ) -> Self {
         Self {
             inner,
             outstanding,
             resume,
+            small_file_probe,
         }
     }
 
     /// Remove `path` from the outstanding set, or fault: a path that is
     /// not present is either off the need list or a duplicate delivery.
     fn claim(&self, path: &str) -> Result<()> {
-        if self
-            .outstanding
-            .lock()
-            .expect("outstanding-needs lock poisoned")
-            .remove(path)
-        {
+        let removed = if let Some(probe) = &self.small_file_probe {
+            let wait_started = probe.start();
+            let mut outstanding = self
+                .outstanding
+                .lock()
+                .expect("outstanding-needs lock poisoned");
+            let wait = wait_started.elapsed();
+            let hold_started = probe.start();
+            let removed = outstanding.remove(path);
+            drop(outstanding);
+            let hold = hold_started.elapsed();
+            probe.note_claim(
+                SmallFileCarrier::Tcp,
+                1,
+                1,
+                usize::from(removed),
+                wait,
+                hold,
+            );
+            removed
+        } else {
+            self.outstanding
+                .lock()
+                .expect("outstanding-needs lock poisoned")
+                .remove(path)
+        };
+        if removed {
             Ok(())
         } else {
             Err(eyre::Report::new(
@@ -1586,7 +1641,12 @@ mod tests {
 
         let outstanding: OutstandingNeeds =
             Arc::new(StdMutex::new(HashSet::from(["a.txt".to_string()])));
-        let sink = NeedListSink::new(Arc::new(NullSink::new()), Arc::clone(&outstanding), None);
+        let sink = NeedListSink::new(
+            Arc::new(NullSink::new()),
+            Arc::clone(&outstanding),
+            None,
+            None,
+        );
 
         let file = |path: &str| {
             PreparedPayload::File(FileHeader {
@@ -1660,6 +1720,7 @@ mod tests {
                 headers: Arc::clone(&headers),
                 resumed: Arc::clone(&resumed),
             }),
+            None,
         );
 
         // A whole-file record for the resume-flagged grant bypasses the

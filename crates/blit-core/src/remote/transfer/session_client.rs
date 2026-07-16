@@ -178,6 +178,7 @@ pub async fn run_push_session(
             unreadable: Some(Arc::clone(&unreadable)),
             trace_data_plane: options.trace_data_plane,
             session_phase_trace: Default::default(),
+            small_file_probe: Default::default(),
         },
     };
     let summary = run_source(cfg, transport, source).await?;
@@ -341,6 +342,7 @@ pub async fn run_pull_session_with_client(
             byte_progress: options.byte_progress,
             trace_data_plane: options.trace_data_plane,
             session_phase_trace: Default::default(),
+            small_file_probe: Default::default(),
         },
         local_apply: None,
     };

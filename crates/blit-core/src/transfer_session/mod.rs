@@ -50,6 +50,9 @@ use crate::remote::transfer::session_phase::{
     BoundSessionPhaseTrace, SessionPhaseFields, SessionPhaseRole, SessionPhaseTrace,
 };
 use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
+use crate::remote::transfer::small_file_probe::{
+    BoundSmallFileProbe, SmallFileCarrier, SmallFileProbe,
+};
 use crate::remote::transfer::source::{FsTransferSource, TransferSource};
 use crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT;
 use crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES;
@@ -222,6 +225,9 @@ pub struct SourceInstruments {
     /// Disabled by default; production probes may also enable it with
     /// `BLIT_TRACE_SESSION_PHASES=1` on each endpoint.
     pub session_phase_trace: SessionPhaseTrace,
+    /// High-volume aggregate observer for otp-12 small-file attribution.
+    /// Separate from the low-frequency phase trace and disabled by default.
+    pub small_file_probe: SmallFileProbe,
 }
 
 pub struct DestinationSessionConfig {
@@ -278,6 +284,9 @@ pub struct DestinationInstruments {
     /// Kept separate from the per-file `trace_data_plane` output so the
     /// observer does not dominate a small-file timing run.
     pub session_phase_trace: SessionPhaseTrace,
+    /// High-volume aggregate observer for otp-12 small-file attribution.
+    /// Separate from the low-frequency phase trace and disabled by default.
+    pub small_file_probe: SmallFileProbe,
 }
 
 /// A session-terminating fault: either end refusing, aborting, or
@@ -692,6 +701,44 @@ fn bind_session_phase_trace(
         .bind(session_token, endpoint_role, initiator_role)
 }
 
+fn bind_small_file_probe(
+    probe: SmallFileProbe,
+    negotiated: &Negotiated,
+    endpoint_role: SessionPhaseRole,
+) -> Option<BoundSmallFileProbe> {
+    let session_token = negotiated
+        .responder_data_plane
+        .as_ref()
+        .map(data_plane::ResponderDataPlane::session_token)
+        .or_else(|| {
+            negotiated
+                .accept
+                .data_plane
+                .as_ref()
+                .map(|grant| grant.session_token.as_slice())
+        });
+    let initiator_role = match TransferRole::try_from(negotiated.open.initiator_role).ok()? {
+        TransferRole::Source => SessionPhaseRole::Source,
+        TransferRole::Destination => SessionPhaseRole::Destination,
+        TransferRole::Unspecified => return None,
+    };
+    let carrier = if session_token.is_some() {
+        SmallFileCarrier::Tcp
+    } else {
+        SmallFileCarrier::InStream
+    };
+    probe
+        .or_from_env()
+        .bind(session_token, endpoint_role, initiator_role, carrier)
+}
+
+async fn finish_small_file_probe(probe: Option<&BoundSmallFileProbe>) {
+    let Some(probe) = probe.cloned() else {
+        return;
+    };
+    let _ = tokio::task::spawn_blocking(move || probe.finish()).await;
+}
+
 async fn flush_session_phase_trace(trace: Option<&BoundSessionPhaseTrace>) {
     let Some(trace) = trace.cloned() else {
         return;
@@ -1081,6 +1128,11 @@ async fn drive_source(
         &negotiated,
         SessionPhaseRole::Source,
     );
+    let small_file_probe = bind_small_file_probe(
+        instruments.small_file_probe.clone(),
+        &negotiated,
+        SessionPhaseRole::Source,
+    );
     // A SOURCE responder (pull, otp-5b) carries a bound listener to accept
     // its send sockets on; a SOURCE initiator (push) has none and dials the
     // grant it received instead. Take it here so the send half owns it.
@@ -1110,6 +1162,7 @@ async fn drive_source(
         // `ProgressEvent::ManifestBatch`: "push: need-list batches").
         instruments.progress.clone(),
         phase_trace.clone(),
+        small_file_probe.clone(),
         SourceEventSender {
             tx: event_tx,
             fault_signal: fault_tx,
@@ -1129,6 +1182,7 @@ async fn drive_source(
         event_rx,
         fault_rx,
         phase_trace,
+        small_file_probe,
     )
     .await
     {
@@ -1155,6 +1209,7 @@ async fn source_recv_half(
     resume_session: bool,
     progress: Option<RemoteTransferProgress>,
     phase_trace: Option<BoundSessionPhaseTrace>,
+    small_file_probe: Option<BoundSmallFileProbe>,
     events: SourceEventSender,
 ) {
     let mut need_batch_seq = 0u64;
@@ -1207,16 +1262,41 @@ async fn source_recv_half(
                         )));
                         return;
                     }
-                    let header = sent
-                        .lock()
-                        .expect("sent-manifest lock poisoned")
-                        .remove(&entry.relative_path);
+                    let header = if let Some(probe) = &small_file_probe {
+                        let wait_started = probe.start();
+                        let mut sent = sent.lock().expect("sent-manifest lock poisoned");
+                        let wait = wait_started.elapsed();
+                        let map_op_started = probe.start();
+                        let header = sent.remove(&entry.relative_path);
+                        let map_op = map_op_started.elapsed();
+                        drop(sent);
+                        probe.note_need_resolve(wait, map_op, header.is_some());
+                        header
+                    } else {
+                        sent.lock()
+                            .expect("sent-manifest lock poisoned")
+                            .remove(&entry.relative_path)
+                    };
                     match header {
                         Some(h) if entry.resume => {
-                            let _ = events.send(SourceEvent::ResumeNeed(h));
+                            if let Some(probe) = &small_file_probe {
+                                probe.note_need_event_enqueue(&h.relative_path);
+                                let started = probe.start();
+                                let _ = events.send(SourceEvent::ResumeNeed(h));
+                                probe.note_need_event_send(started.elapsed());
+                            } else {
+                                let _ = events.send(SourceEvent::ResumeNeed(h));
+                            }
                         }
                         Some(h) => {
-                            let _ = events.send(SourceEvent::Need(h));
+                            if let Some(probe) = &small_file_probe {
+                                probe.note_need_event_enqueue(&h.relative_path);
+                                let started = probe.start();
+                                let _ = events.send(SourceEvent::Need(h));
+                                probe.note_need_event_send(started.elapsed());
+                            } else {
+                                let _ = events.send(SourceEvent::Need(h));
+                            }
                         }
                         None => {
                             let _ = events.send(SourceEvent::Fault(
@@ -1317,6 +1397,7 @@ async fn source_send_half(
     mut events: mpsc::UnboundedReceiver<SourceEvent>,
     mut fault_signal: watch::Receiver<Option<SessionFault>>,
     phase_trace: Option<BoundSessionPhaseTrace>,
+    small_file_probe: Option<BoundSmallFileProbe>,
 ) -> Result<TransferSummary> {
     let mut pending: Vec<FileHeader> = Vec::new();
     let mut resume: ResumeSendState = ResumeSendState::default();
@@ -1343,6 +1424,7 @@ async fn source_send_half(
                 Arc::clone(&source),
                 &instruments,
                 phase_trace.clone(),
+                small_file_probe.clone(),
             )
             .await?,
         ),
@@ -1363,6 +1445,7 @@ async fn source_send_half(
                         Arc::clone(&source),
                         &instruments,
                         phase_trace.clone(),
+                        small_file_probe.clone(),
                     )
                     .await?,
                 )
@@ -1428,9 +1511,20 @@ async fn source_send_half(
     let unreadable: Arc<StdMutex<Vec<String>>> = instruments.unreadable.clone().unwrap_or_default();
     let (mut header_rx, scan_handle) = scan_source.scan(None, Arc::clone(&unreadable));
     while let Some(header) = header_rx.recv().await {
-        sent.lock()
-            .expect("sent-manifest lock poisoned")
-            .insert(header.relative_path.clone(), header.clone());
+        if let Some(probe) = &small_file_probe {
+            let wait_started = probe.start();
+            let mut sent = sent.lock().expect("sent-manifest lock poisoned");
+            let wait = wait_started.elapsed();
+            let map_op_started = probe.start();
+            sent.insert(header.relative_path.clone(), header.clone());
+            let map_op = map_op_started.elapsed();
+            drop(sent);
+            probe.note_manifest_insert(wait, map_op);
+        } else {
+            sent.lock()
+                .expect("sent-manifest lock poisoned")
+                .insert(header.relative_path.clone(), header.clone());
+        }
         tx.send(frame(Frame::ManifestEntry(header))).await?;
         // Faults detected by the receive half abort the stream now,
         // not after the full scan; needs just accumulate. (Resize acks
@@ -1445,6 +1539,7 @@ async fn source_send_half(
             data_plane.as_ref(),
             tx,
             &mut pending_resize,
+            small_file_probe.as_ref(),
         )
         .await?;
     }
@@ -1501,6 +1596,7 @@ async fn source_send_half(
             data_plane.as_ref(),
             tx,
             &mut pending_resize,
+            small_file_probe.as_ref(),
         )
         .await?;
         if !pending.is_empty() {
@@ -1525,8 +1621,20 @@ async fn source_send_half(
                             },
                         );
                     }
+                    let planner_input = batch.len();
+                    let planner_started = small_file_probe.as_ref().map(|probe| probe.start());
                     let payloads =
                         diff_planner::plan_push_payloads(batch, source.root(), plan_options)?;
+                    if let (Some(probe), Some(started)) = (&small_file_probe, planner_started) {
+                        let (tar_shards, tar_members) = tar_payload_shape(&payloads);
+                        probe.note_planner(
+                            started.elapsed(),
+                            planner_input,
+                            payloads.len(),
+                            tar_shards,
+                            tar_members,
+                        );
+                    }
                     if let Some(trace) = &phase_trace {
                         trace.event(
                             "planner_end",
@@ -1549,6 +1657,7 @@ async fn source_send_half(
                         dp,
                         tx,
                         &mut pending_resize,
+                        small_file_probe.as_ref(),
                     )
                     .await?;
                     // A cancel while earlier batches are actively moving
@@ -1580,6 +1689,7 @@ async fn source_send_half(
                             batch,
                             &mut read_buf,
                             instruments.progress.as_ref(),
+                            small_file_probe.as_ref(),
                         ) => {
                             res?;
                         }
@@ -1623,6 +1733,7 @@ async fn source_send_half(
                         dp,
                         tx,
                         &mut pending_resize,
+                        small_file_probe.as_ref(),
                     )
                     .await?;
                     // Same cancel posture as the plain-batch queue above:
@@ -1670,6 +1781,7 @@ async fn source_send_half(
                     data_plane.as_ref(),
                     tx,
                     &mut pending_resize,
+                    small_file_probe.as_ref(),
                 )
                 .await?;
             }
@@ -1701,6 +1813,7 @@ async fn source_send_half(
             dp,
             tx,
             &mut pending_resize,
+            small_file_probe.as_ref(),
         )
         .await?;
     }
@@ -1747,6 +1860,7 @@ async fn source_send_half(
                 trace.event("summary_received", SessionPhaseFields::default());
             }
             flush_session_phase_trace(phase_trace.as_ref()).await;
+            finish_small_file_probe(small_file_probe.as_ref()).await;
             Ok(summary)
         }
         Some(SourceEvent::Fault(fault)) => Err(eyre::Report::new(fault)),
@@ -1786,6 +1900,7 @@ async fn drain_ready_source_events(
     data_plane: Option<&data_plane::SourceDataPlane>,
     tx: &mut Box<dyn FrameTx>,
     pending_resize: &mut Option<data_plane::PendingResize>,
+    small_file_probe: Option<&BoundSmallFileProbe>,
 ) -> Result<()> {
     while let Ok(event) = events.try_recv() {
         process_source_event(
@@ -1798,6 +1913,7 @@ async fn drain_ready_source_events(
             data_plane,
             tx,
             pending_resize,
+            small_file_probe,
         )
         .await?;
     }
@@ -1818,9 +1934,15 @@ async fn process_source_event(
     data_plane: Option<&data_plane::SourceDataPlane>,
     tx: &mut Box<dyn FrameTx>,
     pending_resize: &mut Option<data_plane::PendingResize>,
+    small_file_probe: Option<&BoundSmallFileProbe>,
 ) -> Result<()> {
     match event {
         SourceEvent::Need(header) => {
+            if let Some(probe) = small_file_probe {
+                let handler_started = probe.start();
+                probe.note_need_event_hop(&header.relative_path, handler_started);
+            }
+            let process_started = small_file_probe.map(BoundSmallFileProbe::start);
             if *need_complete {
                 return Err(eyre::Report::new(SessionFault::protocol_violation(
                     format!("need for '{}' after NeedComplete", header.relative_path),
@@ -1829,9 +1951,17 @@ async fn process_source_event(
             *needed_bytes = needed_bytes.saturating_add(header.size);
             *needed_count += 1;
             pending.push(header);
+            if let (Some(probe), Some(started)) = (small_file_probe, process_started) {
+                probe.note_need_handler_work(started.elapsed());
+            }
             Ok(())
         }
         SourceEvent::ResumeNeed(header) => {
+            if let Some(probe) = small_file_probe {
+                let handler_started = probe.start();
+                probe.note_need_event_hop(&header.relative_path, handler_started);
+            }
+            let process_started = small_file_probe.map(BoundSmallFileProbe::start);
             if *need_complete {
                 return Err(eyre::Report::new(SessionFault::protocol_violation(
                     format!(
@@ -1849,6 +1979,9 @@ async fn process_source_event(
             // possible (the receive half's sent-map removal already
             // faults a second need for the same path).
             resume.held.insert(header.relative_path.clone(), header);
+            if let (Some(probe), Some(started)) = (small_file_probe, process_started) {
+                probe.note_need_handler_work(started.elapsed());
+            }
             Ok(())
         }
         SourceEvent::BlockHashes(list) => {
@@ -2050,6 +2183,7 @@ async fn queue_payloads_while_servicing_events(
     data_plane: &data_plane::SourceDataPlane,
     tx: &mut Box<dyn FrameTx>,
     pending_resize: &mut Option<data_plane::PendingResize>,
+    small_file_probe: Option<&BoundSmallFileProbe>,
 ) -> Result<()> {
     for payload in payloads {
         let queued = data_plane.queue(payload);
@@ -2079,6 +2213,7 @@ async fn queue_payloads_while_servicing_events(
                         Some(data_plane),
                         tx,
                         pending_resize,
+                        small_file_probe,
                     )
                     .await?;
                 }
@@ -2104,6 +2239,7 @@ async fn settle_shape_resizes(
     data_plane: &data_plane::SourceDataPlane,
     tx: &mut Box<dyn FrameTx>,
     pending_resize: &mut Option<data_plane::PendingResize>,
+    small_file_probe: Option<&BoundSmallFileProbe>,
 ) -> Result<()> {
     while pending_resize.is_some() {
         let event = events.recv().await.ok_or_else(|| {
@@ -2121,6 +2257,7 @@ async fn settle_shape_resizes(
             Some(data_plane),
             tx,
             pending_resize,
+            small_file_probe,
         )
         .await?;
     }
@@ -2256,8 +2393,21 @@ async fn send_payload_records(
     batch: Vec<FileHeader>,
     read_buf: &mut [u8],
     progress: Option<&RemoteTransferProgress>,
+    small_file_probe: Option<&BoundSmallFileProbe>,
 ) -> Result<()> {
+    let planner_input = batch.len();
+    let planner_started = small_file_probe.map(BoundSmallFileProbe::start);
     let payloads = diff_planner::plan_push_payloads(batch, source.root(), plan_options)?;
+    if let (Some(probe), Some(started)) = (small_file_probe, planner_started) {
+        let (tar_shards, tar_members) = tar_payload_shape(&payloads);
+        probe.note_planner(
+            started.elapsed(),
+            planner_input,
+            payloads.len(),
+            tar_shards,
+            tar_members,
+        );
+    }
     // In-stream only: every shard's header frame must clear the tonic
     // frame limit (codex otp-8 F2). The data-plane branch keeps the
     // planner's shards whole — its records are not protobuf frames.
@@ -2347,6 +2497,16 @@ async fn send_payload_records(
         }
     }
     Ok(())
+}
+
+fn tar_payload_shape(payloads: &[TransferPayload]) -> (usize, usize) {
+    payloads.iter().fold((0, 0), |(shards, members), payload| {
+        if let TransferPayload::TarShard { headers } = payload {
+            (shards + 1, members + headers.len())
+        } else {
+            (shards, members)
+        }
+    })
 }
 
 /// otp-7a: the SOURCE-side block phase for one resume-flagged need over
@@ -2822,6 +2982,11 @@ async fn destination_session(
         &negotiated,
         SessionPhaseRole::Destination,
     );
+    let small_file_probe = bind_small_file_probe(
+        instruments.small_file_probe.clone(),
+        &negotiated,
+        SessionPhaseRole::Destination,
+    );
     // otp-10b-2: the receive side's w6-1 progress lane. Need batches are
     // the denominator (reported where they're emitted, below); per-file
     // events ride each carrier's record handling.
@@ -2860,6 +3025,7 @@ async fn destination_session(
             if let Some(bp) = instruments.byte_progress {
                 sink = sink.with_byte_progress(bp);
             }
+            sink = sink.with_small_file_probe(small_file_probe.clone());
             Arc::new(sink)
         }
     };
@@ -2953,13 +3119,19 @@ async fn destination_session(
             headers: Arc::clone(&resume_headers),
             resumed: Arc::clone(&files_resumed),
         }),
+        small_file_probe.clone(),
     ));
     let (mut data_plane_recv, mut resize_live, resize_ceiling) =
         match negotiated.responder_data_plane {
             // DESTINATION responder (push, otp-4b): accept + receive.
             Some(rdp) => {
                 let initial = rdp.initial_streams() as usize;
-                let run = rdp.spawn(recv_sink, progress.clone(), phase_trace.clone());
+                let run = rdp.spawn(
+                    recv_sink,
+                    progress.clone(),
+                    phase_trace.clone(),
+                    small_file_probe.clone(),
+                );
                 let ceiling = run.ceiling;
                 (
                     Some(data_plane::DestRecvPlane::Responder(run)),
@@ -2979,6 +3151,7 @@ async fn destination_session(
                         progress.clone(),
                         instruments.trace_data_plane,
                         phase_trace.clone(),
+                        small_file_probe.clone(),
                     )
                     .await?;
                     // otp-5b-2: the pull data plane resizes too. Seed
@@ -3309,7 +3482,32 @@ async fn destination_session(
                         }
                     }
                 }
-                {
+                if let Some(probe) = &small_file_probe {
+                    let wait_started = probe.start();
+                    let mut out = outstanding.lock().expect("outstanding-needs lock poisoned");
+                    let wait = wait_started.elapsed();
+                    let hold_started = probe.start();
+                    let mut removed = 0usize;
+                    for h in &shard.files {
+                        if !out.remove(&h.relative_path) {
+                            return Err(violation(format!(
+                                "tar shard entry '{}' which is not on the need list",
+                                h.relative_path
+                            )));
+                        }
+                        removed += 1;
+                    }
+                    drop(out);
+                    let hold = hold_started.elapsed();
+                    probe.note_claim(
+                        SmallFileCarrier::InStream,
+                        shard.files.len(),
+                        1,
+                        removed,
+                        wait,
+                        hold,
+                    );
+                } else {
                     let mut out = outstanding.lock().expect("outstanding-needs lock poisoned");
                     for h in &shard.files {
                         if !out.remove(&h.relative_path) {
@@ -3331,7 +3529,9 @@ async fn destination_session(
                         .map(|h| h.relative_path.clone())
                         .collect()
                 });
-                let outcome = receive_tar_record(transport, sink.as_ref(), shard).await?;
+                let outcome =
+                    receive_tar_record(transport, sink.as_ref(), shard, small_file_probe.as_ref())
+                        .await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
                 if let Some(p) = &progress {
@@ -3670,6 +3870,7 @@ async fn destination_session(
                     trace.event("summary_sent", SessionPhaseFields::default());
                 }
                 flush_session_phase_trace(phase_trace.as_ref()).await;
+                finish_small_file_probe(small_file_probe.as_ref()).await;
                 return Ok(DestinationOutcome {
                     summary,
                     needed_paths,
@@ -4409,6 +4610,7 @@ async fn receive_tar_record(
     transport: &mut FrameTransport,
     sink: &dyn TransferSink,
     shard: TarShardHeader,
+    small_file_probe: Option<&BoundSmallFileProbe>,
 ) -> Result<crate::remote::transfer::SinkOutcome> {
     if shard.archive_size > MAX_TAR_SHARD_BYTES {
         return Err(violation(format!(
@@ -4416,6 +4618,9 @@ async fn receive_tar_record(
             shard.archive_size, MAX_TAR_SHARD_BYTES
         )));
     }
+    let members = shard.files.len();
+    let archive_bytes = shard.archive_size;
+    let receive_started = small_file_probe.map(BoundSmallFileProbe::start);
     let mut data: Vec<u8> = Vec::new();
     data.try_reserve_exact(shard.archive_size as usize)
         .map_err(|err| eyre::eyre!("allocating {} byte tar shard: {err}", shard.archive_size))?;
@@ -4446,12 +4651,43 @@ async fn receive_tar_record(
                         shard.archive_size
                     )));
                 }
-                return sink
-                    .write_payload(PreparedPayload::TarShard {
-                        headers: shard.files,
-                        data,
-                    })
-                    .await;
+                let decoded = receive_started.map(|_| std::time::Instant::now());
+                let shard_id = small_file_probe.map(|probe| probe.shard_id(&shard.files));
+                let correlated = receive_started.map(|_| std::time::Instant::now());
+                let payload = PreparedPayload::TarShard {
+                    headers: shard.files,
+                    data,
+                };
+                let sink_started = receive_started.map(|_| std::time::Instant::now());
+                let outcome = sink.write_payload(payload).await?;
+                if let (
+                    Some(probe),
+                    Some(shard_id),
+                    Some(started),
+                    Some(decoded),
+                    Some(correlated),
+                    Some(sink_started),
+                ) = (
+                    small_file_probe,
+                    shard_id,
+                    receive_started,
+                    decoded,
+                    correlated,
+                    sink_started,
+                ) {
+                    probe.note_shard_receive(
+                        shard_id,
+                        SmallFileCarrier::InStream,
+                        members,
+                        archive_bytes,
+                        started,
+                        decoded,
+                        correlated,
+                        sink_started,
+                        std::time::Instant::now(),
+                    );
+                }
+                return Ok(outcome);
             }
             Some(Frame::Error(err)) => {
                 // Same mid-record abort contract (plan D4) as file and
@@ -4954,9 +5190,17 @@ mod tests {
             ..PlanOptions::default()
         };
         let mut read_buf = vec![0u8; IN_STREAM_CHUNK];
-        send_payload_records(&mut tx, &source, plan_options, batch, &mut read_buf, None)
-            .await
-            .expect("in-stream send succeeds");
+        send_payload_records(
+            &mut tx,
+            &source,
+            plan_options,
+            batch,
+            &mut read_buf,
+            None,
+            None,
+        )
+        .await
+        .expect("in-stream send succeeds");
 
         let frames = frames.lock().expect("capture lock");
         let shard_headers: Vec<&TarShardHeader> = frames

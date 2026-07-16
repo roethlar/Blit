@@ -32,7 +32,7 @@ use crate::remote::transfer::sink::{
     FsSinkConfig, FsTransferSink, NullSink, SinkOutcome, TransferSink,
 };
 use crate::remote::transfer::source::{FilteredSource, FsTransferSource, TransferSource};
-use crate::remote::transfer::RemoteTransferProgress;
+use crate::remote::transfer::{RemoteTransferProgress, SmallFileProbe};
 use crate::transfer_plan::PlanOptions;
 
 use super::transport::in_process_pair;
@@ -618,13 +618,17 @@ pub async fn run_local_session(
             unreadable: Some(Arc::clone(&unreadable)),
             trace_data_plane: false,
             session_phase_trace: Default::default(),
+            small_file_probe: SmallFileProbe::disabled(),
         },
     };
     let dest_cfg = DestinationSessionConfig {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
-        instruments: DestinationInstruments::default(),
+        instruments: DestinationInstruments {
+            small_file_probe: SmallFileProbe::disabled(),
+            ..Default::default()
+        },
         local_apply: Some(local_apply),
     };
 
@@ -892,13 +896,17 @@ mod tests {
                 unreadable: Some(Arc::clone(&unreadable)),
                 trace_data_plane: false,
                 session_phase_trace: Default::default(),
+                small_file_probe: SmallFileProbe::disabled(),
             },
         };
         let dest_cfg = DestinationSessionConfig {
             hello: HelloConfig::default(),
             endpoint: SessionEndpoint::Responder,
             data_plane_host: None,
-            instruments: DestinationInstruments::default(),
+            instruments: DestinationInstruments {
+                small_file_probe: SmallFileProbe::disabled(),
+                ..Default::default()
+            },
             local_apply: Some(local_apply),
         };
         let (a, b) = in_process_pair();
