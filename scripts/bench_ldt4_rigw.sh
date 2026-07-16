@@ -925,9 +925,10 @@ PY
 }
 
 prepare_windows_runtime() {
-    local out active_hash guard
+    local out active_hash guard remote_record swap_record
     WIN_PRIOR_DAEMON="D:/blit-test/bins/active/retained-before-$SESSION_TAG-blit-daemon.exe"
     WIN_TESTED_DAEMON="D:/blit-test/bins/active/retained-tested-$SESSION_TAG-blit-daemon.exe"
+    remote_record="$WIN_SESSION_ROOT/$SESSION_TAG/runtime-swap-intent.txt"
     WIN_SWAP_ATTEMPTED=1
     guard=$(windows_path_guard_script)
     out=$(wssh "$guard
@@ -935,19 +936,32 @@ prepare_windows_runtime() {
 \$active = '$WIN_ACTIVE_DAEMON'
 \$prior = '$WIN_PRIOR_DAEMON'
 \$tested = '$WIN_TESTED_DAEMON'
+\$record = '$remote_record'
 Assert-Ldt4PlainPath '$WIN_STAGE_DAEMON' File | Out-Null
 Assert-Ldt4PlainPath (Split-Path -Parent (ConvertTo-Ldt4CanonicalPath \$active)) Directory | Out-Null
 Assert-Ldt4PlainPath \$active File \$true | Out-Null
 Assert-Ldt4PlainPath \$prior File \$true | Out-Null
 Assert-Ldt4PlainPath \$tested File \$true | Out-Null
+Assert-Ldt4PlainPath \$record File \$true | Out-Null
 if (Test-Path -LiteralPath \$prior) { throw 'prior-retention target already exists' }
 if (Test-Path -LiteralPath \$tested) { throw 'tested-retention target already exists' }
+if (Test-Path -LiteralPath \$record) { throw 'runtime swap intent already exists' }
 \$hadPrior = Test-Path -LiteralPath \$active
 if (\$hadPrior) {
   \$activeItem = Get-Item -LiteralPath \$active -Force -ErrorAction Stop
   if ((\$activeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'active daemon is a reparse point' }
 }
 \$priorHash = if (\$hadPrior) { (Get-FileHash -Algorithm SHA256 -LiteralPath \$active).Hash.ToLower() } else { 'none' }
+\$stagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath '$WIN_STAGE_DAEMON').Hash.ToLower()
+if (\$stagedHash -cne '$WIN_STAGED_DAEMON_SHA') { throw 'staged daemon changed before intent record' }
+\$recordText = \"had_prior=\$([int]\$hadPrior) prior_sha=\$priorHash staged_sha=\$stagedHash\`n\"
+\$recordStream = [IO.File]::Open(\$record,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+try {
+  \$recordBytes = [Text.Encoding]::ASCII.GetBytes(\$recordText)
+  \$recordStream.Write(\$recordBytes,0,\$recordBytes.Length)
+  \$recordStream.Flush(\$true)
+} finally { \$recordStream.Dispose() }
+Write-VolumeCache D -ErrorAction Stop
 if (\$hadPrior) { [IO.File]::Move((ConvertTo-Ldt4CanonicalPath \$active),(ConvertTo-Ldt4CanonicalPath \$prior)) }
 \$sourceStream = [IO.File]::Open((ConvertTo-Ldt4CanonicalPath '$WIN_STAGE_DAEMON'),[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
 try {
@@ -955,7 +969,6 @@ try {
   try { \$sourceStream.CopyTo(\$activeStream); \$activeStream.Flush(\$true) } finally { \$activeStream.Dispose() }
 } finally { \$sourceStream.Dispose() }
 Assert-Ldt4PlainPath \$active File | Out-Null
-\$stagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath '$WIN_STAGE_DAEMON').Hash.ToLower()
 \$activeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath \$active).Hash.ToLower()
 if (\$activeHash -cne \$stagedHash) { throw 'active daemon hash differs from staged daemon' }
 \"S|\$([int]\$hadPrior)|\$priorHash|\$activeHash\"
@@ -973,82 +986,92 @@ if (\$activeHash -cne \$stagedHash) { throw 'active daemon hash differs from sta
         [[ "$WIN_PRIOR_DAEMON_SHA" == none ]] \
             || session_void "Windows absent-prior state malformed: $out"
     fi
+    fetch_windows_file "$remote_record" "$OUT_DIR/windows-runtime-swap.txt" \
+        || session_void 'cannot fetch durable Windows runtime swap intent'
+    swap_record=$(tr -d '\r\n' < "$OUT_DIR/windows-runtime-swap.txt")
+    [[ "$swap_record" == "had_prior=$WIN_HAD_PRIOR prior_sha=$WIN_PRIOR_DAEMON_SHA staged_sha=$WIN_STAGED_DAEMON_SHA" ]] \
+        || session_void "Windows runtime intent differs from preparation result: $swap_record"
     WIN_PREP_COMPLETE=1
-    exclusive_line "$OUT_DIR/windows-runtime-swap.txt" \
-        "had_prior=$WIN_HAD_PRIOR prior_sha=$WIN_PRIOR_DAEMON_SHA staged_sha=$WIN_STAGED_DAEMON_SHA"
 }
 
 restore_windows_runtime() {
-    local mode=${1:-recovery} out require_normal=0 require_bound=0 expected_prior='' guard
+    local mode=${1:-recovery} out guard remote_record
     [[ "$WIN_SWAP_ATTEMPTED" == 1 ]] || return 0
     [[ "$mode" == normal || "$mode" == recovery ]] || return 1
     if [[ "$mode" == normal ]]; then
         [[ "$WIN_PREP_COMPLETE" == 1 ]] || return 1
-        require_normal=1
-        expected_prior=$WIN_PRIOR_DAEMON_SHA
     fi
-    if [[ "$WIN_PREP_COMPLETE" == 1 ]]; then
-        require_bound=1
-        expected_prior=$WIN_PRIOR_DAEMON_SHA
-    fi
+    remote_record="$WIN_SESSION_ROOT/$SESSION_TAG/runtime-swap-intent.txt"
     guard=$(windows_path_guard_script)
     out=$(wssh "$guard
 \$ErrorActionPreference = 'Stop'
 \$active = '$WIN_ACTIVE_DAEMON'
 \$prior = '$WIN_PRIOR_DAEMON'
 \$tested = '$WIN_TESTED_DAEMON'
-Assert-Ldt4PlainPath '$WIN_STAGE_DAEMON' File | Out-Null
+\$record = '$remote_record'
 Assert-Ldt4PlainPath (Split-Path -Parent (ConvertTo-Ldt4CanonicalPath \$active)) Directory | Out-Null
 Assert-Ldt4PlainPath \$active File \$true | Out-Null
 Assert-Ldt4PlainPath \$prior File \$true | Out-Null
 Assert-Ldt4PlainPath \$tested File \$true | Out-Null
-\$stagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath '$WIN_STAGE_DAEMON').Hash.ToLower()
-if ('$WIN_STAGED_DAEMON_SHA' -match '^[0-9a-f]{64}$' -and \$stagedHash -cne '$WIN_STAGED_DAEMON_SHA') { throw 'staged daemon changed after binding' }
-\$activeWasTested = \$false
-\$activeAlreadyRestored = \$false
+Assert-Ldt4PlainPath \$record File \$true | Out-Null
+if (-not (Test-Path -LiteralPath \$record)) {
+  if ('$mode' -eq 'normal') { throw 'normal restoration requires durable swap intent' }
+  'RESTORED|mode=recovery|state=untouched-no-intent'
+  return
+}
+Assert-Ldt4PlainPath \$record File | Out-Null
+\$recordText = (Get-Content -LiteralPath \$record -Raw -ErrorAction Stop).Trim()
+\$recordMatch = [regex]::Match(\$recordText,'\Ahad_prior=([01]) prior_sha=(none|[0-9a-f]{64}) staged_sha=([0-9a-f]{64})\z')
+if (-not \$recordMatch.Success) { throw 'runtime swap intent is malformed' }
+\$hadPrior = \$recordMatch.Groups[1].Value -ceq '1'
+\$expectedPrior = \$recordMatch.Groups[2].Value
+\$stagedHash = \$recordMatch.Groups[3].Value
+if (\$hadPrior -ne (\$expectedPrior -cne 'none')) { throw 'runtime swap intent prior state is inconsistent' }
+if ('$WIN_STAGED_DAEMON_SHA' -match '^[0-9a-f]{64}$' -and \$stagedHash -cne '$WIN_STAGED_DAEMON_SHA') { throw 'local and durable staged daemon binding differ' }
+
+\$priorExists = Test-Path -LiteralPath \$prior
 \$testedExists = Test-Path -LiteralPath \$tested
-if (Test-Path -LiteralPath \$active) {
+\$activeExists = Test-Path -LiteralPath \$active
+if (\$priorExists) {
+  if (-not \$hadPrior) { throw 'prior retention exists for originally absent active daemon' }
+  Assert-Ldt4PlainPath \$prior File | Out-Null
+  \$priorHash = (Get-FileHash -Algorithm SHA256 -LiteralPath \$prior).Hash.ToLower()
+  if (\$priorHash -cne \$expectedPrior) { throw 'prior daemon changed before restoration' }
+}
+if (\$testedExists) { Assert-Ldt4PlainPath \$tested File | Out-Null }
+if (\$activeExists) {
+  Assert-Ldt4PlainPath \$active File | Out-Null
   \$activeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath \$active).Hash.ToLower()
-  if (\$activeHash -ceq \$stagedHash) {
-    if (\$testedExists) { throw 'tested-retention path already exists beside tested active' }
-    [IO.File]::Move((ConvertTo-Ldt4CanonicalPath \$active),(ConvertTo-Ldt4CanonicalPath \$tested))
-    \$activeWasTested = \$true
-    \$testedExists = \$true
-  } elseif ($require_bound -eq 1 -and '$WIN_HAD_PRIOR' -eq '1' -and \$activeHash -ceq '$expected_prior' -and \$testedExists -and -not (Test-Path -LiteralPath \$prior)) {
-    \$activeAlreadyRestored = \$true
-    \$restoredHash = \$activeHash
-  } elseif ('$mode' -eq 'recovery' -and $require_bound -eq 0 -and (Test-Path -LiteralPath \$prior) -and -not \$testedExists) {
+  \$originalAlreadyActive = \$hadPrior -and -not \$priorExists -and \$activeHash -ceq \$expectedPrior
+  if (-not \$originalAlreadyActive) {
+    if (\$testedExists) { throw 'active and tested retention are both occupied during recovery' }
     [IO.File]::Move((ConvertTo-Ldt4CanonicalPath \$active),(ConvertTo-Ldt4CanonicalPath \$tested))
     \$testedExists = \$true
-  } else {
-    throw 'refusing to move unrecognized active daemon'
+    \$activeExists = \$false
   }
 }
-if ($require_normal -eq 1 -and -not \$activeWasTested) { throw 'normal restoration did not find tested active daemon' }
-if (\$testedExists) {
-  if (-not (Test-Path -LiteralPath \$tested -PathType Leaf)) { throw 'tested retention is not a file' }
-  \$testedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath \$tested).Hash.ToLower()
-  if ($require_bound -eq 1 -and \$testedHash -cne \$stagedHash) { throw 'retained tested daemon hash mismatch' }
-} else {
-  \$testedHash = 'none'
-  if ($require_normal -eq 1) { throw 'tested daemon was not retained' }
-}
-if (Test-Path -LiteralPath \$prior) {
-  \$priorHash = (Get-FileHash -Algorithm SHA256 -LiteralPath \$prior).Hash.ToLower()
-  if ('$expected_prior' -match '^[0-9a-f]{64}$' -and \$priorHash -cne '$expected_prior') { throw 'prior daemon changed before restoration' }
-  if (Test-Path -LiteralPath \$active) { throw 'active path occupied before prior restore' }
-  [IO.File]::Move((ConvertTo-Ldt4CanonicalPath \$prior),(ConvertTo-Ldt4CanonicalPath \$active))
+if (\$hadPrior) {
+  if (\$priorExists) {
+    if (\$activeExists) { throw 'active path occupied before prior restore' }
+    [IO.File]::Move((ConvertTo-Ldt4CanonicalPath \$prior),(ConvertTo-Ldt4CanonicalPath \$active))
+    \$activeExists = \$true
+    \$priorExists = \$false
+  }
+  if (-not \$activeExists) { throw 'original active daemon was not restored' }
   Assert-Ldt4PlainPath \$active File | Out-Null
   \$restoredHash = (Get-FileHash -Algorithm SHA256 -LiteralPath \$active).Hash.ToLower()
-  if (\$restoredHash -cne \$priorHash) { throw 'restored daemon hash mismatch' }
+  if (\$restoredHash -cne \$expectedPrior) { throw 'restored daemon differs from durable prior SHA' }
 } else {
-  \$priorHash = 'none'
-  if (-not \$activeAlreadyRestored) { \$restoredHash = 'none' }
+  if (\$priorExists) { throw 'originally absent active daemon has prior retention' }
+  if (\$activeExists) { throw 'recovery recreated an originally absent active daemon' }
+  \$restoredHash = 'none'
 }
-if ($require_normal -eq 1 -and '$WIN_HAD_PRIOR' -eq '1' -and \$restoredHash -cne '$expected_prior') { throw 'normal restoration did not restore original daemon SHA' }
-if ($require_normal -eq 1 -and '$WIN_HAD_PRIOR' -eq '0' -and (Test-Path -LiteralPath \$active)) { throw 'normal restoration created an originally absent active daemon' }
-if ($require_bound -eq 1 -and '$WIN_HAD_PRIOR' -eq '1' -and \$restoredHash -cne '$expected_prior') { throw 'recovery restoration is not bound to recorded original daemon SHA' }
-if ($require_bound -eq 1 -and '$WIN_HAD_PRIOR' -eq '0' -and (Test-Path -LiteralPath \$active)) { throw 'recovery restoration recreated an originally absent active daemon' }
+if (\$testedExists) {
+  Assert-Ldt4PlainPath \$tested File | Out-Null
+  \$testedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath \$tested).Hash.ToLower()
+} else { \$testedHash = 'none' }
+if ('$mode' -eq 'normal' -and (-not \$testedExists -or \$testedHash -cne \$stagedHash)) { throw 'normal restoration did not retain the exact tested daemon' }
+Write-VolumeCache D -ErrorAction Stop
 \"RESTORED|mode=$mode|active=\$(Test-Path -LiteralPath \$active)|tested=\$(Test-Path -LiteralPath \$tested)|tested_sha=\$testedHash|restored_sha=\$restoredHash\"
 ") || { note "Windows runtime restoration failed: $out"; return 1; }
     WIN_SWAP_ATTEMPTED=0
@@ -2285,7 +2308,6 @@ run_selftest() {
     LC_ALL=C grep -Fq '[IO.FileMode]::Append' "$SCRIPT_PATH"
     LC_ALL=C grep -Fq 'reaped=true' "$SCRIPT_PATH"
     LC_ALL=C grep -Fq 'ambiguous exact launcher recovery' "$SCRIPT_PATH"
-    LC_ALL=C grep -Fq 'recovery restoration is not bound to recorded original daemon SHA' "$SCRIPT_PATH"
     python3 - "$SCRIPT_PATH" <<'PY'
 import pathlib
 import re
@@ -2300,6 +2322,31 @@ forbidden = (
 )
 if any(token in text for token in forbidden):
     raise SystemExit("destructive or name-wide process operation appeared")
+prepare = text[text.index("prepare_windows_runtime() {"):text.index("restore_windows_runtime() {")]
+restore = text[text.index("restore_windows_runtime() {"):text.index("q_responder_for() {")]
+record_flush = prepare.index(r"\$recordStream.Flush(\$true)")
+record_barrier = prepare.index("Write-VolumeCache D", record_flush)
+runtime_mutation = min(
+    prepare.index("[IO.File]::Move", record_barrier),
+    prepare.index(r"\$activeStream =", record_barrier),
+)
+if not record_flush < record_barrier < runtime_mutation:
+    raise SystemExit("durable swap intent is not sealed before runtime mutation")
+no_intent = restore.index("if (-not (Test-Path -LiteralPath \\$record))")
+no_intent_return = restore.index("return", no_intent)
+active_classification = restore.index(r"\$activeExists =", no_intent_return)
+if no_intent_return >= active_classification:
+    raise SystemExit("missing swap intent can reach active-path mutation")
+for required in (
+    r"\$recordMatch = [regex]::Match",
+    r"\$priorHash -cne \$expectedPrior",
+    r"\$originalAlreadyActive = \$hadPrior -and -not \$priorExists",
+    "restored daemon differs from durable prior SHA",
+    "recovery recreated an originally absent active daemon",
+    "normal restoration did not retain the exact tested daemon",
+):
+    if required not in restore:
+        raise SystemExit(f"runtime recovery binding disappeared: {required}")
 main = text[text.rindex("\nmain() {\n") + 1:]
 analyzer_result = main.index('exclusive_line "$OUT_DIR/analyzer-result.txt"')
 inventory = main.index("write_final_evidence_inventory", analyzer_result)
