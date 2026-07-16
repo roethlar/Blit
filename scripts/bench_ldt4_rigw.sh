@@ -53,6 +53,7 @@ SESSION_COMPLETE=0
 CURRENT_Q_DAEMON_PID=''
 CURRENT_WIN_DAEMON_PID=''
 CURRENT_WIN_LAUNCHER_PID=''
+CURRENT_DAEMON_ENDPOINT=''
 CURRENT_Q_CLIENT_PID=''
 CURRENT_Q_CLIENT_RUN_ID=''
 CURRENT_Q_CLIENT_COMMAND=''
@@ -1528,10 +1529,16 @@ stop_current_client() {
 }
 
 stop_current_daemon() {
-    local rc=0
-    stop_q_daemon || rc=1
-    stop_windows_daemon || rc=1
-    return "$rc"
+    case "$CURRENT_DAEMON_ENDPOINT" in
+        q) stop_q_daemon || return 1 ;;
+        windows) stop_windows_daemon || return 1 ;;
+        '') return 0 ;;
+        *)
+            mark_void "invalid current daemon endpoint: $CURRENT_DAEMON_ENDPOINT"
+            return 1
+            ;;
+    esac
+    CURRENT_DAEMON_ENDPOINT=''
 }
 
 prepare_arm_dirs() {
@@ -2091,9 +2098,11 @@ run_arm() {
     module_path=$(responder_module_path "$direction" "$fixture" "$initiator")
     read_only=$(responder_read_only "$initiator")
     if q_responder_for "$direction" "$initiator"; then
+        CURRENT_DAEMON_ENDPOINT=q
         start_q_daemon "$run_id" "$module_path" "$read_only"
         windows_component=client
     else
+        CURRENT_DAEMON_ENDPOINT=windows
         start_windows_daemon "$run_id" "$module_path" "$read_only"
         windows_component=daemon
     fi
@@ -2298,6 +2307,19 @@ run_selftest() {
     q_responder_for windows_to_q source_init
     ! q_responder_for q_to_windows source_init
     ! q_responder_for windows_to_q destination_init
+    local stopped=''
+    stop_q_daemon() { stopped="${stopped}q"; }
+    stop_windows_daemon() { stopped="${stopped}w"; }
+    CURRENT_DAEMON_ENDPOINT=q
+    stop_current_daemon
+    [[ "$stopped" == q && -z "$CURRENT_DAEMON_ENDPOINT" ]] \
+        || die 'q daemon ownership dispatch selftest failed'
+    CURRENT_DAEMON_ENDPOINT=windows
+    stop_current_daemon
+    [[ "$stopped" == qw && -z "$CURRENT_DAEMON_ENDPOINT" ]] \
+        || die 'Windows daemon ownership dispatch selftest failed'
+    stop_current_daemon
+    [[ "$stopped" == qw ]] || die 'empty daemon ownership dispatch selftest failed'
     declare -F run_client start_q_daemon start_windows_daemon extract_session_id \
         restore_windows_runtime run_registered_matrix assert_q_registered_path \
         assert_windows_registered_paths stop_current_client \
