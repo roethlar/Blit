@@ -1,17 +1,19 @@
 # Blit review workflow
 
 > **Superseded as the grading mechanism (2026-07-04, D-2026-07-04-1).**
-> All code and plan changes now go through synchronous unprimed `openreview` in
-> `.agents/playbooks/openreview.md`; D-2026-07-15-1 selects Claude CLI with
-> `--model claude-fable-5 --effort max` for current review dispatches. That
-> workflow reuses this directory's `findings/` + `results/` records and the
-> `REVIEW.md` status index, which remain live. The async parts below — `ready/` sentinels,
+> Formal reviews use synchronous unprimed `openreview` in
+> `.agents/playbooks/openreview.md`. D-2026-07-16-3 makes dispatch risk-based:
+> Grok handles ordinary second eyes and slice reviews when needed; Claude
+> Fable 5/max is reserved for final acceptance and tactical high-risk or
+> contested reviews. That workflow reuses this directory's `findings/` +
+> `results/` records and the `REVIEW.md` status index, which remain live. The
+> async parts below — `ready/` sentinels,
 > `reviewer-wait.sh`, the separate Reviewer agent, WIP limits — are
 > historical; do not write new sentinels. The Identity section (sign the
 > `reviewer` field honestly) still applies to verdict records.
-> Repo-specific D-2026-07-16-1 also preserves the independent guard gate:
-> Claude chooses its own isolated red/green proof and the fixed-SHA result must
-> contain literal `guard_confirmed: true`, fail-closed.
+> Repo-specific D-2026-07-16-1 also preserves the independent guard gate: the
+> selected reviewer chooses an isolated red/green proof and the fixed-SHA
+> result must contain literal `guard_confirmed: true`, fail-closed.
 
 Two-agent loop: **Coder** is the implementer, **Reviewer** is the
 gate. `REVIEW.md` at the repo root is the human-readable status

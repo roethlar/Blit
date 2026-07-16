@@ -52,12 +52,14 @@ Turn a talked-through idea into a durable plan before any implementation.
    each) in the doc's Slices section.
 4. Add the doc to STATE.md's Queue (and to "Authoritative docs" if it will be the
    active plan).
-5. Commit the plan doc and run the commit through synchronous unprimed
-   `openreview` (`.agents/playbooks/openreview.md`; D-2026-07-04-1 includes plan changes and
-   D-2026-07-15-1 selects Claude CLI with `--model claude-fable-5 --effort
-   max`; D-2026-07-16-1 requires a neutral best-way question with no framing or
-   steering; docs gate is `bash scripts/agent/check-docs.sh`). Adjudicate and
-   fix the accepted findings before surfacing the draft to the owner.
+5. Commit the plan doc and apply D-2026-07-16-3's risk-based review selection.
+   Use Grok for an independent draft second eye when it adds value; reserve
+   Claude Fable 5/max for final acceptance or a tactical high-risk/contested
+   question. Any selected review uses synchronous unprimed `openreview`
+   (`.agents/playbooks/openreview.md`) and D-2026-07-16-1's neutral best-way
+   question with no framing or steering. The docs gate is
+   `bash scripts/agent/check-docs.sh`. Adjudicate any returned findings before
+   surfacing the draft to the owner.
 6. **Stop.** No implementation until the owner approves; record approval by
    flipping `**Status**: Draft` → `Active` and adding a DECISIONS.md entry.
 
@@ -126,20 +128,16 @@ Audit one document against reality. Never run unscoped.
 Pick up the next unit of review-queue work.
 
 1. Run `catchup` first if you haven't this session.
-2. Pick the highest-priority `[ ]` item in `REVIEW.md` and run its complete
-   committed change through synchronous unprimed `openreview` in
-   `.agents/playbooks/openreview.md`
-   (D-2026-07-04-1 — all code and plan changes, no exceptions;
-   D-2026-07-15-1 — invoke Claude CLI with `--model claude-fable-5 --effort
-   max`; D-2026-07-16-1 — ask only whether the implementation is the best way
-   to achieve the neutral goal, with no framing or steering, while retaining
-   fixed base/head identity and a reviewer-chosen isolated red/green guard with
-   fail-closed `guard_confirmed: true`): implement with
-   tests on `master` (no agent branches), pass the
-   validation suite, commit, write the slice record, invoke Claude on the exact
-   commit, adjudicate every returned finding through `codereview` intake, fix
-   admitted findings one commit at a time on `master`, neutrally re-run
-   `openreview`, record the
-   harness-identified verdict under `.review/results/`, and update the
-   `REVIEW.md` row. No sentinel — the async hand-off is retired.
+2. Pick the highest-priority `[ ]` item in `REVIEW.md`, implement it with tests
+   on `master` (no agent branches), pass the validation suite, commit, and write
+   the slice record. Apply D-2026-07-16-3's risk-based review selection: use
+   Grok for an ordinary slice second eye when needed; reserve Claude Fable
+   5/max for final acceptance or tactical high-risk/contested review. Any
+   selected review uses synchronous unprimed `openreview` with exact base/head,
+   D-2026-07-16-1's neutral best-way question, and a reviewer-chosen isolated
+   red/green guard with fail-closed `guard_confirmed: true`. Adjudicate every
+   returned finding through `codereview` intake, fix admitted findings one
+   commit at a time on `master`, re-review with the selected independent
+   harness when needed, record the verdict under `.review/results/`, and update
+   the `REVIEW.md` row. No sentinel — the async hand-off is retired.
 3. Finish with the `handoff` procedure.

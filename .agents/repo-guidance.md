@@ -55,26 +55,27 @@ execute it exactly:
 - `drift [scope]` → audit a doc against code; fix docs, file findings, raise
   questions.
 - `slice` (repo-specific, no generic-template equivalent) → pick up the next
-  review slice and run its whole committed change through the synchronous,
-  unprimed openreview playbook (`.agents/playbooks/openreview.md`).
+  review slice and apply the risk-based review selection below; selected
+  reviews use synchronous unprimed `.agents/playbooks/openreview.md`.
 
-**Review policy (D-2026-07-04-1, reviewer amended by D-2026-07-15-1 and prompt
-amended by D-2026-07-16-1): every code change and every plan change goes
-through synchronous `openreview` in `.agents/playbooks/openreview.md` — no
-exceptions.** For every review dispatched after the already-in-flight G12 Grok
-review, invoke Claude CLI with
-`--model claude-fable-5 --effort max`; Codex or Grok is not a substitute absent
-a later explicit owner instruction. Per D-2026-07-16-1, the substantive prompt
-is the neutral best-way question only: no plan-conformance request, issue list,
-framing, or steering, including on a re-review. Returned findings use
-`codereview`'s intake/triage and one-finding-per-commit machinery, but Claude is
-re-dispatched with neutral `openreview`; this repo's no-agent-branch rule
-overrides the generic codereview branch examples. This repo also retains the
-pre-refresh independent-guard gate: Claude chooses and runs its own red/green
-guard in an isolated worktree, and its structured result must include literal
-`guard_confirmed: true` alongside the fixed base/head identity. Missing or
-false guard confirmation fails closed even though the portable openreview
-schema does not require that field. The `.review/README.md` async
+**Review policy (D-2026-07-16-3, superseding the unconditional dispatch and
+reviewer-selection clauses of D-2026-07-04-1 and D-2026-07-15-1): formal
+`openreview` is selected in proportion to risk and uncertainty, not required
+for every code or plan change.** Use Grok for ordinary independent second eyes
+and slice reviews when they add value. Reserve Claude CLI with
+`--model claude-fable-5 --effort max` for final acceptance passes and tactical
+high-risk or contested questions. Codex is not an independent reviewer when
+Codex authored the change. Per D-2026-07-16-1 and the `openreview` playbook,
+the substantive prompt remains the neutral best-way question only: no
+plan-conformance request, issue list, framing, or steering, including on a
+re-review. Returned findings use `codereview`'s intake/triage and
+one-finding-per-commit machinery; this repo's no-agent-branch rule overrides
+the generic codereview branch examples. Whenever formal review is selected,
+the reviewer independently runs a red/green guard in an isolated worktree and
+its structured result must include literal `guard_confirmed: true` alongside
+the fixed base/head identity. Missing or false guard confirmation fails that
+review closed even though the portable openreview schema does not require the
+field. The `.review/README.md` async
 sentinel hand-off is retired; its `findings/`/`results/` records and `REVIEW.md`
 remain the record store.
 

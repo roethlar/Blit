@@ -6,18 +6,19 @@ See `.review/findings/<id>.md` for per-finding details.
 ## Legend
 
 - `[ ]` Open — coder may pick up
-- `[~]` In progress — coded/committed, neutral Claude openreview + adjudication
-  in flight (D-2026-07-04-1, D-2026-07-16-1)
+- `[~]` In progress — coded/committed, with any risk-selected neutral
+  openreview + adjudication in flight (D-2026-07-16-3)
 - `[x]` Verified — reviewer verdict adjudicated, admitted findings fixed
-  (current records: `.review/results/<id>.claude.json` +
-  `<id>.claude-verdict.md`; older rows may carry Codex/GPT names;
+  (records: `.review/results/<id>.<reviewer>.json` + a matching verdict file;
+  older rows may carry Codex/GPT-specific names;
   rows graded before 2026-07-04 carry `<id>.verified.json` from the
   retired async loop)
 
 ## Live dial tuning correction — plan and implementation review
 
-Plan: `docs/plan/LIVE_DIAL_TUNING.md` (Active, D-2026-07-16-2). Reviewer: Claude CLI with
-`--model claude-fable-5 --effort max` per D-2026-07-15-1.
+Plan: `docs/plan/LIVE_DIAL_TUNING.md` (Active, D-2026-07-16-2). Review selection:
+Grok for the ldt-4 harness slice; Claude Fable 5/max for final acceptance or a
+tactical high-risk/contested pass (D-2026-07-16-3).
 
 | ID | Title | Status | Commit(s) |
 |----|-------|--------|-----------|

@@ -42,16 +42,16 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   `[x]`; **sf-3a+ blocked** until ONE_TRANSFER_PATH ships, then
   resume/re-derive on the unified baseline. Principle: ceiling-driven,
   never competitor-relative (D-2026-07-04-4 — do not re-litigate).
-- **Background**: REV4 code-complete, gates DATA-COMPLETE (declarations
-  in Blocked); synchronous neutral `openreview` governs all changes
-  (D-2026-07-04-1), with Claude Fable 5/max selected by D-2026-07-15-1.
+- **Background**: REV4 code-complete, gates DATA-COMPLETE (declarations in Blocked);
+  D-2026-07-16-3 makes neutral `openreview` risk-based: Grok for ordinary
+  slice/second-eye review; Claude Fable 5/max for final, tactical, or contested passes.
 
 ## Queue (ordered)
 
 1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 and endpoint correction `9926bf7` are accepted; build/review the additive harness, then execute exact-build quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence under the existing instrument controls.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
-   slices otp-1..13 through the
-   synchronous neutral `openreview` per slice (reviewer selection D-2026-07-15-1).
+   slices otp-1..13 with risk-selected neutral `openreview`
+   (reviewer selection D-2026-07-16-3).
    otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7 (a, b-1,
    b-2), otp-8, otp-9 (a/b), otp-2 (+ otp-2w), otp-10 (a, b-1/2,
@@ -138,11 +138,11 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   sf-2) and **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** (code-
   complete; measurement gates remain). REV4 superseded v1/REV2/REV3
   (history only).
-- Process: `.agents/playbooks/openreview.md` — the synchronous unprimed review for
-  **all code and plan changes** (D-2026-07-04-1), using Claude CLI
-  `--model claude-fable-5 --effort max` for current dispatches
-  (D-2026-07-15-1); `.agents/playbooks/codereview.md` supplies finding intake
-  and triage only. `docs/agent/GPT_REVIEW_LOOP.md` is historical;
+- Process: `.agents/playbooks/openreview.md` — synchronous unprimed review when
+  risk-selected under D-2026-07-16-3: Grok for ordinary second eyes/slices,
+  Claude Fable 5/max for final or tactical high-risk/contested passes;
+  `.agents/playbooks/codereview.md` supplies finding intake and triage only.
+  `docs/agent/GPT_REVIEW_LOOP.md` is historical;
   `.review/README.md` is retired as the grading mechanism (its
   `findings/`/`results/` records and the REVIEW.md index remain live).
 - Review loop: `REVIEW.md` (all `ue-r2-*` rows `[x]`; design-queue

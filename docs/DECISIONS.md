@@ -285,3 +285,28 @@ Format:
 - Supersedes: only the Draft status and owner-activation checkpoint in
   `docs/plan/LIVE_DIAL_TUNING.md`. The reviewed design, no-push rule, fixed-SHA
   review contract, and any plan-defined endpoint safety gates remain unchanged.
+
+## D-2026-07-16-3 — Use Fable selectively and Grok for tactical slice review
+- Decision: formal review is risk-selected rather than an unconditional gate on
+  every code and plan change. Use Grok for independent second eyes and slice
+  reviews when they add value. Reserve Claude CLI with
+  `--model claude-fable-5 --effort max` for final acceptance passes and
+  tactical high-risk or contested questions. The current ldt-4 harness gets a
+  Grok slice review; the final ldt-4 package gets the Fable pass unless a
+  tactical need calls for Fable earlier. Owner, 2026-07-16: **"let's cut back
+  on fable reviews. it's getting costly. use fable for final passes and
+  tactically when needed. use grok for second-eyes and slice reviews when
+  needed."**
+- Why: the recorded live-dial Fable spend reached about $90.62 with strong
+  value on the design race/cap proof and ldt-3 trace-order defect, but poor
+  marginal value on mechanical documentation, clean re-reviews, and a
+  declined style-only suggestion. Reviewer cost should follow expected risk
+  reduction rather than change count.
+- Supersedes: D-2026-07-15-1's Fable-for-every-dispatch selection,
+  D-2026-07-04-1's unconditional every-code/every-plan review clause, and the
+  corresponding review-frequency clause in D-2026-07-16-2. It preserves the
+  synchronous fixed-SHA `openreview` machinery whenever review is selected,
+  D-2026-07-16-1's neutral no-steering prompt for Claude, independent
+  red/green guard proof, fail-closed structured verdict, coder adjudication,
+  one-finding-per-commit fixes, no-agent-branch rule, no-push rule, and all
+  historical review results.
