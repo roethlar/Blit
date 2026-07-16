@@ -63,7 +63,9 @@ code change and every plan change goes through the synchronous reviewloop in
 `.agents/playbooks/reviewloop.md` — no exceptions.** For every review dispatched
 after the already-in-flight G12 Grok review, invoke Claude CLI with
 `--model claude-fable-5 --effort max`; Codex or Grok is not a substitute absent
-a later explicit owner instruction. The `.review/README.md` async sentinel
+a later explicit owner instruction. Per D-2026-07-16-1, the substantive prompt
+is the neutral best-way question only: no plan-conformance request, issue list,
+framing, or steering. The `.review/README.md` async sentinel
 hand-off is retired; its `findings/`/`results/` records and `REVIEW.md` remain
 the record store.
 

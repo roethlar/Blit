@@ -147,3 +147,14 @@ proxy-routed error is retained separately and is non-authoritative.
 
 Round 2 reviews the complete corrected Draft and the incremental range from the
 round-1 reviewed SHA.
+
+### Round 2 attempt 1 — excluded
+
+The first round-2 dispatch was interrupted without a verdict on 2026-07-16
+when the owner replaced the prompt policy with D-2026-07-16-1. Its prompt named
+expected defects and checks, so it is substantively steered under the new rule
+and cannot count as review evidence.
+The exact CLI error envelope is retained at
+`.review/results/live-dial-tuning-plan-r2.claude-attempt1-steered-error.json`;
+the prompt and worktree remain retained under `/tmp`. Round 2 restarts from the
+same immutable plan candidate with a neutral best-way prompt.

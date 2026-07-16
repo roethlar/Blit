@@ -229,15 +229,44 @@ Format:
 - Supersedes: nothing. Amends the rule of D-2026-07-14-3 (rev 10 → rev 11 of the pre-registration); **legitimate only because NO DATA HAS EVER BEEN TAKEN.**
 
 ## D-2026-07-14-5 — the FIRST review of anything asks "is this the best way to do it", not "is this correct per the plan"
+- **Prompt form superseded by D-2026-07-16-1.** The best-way question remains;
+  the prescribed end-goal framing, alternative questions, explicit
+  wrong-question invitation, and later-round correctness narrowing below are
+  historical and must not be copied into a Claude prompt.
 - Decision: the first codex/grok round on a slice, a plan or an instrument is framed around **the end goal**, not around the agent's own plan. It states the goal in plain terms, hands over the artefacts, and asks: will this achieve it? what would you do instead, or first? what does each possible outcome buy? is the *shape* right? — and **only then** correctness. Owner, 2026-07-14, verbatim: **"less 'is this code correct per the plan' and more 'is this the best way to do it'"**, and **"You keep finding problems in the plan you wrote, so it's likely codex will have a more coherent idea."**
 - The failure it closes: a prompt that says *"verify these fixes closed the findings"* can only ever return **a longer list of findings**. It grants the plan, the design and the approach and audits the diff against them — so a wrong *approach* survives every round while the *code* gets steadily more correct. The agent wrote the plan; asking the reviewer to grade the code against that plan is **the author grading their own work with extra steps**, which is precisely what the Identity rule (`.review/README.md`) forbids and what codex exists to avoid.
 - Evidence: the Mac↔Mac instrument. **ELEVEN review rounds, ~110 findings, all accepted, and it has still never run.** Every round was framed as "here are the previous findings, verify they are closed and find the next ones" — and every round obliged. Not one round was ever asked whether the experiment was worth running at all.
 - The prompt must say explicitly that **"this is a well-built thing pointed at the wrong question" is the most valuable answer available and will not offend.** A reviewer told to find bugs finds bugs; a reviewer told to challenge the approach can still report the approach is sound — and *that* report is then worth something, because refusal was available.
 - Later rounds may narrow to correctness against the (now-reviewed) spec.
-- Supersedes: nothing. Extends `docs/agent/GPT_REVIEW_LOOP.md` (§"How to frame the FIRST review of anything"), edited in the same commit.
+- Supersedes: nothing. Extended `docs/agent/GPT_REVIEW_LOOP.md` historically;
+  its prompt details are superseded by D-2026-07-16-1.
 
 ## D-2026-07-15-1 — Future reviewloop dispatches use Claude Fable 5 at max effort
 - Decision: The already-dispatched otp12 pf-1 rig-W G12 Grok review is the sole grandfathered review and remains valid; the owner clarified that it must finish in flight. Every later synchronous reviewloop dispatch uses Claude CLI with the exact reviewer flags `--model claude-fable-5 --effort max`. Codex and Grok are not substitutes unless a later explicit owner instruction changes the reviewer. Owner, 2026-07-15: **"going forward use reviewloop claude with --model claude-fable-5 and --effort max for reviews"** and, clarifying the boundary, **"going forward, meaning let the in-flight grok review finish."**
 - Why: The coding harness is Codex, so Codex reviewing its own work is not an independent second set of eyes. The owner selected a specific external model and effort level for future reviews while preserving the already-running Grok review rather than discarding completed proof.
-- Unchanged: D-2026-07-04-1's repo-wide scope, the synchronous fixed-SHA review contract, validation and red-to-green guard proof, structured fail-closed verdict, coder adjudication, commits on `master`, and the no-push rule all stand. D-2026-07-14-5's first-review end-goal framing also stands.
+- Unchanged: D-2026-07-04-1's repo-wide scope, the synchronous fixed-SHA review contract, validation and red-to-green guard proof, structured fail-closed verdict, coder adjudication, commits on `master`, and the no-push rule all stand. D-2026-07-14-5's best-way question stands only in the neutral form required by D-2026-07-16-1.
 - Supersedes: only the reviewer identity/dispatch clauses of D-2026-06-20-6 and D-2026-07-04-1, D-2026-07-14-2's Codex-mandatory/Grok-additive selection, and the Codex/Grok model-name examples in D-2026-07-14-5. It does not invalidate historical review results.
+
+## D-2026-07-16-1 — Claude review prompts ask the best-way question without steering
+- Decision: every Claude review round receives only a one-sentence neutral goal,
+  immutable artifact/base/head identity, and the substantive question **"Is the
+  code as implemented the best way to achieve this goal?"** For a plan or other
+  non-code artifact, substitute only its noun. Do not ask Claude to validate
+  code against the plan. Do not provide an author-written issue list, prior
+  findings to confirm, expected outcome, preferred design, suggested
+  alternative, concern checklist, persuasive framing, or any other steering.
+  This applies to first reviews and re-reviews alike. Mechanical safety bounds,
+  the fixed-SHA JSON verdict schema, and a neutral request for an independently
+  chosen guard proof remain allowed because they constrain execution and record
+  identity, not the substantive answer.
+- Why: the owner reports that Fable performs best when it is allowed to decide
+  what matters without leading or framing. A prompt that names the author's
+  diagnosis or expected fix turns the second opinion back into plan-conformance
+  checking and biases the result. Owner, 2026-07-16: **"ask it if the code as
+  implemented is 'the best way to achieve the goal'- no leading, no framing. no
+  steering. that's how fable performs best."**
+- Supersedes: D-2026-07-14-5's prescribed prompt framing, explicit
+  wrong-question invitation, alternative-question list, and later-round
+  correctness exception. It preserves only that decision's underlying
+  best-way-not-plan-conformance question. D-2026-07-15-1's Claude Fable 5/max
+  reviewer selection and every fixed-SHA/guard/adjudication safety rule stand.

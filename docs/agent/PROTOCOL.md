@@ -55,8 +55,9 @@ Turn a talked-through idea into a durable plan before any implementation.
 5. Commit the plan doc and run the commit through the synchronous reviewloop
    (`.agents/playbooks/reviewloop.md`; D-2026-07-04-1 includes plan changes and
    D-2026-07-15-1 selects Claude CLI with `--model claude-fable-5 --effort
-   max`; docs gate is `bash scripts/agent/check-docs.sh`). Adjudicate and fix
-   the accepted findings before surfacing the draft to the owner.
+   max`; D-2026-07-16-1 requires a neutral best-way question with no framing or
+   steering; docs gate is `bash scripts/agent/check-docs.sh`). Adjudicate and
+   fix the accepted findings before surfacing the draft to the owner.
 6. **Stop.** No implementation until the owner approves; record approval by
    flipping `**Status**: Draft` → `Active` and adding a DECISIONS.md entry.
 
@@ -129,7 +130,9 @@ Pick up the next unit of review-queue work.
    the synchronous reviewloop in `.agents/playbooks/reviewloop.md`
    (D-2026-07-04-1 — all code and plan changes, no exceptions;
    D-2026-07-15-1 — invoke Claude CLI with `--model claude-fable-5 --effort
-   max`): implement with tests on `master` (no agent branches), pass the
+   max`; D-2026-07-16-1 — ask only whether the implementation is the best way
+   to achieve the neutral goal, with no framing or steering): implement with
+   tests on `master` (no agent branches), pass the
    validation suite, commit, write the finding doc, invoke Claude on the exact
    commit, adjudicate every finding, fix the accepted ones, record the
    harness-identified verdict under `.review/results/`, and update the

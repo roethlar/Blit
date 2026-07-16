@@ -85,6 +85,32 @@ quick/wait toggle and no Strict/Faster WIP mode** — the prior async loop's
 parallelism knobs do not apply here. One finding is dispatched, reviewed, recorded,
 and acted on before the next is dispatched.
 
+## Neutral Claude prompt (D-2026-07-16-1)
+
+Claude is an independent design reviewer, not a plan-conformance checker. Every
+round, including a re-review, gives it one neutral outcome sentence and asks:
+
+```text
+Goal: <one sentence stating the intended outcome without rationale or approach>.
+Is the code as implemented the best way to achieve this goal?
+```
+
+For a plan or another non-code artifact, substitute only the artifact noun in
+the question. Do not add substantive framing. In particular, do not paste or
+summarize the author's plan, diagnosis, approach, previous findings, expected
+fix, preferred alternative, suspected defect class, review checklist, or
+desired verdict. Do not ask Claude to validate code against a plan, and do not
+tell it what answer would be especially valuable. The reviewer chooses what to
+inspect and what matters.
+
+The prompt may additionally carry only execution-neutral facts: exact base/head
+SHAs and artifact identity, retained-worktree location, safety/scope limits,
+the structured verdict schema, and a request to perform an independent guard
+proof. The reviewer chooses the verification and mutation for that proof; the
+coder does not prescribe which behavior should turn red. These mechanical
+fields preserve reproducibility and safety without steering the substantive
+review.
+
 ## Deriving the reviewer incantation (probe-and-verify)
 
 The only harness-specific fact the loop needs is **how to run `<agent>` headless,
@@ -133,10 +159,12 @@ see the gate below):
    dispatch time), so the reviewer evaluates `git diff <base-sha>..<head-sha>` against
    a fixed snapshot — a `main..branch` range is *not* stable if the main branch moves.
    The reviewer reads the code from the **shared workspace** (you do not pipe it the
-   diff); it reads `.agents/review/findings/<id>.md`, and **independently performs the
-   guard proof** (revert → confirm FAIL → restore → confirm PASS) **in its own `git
-   worktree` checked out at the head SHA** — never by mutating your working tree. A
-   reviewer that crashes mid-proof leaves only its disposable worktree dirty.
+   diff). Do not point it at the author's finding record or plan as an acceptance
+   checklist; it may inspect any repository evidence it independently considers
+   relevant. It **independently performs the guard proof** (choose a relevant
+   mutation → confirm FAIL → restore → confirm PASS) **in its own `git worktree`
+   checked out at the head SHA** — never by mutating your working tree. A reviewer
+   that crashes mid-proof leaves only its review worktree dirty.
 3. **Verdict contract (structured, fail-closed).** The reviewer returns its verdict in
    the JSON envelope. Its result payload must match:
    ```json
