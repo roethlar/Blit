@@ -147,11 +147,12 @@ queue, and tests cover SOURCE-initiator and SOURCE-responder layouts.
       and the relevant Windows CI path are green without reducing the prior
       test baseline except for explicitly enumerated obsolete shape-table
       tests replaced by stronger adaptive guards.
-- [ ] A reviewed Mac↔Mac run on quiet endpoints records live decision traces
-      for identical large, 10k-small, and mixed fixtures under both initiator
-      layouts. Acceptance is adaptive behavior and role-invariant policy, not
-      convergence on a preselected worker number. Any material performance or
-      decision-trace asymmetry is a finding, not a threshold exception.
+- [ ] A reviewed rig-W run on quiet `q`↔`netwatch-01` endpoints records live
+      decision traces for identical large, 10k-small, and mixed fixtures under
+      both initiator layouts. Acceptance is adaptive behavior and role-invariant
+      policy, not convergence on a preselected worker number. Any material
+      performance or decision-trace asymmetry is a finding, not a threshold
+      exception.
 
 ## Design
 
@@ -372,11 +373,12 @@ one-finding-per-commit review fixes.
    openreview admitted one Low observer-ordering defect. The isolated fix
    `406a7e5` is mutation-proved; neutral r2 returned clean with an independent
    guard. Accepted at `406a7e5`.
-4. **ldt-4 — quiet Mac↔Mac evidence.** After ldt-1..3 are independently
-   accepted, build and stage exact clean artifacts, verify endpoint quietness,
-   and run identical large/10k-small/mixed fixtures under both initiator
-   layouts with dial observation. Record raw traces, adaptive decisions,
-   floor/peak/final counts, throughput, integrity, and role-invariance verdicts.
+4. **ldt-4 — quiet rig-W `q`↔`netwatch-01` evidence.** After ldt-1..3 are
+   independently accepted, build and stage exact clean artifacts, verify
+   endpoint quietness, and run identical large/10k-small/mixed fixtures under
+   both initiator layouts with dial observation. Record raw traces, adaptive
+   decisions, floor/peak/final counts, throughput, integrity, and
+   role-invariance verdicts.
    Do not tune constants from this one session inside the evidence slice; any
    policy change becomes a new reviewed finding with a repeatable guard.
 
