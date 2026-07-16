@@ -368,8 +368,9 @@ one-finding-per-commit review fixes.
    peak stream accounting, default-off observer inertness, and complete
    decision reasons. Run mutation proofs and the full debug/release/docs/CI
    gates; correct all live status text that still calls exact 8 adaptive parity.
-   A guard-proved candidate is awaiting exact full gates, commit, and neutral
-   Claude Fable 5/max openreview.
+   Candidate `436e1bb` passed exact local gates; neutral Claude Fable 5/max
+   openreview admitted one Low observer-ordering defect. Its isolated fix and
+   fixed-SHA re-review are next.
 4. **ldt-4 — quiet Mac↔Mac evidence.** After ldt-1..3 are independently
    accepted, build and stage exact clean artifacts, verify endpoint quietness,
    and run identical large/10k-small/mixed fixtures under both initiator

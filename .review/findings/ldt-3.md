@@ -4,12 +4,12 @@
 all transfer helpers, and expose a default-off aggregate dial observer whose
 sample and lifecycle records are exact without changing policy or the wire.
 
-**Status**: Candidate — coder mutations and local gates are green; fixed-SHA
-neutral Claude Fable 5/max openreview is pending.
+**Status**: Reopened — coder mutations and local gates are green; neutral
+Claude Fable 5/max openreview admitted one Low observer-ordering defect.
 
 **Branch**: `master`
 
-**Commit**: pending
+**Commit**: `436e1bb5f29ca9ea1dece6eb2c5656a63bce7564` (candidate; review fix pending)
 
 ## What
 
@@ -113,4 +113,14 @@ settlement, final membership, and peak membership.
 
 ## Reviewer comments
 
-Pending fixed-SHA neutral Claude Fable 5/max openreview.
+Claude Fable 5/max reviewed exact range
+`e863ef073698b27519ccda07e8907c053d4cc7df..436e1bb5f29ca9ea1dece6eb2c5656a63bce7564`
+under the neutral best-way question and returned schema-valid `findings` with
+exact SHAs and `guard_confirmed=true`. One Low is admitted: settlement waiters
+are notified before the optional settlement observer event is emitted, so a
+woken tuner can theoretically emit the next epoch's pending event first. The
+fix moves notification after settlement emission and adds a deterministic
+ordering guard. The first formal call was a server-side 529 before any reviewer
+turn; the one allowed retry produced the authoritative result. Records:
+`.review/results/ldt-3-r1.claude.json` and
+`.review/results/ldt-3-r1.claude-verdict.md`.
