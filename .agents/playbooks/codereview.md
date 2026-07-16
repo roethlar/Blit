@@ -1,4 +1,6 @@
-# Playbook: synchronous cross-harness review (`review`)
+<!-- Installed by governance refresh; do not edit. Any change here is drift and is restored on the next refresh. Route changes through the toolkit owner. -->
+
+# Playbook: synchronous cross-harness finding review (`codereview`)
 
 A portable workflow for reviewing a multi-fix sweep (security pass, refactor,
 bug-fix batch) on one git repo with strong per-fix verification. You — the agent in
@@ -6,7 +8,14 @@ the harness you launched from — play the **coder**. The **reviewer** is a seco
 independent agent harness (`codex`, `agy`, `grok`, a subagent, …) that you dispatch
 **headless and one-shot per finding** to get a different model's eyes on the fix.
 
-Invoke it with `review <agent>` (in Claude Code: the tab-completable `/review
+**Framing (deliberate):** this loop verifies specific findings against their
+recorded evidence — the reviewer is handed the finding record and judges the fix
+against it. That conformance priming is intentional here: it suits verification
+work, batch triage, and reviewer models that wander without a rubric. For an
+unprimed whole-change judgment — "is this the best way to achieve the goal?" —
+use the `openreview` playbook instead; the owner chooses per invocation, by name.
+
+Invoke it with `codereview <agent>` (in Claude Code: the tab-completable `/codereview
 <agent>`). This file is durable guidance; it defers to this repo's `AGENTS.md` and
 `.agents/` layout wherever they overlap. Where this playbook and the repo's
 invariants disagree, the invariants win.
@@ -75,9 +84,9 @@ create a parallel canon or bypass owner gates:
 
 ## Operator
 
-`review <agent>` is the harness-neutral entry. In Claude Code it is the
-tab-completable slash command `/review <agent>`; on another harness the owner speaks
-"review \<agent\>". `<agent>` names the reviewer harness to dispatch.
+`codereview <agent>` is the harness-neutral entry. In Claude Code it is the
+tab-completable slash command `/codereview <agent>`; on another harness the owner
+speaks "codereview \<agent\>". `<agent>` names the reviewer harness to dispatch.
 
 The flow is **synchronous by construction**: the coder dispatches the reviewer and
 blocks on its verdict before acting on that finding. There is therefore **no
@@ -85,39 +94,13 @@ quick/wait toggle and no Strict/Faster WIP mode** — the prior async loop's
 parallelism knobs do not apply here. One finding is dispatched, reviewed, recorded,
 and acted on before the next is dispatched.
 
-## Neutral Claude prompt (D-2026-07-16-1)
-
-Claude is an independent design reviewer, not a plan-conformance checker. Every
-round, including a re-review, gives it one neutral outcome sentence and asks:
-
-```text
-Goal: <one sentence stating the intended outcome without rationale or approach>.
-Is the code as implemented the best way to achieve this goal?
-```
-
-For a plan or another non-code artifact, substitute only the artifact noun in
-the question. Do not add substantive framing. In particular, do not paste or
-summarize the author's plan, diagnosis, approach, previous findings, expected
-fix, preferred alternative, suspected defect class, review checklist, or
-desired verdict. Do not ask Claude to validate code against a plan, and do not
-tell it what answer would be especially valuable. The reviewer chooses what to
-inspect and what matters.
-
-The prompt may additionally carry only execution-neutral facts: exact base/head
-SHAs and artifact identity, retained-worktree location, safety/scope limits,
-the structured verdict schema, and a request to perform an independent guard
-proof. The reviewer chooses the verification and mutation for that proof; the
-coder does not prescribe which behavior should turn red. These mechanical
-fields preserve reproducibility and safety without steering the substantive
-review.
-
 ## Deriving the reviewer incantation (probe-and-verify)
 
 The only harness-specific fact the loop needs is **how to run `<agent>` headless,
 non-interactive, one-shot**. This is **not** shipped as a human-maintained table and
 **not** derived by parsing `--help` prose into a committed regex — both rot or break
 silently. Instead derive it live, per harness, per session, by probing — the same
-thing a capable agent already does when a human says "review this with grok":
+thing a capable agent already does when a human says "codereview this with grok":
 
 1. **Presence + surface.** `command -v <agent>`; then `<agent> --help` and
    `<agent> --version`. The top-level help usually reveals whether the headless entry
@@ -159,12 +142,10 @@ see the gate below):
    dispatch time), so the reviewer evaluates `git diff <base-sha>..<head-sha>` against
    a fixed snapshot — a `main..branch` range is *not* stable if the main branch moves.
    The reviewer reads the code from the **shared workspace** (you do not pipe it the
-   diff). Do not point it at the author's finding record or plan as an acceptance
-   checklist; it may inspect any repository evidence it independently considers
-   relevant. It **independently performs the guard proof** (choose a relevant
-   mutation → confirm FAIL → restore → confirm PASS) **in its own `git worktree`
-   checked out at the head SHA** — never by mutating your working tree. A reviewer
-   that crashes mid-proof leaves only its review worktree dirty.
+   diff); it reads `.agents/review/findings/<id>.md`, and **independently performs the
+   guard proof** (revert → confirm FAIL → restore → confirm PASS) **in its own `git
+   worktree` checked out at the head SHA** — never by mutating your working tree. A
+   reviewer that crashes mid-proof leaves only its disposable worktree dirty.
 3. **Verdict contract (structured, fail-closed).** The reviewer returns its verdict in
    the JSON envelope. Its result payload must match:
    ```json
@@ -191,7 +172,7 @@ see the gate below):
    - **accepted** → the branch is ready for an **owner-gated** merge. Do not merge,
      push, or rewrite history on agent authority; leave the branch (or hand off a
      `merge-<id>` branch).
-   - **reopened** → apply fix-ups on the same branch, then re-run `review <agent>`.
+   - **reopened** → apply fix-ups on the same branch, then re-run `codereview <agent>`.
    - **invalid** → write `.agents/review/<id>.contested.md` (which kind of
      disagreement, the reason, what the owner must decide) and route to the owner.
      Disagreement is a recorded verdict, never a silent veto.
@@ -289,7 +270,7 @@ Short, human-readable scoreboard. Per-finding detail lives in
 ```markdown
 # Review status
 
-Workflow: see `.agents/playbooks/reviewloop.md`.
+Workflow: see `.agents/playbooks/codereview.md`.
 Per-finding detail: see `.agents/review/findings/<id>.md`.
 
 ## Legend
