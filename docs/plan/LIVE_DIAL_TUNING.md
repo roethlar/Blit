@@ -100,10 +100,11 @@ queue, and tests cover SOURCE-initiator and SOURCE-responder layouts.
       registry represents exactly the workers eligible to take new payloads;
       `spawn_dial_tuner_with_resize` runs once per TCP SOURCE data plane and
       stops promptly on every completion, refusal, cancellation, and fault.
-- [ ] Under a deterministic clean/non-idle sample trace, both initiator
-      layouts emit the same epoch/op/target sequence and grow beyond eight
-      workers when the receiver ceiling permits it. This proves that neither
-      the retired target of 8 nor the old table maximum of 16 is a cap.
+- [ ] Under a deterministic clean/non-idle sample trace with an advertised
+      receiver ceiling of at least 17, both initiator layouts emit the same
+      epoch/op/target sequence through target 17. The guard must turn red when
+      production growth is clamped at either 8 or 16; reaching 9 alone is not
+      proof that the retired table maximum is gone.
 - [ ] Under a deterministic sustained-blocking trace, both layouts emit the
       same REMOVE sequence and shrink below their startup count, down to one
       when the signal persists. An idle trace and a trace inside the
@@ -344,9 +345,10 @@ Each slice is one reviewloop finding and one commit before review fixes.
    floor; attach probes and tuner in both `SourceDataPlane` constructors;
    consume one op-aware proposal stream; implement shared ADD/REMOVE
    validation and settlement; delete shape-table production policy and forced
-   convergence. Land deterministic identical-trace role guards, >8 growth,
-   below-floor-start shrink, capacity/refusal/stale-frame guards, and update
-   the session contract in the same slice.
+   convergence. Land deterministic identical-trace role guards that grow
+   through target 17 and kill both 8- and 16-clamp mutations,
+   below-floor-start shrink, capacity/refusal/stale-frame guards, and update the
+   session contract in the same slice.
 3. **ldt-3 — lifecycle and observer closure.** Prove tuner/pipeline teardown,
    accepted and unaccepted ADD/REMOVE at need-complete in both layouts (no
    healthy fault, false unchanged settlement, duplicate retirement, or leaked
