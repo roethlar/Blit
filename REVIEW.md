@@ -20,7 +20,7 @@ Plan: `docs/plan/LIVE_DIAL_TUNING.md` (Active, D-2026-07-16-2). Reviewer: Claude
 
 | ID | Title | Status | Commit(s) |
 |----|-------|--------|-----------|
-| live-dial-tuning-plan | Restore one SOURCE-owned telemetry controller with live ADD/REMOVE; retire static shape as worker-count authority | `[x]` | `554d080` (r1 reopened), `a78d553`, `41dcb4d`, `b99637f` (neutral r2 accepted) |
+| live-dial-tuning-plan | Restore one SOURCE-owned telemetry controller with live ADD/REMOVE; retire static shape as worker-count authority | `[~]` | `554d080` (r1 reopened), `a78d553`, `41dcb4d`, `b99637f` (neutral r2 accepted), `acd368f` (activation r1 reopened) |
 | ldt-1 | Acknowledged elastic membership with exact member and terminal outcomes | `[ ]` | — |
 | ldt-2 | Live controller cutover; delete shape worker authority; shared ADD/REMOVE | `[ ]` | — |
 | ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[ ]` | — |

@@ -2,11 +2,12 @@
 
 **Severity**: HIGH — production transfers cannot adapt stream count to live
 conditions and cannot scale down, contrary to the settled transfer design.
-**Status**: Verified — both round-1 findings corrected; neutral Claude Fable
-5/max round 2 accepted the Draft; owner Draft→Active approval pending.
+**Status**: Reopened — D-2026-07-16-2 activated the reviewed plan; activation
+round 1 found three stale secondary references to correct before ldt-1.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `554d080839e1419c2242921e444d40d02c947815` (round-1 candidate),
-`a78d553` and `41dcb4d` (fixes), `b99637f` (round-2 candidate)
+`a78d553` and `41dcb4d` (fixes), `b99637f` (round-2 candidate),
+`acd368f` (activation candidate)
 
 ## Evidence
 
@@ -90,9 +91,8 @@ None.
 
 ## Known gaps
 
-- This finding changes design records only. Production remains static
-  ADD-only until the owner approves Draft→Active and the reviewed code slices
-  land.
+- This finding changes design records only. D-2026-07-16-2 activated the plan;
+  production remains static ADD-only until the reviewed code slices land.
 - The plan deliberately separates TCP stream tuning from local filesystem
   apply workers and the one-lane in-stream carrier. They share session
   choreography but do not share a meaningful socket-blocking signal.
@@ -179,3 +179,24 @@ The retained worktree ended clean at exact reviewed SHA.
 Raw record: `.review/results/live-dial-tuning-plan-r2.claude.json`.
 Adjudication:
 `.review/results/live-dial-tuning-plan-r2.claude-verdict.md`.
+
+### Activation round 1 — reopened
+
+Claude Code `2.1.211`, `claude-fable-5`, effort `max`; reviewed
+`8f08546b181efa00a07365eaccfd6725a4064b43..acd368f338089a32e8d810fcecd4f580f572816a`;
+`guard_confirmed=true`; verdict `REOPENED`; recorded
+`2026-07-16T13:23:12Z`. The prompt was neutral under D-2026-07-16-1.
+
+The activation itself and all primary records are correct. Three live secondary
+references remain stale: this finding still named owner approval as pending,
+`docs/plan/ONE_TRANSFER_PATH.md` called the correction a Draft, and
+`docs/TRANSFER_SESSION.md` called it a Draft. All three findings are admitted as
+one bounded consistency fix. The historical-pair warning from
+`.review/check-state.sh` is pre-existing and is not admitted against this change.
+
+Claude's independently chosen 26-assertion proof was green on the activation,
+red on all 20 activation assertions after restoring the five changed files to
+base, locally red on six plan assertions after restoring only the plan, and
+green/clean after exact restoration. Raw result:
+`.review/results/live-dial-activation-r1.claude.json`. Adjudication:
+`.review/results/live-dial-activation-r1.claude-verdict.md`.
