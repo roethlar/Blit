@@ -4,12 +4,12 @@
 all transfer helpers, and expose a default-off aggregate dial observer whose
 sample and lifecycle records are exact without changing policy or the wire.
 
-**Status**: Reopened — coder mutations and local gates are green; neutral
-Claude Fable 5/max openreview admitted one Low observer-ordering defect.
+**Status**: Review-fix candidate — the one admitted Low observer-ordering
+defect is fixed and mutation-proved; neutral re-review is pending.
 
 **Branch**: `master`
 
-**Commit**: `436e1bb5f29ca9ea1dece6eb2c5656a63bce7564` (candidate; review fix pending)
+**Commit**: `436e1bb5f29ca9ea1dece6eb2c5656a63bce7564` + review fix pending
 
 ## What
 
@@ -76,6 +76,10 @@ settlement, final membership, and peak membership.
   coherent raw byte/blocked/elapsed/stream fields whose ratio recomputes, and
   peak membership distinct from final. Disabling attachment, zeroing injected
   raw counters, and removing peak updates each failed before restoration.
+- `settlement_observer_precedes_waiter_notification` parks the settlement
+  observer callback and proves a registered waiter remains blocked until that
+  callback returns. Moving notification back under the epoch mutex makes the
+  guard fail immediately; exact restoration passes.
 - SOURCE fault and cancellation guards require both layouts to record exact
   pipeline/tuner/receive cleanup without a false resize settlement. Removing
   SOURCE scan cleanup, DESTINATION abort accounting, or receive-sibling drain
@@ -100,9 +104,10 @@ settlement, final membership, and peak membership.
 ## Validation
 
 - Coder mutation proofs above are restored green.
-- Formatting, strict workspace clippy, full workspace tests, focused release
-  dial tests, documentation checks, and diff checks are required on the exact
-  candidate before commit. The final results are recorded in `DEVLOG.md`.
+- Exact review-fix validation passes: formatting, strict workspace clippy,
+  1,532 workspace tests with 2 ignored, 30 focused release dial tests,
+  documentation checks, and diff checks. The final results are recorded in
+  `DEVLOG.md`.
 
 ## Known gaps
 
@@ -120,7 +125,8 @@ exact SHAs and `guard_confirmed=true`. One Low is admitted: settlement waiters
 are notified before the optional settlement observer event is emitted, so a
 woken tuner can theoretically emit the next epoch's pending event first. The
 fix moves notification after settlement emission and adds a deterministic
-ordering guard. The first formal call was a server-side 529 before any reviewer
-turn; the one allowed retry produced the authoritative result. Records:
+ordering guard; both are now locally green and await fixed-SHA re-review. The
+first formal call was a server-side 529 before any reviewer turn; the one
+allowed retry produced the authoritative result. Records:
 `.review/results/ldt-3-r1.claude.json` and
 `.review/results/ldt-3-r1.claude-verdict.md`.

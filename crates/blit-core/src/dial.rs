@@ -789,6 +789,12 @@ impl TransferDial {
                 receiver_ceiling: ceiling,
             });
         }
+        if settled {
+            // Release the tuner only after the optional observer records this
+            // epoch. Otherwise its next sample can publish epoch N+1 before
+            // epoch N's settlement reaches the trace.
+            self.resize_settlement_notify.notify_waiters();
+        }
     }
 
     fn resize_settled_locked(
@@ -812,7 +818,6 @@ impl TransferDial {
         // remains unchanged.
         let settled = state.settle(epoch, accepted);
         debug_assert!(settled);
-        self.resize_settlement_notify.notify_waiters();
         settled
     }
 
@@ -1776,6 +1781,56 @@ mod tests {
         )
         .await
         .expect("settled-before-wait cannot miss the notification");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settlement_observer_precedes_waiter_notification() {
+        let observer_entered = Arc::new(std::sync::Barrier::new(2));
+        let observer_release = Arc::new(std::sync::Barrier::new(2));
+        let observer = DialObserver::new({
+            let observer_entered = Arc::clone(&observer_entered);
+            let observer_release = Arc::clone(&observer_release);
+            move |event| {
+                if matches!(event, DialObservationEvent::Settlement { .. }) {
+                    observer_entered.wait();
+                    observer_release.wait();
+                }
+            }
+        });
+        let dial = Arc::new(TransferDial::conservative().with_observer(Some(observer)));
+        dial.set_negotiated_streams(4);
+        while dial.step_up_cheap_dials() {}
+        burn_cooldown(&dial);
+        assert_eq!(dial.resize_tick(1024, 0.0), None, "sustain tick 1");
+        let proposal = dial.resize_tick(1024, 0.0).expect("proposes epoch 1");
+
+        let notification = dial.resize_settlement_notify.notified();
+        tokio::pin!(notification);
+        notification.as_mut().enable();
+        let settler = {
+            let dial = Arc::clone(&dial);
+            std::thread::spawn(move || {
+                dial.resize_settled(proposal.epoch, proposal.target_streams, true)
+            })
+        };
+        observer_entered.wait();
+
+        let notified_before_observer_returned =
+            tokio::time::timeout(std::time::Duration::from_millis(50), notification.as_mut())
+                .await
+                .is_ok();
+        observer_release.wait();
+        if !notified_before_observer_returned {
+            tokio::time::timeout(std::time::Duration::from_secs(1), notification.as_mut())
+                .await
+                .expect("settlement notification follows observer return");
+        }
+        settler.join().unwrap();
+
+        assert!(
+            !notified_before_observer_returned,
+            "waiter notification must not overtake settlement observation"
+        );
     }
 
     #[test]

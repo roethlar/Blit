@@ -102,8 +102,8 @@ no second code path to differ.
   correction. Its ldt-2 cutover removed sf-2's static ADD-only shape target
   and put the same telemetry-driven ADD/REMOVE controller behind both SOURCE
   socket layouts. ldt-3 supplies lifecycle/observer closure; review of candidate
-  `436e1bb` admitted one Low observer-ordering fix before re-review. Hardware
-  evidence remains ldt-4.
+  `436e1bb` admitted one Low observer-ordering defect whose isolated fix is
+  mutation-proved and awaits re-review. Hardware evidence remains ldt-4.
 - Wire contract discipline (REV4 rule): the unified session's proto —
   messages, field numbers, capability negotiation, transport
   selection — is a reviewed doc+proto slice **before** any behavior

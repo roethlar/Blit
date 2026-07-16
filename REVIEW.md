@@ -24,7 +24,7 @@ Plan: `docs/plan/LIVE_DIAL_TUNING.md` (Active, D-2026-07-16-2). Reviewer: Claude
 | live-dial-tuning-plan | Restore one SOURCE-owned telemetry controller with live ADD/REMOVE; retire static shape as worker-count authority | `[x]` | `554d080` (r1 reopened), `a78d553`, `41dcb4d`, `b99637f` (neutral r2 accepted), `acd368f` (activation r1 reopened), `63d94ac` (activation r2 accepted) |
 | ldt-1 | Acknowledged elastic membership with exact member and terminal outcomes | `[x]` | `f8f3c51` (neutral Claude accepted) |
 | ldt-2 | Live controller cutover; delete shape worker authority; shared ADD/REMOVE | `[x]` | `65a0f9f` (neutral Claude; one non-failing Low declined at intake) |
-| ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[~]` | `436e1bb`; Claude r1 admitted one Low observer-ordering defect; fix/re-review next |
+| ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[~]` | `436e1bb` + review fix pending; admitted Low fixed/mutation-proved; neutral re-review next |
 | ldt-4 | Quiet Mac↔Mac adaptive and role-invariance evidence | `[ ]` | — |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop

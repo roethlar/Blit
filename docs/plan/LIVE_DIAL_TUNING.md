@@ -369,8 +369,8 @@ one-finding-per-commit review fixes.
    decision reasons. Run mutation proofs and the full debug/release/docs/CI
    gates; correct all live status text that still calls exact 8 adaptive parity.
    Candidate `436e1bb` passed exact local gates; neutral Claude Fable 5/max
-   openreview admitted one Low observer-ordering defect. Its isolated fix and
-   fixed-SHA re-review are next.
+   openreview admitted one Low observer-ordering defect. The isolated fix is
+   mutation-proved and locally green; fixed-SHA re-review is next.
 4. **ldt-4 — quiet Mac↔Mac evidence.** After ldt-1..3 are independently
    accepted, build and stage exact clean artifacts, verify endpoint quietness,
    and run identical large/10k-small/mixed fixtures under both initiator
