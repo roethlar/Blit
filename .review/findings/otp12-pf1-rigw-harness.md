@@ -891,5 +891,24 @@ registered `N_resolution=329 ms` exceeds the historical gap and the gRPC
 control fails invariance. The run therefore proves live worker/stream parity
 and a valid current-build P1 non-reproduction, but it does not grade a cause or
 close P1. The complete immutable payload and bounded interpretation are in
-`docs/bench/otp12-pf1-rigw-2026-07-15/`; their separate Claude review is the
-next record gate.
+`docs/bench/otp12-pf1-rigw-2026-07-15/`; their separate review is recorded
+below.
+
+The probe-record gate is now closed at exact immutable candidate
+`7ecc2f9152fa5a4413ab928fcbdd17c78d6d7c05`. At the owner's request,
+Grok 4.5/high supplied a supplementary second eye while Claude's direct
+account waited for reset; it returned schema-valid `accepted`, exact SHAs,
+and `guard_confirmed=true` with no comments. Claude Fable 5/max then returned
+the authoritative schema-valid `accepted` verdict with exact SHAs and
+`guard_confirmed=true`. Both independently recomputed the evidence and
+interpretation and completed retained-copy 128-green, 127-red, exact-
+restored-green guards. The detached worktree ended clean and no benchmark
+endpoint was contacted. Records are under
+`.review/results/otp12-pf1-rigw-probe-record-r1.*`.
+
+The accepted record does not change the licensed result: live 8/8 parity and
+valid current-build P1 non-reproduction are proved, while the 329 ms
+resolution floor, absent/reversed target baseline, and failing gRPC control
+forbid a causal grade or formal P1 closure. The next approved work is the
+separate P2 small-fixture observer plus the pinned `0f922de` historical
+control. Further P1 rig time requires an owner-approved plan amendment.

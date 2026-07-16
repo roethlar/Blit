@@ -1,0 +1,75 @@
+{
+  "record_type": "review_orchestrator_record",
+  "reviewer": {
+    "provider": "xAI",
+    "model": "grok-4.5",
+    "cli": "grok 0.2.101 (5bc4b5dfadcf)",
+    "reasoning_effort": "high"
+  },
+  "review_contract": {
+    "finding": "otp12-pf1-rigw-probe-record",
+    "base_sha": "f120f4c4a2321fe2cb8a3fb637a62f75bb9b9ff5",
+    "reviewed_sha": "7ecc2f9152fa5a4413ab928fcbdd17c78d6d7c05",
+    "worktree": "/tmp/blit-review-pf1-record-7ecc2f9"
+  },
+  "live_probe": {
+    "session_id": "019f681c-d78d-7731-905a-691f0f552ffa",
+    "structured_output": {
+      "ok": true
+    },
+    "envelope": "/tmp/grok-pf1-record-smoke.json",
+    "envelope_sha256": "6494315dba2aa066db8dff75ab8d190bb8b30dde17f6b554f7b963621ef5cb94",
+    "debug_log": "/tmp/grok-pf1-record-smoke.debug.log",
+    "debug_log_sha256": "83ab35557b4e2bdae0263c1d83333d90e293b38e350af80a245ee85e2c3d9eca"
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "session_id": "019f681d-603e-7db3-bd63-33e004308fd6",
+      "request_id": "66798d1c-ccbf-466a-91d7-95b264450820",
+      "stop_reason": "EndTurn",
+      "model_turns": 19,
+      "structured_output": {
+        "verdict": "accepted",
+        "guard_confirmed": true,
+        "reviewed_sha": "7ecc2f9152fa5a4413ab928fcbdd17c78d6d7c05",
+        "base_sha": "f120f4c4a2321fe2cb8a3fb637a62f75bb9b9ff5",
+        "comments": []
+      },
+      "adjudication": "supplementary_acceptance",
+      "note": "Only final structuredOutput was adjudicated. Outer text repeated the JSON four times and scratch thought contained an abandoned malformed draft; neither is authoritative.",
+      "independent_worktree_verification": {
+        "head": "7ecc2f9152fa5a4413ab928fcbdd17c78d6d7c05",
+        "status_short": "",
+        "index_diff": "clean",
+        "worktree_diff": "clean"
+      },
+      "guard": {
+        "retained_copy": "/tmp/blit-review-pf1-record-7ecc2f9-evidence-1784158273-16119/evidence",
+        "retained_backup": "/tmp/blit-review-pf1-record-7ecc2f9-runs-backup-1784158273-16119.csv",
+        "red_output": "/tmp/blit-review-pf1-record-7ecc2f9-red-out.txt",
+        "red_output_sha256": "182554978bd2fd7755dd868cee6f0ccd13300648a41160aaaa0a104a1c88c941",
+        "red_result": "analyzer rejected expected 128 rows, got 127",
+        "green_output": "/tmp/blit-review-pf1-record-7ecc2f9-green-out.txt",
+        "green_output_sha256": "a4a316dc5b0247e0dc4639b8c38a7227e32b577323cc0cd534e1ac6af694ece4",
+        "green_result": "ANALYSIS-PASS after exact restoration",
+        "restored_runs_sha256": "69c10ae12f7591b93585670fcbb62f9021fdeeaf6c4a60e78277190d112bc979"
+      },
+      "artifacts": {
+        "prompt": "/tmp/blit-review-pf1-record-7ecc2f9.prompt.md",
+        "prompt_sha256": "24add7e8d81712362a5933ddcfbf1e4502e967137930834199f89fc88099ab68",
+        "envelope": "/tmp/grok45-pf1-record-7ecc2f9.json",
+        "envelope_sha256": "409d58642bdc3945a742b048e990eda98ce92de7ac71ba8ab8ef891881149d82",
+        "stderr": "/tmp/grok45-pf1-record-7ecc2f9.err",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "debug_log": "/tmp/grok45-pf1-record-7ecc2f9.debug.log",
+        "debug_log_sha256": "2fed72213d29f53c164291c396596f59df05ff02f86db43ddf518978f95722b9",
+        "debug_log_utc_window": "2026-07-15T23:29:42.837100Z..2026-07-15T23:32:55.783306Z",
+        "debug_log_policy": "Retained mode 0600 outside the repository because the CLI debug stream contains authentication material; do not copy its contents into a tracked record."
+      },
+      "network_audit": "Only Read, Grep, and local terminal tools were dispatched. No endpoint, SSH, web/search, or other network tool was observed; the sole network host in the trace was Grok's own API. This is trace evidence, not packet capture, because shell argument payloads are omitted from the debug format."
+    }
+  ],
+  "authoritative_attempt": 1,
+  "policy_note": "The owner explicitly requested this Grok review while the required Claude reviewer was rate-limited. It is a supplementary second eye and does not substitute for the Claude Fable 5/max acceptance gate."
+}

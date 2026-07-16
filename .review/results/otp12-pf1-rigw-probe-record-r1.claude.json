@@ -1,0 +1,144 @@
+{
+  "record_type": "review_orchestrator_record",
+  "reviewer": {
+    "provider": "Anthropic",
+    "model": "claude-fable-5",
+    "cli": "Claude Code 2.1.211",
+    "reasoning_effort": "max"
+  },
+  "review_contract": {
+    "finding": "otp12-pf1-rigw-probe-record",
+    "base_sha": "f120f4c4a2321fe2cb8a3fb637a62f75bb9b9ff5",
+    "reviewed_sha": "7ecc2f9152fa5a4413ab928fcbdd17c78d6d7c05",
+    "authoritative_worktree": "/tmp/blit-review-pf1-record-7ecc2f9"
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "session_id": "1b680f37-2f45-4f4e-b1e0-d43ecf110af4",
+      "subtype": "error_during_execution",
+      "terminal_reason": "aborted_streaming",
+      "is_error": true,
+      "num_turns": 10,
+      "structured_output": null,
+      "adjudication": "discarded",
+      "reason": "The invocation was proxy-routed and its enabled plugin updater cloned a GitHub repository despite the review's no-external-network boundary. The orchestrator interrupted it; it returned no verdict.",
+      "artifacts": {
+        "envelope": "/tmp/claude-fable5-pf1-record-7ecc2f9.json",
+        "envelope_sha256": "4ff0761367c15548345b19465843b1560960b5e1e982a04b2035df9af82df200",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "debug_log": "/tmp/claude-fable5-pf1-record-7ecc2f9.debug.log",
+        "debug_log_sha256": "2505569ba5f8e07a7142fbffda44ed79148340db4d8a7d17f979b01c7bf8c76b",
+        "debug_log_utc_window": "2026-07-15T22:12:23.108Z..2026-07-15T22:19:08.457Z"
+      }
+    },
+    {
+      "attempt": 2,
+      "session_id": "240d3416-4e55-44b5-881a-ae7cef8cba1a",
+      "subtype": "error_during_execution",
+      "terminal_reason": "aborted_streaming",
+      "is_error": true,
+      "num_turns": 27,
+      "structured_output": null,
+      "adjudication": "discarded",
+      "reason": "Although updater traffic was disabled, the process still loaded the stale user setting ANTHROPIC_BASE_URL=http://127.0.0.1:47821. It was interrupted and returned no verdict.",
+      "artifacts": {
+        "envelope": "/tmp/claude-fable5-pf1-record-7ecc2f9-isolated.json",
+        "envelope_sha256": "7336ce47edccbae12e2ce3d79918101058502cc87bed01df92d87c401918c6ac",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "debug_log": "/tmp/claude-fable5-pf1-record-7ecc2f9-isolated.debug.log",
+        "debug_log_sha256": "1ee7ec31d6917144b64f3bf285664f1afed534bea1e0ecbf5719583674c4395c",
+        "debug_log_utc_window": "2026-07-15T22:19:43.274Z..2026-07-15T22:40:58.548Z"
+      }
+    },
+    {
+      "attempt": 3,
+      "session_id": "72ecfbdd-e5a2-4be3-96bb-153da2ad8a93",
+      "subtype": "success",
+      "terminal_reason": "api_error",
+      "api_error_status": 429,
+      "is_error": true,
+      "num_turns": 12,
+      "structured_output": null,
+      "adjudication": "discarded",
+      "reason": "The fresh process used the direct Anthropic endpoint but the account session limit had not reset. It returned a 429 and no verdict.",
+      "artifacts": {
+        "envelope": "/tmp/claude-fable5-pf1-record-7ecc2f9-direct.json",
+        "envelope_sha256": "3e6630153acbaa9af6548ffe225385006d4f4186fb350d1fa1a5b572a187d1f1",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "debug_log": "/tmp/claude-fable5-pf1-record-7ecc2f9-direct.debug.log",
+        "debug_log_sha256": "99cb78182c00e28e1d3fea663cb7face95a97b8c81ea751a345b7197cde88379",
+        "debug_log_utc_window": "2026-07-15T22:41:21.311Z..2026-07-15T22:42:26.011Z"
+      }
+    },
+    {
+      "attempt": 4,
+      "session_id": "66e213d0-6c66-48c5-b9af-6a45c484134a",
+      "subtype": "success",
+      "terminal_reason": "completed",
+      "stop_reason": "tool_use",
+      "is_error": false,
+      "duration_ms": 963830,
+      "duration_api_ms": 753675,
+      "num_turns": 27,
+      "structured_output": {
+        "base_sha": "f120f4c4a2321fe2cb8a3fb637a62f75bb9b9ff5",
+        "comments": [
+          "docs/bench/otp12-pf1-rigw-2026-07-15/README.md:29 — inventory independently recomputed: exactly 290 files / 20,517,586 bytes excluding only the README, SHA-256 inventory digest 1e8d815c74761f34f247eeccc931cccc6d0e69ea73baed68accd45b97d86e51f over sorted path<TAB>size<TAB>sha256 records, and all six key-file hashes (README.md:37-42) match.",
+          "docs/bench/otp12-pf1-rigw-2026-07-15/SESSION-COMPLETE:1 — sole terminal marker contains the full exact build SHA 8e019ef5e948b94a7aca7cb3a8d0be41204742af + LF; no SESSION-VOID or *.tmp exists anywhere in the payload; staging-manifest.csv records the same exact SHA for all five staged binaries.",
+          "docs/bench/otp12-pf1-rigw-2026-07-15/runs.csv:2 — 128 unique arms cover the full block×cell×pair×role product in the exact registered OFF–ON–ON–OFF order with the S/D/D/S role pattern; every row is exit=0/drained/valid with total_ms = transfer_ms + (settled_ms − 250) + flush_ms exact and settled in [250,1000); one run_id per block (4 unique); 48 unique 16-hex trace-on TCP session ids, blank elsewhere; all 128 bench.log per-arm lines equal runs.csv including session ids.",
+          "docs/bench/otp12-pf1-rigw-2026-07-15/clock-samples.csv:2 — 768 samples with exact per-arm before/after×3 schedule keys; rtt_ns = q_after−q_before and offset = windows − (q_before + rtt//2) recompute for all 768. Client dir contains exactly the 128 referenced logs; all 128 landed manifests equal both their recorded digests and the canonical q==Windows fixtures; fixtures dir holds exactly the 4 indexed manifests.",
+          "docs/bench/otp12-pf1-rigw-2026-07-15/phase_events.csv:1 — 11,392 exported rows are a one-to-one identity match (run/session/role/seq/event/elapsed/unix) with the raw [session-phase] lines in trace/ and client/, which belong only to the 48 registered trace-on TCP arms with contiguous producer_seq per endpoint — no trace-off or gRPC leakage; phase_intervals.csv holds 14,964 intervals, all nonnegative and equal to end−start.",
+          "docs/bench/otp12-pf1-rigw-2026-07-15/summary.csv:1 — independently recomputed from runs.csv: all 8 rows match on every statistical field (medians, Δ, paired-delta median, first4/last4, odd/even, role-order partitions {1,4,5,8}/{2,3,6,7}, drifts, range, N_pair_split, N_pair, sorted lists, largest-gap modes); observer_bias = |−127.5 −(−101)| = 26.5 ms and N_resolution = max(329,100,26.5) = 329 ms confirmed.",
+          "docs/bench/otp12-pf1-rigw-2026-07-15/README.md:60 — every wall-time table number recomputes: medians, Δ = destination−source, max/min ratios (1.0738/1.0933/1.0231/1.0589/1.1649/1.1559/1.0991/1.0996), and N_pair (329/100/538/682/154/101/97/23); the gRPC control fails invariance (>1.10 both trace states) and 329 ms exceeds the 282/230 ms historical gap and its 20%/50% thresholds, exactly as stated.",
+          "docs/bench/otp12-pf1-rigw-2026-07-15/README.md:46 — live parity proved from phase_events.csv: all 16 trace-on wm_tcp_mixed arms (8 per initiator layout) have SOURCE epoch-7 source_settled with target_streams=8, live_streams=8, accepted=true and the matching DESTINATION epoch-7 resize_ack_sent (and _send_begin) with live_streams=8, accepted=true; all 48 traced TCP arms show accepted epochs exactly 1–7 with target=live=epoch+1.",
+          "docs/bench/otp12-pf1-rigw-2026-07-15/README.md:94 — all seven two-layout phase rows recompute from phase_events.csv at printed 3-decimal precision (0.004/0.001, 2.955/4.622, 714.535/716.177, 31.396/10.484, 29.131/10.190, 2.323/0.297, 0.017/1.387 and their Δ column) using one endpoint's elapsed_ns and per-run epoch 1–7 sums, medians over 8 runs per layout.",
+          "docs/plan/OTP12_PERF_FINDINGS.md:601 — interpretation is correctly bounded: the record claims only valid current-build P1 non-reproduction + failed registered resolution check + no causal grade; it honors the uniform decision rule (phase deltas descriptive, wall-time counterfactuals only, Δ≈0 rig proves nothing, plan lines 624-634), does not claim the formal P1 bar (lines 668-671 require ≤1.10 against BOTH references with unregressed gRPC controls — the control fails here), keeps P2/0f922de residue open, and gates further P1 rig time on an owner-approved amendment. No overclaim or underclaim found in README, finding, STATE, REVIEW, or DEVLOG.",
+          "docs/bench/otp12-pf1-rigw-2026-07-15/bench.log:226 — informational: the payload log necessarily ends at 'ANALYZER ACCEPTED … finalizing session'; the port-closure/no-process teardown observations are recorded in the committed harness finding and DEVLOG, with the sole fail-closed SESSION-COMPLETE marker as the finalizer's terminal witness inside the payload. Not a defect.",
+          "scripts/otp12pf_rigw_analyze.py:2006 — red/green guard proof completed in retained copy /tmp/blit-review-pf1-record-7ecc2f9-evidence-claude-20260715/: analyzer PASS with all six generated reports byte-identical to committed evidence; deleting only runs.csv's final data row fails closed with 'expected 128 rows, got 127' (exit 2); byte-exact restore from the retained backup (sha 69c10ae1… verified) returns PASS with byte-identical reports again. 23/23 analyzer tests pass, check-docs.sh OK, authored files whitespace-clean, all git diff --check flags confined to the byte-exact imported payload, worktree clean at 7ecc2f9 throughout."
+        ],
+        "guard_confirmed": true,
+        "reviewed_sha": "7ecc2f9152fa5a4413ab928fcbdd17c78d6d7c05",
+        "verdict": "accepted"
+      },
+      "adjudication": "authoritative",
+      "guard": {
+        "retained_copy": "/tmp/blit-review-pf1-record-7ecc2f9-evidence-claude-20260715",
+        "retained_backup": "/tmp/blit-review-pf1-record-7ecc2f9-runsbackup-claude-20260715/runs.csv",
+        "retained_audit": "/tmp/blit-review-pf1-record-7ecc2f9-audit-claude/audit.py",
+        "audit_sha256": "48a22edc33c1d2886705ae4dd557768c6985dbd45509a44bd3f5db988f62eedc",
+        "restored_runs_sha256": "69c10ae12f7591b93585670fcbb62f9021fdeeaf6c4a60e78277190d112bc979",
+        "result": "Initial green passed and the one-row mutation failed at 127/128. The first restore invoked cp -i, blocked on its overwrite prompt, and was interrupted; that pass was not counted. Claude then independently issued a separate noninteractive byte restore, reran the analyzer, matched all six generated reports, and only that explicit retry supports guard_confirmed=true."
+      },
+      "verification": {
+        "analyzer_tests": "23/23 passed",
+        "docs_gate": "passed",
+        "authored_whitespace": "clean",
+        "imported_evidence_whitespace": "expected CRLF-only reports excluded from authored-file check",
+        "independent_audit": "all checks passed on orchestrator rerun after review",
+        "worktree_head": "7ecc2f9152fa5a4413ab928fcbdd17c78d6d7c05",
+        "worktree_status_short": ""
+      },
+      "network_audit": {
+        "base_url": "https://api.anthropic.com",
+        "observed_direct_socket": "api.anthropic.com resolved 2607:6bc0::10 and was the live peer; no loopback socket",
+        "plugin_autoupdate": "skipped",
+        "web_search_requests": 0,
+        "web_fetch_requests": 0,
+        "endpoint_activity": "none observed; Git remote URL was parsed locally at startup but no repository endpoint connection was observed"
+      },
+      "artifacts": {
+        "prompt": "/tmp/blit-review-pf1-record-7ecc2f9.prompt-batched.md",
+        "prompt_sha256": "53aab4cebc0a78a299242238af08a9fdce82979c1d09b7db93422902ea23fb89",
+        "envelope": "/tmp/claude-fable5-pf1-record-7ecc2f9-postreset.json",
+        "envelope_sha256": "db31fe601023676b37ed1da7de2b188ff8bba3698d776df8e85726ad5e451c08",
+        "stderr": "/tmp/claude-fable5-pf1-record-7ecc2f9-postreset.err",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "debug_log": "/tmp/claude-fable5-pf1-record-7ecc2f9-postreset.debug.log",
+        "debug_log_sha256": "8ec4cfd26437f3901b92c78bf43466f21fdbdb43ace3ee24266a31ac5230f961",
+        "debug_log_utc_window": "2026-07-15T23:50:14.432Z..2026-07-16T00:06:18.380Z"
+      }
+    }
+  ],
+  "authoritative_attempt": 4
+}

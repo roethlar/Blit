@@ -2,8 +2,9 @@
 
 **Severity**: HIGH — an invalid or overclaimed P1 reading would select the
 wrong counterfactual and consume more rig time without a gradeable result.
-**Status**: In progress — candidate record complete; Claude Fable 5/max review pending.
-**Commit**: supplied as the immutable reviewed head at dispatch.
+**Status**: Verified — Grok supplementary review and Claude Fable 5/max
+authoritative review accepted the exact candidate without a corrective finding.
+**Commit**: `7ecc2f9152fa5a4413ab928fcbdd17c78d6d7c05` (immutable reviewed head).
 
 ## Evidence
 
@@ -72,4 +73,19 @@ amend the preregistered plan or declare P1 fixed.
 
 ## Reviewer comments
 
-Pending Claude Fable 5/max review of the immutable candidate.
+Grok 4.5/high supplied the owner-requested supplementary second eye and
+returned schema-valid `accepted`, exact SHAs, and `guard_confirmed=true` with
+no comments. Claude Fable 5/max then independently returned schema-valid
+`accepted`, exact SHAs, and `guard_confirmed=true`. Claude recomputed the full
+inventory, schedules, clocks, raw/exported phase identity, reports, summary
+arithmetic, live parity, and two-layout phase table, and found the bounded
+interpretation exact.
+
+Both reviewers retained fresh additive copies and proved analyzer green,
+127/128 red, and exact restored green. Claude's first restore invoked `cp -i`,
+blocked on its overwrite prompt, and was interrupted; that pass was not
+counted. Claude then issued a separate explicit noninteractive restore, reran
+green, and matched all six reports. The detached worktree ended clean at exact
+`7ecc2f9`. Records:
+`.review/results/otp12-pf1-rigw-probe-record-r1.grok.json` and
+`.review/results/otp12-pf1-rigw-probe-record-r1.claude.json`.
