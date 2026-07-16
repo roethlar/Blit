@@ -168,5 +168,14 @@ not the injected test emitter.
 
 ## Reviewer comments
 
-Authoritative Claude Fable 5/max review is pending the exact committed
-candidate.
+Claude Fable 5 via Claude Code 2.1.211, `--effort max`, accepted exact range
+`f01d662351039a4153ee9a64ee6c59c10d29b9b7..713526e8f4cbe61f881a24d1f19cc481d0a8b188`
+with no material finding and `guard_confirmed=true`. It independently passed
+the three probe units and the complete role/carrier guard, replaced production
+shard IDs with one constant, observed the predicted key-isolation failure,
+restored the exact reviewed blob, and reran both commands green. The retained
+review worktree is clean at the reviewed SHA. Raw output and adjudication:
+`.review/results/otp12-pf1-p2-observer-r1.claude.json` and
+`.review/results/otp12-pf1-p2-observer-r1.claude-verdict.md`. The interrupted
+non-authoritative first attempt is retained separately as
+`.review/results/otp12-pf1-p2-observer-r1.claude-attempt1-error.json`.
