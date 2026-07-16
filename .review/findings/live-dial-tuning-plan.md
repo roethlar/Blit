@@ -2,9 +2,10 @@
 
 **Severity**: HIGH — production transfers cannot adapt stream count to live
 conditions and cannot scale down, contrary to the settled transfer design.
-**Status**: In progress — Draft plan written; Claude Fable 5/max review pending.
+**Status**: In progress — Claude Fable 5/max round 1 reopened two plan details;
+fix and re-review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: pending candidate commit
+**Commit**: `554d080839e1419c2242921e444d40d02c947815` (round-1 candidate)
 
 ## Evidence
 
@@ -100,4 +101,31 @@ None.
 
 ## Reviewer comments
 
-Pending Claude Fable 5/max review.
+Claude Code `2.1.211`, `claude-fable-5`, effort `max`; reviewed
+`35d7d1307d7a2a455756b372d3bf637f2a5a382c..554d080839e1419c2242921e444d40d02c947815`;
+`guard_confirmed=true`; verdict `REOPENED`; recorded
+`2026-07-16T06:09:18Z`. The direct attempt returned exit zero, a schema-valid
+payload, exact dispatched SHAs, and left the retained worktree clean.
+
+- **MEDIUM, admitted:** the fault rule for an accepted ADD/REMOVE contradicts
+  the required need-completion race. Specify that draining/completion plus
+  normal END retirement satisfies an already accepted transition; reserve a
+  fault for a still-live pipeline that refuses or errors on it.
+- **LOW, admitted:** growing above 8 does not prove the retired 16-worker table
+  maximum is absent. Make the deterministic guard cross 16 or reach a lower
+  advertised receiver ceiling.
+- **Observation, accepted without a design change:** the frozen blocked-ratio
+  policy can grow to the receiver ceiling on a source-bound transfer. Keep it
+  bounded and make the observer/evidence report the signature.
+- The remaining architecture questions passed: shape authority is deleted,
+  SOURCE ownership is shared across layouts, epoch zero is receiver-bounded,
+  REMOVE fits the existing substrate, the cutover has no dual-policy window,
+  and local/in-stream exclusions are not direction-specific worker paths.
+- Independent proof: docs/diff gates plus 33 semantic assertions were green;
+  restoring only the two contract docs to base made 17 expected assertions
+  red; restoring exact reviewed blobs returned green and clean at the head SHA.
+
+Raw record:
+`.review/results/live-dial-tuning-plan-r1.claude.json`. Adjudication:
+`.review/results/live-dial-tuning-plan-r1.claude-verdict.md`. The earlier
+proxy-routed error is retained separately and is non-authoritative.

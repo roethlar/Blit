@@ -1,0 +1,27 @@
+{
+  "record_type": "review_attempt_error",
+  "authoritative": false,
+  "reviewer": {
+    "provider": "Anthropic",
+    "model": "claude-fable-5",
+    "cli": "Claude Code 2.1.211",
+    "reasoning_effort": "max"
+  },
+  "review_contract": {
+    "base_sha": "35d7d1307d7a2a455756b372d3bf637f2a5a382c",
+    "reviewed_sha": "554d080839e1419c2242921e444d40d02c947815",
+    "authoritative_worktree": "/tmp/blit-review-live-dial-554d080-r1"
+  },
+  "attempt": {
+    "session_id": "38237813-8945-466a-8996-c121861337a5",
+    "subtype": "error_during_execution",
+    "is_error": true,
+    "duration_ms": 254615,
+    "duration_api_ms": 266548,
+    "num_turns": 4,
+    "stop_reason": "tool_use",
+    "terminal_reason": "aborted_streaming",
+    "total_cost_usd": 0.39291999999999994
+  },
+  "exclusion_reason": "The invocation inherited the local ANTHROPIC_BASE_URL request proxy and was interrupted after that route was diagnosed. It returned no verdict and is not an input to adjudication. This is a normalized preservation of the observed error fields, not the authoritative raw review envelope."
+}
