@@ -71,6 +71,11 @@ queue, and tests cover SOURCE-initiator and SOURCE-responder layouts.
 - Pipeline membership, probe-registry membership, dial settlement, and the
   peer's effective count must not drift. A one-way control-channel send is not
   sufficient proof that a worker joined or retired.
+- Need completion is a terminal membership transition, not a local resize
+  failure. Once the peer has accepted an operation, a live pipeline must apply
+  it or fault; a pipeline already closing must satisfy it through normal member
+  admission/retirement and `END`. An accepted operation may never be rewritten
+  as a refused proposal at the unchanged count.
 - `SourceDone`, cancellation, first-error-wins, `StallGuard`, progress, byte
   accounting, resume ordering, and clean socket teardown retain their current
   semantics. Tuner and validation tasks may not outlive the session.
@@ -110,6 +115,13 @@ queue, and tests cover SOURCE-initiator and SOURCE-responder layouts.
       shape, floor/ceiling, and current settled count. Duplicate/stale frames
       cannot repeat a membership change; rejected or locally failed changes
       cannot be reported as settled.
+- [ ] Need completion during an in-flight resize has one result in both
+      layouts. A proposal not accepted by the peer settles unchanged; an
+      accepted ADD completes socket authentication and admits a member that
+      immediately retires with `END` from the closed queue; an accepted REMOVE
+      is satisfied by the named member's requested or already completed normal
+      retirement. None of these healthy completion races faults or leaks a
+      socket, member, probe, or receive task.
 - [ ] REMOVE retires the exact worker/probe membership chosen by the elastic
       pipeline, emits `END`, and lets the matching receiver worker finish in
       both dial/accept layouts. Final reported stream count is settled logical
@@ -204,13 +216,27 @@ pipeline remains the authority on which LIFO member is retired because it owns
 the worker flags. `SourceDataPlane` uses the returned member ID to update the
 matching probe registry entry; it does not blindly pop a separate vector.
 
-An accepted ADD is settled only after the authenticated socket is wrapped,
-the pipeline accepts its member, and its probe is registered. An accepted
-REMOVE is settled only after the pipeline marks one member ineligible for new
-work and the matching probe is removed. The worker may finish its already
-claimed payload afterward, then calls `finish()` and emits `END`. If the peer
-accepted but local membership cannot change, the same-build session faults;
-it must not publish a false effective count.
+While payload admission is live, an accepted ADD is settled only after the
+authenticated socket is wrapped, the pipeline accepts its member, and its
+probe is registered. An accepted REMOVE is settled only after the pipeline
+marks one member ineligible for new work and the matching probe is removed.
+The worker may finish its already claimed payload afterward, then calls
+`finish()` and emits `END`. If a live pipeline refuses or errors on membership
+after peer acceptance, the same-build session faults; it must not publish a
+false effective count.
+
+Payload closing is different from live-pipeline refusal. Keep a terminal
+member ledger until every in-flight epoch settles, and make the membership
+acknowledgement distinguish ordinary join/retire from terminally satisfied
+join/retire. For an accepted ADD, complete the role-specific authenticated
+socket acquisition even if need completion has closed the work queue, admit
+the new member and probe, and let that member immediately execute the normal
+no-payload `finish()`/`END` path. For an accepted REMOVE, a named member that
+has already executed normal END retirement satisfies the decrement; do not
+try to retire a second member. Settlement records the accepted target and the
+terminal retirement outcome so both peers observe the same transition without
+stranding the destination-initiated ADD socket. Need completion by itself is
+never a `SessionFault`.
 
 ### 4. One op-aware resize loop
 
@@ -228,10 +254,12 @@ selects tuner proposals beside payload queueing, peer events, and faults:
    decrement; it does not close a socket. SOURCE retires the acknowledged
    member, updates probes, and settles. The normal `END` closes the matching
    destination receive worker.
-3. Refusal or a failed optional proposal settles at the unchanged count and
-   permanently stops resize for the session. A transport failure after an
-   accepted operation faults the session, preserving same-build fail-fast
-   semantics.
+3. Peer refusal, or a local proposal that fails before peer acceptance, settles
+   at the unchanged count and permanently stops resize for the session. After
+   peer acceptance, an operation is no longer optional: a live pipeline applies
+   it or faults, while a closing pipeline uses the terminal membership outcomes
+   in section 3. A transport/authentication error after an accepted ADD still
+   faults; need completion alone does not.
 
 The destination keeps a small resize state: settled epoch, logical live count,
 and the last ACK. It rejects out-of-order or inconsistent frames and replays a
@@ -241,14 +269,20 @@ construction are shared.
 
 Closing the payload input ends demand. There is no tail loop that opens idle
 sockets to reach a predetermined number. A proposal already in flight is
-settled or faulted under the normal control loop; no new proposal is accepted
-after controller shutdown begins.
+classified by whether the peer accepted it: an unaccepted proposal settles
+unchanged, while an accepted proposal completes through live membership or the
+terminal drain rule above. No new proposal is accepted after controller
+shutdown begins.
 
 ### 5. Lifecycle and observability
 
-`SourceDataPlane::finish` stops proposal intake, aborts/joins the tuner,
-settles any locally orphaned proposal as failed, closes payload input, and
-drains the elastic pipeline. Drop/cancellation aborts both tuner and pipeline.
+`SourceDataPlane::finish` stops proposal intake and the tuner, closes payload
+input, but keeps the membership command endpoint and terminal member ledger
+alive until the one in-flight epoch is classified and settled. A never-accepted
+local proposal may settle unchanged; an accepted proposal must take the live or
+terminal membership path above. It then joins the tuner and drains the elastic
+pipeline. Drop/cancellation aborts both tuner and pipeline under the existing
+fault contract rather than pretending an accepted operation was refused.
 The destination drains every receive worker, including a retiring worker's
 final payload and `END`, before scoring the summary. Its exposed stream count
 is the final logical count; a separate observer field may report peak or total
@@ -301,9 +335,11 @@ Each slice is one reviewloop finding and one commit before review fixes.
 
 1. **ldt-1 — acknowledged elastic membership.** Make pipeline ADD/REMOVE
    return exact membership outcomes; bind probes to member IDs; preserve the
-   existing ADD behavior while making false settlement impossible. Guard busy
-   and idle retirement, failed control delivery, LIFO identity, normal `END`,
-   first-error-wins, and exactly-once payload outcomes.
+   existing ADD behavior while making false settlement impossible. Retain a
+   terminal member ledger and return explicit joined/retire-marked versus
+   joined-then-ended/already-ended outcomes until the pending epoch settles.
+   Guard busy and idle retirement, failed control delivery, LIFO identity,
+   normal `END`, first-error-wins, and exactly-once payload outcomes.
 2. **ldt-2 — live controller cutover.** Finalize the receiver-bounded epoch-0
    floor; attach probes and tuner in both `SourceDataPlane` constructors;
    consume one op-aware proposal stream; implement shared ADD/REMOVE
@@ -312,11 +348,12 @@ Each slice is one reviewloop finding and one commit before review fixes.
    below-floor-start shrink, capacity/refusal/stale-frame guards, and update
    the session contract in the same slice.
 3. **ldt-3 — lifecycle and observer closure.** Prove tuner/pipeline teardown,
-   pending resize at need-complete, cancellation and fault paths, final logical
-   versus peak stream accounting, default-off observer inertness, and complete
+   accepted and unaccepted ADD/REMOVE at need-complete in both layouts (no
+   healthy fault, false unchanged settlement, duplicate retirement, or leaked
+   authenticated socket), cancellation and fault paths, final logical versus
+   peak stream accounting, default-off observer inertness, and complete
    decision reasons. Run mutation proofs and the full debug/release/docs/CI
-   gates; correct all live status text that still calls exact 8 adaptive
-   parity.
+   gates; correct all live status text that still calls exact 8 adaptive parity.
 4. **ldt-4 — quiet Mac↔Mac evidence.** After ldt-1..3 are independently
    accepted, build and stage exact clean artifacts, verify endpoint quietness,
    and run identical large/10k-small/mixed fixtures under both initiator
