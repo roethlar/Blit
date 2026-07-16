@@ -2282,11 +2282,15 @@ run_selftest() {
     local old_tag=$SESSION_TAG sample direction fixture source parent remote_host guard_text
     SESSION_TAG='selftest-ldt4'
     assert_schedule
-    [[ "$(fixture_source q_to_windows large)" == '/Users/michael/blit-bench-work/src_large' ]]
-    [[ "$(fixture_source windows_to_q small)" == 'D:/blit-test/ldt4-staging/fixtures/src_small' ]]
-    [[ "$(active_destination q_to_windows mixed)" == 'D:/blit-test/ldt4-sessions/selftest-ldt4/active/mixed' ]]
+    [[ "$(fixture_source q_to_windows large)" == '/Users/michael/blit-bench-work/src_large' ]] \
+        || die 'q large fixture mapping selftest failed'
+    [[ "$(fixture_source windows_to_q small)" == 'D:/blit-test/ldt4-staging/fixtures/src_small' ]] \
+        || die 'Windows small fixture mapping selftest failed'
+    [[ "$(active_destination q_to_windows mixed)" == 'D:/blit-test/ldt4-sessions/selftest-ldt4/active/mixed' ]] \
+        || die 'Windows active destination mapping selftest failed'
     sample=$(retained_destination windows_to_q ldt4-096)
-    [[ "$sample" == '/Users/michael/blit-ldt4-sessions/selftest-ldt4/retained/ldt4-096' ]]
+    [[ "$sample" == '/Users/michael/blit-ldt4-sessions/selftest-ldt4/retained/ldt4-096' ]] \
+        || die 'q retained destination mapping selftest failed'
     for direction in q_to_windows windows_to_q; do
         case "$direction" in
             q_to_windows) remote_host=$Q_IP ;;
@@ -2295,47 +2299,68 @@ run_selftest() {
         for fixture in large small mixed; do
             source=$(fixture_source "$direction" "$fixture")
             parent=$(dirname "$source")
-            [[ "$(responder_module_path "$direction" "$fixture" destination_init)" == "$parent" ]]
-            [[ "$(responder_module_path "$direction" "$fixture" source_init)" == "$(destination_root "$direction")/selftest-ldt4" ]]
-            [[ "$(client_source_argument "$direction" "$fixture" source_init)" == "$source" ]]
-            [[ "$(client_source_argument "$direction" "$fixture" destination_init)" == "$remote_host:$DAEMON_PORT:/ldt4/src_$fixture" ]]
-            [[ "$(client_destination_argument "$direction" "$fixture" source_init)" == "$(remote_destination_argument "$direction" "$fixture")" ]]
-            [[ "$(client_destination_argument "$direction" "$fixture" destination_init)" == "$(active_destination "$direction" "$fixture")/" ]]
+            [[ "$(responder_module_path "$direction" "$fixture" destination_init)" == "$parent" ]] \
+                || die "$direction/$fixture source-responder module mapping selftest failed"
+            [[ "$(responder_module_path "$direction" "$fixture" source_init)" == "$(destination_root "$direction")/selftest-ldt4" ]] \
+                || die "$direction/$fixture destination-responder module mapping selftest failed"
+            [[ "$(client_source_argument "$direction" "$fixture" source_init)" == "$source" ]] \
+                || die "$direction/$fixture local-source argument selftest failed"
+            [[ "$(client_source_argument "$direction" "$fixture" destination_init)" == "$remote_host:$DAEMON_PORT:/ldt4/src_$fixture" ]] \
+                || die "$direction/$fixture remote-source argument selftest failed"
+            [[ "$(client_destination_argument "$direction" "$fixture" source_init)" == "$(remote_destination_argument "$direction" "$fixture")" ]] \
+                || die "$direction/$fixture remote-destination argument selftest failed"
+            [[ "$(client_destination_argument "$direction" "$fixture" destination_init)" == "$(active_destination "$direction" "$fixture")/" ]] \
+                || die "$direction/$fixture local-destination argument selftest failed"
         done
     done
-    q_responder_for q_to_windows destination_init
-    q_responder_for windows_to_q source_init
-    ! q_responder_for q_to_windows source_init
-    ! q_responder_for windows_to_q destination_init
+    q_responder_for q_to_windows destination_init \
+        || die 'q responder ownership mapping selftest failed for q-to-Windows'
+    q_responder_for windows_to_q source_init \
+        || die 'q responder ownership mapping selftest failed for Windows-to-q'
+    if q_responder_for q_to_windows source_init; then
+        die 'Windows responder ownership mapping selftest failed for q-to-Windows'
+    fi
+    if q_responder_for windows_to_q destination_init; then
+        die 'Windows responder ownership mapping selftest failed for Windows-to-q'
+    fi
     local stopped=''
     stop_q_daemon() { stopped="${stopped}q"; }
     stop_windows_daemon() { stopped="${stopped}w"; }
     CURRENT_DAEMON_ENDPOINT=q
-    stop_current_daemon
+    stop_current_daemon || die 'q daemon ownership dispatch returned failure'
     [[ "$stopped" == q && -z "$CURRENT_DAEMON_ENDPOINT" ]] \
         || die 'q daemon ownership dispatch selftest failed'
     CURRENT_DAEMON_ENDPOINT=windows
-    stop_current_daemon
+    stop_current_daemon || die 'Windows daemon ownership dispatch returned failure'
     [[ "$stopped" == qw && -z "$CURRENT_DAEMON_ENDPOINT" ]] \
         || die 'Windows daemon ownership dispatch selftest failed'
-    stop_current_daemon
+    stop_current_daemon || die 'empty daemon ownership dispatch returned failure'
     [[ "$stopped" == qw ]] || die 'empty daemon ownership dispatch selftest failed'
     declare -F run_client start_q_daemon start_windows_daemon extract_session_id \
         restore_windows_runtime run_registered_matrix assert_q_registered_path \
         assert_windows_registered_paths stop_current_client \
-        write_final_evidence_inventory >/dev/null
+        write_final_evidence_inventory >/dev/null \
+        || die 'registered harness function inventory selftest failed'
     guard_text=$(windows_path_guard_script)
     [[ "$guard_text" == *'function Assert-Ldt4PlainPath'* \
         && "$guard_text" == *'ReparsePoint'* \
-        && "$guard_text" == *'function ConvertTo-Ldt4CommandLine'* ]]
-    LC_ALL=C grep -Fq 'Get-Process cargo,rustc,blit,blit-daemon' "$SCRIPT_PATH"
-    LC_ALL=C grep -Fq "[version]'7.4'" "$SCRIPT_PATH"
-    LC_ALL=C grep -Fq 'windows_powershell=$win_ps' "$SCRIPT_PATH"
-    LC_ALL=C grep -Fq "FINAL-SHA256.csv" "$SCRIPT_PATH"
-    LC_ALL=C grep -Fq '[IO.FileMode]::Append' "$SCRIPT_PATH"
-    LC_ALL=C grep -Fq 'reaped=true' "$SCRIPT_PATH"
-    LC_ALL=C grep -Fq 'ambiguous exact launcher recovery' "$SCRIPT_PATH"
-    python3 - "$SCRIPT_PATH" <<'PY'
+        && "$guard_text" == *'function ConvertTo-Ldt4CommandLine'* ]] \
+        || die 'Windows path/command guard selftest failed'
+    LC_ALL=C grep -Fq 'Get-Process cargo,rustc,blit,blit-daemon' "$SCRIPT_PATH" \
+        || die 'Windows quiet process inventory selftest failed'
+    LC_ALL=C grep -Fq "[version]'7.4'" "$SCRIPT_PATH" \
+        || die 'PowerShell version floor selftest failed'
+    LC_ALL=C grep -Fq 'windows_powershell=$win_ps' "$SCRIPT_PATH" \
+        || die 'PowerShell evidence selftest failed'
+    LC_ALL=C grep -Fq "FINAL-SHA256.csv" "$SCRIPT_PATH" \
+        || die 'final inventory selftest failed'
+    LC_ALL=C grep -Fq '[IO.FileMode]::Append' "$SCRIPT_PATH" \
+        || die 'exclusive Windows log append selftest failed'
+    LC_ALL=C grep -Fq 'reaped=true' "$SCRIPT_PATH" \
+        || die 'client reap evidence selftest failed'
+    LC_ALL=C grep -Fq 'ambiguous exact launcher recovery' "$SCRIPT_PATH" \
+        || die 'exact Windows launcher recovery selftest failed'
+    python3 - "$SCRIPT_PATH" <<'PY' || die 'static harness safety selftest failed'
 import pathlib
 import re
 import sys
