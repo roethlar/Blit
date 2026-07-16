@@ -444,6 +444,29 @@ def _session_destination_root(direction: str) -> str:
     return "/Users/michael/blit-ldt4-sessions"
 
 
+def _registered_trace_paths(
+    direction: str, initiator: str, run_id: str
+) -> tuple[str, str]:
+    return {
+        ("q_to_windows", "source_init"): (
+            f"endpoint/q/{run_id}/client.err",
+            f"endpoint/windows/{run_id}/daemon.err",
+        ),
+        ("q_to_windows", "destination_init"): (
+            f"endpoint/q/{run_id}/daemon.err",
+            f"endpoint/windows/{run_id}/client.err",
+        ),
+        ("windows_to_q", "source_init"): (
+            f"endpoint/windows/{run_id}/client.err",
+            f"endpoint/q/{run_id}/daemon.err",
+        ),
+        ("windows_to_q", "destination_init"): (
+            f"endpoint/windows/{run_id}/daemon.err",
+            f"endpoint/q/{run_id}/client.err",
+        ),
+    }[(direction, initiator)]
+
+
 def _read_csv(path: Path, expected_fields: Sequence[str], label: str) -> list[dict[str, str]]:
     _plain_file(path, label)
     with path.open("r", encoding="utf-8", newline="") as handle:
@@ -794,6 +817,11 @@ def _load_fixture_index(
         key = (row["direction"], row["fixture"])
         if key not in expected or key in found:
             raise AnalysisError(f"fixture-manifests.csv line {line}: unexpected/duplicate cell {key}")
+        expected_manifest = f"manifests/source/{key[0]}_{key[1]}.csv"
+        if row["source_manifest"] != expected_manifest:
+            raise AnalysisError(
+                f"fixture-manifests.csv line {line}: source_manifest is not the registered evidence path"
+            )
         manifest = _load_manifest(root, row["source_manifest"], cache)
         wanted_files, wanted_bytes = EXPECTED_FIXTURES[key[1]]
         if (manifest.files, manifest.bytes) != (wanted_files, wanted_bytes):
@@ -968,9 +996,15 @@ def _load_runs(
         indexed = fixtures[(direction, fixture)]
         if raw["source_manifest"] != indexed.relative_path:
             raise AnalysisError(f"runs.csv line {line}: source_manifest disagrees with fixture index")
-        if raw["landed_manifest"] in seen_landed_manifests:
+        expected_landed_manifest = f"manifests/landed/{raw['run_id']}.csv"
+        if raw["landed_manifest"] != expected_landed_manifest:
+            raise AnalysisError(
+                f"runs.csv line {line}: landed_manifest is not the registered evidence path"
+            )
+        landed_manifest_key = raw["landed_manifest"].casefold()
+        if landed_manifest_key in seen_landed_manifests:
             raise AnalysisError(f"runs.csv line {line}: landed_manifest must be globally unique")
-        seen_landed_manifests.add(raw["landed_manifest"])
+        seen_landed_manifests.add(landed_manifest_key)
         landed = _load_manifest(root, raw["landed_manifest"], manifest_cache)
         if landed.entries != indexed.entries:
             raise AnalysisError(
@@ -988,6 +1022,11 @@ def _load_runs(
                 f"runs.csv line {line}: source/active path drift within {expected_cell}"
             )
 
+        trace_paths = _registered_trace_paths(direction, initiator, raw["run_id"])
+        if (raw["source_trace"], raw["destination_trace"]) != trace_paths:
+            raise AnalysisError(
+                f"runs.csv line {line}: trace paths are not the registered endpoint/component paths"
+            )
         _evidence_file(root, raw["source_trace"], f"source trace line {line}")
         _evidence_file(root, raw["destination_trace"], f"destination trace line {line}")
         rows.append(

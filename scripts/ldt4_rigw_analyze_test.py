@@ -229,7 +229,7 @@ class SyntheticSession:
     def _write_fixtures(self) -> None:
         for direction in analyzer.DIRECTIONS:
             for fixture in analyzer.FIXTURES:
-                relative = f"fixtures/{direction}-{fixture}.manifest"
+                relative = f"manifests/source/{direction}_{fixture}.csv"
                 path = self.root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(_manifest_payload(), encoding="ascii")
@@ -615,11 +615,12 @@ class SyntheticSession:
                     source_events, destination_events = self._events(
                         run_id, session_id, initiator
                     )
-                    source_trace = f"traces/{run_id}.source.log"
-                    destination_trace = f"traces/{run_id}.destination.log"
+                    source_trace, destination_trace = analyzer._registered_trace_paths(
+                        direction, initiator, run_id
+                    )
                     self._write_trace(source_trace, source_events)
                     self._write_trace(destination_trace, destination_events)
-                    landed_manifest = f"landed/{run_id}.manifest"
+                    landed_manifest = f"manifests/landed/{run_id}.csv"
                     landed_path = self.root / landed_manifest
                     landed_path.parent.mkdir(parents=True, exist_ok=True)
                     landed_path.write_text(_manifest_payload(), encoding="ascii")
@@ -643,7 +644,7 @@ class SyntheticSession:
                             "source_path": source_path,
                             "active_destination_path": active_path,
                             "archive_path": archive_path,
-                            "source_manifest": f"fixtures/{direction}-{fixture}.manifest",
+                            "source_manifest": f"manifests/source/{direction}_{fixture}.csv",
                             "landed_manifest": landed_manifest,
                             "source_trace": source_trace,
                             "destination_trace": destination_trace,
@@ -768,6 +769,47 @@ class AnalyzerTests(unittest.TestCase):
         with self.assertRaisesRegex(analyzer.AnalysisError, "registered physical fixture"):
             self.analyze()
 
+    def test_source_manifest_must_use_registered_evidence_path(self) -> None:
+        fixture_row = self.session.fixture_rows[0]
+        original = fixture_row["source_manifest"]
+        relocated = "manifests/source/relocated.csv"
+        (self.root / relocated).write_bytes((self.root / original).read_bytes())
+        fixture_row["source_manifest"] = relocated
+        for row in self.session.run_rows:
+            if (
+                row["direction"] == fixture_row["direction"]
+                and row["fixture"] == fixture_row["fixture"]
+            ):
+                row["source_manifest"] = relocated
+        _write_csv(
+            self.root / "fixture-manifests.csv",
+            analyzer.FIXTURE_INDEX_FIELDS,
+            self.session.fixture_rows,
+        )
+        self.session.write_runs()
+        with self.assertRaisesRegex(analyzer.AnalysisError, "registered evidence path"):
+            self.analyze()
+
+    def test_landed_manifest_must_use_registered_evidence_path(self) -> None:
+        row = self.session.run_rows[0]
+        original = row["landed_manifest"]
+        relocated = "manifests/landed/relocated.csv"
+        (self.root / relocated).write_bytes((self.root / original).read_bytes())
+        row["landed_manifest"] = relocated
+        self.session.write_runs()
+        with self.assertRaisesRegex(analyzer.AnalysisError, "registered evidence path"):
+            self.analyze()
+
+    def test_traces_must_use_registered_endpoint_component_paths(self) -> None:
+        row = self.session.run_rows[0]
+        original = row["source_trace"]
+        relocated = "endpoint/q/ldt4-001/relocated.err"
+        (self.root / relocated).write_bytes((self.root / original).read_bytes())
+        row["source_trace"] = relocated
+        self.session.write_runs()
+        with self.assertRaisesRegex(analyzer.AnalysisError, "registered endpoint/component"):
+            self.analyze()
+
     def test_every_archive_path_must_be_its_registered_retained_run_path(self) -> None:
         self.session.run_rows[1]["archive_path"] = self.session.run_rows[0]["archive_path"]
         self.session.write_runs()
@@ -801,8 +843,31 @@ class AnalyzerTests(unittest.TestCase):
             self.analyze()
 
     def test_abba_first_role_schedule_is_enforced(self) -> None:
-        self.session.run_rows[0]["initiator"] = "destination_init"
-        self.session.run_rows[1]["initiator"] = "source_init"
+        first, second = self.session.run_rows[:2]
+        saved_events = {
+            (index, role): self.session.read_events(row, role)
+            for index, row in enumerate((first, second))
+            for role in ("source", "destination")
+        }
+        first["initiator"] = "destination_init"
+        second["initiator"] = "source_init"
+        for target_index, template_index in ((0, 1), (1, 0)):
+            row = (first, second)[target_index]
+            initiator_role = (
+                "SOURCE" if row["initiator"] == "source_init" else "DESTINATION"
+            )
+            source_trace, destination_trace = analyzer._registered_trace_paths(
+                row["direction"], row["initiator"], row["run_id"]
+            )
+            row["source_trace"] = source_trace
+            row["destination_trace"] = destination_trace
+            for role, trace in (("source", source_trace), ("destination", destination_trace)):
+                events = [dict(event) for event in saved_events[(template_index, role)]]
+                for event in events:
+                    event["run_id"] = row["run_id"]
+                    event["session_id"] = row["session_id"]
+                    event["initiator_role"] = initiator_role
+                self.session._write_trace(trace, events)
         self.session.write_runs()
         with self.assertRaisesRegex(analyzer.AnalysisError, "ABBAABBA"):
             self.analyze()
