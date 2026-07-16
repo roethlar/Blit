@@ -225,7 +225,8 @@ POWERSHELL
 }
 
 assert_q_registered_paths() {
-    local phase=${1:-boundary}
+    local phase=${1:-boundary} allow_small_missing=false
+    if [[ "$phase" == preflight ]]; then allow_small_missing=true; fi
     assert_q_registered_path "$Q_ARTIFACT_REPO" directory false \
         || session_void "$phase: unsafe q artifact repository path"
     assert_q_registered_path "$Q_BLIT" file false \
@@ -238,6 +239,8 @@ assert_q_registered_paths() {
         || session_void "$phase: unsafe q mixed fixture path"
     assert_q_registered_path "$Q_STAGE_ROOT" directory true \
         || session_void "$phase: unsafe q staging path"
+    assert_q_registered_path "$Q_STAGE_ROOT/fixtures/src_small" directory "$allow_small_missing" \
+        || session_void "$phase: unsafe q small fixture path"
     assert_q_registered_path "$Q_SESSION_ROOT" directory true \
         || session_void "$phase: unsafe q session path"
     assert_q_registered_path "$EVIDENCE_ROOT" directory true \
@@ -247,7 +250,8 @@ assert_q_registered_paths() {
 }
 
 assert_windows_registered_paths() {
-    local phase=${1:-boundary} guard out
+    local phase=${1:-boundary} guard out allow_small_missing=0
+    if [[ "$phase" == preflight ]]; then allow_small_missing=1; fi
     guard=$(windows_path_guard_script)
     out=$(wssh "$guard
 \$ErrorActionPreference = 'Stop'
@@ -257,6 +261,7 @@ Assert-Ldt4PlainPath '$WIN_STAGE_DAEMON' File | Out-Null
 Assert-Ldt4PlainPath 'D:/blit-test/rigw-module/src_large' Directory | Out-Null
 Assert-Ldt4PlainPath 'D:/blit-test/rigw-module/src_mixed' Directory | Out-Null
 Assert-Ldt4PlainPath '$WIN_FIXTURE_STAGE' Directory \$true | Out-Null
+Assert-Ldt4PlainPath '$WIN_FIXTURE_STAGE/fixtures/src_small' Directory ([bool]$allow_small_missing) | Out-Null
 Assert-Ldt4PlainPath '$WIN_SESSION_ROOT' Directory \$true | Out-Null
 Assert-Ldt4PlainPath 'D:/blit-test/bins/active' Directory | Out-Null
 Assert-Ldt4PlainPath '$WIN_ACTIVE_DAEMON' File \$true | Out-Null
@@ -2324,6 +2329,12 @@ if any(token in text for token in forbidden):
     raise SystemExit("destructive or name-wide process operation appeared")
 prepare = text[text.index("prepare_windows_runtime() {"):text.index("restore_windows_runtime() {")]
 restore = text[text.index("restore_windows_runtime() {"):text.index("q_responder_for() {")]
+q_paths = text[text.index("assert_q_registered_paths() {"):text.index("assert_windows_registered_paths() {")]
+windows_paths = text[text.index("assert_windows_registered_paths() {"):text.index("mark_void() {")]
+if '$Q_STAGE_ROOT/fixtures/src_small' not in q_paths:
+    raise SystemExit("q small fixture disappeared from boundary path guards")
+if '$WIN_FIXTURE_STAGE/fixtures/src_small' not in windows_paths:
+    raise SystemExit("Windows small fixture disappeared from boundary path guards")
 record_flush = prepare.index(r"\$recordStream.Flush(\$true)")
 record_barrier = prepare.index("Write-VolumeCache D", record_flush)
 runtime_mutation = min(
