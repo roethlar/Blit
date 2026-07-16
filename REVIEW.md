@@ -13,6 +13,15 @@ See `.review/findings/<id>.md` for per-finding details.
   rows graded before 2026-07-04 carry `<id>.verified.json` from the
   retired async loop)
 
+## Live dial tuning correction — plan review
+
+Plan: `docs/plan/LIVE_DIAL_TUNING.md` (Draft). Reviewer: Claude CLI with
+`--model claude-fable-5 --effort max` per D-2026-07-15-1.
+
+| ID | Title | Status | Commit(s) |
+|----|-------|--------|-----------|
+| live-dial-tuning-plan | Restore one SOURCE-owned telemetry controller with live ADD/REMOVE; retire static shape as worker-count authority | `[~]` | candidate pending |
+
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 
 Plan: `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md` (Active). Loop:

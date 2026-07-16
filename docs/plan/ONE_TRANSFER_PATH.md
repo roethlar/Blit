@@ -85,9 +85,11 @@ no second code path to differ.
   cancellation, byte-accounting. Existing pins are ported (not
   dropped) as tests become role-parameterized; test count never
   drops.
-- The sf-2 shape-correction behavior (stream count corrects as the
-  need list accumulates) becomes the one and only stream policy —
-  both directions inherit it by construction; its pins carry over.
+- **Live dial policy carries from REV4.** SOURCE continuously adjusts
+  cheap dials and stream count from measured send telemetry, including
+  mid-transfer ADD and REMOVE. Workload shape informs payload planning;
+  it does not map file/byte totals to a terminal stream count. Both
+  connection layouts inherit the one SOURCE-owned controller.
 - **The bounded-unilateral dial contract carries unchanged**
   (D-2026-06-20-1/-2, REV4 Design §4): the byte SENDER owns the live
   dial, bounded by the byte RECEIVER's advertised capacity profile
@@ -95,6 +97,12 @@ no second code path to differ.
   unlimited). The session's role model must express this — profile
   travels DESTINATION→SOURCE at setup regardless of who initiated —
   and otp-1's contract names it explicitly.
+- **Current implementation drift (2026-07-16):** cutover retained only
+  sf-2's static, ADD-only shape correction; production `TransferSession`
+  does not start the existing telemetry tuner or accept REMOVE. Draft
+  `docs/plan/LIVE_DIAL_TUNING.md` owns the reviewed correction. Until it
+  lands, exact-8 role parity is static-policy parity, not live-dial
+  completion.
 - Wire contract discipline (REV4 rule): the unified session's proto —
   messages, field numbers, capability negotiation, transport
   selection — is a reviewed doc+proto slice **before** any behavior
@@ -144,8 +152,8 @@ no second code path to differ.
       transfer, progress events, jobs/cancel, read-only enforcement —
       each demonstrated by ported tests on the session.
 - [ ] Suite green throughout; final test count ≥ pre-plan baseline
-      (1483); all REV4 invariant pins and the sf-2 pin pass
-      role-parameterized.
+      (1483); all REV4 invariant pins and live ADD/REMOVE dial guards
+      pass role-parameterized.
 - [ ] Benchmark methodology corrected and recorded: symmetric-fs
       cells are the verdict cells; tmpfs cells remain only as
       explicitly-labeled wire-reference rows (never compared across
@@ -157,8 +165,8 @@ no second code path to differ.
 **What already is one code** (kept, becomes the session's engine):
 `remote/transfer/` — pipeline, sink/source abstractions, data plane,
 diff planner, tar-shard, stall guard, progress, `operation_spec` (the
-REV4 unified contract), and the engine dial (stream policy incl. sf-2
-shape correction). The defect layer is above it: four driver loops
+REV4 unified contract), and the live engine dial. The defect layer is
+above it: four driver loops
 choreograph these pieces differently per direction.
 
 **The one choreography** (roles, not directions):
@@ -174,9 +182,11 @@ choreograph these pieces differently per direction.
    returns need-list batches (one diff owner, always the end that
    owns the target fs — push's proven model; pull_sync's
    source-side diff is deleted).
-4. The data plane opens at the dial floor immediately; stream count
-   shape-corrects as the need list accumulates (sf-2 mechanism, now
-   the only policy, both roles).
+4. The data plane opens at a conservative receiver-bounded dial floor.
+   SOURCE then tunes the live stream count up or down from measured
+   per-stream telemetry. Initiator role and push/pull-facing verb never
+   select policy; the receiver's advertised capacity is only a safety
+   bound.
 5. SOURCE feeds payloads (files / tar-shards / resume blocks) through
    the one pipeline into the data plane; DESTINATION writes through
    the one receive path. The receive sink is built with a
@@ -281,7 +291,9 @@ otp-9 deletes them.
    fixtures — the invariance property enters the test suite here.
 4. **otp-4 daemon serves `Transfer`, client initiates as SOURCE**
    (remote push-equivalent rides the session); A/B parity pins vs
-   old push (byte-identical trees, summary parity, sf-2 pin ported).
+   old push (byte-identical trees and summary parity). The sf-2 static
+   shape pin was ported here as transitional behavior; it is not the
+   final stream policy and is retired by `LIVE_DIAL_TUNING.md`.
 5. **otp-5 roles swapped: client initiates as DESTINATION** (pull-
    equivalent) — the same code with roles flipped; the parity suite
    reruns with no per-direction test code.

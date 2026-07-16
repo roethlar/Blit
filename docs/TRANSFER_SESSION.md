@@ -53,11 +53,18 @@ doc explains the state machine the proto cannot.
    profile. Absent/0 profile fields mean "unknown hardware value" —
    conservative defaults, never unlimited, and NEVER "old peer"
    (there are no old peers).
-6. **One stream policy.** The data plane opens at the dial floor
-   immediately; SOURCE shape-corrects the stream count upward via
-   resize as the need list accumulates (the sf-2 mechanism —
-   `TransferDial::propose_shape_resize` — now the only policy).
-   SOURCE is the resize controller in every session.
+6. **One live stream policy.** The data plane opens at a conservative
+   receiver-bounded floor. SOURCE is the sole resize controller in every
+   session and adjusts stream count upward or downward from measured
+   per-stream send telemetry. Workload file/byte totals do not select a
+   terminal worker count. The DESTINATION's advertised capacity is a
+   safety ceiling, not a target.
+
+**Implementation drift, 2026-07-16:** current `TransferSession` still runs
+sf-2's static ADD-only shape correction, does not start the existing live
+tuner, and rejects REMOVE. `docs/plan/LIVE_DIAL_TUNING.md` is the Draft
+correction. Exact-8 parity tests prove both connection layouts share that
+static target; they do not satisfy invariant 6.
 
 ## Phase state machine
 
@@ -173,8 +180,9 @@ push/pull-specific message.
   DESTINATION's capacity ceiling). SOURCE — wherever it sits — owns
   the dial and may use fewer epoch-0 sockets than armed; unclaimed
   slots expire harmlessly. Growth beyond epoch 0 happens only via
-  SOURCE-initiated resize (sf-2 shape correction / tuner), one armed
-  accept per ADD epoch, exactly as ue-r2-2 built.
+  SOURCE-initiated live resize, one armed accept per ADD epoch. REMOVE
+  needs no new credential: SOURCE retires one worker at a payload boundary
+  and its normal `END` closes the matching receive worker.
   **Socket auth, exact:** every epoch-0 socket opens with
   `session_token` (16 bytes) immediately followed by
   `epoch0_sub_token` (16 bytes); every resize-ADD socket opens with

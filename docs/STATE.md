@@ -1,11 +1,11 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-16 (P2 observer independently accepted; pinned historical control next; no causal grade)
+Last updated: 2026-07-16 (live-dial design correction drafted; Claude review pending)
 
-- **NEXT ACTION — ADAPT THE ACCEPTED P2 OBSERVER TO THE PINNED HISTORICAL CONTROL:** Claude Fable 5/max accepted exact observer candidate `713526e` with no material finding and an independent constant-shard-ID red/restored-green proof; `.review/findings/otp12-pf1-p2-observer.md` owns the schema, proof, and constraints. This is still descriptive instrumentation: it has produced no performance evidence and cannot grade H6/H7. Next adapt the neutral schema to pinned `0f922de` and run the plan's local old/new + observer-OFF/ON TCP/gRPC control. In-stream correlation requires one shared run ID per observed session; the existing block-level rig harness is not valid unchanged. If local P2 is null, rig-W plus zoey fallback still applies. Further P1 rig time needs an owner-approved amendment.
+- **NEXT ACTION — REVIEW THE LIVE-DIAL CORRECTION:** `docs/plan/LIVE_DIAL_TUNING.md` restores D-2026-06-20-1/-2's telemetry-driven ADD/REMOVE design and removes static workload shape as worker-count authority. Claude Fable 5/max review is pending; no implementation begins before owner Draft→Active approval.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
-- **WORKER PARITY IS CLOSED.** The identical 10,000-file fixture now reaches exactly 8 workers under both initiator layouts (old guard: 3 vs 2; destination-initiator `max_streams=0`: 1). Payload starts while resize ACKs are pending, refusal is terminal, and resize arbitration is atomic. Final Codex re-review: PASS; workspace gate: 1,490 passed, 2 ignored.
-- **WHY NO MAC↔MAC DATA YET:** the current verdict engine can label a 1.092 cell both `PASS` and `REPRODUCES`, and the end-fabric gate can grade after a 10GbE→1GbE renegotiation because it rechecks MSS/IP but not link speed. Those are measurement blockers, not transfer-path blockers. Historical P1 remains a formal macOS↔Windows blocker; exact current-build `8e019ef` did not reproduce it in the reduced diagnostic, but that run lacks the resolution and controls to close it. No Mac↔Mac data exists.
+- **STATIC ORIENTATION PARITY IS CLOSED; ADAPTIVE WORKER PARITY IS NOT.** The identical 10,000-file fixture reaches 8 in both layouts because both now finish the same hardcoded shape-table ramp. Production does not start the existing telemetry tuner and rejects REMOVE. Exact 8 is not an adaptive acceptance target.
+- **WHY NO MAC↔MAC DATA YET:** endpoints are ready, but running the current static ADD-only policy would measure the wrong design. The live-dial plan must be approved, implemented, and reviewed first. Existing verdict-resolution/fabric controls also remain required. No Mac↔Mac data exists.
 
 - **BASELINE RE-RECORD (D-2026-07-14-1, owner 2026-07-14) — a prerequisite slice for `pf-final`, NOT for pf-1.** Both committed ceilings were recorded at **MTU 1500** before the fabric went jumbo, and pf-0 showed jumbo makes both arms 3–4% faster — so a jumbo build graded against them is **LENIENT** and could let a regression pass. Each rig's baseline is **re-recorded once with its ORIGINAL old build at MTU 9000**, then re-frozen (rig W `bench_otp12_win.sh:105`; rig Z `bench_otp12_zoey.sh:102`; rig D unaffected). Constraints — same old build per rig, `BASELINE_SUMMARY` stays override-free, pf-0's start-AND-end MSS gate applies — in **D-2026-07-14-1**.
 - **pf-0 DONE — MTU is KILLED as a material cause of P1 (2026-07-14, `docs/bench/otp12-jumbo-win-2026-07-13/`).** A-B-B-A on `q` (9000/1500/1500/9000), **256 timed runs, 0 voided**, MSS gate held start AND end of every session. `Δ_9000 = 236`, `Δ_1500 = 229`, measured noise floor **N_Δ = 78 ms**, **r = −3.1% → KILLED**. The null is **not vacuous** — `wm_tcp_large` ran 3–4% faster at jumbo on **both** arms, so the manipulation reached the wire; the benefit is **symmetric**, which is why it cannot explain an **asymmetry**. codex NOT READY → **7/7 accepted** (`11f0c2a`): every finding was a *claim* outrunning the *data* (it recomputed and confirmed all the numbers). **Two limits that now bind pf-1**: (a) the run is **NOT powered** to exclude a *contributing*-size effect (20% of Δ = 46 ms < the 78 ms floor) — it excludes a DOMINANT one only; (b) 78 ms is **between**-session noise, so cross-session grading of a counterfactual is dead, and **pf-1 must measure its own paired within-session floor and register a resolution check before grading**.
@@ -16,12 +16,11 @@ Last updated: 2026-07-16 (P2 observer independently accepted; pinned historical 
 - **P1 (the headline invariance criterion) — the one thing between blit and shipping.** Historical acceptance sessions fail rig W (`wm_tcp_mixed` 1.237 and 1.300 — do NOT read that as a regression, it is **two different Mac NICs**), but **PASS 8/8 with Linux on both ends** (`docs/bench/otp12-perf-2026-07-13/`; P1's own cell 1.092/1.003). Exact current-build `8e019ef` reverses and point-passes in the reduced rig-W diagnostic, but its 329 ms floor and failing gRPC control make that non-reproduction non-acceptance evidence. P1 remains **platform-INTERACTING, not pure layout**, and **NOT exonerated**. **P1 HAS NO ESCAPE HATCH** (codex r5 F1): D-2026-07-12-1 waives only a *cross-direction* miss for a cell that ALREADY passes invariance. So: meet the formal ≤1.10 bar on a gradeable run, or the owner amends acceptance criterion 1. Neither is assumed.
 - **⚠ THREE of my claims were reported and RETRACTED on 2026-07-13**, all the same root cause — trusting an instrument I had not validated: (1) "P1 is code" (a harness that keyed durability to the *initiator*, not the destination); (2) "P1 is acceptable platform residue" (D-2026-07-12-1 does not cover it); (3) "macOS can't send jumbo / the switch is broken" (it was `net.inet.raw.maxdgram` capping *ping*; TCP was always fine — it cost the owner a pointless adapter swap). **Verify the instrument before believing the measurement.**
 
-Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
-≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
-procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
+Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
+- **LIVE_DIAL_TUNING DRAFT:** correct the cutover drift before more acceptance work: one SOURCE-owned controller tunes TCP workers up/down from telemetry in both connection layouts; shape is not a target. Claude Fable 5/max reviews; implementation remains owner-gated.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -37,7 +36,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     was rotated verbatim to `docs/history/state-archive.md`
     (2026-07-14 drift); per-slice detail lives in DEVLOG + `.review/`.
   - **Open: otp-12d and otp-13** — both DEFERRED behind pf-final, see
-    Queue 1.
+    Queue 2.
   - **otp-12 worker-parity repair `[x]`** — both initiator layouts reach the same exact target; zero receiver capacity means unknown/default in both; payload proceeds while resize ACKs are pending; resize refusal is terminal. Final Codex re-review PASS. This is code/integration proof, not hardware acceptance.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]`; **sf-3a+ blocked** until ONE_TRANSFER_PATH ships, then
@@ -49,8 +48,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4) —
-   the only work item until it ships**: slices otp-1..13 through the
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (DRAFT).** Restore telemetry-driven ADD/REMOVE, receiver-bounded startup, exact membership settlement, role guards, and quiet Mac↔Mac evidence. Review first; owner activation second.
+2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
+   slices otp-1..13 through the
    synchronous reviewloop per slice (reviewer selection D-2026-07-15-1).
    otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7 (a, b-1,
@@ -70,7 +70,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    PRE-FIX, and `docs/plan/OTP12_PERF_FINDINGS.md` (pf-final) voids
    pre-fix new arms for acceptance. Assembling the acceptance matrix now
    would build otp-13's artifact from void rows.
-1a. **`docs/plan/OTP12_PERF_FINDINGS.md` (ACTIVE, D-2026-07-13-1).**
+2a. **`docs/plan/OTP12_PERF_FINDINGS.md` (ACTIVE, D-2026-07-13-1).**
     pf-0 is complete: MTU was killed as a dominant cause. **The owner selected
     pf-1 instrumentation on rig W on 2026-07-15.** The TCP phase-trace slice
     and reduced paired q↔netwatch-01 harness must each clear review before rig
@@ -98,7 +98,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     block-1 arms and exercised G14, then G15 exposed Windows SSH consuming
     blocks 2–4 from the loop's stdin; the analyzer correctly voided 32/128.
     G15 isolates SSH stdin and is mutation-proved at `7bdaf8b`; round-15 Claude accepted exact `8e019ef`. Its additive registered run completed all 128 arms and the analyzer accepted the exact evidence now recorded under `docs/bench/otp12-pf1-rigw-2026-07-15/`. Live target traces prove 8/8 stream parity under both initiator layouts. The target's historical P1 direction did not reproduce, but the 329 ms resolution floor and failing gRPC control forbid a causal grade. Grok supplementary and Claude Fable 5/max authoritative reviews accepted exact record `7ecc2f9`. Continue the separately required P2 small-fixture instrumentation and `0f922de` historical control. Further P1 rig work requires a plan amendment; no Mac↔Mac data has been taken, and worker parity is no longer a blocker. Then: pf-1 → pf-final (all rigs) → otp-12d → otp-13.
-1b. **AFTER otp-12 — the Windows/local pair, planned TOGETHER** (same tar
+2b. **AFTER otp-12 — the Windows/local pair, planned TOGETHER** (same tar
    path, opposite directions: a fidelity fix ADDS per-file work to a path
    already losing to robocopy, so planning them apart optimises one against
    the other). Both docs own their detail; do not restate it here.
@@ -111,14 +111,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
      apply **does not scale** (8 workers buy 1.05×; robocopy gets ~2.2× from 8
      threads) and ships **one** worker. At EQUAL concurrency blit BEATS
      robocopy; at 8-vs-8 it loses 1.9×. `docs/bench/win-local-ab-2026-07-13/`.
-2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
+3. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Follow-ups largely
    absorbed by otp-2/otp-12's rig matrices.
-3. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
+4. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
    resumes/re-derives after ONE_TRANSFER_PATH ships.
-4. **PAUSED: design-review queue** (`REVIEW.md`; w7-1 topmost open row —
+5. **PAUSED: design-review queue** (`REVIEW.md`; w7-1 topmost open row —
    likely landed inside otp-6's one-delete-rule slice; re-check first).
-5. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
+6. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
    Pro daemon CPU-bound below 10 GbE from SSD cache). Executes AFTER
    cutover as a runtime-selected write strategy in the unified receive
    sink (design: eval doc §If-FAST-evidence; dead module deletes in
@@ -126,13 +126,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    **Standing owner safety rule**: ALL activity on rig `zoey` stays
    inside its `…/blit-temp/` folder — nothing written outside it, ever;
    no daemon runs on zoey without a fresh go.
-6. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
+7. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
 
 ## Authoritative docs right now
 
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
   D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
   D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b).
+- Draft correction: **`docs/plan/LIVE_DIAL_TUNING.md`** — restore live telemetry ADD/REMOVE before further transfer acceptance measurements.
 - Active plans: `docs/plan/SMALL_FILE_CEILING.md` (**paused** at
   sf-2) and **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** (code-
   complete; measurement gates remain). REV4 superseded v1/REV2/REV3
@@ -153,10 +154,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **The Mac↔Mac measurement is blocked on the open round-12 instrument-correctness findings and both Macs being bench-quiet.** Round 11 is fixed at `bfae311`; worker parity is fixed and reviewed at `42b9b38`. This is no longer a push/pull-path or worker-count blocker. No Mac↔Mac data exists. Detail: `.review/results/macmac-r12.codex-design.md` and `.review/results/macmac-r12.codex-harness.md`.
+- **Mac↔Mac measurement waits for the live-dial correction.** Endpoints are quiet/ready, but HEAD has only static ADD-only parity; existing instrument controls still apply afterward. No data exists.
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
-  evidence, NOT acceptance evidence; Queue 1a):
+  evidence, NOT acceptance evidence; Queue 2a):
   `docs/bench/otp12c-win-2026-07-13/` (198 runs) and
   `otp12c-delegated-2026-07-13/` (**rig D 7/7 PASS**). Codex: FAIL →
   **7/7 accepted**. Detail: DEVLOG 2026-07-13.
