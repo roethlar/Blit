@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-16 (ldt-1..3 accepted; ldt-4 endpoint evidence next)
+Last updated: 2026-07-16 (ldt-1..3 accepted; ldt-4 endpoint correction review blocked)
 
-- **NEXT ACTION — RUN ldt-4 QUIET RIG-W EVIDENCE:** ldt-1..3 are independently accepted. Stage exact clean `406a7e5` artifacts on the owner-selected `q`↔`netwatch-01` pair, verify both endpoints remain quiet, then run the plan's identical adaptive fixtures in both initiator layouts.
+- **NEXT ACTION — RESOLVE ldt-4 ENDPOINT-CORRECTION REVIEW:** the owner-selected `q`↔`netwatch-01` correction is committed at `9926bf7`, but direct Claude Fable 5/max returned server-side 529 on the initial call and the one allowed retry without a structured verdict. The review is fail-closed; do not stage or measure until the owner directs a fresh attempt or resolves the gate.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **WHY NO ldt-4 RIG-W DATA YET:** ldt-3 is now accepted, so the code gate is cleared; ldt-4 staging/quietness checks and existing verdict-resolution/fabric controls come next. No ldt-4 adaptive endpoint data exists yet.
@@ -20,7 +20,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`. ldt-4 quiet rig-W `q`↔`netwatch-01` evidence is next.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`. The ldt-4 rig-W endpoint correction at `9926bf7` awaits a valid Claude verdict after two 529 envelopes.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -48,7 +48,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted; execute ldt-4 exact-build quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence under the existing instrument controls.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted; first resolve the fail-closed review of endpoint correction `9926bf7`, then execute ldt-4 exact-build quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence under the existing instrument controls.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 through the
    synchronous neutral `openreview` per slice (reviewer selection D-2026-07-15-1).
@@ -155,7 +155,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **Rig-W ldt-4 measurement code gate is cleared.** ldt-1..3 are accepted and `q`↔`netwatch-01` were reported quiet/ready; ldt-4 must still re-verify quietness and apply the existing instrument controls before measurement. No ldt-4 data exists yet.
+- **Rig-W ldt-4 code is accepted, but its endpoint-correction review is blocked.** `q`↔`netwatch-01` were reported quiet/ready; Claude returned two 529 envelopes and no verdict for `9926bf7`. No staging or measurement proceeds until that review gate is resolved; no ldt-4 data exists yet.
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):
