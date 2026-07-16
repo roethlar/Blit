@@ -197,7 +197,12 @@ push/pull-specific message.
   epoch and is terminal for further resize proposals; settled workers
   continue. An accepted ADD/REMOVE settles only after SOURCE membership
   actually joins/retires; a post-accept live-membership failure faults the
-  session rather than publishing a false effective count.
+  session rather than publishing a false effective count. At terminal
+  `NeedComplete`, a proposal the peer never accepted settles unchanged. An
+  accepted ADD still completes admission/authentication and then reaches its
+  normal `END`, even when the payload queue has already closed; an accepted
+  REMOVE settles only after the exact member retires or is confirmed already
+  ended. Terminal cleanup cannot rewrite an accepted operation as refused.
   **Resume on the data plane (otp-7b):** in a resume session, block
   records ride the sockets as the binary `BLOCK`/`BLOCK_COMPLETE`
   record shapes (the receive pipeline's existing tags), while the
@@ -288,6 +293,16 @@ push/pull-specific message.
 - StallGuard, byte-accounting, and progress events (w6-1 contract)
   attach at the same boundaries they do today; the session emits the
   existing `DaemonEvent` payloads.
+- Session-owned asynchronous work is joined on every normal, error, and cancel
+  exit: SOURCE scan/count/filter/checksum helpers, the dial tuner, elastic
+  pipeline and nested workers, and all DESTINATION receive workers. Cleanup
+  closes bounded scan inputs before joining non-abortable blocking producers,
+  and terminal acknowledgements are emitted only after the owned work is
+  reaped.
+- The aggregate dial observer is default-off, wire-neutral, and policy-inert.
+  Sample events carry raw inputs and one exact sample reason; lifecycle events
+  separately carry pending/settlement state. Final logical membership and peak
+  observed membership are distinct fields.
 
 ## What this replaced
 

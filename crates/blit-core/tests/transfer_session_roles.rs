@@ -23,7 +23,7 @@ use blit_core::generated::{
     SessionError, SessionHello, SessionOpen, SourceDone, TransferFrame, TransferRole,
     TransferSummary,
 };
-use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
+use blit_core::remote::transfer::source::{FsTransferSource, SourceScan, TransferSource};
 use blit_core::remote::transfer::{
     PreparedPayload, ProgressEvent, RemoteTransferProgress, SessionPhaseEvent, SessionPhaseRole,
     SessionPhaseTrace, SmallFileCarrier, SmallFileProbe, SmallFileProbeReport, TimingAggregate,
@@ -952,10 +952,7 @@ impl TransferSource for TruncatedReadSource {
         &self,
         filter: Option<blit_core::fs_enum::FileFilter>,
         unreadable_paths: Arc<std::sync::Mutex<Vec<String>>>,
-    ) -> (
-        tokio::sync::mpsc::Receiver<FileHeader>,
-        tokio::task::JoinHandle<eyre::Result<u64>>,
-    ) {
+    ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
         self.inner.scan(filter, unreadable_paths)
     }
 
@@ -3092,10 +3089,7 @@ impl TransferSource for FilterIgnoringSource {
         &self,
         _filter: Option<blit_core::fs_enum::FileFilter>,
         unreadable: Arc<std::sync::Mutex<Vec<String>>>,
-    ) -> (
-        tokio::sync::mpsc::Receiver<FileHeader>,
-        tokio::task::JoinHandle<eyre::Result<u64>>,
-    ) {
+    ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
         // The filter arg is discarded on purpose (models a source impl
         // that ignores it, as the deleted relay source did).
         self.inner.scan(None, unreadable)
@@ -3411,7 +3405,7 @@ async fn need_complete_before_manifest_complete_faults_the_source() {
     };
     let (source_transport, mut peer) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root));
-    let source_task = tokio::spawn(run_source(source_cfg, source_transport, source));
+    let mut source_task = tokio::spawn(run_source(source_cfg, source_transport, source));
 
     assert!(matches!(recv_or_panic(&mut peer).await, Frame::Hello(_)));
     peer.send(hello_frame()).await.unwrap();
@@ -3428,20 +3422,38 @@ async fn need_complete_before_manifest_complete_faults_the_source() {
     // The source must abort with a SessionError before its manifest
     // completes — never treat the early promise as a clean empty
     // transfer.
-    let refusal = loop {
-        match recv_or_panic(&mut peer).await {
-            Frame::ManifestEntry(_) => continue,
-            Frame::Error(e) => break e,
-            Frame::ManifestComplete(_) => {
-                panic!("source completed its manifest instead of failing fast")
+    let refusal = match tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match recv_or_panic(&mut peer).await {
+                Frame::ManifestEntry(_) => continue,
+                Frame::Error(e) => break e,
+                Frame::ManifestComplete(_) => {
+                    panic!("source completed its manifest instead of failing fast")
+                }
+                Frame::SourceDone(_) => panic!("source treated early NeedComplete as legitimate"),
+                other => panic!("expected SessionError, got {other:?}"),
             }
-            Frame::SourceDone(_) => panic!("source treated early NeedComplete as legitimate"),
-            other => panic!("expected SessionError, got {other:?}"),
+        }
+    })
+    .await
+    {
+        Ok(refusal) => refusal,
+        Err(_) => {
+            source_task.abort();
+            let _ = source_task.await;
+            panic!("source did not reap its blocked manifest scan and report the ordering fault");
         }
     };
     assert_eq!(refusal.code, session_error::Code::ProtocolViolation as i32);
 
-    let source_err = source_task.await.unwrap().unwrap_err();
+    let source_err = match tokio::time::timeout(Duration::from_secs(5), &mut source_task).await {
+        Ok(joined) => joined.unwrap().unwrap_err(),
+        Err(_) => {
+            source_task.abort();
+            let _ = source_task.await;
+            panic!("source task did not finish after reporting the ordering fault");
+        }
+    };
     let fault = fault_of(&source_err);
     assert_eq!(fault.code, session_error::Code::ProtocolViolation);
     assert!(

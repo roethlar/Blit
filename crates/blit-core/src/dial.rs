@@ -65,6 +65,181 @@ pub const DIAL_STEP_DOWN_BLOCKED_RATIO: f64 = 0.30;
 pub const RESIZE_COOLDOWN_TICKS: u32 = 4;
 pub const RESIZE_SUSTAIN_TICKS: i32 = 2;
 
+/// One engine resize decision (`ue-r2-2`). The adapter that owns the
+/// control stream turns this into a wire `DataPlaneResize` (the engine
+/// stays wire-type-free here on purpose) and MUST eventually call
+/// [`TransferDial::resize_settled`] for the epoch — with what actually
+/// happened — or no further proposals are produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResizeProposal {
+    /// The wire epoch for this change (`resize_epoch() + 1`).
+    pub epoch: u32,
+    /// Absolute desired live count (idempotent, per the proto).
+    pub target_streams: usize,
+    /// Convenience: `target_streams > live` at proposal time.
+    pub add: bool,
+}
+
+/// Why one live-dial sample did or did not change stream membership.
+/// Pending and settlement state is reported by [`DialLifecycleReason`], not
+/// reconstructed as a policy sample that production never takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DialDecisionReason {
+    Idle,
+    Rebaseline,
+    Hysteresis,
+    CheapUp,
+    CheapDown,
+    Sustain,
+    Cooldown,
+    Bound,
+    Add,
+    Remove,
+}
+
+impl DialDecisionReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Rebaseline => "rebaseline",
+            Self::Hysteresis => "hysteresis",
+            Self::CheapUp => "cheap-up",
+            Self::CheapDown => "cheap-down",
+            Self::Sustain => "sustain",
+            Self::Cooldown => "cooldown",
+            Self::Bound => "bound",
+            Self::Add => "add",
+            Self::Remove => "remove",
+        }
+    }
+}
+
+/// Why a proposal lifecycle event was emitted. Keeping this typed beside the
+/// policy removes string reconstruction from session-phase adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DialLifecycleReason {
+    Pending,
+    Add,
+    Remove,
+    Refused,
+}
+
+impl DialLifecycleReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Add => "add",
+            Self::Remove => "remove",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+/// The aggregate passed to the single policy step. Production fills every
+/// field from live probes; deterministic tests replace only that sampling
+/// operation. Invalid samples are membership/counter rebaselines and are
+/// deliberately applied as no-signal ticks.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DialSampleInput {
+    pub(crate) delta_bytes: u64,
+    pub(crate) delta_blocked_nanos: u64,
+    pub(crate) elapsed_nanos: u64,
+    pub(crate) sampled_streams: usize,
+    pub(crate) blocked_ratio: f64,
+    pub(crate) valid: bool,
+}
+
+impl DialSampleInput {
+    #[cfg(test)]
+    fn injected(delta_bytes: u64, blocked_ratio: f64) -> Self {
+        let elapsed_nanos = 1_000_000_000_u64;
+        let delta_blocked_nanos =
+            (blocked_ratio.clamp(0.0, 1.0) * elapsed_nanos as f64).round() as u64;
+        Self {
+            delta_bytes,
+            delta_blocked_nanos,
+            elapsed_nanos,
+            sampled_streams: 1,
+            blocked_ratio: blocked_ratio.clamp(0.0, 1.0),
+            valid: true,
+        }
+    }
+
+    fn rebaseline(elapsed_nanos: u64, sampled_streams: usize) -> Self {
+        Self {
+            delta_bytes: 0,
+            delta_blocked_nanos: 0,
+            elapsed_nanos,
+            sampled_streams,
+            blocked_ratio: 0.0,
+            valid: false,
+        }
+    }
+}
+
+/// Numeric, path-free snapshot emitted for each policy sample.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DialPolicyDecision {
+    #[cfg(test)]
+    pub(crate) reason: DialDecisionReason,
+    pub(crate) proposal: Option<ResizeProposal>,
+}
+
+/// Numeric, path-free snapshot emitted for each observed policy sample.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DialSampleDecision {
+    pub(crate) input: DialSampleInput,
+    pub(crate) reason: DialDecisionReason,
+    pub(crate) proposal: Option<ResizeProposal>,
+    pub(crate) settled_epoch: u32,
+    pub(crate) live_streams: usize,
+    pub(crate) peak_streams: usize,
+    pub(crate) receiver_ceiling: usize,
+    pub(crate) chunk_bytes: usize,
+    pub(crate) prefetch_count: usize,
+    pub(crate) tcp_buffer_bytes: usize,
+}
+
+/// Lifecycle records share the same optional observer as policy samples.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DialObservationEvent {
+    Sample(DialSampleDecision),
+    Pending {
+        proposal: ResizeProposal,
+        reason: DialLifecycleReason,
+        live_streams: usize,
+        peak_streams: usize,
+        receiver_ceiling: usize,
+    },
+    Settlement {
+        proposal: ResizeProposal,
+        reason: DialLifecycleReason,
+        accepted: bool,
+        live_streams: usize,
+        peak_streams: usize,
+        receiver_ceiling: usize,
+    },
+}
+
+#[derive(Clone)]
+pub(crate) struct DialObserver(Arc<dyn Fn(DialObservationEvent) + Send + Sync + 'static>);
+
+impl std::fmt::Debug for DialObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DialObserver")
+    }
+}
+
+impl DialObserver {
+    pub(crate) fn new(observe: impl Fn(DialObservationEvent) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(observe))
+    }
+
+    fn emit(&self, event: DialObservationEvent) {
+        (self.0)(event);
+    }
+}
+
 /// The capacity profile this host advertises when it is the byte
 /// RECEIVER (ue-r2-1e: the first real sender of the ue-r2-1b wire
 /// fields). Honest system facts only — fields we cannot measure yet
@@ -107,20 +282,20 @@ pub fn receiver_initial_streams(profile: Option<&CapacityProfile>) -> usize {
 #[derive(Debug, Default)]
 struct ResizeEpochState {
     settled_epoch: u32,
-    pending_epoch: Option<u32>,
+    pending: Option<ResizeProposal>,
     refused: bool,
 }
 
 impl ResizeEpochState {
     fn settle(&mut self, epoch: u32, accepted: bool) -> bool {
-        if self.pending_epoch != Some(epoch) || epoch == 0 {
+        if self.pending.map(|pending| pending.epoch) != Some(epoch) || epoch == 0 {
             return false;
         }
         if !accepted {
             self.refused = true;
         }
         self.settled_epoch = epoch;
-        self.pending_epoch = None;
+        self.pending = None;
         true
     }
 }
@@ -216,6 +391,10 @@ pub struct TransferDial {
     /// `set_negotiated_streams`; later writes come from
     /// `resize_settled` on an accepted epoch.
     live_streams: AtomicUsize,
+    /// Highest settled logical membership reached in this transfer.
+    /// This is deliberately separate from the final count and from the
+    /// cumulative number of sockets ever opened.
+    peak_streams: AtomicUsize,
     /// Last settled epoch, in-flight proposal, and terminal-refusal bit.
     /// These fields form one arbitration state: observing/claiming them
     /// separately permits an ABA race across a concurrent settlement.
@@ -239,21 +418,7 @@ pub struct TransferDial {
     ceiling_prefetch: usize,
     ceiling_max_streams: usize,
     ceiling_tcp_buffer_bytes: usize,
-}
-
-/// One engine resize decision (`ue-r2-2`). The adapter that owns the
-/// control stream turns this into a wire `DataPlaneResize` (the engine
-/// stays wire-type-free here on purpose) and MUST eventually call
-/// [`TransferDial::resize_settled`] for the epoch — with what actually
-/// happened — or no further proposals are produced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResizeProposal {
-    /// The wire epoch for this change (`resize_epoch() + 1`).
-    pub epoch: u32,
-    /// Absolute desired live count (idempotent, per the proto).
-    pub target_streams: usize,
-    /// Convenience: `target_streams > live` at proposal time.
-    pub add: bool,
+    observer: Option<DialObserver>,
 }
 
 impl TransferDial {
@@ -311,6 +476,7 @@ impl TransferDial {
             tcp_buffer_bytes: AtomicUsize::new(0),
             initial_streams: AtomicUsize::new(initial_streams),
             live_streams: AtomicUsize::new(initial_streams),
+            peak_streams: AtomicUsize::new(initial_streams),
             resize_epochs: Mutex::new(ResizeEpochState::default()),
             #[cfg(test)]
             resize_tick_test_hook: Mutex::new(None),
@@ -325,7 +491,16 @@ impl TransferDial {
             ceiling_prefetch,
             ceiling_max_streams: ceiling_streams,
             ceiling_tcp_buffer_bytes: ceiling_tcp,
+            observer: None,
         }
+    }
+
+    /// Attach the optional aggregate observer before sharing this dial.
+    /// A disabled trace leaves this `None`, so the hot path performs no
+    /// event allocation or role-dependent work.
+    pub(crate) fn with_observer(mut self, observer: Option<DialObserver>) -> Self {
+        self.observer = observer;
+        self
     }
 
     pub fn shared(self) -> Arc<Self> {
@@ -362,6 +537,7 @@ impl TransferDial {
         let clamped = streams.clamp(1, self.ceiling_max_streams.max(1));
         self.initial_streams.store(clamped, Ordering::Relaxed);
         self.live_streams.store(clamped, Ordering::Relaxed);
+        self.peak_streams.store(clamped, Ordering::Relaxed);
         clamped
     }
 
@@ -371,6 +547,11 @@ impl TransferDial {
     /// accepted resize).
     pub fn live_streams(&self) -> usize {
         self.live_streams.load(Ordering::Relaxed)
+    }
+
+    /// Highest settled logical membership reached by this transfer.
+    pub fn peak_streams(&self) -> usize {
+        self.peak_streams.load(Ordering::Relaxed)
     }
 
     /// Last settled resize epoch (0 = only the initial stream set).
@@ -386,7 +567,7 @@ impl TransferDial {
         self.resize_epochs
             .lock()
             .expect("resize epoch state poisoned")
-            .pending_epoch
+            .pending
             .is_some()
     }
 
@@ -424,12 +605,21 @@ impl TransferDial {
     /// call [`Self::resize_settled`] with the outcome; until then
     /// every subsequent tick returns `None`.
     pub fn resize_tick(&self, delta_bytes: u64, blocked_ratio: f64) -> Option<ResizeProposal> {
+        self.resize_tick_decision(delta_bytes, blocked_ratio)
+            .and_then(|(proposal, _)| proposal)
+    }
+
+    fn resize_tick_decision(
+        &self,
+        delta_bytes: u64,
+        blocked_ratio: f64,
+    ) -> Option<(Option<ResizeProposal>, DialDecisionReason)> {
         // Keep eligibility, direction, live count, and epoch claim in the
         // same critical section as settlement. Otherwise a resize can
         // settle/reset cooldown between signal calculation and claim, and a
         // stale tuner decision can immediately open the next epoch.
         let mut state = self.lock_resize_epochs();
-        if state.refused || state.pending_epoch.is_some() {
+        if state.refused || state.pending.is_some() {
             return None;
         }
         #[cfg(test)]
@@ -451,7 +641,7 @@ impl TransferDial {
             .saturating_add(1);
         if delta_bytes == 0 {
             self.resize_sustain.store(0, Ordering::Relaxed);
-            return None;
+            return Some((None, DialDecisionReason::Idle));
         }
         let sustain = if blocked_ratio < DIAL_STEP_UP_BLOCKED_RATIO && self.cheap_dials_maxed() {
             let prev = self.resize_sustain.load(Ordering::Relaxed).max(0);
@@ -467,15 +657,18 @@ impl TransferDial {
             self.resize_sustain.store(0, Ordering::Relaxed);
             0
         };
+        if sustain == 0 {
+            return Some((None, DialDecisionReason::Hysteresis));
+        }
         if ticks < RESIZE_COOLDOWN_TICKS {
-            return None;
+            return Some((None, DialDecisionReason::Cooldown));
         }
         let add = if sustain >= RESIZE_SUSTAIN_TICKS {
             true
         } else if sustain <= -RESIZE_SUSTAIN_TICKS {
             false
         } else {
-            return None;
+            return Some((None, DialDecisionReason::Sustain));
         };
         let live = self.live_streams.load(Ordering::Relaxed).max(1);
         let target = if add {
@@ -486,21 +679,31 @@ impl TransferDial {
         if target == live {
             // Already at the bound in the wanted direction.
             self.resize_sustain.store(0, Ordering::Relaxed);
-            return None;
+            return Some((None, DialDecisionReason::Bound));
         }
-        let epoch = state.settled_epoch.checked_add(1)?;
-        state.pending_epoch = Some(epoch);
+        let Some(epoch) = state.settled_epoch.checked_add(1) else {
+            return Some((None, DialDecisionReason::Bound));
+        };
+        let proposal = ResizeProposal {
+            epoch,
+            target_streams: target,
+            add: target > live,
+        };
+        state.pending = Some(proposal);
         #[cfg(test)]
         if let Some(hook) = test_hook.as_ref() {
             hook.claimed_acquisition
                 .store(state.acquisition(), Ordering::SeqCst);
         }
         self.resize_sustain.store(0, Ordering::Relaxed);
-        Some(ResizeProposal {
-            epoch,
-            target_streams: target,
-            add: target > live,
-        })
+        Some((
+            Some(proposal),
+            if proposal.add {
+                DialDecisionReason::Add
+            } else {
+                DialDecisionReason::Remove
+            },
+        ))
     }
 
     /// Settle the in-flight proposal with what ACTUALLY happened:
@@ -547,7 +750,45 @@ impl TransferDial {
             .resize_epochs
             .lock()
             .expect("resize epoch state poisoned");
-        self.resize_settled_locked(&mut state, epoch, effective_streams, accepted);
+        let proposal = state.pending.filter(|pending| pending.epoch == epoch);
+        let settled = self.resize_settled_locked(&mut state, epoch, effective_streams, accepted);
+        let observation = if settled {
+            let live_streams = self.live_streams();
+            if accepted {
+                self.peak_streams.fetch_max(live_streams, Ordering::Relaxed);
+            }
+            proposal.map(|proposal| {
+                let reason = if !accepted {
+                    DialLifecycleReason::Refused
+                } else if proposal.add {
+                    DialLifecycleReason::Add
+                } else {
+                    DialLifecycleReason::Remove
+                };
+                (
+                    proposal,
+                    reason,
+                    live_streams,
+                    self.peak_streams(),
+                    self.ceiling_max_streams,
+                )
+            })
+        } else {
+            None
+        };
+        drop(state);
+        if let (Some(observer), Some((proposal, reason, live_streams, peak_streams, ceiling))) =
+            (&self.observer, observation)
+        {
+            observer.emit(DialObservationEvent::Settlement {
+                proposal,
+                reason,
+                accepted,
+                live_streams,
+                peak_streams,
+                receiver_ceiling: ceiling,
+            });
+        }
     }
 
     fn resize_settled_locked(
@@ -557,7 +798,7 @@ impl TransferDial {
         effective_streams: usize,
         accepted: bool,
     ) -> bool {
-        if state.pending_epoch != Some(epoch) || epoch == 0 {
+        if state.pending.map(|pending| pending.epoch) != Some(epoch) || epoch == 0 {
             return false;
         }
         self.ticks_since_settle.store(0, Ordering::Relaxed);
@@ -657,16 +898,73 @@ impl TransferDial {
     /// cheap dials before evaluating stream resize; idle samples are no
     /// signal but still reset resize sustain. Timed sampling and
     /// deterministic test injection share this exact policy path.
+    #[cfg(test)]
     pub(crate) fn apply_sample(
         &self,
         delta_bytes: u64,
         blocked_ratio: f64,
     ) -> Option<ResizeProposal> {
-        if delta_bytes == 0 {
-            return self.resize_tick(0, 0.0);
+        self.apply_sample_input(DialSampleInput::injected(delta_bytes, blocked_ratio))
+            .and_then(|decision| decision.proposal)
+    }
+
+    pub(crate) fn apply_sample_input(&self, input: DialSampleInput) -> Option<DialPolicyDecision> {
+        let (proposal, mut reason) = if !input.valid {
+            let (proposal, _) = self.resize_tick_decision(0, 0.0)?;
+            (proposal, DialDecisionReason::Rebaseline)
+        } else if input.delta_bytes == 0 {
+            self.resize_tick_decision(0, 0.0)?
+        } else {
+            let cheap_reason = if input.blocked_ratio < DIAL_STEP_UP_BLOCKED_RATIO {
+                self.step_up_cheap_dials()
+                    .then_some(DialDecisionReason::CheapUp)
+            } else if input.blocked_ratio > DIAL_STEP_DOWN_BLOCKED_RATIO {
+                self.step_down_cheap_dials()
+                    .then_some(DialDecisionReason::CheapDown)
+            } else {
+                None
+            };
+            let (proposal, resize_reason) =
+                self.resize_tick_decision(input.delta_bytes, input.blocked_ratio)?;
+            (proposal, cheap_reason.unwrap_or(resize_reason))
+        };
+        if proposal.is_some() {
+            reason = if proposal.is_some_and(|proposal| proposal.add) {
+                DialDecisionReason::Add
+            } else {
+                DialDecisionReason::Remove
+            };
         }
-        self.apply_tick(blocked_ratio);
-        self.resize_tick(delta_bytes, blocked_ratio)
+        let policy = DialPolicyDecision {
+            #[cfg(test)]
+            reason,
+            proposal,
+        };
+        if let Some(observer) = &self.observer {
+            let decision = DialSampleDecision {
+                input,
+                reason,
+                proposal,
+                settled_epoch: self.resize_epoch(),
+                live_streams: self.live_streams(),
+                peak_streams: self.peak_streams(),
+                receiver_ceiling: self.ceiling_max_streams,
+                chunk_bytes: self.chunk_bytes(),
+                prefetch_count: self.prefetch_count(),
+                tcp_buffer_bytes: self.tcp_buffer_bytes().unwrap_or(0),
+            };
+            observer.emit(DialObservationEvent::Sample(decision));
+            if let Some(proposal) = proposal {
+                observer.emit(DialObservationEvent::Pending {
+                    proposal,
+                    reason: DialLifecycleReason::Pending,
+                    live_streams: decision.live_streams,
+                    peak_streams: decision.peak_streams,
+                    receiver_ceiling: decision.receiver_ceiling,
+                });
+            }
+        }
+        Some(policy)
     }
 }
 
@@ -787,15 +1085,21 @@ pub fn spawn_dial_tuner_with_resize(
         loop {
             tokio::time::sleep(DIAL_TUNER_TICK).await;
             let Some(dial) = weak.upgrade() else { return };
-            let sample = {
+            let (sample, observed_streams) = {
                 let probes = probes.lock().expect("probe registry poisoned");
-                sample_probe_deltas(&probes, &mut baselines, dial.live_streams())
+                (
+                    sample_probe_deltas(&probes, &mut baselines, dial.live_streams()),
+                    probes.len(),
+                )
             };
             let elapsed = last_tick.elapsed();
             last_tick = tokio::time::Instant::now();
             let Some((delta_blocked, delta_bytes, streams)) = sample else {
                 if resize_tx.is_some() {
-                    let _ = dial.apply_sample(0, 0.0);
+                    let _ = dial.apply_sample_input(DialSampleInput::rebaseline(
+                        elapsed.as_nanos().min(u64::MAX as u128) as u64,
+                        observed_streams,
+                    ));
                 }
                 continue;
             };
@@ -808,7 +1112,20 @@ pub fn spawn_dial_tuner_with_resize(
             // busy ticks" means consecutive.
             let ratio = blocked_ratio(delta_blocked, elapsed, streams);
             if let Some(tx) = &resize_tx {
-                if let Some(proposal) = dial.apply_sample(delta_bytes, ratio) {
+                let Some(decision) = dial.apply_sample_input(DialSampleInput {
+                    delta_bytes,
+                    delta_blocked_nanos: delta_blocked,
+                    elapsed_nanos: elapsed.as_nanos().min(u64::MAX as u128) as u64,
+                    sampled_streams: streams,
+                    blocked_ratio: ratio,
+                    valid: true,
+                }) else {
+                    if dial.resize_refused() {
+                        return;
+                    }
+                    continue;
+                };
+                if let Some(proposal) = decision.proposal {
                     if tx.send(proposal).is_err() {
                         // Controller gone (transfer tearing down):
                         // release the pending slot so the dial state
@@ -1172,6 +1489,242 @@ mod tests {
         assert_eq!(dial.apply_sample(1024, 0.15), None, "in-band resets");
         assert_eq!(dial.apply_sample(1024, 0.0), None, "streak restarted");
         assert!(dial.apply_sample(1024, 0.0).is_some(), "streak completes");
+    }
+
+    fn policy_sample(dial: &TransferDial, bytes: u64, ratio: f64) -> DialPolicyDecision {
+        dial.apply_sample_input(DialSampleInput {
+            delta_bytes: bytes,
+            delta_blocked_nanos: 0,
+            elapsed_nanos: 1,
+            sampled_streams: dial.live_streams(),
+            blocked_ratio: ratio,
+            valid: true,
+        })
+        .expect("active policy emits a decision")
+    }
+
+    #[test]
+    fn observer_reason_strings_are_complete_and_exact() {
+        let sample_reasons = [
+            DialDecisionReason::Idle,
+            DialDecisionReason::Rebaseline,
+            DialDecisionReason::Hysteresis,
+            DialDecisionReason::CheapUp,
+            DialDecisionReason::CheapDown,
+            DialDecisionReason::Sustain,
+            DialDecisionReason::Cooldown,
+            DialDecisionReason::Bound,
+            DialDecisionReason::Add,
+            DialDecisionReason::Remove,
+        ]
+        .map(DialDecisionReason::as_str);
+        assert_eq!(
+            sample_reasons,
+            [
+                "idle",
+                "rebaseline",
+                "hysteresis",
+                "cheap-up",
+                "cheap-down",
+                "sustain",
+                "cooldown",
+                "bound",
+                "add",
+                "remove",
+            ]
+        );
+        assert_eq!(
+            [
+                DialLifecycleReason::Pending,
+                DialLifecycleReason::Add,
+                DialLifecycleReason::Remove,
+                DialLifecycleReason::Refused,
+            ]
+            .map(DialLifecycleReason::as_str),
+            ["pending", "add", "remove", "refused"]
+        );
+    }
+
+    #[test]
+    fn observed_policy_names_every_sample_reason_and_lifecycle_quiesces() {
+        let basic = TransferDial::conservative();
+        let rebaseline = basic
+            .apply_sample_input(DialSampleInput {
+                valid: false,
+                ..DialSampleInput::injected(0, 0.0)
+            })
+            .expect("rebaseline is an observed policy decision");
+        assert_eq!(rebaseline.reason, DialDecisionReason::Rebaseline);
+        assert_eq!(
+            policy_sample(&basic, 0, 0.0).reason,
+            DialDecisionReason::Idle
+        );
+        assert_eq!(
+            policy_sample(&basic, 1024, 0.15).reason,
+            DialDecisionReason::Hysteresis
+        );
+        assert_eq!(
+            policy_sample(&basic, 1024, 0.0).reason,
+            DialDecisionReason::CheapUp
+        );
+        assert_eq!(
+            policy_sample(&basic, 1024, 1.0).reason,
+            DialDecisionReason::CheapDown
+        );
+
+        let add = TransferDial::conservative();
+        while add.step_up_cheap_dials() {}
+        assert_eq!(
+            policy_sample(&add, 1024, 0.0).reason,
+            DialDecisionReason::Cooldown
+        );
+        burn_cooldown(&add);
+        assert_eq!(
+            policy_sample(&add, 1024, 0.0).reason,
+            DialDecisionReason::Sustain
+        );
+        let proposed = policy_sample(&add, 1024, 0.0);
+        assert_eq!(proposed.reason, DialDecisionReason::Add);
+        let proposal = proposed.proposal.expect("ADD proposal");
+        assert!(
+            add.apply_sample_input(DialSampleInput::injected(1024, 0.0))
+                .is_none(),
+            "pending membership is a lifecycle wait, not a sample reason"
+        );
+        add.resize_settled(proposal.epoch, proposal.target_streams, true);
+        assert_eq!(add.live_streams(), 5);
+        assert_eq!(add.peak_streams(), 5);
+
+        let bound = TransferDial::conservative_within(Some(&profile(4, 0, 0)));
+        while bound.step_up_cheap_dials() {}
+        burn_cooldown(&bound);
+        assert_eq!(
+            policy_sample(&bound, 1024, 0.0).reason,
+            DialDecisionReason::Sustain
+        );
+        assert_eq!(
+            policy_sample(&bound, 1024, 0.0).reason,
+            DialDecisionReason::Bound
+        );
+
+        let remove = TransferDial::conservative();
+        remove.set_negotiated_streams(2);
+        burn_cooldown(&remove);
+        assert_eq!(
+            policy_sample(&remove, 1024, 1.0).reason,
+            DialDecisionReason::Sustain
+        );
+        let proposed = policy_sample(&remove, 1024, 1.0);
+        assert_eq!(proposed.reason, DialDecisionReason::Remove);
+        let proposal = proposed.proposal.expect("REMOVE proposal");
+        remove.resize_settled(proposal.epoch, remove.live_streams(), false);
+        assert!(
+            remove
+                .apply_sample_input(DialSampleInput::injected(1024, 1.0))
+                .is_none(),
+            "terminal refusal is a lifecycle settlement, not a sample reason"
+        );
+        assert_eq!(remove.live_streams(), 2);
+        assert_eq!(remove.peak_streams(), 2);
+    }
+
+    #[test]
+    fn observer_emits_pending_and_exact_settlement_with_peak() {
+        let events: Arc<Mutex<Vec<DialObservationEvent>>> = Arc::default();
+        let captured = Arc::clone(&events);
+        let dial =
+            TransferDial::conservative().with_observer(Some(DialObserver::new(move |event| {
+                captured.lock().unwrap().push(event);
+            })));
+        while dial.step_up_cheap_dials() {}
+        burn_cooldown(&dial);
+        assert_eq!(
+            policy_sample(&dial, 1024, 0.0).reason,
+            DialDecisionReason::Sustain
+        );
+        let proposal = policy_sample(&dial, 1024, 0.0)
+            .proposal
+            .expect("ADD proposal");
+        dial.resize_settled(proposal.epoch, proposal.target_streams, true);
+
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DialObservationEvent::Pending {
+                proposal: pending,
+                reason: DialLifecycleReason::Pending,
+                ..
+            }
+                if *pending == proposal
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DialObservationEvent::Settlement {
+                proposal: settled,
+                reason: DialLifecycleReason::Add,
+                accepted: true,
+                live_streams: 5,
+                peak_streams: 5,
+                ..
+            } if *settled == proposal
+        )));
+    }
+
+    #[test]
+    fn observer_names_remove_and_refused_settlements() {
+        let events: Arc<Mutex<Vec<DialObservationEvent>>> = Arc::default();
+        let captured = Arc::clone(&events);
+        let observer = DialObserver::new(move |event| {
+            captured.lock().unwrap().push(event);
+        });
+
+        let remove = TransferDial::conservative().with_observer(Some(observer.clone()));
+        remove.set_negotiated_streams(2);
+        burn_cooldown(&remove);
+        assert_eq!(
+            policy_sample(&remove, 1024, 1.0).reason,
+            DialDecisionReason::Sustain
+        );
+        let removed = policy_sample(&remove, 1024, 1.0)
+            .proposal
+            .expect("REMOVE proposal");
+        remove.resize_settled(removed.epoch, removed.target_streams, true);
+
+        let refused = TransferDial::conservative().with_observer(Some(observer));
+        refused.set_negotiated_streams(2);
+        burn_cooldown(&refused);
+        assert_eq!(
+            policy_sample(&refused, 1024, 1.0).reason,
+            DialDecisionReason::Sustain
+        );
+        let declined = policy_sample(&refused, 1024, 1.0)
+            .proposal
+            .expect("REMOVE proposal to refuse");
+        refused.resize_settled(declined.epoch, refused.live_streams(), false);
+
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DialObservationEvent::Settlement {
+                proposal,
+                reason: DialLifecycleReason::Remove,
+                accepted: true,
+                live_streams: 1,
+                peak_streams: 2,
+                ..
+            } if *proposal == removed
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DialObservationEvent::Settlement {
+                proposal,
+                reason: DialLifecycleReason::Refused,
+                accepted: false,
+                live_streams: 2,
+                peak_streams: 2,
+                ..
+            } if *proposal == declined
+        )));
     }
 
     #[test]

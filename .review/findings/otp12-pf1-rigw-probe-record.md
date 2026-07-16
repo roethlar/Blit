@@ -26,15 +26,17 @@ counterfactual on a rig without the finding proves nothing.
 ## What
 
 Preserve the exact accepted evidence, independently recompute its inventory
-and result, prove live eight-stream parity for both initiator layouts, provide
+and result, prove pre-ldt-2 static-target orientation parity at eight for both
+initiator layouts, provide
 the requested two-layout descriptive phase report, and state the narrow
-licensed result: current-build P1 non-reproduction, failed resolution check,
-and no causal hypothesis grade.
+licensed result: then-current-build P1 non-reproduction, failed resolution
+check, and no causal hypothesis grade.
 
 ## Approach
 
 The complete q evidence directory is imported without changing a byte. The
-README separates harness validity, live stream parity, wall-time medians,
+README separates harness validity, historical static-target orientation
+parity, wall-time medians,
 resolution, endpoint-local phase spans, and remaining pf-1 gates. Current
 state and review records advance only to a reviewed probe record; they do not
 amend the preregistered plan or declare P1 fixed.
@@ -57,7 +59,8 @@ amend the preregistered plan or declare P1 fixed.
   restoration must return acceptance.
 - Independently recompute all eight summary rows, the target observer bias and
   resolution, control ratios, clock-sample selections, phase inventories, and
-  target epoch-7 `target_streams=live_streams=8` evidence for both roles.
+  target epoch-7 `target_streams=live_streams=8` evidence for both roles,
+  treating it as pre-ldt-2 static-policy evidence rather than adaptive tuning.
 - Review every interpretive sentence against
   `docs/plan/OTP12_PERF_FINDINGS.md`, especially the positive-gap,
   counterfactual, resolution, and hard-gate requirements.
@@ -78,8 +81,8 @@ returned schema-valid `accepted`, exact SHAs, and `guard_confirmed=true` with
 no comments. Claude Fable 5/max then independently returned schema-valid
 `accepted`, exact SHAs, and `guard_confirmed=true`. Claude recomputed the full
 inventory, schedules, clocks, raw/exported phase identity, reports, summary
-arithmetic, live parity, and two-layout phase table, and found the bounded
-interpretation exact.
+arithmetic, static-target orientation parity, and two-layout phase table, and
+found the bounded interpretation exact.
 
 Both reviewers retained fresh additive copies and proved analyzer green,
 127/128 red, and exact restored green. Claude's first restore invoked `cp -i`,

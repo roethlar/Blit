@@ -181,6 +181,8 @@ pub async fn run_push_session(
             small_file_probe: Default::default(),
             #[cfg(test)]
             dial_test_samples: None,
+            #[cfg(test)]
+            dial_terminal_test_gate: None,
         },
     };
     let summary = run_source(cfg, transport, source).await?;

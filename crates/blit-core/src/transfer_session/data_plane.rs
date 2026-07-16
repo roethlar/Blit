@@ -36,13 +36,15 @@ use async_trait::async_trait;
 use eyre::Result;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::buffer::BufferPool;
+#[cfg(test)]
+use crate::dial::{blocked_ratio, DialSampleInput};
 use crate::dial::{
     receiver_initial_streams, receiver_stream_ceiling, spawn_dial_tuner_with_resize,
-    ResizeProposal, TransferDial,
+    DialObservationEvent, DialObserver, ResizeProposal, TransferDial,
 };
 use crate::generated::{
     session_error::Code, CapacityProfile, DataPlaneGrant, DataPlaneResizeOp, FileHeader,
@@ -200,8 +202,9 @@ pub(super) struct ReceiveTotals {
 /// resize credentials through [`Self::arm`] and joins the accept loop at
 /// `SourceDone` via [`Self::finish`].
 pub(super) struct ResponderDataPlaneRun {
-    arm_tx: mpsc::UnboundedSender<ResizeArm>,
-    task: AbortOnDrop<Result<ReceiveTotals>>,
+    arm_tx: Option<mpsc::UnboundedSender<ResizeArm>>,
+    shutdown: watch::Sender<bool>,
+    task: Option<AbortOnDrop<Result<ReceiveTotals>>>,
     /// The `session_token` half of every socket credential (the control
     /// loop does not need it, but keeping it here documents the shape).
     #[allow(dead_code)]
@@ -254,16 +257,19 @@ impl ResponderDataPlane {
         let ceiling = self.ceiling;
         let session_token = self.session_token.clone();
         let (arm_tx, arm_rx) = mpsc::unbounded_channel::<ResizeArm>();
+        let (shutdown, shutdown_rx) = watch::channel(false);
         let task = AbortOnDrop::new(tokio::spawn(self.accept_loop(
             sink,
             progress,
             phase_trace,
             small_file_probe,
             arm_rx,
+            shutdown_rx,
         )));
         ResponderDataPlaneRun {
-            arm_tx,
-            task,
+            arm_tx: Some(arm_tx),
+            shutdown,
+            task: Some(task),
             session_token,
             ceiling,
         }
@@ -276,6 +282,7 @@ impl ResponderDataPlane {
         phase_trace: Option<BoundSessionPhaseTrace>,
         small_file_probe: Option<BoundSmallFileProbe>,
         arm_rx: mpsc::UnboundedReceiver<ResizeArm>,
+        mut shutdown: watch::Receiver<bool>,
     ) -> Result<ReceiveTotals> {
         // Epoch-0 socket credential: session_token ‖ epoch0_sub_token.
         let mut epoch0 = self.session_token.clone();
@@ -295,7 +302,20 @@ impl ResponderDataPlane {
                     },
                 );
             }
-            let socket = accept_authenticated(&self.listener, &epoch0).await?;
+            let socket = tokio::select! {
+                biased;
+                _ = wait_for_shutdown(&mut shutdown) => {
+                    abort_receive_workers(&mut receives).await;
+                    return Err(dp_fault("data-plane receive aborted"));
+                }
+                socket = accept_authenticated(&self.listener, &epoch0) => match socket {
+                    Ok(socket) => socket,
+                    Err(error) => {
+                        abort_receive_workers(&mut receives).await;
+                        return Err(error);
+                    }
+                },
+            };
             if let Some(trace) = &phase_trace {
                 trace.event(
                     "socket_accept_end",
@@ -345,6 +365,10 @@ impl ResponderDataPlane {
             };
             tokio::select! {
                 biased;
+                _ = wait_for_shutdown(&mut shutdown) => {
+                    abort_receive_workers(&mut receives).await;
+                    return Err(dp_fault("data-plane receive aborted"));
+                }
                 // Control FIRST: an arm must register before its socket
                 // (which the SOURCE dials only after the ack the control
                 // loop sends right after arming), so the accept arm below
@@ -382,9 +406,31 @@ impl ResponderDataPlane {
                 // credential read happens OUTSIDE the select (below) so a
                 // select cancel can never truncate a half-read socket.
                 accepted = accept_raw(&self.listener), if !armed.is_empty() => {
-                    let socket = accepted?;
-                    let (socket, epoch) =
-                        authenticate_resize(socket, &self.session_token, &mut armed).await?;
+                    let socket = match accepted {
+                        Ok(socket) => socket,
+                        Err(error) => {
+                            abort_receive_workers(&mut receives).await;
+                            return Err(error);
+                        }
+                    };
+                    let (socket, epoch) = tokio::select! {
+                        biased;
+                        _ = wait_for_shutdown(&mut shutdown) => {
+                            abort_receive_workers(&mut receives).await;
+                            return Err(dp_fault("data-plane receive aborted"));
+                        }
+                        authenticated = authenticate_resize(
+                            socket,
+                            &self.session_token,
+                            &mut armed,
+                        ) => match authenticated {
+                            Ok(authenticated) => authenticated,
+                            Err(error) => {
+                                abort_receive_workers(&mut receives).await;
+                                return Err(error);
+                            }
+                        },
+                    };
                     if let Some(trace) = &phase_trace {
                         trace.event(
                             "socket_accept_end",
@@ -407,9 +453,17 @@ impl ResponderDataPlane {
                     );
                 }
                 joined = receives.join_next(), if !receives.is_empty() => {
-                    let outcome = joined
+                    let outcome = match joined
                         .expect("join_next is None only when empty, guarded above")
-                        .map_err(|err| dp_fault(format!("receive task panicked: {err}")))??;
+                        .map_err(|err| dp_fault(format!("receive task panicked: {err}")))
+                        .and_then(|outcome| outcome)
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            abort_receive_workers(&mut receives).await;
+                            return Err(error);
+                        }
+                    };
                     total.files_written += outcome.files_written;
                     total.bytes_written += outcome.bytes_written;
                 }
@@ -425,19 +479,52 @@ impl ResponderDataPlaneRun {
     /// accept loop is gone (its receiver dropped) — the control loop then
     /// acks the resize as refused.
     pub(super) fn arm(&self, epoch: u32, sub_token: Vec<u8>) -> bool {
-        self.arm_tx.send(ResizeArm { epoch, sub_token }).is_ok()
+        self.arm_tx
+            .as_ref()
+            .is_some_and(|tx| tx.send(ResizeArm { epoch, sub_token }).is_ok())
     }
 
     /// Signal `SourceDone` (no more resizes) and join the accept loop for
     /// the aggregated receive totals.
-    pub(super) async fn finish(self) -> Result<ReceiveTotals> {
-        let ResponderDataPlaneRun { arm_tx, task, .. } = self;
+    pub(super) async fn finish(&mut self) -> Result<ReceiveTotals> {
         // Dropping the arm sender is the "no more resizes" signal.
-        drop(arm_tx);
-        task.join()
+        drop(self.arm_tx.take());
+        let task = self
+            .task
+            .as_mut()
+            .expect("ResponderDataPlaneRun::finish called once");
+        let joined = task
+            .join_mut()
             .await
-            .map_err(|err| dp_fault(format!("data-plane receive task panicked: {err}")))?
+            .map_err(|err| dp_fault(format!("data-plane receive task panicked: {err}")));
+        self.task = None;
+        joined?
     }
+
+    pub(super) async fn abort_and_join(&mut self) {
+        drop(self.arm_tx.take());
+        let _ = self.shutdown.send(true);
+        if let Some(task) = self.task.as_mut() {
+            let _ = task.join_mut().await;
+            self.task = None;
+        }
+    }
+}
+
+async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        if shutdown.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+async fn abort_receive_workers(receives: &mut JoinSet<Result<SinkOutcome>>) {
+    receives.abort_all();
+    while receives.join_next().await.is_some() {}
 }
 
 /// Spawn one receive worker draining `socket` into `sink` via the shared
@@ -455,6 +542,27 @@ fn spawn_receive(
     epoch: u32,
     socket_id: u32,
 ) {
+    struct ReceiveTaskStopped {
+        trace: Option<BoundSessionPhaseTrace>,
+        epoch: u32,
+        socket_id: u32,
+    }
+
+    impl Drop for ReceiveTaskStopped {
+        fn drop(&mut self) {
+            if let Some(trace) = &self.trace {
+                trace.event(
+                    "receive_task_stopped",
+                    SessionPhaseFields {
+                        epoch: Some(self.epoch),
+                        socket: Some(self.socket_id),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+
     if let Some(trace) = &phase_trace {
         trace.event(
             "socket_trace_attached",
@@ -466,7 +574,16 @@ fn spawn_receive(
         );
     }
     let sink = Arc::clone(sink);
+    // Construct the sentinel before spawning. A JoinSet task can be aborted
+    // before its first poll; keeping the sentinel in the future's captured
+    // state makes that path observable too.
+    let stopped = ReceiveTaskStopped {
+        trace: phase_trace.clone(),
+        epoch,
+        socket_id,
+    };
     receives.spawn(async move {
+        let _stopped = stopped;
         let mut guarded = StallGuard::new(socket, TRANSFER_STALL_TIMEOUT);
         execute_receive_pipeline_with_phase(
             &mut guarded,
@@ -646,14 +763,16 @@ pub(super) async fn dial_destination_data_plane(
                 },
             );
         }
-        let socket = dial_data_plane(&addr, &handshake, None)
-            .await
-            .map_err(|err| {
-                dp_fault_io(
+        let socket = match dial_data_plane(&addr, &handshake, None).await {
+            Ok(socket) => socket,
+            Err(err) => {
+                abort_receive_workers(&mut receives).await;
+                return Err(dp_fault_io(
                     &err,
                     format!("dialing session data plane (receive): {err:#}"),
-                )
-            })?;
+                ));
+            }
+        };
         if let Some(phase) = &phase_trace {
             phase.event(
                 "socket_dial_end",
@@ -748,15 +867,27 @@ impl InitiatorReceivePlaneRun {
     /// Join every receive worker for the aggregated write totals. A worker
     /// error (receive failure / stall) surfaces here; each drains to its
     /// socket's END record on a clean transfer.
-    async fn finish(mut self) -> Result<ReceiveTotals> {
+    async fn finish(&mut self) -> Result<ReceiveTotals> {
         let mut total = SinkOutcome::default();
         while let Some(joined) = self.receives.join_next().await {
-            let outcome =
-                joined.map_err(|err| dp_fault(format!("receive task panicked: {err}")))??;
+            let outcome = match joined
+                .map_err(|err| dp_fault(format!("receive task panicked: {err}")))
+                .and_then(|outcome| outcome)
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    abort_receive_workers(&mut self.receives).await;
+                    return Err(error);
+                }
+            };
             total.files_written += outcome.files_written;
             total.bytes_written += outcome.bytes_written;
         }
         Ok(ReceiveTotals { outcome: total })
+    }
+
+    async fn abort_and_join(&mut self) {
+        abort_receive_workers(&mut self.receives).await;
     }
 }
 
@@ -776,10 +907,17 @@ pub(super) enum DestRecvPlane {
 impl DestRecvPlane {
     /// Drain the data plane to completion and report its write outcome. The
     /// shared control-lane resize state owns final logical membership.
-    pub(super) async fn finish(self) -> Result<ReceiveTotals> {
+    pub(super) async fn finish(&mut self) -> Result<ReceiveTotals> {
         match self {
             DestRecvPlane::Responder(run) => run.finish().await,
             DestRecvPlane::Initiator(run) => run.finish().await,
+        }
+    }
+
+    pub(super) async fn abort_and_join(&mut self) {
+        match self {
+            DestRecvPlane::Responder(run) => run.abort_and_join().await,
+            DestRecvPlane::Initiator(run) => run.abort_and_join().await,
         }
     }
 }
@@ -809,6 +947,93 @@ enum SourceSockets {
     /// off the listener it already bound for epoch-0, credential
     /// `session_token ‖ sub_token`.
     Accept { listener: TcpListener },
+}
+
+fn dial_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn dial_action(add: bool) -> &'static str {
+    if add {
+        "ADD"
+    } else {
+        "REMOVE"
+    }
+}
+
+fn phase_dial_observer(phase: &BoundSessionPhaseTrace) -> DialObserver {
+    let phase = phase.clone();
+    DialObserver::new(move |event| match event {
+        DialObservationEvent::Sample(sample) => {
+            let proposal = sample.proposal;
+            phase.event(
+                "dial_sample",
+                SessionPhaseFields {
+                    action: proposal.map(|proposal| dial_action(proposal.add)),
+                    reason: Some(sample.reason.as_str()),
+                    epoch: Some(
+                        proposal
+                            .map(|proposal| proposal.epoch)
+                            .unwrap_or(sample.settled_epoch),
+                    ),
+                    target_streams: proposal.map(|proposal| dial_u32(proposal.target_streams)),
+                    live_streams: Some(dial_u32(sample.live_streams)),
+                    sample_bytes: Some(sample.input.delta_bytes),
+                    sample_blocked_ns: Some(sample.input.delta_blocked_nanos),
+                    sample_elapsed_ns: Some(sample.input.elapsed_nanos),
+                    sample_streams: Some(dial_u32(sample.input.sampled_streams)),
+                    sample_valid: Some(sample.input.valid),
+                    blocked_ratio: Some(sample.input.blocked_ratio),
+                    chunk_bytes: Some(sample.chunk_bytes as u64),
+                    prefetch_count: Some(dial_u32(sample.prefetch_count)),
+                    tcp_buffer_bytes: Some(sample.tcp_buffer_bytes as u64),
+                    receiver_ceiling: Some(dial_u32(sample.receiver_ceiling)),
+                    peak_streams: Some(dial_u32(sample.peak_streams)),
+                    ..Default::default()
+                },
+            );
+        }
+        DialObservationEvent::Pending {
+            proposal,
+            reason,
+            live_streams,
+            peak_streams,
+            receiver_ceiling,
+        } => phase.event(
+            "dial_pending",
+            SessionPhaseFields {
+                action: Some(dial_action(proposal.add)),
+                reason: Some(reason.as_str()),
+                epoch: Some(proposal.epoch),
+                target_streams: Some(dial_u32(proposal.target_streams)),
+                live_streams: Some(dial_u32(live_streams)),
+                receiver_ceiling: Some(dial_u32(receiver_ceiling)),
+                peak_streams: Some(dial_u32(peak_streams)),
+                ..Default::default()
+            },
+        ),
+        DialObservationEvent::Settlement {
+            proposal,
+            reason,
+            accepted,
+            live_streams,
+            peak_streams,
+            receiver_ceiling,
+        } => phase.event(
+            "dial_settlement",
+            SessionPhaseFields {
+                action: Some(dial_action(proposal.add)),
+                reason: Some(reason.as_str()),
+                epoch: Some(proposal.epoch),
+                target_streams: Some(dial_u32(proposal.target_streams)),
+                live_streams: Some(dial_u32(live_streams)),
+                accepted: Some(accepted),
+                receiver_ceiling: Some(dial_u32(receiver_ceiling)),
+                peak_streams: Some(dial_u32(peak_streams)),
+                ..Default::default()
+            },
+        ),
+    })
 }
 
 /// A running source-side data plane: dialed or accepted sockets wrapped in
@@ -866,14 +1091,39 @@ fn start_source_tuner(
                 // real registry still has to match settled membership, so a
                 // constructor or ADD accidentally changed back to NoProbe
                 // makes the role guard stop producing decisions.
-                let membership_aligned =
-                    probes.lock().expect("probe registry poisoned").len() == dial.live_streams();
-                let proposal = if membership_aligned {
-                    dial.apply_sample(sample.delta_bytes, sample.blocked_ratio)
+                let observed_streams = probes.lock().expect("probe registry poisoned").len();
+                let membership_aligned = observed_streams == dial.live_streams();
+                let decision = if membership_aligned {
+                    let elapsed_nanos = 1_000_000_000_u64;
+                    let blocked_capacity =
+                        (elapsed_nanos as u128).saturating_mul(observed_streams as u128);
+                    let delta_blocked_nanos = (sample.blocked_ratio.clamp(0.0, 1.0)
+                        * blocked_capacity as f64)
+                        .round()
+                        .min(u64::MAX as f64) as u64;
+                    dial.apply_sample_input(DialSampleInput {
+                        delta_bytes: sample.delta_bytes,
+                        delta_blocked_nanos,
+                        elapsed_nanos,
+                        sampled_streams: observed_streams,
+                        blocked_ratio: blocked_ratio(
+                            delta_blocked_nanos,
+                            std::time::Duration::from_nanos(elapsed_nanos),
+                            observed_streams,
+                        ),
+                        valid: true,
+                    })
                 } else {
-                    dial.apply_sample(0, 0.0);
-                    None
+                    dial.apply_sample_input(DialSampleInput {
+                        delta_bytes: 0,
+                        delta_blocked_nanos: 0,
+                        elapsed_nanos: 0,
+                        sampled_streams: observed_streams,
+                        blocked_ratio: 0.0,
+                        valid: false,
+                    })
                 };
+                let proposal = decision.and_then(|decision| decision.proposal);
                 if let Some(proposal) = proposal {
                     if resize_tx.send(proposal).is_err() {
                         dial.resize_settled(proposal.epoch, dial.live_streams(), false);
@@ -912,7 +1162,10 @@ async fn start_source_data_plane(
     small_file_probe: Option<BoundSmallFileProbe>,
 ) -> Result<SourceDataPlane> {
     let initial = validate_epoch0_streams(granted_initial, receiver_capacity)?;
-    let dial = TransferDial::conservative_within(receiver_capacity).shared();
+    let observer = phase_trace.as_ref().map(phase_dial_observer);
+    let dial = TransferDial::conservative_within(receiver_capacity)
+        .with_observer(observer)
+        .shared();
     dial.set_negotiated_streams(initial);
 
     let mut epoch0_handshake = session_token.clone();
@@ -1141,10 +1394,12 @@ impl SourceDataPlane {
     }
 
     pub(super) async fn stop_tuner(&mut self) -> Result<()> {
-        let Some(tuner) = self.tuner.take() else {
+        let Some(tuner) = self.tuner.as_mut() else {
             return Ok(());
         };
-        match tuner.abort_and_join().await {
+        let joined = tuner.abort_and_join_mut().await;
+        self.tuner = None;
+        match joined {
             Ok(()) => Ok(()),
             Err(err) if err.is_cancelled() => Ok(()),
             Err(err) => Err(dp_fault(format!("live dial tuner panicked: {err}"))),
@@ -1395,6 +1650,7 @@ impl SourceDataPlane {
     /// epochs; a late ADD likewise sees a closed queue and emits END rather
     /// than waiting under the receiver's StallGuard.
     pub(super) fn close_payloads(&mut self) -> Result<()> {
+        let first_close = self.payload_tx.is_some();
         // The control command is sent first. Because this handle is the
         // sole command producer, every accepted late membership operation
         // is ordered after Seal even if its worker races the payload sender
@@ -1405,14 +1661,28 @@ impl SourceDataPlane {
             .ok_or_else(|| dp_fault("data-plane membership control already closed"))?
             .seal();
         self.payload_tx = None;
-        sealed.map_err(|err| dp_fault(format!("sealing data-plane membership: {err:#}")))
+        sealed.map_err(|err| dp_fault(format!("sealing data-plane membership: {err:#}")))?;
+        if first_close {
+            if let Some(trace) = &self.phase_trace {
+                trace.event(
+                    "membership_sealed",
+                    SessionPhaseFields {
+                        live_streams: Some(dial_u32(self.dial.live_streams())),
+                        receiver_ceiling: Some(dial_u32(self.dial.ceiling_max_streams())),
+                        peak_streams: Some(dial_u32(self.dial.peak_streams())),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Signal end-of-stream, drain the pipeline (each worker emits its
     /// socket's END record on drain), and return the bytes sent. Must be
     /// awaited before `SourceDone` goes out so the destination's receive
     /// pipeline sees END and completes.
-    pub(super) async fn finish(mut self) -> Result<SinkOutcome> {
+    pub(super) async fn finish(&mut self) -> Result<SinkOutcome> {
         self.stop_tuner().await?;
         if let Some(mut proposals) = self.resize_rx.take() {
             proposals.close();
@@ -1420,21 +1690,31 @@ impl SourceDataPlane {
                 self.refuse_unsent_resize(proposal);
             }
         }
-        // Seal before dropping the payload sender, then drop the sole
-        // command endpoint before joining. Retaining it here would keep a
-        // zero-worker terminal supervisor alive forever.
+        // Seal before dropping the payload sender, then explicitly mark the
+        // command stream finished. The endpoint stays owned until the join
+        // completes so a peer fault that cancels this future can still send a
+        // cooperative Abort and wait for every nested worker to be reaped.
         let close_result = self.close_payloads();
         let resize_pending = self.dial.resize_pending();
-        drop(self.control.take());
+        let finish_result = self
+            .control
+            .as_ref()
+            .ok_or_else(|| dp_fault("data-plane membership control already closed"))?
+            .finish()
+            .map_err(|err| dp_fault(format!("finishing data-plane membership: {err:#}")));
         let pipeline = self
             .pipeline
-            .take()
+            .as_mut()
             .expect("SourceDataPlane::finish called once");
-        let elastic = pipeline
-            .join()
+        let joined = pipeline
+            .join_mut()
             .await
-            .map_err(|err| dp_fault(format!("data-plane send pipeline panicked: {err}")))??;
+            .map_err(|err| dp_fault(format!("data-plane send pipeline panicked: {err}")));
+        self.pipeline = None;
+        self.control = None;
+        let elastic = joined??;
         close_result?;
+        finish_result?;
         if resize_pending {
             return Err(dp_fault(
                 "data-plane membership sealed with a resize epoch still pending",
@@ -1448,9 +1728,56 @@ impl SourceDataPlane {
             )));
         }
         if let Some(trace) = &self.phase_trace {
-            trace.event("data_plane_complete", SessionPhaseFields::default());
+            trace.event(
+                "data_plane_complete",
+                SessionPhaseFields {
+                    live_streams: Some(dial_u32(self.dial.live_streams())),
+                    receiver_ceiling: Some(dial_u32(self.dial.ceiling_max_streams())),
+                    peak_streams: Some(dial_u32(self.dial.peak_streams())),
+                    ..Default::default()
+                },
+            );
         }
         Ok(elastic.outcome)
+    }
+
+    /// Error/cancellation teardown: stop the sampler, ask the elastic
+    /// supervisor to abort and reap every nested worker, then join the outer
+    /// task. A pending accepted epoch is intentionally not rewritten as a
+    /// refusal; the session fault owns that outcome.
+    pub(super) async fn abort_and_join(&mut self) {
+        let _ = self.stop_tuner().await;
+        self.resize_rx = None;
+        self.payload_tx = None;
+        let supervisor_drained = match self.control.as_ref() {
+            Some(control) => control.abort_and_drain().await.is_ok(),
+            None => false,
+        };
+        self.control = None;
+        if let Some(pipeline) = self.pipeline.as_mut() {
+            let joined = if supervisor_drained {
+                pipeline.join_mut().await
+            } else {
+                pipeline.abort_and_join_mut().await
+            };
+            self.pipeline = None;
+            if let Err(err) = joined {
+                if !err.is_cancelled() {
+                    log::debug!("data-plane pipeline teardown join failed: {err}");
+                }
+            }
+        }
+        if let Some(trace) = &self.phase_trace {
+            trace.event(
+                "data_plane_aborted",
+                SessionPhaseFields {
+                    live_streams: Some(dial_u32(self.dial.live_streams())),
+                    receiver_ceiling: Some(dial_u32(self.dial.ceiling_max_streams())),
+                    peak_streams: Some(dial_u32(self.dial.peak_streams())),
+                    ..Default::default()
+                },
+            );
+        }
     }
 }
 
@@ -1756,6 +2083,14 @@ impl TransferSink for NeedListSink {
 mod tests {
     use super::*;
 
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
     /// The grant starts at the canonical receiver-bounded floor without
     /// consulting manifest shape and carries two independent credentials.
     #[tokio::test]
@@ -1776,6 +2111,48 @@ mod tests {
             "session token and epoch-0 sub-token are independent credentials"
         );
         assert_ne!(grant.tcp_port, 0, "a real ephemeral port is granted");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn receive_finish_reaps_siblings_before_returning_first_error() {
+        use crate::remote::transfer::sink::NullSink;
+
+        let mut receives = JoinSet::new();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let entered_task = Arc::clone(&entered);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_task = Arc::clone(&dropped);
+        receives.spawn(async move {
+            let _drop_flag = DropFlag(dropped_task);
+            entered_task.notify_one();
+            std::future::pending::<()>().await;
+            Ok(SinkOutcome::default())
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("pending receive task entered");
+        receives.spawn(async { Err(eyre::eyre!("injected receive failure")) });
+
+        let mut run = InitiatorReceivePlaneRun {
+            receives,
+            host: String::new(),
+            tcp_port: 0,
+            session_token: Vec::new(),
+            sink: Arc::new(NullSink::new()),
+            progress: None,
+            trace: false,
+            phase_trace: None,
+            small_file_probe: None,
+        };
+        let error = match run.finish().await {
+            Err(error) => error,
+            Ok(_) => panic!("first receive failure must surface"),
+        };
+        assert!(format!("{error:#}").contains("injected receive failure"));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "sibling receive task must be destroyed before finish returns"
+        );
     }
 
     /// codex otp-4b-1 F1: the data-plane receive must enforce the same

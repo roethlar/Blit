@@ -53,6 +53,8 @@ use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
 use crate::remote::transfer::small_file_probe::{
     BoundSmallFileProbe, SmallFileCarrier, SmallFileProbe,
 };
+#[cfg(test)]
+use crate::remote::transfer::source::SourceScan;
 use crate::remote::transfer::source::{FsTransferSource, TransferSource};
 use crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT;
 use crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES;
@@ -222,6 +224,50 @@ pub(crate) struct DialTestObservation {
 #[cfg(test)]
 pub(crate) type DialTestSamples = Arc<StdMutex<Option<mpsc::UnboundedReceiver<DialTestSample>>>>;
 
+#[cfg(test)]
+pub(crate) struct DialTerminalTestGate {
+    entered: AtomicBool,
+    changed: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+}
+
+#[cfg(test)]
+impl DialTerminalTestGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            entered: AtomicBool::new(false),
+            changed: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        })
+    }
+
+    async fn hold(&self) {
+        self.entered.store(true, Ordering::Release);
+        self.changed.notify_waiters();
+        self.release
+            .acquire()
+            .await
+            .expect("terminal test gate remains open")
+            .forget();
+    }
+
+    async fn wait_until_entered(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.entered.load(Ordering::Acquire) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct SourceInstruments {
     /// w6-1 progress events, reported exactly where the old push driver
@@ -250,6 +296,11 @@ pub struct SourceInstruments {
     /// production build has no such field and always samples live probes.
     #[cfg(test)]
     pub(crate) dial_test_samples: Option<DialTestSamples>,
+    /// Pauses the SOURCE immediately after ManifestComplete is durably sent,
+    /// allowing deterministic terminal resize races without production
+    /// sleeps or scheduler assumptions.
+    #[cfg(test)]
+    pub(crate) dial_terminal_test_gate: Option<Arc<DialTerminalTestGate>>,
 }
 
 pub struct DestinationSessionConfig {
@@ -1186,7 +1237,7 @@ async fn drive_source(
     let (fault_tx, fault_rx) = watch::channel(None::<SessionFault>);
     // AbortOnDrop: an early error return below must abort the receive
     // half instead of leaking it (same rationale as design-2 / w4-1).
-    let _recv_guard = AbortOnDrop::new(tokio::spawn(source_recv_half(
+    let recv_guard = AbortOnDrop::new(tokio::spawn(source_recv_half(
         rx,
         Arc::clone(&sent),
         Arc::clone(&manifest_sent),
@@ -1203,7 +1254,7 @@ async fn drive_source(
         },
     )));
 
-    match source_send_half(
+    let send_result = source_send_half(
         plan_options,
         data_plane_host.as_deref(),
         instruments,
@@ -1215,11 +1266,11 @@ async fn drive_source(
         &manifest_sent,
         event_rx,
         fault_rx,
-        phase_trace,
+        phase_trace.clone(),
         small_file_probe,
     )
-    .await
-    {
+    .await;
+    let mut result = match send_result {
         Ok(summary) => Ok(summary),
         Err(report) => {
             let mut fault = fault_from_report(report);
@@ -1229,7 +1280,19 @@ async fn drive_source(
             }
             Err(eyre::Report::new(fault))
         }
+    };
+    let recv_cleanup = recv_guard.abort_and_join().await;
+    if result.is_ok() {
+        if let Err(err) = recv_cleanup {
+            if !err.is_cancelled() {
+                result = Err(eyre::Report::new(SessionFault::internal(format!(
+                    "source receive task panicked: {err}"
+                ))));
+            }
+        }
     }
+    flush_session_phase_trace(phase_trace.as_ref()).await;
+    result
 }
 
 /// Receive half of the source driver: drains the transport for the
@@ -1369,6 +1432,9 @@ async fn source_recv_half(
                         "NeedComplete before the source's ManifestComplete",
                     )));
                     return;
+                }
+                if let Some(trace) = &phase_trace {
+                    trace.event("need_complete_received", SessionPhaseFields::default());
                 }
                 let _ = events.send(SourceEvent::NeedComplete);
             }
@@ -1553,391 +1619,424 @@ async fn source_send_half(
         last_ack: None,
     };
 
-    // Streaming manifest: entries go out as enumeration produces them
-    // (immediate start in every direction — plan §Design 2). The open
-    // carries no source path (the source end owns its local endpoint) but
-    // does carry the include/exclude/size/age filter (otp-6a): only
-    // matching files are manifested and transferred. The filter MUST ride
-    // the wire (not be pre-wrapped by a local caller) because for pull the
-    // SOURCE is the remote daemon responder — it, not the client, owns the
-    // scan. Apply it through the universal `FilteredSource` decorator, the
-    // single filter chokepoint every source impl routes through, rather
-    // than the per-impl `scan(filter)` arg — a source impl is free to
-    // ignore that arg (the since-deleted relay source did; codex otp-6a
-    // F1), and the chokepoint makes filtering independent of it. A
-    // default/absent filter scans everything (unchanged from otp-3). Globs
-    // were validated at OPEN (`source_open_validator`), so the conversion
-    // cannot fail on a validated open; map any error to a fault regardless.
-    let scan_source: Arc<dyn TransferSource> = match negotiated.open.filter.as_ref() {
-        Some(spec) if *spec != FilterSpec::default() => {
-            let filter = crate::remote::transfer::operation_spec::filter_from_spec(spec.clone())
-                .map_err(|e| {
-                    eyre::Report::new(SessionFault::internal(format!("invalid filter: {e:#}")))
-                })?;
-            Arc::new(crate::remote::transfer::source::FilteredSource::new(
-                Arc::clone(&source),
-                filter,
-            ))
-        }
-        _ => Arc::clone(&source),
-    };
-    // otp-10b-1: a Checksum session fills each manifest header's
-    // checksum so the DESTINATION can skip content-equal files
-    // regardless of mtime. Wrapped OUTSIDE the filter so only
-    // in-scope files pay the hash; a serving end that refuses to hash
-    // never gets here (CHECKSUM_DISABLED at OPEN).
-    let scan_source: Arc<dyn TransferSource> =
-        if negotiated.open.compare_mode == ComparisonMode::Checksum as i32 {
-            Arc::new(crate::remote::transfer::source::ChecksummingSource::new(
-                scan_source,
-            ))
-        } else {
-            scan_source
-        };
-    // otp-10a: callers that must not treat a partial transfer as success
-    // (the push verb, `blit move`'s source-delete gate) supply their own
-    // accumulator via `SourceInstruments` and inspect it after the
-    // session returns; the wire behavior is identical either way.
-    let unreadable: Arc<StdMutex<Vec<String>>> = instruments.unreadable.clone().unwrap_or_default();
-    let (mut header_rx, scan_handle) = scan_source.scan(None, Arc::clone(&unreadable));
-    while let Some(header) = header_rx.recv().await {
-        if let Some(probe) = &small_file_probe {
-            let wait_started = probe.start();
-            let mut sent = sent.lock().expect("sent-manifest lock poisoned");
-            let wait = wait_started.elapsed();
-            let map_op_started = probe.start();
-            sent.insert(header.relative_path.clone(), header.clone());
-            let map_op = map_op_started.elapsed();
-            drop(sent);
-            probe.note_manifest_insert(wait, map_op);
-        } else {
-            sent.lock()
-                .expect("sent-manifest lock poisoned")
-                .insert(header.relative_path.clone(), header.clone());
-        }
-        tx.send(frame(Frame::ManifestEntry(header))).await?;
-        // Faults detected by the receive half abort the stream now, not after
-        // the full scan. A deterministic or unusually early live sample is
-        // serviced through the same SOURCE controller here as during payloads.
-        drain_ready_source_events(
-            &mut events,
-            &mut pending,
-            &mut resume,
-            &mut need_complete,
-            data_plane.as_ref(),
-            tx,
-            &mut resize,
-            small_file_probe.as_ref(),
-        )
-        .await?;
-    }
-    let scanned = scan_handle
-        .await
-        .map_err(|err| eyre::eyre!("manifest scan task panicked: {err}"))??;
-    let scan_complete = unreadable
-        .lock()
-        .expect("unreadable list lock poisoned")
-        .is_empty();
-    log::debug!("session source manifest complete: {scanned} entries, complete={scan_complete}");
-    if let Some(trace) = &phase_trace {
-        trace.event(
-            "manifest_complete_send_begin",
-            SessionPhaseFields::default(),
-        );
-    }
-    tx.send(frame(Frame::ManifestComplete(ManifestComplete {
-        scan_complete,
-    })))
-    .await?;
-    if let Some(trace) = &phase_trace {
-        trace.event(
-            "manifest_complete_sent",
-            SessionPhaseFields {
-                count: Some(scanned as u64),
-                ..Default::default()
-            },
-        );
-    }
-    manifest_sent.store(true, Ordering::Release);
-
-    // Payload phase. The byte carrier is either the TCP data plane
-    // (dialed above) or the in-stream record grammar (fallback). Needs
-    // accumulated while a batch was being sent become the next planner
-    // batch (contract §Transport selection); payloads only flow after
-    // ManifestComplete.
-    // The in-stream carrier reuses one read buffer across records; the
-    // data plane owns its own pooled buffers, so skip that allocation.
-    let mut read_buf = if data_plane.is_none() {
-        vec![0u8; IN_STREAM_CHUNK]
-    } else {
-        Vec::new()
-    };
-    let mut planner_batch_seq = 0u64;
-    loop {
-        drain_ready_source_events(
-            &mut events,
-            &mut pending,
-            &mut resume,
-            &mut need_complete,
-            data_plane.as_ref(),
-            tx,
-            &mut resize,
-            small_file_probe.as_ref(),
-        )
-        .await?;
-        if !pending.is_empty() {
-            let batch = std::mem::take(&mut pending);
-            match &mut data_plane {
-                Some(dp) => {
-                    let batch_count = batch.len() as u64;
-                    if let Some(trace) = &phase_trace {
-                        trace.event(
-                            "planner_begin",
-                            SessionPhaseFields {
-                                batch: Some(planner_batch_seq),
-                                count: Some(batch_count),
-                                ..Default::default()
-                            },
-                        );
-                    }
-                    let planner_input = batch.len();
-                    let planner_started = small_file_probe.as_ref().map(|probe| probe.start());
-                    let payloads =
-                        diff_planner::plan_push_payloads(batch, source.root(), plan_options)?;
-                    if let (Some(probe), Some(started)) = (&small_file_probe, planner_started) {
-                        let (tar_shards, tar_members) = tar_payload_shape(&payloads);
-                        probe.note_planner(
-                            started.elapsed(),
-                            planner_input,
-                            payloads.len(),
-                            tar_shards,
-                            tar_members,
-                        );
-                    }
-                    if let Some(trace) = &phase_trace {
-                        trace.event(
-                            "planner_end",
-                            SessionPhaseFields {
-                                batch: Some(planner_batch_seq),
-                                count: Some(payloads.len() as u64),
-                                ..Default::default()
-                            },
-                        );
-                    }
-                    planner_batch_seq += 1;
-                    queue_payloads_while_servicing_events(
-                        payloads,
-                        &mut events,
-                        &mut pending,
-                        &mut resume,
-                        &mut need_complete,
-                        dp,
-                        tx,
-                        &mut resize,
-                        small_file_probe.as_ref(),
-                    )
-                    .await?;
-                    // A cancel while earlier batches are actively moving
-                    // closes the send pipeline under backpressure, so this
-                    // queue fails with a data-plane error — prefer the
-                    // peer's framed reason (CANCELLED) the same way the
-                    // finish() drain does (otp-4b-3 codex F1). Not raced
-                    // against events like finish(): live `Need`s still
-                    // arrive here, and `recv_peer_fault` would consume them.
-                }
-                None => {
-                    // codex otp-8 F1: race the record sends against the
-                    // receive half's fault signal — the in-stream twin of
-                    // the data-plane drain's `recv_peer_fault` arm. A peer
-                    // cancel (framed CANCELLED, then RPC teardown) must
-                    // interrupt a send blocked in `reader.read()` or in
-                    // flow-controlled `tx.send()` and surface the framed
-                    // reason, not hang or decay to INTERNAL. Biased:
-                    // when both are ready, the framed fault wins.
-                    tokio::select! {
-                        biased;
-                        fault = peer_fault_signalled(&mut fault_signal) => {
-                            return Err(eyre::Report::new(fault));
-                        }
-                        res = send_payload_records(
-                            tx,
-                            &source,
-                            plan_options,
-                            batch,
-                            &mut read_buf,
-                            instruments.progress.as_ref(),
-                            small_file_probe.as_ref(),
-                        ) => {
-                            res?;
-                        }
-                    }
-                }
+    let result: Result<TransferSummary> = async {
+        // Streaming manifest: entries go out as enumeration produces them
+        // (immediate start in every direction — plan §Design 2). The open
+        // carries no source path (the source end owns its local endpoint) but
+        // does carry the include/exclude/size/age filter (otp-6a): only
+        // matching files are manifested and transferred. The filter MUST ride
+        // the wire (not be pre-wrapped by a local caller) because for pull the
+        // SOURCE is the remote daemon responder — it, not the client, owns the
+        // scan. Apply it through the universal `FilteredSource` decorator, the
+        // single filter chokepoint every source impl routes through, rather
+        // than the per-impl `scan(filter)` arg — a source impl is free to
+        // ignore that arg (the since-deleted relay source did; codex otp-6a
+        // F1), and the chokepoint makes filtering independent of it. A
+        // default/absent filter scans everything (unchanged from otp-3). Globs
+        // were validated at OPEN (`source_open_validator`), so the conversion
+        // cannot fail on a validated open; map any error to a fault regardless.
+        let scan_source: Arc<dyn TransferSource> = match negotiated.open.filter.as_ref() {
+            Some(spec) if *spec != FilterSpec::default() => {
+                let filter =
+                    crate::remote::transfer::operation_spec::filter_from_spec(spec.clone())
+                        .map_err(|e| {
+                            eyre::Report::new(SessionFault::internal(format!(
+                                "invalid filter: {e:#}"
+                            )))
+                        })?;
+                Arc::new(crate::remote::transfer::source::FilteredSource::new(
+                    Arc::clone(&source),
+                    filter,
+                ))
             }
-            continue;
-        }
-        if !resume.ready.is_empty() {
-            // The block phase for correlated (need, hash-list) pairs.
-            // Data plane (otp-7b): each pair becomes ONE composite
-            // ResumeFile work item, so one pipeline worker runs the
-            // whole record on one socket — strict per-file serialization
-            // without cross-socket reorder hazards. In-stream (otp-7a):
-            // control-lane BlockTransfer/Complete frames, as before.
-            let ready = std::mem::take(&mut resume.ready);
-            match &mut data_plane {
-                Some(dp) => {
-                    let payloads = ready
-                        .into_iter()
-                        .map(|(header, hashes)| TransferPayload::ResumeFile {
-                            header,
-                            block_size: hashes.block_size,
-                            dest_hashes: hashes.hashes,
-                        })
-                        .collect();
-                    queue_payloads_while_servicing_events(
-                        payloads,
-                        &mut events,
-                        &mut pending,
-                        &mut resume,
-                        &mut need_complete,
-                        dp,
-                        tx,
-                        &mut resize,
-                        small_file_probe.as_ref(),
-                    )
-                    .await?;
-                    // Same cancel posture as the plain-batch queue above:
-                    // prefer the peer's framed reason over the transport
-                    // break a cancel also causes (otp-4b-3 codex F1).
+            _ => Arc::clone(&source),
+        };
+        // otp-10b-1: a Checksum session fills each manifest header's
+        // checksum so the DESTINATION can skip content-equal files
+        // regardless of mtime. Wrapped OUTSIDE the filter so only
+        // in-scope files pay the hash; a serving end that refuses to hash
+        // never gets here (CHECKSUM_DISABLED at OPEN).
+        let scan_source: Arc<dyn TransferSource> =
+            if negotiated.open.compare_mode == ComparisonMode::Checksum as i32 {
+                Arc::new(crate::remote::transfer::source::ChecksummingSource::new(
+                    scan_source,
+                ))
+            } else {
+                scan_source
+            };
+        // otp-10a: callers that must not treat a partial transfer as success
+        // (the push verb, `blit move`'s source-delete gate) supply their own
+        // accumulator via `SourceInstruments` and inspect it after the
+        // session returns; the wire behavior is identical either way.
+        let unreadable: Arc<StdMutex<Vec<String>>> =
+            instruments.unreadable.clone().unwrap_or_default();
+        let (mut header_rx, mut scan) = scan_source.scan(None, Arc::clone(&unreadable));
+        let scan_result: Result<u64> = async {
+            while let Some(header) = header_rx.recv().await {
+                if let Some(probe) = &small_file_probe {
+                    let wait_started = probe.start();
+                    let mut sent = sent.lock().expect("sent-manifest lock poisoned");
+                    let wait = wait_started.elapsed();
+                    let map_op_started = probe.start();
+                    sent.insert(header.relative_path.clone(), header.clone());
+                    let map_op = map_op_started.elapsed();
+                    drop(sent);
+                    probe.note_manifest_insert(wait, map_op);
+                } else {
+                    sent.lock()
+                        .expect("sent-manifest lock poisoned")
+                        .insert(header.relative_path.clone(), header.clone());
                 }
-                None => {
-                    for (header, hashes) in ready {
-                        // codex 7b-2 G2: the whole in-stream record names
-                        // its file on failure, matching the data-plane
-                        // carrier's outer wrap. Same fault race as the
-                        // plain-batch send above (codex otp-8 F1).
+                tx.send(frame(Frame::ManifestEntry(header))).await?;
+                // Faults detected by the receive half abort the stream now, not after
+                // the full scan. A deterministic or unusually early live sample is
+                // serviced through the same SOURCE controller here as during payloads.
+                drain_ready_source_events(
+                    &mut events,
+                    &mut pending,
+                    &mut resume,
+                    &mut need_complete,
+                    data_plane.as_ref(),
+                    tx,
+                    &mut resize,
+                    small_file_probe.as_ref(),
+                )
+                .await?;
+            }
+            scan.finish().await
+        }
+        .await;
+        let scanned = match scan_result {
+            Ok(scanned) => scanned,
+            Err(error) => {
+                // A filesystem scan runs in `spawn_blocking`, so aborting its
+                // JoinHandle cannot stop it once it has started. Close the
+                // consumer first: that releases a producer blocked in
+                // `blocking_send` before we reap the complete scan chain.
+                header_rx.close();
+                scan.abort_and_join().await;
+                return Err(error);
+            }
+        };
+        let scan_complete = unreadable
+            .lock()
+            .expect("unreadable list lock poisoned")
+            .is_empty();
+        log::debug!(
+            "session source manifest complete: {scanned} entries, complete={scan_complete}"
+        );
+        if let Some(trace) = &phase_trace {
+            trace.event(
+                "manifest_complete_send_begin",
+                SessionPhaseFields::default(),
+            );
+        }
+        tx.send(frame(Frame::ManifestComplete(ManifestComplete {
+            scan_complete,
+        })))
+        .await?;
+        if let Some(trace) = &phase_trace {
+            trace.event(
+                "manifest_complete_sent",
+                SessionPhaseFields {
+                    count: Some(scanned as u64),
+                    ..Default::default()
+                },
+            );
+        }
+        manifest_sent.store(true, Ordering::Release);
+        #[cfg(test)]
+        if let Some(gate) = &instruments.dial_terminal_test_gate {
+            gate.hold().await;
+        }
+
+        // Payload phase. The byte carrier is either the TCP data plane
+        // (dialed above) or the in-stream record grammar (fallback). Needs
+        // accumulated while a batch was being sent become the next planner
+        // batch (contract §Transport selection); payloads only flow after
+        // ManifestComplete.
+        // The in-stream carrier reuses one read buffer across records; the
+        // data plane owns its own pooled buffers, so skip that allocation.
+        let mut read_buf = if data_plane.is_none() {
+            vec![0u8; IN_STREAM_CHUNK]
+        } else {
+            Vec::new()
+        };
+        let mut planner_batch_seq = 0u64;
+        loop {
+            drain_ready_source_events(
+                &mut events,
+                &mut pending,
+                &mut resume,
+                &mut need_complete,
+                data_plane.as_ref(),
+                tx,
+                &mut resize,
+                small_file_probe.as_ref(),
+            )
+            .await?;
+            if !pending.is_empty() {
+                let batch = std::mem::take(&mut pending);
+                match &mut data_plane {
+                    Some(dp) => {
+                        let batch_count = batch.len() as u64;
+                        if let Some(trace) = &phase_trace {
+                            trace.event(
+                                "planner_begin",
+                                SessionPhaseFields {
+                                    batch: Some(planner_batch_seq),
+                                    count: Some(batch_count),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        let planner_input = batch.len();
+                        let planner_started = small_file_probe.as_ref().map(|probe| probe.start());
+                        let payloads =
+                            diff_planner::plan_push_payloads(batch, source.root(), plan_options)?;
+                        if let (Some(probe), Some(started)) = (&small_file_probe, planner_started) {
+                            let (tar_shards, tar_members) = tar_payload_shape(&payloads);
+                            probe.note_planner(
+                                started.elapsed(),
+                                planner_input,
+                                payloads.len(),
+                                tar_shards,
+                                tar_members,
+                            );
+                        }
+                        if let Some(trace) = &phase_trace {
+                            trace.event(
+                                "planner_end",
+                                SessionPhaseFields {
+                                    batch: Some(planner_batch_seq),
+                                    count: Some(payloads.len() as u64),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        planner_batch_seq += 1;
+                        queue_payloads_while_servicing_events(
+                            payloads,
+                            &mut events,
+                            &mut pending,
+                            &mut resume,
+                            &mut need_complete,
+                            dp,
+                            tx,
+                            &mut resize,
+                            small_file_probe.as_ref(),
+                        )
+                        .await?;
+                        // A cancel while earlier batches are actively moving
+                        // closes the send pipeline under backpressure, so this
+                        // queue fails with a data-plane error — prefer the
+                        // peer's framed reason (CANCELLED) the same way the
+                        // finish() drain does (otp-4b-3 codex F1). Not raced
+                        // against events like finish(): live `Need`s still
+                        // arrive here, and `recv_peer_fault` would consume them.
+                    }
+                    None => {
+                        // codex otp-8 F1: race the record sends against the
+                        // receive half's fault signal — the in-stream twin of
+                        // the data-plane drain's `recv_peer_fault` arm. A peer
+                        // cancel (framed CANCELLED, then RPC teardown) must
+                        // interrupt a send blocked in `reader.read()` or in
+                        // flow-controlled `tx.send()` and surface the framed
+                        // reason, not hang or decay to INTERNAL. Biased:
+                        // when both are ready, the framed fault wins.
                         tokio::select! {
                             biased;
                             fault = peer_fault_signalled(&mut fault_signal) => {
                                 return Err(eyre::Report::new(fault));
                             }
-                            res = send_resume_block_records(
+                            res = send_payload_records(
                                 tx,
                                 &source,
-                                &header,
-                                &hashes,
+                                plan_options,
+                                batch,
+                                &mut read_buf,
                                 instruments.progress.as_ref(),
+                                small_file_probe.as_ref(),
                             ) => {
-                                res.map_err(|e| tag_path(e, &header.relative_path))?;
+                                res?;
                             }
                         }
                     }
                 }
+                continue;
             }
-            continue;
-        }
-        if need_complete {
-            break;
-        }
-        wait_for_source_input(
-            &mut events,
-            &mut pending,
-            &mut resume,
-            &mut need_complete,
-            data_plane.as_ref(),
-            tx,
-            &mut resize,
-            small_file_probe.as_ref(),
-        )
-        .await?;
-    }
-
-    // Demand is complete. Stop sampling and decline a proposal that was
-    // claimed locally but never sent; then seal payload admission. A request
-    // already on the wire still settles through ldt-1's terminal membership
-    // outcomes, but no tail convergence opens idle sockets.
-    if let Some(dp) = &mut data_plane {
-        dp.stop_tuner().await?;
-        stop_resize_intake(dp, &mut resize);
-        dp.close_payloads()?;
-        settle_inflight_resize(
-            &mut events,
-            &mut pending,
-            &mut resume,
-            &mut need_complete,
-            dp,
-            tx,
-            &mut resize,
-            small_file_probe.as_ref(),
-        )
-        .await?;
-    }
-
-    // Close the data plane BEFORE SourceDone so the destination's receive
-    // pipeline sees each socket's END record and completes; SourceDone on
-    // the control lane then lets the destination score and summarize.
-    //
-    // The drain is the byte-transfer phase's wall-time sink, so a
-    // mid-transfer cancel almost always lands here. Race it against a
-    // peer-framed fault on the control lane (otp-4b-3): a `CancelJob` on
-    // the served session frames `SessionError{CANCELLED}`, and the source
-    // must surface THAT — not the data-plane transport break it also
-    // causes. Two orderings, both covered:
-    //   * fault arrives while the drain is still pending (e.g. a worker
-    //     blocked reading a slow file, so the socket break never unblocks
-    //     it) → the `recv_peer_fault` arm wins; dropping the unfinished
-    //     `finish()` future drops the data plane, and its `AbortOnDrop`
-    //     stops the in-flight workers.
-    //   * the socket break makes `finish()` return `Err` first → prefer
-    //     the framed reason if the control lane delivers one within the
-    //     stall window (`prefer_peer_fault`).
-    if let Some(dp) = data_plane.take() {
-        tokio::select! {
-            biased;
-            fault = recv_peer_fault(&mut events) => {
-                return Err(eyre::Report::new(fault));
+            if !resume.ready.is_empty() {
+                // The block phase for correlated (need, hash-list) pairs.
+                // Data plane (otp-7b): each pair becomes ONE composite
+                // ResumeFile work item, so one pipeline worker runs the
+                // whole record on one socket — strict per-file serialization
+                // without cross-socket reorder hazards. In-stream (otp-7a):
+                // control-lane BlockTransfer/Complete frames, as before.
+                let ready = std::mem::take(&mut resume.ready);
+                match &mut data_plane {
+                    Some(dp) => {
+                        let payloads = ready
+                            .into_iter()
+                            .map(|(header, hashes)| TransferPayload::ResumeFile {
+                                header,
+                                block_size: hashes.block_size,
+                                dest_hashes: hashes.hashes,
+                            })
+                            .collect();
+                        queue_payloads_while_servicing_events(
+                            payloads,
+                            &mut events,
+                            &mut pending,
+                            &mut resume,
+                            &mut need_complete,
+                            dp,
+                            tx,
+                            &mut resize,
+                            small_file_probe.as_ref(),
+                        )
+                        .await?;
+                        // Same cancel posture as the plain-batch queue above:
+                        // prefer the peer's framed reason over the transport
+                        // break a cancel also causes (otp-4b-3 codex F1).
+                    }
+                    None => {
+                        for (header, hashes) in ready {
+                            // codex 7b-2 G2: the whole in-stream record names
+                            // its file on failure, matching the data-plane
+                            // carrier's outer wrap. Same fault race as the
+                            // plain-batch send above (codex otp-8 F1).
+                            tokio::select! {
+                                biased;
+                                fault = peer_fault_signalled(&mut fault_signal) => {
+                                    return Err(eyre::Report::new(fault));
+                                }
+                                res = send_resume_block_records(
+                                    tx,
+                                    &source,
+                                    &header,
+                                    &hashes,
+                                    instruments.progress.as_ref(),
+                                ) => {
+                                    res.map_err(|e| tag_path(e, &header.relative_path))?;
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
             }
-            res = dp.finish() => {
-                if let Err(dp_err) = res {
-                    return Err(prefer_peer_fault(&mut events, dp_err).await);
+            if need_complete {
+                break;
+            }
+            wait_for_source_input(
+                &mut events,
+                &mut pending,
+                &mut resume,
+                &mut need_complete,
+                data_plane.as_ref(),
+                tx,
+                &mut resize,
+                small_file_probe.as_ref(),
+            )
+            .await?;
+        }
+
+        // Demand is complete. Stop sampling and decline a proposal that was
+        // claimed locally but never sent; then seal payload admission. A request
+        // already on the wire still settles through ldt-1's terminal membership
+        // outcomes, but no tail convergence opens idle sockets.
+        if let Some(dp) = &mut data_plane {
+            dp.stop_tuner().await?;
+            stop_resize_intake(dp, &mut resize);
+            dp.close_payloads()?;
+            settle_inflight_resize(
+                &mut events,
+                &mut pending,
+                &mut resume,
+                &mut need_complete,
+                dp,
+                tx,
+                &mut resize,
+                small_file_probe.as_ref(),
+            )
+            .await?;
+        }
+
+        // Close the data plane BEFORE SourceDone so the destination's receive
+        // pipeline sees each socket's END record and completes; SourceDone on
+        // the control lane then lets the destination score and summarize.
+        //
+        // The drain is the byte-transfer phase's wall-time sink, so a
+        // mid-transfer cancel almost always lands here. Race it against a
+        // peer-framed fault on the control lane (otp-4b-3): a `CancelJob` on
+        // the served session frames `SessionError{CANCELLED}`, and the source
+        // must surface THAT — not the data-plane transport break it also
+        // causes. Two orderings, both covered:
+        //   * fault arrives while the drain is still pending (e.g. a worker
+        //     blocked reading a slow file, so the socket break never unblocks
+        //     it) → the `recv_peer_fault` arm wins; the data-plane owner is
+        //     retained and the error epilogue cooperatively aborts and joins
+        //     every in-flight worker before returning.
+        //   * the socket break makes `finish()` return `Err` first → prefer
+        //     the framed reason if the control lane delivers one within the
+        //     stall window (`prefer_peer_fault`).
+        if let Some(dp) = data_plane.as_mut() {
+            tokio::select! {
+                biased;
+                fault = recv_peer_fault(&mut events) => {
+                    return Err(eyre::Report::new(fault));
+                }
+                res = dp.finish() => {
+                    if let Err(dp_err) = res {
+                        return Err(prefer_peer_fault(&mut events, dp_err).await);
+                    }
                 }
             }
         }
-    }
+        data_plane = None;
 
-    tx.send(frame(Frame::SourceDone(SourceDone {}))).await?;
+        tx.send(frame(Frame::SourceDone(SourceDone {}))).await?;
 
-    // CLOSING: the destination is the scorer; the next event must be
-    // its summary (the receive half ends after forwarding it).
-    match events.recv().await {
-        Some(SourceEvent::Summary(summary)) => {
-            if let Some(trace) = &phase_trace {
-                trace.event("summary_received", SessionPhaseFields::default());
+        // CLOSING: the destination is the scorer; the next event must be
+        // its summary (the receive half ends after forwarding it).
+        match events.recv().await {
+            Some(SourceEvent::Summary(summary)) => {
+                if let Some(trace) = &phase_trace {
+                    trace.event("summary_received", SessionPhaseFields::default());
+                }
+                finish_small_file_probe(small_file_probe.as_ref()).await;
+                Ok(summary)
             }
-            flush_session_phase_trace(phase_trace.as_ref()).await;
-            finish_small_file_probe(small_file_probe.as_ref()).await;
-            Ok(summary)
+            Some(SourceEvent::Fault(fault)) => Err(eyre::Report::new(fault)),
+            Some(SourceEvent::Need(h) | SourceEvent::ResumeNeed(h)) => {
+                Err(eyre::Report::new(SessionFault::protocol_violation(
+                    format!("need for '{}' after NeedComplete", h.relative_path),
+                )))
+            }
+            Some(SourceEvent::BlockHashes(l)) => {
+                Err(eyre::Report::new(SessionFault::protocol_violation(
+                    format!("BlockHashList for '{}' after SourceDone", l.relative_path),
+                )))
+            }
+            Some(SourceEvent::NeedComplete) => Err(eyre::Report::new(
+                SessionFault::protocol_violation("duplicate NeedComplete"),
+            )),
+            Some(SourceEvent::ResizeAck(_)) => Err(eyre::Report::new(
+                SessionFault::protocol_violation("DataPlaneResizeAck after SourceDone"),
+            )),
+            None => Err(eyre::Report::new(SessionFault::internal(
+                "source receive half ended before TransferSummary",
+            ))),
         }
-        Some(SourceEvent::Fault(fault)) => Err(eyre::Report::new(fault)),
-        Some(SourceEvent::Need(h) | SourceEvent::ResumeNeed(h)) => {
-            Err(eyre::Report::new(SessionFault::protocol_violation(
-                format!("need for '{}' after NeedComplete", h.relative_path),
-            )))
-        }
-        Some(SourceEvent::BlockHashes(l)) => {
-            Err(eyre::Report::new(SessionFault::protocol_violation(
-                format!("BlockHashList for '{}' after SourceDone", l.relative_path),
-            )))
-        }
-        Some(SourceEvent::NeedComplete) => Err(eyre::Report::new(
-            SessionFault::protocol_violation("duplicate NeedComplete"),
-        )),
-        Some(SourceEvent::ResizeAck(_)) => Err(eyre::Report::new(
-            SessionFault::protocol_violation("DataPlaneResizeAck after SourceDone"),
-        )),
-        None => Err(eyre::Report::new(SessionFault::internal(
-            "source receive half ended before TransferSummary",
-        ))),
     }
+    .await;
+
+    if result.is_err() {
+        if let Some(dp) = data_plane.as_mut() {
+            dp.abort_and_join().await;
+        }
+    }
+    result
 }
 
 /// Drain ready peer events and live-dial proposals without blocking. Peer
@@ -1955,6 +2054,14 @@ async fn drain_ready_source_events(
     small_file_probe: Option<&BoundSmallFileProbe>,
 ) -> Result<()> {
     loop {
+        // Once the ordered terminal need marker is known and no payload work
+        // remains to queue, do not consume a newly claimed tuner proposal.
+        // Shutdown closes/drains the proposal channel and settles it
+        // unchanged. Sending it here would cross a resize after demand was
+        // already terminal merely because both events became ready together.
+        if *need_complete && pending.is_empty() && resume.ready.is_empty() {
+            break;
+        }
         if let Ok(event) = events.try_recv() {
             process_source_event(
                 event,
@@ -2759,6 +2866,7 @@ enum DestinationResizeDecision {
 struct DestinationResizeState {
     settled_epoch: u32,
     live_streams: usize,
+    peak_streams: usize,
     ceiling: usize,
     refused: bool,
     last_request: Option<DataPlaneResize>,
@@ -2771,6 +2879,7 @@ impl DestinationResizeState {
         Self {
             settled_epoch: 0,
             live_streams,
+            peak_streams: live_streams,
             ceiling,
             refused: false,
             last_request: None,
@@ -2871,6 +2980,7 @@ impl DestinationResizeState {
     fn settle(&mut self, request: DataPlaneResize, accepted: bool) -> DataPlaneResizeAck {
         if accepted {
             self.live_streams = request.target_stream_count as usize;
+            self.peak_streams = self.peak_streams.max(self.live_streams);
         } else {
             self.refused = true;
         }
@@ -3286,6 +3396,33 @@ async fn destination_session(
         &negotiated,
         SessionPhaseRole::Destination,
     );
+    let result = destination_session_inner(
+        transport,
+        negotiated,
+        dst_root,
+        data_plane_host,
+        instruments,
+        local_apply,
+        phase_trace.clone(),
+        small_file_probe.clone(),
+    )
+    .await;
+    flush_session_phase_trace(phase_trace.as_ref()).await;
+    finish_small_file_probe(small_file_probe.as_ref()).await;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn destination_session_inner(
+    transport: &mut FrameTransport,
+    negotiated: Negotiated,
+    dst_root: &Path,
+    data_plane_host: Option<&str>,
+    instruments: DestinationInstruments,
+    local_apply: Option<local::LocalApply>,
+    phase_trace: Option<BoundSessionPhaseTrace>,
+    small_file_probe: Option<BoundSmallFileProbe>,
+) -> Result<DestinationOutcome> {
     // otp-10b-2: the receive side's w6-1 progress lane. Need batches are
     // the denominator (reported where they're emitted, below); per-file
     // events ride each carrier's record handling.
@@ -3526,6 +3663,7 @@ async fn destination_session(
     // data-plane receive does.
     let mut local_run = local_apply.as_ref().map(|la| la.start(progress.clone()));
 
+    let result: Result<DestinationOutcome> = async {
     loop {
         let received = match transport.recv().await? {
             Some(f) => f,
@@ -3657,6 +3795,9 @@ async fn destination_session(
                 transport
                     .send(frame(Frame::NeedComplete(NeedComplete {})))
                     .await?;
+                if let Some(trace) = &phase_trace {
+                    trace.event("need_complete_sent", SessionPhaseFields::default());
+                }
                 manifest_complete = true;
             }
             Some(Frame::FileBegin(header)) => {
@@ -4001,11 +4142,21 @@ async fn destination_session(
                     }
                 }
                 let final_logical_streams = resize_state.as_ref().map(|state| state.live_streams);
-                let (in_stream_carrier_used, data_plane_streams) = match data_plane_recv.take() {
+                let peak_logical_streams = resize_state.as_ref().map(|state| state.peak_streams);
+                let receiver_ceiling = resize_state.as_ref().map(|state| state.ceiling);
+                let (in_stream_carrier_used, data_plane_streams) = match data_plane_recv.as_mut() {
                     Some(run) => {
                         let totals = run.finish().await?;
                         if let Some(trace) = &phase_trace {
-                            trace.event("data_plane_complete", SessionPhaseFields::default());
+                            trace.event(
+                                "data_plane_complete",
+                                SessionPhaseFields {
+                                    live_streams: final_logical_streams.map(|value| value as u32),
+                                    receiver_ceiling: receiver_ceiling.map(|value| value as u32),
+                                    peak_streams: peak_logical_streams.map(|value| value as u32),
+                                    ..Default::default()
+                                },
+                            );
                         }
                         files_written = totals.outcome.files_written as u64;
                         bytes_written = totals.outcome.bytes_written;
@@ -4013,6 +4164,7 @@ async fn destination_session(
                             final_logical_streams.is_some(),
                             "receive data plane must have logical resize state"
                         );
+                        data_plane_recv = None;
                         (false, final_logical_streams)
                     }
                     None => (true, None),
@@ -4150,8 +4302,6 @@ async fn destination_session(
                 if let Some(trace) = &phase_trace {
                     trace.event("summary_sent", SessionPhaseFields::default());
                 }
-                flush_session_phase_trace(phase_trace.as_ref()).await;
-                finish_small_file_probe(small_file_probe.as_ref()).await;
                 return Ok(DestinationOutcome {
                     summary,
                     needed_paths,
@@ -4174,6 +4324,29 @@ async fn destination_session(
             }
         }
     }
+    }
+    .await;
+
+    if result.is_err() {
+        let data_plane_was_live = data_plane_recv.is_some();
+        if let Some(run) = data_plane_recv.as_mut() {
+            run.abort_and_join().await;
+        }
+        if data_plane_was_live {
+            if let (Some(trace), Some(state)) = (&phase_trace, &resize_state) {
+                trace.event(
+                    "data_plane_aborted",
+                    SessionPhaseFields {
+                        live_streams: Some(state.live_streams as u32),
+                        receiver_ceiling: Some(state.ceiling as u32),
+                        peak_streams: Some(state.peak_streams as u32),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+    result
 }
 
 /// The LOCAL carrier's twin of [`diff_chunk_and_send_needs`] (otp-11):
@@ -5283,10 +5456,7 @@ mod tests {
             &self,
             filter: Option<crate::fs_enum::FileFilter>,
             unreadable_paths: Arc<StdMutex<Vec<String>>>,
-        ) -> (
-            mpsc::Receiver<FileHeader>,
-            tokio::task::JoinHandle<Result<u64>>,
-        ) {
+        ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             self.inner.scan(filter, unreadable_paths)
         }
 
@@ -5301,6 +5471,48 @@ mod tests {
                 .map_err(|_| eyre::eyre!("payload test gate closed"))?;
             permit.forget();
             self.inner.prepare_payload(payload).await
+        }
+
+        async fn check_availability(
+            &self,
+            headers: Vec<FileHeader>,
+            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        ) -> Result<Vec<FileHeader>> {
+            self.inner
+                .check_availability(headers, unreadable_paths)
+                .await
+        }
+
+        async fn open_file(
+            &self,
+            header: &FileHeader,
+        ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+            self.inner.open_file(header).await
+        }
+
+        fn root(&self) -> &Path {
+            self.inner.root()
+        }
+    }
+
+    struct PrepareFaultSource {
+        inner: FsTransferSource,
+    }
+
+    #[async_trait::async_trait]
+    impl TransferSource for PrepareFaultSource {
+        fn scan(
+            &self,
+            _filter: Option<crate::fs_enum::FileFilter>,
+            _unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+            let (_tx, rx) = mpsc::channel(1);
+            let task = tokio::spawn(async { Err(eyre::eyre!("injected TCP source fault")) });
+            (rx, SourceScan::new(task))
+        }
+
+        async fn prepare_payload(&self, _payload: TransferPayload) -> Result<PreparedPayload> {
+            Err(eyre::eyre!("injected TCP source fault"))
         }
 
         async fn check_availability(
@@ -5343,6 +5555,87 @@ mod tests {
         }
     }
 
+    struct ResizeAckGate {
+        entered: AtomicBool,
+        changed: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
+        acks: StdMutex<Vec<DataPlaneResizeAck>>,
+    }
+
+    impl ResizeAckGate {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                entered: AtomicBool::new(false),
+                changed: tokio::sync::Notify::new(),
+                release: tokio::sync::Semaphore::new(0),
+                acks: StdMutex::new(Vec::new()),
+            })
+        }
+
+        async fn wait_until_entered(&self) {
+            loop {
+                let changed = self.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if self.entered.load(Ordering::Acquire) {
+                    return;
+                }
+                changed.await;
+            }
+        }
+
+        fn release(&self) {
+            self.release.add_permits(1);
+        }
+    }
+
+    struct ResizeAckGateTx {
+        inner: Box<dyn FrameTx>,
+        gate: Arc<ResizeAckGate>,
+    }
+
+    #[async_trait::async_trait]
+    impl FrameTx for ResizeAckGateTx {
+        async fn send(&mut self, frame: TransferFrame) -> Result<()> {
+            if let Some(Frame::ResizeAck(ack)) = frame.frame.as_ref() {
+                self.gate.acks.lock().unwrap().push(*ack);
+                self.gate.entered.store(true, Ordering::Release);
+                self.gate.changed.notify_waiters();
+                self.gate
+                    .release
+                    .acquire()
+                    .await
+                    .map_err(|_| eyre::eyre!("resize ACK test gate closed"))?
+                    .forget();
+            }
+            self.inner.send(frame).await
+        }
+    }
+
+    struct CancelOnResizeAckTx {
+        inner: Box<dyn FrameTx>,
+        fired: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl FrameTx for CancelOnResizeAckTx {
+        async fn send(&mut self, frame: TransferFrame) -> Result<()> {
+            if matches!(frame.frame.as_ref(), Some(Frame::ResizeAck(_))) {
+                self.fired.store(true, Ordering::Release);
+                return self
+                    .inner
+                    .send(super::frame(Frame::Error(SessionError {
+                        code: session_error::Code::Cancelled as i32,
+                        message: "injected cancellation during resize".into(),
+                        relative_path: None,
+                        ..Default::default()
+                    })))
+                    .await;
+            }
+            self.inner.send(frame).await
+        }
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct WireResizeStep {
         epoch: u32,
@@ -5357,6 +5650,7 @@ mod tests {
         final_streams: usize,
         summary: TransferSummary,
         needed_paths: Vec<String>,
+        events: Vec<crate::remote::transfer::session_phase::SessionPhaseEvent>,
     }
 
     async fn submit_dial_sample(
@@ -5410,6 +5704,25 @@ mod tests {
         file_count: usize,
         file_bytes: usize,
     ) -> DialTraceRun {
+        run_dial_trace_script_with_fixture(
+            initiator_role,
+            receiver_capacity,
+            &[(target_streams, delta_bytes, blocked_ratio, hold_samples)],
+            false,
+            file_count,
+            file_bytes,
+        )
+        .await
+    }
+
+    async fn run_dial_trace_script_with_fixture(
+        initiator_role: TransferRole,
+        receiver_capacity: CapacityProfile,
+        phases: &[(usize, u64, f64, usize)],
+        trace_enabled: bool,
+        file_count: usize,
+        file_bytes: usize,
+    ) -> DialTraceRun {
         let tmp = tempfile::tempdir().expect("tempdir");
         let src_root = tmp.path().join("src");
         let dst_root = tmp.path().join("dst");
@@ -5443,6 +5756,20 @@ mod tests {
         };
 
         let (sample_tx, sample_rx) = mpsc::unbounded_channel();
+        let captured_events: Arc<
+            StdMutex<Vec<crate::remote::transfer::session_phase::SessionPhaseEvent>>,
+        > = Arc::default();
+        let phase_trace = if trace_enabled {
+            let captured = Arc::clone(&captured_events);
+            SessionPhaseTrace::capture("dial-guard", move |event| {
+                captured
+                    .lock()
+                    .expect("dial phase capture lock poisoned")
+                    .push(event);
+            })
+        } else {
+            SessionPhaseTrace::disabled()
+        };
         let source_cfg = SourceSessionConfig {
             hello: HelloConfig::default(),
             endpoint: source_endpoint,
@@ -5450,6 +5777,7 @@ mod tests {
             data_plane_host: source_host,
             instruments: SourceInstruments {
                 dial_test_samples: Some(Arc::new(StdMutex::new(Some(sample_rx)))),
+                session_phase_trace: phase_trace.clone(),
                 ..Default::default()
             },
         };
@@ -5458,7 +5786,10 @@ mod tests {
             endpoint: dest_endpoint,
             data_plane_host: dest_host,
             receiver_capacity: Some(receiver_capacity),
-            instruments: DestinationInstruments::default(),
+            instruments: DestinationInstruments {
+                session_phase_trace: phase_trace,
+                ..Default::default()
+            },
             local_apply: None,
         };
 
@@ -5495,25 +5826,27 @@ mod tests {
             .expect("payload demand never reached the gated source");
 
         let mut live = crate::dial::receiver_initial_streams(Some(&receiver_capacity));
-        let mut attempts = 0usize;
-        while live != target_streams {
-            attempts += 1;
-            assert!(attempts <= 256, "dial trace did not reach {target_streams}");
-            let observed = submit_dial_sample(&sample_tx, delta_bytes, blocked_ratio).await;
-            if let Some(proposal) = observed.proposal {
-                assert_eq!(proposal.epoch, observed.settled_epoch);
-                assert_eq!(proposal.target_streams, observed.live_streams);
+        for &(target_streams, delta_bytes, blocked_ratio, hold_samples) in phases {
+            let mut attempts = 0usize;
+            while live != target_streams {
+                attempts += 1;
+                assert!(attempts <= 256, "dial trace did not reach {target_streams}");
+                let observed = submit_dial_sample(&sample_tx, delta_bytes, blocked_ratio).await;
+                if let Some(proposal) = observed.proposal {
+                    assert_eq!(proposal.epoch, observed.settled_epoch);
+                    assert_eq!(proposal.target_streams, observed.live_streams);
+                }
+                live = observed.live_streams;
             }
-            live = observed.live_streams;
-        }
-        for _ in 0..hold_samples {
-            let observed = submit_dial_sample(&sample_tx, delta_bytes, blocked_ratio).await;
-            assert_eq!(observed.proposal, None, "bound/hold sample resized");
-            assert_eq!(observed.live_streams, target_streams);
-            assert_eq!(
-                observed.settled_epoch,
-                captured.lock().unwrap().len() as u32
-            );
+            for _ in 0..hold_samples {
+                let observed = submit_dial_sample(&sample_tx, delta_bytes, blocked_ratio).await;
+                assert_eq!(observed.proposal, None, "bound/hold sample resized");
+                assert_eq!(observed.live_streams, target_streams);
+                assert_eq!(
+                    observed.settled_epoch,
+                    captured.lock().unwrap().len() as u32
+                );
+            }
         }
 
         gate.release(file_count + 8);
@@ -5530,7 +5863,13 @@ mod tests {
         let final_streams = destination
             .data_plane_streams
             .expect("data plane ran, final logical count recorded");
-        assert_eq!(final_streams, target_streams);
+        assert_eq!(
+            final_streams,
+            phases
+                .last()
+                .expect("dial trace needs at least one phase")
+                .0
+        );
         let mut needed_paths = destination.needed_paths;
         needed_paths.sort();
         for i in 0..file_count {
@@ -5555,12 +5894,18 @@ mod tests {
                 token_len: resize.sub_token.len(),
             })
             .collect();
+        drop(frames);
+        let events = captured_events
+            .lock()
+            .expect("dial phase capture lock poisoned")
+            .clone();
         DialTraceRun {
             steps,
             add_tokens,
             final_streams,
             summary: source_summary,
             needed_paths,
+            events,
         }
     }
 
@@ -5694,6 +6039,770 @@ mod tests {
             assert_eq!(unknown.steps.len(), 13);
             assert_eq!(unknown.final_streams, 17);
         }
+    }
+
+    async fn wait_for_captured_phase(
+        events: &Arc<StdMutex<Vec<crate::remote::transfer::session_phase::SessionPhaseEvent>>>,
+        endpoint_role: SessionPhaseRole,
+        name: &'static str,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if events
+                    .lock()
+                    .expect("phase event capture lock poisoned")
+                    .iter()
+                    .any(|event| event.endpoint_role == endpoint_role && event.event == name)
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {endpoint_role:?}/{name}"));
+    }
+
+    async fn run_unsent_terminal_resize(initiator_role: TransferRole, blocked_ratio: f64) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("source dir");
+        std::fs::create_dir_all(&dst_root).expect("destination dir");
+
+        let open = SessionOpen {
+            initiator_role: initiator_role as i32,
+            compare_mode: ComparisonMode::SizeMtime as i32,
+            in_stream_bytes: false,
+            ..Default::default()
+        };
+        let (source_endpoint, dest_endpoint, source_host, dest_host) = match initiator_role {
+            TransferRole::Source => (
+                SessionEndpoint::initiator(open),
+                SessionEndpoint::Responder,
+                Some("127.0.0.1".to_string()),
+                None,
+            ),
+            TransferRole::Destination => (
+                SessionEndpoint::Responder,
+                SessionEndpoint::initiator(open),
+                None,
+                Some("127.0.0.1".to_string()),
+            ),
+            TransferRole::Unspecified => unreachable!(),
+        };
+
+        let events: Arc<StdMutex<Vec<crate::remote::transfer::session_phase::SessionPhaseEvent>>> =
+            Arc::default();
+        let captured_events = Arc::clone(&events);
+        let phase_trace = SessionPhaseTrace::capture("terminal-resize", move |event| {
+            captured_events.lock().unwrap().push(event);
+        });
+        let gate = DialTerminalTestGate::new();
+        let (sample_tx, sample_rx) = mpsc::unbounded_channel();
+        let source_cfg = SourceSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: source_endpoint,
+            plan_options: PlanOptions::default(),
+            data_plane_host: source_host,
+            instruments: SourceInstruments {
+                session_phase_trace: phase_trace.clone(),
+                dial_test_samples: Some(Arc::new(StdMutex::new(Some(sample_rx)))),
+                dial_terminal_test_gate: Some(Arc::clone(&gate)),
+                ..Default::default()
+            },
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: dest_endpoint,
+            data_plane_host: dest_host,
+            receiver_capacity: Some(constrained_profile(17)),
+            instruments: DestinationInstruments {
+                session_phase_trace: phase_trace,
+                ..Default::default()
+            },
+            local_apply: None,
+        };
+        let resize_frames: Arc<StdMutex<Vec<DataPlaneResize>>> = Arc::default();
+        let (source_transport, dest_transport) = transport::in_process_pair();
+        let (source_tx, source_rx) = source_transport.split();
+        let source_transport = FrameTransport::new(
+            Box::new(ResizeCaptureTx {
+                inner: source_tx,
+                frames: Arc::clone(&resize_frames),
+            }),
+            source_rx,
+        );
+        let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root));
+        let session = tokio::spawn(async move {
+            tokio::join!(
+                run_source(source_cfg, source_transport, source),
+                run_destination(dest_cfg, dest_transport, DestinationTarget::Fixed(dst_root)),
+            )
+        });
+
+        gate.wait_until_entered().await;
+        wait_for_captured_phase(&events, SessionPhaseRole::Source, "need_complete_received").await;
+        for _ in 0..3 {
+            let observed = submit_dial_sample(&sample_tx, 1024, blocked_ratio).await;
+            assert_eq!(observed.proposal, None);
+            assert_eq!(observed.live_streams, 4);
+        }
+        let (reply, pending_reply) = tokio::sync::oneshot::channel();
+        sample_tx
+            .send(DialTestSample {
+                delta_bytes: 1024,
+                blocked_ratio,
+                reply,
+            })
+            .expect("test tuner remains alive");
+        wait_for_captured_phase(&events, SessionPhaseRole::Source, "dial_pending").await;
+        gate.release();
+
+        let (source_result, destination_result) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), session)
+                .await
+                .expect("terminal resize session timed out")
+                .expect("terminal resize session task panicked");
+        let source_summary = source_result.expect("source succeeds");
+        let destination = destination_result.expect("destination succeeds");
+        assert_eq!(source_summary, destination.summary);
+        assert_eq!(source_summary.files_transferred, 0);
+        assert_eq!(destination.data_plane_streams, Some(4));
+        assert!(resize_frames.lock().unwrap().is_empty());
+        assert!(
+            pending_reply.await.is_err(),
+            "terminal shutdown stops the injected tuner instead of accepting its proposal"
+        );
+        let events = events.lock().unwrap();
+        let settlement: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.endpoint_role == SessionPhaseRole::Source && event.event == "dial_settlement"
+            })
+            .collect();
+        assert_eq!(settlement.len(), 1);
+        assert_eq!(settlement[0].accepted, Some(false));
+        assert_eq!(settlement[0].live_streams, Some(4));
+        assert_eq!(settlement[0].peak_streams, Some(4));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn need_complete_refuses_ready_unsent_add_and_remove_in_both_layouts() {
+        for role in [TransferRole::Source, TransferRole::Destination] {
+            run_unsent_terminal_resize(role, 0.0).await;
+            run_unsent_terminal_resize(role, 1.0).await;
+        }
+    }
+
+    async fn run_accepted_terminal_resize(initiator_role: TransferRole, op: DataPlaneResizeOp) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("source dir");
+        std::fs::create_dir_all(&dst_root).expect("destination dir");
+        let content = vec![0x6b; 129 * 1024];
+        for index in 0..16 {
+            std::fs::write(src_root.join(format!("payload-{index:02}.bin")), &content)
+                .expect("write fixture");
+        }
+
+        let open = SessionOpen {
+            initiator_role: initiator_role as i32,
+            compare_mode: ComparisonMode::SizeMtime as i32,
+            in_stream_bytes: false,
+            ..Default::default()
+        };
+        let (source_endpoint, dest_endpoint, source_host, dest_host) = match initiator_role {
+            TransferRole::Source => (
+                SessionEndpoint::initiator(open),
+                SessionEndpoint::Responder,
+                Some("127.0.0.1".to_string()),
+                None,
+            ),
+            TransferRole::Destination => (
+                SessionEndpoint::Responder,
+                SessionEndpoint::initiator(open),
+                None,
+                Some("127.0.0.1".to_string()),
+            ),
+            TransferRole::Unspecified => unreachable!(),
+        };
+        let events: Arc<StdMutex<Vec<crate::remote::transfer::session_phase::SessionPhaseEvent>>> =
+            Arc::default();
+        let captured_events = Arc::clone(&events);
+        let phase_trace = SessionPhaseTrace::capture("accepted-terminal", move |event| {
+            captured_events.lock().unwrap().push(event);
+        });
+        let (sample_tx, sample_rx) = mpsc::unbounded_channel();
+        let payload_gate = PayloadGate::new();
+        let source: Arc<dyn TransferSource> = Arc::new(GatedTransferSource {
+            inner: FsTransferSource::new(src_root),
+            gate: Arc::clone(&payload_gate),
+        });
+        let source_cfg = SourceSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: source_endpoint,
+            plan_options: PlanOptions::default(),
+            data_plane_host: source_host,
+            instruments: SourceInstruments {
+                session_phase_trace: phase_trace.clone(),
+                dial_test_samples: Some(Arc::new(StdMutex::new(Some(sample_rx)))),
+                ..Default::default()
+            },
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: dest_endpoint,
+            data_plane_host: dest_host,
+            receiver_capacity: Some(constrained_profile(17)),
+            instruments: DestinationInstruments {
+                session_phase_trace: phase_trace,
+                ..Default::default()
+            },
+            local_apply: None,
+        };
+
+        let source_resizes: Arc<StdMutex<Vec<DataPlaneResize>>> = Arc::default();
+        let ack_gate = ResizeAckGate::new();
+        let (source_transport, destination_transport) = transport::in_process_pair();
+        let (source_tx, source_rx) = source_transport.split();
+        let source_transport = FrameTransport::new(
+            Box::new(ResizeCaptureTx {
+                inner: source_tx,
+                frames: Arc::clone(&source_resizes),
+            }),
+            source_rx,
+        );
+        let (destination_tx, destination_rx) = destination_transport.split();
+        let destination_transport = FrameTransport::new(
+            Box::new(ResizeAckGateTx {
+                inner: destination_tx,
+                gate: Arc::clone(&ack_gate),
+            }),
+            destination_rx,
+        );
+        let destination_root = dst_root.clone();
+        let session = tokio::spawn(async move {
+            tokio::join!(
+                run_source(source_cfg, source_transport, source),
+                run_destination(
+                    dest_cfg,
+                    destination_transport,
+                    DestinationTarget::Fixed(destination_root)
+                ),
+            )
+        });
+
+        // Four workers are held in prepare and the one-slot queue is full,
+        // so the SOURCE remains in its event-servicing queue loop while the
+        // deterministic resize is proposed.
+        payload_gate.wait_for_entered(4).await;
+        let blocked_ratio = if op == DataPlaneResizeOp::Add {
+            0.0
+        } else {
+            1.0
+        };
+        for _ in 0..3 {
+            let observed = submit_dial_sample(&sample_tx, 1024, blocked_ratio).await;
+            assert_eq!(observed.proposal, None);
+        }
+        let (reply, _pending_reply) = tokio::sync::oneshot::channel();
+        sample_tx
+            .send(DialTestSample {
+                delta_bytes: 1024,
+                blocked_ratio,
+                reply,
+            })
+            .expect("test tuner remains alive");
+        ack_gate.wait_until_entered().await;
+        payload_gate.release(64);
+        wait_for_captured_phase(&events, SessionPhaseRole::Source, "membership_sealed").await;
+        ack_gate.release();
+        wait_for_captured_phase(&events, SessionPhaseRole::Source, "dial_settlement").await;
+
+        let (source_result, destination_result) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), session)
+                .await
+                .expect("accepted terminal resize session timed out")
+                .expect("accepted terminal resize session task panicked");
+        let source_summary = source_result.expect("source succeeds");
+        let destination = destination_result.expect("destination succeeds");
+        assert_eq!(source_summary, destination.summary);
+        assert_eq!(source_summary.files_transferred, 16);
+        let expected_final = if op == DataPlaneResizeOp::Add { 5 } else { 3 };
+        let expected_peak = if op == DataPlaneResizeOp::Add { 5 } else { 4 };
+        assert_eq!(destination.data_plane_streams, Some(expected_final));
+        for index in 0..16 {
+            assert_eq!(
+                std::fs::read(dst_root.join(format!("payload-{index:02}.bin"))).unwrap(),
+                content
+            );
+        }
+        let resizes = source_resizes.lock().unwrap();
+        assert_eq!(resizes.len(), 1);
+        assert_eq!(DataPlaneResizeOp::try_from(resizes[0].op).unwrap(), op);
+        assert_eq!(resizes[0].target_stream_count as usize, expected_final);
+        let acks = ack_gate.acks.lock().unwrap();
+        assert_eq!(acks.len(), 1);
+        assert!(acks[0].accepted);
+        assert_eq!(acks[0].effective_stream_count as usize, expected_final);
+        let events = events.lock().unwrap();
+        for endpoint_role in [SessionPhaseRole::Source, SessionPhaseRole::Destination] {
+            let complete = events
+                .iter()
+                .find(|event| {
+                    event.endpoint_role == endpoint_role && event.event == "data_plane_complete"
+                })
+                .expect("data-plane completion observed");
+            assert_eq!(complete.live_streams, Some(expected_final as u32));
+            assert_eq!(complete.peak_streams, Some(expected_peak as u32));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn accepted_add_and_remove_settle_after_need_complete_in_both_layouts() {
+        for role in [TransferRole::Source, TransferRole::Destination] {
+            run_accepted_terminal_resize(role, DataPlaneResizeOp::Add).await;
+            run_accepted_terminal_resize(role, DataPlaneResizeOp::Remove).await;
+        }
+    }
+
+    fn assert_destination_receive_tasks_stopped(
+        events: &[crate::remote::transfer::session_phase::SessionPhaseEvent],
+    ) {
+        let attached: HashSet<_> = events
+            .iter()
+            .filter(|event| {
+                event.endpoint_role == SessionPhaseRole::Destination
+                    && event.event == "socket_trace_attached"
+            })
+            .map(|event| (event.epoch, event.socket))
+            .collect();
+        let stopped: HashSet<_> = events
+            .iter()
+            .filter(|event| {
+                event.endpoint_role == SessionPhaseRole::Destination
+                    && event.event == "receive_task_stopped"
+            })
+            .map(|event| (event.epoch, event.socket))
+            .collect();
+        assert!(!attached.is_empty(), "TCP receive workers were started");
+        assert_eq!(
+            stopped, attached,
+            "every receive task stopped before return"
+        );
+    }
+
+    fn assert_data_plane_abort_accounting(
+        events: &[crate::remote::transfer::session_phase::SessionPhaseEvent],
+        source_streams: u32,
+        destination_streams: u32,
+    ) {
+        for endpoint_role in [SessionPhaseRole::Source, SessionPhaseRole::Destination] {
+            let aborted: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    event.endpoint_role == endpoint_role && event.event == "data_plane_aborted"
+                })
+                .collect();
+            assert_eq!(aborted.len(), 1, "one abort record for {endpoint_role:?}");
+            let streams = match endpoint_role {
+                SessionPhaseRole::Source => source_streams,
+                SessionPhaseRole::Destination => destination_streams,
+            };
+            assert_eq!(aborted[0].live_streams, Some(streams));
+            assert_eq!(aborted[0].peak_streams, Some(streams));
+            assert_eq!(aborted[0].receiver_ceiling, Some(17));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tcp_source_fault_joins_data_plane_tasks_in_both_layouts() {
+        for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let src_root = tmp.path().join("src");
+            let dst_root = tmp.path().join("dst");
+            std::fs::create_dir_all(&src_root).unwrap();
+            std::fs::create_dir_all(&dst_root).unwrap();
+            std::fs::write(src_root.join("fault.bin"), vec![0x41; 129 * 1024]).unwrap();
+
+            let open = SessionOpen {
+                initiator_role: initiator_role as i32,
+                compare_mode: ComparisonMode::SizeMtime as i32,
+                in_stream_bytes: false,
+                ..Default::default()
+            };
+            let (source_endpoint, dest_endpoint, source_host, dest_host) = match initiator_role {
+                TransferRole::Source => (
+                    SessionEndpoint::initiator(open),
+                    SessionEndpoint::Responder,
+                    Some("127.0.0.1".to_string()),
+                    None,
+                ),
+                TransferRole::Destination => (
+                    SessionEndpoint::Responder,
+                    SessionEndpoint::initiator(open),
+                    None,
+                    Some("127.0.0.1".to_string()),
+                ),
+                TransferRole::Unspecified => unreachable!(),
+            };
+            let events: Arc<
+                StdMutex<Vec<crate::remote::transfer::session_phase::SessionPhaseEvent>>,
+            > = Arc::default();
+            let captured = Arc::clone(&events);
+            let phase_trace = SessionPhaseTrace::capture("source-fault", move |event| {
+                captured.lock().unwrap().push(event);
+            });
+            let source_cfg = SourceSessionConfig {
+                hello: HelloConfig::default(),
+                endpoint: source_endpoint,
+                plan_options: PlanOptions::default(),
+                data_plane_host: source_host,
+                instruments: SourceInstruments {
+                    session_phase_trace: phase_trace.clone(),
+                    ..Default::default()
+                },
+            };
+            let dest_cfg = DestinationSessionConfig {
+                hello: HelloConfig::default(),
+                endpoint: dest_endpoint,
+                data_plane_host: dest_host,
+                receiver_capacity: Some(constrained_profile(17)),
+                instruments: DestinationInstruments {
+                    session_phase_trace: phase_trace,
+                    ..Default::default()
+                },
+                local_apply: None,
+            };
+            let source: Arc<dyn TransferSource> = Arc::new(PrepareFaultSource {
+                inner: FsTransferSource::new(src_root),
+            });
+            let (source_transport, destination_transport) = transport::in_process_pair();
+            let session = tokio::spawn(async move {
+                tokio::join!(
+                    run_source(source_cfg, source_transport, source),
+                    run_destination(
+                        dest_cfg,
+                        destination_transport,
+                        DestinationTarget::Fixed(dst_root)
+                    ),
+                )
+            });
+            let (source_result, destination_result) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), session)
+                    .await
+                    .expect("source-fault session timed out")
+                    .expect("source-fault session task panicked");
+            let source_error = source_result.expect_err("source fault must fail SOURCE");
+            let destination_error =
+                destination_result.expect_err("source fault must fail DESTINATION");
+            assert!(
+                format!("{source_error:#}").contains("injected TCP source fault"),
+                "source returned: {source_error:#}"
+            );
+            assert!(
+                format!("{destination_error:#}").contains("injected TCP source fault"),
+                "destination returned: {destination_error:#}"
+            );
+            let events = events.lock().unwrap();
+            assert_data_plane_abort_accounting(&events, 4, 4);
+            assert!(!events.iter().any(|event| event.event == "summary_sent"));
+            assert_destination_receive_tasks_stopped(&events);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tcp_cancellation_during_add_joins_tasks_without_false_settlement() {
+        for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let src_root = tmp.path().join("src");
+            let dst_root = tmp.path().join("dst");
+            std::fs::create_dir_all(&src_root).unwrap();
+            std::fs::create_dir_all(&dst_root).unwrap();
+            let content = vec![0x33; 129 * 1024];
+            for index in 0..16 {
+                std::fs::write(src_root.join(format!("cancel-{index:02}.bin")), &content).unwrap();
+            }
+
+            let open = SessionOpen {
+                initiator_role: initiator_role as i32,
+                compare_mode: ComparisonMode::SizeMtime as i32,
+                in_stream_bytes: false,
+                ..Default::default()
+            };
+            let (source_endpoint, dest_endpoint, source_host, dest_host) = match initiator_role {
+                TransferRole::Source => (
+                    SessionEndpoint::initiator(open),
+                    SessionEndpoint::Responder,
+                    Some("127.0.0.1".to_string()),
+                    None,
+                ),
+                TransferRole::Destination => (
+                    SessionEndpoint::Responder,
+                    SessionEndpoint::initiator(open),
+                    None,
+                    Some("127.0.0.1".to_string()),
+                ),
+                TransferRole::Unspecified => unreachable!(),
+            };
+            let events: Arc<
+                StdMutex<Vec<crate::remote::transfer::session_phase::SessionPhaseEvent>>,
+            > = Arc::default();
+            let captured = Arc::clone(&events);
+            let phase_trace = SessionPhaseTrace::capture("cancel-resize", move |event| {
+                captured.lock().unwrap().push(event);
+            });
+            let payload_gate = PayloadGate::new();
+            let source: Arc<dyn TransferSource> = Arc::new(GatedTransferSource {
+                inner: FsTransferSource::new(src_root),
+                gate: Arc::clone(&payload_gate),
+            });
+            let (sample_tx, sample_rx) = mpsc::unbounded_channel();
+            let source_cfg = SourceSessionConfig {
+                hello: HelloConfig::default(),
+                endpoint: source_endpoint,
+                plan_options: PlanOptions::default(),
+                data_plane_host: source_host,
+                instruments: SourceInstruments {
+                    session_phase_trace: phase_trace.clone(),
+                    dial_test_samples: Some(Arc::new(StdMutex::new(Some(sample_rx)))),
+                    ..Default::default()
+                },
+            };
+            let dest_cfg = DestinationSessionConfig {
+                hello: HelloConfig::default(),
+                endpoint: dest_endpoint,
+                data_plane_host: dest_host,
+                receiver_capacity: Some(constrained_profile(17)),
+                instruments: DestinationInstruments {
+                    session_phase_trace: phase_trace,
+                    ..Default::default()
+                },
+                local_apply: None,
+            };
+            let resize_frames: Arc<StdMutex<Vec<DataPlaneResize>>> = Arc::default();
+            let cancellation_fired = Arc::new(AtomicBool::new(false));
+            let (source_transport, destination_transport) = transport::in_process_pair();
+            let (source_tx, source_rx) = source_transport.split();
+            let source_transport = FrameTransport::new(
+                Box::new(ResizeCaptureTx {
+                    inner: source_tx,
+                    frames: Arc::clone(&resize_frames),
+                }),
+                source_rx,
+            );
+            let (destination_tx, destination_rx) = destination_transport.split();
+            let destination_transport = FrameTransport::new(
+                Box::new(CancelOnResizeAckTx {
+                    inner: destination_tx,
+                    fired: Arc::clone(&cancellation_fired),
+                }),
+                destination_rx,
+            );
+            let session = tokio::spawn(async move {
+                tokio::join!(
+                    run_source(source_cfg, source_transport, source),
+                    run_destination(
+                        dest_cfg,
+                        destination_transport,
+                        DestinationTarget::Fixed(dst_root)
+                    ),
+                )
+            });
+
+            payload_gate.wait_for_entered(4).await;
+            for _ in 0..3 {
+                assert_eq!(
+                    submit_dial_sample(&sample_tx, 1024, 0.0).await.proposal,
+                    None
+                );
+            }
+            let (reply, _pending_reply) = tokio::sync::oneshot::channel();
+            sample_tx
+                .send(DialTestSample {
+                    delta_bytes: 1024,
+                    blocked_ratio: 0.0,
+                    reply,
+                })
+                .expect("test tuner remains alive");
+
+            let (source_result, destination_result) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), session)
+                    .await
+                    .expect("cancelled resize session timed out")
+                    .expect("cancelled resize session task panicked");
+            let source_error = source_result.expect_err("cancel must fail SOURCE");
+            let _ = destination_result.expect_err("cancel must fail DESTINATION");
+            assert!(cancellation_fired.load(Ordering::Acquire));
+            assert!(
+                format!("{source_error:#}").contains("injected cancellation during resize"),
+                "source returned: {source_error:#}"
+            );
+            assert_eq!(resize_frames.lock().unwrap().len(), 1);
+            let events = events.lock().unwrap();
+            assert!(events.iter().any(|event| {
+                event.endpoint_role == SessionPhaseRole::Source && event.event == "dial_pending"
+            }));
+            assert_data_plane_abort_accounting(&events, 4, 5);
+            assert!(
+                !events.iter().any(|event| {
+                    event.endpoint_role == SessionPhaseRole::Source
+                        && event.event == "dial_settlement"
+                }),
+                "faulted accepted transport must not be rewritten as a refusal"
+            );
+            assert!(!events.iter().any(|event| event.event == "summary_sent"));
+            assert_destination_receive_tasks_stopped(&events);
+        }
+    }
+
+    fn dial_event_semantics(
+        events: &[crate::remote::transfer::session_phase::SessionPhaseEvent],
+    ) -> Vec<(
+        &'static str,
+        Option<&'static str>,
+        Option<&'static str>,
+        Option<u32>,
+        Option<u32>,
+        Option<u32>,
+        Option<bool>,
+    )> {
+        events
+            .iter()
+            .filter(|event| {
+                event.endpoint_role == SessionPhaseRole::Source && event.event.starts_with("dial_")
+            })
+            .map(|event| {
+                (
+                    event.event,
+                    event.action,
+                    event.reason,
+                    event.epoch,
+                    event.target_streams,
+                    event.live_streams,
+                    event.accepted,
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dial_observer_is_inert_and_reports_peak_separately_from_final() {
+        let phases = [(7, 1024, 0.0, 0), (1, 1024, 1.0, 0), (3, 1024, 0.0, 0)];
+        let mut observed_runs = Vec::new();
+        for role in [TransferRole::Source, TransferRole::Destination] {
+            let off = run_dial_trace_script_with_fixture(
+                role,
+                constrained_profile(17),
+                &phases,
+                false,
+                31,
+                129 * 1024,
+            )
+            .await;
+            let on = run_dial_trace_script_with_fixture(
+                role,
+                constrained_profile(17),
+                &phases,
+                true,
+                31,
+                129 * 1024,
+            )
+            .await;
+
+            assert!(off.events.is_empty(), "observer OFF emitted for {role:?}");
+            assert_eq!(off.steps, on.steps, "observer changed policy for {role:?}");
+            assert_eq!(off.summary, on.summary);
+            assert_eq!(off.needed_paths, on.needed_paths);
+            assert_eq!(off.final_streams, 3);
+            assert_eq!(on.final_streams, 3);
+            assert_eq!(on.add_tokens.len(), 5, "4→7 then 1→3 opens five sockets");
+
+            let samples: Vec<_> = on
+                .events
+                .iter()
+                .filter(|event| {
+                    event.endpoint_role == SessionPhaseRole::Source && event.event == "dial_sample"
+                })
+                .collect();
+            assert!(!samples.is_empty());
+            assert!(samples.iter().all(|event| {
+                event.reason.is_some()
+                    && event.sample_bytes.is_some()
+                    && event.sample_blocked_ns.is_some()
+                    && event.sample_elapsed_ns.is_some()
+                    && event.sample_streams.is_some()
+                    && event.sample_valid.is_some()
+                    && event.blocked_ratio.is_some()
+                    && event.chunk_bytes.is_some()
+                    && event.prefetch_count.is_some()
+                    && event.tcp_buffer_bytes.is_some()
+                    && event.receiver_ceiling == Some(17)
+                    && event.peak_streams.is_some()
+                    && (crate::dial::blocked_ratio(
+                        event.sample_blocked_ns.unwrap(),
+                        std::time::Duration::from_nanos(event.sample_elapsed_ns.unwrap()),
+                        event.sample_streams.unwrap() as usize,
+                    ) - event.blocked_ratio.unwrap())
+                    .abs()
+                        <= 1e-12
+            }));
+            assert_eq!(
+                on.events
+                    .iter()
+                    .filter(|event| {
+                        event.endpoint_role == SessionPhaseRole::Source
+                            && event.event == "dial_pending"
+                    })
+                    .count(),
+                on.steps.len()
+            );
+            assert_eq!(
+                on.events
+                    .iter()
+                    .filter(|event| {
+                        event.endpoint_role == SessionPhaseRole::Source
+                            && event.event == "dial_settlement"
+                            && event.accepted == Some(true)
+                    })
+                    .count(),
+                on.steps.len()
+            );
+            for endpoint_role in [SessionPhaseRole::Source, SessionPhaseRole::Destination] {
+                let complete: Vec<_> = on
+                    .events
+                    .iter()
+                    .filter(|event| {
+                        event.endpoint_role == endpoint_role && event.event == "data_plane_complete"
+                    })
+                    .collect();
+                assert_eq!(complete.len(), 1, "one completion for {endpoint_role:?}");
+                assert_eq!(complete[0].live_streams, Some(3));
+                assert_eq!(complete[0].peak_streams, Some(7));
+                assert_eq!(complete[0].receiver_ceiling, Some(17));
+            }
+
+            let dial_json = serde_json::to_string(
+                &on.events
+                    .iter()
+                    .filter(|event| event.event.starts_with("dial_"))
+                    .collect::<Vec<_>>(),
+            )
+            .expect("dial events serialize");
+            assert!(!dial_json.contains("f00.bin"));
+            assert!(!dial_json.contains("token"));
+            observed_runs.push(on);
+        }
+
+        assert_eq!(observed_runs[0].steps, observed_runs[1].steps);
+        assert_eq!(observed_runs[0].summary, observed_runs[1].summary);
+        assert_eq!(
+            dial_event_semantics(&observed_runs[0].events),
+            dial_event_semantics(&observed_runs[1].events),
+            "semantic dial trace must not depend on who initiated"
+        );
     }
 
     /// otp-10c-2 codex F4: the mirror delete pass containment-checks

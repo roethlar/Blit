@@ -31,7 +31,9 @@ use crate::remote::transfer::pipeline::execute_sink_pipeline_streaming;
 use crate::remote::transfer::sink::{
     FsSinkConfig, FsTransferSink, NullSink, SinkOutcome, TransferSink,
 };
-use crate::remote::transfer::source::{FilteredSource, FsTransferSource, TransferSource};
+use crate::remote::transfer::source::{
+    FilteredSource, FsTransferSource, SourceScan, TransferSource,
+};
 use crate::remote::transfer::{RemoteTransferProgress, SmallFileProbe};
 use crate::transfer_plan::PlanOptions;
 
@@ -438,11 +440,8 @@ impl TransferSource for DestSubtreeExcludedSource {
         &self,
         filter: Option<FileFilter>,
         unreadable_paths: Arc<StdMutex<Vec<String>>>,
-    ) -> (
-        mpsc::Receiver<FileHeader>,
-        tokio::task::JoinHandle<Result<u64>>,
-    ) {
-        let (mut inner_rx, inner_handle) = self.inner.scan(filter, unreadable_paths);
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
         let (tx, rx) = mpsc::channel(64);
         let exact = self.exclude_rel.clone();
         let prefix = format!("{}/", self.exclude_rel);
@@ -457,12 +456,10 @@ impl TransferSource for DestSubtreeExcludedSource {
                     break;
                 }
             }
-            inner_handle
-                .await
-                .map_err(|err| eyre!("manifest scan task panicked: {err}"))??;
             Ok(forwarded)
         });
-        (rx, handle)
+        scan.replace_primary(handle);
+        (rx, scan)
     }
 
     async fn prepare_payload(
@@ -621,6 +618,8 @@ pub async fn run_local_session(
             small_file_probe: SmallFileProbe::disabled(),
             #[cfg(test)]
             dial_test_samples: None,
+            #[cfg(test)]
+            dial_terminal_test_gate: None,
         },
     };
     let dest_cfg = DestinationSessionConfig {
@@ -801,10 +800,7 @@ mod tests {
             &self,
             filter: Option<FileFilter>,
             unreadable_paths: Arc<StdMutex<Vec<String>>>,
-        ) -> (
-            mpsc::Receiver<FileHeader>,
-            tokio::task::JoinHandle<eyre::Result<u64>>,
-        ) {
+        ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             self.inner.scan(filter, unreadable_paths)
         }
 
@@ -902,6 +898,8 @@ mod tests {
                 small_file_probe: SmallFileProbe::disabled(),
                 #[cfg(test)]
                 dial_test_samples: None,
+                #[cfg(test)]
+                dial_terminal_test_gate: None,
             },
         };
         let dest_cfg = DestinationSessionConfig {
@@ -1088,14 +1086,14 @@ mod tests {
             inner: Arc::new(FsTransferSource::new(src_root.clone())),
             exclude_rel: "backup".to_string(),
         };
-        let (mut rx, handle) = wrapper.scan(None, Arc::default());
+        let (mut rx, mut scan) = wrapper.scan(None, Arc::default());
         let mut forwarded = Vec::new();
         while let Some(h) = rx.recv().await {
             forwarded.push(h.relative_path);
         }
         forwarded.sort();
         assert_eq!(forwarded, vec!["a.txt".to_string(), "b.txt".to_string()]);
-        let count = handle.await.expect("join").expect("scan");
+        let count = scan.finish().await.expect("scan");
         assert_eq!(count, 2, "the forwarded count excludes the subtree");
     }
 
@@ -1120,11 +1118,8 @@ mod tests {
                 &self,
                 filter: Option<FileFilter>,
                 unreadable_paths: Arc<StdMutex<Vec<String>>>,
-            ) -> (
-                mpsc::Receiver<FileHeader>,
-                tokio::task::JoinHandle<eyre::Result<u64>>,
-            ) {
-                let (mut inner_rx, inner_handle) = self.inner.scan(filter, unreadable_paths);
+            ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+                let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
                 let (tx, rx) = mpsc::channel(8);
                 let gate = self
                     .gate
@@ -1148,12 +1143,10 @@ mod tests {
                             }
                         }
                     }
-                    inner_handle
-                        .await
-                        .map_err(|err| eyre!("scan task panicked: {err}"))??;
                     Ok(forwarded)
                 });
-                (rx, handle)
+                scan.replace_primary(handle);
+                (rx, scan)
             }
 
             async fn prepare_payload(

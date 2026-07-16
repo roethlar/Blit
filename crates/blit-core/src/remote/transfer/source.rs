@@ -8,20 +8,154 @@ use tokio::sync::mpsc;
 
 use crate::fs_enum::FileFilter;
 use crate::generated::FileHeader;
+use crate::remote::transfer::abort_on_drop::AbortOnDrop;
 use crate::remote::transfer::payload::{PreparedPayload, TransferPayload};
+
+/// All tasks that produce one streamed manifest. Decorators append their
+/// forwarding or hashing tasks instead of detaching them, so a failed session
+/// can abort and reap the complete validation chain before returning.
+enum SourceScanTask {
+    Count {
+        task: AbortOnDrop<Result<u64>>,
+        reported: bool,
+    },
+    Auxiliary(AbortOnDrop<()>),
+}
+
+enum SourceScanJoin {
+    Count(std::result::Result<Result<u64>, tokio::task::JoinError>),
+    Auxiliary(std::result::Result<(), tokio::task::JoinError>),
+}
+
+impl SourceScanTask {
+    async fn join(&mut self) -> SourceScanJoin {
+        match self {
+            Self::Count { task, .. } => SourceScanJoin::Count(task.join_mut().await),
+            Self::Auxiliary(task) => SourceScanJoin::Auxiliary(task.join_mut().await),
+        }
+    }
+
+    async fn abort_and_join(&mut self) {
+        match self {
+            Self::Count { task, .. } => {
+                let _ = task.abort_and_join_mut().await;
+            }
+            Self::Auxiliary(task) => {
+                let _ = task.abort_and_join_mut().await;
+            }
+        }
+    }
+
+    fn is_reported_count(&self) -> bool {
+        matches!(self, Self::Count { reported: true, .. })
+    }
+}
+
+pub struct SourceScan {
+    /// Creation order is dependency order: each decorator/replacement owns
+    /// the preceding stage's receiver. Error cleanup reaps this stack in
+    /// reverse so downstream receivers close before upstream producers.
+    tasks: Vec<SourceScanTask>,
+}
+
+impl SourceScan {
+    pub fn new(primary: tokio::task::JoinHandle<Result<u64>>) -> Self {
+        Self {
+            tasks: vec![SourceScanTask::Count {
+                task: AbortOnDrop::new(primary),
+                reported: true,
+            }],
+        }
+    }
+
+    pub fn add_auxiliary(&mut self, task: tokio::task::JoinHandle<()>) {
+        self.tasks
+            .push(SourceScanTask::Auxiliary(AbortOnDrop::new(task)));
+    }
+
+    /// Replace the reported count producer while retaining the prior scan as
+    /// an owned child whose failure and lifetime remain part of this run.
+    pub fn replace_primary(&mut self, primary: tokio::task::JoinHandle<Result<u64>>) {
+        for task in &mut self.tasks {
+            if let SourceScanTask::Count { reported, .. } = task {
+                *reported = false;
+            }
+        }
+        self.tasks.push(SourceScanTask::Count {
+            task: AbortOnDrop::new(primary),
+            reported: true,
+        });
+    }
+
+    pub async fn finish(&mut self) -> Result<u64> {
+        let reported_index = self
+            .tasks
+            .iter()
+            .position(SourceScanTask::is_reported_count)
+            .expect("SourceScan::finish called once");
+        let reported = self.tasks[reported_index].join().await;
+        self.tasks.remove(reported_index);
+        let count = match reported {
+            SourceScanJoin::Count(Ok(Ok(count))) => count,
+            SourceScanJoin::Count(Ok(Err(error))) => {
+                self.abort_and_join().await;
+                return Err(error);
+            }
+            SourceScanJoin::Count(Err(error)) => {
+                self.abort_and_join().await;
+                return Err(eyre::eyre!("manifest scan task panicked: {error}"));
+            }
+            SourceScanJoin::Auxiliary(_) => unreachable!("reported task is always a count"),
+        };
+
+        while !self.tasks.is_empty() {
+            let joined = self
+                .tasks
+                .last_mut()
+                .expect("non-empty manifest task stack")
+                .join()
+                .await;
+            self.tasks.pop();
+            match joined {
+                SourceScanJoin::Count(Ok(Ok(_))) | SourceScanJoin::Auxiliary(Ok(())) => {}
+                SourceScanJoin::Count(Ok(Err(error))) => {
+                    self.abort_and_join().await;
+                    return Err(error);
+                }
+                SourceScanJoin::Count(Err(error)) => {
+                    self.abort_and_join().await;
+                    return Err(eyre::eyre!("manifest scan task panicked: {error}"));
+                }
+                SourceScanJoin::Auxiliary(Err(error)) => {
+                    self.abort_and_join().await;
+                    return Err(eyre::eyre!("manifest helper panicked: {error}"));
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    pub async fn abort_and_join(&mut self) {
+        while !self.tasks.is_empty() {
+            self.tasks
+                .last_mut()
+                .expect("non-empty manifest task stack")
+                .abort_and_join()
+                .await;
+            self.tasks.pop();
+        }
+    }
+}
 
 #[async_trait]
 pub trait TransferSource: Send + Sync {
     /// Scans the source and streams discovered file headers.
-    /// Returns a receiver for the headers and a join handle for the scan task.
+    /// Returns a receiver for the headers and the owned validation-task run.
     fn scan(
         &self,
         filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
-    ) -> (
-        mpsc::Receiver<FileHeader>,
-        tokio::task::JoinHandle<Result<u64>>,
-    );
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan);
 
     /// Prepares a payload for transfer (e.g. opens a file or builds a tar shard).
     async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload>;
@@ -60,15 +194,13 @@ impl TransferSource for FsTransferSource {
         &self,
         filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
-    ) -> (
-        mpsc::Receiver<FileHeader>,
-        tokio::task::JoinHandle<Result<u64>>,
-    ) {
-        spawn_manifest_task(
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        let (headers, task) = spawn_manifest_task(
             self.root.clone(),
             filter.unwrap_or_default(),
             unreadable_paths,
-        )
+        );
+        (headers, SourceScan::new(task))
     }
 
     async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
@@ -310,15 +442,12 @@ impl TransferSource for FilteredSource {
         // by the orchestrator. Inner source emits unfiltered headers.
         _filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
-    ) -> (
-        mpsc::Receiver<FileHeader>,
-        tokio::task::JoinHandle<Result<u64>>,
-    ) {
-        let (header_rx, scan_handle) = self.inner.scan(None, unreadable_paths);
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        let (header_rx, mut scan) = self.inner.scan(None, unreadable_paths);
         if self.filter.is_empty() {
             // Fast path — no filter installed, return the inner channel
             // directly so we don't add a per-header forwarding hop.
-            return (header_rx, scan_handle);
+            return (header_rx, scan);
         }
         let filter = self.filter.clone_without_cache();
         let (tx, rx_filtered) = mpsc::channel::<FileHeader>(64);
@@ -330,8 +459,9 @@ impl TransferSource for FilteredSource {
         // an empty PathBuf, so basename globs like `*.txt` silently
         // rejected the file.
         let source_root = self.inner.root().to_path_buf();
-        tokio::spawn(filter_headers(header_rx, tx, filter, source_root));
-        (rx_filtered, scan_handle)
+        let task = tokio::spawn(filter_headers(header_rx, tx, filter, source_root));
+        scan.add_auxiliary(task);
+        (rx_filtered, scan)
     }
 
     async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
@@ -389,11 +519,8 @@ impl TransferSource for ChecksummingSource {
         &self,
         filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
-    ) -> (
-        mpsc::Receiver<FileHeader>,
-        tokio::task::JoinHandle<Result<u64>>,
-    ) {
-        let (mut header_rx, scan_handle) = self.inner.scan(filter, unreadable_paths);
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        let (mut header_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
         let (tx, rx_hashed) = mpsc::channel::<FileHeader>(64);
         let inner = Arc::clone(&self.inner);
         // codex otp-10b-1 F2: the hashing task must not outlive its
@@ -401,7 +528,7 @@ impl TransferSource for ChecksummingSource {
         // is checked between 64 KiB hash chunks, bounding residual work
         // after a session ends to one chunk.
         let stop_probe = tx.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let stop = move || stop_probe.is_closed();
             while let Some(mut header) = header_rx.recv().await {
                 match hash_header_content(inner.as_ref(), &header, &stop).await {
@@ -422,7 +549,8 @@ impl TransferSource for ChecksummingSource {
                 }
             }
         });
-        (rx_hashed, scan_handle)
+        scan.add_auxiliary(task);
+        (rx_hashed, scan)
     }
 
     async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
@@ -517,8 +645,97 @@ async fn filter_headers(
 #[cfg(test)]
 mod filtered_source_tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as StdMutex;
     use tokio::sync::mpsc::channel;
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn abort_reaps_downstream_replacement_before_blocked_scan_producer() {
+        let (tx, rx) = mpsc::channel(1);
+        let second_send = Arc::new(tokio::sync::Notify::new());
+        let second_send_task = Arc::clone(&second_send);
+        let child = tokio::task::spawn_blocking(move || {
+            tx.blocking_send(()).expect("first manifest item queued");
+            second_send_task.notify_one();
+            let _ = tx.blocking_send(());
+            Ok(1)
+        });
+
+        let replacement_dropped = Arc::new(AtomicBool::new(false));
+        let replacement_dropped_task = Arc::clone(&replacement_dropped);
+        let replacement_entered = Arc::new(tokio::sync::Notify::new());
+        let replacement_entered_task = Arc::clone(&replacement_entered);
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let replacement = tokio::spawn(async move {
+            let _drop_flag = DropFlag(replacement_dropped_task);
+            replacement_entered_task.notify_one();
+            let _ = release_rx.await;
+            drop(rx);
+            Ok(2)
+        });
+        let mut scan = SourceScan::new(child);
+        scan.replace_primary(replacement);
+        replacement_entered.notified().await;
+        second_send.notified().await;
+
+        if tokio::time::timeout(std::time::Duration::from_secs(5), scan.abort_and_join())
+            .await
+            .is_err()
+        {
+            // Mutation cleanup: release the replacement so an upstream-first
+            // implementation cannot strand the blocking pool after failing.
+            let _ = release_tx.send(());
+            scan.abort_and_join().await;
+            panic!("scan cleanup awaited its blocked producer before closing the receiver");
+        }
+        assert!(
+            replacement_dropped.load(Ordering::SeqCst),
+            "downstream receiver owner is destroyed before cleanup returns"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scan_error_reaps_pending_validation_helpers_before_return() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let release_task = Arc::clone(&release);
+        let primary = tokio::spawn(async move {
+            release_task.notified().await;
+            Err(eyre::eyre!("injected manifest failure"))
+        });
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let entered_task = Arc::clone(&entered);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_task = Arc::clone(&dropped);
+        let helper = tokio::spawn(async move {
+            let _drop_flag = DropFlag(dropped_task);
+            entered_task.notify_one();
+            std::future::pending::<()>().await;
+        });
+        let mut scan = SourceScan::new(primary);
+        scan.add_auxiliary(helper);
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("validation helper entered");
+        release.notify_one();
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), scan.finish())
+            .await
+            .expect("scan failure cleanup timed out")
+            .expect_err("primary scan must fail");
+        assert!(format!("{error:#}").contains("injected manifest failure"));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "validation helper must be destroyed before scan failure returns"
+        );
+    }
 
     /// Stub source that emits a fixed list of headers. Lets us verify
     /// `FilteredSource` filtering behavior independent of the real fs/remote
@@ -550,10 +767,7 @@ mod filtered_source_tests {
             &self,
             _filter: Option<FileFilter>,
             _unreadable: Arc<Mutex<Vec<String>>>,
-        ) -> (
-            mpsc::Receiver<FileHeader>,
-            tokio::task::JoinHandle<Result<u64>>,
-        ) {
+        ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             let headers = self.headers.lock().unwrap().take().unwrap_or_default();
             let (tx, rx) = channel(64);
             let count = headers.len() as u64;
@@ -565,7 +779,7 @@ mod filtered_source_tests {
                 }
                 Ok(count)
             });
-            (rx, handle)
+            (rx, SourceScan::new(handle))
         }
 
         async fn prepare_payload(&self, _: TransferPayload) -> Result<PreparedPayload> {
@@ -754,10 +968,7 @@ mod checksumming_source_tests {
             &self,
             _filter: Option<FileFilter>,
             _unreadable: Arc<Mutex<Vec<String>>>,
-        ) -> (
-            mpsc::Receiver<FileHeader>,
-            tokio::task::JoinHandle<Result<u64>>,
-        ) {
+        ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             let headers = self.headers.lock().unwrap().take().unwrap_or_default();
             let (tx, rx) = channel(64);
             let count = headers.len() as u64;
@@ -769,7 +980,7 @@ mod checksumming_source_tests {
                 }
                 Ok(count)
             });
-            (rx, handle)
+            (rx, SourceScan::new(handle))
         }
 
         async fn prepare_payload(&self, _: TransferPayload) -> Result<PreparedPayload> {
@@ -822,13 +1033,13 @@ mod checksumming_source_tests {
             root: PathBuf::from("/stub"),
         });
         let source = ChecksummingSource::new(stub);
-        let (mut rx, handle) = source.scan(None, Arc::default());
+        let (mut rx, mut scan) = source.scan(None, Arc::default());
 
         let mut got = std::collections::BTreeMap::new();
         while let Some(h) = rx.recv().await {
             got.insert(h.relative_path.clone(), h.checksum);
         }
-        handle.await.unwrap().unwrap();
+        scan.finish().await.unwrap();
 
         assert_eq!(
             got.len(),

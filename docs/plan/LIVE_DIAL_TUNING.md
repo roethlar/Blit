@@ -282,20 +282,27 @@ input, but keeps the membership command endpoint and terminal member ledger
 alive until the one in-flight epoch is classified and settled. A never-accepted
 local proposal may settle unchanged; an accepted proposal must take the live or
 terminal membership path above. It then joins the tuner and drains the elastic
-pipeline. Drop/cancellation aborts both tuner and pipeline under the existing
-fault contract rather than pretending an accepted operation was refused.
-The destination drains every receive worker, including a retiring worker's
-final payload and `END`, before scoring the summary. Its exposed stream count
-is the final logical count; a separate observer field may report peak or total
-opened sockets without changing that contract.
+pipeline. Every SOURCE scan/count/filter/checksum helper, tuner, and pipeline
+worker is owned and joined on normal, error, and cancellation exits. The
+DESTINATION likewise owns and joins every receive worker, including a retiring
+worker's final payload and `END`, before scoring the summary. Drop/cancellation
+uses the existing fault contract rather than pretending an accepted operation
+was refused. The exposed stream count is the final logical count; the observer
+reports a distinct peak count without changing that contract.
 
 Extend the existing session-phase instrumentation with one low-frequency dial
-event schema. Every sample records the raw aggregate used by policy and the
-decision reason (`idle`, `hysteresis`, `cheap-up`, `cheap-down`, `cooldown`,
-`bound`, `add`, `remove`, `pending`, `refused`) plus proposal/settlement fields.
-It is disabled by default and must be inert under the existing observer OFF/ON
-parity discipline. Hardware reviews consume these events; stderr anecdotes or
-final worker count alone are not evidence that the tuner ran correctly.
+event schema. Every sample records the raw aggregate used by policy — bytes,
+blocked nanoseconds, elapsed nanoseconds, stream count, validity, and computed
+ratio — plus the exact sample reason: `idle`, `rebaseline`, `hysteresis`,
+`cheap-up`, `cheap-down`, `sustain`, `cooldown`, `bound`, `add`, or `remove`.
+Lifecycle events use their own closed taxonomy: `dial_pending` records
+`pending`, while `dial_settlement` records `add`, `remove`, or `refused`, along
+with the proposal and settlement fields. Construction-time chunk, prefetch,
+and TCP choices are cheap snapshots, not worker authority. The observer is
+disabled by default and must be wire-neutral and policy-inert under the
+existing OFF/ON parity discipline. Hardware reviews consume these events;
+stderr anecdotes or final worker count alone are not evidence that the tuner
+ran correctly.
 
 ### 6. Durable contract correction
 
@@ -315,6 +322,8 @@ review passes.
   `data_plane.rs` — existing live probes and probe-aware sessions.
 - `crates/blit-core/src/remote/transfer/pipeline.rs` — acknowledged elastic
   membership and exact retire identity.
+- `crates/blit-core/src/remote/transfer/abort_on_drop.rs` and `source.rs` —
+  cancellation-safe task ownership and ordered scan/helper teardown.
 - `crates/blit-core/src/transfer_session/data_plane.rs` — common SOURCE data
   plane ownership, probe registry, tuner lifecycle, ADD/REMOVE membership.
 - `crates/blit-core/src/transfer_session/mod.rs` — op-aware SOURCE proposal
@@ -359,6 +368,8 @@ one-finding-per-commit review fixes.
    peak stream accounting, default-off observer inertness, and complete
    decision reasons. Run mutation proofs and the full debug/release/docs/CI
    gates; correct all live status text that still calls exact 8 adaptive parity.
+   A guard-proved candidate is awaiting exact full gates, commit, and neutral
+   Claude Fable 5/max openreview.
 4. **ldt-4 — quiet Mac↔Mac evidence.** After ldt-1..3 are independently
    accepted, build and stage exact clean artifacts, verify endpoint quietness,
    and run identical large/10k-small/mixed fixtures under both initiator

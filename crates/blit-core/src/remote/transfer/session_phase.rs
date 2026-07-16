@@ -40,6 +40,8 @@ pub struct SessionPhaseEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub epoch: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub socket: Option<u32>,
@@ -53,12 +55,35 @@ pub struct SessionPhaseEvent {
     pub live_streams: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_blocked_ns: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_elapsed_ns: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_streams: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_valid: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefetch_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_buffer_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receiver_ceiling: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_streams: Option<u32>,
 }
 
 /// Optional event fields shared by the small set of phase hooks.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SessionPhaseFields {
     pub(crate) action: Option<&'static str>,
+    pub(crate) reason: Option<&'static str>,
     pub(crate) epoch: Option<u32>,
     pub(crate) socket: Option<u32>,
     pub(crate) batch: Option<u64>,
@@ -66,6 +91,17 @@ pub(crate) struct SessionPhaseFields {
     pub(crate) target_streams: Option<u32>,
     pub(crate) live_streams: Option<u32>,
     pub(crate) accepted: Option<bool>,
+    pub(crate) sample_bytes: Option<u64>,
+    pub(crate) sample_blocked_ns: Option<u64>,
+    pub(crate) sample_elapsed_ns: Option<u64>,
+    pub(crate) sample_streams: Option<u32>,
+    pub(crate) sample_valid: Option<bool>,
+    pub(crate) blocked_ratio: Option<f64>,
+    pub(crate) chunk_bytes: Option<u64>,
+    pub(crate) prefetch_count: Option<u32>,
+    pub(crate) tcp_buffer_bytes: Option<u64>,
+    pub(crate) receiver_ceiling: Option<u32>,
+    pub(crate) peak_streams: Option<u32>,
 }
 
 type EventEmitter = dyn Fn(SessionPhaseEvent) + Send + Sync + 'static;
@@ -167,7 +203,7 @@ impl SessionPhaseTrace {
         mut output: impl FnMut(PhaseWriterOutput) + Send + 'static,
     ) -> Self {
         enum WriterMessage {
-            Event(SessionPhaseEvent),
+            Event(Box<SessionPhaseEvent>),
             Flush(std::sync::mpsc::SyncSender<()>),
         }
 
@@ -196,7 +232,7 @@ impl SessionPhaseTrace {
             emitter: Some(TraceEmitter {
                 run_id: Arc::from(run_id),
                 emit: Arc::new(move |event| {
-                    let _ = event_tx.send(WriterMessage::Event(event));
+                    let _ = event_tx.send(WriterMessage::Event(Box::new(event)));
                 }),
                 flush: Arc::new(move || {
                     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(0);
@@ -324,6 +360,7 @@ impl BoundSessionPhaseTrace {
             initiator_role: self.initiator_role,
             event,
             action: fields.action,
+            reason: fields.reason,
             epoch: fields.epoch,
             socket: fields.socket,
             batch: fields.batch,
@@ -331,6 +368,17 @@ impl BoundSessionPhaseTrace {
             target_streams: fields.target_streams,
             live_streams: fields.live_streams,
             accepted: fields.accepted,
+            sample_bytes: fields.sample_bytes,
+            sample_blocked_ns: fields.sample_blocked_ns,
+            sample_elapsed_ns: fields.sample_elapsed_ns,
+            sample_streams: fields.sample_streams,
+            sample_valid: fields.sample_valid,
+            blocked_ratio: fields.blocked_ratio,
+            chunk_bytes: fields.chunk_bytes,
+            prefetch_count: fields.prefetch_count,
+            tcp_buffer_bytes: fields.tcp_buffer_bytes,
+            receiver_ceiling: fields.receiver_ceiling,
+            peak_streams: fields.peak_streams,
         };
         (self.emitter.emit)(record);
     }

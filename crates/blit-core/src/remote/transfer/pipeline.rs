@@ -192,6 +192,10 @@ enum SinkCommand {
         reply: oneshot::Sender<usize>,
     },
     Seal,
+    Finish,
+    Abort {
+        reply: oneshot::Sender<()>,
+    },
 }
 
 /// The single, non-cloneable command endpoint for an elastic pipeline.
@@ -277,6 +281,29 @@ impl ElasticPipelineControl {
             return Err(eyre!("elastic pipeline closed before it was sealed"));
         }
         Ok(())
+    }
+
+    /// Declare that no later membership command will be issued while keeping
+    /// the control endpoint alive for cooperative abort. This lets a caller
+    /// race the clean pipeline drain against a peer fault without losing the
+    /// ability to abort and reap nested workers if the fault wins.
+    pub fn finish(&self) -> Result<()> {
+        self.tx
+            .send(SinkCommand::Finish)
+            .map_err(|_| eyre!("elastic pipeline closed before clean finish"))
+    }
+
+    /// Cancel every worker and wait until the supervisor has reaped them.
+    /// Error paths use this before returning so sockets, probes, and member
+    /// tasks cannot remain live for an executor turn after their session.
+    pub async fn abort_and_drain(&self) -> Result<()> {
+        let (reply, drained) = oneshot::channel();
+        self.tx
+            .send(SinkCommand::Abort { reply })
+            .map_err(|_| eyre!("elastic pipeline closed before abort"))?;
+        drained
+            .await
+            .map_err(|_| eyre!("elastic pipeline dropped abort acknowledgement"))
     }
 }
 
@@ -623,7 +650,7 @@ pub async fn execute_sink_pipeline_elastic(
     // for late-added workers — flume disconnect is sender-driven, so the
     // retained receiver does not keep the queue alive.)
     let cancelled_fwd = cancelled.clone();
-    let forwarder = tokio::spawn(async move {
+    let mut forwarder = tokio::spawn(async move {
         while let Some(payload) = payload_rx.recv().await {
             if cancelled_fwd.load(std::sync::atomic::Ordering::Relaxed) {
                 // A worker errored — stop draining the producer and let
@@ -648,9 +675,10 @@ pub async fn execute_sink_pipeline_elastic(
     // moot beyond that point.
     let mut control_rx = control_rx.map(|commands| commands.rx);
     let mut control_open = control_rx.is_some();
+    let mut finish_requested = false;
     let mut first_err: Option<eyre::Report> = None;
     loop {
-        if join_set.is_empty() && !control_open {
+        if join_set.is_empty() && (!control_open || finish_requested) {
             break;
         }
         let control_recv = async {
@@ -674,6 +702,53 @@ pub async fn execute_sink_pipeline_elastic(
                         if ledger.phase == PipelinePhase::Live {
                             ledger.phase = PipelinePhase::Sealed;
                         }
+                    }
+                    Some(SinkCommand::Finish) => {
+                        if ledger.phase == PipelinePhase::Live {
+                            ledger.phase = PipelinePhase::Sealed;
+                        }
+                        finish_requested = true;
+                    }
+                    Some(SinkCommand::Abort { reply }) => {
+                        ledger.phase = PipelinePhase::Failing;
+                        cancelled.store(true, Ordering::Relaxed);
+                        if let Some(rx) = control_rx.as_mut() {
+                            rx.close();
+                        }
+                        fail_pending_membership(&mut ledger, "elastic pipeline aborted");
+                        forwarder.abort();
+                        let _ = (&mut forwarder).await;
+                        join_set.abort_all();
+                        while let Some(joined) = join_set.join_next_with_id().await {
+                            if let Ok((task_id, (member_id, _))) = joined {
+                                task_members.remove(&task_id);
+                                if let Some(record) = ledger.members.get_mut(&member_id) {
+                                    record.state = MemberState::Failed;
+                                    if record.probe_registered {
+                                        record.probe_registered = false;
+                                        let _ = probes
+                                            .lock()
+                                            .expect("probe registry poisoned")
+                                            .unregister(member_id);
+                                    }
+                                }
+                            } else if let Err(join) = joined {
+                                if let Some(member_id) = task_members.remove(&join.id()) {
+                                    if let Some(record) = ledger.members.get_mut(&member_id) {
+                                        record.state = MemberState::Failed;
+                                        if record.probe_registered {
+                                            record.probe_registered = false;
+                                            let _ = probes
+                                                .lock()
+                                                .expect("probe registry poisoned")
+                                                .unregister(member_id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let _ = reply.send(());
+                        return Err(eyre!("elastic pipeline aborted"));
                     }
                     Some(SinkCommand::Add { member, reply }) => {
                         let mut reply = Some(reply);
@@ -1490,12 +1565,12 @@ mod tests {
         ));
 
         let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut rx, handle) = source.scan(None, unreadable);
+        let (mut rx, mut handle) = source.scan(None, unreadable);
         let mut headers = Vec::new();
         while let Some(h) = rx.recv().await {
             headers.push(h);
         }
-        let _total = handle.await.unwrap().unwrap();
+        let _total = handle.finish().await.unwrap();
 
         let planned = crate::remote::transfer::payload::plan_transfer_payloads(
             headers,
@@ -1538,12 +1613,12 @@ mod tests {
         ));
 
         let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut rx, scan_handle) = source.scan(None, unreadable);
+        let (mut rx, mut scan_handle) = source.scan(None, unreadable);
         let mut headers = Vec::new();
         while let Some(h) = rx.recv().await {
             headers.push(h);
         }
-        let _ = scan_handle.await.unwrap().unwrap();
+        let _ = scan_handle.finish().await.unwrap();
 
         let planned = crate::remote::transfer::payload::plan_transfer_payloads(
             headers,
@@ -1603,12 +1678,12 @@ mod tests {
         };
 
         let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut rx, scan_handle) = source.scan(None, unreadable);
+        let (mut rx, mut scan_handle) = source.scan(None, unreadable);
         let mut headers = Vec::new();
         while let Some(h) = rx.recv().await {
             headers.push(h);
         }
-        let _ = scan_handle.await.unwrap().unwrap();
+        let _ = scan_handle.finish().await.unwrap();
 
         let planned = crate::remote::transfer::payload::plan_transfer_payloads(
             headers,
@@ -2072,12 +2147,12 @@ mod tests {
         ));
 
         let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut rx, handle) = source.scan(None, unreadable);
+        let (mut rx, mut handle) = source.scan(None, unreadable);
         let mut headers = Vec::new();
         while let Some(h) = rx.recv().await {
             headers.push(h);
         }
-        let _ = handle.await.unwrap().unwrap();
+        let _ = handle.finish().await.unwrap();
         let planned = crate::remote::transfer::payload::plan_transfer_payloads(
             headers,
             source.root(),
@@ -2131,12 +2206,12 @@ mod tests {
         });
 
         let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let (mut header_rx, mut scan_handle) = source.scan(None, unreadable);
         let mut headers = Vec::new();
         while let Some(h) = header_rx.recv().await {
             headers.push(h);
         }
-        let _scanned = scan_handle.await.unwrap().unwrap();
+        let _scanned = scan_handle.finish().await.unwrap();
 
         let planned = crate::remote::transfer::payload::plan_transfer_payloads(
             headers,
@@ -2219,6 +2294,7 @@ mod workqueue_tests {
     //! sinks and one slow sink bottlenecks the whole transfer; with it,
     //! the fast sink absorbs the bulk.
     use super::*;
+    use crate::remote::transfer::abort_on_drop::AbortOnDrop;
     use crate::remote::transfer::sink::{SinkOutcome, TransferSink};
     use crate::remote::transfer::source::FsTransferSource;
     use std::path::{Path, PathBuf};
@@ -2265,12 +2341,12 @@ mod workqueue_tests {
 
         let source = Arc::new(FsTransferSource::new(src.clone()));
         let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let (mut header_rx, mut scan_handle) = source.scan(None, unreadable);
         let mut headers = Vec::new();
         while let Some(h) = header_rx.recv().await {
             headers.push(h);
         }
-        let _ = scan_handle.await.unwrap().unwrap();
+        let _ = scan_handle.finish().await.unwrap();
         // Feed each file as its OWN payload (not via plan_transfer_payloads,
         // which bundles tiny files into a single tar shard — that would
         // leave only one payload and nothing to steal).
@@ -2383,6 +2459,33 @@ mod workqueue_tests {
         root: PathBuf,
     }
 
+    struct DropTrackedGatedSink {
+        entered: Arc<tokio::sync::Notify>,
+        gate: Arc<tokio::sync::Semaphore>,
+        dropped: Arc<AtomicBool>,
+        root: PathBuf,
+    }
+
+    impl Drop for DropTrackedGatedSink {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TransferSink for DropTrackedGatedSink {
+        async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
+            self.entered.notify_one();
+            let permit = self.gate.acquire().await.expect("gate open");
+            permit.forget();
+            Ok(SinkOutcome::default())
+        }
+
+        fn root(&self) -> &Path {
+            &self.root
+        }
+    }
+
     #[async_trait::async_trait]
     impl TransferSink for SignaledGatedSink {
         async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
@@ -2415,6 +2518,116 @@ mod workqueue_tests {
             .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn elastic_abort_waits_for_nested_worker_cleanup() {
+        let tmp = tempdir().unwrap();
+        let (source, headers) = scan_headers(&tmp.path().join("src"), 1).await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let sink: Arc<dyn TransferSink> = Arc::new(DropTrackedGatedSink {
+            entered: Arc::clone(&entered),
+            gate,
+            dropped: Arc::clone(&dropped),
+            root: PathBuf::from("/abort"),
+        });
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(TransferPayload::File(headers[0].clone()))
+            .await
+            .unwrap();
+        let (control, commands) = ElasticPipelineControl::channel();
+        let probes = test_probe_registry();
+        let observed_probes = Arc::clone(&probes);
+        let pipeline = tokio::spawn(async move {
+            execute_sink_pipeline_elastic(
+                source,
+                vec![SinkMember::with_probe(
+                    StreamId(7),
+                    sink,
+                    StreamProbe::new(StreamId(7)),
+                )],
+                rx,
+                1,
+                None,
+                Some(commands),
+                probes,
+            )
+            .await
+        });
+        wait_for_signal(&entered, "abort-test worker payload claim").await;
+
+        control
+            .abort_and_drain()
+            .await
+            .expect("supervisor acknowledges cleanup");
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "abort acknowledgement must follow nested worker destruction"
+        );
+        assert!(
+            observed_probes.lock().unwrap().is_empty(),
+            "aborted worker probe must be removed before return"
+        );
+        drop(tx);
+        drop(control);
+        assert!(pipeline.await.unwrap().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_clean_join_retains_cooperative_abort_and_reaps_workers() {
+        let tmp = tempdir().unwrap();
+        let (source, headers) = scan_headers(&tmp.path().join("src"), 1).await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let sink: Arc<dyn TransferSink> = Arc::new(DropTrackedGatedSink {
+            entered: Arc::clone(&entered),
+            gate,
+            dropped: Arc::clone(&dropped),
+            root: PathBuf::from("/cancelled-clean-join"),
+        });
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(TransferPayload::File(headers[0].clone()))
+            .await
+            .unwrap();
+        let (control, commands) = ElasticPipelineControl::channel();
+        let probes = test_probe_registry();
+        let observed_probes = Arc::clone(&probes);
+        let mut pipeline = AbortOnDrop::new(tokio::spawn(async move {
+            execute_sink_pipeline_elastic(
+                source,
+                vec![SinkMember::with_probe(
+                    StreamId(8),
+                    sink,
+                    StreamProbe::new(StreamId(8)),
+                )],
+                rx,
+                1,
+                None,
+                Some(commands),
+                probes,
+            )
+            .await
+        }));
+        wait_for_signal(&entered, "clean-join worker payload claim").await;
+        drop(tx);
+        control.finish().expect("mark clean command completion");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), pipeline.join_mut())
+                .await
+                .is_err(),
+            "clean join is held by the blocked nested worker"
+        );
+        control
+            .abort_and_drain()
+            .await
+            .expect("cancelled clean join retains cooperative abort");
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(observed_probes.lock().unwrap().is_empty());
+        assert!(pipeline.join_mut().await.unwrap().is_err());
+    }
+
     async fn scan_headers(
         src: &Path,
         n: usize,
@@ -2425,12 +2638,12 @@ mod workqueue_tests {
         }
         let source = Arc::new(FsTransferSource::new(src.to_path_buf()));
         let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let (mut header_rx, mut scan_handle) = source.scan(None, unreadable);
         let mut headers = Vec::new();
         while let Some(h) = header_rx.recv().await {
             headers.push(h);
         }
-        let _ = scan_handle.await.unwrap().unwrap();
+        let _ = scan_handle.finish().await.unwrap();
         assert_eq!(headers.len(), n);
         (source, headers)
     }
@@ -3071,12 +3284,12 @@ mod workqueue_tests {
         }
         let source = Arc::new(FsTransferSource::new(src.clone()));
         let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let (mut header_rx, mut scan_handle) = source.scan(None, unreadable);
         let mut headers = Vec::new();
         while let Some(h) = header_rx.recv().await {
             headers.push(h);
         }
-        let _ = scan_handle.await.unwrap().unwrap();
+        let _ = scan_handle.finish().await.unwrap();
         assert_eq!(headers.len(), n);
 
         let sink: Arc<dyn TransferSink> = Arc::new(ErrSink {
@@ -3167,12 +3380,12 @@ mod workqueue_tests {
         }
         let source = Arc::new(FsTransferSource::new(src.clone()));
         let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let (mut header_rx, mut scan_handle) = source.scan(None, unreadable);
         let mut headers = Vec::new();
         while let Some(h) = header_rx.recv().await {
             headers.push(h);
         }
-        let _ = scan_handle.await.unwrap().unwrap();
+        let _ = scan_handle.finish().await.unwrap();
         assert_eq!(headers.len(), n, "one header per file");
 
         let bytes_a = Arc::new(AtomicU64::new(0));
@@ -3241,12 +3454,12 @@ mod workqueue_tests {
         }
         let source = Arc::new(FsTransferSource::new(src.clone()));
         let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let (mut header_rx, mut scan_handle) = source.scan(None, unreadable);
         let mut headers = Vec::new();
         while let Some(h) = header_rx.recv().await {
             headers.push(h);
         }
-        let _ = scan_handle.await.unwrap().unwrap();
+        let _ = scan_handle.finish().await.unwrap();
         assert_eq!(headers.len(), n);
 
         let count = Arc::new(AtomicU64::new(0));
@@ -3301,12 +3514,12 @@ mod workqueue_tests {
         }
         let source = Arc::new(FsTransferSource::new(src.clone()));
         let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let (mut header_rx, mut scan_handle) = source.scan(None, unreadable);
         let mut headers = Vec::new();
         while let Some(h) = header_rx.recv().await {
             headers.push(h);
         }
-        let _ = scan_handle.await.unwrap().unwrap();
+        let _ = scan_handle.finish().await.unwrap();
         assert_eq!(headers.len(), n);
 
         let survivor = Arc::new(AtomicU64::new(0));

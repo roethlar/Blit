@@ -246,7 +246,7 @@ impl blit_core::remote::transfer::source::TransferSource for StuckAfterFirstChun
         unreadable: Arc<std::sync::Mutex<Vec<String>>>,
     ) -> (
         tokio::sync::mpsc::Receiver<blit_core::generated::FileHeader>,
-        tokio::task::JoinHandle<eyre::Result<u64>>,
+        blit_core::remote::transfer::source::SourceScan,
     ) {
         self.inner.scan(filter, unreadable)
     }
@@ -768,7 +768,7 @@ impl blit_core::remote::transfer::source::TransferSource for TruncatedReadSource
         unreadable: Arc<std::sync::Mutex<Vec<String>>>,
     ) -> (
         tokio::sync::mpsc::Receiver<blit_core::generated::FileHeader>,
-        tokio::task::JoinHandle<eyre::Result<u64>>,
+        blit_core::remote::transfer::source::SourceScan,
     ) {
         self.inner.scan(filter, unreadable)
     }

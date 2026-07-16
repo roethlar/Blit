@@ -226,8 +226,9 @@ new two-endpoint trace uncorrelatable.
   G12 turns the trace-off guard red under `/bin/bash` 3.2 nounset; restoring the
   permanently nonempty command array returns the complete self-test green.
 - Every trace-on TCP session must prove the complete seven-epoch one-stream
-  ramp from one to eight live sockets on both roles, including exact proposal,
-  preparation, ACK, settlement, attachment, and role-local ordering evidence.
+  ramp to the pre-ldt-2 static target of eight sockets on both roles, including
+  exact proposal, preparation, ACK, settlement, attachment, and role-local
+  ordering evidence.
   Removing epoch 7 makes the targeted analyzer guard fail; disabling exact
   target/live validation makes all four final-epoch SOURCE and DESTINATION
   mutations fail. Restoring both guards returns the analyzer suite to green.
@@ -882,15 +883,17 @@ and 14,964 endpoint-local intervals. Both endpoint session trees were removed
 by the successful finalizer, both 9031 listeners are closed, and no benchmark
 process remains. All staging and every earlier evidence tree remain retained.
 
-For target `wm_tcp_mixed`, both initiator layouts reached accepted
-`target_streams=live_streams=8` on both endpoint traces in every trace-on arm.
+For target `wm_tcp_mixed`, both initiator layouts reached the then-current
+pre-ldt-2 static target, accepted `target_streams=live_streams=8`, on both
+endpoint traces in every trace-on arm.
 The historical P1 direction did not reproduce: durable-total medians were
 1469.5/1368.5 ms (SOURCE/DESTINATION initiation) with trace off and
 1494.5/1367 ms with trace on. Those point ratios are within 1.10, but the
 registered `N_resolution=329 ms` exceeds the historical gap and the gRPC
-control fails invariance. The run therefore proves live worker/stream parity
-and a valid current-build P1 non-reproduction, but it does not grade a cause or
-close P1. The complete immutable payload and bounded interpretation are in
+control fails invariance. The run therefore proves historical static-policy
+orientation parity at eight and a valid then-current-build P1
+non-reproduction, but it does not prove adaptive up/down tuning, grade a cause,
+or close P1. The complete immutable payload and bounded interpretation are in
 `docs/bench/otp12-pf1-rigw-2026-07-15/`; their separate review is recorded
 below.
 
@@ -906,8 +909,9 @@ restored-green guards. The detached worktree ended clean and no benchmark
 endpoint was contacted. Records are under
 `.review/results/otp12-pf1-rigw-probe-record-r1.*`.
 
-The accepted record does not change the licensed result: live 8/8 parity and
-valid current-build P1 non-reproduction are proved, while the 329 ms
+The accepted record does not change the licensed result: pre-ldt-2
+static-target orientation parity at eight and valid then-current-build P1
+non-reproduction are proved, while the 329 ms
 resolution floor, absent/reversed target baseline, and failing gRPC control
 forbid a causal grade or formal P1 closure. The next approved work is the
 separate P2 small-fixture observer plus the pinned `0f922de` historical

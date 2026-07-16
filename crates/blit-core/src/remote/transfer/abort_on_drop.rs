@@ -36,10 +36,17 @@ impl<T> AbortOnDrop<T> {
     /// would release the guard before awaiting — that's the
     /// cancellation-gap bug R34-F2 fixed.
     pub async fn join(mut self) -> std::result::Result<T, tokio::task::JoinError> {
+        self.join_mut().await
+    }
+
+    /// Borrowing form of [`Self::join`]. Owners that must remain able to
+    /// cancel and reap the task after their current future is cancelled keep
+    /// the guard in place while this await is pending.
+    pub async fn join_mut(&mut self) -> std::result::Result<T, tokio::task::JoinError> {
         // Borrow the JoinHandle out of the Option, but DON'T move it
-        // out of `self`. `self` lives across this await; if the
-        // surrounding future is cancelled here, `self` drops and
-        // `Drop::drop` aborts the still-owned handle.
+        // out of `self`. If this borrowed await is cancelled, the larger
+        // owner still retains the guard and can explicitly join/abort it;
+        // dropping that owner invokes `Drop` as the final backstop.
         let handle = self
             .0
             .as_mut()
@@ -57,6 +64,12 @@ impl<T> AbortOnDrop<T> {
     /// an already-running poll, so callers that must observe all effects from
     /// that final poll cannot safely abort and continue immediately.
     pub async fn abort_and_join(mut self) -> std::result::Result<T, tokio::task::JoinError> {
+        self.abort_and_join_mut().await
+    }
+
+    /// Borrowing form of [`Self::abort_and_join`], for cancellation-safe
+    /// teardown owned by a larger state machine.
+    pub async fn abort_and_join_mut(&mut self) -> std::result::Result<T, tokio::task::JoinError> {
         let handle = self
             .0
             .as_mut()

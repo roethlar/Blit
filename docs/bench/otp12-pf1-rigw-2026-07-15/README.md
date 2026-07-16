@@ -1,8 +1,8 @@
 # otp-12 pf-1 rig-W paired phase diagnostic (2026-07-15)
 
 **Status**: Evidence — exact registered session accepted by the harness and
-independently recomputed. This is a current-build P1 diagnostic, not a causal
-grade, fix proof, or acceptance run.
+independently recomputed. This is a then-current-build P1 diagnostic, not a
+causal grade, fix proof, or acceptance run.
 
 ## Session identity and validity
 
@@ -41,15 +41,16 @@ computed over sorted lines of
 | `phase_events.csv` | `088fce0369e504c363f7aa5ef87da6280747e31245651b83046953ef9f122a7e` |
 | `phase_intervals.csv` | `e8c5df376a1e59e9a2353b20385c2521936de78d9962353c52967abfbc00a5aa` |
 
-## Live worker/stream parity
+## Historical static-target worker/stream orientation parity
 
-The old initiator-dependent worker cap is absent on the live pair. For target
-`wm_tcp_mixed`, all 16 traced arms (eight per initiator layout) reached resize
-epoch 7 with `target_streams=8`, `live_streams=8`, and `accepted=true` on the
-SOURCE trace; the matching DESTINATION trace also records accepted
-`live_streams=8`. Thus SOURCE- and DESTINATION-initiated transfers reached the
-same eight-stream target on both endpoint records. This proves live parity; it
-does not by itself prove parity caused any wall-time change.
+Candidate `8e019ef` predates ldt-2 and still used the static eight-stream
+target. For `wm_tcp_mixed`, all 16 traced arms (eight per initiator layout)
+reached resize epoch 7 with `target_streams=8`, `live_streams=8`, and
+`accepted=true` on the SOURCE trace; the matching DESTINATION trace also
+records accepted `live_streams=8`. Thus both initiator layouts reached the
+same then-current static target on both endpoint records. This is historical
+orientation-parity evidence at eight; it does not prove adaptive up/down
+tuning or that worker parity caused any wall-time change.
 
 ## Wall-time result
 
@@ -82,7 +83,7 @@ N_resolution  = max(N_pair_off=329, N_pair_on=100, 26.5) = 329 ms
 That 329 ms floor exceeds both the historical P1 gap and its 20% and 50%
 recovery thresholds. The current plan also forbids grading a counterfactual on
 a rig where the baseline gap is absent. The only licensed interpretation is:
-**valid current-build P1 non-reproduction; registered resolution check failed;
+**valid then-current-build P1 non-reproduction; registered resolution check failed;
 no hypothesis was confirmed or killed.**
 
 ## Two-layout phase timing (descriptive)
