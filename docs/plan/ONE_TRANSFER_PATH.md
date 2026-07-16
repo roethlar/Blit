@@ -99,8 +99,9 @@ no second code path to differ.
   and otp-1's contract names it explicitly.
 - **Current implementation drift (2026-07-16):** cutover retained only
   sf-2's static, ADD-only shape correction; production `TransferSession`
-  does not start the existing telemetry tuner or accept REMOVE. Draft
-  `docs/plan/LIVE_DIAL_TUNING.md` owns the reviewed correction. Until it
+  does not start the existing telemetry tuner or accept REMOVE. Active
+  `docs/plan/LIVE_DIAL_TUNING.md` (D-2026-07-16-2) owns the reviewed
+  correction. Until it
   lands, exact-8 role parity is static-policy parity, not live-dial
   completion.
 - Wire contract discipline (REV4 rule): the unified session's proto —

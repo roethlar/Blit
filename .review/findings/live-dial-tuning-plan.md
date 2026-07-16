@@ -55,7 +55,7 @@ rather than claiming exact eight completes the design.
 
 ## Files changed
 
-- `docs/plan/LIVE_DIAL_TUNING.md` — Draft correction and implementation slices.
+- `docs/plan/LIVE_DIAL_TUNING.md` — Active correction and implementation slices.
 - `docs/plan/ONE_TRANSFER_PATH.md` — restore REV4 live-dial intent and record
   current implementation drift.
 - `docs/TRANSFER_SESSION.md` — correct the one-stream-policy contract and

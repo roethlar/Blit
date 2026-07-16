@@ -62,9 +62,9 @@ doc explains the state machine the proto cannot.
 
 **Implementation drift, 2026-07-16:** current `TransferSession` still runs
 sf-2's static ADD-only shape correction, does not start the existing live
-tuner, and rejects REMOVE. `docs/plan/LIVE_DIAL_TUNING.md` is the Draft
-correction. Exact-8 parity tests prove both connection layouts share that
-static target; they do not satisfy invariant 6.
+tuner, and rejects REMOVE. Active `docs/plan/LIVE_DIAL_TUNING.md`
+(D-2026-07-16-2) owns the correction. Exact-8 parity tests prove both
+connection layouts share that static target; they do not satisfy invariant 6.
 
 ## Phase state machine
 
