@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-16 (ldt-4 harness/analyzer candidate `7491b4f`; Grok review next)
+Last updated: 2026-07-16 (ldt-4 harness/analyzer candidate `7491b4f`; Fable openreview next)
 
-- **NEXT ACTION — FIXED-SHA GROK REVIEW OF THE ldt-4 HARNESS:** the non-destructive harness/analyzer for both byte directions, all three fixtures, and both initiator layouts is committed through `7491b4f`. Review the exact candidate before endpoint staging or measurement.
+- **NEXT ACTION — FIXED-SHA FABLE OPENREVIEW OF THE ldt-4 HARNESS:** the non-destructive harness/analyzer for both byte directions, all three fixtures, and both initiator layouts is committed through `7491b4f`. Review the exact candidate before endpoint staging or measurement; Grok is advisory only under D-2026-07-16-4.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **WHY NO ldt-4 RIG-W DATA YET:** the harness/analyzer candidate has not been accepted, staged, or run. After fixed-SHA review, live preflight must re-establish endpoint quietness before any arm; no ldt-4 adaptive endpoint data exists yet.
@@ -43,15 +43,15 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   resume/re-derive on the unified baseline. Principle: ceiling-driven,
   never competitor-relative (D-2026-07-04-4 — do not re-litigate).
 - **Background**: REV4 code-complete, gates DATA-COMPLETE (declarations in Blocked);
-  D-2026-07-16-3 makes neutral `openreview` risk-based: Grok for ordinary
-  slice/second-eye review; Claude Fable 5/max for final, tactical, or contested passes.
+  D-2026-07-16-3/-4 makes review risk-based: Grok is advisory for ordinary
+  second eyes/slice checks; every formal `openreview` uses Claude Fable 5/max.
 
 ## Queue (ordered)
 
 1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 and endpoint correction `9926bf7` are accepted; review the harness/analyzer candidate through `7491b4f`, then stage the exact reviewed build and execute quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence under the existing instrument controls.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
-   (reviewer selection D-2026-07-16-3).
+   (reviewer authority D-2026-07-16-4).
    otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7 (a, b-1,
    b-2), otp-8, otp-9 (a/b), otp-2 (+ otp-2w), otp-10 (a, b-1/2,
@@ -139,8 +139,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   complete; measurement gates remain). REV4 superseded v1/REV2/REV3
   (history only).
 - Process: `.agents/playbooks/openreview.md` — synchronous unprimed review when
-  risk-selected under D-2026-07-16-3: Grok for ordinary second eyes/slices,
-  Claude Fable 5/max for final or tactical high-risk/contested passes;
+  risk-selected under D-2026-07-16-3/-4: Grok may advise, but every formal
+  `openreview` uses Claude Fable 5/max;
   `.agents/playbooks/codereview.md` supplies finding intake and triage only.
   `docs/agent/GPT_REVIEW_LOOP.md` is historical;
   `.review/README.md` is retired as the grading mechanism (its

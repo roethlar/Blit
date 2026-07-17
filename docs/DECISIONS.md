@@ -310,3 +310,8 @@ Format:
   red/green guard proof, fail-closed structured verdict, coder adjudication,
   one-finding-per-commit fixes, no-agent-branch rule, no-push rule, and all
   historical review results.
+
+## D-2026-07-16-4 — Fable owns formal openreview; Grok remains advisory
+- Decision: Every formal `openreview` dispatch uses Claude CLI with `--model claude-fable-5 --effort max`; Grok may provide an advisory second eye or tactical slice check, but a Grok result is never the formal acceptance verdict. Owner, 2026-07-16: **"no don't use grok for openreview. that should be fable."**
+- Why: The cost reduction comes from selecting fewer formal reviews, not from substituting Grok at the acceptance boundary; the owner wants Fable's unprimed judgment for every review that carries `openreview` authority.
+- Supersedes: D-2026-07-16-3 only where it permitted the ldt-4 harness or another ordinary slice review to use Grok as formal `openreview`. It preserves risk-based review frequency, Grok advisory use, Fable tactical/final use, D-2026-07-16-1's neutral prompt, and every fixed-SHA/guard/adjudication/git-safety rule.

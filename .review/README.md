@@ -2,10 +2,10 @@
 
 > **Superseded as the grading mechanism (2026-07-04, D-2026-07-04-1).**
 > Formal reviews use synchronous unprimed `openreview` in
-> `.agents/playbooks/openreview.md`. D-2026-07-16-3 makes dispatch risk-based:
-> Grok handles ordinary second eyes and slice reviews when needed; Claude
-> Fable 5/max is reserved for final acceptance and tactical high-risk or
-> contested reviews. That workflow reuses this directory's `findings/` +
+> `.agents/playbooks/openreview.md`. D-2026-07-16-3 makes dispatch risk-based,
+> and D-2026-07-16-4 fixes reviewer authority: Grok may provide advisory second
+> eyes or tactical slice checks, but every formal `openreview` uses Claude
+> Fable 5/max. That workflow reuses this directory's `findings/` +
 > `results/` records and the `REVIEW.md` status index, which remain live. The
 > async parts below — `ready/` sentinels,
 > `reviewer-wait.sh`, the separate Reviewer agent, WIP limits — are

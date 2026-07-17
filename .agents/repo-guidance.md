@@ -58,14 +58,15 @@ execute it exactly:
   review slice and apply the risk-based review selection below; selected
   reviews use synchronous unprimed `.agents/playbooks/openreview.md`.
 
-**Review policy (D-2026-07-16-3, superseding the unconditional dispatch and
-reviewer-selection clauses of D-2026-07-04-1 and D-2026-07-15-1): formal
+**Review policy (D-2026-07-16-4, refining D-2026-07-16-3): formal
 `openreview` is selected in proportion to risk and uncertainty, not required
-for every code or plan change.** Use Grok for ordinary independent second eyes
-and slice reviews when they add value. Reserve Claude CLI with
-`--model claude-fable-5 --effort max` for final acceptance passes and tactical
-high-risk or contested questions. Codex is not an independent reviewer when
-Codex authored the change. Per D-2026-07-16-1 and the `openreview` playbook,
+for every code or plan change.** Grok may provide ordinary advisory second eyes
+and tactical slice checks when they add value, but a Grok result is never a
+formal `openreview` acceptance verdict. Every formal `openreview` uses Claude
+CLI with `--model claude-fable-5 --effort max`; cost is controlled by selecting
+fewer formal reviews, not by substituting the acceptance reviewer. Codex is not
+an independent reviewer when Codex authored the change. Per D-2026-07-16-1 and
+the `openreview` playbook,
 the substantive prompt remains the neutral best-way question only: no
 plan-conformance request, issue list, framing, or steering, including on a
 re-review. Returned findings use `codereview`'s intake/triage and

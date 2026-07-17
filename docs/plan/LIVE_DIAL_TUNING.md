@@ -352,8 +352,9 @@ review passes.
 
 ## Slices
 
-Each slice is one committed whole-change openreview candidate before any
-one-finding-per-commit review fixes.
+When formal review is selected, the slice is one committed whole-change Fable
+openreview candidate before any one-finding-per-commit review fixes. Grok may
+advise but cannot accept the slice (D-2026-07-16-4).
 
 1. **ldt-1 — acknowledged elastic membership.** Make pipeline ADD/REMOVE
    return exact membership outcomes; bind probes to member IDs; preserve the
@@ -392,8 +393,8 @@ one-finding-per-commit review fixes.
    Do not tune constants from this one session inside the evidence slice; any
    policy change becomes a new reviewed finding with a repeatable guard.
    The harness/analyzer candidate is committed through `7491b4f`; fixed-SHA
-   Grok review is pending. No endpoint staging, live arm, or ldt-4 datum has
-   been produced by this candidate.
+   Claude Fable 5/max openreview is pending. No endpoint staging, live arm, or
+   ldt-4 datum has been produced by this candidate.
 
 ## Open questions
 

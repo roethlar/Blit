@@ -5,10 +5,10 @@ on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
 **Status**: Candidate — implementation and follow-up fixes are committed and
-local gates are green; neutral fixed-SHA Grok review is pending. No candidate
-artifact has been staged and no generated harness operation or live arm has
-run on either endpoint; only the read-only parser check described below
-occurred.
+local gates are green; neutral fixed-SHA Claude Fable 5/max openreview is
+pending. No candidate artifact has been staged and no generated harness
+operation or live arm has run on either endpoint; only the read-only parser
+check described below occurred.
 
 **Branch**: `master`
 
@@ -97,9 +97,9 @@ exactly, and make no worker-count target part of acceptance.
 
 ## Known gaps
 
-- Formal Grok review has not run. The implementation is not accepted until a
-  structured exact-base/head verdict with an independent red/green guard passes
-  the repo's fail-closed review gate.
+- Formal Claude Fable 5/max openreview has not run. The implementation is not
+  accepted until a structured exact-base/head verdict with an independent
+  red/green guard passes the repo's fail-closed review gate.
 - No endpoint staging, daemon launch, live transfer, ldt-4 evidence, or hardware
   ADD/REMOVE claim exists for this candidate. Hosted Windows CI also remains
   unobserved.
@@ -113,4 +113,4 @@ exactly, and make no worker-count target part of acceptance.
 
 ## Reviewer comments
 
-Pending neutral fixed-SHA Grok openreview.
+Pending neutral fixed-SHA Claude Fable 5/max openreview.

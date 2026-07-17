@@ -17,8 +17,8 @@ See `.review/findings/<id>.md` for per-finding details.
 ## Live dial tuning correction — plan and implementation review
 
 Plan: `docs/plan/LIVE_DIAL_TUNING.md` (Active, D-2026-07-16-2). Review selection:
-Grok for the ldt-4 harness slice; Claude Fable 5/max for final acceptance or a
-tactical high-risk/contested pass (D-2026-07-16-3).
+Grok may provide advisory second eyes, but formal `openreview` uses Claude
+Fable 5/max (D-2026-07-16-4).
 
 | ID | Title | Status | Commit(s) |
 |----|-------|--------|-----------|
@@ -26,7 +26,7 @@ tactical high-risk/contested pass (D-2026-07-16-3).
 | ldt-1 | Acknowledged elastic membership with exact member and terminal outcomes | `[x]` | `f8f3c51` (neutral Claude accepted) |
 | ldt-2 | Live controller cutover; delete shape worker authority; shared ADD/REMOVE | `[x]` | `65a0f9f` (neutral Claude; one non-failing Low declined at intake) |
 | ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[x]` | `436e1bb` + review fix `406a7e5`; Claude r2 clean with independent guard |
-| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | endpoint correction `9926bf7` accepted; harness/analyzer candidate `7491b4f`; fixed-SHA Grok review next; no endpoint data |
+| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | endpoint correction `9926bf7` accepted; harness/analyzer candidate `7491b4f`; fixed-SHA Fable openreview next; no endpoint data |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 

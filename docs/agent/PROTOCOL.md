@@ -52,10 +52,10 @@ Turn a talked-through idea into a durable plan before any implementation.
    each) in the doc's Slices section.
 4. Add the doc to STATE.md's Queue (and to "Authoritative docs" if it will be the
    active plan).
-5. Commit the plan doc and apply D-2026-07-16-3's risk-based review selection.
-   Use Grok for an independent draft second eye when it adds value; reserve
-   Claude Fable 5/max for final acceptance or a tactical high-risk/contested
-   question. Any selected review uses synchronous unprimed `openreview`
+5. Commit the plan doc and apply D-2026-07-16-3/-4's risk-based review
+   selection. Grok may provide an advisory draft second eye when it adds value,
+   but cannot accept the draft. Any selected formal review uses Claude Fable
+   5/max through synchronous unprimed `openreview`
    (`.agents/playbooks/openreview.md`) and D-2026-07-16-1's neutral best-way
    question with no framing or steering. The docs gate is
    `bash scripts/agent/check-docs.sh`. Adjudicate any returned findings before
@@ -130,14 +130,14 @@ Pick up the next unit of review-queue work.
 1. Run `catchup` first if you haven't this session.
 2. Pick the highest-priority `[ ]` item in `REVIEW.md`, implement it with tests
    on `master` (no agent branches), pass the validation suite, commit, and write
-   the slice record. Apply D-2026-07-16-3's risk-based review selection: use
-   Grok for an ordinary slice second eye when needed; reserve Claude Fable
-   5/max for final acceptance or tactical high-risk/contested review. Any
-   selected review uses synchronous unprimed `openreview` with exact base/head,
+   the slice record. Apply D-2026-07-16-3/-4's risk-based review selection:
+   Grok may provide an advisory slice second eye, but cannot accept the slice.
+   Any selected formal review or re-review uses Claude Fable 5/max through
+   synchronous unprimed `openreview` with exact base/head,
    D-2026-07-16-1's neutral best-way question, and a reviewer-chosen isolated
    red/green guard with fail-closed `guard_confirmed: true`. Adjudicate every
    returned finding through `codereview` intake, fix admitted findings one
-   commit at a time on `master`, re-review with the selected independent
-   harness when needed, record the verdict under `.review/results/`, and update
+   commit at a time on `master`, re-review with Fable when needed, record the
+   verdict under `.review/results/`, and update
    the `REVIEW.md` row. No sentinel — the async hand-off is retired.
 3. Finish with the `handoff` procedure.
