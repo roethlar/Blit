@@ -1372,6 +1372,10 @@ if (Get-NetTCPConnection -State Listen -LocalPort $DAEMON_PORT -ErrorAction Sile
     return "$cleanup_issue"
 }
 
+normalize_q_client_pid_list() {
+    awk 'NF == 1 && $1 ~ /^[0-9]+$/ { print $1 }'
+}
+
 stop_q_client() {
     local run_id=$CURRENT_Q_CLIENT_RUN_ID pid=$CURRENT_Q_CLIENT_PID command environment pid_path identity_path i candidate matches match_count cleanup_issue=0
     [[ -n "$run_id" ]] || return 0
@@ -1389,7 +1393,7 @@ stop_q_client() {
     fi
     if [[ -z "$pid" ]]; then
         matches=''
-        for candidate in $(ps -axo pid=); do
+        for candidate in $(ps -axo pid= | normalize_q_client_pid_list); do
             [[ "$candidate" =~ ^[0-9]+$ ]] || continue
             command=$(ps -ww -p "$candidate" -o command= 2>/dev/null || true)
             [[ "$command" == "$CURRENT_Q_CLIENT_COMMAND" ]] || continue
@@ -2407,6 +2411,10 @@ run_selftest() {
         | decode_windows_file_payload >/dev/null 2>&1; then
         die 'malformed Windows fetch payload passed selftest'
     fi
+    sample=$(printf '    1\n  265\n12345\nnoise\n' | normalize_q_client_pid_list) \
+        || die 'q client PID normalization selftest failed'
+    [[ "$sample" == $'1\n265\n12345' ]] \
+        || die 'q client PID normalization dropped padded low PIDs'
     python3 - "$SCRIPT_PATH" <<'PY' || die 'static harness safety selftest failed'
 import pathlib
 import re
