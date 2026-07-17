@@ -797,7 +797,7 @@ Assert-Ldt4PlainPath '$WIN_FIXTURE_STAGE/fixtures/src_small' Directory | Out-Nul
                 || session_void "staged $fixture content differs from the canonical Windows source"
             [[ ! -e "$local_destination" && ! -L "$local_destination" ]] \
                 || session_void "q staged $fixture destination appeared concurrently"
-            mv -n "$incoming" "$Q_STAGE_ROOT/fixtures/" \
+            rename_q_directory_exclusive "$incoming" "$local_destination" \
                 || session_void "q staged $fixture promotion failed; validated incoming tree retained"
             [[ ! -e "$incoming" && ! -L "$incoming" ]] \
                 || session_void "q staged $fixture promotion left the incoming tree in place"
@@ -2509,7 +2509,12 @@ if required_stage_copy not in stage:
 copy = stage.index(required_stage_copy)
 source_manifest = stage.index('write_windows_manifest "$remote_source" "$remote_manifest"', 0, copy)
 validate = stage.index('cmp -s "$q_manifest" "$win_manifest"', copy)
-promote = stage.index('mv -n "$incoming" "$Q_STAGE_ROOT/fixtures/"', validate)
+required_promotion = 'rename_q_directory_exclusive "$incoming" "$local_destination"'
+if required_promotion not in stage:
+    raise SystemExit("canonical fixture promotion is not an exclusive atomic rename")
+if 'mv -n "$incoming"' in stage:
+    raise SystemExit("canonical fixture promotion fell back to mv")
+promote = stage.index(required_promotion, validate)
 if not source_manifest < copy < validate < promote or 'incoming-fixtures' not in stage:
     raise SystemExit("canonical fixture copy is not validated before stable-path promotion")
 environment = text[text.index("environment_gate() {"):text.index("prepare_windows_runtime() {")]
@@ -2584,7 +2589,7 @@ main() {
     fi
     [[ $# -eq 0 ]] || die 'the registered harness accepts no positional arguments'
     validate_invocation
-    for command in git python3 ssh scp shasum lsof nc awk cmp mv tar; do
+    for command in git python3 ssh scp shasum lsof nc awk cmp tar; do
         command -v "$command" >/dev/null || die "required command absent: $command"
     done
     assert_q_registered_paths preflight

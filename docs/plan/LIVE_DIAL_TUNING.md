@@ -401,8 +401,9 @@ advise but cannot accept the slice (D-2026-07-16-4).
    stable q source paths. Canonical-fixture Fable round one reviewed exact
    `ef48920` and admitted two Low corrections: promote with the harness's
    existing exclusive atomic rename primitive, and validate the fetched
-   canonical shape before the large copy/free-space gate. Land them one per
-   commit, then run the final neutral review. All live matrix data remains.
+   canonical shape before the large copy/free-space gate. The rename correction
+   is fixed and mutation-proved as `ldt-4-r3-f1`; land `f2` separately, then run
+   the final neutral review. All live matrix data remains.
 
 ## Open questions
 
