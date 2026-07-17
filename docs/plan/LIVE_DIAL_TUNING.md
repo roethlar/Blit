@@ -393,10 +393,10 @@ advise but cannot accept the slice (D-2026-07-16-4).
    Do not tune constants from this one session inside the evidence slice; any
    policy change becomes a new reviewed finding with a repeatable guard.
    Fable round one reviewed exact harness/analyzer head `0e48721`; intake
-   admitted seven bounded fixes and declined two analyzer claims. The fixes
-   land one per commit before a neutral whole-change Fable re-review. No
-   endpoint staging, live arm, or ldt-4 datum has been produced by this
-   candidate.
+   admitted seven bounded fixes and declined two analyzer claims. All seven
+   fixes are now guard-proved one per commit; full local gates and a neutral
+   whole-change Fable re-review remain. No endpoint staging, live arm, or
+   ldt-4 datum has been produced by this candidate.
 
 ## Open questions
 

@@ -1528,7 +1528,7 @@ def _validate_dial(events: Sequence[dict[str, Any]], context: str) -> DialResult
                 if denominator == 0
                 else min(1.0, event["sample_blocked_ns"] / denominator)
             )
-            if not math.isclose(float(ratio), computed, rel_tol=0.0, abs_tol=1e-12):
+            if float(ratio) != computed:
                 raise AnalysisError(f"{context}: blocked_ratio does not match raw sample counters")
             if event["receiver_ceiling"] != EXPECTED_CEILING:
                 raise AnalysisError(f"{context}: receiver ceiling is not the accepted safety ceiling")

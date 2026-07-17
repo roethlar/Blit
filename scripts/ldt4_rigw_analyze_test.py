@@ -8,6 +8,7 @@ import csv
 import hashlib
 import importlib.util
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -1323,6 +1324,24 @@ class AnalyzerTests(unittest.TestCase):
         sample["reason"] = "hysteresis"
         self.session.write_events(row, events)
         with self.assertRaisesRegex(analyzer.AnalysisError, "sample reason.*policy replay"):
+            self.analyze()
+
+    def test_blocked_ratio_cannot_cross_policy_threshold_within_tolerance(self) -> None:
+        row = self.session.run_rows[0]
+        events = self.session.read_events(row)
+        sample = next(
+            event
+            for event in events
+            if event["event"] == "dial_sample" and event.get("reason") == "cheap-up"
+        )
+        sample.update(
+            sample_elapsed_ns=analyzer.DIAL_TUNER_TICK_NS,
+            sample_streams=4,
+            sample_blocked_ns=100_000_000,
+            blocked_ratio=math.nextafter(analyzer.STEP_UP_THRESHOLD, 0.0),
+        )
+        self.session.write_events(row, events)
+        with self.assertRaisesRegex(analyzer.AnalysisError, "blocked_ratio does not match"):
             self.analyze()
 
     def test_policy_replay_rejects_wrong_cheap_value(self) -> None:
