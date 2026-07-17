@@ -11,8 +11,9 @@ Windows large fixtures had different content. `ldt-4-live-f1` is fixed at
 `b0c6ce3`: Windows is canonical for large and mixed fixtures, and validated
 copies use stable q source paths. Canonical-fixture Fable round one reviewed
 exact `ef48920` and admitted two Low staging corrections. `ldt-4-r3-f1` now
-uses the existing exclusive atomic rename helper and is mutation-proved;
-`ldt-4-r3-f2` remains before final review and another live launch.
+uses the existing exclusive atomic rename helper, and `ldt-4-r3-f2` validates
+canonical shape before copy and space accounting. Both are mutation-proved;
+full candidate gates and final review remain before another live launch.
 
 **Branch**: `master`
 
@@ -87,6 +88,8 @@ exactly, and make no worker-count target part of acceptance.
   stable q paths in the harness and analyzer.
 - `ldt-4-r3-f1` replaces `mv -n` promotion with the existing exclusive atomic
   rename primitive; its guard proof is recorded in the per-finding file.
+- `ldt-4-r3-f2` rejects wrong canonical shape before copy and derives the
+  staging capacity reservation from that validated manifest.
 
 ## Tests and guard proof
 
@@ -131,8 +134,8 @@ exactly, and make no worker-count target part of acceptance.
   or adaptive verdict exists. Hosted Windows CI also remains unobserved.
 - Canonical-fixture Fable round one admitted two Low corrections: use the
   existing exclusive atomic rename helper for stable promotion, and reject a
-  canonical manifest's wrong shape before copying it. The rename correction is
-  fixed and mutation-proved; shape validation and a fresh exact-head review
+  canonical manifest's wrong shape before copying it. Both corrections are
+  fixed and mutation-proved; full candidate gates and a fresh exact-head review
   remain.
 - Some fixed fixtures may finish before the tuner has a useful live sample or
   resize opportunity. The analyzer explicitly marks a missing sample at or

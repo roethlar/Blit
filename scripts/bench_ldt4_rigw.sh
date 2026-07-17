@@ -706,7 +706,7 @@ initialize_evidence_files() {
 stage_fixtures() {
     local q_state win_state transport="$WIN_FIXTURE_STAGE/src-small.transport.tar" guard
     local fixture remote_source local_destination incoming_root incoming
-    local q_manifest win_manifest remote_manifest q_shape win_shape
+    local q_manifest win_manifest remote_manifest expected q_shape win_shape
     local q_free fixture_bytes required_free
     assert_q_registered_path "$Q_STAGE_ROOT" directory true \
         || session_void 'q small-fixture staging has an unsafe ancestor'
@@ -776,8 +776,12 @@ Assert-Ldt4PlainPath '$WIN_FIXTURE_STAGE/fixtures/src_small' Directory | Out-Nul
                 || session_void "Windows canonical $fixture manifest failed before staging"
             fetch_windows_file "$remote_manifest" "$win_manifest" \
                 || session_void "Windows canonical $fixture manifest fetch failed before staging"
-            fixture_bytes=$(expected_shape "$fixture")
-            fixture_bytes=${fixture_bytes#*,}
+            expected=$(expected_shape "$fixture")
+            win_shape=$(manifest_shape "$win_manifest") \
+                || session_void "Windows canonical $fixture manifest shape failed before staging"
+            [[ "$win_shape" == "$expected" ]] \
+                || session_void "Windows canonical $fixture shape differs before staging: windows=$win_shape expected=$expected"
+            fixture_bytes=${win_shape#*,}
             q_free=$(df -Pk "$Q_SESSION_ROOT" | awk 'NR==2 {printf "%.0f", $4 * 1024}')
             required_free=$((MIN_FREE_BYTES + fixture_bytes))
             awk -v free="$q_free" -v need="$required_free" 'BEGIN {exit !(free >= need)}' \
@@ -789,9 +793,9 @@ Assert-Ldt4PlainPath '$WIN_FIXTURE_STAGE/fixtures/src_small' Directory | Out-Nul
                 || session_void "q incoming $fixture fixture is not a plain directory"
             write_q_manifest "$incoming" "$q_manifest" \
                 || session_void "q incoming $fixture manifest failed"
-            q_shape=$(manifest_shape "$q_manifest")
-            win_shape=$(manifest_shape "$win_manifest")
-            [[ "$q_shape" == "$(expected_shape "$fixture")" && "$win_shape" == "$q_shape" ]] \
+            q_shape=$(manifest_shape "$q_manifest") \
+                || session_void "q incoming $fixture manifest shape failed"
+            [[ "$q_shape" == "$win_shape" ]] \
                 || session_void "staged $fixture shape differs: q=$q_shape windows=$win_shape"
             cmp -s "$q_manifest" "$win_manifest" \
                 || session_void "staged $fixture content differs from the canonical Windows source"
@@ -2508,6 +2512,17 @@ if required_stage_copy not in stage:
     raise SystemExit("canonical Windows fixture staging disappeared")
 copy = stage.index(required_stage_copy)
 source_manifest = stage.index('write_windows_manifest "$remote_source" "$remote_manifest"', 0, copy)
+fetch_manifest = stage.index('fetch_windows_file "$remote_manifest" "$win_manifest"', source_manifest, copy)
+expected = stage.index('expected=$(expected_shape "$fixture")', fetch_manifest, copy)
+source_shape = stage.index('win_shape=$(manifest_shape "$win_manifest")', expected, copy)
+source_shape_check = stage.index('[[ "$win_shape" == "$expected" ]]', source_shape, copy)
+source_bytes = stage.index('fixture_bytes=${win_shape#*,}', source_shape_check, copy)
+free_probe = stage.index('q_free=$(df -Pk "$Q_SESSION_ROOT"', source_bytes, copy)
+free_required = stage.index('required_free=$((MIN_FREE_BYTES + fixture_bytes))', free_probe, copy)
+free_enforce = stage.index('awk -v free="$q_free" -v need="$required_free"', free_required, copy)
+free_void = stage.index('|| session_void "q free bytes $q_free cannot stage $fixture and retain $MIN_FREE_BYTES"', free_enforce, copy)
+q_shape = stage.index('q_shape=$(manifest_shape "$q_manifest")', copy)
+shape_match = stage.index('[[ "$q_shape" == "$win_shape" ]]', q_shape)
 validate = stage.index('cmp -s "$q_manifest" "$win_manifest"', copy)
 required_promotion = 'rename_q_directory_exclusive "$incoming" "$local_destination"'
 if required_promotion not in stage:
@@ -2515,7 +2530,11 @@ if required_promotion not in stage:
 if 'mv -n "$incoming"' in stage:
     raise SystemExit("canonical fixture promotion fell back to mv")
 promote = stage.index(required_promotion, validate)
-if not source_manifest < copy < validate < promote or 'incoming-fixtures' not in stage:
+if not (
+    source_manifest < fetch_manifest < expected < source_shape < source_shape_check
+    < source_bytes < free_probe < free_required < free_enforce < free_void < copy
+    < q_shape < shape_match < validate < promote
+) or 'incoming-fixtures' not in stage:
     raise SystemExit("canonical fixture copy is not validated before stable-path promotion")
 environment = text[text.index("environment_gate() {"):text.index("prepare_windows_runtime() {")]
 evidence_start = environment.index('exclusive_line "$OUT_DIR/environment-$phase.txt"')

@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-16 (ldt-4 exclusive promotion fixed; pre-copy shape fix next)
+Last updated: 2026-07-16 (ldt-4 canonical staging fixes complete; full gates next)
 
-- **NEXT ACTION — CLOSE `ldt-4-r3-f2`, THEN FINAL FABLE REVIEW:** After the first `4e0fdc3` launch voided pre-arm on unequal fixture content, `b0c6ce3` established Windows-canonical large/mixed fixtures and stable q paths. Fable reviewed exact `ef48920` and admitted two Low corrections. `f1` now promotes through the existing exclusive atomic rename helper and is mutation-proved. Validate canonical shape before copy/free-space accounting in the separate `f2` commit, re-run exact local gates, then final-review before another launch.
+- **NEXT ACTION — FULL EXACT-CANDIDATE GATES, THEN FINAL FABLE REVIEW:** After the first `4e0fdc3` launch voided pre-arm on unequal fixture content, `b0c6ce3` established Windows-canonical large/mixed fixtures and stable q paths. Fable reviewed exact `ef48920` and admitted two Low corrections. `f1` now promotes through the existing exclusive atomic rename helper; `f2` validates canonical shape and sizes the space gate before copy. Both are mutation-proved. Run the full exact-head gates, then final-review before another launch.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **WHY NO ldt-4 RIG-W DATA YET:** the first hardware attempt was a fixture-preflight void with zero arms and no Windows runtime swap. It produced failure evidence, not adaptive endpoint data. Two admitted staging fixes, a clean final review, exact restaging, and a fresh live gate remain before any matrix arm.
@@ -20,7 +20,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`; the ldt-4 rig-W endpoint correction is accepted at `9926bf7`. Fable r2 accepted harness `4e0fdc3`; its first launch found a pre-arm fixture defect. Canonical review admitted two Low staging corrections; `ldt-4-r3-f1` is fixed/guarded and `f2` remains before final review.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`; the ldt-4 rig-W endpoint correction is accepted at `9926bf7`. Fable r2 accepted harness `4e0fdc3`; its first launch found a pre-arm fixture defect. Canonical review admitted two Low staging corrections; `ldt-4-r3-f1` and `f2` are fixed/guarded, with full gates and final review remaining.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -48,7 +48,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 and endpoint correction `9926bf7` are accepted. The seven first-round harness findings are closed and Fable accepted `4e0fdc3`; its first exact launch found a pre-arm canonical-fixture defect. `ldt-4-r3-f1` is fixed/guarded; close `f2`, obtain a clean final Fable review, then stage that exact harness and execute quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 and endpoint correction `9926bf7` are accepted. The seven first-round harness findings are closed and Fable accepted `4e0fdc3`; its first exact launch found a pre-arm canonical-fixture defect. `ldt-4-r3-f1` and `f2` are fixed/guarded; pass full exact-head gates and a clean final Fable review, then stage that exact harness and execute quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).
