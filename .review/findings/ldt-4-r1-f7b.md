@@ -2,7 +2,7 @@
 
 **Severity**: LOW — the old absolute tolerance allowed a trace value to cross
 an exact policy threshold while still matching its raw counters.
-**Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
+**Status**: Closed by clean neutral whole-change re-review at `4e0fdc3`.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `f470b06`
 
@@ -62,5 +62,6 @@ a tolerance that can cross policy thresholds.
 
 Claude Fable 5/max returned the bundled integrity candidate over exact
 `e41b871..0e48721` with `guard_confirmed=true`. Intake split numeric tolerance
-from duplicate-key parsing to preserve one finding per commit. Final fixed-SHA
-whole-change re-review is pending.
+from duplicate-key parsing to preserve one finding per commit. Claude Fable
+5/max re-reviewed exact fixed head `4e0fdc3` with an independent red/green
+guard and returned clean, closing this finding.

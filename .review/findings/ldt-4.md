@@ -4,9 +4,9 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: Fixed-SHA re-review candidate — all admitted `f1`–`f3`, `f5a`,
-`f6`, `f7a`, and `f7b` fixes are guard-proved and full local gates pass;
-neutral fixed-SHA whole-change re-review remains. No candidate artifact has been staged
+**Status**: Harness accepted at exact reviewed head `4e0fdc3`; live evidence
+pending. All admitted `f1`–`f3`, `f5a`, `f6`, `f7a`, and `f7b` fixes are
+guard-proved and full local gates pass. No candidate artifact has been staged
 and no generated harness operation or live arm has run on either endpoint;
 only the read-only parser check described below and the in-memory crash-guard
 SSH probe occurred.
@@ -108,10 +108,6 @@ exactly, and make no worker-count target part of acceptance.
 
 ## Known gaps
 
-- Round-one Claude Fable 5/max openreview found seven admitted bounded fixes.
-  They are landed and guard-proved, but the implementation is not accepted
-  until a fresh structured exact-base/head whole-change review passes the
-  repo's fail-closed guard gate.
 - No endpoint staging, daemon launch, live transfer, ldt-4 evidence, or hardware
   ADD/REMOVE claim exists for this candidate. Hosted Windows CI also remains
   unobserved.
@@ -132,3 +128,11 @@ SHAs, seven candidates, and `guard_confirmed=true`. Intake admitted
 `ldt-4-r1-f1`, `f2`, `f3`, the narrowed comment-truth `f5a`, `f6`, and split
 `f7a`/`f7b`; original analyzer candidates `f4` and `f5` were declined. Full
 evidence and rationale: `.review/results/ldt-4-harness-r1.claude-verdict.md`.
+
+Claude Fable 5/max then re-reviewed exact range
+`e41b87173f2073a9b6694a62813eddc14a7844ad..4e0fdc307ba26e81f8532cd191089fa291c7f1aa`
+under the same neutral question. The schema-valid result was clean with no
+findings, exact SHAs, and `guard_confirmed=true`; its threshold-direction
+mutation made 13 focused dial tests fail, exact restoration made all 30 pass,
+and the detached worktree ended clean. Full record:
+`.review/results/ldt-4-harness-r2.claude-verdict.md`.

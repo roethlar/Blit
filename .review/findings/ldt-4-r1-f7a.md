@@ -2,7 +2,7 @@
 
 **Severity**: LOW — conflicting trace fields could collapse last-wins before
 the analyzer's exact schema and evidence-integrity checks.
-**Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
+**Status**: Closed by clean neutral whole-change re-review at `4e0fdc3`.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `efc796a`
 
@@ -62,5 +62,6 @@ JSON-specific finding.
 
 Claude Fable 5/max returned the bundled integrity candidate over exact
 `e41b871..0e48721` with `guard_confirmed=true`. Intake split duplicate-key
-handling from numeric tolerance to preserve one finding per commit. Final
-fixed-SHA whole-change re-review is pending.
+handling from numeric tolerance to preserve one finding per commit. Claude
+Fable 5/max re-reviewed exact fixed head `4e0fdc3` with an independent
+red/green guard and returned clean, closing this finding.

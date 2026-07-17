@@ -2,7 +2,7 @@
 
 **Severity**: LOW — a stale API comment described a successful partial
 settlement that production deliberately makes impossible.
-**Status**: Fixed and manually guard-proved; neutral whole-change re-review pending.
+**Status**: Closed by clean neutral whole-change re-review at `4e0fdc3`.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `f67ef75`
 
@@ -63,4 +63,5 @@ None. This changes no executable behavior.
 Claude Fable 5/max returned the analyzer candidate over exact
 `e41b871..0e48721` with `guard_confirmed=true`. Intake proved its predicted
 runtime path impossible but found this stale sentence was the misleading
-evidence behind it. Final fixed-SHA whole-change re-review is pending.
+evidence behind it. Claude Fable 5/max re-reviewed exact fixed head `4e0fdc3`
+with an independent red/green guard and returned clean, closing this finding.

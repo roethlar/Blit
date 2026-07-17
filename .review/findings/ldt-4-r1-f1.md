@@ -2,7 +2,7 @@
 
 **Severity**: MEDIUM — harmless SSH/profile stdout could void every Windows
 evidence fetch before an arm completes.
-**Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
+**Status**: Closed by clean neutral whole-change re-review at `4e0fdc3`.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `598fa59` (framing/decoder); `92a5a89` (Bash-to-PowerShell
 generation correction)
@@ -77,4 +77,5 @@ reviewed live harness run rather than this read-only check.
 Claude Fable 5/max returned the candidate over exact
 `e41b871..0e48721` with `guard_confirmed=true`. Intake corrected the overly
 broad trailing-newline wording but admitted the profile/banner failure.
-Final fixed-SHA whole-change re-review is pending.
+Claude Fable 5/max re-reviewed exact fixed head `4e0fdc3` with an
+independent red/green guard and returned clean, closing this finding.

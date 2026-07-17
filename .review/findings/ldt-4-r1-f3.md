@@ -2,7 +2,7 @@
 
 **Severity**: MEDIUM — the orphan-client fallback silently skipped common low
 PIDs and could leave a stale writer alive during a later arm.
-**Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
+**Status**: Closed by clean neutral whole-change re-review at `4e0fdc3`.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `0efa4e0`
 
@@ -61,5 +61,6 @@ in-memory PID and the exclusively written PID file.
 
 Claude Fable 5/max returned the candidate over exact
 `e41b871..0e48721` with `guard_confirmed=true`. Intake reproduced the padding
-failure locally and admitted it. Final fixed-SHA whole-change re-review is
-pending.
+failure locally and admitted it. Claude Fable 5/max re-reviewed exact fixed
+head `4e0fdc3` with an independent red/green guard and returned clean, closing
+this finding.

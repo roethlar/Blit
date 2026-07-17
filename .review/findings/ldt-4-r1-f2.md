@@ -2,7 +2,7 @@
 
 **Severity**: MEDIUM — a rerun after untrapped termination could preserve the
 test daemon as the supposed machine baseline and strand the true original.
-**Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
+**Status**: Closed by clean neutral whole-change re-review at `4e0fdc3`.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `096304b`
 
@@ -70,4 +70,6 @@ this fix closes.
 Claude Fable 5/max returned the candidate over exact
 `e41b871..0e48721` with `guard_confirmed=true`. Intake admitted the hard-crash
 misclassification and selected fail-closed refusal rather than automatic
-recovery or deletion. Final fixed-SHA whole-change re-review is pending.
+recovery or deletion. Claude Fable 5/max re-reviewed exact fixed head
+`4e0fdc3` with an independent red/green guard and returned clean, closing this
+finding.
