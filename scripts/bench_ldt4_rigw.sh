@@ -504,6 +504,25 @@ try {
 " | tr -d '\r' | tail -1
 }
 
+decode_windows_file_payload() {
+    python3 -c '
+import base64
+import binascii
+import sys
+
+prefix = b"LDT4-FILE-B64|"
+raw = sys.stdin.buffer.read().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+payloads = [line[len(prefix):] for line in raw.split(b"\n") if line.startswith(prefix)]
+if len(payloads) != 1:
+    raise SystemExit(f"expected exactly one tagged Windows file payload, got {len(payloads)}")
+try:
+    decoded = base64.b64decode(payloads[0], validate=True)
+except (binascii.Error, ValueError) as exc:
+    raise SystemExit(f"malformed tagged Windows file payload: {exc}") from exc
+sys.stdout.buffer.write(decoded)
+'
+}
+
 fetch_windows_file() {
     local remote=$1 local_path=$2 remote_hash local_hash guard
     assert_q_registered_path "$(dirname "$local_path")" directory false \
@@ -513,11 +532,13 @@ fetch_windows_file() {
     [[ ! -e "$local_path" && ! -L "$local_path" ]] || die "refusing fetch overwrite: $local_path"
     remote_hash=$(windows_sha256 "$remote")
     guard=$(windows_path_guard_script)
-    wssh "$guard
+    if ! wssh "$guard
 Assert-Ldt4PlainPath '$remote' File | Out-Null
-[Console]::Out.Write([Convert]::ToBase64String([IO.File]::ReadAllBytes('$remote')))
+[Console]::Out.Write("`nLDT4-FILE-B64|" + [Convert]::ToBase64String([IO.File]::ReadAllBytes('$remote')) + "`n")
 " \
-        | python3 -c 'import base64, pathlib, sys; data=base64.b64decode(sys.stdin.buffer.read(), validate=True); handle=pathlib.Path(sys.argv[1]).open("xb"); handle.write(data); handle.close()' "$local_path"
+        | decode_windows_file_payload > "$local_path"; then
+        die "tagged Windows file fetch failed: $remote"
+    fi
     local_hash=$(local_sha256 "$local_path")
     [[ "$local_hash" == "$remote_hash" ]] || die "fetched file hash mismatch: $remote"
 }
@@ -2360,6 +2381,21 @@ run_selftest() {
         || die 'client reap evidence selftest failed'
     LC_ALL=C grep -Fq 'ambiguous exact launcher recovery' "$SCRIPT_PATH" \
         || die 'exact Windows launcher recovery selftest failed'
+    sample=$(printf 'profile banner\r\nLDT4-FILE-B64|aGVsbG8=\r\n' \
+        | decode_windows_file_payload) \
+        || die 'tagged Windows fetch decode selftest failed'
+    [[ "$sample" == hello ]] || die 'tagged Windows fetch payload changed'
+    if printf 'profile banner\r\n' | decode_windows_file_payload >/dev/null 2>&1; then
+        die 'missing Windows fetch payload tag passed selftest'
+    fi
+    if printf 'LDT4-FILE-B64|aGVsbG8=\nLDT4-FILE-B64|d29ybGQ=\n' \
+        | decode_windows_file_payload >/dev/null 2>&1; then
+        die 'duplicate Windows fetch payload tags passed selftest'
+    fi
+    if printf '%s\n' 'LDT4-FILE-B64|%%%' \
+        | decode_windows_file_payload >/dev/null 2>&1; then
+        die 'malformed Windows fetch payload passed selftest'
+    fi
     python3 - "$SCRIPT_PATH" <<'PY' || die 'static harness safety selftest failed'
 import pathlib
 import re

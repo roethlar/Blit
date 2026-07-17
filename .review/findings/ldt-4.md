@@ -4,10 +4,9 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: Review fixes open — neutral fixed-SHA Claude Fable 5/max round one
-returned seven candidates. Intake admitted three Medium harness-safety defects
-and four Low contract/test/evidence-strictness defects; two analyzer claims were
-declined. No candidate artifact has been staged and no generated harness
+**Status**: Review fixes in progress — `ldt-4-r1-f1` is fixed and
+mutation-proved; the remaining admitted findings still precede neutral
+fixed-SHA whole-change re-review. No candidate artifact has been staged and no generated harness
 operation or live arm has run on either endpoint; only the read-only parser
 check described below occurred.
 

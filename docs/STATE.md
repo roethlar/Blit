@@ -2,7 +2,7 @@
 
 Last updated: 2026-07-16 (ldt-4 Fable r1 triaged; seven bounded fixes next)
 
-- **NEXT ACTION — FIX THE SEVEN ADMITTED ldt-4 REVIEW FINDINGS, ONE PER COMMIT:** Fable r1 reviewed exact `e41b871..0e48721` and returned seven candidates. Intake admitted strict Windows fetch framing, hard-crash daemon-baseline detection, padded-PID recovery, one stale resize comment, missing Python replay branch guards, duplicate JSON-key rejection, and exact blocked-ratio recomputation. Two analyzer claims were declined. Re-run neutral whole-change Fable review before any endpoint staging or measurement.
+- **NEXT ACTION — CONTINUE THE ADMITTED ldt-4 REVIEW FIXES, ONE PER COMMIT:** Fable r1 reviewed exact `e41b871..0e48721`; intake and per-finding status live in `.review/results/ldt-4-harness-r1.claude-verdict.md` and `.review/findings/ldt-4-r1-*.md`. Tagged strict Windows fetch framing is fixed and mutation-proved. Complete the remaining fixes, then run neutral whole-change Fable review before any endpoint staging or measurement.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **WHY NO ldt-4 RIG-W DATA YET:** the harness/analyzer has open review fixes and has not been accepted, staged, or run. After a clean fixed-SHA re-review, live preflight must re-establish endpoint quietness before any arm; no ldt-4 adaptive endpoint data exists yet.
@@ -20,7 +20,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`; the ldt-4 rig-W endpoint correction is accepted at `9926bf7`. Fable r1 reviewed the additive harness/analyzer at `0e48721`; seven admitted fixes, clean re-review, and endpoint evidence remain.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`; the ldt-4 rig-W endpoint correction is accepted at `9926bf7`. Fable r1 reviewed the additive harness/analyzer at `0e48721`; admitted fixes are in progress, followed by clean re-review and endpoint evidence.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
