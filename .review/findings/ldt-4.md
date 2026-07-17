@@ -4,11 +4,12 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: Live repair in progress. Exact reviewed head `5a2265e` cleared
-canonical staging and reached arm `ldt4-001`, then voided before daemon launch
-or timing when generated PowerShell joined two log paths. `ldt-4-live-f2` is
-fixed and mutation-proved at `b9b8080`; separate partial-start teardown finding
-`ldt-4-live-f3` remains before final review and a fresh run.
+**Status**: Live repairs fixed and mutation-proved. Exact reviewed head
+`5a2265e` cleared canonical staging and reached arm `ldt4-001`, then voided
+before daemon launch or timing. `ldt-4-live-f2` fixes the generated PowerShell
+log array at `b9b8080`; `ldt-4-live-f3` safely classifies the proven no-launch
+teardown state at `a39f0c5`. Tactical code review and a fresh live run are next;
+formal Fable openreview is on owner-directed capacity hold.
 
 **Branch**: `master`
 
@@ -87,6 +88,8 @@ exactly, and make no worker-count target part of acceptance.
   derive the staging capacity reservation from that validated manifest.
 - `b9b8080` closes `ldt-4-live-f2`: make the two generated Windows daemon log
   paths explicit PowerShell array elements and pin their exact source form.
+- `a39f0c5` closes `ldt-4-live-f3`: recognize only a missing-start state with
+  zero PIDs, no post-launch markers, and a closed port before returning clean.
 
 ## Tests and guard proof
 
@@ -130,14 +133,19 @@ exactly, and make no worker-count target part of acceptance.
   loop turns the offline self-test red. Exact restoration passes the 96-arm
   self-test, all 75 analyzer tests, formatting, strict clippy, the full
   workspace suite, documentation checks, and diff checks.
+- At `a39f0c5`, disabling the missing-start branch or weakening the durable
+  pre-launch flush independently turns the offline self-test red. Exact
+  restoration passes; the current function also returned the exact no-launch
+  result against retained Windows arm `ldt4-001` through SSH without a
+  registered session or runtime file write.
 
 ## Known gaps
 
 - Exact product and harness artifacts are staged additively and two void
   sessions are retained, but no live arm, transfer datum, hardware ADD/REMOVE
-  claim, or adaptive verdict exists. `ldt-4-live-f3` must make teardown safe
-  when startup stops before its durable launch boundary. Hosted Windows CI
-  also remains unobserved.
+  claim, or adaptive verdict exists. Tactical review and a fresh live run
+  remain; formal Fable openreview is deferred by the owner while that model is
+  out of capacity. Hosted Windows CI also remains unobserved.
 - Canonical-fixture Fable round one admitted two Low corrections: use the
   existing exclusive atomic rename helper for stable promotion, and reject a
   canonical manifest's wrong shape before copying it. Both corrections are
@@ -203,5 +211,7 @@ was accepted. Teardown then required the not-yet-created `start.cmd`, exposing
 separate `ldt-4-live-f3`. Read-only post-run checks proved both ports closed,
 no session process remained, the active Windows daemon was restored to durable
 prior SHA `1510d8d0…0512`, and the exact staged daemon remains retained under
-the session-specific tested name. `ldt-4-live-f2` is fixed at `b9b8080`; final
-Fable review waits for `ldt-4-live-f3`.
+the session-specific tested name. `ldt-4-live-f2` is fixed at `b9b8080` and
+`ldt-4-live-f3` at `a39f0c5`, each with independent red/restored-green guards.
+The owner placed further formal Fable openreviews on capacity hold and allowed
+tactical code review by Grok or Claude Opus 4.8 instead.

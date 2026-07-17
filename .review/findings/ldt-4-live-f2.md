@@ -61,10 +61,11 @@ None.
 ## Known gaps
 
 The same failed launch exposed separate partial-start teardown finding
-`ldt-4-live-f3`. That repair, final Fable review, and a fresh live run remain.
+`ldt-4-live-f3`, now fixed and mutation-proved at `a39f0c5`. Tactical code
+review and a fresh live run remain; further formal Fable openreviews are on
+owner-directed hold while that model is out of capacity.
 
 ## Reviewer comments
 
 This finding came from the attached live launch, not a reviewer candidate.
-Formal whole-change review is deferred until the separate teardown repair is
-also fixed and mutation-proved.
+Formal whole-change review remains deferred under the owner's capacity hold.

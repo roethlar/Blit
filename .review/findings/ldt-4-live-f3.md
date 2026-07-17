@@ -2,9 +2,9 @@
 
 **Severity**: MEDIUM — teardown falsely reports failure after a startup error
 that occurred before any launcher or daemon could exist.
-**Status**: Open; next one-finding repair under the active ldt-4 plan.
+**Status**: Fixed and mutation-proved; tactical code review and live retry pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: pending
+**Commit**: `a39f0c570191d65f197e4ab58eade375ec52e6d6`
 
 ## Evidence
 
@@ -46,15 +46,30 @@ current exact-ownership teardown path remains unchanged.
 
 ## Files changed
 
-- `scripts/bench_ldt4_rigw.sh` — pending partial-start classification and
-  offline structural guard.
+- `scripts/bench_ldt4_rigw.sh` — partial-start classification and offline
+  structural guard.
 
 ## Guard proof
 
-Pending. The guard must pin the flushed-start-file-before-process-create
-ordering and the no-launch branch's PID/artifact/port refusals. Temporarily
-disabling that branch and breaking its startup-order premise must each turn the
-no-SSH self-test red; exact restoration must return green.
+- The no-SSH self-test pins one durable `start.cmd` flush before the sole
+  process-create call, validates the partial paths before classification, and
+  requires the ordered PID, four-marker, and listener refusals before the only
+  successful return. It rejects any process enumeration or stop operation in
+  that branch.
+- Replacing the missing-start condition with false makes the self-test fail
+  with `Windows no-launch teardown branch is not unique`. Weakening the exact
+  durable flush makes it fail with
+  `Windows start command durable flush is not unique`. Exact restoration
+  returns `PASS (96 arms, no SSH)` after each mutation.
+- The exact current `stop_windows_daemon` function was streamed in memory over
+  SSH to q and executed against the retained `ldt4-001` partial state on
+  Windows. It returned `LDT4-NO-LAUNCH-TEARDOWN|PASS`; that branch contains no
+  registered session or runtime file write.
+- Bash syntax, all 75 analyzer tests, formatting, strict workspace clippy,
+  documentation, and diff checks pass. One full workspace run had the known
+  transient temporary-daemon failure in `test_admin_list_modules`; that exact
+  test passed alone and the complete workspace rerun passed without a code
+  change.
 
 ## Coder dispute
 
@@ -62,9 +77,12 @@ None.
 
 ## Known gaps
 
-No live arm or transfer datum exists. Final Fable review and a fresh additive
-live run wait for this repair.
+No live arm or transfer datum exists. A tactical Grok or Claude Opus 4.8 code
+review and a fresh additive live run remain. The owner put further formal Fable
+openreviews on hold while that model is out of capacity.
 
 ## Reviewer comments
 
 This finding came from the attached live launch, not a reviewer candidate.
+Formal openreview is intentionally deferred; do not describe the tactical code
+review as a formal acceptance verdict.
