@@ -1264,7 +1264,7 @@ foreach (\$log in @((\$dir + '/daemon.out'), (\$dir + '/daemon.err'))) {
   \$logStream = [IO.File]::Open(\$log,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
   \$logStream.Dispose()
 }
-\$startText = @('@echo off','set /a BLIT_LAUNCH_WAIT=0',':wait_for_launch_ok','if exist \"' + \$dir + '/launch.ok\" goto launch_ready','set /a BLIT_LAUNCH_WAIT+=1','if %BLIT_LAUNCH_WAIT% GEQ 15 exit /b 111','>nul 2>&1 ping -n 2 127.0.0.1','goto wait_for_launch_ok',':launch_ready','set BLIT_TRACE_SESSION_PHASES=1','set BLIT_TRACE_RUN_ID=$run_id','\"$WIN_ACTIVE_DAEMON\" --config \"' + \$config + '\" >> \"' + \$dir + '/daemon.out\" 2>> \"' + \$dir + '/daemon.err\"') -join \"\`r\`n\"
+\$startText = @('@echo off','set /a BLIT_LAUNCH_WAIT=0',':wait_for_launch_ok',('if exist \"' + \$dir + '/launch.ok\" goto launch_ready'),'set /a BLIT_LAUNCH_WAIT+=1','if %BLIT_LAUNCH_WAIT% GEQ 15 exit /b 111','>nul 2>&1 ping -n 2 127.0.0.1','goto wait_for_launch_ok',':launch_ready','set BLIT_TRACE_SESSION_PHASES=1','set BLIT_TRACE_RUN_ID=$run_id',('\"$WIN_ACTIVE_DAEMON\" --config \"' + \$config + '\" >> \"' + \$dir + '/daemon.out\" 2>> \"' + \$dir + '/daemon.err\"')) -join \"\`r\`n\"
 \$startStream = [IO.File]::Open(\$start,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
 try { \$bytes=[Text.Encoding]::ASCII.GetBytes(\$startText + \"\`r\`n\"); \$startStream.Write(\$bytes,0,\$bytes.Length); \$startStream.Flush(\$true) } finally { \$startStream.Dispose() }
 \$launcherCommand = 'cmd.exe /d /c \"\"' + \$start + '\"\"'
@@ -2524,6 +2524,12 @@ windows_stop = text[text.index("stop_windows_daemon() {"):text.index("normalize_
 required_log_loop = r'''foreach (\$log in @((\$dir + '/daemon.out'), (\$dir + '/daemon.err'))) {'''
 if windows_start.count(required_log_loop) != 1:
     raise SystemExit("Windows daemon log paths are not two explicit array elements")
+required_start_elements = (
+    r""",('if exist \"' + \$dir + '/launch.ok\" goto launch_ready'),""",
+    r""",('\"$WIN_ACTIVE_DAEMON\" --config \"' + \$config + '\" >> \"' + \$dir + '/daemon.out\" 2>> \"' + \$dir + '/daemon.err\"')) -join""",
+)
+if any(windows_start.count(element) != 1 for element in required_start_elements):
+    raise SystemExit("Windows start command paths are not explicit array elements")
 required_start_flush = r"\$startStream.Flush(\$true)"
 if windows_start.count(required_start_flush) != 1:
     raise SystemExit("Windows start command durable flush is not unique")
