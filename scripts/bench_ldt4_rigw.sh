@@ -1371,6 +1371,24 @@ Assert-Ldt4PlainPath \$dir Directory | Out-Null
 Assert-Ldt4PlainPath '$WIN_ACTIVE_DAEMON' File | Out-Null
 \$config = ConvertTo-Ldt4CanonicalPath (\$dir + '/daemon.toml')
 \$start = ConvertTo-Ldt4CanonicalPath (\$dir + '/start.cmd')
+Assert-Ldt4PlainPath \$config File \$true | Out-Null
+Assert-Ldt4PlainPath \$start File \$true | Out-Null
+if (-not (Test-Path -LiteralPath \$start)) {
+  if (\$persistedDaemonPid -ne 0 -or \$launcher -ne 0) { throw 'missing start command has PID evidence' }
+  \$postLaunchMarkers = @(
+    (\$dir + '/launcher.pid'),
+    (\$dir + '/daemon.pid'),
+    (\$dir + '/launch.ok'),
+    (\$dir + '/daemon-identity.txt')
+  )
+  foreach (\$marker in \$postLaunchMarkers) {
+    Assert-Ldt4PlainPath \$marker File \$true | Out-Null
+    if (Test-Path -LiteralPath \$marker) { throw "missing start command has post-launch evidence: \$marker" }
+  }
+  if (Get-NetTCPConnection -State Listen -LocalPort $DAEMON_PORT -ErrorAction SilentlyContinue) { throw 'missing start command has a daemon port listener' }
+  'STOPPED'
+  return
+}
 Assert-Ldt4PlainPath \$config File | Out-Null
 Assert-Ldt4PlainPath \$start File | Out-Null
 \$expectedLauncher = ConvertTo-Ldt4CommandLine ('cmd.exe /d /c \"\"' + \$start + '\"\"')
@@ -2502,9 +2520,55 @@ restore = text[text.index("restore_windows_runtime() {"):text.index("q_responder
 q_paths = text[text.index("assert_q_registered_paths() {"):text.index("assert_windows_registered_paths() {")]
 windows_paths = text[text.index("assert_windows_registered_paths() {"):text.index("mark_void() {")]
 windows_start = text[text.index("start_windows_daemon() {"):text.index("stop_q_daemon() {")]
+windows_stop = text[text.index("stop_windows_daemon() {"):text.index("normalize_q_client_pid_list() {")]
 required_log_loop = r'''foreach (\$log in @((\$dir + '/daemon.out'), (\$dir + '/daemon.err'))) {'''
 if windows_start.count(required_log_loop) != 1:
     raise SystemExit("Windows daemon log paths are not two explicit array elements")
+required_start_flush = r"\$startStream.Flush(\$true)"
+if windows_start.count(required_start_flush) != 1:
+    raise SystemExit("Windows start command durable flush is not unique")
+start_flush = windows_start.index(required_start_flush)
+process_creates = [match.start() for match in re.finditer("Invoke-CimMethod", windows_start)]
+if len(process_creates) != 1 or start_flush >= process_creates[0]:
+    raise SystemExit("Windows start command is not durable before process creation")
+allow_missing_config = windows_stop.index(r"Assert-Ldt4PlainPath \$config File \$true | Out-Null")
+allow_missing_start = windows_stop.index(r"Assert-Ldt4PlainPath \$start File \$true | Out-Null", allow_missing_config)
+required_missing_start = r"if (-not (Test-Path -LiteralPath \$start)) {"
+if windows_stop.count(required_missing_start) != 1:
+    raise SystemExit("Windows no-launch teardown branch is not unique")
+missing_start = windows_stop.index(required_missing_start)
+required_start = windows_stop.index(r"Assert-Ldt4PlainPath \$start File | Out-Null", missing_start)
+no_launch = windows_stop[missing_start:required_start]
+if not allow_missing_config < allow_missing_start < missing_start:
+    raise SystemExit("Windows partial-start paths are not validated before classification")
+for required in (
+    r"\$persistedDaemonPid -ne 0 -or \$launcher -ne 0",
+    r"\$postLaunchMarkers = @(",
+    r"(\$dir + '/launcher.pid')",
+    r"(\$dir + '/daemon.pid')",
+    r"(\$dir + '/launch.ok')",
+    r"(\$dir + '/daemon-identity.txt')",
+    r"Assert-Ldt4PlainPath \$marker File \$true | Out-Null",
+    r"if (Test-Path -LiteralPath \$marker)",
+    "Get-NetTCPConnection -State Listen -LocalPort $DAEMON_PORT",
+    "'STOPPED'",
+    "return",
+):
+    if required not in no_launch:
+        raise SystemExit(f"Windows no-launch teardown proof disappeared: {required}")
+pid_refusal = no_launch.index(r"\$persistedDaemonPid -ne 0 -or \$launcher -ne 0")
+marker_array = no_launch.index(r"\$postLaunchMarkers = @(", pid_refusal)
+marker_safety = no_launch.index(r"Assert-Ldt4PlainPath \$marker File \$true | Out-Null", marker_array)
+marker_refusal = no_launch.index(r"if (Test-Path -LiteralPath \$marker)", marker_safety)
+port_refusal = no_launch.index("Get-NetTCPConnection -State Listen -LocalPort $DAEMON_PORT", marker_refusal)
+stopped = no_launch.index("'STOPPED'", port_refusal)
+no_launch_return = no_launch.index("return", stopped)
+if not pid_refusal < marker_array < marker_safety < marker_refusal < port_refusal < stopped < no_launch_return:
+    raise SystemExit("Windows no-launch teardown proof is out of order")
+if no_launch.count("return") != 1:
+    raise SystemExit("Windows no-launch teardown has an unguarded return")
+if any(token in no_launch for token in ("Get-CimInstance", "Get-Process", "Stop-Process")):
+    raise SystemExit("Windows no-launch teardown can enumerate or stop a process")
 for staged in ('src_large', 'src_small', 'src_mixed'):
     if f'$Q_STAGE_ROOT/fixtures/{staged}' not in q_paths:
         raise SystemExit(f"q {staged} fixture disappeared from boundary path guards")
