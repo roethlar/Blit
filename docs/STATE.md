@@ -1,11 +1,19 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-17 (ldt-4 live startup repairs tactical-review clean; fresh live gates next)
+Last updated: 2026-07-17 (ldt-4 start-command f4 fixed/guarded; tactical review + retry next)
 
-- **NEXT ACTION — ADDITIVELY STAGE `a39f0c5`, THEN FRESH LIVE GATES:** `ldt-4-live-f2` fixes the Windows log array at `b9b8080`; `ldt-4-live-f3` accepts only the proven no-launch teardown state at `a39f0c5`. Both are mutation-proved with full local gates green, and Grok 4.5/high found no material defect in tactical review of exact `5a2265e..a39f0c5`. Formal Fable openreviews remain on owner-directed capacity hold; stage that exact code head without replacing retained artifacts and retry through attached SSH.
+- **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
+  `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
+  faults with retained harness evidence and full local gates green.
+  - Done: live evidence remains retained; no endpoint or daemon deletion/overwrite.
+  - In-flight: no completed/timed live transfer row yet.
+  - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
+    fresh `q`↔`netwatch-01` retry.
+
+- **NEXT ACTION — TACTICAL REVIEW `d53b5fd`, THEN ADDITIVE LIVE RETRY:** exact `a39f0c5` cleared additive staging, cross-endpoint fixture equality, and the live environment gate, then exposed generated start-command finding `ldt-4-live-f4` before daemon launch or timing. `d53b5fd` keeps both dynamic PowerShell array entries intact and is mutation-proved with full local gates green. Use Grok or Claude Opus 4.8 for tactical code review while formal Fable openreviews remain on owner-directed capacity hold, then stage that exact head without replacing retained artifacts.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
-- **WHY NO ldt-4 RIG-W DATA YET:** two retained sessions failed closed before a transfer: the first on unequal fixtures; the second, tag `ldt4-20260717T052509Z-5a2265e202a4`, after canonical staging but before Windows daemon launch because PowerShell joined two log paths. `runs.csv` has zero data rows. Both ports are closed, no session process remains, and Windows' prior active daemon was restored byte-for-byte. Both live startup/teardown faults are fixed, guarded, and tactical-review clean; a fresh launch remains.
+- **WHY NO ldt-4 RIG-W DATA YET:** three retained sessions failed closed before a transfer: unequal fixtures; joined log paths; then tag `ldt4-20260717T062334Z-a39f0c570191`, where PowerShell split two generated `start.cmd` paths across lines. Every `runs.csv` has zero data rows. Both ports are closed, no session process remains, and Windows' prior active daemon is restored byte-for-byte. The newest fault is fixed and guarded at `d53b5fd`; tactical review and a fresh launch remain.
 
 - **BASELINE RE-RECORD (D-2026-07-14-1, owner 2026-07-14) — a prerequisite slice for `pf-final`, NOT for pf-1.** Both committed ceilings were recorded at **MTU 1500** before the fabric went jumbo, and pf-0 showed jumbo makes both arms 3–4% faster — so a jumbo build graded against them is **LENIENT** and could let a regression pass. Each rig's baseline is **re-recorded once with its ORIGINAL old build at MTU 9000**, then re-frozen (rig W `bench_otp12_win.sh:105`; rig Z `bench_otp12_zoey.sh:102`; rig D unaffected). Constraints — same old build per rig, `BASELINE_SUMMARY` stays override-free, pf-0's start-AND-end MSS gate applies — in **D-2026-07-14-1**.
 - **pf-0 DONE — MTU is KILLED as a material cause of P1 (2026-07-14, `docs/bench/otp12-jumbo-win-2026-07-13/`).** A-B-B-A on `q` (9000/1500/1500/9000), **256 timed runs, 0 voided**, MSS gate held start AND end of every session. `Δ_9000 = 236`, `Δ_1500 = 229`, measured noise floor **N_Δ = 78 ms**, **r = −3.1% → KILLED**. The null is **not vacuous** — `wm_tcp_large` ran 3–4% faster at jumbo on **both** arms, so the manipulation reached the wire; the benefit is **symmetric**, which is why it cannot explain an **asymmetry**. codex NOT READY → **7/7 accepted** (`11f0c2a`): every finding was a *claim* outrunning the *data* (it recomputed and confirmed all the numbers). **Two limits that now bind pf-1**: (a) the run is **NOT powered** to exclude a *contributing*-size effect (20% of Δ = 46 ms < the 78 ms floor) — it excludes a DOMINANT one only; (b) 78 ms is **between**-session noise, so cross-session grading of a counterfactual is dead, and **pf-1 must measure its own paired within-session floor and register a resolution check before grading**.
@@ -20,7 +28,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`; the ldt-4 rig-W endpoint correction is accepted at `9926bf7`. Exact reviewed harness `5a2265e` reached its first arm after canonical staging; live startup/teardown findings are fixed and guarded through `a39f0c5`, and tactical Grok review is clean. Additive staging and the fresh run are next; formal Fable openreview is held for capacity.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`; the ldt-4 rig-W endpoint correction is accepted at `9926bf7`. Repairs through `a39f0c5` are tactical Grok-clean; the fresh run exposed separate `start.cmd` array finding `ldt-4-live-f4`, fixed and mutation-proved at `d53b5fd`. Tactical Grok/Opus review precedes additive staging and retry; formal Fable openreview is held for capacity.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -48,7 +56,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 and endpoint correction `9926bf7` are accepted. Exact reviewed `5a2265e` cleared canonical staging but its first arm exposed two startup/teardown harness defects before daemon launch or timing. Fixes through `a39f0c5` are guarded with full local gates green and tactical Grok review found no material defect. Formal Fable openreview is held; additively stage exact `a39f0c5`, then execute fresh quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 and endpoint correction `9926bf7` are accepted. Repairs through `a39f0c5` are guarded and tactical Grok-clean. Its additive retry cleared fixtures and environment, then exposed generated start-command finding `ldt-4-live-f4` before daemon launch or timing. The fix at `d53b5fd` is mutation-proved with full local gates green. Formal Fable openreview is held; tactically review with Grok or Claude Opus 4.8, additively stage exact `d53b5fd`, then execute fresh quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).

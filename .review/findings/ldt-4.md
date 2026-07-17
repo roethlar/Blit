@@ -4,17 +4,17 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: Live repairs fixed, mutation-proved, and tactically reviewed clean. Exact reviewed head
-`5a2265e` cleared canonical staging and reached arm `ldt4-001`, then voided
-before daemon launch or timing. `ldt-4-live-f2` fixes the generated PowerShell
-log array at `b9b8080`; `ldt-4-live-f3` safely classifies the proven no-launch
-teardown state at `a39f0c5`. A fresh live run is next; formal Fable openreview
-is on owner-directed capacity hold.
+**Status**: Live repairs continue fail-closed. Exact `a39f0c5` cleared additive
+staging, fixtures, and the live environment gate, then its first arm exposed
+`ldt-4-live-f4`: PowerShell split two generated start-command paths across
+lines. The fix is mutation-proved at `d53b5fd`; tactical code review and a fresh
+additive live run are next. Formal Fable openreview is on owner-directed
+capacity hold.
 
 **Branch**: `master`
 
 **Implementation range**:
-`e41b87173f2073a9b6694a62813eddc14a7844ad..fdf7b3771c00c950ca40fb7e9904a91c89f8a72d`
+`e41b87173f2073a9b6694a62813eddc14a7844ad..d53b5fdd3b85fd61f377de917e16ba19aa65d137`
 
 **Artifact under test**: accepted ldt-3 runtime
 `406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77`
@@ -90,6 +90,9 @@ exactly, and make no worker-count target part of acceptance.
   paths explicit PowerShell array elements and pin their exact source form.
 - `a39f0c5` closes `ldt-4-live-f3`: recognize only a missing-start state with
   zero PIDs, no post-launch markers, and a closed port before returning clean.
+- `d53b5fd` closes `ldt-4-live-f4`: make both generated Windows responder
+  startup concatenations explicit PowerShell array elements in launch and identity
+  commands.
 
 ## Tests and guard proof
 
@@ -141,11 +144,12 @@ exactly, and make no worker-count target part of acceptance.
 
 ## Known gaps
 
-- Exact product and harness artifacts are staged additively and two void
-  sessions are retained, but no live arm, transfer datum, hardware ADD/REMOVE
-  claim, or adaptive verdict exists. Tactical Grok review is clean; a fresh
-  live run remains. Formal Fable openreview is deferred by the owner while that
-  model is out of capacity. Hosted Windows CI also remains unobserved.
+- Exact product and harness artifacts are staged additively and three void sessions
+  are retained, but no completed/timed live arm or transfer datum exists. The
+  fixes through `d53b5fd` are tactical Grok-clean; `ldt-4-live-f4` is fixed and
+  guarded there, with tactical code review and a fresh run remaining. Formal
+  Fable openreview is deferred by the owner while that model is out of capacity.
+  Hosted Windows CI also remains unobserved.
 - Canonical-fixture Fable round one admitted two Low corrections: use the
   existing exclusive atomic rename helper for stable promotion, and reject a
   canonical manifest's wrong shape before copying it. Both corrections are
@@ -224,3 +228,14 @@ initial process cancellation and returned `clean` with no findings after Bash
 and launched-state ownership verification. This advisory result is not formal
 openreview acceptance. Record:
 `.review/results/ldt-4-live-fixes-r1.grok-verdict.md`.
+
+Exact `a39f0c5` was then bundled and staged without replacing the retained
+bundle or checkout. q's Bash 3.2 self-test passed, all three fixture manifests
+matched across endpoints, and the live environment gate passed. Retained
+session `ldt4-20260717T062334Z-a39f0c570191` voided on its first arm before
+daemon launch or timing because two unparenthesized concatenations made
+PowerShell emit a 20-item `start.cmd` rather than 12 intact lines. Cleanup
+closed both ports, left no session process, restored the exact prior Windows
+daemon, and retained the tested daemon and evidence. `ldt-4-live-f4` fixes both
+array elements and is mutation-proved at `d53b5fd`; tactical code review and
+fresh additive staging remain.

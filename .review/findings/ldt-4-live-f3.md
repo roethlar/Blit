@@ -77,8 +77,10 @@ None.
 
 ## Known gaps
 
-No live arm or transfer datum exists. Tactical Grok review found no material
-defect at exact `a39f0c5`; a fresh additive live run remains. The owner put
+No completed/timed live arm or transfer datum exists. Tactical Grok review found no
+material defect at exact `a39f0c5`; a fresh additive live run cleared the
+no-launch teardown fault, then exposed separate generated start-command finding
+`ldt-4-live-f4`, fixed and mutation-proved at `d53b5fd`. The owner put
 further formal Fable openreviews on hold while that model is out of capacity.
 
 ## Reviewer comments

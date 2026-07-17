@@ -62,9 +62,10 @@ None.
 
 The same failed launch exposed separate partial-start teardown finding
 `ldt-4-live-f3`, now fixed and mutation-proved at `a39f0c5`. Tactical Grok
-review found no material defect at that exact head. A fresh live run remains;
-further formal Fable openreviews are on owner-directed hold while that model is
-out of capacity.
+review found no material defect at that exact head. A fresh live run cleared
+this log-array fault, then exposed separate generated start-command finding
+`ldt-4-live-f4`, fixed and mutation-proved at `d53b5fd`. Further formal Fable
+openreviews are on owner-directed hold while that model is out of capacity.
 
 ## Reviewer comments
 
