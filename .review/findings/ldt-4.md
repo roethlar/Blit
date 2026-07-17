@@ -4,8 +4,8 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: Review fixes in progress — Medium `f1`–`f3`, Low comment-truth
-`f5a`, and replay coverage `f6` are guard-proved; the remaining findings precede neutral
+**Status**: Review fixes in progress — `f1`–`f3`, `f5a`, `f6`, and duplicate-key
+`f7a` are guard-proved; exact ratio check `f7b` precedes neutral
 fixed-SHA whole-change re-review. No candidate artifact has been staged and no generated harness
 operation or live arm has run on either endpoint; only the read-only parser
 check described below and the in-memory crash-guard SSH probe occurred.
@@ -75,7 +75,7 @@ exactly, and make no worker-count target part of acceptance.
 
 - Bash 3.2 syntax and the offline harness self-test pass. An xtrace audit shows
   the self-test executes no SSH command.
-- The analyzer compiles, parses under Python 3.9 grammar, and passes all 73
+- The analyzer compiles, parses under Python 3.9 grammar, and passes all 74
   synthetic tests.
 - Analyzer mutations for evidence relocation, source/active/archive binding,
   socket attachment/write/receive/stop order, and policy replay turn the

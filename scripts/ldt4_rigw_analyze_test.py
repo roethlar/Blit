@@ -1838,6 +1838,23 @@ class AnalyzerTests(unittest.TestCase):
         with self.assertRaisesRegex(analyzer.AnalysisError, "foreign session"):
             self.analyze()
 
+    def test_trace_rejects_duplicate_json_keys_before_last_wins_collapse(self) -> None:
+        row = self.session.run_rows[0]
+        path = self.root / row["source_trace"]
+        text = path.read_text(encoding="utf-8")
+        needle = '"reason":"cheap-up"'
+        self.assertIn(needle, text)
+        path.write_text(
+            text.replace(
+                needle,
+                '"reason":"hysteresis","reason":"cheap-up"',
+                1,
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(analyzer.AnalysisError, "duplicate JSON key 'reason'"):
+            self.analyze()
+
     def test_input_inventory_hashes_every_pre_analysis_plain_file(self) -> None:
         runs_sha = hashlib.sha256((self.root / "runs.csv").read_bytes()).hexdigest()
         expected_count = sum(path.is_file() for path in self.root.rglob("*"))

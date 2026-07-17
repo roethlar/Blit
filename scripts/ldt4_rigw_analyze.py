@@ -263,6 +263,21 @@ class AnalysisError(RuntimeError):
     """The evidence is incomplete, inconsistent, or unsafe to grade."""
 
 
+class DuplicateJsonKeyError(ValueError):
+    def __init__(self, key: str) -> None:
+        super().__init__(key)
+        self.key = key
+
+
+def _reject_duplicate_json_keys(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise DuplicateJsonKeyError(key)
+        result[key] = value
+    return result
+
+
 @dataclass(frozen=True)
 class ManifestEntry:
     encoded_path: str
@@ -1093,7 +1108,11 @@ def _load_trace_file(root: Path, relative: str, cache: dict[str, list[dict[str, 
                 continue
             payload = line[len(TRACE_PREFIX) :]
             try:
-                event = json.loads(payload)
+                event = json.loads(payload, object_pairs_hook=_reject_duplicate_json_keys)
+            except DuplicateJsonKeyError as exc:
+                raise AnalysisError(
+                    f"trace {relative} line {line_number}: duplicate JSON key {exc.key!r}"
+                ) from exc
             except json.JSONDecodeError as exc:
                 raise AnalysisError(
                     f"trace {relative} line {line_number}: malformed session-phase JSON"
