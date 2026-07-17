@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-16 (ldt-4 Fable r1 triaged; seven bounded fixes next)
+Last updated: 2026-07-16 (ldt-4 fixes and generated-script correction landed; full gates next)
 
-- **NEXT ACTION — RUN FULL LOCAL GATES, THEN NEUTRAL WHOLE-CHANGE FABLE RE-REVIEW:** all seven admitted ldt-4 fixes landed one per commit with red/green or manual guard proof; intake and per-finding records live in `.review/results/ldt-4-harness-r1.claude-verdict.md` and `.review/findings/ldt-4-r1-*.md`. No endpoint staging or measurement occurs until the exact clean fixed head passes the formal review gate.
+- **NEXT ACTION — RUN FULL LOCAL GATES, THEN NEUTRAL WHOLE-CHANGE FABLE RE-REVIEW:** all seven admitted ldt-4 fixes landed one per commit with red/green or manual guard proof. A fresh SSH parser check then caught and guard-proved a Bash-to-PowerShell quoting correction in f1 before review. Intake and per-finding records live in `.review/results/ldt-4-harness-r1.claude-verdict.md` and `.review/findings/ldt-4-r1-*.md`. No endpoint staging or measurement occurs until the exact clean fixed head passes the formal review gate.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **WHY NO ldt-4 RIG-W DATA YET:** the harness/analyzer has open review fixes and has not been accepted, staged, or run. After a clean fixed-SHA re-review, live preflight must re-establish endpoint quietness before any arm; no ldt-4 adaptive endpoint data exists yet.
@@ -20,7 +20,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`; the ldt-4 rig-W endpoint correction is accepted at `9926bf7`. Fable r1 reviewed the additive harness/analyzer at `0e48721`; admitted fixes are in progress, followed by clean re-review and endpoint evidence.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`; the ldt-4 rig-W endpoint correction is accepted at `9926bf7`. Fable r1 reviewed the additive harness/analyzer at `0e48721`; all admitted fixes and the pre-review generated-fetch correction are guard-proved, followed by full gates, clean re-review, and endpoint evidence.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can

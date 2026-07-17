@@ -534,7 +534,7 @@ fetch_windows_file() {
     guard=$(windows_path_guard_script)
     if ! wssh "$guard
 Assert-Ldt4PlainPath '$remote' File | Out-Null
-[Console]::Out.Write("`nLDT4-FILE-B64|" + [Convert]::ToBase64String([IO.File]::ReadAllBytes('$remote')) + "`n")
+[Console]::Out.Write(\"\`nLDT4-FILE-B64|\" + [Convert]::ToBase64String([IO.File]::ReadAllBytes('$remote')) + \"\`n\")
 " \
         | decode_windows_file_payload > "$local_path"; then
         die "tagged Windows file fetch failed: $remote"
@@ -2421,6 +2421,10 @@ import re
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+fetch = text[text.index("fetch_windows_file() {"):text.index("manifest_shape() {")]
+required_fetch_line = r'''[Console]::Out.Write(\"\`nLDT4-FILE-B64|\" + [Convert]::ToBase64String([IO.File]::ReadAllBytes('$remote')) + \"\`n\")'''
+if required_fetch_line not in fetch:
+    raise SystemExit("Windows fetch framing is not escaped through Bash")
 forbidden = (
     "Stop-Process " + "-Name",
     "task" + "kill /IM",

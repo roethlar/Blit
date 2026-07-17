@@ -50,6 +50,16 @@ SHA guard.
 - Production mutation from `len(payloads) != 1` to `< 1` returned exit 1 with
   `duplicate Windows fetch payload tags passed selftest`; exact restoration
   returns `PASS (96 arms, no SSH)`.
+- The pre-review generated-script parser check exposed that the initial fix's
+  PowerShell quotes/backticks were not escaped through Bash. The exact source
+  form now protects both layers. Removing only the quote escapes makes the
+  offline safety test exit 1 with `Windows fetch framing is not escaped
+  through Bash`; exact restoration returns green.
+- A fresh read-only SSH probe compiled the exact generated guard + fetch,
+  guard + prepare, and guard + normal-restoration PowerShell with
+  `[ScriptBlock]::Create` and returned `LDT4-PARSER-PROBE|PASS`. It invoked
+  none of those blocks. The local fetch decoder also accepted the parser
+  wrapper's tagged payload and matched its independent SHA.
 
 ## Coder dispute
 
@@ -57,9 +67,9 @@ None.
 
 ## Known gaps
 
-The generated PowerShell will receive a read-only parser check with the other
-Windows harness fixes before final review; no endpoint file is needed to prove
-the decoder behavior.
+Hosted Windows CI remains unobserved. The parser proof compiled but did not
+execute the generated blocks, so the first endpoint fetch still belongs to the
+reviewed live harness run rather than this read-only check.
 
 ## Reviewer comments
 
