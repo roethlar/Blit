@@ -4,9 +4,10 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: Candidate — implementation and follow-up fixes are committed and
-local gates are green; neutral fixed-SHA Claude Fable 5/max openreview is
-pending. No candidate artifact has been staged and no generated harness
+**Status**: Review fixes open — neutral fixed-SHA Claude Fable 5/max round one
+returned seven candidates. Intake admitted three Medium harness-safety defects
+and four Low contract/test/evidence-strictness defects; two analyzer claims were
+declined. No candidate artifact has been staged and no generated harness
 operation or live arm has run on either endpoint; only the read-only parser
 check described below occurred.
 
@@ -97,9 +98,10 @@ exactly, and make no worker-count target part of acceptance.
 
 ## Known gaps
 
-- Formal Claude Fable 5/max openreview has not run. The implementation is not
-  accepted until a structured exact-base/head verdict with an independent
-  red/green guard passes the repo's fail-closed review gate.
+- Round-one Claude Fable 5/max openreview found seven admitted bounded fixes.
+  The implementation is not accepted until they land one per commit and a
+  fresh structured exact-base/head whole-change review passes the repo's
+  fail-closed guard gate.
 - No endpoint staging, daemon launch, live transfer, ldt-4 evidence, or hardware
   ADD/REMOVE claim exists for this candidate. Hosted Windows CI also remains
   unobserved.
@@ -113,4 +115,10 @@ exactly, and make no worker-count target part of acceptance.
 
 ## Reviewer comments
 
-Pending neutral fixed-SHA Claude Fable 5/max openreview.
+Claude Fable 5/max reviewed exact range
+`e41b87173f2073a9b6694a62813eddc14a7844ad..0e4872162f09120188404d5d23448ff3a6298133`
+under the neutral best-way question. The result was schema-valid with exact
+SHAs, seven candidates, and `guard_confirmed=true`. Intake admitted
+`ldt-4-r1-f1`, `f2`, `f3`, the narrowed comment-truth `f5a`, `f6`, and split
+`f7a`/`f7b`; original analyzer candidates `f4` and `f5` were declined. Full
+evidence and rationale: `.review/results/ldt-4-harness-r1.claude-verdict.md`.

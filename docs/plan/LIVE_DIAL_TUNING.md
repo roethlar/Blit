@@ -392,9 +392,11 @@ advise but cannot accept the slice (D-2026-07-16-4).
    role-invariance verdicts.
    Do not tune constants from this one session inside the evidence slice; any
    policy change becomes a new reviewed finding with a repeatable guard.
-   The harness/analyzer candidate is committed through `7491b4f`; fixed-SHA
-   Claude Fable 5/max openreview is pending. No endpoint staging, live arm, or
-   ldt-4 datum has been produced by this candidate.
+   Fable round one reviewed exact harness/analyzer head `0e48721`; intake
+   admitted seven bounded fixes and declined two analyzer claims. The fixes
+   land one per commit before a neutral whole-change Fable re-review. No
+   endpoint staging, live arm, or ldt-4 datum has been produced by this
+   candidate.
 
 ## Open questions
 

@@ -1,11 +1,11 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-16 (ldt-4 harness/analyzer candidate `7491b4f`; Fable openreview next)
+Last updated: 2026-07-16 (ldt-4 Fable r1 triaged; seven bounded fixes next)
 
-- **NEXT ACTION — FIXED-SHA FABLE OPENREVIEW OF THE ldt-4 HARNESS:** the non-destructive harness/analyzer for both byte directions, all three fixtures, and both initiator layouts is committed through `7491b4f`. Review the exact candidate before endpoint staging or measurement; Grok is advisory only under D-2026-07-16-4.
+- **NEXT ACTION — FIX THE SEVEN ADMITTED ldt-4 REVIEW FINDINGS, ONE PER COMMIT:** Fable r1 reviewed exact `e41b871..0e48721` and returned seven candidates. Intake admitted strict Windows fetch framing, hard-crash daemon-baseline detection, padded-PID recovery, one stale resize comment, missing Python replay branch guards, duplicate JSON-key rejection, and exact blocked-ratio recomputation. Two analyzer claims were declined. Re-run neutral whole-change Fable review before any endpoint staging or measurement.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
-- **WHY NO ldt-4 RIG-W DATA YET:** the harness/analyzer candidate has not been accepted, staged, or run. After fixed-SHA review, live preflight must re-establish endpoint quietness before any arm; no ldt-4 adaptive endpoint data exists yet.
+- **WHY NO ldt-4 RIG-W DATA YET:** the harness/analyzer has open review fixes and has not been accepted, staged, or run. After a clean fixed-SHA re-review, live preflight must re-establish endpoint quietness before any arm; no ldt-4 adaptive endpoint data exists yet.
 
 - **BASELINE RE-RECORD (D-2026-07-14-1, owner 2026-07-14) — a prerequisite slice for `pf-final`, NOT for pf-1.** Both committed ceilings were recorded at **MTU 1500** before the fabric went jumbo, and pf-0 showed jumbo makes both arms 3–4% faster — so a jumbo build graded against them is **LENIENT** and could let a regression pass. Each rig's baseline is **re-recorded once with its ORIGINAL old build at MTU 9000**, then re-frozen (rig W `bench_otp12_win.sh:105`; rig Z `bench_otp12_zoey.sh:102`; rig D unaffected). Constraints — same old build per rig, `BASELINE_SUMMARY` stays override-free, pf-0's start-AND-end MSS gate applies — in **D-2026-07-14-1**.
 - **pf-0 DONE — MTU is KILLED as a material cause of P1 (2026-07-14, `docs/bench/otp12-jumbo-win-2026-07-13/`).** A-B-B-A on `q` (9000/1500/1500/9000), **256 timed runs, 0 voided**, MSS gate held start AND end of every session. `Δ_9000 = 236`, `Δ_1500 = 229`, measured noise floor **N_Δ = 78 ms**, **r = −3.1% → KILLED**. The null is **not vacuous** — `wm_tcp_large` ran 3–4% faster at jumbo on **both** arms, so the manipulation reached the wire; the benefit is **symmetric**, which is why it cannot explain an **asymmetry**. codex NOT READY → **7/7 accepted** (`11f0c2a`): every finding was a *claim* outrunning the *data* (it recomputed and confirmed all the numbers). **Two limits that now bind pf-1**: (a) the run is **NOT powered** to exclude a *contributing*-size effect (20% of Δ = 46 ms < the 78 ms floor) — it excludes a DOMINANT one only; (b) 78 ms is **between**-session noise, so cross-session grading of a counterfactual is dead, and **pf-1 must measure its own paired within-session floor and register a resolution check before grading**.
@@ -20,7 +20,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`; the ldt-4 rig-W endpoint correction is accepted at `9926bf7`. The additive harness/analyzer candidate is committed through `7491b4f`; formal review and endpoint evidence remain.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`; the ldt-4 rig-W endpoint correction is accepted at `9926bf7`. Fable r1 reviewed the additive harness/analyzer at `0e48721`; seven admitted fixes, clean re-review, and endpoint evidence remain.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -48,7 +48,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 and endpoint correction `9926bf7` are accepted; review the harness/analyzer candidate through `7491b4f`, then stage the exact reviewed build and execute quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence under the existing instrument controls.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 and endpoint correction `9926bf7` are accepted; close the seven admitted harness/analyzer findings one per commit, obtain a clean neutral Fable re-review, then stage the exact reviewed build and execute quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence under the existing instrument controls.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).
