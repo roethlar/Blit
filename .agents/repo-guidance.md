@@ -76,7 +76,16 @@ the reviewer independently runs a red/green guard in an isolated worktree and
 its structured result must include literal `guard_confirmed: true` alongside
 the fixed base/head identity. Missing or false guard confirmation fails that
 review closed even though the portable openreview schema does not require the
-field. The `.review/README.md` async
+field. Formal Claude dispatches must also be observable: use print mode with
+`--brief --output-format stream-json`, retain the raw event stream, and require
+the reviewer itself to send concise progress heartbeats before the final JSON
+at major phase changes, around long-running checks, and during prolonged
+tool-heavy work. Heartbeats report only the current activity, never a
+provisional verdict or finding, so they add no substantive review framing.
+Only the terminal schema-valid result is the acceptance record. Do not
+calculate token or monetary usage as a review-health signal; if heartbeats
+stop, inspect the live session rather than starting a duplicate review. The
+`.review/README.md` async
 sentinel hand-off is retired; its `findings/`/`results/` records and `REVIEW.md`
 remain the record store.
 
