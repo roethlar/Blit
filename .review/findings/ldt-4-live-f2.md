@@ -2,7 +2,7 @@
 
 **Severity**: MEDIUM — every Windows-responder arm fails before daemon launch,
 so the registered matrix cannot produce evidence.
-**Status**: Fixed and mutation-proved; final whole-change review and live retry pending.
+**Status**: Fixed, mutation-proved, and tactically reviewed clean; live retry pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `b9b8080c5463af894547aacad1395f86116ff657`
 
@@ -61,11 +61,15 @@ None.
 ## Known gaps
 
 The same failed launch exposed separate partial-start teardown finding
-`ldt-4-live-f3`, now fixed and mutation-proved at `a39f0c5`. Tactical code
-review and a fresh live run remain; further formal Fable openreviews are on
-owner-directed hold while that model is out of capacity.
+`ldt-4-live-f3`, now fixed and mutation-proved at `a39f0c5`. Tactical Grok
+review found no material defect at that exact head. A fresh live run remains;
+further formal Fable openreviews are on owner-directed hold while that model is
+out of capacity.
 
 ## Reviewer comments
 
-This finding came from the attached live launch, not a reviewer candidate.
-Formal whole-change review remains deferred under the owner's capacity hold.
+Grok 4.5/high reviewed exact range `5a2265e..a39f0c5`, reproduced the old and
+fixed PowerShell array behavior in memory, ran the complete Bash 3.2 no-SSH
+self-test, and returned `clean` with no findings. This is tactical advisory
+review, not formal acceptance. Record:
+`.review/results/ldt-4-live-fixes-r1.grok-verdict.md`.

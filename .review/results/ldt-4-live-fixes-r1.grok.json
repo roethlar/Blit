@@ -1,0 +1,46 @@
+{
+  "record_type": "tactical_code_review",
+  "reviewer": {
+    "provider": "xAI",
+    "model": "grok-4.5",
+    "cli": "grok 0.2.102 (ab5ebf69acec)",
+    "reasoning_effort": "high"
+  },
+  "review_contract": {
+    "finding_ids": [
+      "ldt-4-live-f2",
+      "ldt-4-live-f3"
+    ],
+    "base_sha": "5a2265e202a4ca5b4bbf08f8b58b7ff59ff75a8b",
+    "reviewed_sha": "a39f0c570191d65f197e4ab58eade375ec52e6d6",
+    "worktree": "/private/tmp/blit-grok-ldt4-live-a39f0c5",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "019f6ea9-d29c-7322-a536-0a4dcc66bb45",
+    "initial_completion": "cancelled during semantic analysis before checks or verdict",
+    "resume_completion": "clean verdict after permitted checks and final synthesis",
+    "resume_policy": "The interrupted session was resumed in place; no duplicate review was launched."
+  },
+  "structured_output": {
+    "verdict": "clean",
+    "reviewed_sha": "a39f0c570191d65f197e4ab58eade375ec52e6d6",
+    "base_sha": "5a2265e202a4ca5b4bbf08f8b58b7ff59ff75a8b",
+    "summary": "Log paths are two explicit PS array elements; no-launch teardown is start.cmd-absent + zero PIDs + four markers absent + port closed, fail-closed without process ops; exact ownership path intact; selftest/bash-n/pwsh probes pass.",
+    "findings": []
+  },
+  "checks": {
+    "bash_syntax": "pass",
+    "bash_3_2_selftest": "PASS (96 arms, no SSH)",
+    "powershell_log_array": "old form count 1; reviewed form count 2 with distinct paths",
+    "powershell_no_launch_parse": "parse_ok",
+    "ordering_audit": "daemon logs precede start.cmd open and durable flush; flush precedes the sole Invoke-CimMethod",
+    "ownership_audit": "exact PID, command, executable, parent, and unique-match launched-state checks remain intact"
+  },
+  "independent_worktree_verification": {
+    "head": "a39f0c570191d65f197e4ab58eade375ec52e6d6",
+    "status_short": "",
+    "detached": true
+  },
+  "policy_note": "This is an owner-authorized tactical Grok code review while Fable is out of capacity. It is advisory and is not a formal openreview acceptance verdict."
+}

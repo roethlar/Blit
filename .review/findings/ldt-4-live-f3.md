@@ -2,7 +2,7 @@
 
 **Severity**: MEDIUM — teardown falsely reports failure after a startup error
 that occurred before any launcher or daemon could exist.
-**Status**: Fixed and mutation-proved; tactical code review and live retry pending.
+**Status**: Fixed, mutation-proved, and tactically reviewed clean; live retry pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `a39f0c570191d65f197e4ab58eade375ec52e6d6`
 
@@ -77,12 +77,14 @@ None.
 
 ## Known gaps
 
-No live arm or transfer datum exists. A tactical Grok or Claude Opus 4.8 code
-review and a fresh additive live run remain. The owner put further formal Fable
-openreviews on hold while that model is out of capacity.
+No live arm or transfer datum exists. Tactical Grok review found no material
+defect at exact `a39f0c5`; a fresh additive live run remains. The owner put
+further formal Fable openreviews on hold while that model is out of capacity.
 
 ## Reviewer comments
 
-This finding came from the attached live launch, not a reviewer candidate.
-Formal openreview is intentionally deferred; do not describe the tactical code
-review as a formal acceptance verdict.
+Grok 4.5/high reviewed exact range `5a2265e..a39f0c5`, audited every partial
+startup window and the unchanged launched-state ownership path, ran the Bash
+3.2 self-test and in-memory PowerShell parser probes, and returned `clean` with
+no findings. This is tactical advisory review, not formal acceptance. Record:
+`.review/results/ldt-4-live-fixes-r1.grok-verdict.md`.

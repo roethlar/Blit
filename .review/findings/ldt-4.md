@@ -4,12 +4,12 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: Live repairs fixed and mutation-proved. Exact reviewed head
+**Status**: Live repairs fixed, mutation-proved, and tactically reviewed clean. Exact reviewed head
 `5a2265e` cleared canonical staging and reached arm `ldt4-001`, then voided
 before daemon launch or timing. `ldt-4-live-f2` fixes the generated PowerShell
 log array at `b9b8080`; `ldt-4-live-f3` safely classifies the proven no-launch
-teardown state at `a39f0c5`. Tactical code review and a fresh live run are next;
-formal Fable openreview is on owner-directed capacity hold.
+teardown state at `a39f0c5`. A fresh live run is next; formal Fable openreview
+is on owner-directed capacity hold.
 
 **Branch**: `master`
 
@@ -143,9 +143,9 @@ exactly, and make no worker-count target part of acceptance.
 
 - Exact product and harness artifacts are staged additively and two void
   sessions are retained, but no live arm, transfer datum, hardware ADD/REMOVE
-  claim, or adaptive verdict exists. Tactical review and a fresh live run
-  remain; formal Fable openreview is deferred by the owner while that model is
-  out of capacity. Hosted Windows CI also remains unobserved.
+  claim, or adaptive verdict exists. Tactical Grok review is clean; a fresh
+  live run remains. Formal Fable openreview is deferred by the owner while that
+  model is out of capacity. Hosted Windows CI also remains unobserved.
 - Canonical-fixture Fable round one admitted two Low corrections: use the
   existing exclusive atomic rename helper for stable promotion, and reject a
   canonical manifest's wrong shape before copying it. Both corrections are
@@ -215,3 +215,12 @@ the session-specific tested name. `ldt-4-live-f2` is fixed at `b9b8080` and
 `ldt-4-live-f3` at `a39f0c5`, each with independent red/restored-green guards.
 The owner placed further formal Fable openreviews on capacity hold and allowed
 tactical code review by Grok or Claude Opus 4.8 instead.
+
+Grok 4.5/high then tactically reviewed exact range
+`5a2265e202a4ca5b4bbf08f8b58b7ff59ff75a8b..a39f0c570191d65f197e4ab58eade375ec52e6d6`
+in a retained clean detached worktree. The same session resumed after an
+initial process cancellation and returned `clean` with no findings after Bash
+3.2 self-test, in-memory PowerShell array/parser probes, ordering-window audit,
+and launched-state ownership verification. This advisory result is not formal
+openreview acceptance. Record:
+`.review/results/ldt-4-live-fixes-r1.grok-verdict.md`.
