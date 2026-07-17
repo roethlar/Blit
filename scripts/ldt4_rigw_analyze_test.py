@@ -685,6 +685,59 @@ class SyntheticSession:
         self._write_trace(row[f"{role}_trace"], events)
 
 
+class DialPolicyReplayTests(unittest.TestCase):
+    def test_replay_covers_hysteresis_cooldown_sustain_and_bound(self) -> None:
+        maxed = {
+            "chunk_bytes": analyzer.CEILING_CHUNK_BYTES,
+            "prefetch_count": analyzer.CEILING_PREFETCH,
+            "tcp_buffer_bytes": analyzer.CEILING_TCP_BUFFER_BYTES,
+        }
+        cases = (
+            ("hysteresis", {}, 4, 0.10),
+            ("cooldown", maxed, 4, 0.0),
+            ("sustain", {**maxed, "ticks_since_settle": 3}, 4, 0.0),
+            (
+                "bound",
+                {**maxed, "ticks_since_settle": 3, "sustain": 1},
+                analyzer.EXPECTED_CEILING,
+                0.0,
+            ),
+        )
+        for expected_reason, policy_fields, live_streams, ratio in cases:
+            with self.subTest(reason=expected_reason):
+                policy = analyzer.DialPolicyReplay(**policy_fields)
+                event = {
+                    "sample_valid": True,
+                    "sample_bytes": 1024,
+                    "blocked_ratio": ratio,
+                    "reason": expected_reason,
+                    "chunk_bytes": policy.chunk_bytes,
+                    "prefetch_count": policy.prefetch_count,
+                    "tcp_buffer_bytes": policy.tcp_buffer_bytes,
+                }
+                reason, proposal = policy.apply_sample(
+                    event,
+                    live_streams=live_streams,
+                    settled_epoch=0,
+                    context=f"unit {expected_reason}",
+                )
+                self.assertEqual(reason, expected_reason)
+                self.assertIsNone(proposal)
+
+        fixture_guarded = {
+            "idle",
+            "rebaseline",
+            "cheap-up",
+            "cheap-down",
+            "add",
+            "remove",
+        }
+        self.assertEqual(
+            fixture_guarded | {case[0] for case in cases},
+            analyzer.SAMPLE_REASONS,
+        )
+
+
 class AnalyzerTests(unittest.TestCase):
     def setUp(self) -> None:
         patcher = mock.patch.dict(analyzer.EXPECTED_FIXTURES, TEST_FIXTURES, clear=True)
