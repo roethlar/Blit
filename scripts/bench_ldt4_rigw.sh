@@ -226,22 +226,22 @@ POWERSHELL
 }
 
 assert_q_registered_paths() {
-    local phase=${1:-boundary} allow_small_missing=false
-    if [[ "$phase" == preflight ]]; then allow_small_missing=true; fi
+    local phase=${1:-boundary} allow_staged_missing=false
+    if [[ "$phase" == preflight ]]; then allow_staged_missing=true; fi
     assert_q_registered_path "$Q_ARTIFACT_REPO" directory false \
         || session_void "$phase: unsafe q artifact repository path"
     assert_q_registered_path "$Q_BLIT" file false \
         || session_void "$phase: unsafe q client path"
     assert_q_registered_path "$Q_DAEMON" file false \
         || session_void "$phase: unsafe q daemon path"
-    assert_q_registered_path '/Users/michael/blit-bench-work/src_large' directory false \
-        || session_void "$phase: unsafe q large fixture path"
-    assert_q_registered_path '/Users/michael/blit-bench-work/src_mixed' directory false \
-        || session_void "$phase: unsafe q mixed fixture path"
     assert_q_registered_path "$Q_STAGE_ROOT" directory true \
         || session_void "$phase: unsafe q staging path"
-    assert_q_registered_path "$Q_STAGE_ROOT/fixtures/src_small" directory "$allow_small_missing" \
+    assert_q_registered_path "$Q_STAGE_ROOT/fixtures/src_large" directory "$allow_staged_missing" \
+        || session_void "$phase: unsafe q staged large fixture path"
+    assert_q_registered_path "$Q_STAGE_ROOT/fixtures/src_small" directory "$allow_staged_missing" \
         || session_void "$phase: unsafe q small fixture path"
+    assert_q_registered_path "$Q_STAGE_ROOT/fixtures/src_mixed" directory "$allow_staged_missing" \
+        || session_void "$phase: unsafe q staged mixed fixture path"
     assert_q_registered_path "$Q_SESSION_ROOT" directory true \
         || session_void "$phase: unsafe q session path"
     assert_q_registered_path "$EVIDENCE_ROOT" directory true \
@@ -301,9 +301,9 @@ require_safe_tag() {
 fixture_source() {
     local direction=$1 fixture=$2
     case "$direction:$fixture" in
-        q_to_windows:large) printf '%s\n' '/Users/michael/blit-bench-work/src_large' ;;
+        q_to_windows:large) printf '%s\n' "$Q_STAGE_ROOT/fixtures/src_large" ;;
         q_to_windows:small) printf '%s\n' "$Q_STAGE_ROOT/fixtures/src_small" ;;
-        q_to_windows:mixed) printf '%s\n' '/Users/michael/blit-bench-work/src_mixed' ;;
+        q_to_windows:mixed) printf '%s\n' "$Q_STAGE_ROOT/fixtures/src_mixed" ;;
         windows_to_q:large) printf '%s\n' 'D:/blit-test/rigw-module/src_large' ;;
         windows_to_q:small) printf '%s\n' "$WIN_FIXTURE_STAGE/fixtures/src_small" ;;
         windows_to_q:mixed) printf '%s\n' 'D:/blit-test/rigw-module/src_mixed' ;;
@@ -703,8 +703,11 @@ initialize_evidence_files() {
         'cell,direction,fixture,pair,initiator,run_id,session_id,duration_ms,files,bytes,source_path,active_destination_path,archive_path,source_manifest,landed_manifest,source_trace,destination_trace,exit,valid'
 }
 
-stage_small_fixture() {
+stage_fixtures() {
     local q_state win_state transport="$WIN_FIXTURE_STAGE/src-small.transport.tar" guard
+    local fixture remote_source local_destination incoming_root incoming
+    local q_manifest win_manifest remote_manifest q_shape win_shape
+    local q_free fixture_bytes required_free
     assert_q_registered_path "$Q_STAGE_ROOT" directory true \
         || session_void 'q small-fixture staging has an unsafe ancestor'
     guard=$(windows_path_guard_script)
@@ -748,6 +751,61 @@ if (\$LASTEXITCODE -ne 0) { throw \"tar creation failed rc=\$LASTEXITCODE\" }
     wssh "$guard
 Assert-Ldt4PlainPath '$WIN_FIXTURE_STAGE/fixtures/src_small' Directory | Out-Null
 " >/dev/null || session_void 'Windows staged small fixture is not a plain directory'
+    for fixture in large mixed; do
+        remote_source=$(fixture_source windows_to_q "$fixture")
+        local_destination=$(fixture_source q_to_windows "$fixture")
+        assert_q_registered_path "$local_destination" directory true \
+            || session_void "q staged $fixture fixture has an unsafe ancestor"
+        if [[ ! -e "$local_destination" && ! -L "$local_destination" ]]; then
+            incoming_root="$Q_SESSION_ROOT/$SESSION_TAG/incoming-fixtures"
+            assert_q_registered_path "$incoming_root" directory true \
+                || session_void "q incoming $fixture fixture has an unsafe ancestor"
+            if [[ ! -e "$incoming_root" && ! -L "$incoming_root" ]]; then
+                mkdir "$incoming_root" \
+                    || session_void 'q incoming-fixture namespace creation failed'
+            fi
+            assert_q_registered_path "$incoming_root" directory false \
+                || session_void 'q incoming-fixture namespace is not plain'
+            incoming="$incoming_root/src_$fixture"
+            [[ ! -e "$incoming" && ! -L "$incoming" ]] \
+                || session_void "q incoming $fixture fixture already exists"
+            q_manifest="$OUT_DIR/manifests/staging-q-$fixture.csv"
+            win_manifest="$OUT_DIR/manifests/staging-windows-$fixture.csv"
+            remote_manifest="$WIN_SESSION_ROOT/$SESSION_TAG/manifests/staging-source-$fixture.csv"
+            write_windows_manifest "$remote_source" "$remote_manifest" >/dev/null \
+                || session_void "Windows canonical $fixture manifest failed before staging"
+            fetch_windows_file "$remote_manifest" "$win_manifest" \
+                || session_void "Windows canonical $fixture manifest fetch failed before staging"
+            fixture_bytes=$(expected_shape "$fixture")
+            fixture_bytes=${fixture_bytes#*,}
+            q_free=$(df -Pk "$Q_SESSION_ROOT" | awk 'NR==2 {printf "%.0f", $4 * 1024}')
+            required_free=$((MIN_FREE_BYTES + fixture_bytes))
+            awk -v free="$q_free" -v need="$required_free" 'BEGIN {exit !(free >= need)}' \
+                || session_void "q free bytes $q_free cannot stage $fixture and retain $MIN_FREE_BYTES"
+            note "copying the canonical Windows $fixture fixture into this session's retained incoming namespace"
+            scp -r "${SSH_MUX[@]}" "$WIN_SSH:$remote_source" "$incoming_root/" \
+                || session_void "q $fixture fixture staging failed; partial tree retained"
+            assert_q_registered_path "$incoming" directory false \
+                || session_void "q incoming $fixture fixture is not a plain directory"
+            write_q_manifest "$incoming" "$q_manifest" \
+                || session_void "q incoming $fixture manifest failed"
+            q_shape=$(manifest_shape "$q_manifest")
+            win_shape=$(manifest_shape "$win_manifest")
+            [[ "$q_shape" == "$(expected_shape "$fixture")" && "$win_shape" == "$q_shape" ]] \
+                || session_void "staged $fixture shape differs: q=$q_shape windows=$win_shape"
+            cmp -s "$q_manifest" "$win_manifest" \
+                || session_void "staged $fixture content differs from the canonical Windows source"
+            [[ ! -e "$local_destination" && ! -L "$local_destination" ]] \
+                || session_void "q staged $fixture destination appeared concurrently"
+            mv -n "$incoming" "$Q_STAGE_ROOT/fixtures/" \
+                || session_void "q staged $fixture promotion failed; validated incoming tree retained"
+            [[ ! -e "$incoming" && ! -L "$incoming" ]] \
+                || session_void "q staged $fixture promotion left the incoming tree in place"
+            note "validated and promoted the canonical Windows $fixture fixture into q's stable retained path"
+        fi
+        assert_q_registered_path "$local_destination" directory false \
+            || session_void "q staged $fixture fixture is not a plain directory"
+    done
 }
 
 build_fixture_manifests() {
@@ -2318,8 +2376,10 @@ run_selftest() {
     local old_tag=$SESSION_TAG sample direction fixture source parent remote_host guard_text
     SESSION_TAG='selftest-ldt4'
     assert_schedule
-    [[ "$(fixture_source q_to_windows large)" == '/Users/michael/blit-bench-work/src_large' ]] \
+    [[ "$(fixture_source q_to_windows large)" == '/Users/michael/blit-ldt4-staging/fixtures/src_large' ]] \
         || die 'q large fixture mapping selftest failed'
+    [[ "$(fixture_source q_to_windows mixed)" == '/Users/michael/blit-ldt4-staging/fixtures/src_mixed' ]] \
+        || die 'q mixed fixture mapping selftest failed'
     [[ "$(fixture_source windows_to_q small)" == 'D:/blit-test/ldt4-staging/fixtures/src_small' ]] \
         || die 'Windows small fixture mapping selftest failed'
     [[ "$(active_destination q_to_windows mixed)" == 'D:/blit-test/ldt4-sessions/selftest-ldt4/active/mixed' ]] \
@@ -2437,10 +2497,21 @@ prepare = text[text.index("prepare_windows_runtime() {"):text.index("restore_win
 restore = text[text.index("restore_windows_runtime() {"):text.index("q_responder_for() {")]
 q_paths = text[text.index("assert_q_registered_paths() {"):text.index("assert_windows_registered_paths() {")]
 windows_paths = text[text.index("assert_windows_registered_paths() {"):text.index("mark_void() {")]
-if '$Q_STAGE_ROOT/fixtures/src_small' not in q_paths:
-    raise SystemExit("q small fixture disappeared from boundary path guards")
+for staged in ('src_large', 'src_small', 'src_mixed'):
+    if f'$Q_STAGE_ROOT/fixtures/{staged}' not in q_paths:
+        raise SystemExit(f"q {staged} fixture disappeared from boundary path guards")
 if '$WIN_FIXTURE_STAGE/fixtures/src_small' not in windows_paths:
     raise SystemExit("Windows small fixture disappeared from boundary path guards")
+stage = text[text.index("stage_fixtures() {"):text.index("build_fixture_manifests() {")]
+required_stage_copy = 'scp -r "${SSH_MUX[@]}" "$WIN_SSH:$remote_source" "$incoming_root/"'
+if required_stage_copy not in stage:
+    raise SystemExit("canonical Windows fixture staging disappeared")
+copy = stage.index(required_stage_copy)
+source_manifest = stage.index('write_windows_manifest "$remote_source" "$remote_manifest"', 0, copy)
+validate = stage.index('cmp -s "$q_manifest" "$win_manifest"', copy)
+promote = stage.index('mv -n "$incoming" "$Q_STAGE_ROOT/fixtures/"', validate)
+if not source_manifest < copy < validate < promote or 'incoming-fixtures' not in stage:
+    raise SystemExit("canonical fixture copy is not validated before stable-path promotion")
 environment = text[text.index("environment_gate() {"):text.index("prepare_windows_runtime() {")]
 evidence_start = environment.index('exclusive_line "$OUT_DIR/environment-$phase.txt"')
 environment_evidence = environment[evidence_start:environment.index("\n}", evidence_start)]
@@ -2513,7 +2584,7 @@ main() {
     fi
     [[ $# -eq 0 ]] || die 'the registered harness accepts no positional arguments'
     validate_invocation
-    for command in git python3 ssh shasum lsof nc awk cmp tar; do
+    for command in git python3 ssh scp shasum lsof nc awk cmp mv tar; do
         command -v "$command" >/dev/null || die "required command absent: $command"
     done
     assert_q_registered_paths preflight
@@ -2526,7 +2597,7 @@ main() {
     trap 'exit 143' TERM
     reserve_endpoint_sessions
     initialize_evidence_files "$artifact_hashes"
-    stage_small_fixture
+    stage_fixtures
     build_fixture_manifests
     environment_gate start
     prepare_windows_runtime

@@ -445,9 +445,7 @@ def _windows_path(value: str) -> bool:
 
 def _registered_source_path(direction: str, fixture: str) -> str:
     if direction == "q_to_windows":
-        if fixture == "small":
-            return "/Users/michael/blit-ldt4-staging/fixtures/src_small"
-        return f"/Users/michael/blit-bench-work/src_{fixture}"
+        return f"/Users/michael/blit-ldt4-staging/fixtures/src_{fixture}"
     if fixture == "small":
         return "D:/blit-test/ldt4-staging/fixtures/src_small"
     return f"D:/blit-test/rigw-module/src_{fixture}"

@@ -51,9 +51,9 @@ TEST_FIRST_ROLE = (
     "source_init",
 )
 TEST_SOURCE_PATHS = {
-    ("q_to_windows", "large"): "/Users/michael/blit-bench-work/src_large",
+    ("q_to_windows", "large"): "/Users/michael/blit-ldt4-staging/fixtures/src_large",
     ("q_to_windows", "small"): "/Users/michael/blit-ldt4-staging/fixtures/src_small",
-    ("q_to_windows", "mixed"): "/Users/michael/blit-bench-work/src_mixed",
+    ("q_to_windows", "mixed"): "/Users/michael/blit-ldt4-staging/fixtures/src_mixed",
     ("windows_to_q", "large"): "D:/blit-test/rigw-module/src_large",
     ("windows_to_q", "small"): "D:/blit-test/ldt4-staging/fixtures/src_small",
     ("windows_to_q", "mixed"): "D:/blit-test/rigw-module/src_mixed",
