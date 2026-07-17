@@ -9,8 +9,9 @@ layouts and both byte directions.
 fixture, then voided before any arm or Windows runtime swap because the q and
 Windows large fixtures had different content. `ldt-4-live-f1` is fixed at
 `b0c6ce3`: Windows is canonical for large and mixed fixtures, and validated
-copies use stable q source paths. Full local gates pass; final Fable review is
-pending before another live launch.
+copies use stable q source paths. Canonical-fixture Fable round one reviewed
+exact `ef48920` and admitted two Low staging corrections. They must land one
+per commit and pass a fresh final review before another live launch.
 
 **Branch**: `master`
 
@@ -125,6 +126,10 @@ exactly, and make no worker-count target part of acceptance.
 - Exact product and harness artifacts are staged additively and one preflight
   void is retained, but no live arm, transfer datum, hardware ADD/REMOVE claim,
   or adaptive verdict exists. Hosted Windows CI also remains unobserved.
+- Canonical-fixture Fable round one admitted two Low corrections: use the
+  existing exclusive atomic rename helper for stable promotion, and reject a
+  canonical manifest's wrong shape before copying it. The corrected harness is
+  not accepted until both land and a fresh exact-head review passes.
 - Some fixed fixtures may finish before the tuner has a useful live sample or
   resize opportunity. The analyzer explicitly marks a missing sample at or
   after the first tuner tick `REVIEW_REQUIRED`; deterministic ldt-2 guards, not
@@ -154,5 +159,17 @@ and the detached worktree ended clean. Full record:
 The first accepted-harness launch exposed `ldt-4-live-f1` before any arm: the
 old fixture contract relied on independently created q and Windows sources and
 correctly refused their mismatch, but did not establish a canonical
-byte-identical pair. The guarded fix at `b0c6ce3` awaits a fresh formal Fable
-review before it can replace `4e0fdc3` as the exact live harness.
+byte-identical pair. Its canonical-staging correction now has two admitted Low
+follow-ups; the corrected head still needs a fresh formal Fable review before
+it can replace `4e0fdc3` as the exact live harness.
+
+Claude Fable 5/max reviewed exact range
+`4e0fdc307ba26e81f8532cd191089fa291c7f1aa..ef48920720b02d09a490c1c07f6acd35651aba65`
+under the same neutral question. The valid mechanically constrained retry
+returned two Low candidates with exact SHAs and `guard_confirmed=true`; its
+path-registry mutation made the offline harness self-test fail, exact
+restoration passed all 96 no-SSH arms, and the worktree ended clean. Intake
+admitted `ldt-4-r3-f1` (exclusive atomic fixture promotion) and
+`ldt-4-r3-f2` (pre-copy canonical shape/space validation). Full dispatch,
+safety, guard, and intake record:
+`.review/results/ldt-4-canonical-r1.claude-verdict.md`.

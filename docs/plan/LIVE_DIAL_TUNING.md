@@ -398,7 +398,11 @@ advise but cannot accept the slice (D-2026-07-16-4).
    the small fixture, then voided before any arm or daemon swap because the two
    large fixtures differed in content. Guarded candidate `b0c6ce3` makes
    Windows large/mixed fixtures canonical and promotes validated copies into
-   stable q source paths. Final Fable review and all live matrix data remain.
+   stable q source paths. Canonical-fixture Fable round one reviewed exact
+   `ef48920` and admitted two Low corrections: promote with the harness's
+   existing exclusive atomic rename primitive, and validate the fetched
+   canonical shape before the large copy/free-space gate. Land them one per
+   commit, then run the final neutral review. All live matrix data remains.
 
 ## Open questions
 
