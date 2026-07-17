@@ -4,17 +4,18 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: Harness accepted at exact reviewed head `4e0fdc3`; live evidence
-pending. All admitted `f1`–`f3`, `f5a`, `f6`, `f7a`, and `f7b` fixes are
-guard-proved and full local gates pass. No candidate artifact has been staged
-and no generated harness operation or live arm has run on either endpoint;
-only the read-only parser check described below and the in-memory crash-guard
-SSH probe occurred.
+**Status**: The original harness was accepted at exact reviewed head
+`4e0fdc3`. Its first exact launch staged the registered artifacts and small
+fixture, then voided before any arm or Windows runtime swap because the q and
+Windows large fixtures had different content. `ldt-4-live-f1` is fixed at
+`b0c6ce3`: Windows is canonical for large and mixed fixtures, and validated
+copies use stable q source paths. Full local gates pass; final Fable review is
+pending before another live launch.
 
 **Branch**: `master`
 
 **Implementation range**:
-`e41b87173f2073a9b6694a62813eddc14a7844ad..92a5a89f9b50a0b2757508b56bef98c6f8902af2`
+`e41b87173f2073a9b6694a62813eddc14a7844ad..b0c6ce3cbeec37b17f7dc83172792232f0a3ffc9`
 
 **Artifact under test**: accepted ldt-3 runtime
 `406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77`
@@ -78,6 +79,10 @@ exactly, and make no worker-count target part of acceptance.
 - `f67ef75`, `80ecaad`, `efc796a`, and `f470b06` correct the accepted-resize
   contract comment, cover every independent replay reason, reject duplicate
   trace keys, and require exact blocked-ratio recomputation.
+- `b0c6ce3` closes live finding `ldt-4-live-f1`: stage the canonical Windows
+  large and mixed fixtures through a retained per-session incoming namespace,
+  validate exact content before no-clobber promotion, and register the same
+  stable q paths in the harness and analyzer.
 
 ## Tests and guard proof
 
@@ -105,12 +110,21 @@ exactly, and make no worker-count target part of acceptance.
   shell-generation quoting, exact fetch, prepare, and normal restoration all
   parsed cleanly; no generated command was executed and no endpoint file,
   process, daemon, or staging path changed.
+- The first exact `4e0fdc3` live launch stopped in fixture preflight with zero
+  arms and no Windows runtime swap after proving the two 1 GiB fixtures had
+  unequal content. The void evidence and both endpoint session namespaces are
+  retained under tag `ldt4-20260717T032327Z-4e0fdc307ba2`.
+- At `b0c6ce3`, reverting the stable q large path, copying directly to the
+  final path, or restoring the analyzer's old q source registry turns its
+  corresponding guard red. Exact restoration passes Bash syntax, the 96-arm
+  no-SSH self-test, all 75 analyzer tests, formatting, strict workspace
+  clippy, and the full workspace suite.
 
 ## Known gaps
 
-- No endpoint staging, daemon launch, live transfer, ldt-4 evidence, or hardware
-  ADD/REMOVE claim exists for this candidate. Hosted Windows CI also remains
-  unobserved.
+- Exact product and harness artifacts are staged additively and one preflight
+  void is retained, but no live arm, transfer datum, hardware ADD/REMOVE claim,
+  or adaptive verdict exists. Hosted Windows CI also remains unobserved.
 - Some fixed fixtures may finish before the tuner has a useful live sample or
   resize opportunity. The analyzer explicitly marks a missing sample at or
   after the first tuner tick `REVIEW_REQUIRED`; deterministic ldt-2 guards, not
@@ -136,3 +150,9 @@ findings, exact SHAs, and `guard_confirmed=true`; its threshold-direction
 mutation made 13 focused dial tests fail, exact restoration made all 30 pass,
 and the detached worktree ended clean. Full record:
 `.review/results/ldt-4-harness-r2.claude-verdict.md`.
+
+The first accepted-harness launch exposed `ldt-4-live-f1` before any arm: the
+old fixture contract compared independently created q and Windows sources
+instead of ensuring byte-identical physical inputs. The guarded fix at
+`b0c6ce3` awaits a fresh formal Fable review before it can replace `4e0fdc3`
+as the exact live harness.

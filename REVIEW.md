@@ -26,7 +26,7 @@ Fable 5/max (D-2026-07-16-4).
 | ldt-1 | Acknowledged elastic membership with exact member and terminal outcomes | `[x]` | `f8f3c51` (neutral Claude accepted) |
 | ldt-2 | Live controller cutover; delete shape worker authority; shared ADD/REMOVE | `[x]` | `65a0f9f` (neutral Claude; one non-failing Low declined at intake) |
 | ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[x]` | `436e1bb` + review fix `406a7e5`; Claude r2 clean with independent guard |
-| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | Fable r1 admitted seven bounded fixes; all are guard-proved one per commit; full gates then neutral Fable re-review; no endpoint data |
+| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | Fable r2 accepted `4e0fdc3`; first launch voided pre-arm on unequal fixtures; canonical-fixture fix `b0c6ce3` is guard-proved and locally green; final Fable review next |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 

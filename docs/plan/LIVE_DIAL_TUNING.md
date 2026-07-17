@@ -392,11 +392,13 @@ advise but cannot accept the slice (D-2026-07-16-4).
    role-invariance verdicts.
    Do not tune constants from this one session inside the evidence slice; any
    policy change becomes a new reviewed finding with a repeatable guard.
-   Fable round one reviewed exact harness/analyzer head `0e48721`; intake
-   admitted seven bounded fixes and declined two analyzer claims. All seven
-   fixes are now guard-proved one per commit; full local gates and a neutral
-   whole-change Fable re-review remain. No endpoint staging, live arm, or
-   ldt-4 datum has been produced by this candidate.
+   Fable round one reviewed exact harness/analyzer head `0e48721`; all seven
+   admitted fixes landed one per commit, and a neutral re-review accepted exact
+   head `4e0fdc3`. Its first exact launch staged registered artifacts and the
+   small fixture, then voided before any arm or daemon swap because the two
+   large fixtures differed in content. Guarded candidate `b0c6ce3` makes
+   Windows large/mixed fixtures canonical and promotes validated copies into
+   stable q source paths. Final Fable review and all live matrix data remain.
 
 ## Open questions
 
