@@ -5,7 +5,7 @@ on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
 **Status**: The original harness was accepted at exact reviewed head
-`4e0fdc3`. Its first exact launch staged the registered artifacts and small
+`4e0fdc3`. After exact artifacts were staged, its first launch staged the small
 fixture, then voided before any arm or Windows runtime swap because the q and
 Windows large fixtures had different content. `ldt-4-live-f1` is fixed at
 `b0c6ce3`: Windows is canonical for large and mixed fixtures, and validated
@@ -152,7 +152,7 @@ and the detached worktree ended clean. Full record:
 `.review/results/ldt-4-harness-r2.claude-verdict.md`.
 
 The first accepted-harness launch exposed `ldt-4-live-f1` before any arm: the
-old fixture contract compared independently created q and Windows sources
-instead of ensuring byte-identical physical inputs. The guarded fix at
-`b0c6ce3` awaits a fresh formal Fable review before it can replace `4e0fdc3`
-as the exact live harness.
+old fixture contract relied on independently created q and Windows sources and
+correctly refused their mismatch, but did not establish a canonical
+byte-identical pair. The guarded fix at `b0c6ce3` awaits a fresh formal Fable
+review before it can replace `4e0fdc3` as the exact live harness.
