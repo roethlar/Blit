@@ -4,12 +4,11 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: Accepted for fresh live gates at exact reviewed head `5a2265e`. The
-original `4e0fdc3` launch voided before any arm or Windows runtime swap on
-unequal fixture content. `b0c6ce3` established canonical stable fixtures;
-`1302b90` and `fdf7b37` close the two admitted staging corrections with
-mutation proof. Full local gates pass, and final Fable review over exact
-`4e0fdc3..5a2265e` is clean with `guard_confirmed=true`.
+**Status**: Live repair in progress. Exact reviewed head `5a2265e` cleared
+canonical staging and reached arm `ldt4-001`, then voided before daemon launch
+or timing when generated PowerShell joined two log paths. `ldt-4-live-f2` is
+fixed and mutation-proved at `b9b8080`; separate partial-start teardown finding
+`ldt-4-live-f3` remains before final review and a fresh run.
 
 **Branch**: `master`
 
@@ -86,6 +85,8 @@ exactly, and make no worker-count target part of acceptance.
   exclusive atomic rename primitive.
 - `fdf7b37` closes `ldt-4-r3-f2`: reject wrong canonical shape before copy and
   derive the staging capacity reservation from that validated manifest.
+- `b9b8080` closes `ldt-4-live-f2`: make the two generated Windows daemon log
+  paths explicit PowerShell array elements and pin their exact source form.
 
 ## Tests and guard proof
 
@@ -125,12 +126,18 @@ exactly, and make no worker-count target part of acceptance.
 - At `1302b90` and `fdf7b37`, restoring `mv -n`, restoring post-copy canonical
   shape validation, or removing only the low-space refusal turns the offline
   self-test red. Exact restoration passes all local gates listed above.
+- At `b9b8080`, restoring the exact live-failing unparenthesized PowerShell log
+  loop turns the offline self-test red. Exact restoration passes the 96-arm
+  self-test, all 75 analyzer tests, formatting, strict clippy, the full
+  workspace suite, documentation checks, and diff checks.
 
 ## Known gaps
 
-- Exact product and harness artifacts are staged additively and one preflight
-  void is retained, but no live arm, transfer datum, hardware ADD/REMOVE claim,
-  or adaptive verdict exists. Hosted Windows CI also remains unobserved.
+- Exact product and harness artifacts are staged additively and two void
+  sessions are retained, but no live arm, transfer datum, hardware ADD/REMOVE
+  claim, or adaptive verdict exists. `ldt-4-live-f3` must make teardown safe
+  when startup stops before its durable launch boundary. Hosted Windows CI
+  also remains unobserved.
 - Canonical-fixture Fable round one admitted two Low corrections: use the
   existing exclusive atomic rename helper for stable promotion, and reject a
   canonical manifest's wrong shape before copying it. Both corrections are
@@ -187,3 +194,14 @@ findings, exact SHAs, and `guard_confirmed=true`. Its independent mutation
 restored the old `mv -n` promotion; the offline self-test turned red, exact
 restoration passed all 96 no-SSH arms, and the detached worktree ended clean.
 Full record: `.review/results/ldt-4-canonical-r2.claude-verdict.md`.
+
+The next attached launch used that exact reviewed head and retained tag
+`ldt4-20260717T052509Z-5a2265e202a4`. Canonical fixture staging and
+cross-endpoint manifests passed, but PowerShell treated the intended
+`daemon.out` and `daemon.err` array as one space-joined filename. No timing row
+was accepted. Teardown then required the not-yet-created `start.cmd`, exposing
+separate `ldt-4-live-f3`. Read-only post-run checks proved both ports closed,
+no session process remained, the active Windows daemon was restored to durable
+prior SHA `1510d8d0…0512`, and the exact staged daemon remains retained under
+the session-specific tested name. `ldt-4-live-f2` is fixed at `b9b8080`; final
+Fable review waits for `ldt-4-live-f3`.
