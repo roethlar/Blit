@@ -973,14 +973,25 @@ Assert-Ldt4PlainPath \$record File \$true | Out-Null
 if (Test-Path -LiteralPath \$prior) { throw 'prior-retention target already exists' }
 if (Test-Path -LiteralPath \$tested) { throw 'tested-retention target already exists' }
 if (Test-Path -LiteralPath \$record) { throw 'runtime swap intent already exists' }
+\$stagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath '$WIN_STAGE_DAEMON').Hash.ToLower()
+if (\$stagedHash -cne '$WIN_STAGED_DAEMON_SHA') { throw 'staged daemon changed before baseline check' }
+\$activeParent = Split-Path -Parent (ConvertTo-Ldt4CanonicalPath \$active)
+\$retainedPriors = @(Get-ChildItem -LiteralPath \$activeParent -Force -ErrorAction Stop |
+  Where-Object { \$_.Name -like 'retained-before-*-blit-daemon.exe' })
+foreach (\$retainedPrior in \$retainedPriors) {
+  if (\$retainedPrior.PSIsContainer -or
+      ((\$retainedPrior.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+    throw \"unsafe retained-before daemon entry: \$(\$retainedPrior.FullName)\"
+  }
+}
+if (\$retainedPriors.Count -ne 0) { throw 'unresolved retained-before daemon from an earlier session' }
 \$hadPrior = Test-Path -LiteralPath \$active
 if (\$hadPrior) {
   \$activeItem = Get-Item -LiteralPath \$active -Force -ErrorAction Stop
   if ((\$activeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'active daemon is a reparse point' }
 }
 \$priorHash = if (\$hadPrior) { (Get-FileHash -Algorithm SHA256 -LiteralPath \$active).Hash.ToLower() } else { 'none' }
-\$stagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath '$WIN_STAGE_DAEMON').Hash.ToLower()
-if (\$stagedHash -cne '$WIN_STAGED_DAEMON_SHA') { throw 'staged daemon changed before intent record' }
+if (\$hadPrior -and \$priorHash -ceq \$stagedHash) { throw 'active daemon already matches staged test daemon; prior baseline is ambiguous' }
 \$recordText = \"had_prior=\$([int]\$hadPrior) prior_sha=\$priorHash staged_sha=\$stagedHash\`n\"
 \$recordStream = [IO.File]::Open(\$record,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
 try {
@@ -2427,6 +2438,11 @@ if "time_machine_auto=$auto" in environment_evidence or "time_machine_running=$t
     raise SystemExit("environment evidence duplicates Time Machine fields outside q quiet record")
 record_flush = prepare.index(r"\$recordStream.Flush(\$true)")
 record_barrier = prepare.index("Write-VolumeCache D", record_flush)
+retained_guard = prepare.index("unresolved retained-before daemon")
+active_guard = prepare.index(r"if (\$hadPrior -and \$priorHash -ceq \$stagedHash)")
+intent_create = prepare.index(r"\$recordStream =", active_guard)
+if not retained_guard < intent_create or not active_guard < intent_create:
+    raise SystemExit("stale runtime baseline can reach intent creation")
 runtime_mutation = min(
     prepare.index("[IO.File]::Move", record_barrier),
     prepare.index(r"\$activeStream =", record_barrier),
