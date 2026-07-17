@@ -88,57 +88,61 @@ queue, and tests cover SOURCE-initiator and SOURCE-responder layouts.
 
 ## Acceptance criteria
 
-- [ ] Production `TransferSession` has exactly one stream-count policy:
+The checked code criteria are backed by the accepted ldt-1, ldt-2, and ldt-3
+records at `f8f3c51`, `65a0f9f`, and `406a7e5`. Windows CI and live rig-W
+evidence remain open and are not implied by those local guards.
+
+- [x] Production `TransferSession` has exactly one stream-count policy:
       SOURCE-owned live telemetry. `initial_stream_proposal`,
       `propose_shape_resize`, accumulated need bytes/counts, and the forced
       post-payload shape ramp have no production role and are deleted rather
       than left as a second authority.
-- [ ] Epoch-0 worker count is the conservative floor clamped to the same
+- [x] Epoch-0 worker count is the conservative floor clamped to the same
       receiver ceiling at both ends. It is independent of manifest size,
       file count, initiator role, and CLI verb.
-- [ ] Every epoch-0 and ADDed SOURCE data socket uses `LiveProbe`; one shared
+- [x] Every epoch-0 and ADDed SOURCE data socket uses `LiveProbe`; one shared
       registry represents exactly the workers eligible to take new payloads;
       `spawn_dial_tuner_with_resize` runs once per TCP SOURCE data plane and
       stops promptly on every completion, refusal, cancellation, and fault.
-- [ ] Under a deterministic clean/non-idle sample trace with an advertised
+- [x] Under a deterministic clean/non-idle sample trace with an advertised
       receiver ceiling of at least 17, both initiator layouts emit the same
       epoch/op/target sequence through target 17. The guard must turn red when
       production growth is clamped at either 8 or 16; reaching 9 alone is not
       proof that the retired table maximum is gone.
-- [ ] Under a deterministic sustained-blocking trace, both layouts emit the
+- [x] Under a deterministic sustained-blocking trace, both layouts emit the
       same REMOVE sequence and shrink below their startup count, down to one
       when the signal persists. An idle trace and a trace inside the
       hysteresis band hold steady.
-- [ ] A receiver limit below the proposed count clamps both layouts
+- [x] A receiver limit below the proposed count clamps both layouts
       identically. Unknown/zero capacity resolves to the documented default
       safety limit in both layouts. No trace can cross the limit or floor.
-- [ ] ADD and REMOVE validate monotonic epoch, exact one-step target, token
+- [x] ADD and REMOVE validate monotonic epoch, exact one-step target, token
       shape, floor/ceiling, and current settled count. Duplicate/stale frames
       cannot repeat a membership change; rejected or locally failed changes
       cannot be reported as settled.
-- [ ] Need completion during an in-flight resize has one result in both
+- [x] Need completion during an in-flight resize has one result in both
       layouts. A proposal not accepted by the peer settles unchanged; an
       accepted ADD completes socket authentication and admits a member that
       immediately retires with `END` from the closed queue; an accepted REMOVE
       is satisfied by the named member's requested or already completed normal
       retirement. None of these healthy completion races faults or leaks a
       socket, member, probe, or receive task.
-- [ ] REMOVE retires the exact worker/probe membership chosen by the elastic
+- [x] REMOVE retires the exact worker/probe membership chosen by the elastic
       pipeline, emits `END`, and lets the matching receiver worker finish in
       both dial/accept layouts. Final reported stream count is settled logical
       membership, not cumulative sockets ever opened.
-- [ ] Role-parameterized integration guards cover ADD while busy, REMOVE while
+- [x] Role-parameterized integration guards cover ADD while busy, REMOVE while
       busy, REMOVE while idle, need completion during a pending resize,
       terminal refusal, malformed/stale resize frames, cancellation, peer
       fault, source fault, and normal close. All successful cases produce
       identical requested-path inventories, byte counts, trees, timestamps,
       and permissions across initiator layouts.
-- [ ] Default-off dial observation records sample bytes, blocked ratio, cheap
+- [x] Default-off dial observation records sample bytes, blocked ratio, cheap
       dial values, live count, receiver ceiling, epoch, decision/reason, and
       settlement. The schema uses semantic SOURCE/DESTINATION and
       initiator/responder fields only for attribution; policy never reads
       those role labels.
-- [ ] The exact-8 parity assertions are replaced by adaptive assertions. Repo
+- [x] The exact-8 parity assertions are replaced by adaptive assertions. Repo
       status and contracts say what was actually proved: static-orientation
       parity was closed, while live up/down tuning is complete only after this
       plan's code and hardware slices pass.
@@ -336,6 +340,12 @@ review passes.
 - `proto/blit.proto` — comments/contract precision only unless review proves
   the existing ADD/REMOVE shape insufficient; any shape change requires a
   separate reviewed plan amendment before code.
+- `scripts/bench_ldt4_rigw.sh` — registered non-destructive 96-arm rig-W
+  harness, exact-artifact gates, identity-scoped process ownership, additive
+  evidence retention, and Windows runtime restoration.
+- `scripts/ldt4_rigw_analyze.py` and `scripts/ldt4_rigw_analyze_test.py` —
+  fail-closed evidence validation, role/path/trace/integrity grading, and
+  mutation-sensitive synthetic coverage.
 - `docs/plan/ONE_TRANSFER_PATH.md`, `docs/TRANSFER_SESSION.md`,
   `docs/STATE.md`, `REVIEW.md`, `.review/`, and `DEVLOG.md` — intent, status,
   review, and evidence.
@@ -381,6 +391,9 @@ one-finding-per-commit review fixes.
    role-invariance verdicts.
    Do not tune constants from this one session inside the evidence slice; any
    policy change becomes a new reviewed finding with a repeatable guard.
+   The harness/analyzer candidate is committed through `7491b4f`; fixed-SHA
+   Grok review is pending. No endpoint staging, live arm, or ldt-4 datum has
+   been produced by this candidate.
 
 ## Open questions
 

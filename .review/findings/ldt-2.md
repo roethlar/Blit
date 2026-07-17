@@ -133,7 +133,7 @@ old exact-eight parity result proved only symmetry of a static target.
   shared buffer pool retains its epoch-zero buffer size. This does not block
   live ADD/REMOVE or role parity, but its performance-policy fidelity needs a
   separate measured design rather than expansion inside ldt-2.
-- ldt-4 remains the first endpoint/SSH/Mac↔Mac evidence slice. No endpoint,
+- ldt-4 remains the first endpoint/SSH rig-W `q`↔`netwatch-01` evidence slice. No endpoint,
   Time Machine, mount, daemon, network, benchmark, push, or deletion action is
   part of ldt-2.
 

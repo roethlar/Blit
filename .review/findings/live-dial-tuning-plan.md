@@ -50,7 +50,8 @@ finding.
 ownership boundary for both connection layouts. It removes workload shape as
 worker-count authority, wires the existing live probes/tuner, specifies exact
 ADD and REMOVE membership settlement, preserves the receiver safety ceiling,
-and requires deterministic role/lifecycle guards plus quiet Mac↔Mac evidence.
+and requires deterministic role/lifecycle guards plus quiet rig-W
+`q`↔`netwatch-01` evidence.
 The parent plan, session contract, and STATE now name current HEAD as drift
 rather than claiming exact eight completes the design.
 

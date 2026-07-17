@@ -26,7 +26,7 @@ tactical high-risk/contested pass (D-2026-07-16-3).
 | ldt-1 | Acknowledged elastic membership with exact member and terminal outcomes | `[x]` | `f8f3c51` (neutral Claude accepted) |
 | ldt-2 | Live controller cutover; delete shape worker authority; shared ADD/REMOVE | `[x]` | `65a0f9f` (neutral Claude; one non-failing Low declined at intake) |
 | ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[x]` | `436e1bb` + review fix `406a7e5`; Claude r2 clean with independent guard |
-| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | endpoint correction `9926bf7` accepted by clean Claude r2; harness next |
+| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | endpoint correction `9926bf7` accepted; harness/analyzer candidate `7491b4f`; fixed-SHA Grok review next; no endpoint data |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 

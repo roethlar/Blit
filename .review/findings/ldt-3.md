@@ -114,7 +114,7 @@ settlement, final membership, and peak membership.
 
 - Hosted Windows CI is unobserved without a push or pull request and cannot be
   claimed green from this local slice.
-- ldt-4 owns the first quiet Mac-to-Mac adaptive evidence. This slice contacts
+- ldt-4 owns the first quiet rig-W `q`↔`netwatch-01` adaptive evidence. This slice contacts
   no endpoint and makes no performance claim.
 
 ## Reviewer comments
