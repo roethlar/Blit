@@ -1259,7 +1259,7 @@ Assert-Ldt4PlainPath \$config File \$true | Out-Null
 try { \$bytes=[Text.UTF8Encoding]::new(\$false).GetBytes(\$text); \$stream.Write(\$bytes,0,\$bytes.Length); \$stream.Flush(\$true) } finally { \$stream.Dispose() }
 \$start = \$dir + '/start.cmd'
 Assert-Ldt4PlainPath \$start File \$true | Out-Null
-foreach (\$log in @(\$dir + '/daemon.out',\$dir + '/daemon.err')) {
+foreach (\$log in @((\$dir + '/daemon.out'), (\$dir + '/daemon.err'))) {
   Assert-Ldt4PlainPath \$log File \$true | Out-Null
   \$logStream = [IO.File]::Open(\$log,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
   \$logStream.Dispose()
@@ -2501,6 +2501,10 @@ prepare = text[text.index("prepare_windows_runtime() {"):text.index("restore_win
 restore = text[text.index("restore_windows_runtime() {"):text.index("q_responder_for() {")]
 q_paths = text[text.index("assert_q_registered_paths() {"):text.index("assert_windows_registered_paths() {")]
 windows_paths = text[text.index("assert_windows_registered_paths() {"):text.index("mark_void() {")]
+windows_start = text[text.index("start_windows_daemon() {"):text.index("stop_q_daemon() {")]
+required_log_loop = r'''foreach (\$log in @((\$dir + '/daemon.out'), (\$dir + '/daemon.err'))) {'''
+if windows_start.count(required_log_loop) != 1:
+    raise SystemExit("Windows daemon log paths are not two explicit array elements")
 for staged in ('src_large', 'src_small', 'src_mixed'):
     if f'$Q_STAGE_ROOT/fixtures/{staged}' not in q_paths:
         raise SystemExit(f"q {staged} fixture disappeared from boundary path guards")
