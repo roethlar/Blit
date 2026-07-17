@@ -2,7 +2,7 @@
 
 **Severity**: LOW — a cross-device `mv` fallback could leave a partial tree at
 the stable source path during an already-failing fixture-staging launch.
-**Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
+**Status**: Fixed and mutation-proved; accepted by clean final whole-change review.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `1302b906c4315b188bf48636da59c8879e443693`
 
@@ -63,12 +63,14 @@ None.
 
 ## Known gaps
 
-The live promotion path has not run. A clean final fixed-SHA whole-change review
-and a fresh exact harness launch remain before hardware evidence.
+The live promotion path has not run. A fresh exact harness launch remains
+before hardware evidence.
 
 ## Reviewer comments
 
 Claude Fable 5/max returned the candidate over exact `4e0fdc3..ef48920` with
 `guard_confirmed=true`. Intake admitted the latent cross-device failure because
 the existing accepted helper removes it without adding a new mechanism.
-Final fixed-SHA whole-change re-review is pending.
+Final Fable 5/max review over exact `4e0fdc3..5a2265e` returned clean with
+`guard_confirmed=true`; record:
+`.review/results/ldt-4-canonical-r2.claude-verdict.md`.

@@ -4,13 +4,12 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: Fixed-SHA re-review candidate. The original harness was accepted at
-exact reviewed head `4e0fdc3`; its first launch voided before any arm or Windows
-runtime swap on unequal fixture content. `b0c6ce3` established canonical stable
-fixtures, and canonical-fixture Fable round one reviewed exact `ef48920` and
-admitted two Low staging corrections. `1302b90` and `fdf7b37` close them with
-mutation proof, and full local gates pass. A neutral exact-head review remains
-before another live launch.
+**Status**: Accepted for fresh live gates at exact reviewed head `5a2265e`. The
+original `4e0fdc3` launch voided before any arm or Windows runtime swap on
+unequal fixture content. `b0c6ce3` established canonical stable fixtures;
+`1302b90` and `fdf7b37` close the two admitted staging corrections with
+mutation proof. Full local gates pass, and final Fable review over exact
+`4e0fdc3..5a2265e` is clean with `guard_confirmed=true`.
 
 **Branch**: `master`
 
@@ -135,8 +134,8 @@ exactly, and make no worker-count target part of acceptance.
 - Canonical-fixture Fable round one admitted two Low corrections: use the
   existing exclusive atomic rename helper for stable promotion, and reject a
   canonical manifest's wrong shape before copying it. Both corrections are
-  fixed and mutation-proved with full local gates green; a fresh exact-head
-  review remains.
+  fixed and mutation-proved with full local gates green; final exact-head Fable
+  review is clean.
 - Some fixed fixtures may finish before the tuner has a useful live sample or
   resize opportunity. The analyzer explicitly marks a missing sample at or
   after the first tuner tick `REVIEW_REQUIRED`; deterministic ldt-2 guards, not
@@ -180,3 +179,11 @@ admitted `ldt-4-r3-f1` (exclusive atomic fixture promotion) and
 `ldt-4-r3-f2` (pre-copy canonical shape/space validation). Full dispatch,
 safety, guard, and intake record:
 `.review/results/ldt-4-canonical-r1.claude-verdict.md`.
+
+Claude Fable 5/max then reviewed exact range
+`4e0fdc307ba26e81f8532cd191089fa291c7f1aa..5a2265e202a4ca5b4bbf08f8b58b7ff59ff75a8b`
+under the same neutral question. The schema-valid result was clean with no
+findings, exact SHAs, and `guard_confirmed=true`. Its independent mutation
+restored the old `mv -n` promotion; the offline self-test turned red, exact
+restoration passed all 96 no-SSH arms, and the detached worktree ended clean.
+Full record: `.review/results/ldt-4-canonical-r2.claude-verdict.md`.
