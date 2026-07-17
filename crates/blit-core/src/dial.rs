@@ -706,13 +706,13 @@ impl TransferDial {
         ))
     }
 
-    /// Settle the in-flight proposal with what ACTUALLY happened:
-    /// `effective_streams` is the live count now in effect (from the
-    /// peer's ack, or the local count if a post-ack dial failed and
-    /// nothing changed). `accepted = false` leaves the live count
-    /// untouched, consumes the refused epoch, and permanently disables
-    /// further proposals on this transfer. Stale epochs (not the pending
-    /// one) are ignored. Either way the cooldown clock restarts.
+    /// Settle the in-flight proposal with what ACTUALLY happened.
+    /// Production passes `accepted = true` only after local membership reaches
+    /// the proposal target; a post-ack membership failure faults the session
+    /// instead of publishing a partial settlement. `accepted = false` leaves
+    /// the live count untouched, consumes the refused epoch, and permanently
+    /// disables further proposals on this transfer. Stale epochs (not the
+    /// pending one) are ignored. Either way the cooldown clock restarts.
     pub fn resize_settled(&self, epoch: u32, effective_streams: usize, accepted: bool) {
         #[cfg(test)]
         let mut state = {

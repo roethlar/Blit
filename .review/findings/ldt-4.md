@@ -4,8 +4,8 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: Review fixes in progress — `ldt-4-r1-f1` through `f3` are fixed and
-mutation-proved; the remaining admitted findings still precede neutral
+**Status**: Review fixes in progress — Medium `f1`–`f3` and Low comment-truth
+`f5a` are fixed and guard-proved; the remaining admitted findings precede neutral
 fixed-SHA whole-change re-review. No candidate artifact has been staged and no generated harness
 operation or live arm has run on either endpoint; only the read-only parser
 check described below and the in-memory crash-guard SSH probe occurred.
