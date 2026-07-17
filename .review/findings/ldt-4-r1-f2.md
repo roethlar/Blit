@@ -4,7 +4,7 @@
 test daemon as the supposed machine baseline and strand the true original.
 **Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: review-fix commit pending final record
+**Commit**: `096304b`
 
 ## Evidence
 

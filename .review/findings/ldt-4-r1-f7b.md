@@ -4,7 +4,7 @@
 an exact policy threshold while still matching its raw counters.
 **Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: review-fix commit pending final record
+**Commit**: `f470b06`
 
 ## Evidence
 

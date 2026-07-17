@@ -4,7 +4,7 @@
 the analyzer's exact schema and evidence-integrity checks.
 **Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: review-fix commit pending final record
+**Commit**: `efc796a`
 
 ## Evidence
 

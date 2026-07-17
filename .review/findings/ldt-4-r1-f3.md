@@ -4,7 +4,7 @@
 PIDs and could leave a stale writer alive during a later arm.
 **Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: review-fix commit pending final record
+**Commit**: `0efa4e0`
 
 ## Evidence
 

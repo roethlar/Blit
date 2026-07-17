@@ -4,9 +4,9 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: Review-fix candidate — all admitted `f1`–`f3`, `f5a`, `f6`,
-`f7a`, and `f7b` fixes are guard-proved; full local gates and neutral
-fixed-SHA whole-change re-review remain. No candidate artifact has been staged
+**Status**: Fixed-SHA re-review candidate — all admitted `f1`–`f3`, `f5a`,
+`f6`, `f7a`, and `f7b` fixes are guard-proved and full local gates pass;
+neutral fixed-SHA whole-change re-review remains. No candidate artifact has been staged
 and no generated harness operation or live arm has run on either endpoint;
 only the read-only parser check described below and the in-memory crash-guard
 SSH probe occurred.
@@ -14,7 +14,7 @@ SSH probe occurred.
 **Branch**: `master`
 
 **Implementation range**:
-`e41b87173f2073a9b6694a62813eddc14a7844ad..7491b4fbdfc84bde2fa713894d292855faaf3b13`
+`e41b87173f2073a9b6694a62813eddc14a7844ad..92a5a89f9b50a0b2757508b56bef98c6f8902af2`
 
 **Artifact under test**: accepted ldt-3 runtime
 `406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77`
@@ -71,6 +71,13 @@ exactly, and make no worker-count target part of acceptance.
   audit findings one at a time.
 - `7491b4f` makes every self-test assertion propagate failure so mutations
   cannot silently pass under Bash errexit context.
+- `598fa59`, `096304b`, and `0efa4e0` close round-one Windows fetch framing,
+  ambiguous hard-crash baseline, and padded-PID recovery findings;
+  `92a5a89` closes the pre-review Bash-to-PowerShell generation defect exposed
+  by the required parser check.
+- `f67ef75`, `80ecaad`, `efc796a`, and `f470b06` correct the accepted-resize
+  contract comment, cover every independent replay reason, reject duplicate
+  trace keys, and require exact blocked-ratio recomputation.
 
 ## Tests and guard proof
 
@@ -90,18 +97,21 @@ exactly, and make no worker-count target part of acceptance.
   schedule and path parity sound, all four prior audit findings closed, no
   deletion/overwrite/name-wide kill, fail-closed ownership and restoration,
   and a clean unchanged worktree.
-- Full local gates pass: formatting, strict workspace clippy, 1,532 workspace
-  tests with 2 ignored, documentation checks, and diff checks.
+- Exact-current-head local gates pass: formatting, strict workspace clippy,
+  1,532 workspace tests with 2 ignored, 30 focused release dial tests, all 75
+  analyzer tests, documentation checks, and diff checks.
 - Generated Windows prepare/restoration PowerShell was sent over SSH only to
-  PowerShell's in-memory parser. It parsed cleanly; no generated command was
-  executed and no endpoint file, process, daemon, or staging path changed.
+  PowerShell's in-memory parser. After it exposed and the coder fixed f1's
+  shell-generation quoting, exact fetch, prepare, and normal restoration all
+  parsed cleanly; no generated command was executed and no endpoint file,
+  process, daemon, or staging path changed.
 
 ## Known gaps
 
 - Round-one Claude Fable 5/max openreview found seven admitted bounded fixes.
-  The implementation is not accepted until they land one per commit and a
-  fresh structured exact-base/head whole-change review passes the repo's
-  fail-closed guard gate.
+  They are landed and guard-proved, but the implementation is not accepted
+  until a fresh structured exact-base/head whole-change review passes the
+  repo's fail-closed guard gate.
 - No endpoint staging, daemon launch, live transfer, ldt-4 evidence, or hardware
   ADD/REMOVE claim exists for this candidate. Hosted Windows CI also remains
   unobserved.

@@ -4,7 +4,7 @@
 settlement that production deliberately makes impossible.
 **Status**: Fixed and manually guard-proved; neutral whole-change re-review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: review-fix commit pending final record
+**Commit**: `f67ef75`
 
 ## Evidence
 

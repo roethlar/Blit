@@ -4,7 +4,8 @@
 evidence fetch before an arm completes.
 **Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: review-fix commit pending final record
+**Commit**: `598fa59` (framing/decoder); `92a5a89` (Bash-to-PowerShell
+generation correction)
 
 ## Evidence
 

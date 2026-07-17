@@ -4,7 +4,7 @@
 first surface by refusing or misreading an expensive live session.
 **Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: review-fix commit pending final record
+**Commit**: `80ecaad`
 
 ## Evidence
 
