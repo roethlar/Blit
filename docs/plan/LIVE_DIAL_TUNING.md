@@ -402,9 +402,9 @@ advise but cannot accept the slice (D-2026-07-16-4).
    `ef48920` and admitted two Low corrections: promote with the harness's
    existing exclusive atomic rename primitive, and validate the fetched
    canonical shape before the large copy/free-space gate. The rename correction
-   is fixed and mutation-proved as `ldt-4-r3-f1`; `f2` now validates and sizes
-   from the fetched manifest before copy. Run full candidate gates, then the
-   final neutral review. All live matrix data remains.
+   is fixed and mutation-proved at `1302b90`; `f2` validates and sizes from the
+   fetched manifest before copy at `fdf7b37`. Full local candidate gates pass;
+   run the final neutral review next. All live matrix data remains.
 
 ## Open questions
 

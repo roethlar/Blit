@@ -4,21 +4,18 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: The original harness was accepted at exact reviewed head
-`4e0fdc3`. After exact artifacts were staged, its first launch staged the small
-fixture, then voided before any arm or Windows runtime swap because the q and
-Windows large fixtures had different content. `ldt-4-live-f1` is fixed at
-`b0c6ce3`: Windows is canonical for large and mixed fixtures, and validated
-copies use stable q source paths. Canonical-fixture Fable round one reviewed
-exact `ef48920` and admitted two Low staging corrections. `ldt-4-r3-f1` now
-uses the existing exclusive atomic rename helper, and `ldt-4-r3-f2` validates
-canonical shape before copy and space accounting. Both are mutation-proved;
-full candidate gates and final review remain before another live launch.
+**Status**: Fixed-SHA re-review candidate. The original harness was accepted at
+exact reviewed head `4e0fdc3`; its first launch voided before any arm or Windows
+runtime swap on unequal fixture content. `b0c6ce3` established canonical stable
+fixtures, and canonical-fixture Fable round one reviewed exact `ef48920` and
+admitted two Low staging corrections. `1302b90` and `fdf7b37` close them with
+mutation proof, and full local gates pass. A neutral exact-head review remains
+before another live launch.
 
 **Branch**: `master`
 
 **Implementation range**:
-`e41b87173f2073a9b6694a62813eddc14a7844ad..b0c6ce3cbeec37b17f7dc83172792232f0a3ffc9`
+`e41b87173f2073a9b6694a62813eddc14a7844ad..fdf7b3771c00c950ca40fb7e9904a91c89f8a72d`
 
 **Artifact under test**: accepted ldt-3 runtime
 `406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77`
@@ -86,10 +83,10 @@ exactly, and make no worker-count target part of acceptance.
   large and mixed fixtures through a retained per-session incoming namespace,
   validate exact content before no-clobber promotion, and register the same
   stable q paths in the harness and analyzer.
-- `ldt-4-r3-f1` replaces `mv -n` promotion with the existing exclusive atomic
-  rename primitive; its guard proof is recorded in the per-finding file.
-- `ldt-4-r3-f2` rejects wrong canonical shape before copy and derives the
-  staging capacity reservation from that validated manifest.
+- `1302b90` closes `ldt-4-r3-f1`: replace `mv -n` promotion with the existing
+  exclusive atomic rename primitive.
+- `fdf7b37` closes `ldt-4-r3-f2`: reject wrong canonical shape before copy and
+  derive the staging capacity reservation from that validated manifest.
 
 ## Tests and guard proof
 
@@ -126,6 +123,9 @@ exactly, and make no worker-count target part of acceptance.
   corresponding guard red. Exact restoration passes Bash syntax, the 96-arm
   no-SSH self-test, all 75 analyzer tests, formatting, strict workspace
   clippy, and the full workspace suite.
+- At `1302b90` and `fdf7b37`, restoring `mv -n`, restoring post-copy canonical
+  shape validation, or removing only the low-space refusal turns the offline
+  self-test red. Exact restoration passes all local gates listed above.
 
 ## Known gaps
 
@@ -135,8 +135,8 @@ exactly, and make no worker-count target part of acceptance.
 - Canonical-fixture Fable round one admitted two Low corrections: use the
   existing exclusive atomic rename helper for stable promotion, and reject a
   canonical manifest's wrong shape before copying it. Both corrections are
-  fixed and mutation-proved; full candidate gates and a fresh exact-head review
-  remain.
+  fixed and mutation-proved with full local gates green; a fresh exact-head
+  review remains.
 - Some fixed fixtures may finish before the tuner has a useful live sample or
   resize opportunity. The analyzer explicitly marks a missing sample at or
   after the first tuner tick `REVIEW_REQUIRED`; deterministic ldt-2 guards, not

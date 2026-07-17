@@ -4,7 +4,7 @@
 large transfer and breach the retained-space floor before the harness voided.
 **Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: review-fix commit pending final record
+**Commit**: `fdf7b3771c00c950ca40fb7e9904a91c89f8a72d`
 
 ## Evidence
 

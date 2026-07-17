@@ -4,7 +4,7 @@
 the stable source path during an already-failing fixture-staging launch.
 **Status**: Fixed and mutation-proved; neutral whole-change re-review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: review-fix commit pending final record
+**Commit**: `1302b906c4315b188bf48636da59c8879e443693`
 
 ## Evidence
 
