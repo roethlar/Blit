@@ -314,6 +314,23 @@ These are intentionally not next-actionable. Don't pick them up
 without the listed prerequisite — they're tracked here so they
 don't get lost, not so the next agent reimplements them on a hunch.
 
+- [ ] **Mac↔Mac Thunderbolt Bridge ceiling/control experiment** — optional
+      follow-up after the required ldt-4 `q`↔`netwatch-01` evidence; it is
+      not a substitute for Mac↔Windows acceptance. macOS supports direct IP
+      over Thunderbolt Bridge, making this a useful same-OS control and a way
+      to measure Blit's engine/CPU ceiling above 10 GbE while removing Windows,
+      NTFS, the Ethernet NICs, and the switch as variables. First prove the
+      certified cable/link and exact Thunderbolt-interface routing, then record
+      bidirectional single- and multi-stream `iperf3` baselines before running
+      Blit. Treat Thunderbolt 4's advertised 40 Gb/s as a link rate, not expected
+      TCP payload throughput. Use a sustained workload of tens of GiB (or an
+      equivalent controlled long-running sink): the existing short fixtures
+      may finish before the live controller has enough samples to ADD or REMOVE.
+      Compare initiator layouts within the same physical byte direction and
+      exact source/destination paths. Any implementation or formal benchmark
+      matrix needs its own approved plan. References: [Apple IP over Thunderbolt
+      setup](https://support.apple.com/guide/mac-help/mchld53dd2f5/mac),
+      [Intel Thunderbolt 4 data-bandwidth summary](https://cdrdv2-public.intel.com/755295/Thunderbolt_4_One-pager-002-210119.pdf).
 - [x] **Remote→remote re-evaluation** — resolved by
   `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`. Phase 1 (`15991ed`)
   added the `DelegatedPull` wire/gate/daemon path; Phase 2 makes
