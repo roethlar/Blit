@@ -1,0 +1,5 @@
+endpoint,role,artifact_sha,build_id,sha256,staged_path,runtime_path
+q,client,406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77,406a7e585459,9a7358e3dadf5d9564911de49ff3d3c3d0261ddb1b1ac6dd84cb54eb9dbe3276,/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit,/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit
+q,daemon,406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77,406a7e585459,220db3d7d5f29817a3c37a8c53b60543cc71fa59910dcf10b13d64c06d498a05,/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit-daemon,/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit-daemon
+windows,client,406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77,406a7e585459,772a8a3ffe2279b1fccb4e4ca64da1ec062a6f15d43d0a93bbdf97e3dae7af10,D:/blit-test/bins/406a7e5/blit.exe,D:/blit-test/bins/406a7e5/blit.exe
+windows,daemon,406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77,406a7e585459,ae414e649cf64f042f9d2a61639371c57d2fc3107cc426fe5a27a057b6630322,D:/blit-test/bins/406a7e5/blit-daemon.exe,D:/blit-test/bins/active/blit-daemon.exe

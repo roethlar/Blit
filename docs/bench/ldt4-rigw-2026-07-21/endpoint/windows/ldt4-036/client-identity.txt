@@ -1,0 +1,7 @@
+run_id=ldt4-036
+pid=1600
+parent_pid=8656
+executable=D:/blit-test/bins/406a7e5/blit.exe
+command=d:/blit-test/bins/406a7e5/blit.exe copy d:/blit-test/ldt4-staging/fixtures/src_small 10.1.10.54:9031:/ldt4/active/small/ --yes
+trace_session_phases=1
+trace_run_id=ldt4-036

@@ -1,0 +1,7 @@
+run_id=ldt4-013
+pid=1408
+parent_pid=6156
+executable=D:/blit-test/bins/406a7e5/blit.exe
+command=d:/blit-test/bins/406a7e5/blit.exe copy 10.1.10.54:9031:/ldt4/src_large d:/blit-test/ldt4-sessions/ldt4-20260721t224319z-96a4e3b03caf/active/large/ --yes
+trace_session_phases=1
+trace_run_id=ldt4-013

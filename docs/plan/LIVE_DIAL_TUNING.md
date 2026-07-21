@@ -405,7 +405,17 @@ advise but cannot accept the slice (D-2026-07-16-4).
    is fixed and mutation-proved at `1302b90`; `f2` validates and sizes from the
    fetched manifest before copy at `fdf7b37`. Full local gates pass, and final
    Fable review accepts exact `5a2265e` with an independent red/green guard.
-   Exact restaging and all live matrix data remain.
+   Exact harness/analyzer `96a4e3b` then completed all 96 rig-W arms in
+   session `ldt4-20260721T224319Z-96a4e3b03caf`; retained evidence and an
+   independent byte-for-byte analysis recomputation are recorded at
+   `docs/bench/ldt4-rigw-2026-07-21/`. The structurally valid result is
+   `REVIEW_REQUIRED`: arm review 0, decision review 14, performance review 2.
+   Every arm stayed at floor = peak = final = 4; 74 arms produced no tuner
+   sample and 22 produced one, so this matrix did not exercise adaptive
+   membership. Own a dedicated sustained controller-exercise workload as the
+   next finding. Keep the `q_to_windows_large` 1.197 and
+   `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
+   payloads cannot hide their fixed overhead.
 
 ## Open questions
 

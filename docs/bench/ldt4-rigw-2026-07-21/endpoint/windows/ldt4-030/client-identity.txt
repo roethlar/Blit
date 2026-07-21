@@ -1,0 +1,7 @@
+run_id=ldt4-030
+pid=4840
+parent_pid=9176
+executable=D:/blit-test/bins/406a7e5/blit.exe
+command=d:/blit-test/bins/406a7e5/blit.exe copy d:/blit-test/rigw-module/src_large 10.1.10.54:9031:/ldt4/active/large/ --yes
+trace_session_phases=1
+trace_run_id=ldt4-030

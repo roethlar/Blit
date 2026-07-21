@@ -1,0 +1,7 @@
+direction,fixture,source_manifest
+q_to_windows,large,manifests/source/q_to_windows_large.csv
+windows_to_q,large,manifests/source/windows_to_q_large.csv
+q_to_windows,small,manifests/source/q_to_windows_small.csv
+windows_to_q,small,manifests/source/windows_to_q_small.csv
+q_to_windows,mixed,manifests/source/q_to_windows_mixed.csv
+windows_to_q,mixed,manifests/source/windows_to_q_mixed.csv

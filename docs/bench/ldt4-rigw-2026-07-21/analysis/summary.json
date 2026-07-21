@@ -1,0 +1,391 @@
+{
+  "arm_count": 96,
+  "arm_review_count": 0,
+  "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+  "cells": [
+    {
+      "cell": "q_to_windows_large",
+      "decision_review_pairs": 0,
+      "decision_verdict": "MATCH",
+      "destination_first_delta_median_ms": "173",
+      "destination_init_durations_ms": [
+        "1040",
+        "1052",
+        "1048",
+        "1086",
+        "1092",
+        "1056",
+        "1050",
+        "895"
+      ],
+      "destination_init_median_ms": "1051",
+      "first_half_delta_median_ms": "172.5",
+      "first_last_drift_ms": "3",
+      "last_half_delta_median_ms": "175.5",
+      "paired_delta_median_ms": "173",
+      "paired_destination_minus_source_ms": [
+        "160",
+        "174",
+        "171",
+        "208",
+        "214",
+        "179",
+        "172",
+        "-186"
+      ],
+      "performance_limit": "1.1",
+      "performance_verdict": "REVIEW_REQUIRED",
+      "role_order_drift_ms": "-11",
+      "slower_faster_median_ratio": "1.19703872437357630979498861",
+      "source_first_delta_median_ms": "184",
+      "source_init_durations_ms": [
+        "880",
+        "878",
+        "877",
+        "878",
+        "878",
+        "877",
+        "878",
+        "1081"
+      ],
+      "source_init_median_ms": "878"
+    },
+    {
+      "cell": "windows_to_q_large",
+      "decision_review_pairs": 0,
+      "decision_verdict": "MATCH",
+      "destination_first_delta_median_ms": "-16",
+      "destination_init_durations_ms": [
+        "878",
+        "879",
+        "878",
+        "879",
+        "878",
+        "902",
+        "880",
+        "879"
+      ],
+      "destination_init_median_ms": "879",
+      "first_half_delta_median_ms": "-16.5",
+      "first_last_drift_ms": "-9",
+      "last_half_delta_median_ms": "-25.5",
+      "paired_delta_median_ms": "-16.5",
+      "paired_destination_minus_source_ms": [
+        "-16",
+        "-41",
+        "-17",
+        "-15",
+        "-36",
+        "7",
+        "-15",
+        "-70"
+      ],
+      "performance_limit": "1.1",
+      "performance_verdict": "WITHIN_1.10",
+      "role_order_drift_ms": "10",
+      "slower_faster_median_ratio": "1.018202502844141069397042093",
+      "source_first_delta_median_ms": "-26",
+      "source_init_durations_ms": [
+        "894",
+        "920",
+        "895",
+        "894",
+        "914",
+        "895",
+        "895",
+        "949"
+      ],
+      "source_init_median_ms": "895"
+    },
+    {
+      "cell": "windows_to_q_small",
+      "decision_review_pairs": 8,
+      "decision_verdict": "REVIEW_REQUIRED",
+      "destination_first_delta_median_ms": "-8",
+      "destination_init_durations_ms": [
+        "651",
+        "649",
+        "639",
+        "634",
+        "646",
+        "636",
+        "633",
+        "644"
+      ],
+      "destination_init_median_ms": "641.5",
+      "first_half_delta_median_ms": "-2",
+      "first_last_drift_ms": "-19.5",
+      "last_half_delta_median_ms": "-21.5",
+      "paired_delta_median_ms": "-8.5",
+      "paired_destination_minus_source_ms": [
+        "-9",
+        "5",
+        "4",
+        "-8",
+        "-46",
+        "-23",
+        "-20",
+        "2"
+      ],
+      "performance_limit": "1.1",
+      "performance_verdict": "WITHIN_1.10",
+      "role_order_drift_ms": "0.5",
+      "slower_faster_median_ratio": "1.010911925175370226032735776",
+      "source_first_delta_median_ms": "-8.5",
+      "source_init_durations_ms": [
+        "660",
+        "644",
+        "635",
+        "642",
+        "692",
+        "659",
+        "653",
+        "642"
+      ],
+      "source_init_median_ms": "648.5"
+    },
+    {
+      "cell": "q_to_windows_small",
+      "decision_review_pairs": 6,
+      "decision_verdict": "REVIEW_REQUIRED",
+      "destination_first_delta_median_ms": "47",
+      "destination_init_durations_ms": [
+        "1055",
+        "1080",
+        "1039",
+        "950",
+        "944",
+        "1072",
+        "964",
+        "991"
+      ],
+      "destination_init_median_ms": "1015",
+      "first_half_delta_median_ms": "5",
+      "first_last_drift_ms": "35.5",
+      "last_half_delta_median_ms": "40.5",
+      "paired_delta_median_ms": "13.5",
+      "paired_destination_minus_source_ms": [
+        "-4",
+        "74",
+        "7",
+        "3",
+        "6",
+        "153",
+        "20",
+        "61"
+      ],
+      "performance_limit": "1.1",
+      "performance_verdict": "WITHIN_1.10",
+      "role_order_drift_ms": "42.5",
+      "slower_faster_median_ratio": "1.073506081438392384981491274",
+      "source_first_delta_median_ms": "4.5",
+      "source_init_durations_ms": [
+        "1059",
+        "1006",
+        "1032",
+        "947",
+        "938",
+        "919",
+        "944",
+        "930"
+      ],
+      "source_init_median_ms": "945.5"
+    },
+    {
+      "cell": "q_to_windows_mixed",
+      "decision_review_pairs": 0,
+      "decision_verdict": "MATCH",
+      "destination_first_delta_median_ms": "6.5",
+      "destination_init_durations_ms": [
+        "591",
+        "590",
+        "807",
+        "816",
+        "811",
+        "814",
+        "626",
+        "817"
+      ],
+      "destination_init_median_ms": "809",
+      "first_half_delta_median_ms": "-38",
+      "first_last_drift_ms": "137",
+      "last_half_delta_median_ms": "99",
+      "paired_delta_median_ms": "53.5",
+      "paired_destination_minus_source_ms": [
+        "-141",
+        "-101",
+        "114",
+        "25",
+        "119",
+        "116",
+        "-131",
+        "82"
+      ],
+      "performance_limit": "1.1",
+      "performance_verdict": "REVIEW_REQUIRED",
+      "role_order_drift_ms": "-47",
+      "slower_faster_median_ratio": "1.131468531468531468531468531",
+      "source_first_delta_median_ms": "53.5",
+      "source_init_durations_ms": [
+        "732",
+        "691",
+        "693",
+        "791",
+        "692",
+        "698",
+        "757",
+        "735"
+      ],
+      "source_init_median_ms": "715"
+    },
+    {
+      "cell": "windows_to_q_mixed",
+      "decision_review_pairs": 0,
+      "decision_verdict": "MATCH",
+      "destination_first_delta_median_ms": "13",
+      "destination_init_durations_ms": [
+        "592",
+        "590",
+        "561",
+        "551",
+        "557",
+        "545",
+        "641",
+        "548"
+      ],
+      "destination_init_median_ms": "559",
+      "first_half_delta_median_ms": "17",
+      "first_last_drift_ms": "-51",
+      "last_half_delta_median_ms": "-34",
+      "paired_delta_median_ms": "7",
+      "paired_destination_minus_source_ms": [
+        "43",
+        "3",
+        "23",
+        "11",
+        "-49",
+        "-29",
+        "58",
+        "-39"
+      ],
+      "performance_limit": "1.1",
+      "performance_verdict": "WITHIN_1.10",
+      "role_order_drift_ms": "27",
+      "slower_faster_median_ratio": "1.034883720930232558139534884",
+      "source_first_delta_median_ms": "-14",
+      "source_init_durations_ms": [
+        "549",
+        "587",
+        "538",
+        "540",
+        "606",
+        "574",
+        "583",
+        "587"
+      ],
+      "source_init_median_ms": "578.5"
+    }
+  ],
+  "decision_review_count": 14,
+  "fixture_manifests": [
+    {
+      "bytes": 1073741824,
+      "direction": "q_to_windows",
+      "files": 1,
+      "fixture": "large",
+      "path": "manifests/source/q_to_windows_large.csv",
+      "sha256": "6ded420382e363fb191497f83869f04fa5c2c05f23f8c638a4a47f434dacf788"
+    },
+    {
+      "bytes": 40960000,
+      "direction": "q_to_windows",
+      "files": 10000,
+      "fixture": "small",
+      "path": "manifests/source/q_to_windows_small.csv",
+      "sha256": "913dcd9fcd5ea6447db1d9e6f427254c09c895acdbc7804ce5791d1a4e1a309d"
+    },
+    {
+      "bytes": 547110912,
+      "direction": "q_to_windows",
+      "files": 5001,
+      "fixture": "mixed",
+      "path": "manifests/source/q_to_windows_mixed.csv",
+      "sha256": "2452aa3059998eedf5e63a860a08f0db255286862a9a5fe576dca19d6e4c756e"
+    },
+    {
+      "bytes": 1073741824,
+      "direction": "windows_to_q",
+      "files": 1,
+      "fixture": "large",
+      "path": "manifests/source/windows_to_q_large.csv",
+      "sha256": "6ded420382e363fb191497f83869f04fa5c2c05f23f8c638a4a47f434dacf788"
+    },
+    {
+      "bytes": 40960000,
+      "direction": "windows_to_q",
+      "files": 10000,
+      "fixture": "small",
+      "path": "manifests/source/windows_to_q_small.csv",
+      "sha256": "913dcd9fcd5ea6447db1d9e6f427254c09c895acdbc7804ce5791d1a4e1a309d"
+    },
+    {
+      "bytes": 547110912,
+      "direction": "windows_to_q",
+      "files": 5001,
+      "fixture": "mixed",
+      "path": "manifests/source/windows_to_q_mixed.csv",
+      "sha256": "2452aa3059998eedf5e63a860a08f0db255286862a9a5fe576dca19d6e4c756e"
+    }
+  ],
+  "floor_streams_observed": 4,
+  "harness_sha": "96a4e3b03caf43ee368efadc779e3324248067f6",
+  "input_file_count": 1218,
+  "input_inventory_sha256": "9af57bfd728fabd00e7e9762e25c99b40c649a84f777a043cb6e5dd928821671",
+  "no_sample_arm_count": 74,
+  "pair_count": 48,
+  "performance_materiality_ratio": "1.1",
+  "performance_review_count": 2,
+  "preselected_worker_target": null,
+  "receiver_safety_ceiling_observed": 32,
+  "schema": 1,
+  "staged_binaries": [
+    {
+      "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+      "build_id": "406a7e585459",
+      "endpoint": "q",
+      "role": "client",
+      "runtime_path": "/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit",
+      "sha256": "9a7358e3dadf5d9564911de49ff3d3c3d0261ddb1b1ac6dd84cb54eb9dbe3276",
+      "staged_path": "/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit"
+    },
+    {
+      "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+      "build_id": "406a7e585459",
+      "endpoint": "q",
+      "role": "daemon",
+      "runtime_path": "/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit-daemon",
+      "sha256": "220db3d7d5f29817a3c37a8c53b60543cc71fa59910dcf10b13d64c06d498a05",
+      "staged_path": "/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit-daemon"
+    },
+    {
+      "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+      "build_id": "406a7e585459",
+      "endpoint": "windows",
+      "role": "client",
+      "runtime_path": "D:/blit-test/bins/406a7e5/blit.exe",
+      "sha256": "772a8a3ffe2279b1fccb4e4ca64da1ec062a6f15d43d0a93bbdf97e3dae7af10",
+      "staged_path": "D:/blit-test/bins/406a7e5/blit.exe"
+    },
+    {
+      "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+      "build_id": "406a7e585459",
+      "endpoint": "windows",
+      "role": "daemon",
+      "runtime_path": "D:/blit-test/bins/active/blit-daemon.exe",
+      "sha256": "ae414e649cf64f042f9d2a61639371c57d2fc3107cc426fe5a27a057b6630322",
+      "staged_path": "D:/blit-test/bins/406a7e5/blit-daemon.exe"
+    }
+  ],
+  "status": "REVIEW_REQUIRED",
+  "timing_rule": "endpoint-local elapsed_ns only; no cross-host clock subtraction"
+}

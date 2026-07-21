@@ -1,0 +1,8 @@
+run_id=ldt4-037
+launcher_pid=7892
+conhost_pid=7752
+conhost_path=C:/Windows/System32/conhost.exe
+daemon_pid=7348
+launcher_command=cmd.exe /d /c d:/blit-test/ldt4-sessions/ldt4-20260721t224319z-96a4e3b03caf/logs/ldt4-037/start.cmd
+daemon_command=d:/blit-test/bins/active/blit-daemon.exe --config d:/blit-test/ldt4-sessions/ldt4-20260721t224319z-96a4e3b03caf/logs/ldt4-037/daemon.toml
+config=D:/blit-test/ldt4-sessions/ldt4-20260721T224319Z-96a4e3b03caf/logs/ldt4-037/daemon.toml
