@@ -1,0 +1,39 @@
+{
+  "record_type": "tactical_code_review",
+  "reviewer": {
+    "provider": "xAI",
+    "model": "grok-4.5",
+    "cli": "grok 0.2.106 (bde89716f679)",
+    "reasoning_effort": "high"
+  },
+  "review_contract": {
+    "finding_ids": [
+      "ldt-4-live-f5"
+    ],
+    "base_sha": "31c12c9079a6bb5f15fa5a412ce84356f0a81017",
+    "reviewed_sha": "322a1611230e78c2268d91c45e6bd1e7ed24f953",
+    "worktree": "/private/tmp/blit-grok-ldt4-f5-322a161",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "019f8650-a67c-7172-8175-3285f759ce4d",
+    "completion": "clean verdict after local semantic and mutation checks"
+  },
+  "structured_output": {
+    "verdict": "clean",
+    "base_sha": "31c12c9079a6bb5f15fa5a412ce84356f0a81017",
+    "reviewed_sha": "322a1611230e78c2268d91c45e6bd1e7ed24f953",
+    "summary": "The patch moves ldt-4 SSH, data-plane, and analyzer pins together to verified 10.1.10.173, preserves the independent hardware and topology gates, does not weaken host-key checking, and is non-vacuously guarded.",
+    "findings": []
+  },
+  "checks": {
+    "identity": "clean detached 322a1611230e78c2268d91c45e6bd1e7ed24f953 with one-commit parent 31c12c9079a6bb5f15fa5a412ce84356f0a81017",
+    "bash_syntax": "pass",
+    "bash_3_2_selftest": "PASS (96 arms, no SSH)",
+    "analyzer_tests": "76 passed",
+    "use_site_audit": "WIN_SSH owns SSH/scp; WIN_IP owns route, ping, ARP, MSS, daemon readiness, and transfer arguments; Windows runtime topology requires the same source IP",
+    "hardware_gates": "COMPUTERNAME, MAC, NIC, MTU, and 10 GbE checks unchanged",
+    "guard_mutations": "old .177, split SSH/IP, synchronized wrong IP, and analyzer .177 mutations each fail"
+  },
+  "policy_note": "This is owner-authorized tactical Grok review while formal Fable review is on capacity hold. It is advisory and is not a formal openreview acceptance verdict."
+}

@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-21 (owner-directed Windows .173 adaptation mutation-proved/full-gate green; tactical review next)
+Last updated: 2026-07-21 (owner-directed Windows .173 adaptation tactical Grok-clean at 322a161; additive staging next)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,7 +10,7 @@ Last updated: 2026-07-21 (owner-directed Windows .173 adaptation mutation-proved
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — TACTICALLY REVIEW/STAGE VERIFIED `.173` ADAPTATION, THEN RUN:** D-2026-07-21-1 directs ldt-4 to follow current `NETWATCH-01` identity rather than force its old DHCP lease. `ldt-4-live-f5` moves the coupled SSH/data-plane/analyzer pin to strictly authenticated `.173`; its identity mutations, focused suites, formatting, strict clippy, and full workspace suite are green. Commit and tactically review the exact candidate, additively stage it, install only q's already verified matching `.173` host-key alias, then run the fresh quiet matrix.
+- **NEXT ACTION — ADDITIVELY STAGE EXACT `322a161`, TRUST VERIFIED `.173`, THEN RUN:** D-2026-07-21-1 directs ldt-4 to follow current `NETWATCH-01` identity rather than force its old DHCP lease. `ldt-4-live-f5` moves the coupled SSH/data-plane/analyzer pin to strictly authenticated `.173`; exact `322a161` is mutation-proved, full-gate green, and tactical Grok-clean. Additively stage that head, install only q's already verified matching `.173` host-key alias, then run the fresh quiet matrix.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **WHY NO ldt-4 RIG-W DATA YET:** three retained sessions failed closed before a transfer: unequal fixtures; joined log paths; then tag `ldt4-20260717T062334Z-a39f0c570191`, where PowerShell split two generated `start.cmd` paths across lines. Every `runs.csv` has zero data rows. Both ports are closed, no session process remains, and Windows' prior active daemon is restored byte-for-byte. The newest fault is fixed, guarded, tactical Grok-clean, and additively staged at `d53b5fd`. Its first post-staging launch stopped even earlier, before evidence reservation, because Windows moved from `.177` to verified `.173`; D-2026-07-21-1 authorizes the guarded endpoint adaptation now in verification.
@@ -28,7 +28,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`; the ldt-4 rig-W endpoint correction is accepted at `9926bf7`. Repairs through `a39f0c5` are tactical Grok-clean; `start.cmd` finding `f4` is fixed/reviewed/staged at `d53b5fd`. q's 10 GbE link is restored. D-2026-07-21-1 supersedes only the stale Windows `.177` literal; guarded `.173` finding `ldt-4-live-f5` is mutation-proved/full-gate green before tactical review/staging/live retry. Formal Fable openreview is held for capacity.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1 is accepted at `f8f3c51`; ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at `406a7e5`; the ldt-4 rig-W endpoint correction is accepted at `9926bf7`. Repairs through `a39f0c5` are tactical Grok-clean; `start.cmd` finding `f4` is fixed/reviewed/staged at `d53b5fd`. q's 10 GbE link is restored. D-2026-07-21-1 supersedes only the stale Windows `.177` literal; guarded `.173` finding `ldt-4-live-f5` is mutation-proved/full-gate green and tactical Grok-clean at `322a161` before additive staging/live retry. Formal Fable openreview is held for capacity.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can

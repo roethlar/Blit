@@ -3,9 +3,9 @@
 **Severity**: MEDIUM — the registered run cannot pass Windows preflight or
 produce evidence while the harness dials a DHCP address the endpoint no longer
 owns.
-**Status**: Fixed, mutation-proved, and full-gate green; tactical code review and additive staging pending.
+**Status**: Fixed, mutation-proved, full-gate green, and tactically reviewed clean; additive staging pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: pending
+**Commit**: `322a1611230e78c2268d91c45e6bd1e7ed24f953`
 
 ## Evidence
 
@@ -68,9 +68,13 @@ None.
 
 ## Known gaps
 
-Tactical review, additive staging, q's verified host-key alias, and a completed
-live arm/run remain.
+Additive staging, q's verified host-key alias, and a completed live arm/run
+remain.
 
 ## Reviewer comments
 
-Pending.
+Grok 4.5/high reviewed exact range `31c12c9..322a161`, audited every SSH,
+data-plane, topology, and analyzer identity use, ran the complete offline
+suites, independently rejected old/split/wrong identities, and returned
+`clean` with no findings. This is tactical advisory review, not formal
+acceptance. Record: `.review/results/ldt-4-live-f5-r1.grok-verdict.md`.
