@@ -26,7 +26,7 @@ Fable 5/max (D-2026-07-16-4).
 | ldt-1 | Acknowledged elastic membership with exact member and terminal outcomes | `[x]` | `f8f3c51` (neutral Claude accepted) |
 | ldt-2 | Live controller cutover; delete shape worker authority; shared ADD/REMOVE | `[x]` | `65a0f9f` (neutral Claude; one non-failing Low declined at intake) |
 | ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[x]` | `436e1bb` + review fix `406a7e5`; Claude r2 clean with independent guard |
-| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | Exact staged `c2e1284` cleared f8 live and completed 25 arms. Retained session `ldt4-20260721T212142Z-c2e12846bcb1` then voided after arm 26 completed because its exact Windows `cmd.exe` launcher exited normally between teardown's existence check and strict stop. No listener/process remains, the prior daemon is restored, and all provisional rows are invalid. `f9` owns the teardown race; formal Fable held |
+| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | Exact staged `c2e1284` cleared f8 live and completed 25 arms. Retained session `ldt4-20260721T212142Z-c2e12846bcb1` then voided after arm 26 completed because its exact Windows `cmd.exe` launcher exited normally between teardown's existence check and strict stop. No listener/process remains, the prior daemon is restored, and all provisional rows are invalid. `f9` tolerates only that already-achieved absence while retaining exact identity/final postconditions; mutation-proved/full-gate green, tactical review next; formal Fable held |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 

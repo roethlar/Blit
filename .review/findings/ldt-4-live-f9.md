@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — a completed Windows-responder arm can void the entire
 session when its exact `cmd.exe` launcher exits normally between teardown's
 existence check and `Stop-Process`.
-**Status**: Open; live evidence retained, no datum accepted.
+**Status**: Fixed, mutation-proved, and full-gate green; tactical review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: pending
 
@@ -54,11 +54,23 @@ any child, the daemon, or port 9031 survives.
 
 ## Files changed
 
-- Pending.
+- `scripts/bench_ldt4_rigw.sh` — tolerate the exact launcher's normal
+  check-to-stop disappearance and structurally forbid the strict live-failing
+  form.
 
 ## Guard proof
 
-Pending.
+- Focused restored green: Bash syntax; 96-arm Bash 3.2 self-test with no SSH;
+  all 77 analyzer tests.
+- Production mutation: changing only the launcher's explicit stop action from
+  `SilentlyContinue` back to `Stop` made the static Bash self-test fail at
+  `Windows launcher teardown does not tolerate exact launcher self-exit`.
+  Restoring it returned the focused checks green.
+- Full repository gates pass: rustfmt check, strict workspace clippy, and the
+  complete workspace test suite. The first suite run hit an unrelated
+  temporary-daemon connection refusal in
+  `delegated_pull_to_read_only_destination_is_rejected`; that exact test passed
+  alone and the complete workspace rerun passed unchanged.
 
 ## Coder dispute
 
@@ -66,8 +78,7 @@ None.
 
 ## Known gaps
 
-Implementation, guard proof, full repository gates, tactical review, additive
-staging, and a complete valid live run remain.
+Tactical review, additive staging, and a complete valid live run remain.
 
 ## Reviewer comments
 

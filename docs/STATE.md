@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-21 (f8 cleared live; Windows launcher teardown race f9 open)
+Last updated: 2026-07-21 (Windows launcher teardown race f9 mutation-proved/full-gate green; tactical review next)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,7 +10,7 @@ Last updated: 2026-07-21 (f8 cleared live; Windows launcher teardown race f9 ope
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — FIX `ldt-4-live-f9`, THEN REVIEW/RESTAGE/RUN:** exact staged `c2e1284` cleared f8 and completed 25 byte-identical arms. Arm 26 completed through `summary_received`, then Windows teardown voided because the exact `cmd.exe` launcher exited normally between the existence check and strict stop. The retained session has 25 provisional rows; none is valid or gradeable. Both ports are closed, no session process remains, and the prior Windows daemon is restored byte-for-byte.
+- **NEXT ACTION — TACTICALLY REVIEW `ldt-4-live-f9`, THEN RESTAGE/RUN:** exact staged `c2e1284` cleared f8 and completed 25 byte-identical arms. Arm 26 completed through `summary_received`, then Windows teardown voided because the exact `cmd.exe` launcher exited normally between the existence check and strict stop. f9 accepts only the already-achieved launcher absence while retaining exact pre-stop identity and final daemon/launcher/child/listener postconditions; it is mutation-proved/full-gate green. The retained session's 25 provisional rows remain invalid and ungraded.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **WHY NO ldt-4 RIG-W DATA YET:** earlier retained sessions failed closed on fixtures, generated paths, endpoint DHCP, q hostname, Windows console-host classification, and Windows client path syntax. Exact `c2e1284` cleared all those gates and completed 25 arms, but retained session `ldt4-20260721T212142Z-c2e12846bcb1` is void because teardown treated an already-exited exact Windows launcher as a stop failure after arm 26. Its 25 provisional rows are invalid and ungraded. Both ports are closed, no session process remains, and the prior active Windows daemon is restored byte-for-byte. `ldt-4-live-f9` owns the teardown race.
@@ -28,7 +28,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted. Exact `c2e1284` cleared repairs through Windows client path `f8` live and completed 25 arms. The retained retry then exposed Windows exact-launcher teardown race `f9` after arm 26 completed; the session is void and every provisional row is invalid. Formal Fable openreview is held for capacity.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted. Exact `c2e1284` cleared repairs through Windows client path `f8` live and completed 25 arms. The retained retry then exposed Windows exact-launcher teardown race `f9` after arm 26 completed; the session is void and every provisional row is invalid. f9 is mutation-proved/full-gate green before tactical review. Formal Fable openreview is held for capacity.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -56,7 +56,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `c2e1284` cleared live repairs through `f8` and completed 25 arms, then the retained retry exposed Windows exact-launcher teardown race `ldt-4-live-f9` after arm 26 completed. No provisional row is valid. Formal Fable openreview is held; fix/guard/review f9, stage the exact reviewed harness additively, then execute fresh quiet rig-W adaptive and role-invariance evidence.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `c2e1284` cleared live repairs through `f8` and completed 25 arms, then the retained retry exposed Windows exact-launcher teardown race `ldt-4-live-f9` after arm 26 completed. No provisional row is valid. f9 is mutation-proved/full-gate green. Formal Fable openreview is held; tactically review, stage the exact reviewed harness additively, then execute fresh quiet rig-W adaptive and role-invariance evidence.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).

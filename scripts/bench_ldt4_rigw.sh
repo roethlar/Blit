@@ -1457,7 +1457,7 @@ if (\$d) {
 if (\$d) {
   Stop-Process -Id \$stoppedDaemonPid -Force -ErrorAction Stop
 }
-if (\$c -and (Get-Process -Id \$launcher -ErrorAction SilentlyContinue)) { Stop-Process -Id \$launcher -Force -ErrorAction Stop }
+if (\$c -and (Get-Process -Id \$launcher -ErrorAction SilentlyContinue)) { Stop-Process -Id \$launcher -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Milliseconds 300
 \$late = if (\$launcher -gt 0) { @(Get-CimInstance Win32_Process -Filter \"ParentProcessId=\$launcher\" -ErrorAction Stop) } else { @() }
 if (\$late.Count -gt 1) { throw \"ambiguous late process children: \$(\$late.ProcessId -join ',')\" }
@@ -2559,6 +2559,10 @@ windows_paths = text[text.index("assert_windows_registered_paths() {"):text.inde
 windows_start = text[text.index("start_windows_daemon() {"):text.index("stop_q_daemon() {")]
 windows_stop = text[text.index("stop_windows_daemon() {"):text.index("normalize_q_client_pid_list() {")]
 windows_client = text[text.index("run_windows_client() {"):text.index("run_client() {")]
+required_launcher_stop = r"""if (\$c -and (Get-Process -Id \$launcher -ErrorAction SilentlyContinue)) { Stop-Process -Id \$launcher -Force -ErrorAction SilentlyContinue }"""
+forbidden_launcher_stop = r"""if (\$c -and (Get-Process -Id \$launcher -ErrorAction SilentlyContinue)) { Stop-Process -Id \$launcher -Force -ErrorAction Stop }"""
+if windows_stop.count(required_launcher_stop) != 1 or forbidden_launcher_stop in windows_stop:
+    raise SystemExit("Windows launcher teardown does not tolerate exact launcher self-exit")
 required_client_launch_gate = r"""\$stderrPath,(\$dir + '/client-launch.ok'))) {"""
 forbidden_client_launch_gate = r"""\$stderrPath,\$dir + '/client-launch.ok')) {"""
 if windows_client.count(required_client_launch_gate) != 1 or forbidden_client_launch_gate in windows_client:
