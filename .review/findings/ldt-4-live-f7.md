@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — every Windows-responder arm fails before its client can
 launch because the startup gate mistakes the platform console host for a
 second daemon child.
-**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and additively staged; live retry pending.
+**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and additively staged; live retry cleared f7 and advanced to separate Windows client-path finding f8.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `55fc5d5ff4561b0b126265f61e2962414db1de3e`
 
@@ -74,7 +74,10 @@ None.
 
 ## Known gaps
 
-A completed live arm/run remains.
+Exact `55fc5d5` cleared the formerly failing console-host classification live
+and completed the first transfer arm. The retained session then exposed
+separate Windows client launch-gate path finding `ldt-4-live-f8`; because the
+session is void, a complete valid run remains.
 
 ## Reviewer comments
 
