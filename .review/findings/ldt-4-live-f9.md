@@ -3,9 +3,9 @@
 **Severity**: MEDIUM — a completed Windows-responder arm can void the entire
 session when its exact `cmd.exe` launcher exits normally between teardown's
 existence check and `Stop-Process`.
-**Status**: Fixed, mutation-proved, and full-gate green; tactical review pending.
+**Status**: Fixed, mutation-proved, full-gate green, and tactically reviewed clean; additive staging and live retry pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: pending
+**Commit**: `ef9ef0b6f5317dec4ef609c8e9e59f731c72e501`
 
 ## Evidence
 
@@ -78,8 +78,12 @@ None.
 
 ## Known gaps
 
-Tactical review, additive staging, and a complete valid live run remain.
+Additive staging and a complete valid live run remain.
 
 ## Reviewer comments
 
-This finding came from the attached live launch, not a reviewer candidate.
+Tactical Grok 4.5/high review returned clean with no findings for exact range
+`0c4c7f4..ef9ef0b`. It independently changed only the production launcher stop
+back to strict, proved the exact guard red, restored focused green, and left a
+clean exact worktree. Record:
+`.review/results/ldt-4-live-f9-r1.grok-verdict.md`.

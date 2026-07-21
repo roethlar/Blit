@@ -1,0 +1,40 @@
+{
+  "record_type": "tactical_code_review",
+  "reviewer": {
+    "provider": "xAI",
+    "model": "grok-4.5",
+    "cli": "grok 0.2.106 (bde89716f679)",
+    "reasoning_effort": "high"
+  },
+  "review_contract": {
+    "finding_ids": [
+      "ldt-4-live-f9"
+    ],
+    "base_sha": "0c4c7f4a45686486a60d62b05ec7b0f69a9ae2e1",
+    "reviewed_sha": "ef9ef0b6f5317dec4ef609c8e9e59f731c72e501",
+    "worktree": "/private/tmp/blit-grok-ldt4-f9-ef9ef0b",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "019f869e-01af-7b31-ae63-bb46ed01ea6c",
+    "completion": "clean verdict after local semantic and mutation checks"
+  },
+  "structured_output": {
+    "verdict": "clean",
+    "base_sha": "0c4c7f4a45686486a60d62b05ec7b0f69a9ae2e1",
+    "reviewed_sha": "ef9ef0b6f5317dec4ef609c8e9e59f731c72e501",
+    "summary": "The production change is minimal and correct: only the redundant post-daemon launcher stop becomes tolerant of an already-exited cmd.exe. Exact launcher and daemon identity checks remain strict, and final daemon, launcher, child, and port-9031 absence checks remain authoritative, so access-denied or surviving-process cases still fail closed.",
+    "guard_proof": "Bash syntax, the 96-arm no-SSH self-test, and 77 analyzer tests passed. Changing only the production launcher stop from SilentlyContinue back to Stop made the exact structural guard fail; restoring reviewed bytes returned focused green. HEAD and status are clean and byte-identical to the reviewed commit; script SHA-256 is 65e487d95f64e04ec2c1e3fd49212e59767fa3c69c6f8994bedd76e8f08d7a0c.",
+    "findings": []
+  },
+  "checks": {
+    "identity": "clean detached ef9ef0b6f5317dec4ef609c8e9e59f731c72e501 with one-commit parent 0c4c7f4a45686486a60d62b05ec7b0f69a9ae2e1",
+    "bash_syntax": "pass",
+    "bash_3_2_selftest": "PASS (96 arms, no SSH)",
+    "analyzer_tests": "77 passed",
+    "scope_audit": "only the redundant launcher stop error action changed; daemon stop remains strict",
+    "postcondition_audit": "exact pre-stop identities and final daemon, launcher, child, and listener absence checks remain authoritative",
+    "guard_mutation": "production launcher stop SilentlyContinue to Stop failed the exact self-exit guard; exact restoration returned green"
+  },
+  "policy_note": "This is tactical advisory code review, not a formal openreview acceptance verdict."
+}
