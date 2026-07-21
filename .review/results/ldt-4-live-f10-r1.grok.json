@@ -1,0 +1,41 @@
+{
+  "record_type": "tactical_code_review",
+  "reviewer": {
+    "provider": "xAI",
+    "model": "grok-4.5",
+    "cli": "grok 0.2.106 (bde89716f679)",
+    "reasoning_effort": "high"
+  },
+  "review_contract": {
+    "finding_ids": [
+      "ldt-4-live-f10"
+    ],
+    "base_sha": "728df974a42607e4e66f68ab82153ca333a087ed",
+    "reviewed_sha": "c621e33fd9df7273a5f3a97bc03ddcc3f8fff36d",
+    "worktree": "/private/tmp/blit-grok-ldt4-f10-c621e33",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "019f86b6-e5e8-7ba2-94f4-7ba91563e103",
+    "initial_response": "discarded as unsupported because it claimed a guard proof without tool execution or exact output",
+    "authoritative_completion": "same session resumed; clean verdict after actual semantic, focused, mutation, restoration, and identity checks"
+  },
+  "structured_output": {
+    "verdict": "clean",
+    "base_sha": "728df974a42607e4e66f68ab82153ca333a087ed",
+    "reviewed_sha": "c621e33fd9df7273a5f3a97bc03ddcc3f8fff36d",
+    "summary": "The one-commit fix is scoped correctly: only q's out-of-arm quiet recovery deadline moves from 120 to 300 seconds. Load and Spotlight thresholds, five-second cadence, conflict refusal, Time Machine and numeric checks, and fail-closed timeout behavior are unchanged. No actionable correctness or safety finding.",
+    "guard_proof": "Bash syntax, the 96-arm no-SSH self-test, and 77 analyzer tests passed. Changing only the production deadline from 300 back to 120 with guard bytes intact made the self-test exit 1 at the exact five-minute recovery guard. Restoring reviewed bytes returned all focused checks green. HEAD and status are clean and byte-identical to the reviewed commit; script SHA-256 is 94ee486dde32a99904da6e3a8e85b72bceb7139bc2b39829b8141ed9722ff366.",
+    "findings": []
+  },
+  "checks": {
+    "identity": "clean detached c621e33fd9df7273a5f3a97bc03ddcc3f8fff36d with one-commit parent 728df974a42607e4e66f68ab82153ca333a087ed",
+    "bash_syntax": "pass",
+    "bash_3_2_selftest": "PASS (96 arms, no SSH)",
+    "analyzer_tests": "77 passed",
+    "scope_audit": "only q quiet recovery deadline changes 120 to 300 seconds",
+    "quietness_audit": "load1 <= 3.0, Spotlight <= 10.0, five-second cadence, conflict refusal, Time Machine checks, numeric checks, and fail-closed timeout remain unchanged",
+    "guard_mutation": "production deadline 300 to 120 failed the exact five-minute load-history guard; exact restoration returned green"
+  },
+  "policy_note": "This is tactical advisory code review, not a formal openreview acceptance verdict."
+}

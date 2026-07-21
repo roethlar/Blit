@@ -3,9 +3,9 @@
 **Severity**: MEDIUM — the unchanged q load ceiling can void a healthy session
 because its two-minute recovery window expires while the benchmark's one-minute
 load history is still decaying between registered arms.
-**Status**: Fixed, mutation-proved, and full-gate green; tactical review pending.
+**Status**: Fixed, mutation-proved, full-gate green, and tactically reviewed clean; additive staging and live retry pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: pending
+**Commit**: `c621e33fd9df7273a5f3a97bc03ddcc3f8fff36d`
 
 ## Evidence
 
@@ -74,8 +74,12 @@ None.
 
 ## Known gaps
 
-Tactical review, additive staging, and a complete valid live run remain.
+Additive staging and a complete valid live run remain.
 
 ## Reviewer comments
 
-This finding came from the attached live launch, not a reviewer candidate.
+Tactical Grok 4.5/high review returned clean with no findings for exact range
+`728df97..c621e33`. Its initial unsupported no-tool response was discarded;
+the same resumed session actually proved production 300→120 red, restored
+focused green, and left a clean exact worktree. Record:
+`.review/results/ldt-4-live-f10-r1.grok-verdict.md`.
