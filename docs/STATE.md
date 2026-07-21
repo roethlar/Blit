@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-21 (exact 21fe468 cleared stable-q identity live; Windows conhost child-topology f7 next)
+Last updated: 2026-07-21 (Windows conhost child-topology f7 mutation-proved/full-gate green; tactical review next)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,7 +10,7 @@ Last updated: 2026-07-21 (exact 21fe468 cleared stable-q identity live; Windows 
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — FIX/GUARD `ldt-4-live-f7`, THEN REVIEW/RESTAGE/RUN:** exact `21fe468` cleared stable q identity and full start/runtime gates live. Retained retry `ldt4-20260721T204038Z-21fe468af129` voided at first Windows daemon startup because the gate expected one raw launcher child while current Windows creates one exact system `conhost.exe` plus one exact daemon. An additive four-sample diagnostic reproduced that stable topology. Require both exact classes and reject every other shape.
+- **NEXT ACTION — TACTICALLY REVIEW `ldt-4-live-f7`, THEN RESTAGE/RUN:** exact `21fe468` cleared stable q identity and full start/runtime gates live. Retained retry `ldt4-20260721T204038Z-21fe468af129` voided at first Windows daemon startup because current Windows creates one exact system `conhost.exe` plus one exact daemon. The f7 candidate now requires exactly those two classes, records the sidecar identity, rejects every other shape, and is mutation-proved/full-gate green.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **WHY NO ldt-4 RIG-W DATA YET:** earlier retained sessions failed closed before transfer on fixtures, generated paths, endpoint DHCP, and q resolver hostname. Exact `21fe468` cleared all those gates and prepared the Windows runtime, then first arm `ldt4-001` started the exact daemon and system console host but voided before client launch because the harness required one raw child. Session `ldt4-20260721T204038Z-21fe468af129` has zero rows; both ports are closed, no Blit process remains, and the prior active Windows daemon is restored byte-for-byte. `ldt-4-live-f7` owns the exact child classification.
@@ -28,7 +28,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted; repairs `f4`/`f5` are fixed/reviewed/staged through `322a161`; stable-q-identity `f6` is fixed/reviewed/staged at `21fe468` and cleared live. That retry exposed Windows console-host topology `f7` before client launch/timing. Formal Fable openreview is held for capacity.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted; repairs `f4`/`f5` are fixed/reviewed/staged through `322a161`; stable-q-identity `f6` is fixed/reviewed/staged at `21fe468` and cleared live. That retry exposed Windows console-host topology `f7` before client launch/timing; its exact classification fix is mutation-proved/full-gate green before tactical review. Formal Fable openreview is held for capacity.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -56,7 +56,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Live repairs through stable-q-identity `f6` are fixed/reviewed/staged at exact `21fe468`, which cleared those gates live. Its retained retry exposed Windows console-host child-topology finding `ldt-4-live-f7` before client launch or timing. Formal Fable openreview is held; fix/guard/review the exact child partition, additively stage, then execute fresh quiet rig-W adaptive and role-invariance evidence.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Live repairs through stable-q-identity `f6` are fixed/reviewed/staged at exact `21fe468`, which cleared those gates live. Its retained retry exposed Windows console-host child-topology finding `ldt-4-live-f7` before client launch or timing. The exact child partition is mutation-proved/full-gate green. Formal Fable openreview is held; tactically review, additively stage, then execute fresh quiet rig-W adaptive and role-invariance evidence.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).

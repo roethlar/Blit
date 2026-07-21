@@ -1293,8 +1293,25 @@ Start-Sleep -Seconds 2
 \$actualLauncher = if (\$launcher) { ConvertTo-Ldt4CommandLine \$launcher.CommandLine } else { '' }
 if (-not \$launcher -or \$launcher.Name -ine 'cmd.exe' -or \$actualLauncher -cne \$expectedLauncher) { throw \"launcher identity mismatch: \$actualLauncher\" }
 \$children = @(Get-CimInstance Win32_Process -Filter \"ParentProcessId=\$launcherPid\" -ErrorAction Stop)
-if (\$children.Count -ne 1) { throw \"daemon child count=\$(\$children.Count)\" }
-\$daemon = \$children[0]
+\$expectedConhost = (Join-Path \$env:SystemRoot 'System32/conhost.exe').Replace([char]92,[char]47)
+\$daemonChildren = @(\$children | Where-Object {
+  \$childPath = if (\$_.ExecutablePath) { \$_.ExecutablePath.Replace([char]92,[char]47) } else { '' }
+  \$childCommand = ConvertTo-Ldt4CommandLine \$_.CommandLine
+  \$_.Name -ieq 'blit-daemon.exe' -and \$childPath -ieq '$WIN_ACTIVE_DAEMON' -and \$childCommand -ceq \$expectedDaemon
+})
+\$conhostChildren = @(\$children | Where-Object {
+  \$childPath = if (\$_.ExecutablePath) { \$_.ExecutablePath.Replace([char]92,[char]47) } else { '' }
+  \$_.Name -ieq 'conhost.exe' -and \$childPath -ieq \$expectedConhost
+})
+if (\$children.Count -ne 2 -or \$daemonChildren.Count -ne 1 -or \$conhostChildren.Count -ne 1) {
+  \$childSummary = @(\$children | ForEach-Object {
+    \$childPath = if (\$_.ExecutablePath) { \$_.ExecutablePath.Replace([char]92,[char]47) } else { '' }
+    \"\$(\$_.ProcessId)|\$(\$_.Name)|\$childPath|\$(ConvertTo-Ldt4CommandLine \$_.CommandLine)\"
+  }) -join ';'
+  throw \"launcher children do not match exact conhost/daemon topology: \$childSummary\"
+}
+\$daemon = \$daemonChildren[0]
+\$conhost = \$conhostChildren[0]
 \$actual = if (\$daemon.ExecutablePath) { \$daemon.ExecutablePath.Replace([char]92,[char]47) } else { '' }
 \$actualCommand = ConvertTo-Ldt4CommandLine \$daemon.CommandLine
 if (\$daemon.Name -ine 'blit-daemon.exe' -or \$actual -ine '$WIN_ACTIVE_DAEMON' -or \$actualCommand -cne \$expectedDaemon) { throw \"daemon identity mismatch: \$actual \$actualCommand\" }
@@ -1302,7 +1319,7 @@ if (\$daemon.Name -ine 'blit-daemon.exe' -or \$actual -ine '$WIN_ACTIVE_DAEMON' 
 \$pidStream = [IO.File]::Open(\$daemonPidPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
   try { \$bytes=[Text.Encoding]::ASCII.GetBytes([string]\$daemon.ProcessId); \$pidStream.Write(\$bytes,0,\$bytes.Length); \$pidStream.Flush(\$true) } finally { \$pidStream.Dispose() }
 \$identityPath = \$dir + '/daemon-identity.txt'
-\$identityText = \"run_id=$run_id\`nlauncher_pid=\$launcherPid\`ndaemon_pid=\$(\$daemon.ProcessId)\`nlauncher_command=\$expectedLauncher\`ndaemon_command=\$expectedDaemon\`nconfig=\$((ConvertTo-Ldt4CanonicalPath \$config).Replace([char]92,[char]47))\`n\"
+\$identityText = \"run_id=$run_id\`nlauncher_pid=\$launcherPid\`nconhost_pid=\$(\$conhost.ProcessId)\`nconhost_path=\$expectedConhost\`ndaemon_pid=\$(\$daemon.ProcessId)\`nlauncher_command=\$expectedLauncher\`ndaemon_command=\$expectedDaemon\`nconfig=\$((ConvertTo-Ldt4CanonicalPath \$config).Replace([char]92,[char]47))\`n\"
 \$identityStream = [IO.File]::Open(\$identityPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
 try { \$bytes=[Text.UTF8Encoding]::new(\$false).GetBytes(\$identityText); \$identityStream.Write(\$bytes,0,\$bytes.Length); \$identityStream.Flush(\$true) } finally { \$identityStream.Dispose() }
 \"P|\$launcherPid|\$(\$daemon.ProcessId)\"
@@ -2557,6 +2574,36 @@ start_flush = windows_start.index(required_start_flush)
 process_creates = [match.start() for match in re.finditer("Invoke-CimMethod", windows_start)]
 if len(process_creates) != 1 or start_flush >= process_creates[0]:
     raise SystemExit("Windows start command is not durable before process creation")
+child_topology_requirements = (
+    r"\$expectedConhost = (Join-Path \$env:SystemRoot 'System32/conhost.exe')",
+    r"\$daemonChildren = @(\$children | Where-Object {",
+    r"\$_.Name -ieq 'blit-daemon.exe' -and \$childPath -ieq '$WIN_ACTIVE_DAEMON' -and \$childCommand -ceq \$expectedDaemon",
+    r"\$conhostChildren = @(\$children | Where-Object {",
+    r"\$_.Name -ieq 'conhost.exe' -and \$childPath -ieq \$expectedConhost",
+    r"if (\$children.Count -ne 2 -or \$daemonChildren.Count -ne 1 -or \$conhostChildren.Count -ne 1) {",
+    "launcher children do not match exact conhost/daemon topology",
+    r"\$daemon = \$daemonChildren[0]",
+    r"\$conhost = \$conhostChildren[0]",
+    r"conhost_pid=\$(\$conhost.ProcessId)",
+    r"conhost_path=\$expectedConhost",
+)
+if any(windows_start.count(requirement) != 1 for requirement in child_topology_requirements):
+    raise SystemExit("Windows daemon start does not require one exact console host and daemon")
+if "daemon child count=" in windows_start:
+    raise SystemExit("Windows daemon start still requires one raw child")
+children = windows_start.index(r"\$children = @(Get-CimInstance Win32_Process")
+expected_conhost = windows_start.index(child_topology_requirements[0], children)
+daemon_children = windows_start.index(child_topology_requirements[1], expected_conhost)
+conhost_children = windows_start.index(child_topology_requirements[3], daemon_children)
+exact_topology = windows_start.index(child_topology_requirements[5], conhost_children)
+daemon_assignment = windows_start.index(child_topology_requirements[7], exact_topology)
+conhost_assignment = windows_start.index(child_topology_requirements[8], daemon_assignment)
+identity_conhost = windows_start.index(child_topology_requirements[9], conhost_assignment)
+if not (
+    children < expected_conhost < daemon_children < conhost_children < exact_topology
+    < daemon_assignment < conhost_assignment < identity_conhost
+):
+    raise SystemExit("Windows console-host/daemon classification is out of order")
 allow_missing_config = windows_stop.index(r"Assert-Ldt4PlainPath \$config File \$true | Out-Null")
 allow_missing_start = windows_stop.index(r"Assert-Ldt4PlainPath \$start File \$true | Out-Null", allow_missing_config)
 required_missing_start = r"if (-not (Test-Path -LiteralPath \$start)) {"

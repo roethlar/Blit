@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — every Windows-responder arm fails before its client can
 launch because the startup gate mistakes the platform console host for a
 second daemon child.
-**Status**: Accepted; fix and guard pending.
+**Status**: Fixed, mutation-proved, and full-gate green; tactical review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: pending
 
@@ -55,11 +55,18 @@ host PID/path alongside daemon identity.
 
 ## Files changed
 
-- `scripts/bench_ldt4_rigw.sh` — pending exact console-host/daemon partition.
+- `scripts/bench_ldt4_rigw.sh` — exact console-host/daemon partition and
+  retained identity evidence.
 
 ## Guard proof
 
-Pending.
+- Focused restored green: Bash syntax; 96-arm Bash 3.2 self-test with no SSH;
+  all 77 analyzer tests.
+- Production mutation: changing the exact topology requirement from two raw
+  children back to one made the static Bash self-test fail at the console-host
+  classification guard. Restoring two returned the focused checks green.
+- Full repository gates pass: rustfmt check, strict workspace clippy, and the
+  complete workspace test suite.
 
 ## Coder dispute
 
@@ -67,8 +74,7 @@ None.
 
 ## Known gaps
 
-Fix, focused/full gates, tactical review, additive staging, and a completed
-live arm/run remain.
+Tactical review, additive staging, and a completed live arm/run remain.
 
 ## Reviewer comments
 
