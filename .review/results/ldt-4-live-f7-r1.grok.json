@@ -1,0 +1,40 @@
+{
+  "record_type": "tactical_code_review",
+  "reviewer": {
+    "provider": "xAI",
+    "model": "grok-4.5",
+    "cli": "grok 0.2.106 (bde89716f679)",
+    "reasoning_effort": "high"
+  },
+  "review_contract": {
+    "finding_ids": [
+      "ldt-4-live-f7"
+    ],
+    "base_sha": "9bf1fe74ee0758d2bb4cbadba5dd72f893930909",
+    "reviewed_sha": "55fc5d5ff4561b0b126265f61e2962414db1de3e",
+    "worktree": "/private/tmp/blit-grok-ldt4-f7-55fc5d5",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "019f8676-07cb-7641-85a4-e6b35f9dd729",
+    "completion": "clean verdict after local semantic and mutation checks"
+  },
+  "structured_output": {
+    "verdict": "clean",
+    "base_sha": "9bf1fe74ee0758d2bb4cbadba5dd72f893930909",
+    "reviewed_sha": "55fc5d5ff4561b0b126265f61e2962414db1de3e",
+    "summary": "The patch accepts only the measured cmd.exe pair: one system-root conhost.exe by name/path and one registered daemon by name/path/command. It rejects every other raw-child shape, records console-host identity, and preserves exact recovery, teardown, and listener checks.",
+    "guard_proof": "Bash syntax, the 96-arm no-SSH self-test, and 77 analyzer tests passed. Changing only the production raw child requirement from two to one made the self-test fail; restoring exact reviewed bytes returned all checks green and left the worktree clean.",
+    "findings": []
+  },
+  "checks": {
+    "identity": "clean detached 55fc5d5ff4561b0b126265f61e2962414db1de3e with one-commit parent 9bf1fe74ee0758d2bb4cbadba5dd72f893930909",
+    "bash_syntax": "pass",
+    "bash_3_2_selftest": "PASS (96 arms, no SSH)",
+    "analyzer_tests": "77 passed",
+    "classification_audit": "exact normalized system conhost name/path plus exact daemon name/path/command; raw count exactly two",
+    "teardown_audit": "existing exact daemon recovery, launcher teardown, late-child refusal, and listener closure remain unchanged",
+    "guard_mutation": "production raw child count two to one failed the self-test; exact restoration returned green"
+  },
+  "policy_note": "This is tactical advisory code review, not a formal openreview acceptance verdict."
+}
