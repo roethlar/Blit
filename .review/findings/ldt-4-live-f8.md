@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — every Windows-client arm fails before client creation
 because PowerShell splits the launch-gate expression and path-checks its parent
 directory as a file.
-**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and additively staged; live retry pending.
+**Status**: Closed — fixed, mutation-proved, tactically reviewed clean, and validated by the complete 96-arm rig-W run.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `c2e12846bcb188f48f1c26a3c0977dbc0a52fa24`
 
@@ -71,8 +71,9 @@ None.
 
 ## Known gaps
 
-A complete valid live run remains. Exact reviewed code `c2e1284` is staged in
-the clean detached q checkout `/Users/michael/Dev/blit_v2_harness_c2e1284`.
+None for this finding. Exact harness `96a4e3b03caf43ee368efadc779e3324248067f6`
+includes the fix and completed all 96 valid arms. Retained evidence is recorded
+at `docs/bench/ldt4-rigw-2026-07-21/`.
 
 ## Reviewer comments
 
