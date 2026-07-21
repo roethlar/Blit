@@ -1,0 +1,40 @@
+{
+  "record_type": "tactical_code_review",
+  "reviewer": {
+    "provider": "xAI",
+    "model": "grok-4.5",
+    "cli": "grok 0.2.106 (bde89716f679)",
+    "reasoning_effort": "high"
+  },
+  "review_contract": {
+    "finding_ids": [
+      "ldt-4-live-f6"
+    ],
+    "base_sha": "16fb0cda9011ab3f189300ad4e2a4b83a7030ad3",
+    "reviewed_sha": "21fe468af1290d5da4d0c60c9bff430a5b1ea61c",
+    "worktree": "/private/tmp/blit-grok-ldt4-f6-21fe468",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "019f8662-3558-7fc2-9e59-bf9beb146d27",
+    "completion": "clean verdict after local semantic and mutation checks"
+  },
+  "structured_output": {
+    "verdict": "clean",
+    "base_sha": "16fb0cda9011ab3f189300ad4e2a4b83a7030ad3",
+    "reviewed_sha": "21fe468af1290d5da4d0c60c9bff430a5b1ea61c",
+    "summary": "The patch safely replaces only q's brittle resolver-hostname gate with exact stable macOS LocalHostName and ComputerName checks, retains the independent hardware and topology gates, records both identities at both boundaries, and analyzer-binds them.",
+    "guard_proof": "Bash syntax, the 96-arm no-SSH self-test, and 77 analyzer tests passed. Changing the production LocalHostName expectation from Q to Q.local made the self-test fail; restoring exact reviewed bytes returned all focused checks green and left the worktree clean.",
+    "findings": []
+  },
+  "checks": {
+    "identity": "clean detached 21fe468af1290d5da4d0c60c9bff430a5b1ea61c with one-commit parent 16fb0cda9011ab3f189300ad4e2a4b83a7030ad3",
+    "bash_syntax": "pass",
+    "bash_3_2_selftest": "PASS (96 arms, no SSH)",
+    "analyzer_tests": "77 passed",
+    "use_site_audit": "LocalHostName and ComputerName are exact Q/Q at the live producer and analyzer; both are recorded in start/end evidence",
+    "hardware_gates": "IP, MAC, NIC, MTU, media, route, ARP, MSS, and Windows topology checks unchanged",
+    "guard_mutation": "production LocalHostName expectation Q to Q.local failed the self-test; exact restoration returned green"
+  },
+  "policy_note": "This is tactical advisory code review, not a formal openreview acceptance verdict."
+}

@@ -3,9 +3,9 @@
 **Severity**: MEDIUM — the registered run cannot pass its start environment
 gate after a network-service transition changes the resolver-derived hostname
 of the same pinned Mac.
-**Status**: Fixed, mutation-proved, and full-gate green; tactical review pending.
+**Status**: Fixed, mutation-proved, full-gate green, and tactically reviewed clean; additive staging pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: pending
+**Commit**: `21fe468af1290d5da4d0c60c9bff430a5b1ea61c`
 
 ## Evidence
 
@@ -70,8 +70,11 @@ None.
 
 ## Known gaps
 
-Tactical review, additive staging, and a completed live arm/run remain.
+Additive staging and a completed live arm/run remain.
 
 ## Reviewer comments
 
-This finding came from the attached live launch, not a reviewer candidate.
+Tactical Grok 4.5/high review returned clean with no findings for exact range
+`16fb0cd..21fe468`. It independently mutation-proved the production identity
+guard and restored a clean exact worktree. Record:
+`.review/results/ldt-4-live-f6-r1.grok-verdict.md`.

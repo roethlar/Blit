@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-21 (stable-q-identity f6 mutation-proved and full-gate green; tactical review next)
+Last updated: 2026-07-21 (stable-q-identity f6 tactical Grok-clean at 21fe468; additive staging next)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,7 +10,7 @@ Last updated: 2026-07-21 (stable-q-identity f6 mutation-proved and full-gate gre
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — TACTICALLY REVIEW `ldt-4-live-f6`, THEN RESTAGE/RUN:** exact `322a161` is reviewed/staged and strictly authenticates current Windows `.173`. Retained retry `ldt4-20260721T202216Z-322a1611230e` voided before daemon preparation when resolver-derived `hostname` changed to `Q.local`. The f6 candidate now gates stable macOS `LocalHostName=Q` and `ComputerName=Q`, records and analyzer-binds both, and is mutation-proved/full-gate green. Review that exact fix, additively stage it, and retry.
+- **NEXT ACTION — ADDITIVELY STAGE EXACT `21fe468`, THEN RUN:** retained retry `ldt4-20260721T202216Z-322a1611230e` voided before daemon preparation when q's resolver-derived hostname changed to `Q.local`. The f6 fix gates stable macOS `LocalHostName=Q` and `ComputerName=Q`, records and analyzer-binds both, and is mutation-proved/full-gate green and tactical Grok-clean at exact `21fe468`. Additively stage that head and retry.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **WHY NO ldt-4 RIG-W DATA YET:** earlier retained sessions failed closed before transfer on unequal fixtures, joined log paths, and split generated `start.cmd` paths. Exact `322a161` closes the later Windows DHCP drift and is reviewed/staged. Its retained retry `ldt4-20260721T202216Z-322a1611230e` has zero rows and stopped before daemon preparation because q's resolver hostname changed to `Q.local`; stable identity is still exact `Q`. q port 9031 is closed and no daemon swap or transfer began. `ldt-4-live-f6` owns the correction.
@@ -28,7 +28,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted; `start.cmd` finding `f4` is fixed/reviewed/staged at `d53b5fd`; D-2026-07-21-1's `.173` adaptation `f5` is fixed/reviewed/staged at `322a161` with strict host trust. Its live retry exposed stable-q-identity finding `f6` before daemon prep or timing; the fix is mutation-proved/full-gate green before tactical review. Formal Fable openreview is held for capacity.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted; `start.cmd` finding `f4` is fixed/reviewed/staged at `d53b5fd`; D-2026-07-21-1's `.173` adaptation `f5` is fixed/reviewed/staged at `322a161` with strict host trust. Its live retry exposed stable-q-identity finding `f6` before daemon prep or timing; the fix is mutation-proved/full-gate green and tactical Grok-clean at `21fe468`. Formal Fable openreview is held for capacity.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -56,7 +56,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Live repairs `f4` and `f5` are fixed/reviewed/staged through exact `322a161`. Its retained retry exposed resolver-hostname finding `ldt-4-live-f6` before daemon preparation or timing. The stable identity fix is mutation-proved/full-gate green. Formal Fable openreview is held; tactically review, additively stage, then execute fresh quiet rig-W adaptive and role-invariance evidence.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Live repairs `f4` and `f5` are fixed/reviewed/staged through exact `322a161`. Its retained retry exposed resolver-hostname finding `ldt-4-live-f6` before daemon preparation or timing. The stable identity fix is mutation-proved/full-gate green and tactical Grok-clean at `21fe468`. Formal Fable openreview is held; additively stage, then execute fresh quiet rig-W adaptive and role-invariance evidence.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).
