@@ -135,6 +135,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    inside its `…/blit-temp/` folder — nothing written outside it, ever;
    no daemon runs on zoey without a fresh go.
 7. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
+8. **Mac↔Mac Thunderbolt Bridge ceiling/control experiment — QUEUED LAST.**
+   The detailed scope and prerequisites live in `TODO.md` under “Deferred
+   design calls.” Draft and approve its own plan before implementation or rig
+   work. It follows required ldt-4 Mac↔Windows evidence and does not substitute
+   for it; its purpose is a same-OS control and a higher-bandwidth path for
+   measuring where the live controller should tune above the 10 GbE ceiling.
 
 ## Authoritative docs right now
 

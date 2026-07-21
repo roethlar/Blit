@@ -314,8 +314,9 @@ These are intentionally not next-actionable. Don't pick them up
 without the listed prerequisite — they're tracked here so they
 don't get lost, not so the next agent reimplements them on a hunch.
 
-- [ ] **Mac↔Mac Thunderbolt Bridge ceiling/control experiment** — optional
-      follow-up after the required ldt-4 `q`↔`netwatch-01` evidence; it is
+- [ ] **Mac↔Mac Thunderbolt Bridge ceiling/control experiment** — queued last
+      in `docs/STATE.md`; follow-up after the required ldt-4
+      `q`↔`netwatch-01` evidence; it is
       not a substitute for Mac↔Windows acceptance. macOS supports direct IP
       over Thunderbolt Bridge, making this a useful same-OS control and a way
       to measure Blit's engine/CPU ceiling above 10 GbE while removing Windows,
