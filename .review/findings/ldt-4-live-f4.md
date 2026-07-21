@@ -73,9 +73,12 @@ None.
 ## Known gaps
 
 No completed/timed live arm or transfer datum exists. Exact `d53b5fd` is
-additively staged and its q Bash 3.2 self-test passes; a fresh live run remains
-and waits for q's registered 10 GbE adapter/link. Formal Fable openreviews
-remain on owner-directed capacity hold.
+additively staged and its q Bash 3.2 self-test passes. The first post-staging
+launch failed closed in Windows path preflight before evidence reservation:
+the harness-pinned `10.1.10.177` is absent while `NETWATCH-01` now owns
+`10.1.10.173`. A fresh live run waits for the registered address to return (or
+a separately planned and reviewed harness identity change). Formal Fable
+openreviews remain on owner-directed capacity hold.
 
 ## Reviewer comments
 
