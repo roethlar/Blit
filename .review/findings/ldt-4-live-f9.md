@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — a completed Windows-responder arm can void the entire
 session when its exact `cmd.exe` launcher exits normally between teardown's
 existence check and `Stop-Process`.
-**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and additively staged; live retry pending.
+**Status**: Closed — fixed, mutation-proved, tactically reviewed clean, and validated by the complete 96-arm rig-W run.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `ef9ef0b6f5317dec4ef609c8e9e59f731c72e501`
 
@@ -78,8 +78,9 @@ None.
 
 ## Known gaps
 
-A complete valid live run remains. Exact reviewed code `ef9ef0b` is staged in
-the clean detached q checkout `/Users/michael/Dev/blit_v2_harness_ef9ef0b`.
+None for this finding. Exact harness `96a4e3b03caf43ee368efadc779e3324248067f6`
+includes the fix and completed all 96 valid arms. Retained evidence is recorded
+at `docs/bench/ldt4-rigw-2026-07-21/`.
 
 ## Reviewer comments
 
