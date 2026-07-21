@@ -412,8 +412,9 @@ advise but cannot accept the slice (D-2026-07-16-4).
    `REVIEW_REQUIRED`: arm review 0, decision review 14, performance review 2.
    Every arm stayed at floor = peak = final = 4; 74 arms produced no tuner
    sample and 22 produced one, so this matrix did not exercise adaptive
-   membership. Own a dedicated sustained controller-exercise workload as the
-   next finding. Keep the `q_to_windows_large` 1.197 and
+   membership. `ldt-4-live-f12` owns a dedicated sustained
+   controller-exercise workload while preserving the original fixed matrix.
+   Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.
 
