@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-21 (Windows evidence-reservation f11 tactical review clean; exact staging next)
+Last updated: 2026-07-21 (exact Windows evidence-reservation f11 staged; live retry next)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,7 +10,7 @@ Last updated: 2026-07-21 (Windows evidence-reservation f11 tactical review clean
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — ADDITIVELY STAGE EXACT `96a4e3b`, THEN RUN:** exact staged `c621e33` completed 21 byte-identical arms. Before arm 22, Windows created the exact plain empty evidence directory but the SSH reservation returned nonzero, so the harness correctly voided rather than guessing whether the remote effect committed. Exact `96a4e3b` uses a fresh nonce, exclusive durable marker, and one authenticated exact-postcondition reconciliation; it is mutation-proved/full-gate green and tactical Grok-clean. The retained session's 21 provisional rows remain invalid and ungraded.
+- **NEXT ACTION — RUN EXACT STAGED `96a4e3b`:** exact staged `c621e33` completed 21 byte-identical arms. Before arm 22, Windows created the exact plain empty evidence directory but the SSH reservation returned nonzero, so the harness correctly voided rather than guessing whether the remote effect committed. Exact `96a4e3b` uses a fresh nonce, exclusive durable marker, and one authenticated exact-postcondition reconciliation; it is mutation-proved/full-gate green, tactical Grok-clean, and staged in a clean detached q checkout. The retained session's 21 provisional rows remain invalid and ungraded.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **WHY NO ldt-4 RIG-W DATA YET:** earlier retained sessions failed closed on fixtures, generated paths, endpoint DHCP, q hostname, Windows console-host classification, Windows client path syntax, Windows launcher teardown, and q load-history recovery. Exact `c621e33` completed 21 arms, but retained session `ldt4-20260721T221543Z-c621e33fd9df` is void because Windows committed arm 22's exact empty evidence directory while SSH reported failure. Its 21 provisional rows are invalid and ungraded. Both ports are closed, no session process remains, and the prior active Windows daemon is restored byte-for-byte. `ldt-4-live-f11` owns safe reconciliation of that ambiguous remote effect.
@@ -28,7 +28,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted. Exact staged `c621e33` completed 21 arms, then exposed ambiguous Windows evidence reservation `f11` before arm 22; the session is void and every provisional row is invalid. Exact `96a4e3b` nonce-bound marker reconciliation is mutation-proved/full-gate green and tactical Grok-clean before additive staging. Formal Fable openreview is held for capacity.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted. Exact staged `c621e33` completed 21 arms, then exposed ambiguous Windows evidence reservation `f11` before arm 22; the session is void and every provisional row is invalid. Exact `96a4e3b` nonce-bound marker reconciliation is mutation-proved/full-gate green, tactical Grok-clean, and additively staged for the live retry. Formal Fable openreview is held for capacity.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -56,7 +56,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact staged `c621e33` completed 21 arms, then the retained retry exposed Windows evidence-reservation ambiguity `ldt-4-live-f11` before arm 22. No provisional row is valid. Exact `96a4e3b` nonce-bound marker reconciliation is mutation-proved/full-gate green and tactical Grok-clean; additively stage the exact repair, then execute fresh quiet rig-W adaptive and role-invariance evidence. Formal Fable openreview is held.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact staged `c621e33` completed 21 arms, then the retained retry exposed Windows evidence-reservation ambiguity `ldt-4-live-f11` before arm 22. No provisional row is valid. Exact `96a4e3b` nonce-bound marker reconciliation is mutation-proved/full-gate green, tactical Grok-clean, and additively staged; execute fresh quiet rig-W adaptive and role-invariance evidence. Formal Fable openreview is held.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).
