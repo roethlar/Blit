@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-21 (exact 55fc5d5 cleared Windows conhost live and completed arm 1; Windows client-path f8 next)
+Last updated: 2026-07-21 (Windows client-path f8 mutation-proved/full-gate green; tactical review next)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,7 +10,7 @@ Last updated: 2026-07-21 (exact 55fc5d5 cleared Windows conhost live and complet
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — FIX/GUARD `ldt-4-live-f8`, THEN REVIEW/RESTAGE/RUN:** exact `55fc5d5` cleared Windows console-host classification live and completed/retained arm 1. Session `ldt4-20260721T210445Z-55fc5d5ff456` then voided before arm-2 client creation because unparenthesized `$dir + '/client-launch.ok'` split the prospective-file array and treated the existing log directory as a file. Parenthesize that one element and guard the rendered path.
+- **NEXT ACTION — TACTICALLY REVIEW `ldt-4-live-f8`, THEN RESTAGE/RUN:** exact `55fc5d5` cleared Windows console-host classification live and completed/retained arm 1. Session `ldt4-20260721T210445Z-55fc5d5ff456` then voided before arm-2 client creation because unparenthesized `$dir + '/client-launch.ok'` split the prospective-file array. The f8 candidate parenthesizes that one path, structurally forbids the live-failing form, and is mutation-proved/full-gate green.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **WHY NO ldt-4 RIG-W DATA YET:** earlier retained sessions failed closed on fixtures, generated paths, endpoint DHCP, q hostname, and Windows console-host classification. Exact `55fc5d5` cleared those gates and completed arm 1, but session `ldt4-20260721T210445Z-55fc5d5ff456` is void because arm 2 failed before Windows client creation on split launch-gate path syntax. Its one provisional row is invalid and ungraded. Both ports are closed, no Blit process remains, and the prior active Windows daemon is restored byte-for-byte. `ldt-4-live-f8` owns the path correction.
@@ -28,7 +28,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted; repairs through stable-q-identity `f6` are fixed/reviewed/staged at `21fe468`; Windows console-host `f7` is fixed/reviewed/staged at `55fc5d5` and cleared live. That retry completed arm 1, then exposed Windows client launch-gate path `f8` before arm-2 client creation. Formal Fable openreview is held for capacity.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted; repairs through stable-q-identity `f6` are fixed/reviewed/staged at `21fe468`; Windows console-host `f7` is fixed/reviewed/staged at `55fc5d5` and cleared live. That retry completed arm 1, then exposed Windows client launch-gate path `f8` before arm-2 client creation; the exact path fix is mutation-proved/full-gate green before tactical review. Formal Fable openreview is held for capacity.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -56,7 +56,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Live repairs through Windows console-host `f7` are fixed/reviewed/staged at exact `55fc5d5`, which cleared those gates and completed arm 1 live. Its retained retry exposed Windows client launch-gate path finding `ldt-4-live-f8` before arm-2 client creation. Formal Fable openreview is held; fix/guard/review the one exact path element, additively stage, then execute fresh quiet rig-W adaptive and role-invariance evidence.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Live repairs through Windows console-host `f7` are fixed/reviewed/staged at exact `55fc5d5`, which cleared those gates and completed arm 1 live. Its retained retry exposed Windows client launch-gate path finding `ldt-4-live-f8` before arm-2 client creation. The exact path fix is mutation-proved/full-gate green. Formal Fable openreview is held; tactically review, additively stage, then execute fresh quiet rig-W adaptive and role-invariance evidence.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).

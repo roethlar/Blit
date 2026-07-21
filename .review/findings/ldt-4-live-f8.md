@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — every Windows-client arm fails before client creation
 because PowerShell splits the launch-gate expression and path-checks its parent
 directory as a file.
-**Status**: Accepted; fix and guard pending.
+**Status**: Fixed, mutation-proved, and full-gate green; tactical review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: pending
 
@@ -52,11 +52,18 @@ file array contains one exact `$dir/client-launch.ok` path.
 
 ## Files changed
 
-- `scripts/bench_ldt4_rigw.sh` — pending exact Windows client launch-gate path.
+- `scripts/bench_ldt4_rigw.sh` — exact Windows client launch-gate path and
+  structural guard.
 
 ## Guard proof
 
-Pending.
+- Focused restored green: Bash syntax; 96-arm Bash 3.2 self-test with no SSH;
+  all 77 analyzer tests.
+- Production mutation: removing only the launch-gate element's parentheses
+  made the static Bash self-test fail at the exact Windows client path guard.
+  Restoring them returned the focused checks green.
+- Full repository gates pass: rustfmt check, strict workspace clippy, and the
+  complete workspace test suite.
 
 ## Coder dispute
 
@@ -64,8 +71,7 @@ None.
 
 ## Known gaps
 
-Fix, focused/full gates, tactical review, additive staging, and a complete
-valid live run remain.
+Tactical review, additive staging, and a complete valid live run remain.
 
 ## Reviewer comments
 

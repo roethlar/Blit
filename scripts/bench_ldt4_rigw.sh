@@ -1981,7 +1981,7 @@ Assert-Ldt4PlainPath '$WIN_BLIT' File | Out-Null
 \$resultPath = \$dir + '/client-result.txt'
 \$stdoutPath = \$dir + '/client.out'
 \$stderrPath = \$dir + '/client.err'
-foreach (\$path in @(\$controller,\$controllerPidPath,\$clientPidPath,\$identityPath,\$resultPath,\$stdoutPath,\$stderrPath,\$dir + '/client-launch.ok')) {
+foreach (\$path in @(\$controller,\$controllerPidPath,\$clientPidPath,\$identityPath,\$resultPath,\$stdoutPath,\$stderrPath,(\$dir + '/client-launch.ok'))) {
   Assert-Ldt4PlainPath \$path File \$true | Out-Null
 }
 foreach (\$path in @(\$resultPath,\$stdoutPath,\$stderrPath)) {
@@ -2558,6 +2558,11 @@ q_paths = text[text.index("assert_q_registered_paths() {"):text.index("assert_wi
 windows_paths = text[text.index("assert_windows_registered_paths() {"):text.index("mark_void() {")]
 windows_start = text[text.index("start_windows_daemon() {"):text.index("stop_q_daemon() {")]
 windows_stop = text[text.index("stop_windows_daemon() {"):text.index("normalize_q_client_pid_list() {")]
+windows_client = text[text.index("run_windows_client() {"):text.index("run_client() {")]
+required_client_launch_gate = r"""\$stderrPath,(\$dir + '/client-launch.ok'))) {"""
+forbidden_client_launch_gate = r"""\$stderrPath,\$dir + '/client-launch.ok')) {"""
+if windows_client.count(required_client_launch_gate) != 1 or forbidden_client_launch_gate in windows_client:
+    raise SystemExit("Windows client launch gate is not one parenthesized file path")
 required_log_loop = r'''foreach (\$log in @((\$dir + '/daemon.out'), (\$dir + '/daemon.err'))) {'''
 if windows_start.count(required_log_loop) != 1:
     raise SystemExit("Windows daemon log paths are not two explicit array elements")

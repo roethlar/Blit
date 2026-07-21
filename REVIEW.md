@@ -26,7 +26,7 @@ Fable 5/max (D-2026-07-16-4).
 | ldt-1 | Acknowledged elastic membership with exact member and terminal outcomes | `[x]` | `f8f3c51` (neutral Claude accepted) |
 | ldt-2 | Live controller cutover; delete shape worker authority; shared ADD/REMOVE | `[x]` | `65a0f9f` (neutral Claude; one non-failing Low declined at intake) |
 | ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[x]` | `436e1bb` + review fix `406a7e5`; Claude r2 clean with independent guard |
-| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | Repairs through `f6` fixed/reviewed/staged at `21fe468`; Windows console-host `f7` fixed/reviewed/staged at `55fc5d5` and cleared live. Retained retry `ldt4-20260721T210445Z-55fc5d5ff456` completed arm 1, then exposed unparenthesized Windows client launch-gate path `f8` before arm-2 client creation; session void, exact path fix next; formal Fable held |
+| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | Repairs through `f6` fixed/reviewed/staged at `21fe468`; Windows console-host `f7` fixed/reviewed/staged at `55fc5d5` and cleared live. Retained retry `ldt4-20260721T210445Z-55fc5d5ff456` completed arm 1, then exposed unparenthesized Windows client launch-gate path `f8` before arm-2 client creation; exact path fix is mutation-proved/full-gate green, tactical review next; formal Fable held |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 
