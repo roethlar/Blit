@@ -114,6 +114,17 @@ review loop from rig-W benchmarking** — the contention that destroyed a
   under `.177` but no `.173` entry. D-2026-07-21-1 directs ldt-4 to adapt to
   `.173`; add only the already verified matching key under that address after
   exact code review. Never bypass host-key checking.
+- **CURRENT IDENTITY/STAGING (2026-07-21):** q now reports resolver-derived
+  `hostname=Q.local`; stable macOS `LocalHostName=Q` and `ComputerName=Q` are
+  unchanged. Exact `322a161` is staged at
+  `~/Dev/blit_v2_harness_322a161` from complete-history bundle
+  `~/blit-ldt4-stage-322a161.bundle` (SHA-256
+  `429e4bea6bfecd497ebd73e4972ef736c189fa09c482c8ff4cb5301c6cf279da`;
+  target history count 1,938); q Bash 3.2 and all 76 analyzer tests pass.
+  q's `.173` trust entry was added only by aliasing its three already trusted
+  matching `.177` keys; pre-edit backup is
+  `~/.ssh/known_hosts.ldt4-pre-173-20260721T202154Z`. Strict SSH returns
+  `NETWATCH-01` / `.173`.
 
 - **10GbE**: `en8` = **10.1.10.54**, MTU **9000**, media 10Gbase-T. This is the
   **Aquantia adapter physically moved off nagatha**, so nagatha's 10GbE is now a

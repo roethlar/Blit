@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — the registered run cannot pass Windows preflight or
 produce evidence while the harness dials a DHCP address the endpoint no longer
 owns.
-**Status**: Fixed, mutation-proved, full-gate green, and tactically reviewed clean; additive staging pending.
+**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and additively staged; live retry advanced to separate hostname finding f6.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `322a1611230e78c2268d91c45e6bd1e7ed24f953`
 
@@ -68,8 +68,11 @@ None.
 
 ## Known gaps
 
-Additive staging, q's verified host-key alias, and a completed live arm/run
-remain.
+Exact `322a161` is additively staged and q strictly authenticates `.173` with
+the already trusted matching keyset. Its live retry cleared Windows SSH and all
+three fixture manifests, then exposed separate stable-q-identity finding
+`ldt-4-live-f6` before any arm or daemon preparation. A completed live run
+remains.
 
 ## Reviewer comments
 
