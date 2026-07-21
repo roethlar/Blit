@@ -916,12 +916,22 @@ if (\$null -eq \$avg -or [double]::IsNaN([double]\$avg) -or [double]::IsInfinity
     done
 }
 
+q_machine_identity() {
+    local q_local_hostname q_computer_name
+    q_local_hostname=$(scutil --get LocalHostName) || return 1
+    q_computer_name=$(scutil --get ComputerName) || return 1
+    [[ "$q_local_hostname" == Q && "$q_computer_name" == Q ]] || return 1
+    printf '%s|%s\n' "$q_local_hostname" "$q_computer_name"
+}
+
 environment_gate() {
-    local phase=$1 q_free win_free q_route q_route_raw q_route_mtu q_mtu q_media q_status q_mac q_arp q_peer auto tm_running win_topology quiet_q quiet_win q_mss q_mss_ip win_mss win_mss_ip win_mss_raw win_ps guard
+    local phase=$1 q_identity q_local_hostname q_computer_name q_free win_free q_route q_route_raw q_route_mtu q_mtu q_media q_status q_mac q_arp q_peer auto tm_running win_topology quiet_q quiet_win q_mss q_mss_ip win_mss win_mss_ip win_mss_raw win_ps guard
     assert_q_registered_paths "$phase"
     assert_windows_registered_paths "$phase"
     ports_closed || session_void "$phase: daemon port is occupied"
-    [[ "$(hostname)" == q.lan ]] || session_void "$phase: harness is not executing on q.lan"
+    q_identity=$(q_machine_identity) \
+        || session_void "$phase: stable q machine identity is not exact Q/Q"
+    IFS='|' read -r q_local_hostname q_computer_name <<<"$q_identity"
     q_route_raw=$(route -n get "$WIN_IP") || session_void "$phase: q route probe failed"
     q_route=$(printf '%s\n' "$q_route_raw" | awk '/interface:/ {print $2; exit}')
     [[ "$q_route" == "$Q_NIC" ]] || session_void "$phase: q route uses $q_route, expected $Q_NIC"
@@ -1010,7 +1020,7 @@ PY
     [[ "$win_mss" == 8960 && "$win_mss_ip" == "$WIN_IP" ]] \
         || session_void "$phase: Windows-to-q MSS/source is $win_mss/$win_mss_ip"
     exclusive_line "$OUT_DIR/environment-$phase.txt" \
-        "phase=$phase q_ip=$Q_IP q_nic=$Q_NIC q_mtu=$q_mtu q_media=$q_media q_route=$q_route q_route_mtu=$q_route_mtu q_mac=$q_mac q_peer=$q_peer q_free=$q_free $quiet_q q_to_windows_mss=$q_mss windows_to_q_mss=$win_mss windows_powershell=$win_ps windows=$win_topology $quiet_win"
+        "phase=$phase q_ip=$Q_IP q_nic=$Q_NIC q_mtu=$q_mtu q_media=$q_media q_route=$q_route q_route_mtu=$q_route_mtu q_local_hostname=$q_local_hostname q_computer_name=$q_computer_name q_mac=$q_mac q_peer=$q_peer q_free=$q_free $quiet_q q_to_windows_mss=$q_mss windows_to_q_mss=$win_mss windows_powershell=$win_ps windows=$win_topology $quiet_win"
 }
 
 prepare_windows_runtime() {
@@ -2398,6 +2408,14 @@ run_selftest() {
     local old_tag=$SESSION_TAG sample direction fixture source parent remote_host guard_text
     SESSION_TAG='selftest-ldt4'
     assert_schedule
+    scutil() {
+        case "${1:-}:${2:-}" in
+            '--get:LocalHostName'|'--get:ComputerName') printf 'Q\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    [[ "$(q_machine_identity)" == 'Q|Q' ]] \
+        || die 'stable q machine identity selftest failed'
     [[ "$WIN_SSH" == "michael@$WIN_IP" && "$WIN_IP" == '10.1.10.173' ]] \
         || die 'Windows endpoint identity selftest failed'
     [[ "$(fixture_source q_to_windows large)" == '/Users/michael/blit-ldt4-staging/fixtures/src_large' ]] \
@@ -2684,7 +2702,7 @@ main() {
     fi
     [[ $# -eq 0 ]] || die 'the registered harness accepts no positional arguments'
     validate_invocation
-    for command in git python3 ssh scp shasum lsof nc awk cmp tar; do
+    for command in git python3 ssh scp shasum lsof nc awk cmp tar scutil; do
         command -v "$command" >/dev/null || die "required command absent: $command"
     done
     assert_q_registered_paths preflight

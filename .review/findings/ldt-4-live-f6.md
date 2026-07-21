@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — the registered run cannot pass its start environment
 gate after a network-service transition changes the resolver-derived hostname
 of the same pinned Mac.
-**Status**: Accepted; fix and guard pending.
+**Status**: Fixed, mutation-proved, and full-gate green; tactical review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: pending
 
@@ -46,13 +46,23 @@ and make the analyzer validate them.
 
 ## Files changed
 
-- `scripts/bench_ldt4_rigw.sh` — pending stable q identity helper/gate/evidence.
-- `scripts/ldt4_rigw_analyze.py` — pending stable identity validation.
-- `scripts/ldt4_rigw_analyze_test.py` — pending exact evidence guard.
+- `scripts/bench_ldt4_rigw.sh` — stable q identity helper/gate/evidence.
+- `scripts/ldt4_rigw_analyze.py` — stable identity validation.
+- `scripts/ldt4_rigw_analyze_test.py` — exact evidence guard.
 
 ## Guard proof
 
-Pending.
+- Focused restored green: `bash -n`; 96-arm Bash self-test with no SSH; 77
+  analyzer tests.
+- Producer mutation: changing the production LocalHostName expectation from
+  `Q` to `Q.local` made the Bash self-test fail at the stable identity guard;
+  restoring exact `Q` returned it green.
+- Consumer mutation: allowing `Q.local` in the analyzer's production identity
+  regex made `test_environment_gate_requires_stable_q_identity` fail because
+  the invalid evidence was accepted; restoring exact `Q` returned all 77 tests
+  green.
+- Full repository gates pass: rustfmt check, strict workspace clippy, and the
+  complete workspace test suite.
 
 ## Coder dispute
 
@@ -60,8 +70,7 @@ None.
 
 ## Known gaps
 
-Fix, focused/full gates, tactical review, additive staging, and a completed
-live arm/run remain.
+Tactical review, additive staging, and a completed live arm/run remain.
 
 ## Reviewer comments
 

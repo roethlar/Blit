@@ -177,7 +177,9 @@ class SyntheticSession:
         environment_tail = (
             f"q_ip={analyzer.Q_IP} q_nic={analyzer.Q_NIC} q_mtu=9000 "
             f"q_media=autoselect (10Gbase-T <full-duplex>) q_route={analyzer.Q_NIC} "
-            f"q_route_mtu=9000 q_mac={analyzer.Q_MAC} q_peer={analyzer.WINDOWS_MAC} "
+            f"q_route_mtu=9000 q_local_hostname={analyzer.Q_LOCAL_HOSTNAME} "
+            f"q_computer_name={analyzer.Q_COMPUTER_NAME} q_mac={analyzer.Q_MAC} "
+            f"q_peer={analyzer.WINDOWS_MAC} "
             "q_free=40000000000 q_load1=1.25 q_spotlight_cpu=2.5 "
             "time_machine_auto=0 time_machine_running=0 "
             "q_to_windows_mss=8948 windows_to_q_mss=8960 "
@@ -1005,6 +1007,17 @@ class AnalyzerTests(unittest.TestCase):
         path = self.root / "environment-end.txt"
         path.write_text(
             path.read_text(encoding="ascii").replace("q_mtu=9000", "q_mtu=1500"),
+            encoding="ascii",
+        )
+        with self.assertRaisesRegex(analyzer.AnalysisError, "endpoint gate shape"):
+            self.analyze()
+
+    def test_environment_gate_requires_stable_q_identity(self) -> None:
+        path = self.root / "environment-start.txt"
+        path.write_text(
+            path.read_text(encoding="ascii").replace(
+                "q_local_hostname=Q", "q_local_hostname=Q.local"
+            ),
             encoding="ascii",
         )
         with self.assertRaisesRegex(analyzer.AnalysisError, "endpoint gate shape"):
