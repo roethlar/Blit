@@ -26,7 +26,7 @@ Fable 5/max (D-2026-07-16-4).
 | ldt-1 | Acknowledged elastic membership with exact member and terminal outcomes | `[x]` | `f8f3c51` (neutral Claude accepted) |
 | ldt-2 | Live controller cutover; delete shape worker authority; shared ADD/REMOVE | `[x]` | `65a0f9f` (neutral Claude; one non-failing Low declined at intake) |
 | ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[x]` | `436e1bb` + review fix `406a7e5`; Claude r2 clean with independent guard |
-| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | `f4` fixed/reviewed/staged at `d53b5fd`; owner-directed DHCP adaptation `f5` is fixed/reviewed/staged at `322a161` with strict `.173` trust. Retained retry `ldt4-20260721T202216Z-322a1611230e` exposed resolver-hostname `f6` before daemon prep/arm timing; stable q identity fix is mutation-proved/full-gate green and tactical Grok-clean at `21fe468`; additive staging/live retry next; formal Fable held |
+| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | `f4` fixed/reviewed/staged at `d53b5fd`; owner-directed DHCP adaptation `f5` is fixed/reviewed/staged at `322a161` with strict `.173` trust. Retained retry `ldt4-20260721T202216Z-322a1611230e` exposed resolver-hostname `f6` before daemon prep/arm timing; stable q identity fix is mutation-proved/full-gate green, tactical Grok-clean, and additively staged at `21fe468`; live retry next; formal Fable held |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 

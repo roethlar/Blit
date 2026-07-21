@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — the registered run cannot pass its start environment
 gate after a network-service transition changes the resolver-derived hostname
 of the same pinned Mac.
-**Status**: Fixed, mutation-proved, full-gate green, and tactically reviewed clean; additive staging pending.
+**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and additively staged; live retry pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `21fe468af1290d5da4d0c60c9bff430a5b1ea61c`
 
@@ -70,7 +70,7 @@ None.
 
 ## Known gaps
 
-Additive staging and a completed live arm/run remain.
+A completed live arm/run remains.
 
 ## Reviewer comments
 
