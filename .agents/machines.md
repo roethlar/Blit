@@ -105,15 +105,15 @@ the rig-W Mac end: **quiet, dedicated, and faster than nagatha** (1 GiB in
 review loop from rig-W benchmarking** — the contention that destroyed a
 53-minute experiment (below).
 
-- **CURRENT BLOCKER (observed 2026-07-21 at repo `3c5084e`):** q's reconnected
+- **CURRENT STATE (observed 2026-07-21 at repo `31c12c9`):** q's reconnected
   Aquantia is restored as registered `en8` / `10.1.10.54`, MTU 9000, active
   10Gbase-T, and the route to Windows uses `en8`. Windows DHCP has moved
-  `NETWATCH-01` from harness-pinned `10.1.10.177` back to `10.1.10.173`:
+  `NETWATCH-01` from `10.1.10.177` back to `10.1.10.173`:
   `.177` has incomplete ARP/no TCP 22, while DNS and strict-host-key SSH from
   nagatha identify `.173` as `NETWATCH-01`. q has the same trusted host key
-  under `.177` but no `.173` entry. Preserve exact reviewed `d53b5fd` by
-  restoring Windows to `.177`; changing the registered pin is code work and
-  needs its own plan/review. Never bypass host-key checking.
+  under `.177` but no `.173` entry. D-2026-07-21-1 directs ldt-4 to adapt to
+  `.173`; add only the already verified matching key under that address after
+  exact code review. Never bypass host-key checking.
 
 - **10GbE**: `en8` = **10.1.10.54**, MTU **9000**, media 10Gbase-T. This is the
   **Aquantia adapter physically moved off nagatha**, so nagatha's 10GbE is now a

@@ -17,8 +17,8 @@ readonly CARGO_LOCK_SHA='ec1ce3fbe4208c7f7993e27ed997555b60bfef46c4bcec323b90bf9
 readonly ARM_COUNT=96
 readonly Q_IP='10.1.10.54'
 readonly Q_NIC='en8'
-readonly WIN_SSH='michael@10.1.10.177'
-readonly WIN_IP='10.1.10.177'
+readonly WIN_SSH='michael@10.1.10.173'
+readonly WIN_IP='10.1.10.173'
 readonly WIN_NIC='Ethernet'
 readonly Q_ARTIFACT_REPO='/Users/michael/Dev/blit_v2_artifact_406a7e5'
 readonly Q_BLIT="$Q_ARTIFACT_REPO/target/release/blit"
@@ -2398,6 +2398,8 @@ run_selftest() {
     local old_tag=$SESSION_TAG sample direction fixture source parent remote_host guard_text
     SESSION_TAG='selftest-ldt4'
     assert_schedule
+    [[ "$WIN_SSH" == "michael@$WIN_IP" && "$WIN_IP" == '10.1.10.173' ]] \
+        || die 'Windows endpoint identity selftest failed'
     [[ "$(fixture_source q_to_windows large)" == '/Users/michael/blit-ldt4-staging/fixtures/src_large' ]] \
         || die 'q large fixture mapping selftest failed'
     [[ "$(fixture_source q_to_windows mixed)" == '/Users/michael/blit-ldt4-staging/fixtures/src_mixed' ]] \

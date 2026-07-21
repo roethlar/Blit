@@ -753,6 +753,9 @@ class AnalyzerTests(unittest.TestCase):
     def analyze(self, expected_harness_sha: str = TEST_HARNESS_SHA) -> analyzer.AnalysisResult:
         return analyzer.analyze(self.root, expected_harness_sha)
 
+    def test_registered_windows_endpoint_matches_current_identity(self) -> None:
+        self.assertEqual(analyzer.WINDOWS_IP, "10.1.10.173")
+
     def make_zero_sample_arm(self, row: dict[str, str], phase_span_ns: int) -> None:
         source = [
             event

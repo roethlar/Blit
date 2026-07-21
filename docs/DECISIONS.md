@@ -315,3 +315,17 @@ Format:
 - Decision: Every formal `openreview` dispatch uses Claude CLI with `--model claude-fable-5 --effort max`; Grok may provide an advisory second eye or tactical slice check, but a Grok result is never the formal acceptance verdict. Owner, 2026-07-16: **"no don't use grok for openreview. that should be fable."**
 - Why: The cost reduction comes from selecting fewer formal reviews, not from substituting Grok at the acceptance boundary; the owner wants Fable's unprimed judgment for every review that carries `openreview` authority.
 - Supersedes: D-2026-07-16-3 only where it permitted the ldt-4 harness or another ordinary slice review to use Grok as formal `openreview`. It preserves risk-based review frequency, Grok advisory use, Fable tactical/final use, D-2026-07-16-1's neutral prompt, and every fixed-SHA/guard/adjudication/git-safety rule.
+
+## D-2026-07-21-1 — ldt-4 follows netwatch-01's verified current DHCP identity
+- Decision: Change the registered ldt-4 Windows endpoint from stale
+  `10.1.10.177` to verified-current `10.1.10.173` and proceed without forcing
+  the machine back onto its prior lease. Owner, 2026-07-21: **"no. just adapt
+  to reality and go."**
+- Why: DNS and strict-host-key SSH identify `.173` as the same `NETWATCH-01`,
+  with host keys identical to q's trusted `.177` records; the NIC MAC,
+  interface, MTU, and 10 GbE topology remain independently pinned. A DHCP
+  address change is not a reason to mutate the rig or discard current reality.
+- Supersedes: the `.177` literal introduced by ldt-4 endpoint correction
+  `9926bf7` and repeated in the harness/analyzer. It does not weaken endpoint
+  identity, host-key verification, MAC/interface/link gates, exact-artifact
+  review, or the additive evidence contract.
