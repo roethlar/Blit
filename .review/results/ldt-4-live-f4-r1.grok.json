@@ -1,0 +1,39 @@
+{
+  "record_type": "tactical_code_review",
+  "reviewer": {
+    "provider": "xAI",
+    "model": "grok-4.5",
+    "cli": "grok 0.2.106 (bde89716f679)",
+    "reasoning_effort": "high"
+  },
+  "review_contract": {
+    "finding_ids": [
+      "ldt-4-live-f4"
+    ],
+    "base_sha": "a39f0c570191d65f197e4ab58eade375ec52e6d6",
+    "reviewed_sha": "d53b5fdd3b85fd61f377de917e16ba19aa65d137",
+    "worktree": "/private/tmp/blit-grok-ldt4-f4-d53b5fd",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "019f8603-7989-7ad3-a899-9052485663a0",
+    "completion": "clean verdict after local semantic and mutation checks"
+  },
+  "structured_output": {
+    "verdict": "clean",
+    "base_sha": "a39f0c570191d65f197e4ab58eade375ec52e6d6",
+    "reviewed_sha": "d53b5fdd3b85fd61f377de917e16ba19aa65d137",
+    "summary": "Both dynamic start.cmd concatenations are one array element after parenthesization; the exact 12-line CRLF batch shape, spaced-path quoting, durable flush ordering, teardown lifecycle, and mutation-sensitive guard are sound.",
+    "findings": []
+  },
+  "checks": {
+    "identity": "clean detached d53b5fdd3b85fd61f377de917e16ba19aa65d137",
+    "bash_syntax": "pass",
+    "bash_3_2_selftest": "PASS (96 arms, no SSH)",
+    "powershell_array_probe": "old form 20 elements; reviewed form 12 intact lines including paths with spaces",
+    "start_ordering": "unique start.cmd Flush(true) precedes the sole Invoke-CimMethod process creation",
+    "teardown_audit": "missing start.cmd remains the proven no-launch boundary; launched-state exact ownership checks remain intact",
+    "guard_mutations": "unparenthesizing either dynamic production entry independently makes the offline self-test fail"
+  },
+  "policy_note": "This is owner-authorized tactical Grok review while formal Fable review is on capacity hold. It is advisory and is not a formal openreview acceptance verdict."
+}

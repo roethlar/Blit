@@ -2,7 +2,7 @@
 
 **Severity**: MEDIUM — every Windows-responder arm exits before daemon launch,
 so the registered matrix cannot produce evidence.
-**Status**: Fixed and mutation-proved; tactical code review and live retry pending.
+**Status**: Fixed, mutation-proved, and tactically reviewed clean; additive staging and live retry pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `d53b5fdd3b85fd61f377de917e16ba19aa65d137`
 
@@ -72,12 +72,15 @@ None.
 
 ## Known gaps
 
-No completed/timed live arm or transfer datum exists. A tactical Grok or Claude Opus 4.8 code
-review and fresh additive live run remain. Formal Fable openreviews remain on
-owner-directed capacity hold.
+No completed/timed live arm or transfer datum exists. Additive staging and a
+fresh live run remain. Formal Fable openreviews remain on owner-directed
+capacity hold.
 
 ## Reviewer comments
 
-This finding came from the attached live launch, not a reviewer candidate.
-Any tactical review is advisory and must not be recorded as formal openreview
-acceptance.
+Grok 4.5/high reviewed exact range `a39f0c5..d53b5fd`, reproduced old 20-item
+versus fixed 12-line PowerShell generation, ran the complete Bash 3.2 no-SSH
+self-test, independently mutated both production parenthesizations, audited the
+start/teardown boundary, and returned `clean` with no findings. This is tactical
+advisory review, not formal acceptance. Record:
+`.review/results/ldt-4-live-f4-r1.grok-verdict.md`.

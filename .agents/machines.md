@@ -105,6 +105,14 @@ the rig-W Mac end: **quiet, dedicated, and faster than nagatha** (1 GiB in
 review loop from rig-W benchmarking** — the contention that destroyed a
 53-minute experiment (below).
 
+- **CURRENT BLOCKER (observed 2026-07-21 at repo `500e7c5`):** q is reachable
+  as `q` over management `en0` / `10.1.10.221`, but registered 10 GbE address
+  `10.1.10.54` is unreachable. q enumerates no `en8` or `en9`, and
+  `networksetup -listallhardwareports` shows no Aquantia/10 GbE service. Its
+  route to netwatch-01 therefore uses `en0` at MTU 1500. The ldt-4 live retry
+  must wait for the 10 GbE adapter/link to be physically restored and must not
+  substitute the management path.
+
 - **10GbE**: `en8` = **10.1.10.54**, MTU **9000**, media 10Gbase-T. This is the
   **Aquantia adapter physically moved off nagatha**, so nagatha's 10GbE is now a
   *different* NIC at **10.1.10.92** (also MTU 9000). Any doc naming
