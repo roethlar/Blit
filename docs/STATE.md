@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-21 (exact Windows client-path f8 staged; live retry next)
+Last updated: 2026-07-21 (f8 cleared live; Windows launcher teardown race f9 open)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,10 +10,10 @@ Last updated: 2026-07-21 (exact Windows client-path f8 staged; live retry next)
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — RUN EXACT STAGED `c2e1284`:** exact `55fc5d5` cleared Windows console-host classification live and completed/retained arm 1. Session `ldt4-20260721T210445Z-55fc5d5ff456` then voided before arm-2 client creation because unparenthesized `$dir + '/client-launch.ok'` split the prospective-file array. Exact `c2e1284` parenthesizes that one path, structurally forbids the live-failing form, is mutation-proved/full-gate green, tactical Grok-clean, and staged in a clean detached q checkout.
+- **NEXT ACTION — FIX `ldt-4-live-f9`, THEN REVIEW/RESTAGE/RUN:** exact staged `c2e1284` cleared f8 and completed 25 byte-identical arms. Arm 26 completed through `summary_received`, then Windows teardown voided because the exact `cmd.exe` launcher exited normally between the existence check and strict stop. The retained session has 25 provisional rows; none is valid or gradeable. Both ports are closed, no session process remains, and the prior Windows daemon is restored byte-for-byte.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
-- **WHY NO ldt-4 RIG-W DATA YET:** earlier retained sessions failed closed on fixtures, generated paths, endpoint DHCP, q hostname, and Windows console-host classification. Exact `55fc5d5` cleared those gates and completed arm 1, but session `ldt4-20260721T210445Z-55fc5d5ff456` is void because arm 2 failed before Windows client creation on split launch-gate path syntax. Its one provisional row is invalid and ungraded. Both ports are closed, no Blit process remains, and the prior active Windows daemon is restored byte-for-byte. `ldt-4-live-f8` owns the path correction.
+- **WHY NO ldt-4 RIG-W DATA YET:** earlier retained sessions failed closed on fixtures, generated paths, endpoint DHCP, q hostname, Windows console-host classification, and Windows client path syntax. Exact `c2e1284` cleared all those gates and completed 25 arms, but retained session `ldt4-20260721T212142Z-c2e12846bcb1` is void because teardown treated an already-exited exact Windows launcher as a stop failure after arm 26. Its 25 provisional rows are invalid and ungraded. Both ports are closed, no session process remains, and the prior active Windows daemon is restored byte-for-byte. `ldt-4-live-f9` owns the teardown race.
 
 - **BASELINE RE-RECORD (D-2026-07-14-1, owner 2026-07-14) — a prerequisite slice for `pf-final`, NOT for pf-1.** Both committed ceilings were recorded at **MTU 1500** before the fabric went jumbo, and pf-0 showed jumbo makes both arms 3–4% faster — so a jumbo build graded against them is **LENIENT** and could let a regression pass. Each rig's baseline is **re-recorded once with its ORIGINAL old build at MTU 9000**, then re-frozen (rig W `bench_otp12_win.sh:105`; rig Z `bench_otp12_zoey.sh:102`; rig D unaffected). Constraints — same old build per rig, `BASELINE_SUMMARY` stays override-free, pf-0's start-AND-end MSS gate applies — in **D-2026-07-14-1**.
 - **pf-0 DONE — MTU is KILLED as a material cause of P1 (2026-07-14, `docs/bench/otp12-jumbo-win-2026-07-13/`).** A-B-B-A on `q` (9000/1500/1500/9000), **256 timed runs, 0 voided**, MSS gate held start AND end of every session. `Δ_9000 = 236`, `Δ_1500 = 229`, measured noise floor **N_Δ = 78 ms**, **r = −3.1% → KILLED**. The null is **not vacuous** — `wm_tcp_large` ran 3–4% faster at jumbo on **both** arms, so the manipulation reached the wire; the benefit is **symmetric**, which is why it cannot explain an **asymmetry**. codex NOT READY → **7/7 accepted** (`11f0c2a`): every finding was a *claim* outrunning the *data* (it recomputed and confirmed all the numbers). **Two limits that now bind pf-1**: (a) the run is **NOT powered** to exclude a *contributing*-size effect (20% of Δ = 46 ms < the 78 ms floor) — it excludes a DOMINANT one only; (b) 78 ms is **between**-session noise, so cross-session grading of a counterfactual is dead, and **pf-1 must measure its own paired within-session floor and register a resolution check before grading**.
@@ -28,7 +28,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted; repairs through stable-q-identity `f6` are fixed/reviewed/staged at `21fe468`; Windows console-host `f7` is fixed/reviewed/staged at `55fc5d5` and cleared live. That retry completed arm 1, then exposed Windows client launch-gate path `f8` before arm-2 client creation; exact `c2e1284` is mutation-proved/full-gate green, tactical Grok-clean, and additively staged for the live retry. Formal Fable openreview is held for capacity.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted. Exact `c2e1284` cleared repairs through Windows client path `f8` live and completed 25 arms. The retained retry then exposed Windows exact-launcher teardown race `f9` after arm 26 completed; the session is void and every provisional row is invalid. Formal Fable openreview is held for capacity.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -56,7 +56,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Live repairs through Windows console-host `f7` are fixed/reviewed/staged at exact `55fc5d5`, which cleared those gates and completed arm 1 live. Its retained retry exposed Windows client launch-gate path finding `ldt-4-live-f8` before arm-2 client creation. Exact `c2e1284` is mutation-proved/full-gate green, tactical Grok-clean, and additively staged. Formal Fable openreview is held; execute fresh quiet rig-W adaptive and role-invariance evidence.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `c2e1284` cleared live repairs through `f8` and completed 25 arms, then the retained retry exposed Windows exact-launcher teardown race `ldt-4-live-f9` after arm 26 completed. No provisional row is valid. Formal Fable openreview is held; fix/guard/review f9, stage the exact reviewed harness additively, then execute fresh quiet rig-W adaptive and role-invariance evidence.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).
