@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — every Windows-client arm fails before client creation
 because PowerShell splits the launch-gate expression and path-checks its parent
 directory as a file.
-**Status**: Fixed, mutation-proved, full-gate green, and tactically reviewed clean; additive staging and live retry pending.
+**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and additively staged; live retry pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `c2e12846bcb188f48f1c26a3c0977dbc0a52fa24`
 
@@ -71,7 +71,8 @@ None.
 
 ## Known gaps
 
-Additive staging and a complete valid live run remain.
+A complete valid live run remains. Exact reviewed code `c2e1284` is staged in
+the clean detached q checkout `/Users/michael/Dev/blit_v2_harness_c2e1284`.
 
 ## Reviewer comments
 
