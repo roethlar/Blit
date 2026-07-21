@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — every Windows-responder arm fails before its client can
 launch because the startup gate mistakes the platform console host for a
 second daemon child.
-**Status**: Fixed, mutation-proved, full-gate green, and tactically reviewed clean; additive staging pending.
+**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and additively staged; live retry pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `55fc5d5ff4561b0b126265f61e2962414db1de3e`
 
@@ -74,7 +74,7 @@ None.
 
 ## Known gaps
 
-Additive staging and a completed live arm/run remain.
+A completed live arm/run remains.
 
 ## Reviewer comments
 
