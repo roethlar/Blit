@@ -2,7 +2,7 @@
 
 **Severity**: MEDIUM — teardown falsely reports failure after a startup error
 that occurred before any launcher or daemon could exist.
-**Status**: Fixed, mutation-proved, and tactically reviewed clean; live retry pending.
+**Status**: Closed — fixed, mutation-proved, tactically reviewed clean, and validated by the complete 96-arm rig-W run.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `a39f0c570191d65f197e4ab58eade375ec52e6d6`
 
@@ -77,11 +77,9 @@ None.
 
 ## Known gaps
 
-No completed/timed live arm or transfer datum exists. Tactical Grok review found no
-material defect at exact `a39f0c5`; a fresh additive live run cleared the
-no-launch teardown fault, then exposed separate generated start-command finding
-`ldt-4-live-f4`, fixed and mutation-proved at `d53b5fd`. The owner put
-further formal Fable openreviews on hold while that model is out of capacity.
+None for this finding. Exact harness `96a4e3b03caf43ee368efadc779e3324248067f6`
+includes the fix and completed all 96 valid arms. Retained evidence is recorded
+at `docs/bench/ldt4-rigw-2026-07-21/`.
 
 ## Reviewer comments
 
