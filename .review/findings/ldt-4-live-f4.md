@@ -2,7 +2,7 @@
 
 **Severity**: MEDIUM — every Windows-responder arm exits before daemon launch,
 so the registered matrix cannot produce evidence.
-**Status**: Fixed, mutation-proved, tactically reviewed clean, and additively staged; live retry pending.
+**Status**: Closed — fixed, mutation-proved, tactically reviewed clean, and validated by the complete 96-arm rig-W run.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `d53b5fdd3b85fd61f377de917e16ba19aa65d137`
 
@@ -72,13 +72,9 @@ None.
 
 ## Known gaps
 
-No completed/timed live arm or transfer datum exists. Exact `d53b5fd` is
-additively staged and its q Bash 3.2 self-test passes. The first post-staging
-launch failed closed in Windows path preflight before evidence reservation:
-the harness-pinned `10.1.10.177` is absent while `NETWATCH-01` now owns
-`10.1.10.173`. A fresh live run waits for the registered address to return (or
-a separately planned and reviewed harness identity change). Formal Fable
-openreviews remain on owner-directed capacity hold.
+None for this finding. Exact harness `96a4e3b03caf43ee368efadc779e3324248067f6`
+includes the fix and completed all 96 valid arms. Retained evidence is recorded
+at `docs/bench/ldt4-rigw-2026-07-21/`.
 
 ## Reviewer comments
 
