@@ -1,0 +1,40 @@
+{
+  "record_type": "tactical_code_review",
+  "reviewer": {
+    "provider": "xAI",
+    "model": "grok-4.5",
+    "cli": "grok 0.2.106 (bde89716f679)",
+    "reasoning_effort": "high"
+  },
+  "review_contract": {
+    "finding_ids": [
+      "ldt-4-live-f8"
+    ],
+    "base_sha": "f8278227a252821814a4f7ce4c9df7ffb079d212",
+    "reviewed_sha": "c2e12846bcb188f48f1c26a3c0977dbc0a52fa24",
+    "worktree": "/private/tmp/blit-grok-ldt4-f8-c2e1284",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "019f8686-e799-7330-872f-a655055d8312",
+    "completion": "clean verdict after local semantic and mutation checks"
+  },
+  "structured_output": {
+    "verdict": "clean",
+    "base_sha": "f8278227a252821814a4f7ce4c9df7ffb079d212",
+    "reviewed_sha": "c2e12846bcb188f48f1c26a3c0977dbc0a52fa24",
+    "summary": "The exact one-commit fix is correct and minimal: parenthesizing only the final launch-gate expression makes the prospective-file array contain one exact file path. Stop and client controller commands, timing, teardown, and evidence handling are untouched, and the structural guard is specific to the live-failing form.",
+    "guard_proof": "Removing only the production parentheses made the no-SSH self-test fail at the Windows client launch-path guard. Restoring exact reviewed bytes returned Bash syntax, the 96-arm self-test, and all 77 analyzer tests green; the restored script SHA-256 is aea74a5cea1e0298cf304187d4959d10d1bc2a5bd3fb3a7c7d7e7be59921dd97 and the worktree is clean.",
+    "findings": []
+  },
+  "checks": {
+    "identity": "clean detached c2e12846bcb188f48f1c26a3c0977dbc0a52fa24 with one-commit parent f8278227a252821814a4f7ce4c9df7ffb079d212",
+    "bash_syntax": "pass",
+    "bash_3_2_selftest": "PASS (96 arms, no SSH)",
+    "analyzer_tests": "77 passed",
+    "path_audit": "the final prospective-file element is one parenthesized $dir/client-launch.ok path",
+    "scope_audit": "stop and client controller commands, timing, teardown, and evidence handling are unchanged",
+    "guard_mutation": "removing only the production parentheses failed the exact launch-path guard; exact restoration returned green"
+  },
+  "policy_note": "This is tactical advisory code review, not a formal openreview acceptance verdict."
+}
