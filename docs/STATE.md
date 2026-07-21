@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-21 (stable-q-identity f6 exact 21fe468 additively staged and q-native green; live retry next)
+Last updated: 2026-07-21 (exact 21fe468 cleared stable-q identity live; Windows conhost child-topology f7 next)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,10 +10,10 @@ Last updated: 2026-07-21 (stable-q-identity f6 exact 21fe468 additively staged a
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — RUN EXACT STAGED `21fe468`:** retained retry `ldt4-20260721T202216Z-322a1611230e` voided before daemon preparation when q's resolver-derived hostname changed to `Q.local`. The f6 fix gates stable macOS `LocalHostName=Q` and `ComputerName=Q`, records and analyzer-binds both, and is mutation-proved/full-gate green, tactical Grok-clean, and additively staged at exact `21fe468`. Execute the fresh attached quiet rig-W retry.
+- **NEXT ACTION — FIX/GUARD `ldt-4-live-f7`, THEN REVIEW/RESTAGE/RUN:** exact `21fe468` cleared stable q identity and full start/runtime gates live. Retained retry `ldt4-20260721T204038Z-21fe468af129` voided at first Windows daemon startup because the gate expected one raw launcher child while current Windows creates one exact system `conhost.exe` plus one exact daemon. An additive four-sample diagnostic reproduced that stable topology. Require both exact classes and reject every other shape.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
-- **WHY NO ldt-4 RIG-W DATA YET:** earlier retained sessions failed closed before transfer on unequal fixtures, joined log paths, and split generated `start.cmd` paths. Exact `322a161` closes the later Windows DHCP drift and is reviewed/staged. Its retained retry `ldt4-20260721T202216Z-322a1611230e` has zero rows and stopped before daemon preparation because q's resolver hostname changed to `Q.local`; stable identity is still exact `Q`. q port 9031 is closed and no daemon swap or transfer began. `ldt-4-live-f6` owns the correction.
+- **WHY NO ldt-4 RIG-W DATA YET:** earlier retained sessions failed closed before transfer on fixtures, generated paths, endpoint DHCP, and q resolver hostname. Exact `21fe468` cleared all those gates and prepared the Windows runtime, then first arm `ldt4-001` started the exact daemon and system console host but voided before client launch because the harness required one raw child. Session `ldt4-20260721T204038Z-21fe468af129` has zero rows; both ports are closed, no Blit process remains, and the prior active Windows daemon is restored byte-for-byte. `ldt-4-live-f7` owns the exact child classification.
 
 - **BASELINE RE-RECORD (D-2026-07-14-1, owner 2026-07-14) — a prerequisite slice for `pf-final`, NOT for pf-1.** Both committed ceilings were recorded at **MTU 1500** before the fabric went jumbo, and pf-0 showed jumbo makes both arms 3–4% faster — so a jumbo build graded against them is **LENIENT** and could let a regression pass. Each rig's baseline is **re-recorded once with its ORIGINAL old build at MTU 9000**, then re-frozen (rig W `bench_otp12_win.sh:105`; rig Z `bench_otp12_zoey.sh:102`; rig D unaffected). Constraints — same old build per rig, `BASELINE_SUMMARY` stays override-free, pf-0's start-AND-end MSS gate applies — in **D-2026-07-14-1**.
 - **pf-0 DONE — MTU is KILLED as a material cause of P1 (2026-07-14, `docs/bench/otp12-jumbo-win-2026-07-13/`).** A-B-B-A on `q` (9000/1500/1500/9000), **256 timed runs, 0 voided**, MSS gate held start AND end of every session. `Δ_9000 = 236`, `Δ_1500 = 229`, measured noise floor **N_Δ = 78 ms**, **r = −3.1% → KILLED**. The null is **not vacuous** — `wm_tcp_large` ran 3–4% faster at jumbo on **both** arms, so the manipulation reached the wire; the benefit is **symmetric**, which is why it cannot explain an **asymmetry**. codex NOT READY → **7/7 accepted** (`11f0c2a`): every finding was a *claim* outrunning the *data* (it recomputed and confirmed all the numbers). **Two limits that now bind pf-1**: (a) the run is **NOT powered** to exclude a *contributing*-size effect (20% of Δ = 46 ms < the 78 ms floor) — it excludes a DOMINANT one only; (b) 78 ms is **between**-session noise, so cross-session grading of a counterfactual is dead, and **pf-1 must measure its own paired within-session floor and register a resolution check before grading**.
@@ -28,7 +28,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted; `start.cmd` finding `f4` is fixed/reviewed/staged at `d53b5fd`; D-2026-07-21-1's `.173` adaptation `f5` is fixed/reviewed/staged at `322a161` with strict host trust. Its live retry exposed stable-q-identity finding `f6` before daemon prep or timing; the fix is mutation-proved/full-gate green, tactical Grok-clean, and additively staged at `21fe468`. Formal Fable openreview is held for capacity.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted; repairs `f4`/`f5` are fixed/reviewed/staged through `322a161`; stable-q-identity `f6` is fixed/reviewed/staged at `21fe468` and cleared live. That retry exposed Windows console-host topology `f7` before client launch/timing. Formal Fable openreview is held for capacity.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -56,7 +56,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Live repairs `f4` and `f5` are fixed/reviewed/staged through exact `322a161`. Its retained retry exposed resolver-hostname finding `ldt-4-live-f6` before daemon preparation or timing. The stable identity fix is mutation-proved/full-gate green, tactical Grok-clean, and additively staged at `21fe468`. Formal Fable openreview is held; execute fresh quiet rig-W adaptive and role-invariance evidence.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Live repairs through stable-q-identity `f6` are fixed/reviewed/staged at exact `21fe468`, which cleared those gates live. Its retained retry exposed Windows console-host child-topology finding `ldt-4-live-f7` before client launch or timing. Formal Fable openreview is held; fix/guard/review the exact child partition, additively stage, then execute fresh quiet rig-W adaptive and role-invariance evidence.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).

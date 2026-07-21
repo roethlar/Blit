@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — the registered run cannot pass its start environment
 gate after a network-service transition changes the resolver-derived hostname
 of the same pinned Mac.
-**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and additively staged; live retry pending.
+**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and additively staged; live retry advanced to separate Windows console-host finding f7.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `21fe468af1290d5da4d0c60c9bff430a5b1ea61c`
 
@@ -70,7 +70,9 @@ None.
 
 ## Known gaps
 
-A completed live arm/run remains.
+Exact `21fe468` cleared the formerly failing q identity gate live. The retained
+retry then exposed separate Windows console-host finding `ldt-4-live-f7` before
+client launch or timing. A completed live arm/run remains.
 
 ## Reviewer comments
 
