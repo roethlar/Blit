@@ -26,7 +26,7 @@ Fable 5/max (D-2026-07-16-4).
 | ldt-1 | Acknowledged elastic membership with exact member and terminal outcomes | `[x]` | `f8f3c51` (neutral Claude accepted) |
 | ldt-2 | Live controller cutover; delete shape worker authority; shared ADD/REMOVE | `[x]` | `65a0f9f` (neutral Claude; one non-failing Low declined at intake) |
 | ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[x]` | `436e1bb` + review fix `406a7e5`; Claude r2 clean with independent guard |
-| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | Exact staged `c621e33` completed 21 arms, then retained session `ldt4-20260721T221543Z-c621e33fd9df` voided before arm 22 when Windows committed the exact empty evidence directory but SSH returned nonzero. No transfer started for arm 22, no listener/process remains, the prior daemon is restored, no analyzer ran, and all provisional rows are invalid. `ldt-4-live-f11` owns marker-bound reconciliation of that ambiguous remote effect; fix/review/staging/live retry next; formal Fable held |
+| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | Exact staged `c621e33` completed 21 arms, then retained session `ldt4-20260721T221543Z-c621e33fd9df` voided before arm 22 when Windows committed the exact empty evidence directory but SSH returned nonzero. No transfer started for arm 22, no listener/process remains, the prior daemon is restored, no analyzer ran, and all provisional rows are invalid. `ldt-4-live-f11` adds nonce-bound durable reservation plus exact authenticated reconciliation and is mutation-proved/full-gate green; tactical review/staging/live retry next; formal Fable held |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 

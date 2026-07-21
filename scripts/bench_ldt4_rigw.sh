@@ -1684,8 +1684,24 @@ stop_current_daemon() {
     CURRENT_DAEMON_ENDPOINT=''
 }
 
+windows_arm_reservation_postcondition_script() {
+    local remote_dir=$1 marker=$2 reservation=$3
+    cat <<POWERSHELL
+Assert-Ldt4PlainPath '$remote_dir' Directory | Out-Null
+\$canonicalMarker = Assert-Ldt4PlainPath '$marker' File
+if ([IO.File]::ReadAllText(\$canonicalMarker) -cne '$reservation') {
+  throw 'remote arm evidence reservation marker mismatch'
+}
+\$children = @(Get-ChildItem -LiteralPath '$remote_dir' -Force -ErrorAction Stop)
+if (\$children.Count -ne 1 -or \$children[0].FullName -ine \$canonicalMarker) {
+  throw 'remote arm evidence reservation has unexpected contents'
+}
+POWERSHELL
+}
+
 prepare_arm_dirs() {
     local run_id=$1 remote_dir="$WIN_SESSION_ROOT/$SESSION_TAG/logs/$run_id" guard
+    local reservation_nonce reservation marker postcondition
     assert_q_registered_path "$OUT_DIR/endpoint/q" directory false \
         || session_void "$run_id q evidence parent is unsafe"
     assert_q_registered_path "$OUT_DIR/endpoint/windows" directory false \
@@ -1704,15 +1720,44 @@ prepare_arm_dirs() {
         || session_void "$run_id reserved q evidence directory is unsafe"
     assert_q_registered_path "$OUT_DIR/endpoint/windows/$run_id" directory false \
         || session_void "$run_id reserved Windows evidence directory is unsafe"
+    reservation_nonce=$(python3 -c 'import secrets; print(secrets.token_hex(16))') \
+        || session_void "$run_id cannot generate Windows evidence reservation nonce"
+    [[ "$reservation_nonce" =~ ^[0-9a-f]{32}$ ]] \
+        || session_void "$run_id Windows evidence reservation nonce is invalid"
+    reservation="$SESSION_TAG|$run_id|$reservation_nonce"
+    marker="$remote_dir/.ldt4-reservation"
     guard=$(windows_path_guard_script)
-    wssh "$guard
+    postcondition=$(windows_arm_reservation_postcondition_script \
+        "$remote_dir" "$marker" "$reservation")
+    if wssh "$guard
 \$ErrorActionPreference = 'Stop'
 Assert-Ldt4PlainPath '$WIN_SESSION_ROOT/$SESSION_TAG/logs' Directory | Out-Null
 Assert-Ldt4PlainPath '$remote_dir' Directory \$true | Out-Null
 if (Test-Path -LiteralPath '$remote_dir') { throw 'remote arm evidence already exists' }
 New-Item -ItemType Directory -Path '$remote_dir' -ErrorAction Stop | Out-Null
 Assert-Ldt4PlainPath '$remote_dir' Directory | Out-Null
-" >/dev/null || session_void "$run_id cannot reserve Windows arm evidence"
+Assert-Ldt4PlainPath '$marker' File \$true | Out-Null
+if (Test-Path -LiteralPath '$marker') { throw 'remote arm evidence reservation marker already exists' }
+\$markerBytes = [Text.Encoding]::UTF8.GetBytes('$reservation')
+\$markerStream = [IO.File]::Open((ConvertTo-Ldt4CanonicalPath '$marker'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+try {
+  \$markerStream.Write(\$markerBytes, 0, \$markerBytes.Length)
+  \$markerStream.Flush(\$true)
+} finally {
+  \$markerStream.Dispose()
+}
+$postcondition
+" >/dev/null; then
+        return
+    fi
+    note "$run_id ambiguous Windows arm evidence reservation; reconciling exact marker"
+    guard=$(windows_path_guard_script)
+    postcondition=$(windows_arm_reservation_postcondition_script \
+        "$remote_dir" "$marker" "$reservation")
+    wssh "$guard
+\$ErrorActionPreference = 'Stop'
+$postcondition
+" >/dev/null || session_void "$run_id cannot reconcile Windows arm evidence reservation"
 }
 
 prepare_active_destination() {
@@ -2557,6 +2602,8 @@ restore = text[text.index("restore_windows_runtime() {"):text.index("q_responder
 q_paths = text[text.index("assert_q_registered_paths() {"):text.index("assert_windows_registered_paths() {")]
 windows_paths = text[text.index("assert_windows_registered_paths() {"):text.index("mark_void() {")]
 q_quiet = text[text.index("q_quiet_gate() {"):text.index("windows_quiet_gate() {")]
+arm_reservation = text[text.index("windows_arm_reservation_postcondition_script() {"):text.index("prepare_arm_dirs() {")]
+arm_dirs = text[text.index("prepare_arm_dirs() {"):text.index("prepare_active_destination() {")]
 windows_start = text[text.index("start_windows_daemon() {"):text.index("stop_q_daemon() {")]
 windows_stop = text[text.index("stop_windows_daemon() {"):text.index("normalize_q_client_pid_list() {")]
 windows_client = text[text.index("run_windows_client() {"):text.index("run_client() {")]
@@ -2566,6 +2613,35 @@ if windows_stop.count(required_launcher_stop) != 1 or forbidden_launcher_stop in
     raise SystemExit("Windows launcher teardown does not tolerate exact launcher self-exit")
 if q_quiet.count("local deadline=$((SECONDS + 300))") != 1 or "local deadline=$((SECONDS + 120))" in q_quiet:
     raise SystemExit("q quiet gate does not retain five-minute load-history recovery")
+reservation_postconditions = (
+    r"\$canonicalMarker = Assert-Ldt4PlainPath '$marker' File",
+    r"if ([IO.File]::ReadAllText(\$canonicalMarker) -cne '$reservation') {",
+    r"\$children = @(Get-ChildItem -LiteralPath '$remote_dir' -Force -ErrorAction Stop)",
+    r"if (\$children.Count -ne 1 -or \$children[0].FullName -ine \$canonicalMarker) {",
+)
+if any(arm_reservation.count(requirement) != 1 for requirement in reservation_postconditions):
+    raise SystemExit("Windows arm reservation postcondition is not exact and marker-bound")
+reservation_flow = (
+    "reservation_nonce=$(python3 -c 'import secrets; print(secrets.token_hex(16))')",
+    '[[ "$reservation_nonce" =~ ^[0-9a-f]{32}$ ]]',
+    'reservation="$SESSION_TAG|$run_id|$reservation_nonce"',
+    'marker="$remote_dir/.ldt4-reservation"',
+    r"\$markerStream = [IO.File]::Open((ConvertTo-Ldt4CanonicalPath '$marker'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)",
+    r"\$markerStream.Flush(\$true)",
+    'note "$run_id ambiguous Windows arm evidence reservation; reconciling exact marker"',
+    'cannot reconcile Windows arm evidence reservation',
+)
+if any(arm_dirs.count(requirement) != 1 for requirement in reservation_flow):
+    raise SystemExit("Windows arm reservation does not retain authenticated ambiguous-result recovery")
+if arm_dirs.count("postcondition=$(windows_arm_reservation_postcondition_script") != 2 or arm_dirs.count('wssh "$guard') != 2:
+    raise SystemExit("Windows arm reservation does not verify the same postcondition after ambiguity")
+primary = arm_dirs.index('if wssh "$guard')
+durable_marker = arm_dirs.index(r"\$markerStream.Flush(\$true)", primary)
+primary_return = arm_dirs.index("return", durable_marker)
+ambiguity = arm_dirs.index("ambiguous Windows arm evidence reservation", primary_return)
+reconcile = arm_dirs.index("cannot reconcile Windows arm evidence reservation", ambiguity)
+if not primary < durable_marker < primary_return < ambiguity < reconcile:
+    raise SystemExit("Windows arm reservation recovery is out of order")
 required_client_launch_gate = r"""\$stderrPath,(\$dir + '/client-launch.ok'))) {"""
 forbidden_client_launch_gate = r"""\$stderrPath,\$dir + '/client-launch.ok')) {"""
 if windows_client.count(required_client_launch_gate) != 1 or forbidden_client_launch_gate in windows_client:

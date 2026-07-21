@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — a Windows evidence directory can be created successfully
 while the SSH call reports failure, voiding an otherwise healthy registered
 session before the transfer starts.
-**Status**: Open; fix, guard proof, verification, review, staging, and live retry pending.
+**Status**: Fixed, mutation-proved, and full-gate green; tactical review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: Pending
 
@@ -62,11 +62,19 @@ exact marker contents, and no unexpected directory contents.
 
 ## Files changed
 
-- `scripts/bench_ldt4_rigw.sh` — pending.
+- `scripts/bench_ldt4_rigw.sh` — nonce-bound durable reservation marker,
+  authenticated ambiguous-result reconciliation, and structural guard.
 
 ## Guard proof
 
-Pending.
+- Focused restored green: Bash syntax; 96-arm Bash 3.2 self-test with no SSH;
+  all 77 analyzer tests.
+- Production mutation: inverting the exact marker-content comparison from
+  `-cne` to `-ceq` made the static self-test fail at
+  `Windows arm reservation postcondition is not exact and marker-bound`.
+  Restoring the strict mismatch refusal returned the focused checks green.
+- Full repository gates pass: rustfmt check, strict workspace clippy, and the
+  complete workspace test suite.
 
 ## Coder dispute
 
@@ -74,8 +82,8 @@ None.
 
 ## Known gaps
 
-The fix, independent tactical review, additive staging, and a complete valid
-live run remain.
+Independent tactical review, additive staging, and a complete valid live run
+remain.
 
 ## Reviewer comments
 
