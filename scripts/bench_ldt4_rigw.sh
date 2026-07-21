@@ -853,7 +853,7 @@ ports_closed() {
 }
 
 q_quiet_gate() {
-    local deadline=$((SECONDS + 120)) load bad spotlight auto tm_running
+    local deadline=$((SECONDS + 300)) load bad spotlight auto tm_running
     while :; do
         bad=$(ps -axo comm= | awk '
             {name=$1; sub(/^.*\//,"",name)}
@@ -2556,6 +2556,7 @@ prepare = text[text.index("prepare_windows_runtime() {"):text.index("restore_win
 restore = text[text.index("restore_windows_runtime() {"):text.index("q_responder_for() {")]
 q_paths = text[text.index("assert_q_registered_paths() {"):text.index("assert_windows_registered_paths() {")]
 windows_paths = text[text.index("assert_windows_registered_paths() {"):text.index("mark_void() {")]
+q_quiet = text[text.index("q_quiet_gate() {"):text.index("windows_quiet_gate() {")]
 windows_start = text[text.index("start_windows_daemon() {"):text.index("stop_q_daemon() {")]
 windows_stop = text[text.index("stop_windows_daemon() {"):text.index("normalize_q_client_pid_list() {")]
 windows_client = text[text.index("run_windows_client() {"):text.index("run_client() {")]
@@ -2563,6 +2564,8 @@ required_launcher_stop = r"""if (\$c -and (Get-Process -Id \$launcher -ErrorActi
 forbidden_launcher_stop = r"""if (\$c -and (Get-Process -Id \$launcher -ErrorAction SilentlyContinue)) { Stop-Process -Id \$launcher -Force -ErrorAction Stop }"""
 if windows_stop.count(required_launcher_stop) != 1 or forbidden_launcher_stop in windows_stop:
     raise SystemExit("Windows launcher teardown does not tolerate exact launcher self-exit")
+if q_quiet.count("local deadline=$((SECONDS + 300))") != 1 or "local deadline=$((SECONDS + 120))" in q_quiet:
+    raise SystemExit("q quiet gate does not retain five-minute load-history recovery")
 required_client_launch_gate = r"""\$stderrPath,(\$dir + '/client-launch.ok'))) {"""
 forbidden_client_launch_gate = r"""\$stderrPath,\$dir + '/client-launch.ok')) {"""
 if windows_client.count(required_client_launch_gate) != 1 or forbidden_client_launch_gate in windows_client:

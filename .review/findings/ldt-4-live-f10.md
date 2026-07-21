@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — the unchanged q load ceiling can void a healthy session
 because its two-minute recovery window expires while the benchmark's one-minute
 load history is still decaying between registered arms.
-**Status**: Open; live evidence retained, no datum accepted.
+**Status**: Fixed, mutation-proved, and full-gate green; tactical review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: pending
 
@@ -54,11 +54,19 @@ minutes for load history to decay.
 
 ## Files changed
 
-- Pending.
+- `scripts/bench_ldt4_rigw.sh` — five-minute q quietness recovery and its
+  exact structural guard.
 
 ## Guard proof
 
-Pending.
+- Focused restored green: Bash syntax; 96-arm Bash 3.2 self-test with no SSH;
+  all 77 analyzer tests.
+- Production mutation: changing only q's recovery deadline from 300 back to
+  120 seconds made the static Bash self-test fail at
+  `q quiet gate does not retain five-minute load-history recovery`. Restoring
+  300 returned the focused checks green.
+- Full repository gates pass: rustfmt check, strict workspace clippy, and the
+  complete workspace test suite.
 
 ## Coder dispute
 
@@ -66,8 +74,7 @@ None.
 
 ## Known gaps
 
-Implementation, guard proof, full repository gates, tactical review, additive
-staging, and a complete valid live run remain.
+Tactical review, additive staging, and a complete valid live run remain.
 
 ## Reviewer comments
 
