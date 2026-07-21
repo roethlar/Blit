@@ -151,6 +151,14 @@ review loop from rig-W benchmarking** — the contention that destroyed a
   `visudo -c` rejects any other mode). ssh key authorized on netwatch-01 in
   **`C:\ProgramData\ssh\administrators_authorized_keys`** (michael is an admin
   there, so the per-user file is ignored). macOS firewall is OFF on `q`.
+- **ldt-4 harness staged 2026-07-21:** complete-history retained bundle
+  `~/blit-ldt4-stage-d53b5fd.bundle` has SHA-256
+  `08cb33935c66cf55e04a88ff0ff3a2a2633d4a443d3f8f7856808ee5303d0af7`
+  on nagatha and q. New retained checkout
+  `~/Dev/blit_v2_harness_d53b5fd` is clean, detached at exact `d53b5fd`, and
+  has the expected 1,930-commit target history. q's native Bash 3.2 no-SSH
+  harness self-test passes all 96 arms. This stages no new product binary; the
+  registered accepted `406a7e5` artifacts remain the run payload.
 - **`q` RUNS GITEA** (it is `origin`, `http://q:3000`). It idles cheaply, but
   **do not push to `origin` during a benchmark session**.
 

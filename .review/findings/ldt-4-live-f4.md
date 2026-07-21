@@ -2,7 +2,7 @@
 
 **Severity**: MEDIUM — every Windows-responder arm exits before daemon launch,
 so the registered matrix cannot produce evidence.
-**Status**: Fixed, mutation-proved, and tactically reviewed clean; additive staging and live retry pending.
+**Status**: Fixed, mutation-proved, tactically reviewed clean, and additively staged; live retry pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `d53b5fdd3b85fd61f377de917e16ba19aa65d137`
 
@@ -72,9 +72,10 @@ None.
 
 ## Known gaps
 
-No completed/timed live arm or transfer datum exists. Additive staging and a
-fresh live run remain. Formal Fable openreviews remain on owner-directed
-capacity hold.
+No completed/timed live arm or transfer datum exists. Exact `d53b5fd` is
+additively staged and its q Bash 3.2 self-test passes; a fresh live run remains
+and waits for q's registered 10 GbE adapter/link. Formal Fable openreviews
+remain on owner-directed capacity hold.
 
 ## Reviewer comments
 
