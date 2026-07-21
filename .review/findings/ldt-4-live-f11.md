@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — a Windows evidence directory can be created successfully
 while the SSH call reports failure, voiding an otherwise healthy registered
 session before the transfer starts.
-**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and additively staged; live retry pending.
+**Status**: Closed — fixed, mutation-proved, tactically reviewed clean, and validated by the complete 96-arm rig-W run.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `96a4e3b03caf43ee368efadc779e3324248067f6`
 
@@ -82,8 +82,9 @@ None.
 
 ## Known gaps
 
-A complete valid live run remains. Exact reviewed code `96a4e3b` is staged in
-the clean detached q checkout `/Users/michael/Dev/blit_v2_harness_96a4e3b`.
+None for this finding. Exact harness `96a4e3b03caf43ee368efadc779e3324248067f6`
+includes the fix and completed all 96 valid arms. Retained evidence is recorded
+at `docs/bench/ldt4-rigw-2026-07-21/`.
 
 ## Reviewer comments
 
