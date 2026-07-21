@@ -3,9 +3,9 @@
 **Severity**: MEDIUM — a Windows evidence directory can be created successfully
 while the SSH call reports failure, voiding an otherwise healthy registered
 session before the transfer starts.
-**Status**: Fixed, mutation-proved, and full-gate green; tactical review pending.
+**Status**: Fixed, mutation-proved, full-gate green, and tactically reviewed clean; additive staging and live retry pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: Pending
+**Commit**: `96a4e3b03caf43ee368efadc779e3324248067f6`
 
 ## Evidence
 
@@ -82,9 +82,11 @@ None.
 
 ## Known gaps
 
-Independent tactical review, additive staging, and a complete valid live run
-remain.
+Additive staging and a complete valid live run remain.
 
 ## Reviewer comments
 
-Pending.
+Tactical Grok 4.5/high review returned clean with no findings for exact range
+`6d3a0bc..96a4e3b`. It independently proved production `-cne`→`-ceq` red,
+restored focused green, and left a clean exact worktree. Record:
+`.review/results/ldt-4-live-f11-r1.grok-verdict.md`.

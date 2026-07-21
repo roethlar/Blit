@@ -1,0 +1,42 @@
+{
+  "record_type": "tactical_code_review",
+  "reviewer": {
+    "provider": "xAI",
+    "model": "grok-4.5",
+    "cli": "grok 0.2.106 (bde89716f679)",
+    "reasoning_effort": "high"
+  },
+  "review_contract": {
+    "finding_ids": [
+      "ldt-4-live-f11"
+    ],
+    "base_sha": "6d3a0bcc789d4153d809b538b66f06938fa51f7d",
+    "reviewed_sha": "96a4e3b03caf43ee368efadc779e3324248067f6",
+    "worktree": "/private/tmp/blit-grok-ldt4-f11-96a4e3b",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "019f86d1-9723-7691-bb7e-a0fb3c81b7b1",
+    "authoritative_completion": "terminal schema-constrained structuredOutput; clean after semantic, focused, mutation, restoration, and identity checks",
+    "envelope_note": "The CLI text envelope duplicated draft JSON and included non-authoritative internal false starts; only the terminal structuredOutput is recorded as the verdict."
+  },
+  "structured_output": {
+    "verdict": "clean",
+    "base_sha": "6d3a0bcc789d4153d809b538b66f06938fa51f7d",
+    "reviewed_sha": "96a4e3b03caf43ee368efadc779e3324248067f6",
+    "summary": "The marker-bound Windows arm reservation and one authenticated reconciliation after nonzero SSH remain fail-closed. The primary refuses a pre-existing arm path; reconciliation accepts only the exact plain directory, exact plain marker, exact nonce-bound contents, and exactly one child. The marker does not break later named evidence-file creation or collection, and reconciliation runs before measured transfer timing.",
+    "guard_proof": "Changing only the production marker comparison from -cne to -ceq while retaining the guard bytes made the self-test exit 1 at the exact marker-bound postcondition reason. Exact restoration returned Bash syntax, the 96-arm no-SSH self-test, and all 77 analyzer tests green. The clean detached worktree remained at the reviewed SHA with script SHA-256 0a0b7d783c8ef2d9262348c72a6d28f72d689a28c81a9a17cda29164b3b3bc2f.",
+    "findings": []
+  },
+  "checks": {
+    "identity": "clean detached 96a4e3b03caf43ee368efadc779e3324248067f6 with one-commit parent 6d3a0bcc789d4153d809b538b66f06938fa51f7d",
+    "bash_syntax": "pass",
+    "bash_3_2_selftest": "PASS (96 arms, no SSH)",
+    "analyzer_tests": "77 passed",
+    "scope_audit": "nonce-bound exclusive durable marker plus one exact authenticated reconciliation before timed transfer work",
+    "collision_audit": "pre-existing, missing, mismatched, linked, non-plain, or extra-content reservations remain terminal",
+    "guard_mutation": "production marker mismatch check -cne to -ceq failed the exact marker-bound structural guard; exact restoration returned green",
+    "independent_postcheck": "primary agent re-proved exact HEAD, clean status, byte identity, script SHA-256, Bash syntax, 96-arm self-test, and 77 analyzer tests"
+  },
+  "policy_note": "This is tactical advisory code review, not a formal openreview acceptance verdict."
+}
