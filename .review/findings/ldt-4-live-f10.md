@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — the unchanged q load ceiling can void a healthy session
 because its two-minute recovery window expires while the benchmark's one-minute
 load history is still decaying between registered arms.
-**Status**: Fixed, mutation-proved, full-gate green, and tactically reviewed clean; additive staging and live retry pending.
+**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and additively staged; live retry pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `c621e33fd9df7273a5f3a97bc03ddcc3f8fff36d`
 
@@ -74,7 +74,8 @@ None.
 
 ## Known gaps
 
-Additive staging and a complete valid live run remain.
+A complete valid live run remains. Exact reviewed code `c621e33` is staged in
+the clean detached q checkout `/Users/michael/Dev/blit_v2_harness_c621e33`.
 
 ## Reviewer comments
 

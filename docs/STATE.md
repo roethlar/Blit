@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-21 (q load-history recovery f10 tactical review clean; exact staging/live retry next)
+Last updated: 2026-07-21 (exact q load-history recovery f10 staged; live retry next)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,7 +10,7 @@ Last updated: 2026-07-21 (q load-history recovery f10 tactical review clean; exa
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — ADDITIVELY STAGE EXACT `c621e33`, THEN RUN:** exact staged `ef9ef0b` cleared f9 and completed 38 byte-identical arms. The next between-pair q quiet gate held the unchanged 3.0 load bar for 120 seconds, then voided at load1 3.53 with Spotlight 0.0. No current conflict survived and load1 decayed to 1.98 without intervention. Exact `c621e33` keeps the threshold and five-second cadence but extends only the out-of-arm recovery budget; it is mutation-proved/full-gate green and tactical Grok-clean. The retained session's 38 provisional rows remain invalid and ungraded.
+- **NEXT ACTION — RUN EXACT STAGED `c621e33`:** exact staged `ef9ef0b` cleared f9 and completed 38 byte-identical arms. The next between-pair q quiet gate held the unchanged 3.0 load bar for 120 seconds, then voided at load1 3.53 with Spotlight 0.0. No current conflict survived and load1 decayed to 1.98 without intervention. Exact `c621e33` keeps the threshold and five-second cadence but extends only the out-of-arm recovery budget; it is mutation-proved/full-gate green, tactical Grok-clean, and staged in a clean detached q checkout. The retained session's 38 provisional rows remain invalid and ungraded.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **WHY NO ldt-4 RIG-W DATA YET:** earlier retained sessions failed closed on fixtures, generated paths, endpoint DHCP, q hostname, Windows console-host classification, Windows client path syntax, and Windows launcher teardown. Exact `ef9ef0b` cleared all those gates and completed 38 arms, but retained session `ldt4-20260721T214439Z-ef9ef0b6f531` is void because q's fixed quiet gate expired before its one-minute load history decayed. Its 38 provisional rows are invalid and ungraded. Both ports are closed, no session process remains, and the prior active Windows daemon is restored byte-for-byte. `ldt-4-live-f10` owns the recovery bound; the quietness threshold does not change.
@@ -28,7 +28,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted. Exact `ef9ef0b` cleared repairs through Windows launcher teardown `f9` live and completed 38 arms. The retained retry then exposed q load-history recovery bound `f10` between arms; the session is void and every provisional row is invalid. Exact `c621e33` is mutation-proved/full-gate green and tactical Grok-clean before additive staging. Formal Fable openreview is held for capacity.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted. Exact `ef9ef0b` cleared repairs through Windows launcher teardown `f9` live and completed 38 arms. The retained retry then exposed q load-history recovery bound `f10` between arms; the session is void and every provisional row is invalid. Exact `c621e33` is mutation-proved/full-gate green, tactical Grok-clean, and additively staged for the live retry. Formal Fable openreview is held for capacity.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -56,7 +56,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `ef9ef0b` cleared live repairs through `f9` and completed 38 arms, then the retained retry exposed q load-history recovery finding `ldt-4-live-f10` between arms. No provisional row is valid. Exact `c621e33` is mutation-proved/full-gate green and tactical Grok-clean. Formal Fable openreview is held; additively stage the exact reviewed harness, then execute fresh quiet rig-W adaptive and role-invariance evidence.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `ef9ef0b` cleared live repairs through `f9` and completed 38 arms, then the retained retry exposed q load-history recovery finding `ldt-4-live-f10` between arms. No provisional row is valid. Exact `c621e33` is mutation-proved/full-gate green, tactical Grok-clean, and additively staged. Formal Fable openreview is held; execute fresh quiet rig-W adaptive and role-invariance evidence.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).
