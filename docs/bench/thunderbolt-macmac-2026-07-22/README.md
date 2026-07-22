@@ -130,4 +130,3 @@ does not grade rsync on an unrelated encryption bottleneck.
   any investigation of the remaining wire gap should start from profiling or
   existing counters, then use RAM-only confirmation under a separately
   approved tuning plan.
-
