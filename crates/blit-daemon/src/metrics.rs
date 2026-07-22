@@ -46,11 +46,6 @@ impl TransferMetrics {
         })
     }
 
-    #[allow(dead_code)] // Read by future GUI/TUI exposure RPC.
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
     #[inline]
     pub fn inc_push(&self) {
         if self.enabled {

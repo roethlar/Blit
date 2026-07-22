@@ -91,11 +91,6 @@ pub(crate) enum GateDenial {
     /// authorizes it. Per §4.3.3 rule 7, special ranges require an
     /// IP- or CIDR-form entry.
     SpecialRangeNeedsIpAuth(String),
-    /// The per-module override denied delegation against this module
-    /// even though the daemon-wide policy permits it. Populated from
-    /// the handler when `ModuleConfig::delegation_allowed` is false.
-    #[allow(dead_code)]
-    ModuleOptOut { module: String },
 }
 
 impl GateDenial {
@@ -123,9 +118,6 @@ impl GateDenial {
                     "source resolves to a special-range address that requires \
                      IP- or CIDR-form authorization (not a hostname entry): {detail}"
                 )
-            }
-            GateDenial::ModuleOptOut { module } => {
-                format!("module '{module}' opts out of being a delegation destination")
             }
         }
     }

@@ -165,7 +165,6 @@ pub async fn subscribe(
 /// completed before the ring rotated it out, or never
 /// existed).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum WatchSnapshot {
     /// Transfer is in flight. Embeds the active row.
     Active(blit_core::generated::ActiveTransfer),

@@ -118,7 +118,6 @@ impl ByteProgressSink {
     /// Construct a fresh sink backed by a new atomic. Daemon
     /// callers can ignore this and instead clone-from the
     /// counter their row already owns via `ByteProgressSink::from_counter`.
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             counter: Arc::new(AtomicU64::new(0)),

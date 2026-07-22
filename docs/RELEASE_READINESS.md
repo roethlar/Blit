@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** control-plane duplicate reconciled, 2026-07-22
+**As of:** dead-code hygiene complete, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -108,6 +108,11 @@ performance ceilings and hardware tuning remain post-release work.
   otp-10c-2 deleted it with the legacy gRPC sinks, fallback module, and four
   old drivers. Current payload code contains only session-used preparation and
   planning helpers.
+- Jobs watch no longer accepts the inert polling-interval option; its help now
+  describes stream updates. Unused/runtime-misplaced CLI dependencies, the
+  empty app transfer module, unused perf report wrapper, genuinely dead daemon
+  helpers, and stale dead-code suppressions are removed. Restoring the retired
+  flag makes its parser guard fail.
 
 ## Release blockers
 

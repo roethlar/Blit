@@ -171,10 +171,6 @@ impl ActiveSnapshot {
 /// 4. Stream errors fall back to a final GetState query so a
 ///    Subscribe Lagged or daemon disconnect doesn't leave the
 ///    operator without a terminal answer.
-///
-/// `args.interval_ms` is preserved on the CLI for backward
-/// compatibility but has no effect under the streaming model
-/// — Subscribe pushes; no polling cadence to configure.
 async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
     let remote = RemoteEndpoint::parse(&args.remote)
         .with_context(|| format!("parsing remote endpoint '{}'", args.remote))?;

@@ -1,9 +1,7 @@
-//! Performance-history toggles + summary read.
+//! Performance-history toggles + granular reads.
 //!
 //! Moved from `crates/blit-cli/src/diagnostics.rs` (perf path)
-//! in A.0. Thin wrappers around `blit_core::perf_history` plus a
-//! `query()` helper that bundles the three reads (enabled flag,
-//! history path, recent records) into a single result struct.
+//! in A.0. Thin wrappers around `blit_core::perf_history`.
 
 use blit_core::perf_history;
 use eyre::Result;
@@ -11,23 +9,11 @@ use std::path::PathBuf;
 
 pub use blit_core::perf_history::PerformanceRecord;
 
-/// Bundle returned by [`query`]. Callers (`blit diagnostics perf`,
-/// future TUI F4 diagnostics screen) render this however they
-/// like — JSON, text, table cells.
-#[derive(Debug, Clone)]
-pub struct PerfReport {
-    pub enabled: bool,
-    pub history_path: PathBuf,
-    pub records: Vec<PerformanceRecord>,
-}
-
 /// Read the persisted "perf history enabled" flag. Separate
-/// from [`query`] because the CLI's `diagnostics perf` verb
-/// treats the post-toggle refresh as best-effort: a malformed
+/// so the CLI's `diagnostics perf` verb can treat the post-toggle
+/// refresh as best-effort: a malformed
 /// `settings.json` shows the startup warning and falls back to
 /// the caller's existing value rather than failing the verb.
-/// Callers that want the bundled read (TUI F4 pane, scripted
-/// consumers) use [`query`] and propagate the error.
 pub fn read_enabled() -> Result<bool> {
     perf_history::perf_history_enabled()
 }
@@ -44,19 +30,6 @@ pub fn history_path() -> Result<PathBuf> {
 /// `blit_core::perf_history::read_recent_records`'s contract.
 pub fn read_records(limit: usize) -> Result<Vec<PerformanceRecord>> {
     perf_history::read_recent_records(limit)
-}
-
-/// One-call read of the three perf-history surfaces. Convenience
-/// for callers that want one-shot reads and don't need the
-/// best-effort split (TUI's F4 pane will likely use this; the
-/// CLI uses the granular functions above so it can keep
-/// pre-A.0's best-effort enabled-refresh semantics).
-pub fn query(limit: usize) -> Result<PerfReport> {
-    Ok(PerfReport {
-        enabled: read_enabled()?,
-        history_path: history_path()?,
-        records: read_records(limit)?,
-    })
 }
 
 /// Persist a new "perf history enabled" setting. Caller refreshes

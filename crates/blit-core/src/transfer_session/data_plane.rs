@@ -209,10 +209,6 @@ pub(super) struct ResponderDataPlaneRun {
     arm_tx: Option<mpsc::UnboundedSender<ResizeArm>>,
     shutdown: watch::Sender<bool>,
     task: Option<AbortOnDrop<Result<ReceiveTotals>>>,
-    /// The `session_token` half of every socket credential (the control
-    /// loop does not need it, but keeping it here documents the shape).
-    #[allow(dead_code)]
-    session_token: Vec<u8>,
     /// The receiver's advertised `max_streams` — the control loop refuses
     /// a resize that would grow past it (defense in depth; the source's
     /// dial already clamps to the same ceiling).
@@ -259,7 +255,6 @@ impl ResponderDataPlane {
         small_file_probe: Option<BoundSmallFileProbe>,
     ) -> ResponderDataPlaneRun {
         let ceiling = self.ceiling;
-        let session_token = self.session_token.clone();
         let (arm_tx, arm_rx) = mpsc::unbounded_channel::<ResizeArm>();
         let (shutdown, shutdown_rx) = watch::channel(false);
         let task = AbortOnDrop::new(tokio::spawn(self.accept_loop(
@@ -274,7 +269,6 @@ impl ResponderDataPlane {
             arm_tx: Some(arm_tx),
             shutdown,
             task: Some(task),
-            session_token,
             ceiling,
         }
     }

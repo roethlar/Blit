@@ -109,7 +109,6 @@ impl BlitService {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn with_modules(
         modules: HashMap<String, ModuleConfig>,
         force_grpc_data: bool,
@@ -244,7 +243,6 @@ pub(crate) fn tick_progress_once(
 /// Tests don't spawn this — they call [`tick_progress_once`]
 /// directly so the test ordering is deterministic and doesn't pick
 /// up arbitrary background events.
-#[allow(dead_code)]
 pub fn spawn_progress_ticker(svc: &BlitService) -> tokio::task::JoinHandle<()> {
     let active_jobs = svc.active_jobs.clone();
     let events_tx = svc.events_tx.clone();

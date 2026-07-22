@@ -113,9 +113,8 @@ pub const DEFAULT_RECENT_LIMIT: usize = 50;
 pub const JOB_EVENT_RING_CAP: usize = 64;
 
 /// What kind of transfer a row represents. Mirrors the
-/// dispatch sites in `service/core.rs`. When milestone C
-/// introduces the `TransferStarted.Kind` wire enum, the
-/// conversion will live in the GetState handler.
+/// dispatch sites in `service/core.rs` and maps to the wire
+/// enum through [`ActiveJobKind::to_wire`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActiveJobKind {
@@ -126,10 +125,8 @@ pub enum ActiveJobKind {
 }
 
 impl ActiveJobKind {
-    /// Stable, lowercased name used by logs / future wire
-    /// serialization (e.g. `GetState.active[].kind` once the
-    /// proto enum is mapped in b-3/b-4).
-    #[allow(dead_code)]
+    /// Stable lowercased names used by policy tests.
+    #[cfg(test)]
     pub fn as_str(self) -> &'static str {
         match self {
             ActiveJobKind::Push => "push",
@@ -171,9 +168,9 @@ impl ActiveJobKind {
     }
 }
 
-/// Outcome of an [`ActiveJobs::cancel`] call. The upcoming
-/// `CancelJob` RPC handler will map each variant onto a
-/// distinct gRPC status:
+/// Outcome of an [`ActiveJobs::cancel_authorized`] call. The
+/// `CancelJob` RPC handler maps each variant onto a distinct
+/// gRPC status:
 ///
 /// - `Cancelled` → `Code::Ok` with a body acknowledging the
 ///   cancel was fired.
@@ -188,7 +185,6 @@ impl ActiveJobKind {
 /// - `Unauthorized` → `Code::PermissionDenied` — the caller is not
 ///   the peer that started the transfer (audit-9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum CancelOutcome {
     Cancelled,
     Unsupported,
@@ -197,15 +193,10 @@ pub enum CancelOutcome {
 }
 
 /// One row of the `ActiveJobs` table. Fields mirror the
-/// `ActiveTransfer` proto message planned for `GetState` in
-/// §6.3 of the TUI design doc.
+/// `ActiveTransfer` proto message returned by `GetState`.
 ///
-/// Fields are `#[allow(dead_code)]` for this slice because
-/// the read consumer (`GetState` handler) lands in b-4. The
-/// `snapshot()` test in this module exercises them so the
-/// shape is locked in now.
+/// The `GetState` handler renders these fields into the wire row.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ActiveJob {
     pub transfer_id: String,
     pub kind: ActiveJobKind,
@@ -235,15 +226,11 @@ pub struct ActiveJob {
 }
 
 /// One entry in the recent-runs ring buffer. Fields mirror
-/// the `TransferRecord` proto message planned for
-/// `GetState.recent[]` in §6.3 of the TUI design doc.
+/// the `TransferRecord` proto message returned in
+/// `GetState.recent[]`.
 ///
-/// Fields are `#[allow(dead_code)]` for this slice because
-/// the read consumer (`GetState` handler) lands in b-4; the
-/// `recent()` tests in this module exercise them so the
-/// shape is locked in now.
+/// The `GetState` handler renders these fields into the wire row.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[allow(dead_code)]
 pub struct TransferRecord {
     pub transfer_id: String,
     pub kind: ActiveJobKind,
@@ -480,9 +467,7 @@ impl ActiveJobs {
     /// Construct a registry with a custom recent-runs ring
     /// depth. `limit == 0` is allowed and disables the ring
     /// (Drop still removes the active row; nothing is
-    /// preserved). Will be reached by the future
-    /// `GetState.GetStateRequest.recent_limit` plumbing.
-    #[allow(dead_code)]
+    /// preserved).
     pub fn with_recent_limit(limit: usize) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -554,10 +539,8 @@ impl ActiveJobs {
         }
     }
 
-    /// Try to cancel an active transfer by id. Returns a
-    /// [`CancelOutcome`] distinguishing the three outcomes
-    /// the upcoming `CancelJob` RPC needs to map onto gRPC
-    /// status codes.
+    /// Test-only authorization-free cancellation helper. Production
+    /// callers use [`Self::cancel_authorized`].
     ///
     /// Idempotent for `Cancelled`: firing an
     /// already-cancelled token is a no-op. The entry stays
@@ -570,7 +553,7 @@ impl ActiveJobs {
     /// is **not** fired in that case — handlers that don't
     /// race the token would silently keep running, and the
     /// caller would be lied to.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn cancel(&self, transfer_id: &str) -> CancelOutcome {
         let guard = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
         match guard.get(transfer_id) {
@@ -614,16 +597,13 @@ impl ActiveJobs {
         }
     }
 
-    /// Snapshot of every active row. Used by tests in this
-    /// slice; will be used by `GetState.active[]` once the
-    /// RPC handler lands in a later sub-slice.
+    /// Snapshot of every active row for `GetState.active[]`.
     ///
     /// `bytes_completed` is loaded from the per-row atomic
     /// inside the lock so the snapshot reflects every report
     /// that landed before the snapshot acquired the lock.
     /// Reports that arrive concurrently (or after the lock
     /// is released) show up in the next snapshot.
-    #[allow(dead_code)]
     pub fn snapshot(&self) -> Vec<ActiveJob> {
         self.inner
             .table
@@ -851,10 +831,7 @@ impl ActiveJobs {
         out
     }
 
-    /// Snapshot of the recent-runs ring, oldest first. Will
-    /// be consumed by `GetState.recent[]` once the RPC
-    /// handler lands.
-    #[allow(dead_code)]
+    /// Snapshot of the recent-runs ring, oldest first.
     pub fn recent(&self) -> Vec<TransferRecord> {
         self.inner
             .recent
@@ -1060,10 +1037,7 @@ impl ActiveJobGuard {
     /// Stable id assigned to this transfer. Exposed so handlers
     /// that want to surface the id in their wire response (M-C
     /// `TransferStarted.transfer_id`, M-Jobs `CancelJob`) can
-    /// read it. Currently only the tests in this module
-    /// consume it; future slices will read it from the
-    /// dispatch boundary.
-    #[allow(dead_code)]
+    /// read it.
     pub fn transfer_id(&self) -> &str {
         &self.transfer_id
     }
@@ -1107,8 +1081,8 @@ impl ActiveJobGuard {
     /// Reference to the per-row cancellation token. Handlers
     /// that opt into daemon-side cancellation race against
     /// `cancellation_token().cancelled()` inside a `tokio::select!`;
-    /// `ActiveJobs::cancel(id)` fires this token from outside
-    /// (via the CancelJob RPC in m-jobs-2).
+    /// `ActiveJobs::cancel_authorized(id, caller)` fires this token
+    /// from the `CancelJob` RPC.
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation
     }
@@ -1124,7 +1098,6 @@ impl ActiveJobGuard {
     /// holds; cloning is cheap and keeping a clone alive past
     /// Drop is harmless — reports after Drop just bump an
     /// orphaned atomic, no row to resurrect.
-    #[allow(dead_code)]
     pub fn bytes_counter(&self) -> ByteProgressSink {
         ByteProgressSink::from_counter(Arc::clone(&self.progress.bytes_completed))
     }

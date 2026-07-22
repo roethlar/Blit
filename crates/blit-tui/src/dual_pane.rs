@@ -78,7 +78,6 @@ impl Location {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // M2 providers populate Parent/Symlink/Other from real metadata.
 pub enum EntryKind {
     Place,
     Parent,

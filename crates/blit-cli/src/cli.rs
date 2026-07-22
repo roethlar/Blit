@@ -130,20 +130,14 @@ pub struct JobsWatchArgs {
     /// Transfer id to watch — typically obtained from
     /// `blit jobs list <remote>` or the `--detach` output.
     pub transfer_id: String,
-    /// Poll interval in milliseconds. Default 1000ms. A future
-    /// milestone-C `Subscribe` RPC will replace polling with a
-    /// streaming subscription; until then this flag controls
-    /// the GetState polling cadence.
-    #[arg(long, default_value_t = 1000)]
-    pub interval_ms: u64,
     /// Maximum wall-clock seconds to watch before giving up.
     /// 0 = wait forever. Useful for scripts that don't want
     /// to hang on a stuck transfer.
     #[arg(long, default_value_t = 0)]
     pub timeout_secs: u64,
-    /// Output as JSON-Lines (one object per poll, plus a
-    /// final outcome line). Default is a human-readable
-    /// updating ticker.
+    /// Output as JSON-Lines (one object per stream update,
+    /// plus a final outcome line). Default is a
+    /// human-readable stream.
     #[arg(long)]
     pub json: bool,
 }
@@ -658,6 +652,23 @@ mod tests {
             panic!("expected Copy");
         };
         assert!(args.drop_windows_metadata);
+    }
+
+    #[test]
+    fn jobs_watch_rejects_retired_poll_interval() {
+        let error = match Cli::try_parse_from([
+            "blit",
+            "jobs",
+            "watch",
+            "server",
+            "transfer-1",
+            "--interval-ms",
+            "50",
+        ]) {
+            Ok(_) => panic!("streaming watch has no polling interval"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("--interval-ms"));
     }
 
     #[test]

@@ -195,7 +195,9 @@ performance ratios are measured or graded.
    closed: all recorded abandoned foundation modules/helpers are gone, with
    zero-copy still governed separately by the later FAST decision. `w8-2` is
    closed as stale: otp-10c-2 already deleted the zero-caller control-plane
-   payload duplicate with its legacy sinks and fallback module.
+   payload duplicate with its legacy sinks and fallback module. `w8-3` is
+   closed: the inert watch flag, app stubs, unused/misplaced CLI dependencies,
+   dead daemon helpers, and stale dead-code suppressions are removed.
 7. **rel-7 — reproducible artifacts.** Build the supported target matrix from
    one exact commit, preserve build identity, generate checksums, and fail if a
    required artifact is absent.
