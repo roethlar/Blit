@@ -110,12 +110,20 @@ path, then push it.
   Force checksum validation for changed files (metadata comparison is the default).
 
 - `--resume`  
-  Enable block-level resumption for interrupted transfers. Compares source and
-  destination files block-by-block (hashing) and transfers only the changed parts.
-  Useful for resuming large file transfers or updating files with small changes.
+  Use block-level comparison to continue eligible partial files. This applies
+  to local, push, pull, and remote-to-remote transfers.
+
+- `--retry <N>`
+  Retry up to `N` times after a transient failure. Each attempt re-runs
+  destination comparison, so normal comparison skips files now complete;
+  flags that force copying still apply. With `--resume`, eligible partial
+  files continue at block granularity. The default is 0 (no retries).
+
+- `--wait <SECONDS>`
+  Wait this many seconds between retries (default: 5).
 
 - `--verbose`  
-  Emit planner heartbeat messages and fast-path decisions to stderr.
+  Emit detailed transfer diagnostics.
 
 - `--progress`  
   Show an interactive ASCII spinner while the transfer runs.

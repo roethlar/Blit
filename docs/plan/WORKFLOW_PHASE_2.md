@@ -1,9 +1,26 @@
-# Phase 2: Streaming Orchestrator & Local Operations
+# Phase 2: Streaming Orchestrator & Local Operations (historical)
 
-**Goal**: Deliver the local transfer pipeline defined in plan v6 (streaming planner, adaptive predictor, local performance history, and progress UX) while keeping FAST/SIMPLE/RELIABLE/PRIVATE principles intact.
+**Goal**: Historical proposal for the local transfer pipeline defined in plan v6 (streaming planner, adaptive predictor, local performance history, and progress UX) while keeping FAST/SIMPLE/RELIABLE/PRIVATE principles intact.
 **Prerequisites**: Phase 0 & 1 complete (workspace, ported modules, gRPC scaffolding).
-**Status**: Shipped (was: In progress (streaming planner + fast-path routing in place))
-**Critical Path**: Adaptive predictor/performance history, CLI progress UX.
+**Status**: Historical
+**Critical Path**: None; this document is not an active implementation or release checklist.
+
+## Reality correction (2026-07-22)
+
+This plan was previously and incorrectly marked Shipped. The promised
+`TransferFacade::stream_local_plan`, `PlannerEvent`, `drive_planner_events`,
+planner heartbeat, and 10-second local-planner stall detector never shipped.
+The adaptive predictor was recorded but never consumed for routing. The old
+orchestrator fast paths existed for a time, then were deleted at otp-11b after
+an unsound journal skip was found.
+
+Current local, push, pull, and remote-to-remote transfers use the unified
+`transfer_session`. It streams manifest entries, applies destination diffs in
+bounded chunks, and has transfer/data-plane stall protection; those are not
+the local planner state machine promised here. Current behavior and release
+status live in `docs/TRANSFER_SESSION.md`, `docs/STATE.md`, and
+`docs/RELEASE_READINESS.md`. The remaining text is retained as historical
+design intent, not proof that a feature shipped.
 
 ## Success Criteria
 
@@ -26,10 +43,10 @@
 
 | Task | Description | Deliverable |
 |------|-------------|-------------|
-| 2.1.1 | Refactor `TransferFacade::build_local_plan` into an async stream producing batches. | ✅ `TransferFacade::stream_local_plan` emitting `PlannerEvent` |
-| 2.1.2 | Implement heartbeat scheduler (1 s default, adaptive 0.5 s when workers are idle). | ✅ Heartbeat loop in `drive_planner_events` |
-| 2.1.3 | Add 10 s stall detector (planner + workers idle) with error messaging. | ✅ Stall guard in `drive_planner_events`; Windows+Linux verified |
-| 2.1.4 | Wire fast-path routing: tiny manifests → direct copy; single huge file → large-file worker. | ✅ Fast-path routing implemented in orchestrator; dedicated tests follow under 2.4.x. |
+| 2.1.1 | Refactor `TransferFacade::build_local_plan` into an async stream producing batches. | Not shipped as specified; named API never existed in the completed tree. |
+| 2.1.2 | Implement heartbeat scheduler (1 s default, adaptive 0.5 s when workers are idle). | Not shipped. |
+| 2.1.3 | Add 10 s stall detector (planner + workers idle) with error messaging. | Not shipped; current transfer stall guards are a different mechanism. |
+| 2.1.4 | Wire fast-path routing: tiny manifests → direct copy; single huge file → large-file worker. | Shipped historically in the old orchestrator, then retired with that architecture at otp-11b. |
 
 ### 2.2 Adaptive Predictor & Telemetry
 
@@ -37,7 +54,7 @@
 |------|-------------|-------------|
 | 2.2.1 | Implement local performance history writer (capped JSONL). | `perf_history.rs` with rotate-on-size logic. |
 | 2.2.2 | Build EMA-based predictor segmented by filesystem profile. | Predictor struct + serde (for persistence). |
-| 2.2.3 | Integrate predictor into orchestrator routing decisions. | Orchestrator chooses streaming vs. fast-path based on prediction. |
+| 2.2.3 | Integrate predictor into orchestrator routing decisions. | Not shipped; predictor output was never consumed for routing. |
 | 2.2.4 | Add `blit diagnostics perf` CLI command. | ✅ Command prints recent runs + stats. |
 | 2.2.5 | Add CLI/config toggle for telemetry (`profile` command remains visible). Replace environment variable usage. | Diagnostics toggles (`blit diagnostics perf --enable/--disable`) + settings file. |
 
@@ -55,7 +72,7 @@
 
 | Task | Description | Deliverable |
 |------|-------------|-------------|
-| 2.4.1 | Extend unit tests for planner streaming, predictor, stall detector. | `transfer_engine` streaming tests passing on Windows/Linux |
+| 2.4.1 | Extend unit tests for planner streaming, predictor, stall detector. | Not shipped; the claimed planner/stall machinery and tests do not exist. |
 | 2.4.2 | Add integration tests covering 1-file, 8-file, 100k-file, checksum mirror scenarios. | `tests/integration/local_transfers.rs` exercises tiny vs streaming manifests; large/100k cases still pending. |
 | 2.4.3 | Keep macOS/Linux + Windows benchmarks v2-only (synthetic payload, perf-history disabled by default) and capture rsync/robocopy baselines. | `scripts/bench_local_mirror.sh` (vs `rsync`) / `scripts/windows/bench-local-mirror.ps1` (vs `robocopy`) emit summary timings + log paths. |
 | 2.4.4 | Quantify performance history warm-up impact (first vs. 10th vs. 100th run) across representative workloads. | Benchmark report captured in docs with hard numbers and log references. |
@@ -86,10 +103,10 @@
 | Progress UI regresses non-interactive usage | Provide quiet mode, ensure logs respect TTY detection |
 | Telemetry log growth | Size cap + rotation; disable when env set |
 
-## Exit Checklist (Phase 2 Complete)
+## Historical exit checklist (never completed)
 
-- [x] Streaming planner + heartbeat + stall detector merged.
-- [x] Performance history/predictor integrated; diagnostics command works.
+- [ ] Streaming planner + heartbeat + stall detector merged. **Not shipped.**
+- [ ] Performance history/predictor integrated; diagnostics command works. **History/diagnostics shipped, but predictor-driven routing did not.**
 - [x] CLI progress indicator + flag cleanup in place.
 - [ ] New unit/integration tests pass.
     - Local run: `cargo test --all-targets` (2025-10-18)
@@ -98,3 +115,6 @@
 - [ ] Benchmarks executed and recorded in Phase 2.5 doc.
 - [ ] Remote push streaming validated (<1 s first-byte) across Linux/macOS/Windows with logs captured.
 - [ ] DEVLOG and docs updated with outcomes.
+
+This unchecked historical list is not a current release gate; use
+`docs/RELEASE_READINESS.md` for the release boundary.

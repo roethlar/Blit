@@ -3,11 +3,11 @@
 //! generic retry loop. Part 2 wires the CLI flags and the transfer
 //! dispatch through `run_with_retries`.
 //!
-//! This is viable because blit transfers are **resumable** — a retry
-//! re-runs the same transfer, the manifest compare only re-sends
-//! missing/changed files, so a retry continues rather than restarts. The
-//! audit-1c stall-timeout is what turns an infinite stall into the clean,
-//! fast, retryable failure this loop catches.
+//! A retry re-runs the same transfer and its destination comparison. Normal
+//! comparison skips files now complete; modes that force copying still do so.
+//! When resume is enabled, eligible partial files continue at block
+//! granularity. The audit-1c stall timeout turns an infinite stall into the
+//! bounded, retryable failure this loop catches.
 
 use std::future::Future;
 use std::time::Duration;
@@ -24,8 +24,8 @@ pub use blit_core::remote::retry::is_retryable;
 /// only when [`is_retryable`] accepts the error; a fatal error returns
 /// immediately. `retries == 0` reproduces the no-retry default.
 ///
-/// The transfer's resumability means each retry continues the prior
-/// attempt rather than restarting from scratch.
+/// Each retry re-runs the caller's destination comparison. Callers that enable
+/// resume can also continue eligible partial files at block granularity.
 pub async fn run_with_retries<F, Fut>(retries: u32, wait: Duration, mut attempt: F) -> Result<()>
 where
     F: FnMut(u32) -> Fut,

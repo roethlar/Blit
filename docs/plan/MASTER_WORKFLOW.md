@@ -1,6 +1,11 @@
 # Blit v2 Master Workflow
 
-**Status**: Active
+**Status**: Historical
+
+**Reality correction (2026-07-22)**: This workflow is not the current plan.
+Its Phase 2 streaming-planner/heartbeat claims were never completed as written,
+and the old orchestrator was later replaced by the unified transfer session.
+Use `docs/STATE.md` and its named active plans for current work.
 
 **Project**: Blit v2 – feature-complete hybrid transport implementation  
 **Plan Reference**: [greenfield_plan_v6.md](./greenfield_plan_v6.md)  
@@ -31,17 +36,17 @@
 |-------|---------|--------------|
 | **Phase 0 – Foundation** | Workspace, core library port, baseline CLI/daemon scaffolding | ✅ Complete |
 | **Phase 1 – gRPC Scaffolding** | Proto definitions, tonic wiring, build plumbing | ✅ Complete |
-| **Phase 2 – Streaming Orchestrator & Local Ops** | Streaming planner, predictor, local CLI UX | Gate: local `copy`/`mirror`/`move` fast & reliable; tests and benchmarks pass |
+| **Phase 2 – Historical Local Orchestrator Plan** | Proposed streaming planner, predictor, local CLI UX; never completed as written and later superseded | Historical only; see `WORKFLOW_PHASE_2.md` reality correction |
 | **Phase 2.5 – Validation Checkpoint** | Benchmark parity against v1 | Gate: local workloads ≥ 95 % v1 throughput; resource usage within budgets |
 | **Phase 3 – Remote Operations** | Hybrid transport, remote CLI verbs, admin RPCs, mDNS discovery | Gate: remote `copy`/`mirror`/`move`, `scan`, `list`/`ls`, `find`, `du`, `df`, `rm`, `profile` all succeed with fallback + error handling |
 | **Phase 4 – Production Hardening** | Packaging, documentation, service polish | Gate: packages & installers, integration suite, docs complete |
 | **Phase 3.5 – RDMA (Deferred)** | RDMA/RoCE integration | Deferred until after core release (recorded in plan for future work) |
 
-### Detailed Gates
-- **Phase 2 Gate**:  
+### Historical detailed gates
+- **Phase 2 Gate (not met as written)**:
   - `blit copy` / `blit mirror` / `blit move` (local) deliver within FAST target.  
-  - Streaming planner heartbeat + stall detector operational.  
-  - Predictor/history toggles documented; CLI remains quiet by default with verbose hooks.  
+  - Streaming planner heartbeat + stall detector were proposed but never operational.
+  - Predictor/history toggles were documented, but predictor-driven routing never shipped.
   - Unit/integration tests green.
 
 - **Phase 2.5 Gate**:  
@@ -84,7 +89,7 @@ Future architectural decisions must be recorded here and in DEVLOG before implem
 
 Use these documents for day-to-day execution:
 
-- **[WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md)** – Streaming orchestrator, predictor, local CLI UX.
+- **[WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md)** – Historical streaming-orchestrator proposal; not a current implementation record.
 - **[WORKFLOW_PHASE_2.5.md](./WORKFLOW_PHASE_2.5.md)** – Benchmark/validation checklist.
 - **[WORKFLOW_PHASE_3.md](./WORKFLOW_PHASE_3.md)** – Remote transport, CLI verbs, admin RPCs, mDNS.
 - **[WORKFLOW_PHASE_4.md](./WORKFLOW_PHASE_4.md)** – Packaging, docs, integration tests.

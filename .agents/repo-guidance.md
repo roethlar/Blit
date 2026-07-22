@@ -177,7 +177,7 @@ consent (`docs/DECISIONS.md` D-2026-06-07-1).
 
 - Rust edition 2021; format with rustfmt. Modules snake_case, types
   PascalCase, constants SHOUT_CASE; match existing names
-  (`transfer_session`, `TransferSession`, `PLAN_OPTIONS`).
+  (`transfer_session`, `SessionFault`, `CONTRACT_VERSION`).
 - No blocking calls inside async contexts (use async send APIs in Tokio).
 - Prefer async-aware tests (`#[tokio::test]`) for planner/engine work; keep
   tests deterministic; capture long logs under `logs/`.
@@ -204,7 +204,7 @@ consent (`docs/DECISIONS.md` D-2026-06-07-1).
 
 ## Commit and Docs Hygiene
 
-- Commit subject: short imperative ("Add streaming planner heartbeat").
+- Commit subject: short imperative ("Preserve transfer error context").
   Review-loop commits: `Fix <id>: <one-line summary>` per `.review/README.md`.
 - After meaningful work: append a `DEVLOG.md` entry (newest-first, ISO
   timestamp) and update `docs/STATE.md` — the `handoff` procedure does both.

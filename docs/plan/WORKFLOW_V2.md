@@ -4,11 +4,16 @@
 
 This document outlines the high-level, phased plan for completing `blit-v2`. It serves as the strategic map for the project.
 
+**Reality correction (2026-07-22):** The Phase 2 streaming planner,
+heartbeat, and local-planner stall guard below never shipped. The old
+orchestrator was later replaced by the unified transfer session. This file is
+retained as historical intent; `docs/STATE.md` names the active plans.
+
 ## Phase 2: Streaming Orchestrator & Local Operations
 
 **Goal:** Realise the v5 local design—streaming planner, adaptive predictor, and performance-history-backed heuristics.
 
-- ✅ Streaming planner + heartbeat/stall guard wired into `TransferOrchestrator`.
+- ❌ Streaming planner + heartbeat/stall guard was never wired as claimed.
 - 🔄 Next: predictor refinements, progress UI, Windows/Linux parity tests.
 - Ensure tests/benchmarks cover new behaviour; keep docs/logs current.
 

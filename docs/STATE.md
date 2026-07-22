@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (dead copy logger removed)
+Last updated: 2026-07-22 (w10 documentation/help truth reconciled)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -20,8 +20,9 @@ Last updated: 2026-07-22 (dead copy logger removed)
   admitted six corrections, now all fixed one per commit with focused proofs.
   rel-5 carries exact byte/file totals and carrier outcome through daemon, CLI,
   and TUI consumers. Temporary daemons now retain bounded stderr, include it in
-  startup failures, and retry transient early exits. rel-6 has closed every
-  review row through `w5-5`; dirty build IDs are exact without docs churn.
+  startup failures, and retry transient early exits. rel-6 has closed the
+  design-review queue through `w10`; dirty build IDs are exact without docs
+  churn. The remaining handshake row is fixed locally and awaits ledger close.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -126,8 +127,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    performance status flip are not release gates (D-2026-07-22-1).
 4. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
    resumes/re-derives after ONE_TRANSFER_PATH ships.
-5. **PAUSED: design-review queue** (`REVIEW.md`; `w10-docs-batch` is next;
-   reconcile each recorded claim against the unified session code first).
+5. **Design-review queue reconciled through `w10`.** The remaining unchecked
+   handshake row has a locally mutation-proved fix; hosted confirmation stays
+   a release blocker rather than a reason to misclassify the code repair.
 6. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
    Pro daemon CPU-bound below 10 GbE from SSD cache). Executes AFTER
    cutover as a runtime-selected write strategy in the unified receive
@@ -189,9 +191,6 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Open questions
 
-- **(SLOTTED 2026-07-12 — owner ack)** `docs/WHITEPAPER.md` §8 (~line
-  592) describes the deleted `determine_remote_tuning` — fix folded
-  into **w10-docs-batch**; no one-off edit.
 - **(PARTIALLY RESOLVED 2026-07-04)** Windows triage: w9-3 fixed the
   Linux daemon-spawn flakiness; **windows-latest CI has never been
   observed green — check it live, do not record push state here.**

@@ -1180,17 +1180,12 @@ use super::data_plane::{
 /// This is the symmetric counterpart to [`execute_sink_pipeline_streaming`]:
 /// where the outbound executor takes a [`TransferSource`] and dispatches
 /// payloads round-robin across N sinks, this one consumes a single
-/// inbound wire (parsing record headers and producing
-/// [`PreparedPayload::FileStream`] / [`PreparedPayload::TarShard`] /
-/// [`PreparedPayload::FileBlock`] events) and feeds them to a single sink
-/// sequentially. Multi-stream parallelism comes from spawning N invocations,
-/// one per inbound TCP connection.
-///
-/// Both directions converge on `TransferSink::write_payload`: file data
-/// hits disk through `FsTransferSink::write_payload(FileStream { … })`,
-/// which uses the same `receive_stream_double_buffered` helper as the
-/// daemon's push receiver and the client's pull receiver — one path,
-/// one optimization surface.
+/// inbound wire and feeds one sink sequentially. Whole-file records borrow a
+/// size-limited reader from the socket and call
+/// [`TransferSink::write_file_stream`] directly; tar shards and resume-block
+/// records become [`PreparedPayload`] values and use
+/// [`TransferSink::write_payload`]. Multi-stream parallelism comes from
+/// spawning N invocations, one per inbound TCP connection.
 pub async fn execute_receive_pipeline<R: AsyncRead + Unpin + Send>(
     socket: &mut R,
     sink: Arc<dyn TransferSink>,

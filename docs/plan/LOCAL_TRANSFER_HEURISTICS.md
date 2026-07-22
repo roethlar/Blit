@@ -4,6 +4,13 @@
 
 **Goal:** Deliver the fastest possible local `copy`/`mirror` experience across *all* workloads while preserving the SIMPLE and RELIABLE guarantees. This document captures the full design we intend to implement in Phase 2 for Blit v2. There is no staged rollout—every mechanism described here will ship together once complete.
 
+**Reality correction (2026-07-22):** The streaming planner, heartbeat,
+10-second local-planner stall detector, and predictor-driven routing described
+below never shipped. The historical fast-path orchestrator was later deleted at
+otp-11b. Current transfers use the unified `transfer_session`; see
+`docs/TRANSFER_SESSION.md`. Everything below is retained design history, not a
+description of current behavior or approved future work.
+
 ---
 
 ## 1. Design Tenets
@@ -188,4 +195,6 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
 
 ---
 
-**Status:** Updated design approved for immediate implementation. No further staged phases; work continues until the entire orchestration stack meets performance goals.
+**Historical disposition:** This design was not completed as written and is no
+longer approved for implementation. The unified transfer session superseded its
+orchestration model.

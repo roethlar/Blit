@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** dead copy logger removed, 2026-07-22
+**As of:** w10 documentation/help reconciliation, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -10,7 +10,7 @@ performance ceilings and hardware tuning remain post-release work.
 ## Proven
 
 - Local formatting, strict workspace clippy, workspace tests, and docs checks
-  passed at `43f156d` before this docs-only audit.
+  passed for the w10 candidate on 2026-07-22.
 - Linux and macOS tests, formatting, and clippy passed on published GitHub head
   `dcf9245` in CI run `29584631185` on 2026-07-17.
 - ldt-1 through ldt-3 established one SOURCE-owned adaptive controller,
@@ -123,6 +123,13 @@ performance ceilings and hardware tuning remain post-release work.
 - The copy engine no longer accepts a logger that was always a production
   no-op. Errors still return with caller context; the unused file logger and
   its blit-core dependency are gone and guarded against reintroduction.
+- Public reliability help now states the actual unified-session contract:
+  retry re-applies the selected destination comparison, while `--resume`
+  continues eligible partial files block-wise for local, push, pull, and remote-to-remote. A
+  generated-help test failed before the correction and passes after it. False
+  Phase 2 shipped claims, the nonexistent `FileStream` payload description,
+  and the deleted static-tuning path are corrected to current or explicitly
+  historical truth. No transfer or hardware test was used.
 
 ## Release blockers
 

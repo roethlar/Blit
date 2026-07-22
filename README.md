@@ -11,7 +11,7 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 - **CLI and Daemon Binaries**
   Minimal, ergonomic command-line interface; full daemon/server for automation and concurrent requests.
 - **Resumable Transfers**
-  Block-level resume with Blake3 hashing (`--resume`). Interrupted transfers continue from where they stopped; only changed blocks are transferred.
+  With `--resume`, eligible partial files continue through block-level Blake3 comparison across local, push, pull, and remote-to-remote transfers. Retries re-run the selected destination comparison (so normal comparison skips files now complete); partial-file continuation requires `--resume`.
 - **Hybrid Transport**
   TCP data plane for high-throughput transfers (10+ Gbps), with gRPC fallback for diagnostics.
 - **Platform Optimization**

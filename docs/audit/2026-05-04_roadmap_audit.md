@@ -143,9 +143,9 @@ pipeline.
 
 | Phase | Feature | State | Evidence |
 |---|---|---|---|
-| 1 | `PreparedPayload::FileStream` variant | SHIPPING | `crates/blit-core/src/remote/transfer/payload.rs` exposes `FileStream`. |
-| 2 | Sink support for `FileStream` (Fs/Null/DataPlane/GrpcFallback) | SHIPPING | `remote/transfer/sink.rs:565` "Relay case: bytes arrive on `reader`". `FsTransferSink::write_file_stream`. |
-| 3 | `DataPlaneSource` (read records off socket, emit `FileStream` payloads) | SHIPPING | `remote/transfer/source.rs` (look for "off the wire by DataPlaneSource"); `data_plane.rs:183`. |
+| 1 | Streaming whole-file receive | CORRECTED 2026-07-22 | No `PreparedPayload::FileStream` variant exists. `execute_receive_pipeline` hands a size-limited borrowed reader directly to `TransferSink::write_file_stream`. |
+| 2 | Sink support for streamed files | SHIPPING | `FsTransferSink::write_file_stream` consumes the borrowed reader; non-stream payloads still use `write_payload`. |
+| 3 | TCP file-record decode | SHIPPING | `execute_receive_pipeline` decodes `DATA_PLANE_RECORD_FILE` and calls `write_file_stream` directly; it does not emit a payload variant. |
 | 4 | `execute_receive_pipeline` executor | SHIPPING | `remote/transfer/pipeline.rs:201` `pub async fn execute_receive_pipeline`. |
 | 5 | Daemon push-receive call site swap | SHIPPING | `crates/blit-daemon/src/service/push/data_plane.rs:152-170` calls `execute_receive_pipeline`. |
 | 6 | Daemon pull-receive call site swap (client-side application loop in `pull.rs`) | SHIPPING | `crates/blit-core/src/remote/pull.rs:1552-1573` `execute_receive_pipeline`. |
@@ -248,7 +248,7 @@ Historical phase workflows. Items called out:
 
 | Item | State | Evidence |
 |---|---|---|
-| Streaming planner / heartbeat / 10s stall detector (Phase 2) | SHIPPING | `transfer_facade` was deleted in 2026-04-14 unification but the streaming-planner role is now performed by `TransferSource → DiffPlanner → execute_sink_pipeline_streaming`. Equivalent behavior preserved. (Cf. DEVLOG 2026-04-14.) |
+| Streaming planner / heartbeat / 10s stall detector (Phase 2) | CORRECTED 2026-07-22 — NOT SHIPPED AS SPECIFIED | The pipeline streamed work, but the promised `PlannerEvent` heartbeat/state machine and local-planner 10s stall detector never existed. Current transfer stall guards are not equivalent proof. |
 | Local performance history (capped JSONL) | SHIPPING | `perf_history.rs`. |
 | EMA-based predictor + integration | PARTIAL | Trained, persisted, but **predictions never read** (see cross-cutting). |
 | `blit diagnostics perf` CLI | SHIPPING | `crates/blit-cli/src/diagnostics.rs:8-118`. |
@@ -323,8 +323,8 @@ Phase 2 implementation design.
 
 | Feature | State | Evidence |
 |---|---|---|
-| §3 Streaming planner + heartbeat + 10 s stall detector | SHIPPING | Per Phase 2 above. |
-| §4 Immediate fast-paths (≤8 files & ≤100 MB direct copy; single ≥1 GiB file dispatched immediately) | SHIPPING | `orchestrator/fast_path.rs`; `maybe_select_fast_path` at `orchestrator.rs:204`. |
+| §3 Streaming planner + heartbeat + 10 s stall detector | CORRECTED 2026-07-22 — NOT SHIPPED AS SPECIFIED | See corrected Phase 2 row above. |
+| §4 Immediate fast-paths (≤8 files & ≤100 MB direct copy; single ≥1 GiB file dispatched immediately) | HISTORICAL / RETIRED | These existed in the old orchestrator, which was deleted at otp-11b when local transfer moved to the unified session. |
 | §5 Performance history (capped JSONL, signature, profile) | SHIPPING | `perf_history.rs`. |
 | §6 Adaptive predictor (linear, EMA, FS-segmented, init defaults, 1 s threshold routing) | PARTIAL — **predictions never consumed** | See cross-cutting. The ≤1 s routing decision in §6.2 is not actually implemented in the orchestrator; orchestrator only uses `derive_local_plan_tuning` (which doesn't use the predictor). |
 | §7 Worker/buffer tuning (auto, debug `--workers` limiter, hidden in help) | SHIPPING | CLI accepts `--workers`; `transfer_plan.rs` derives chunk sizes from total bytes. |

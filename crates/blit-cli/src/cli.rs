@@ -212,7 +212,7 @@ pub struct TransferArgs {
     /// Perform a dry run without making changes
     #[arg(long)]
     pub dry_run: bool,
-    /// Keep verbose transfer logs
+    /// Emit detailed transfer diagnostics
     #[arg(long, short = 'v')]
     pub verbose: bool,
     /// Show an interactive progress indicator.
@@ -256,7 +256,8 @@ pub struct TransferArgs {
     pub delete_scope: String,
 
     // -- Reliability options: recovery + retries.
-    /// Resume interrupted transfers using block-level comparison
+    /// Use block-level comparison to continue eligible partial files for
+    /// local, push, pull, and remote-to-remote transfers
     #[arg(long, help_heading = "Reliability")]
     pub resume: bool,
     /// Discard Windows file attributes and named data streams.
@@ -266,9 +267,10 @@ pub struct TransferArgs {
     #[arg(long, help_heading = "Reliability")]
     pub drop_windows_metadata: bool,
     /// Retry the transfer up to N times on a transient failure (network
-    /// drop, stall timeout). 0 (default) disables retries. Because
-    /// transfers are resumable, each retry continues rather than
-    /// restarts.
+    /// drop, stall timeout). Each retry re-runs destination comparison, so
+    /// normal comparison skips files now complete; flags that force copying
+    /// still apply. With --resume, eligible partial files continue at block
+    /// granularity. 0 (default) disables retries.
     #[arg(
         long,
         value_name = "N",
@@ -636,6 +638,34 @@ mod tests {
         };
         assert_eq!(args.retry, 3);
         assert_eq!(args.wait, 10);
+    }
+
+    #[test]
+    fn reliability_help_matches_retry_and_resume_behavior() {
+        let command = Cli::command();
+        let copy = command
+            .find_subcommand("copy")
+            .expect("copy subcommand exists");
+        let help_for = |id: &str| {
+            let argument = copy
+                .get_arguments()
+                .find(|argument| argument.get_id() == id)
+                .unwrap_or_else(|| panic!("{id} argument exists"));
+            argument
+                .get_long_help()
+                .or_else(|| argument.get_help())
+                .expect("argument has help")
+                .to_string()
+        };
+
+        let resume = help_for("resume");
+        assert!(resume.contains("eligible partial files"));
+        assert!(resume.contains("local, push, pull, and remote-to-remote"));
+
+        let retry = help_for("retry");
+        assert!(retry.contains("Each retry re-runs destination comparison"));
+        assert!(retry.contains("flags that force copying still apply"));
+        assert!(retry.contains("With --resume, eligible partial files continue at block"));
     }
 
     #[test]

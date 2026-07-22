@@ -3,11 +3,10 @@
 **Audience:** an LLM agent (or human reviewer) being asked to assess code
 quality, architectural soundness, and likely bug surfaces.
 
-**Repo:** `~/dev/Blit` (Rust workspace, ~26 KLOC excluding generated proto).
-Three crates: `blit-core` (library), `blit-cli` (produces the `blit`
-user binary — name set via `[[bin]] name = "blit"`; admin verbs are
-merged in here, no separate `blit-utils`), `blit-daemon` (server
-binary). Workspace `Cargo.toml` lists them; nothing else.
+**Repo:** Rust workspace with six members: `blit-core`, `blit-app`,
+`blit-cli` (the `blit` user binary; admin verbs are merged here),
+`blit-daemon`, `blit-tui`, and `blit-prometheus-bridge`. The workspace root is
+virtual; integration tests live under individual crates.
 
 **Stated philosophy:** "fastest, most reliable, most stable file transfer
 in any scenario." Adaptive tuning over hardcoded constants. Identical data
@@ -332,9 +331,9 @@ Inputs: total bytes of the manifest, number of files, prior `perf_history`
 records keyed by transfer profile. Output values are smoothed across
 runs (`crates/blit-core/src/perf_predictor.rs`).
 
-Currently `auto_tune` does NOT cover manifest-batching parameters or
-receive-side parallelism; those are hardcoded in places. **This is the
-top architectural gap** — see § 8.
+Historically, `auto_tune` did not cover manifest batching or receive-side
+parallelism. That observation belonged to the deleted engine and is not a
+current architectural prescription; §8 records current ownership.
 
 ---
 
@@ -373,6 +372,11 @@ protocol, not rsync's rolling checksum.
 
 These are the changes the last few weeks touched. A reviewer should
 focus here for correctness & corner cases.
+
+**Historical architecture note (2026-07-22):** Sections 7.4–7.6 describe
+bugs and fixes in the deleted Push/PullSync drivers. They remain useful
+provenance, but their snippets and reviewer prompts are not descriptions of
+the current unified session.
 
 ### 7.1 Receive-pipeline unification (`1baa981`, `a232dbd`, `b64bfd8`)
 
@@ -457,7 +461,7 @@ accidentally (empty local manifest = 2 messages); noop on a populated
 dest hung silently.
 
 ```rust
-// pull.rs::pull_sync (current, post-fix)
+// pull.rs::pull_sync (historical post-fix code; later deleted)
 let (tx, rx) = mpsc::channel::<ClientPullMessage>(32);
 // Open the gRPC stream FIRST so the daemon starts consuming.
 let request_stream = ReceiverStream::new(rx);
@@ -481,11 +485,8 @@ manifest_send_task.await??;
 drop(tx);
 ```
 
-**Watch for:** the spawned manifest task holds a clone of `tx`. The
-original `tx` is dropped explicitly after the response loop. Daemon
-sees end-of-stream only when *all* clones drop. Verify the sequence
-makes the daemon see EOF reliably (it does in current testing, but
-the ordering is subtle).
+**Historical watch point:** the spawned manifest task held a clone of `tx`.
+This ordering no longer exists in the unified session.
 
 ### 7.5 push small-file completion race (`60d152f`, `5bb78d9`)
 
@@ -572,29 +573,21 @@ happens during its drop — verify this.
 
 ## 8. Known issues / open questions
 
-### 8.1 Per-file gRPC overhead during push manifest
+### 8.1 Per-entry control-plane manifest overhead
 
-Identified in commit-message and code review of `crates/blit-core/src/remote/push/client/mod.rs:615`:
+The old evidence and proposed implementation in this section targeted
+`remote/push/client/mod.rs`, which was deleted at otp-10c-2. The current
+unified session sends one `ManifestEntry` frame per file as enumeration
+produces it; the destination diffs entries in bounded groups of 128 before
+sending `NeedBatch` frames.
 
-```rust
-// One ClientPushRequest::FileManifest per file, one .await per send.
-send_payload(&tx, ClientPayload::FileManifest(header.clone())).await?;
-```
-
-For 10 000 × 4 KiB files this is ~1 s of pure protocol overhead on top
-of network + disk. The bench shows blit at ~10k files/sec while the
-underlying ZFS does 110k files/sec for the same set.
-
-The proposed fix (in `docs/plan/UNIFIED_RECEIVE_PIPELINE.md` and a
-research synthesis) is an **adaptive batched manifest** — `FileManifestBatch`
-proto variant + Kafka-style opportunistic coalescing driven by
-in-flight backpressure (no `linger_ms`). Batch caps live in
-`TuningParams`, set by `auto_tune::determine_remote_tuning` using
-RTT × file count.
-
-A more radical alternative ("skip the manifest phase entirely for
-fresh copies and stream tar shards directly") is mentioned in the same
-plan but not yet implemented.
+There is no `FileManifestBatch`, `TuningParams`, or
+`auto_tune::determine_remote_tuning` in the current path. The live dial in
+`crates/blit-core/src/dial.rs` controls data-plane chunk, prefetch, TCP buffer,
+and stream membership from observed backpressure; it does not batch manifest
+frames. The old benchmark did not measure the rewritten session, so it cannot
+quantify current overhead. Any future batching change must start from the
+current `ManifestEntry`/`DEST_DIFF_CHUNK` flow and new evidence.
 
 ### 8.2 Mirror cannot detect `mtime touched, content unchanged`
 
@@ -617,39 +610,42 @@ sound journal replay is a designed future session capability
 rsync's rolling-checksum diff sends 0 bytes when content matches
 despite mtime change; blit re-transfers the whole file.
 
-The block-hash resume path exists (`stream_via_data_plane_resume`) but
-isn't triggered for plain `mirror` — only when `--resume` is set or
-the file is newly `Modified` per the size+mtime test. Worth examining:
-when, if ever, should mirror auto-promote a size-match-mtime-mismatch
-file to block-hash comparison?
+The unified session's block-hash phase is enabled by `--resume`; plain
+`mirror` transfers a size/mtime-modified file whole. Whether mirror should
+ever auto-promote such a file to block comparison is a future policy question,
+not current behavior.
 
-### 8.3 PULL gRPC fallback >4 GiB body limit
+### 8.3 Historical PULL gRPC fallback >4 GiB body limit
 
-Pre-existing. The gRPC fallback path has an undocumented 4 GB body
-size cap that errors immediately on any single file ≥ 4 GiB. The TCP
-data plane has no such limit; the fallback is for restrictive
-networks. Easy fix (chunk the gRPC frames) but unscheduled.
+The deleted PullSync fallback had a single-body limit. The unified session's
+in-stream carrier sends file data as bounded `FileData` frames, so that old
+4 GiB body shape no longer exists. This is closed historical context, not a
+current release issue.
 
-### 8.4 Hardcoded constants that should be in TuningParams
+### 8.4 Fixed constants and current ownership
 
-A grep for `1024 * 1024` / `MAX_*` in the transfer subsystem turns up:
+A current transfer still has fixed safety and batching constants, but
+`TuningParams` was deleted. Ownership is split deliberately:
 
-- `RECEIVE_CHUNK_SIZE = 1024 * 1024` in `data_plane.rs` (good default,
-  but should auto-tune based on RTT/disk).
-- `MAX_PARALLEL_TAR_TASKS = 4` in daemon's old TarShardExecutor
-  (now used only by gRPC fallback).
-- Tar shard count thresholds (32, 1024, 2048) in `transfer_plan.rs`.
-- mpsc channel capacities (32 in pull_sync, 32 in push manifest exchange).
+- `TransferDial` owns live data-plane chunk size, prefetch, TCP buffer size,
+  and stream membership within receiver-advertised bounds.
+- `DEST_DIFF_CHUNK = 128` bounds destination manifest-diff work before each
+  `NeedBatch`; it is not controlled by the data-plane dial.
+- `RECEIVE_CHUNK_SIZE = 1 MiB`, wire-record limits, and in-stream frame limits
+  are fixed receive/safety bounds.
+- Tar-shard thresholds remain planner policy in `transfer_plan.rs`.
 
-Each of these is a reasonable static default; none is adaptive. The
-project's stated philosophy says they should be.
+The deleted PullSync channel capacities and daemon `TarShardExecutor` are no
+longer part of the product. A fixed constant is not automatically a defect;
+changing one needs evidence tied to its current owner and invariant.
 
 ---
 
 ## 9. Test coverage
 
-The workspace has 173 tests passing on Linux; daemon-on-Windows runs
-add 20-some platform-specific. Categories:
+The canonical verification commands and current release gaps live in
+`.agents/repo-guidance.md` and `docs/RELEASE_READINESS.md`; this document does
+not freeze a test count. Coverage categories include:
 
 - Unit tests in each module (`#[cfg(test)] mod tests`).
 - Integration tests in `crates/blit-cli/tests/`:
@@ -658,18 +654,19 @@ add 20-some platform-specific. Categories:
   - `remote_push_single_file` — single-file push regression (recent)
   - `remote_resume`, `remote_remote`, `remote_pull_mirror`,
     `remote_transfer_edges`, `remote_move`
+  - `push_session_cutover` / `pull_session_cutover` — unified verb routing,
+    progress, compare modes, and resume
+  - `windows_metadata` — attributes, named streams, and timestamp precision
   - `single_file_copy` — the local rsync semantics
   - `diagnostics_dump` — bug-report tooling
-  - `blit_utils` — admin verbs (scan/ls/find/du/df/rm/completions/profile/list-modules/perf)
-- A live-bench harness in `testing/` (gitignored) that orchestrates
-  daemon + client + iperf3 baseline.
+  - `admin_verbs` / `blit_utils` — admin verbs and daemon readiness
+- Integration tests in `crates/blit-core/tests/` cover the unified local and
+  two-role session, wire compatibility, enumeration, and mirror planning.
 
-Notable gaps:
-- No fuzz tests for the data plane wire format
-- No integration test for the `pull_sync` deadlock scenario fixed in
-  `946bd77` — it would be a 30-line test (mirror to a populated dir)
-- No tests verify mtime preservation end-to-end (the bug in `946bd77`
-  passed all existing tests because none checked mtimes)
+The receive parser has a deterministic malformed-record/fuzz-style unit
+harness, and end-to-end guards cover streamed-file mtime preservation. The
+old PullSync deadlock shape disappeared with that driver; current bounded
+channel and role-session behavior is covered in the unified-session suites.
 
 ---
 
@@ -693,8 +690,8 @@ In rough order of likely yield:
    `data_plane.rs::send_*` and `pipeline.rs::execute_receive_pipeline`.
    Field order changes (e.g. recent mtime+perms inline addition) need
    to stay in sync between sender and receiver.
-6. **Resume protocol (`stream_via_data_plane_resume`)** — least
-   exercised, most state.
+6. **The session resume protocol** — block-hash ordering, both carriers, and
+   final metadata application.
 7. ~~`change_journal/` subsystem~~ — deleted at otp-11b: its no-op
    fast path was proven UNSOUND (silent data loss on deep
    modifications; `docs/bench/otp11-local-2026-07-11/README.md`).
