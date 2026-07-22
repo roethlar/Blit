@@ -181,9 +181,5 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Open questions
 
-- **(PARTIALLY RESOLVED 2026-07-04)** Windows triage: w9-3 fixed the
-  Linux daemon-spawn flakiness; **windows-latest CI has never been
-  observed green — check it live, do not record push state here.**
-  NOTE 2026-07-12: the macOS `blit_utils` residual reproduced again during
-  rel-1; rel-1b now requires the spawned daemon's unique module identity instead
-  of accepting any TCP listener (`release-cli-daemon-test-startup-race`).
+- None for release. Optional hardware ceilings and performance design choices
+  remain in the post-release queue.

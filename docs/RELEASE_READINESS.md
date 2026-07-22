@@ -1,8 +1,8 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** local 0.1.1 candidate `b51e3c76`; latest complete hosted run
-`29951872658` at `6fb4d3f`, 2026-07-22
+**As of:** current 0.1.1 candidate; latest complete hosted run `29951872658`
+at `6fb4d3f`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional

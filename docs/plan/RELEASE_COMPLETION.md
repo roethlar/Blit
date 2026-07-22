@@ -146,10 +146,10 @@ performance ratios are measured or graded.
 
 ## Slices
 
-1. **rel-1 — deterministic Windows CI timeout guard.** Replace the loopback
+1. **rel-1 — deterministic Windows CI timeout guard `[x]`.** Replace the loopback
    buffer-size assumption, prove the old Windows-success behavior red, run full
    local gates, and obtain a green Windows-focused run before broader work.
-1b. **rel-1b — CLI integration daemon readiness.** Own the temporary daemon
+1b. **rel-1b — CLI integration daemon readiness `[x]`.** Own the temporary daemon
     lifecycle, replace startup timing with bounded positive readiness, and
     mutation-prove that clients cannot run before the listener is ready.
 2. **rel-2 — P2 small-file regression `[x]`.** Reconcile retained timings against the
