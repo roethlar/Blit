@@ -26,13 +26,16 @@ Last updated: 2026-07-22 (release-first evidence audit, D-2026-07-22-1)
 - **BASELINE RE-RECORD (D-2026-07-14-1, owner 2026-07-14) — a prerequisite slice for `pf-final`, NOT for pf-1.** Both committed ceilings were recorded at **MTU 1500** before the fabric went jumbo, and pf-0 showed jumbo makes both arms 3–4% faster — so a jumbo build graded against them is **LENIENT** and could let a regression pass. Each rig's baseline is **re-recorded once with its ORIGINAL old build at MTU 9000**, then re-frozen (rig W `bench_otp12_win.sh:105`; rig Z `bench_otp12_zoey.sh:102`; rig D unaffected). Constraints — same old build per rig, `BASELINE_SUMMARY` stays override-free, pf-0's start-AND-end MSS gate applies — in **D-2026-07-14-1**.
 - **pf-0 DONE — MTU is KILLED as a material cause of P1 (2026-07-14, `docs/bench/otp12-jumbo-win-2026-07-13/`).** A-B-B-A on `q` (9000/1500/1500/9000), **256 timed runs, 0 voided**, MSS gate held start AND end of every session. `Δ_9000 = 236`, `Δ_1500 = 229`, measured noise floor **N_Δ = 78 ms**, **r = −3.1% → KILLED**. The null is **not vacuous** — `wm_tcp_large` ran 3–4% faster at jumbo on **both** arms, so the manipulation reached the wire; the benefit is **symmetric**, which is why it cannot explain an **asymmetry**. codex NOT READY → **7/7 accepted** (`11f0c2a`): every finding was a *claim* outrunning the *data* (it recomputed and confirmed all the numbers). **Two limits that now bind pf-1**: (a) the run is **NOT powered** to exclude a *contributing*-size effect (20% of Δ = 46 ms < the 78 ms floor) — it excludes a DOMINANT one only; (b) 78 ms is **between**-session noise, so cross-session grading of a counterfactual is dead, and **pf-1 must measure its own paired within-session floor and register a resolution check before grading**.
 - **THE FAST ARM IS BISTABLE — the trap named in pf-1's gate above.** `win_init` runs are **bimodal** (~730/~840 ms): S1 drew 6 low/2 high and S4 drew 2 low/6 high **at the same MTU**, and that mode mixture — not MTU — is what sets N_Δ. `mac_init` is stable to 5–6 ms. A counterfactual that merely shifts the mixture would **fake a recovery**.
-- **P1 REPRODUCES ON A SECOND MAC (2026-07-13, `docs/bench/otp12-q-baseline-2026-07-13/`).** `wm_tcp_mixed` = **1.385 FAIL** on `q`↔netwatch-01 **at MTU 9000**, while all three controls PASS at **1.002–1.043** in the same session (so rig noise is ~2–4% and P1 is 10× outside it). **P1 is a property of the macOS↔Windows PAIRING, not of one machine** — the assumption **H1** rests on (corrected 2026-07-14: H5/H6/H7 are **P2** hypotheses; the earlier "H1/H5/H6/H7" was wrong), never tested until now. **And jumbo does NOT dissolve P1** — pf-0 has now measured the matched 1500 arm and killed MTU outright (above).
+- **P1 REPRODUCED ON A SECOND MAC BEFORE THE FIX (2026-07-13, `docs/bench/otp12-q-baseline-2026-07-13/`).** `wm_tcp_mixed` = **1.385 FAIL** on `q`↔netwatch-01 at MTU 9000, while all three controls passed at 1.002–1.043. That proved the historical result was not tied to one Mac; D-2026-07-22-2 now closes its initiator-dependent product mechanism from exact code/guard evidence below.
 - **RIG-W HOST AND QUIETNESS RULES:** `.agents/machines.md` is canonical. ldt-4 must establish quietness live on `q` and `netwatch-01`; recorded readiness is never substituted for the run gate.
 - Recent code state: every transfer rides the ONE session. ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at review fix `406a7e5` after clean neutral r2 (`.review/findings/ldt-3.md`).
-- **P1 is a known post-release performance finding, not a shipping gate
-  (D-2026-07-22-1).** Historical rig-W sessions fail `wm_tcp_mixed`; Linux
-  passes 8/8. The result remains platform-interacting and unexplained, but no
-  further hardware run is authorized before release.
+- **P1 IS CLOSED WITHOUT ANOTHER TRANSFER (D-2026-07-22-2).** The failing
+  builds used the old-red worker path: its deterministic guard settled SOURCE
+  initiation at 3 workers and DESTINATION initiation at 2, while a second
+  destination-only zero-capacity branch could cap at 1.
+  `a76b785..42b9b38` fixed and mutation-proved parity;
+  post-fix `8e019ef` passed the target point bar, and ldt-2 retains adaptive
+  role parity. Evidence: `docs/bench/p1-evidence-reconciliation-2026-07-22/`.
 - **⚠ THREE of my claims were reported and RETRACTED on 2026-07-13**, all the same root cause — trusting an instrument I had not validated: (1) "P1 is code" (a harness that keyed durability to the *initiator*, not the destination); (2) "P1 is acceptable platform residue" (D-2026-07-12-1 does not cover it); (3) "macOS can't send jumbo / the switch is broken" (it was `net.inet.raw.maxdgram` capping *ping*; TCP was always fine — it cost the owner a pointless adapter swap). **Verify the instrument before believing the measurement.**
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
@@ -84,7 +87,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    c-1/2), **otp-11 (a + b)**, **otp-12a (zoey)**, **otp-12b
    (Mac↔Windows)** `[x]`. 12a: 10 PASS, 2 to the walk. 12b — THE
    INVARIANCE CRITERION: 11/12 PASS (1.003–1.057); wm_tcp_mixed 1.237
-   (TCP×mixed×dest-initiator, code-shaped); push_tcp_small 1.149
+   (TCP×mixed×dest-initiator, historical pre-fix result now closed by
+   D-2026-07-22-2); push_tcp_small 1.149
    (both rigs); Win→Mac beats the better old direction 6/6; Mac→Win
    gap shapes recorded for the walk
    (`docs/bench/otp12-{zoey,win}-2026-07-12/`). **otp-12c `[x]`
@@ -95,12 +99,10 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    **otp-12d and otp-13 are POST-RELEASE (D-2026-07-22-1).** Their retained
    pre-fix evidence remains usable for what it records; no performance
    acceptance matrix is a shipping prerequisite.
-2a. **POST-RELEASE: `docs/plan/OTP12_PERF_FINDINGS.md`.** pf-0 killed MTU
-    as a dominant P1 cause. The accepted 128-arm `8e019ef` record proves
-    historical static orientation parity but cannot grade causation because
-    its resolution floor exceeded the gap and its gRPC control failed. Exact
-    evidence: `docs/bench/otp12-pf1-rigw-2026-07-15/`. No further P1/P2 rig
-    work, pf-final run, otp-12d, or otp-13 occurs before release.
+2a. **POST-RELEASE P2 ONLY: `docs/plan/OTP12_PERF_FINDINGS.md`.** P1 is
+    closed by D-2026-07-22-2 from direct old-red/new-green worker-parity proof;
+    no P1 rig or final run remains. P2, pf-final residue, otp-12d, and otp-13
+    remain outside the release queue unless the owner explicitly moves them.
 2b. **RELEASE SCOPE — Windows metadata fidelity; local performance is
    post-release.** The measured metadata loss is a correctness blocker if the
    first release promises Windows metadata fidelity. The owner must either

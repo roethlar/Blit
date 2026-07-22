@@ -22,14 +22,20 @@ policy, including reviewed build `8e019ef`. Preserve those measurements as
 historical controls; they do not describe or prove the current adaptive
 ADD/REMOVE controller.
 
-**⚠ THE DECISION P1 NEEDS (surfaced round 5, owner's to make — NOT
-assumed by this plan):** P1 has **no escape hatch on the books**.
-D-2026-07-12-1 waives a cross-direction converge-up miss only for a cell
-that is *already* invariance-passing; P1 is the invariance failure
-itself. So P1 must either be **FIXED** (≤1.10 on rig W — the default this
-plan pursues) or the owner must **amend acceptance criterion 1** in a new
-decision. pf-1 proceeds either way: it produces the evidence that
-decision would rest on.
+**P1 CLOSED OFFLINE (2026-07-22, D-2026-07-22-2):** exact history proves that
+the failing `e21cf84`/`f35702a` code gave the same shape target different
+realized worker counts by initiator layout: SOURCE initiation stopped at 3,
+DESTINATION initiation at 2, with a second destination-only zero-capacity path
+capable of forcing 1. The measured Windows→Mac fast/slow ordering matches those
+roles exactly. `a76b785..42b9b38` made the ramp and receiver ceiling shared and
+mutation-proved 8-versus-8 parity. Post-fix `8e019ef` then reached eight in both
+layouts and the target P1 point ratios passed at 1.0738/1.0933. ldt-2's current
+adaptive controller retains role-identical deterministic ADD/REMOVE traces.
+The later rig's noisy controls limit millisecond attribution; they do not
+invalidate this direct old-red/new-green code proof. All P1-only investigation,
+rig fallback, counterfactual, and final-rerun requirements below are historical
+and no longer operative. Full reconciliation:
+`docs/bench/p1-evidence-reconciliation-2026-07-22/`. P2 remains open.
 **Created**: 2026-07-12
 **Parent**: `docs/plan/ONE_TRANSFER_PATH.md` (Active), whose Constraints
 say the quiet part: "Unification that slows the fast direction fails
@@ -39,17 +45,17 @@ review." P1 is a miss of the parent's HEADLINE acceptance criterion
 if an investigation slice needs one, it stops and this doc is amended
 through the loop first.
 
-**Sequencing (corrected 2026-07-13).** This doc originally deferred
+**Historical sequencing (corrected 2026-07-13).** This doc originally deferred
 otp-12c/12d/13 outright. In fact **otp-12c RAN on 2026-07-13** under a
 fresh in-session owner go (rig D delegated parity + a rig-W re-baseline
 at the cutover sha `f35702a`; `docs/bench/otp12c-{delegated,win}-2026-07-13/`).
-That does not change this plan's standing, and the rows are not lost
-work — under `pf-final` they are **pre-fix rows, void for acceptance**,
+Those rows were not lost work — under the then-planned `pf-final` they were
+**pre-fix rows, void for acceptance**,
 but they serve two real purposes: (a) an **independent replication** of
 both findings at the shipped sha (below), which is exactly the
 independent corroboration the round-2 review said P1 lacked; and (b) the
-pre-pf-1 control the investigation needs. **otp-12d and otp-13 remain
-deferred** until P1/P2 are fixed or explained at code level — assembling
+pre-pf-1 control the investigation needed. **otp-12d and otp-13 were
+deferred** until P1/P2 were fixed or explained at code level — assembling
 an acceptance matrix out of pre-fix rows would build the artifact otp-13
 walks from rows this plan declares void.
 

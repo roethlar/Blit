@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** local `master` at `43f156d`, 2026-07-22
+**As of:** local `master` at `f2fe4de`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-1. Correctness,
 supported-platform CI, packaging, installation, and startup are release work.
@@ -15,6 +15,11 @@ Performance ceilings and hardware tuning are post-release work.
   `dcf9245` in CI run `29584631185` on 2026-07-17.
 - ldt-1 through ldt-3 established one SOURCE-owned adaptive controller,
   acknowledged ADD/REMOVE membership, role-parity tests, and lifecycle closure.
+- The historical P1 initiator discrepancy is closed without another transfer:
+  the pre-fix code made SOURCE/DESTINATION initiation settle at 3/2 workers,
+  `a76b785..42b9b38` mutation-proved parity, post-fix `8e019ef` no longer
+  failed the target cell, and ldt-2 retains adaptive role parity. Evidence:
+  `docs/bench/p1-evidence-reconciliation-2026-07-22/`.
 - Every complete ldt-4 live payload had exact manifest identity and normal
   endpoint restoration. The complete and partial session classification is in
   `docs/bench/ldt4-evidence-audit-2026-07-22/`.
@@ -47,7 +52,7 @@ Performance ceilings and hardware tuning are post-release work.
 
 ## Deferred until after release
 
-- P1 performance-invariance closure, ldt-4 causal tuning, fixed-cell throughput
+- P2 performance attribution, ldt-4 causal tuning, fixed-cell throughput
   asymmetries, MTU follow-ups, and all further hardware matrices.
 - Mac↔Mac Thunderbolt ceiling testing.
 - Small-file and zero-copy performance work, performance refactors, and other

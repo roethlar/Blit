@@ -349,3 +349,19 @@ Format:
   pre-release scheduling of `OTP12_PERF_FINDINGS`, performance acceptance
   residue, and the Thunderbolt experiment. It preserves accepted ldt-1..3
   code, all retained evidence, and every endpoint identity and safety rule.
+
+## D-2026-07-22-2 — Resolve P1 from existing evidence without more transfers
+- Decision: Identify and close the P1 initiator discrepancy from retained raw
+  evidence, exact historical/current code, and deterministic mutation guards;
+  do not run another physical transfer for it. Owner, 2026-07-22, verbatim:
+  **"no. without doing more pointless transfers, identify and fix the
+  discrepancy"**.
+- Why: the failing builds' product path is identical to the old-red worker
+  guard (SOURCE initiation 3 workers, DESTINATION initiation 2, plus a
+  destination-only zero-capacity cap); `a76b785..42b9b38` fixes and
+  mutation-proves parity, post-fix `8e019ef` no longer shows the target-cell
+  failure, and ldt-2 preserves role parity under the current controller.
+- Supersedes: D-2026-07-22-1 only where it deferred P1 closure and
+  `OTP12_PERF_FINDINGS` where it required another P1 rig/counterfactual/final
+  run. It preserves the ban on unapproved data-moving hardware work and does
+  not close the separate P2 finding.
