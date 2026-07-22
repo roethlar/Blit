@@ -1,9 +1,9 @@
 # windows-move-tree-hang: blit move (push-tree) hangs on Windows CI
 
-**Severity**: Known issue / test-gate
-**Status**: Test gated off Windows; root cause pending
-**Branch**: `phase5/a1`
-**Commit**: pending
+**Severity**: High — nested local-to-remote moves stalled on Windows
+**Status**: Fixed; stale Windows ignore removed by the rel-3 reconciliation
+**Branch**: `master`
+**Fix commits**: `48c5a11` (original path correction), this rel-3 commit
 
 ## Symptom
 
@@ -17,48 +17,39 @@ across at least 14 consecutive CI runs on `phase5/a1`, going back to
 the original audit-6e directory-coverage commits (no run on the branch
 has ever passed Windows CI).
 
-## Suspected root cause
+## Root cause
 
-`blit move` (local→remote) at
-`crates/blit-cli/src/transfers/mod.rs:556` finishes the push and then
-calls `std::fs::remove_dir_all(&src_path)` to delete the local source
-tree. On Windows, `remove_dir_all` cannot unlink files that have open
-handles in any process — including the **same** process if a handle
-hasn't been dropped yet. macOS/Linux let you unlink open files (they
-get marked for deletion on the last close). It's plausible the push
-code path is holding source file handles open when the delete runs,
-producing a Windows-only deadlock or repeated error-retry storm.
+The retained Windows log from GitHub run `26706097142`, job `78707535631`,
+ended after the old daemon returned three needs: `a.txt`, `b.txt`, and
+`nested\c.txt`. There was no source-delete output or failure. The old push
+client keyed its manifest by canonical POSIX `nested/c.txt`, so the native
+Windows echo missed the lookup. Top-level payloads could run, but the nested
+file remained outstanding and both ends waited until the test's 60-second
+process timeout. This is why flat/single-file moves passed and only the nested
+push-tree case hung.
 
-The pull-move directory-tree test passes on Windows because it deletes
-the **remote** source (via the daemon's RPC), where handle semantics
-are isolated from the CLI.
+The handle-lifetime theory was wrong. The hang happened during transfer, not
+in `remove_dir_all`.
 
-## What was done now
+## Fix and current path
 
-The test is gated off Windows with
-`#[cfg_attr(target_os = "windows", ignore = "...")]` and a comment
-pointing here. CI on the new head should go green on Windows. Linux
-and macOS continue to run the test. **This does not fix the underlying
-hang**; it stops red CI from masking other Windows regressions.
+`48c5a11` changed the old daemon need-list echo from
+`PathBuf::to_string_lossy()` to `path_posix::relative_path_to_posix()`. The
+owner's Windows host reproduced nested-push failures before that commit and
+passed the nested push guards after it; the 10k forced-gRPC guard fell from a
+300-second timeout to 0.77 seconds.
 
-## What still needs to happen
+The later unified-session cutover deleted the old push controller entirely.
+Current enumeration creates POSIX wire paths through `relative_path_to_posix`,
+and destination diff returns `FileHeader.relative_path` directly in
+`NeedEntry`; it never converts the wire identity back through a native
+`PathBuf`. The exact old mismatch is therefore absent by construction.
 
-1. **Interactive Windows debugging.** This dev host is macOS; the hang
-   needs to be reproduced on a Windows machine with `cargo test -p
-   blit-cli --test remote_move test_remote_move_local_to_remote_directory_tree
-   -- --include-ignored` to confirm the hang.
-2. **Inspect file-handle lifecycle.** Specifically: does the local
-   push-side enumeration code in `blit_app::transfers::remote` hold
-   file handles past the end of the push? `RemotePushClient` /
-   `run_remote_push` likely opens each file briefly during read; check
-   that no `tokio::fs::File` / `std::fs::File` is parked across the
-   push completion boundary.
-3. **Likely fix**: explicit `drop(...)` or a `flush + close` step
-   between push completion and source-delete. Possibly an explicit
-   `tokio::task::yield_now` to let any pending I/O futures wind down.
-4. **Validate** by running the gated test on Windows
-   (`--include-ignored`) and confirming it passes with the fix; then
-   remove the `cfg_attr` gate.
+Rel-3 removes the stale Windows ignore from
+`test_remote_move_local_to_remote_directory_tree`. Its three-file nested tree
+is the direct end-to-end guard. Local focused and workspace tests pass; the
+exact current commit still needs the owner-gated hosted Windows run shared
+with rel-1 confirmation.
 
 ## Cross-ref
 

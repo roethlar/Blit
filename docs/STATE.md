@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (rel-2 TCP small-file fix)
+Last updated: 2026-07-22 (rel-3 Windows nested-move reconciliation)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -13,8 +13,9 @@ Last updated: 2026-07-22 (rel-2 TCP small-file fix)
 - **NEXT ACTION — RELEASE BLOCKERS ONLY:** use `docs/RELEASE_READINESS.md`.
   rel-1's deterministic Windows CI guard is fixed locally; hosted confirmation
   awaits an owner-approved publication. rel-1b proves temporary-daemon identity;
-  rel-2 restores TCP scan/transfer overlap and shard-level need claiming with
-  mutation-sensitive software guards. Windows move is next; no rig work is queued.
+  rel-2 restores TCP overlap and shard-level need claiming. rel-3 traced the
+  Windows move timeout to the already-fixed nested-path echo and re-enabled its
+  test. Windows metadata fidelity is next; no rig work is queued.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -171,8 +172,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   the nondeterministic 64 MiB socket-buffer premise with a two-byte in-memory
   blocked writer and has local red/green proof. Hosted Windows confirmation
   awaits owner-approved publication. Finding: `release-win-ci-handshake-stall-test`.
-- **Release blockers:** Windows directory-tree move hangs, attributes/ADS loss,
-  incomplete progress, and artifact/install proof remain unresolved. See
+- **Release blockers:** Windows attributes/ADS loss, incomplete progress, and
+  artifact/install proof remain unresolved. Hosted Windows must confirm rel-1
+  and the re-enabled rel-3 nested move test. See
   `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):

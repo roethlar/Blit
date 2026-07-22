@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** local release work through rel-2, 2026-07-22
+**As of:** local release work through rel-3, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -35,6 +35,11 @@ performance ceilings and hardware tuning remain post-release work.
   shard. Both are fixed with mutation-sensitive role/operation-count guards;
   no hardware transfer was rerun. Finding:
   `release-p2-tcp-small-file-regression`.
+- rel-3 reconciled the Windows directory-move timeout to the old daemon's
+  `nested\c.txt` need-list echo, not a source-delete handle. `48c5a11` fixed
+  that native-separator mismatch and the unified session later deleted the old
+  path. The exact nested push-move test is active on Windows again; current-head
+  hosted confirmation remains publication-gated.
 
 ## Release blockers
 
@@ -43,15 +48,15 @@ performance ceilings and hardware tuning remain post-release work.
    rel-1 now exercises the same production timeout through a deterministic
    two-byte/one-byte in-memory blocked writer with local mutation proof. The
    exact fix has not run on hosted Windows because publication is owner-gated.
-   Finding: `release-win-ci-handshake-stall-test`.
-2. **Windows directory-tree move can hang.** The integration test is ignored on
-   Windows after repeated hangs; the product behavior remains unresolved.
-3. **Windows attributes and alternate data streams are silently lost on the
+   The re-enabled nested push-move test also needs current-head Windows
+   confirmation. Findings: `release-win-ci-handshake-stall-test` and
+   `windows-move-tree-hang`.
+2. **Windows attributes and alternate data streams are silently lost on the
    tar path.** Full fidelity is required for this release.
-4. **Progress reporting is incomplete.** Delegated progress can be silent and
+3. **Progress reporting is incomplete.** Delegated progress can be silent and
    served-session byte/file totals can remain zero through daemon, RPC, CLI,
    and TUI consumers.
-5. **Current release artifacts are unproved.** The exact local head is not on
+4. **Current release artifacts are unproved.** The exact local head is not on
    GitHub, the latest published release-build jobs were skipped, and install /
    startup smoke checks for the produced CLI and daemon artifacts are not
    recorded.

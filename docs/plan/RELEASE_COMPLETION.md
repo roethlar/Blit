@@ -154,9 +154,11 @@ performance ratios are measured or graded.
    exact old/new executed paths and existing observers, name the responsible
    code delta, fix it, and add a direct mutation-sensitive guard. Do not run a
    physical performance matrix or a large-write test.
-3. **rel-3 — Windows directory-tree move completion.** Reproduce with a bounded
-   small tree, identify the held handle or cleanup deadlock, fix it, re-enable
-   the Windows test, and prove the fix red/green.
+3. **rel-3 — Windows directory-tree move completion `[x locally]`.** The
+   retained log identified a native-separator need-list stall, not a held
+   source handle. `48c5a11` fixed that executed path, and unified-session
+   cutover later deleted it. The exact bounded nested-tree test is re-enabled;
+   current-head hosted confirmation joins rel-1's publication gate.
 4. **rel-4 — Windows metadata fidelity.** Amend the transfer contract first;
    then enumerate, transport, validate, and apply bounded attributes/ADS for
    local and remote file/tar carriers. Guard single versus ≥32-file behavior,
