@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — the f12 byte drain lasted up to 20.7 seconds, but its
 five payloads queued in milliseconds and stopped the tuner before any sample,
 so ldt-4 still has no live membership transition.
-**Status**: Open; implementation pending.
+**Status**: Fixed in candidate; tactical review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: pending
 
@@ -82,18 +82,30 @@ every arm and exact material transition parity within each pair.
   binding, or weakened accepted-ADD/transition-parity requirements. Mutation-
   prove the admission-horizon guard, restore it, and run full repository gates.
 
-## Files expected
+## Files changed
 
 - `scripts/bench_ldt4_rigw.sh` — pinned payload volume, fresh additive roots,
   40-file fixture, capacity and predecessor gates.
 - `scripts/ldt4_rigw_analyze.py` — exact f13 fixture/predecessor contract while
   preserving fixed and f12 evidence modes.
 - `scripts/ldt4_rigw_analyze_test.py` — valid f13 session and rejection tests.
-- `.agents/machines.md` — dated q payload-volume identity and scope.
+- `.agents/machines.md` already records the dated q payload-volume identity and
+  scope from the finding-opening commit.
 
 ## Guard proof
 
-Pending.
+- The Bash 3.2 syntax check and exact four-arm no-SSH self-test pass.
+- All 86 analyzer tests pass, including a valid horizon session and rejection
+  guards for a changed predecessor digest, substituted payload-volume UUID,
+  below-floor payload volume, and insufficient retained-destination capacity.
+- Changing only production `HORIZON_FILE_COUNT=40` to `25` makes the exact
+  self-test fail with `horizon fixture is not the exact registered 40-file/40
+  GiB shape`; restoring `40` returns it green.
+- The retained f12 evidence re-analyzes as `REVIEW_REQUIRED` with all six
+  analysis outputs byte-for-byte identical to the committed copies, proving
+  the new matrix mode did not change predecessor interpretation.
+- `cargo fmt --all -- --check`, strict workspace clippy, the complete workspace
+  test suite, and `scripts/agent/check-docs.sh` pass.
 
 ## Coder dispute
 
@@ -101,9 +113,9 @@ None.
 
 ## Known gaps
 
-Implementation, mutation proof, full gates, Claude Opus 4.8/max tactical
-review, exact additive staging, and one fresh quiet four-arm run remain. The
-fixed matrix's two performance findings remain separate.
+Claude Opus 4.8/max tactical review, exact additive staging, and one fresh
+quiet four-arm run remain. The fixed matrix's two performance findings remain
+separate.
 
 ## Reviewer comments
 

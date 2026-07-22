@@ -430,7 +430,10 @@ advise but cannot accept the slice (D-2026-07-16-4).
    ceiling makes that longer than the earliest tick-7 ADD. Because q's internal
    volume cannot retain another large pair above its no-delete floor, f13 pins
    fresh roots to q's exact local Apps APFS SSD UUID while retaining the
-   internal evidence and quietness gates. Implementation, Opus tactical review,
+   internal evidence and quietness gates. The candidate is Bash-3.2
+   self-tested, mutation-proved at the exact 40-file horizon, covered by 86
+   analyzer tests, backward-compatible byte-for-byte with retained f12
+   analysis, and full-repository green. Opus 4.8/max tactical review, exact
    staging, and live execution remain.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer

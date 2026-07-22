@@ -30,6 +30,7 @@ TEST_FIXTURES = {
     "small": (2, 3),
     "mixed": (2, 3),
     "sustained": (2, 3),
+    "horizon": (2, 3),
 }
 TEST_HARNESS_SHA = "1" * 40
 TEST_SAFE_ID = "ldt4-test-session"
@@ -56,19 +57,30 @@ TEST_SUSTAINED_CELL_ORDER = (
     "windows_to_q_sustained",
 )
 TEST_SUSTAINED_FIRST_ROLE = ("source_init", "destination_init")
+TEST_HORIZON_CELL_ORDER = (
+    "q_to_windows_horizon",
+    "windows_to_q_horizon",
+)
+TEST_HORIZON_FIRST_ROLE = ("source_init", "destination_init")
 TEST_SOURCE_PATHS = {
     ("q_to_windows", "large"): "/Users/michael/blit-ldt4-staging/fixtures/src_large",
     ("q_to_windows", "small"): "/Users/michael/blit-ldt4-staging/fixtures/src_small",
     ("q_to_windows", "mixed"): "/Users/michael/blit-ldt4-staging/fixtures/src_mixed",
     ("q_to_windows", "sustained"): "/Users/michael/blit-ldt4-staging/fixtures/src_sustained",
+    ("q_to_windows", "horizon"): "/Volumes/Apps/blit-ldt4-f13/staging/fixtures/src_horizon",
     ("windows_to_q", "large"): "D:/blit-test/rigw-module/src_large",
     ("windows_to_q", "small"): "D:/blit-test/ldt4-staging/fixtures/src_small",
     ("windows_to_q", "mixed"): "D:/blit-test/rigw-module/src_mixed",
     ("windows_to_q", "sustained"): "D:/blit-test/ldt4-staging/fixtures/src_sustained",
+    ("windows_to_q", "horizon"): "D:/blit-test/ldt4-f13/staging/fixtures/src_horizon",
 }
 TEST_DESTINATION_ROOTS = {
     "q_to_windows": "D:/blit-test/ldt4-sessions",
     "windows_to_q": "/Users/michael/blit-ldt4-sessions",
+}
+TEST_HORIZON_DESTINATION_ROOTS = {
+    "q_to_windows": "D:/blit-test/ldt4-f13/sessions",
+    "windows_to_q": "/Volumes/Apps/blit-ldt4-f13/sessions",
 }
 TEST_BINARY_PATHS = {
     ("q", "client"): (
@@ -134,6 +146,26 @@ class SyntheticSession:
                 f"inventory_sha256={analyzer.PARENT_INVENTORY_SHA256}\n",
                 encoding="ascii",
             )
+        elif matrix == "horizon":
+            completion = (
+                f"artifact_sha={analyzer.ARTIFACT_SHA}\n"
+                f"harness_sha={TEST_HARNESS_SHA}\n"
+                "matrix=horizon\n"
+                "arm_count=4\n"
+                f"parent_inventory_sha256={analyzer.PARENT_INVENTORY_SHA256}\n"
+                f"predecessor_inventory_sha256={analyzer.PREDECESSOR_INVENTORY_SHA256}\n"
+            )
+            (root / "parent-evidence.txt").write_text(
+                f"session={analyzer.PARENT_SESSION} evidence={analyzer.PARENT_EVIDENCE} "
+                f"inventory_sha256={analyzer.PARENT_INVENTORY_SHA256}\n",
+                encoding="ascii",
+            )
+            (root / "predecessor-evidence.txt").write_text(
+                f"session={analyzer.PREDECESSOR_SESSION} "
+                f"evidence={analyzer.PREDECESSOR_EVIDENCE} "
+                f"inventory_sha256={analyzer.PREDECESSOR_INVENTORY_SHA256}\n",
+                encoding="ascii",
+            )
         else:
             raise ValueError(f"unsupported synthetic matrix: {matrix}")
         (root / "MEASUREMENTS-COMPLETE").write_text(completion, encoding="ascii")
@@ -168,7 +200,11 @@ class SyntheticSession:
     def _schedule_rows(self) -> list[tuple[str, str, str, str, str]]:
         rows: list[tuple[str, str, str, str, str]] = []
         sequence = 0
-        cells = TEST_CELL_ORDER if self.matrix == "fixed" else TEST_SUSTAINED_CELL_ORDER
+        cells = {
+            "fixed": TEST_CELL_ORDER,
+            "sustained": TEST_SUSTAINED_CELL_ORDER,
+            "horizon": TEST_HORIZON_CELL_ORDER,
+        }[self.matrix]
         for cell in cells:
             direction = next(
                 candidate
@@ -176,10 +212,12 @@ class SyntheticSession:
                 if cell.startswith(f"{candidate}_")
             )
             fixture = cell[len(direction) + 1 :]
-            first_roles = (
-                TEST_FIRST_ROLE
-                if self.matrix == "fixed"
-                else (TEST_SUSTAINED_FIRST_ROLE[cells.index(cell)],)
+            supplement_first_roles = {
+                "sustained": TEST_SUSTAINED_FIRST_ROLE,
+                "horizon": TEST_HORIZON_FIRST_ROLE,
+            }
+            first_roles = TEST_FIRST_ROLE if self.matrix == "fixed" else (
+                supplement_first_roles[self.matrix][cells.index(cell)],
             )
             for first in first_roles:
                 second = (
@@ -223,6 +261,15 @@ class SyntheticSession:
             (self.root / f"environment-{phase}.txt").write_text(
                 f"phase={phase} {environment_tail}", encoding="ascii"
             )
+            if self.matrix == "horizon":
+                (self.root / f"payload-volume-{phase}.txt").write_text(
+                    f"phase={phase} mount={analyzer.Q_PAYLOAD_VOLUME} "
+                    f"uuid={analyzer.Q_PAYLOAD_VOLUME_UUID} "
+                    "filesystem=case-sensitive_apfs protocol=PCI-Express "
+                    "solid_state=true writable=true backing=/dev/disk8s1 "
+                    "free_bytes=500000000000\n",
+                    encoding="ascii",
+                )
         runtime_rows = []
         for index, schedule in enumerate(self._schedule_rows()):
             if index % 2:
@@ -232,8 +279,8 @@ class SyntheticSession:
                     "sequence": schedule[0],
                     "cell": schedule[1],
                     "pair": str((index // 2) % 8 + 1 if self.matrix == "fixed" else 1),
-                    "q_free_bytes": "50000000000",
-                    "windows_free_bytes": "50000000000",
+                    "q_free_bytes": "500000000000",
+                    "windows_free_bytes": "500000000000",
                     "q_quiet": (
                         "q_load1=1.25;q_spotlight_cpu=2.5;"
                         "time_machine_auto=0;time_machine_running=0"
@@ -261,7 +308,11 @@ class SyntheticSession:
         )
 
     def _write_fixtures(self) -> None:
-        fixtures = analyzer.FIXTURES if self.matrix == "fixed" else analyzer.SUSTAINED_FIXTURES
+        fixtures = {
+            "fixed": analyzer.FIXTURES,
+            "sustained": analyzer.SUSTAINED_FIXTURES,
+            "horizon": analyzer.HORIZON_FIXTURES,
+        }[self.matrix]
         for direction in analyzer.DIRECTIONS:
             for fixture in fixtures:
                 relative = f"manifests/source/{direction}_{fixture}.csv"
@@ -640,16 +691,22 @@ class SyntheticSession:
         )
 
     def _write_runs(self) -> None:
-        cells = TEST_CELL_ORDER if self.matrix == "fixed" else TEST_SUSTAINED_CELL_ORDER
+        cells = {
+            "fixed": TEST_CELL_ORDER,
+            "sustained": TEST_SUSTAINED_CELL_ORDER,
+            "horizon": TEST_HORIZON_CELL_ORDER,
+        }[self.matrix]
         for cell in cells:
             direction = next(
                 value for value in analyzer.DIRECTIONS if cell.startswith(f"{value}_")
             )
             fixture = cell.removeprefix(f"{direction}_")
-            pairs_and_roles = (
-                zip(range(1, 9), TEST_FIRST_ROLE)
-                if self.matrix == "fixed"
-                else ((1, TEST_SUSTAINED_FIRST_ROLE[cells.index(cell)]),)
+            supplement_first_roles = {
+                "sustained": TEST_SUSTAINED_FIRST_ROLE,
+                "horizon": TEST_HORIZON_FIRST_ROLE,
+            }
+            pairs_and_roles = zip(range(1, 9), TEST_FIRST_ROLE) if self.matrix == "fixed" else (
+                (1, supplement_first_roles[self.matrix][cells.index(cell)]),
             )
             for pair, first in pairs_and_roles:
                 second = next(role for role in analyzer.INITIATORS if role != first)
@@ -671,7 +728,11 @@ class SyntheticSession:
                     landed_path.parent.mkdir(parents=True, exist_ok=True)
                     landed_path.write_text(_manifest_payload(), encoding="ascii")
                     source_path = TEST_SOURCE_PATHS[(direction, fixture)]
-                    destination_root = TEST_DESTINATION_ROOTS[direction]
+                    destination_root = (
+                        TEST_DESTINATION_ROOTS[direction]
+                        if self.matrix != "horizon"
+                        else TEST_HORIZON_DESTINATION_ROOTS[direction]
+                    )
                     active_path = f"{destination_root}/{self.safe_id}/active/{fixture}"
                     archive_path = f"{destination_root}/{self.safe_id}/retained/{run_id}"
                     duration = 8000 if initiator == "source_init" else 8100
@@ -937,6 +998,100 @@ class AnalyzerTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(analyzer.AnalysisError, "exact valid 96-arm binding"):
             analyzer.analyze(root, TEST_HARNESS_SHA, "sustained")
+
+    def test_valid_horizon_supplement_binds_predecessor_volume_and_adds(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "ldt4-horizon-test"
+        root.mkdir()
+        session = SyntheticSession(root, "horizon")
+        result = analyzer.analyze(root, TEST_HARNESS_SHA, "horizon")
+        self.assertEqual(result.arm_count, 4)
+        self.assertEqual(result.arm_review_count, 0)
+        self.assertEqual(result.decision_review_count, 0)
+        self.assertEqual(result.performance_review_count, 0)
+        self.assertEqual(result.status, "STRUCTURALLY_VALID_HORIZON_ROLE_PARITY")
+        summary = json.loads((result.output_dir / "summary.json").read_text())
+        self.assertEqual(summary["matrix"], "horizon")
+        self.assertEqual(
+            summary["predecessor_inventory_sha256"],
+            analyzer.PREDECESSOR_INVENTORY_SHA256,
+        )
+        self.assertEqual(summary["pair_count"], 2)
+        with (result.output_dir / "arms.csv").open(newline="") as handle:
+            arms = list(csv.DictReader(handle))
+        self.assertEqual({row["arm_verdict"] for row in arms}, {"HORIZON_ADD_ACCEPTED"})
+        self.assertEqual({row["accepted_adds"] for row in arms}, {"1"})
+        self.assertEqual(
+            {
+                row["active_destination_path"].split(f"/{root.name}/", 1)[0]
+                for row in arms
+            },
+            set(TEST_HORIZON_DESTINATION_ROOTS.values()),
+        )
+        self.assertEqual(len(session.run_rows), 4)
+
+    def test_horizon_predecessor_binding_is_exact(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "ldt4-horizon-predecessor"
+        root.mkdir()
+        SyntheticSession(root, "horizon")
+        (root / "predecessor-evidence.txt").write_text(
+            f"session={analyzer.PREDECESSOR_SESSION} "
+            f"evidence={analyzer.PREDECESSOR_EVIDENCE} "
+            f"inventory_sha256={'0' * 64}\n",
+            encoding="ascii",
+        )
+        with self.assertRaisesRegex(analyzer.AnalysisError, "exact sustained evidence binding"):
+            analyzer.analyze(root, TEST_HARNESS_SHA, "horizon")
+
+    def test_horizon_payload_volume_identity_is_exact(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "ldt4-horizon-volume"
+        root.mkdir()
+        SyntheticSession(root, "horizon")
+        path = root / "payload-volume-start.txt"
+        path.write_text(
+            path.read_text(encoding="ascii").replace(
+                analyzer.Q_PAYLOAD_VOLUME_UUID, "00000000-0000-0000-0000-000000000000"
+            ),
+            encoding="ascii",
+        )
+        with self.assertRaisesRegex(analyzer.AnalysisError, "payload-volume gate"):
+            analyzer.analyze(root, TEST_HARNESS_SHA, "horizon")
+
+    def test_horizon_payload_volume_floor_is_enforced(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "ldt4-horizon-volume-floor"
+        root.mkdir()
+        SyntheticSession(root, "horizon")
+        path = root / "payload-volume-end.txt"
+        path.write_text(
+            path.read_text(encoding="ascii").replace(
+                "free_bytes=500000000000", f"free_bytes={analyzer.MIN_FREE_BYTES - 1}"
+            ),
+            encoding="ascii",
+        )
+        with self.assertRaisesRegex(analyzer.AnalysisError, "free_bytes is below"):
+            analyzer.analyze(root, TEST_HARNESS_SHA, "horizon")
+
+    def test_horizon_runtime_gate_reserves_all_destination_arms(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "ldt4-horizon-retention"
+        root.mkdir()
+        SyntheticSession(root, "horizon")
+        with (root / "runtime-gates.csv").open(newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        rows[0]["q_free_bytes"] = str(
+            analyzer.MIN_FREE_BYTES + analyzer.HORIZON_DESTINATION_BYTES - 1
+        )
+        _write_csv(root / "runtime-gates.csv", analyzer.RUNTIME_GATE_FIELDS, rows)
+        with self.assertRaisesRegex(analyzer.AnalysisError, "remaining horizon destinations"):
+            analyzer.analyze(root, TEST_HARNESS_SHA, "horizon")
 
     def test_source_path_must_be_the_registered_physical_fixture(self) -> None:
         self.session.run_rows[1]["source_path"] = "/different/source"

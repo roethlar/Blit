@@ -71,14 +71,26 @@ EXPECTED_FIXTURES: dict[str, tuple[int, int]] = {
     "small": (10_000, 40_960_000),
     "mixed": (5_001, 547_110_912),
     "sustained": (5, 5_368_709_120),
+    "horizon": (40, 42_949_672_960),
 }
 SUSTAINED_FIXTURES = ("sustained",)
 SUSTAINED_CELL_ORDER = ("q_to_windows_sustained", "windows_to_q_sustained")
 SUSTAINED_FIRST_ROLE = ("source_init", "destination_init")
+HORIZON_FIXTURES = ("horizon",)
+HORIZON_CELL_ORDER = ("q_to_windows_horizon", "windows_to_q_horizon")
+HORIZON_FIRST_ROLE = ("source_init", "destination_init")
 PARENT_SESSION = "ldt4-20260721T224319Z-96a4e3b03caf"
 PARENT_EVIDENCE = "docs/bench/ldt4-rigw-2026-07-21"
 PARENT_INVENTORY_SHA256 = "713cb4624e6f64a3863b67101fb9a3f3df288306d3e6f418c19501428711990b"
+PREDECESSOR_SESSION = "ldt4-20260722T001611Z-04e80082e12c"
+PREDECESSOR_EVIDENCE = "docs/bench/ldt4-rigw-sustained-2026-07-22"
+PREDECESSOR_INVENTORY_SHA256 = (
+    "17348aaa261b936e04c104553d7b5c4bbcf008968306a29c4dea922535110eef"
+)
 SUSTAINED_DESTINATION_BYTES = 10_737_418_240
+HORIZON_DESTINATION_BYTES = 85_899_345_920
+Q_PAYLOAD_VOLUME = "/Volumes/Apps"
+Q_PAYLOAD_VOLUME_UUID = "33BAD653-9FA1-4236-966F-5BC4B221B34F"
 EXPECTED_FLOOR = 4
 EXPECTED_CEILING = 32
 FLOOR_CHUNK_BYTES = 16 * 1024 * 1024
@@ -454,6 +466,10 @@ def _windows_path(value: str) -> bool:
 
 
 def _registered_source_path(direction: str, fixture: str) -> str:
+    if fixture == "horizon":
+        if direction == "q_to_windows":
+            return "/Volumes/Apps/blit-ldt4-f13/staging/fixtures/src_horizon"
+        return "D:/blit-test/ldt4-f13/staging/fixtures/src_horizon"
     if direction == "q_to_windows":
         return f"/Users/michael/blit-ldt4-staging/fixtures/src_{fixture}"
     if fixture in {"small", "sustained"}:
@@ -461,7 +477,11 @@ def _registered_source_path(direction: str, fixture: str) -> str:
     return f"D:/blit-test/rigw-module/src_{fixture}"
 
 
-def _session_destination_root(direction: str) -> str:
+def _session_destination_root(direction: str, fixture: str) -> str:
+    if fixture == "horizon":
+        if direction == "q_to_windows":
+            return "D:/blit-test/ldt4-f13/sessions"
+        return "/Volumes/Apps/blit-ldt4-f13/sessions"
     if direction == "q_to_windows":
         return "D:/blit-test/ldt4-sessions"
     return "/Users/michael/blit-ldt4-sessions"
@@ -557,11 +577,57 @@ def _expected_sustained_schedule_rows() -> list[tuple[str, str, str, str, str]]:
     return rows
 
 
+def _expected_horizon_schedule_rows() -> list[tuple[str, str, str, str, str]]:
+    rows: list[tuple[str, str, str, str, str]] = []
+    sequence = 0
+    for cell, first in zip(HORIZON_CELL_ORDER, HORIZON_FIRST_ROLE):
+        direction = next(
+            candidate for candidate in DIRECTIONS if cell.startswith(f"{candidate}_")
+        )
+        second = next(role for role in INITIATORS if role != first)
+        for initiator in (first, second):
+            sequence += 1
+            rows.append((f"{sequence:03d}", cell, direction, "horizon", initiator))
+    return rows
+
+
 def _schedule_rows(matrix: str) -> list[tuple[str, str, str, str, str]]:
     if matrix == "fixed":
         return _expected_schedule_rows()
     if matrix == "sustained":
         return _expected_sustained_schedule_rows()
+    if matrix == "horizon":
+        return _expected_horizon_schedule_rows()
+    raise AnalysisError(f"unregistered matrix {matrix!r}")
+
+
+def _matrix_fixtures(matrix: str) -> tuple[str, ...]:
+    if matrix == "fixed":
+        return FIXTURES
+    if matrix == "sustained":
+        return SUSTAINED_FIXTURES
+    if matrix == "horizon":
+        return HORIZON_FIXTURES
+    raise AnalysisError(f"unregistered matrix {matrix!r}")
+
+
+def _matrix_cells(matrix: str) -> tuple[str, ...]:
+    if matrix == "fixed":
+        return CELL_ORDER
+    if matrix == "sustained":
+        return SUSTAINED_CELL_ORDER
+    if matrix == "horizon":
+        return HORIZON_CELL_ORDER
+    raise AnalysisError(f"unregistered matrix {matrix!r}")
+
+
+def _matrix_first_roles(matrix: str) -> tuple[str, ...]:
+    if matrix == "fixed":
+        return FIRST_ROLE
+    if matrix == "sustained":
+        return SUSTAINED_FIRST_ROLE
+    if matrix == "horizon":
+        return HORIZON_FIRST_ROLE
     raise AnalysisError(f"unregistered matrix {matrix!r}")
 
 
@@ -572,7 +638,7 @@ def _load_schedule(root: Path, matrix: str) -> None:
         "ascii"
     )
     if path.read_bytes() != expected:
-        label = "96-arm" if matrix == "fixed" else "sustained"
+        label = "96-arm" if matrix == "fixed" else matrix
         raise AnalysisError(f"schedule.csv is not the exact registered {label} schedule")
 
 
@@ -637,6 +703,24 @@ def _load_environment_gate(root: Path, phase: str) -> None:
     )
 
 
+def _load_payload_volume_gate(root: Path, phase: str) -> None:
+    label = f"payload-volume-{phase}.txt"
+    line = _read_single_lf_line(root / label, label)
+    pattern = re.compile(
+        rf"^phase={re.escape(phase)} mount={re.escape(Q_PAYLOAD_VOLUME)} "
+        rf"uuid={re.escape(Q_PAYLOAD_VOLUME_UUID)} "
+        r"filesystem=case-sensitive_apfs protocol=PCI-Express "
+        r"solid_state=true writable=true "
+        r"backing=/dev/disk[0-9]+s[0-9]+ "
+        r"free_bytes=(?P<free_bytes>(?:0|[1-9][0-9]*))$"
+    )
+    match = pattern.fullmatch(line)
+    if match is None:
+        raise AnalysisError(f"{label} is not the exact registered payload-volume gate")
+    if int(match.group("free_bytes")) < MIN_FREE_BYTES:
+        raise AnalysisError(f"{label}: free_bytes is below {MIN_FREE_BYTES}")
+
+
 def _load_runtime_gates(root: Path, matrix: str) -> None:
     rows = _read_csv(root / "runtime-gates.csv", RUNTIME_GATE_FIELDS, "runtime-gates.csv")
     expected_schedule = _schedule_rows(matrix)
@@ -668,20 +752,25 @@ def _load_runtime_gates(root: Path, matrix: str) -> None:
                 raise AnalysisError(
                     f"runtime-gates.csv line {line_number}: {field} is below the registered minimum"
                 )
-        if matrix == "sustained":
-            q_required = MIN_FREE_BYTES + SUSTAINED_DESTINATION_BYTES
-            windows_required = MIN_FREE_BYTES + (
+        if matrix in {"sustained", "horizon"}:
+            destination_bytes = (
                 SUSTAINED_DESTINATION_BYTES
-                if row["cell"] == "q_to_windows_sustained"
+                if matrix == "sustained"
+                else HORIZON_DESTINATION_BYTES
+            )
+            q_required = MIN_FREE_BYTES + destination_bytes
+            windows_required = MIN_FREE_BYTES + (
+                destination_bytes
+                if row["cell"] == f"q_to_windows_{_matrix_fixtures(matrix)[0]}"
                 else 0
             )
             if int(row["q_free_bytes"]) < q_required:
                 raise AnalysisError(
-                    f"runtime-gates.csv line {line_number}: q_free_bytes cannot retain the remaining sustained destinations"
+                    f"runtime-gates.csv line {line_number}: q_free_bytes cannot retain the remaining {matrix} destinations"
                 )
             if int(row["windows_free_bytes"]) < windows_required:
                 raise AnalysisError(
-                    f"runtime-gates.csv line {line_number}: windows_free_bytes cannot retain the remaining sustained destinations"
+                    f"runtime-gates.csv line {line_number}: windows_free_bytes cannot retain the remaining {matrix} destinations"
                 )
         q_match = q_quiet_re.fullmatch(row["q_quiet"])
         windows_match = windows_quiet_re.fullmatch(row["windows_quiet"])
@@ -876,7 +965,7 @@ def _load_fixture_index(
     rows = _read_csv(
         root / "fixture-manifests.csv", FIXTURE_INDEX_FIELDS, "fixture-manifests.csv"
     )
-    registered_fixtures = FIXTURES if matrix == "fixed" else SUSTAINED_FIXTURES
+    registered_fixtures = _matrix_fixtures(matrix)
     expected = {
         (direction, fixture)
         for direction in DIRECTIONS
@@ -989,7 +1078,7 @@ def _load_runs(
         line = index + 2
         direction = raw["direction"]
         fixture = raw["fixture"]
-        registered_fixtures = FIXTURES if matrix == "fixed" else SUSTAINED_FIXTURES
+        registered_fixtures = _matrix_fixtures(matrix)
         if direction not in DIRECTIONS or fixture not in registered_fixtures:
             raise AnalysisError(f"runs.csv line {line}: unregistered direction/fixture")
         expected_cell = _cell(direction, fixture)
@@ -1041,7 +1130,7 @@ def _load_runs(
             raise AnalysisError(
                 f"runs.csv line {line}: source_path is not the registered physical fixture"
             )
-        destination_root = _session_destination_root(direction)
+        destination_root = _session_destination_root(direction, fixture)
         active_match = re.fullmatch(
             rf"{re.escape(destination_root)}/([^/]+)/active/{re.escape(fixture)}",
             raw["active_destination_path"],
@@ -1131,7 +1220,7 @@ def _load_runs(
             )
         )
 
-    expected_cells = CELL_ORDER if matrix == "fixed" else SUSTAINED_CELL_ORDER
+    expected_cells = _matrix_cells(matrix)
     if set(paths_by_cell) != set(expected_cells):
         raise AnalysisError(f"runs.csv does not cover every {matrix} cell")
     if len(rows) % 2:
@@ -1158,8 +1247,8 @@ def _load_runs(
         if matrix == "fixed":
             wanted = list(zip(PAIRS, FIRST_ROLE))
         else:
-            cell_index = SUSTAINED_CELL_ORDER.index(cell)
-            wanted = [(1, SUSTAINED_FIRST_ROLE[cell_index])]
+            cell_index = expected_cells.index(cell)
+            wanted = [(1, _matrix_first_roles(matrix)[cell_index])]
         if groups_by_cell[cell] != wanted:
             if matrix == "fixed":
                 raise AnalysisError(
@@ -2694,7 +2783,20 @@ def _build_sustained_reports(
     fixtures: dict[tuple[str, str], Manifest],
     staging: Sequence[dict[str, str]],
     harness_sha: str,
+    matrix: str,
 ) -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]], list[dict[str, str]], str]:
+    if matrix not in {"sustained", "horizon"}:
+        raise AnalysisError(f"unregistered controller-supplement matrix {matrix!r}")
+    fixture = _matrix_fixtures(matrix)[0]
+    cells = _matrix_cells(matrix)
+    accepted_arm_verdict = (
+        "SUSTAINED_ADD_ACCEPTED" if matrix == "sustained" else "HORIZON_ADD_ACCEPTED"
+    )
+    accepted_status = (
+        "STRUCTURALLY_VALID_SUSTAINED_ROLE_PARITY"
+        if matrix == "sustained"
+        else "STRUCTURALLY_VALID_HORIZON_ROLE_PARITY"
+    )
     arm_by_key = {(arm.row.cell, arm.row.initiator): arm for arm in arms}
     arm_rows: list[dict[str, str]] = []
     sample_rows: list[dict[str, str]] = []
@@ -2761,7 +2863,7 @@ def _build_sustained_reports(
                 ),
                 "client_complete_elapsed_ns": str(client_complete_elapsed_ns),
                 "review_reasons": json.dumps(tuple(reasons), separators=(",", ":")),
-                "arm_verdict": "REVIEW_REQUIRED" if reasons else "SUSTAINED_ADD_ACCEPTED",
+                "arm_verdict": "REVIEW_REQUIRED" if reasons else accepted_arm_verdict,
                 "source_path": arm.row.source_path,
                 "active_destination_path": arm.row.active_destination_path,
                 "archive_path": arm.row.archive_path,
@@ -2792,7 +2894,7 @@ def _build_sustained_reports(
     decision_review_count = 0
     trace_timing_difference_count = 0
     material_fields = {"peak", "final", "add_count", "remove_count", "operation_sequence"}
-    for cell in SUSTAINED_CELL_ORDER:
+    for cell in cells:
         source = arm_by_key[(cell, "source_init")]
         destination = arm_by_key[(cell, "destination_init")]
         differences = _role_differences(source, destination)
@@ -2859,11 +2961,11 @@ def _build_sustained_reports(
     status = (
         "REVIEW_REQUIRED"
         if arm_review_count or decision_review_count
-        else "STRUCTURALLY_VALID_SUSTAINED_ROLE_PARITY"
+        else accepted_status
     )
     summary: dict[str, Any] = {
         "schema": 1,
-        "matrix": "sustained",
+        "matrix": matrix,
         "status": status,
         "artifact_sha": ARTIFACT_SHA,
         "harness_sha": harness_sha,
@@ -2873,7 +2975,7 @@ def _build_sustained_reports(
         "arm_count": len(arms),
         "no_sample_arm_count": sum(not arm.dial.samples for arm in arms),
         "arm_review_count": arm_review_count,
-        "pair_count": len(SUSTAINED_CELL_ORDER),
+        "pair_count": len(cells),
         "floor_streams_observed": EXPECTED_FLOOR,
         "receiver_safety_ceiling_observed": EXPECTED_CEILING,
         "preselected_worker_target": None,
@@ -2886,29 +2988,50 @@ def _build_sustained_reports(
         "fixture_manifests": [
             {
                 "direction": direction,
-                "fixture": "sustained",
-                "path": fixtures[(direction, "sustained")].relative_path,
-                "sha256": fixtures[(direction, "sustained")].file_sha256,
-                "files": fixtures[(direction, "sustained")].files,
-                "bytes": fixtures[(direction, "sustained")].bytes,
+                "fixture": fixture,
+                "path": fixtures[(direction, fixture)].relative_path,
+                "sha256": fixtures[(direction, fixture)].file_sha256,
+                "files": fixtures[(direction, fixture)].files,
+                "bytes": fixtures[(direction, fixture)].bytes,
             }
             for direction in DIRECTIONS
         ],
         "cells": cell_summaries,
     }
+    if matrix == "horizon":
+        summary.update(
+            {
+                "predecessor_session": PREDECESSOR_SESSION,
+                "predecessor_evidence": PREDECESSOR_EVIDENCE,
+                "predecessor_inventory_sha256": PREDECESSOR_INVENTORY_SHA256,
+            }
+        )
+    title = (
+        "# ldt-4 rig-W sustained controller supplement"
+        if matrix == "sustained"
+        else "# ldt-4 rig-W admission-horizon controller supplement"
+    )
     lines = [
-        "# ldt-4 rig-W sustained controller supplement",
+        title,
         "",
         f"Status: **{status}**",
         "",
-        f"Validated {len(arms)} sustained arms in two physical byte directions.",
+        f"Validated {len(arms)} {matrix} arms in two physical byte directions.",
         f"Parent fixed-matrix evidence: `{PARENT_EVIDENCE}` ({PARENT_INVENTORY_SHA256}).",
-        "Every arm must accept an ADD above the four-stream floor; accepted transition sequences must match within each initiator-layout pair.",
-        "Reason-only trailing sample differences are exported separately and do not override matching accepted membership transitions.",
-        "",
-        "| Cell | source-init ms | destination-init ms | source operations | destination operations | verdict |",
-        "|---|---:|---:|---|---|---|",
     ]
+    if matrix == "horizon":
+        lines.append(
+            f"Predecessor sustained evidence: `{PREDECESSOR_EVIDENCE}` ({PREDECESSOR_INVENTORY_SHA256})."
+        )
+    lines.extend(
+        [
+            "Every arm must accept an ADD above the four-stream floor; accepted transition sequences must match within each initiator-layout pair.",
+            "Reason-only trailing sample differences are exported separately and do not override matching accepted membership transitions.",
+            "",
+            "| Cell | source-init ms | destination-init ms | source operations | destination operations | verdict |",
+            "|---|---:|---:|---|---|---|",
+        ]
+    )
     for cell in cell_summaries:
         lines.append(
             f"| {cell['cell']} | {cell['source_init_ms']} | {cell['destination_init_ms']} | "
@@ -2956,6 +3079,19 @@ def _load_parent_evidence(session_dir: Path) -> None:
         raise AnalysisError("parent-evidence.txt is not the exact valid 96-arm binding")
 
 
+def _load_predecessor_evidence(session_dir: Path) -> None:
+    expected = (
+        f"session={PREDECESSOR_SESSION} evidence={PREDECESSOR_EVIDENCE} "
+        f"inventory_sha256={PREDECESSOR_INVENTORY_SHA256}"
+    )
+    if _read_single_lf_line(
+        session_dir / "predecessor-evidence.txt", "predecessor-evidence.txt"
+    ) != expected:
+        raise AnalysisError(
+            "predecessor-evidence.txt is not the exact sustained evidence binding"
+        )
+
+
 def _validate_measurements_complete(
     session_dir: Path, expected_harness_sha: str, matrix: str
 ) -> None:
@@ -2974,6 +3110,15 @@ def _validate_measurements_complete(
             "matrix=sustained\n"
             "arm_count=4\n"
             f"parent_inventory_sha256={PARENT_INVENTORY_SHA256}\n"
+        )
+    elif matrix == "horizon":
+        expected_text = (
+            f"artifact_sha={ARTIFACT_SHA}\n"
+            f"harness_sha={expected_harness_sha}\n"
+            "matrix=horizon\n"
+            "arm_count=4\n"
+            f"parent_inventory_sha256={PARENT_INVENTORY_SHA256}\n"
+            f"predecessor_inventory_sha256={PREDECESSOR_INVENTORY_SHA256}\n"
         )
     else:
         raise AnalysisError(f"unregistered matrix {matrix!r}")
@@ -3002,14 +3147,19 @@ def analyze(
 
     # Provenance is validated before large evidence files are trusted.
     harness_sha = _load_provenance(session_dir, expected_harness_sha)
-    if matrix == "sustained":
+    if matrix in {"sustained", "horizon"}:
         _load_parent_evidence(session_dir)
+    if matrix == "horizon":
+        _load_predecessor_evidence(session_dir)
     _load_artifact_build(session_dir)
     staging = _load_staging_manifest(session_dir)
     _load_windows_runtime_evidence(session_dir, staging)
     _load_schedule(session_dir, matrix)
     _load_environment_gate(session_dir, "start")
     _load_environment_gate(session_dir, "end")
+    if matrix == "horizon":
+        _load_payload_volume_gate(session_dir, "start")
+        _load_payload_volume_gate(session_dir, "end")
     _load_runtime_gates(session_dir, matrix)
     manifest_cache: dict[str, Manifest] = {}
     fixtures = _load_fixture_index(session_dir, manifest_cache, matrix)
@@ -3022,7 +3172,7 @@ def analyze(
         )
     else:
         summary, arm_rows, pair_rows, sample_rows, markdown = _build_sustained_reports(
-            session_dir, arms, fixtures, staging, harness_sha
+            session_dir, arms, fixtures, staging, harness_sha, matrix
         )
     inventory_rows, inventory_sha = _inventory_input_files(session_dir)
     summary["input_file_count"] = len(inventory_rows)
@@ -3085,7 +3235,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session-dir", required=True, type=Path)
     parser.add_argument("--expected-harness-sha", required=True)
-    parser.add_argument("--matrix", choices=("fixed", "sustained"), default="fixed")
+    parser.add_argument(
+        "--matrix", choices=("fixed", "sustained", "horizon"), default="fixed"
+    )
     args = parser.parse_args(argv)
     try:
         result = analyze(args.session_dir, args.expected_harness_sha, args.matrix)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bench_ldt4_rigw.sh -- registered ldt-4 sustained rig-W supplement harness.
+# bench_ldt4_rigw.sh -- registered ldt-4 admission-horizon rig-W supplement harness.
 #
 # This runner is intentionally additive.  Endpoint session roots, active
 # destination containers, retained payloads, traces, and manifests are never
@@ -29,16 +29,25 @@ readonly WIN_STAGE_DAEMON="$WIN_STAGE_ROOT/blit-daemon.exe"
 readonly WIN_ACTIVE_DAEMON='D:/blit-test/bins/active/blit-daemon.exe'
 readonly Q_STAGE_ROOT='/Users/michael/blit-ldt4-staging'
 readonly WIN_FIXTURE_STAGE='D:/blit-test/ldt4-staging'
-readonly Q_SESSION_ROOT='/Users/michael/blit-ldt4-sessions'
-readonly WIN_SESSION_ROOT='D:/blit-test/ldt4-sessions'
+readonly Q_PAYLOAD_VOLUME='/Volumes/Apps'
+readonly Q_PAYLOAD_VOLUME_UUID='33BAD653-9FA1-4236-966F-5BC4B221B34F'
+readonly Q_F13_ROOT="$Q_PAYLOAD_VOLUME/blit-ldt4-f13"
+readonly Q_HORIZON_STAGE_ROOT="$Q_F13_ROOT/staging"
+readonly Q_SESSION_ROOT="$Q_F13_ROOT/sessions"
+readonly WIN_F13_ROOT='D:/blit-test/ldt4-f13'
+readonly WIN_HORIZON_STAGE_ROOT="$WIN_F13_ROOT/staging"
+readonly WIN_SESSION_ROOT="$WIN_F13_ROOT/sessions"
 readonly DAEMON_PORT=9031
 readonly MIN_FREE_BYTES=33000000000
-readonly SUSTAINED_FILE_COUNT=5
-readonly SUSTAINED_FIXTURE_BYTES=5368709120
-readonly SUSTAINED_DESTINATION_BYTES=10737418240
+readonly HORIZON_FILE_COUNT=40
+readonly HORIZON_FIXTURE_BYTES=42949672960
+readonly HORIZON_DESTINATION_BYTES=85899345920
 readonly PARENT_SESSION='ldt4-20260721T224319Z-96a4e3b03caf'
 readonly PARENT_EVIDENCE='docs/bench/ldt4-rigw-2026-07-21'
 readonly PARENT_INVENTORY_SHA='713cb4624e6f64a3863b67101fb9a3f3df288306d3e6f418c19501428711990b'
+readonly PREDECESSOR_SESSION='ldt4-20260722T001611Z-04e80082e12c'
+readonly PREDECESSOR_EVIDENCE='docs/bench/ldt4-rigw-sustained-2026-07-22'
+readonly PREDECESSOR_INVENTORY_SHA='17348aaa261b936e04c104553d7b5c4bbcf008968306a29c4dea922535110eef'
 readonly EVIDENCE_ROOT='/Users/michael/blit-ldt4-evidence'
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -231,6 +240,43 @@ function ConvertTo-Ldt4CommandLine {
 POWERSHELL
 }
 
+q_payload_volume_field() {
+    local field=$1
+    diskutil info -plist "$Q_PAYLOAD_VOLUME" \
+        | plutil -extract "$field" raw -
+}
+
+q_payload_volume_gate() {
+    local phase=${1:-boundary} uuid mount filesystem filesystem_name protocol solid writable backing free
+    assert_q_registered_path "$Q_PAYLOAD_VOLUME" directory false \
+        || session_void "$phase: q payload volume path is absent, linked, or unsafe"
+    uuid=$(q_payload_volume_field VolumeUUID) \
+        || session_void "$phase: cannot read q payload volume UUID"
+    mount=$(q_payload_volume_field MountPoint) \
+        || session_void "$phase: cannot read q payload volume mount point"
+    filesystem=$(q_payload_volume_field FilesystemType) \
+        || session_void "$phase: cannot read q payload volume filesystem"
+    filesystem_name=$(q_payload_volume_field FilesystemName) \
+        || session_void "$phase: cannot read q payload volume filesystem name"
+    protocol=$(q_payload_volume_field BusProtocol) \
+        || session_void "$phase: cannot read q payload volume protocol"
+    solid=$(q_payload_volume_field SolidState) \
+        || session_void "$phase: cannot read q payload volume solid-state flag"
+    writable=$(q_payload_volume_field WritableVolume) \
+        || session_void "$phase: cannot read q payload volume writable flag"
+    backing=$(df -Pk "$Q_PAYLOAD_VOLUME" | awk 'NR==2 {print $1}') \
+        || session_void "$phase: cannot read q payload volume backing device"
+    free=$(df -Pk "$Q_PAYLOAD_VOLUME" | awk 'NR==2 {printf "%.0f", $4 * 1024}') \
+        || session_void "$phase: cannot read q payload volume free bytes"
+    [[ "$uuid" == "$Q_PAYLOAD_VOLUME_UUID" && "$mount" == "$Q_PAYLOAD_VOLUME" \
+        && "$filesystem" == apfs && "$filesystem_name" == 'Case-sensitive APFS' \
+        && "$protocol" == PCI-Express && "$solid" == true && "$writable" == true \
+        && "$backing" =~ ^/dev/disk[0-9]+s[0-9]+$ && "$free" =~ ^[0-9]+$ ]] \
+        || session_void "$phase: q payload volume identity mismatch (uuid=$uuid mount=$mount filesystem=$filesystem name=$filesystem_name protocol=$protocol solid=$solid writable=$writable backing=$backing free=$free)"
+    printf 'phase=%s mount=%s uuid=%s filesystem=case-sensitive_apfs protocol=%s solid_state=%s writable=%s backing=%s free_bytes=%s\n' \
+        "$phase" "$mount" "$uuid" "$protocol" "$solid" "$writable" "$backing" "$free"
+}
+
 assert_q_registered_paths() {
     local phase=${1:-boundary} allow_staged_missing=false
     if [[ "$phase" == preflight ]]; then allow_staged_missing=true; fi
@@ -244,8 +290,8 @@ assert_q_registered_paths() {
         || session_void "$phase: unsafe q staging path"
     assert_q_registered_path "$Q_STAGE_ROOT/fixtures/src_large" directory "$allow_staged_missing" \
         || session_void "$phase: unsafe q staged large fixture path"
-    assert_q_registered_path "$Q_STAGE_ROOT/fixtures/src_sustained" directory "$allow_staged_missing" \
-        || session_void "$phase: unsafe q staged sustained fixture path"
+    assert_q_registered_path "$Q_HORIZON_STAGE_ROOT/fixtures/src_horizon" directory "$allow_staged_missing" \
+        || session_void "$phase: unsafe q staged horizon fixture path"
     assert_q_registered_path "$Q_SESSION_ROOT" directory true \
         || session_void "$phase: unsafe q session path"
     assert_q_registered_path "$EVIDENCE_ROOT" directory true \
@@ -265,7 +311,7 @@ Assert-Ldt4PlainPath '$WIN_BLIT' File | Out-Null
 Assert-Ldt4PlainPath '$WIN_STAGE_DAEMON' File | Out-Null
 Assert-Ldt4PlainPath 'D:/blit-test/rigw-module/src_large' Directory | Out-Null
 Assert-Ldt4PlainPath '$WIN_FIXTURE_STAGE' Directory \$true | Out-Null
-Assert-Ldt4PlainPath '$WIN_FIXTURE_STAGE/fixtures/src_sustained' Directory ([bool]$allow_fixture_missing) | Out-Null
+Assert-Ldt4PlainPath '$WIN_HORIZON_STAGE_ROOT/fixtures/src_horizon' Directory ([bool]$allow_fixture_missing) | Out-Null
 Assert-Ldt4PlainPath '$WIN_SESSION_ROOT' Directory \$true | Out-Null
 Assert-Ldt4PlainPath 'D:/blit-test/bins/active' Directory | Out-Null
 Assert-Ldt4PlainPath '$WIN_ACTIVE_DAEMON' File \$true | Out-Null
@@ -307,11 +353,11 @@ fixture_source() {
         q_to_windows:large) printf '%s\n' "$Q_STAGE_ROOT/fixtures/src_large" ;;
         q_to_windows:small) printf '%s\n' "$Q_STAGE_ROOT/fixtures/src_small" ;;
         q_to_windows:mixed) printf '%s\n' "$Q_STAGE_ROOT/fixtures/src_mixed" ;;
-        q_to_windows:sustained) printf '%s\n' "$Q_STAGE_ROOT/fixtures/src_sustained" ;;
+        q_to_windows:horizon) printf '%s\n' "$Q_HORIZON_STAGE_ROOT/fixtures/src_horizon" ;;
         windows_to_q:large) printf '%s\n' 'D:/blit-test/rigw-module/src_large' ;;
         windows_to_q:small) printf '%s\n' "$WIN_FIXTURE_STAGE/fixtures/src_small" ;;
         windows_to_q:mixed) printf '%s\n' 'D:/blit-test/rigw-module/src_mixed' ;;
-        windows_to_q:sustained) printf '%s\n' "$WIN_FIXTURE_STAGE/fixtures/src_sustained" ;;
+        windows_to_q:horizon) printf '%s\n' "$WIN_HORIZON_STAGE_ROOT/fixtures/src_horizon" ;;
         *) die "unregistered fixture $direction:$fixture" ;;
     esac
 }
@@ -349,12 +395,12 @@ second_role_for_pair() {
 
 emit_schedule() {
     local cell direction fixture first second sequence=0
-    for cell in q_to_windows_sustained windows_to_q_sustained; do
+    for cell in q_to_windows_horizon windows_to_q_horizon; do
         direction=${cell%_*}
-        fixture=sustained
+        fixture=horizon
         case "$cell" in
-            q_to_windows_sustained) first=source_init; second=destination_init ;;
-            windows_to_q_sustained) first=destination_init; second=source_init ;;
+            q_to_windows_horizon) first=source_init; second=destination_init ;;
+            windows_to_q_horizon) first=destination_init; second=source_init ;;
         esac
         sequence=$((sequence + 1))
         printf '%03d,%s,%s,%s,%s\n' "$sequence" "$cell" "$direction" "$fixture" "$first"
@@ -364,13 +410,13 @@ emit_schedule() {
 }
 
 assert_schedule() {
-    local schedule lines sustained_sequence
+    local schedule lines horizon_sequence
     schedule=$(emit_schedule)
     lines=$(printf '%s\n' "$schedule" | awk 'END { print NR }')
     [[ "$lines" -eq "$ARM_COUNT" ]] || die "schedule has $lines arms, expected $ARM_COUNT"
-    sustained_sequence=$(printf '%s\n' "$schedule" | awk -F, '$4=="sustained" {print $2 ":" $5}' | paste -sd, -)
-    [[ "$sustained_sequence" == 'q_to_windows_sustained:source_init,q_to_windows_sustained:destination_init,windows_to_q_sustained:destination_init,windows_to_q_sustained:source_init' ]] \
-        || die 'schedule does not append the exact four-arm sustained role pairs'
+    horizon_sequence=$(printf '%s\n' "$schedule" | awk -F, '$4=="horizon" {print $2 ":" $5}' | paste -sd, -)
+    [[ "$horizon_sequence" == 'q_to_windows_horizon:source_init,q_to_windows_horizon:destination_init,windows_to_q_horizon:destination_init,windows_to_q_horizon:source_init' ]] \
+        || die 'schedule does not contain the exact four-arm horizon role pairs'
 }
 
 write_q_manifest() {
@@ -560,7 +606,7 @@ expected_shape() {
         large) printf '%s\n' '1,1073741824' ;;
         small) printf '%s\n' '10000,40960000' ;;
         mixed) printf '%s\n' '5001,547110912' ;;
-        sustained) printf '%s\n' '5,5368709120' ;;
+        horizon) printf '%s\n' '40,42949672960' ;;
         *) die "unregistered fixture $1" ;;
     esac
 }
@@ -644,12 +690,19 @@ reserve_evidence() {
 
 reserve_endpoint_sessions() {
     local q_session="$Q_SESSION_ROOT/$SESSION_TAG" guard
+    assert_q_registered_path "$Q_F13_ROOT" directory true \
+        || session_void 'q f13 root has an unsafe ancestor'
     assert_q_registered_path "$Q_SESSION_ROOT" directory true \
         || session_void 'q session root has an unsafe ancestor'
     assert_q_registered_path "$q_session" directory true \
         || session_void 'q endpoint session has an unsafe ancestor'
     [[ ! -e "$q_session" && ! -L "$q_session" ]] \
         || session_void "q session already exists: $q_session"
+    if [[ ! -e "$Q_F13_ROOT" && ! -L "$Q_F13_ROOT" ]]; then
+        mkdir "$Q_F13_ROOT" || session_void "cannot create $Q_F13_ROOT"
+    fi
+    [[ -d "$Q_F13_ROOT" && ! -L "$Q_F13_ROOT" ]] \
+        || session_void 'q f13 root is not a plain directory'
     if [[ ! -e "$Q_SESSION_ROOT" && ! -L "$Q_SESSION_ROOT" ]]; then
         mkdir "$Q_SESSION_ROOT" || session_void "cannot create $Q_SESSION_ROOT"
     fi
@@ -664,8 +717,12 @@ reserve_endpoint_sessions() {
 \$ErrorActionPreference = 'Stop'
 \$session = '$WIN_SESSION_ROOT/$SESSION_TAG'
 \$root = '$WIN_SESSION_ROOT'
+\$f13Root = '$WIN_F13_ROOT'
+Assert-Ldt4PlainPath \$f13Root Directory \$true | Out-Null
 Assert-Ldt4PlainPath \$root Directory \$true | Out-Null
 Assert-Ldt4PlainPath \$session Directory \$true | Out-Null
+if (-not (Test-Path -LiteralPath \$f13Root)) { New-Item -ItemType Directory -Path \$f13Root -ErrorAction Stop | Out-Null }
+Assert-Ldt4PlainPath \$f13Root Directory | Out-Null
 if (-not (Test-Path -LiteralPath \$root)) { New-Item -ItemType Directory -Path \$root -ErrorAction Stop | Out-Null }
 Assert-Ldt4PlainPath \$root Directory | Out-Null
 if (Test-Path -LiteralPath \$session) { throw 'Windows session already exists' }
@@ -687,6 +744,8 @@ initialize_evidence_files() {
     append_line "$OUT_DIR/provenance.csv" "harness,$EXPECTED_HARNESS_SHA"
     exclusive_line "$OUT_DIR/parent-evidence.txt" \
         "session=$PARENT_SESSION evidence=$PARENT_EVIDENCE inventory_sha256=$PARENT_INVENTORY_SHA"
+    exclusive_line "$OUT_DIR/predecessor-evidence.txt" \
+        "session=$PREDECESSOR_SESSION evidence=$PREDECESSOR_EVIDENCE inventory_sha256=$PREDECESSOR_INVENTORY_SHA"
     exclusive_line "$OUT_DIR/artifact-build.txt" \
         "artifact_sha=$ARTIFACT_SHA build_id=$BUILD_ID cargo_lock_sha256=$lock_hash q_artifact_repo=$Q_ARTIFACT_REPO"
     exclusive_line "$OUT_DIR/staging-manifest.csv" \
@@ -813,132 +872,154 @@ Assert-Ldt4PlainPath '$WIN_FIXTURE_STAGE/fixtures/src_small' Directory | Out-Nul
     done
 }
 
-stage_sustained_fixtures() {
-    local q_target="$Q_STAGE_ROOT/fixtures/src_sustained"
+stage_horizon_fixtures() {
+    local q_target="$Q_HORIZON_STAGE_ROOT/fixtures/src_horizon"
     local q_canonical="$Q_STAGE_ROOT/fixtures/src_large/large_1024M.bin"
     local q_incoming_root="$Q_SESSION_ROOT/$SESSION_TAG/incoming-fixtures"
-    local q_incoming="$q_incoming_root/src_sustained-q"
+    local q_incoming="$q_incoming_root/src_horizon-q"
     local q_free q_source_reserve q_required q_manifest q_shape index name
     local win_free win_state win_source_reserve win_required guard
 
     assert_q_registered_path "$q_canonical" file false \
-        || session_void 'q canonical large file is not a plain sustained source'
+        || session_void 'q canonical large file is not a plain horizon source'
     assert_q_registered_path "$q_target" directory true \
-        || session_void 'q sustained fixture path has an unsafe ancestor'
-    q_source_reserve=$SUSTAINED_FIXTURE_BYTES
+        || session_void 'q horizon fixture path has an unsafe ancestor'
+    q_source_reserve=$HORIZON_FIXTURE_BYTES
     if [[ -e "$q_target" || -L "$q_target" ]]; then
         assert_q_registered_path "$q_target" directory false \
-            || session_void 'q sustained fixture is not a plain directory'
+            || session_void 'q horizon fixture is not a plain directory'
         q_source_reserve=0
     fi
-    q_free=$(df -Pk "$Q_SESSION_ROOT" | awk 'NR==2 {printf "%.0f", $4 * 1024}')
-    q_required=$((MIN_FREE_BYTES + SUSTAINED_DESTINATION_BYTES + q_source_reserve))
+    q_free=$(df -Pk "$Q_PAYLOAD_VOLUME" | awk 'NR==2 {printf "%.0f", $4 * 1024}')
+    q_required=$((MIN_FREE_BYTES + HORIZON_DESTINATION_BYTES + q_source_reserve))
     awk -v free="$q_free" -v need="$q_required" 'BEGIN {exit !(free >= need)}' \
-        || session_void "q free bytes $q_free cannot retain the sustained supplement and $MIN_FREE_BYTES-byte floor (need $q_required)"
+        || session_void "q payload-volume free bytes $q_free cannot retain the horizon supplement and $MIN_FREE_BYTES-byte floor (need $q_required)"
 
     guard=$(windows_path_guard_script)
     win_state=$(wssh "$guard
 \$ErrorActionPreference = 'Stop'
-Assert-Ldt4PlainPath '$WIN_FIXTURE_STAGE/fixtures/src_sustained' Directory \$true | Out-Null
-if (Test-Path -LiteralPath '$WIN_FIXTURE_STAGE/fixtures/src_sustained') { 'present' } else { 'absent' }
+Assert-Ldt4PlainPath '$WIN_HORIZON_STAGE_ROOT/fixtures/src_horizon' Directory \$true | Out-Null
+if (Test-Path -LiteralPath '$WIN_HORIZON_STAGE_ROOT/fixtures/src_horizon') { 'present' } else { 'absent' }
 " | tr -d '\r' | tail -1) \
-        || session_void 'cannot determine Windows sustained-fixture state'
+        || session_void 'cannot determine Windows horizon-fixture state'
     [[ "$win_state" == present || "$win_state" == absent ]] \
-        || session_void "Windows sustained-fixture state is malformed: $win_state"
-    win_source_reserve=$SUSTAINED_FIXTURE_BYTES
+        || session_void "Windows horizon-fixture state is malformed: $win_state"
+    win_source_reserve=$HORIZON_FIXTURE_BYTES
     [[ "$win_state" == absent ]] || win_source_reserve=0
     win_free=$(wssh "(Get-PSDrive D -ErrorAction Stop).Free" | tr -d '\r' | tail -1) \
-        || session_void 'cannot determine Windows free bytes for sustained supplement'
+        || session_void 'cannot determine Windows free bytes for horizon supplement'
     [[ "$win_free" =~ ^[0-9]+$ ]] \
-        || session_void "Windows sustained free bytes are malformed: $win_free"
-    win_required=$((MIN_FREE_BYTES + SUSTAINED_DESTINATION_BYTES + win_source_reserve))
+        || session_void "Windows horizon free bytes are malformed: $win_free"
+    win_required=$((MIN_FREE_BYTES + HORIZON_DESTINATION_BYTES + win_source_reserve))
     awk -v free="$win_free" -v need="$win_required" 'BEGIN {exit !(free >= need)}' \
-        || session_void "Windows free bytes $win_free cannot retain the sustained supplement and $MIN_FREE_BYTES-byte floor (need $win_required)"
+        || session_void "Windows free bytes $win_free cannot retain the horizon supplement and $MIN_FREE_BYTES-byte floor (need $win_required)"
 
     if [[ "$q_source_reserve" -ne 0 ]]; then
+        if [[ ! -e "$Q_HORIZON_STAGE_ROOT" && ! -L "$Q_HORIZON_STAGE_ROOT" ]]; then
+            mkdir "$Q_HORIZON_STAGE_ROOT" \
+                || session_void 'q horizon staging root creation failed'
+        fi
+        assert_q_registered_path "$Q_HORIZON_STAGE_ROOT" directory false \
+            || session_void 'q horizon staging root is not plain'
+        if [[ ! -e "$Q_HORIZON_STAGE_ROOT/fixtures" && ! -L "$Q_HORIZON_STAGE_ROOT/fixtures" ]]; then
+            mkdir "$Q_HORIZON_STAGE_ROOT/fixtures" \
+                || session_void 'q horizon fixture parent creation failed'
+        fi
+        assert_q_registered_path "$Q_HORIZON_STAGE_ROOT/fixtures" directory false \
+            || session_void 'q horizon fixture parent is not plain'
         assert_q_registered_path "$q_incoming_root" directory true \
-            || session_void 'q sustained incoming root has an unsafe ancestor'
+            || session_void 'q horizon incoming root has an unsafe ancestor'
         if [[ ! -e "$q_incoming_root" && ! -L "$q_incoming_root" ]]; then
             mkdir "$q_incoming_root" \
-                || session_void 'q sustained incoming root creation failed'
+                || session_void 'q horizon incoming root creation failed'
         fi
         assert_q_registered_path "$q_incoming_root" directory false \
-            || session_void 'q sustained incoming root is not plain'
+            || session_void 'q horizon incoming root is not plain'
         [[ ! -e "$q_incoming" && ! -L "$q_incoming" ]] \
-            || session_void 'q sustained incoming fixture already exists'
-        mkdir "$q_incoming" || session_void 'q sustained incoming fixture creation failed'
-        for index in 1 2 3 4 5; do
-            printf -v name 'sustained_%02d.bin' "$index"
+            || session_void 'q horizon incoming fixture already exists'
+        mkdir "$q_incoming" || session_void 'q horizon incoming fixture creation failed'
+        for ((index=1; index<=HORIZON_FILE_COUNT; index++)); do
+            printf -v name 'horizon_%02d.bin' "$index"
             cp "$q_canonical" "$q_incoming/$name" \
-                || session_void "q sustained copy $name failed; incoming fixture retained"
+                || session_void "q horizon copy $name failed; incoming fixture retained"
             assert_q_registered_path "$q_incoming/$name" file false \
-                || session_void "q sustained copy $name is not a plain file"
+                || session_void "q horizon copy $name is not a plain file"
         done
-        q_manifest="$OUT_DIR/manifests/staging-q-sustained.csv"
+        q_manifest="$OUT_DIR/manifests/staging-q-horizon.csv"
         write_q_manifest "$q_incoming" "$q_manifest" \
-            || session_void 'q sustained incoming manifest failed'
+            || session_void 'q horizon incoming manifest failed'
         q_shape=$(manifest_shape "$q_manifest") \
-            || session_void 'q sustained incoming shape failed'
-        [[ "$q_shape" == "$(expected_shape sustained)" ]] \
-            || session_void "q sustained incoming shape is $q_shape"
-        sync || session_void 'q sustained fixture durability flush failed'
+            || session_void 'q horizon incoming shape failed'
+        [[ "$q_shape" == "$(expected_shape horizon)" ]] \
+            || session_void "q horizon incoming shape is $q_shape"
+        sync || session_void 'q horizon fixture durability flush failed'
         [[ ! -e "$q_target" && ! -L "$q_target" ]] \
-            || session_void 'q sustained target appeared concurrently'
+            || session_void 'q horizon target appeared concurrently'
         rename_q_directory_exclusive "$q_incoming" "$q_target" \
-            || session_void 'q sustained exclusive promotion failed; incoming fixture retained'
-        sync || session_void 'q sustained promotion metadata flush failed'
+            || session_void 'q horizon exclusive promotion failed; incoming fixture retained'
+        sync || session_void 'q horizon promotion metadata flush failed'
     fi
 
     if [[ "$win_state" == absent ]]; then
         wssh "$guard
 \$ErrorActionPreference = 'Stop'
 \$source = 'D:/blit-test/rigw-module/src_large/large_1024M.bin'
-\$target = '$WIN_FIXTURE_STAGE/fixtures/src_sustained'
+\$stageRoot = '$WIN_HORIZON_STAGE_ROOT'
+\$fixtureParent = \$stageRoot + '/fixtures'
+\$target = \$fixtureParent + '/src_horizon'
 \$incomingRoot = '$WIN_SESSION_ROOT/$SESSION_TAG/incoming-fixtures'
-\$incoming = \$incomingRoot + '/src_sustained-windows'
+\$incoming = \$incomingRoot + '/src_horizon-windows'
 Assert-Ldt4PlainPath \$source File | Out-Null
 Assert-Ldt4PlainPath \$target Directory \$true | Out-Null
 Assert-Ldt4PlainPath \$incomingRoot Directory \$true | Out-Null
-if (Test-Path -LiteralPath \$target) { throw 'Windows sustained target appeared concurrently' }
+if (Test-Path -LiteralPath \$target) { throw 'Windows horizon target appeared concurrently' }
+if (-not (Test-Path -LiteralPath \$stageRoot)) {
+  New-Item -ItemType Directory -Path \$stageRoot -ErrorAction Stop | Out-Null
+}
+Assert-Ldt4PlainPath \$stageRoot Directory | Out-Null
+if (-not (Test-Path -LiteralPath \$fixtureParent)) {
+  New-Item -ItemType Directory -Path \$fixtureParent -ErrorAction Stop | Out-Null
+}
+Assert-Ldt4PlainPath \$fixtureParent Directory | Out-Null
 if (-not (Test-Path -LiteralPath \$incomingRoot)) {
   New-Item -ItemType Directory -Path \$incomingRoot -ErrorAction Stop | Out-Null
 }
 Assert-Ldt4PlainPath \$incomingRoot Directory | Out-Null
-if (Test-Path -LiteralPath \$incoming) { throw 'Windows sustained incoming fixture already exists' }
+if (Test-Path -LiteralPath \$incoming) { throw 'Windows horizon incoming fixture already exists' }
 New-Item -ItemType Directory -Path \$incoming -ErrorAction Stop | Out-Null
-foreach (\$index in 1..$SUSTAINED_FILE_COUNT) {
-  \$name = 'sustained_{0:D2}.bin' -f \$index
+foreach (\$index in 1..$HORIZON_FILE_COUNT) {
+  \$name = 'horizon_{0:D2}.bin' -f \$index
   \$destination = \$incoming + '/' + \$name
   Copy-Item -LiteralPath \$source -Destination \$destination -ErrorAction Stop
   Assert-Ldt4PlainPath \$destination File | Out-Null
 }
 \$children = @(Get-ChildItem -LiteralPath \$incoming -Force -ErrorAction Stop)
-if (\$children.Count -ne $SUSTAINED_FILE_COUNT) { throw \"Windows sustained incoming child count is \$(\$children.Count)\" }
+if (\$children.Count -ne $HORIZON_FILE_COUNT) { throw \"Windows horizon incoming child count is \$(\$children.Count)\" }
 foreach (\$item in \$children) {
   if (\$item.PSIsContainer -or -not (\$item -is [IO.FileInfo]) -or ((\$item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or \$item.Length -ne 1073741824) {
-    throw \"Windows sustained incoming child is not an exact plain 1 GiB file: \$(\$item.FullName)\"
+    throw \"Windows horizon incoming child is not an exact plain 1 GiB file: \$(\$item.FullName)\"
   }
 }
 Write-VolumeCache D -ErrorAction Stop
-if (Test-Path -LiteralPath \$target) { throw 'Windows sustained target appeared before promotion' }
+if (Test-Path -LiteralPath \$target) { throw 'Windows horizon target appeared before promotion' }
 [IO.Directory]::Move((ConvertTo-Ldt4CanonicalPath \$incoming),(ConvertTo-Ldt4CanonicalPath \$target))
 Write-VolumeCache D -ErrorAction Stop
 Assert-Ldt4PlainPath \$target Directory | Out-Null
-if (Test-Path -LiteralPath \$incoming) { throw 'Windows sustained incoming survived promotion' }
-" >/dev/null || session_void 'Windows sustained fixture creation/promotion failed; evidence retained'
+if (Test-Path -LiteralPath \$incoming) { throw 'Windows horizon incoming survived promotion' }
+" >/dev/null || session_void 'Windows horizon fixture creation/promotion failed; evidence retained'
     fi
 
     assert_q_registered_path "$q_target" directory false \
-        || session_void 'q sustained fixture is not plain after staging'
+        || session_void 'q horizon fixture is not plain after staging'
     wssh "$guard
 \$ErrorActionPreference = 'Stop'
-Assert-Ldt4PlainPath '$WIN_FIXTURE_STAGE/fixtures/src_sustained' Directory | Out-Null
-" >/dev/null || session_void 'Windows sustained fixture is not plain after staging'
+Assert-Ldt4PlainPath '$WIN_HORIZON_STAGE_ROOT/fixtures/src_horizon' Directory | Out-Null
+" >/dev/null || session_void 'Windows horizon fixture is not plain after staging'
 }
 
 build_fixture_manifests() {
     local fixture q_rel q_abs win_rel win_abs remote_win q_shape win_shape
-    for fixture in sustained; do
+    for fixture in horizon; do
         q_rel="manifests/source/q_to_windows_${fixture}.csv"
         q_abs="$OUT_DIR/$q_rel"
         win_rel="manifests/source/windows_to_q_${fixture}.csv"
@@ -1049,7 +1130,8 @@ q_machine_identity() {
 }
 
 environment_gate() {
-    local phase=$1 q_identity q_local_hostname q_computer_name q_free win_free q_route q_route_raw q_route_mtu q_mtu q_media q_status q_mac q_arp q_peer auto tm_running win_topology quiet_q quiet_win q_mss q_mss_ip win_mss win_mss_ip win_mss_raw win_ps guard
+    local phase=$1 q_identity q_local_hostname q_computer_name q_free q_payload_volume win_free q_route q_route_raw q_route_mtu q_mtu q_media q_status q_mac q_arp q_peer auto tm_running win_topology quiet_q quiet_win q_mss q_mss_ip win_mss win_mss_ip win_mss_raw win_ps guard
+    q_payload_volume=$(q_payload_volume_gate "$phase")
     assert_q_registered_paths "$phase"
     assert_windows_registered_paths "$phase"
     ports_closed || session_void "$phase: daemon port is occupied"
@@ -1079,15 +1161,15 @@ environment_gate() {
     [[ "$auto" == 0 ]] || session_void "$phase: Time Machine AutoBackup is $auto, expected manual"
     tm_running=$(tmutil status 2>/dev/null | awk -F'= ' '/Running/ {gsub(/[ ;]/,"",$2); print $2; exit}')
     [[ "$tm_running" == 0 ]] || session_void "$phase: Time Machine Running is ${tm_running:-unknown}"
-    q_free=$(df -Pk "$Q_SESSION_ROOT" | awk 'NR==2 {printf "%.0f", $4 * 1024}')
+    q_free=$(df -Pk "$EVIDENCE_ROOT" | awk 'NR==2 {printf "%.0f", $4 * 1024}')
     awk -v free="$q_free" -v need="$MIN_FREE_BYTES" 'BEGIN {exit !(free >= need)}' \
-        || session_void "$phase: q free bytes $q_free below $MIN_FREE_BYTES"
+        || session_void "$phase: q internal evidence-volume free bytes $q_free below $MIN_FREE_BYTES"
     guard=$(windows_path_guard_script)
     win_topology=$(wssh "$guard
 \$ErrorActionPreference = 'Stop'
 \$psVersion = \$PSVersionTable.PSVersion
 if (\$psVersion -lt [version]'7.4') { throw \"PowerShell \$psVersion is below required 7.4\" }
-Assert-Ldt4PlainPath '$WIN_FIXTURE_STAGE/fixtures/src_sustained' Directory | Out-Null
+Assert-Ldt4PlainPath '$WIN_HORIZON_STAGE_ROOT/fixtures/src_horizon' Directory | Out-Null
 Assert-Ldt4PlainPath '$WIN_SESSION_ROOT/$SESSION_TAG' Directory | Out-Null
 if (\$env:COMPUTERNAME -ne 'NETWATCH-01') { throw \"unexpected host: \$(\$env:COMPUTERNAME)\" }
 \$adapter = Get-NetAdapter -Name '$WIN_NIC' -ErrorAction Stop
@@ -1145,6 +1227,7 @@ PY
         || session_void "$phase: Windows-to-q MSS/source is $win_mss/$win_mss_ip"
     exclusive_line "$OUT_DIR/environment-$phase.txt" \
         "phase=$phase q_ip=$Q_IP q_nic=$Q_NIC q_mtu=$q_mtu q_media=$q_media q_route=$q_route q_route_mtu=$q_route_mtu q_local_hostname=$q_local_hostname q_computer_name=$q_computer_name q_mac=$q_mac q_peer=$q_peer q_free=$q_free $quiet_q q_to_windows_mss=$q_mss windows_to_q_mss=$win_mss windows_powershell=$win_ps windows=$win_topology $quiet_win"
+    exclusive_line "$OUT_DIR/payload-volume-$phase.txt" "$q_payload_volume"
 }
 
 prepare_windows_runtime() {
@@ -2381,18 +2464,22 @@ PY
 }
 
 runtime_boundary_gate() {
-    local sequence=$1 cell=$2 pair=$3 q_quiet win_quiet q_free win_free
-    local q_required=$((MIN_FREE_BYTES + SUSTAINED_DESTINATION_BYTES)) win_required=$MIN_FREE_BYTES
+    local sequence=$1 cell=$2 pair=$3 q_quiet win_quiet q_free q_internal_free win_free
+    local q_required=$((MIN_FREE_BYTES + HORIZON_DESTINATION_BYTES)) win_required=$MIN_FREE_BYTES
+    q_payload_volume_gate "$cell pair $pair runtime boundary" >/dev/null
     assert_q_registered_paths "$cell pair $pair runtime boundary"
     assert_windows_registered_paths "$cell pair $pair runtime boundary"
     ports_closed || session_void "$cell pair $pair: daemon port occupied at runtime boundary"
     q_quiet=$(q_quiet_gate)
     win_quiet=$(windows_quiet_gate)
-    q_free=$(df -Pk "$Q_SESSION_ROOT" | awk 'NR==2 {printf "%.0f", $4 * 1024}')
+    q_free=$(df -Pk "$Q_PAYLOAD_VOLUME" | awk 'NR==2 {printf "%.0f", $4 * 1024}')
+    q_internal_free=$(df -Pk "$EVIDENCE_ROOT" | awk 'NR==2 {printf "%.0f", $4 * 1024}')
     win_free=$(wssh "(Get-PSDrive D -ErrorAction Stop).Free" | tr -d '\r' | tail -1)
     [[ "$win_free" =~ ^[0-9]+$ ]] || session_void "$cell pair $pair: Windows free bytes malformed"
-    if [[ "$cell" == q_to_windows_sustained ]]; then
-        win_required=$((MIN_FREE_BYTES + SUSTAINED_DESTINATION_BYTES))
+    awk -v free="$q_internal_free" -v need="$MIN_FREE_BYTES" 'BEGIN {exit !(free >= need)}' \
+        || session_void "$cell pair $pair: q internal evidence-volume free bytes $q_internal_free below $MIN_FREE_BYTES"
+    if [[ "$cell" == q_to_windows_horizon ]]; then
+        win_required=$((MIN_FREE_BYTES + HORIZON_DESTINATION_BYTES))
     fi
     awk -v free="$q_free" -v need="$q_required" 'BEGIN {exit !(free >= need)}' \
         || session_void "$cell pair $pair: q free bytes $q_free below remaining-session need $q_required"
@@ -2475,8 +2562,8 @@ run_arm() {
 write_measurements_complete() {
     local marker="$OUT_DIR/MEASUREMENTS-COMPLETE"
     [[ ! -e "$marker" && ! -L "$marker" ]] || session_void 'measurement marker already exists'
-    (set -o noclobber; printf 'artifact_sha=%s\nharness_sha=%s\nmatrix=sustained\narm_count=4\nparent_inventory_sha256=%s\n' \
-        "$ARTIFACT_SHA" "$EXPECTED_HARNESS_SHA" "$PARENT_INVENTORY_SHA" > "$marker") \
+    (set -o noclobber; printf 'artifact_sha=%s\nharness_sha=%s\nmatrix=horizon\narm_count=4\nparent_inventory_sha256=%s\npredecessor_inventory_sha256=%s\n' \
+        "$ARTIFACT_SHA" "$EXPECTED_HARNESS_SHA" "$PARENT_INVENTORY_SHA" "$PREDECESSOR_INVENTORY_SHA" > "$marker") \
         || session_void 'cannot create exclusive measurement marker'
 }
 
@@ -2610,26 +2697,29 @@ run_selftest() {
         || die 'Windows endpoint identity selftest failed'
     [[ "$(fixture_source q_to_windows large)" == '/Users/michael/blit-ldt4-staging/fixtures/src_large' ]] \
         || die 'q large fixture mapping selftest failed'
-    [[ "$(fixture_source q_to_windows sustained)" == '/Users/michael/blit-ldt4-staging/fixtures/src_sustained' ]] \
-        || die 'q sustained fixture mapping selftest failed'
-    [[ "$(fixture_source windows_to_q sustained)" == 'D:/blit-test/ldt4-staging/fixtures/src_sustained' ]] \
-        || die 'Windows sustained fixture mapping selftest failed'
-    [[ "$(expected_shape sustained)" == "$SUSTAINED_FILE_COUNT,$SUSTAINED_FIXTURE_BYTES" ]] \
-        || die 'sustained fixture is not the exact registered five-file/5 GiB shape'
+    [[ "$(fixture_source q_to_windows horizon)" == '/Volumes/Apps/blit-ldt4-f13/staging/fixtures/src_horizon' ]] \
+        || die 'q horizon fixture mapping selftest failed'
+    [[ "$(fixture_source windows_to_q horizon)" == 'D:/blit-test/ldt4-f13/staging/fixtures/src_horizon' ]] \
+        || die 'Windows horizon fixture mapping selftest failed'
+    [[ "$(expected_shape horizon)" == "$HORIZON_FILE_COUNT,$HORIZON_FIXTURE_BYTES" ]] \
+        || die 'horizon fixture is not the exact registered 40-file/40 GiB shape'
     [[ "$PARENT_SESSION|$PARENT_EVIDENCE|$PARENT_INVENTORY_SHA" == \
         'ldt4-20260721T224319Z-96a4e3b03caf|docs/bench/ldt4-rigw-2026-07-21|713cb4624e6f64a3863b67101fb9a3f3df288306d3e6f418c19501428711990b' ]] \
-        || die 'sustained parent-evidence binding changed'
-    [[ "$(active_destination q_to_windows sustained)" == 'D:/blit-test/ldt4-sessions/selftest-ldt4/active/sustained' ]] \
+        || die 'horizon fixed-parent evidence binding changed'
+    [[ "$PREDECESSOR_SESSION|$PREDECESSOR_EVIDENCE|$PREDECESSOR_INVENTORY_SHA" == \
+        'ldt4-20260722T001611Z-04e80082e12c|docs/bench/ldt4-rigw-sustained-2026-07-22|17348aaa261b936e04c104553d7b5c4bbcf008968306a29c4dea922535110eef' ]] \
+        || die 'horizon predecessor-evidence binding changed'
+    [[ "$(active_destination q_to_windows horizon)" == 'D:/blit-test/ldt4-f13/sessions/selftest-ldt4/active/horizon' ]] \
         || die 'Windows active destination mapping selftest failed'
     sample=$(retained_destination windows_to_q ldt4-004)
-    [[ "$sample" == '/Users/michael/blit-ldt4-sessions/selftest-ldt4/retained/ldt4-004' ]] \
+    [[ "$sample" == '/Volumes/Apps/blit-ldt4-f13/sessions/selftest-ldt4/retained/ldt4-004' ]] \
         || die 'q retained destination mapping selftest failed'
     for direction in q_to_windows windows_to_q; do
         case "$direction" in
             q_to_windows) remote_host=$Q_IP ;;
             windows_to_q) remote_host=$WIN_IP ;;
         esac
-        for fixture in sustained; do
+        for fixture in horizon; do
             source=$(fixture_source "$direction" "$fixture")
             parent=$(dirname "$source")
             [[ "$(responder_module_path "$direction" "$fixture" destination_init)" == "$parent" ]] \
@@ -2863,22 +2953,53 @@ if no_launch.count("return") != 1:
     raise SystemExit("Windows no-launch teardown has an unguarded return")
 if any(token in no_launch for token in ("Get-CimInstance", "Get-Process", "Stop-Process")):
     raise SystemExit("Windows no-launch teardown can enumerate or stop a process")
-for staged in ('src_large', 'src_sustained'):
-    if f'$Q_STAGE_ROOT/fixtures/{staged}' not in q_paths:
-        raise SystemExit(f"q {staged} fixture disappeared from boundary path guards")
-if '$WIN_FIXTURE_STAGE/fixtures/src_sustained' not in windows_paths:
-    raise SystemExit("Windows sustained fixture disappeared from boundary path guards")
-sustained_stage = text[text.index("stage_sustained_fixtures() {"):text.index("build_fixture_manifests() {")]
+if '$Q_STAGE_ROOT/fixtures/src_large' not in q_paths:
+    raise SystemExit("q canonical large fixture disappeared from boundary path guards")
+if '$Q_HORIZON_STAGE_ROOT/fixtures/src_horizon' not in q_paths:
+    raise SystemExit("q horizon fixture disappeared from boundary path guards")
+if '$WIN_HORIZON_STAGE_ROOT/fixtures/src_horizon' not in windows_paths:
+    raise SystemExit("Windows horizon fixture disappeared from boundary path guards")
+horizon_stage = text[text.index("stage_horizon_fixtures() {"):text.index("build_fixture_manifests() {")]
 for required in (
-    'q_required=$((MIN_FREE_BYTES + SUSTAINED_DESTINATION_BYTES + q_source_reserve))',
-    'win_required=$((MIN_FREE_BYTES + SUSTAINED_DESTINATION_BYTES + win_source_reserve))',
-    'for index in 1 2 3 4 5',
-    'foreach (\\$index in 1..$SUSTAINED_FILE_COUNT)',
+    'q_required=$((MIN_FREE_BYTES + HORIZON_DESTINATION_BYTES + q_source_reserve))',
+    'win_required=$((MIN_FREE_BYTES + HORIZON_DESTINATION_BYTES + win_source_reserve))',
+    'for ((index=1; index<=HORIZON_FILE_COUNT; index++))',
+    'foreach (\\$index in 1..$HORIZON_FILE_COUNT)',
     'rename_q_directory_exclusive "$q_incoming" "$q_target"',
     '[IO.Directory]::Move((ConvertTo-Ldt4CanonicalPath \\$incoming),(ConvertTo-Ldt4CanonicalPath \\$target))',
 ):
-    if required not in sustained_stage:
-        raise SystemExit(f"sustained staging/capacity guard disappeared: {required}")
+    if required not in horizon_stage:
+        raise SystemExit(f"horizon staging/capacity guard disappeared: {required}")
+volume_gate = text[text.index("q_payload_volume_field() {"):text.index("assert_q_registered_paths() {")]
+for required in (
+    'VolumeUUID',
+    'MountPoint',
+    'FilesystemType',
+    'FilesystemName',
+    'BusProtocol',
+    'SolidState',
+    'WritableVolume',
+    'plutil -extract "$field" raw -',
+    '"$uuid" == "$Q_PAYLOAD_VOLUME_UUID"',
+    '"$backing" =~ ^/dev/disk[0-9]+s[0-9]+$',
+):
+    if required not in volume_gate:
+        raise SystemExit(f"q payload-volume identity guard disappeared: {required}")
+environment = text[text.index("environment_gate() {"):text.index("prepare_windows_runtime() {")]
+for required in (
+    'q_payload_volume=$(q_payload_volume_gate "$phase")',
+    'exclusive_line "$OUT_DIR/payload-volume-$phase.txt" "$q_payload_volume"',
+):
+    if required not in environment:
+        raise SystemExit(f"q payload-volume boundary evidence disappeared: {required}")
+runtime_boundary = text[text.index("runtime_boundary_gate() {"):text.index("run_arm() {")]
+for required in (
+    'q_payload_volume_gate "$cell pair $pair runtime boundary" >/dev/null',
+    'q_internal_free=$(df -Pk "$EVIDENCE_ROOT"',
+    'q_required=$((MIN_FREE_BYTES + HORIZON_DESTINATION_BYTES))',
+):
+    if required not in runtime_boundary:
+        raise SystemExit(f"q horizon runtime gate disappeared: {required}")
 stage = text[text.index("stage_fixtures() {"):text.index("build_fixture_manifests() {")]
 required_stage_copy = 'scp -r "${SSH_MUX[@]}" "$WIN_SSH:$remote_source" "$incoming_root/"'
 if required_stage_copy not in stage:
@@ -2953,20 +3074,27 @@ if not analyzer_result < inventory < complete:
 tail = main[inventory + len("write_final_evidence_inventory"):]
 if re.search(r'\b(exclusive_line|append_line|write_measurements_complete)\b', tail):
     raise SystemExit("evidence mutation appears after final inventory")
-main_stage = main.index("stage_sustained_fixtures")
+main_stage = main.index("stage_horizon_fixtures")
 matrix = main.index("run_registered_matrix", main_stage)
 if not main_stage < matrix or "\n    stage_fixtures\n" in main:
     raise SystemExit("supplemental run can execute the fixed 96-arm matrix")
+main_volume = main.index("q_payload_volume_gate preflight")
+main_paths = main.index("assert_q_registered_paths preflight", main_volume)
+main_reserve = main.index("reserve_evidence", main_paths)
+if not main_volume < main_paths < main_reserve:
+    raise SystemExit("q payload-volume identity is not gated before reservation")
 for required in (
-    "readonly SUSTAINED_FILE_COUNT=5",
-    "readonly SUSTAINED_FIXTURE_BYTES=5368709120",
-    "readonly SUSTAINED_DESTINATION_BYTES=10737418240",
-    "q_to_windows_sustained",
-    "windows_to_q_sustained",
+    "readonly HORIZON_FILE_COUNT=40",
+    "readonly HORIZON_FIXTURE_BYTES=42949672960",
+    "readonly HORIZON_DESTINATION_BYTES=85899345920",
+    "q_to_windows_horizon",
+    "windows_to_q_horizon",
     "parent_inventory_sha256=%s",
+    "predecessor_inventory_sha256=%s",
+    "--matrix horizon",
 ):
     if required not in text:
-        raise SystemExit(f"sustained supplement binding disappeared: {required}")
+        raise SystemExit(f"horizon supplement binding disappeared: {required}")
 PY
     SESSION_TAG=$old_tag
     printf 'ldt-4 harness selftest: PASS (%s arms, no SSH)\n' "$ARM_COUNT"
@@ -2993,9 +3121,10 @@ main() {
     fi
     [[ $# -eq 0 ]] || die 'the registered harness accepts no positional arguments'
     validate_invocation
-    for command in git python3 ssh scp shasum lsof nc awk cmp tar scutil; do
+    for command in git python3 ssh scp shasum lsof nc awk cmp tar scutil diskutil plutil; do
         command -v "$command" >/dev/null || die "required command absent: $command"
     done
+    q_payload_volume_gate preflight >/dev/null
     assert_q_registered_paths preflight
     assert_windows_registered_paths preflight
     verify_harness_identity
@@ -3006,7 +3135,7 @@ main() {
     trap 'exit 143' TERM
     reserve_endpoint_sessions
     initialize_evidence_files "$artifact_hashes"
-    stage_sustained_fixtures
+    stage_horizon_fixtures
     build_fixture_manifests
     environment_gate start
     prepare_windows_runtime
@@ -3020,7 +3149,7 @@ main() {
     environment_gate end
     write_measurements_complete
     analysis_record=$(python3 "$ANALYZER" --session-dir "$OUT_DIR" \
-        --expected-harness-sha "$EXPECTED_HARNESS_SHA" --matrix sustained) \
+        --expected-harness-sha "$EXPECTED_HARNESS_SHA" --matrix horizon) \
         || session_void 'reviewed analyzer refused the complete measurement set'
     exclusive_line "$OUT_DIR/analyzer-result.txt" "$analysis_record"
     write_final_evidence_inventory \
