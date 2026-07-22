@@ -183,7 +183,9 @@ performance ratios are measured or graded.
    with direct code/test evidence. The release ledger must reach zero unresolved
    defects. `w7-1` is closed: the session mirror and explicit daemon purge use
    one contained deletion executor; the old parallel enumerator no longer
-   exists.
+   exists. The dirty-build profile-skew defect is closed: all profiles watch
+   and hash the same executable-input set, including untracked source bytes,
+   while documentation changes do not churn peer compatibility.
 7. **rel-7 — reproducible artifacts.** Build the supported target matrix from
    one exact commit, preserve build identity, generate checksums, and fail if a
    required artifact is absent.

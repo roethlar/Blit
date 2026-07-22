@@ -26,6 +26,10 @@ pub mod win_fs;
 pub(crate) mod windows_metadata;
 pub mod zero_copy;
 
+#[cfg(test)]
+#[path = "../build_identity.rs"]
+mod build_identity_test_support;
+
 pub mod generated {
     tonic::include_proto!("blit.v2");
 }

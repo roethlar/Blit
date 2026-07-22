@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** temporary-daemon diagnostics fixed, 2026-07-22
+**As of:** dirty build identity stabilized, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -79,6 +79,13 @@ performance ceilings and hardware tuning remain post-release work.
   executor. It preserves filtered-mirror scope and cancellation while making
   recursive purge clear Windows read-only trees before deletion. Opposite-mode
   mutations make the existing filtered-mirror and recursive-purge guards fail.
+- Same-tree CLI and daemon builds now derive one stable handshake ID even when
+  Cargo profiles rebuild separately. The identity is scoped to executable
+  inputs, watches the complete input set on every build, and hashes both tracked
+  diffs and actual untracked-file bytes. Documentation-only changes no longer
+  cause false `BUILD_MISMATCH` failures. Both rules fail under mutation, and the
+  real three-case containment suite passes from one dirty tree without forcing
+  either profile to resample.
 
 ## Release blockers
 
