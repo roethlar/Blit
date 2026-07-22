@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** rel-5 progress fixes 2/3, 2026-07-22
+**As of:** rel-5 progress complete, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -60,6 +60,13 @@ performance ceilings and hardware tuning remain post-release work.
   roles: destination writes report directly, while source payload events relay
   into the counter. A two-role loopback guard requires each completed record's
   byte count to match its transfer summary.
+- rel-5 now accounts for the declared byte/file denominator, completed
+  bytes/files, and final TCP versus in-stream carrier in one shared job row.
+  GetState snapshots, periodic and terminal events, persisted recents,
+  delegated cumulative updates, CLI JSON/human output, and TUI rows retain and
+  render the values. Mutations disabling manifest totals, file completion,
+  carrier convergence, or delegated denominator consumption each make a
+  focused guard fail.
 
 ## Release blockers
 
@@ -77,10 +84,7 @@ performance ceilings and hardware tuning remain post-release work.
    the exact test and complete suite then passed, while the harness discarded
    stderr and therefore lost the cause. `tests-harness-stderr-blackhole` must
    capture the process error and any remaining startup failure must be fixed.
-3. **Progress reporting is incomplete.** Daemon byte/file denominators can
-   remain zero through daemon, RPC, CLI, and TUI consumers. Delegated live
-   bytes and served-session byte counters are fixed locally.
-4. **Current release artifacts are unproved.** The exact local head is not on
+3. **Current release artifacts are unproved.** The exact local head is not on
    GitHub, the latest published release-build jobs were skipped, and install /
    startup smoke checks for the produced CLI and daemon artifacts are not
    recorded.

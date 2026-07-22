@@ -347,6 +347,28 @@ pub struct DelegatedPullOutcome {
 struct DelegatedBytesProgressState {
     files_completed: u64,
     bytes_completed: u64,
+    files_total: u64,
+    bytes_total: u64,
+}
+
+fn report_delegated_totals(
+    progress: Option<&RemoteTransferProgress>,
+    state: &mut DelegatedBytesProgressState,
+    files_total: u64,
+    bytes_total: u64,
+) {
+    let file_delta = files_total
+        .saturating_sub(state.files_total)
+        .try_into()
+        .unwrap_or(usize::MAX);
+    let byte_delta = bytes_total.saturating_sub(state.bytes_total);
+    state.files_total = state.files_total.max(files_total);
+    state.bytes_total = state.bytes_total.max(bytes_total);
+    if let Some(progress) = progress {
+        if file_delta > 0 || byte_delta > 0 {
+            progress.report_manifest_batch(file_delta, byte_delta);
+        }
+    }
 }
 
 fn report_bytes_progress(
@@ -354,6 +376,7 @@ fn report_bytes_progress(
     state: &mut DelegatedBytesProgressState,
     bytes: &BytesProgress,
 ) {
+    report_delegated_totals(progress, state, bytes.files_total, bytes.bytes_total);
     if let Some(progress) = progress {
         let file_delta = bytes
             .files_completed
@@ -515,9 +538,12 @@ where
                 on_started(&started);
             }
             Some(DelegatedPayload::ManifestBatch(batch)) => {
-                if let Some(progress) = progress {
-                    progress.report_manifest_batch(batch.file_count as usize);
-                }
+                report_delegated_totals(
+                    progress,
+                    &mut bytes_progress_state,
+                    batch.file_count,
+                    batch.total_bytes,
+                );
             }
             Some(DelegatedPayload::BytesProgress(bytes)) => {
                 report_bytes_progress(progress, &mut bytes_progress_state, &bytes);
@@ -774,6 +800,13 @@ mod tests {
 
         assert!(matches!(
             rx.try_recv().unwrap(),
+            ProgressEvent::ManifestBatch {
+                files: 3,
+                bytes: 4096
+            }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
             ProgressEvent::Payload {
                 files: 1,
                 bytes: 1024
@@ -804,6 +837,13 @@ mod tests {
         report_bytes_progress(Some(&progress), &mut state, &update);
         report_bytes_progress(Some(&progress), &mut state, &update);
 
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ProgressEvent::ManifestBatch {
+                files: 1,
+                bytes: 2048
+            }
+        ));
         assert!(matches!(
             rx.try_recv().unwrap(),
             ProgressEvent::Payload {

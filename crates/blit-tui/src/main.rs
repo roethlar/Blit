@@ -9644,7 +9644,7 @@ mod tests {
     fn progress_totals_manifest_is_denominator_only() {
         use blit_core::remote::transfer::{ProgressEvent, ProgressTotals};
         let mut totals = ProgressTotals::default();
-        totals.apply(&ProgressEvent::ManifestBatch { files: 5 });
+        totals.apply(&ProgressEvent::ManifestBatch { files: 5, bytes: 0 });
         assert_eq!(totals.manifest_files, 5);
         assert_eq!(totals.files, 0);
         assert_eq!(totals.bytes, 0, "ManifestBatch doesn't move totals");
@@ -9698,7 +9698,10 @@ mod tests {
     fn progress_totals_manifest_batch_is_inert_for_pull() {
         use blit_core::remote::transfer::{ProgressEvent, ProgressTotals};
         let mut totals = ProgressTotals::default();
-        totals.apply(&ProgressEvent::ManifestBatch { files: 12 });
+        totals.apply(&ProgressEvent::ManifestBatch {
+            files: 12,
+            bytes: 0,
+        });
         assert_eq!(totals.files, 0);
         assert_eq!(totals.bytes, 0);
         assert!(!totals.started(), "manifest alone doesn't start the footer");

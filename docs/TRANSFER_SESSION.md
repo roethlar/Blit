@@ -428,9 +428,13 @@ push/pull-specific message.
   `ActiveJobs` at OPEN (same transfer_id contract as today); the
   cancel token races the session exactly as w4-3 wired, and the
   peer receives `SessionError{CANCELLED}`.
-- StallGuard, byte-accounting, and progress events (w6-1 contract)
-  attach at the same boundaries they do today; the session emits the
-  existing `DaemonEvent` payloads.
+- StallGuard, byte-accounting, and progress events (w6-1/rel-5 contract)
+  attach at the same boundaries they do today. Each accepted need contributes
+  its declared primary plus Windows-stream payload bytes and one file to the
+  denominator; payload/file completion contributes once to the completed lane.
+  The session summary converges terminal bytes, files, and whether the
+  in-stream carrier was used. The daemon emits those values through GetState,
+  `DaemonEvent`, delegated progress, and persisted recents.
 - Session-owned asynchronous work is joined on every normal, error, and cancel
   exit: SOURCE scan/count/filter/checksum helpers, the dial tuner, elastic
   pipeline and nested workers, and all DESTINATION receive workers. Cleanup

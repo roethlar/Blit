@@ -52,12 +52,10 @@
 //!   `GetState.recent[].bytes`. The sink type lives in
 //!   `blit-core` so the data-plane write loop
 //!   (`receive_stream_double_buffered`) can take it as a
-//!   parameter in c-1b without `blit-core` depending on
-//!   `blit-daemon` (the dependency goes the other way).
-//!   This slice adds only the registry-side machinery; the
-//!   sink is never called yet — current behavior is
-//!   unchanged except the proto byte fields now carry the
-//!   (still zero) atomic value instead of a hardcoded zero.
+//!   parameter without `blit-core` depending on `blit-daemon`
+//!   (the dependency goes the other way). rel-5 also threads
+//!   manifest byte/file totals, completed files, and carrier outcome
+//!   through the same per-row progress state.
 //!
 //! Out of scope (next sub-slices):
 //!
@@ -68,12 +66,7 @@
 //! - `SubscribeRequest.transfer_id_filter` proto field
 //!   (`m-jobs-5-subscribe-filter`).
 //! - `blit jobs watch` polling CLI (`m-jobs-6-watch`).
-//! - Data-plane wiring of `ByteProgressSink`
-//!   (`c-1b-byte-counter-wiring`): `receive_stream_double_buffered`
-//!   grows an optional `&ByteProgressSink` and
-//!   `handle_delegated_pull` passes the counter through.
-//! - Throughput EWMA, files-completed counter, bytes_total
-//!   wiring from the manifest stage (subsequent C sub-slices).
+//! - Throughput EWMA; current throughput is the exact most-recent tick.
 //!
 //! ## Locking
 //!
@@ -92,10 +85,10 @@
 //! try_lock-then-spawn pattern; the reviewer caught it.
 
 use blit_core::generated::DaemonEvent;
-use blit_core::remote::transfer::ByteProgressSink;
+use blit_core::remote::transfer::{ByteProgressSink, ProgressEvent};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc};
@@ -205,8 +198,7 @@ pub enum CancelOutcome {
 
 /// One row of the `ActiveJobs` table. Fields mirror the
 /// `ActiveTransfer` proto message planned for `GetState` in
-/// §6.3 of the TUI design doc; missing wire fields
-/// (`bytes_completed`, `bytes_total`) land in milestone C.
+/// §6.3 of the TUI design doc.
 ///
 /// Fields are `#[allow(dead_code)]` for this slice because
 /// the read consumer (`GetState` handler) lands in b-4. The
@@ -232,20 +224,19 @@ pub struct ActiveJob {
     /// Unix milliseconds at which the row was registered.
     pub start_unix_ms: u64,
     /// Cumulative bytes the data plane has reported writing for
-    /// this transfer. Read from the per-row atomic at
-    /// `snapshot()` time. Zero until c-1b wires the receive
-    /// loop to call [`ByteProgressSink::report`]; the field is
-    /// already plumbed onto the wire (`ActiveTransfer.bytes_completed`)
-    /// so future Subscribe events and GetState consumers don't
-    /// see a shape change.
+    /// this transfer. Read from the per-row atomic at `snapshot()` time.
     pub bytes_completed: u64,
+    /// Sum of payload bytes represented by the needed manifest entries.
+    pub bytes_total: u64,
+    /// Files whose payload records completed.
+    pub files_completed: u64,
+    /// Files represented by the needed manifest entries.
+    pub files_total: u64,
 }
 
 /// One entry in the recent-runs ring buffer. Fields mirror
 /// the `TransferRecord` proto message planned for
-/// `GetState.recent[]` in §6.3 of the TUI design doc. Missing
-/// wire fields (`bytes`, `files`) land in milestone C from
-/// the write-loop instrumentation.
+/// `GetState.recent[]` in §6.3 of the TUI design doc.
 ///
 /// Fields are `#[allow(dead_code)]` for this slice because
 /// the read consumer (`GetState` handler) lands in b-4; the
@@ -265,11 +256,14 @@ pub struct TransferRecord {
     /// produce a wraparound.
     pub duration_ms: u64,
     /// Total bytes the data plane reported for this transfer.
-    /// Snapshotted from the per-row atomic at Drop time. Zero
-    /// until c-1b wires the receive loop; field already lives
-    /// on `TransferRecord.bytes` so future consumers don't
-    /// see a shape change.
+    /// Snapshotted from the per-row atomic at Drop time.
     pub bytes: u64,
+    /// Files whose payload records completed before the row drained.
+    #[serde(default)]
+    pub files: u64,
+    /// Whether payload used the in-stream gRPC carrier rather than TCP.
+    #[serde(default)]
+    pub tcp_fallback_used: bool,
     /// `true` if the handler reported success (Subscribe-era
     /// `TransferComplete`); `false` if it failed or the
     /// guard drained without a recorded outcome (panic,
@@ -291,9 +285,111 @@ pub struct TransferRecord {
 pub struct ProgressSample {
     pub transfer_id: String,
     pub bytes_completed: u64,
+    pub bytes_total: u64,
+    pub files_completed: u64,
+    pub files_total: u64,
     /// Instantaneous rate over the tick window — `delta_bytes *
     /// 1000 / delta_ms`. Zero on the same-ms first tick.
     pub throughput_bps: u64,
+}
+
+#[derive(Default)]
+struct JobProgressCounters {
+    bytes_completed: Arc<AtomicU64>,
+    bytes_total: AtomicU64,
+    files_completed: AtomicU64,
+    files_total: AtomicU64,
+    tcp_fallback_used: AtomicBool,
+}
+
+/// Cumulative progress snapshot shared by GetState, daemon events, delegated
+/// response progress, and terminal records.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobProgressSnapshot {
+    pub bytes_completed: u64,
+    pub bytes_total: u64,
+    pub files_completed: u64,
+    pub files_total: u64,
+    pub tcp_fallback_used: bool,
+}
+
+/// Cloneable producer handle for one active job's progress counters.
+#[derive(Clone)]
+pub struct ActiveJobProgress {
+    counters: Arc<JobProgressCounters>,
+}
+
+impl ActiveJobProgress {
+    /// Fold source-side progress. Source payload events are the byte producer.
+    pub fn report_source_event(&self, event: &ProgressEvent) {
+        self.report_event(event, true);
+    }
+
+    /// Fold destination-side progress. Destination bytes are already reported
+    /// chunk-by-chunk through `ByteProgressSink`, so payload events contribute
+    /// files but do not double-count bytes.
+    pub fn report_destination_event(&self, event: &ProgressEvent) {
+        self.report_event(event, false);
+    }
+
+    fn report_event(&self, event: &ProgressEvent, report_payload_bytes: bool) {
+        match event {
+            ProgressEvent::ManifestBatch { files, bytes } => {
+                atomic_saturating_add(&self.counters.files_total, *files as u64);
+                atomic_saturating_add(&self.counters.bytes_total, *bytes);
+            }
+            ProgressEvent::Payload { files, bytes } => {
+                atomic_saturating_add(&self.counters.files_completed, *files as u64);
+                if report_payload_bytes {
+                    atomic_saturating_add(&self.counters.bytes_completed, *bytes);
+                }
+            }
+            ProgressEvent::FileComplete { .. } => {
+                atomic_saturating_add(&self.counters.files_completed, 1);
+            }
+        }
+    }
+
+    /// Converge terminal counters onto the scorer's authoritative summary.
+    /// Totals remain at least as large as the completed work when no manifest
+    /// denominator was observed.
+    pub fn finish(&self, files: u64, bytes: u64, tcp_fallback_used: bool) {
+        self.counters
+            .bytes_completed
+            .store(bytes, Ordering::Relaxed);
+        self.counters
+            .files_completed
+            .store(files, Ordering::Relaxed);
+        self.counters
+            .bytes_total
+            .fetch_max(bytes, Ordering::Relaxed);
+        self.counters
+            .files_total
+            .fetch_max(files, Ordering::Relaxed);
+        self.counters
+            .tcp_fallback_used
+            .store(tcp_fallback_used, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> JobProgressSnapshot {
+        progress_snapshot(&self.counters)
+    }
+}
+
+fn atomic_saturating_add(counter: &AtomicU64, delta: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_add(delta))
+    });
+}
+
+fn progress_snapshot(counters: &JobProgressCounters) -> JobProgressSnapshot {
+    JobProgressSnapshot {
+        bytes_completed: counters.bytes_completed.load(Ordering::Relaxed),
+        bytes_total: counters.bytes_total.load(Ordering::Relaxed),
+        files_completed: counters.files_completed.load(Ordering::Relaxed),
+        files_total: counters.files_total.load(Ordering::Relaxed),
+        tcp_fallback_used: counters.tcp_fallback_used.load(Ordering::Relaxed),
+    }
 }
 
 /// In-memory registry, shared between the dispatch boundary and
@@ -321,15 +417,13 @@ pub struct ActiveJobs {
 struct TableEntry {
     /// Snapshot fields. Cloned into the public `ActiveJob`
     /// shape at `snapshot()` time, with `bytes_completed`
-    /// loaded from `bytes_counter`.
+    /// loaded from the shared progress counters.
     job: ActiveJob,
     cancellation: CancellationToken,
-    /// Per-row byte counter. Cloned (Arc bump) into every
-    /// [`ByteProgressSink`] handed out by
-    /// [`ActiveJobGuard::bytes_counter`]; loaded by
-    /// `snapshot()` and by Drop when building the
-    /// `TransferRecord`.
-    bytes_counter: Arc<AtomicU64>,
+    /// Per-row byte/file counters and carrier outcome. The byte atomic is
+    /// cloned into every [`ByteProgressSink`]; snapshots, events, and Drop
+    /// read the full shared state.
+    progress: Arc<JobProgressCounters>,
     /// c-4: byte counter value observed by the most recent
     /// `snapshot_progress_samples` call. Used to compute
     /// per-tick byte deltas for the `TransferProgress.throughput_bps`
@@ -431,13 +525,16 @@ impl ActiveJobs {
             path,
             start_unix_ms,
             bytes_completed: 0,
+            bytes_total: 0,
+            files_completed: 0,
+            files_total: 0,
         };
         let cancellation = CancellationToken::new();
-        let bytes_counter = Arc::new(AtomicU64::new(0));
+        let progress = Arc::new(JobProgressCounters::default());
         let entry = TableEntry {
             job: row,
             cancellation: cancellation.clone(),
-            bytes_counter: Arc::clone(&bytes_counter),
+            progress: Arc::clone(&progress),
             last_progress_bytes: AtomicU64::new(0),
             last_progress_unix_ms: AtomicU64::new(start_unix_ms),
             events_ring: VecDeque::with_capacity(JOB_EVENT_RING_CAP),
@@ -453,7 +550,7 @@ impl ActiveJobs {
             start_unix_ms,
             outcome: Mutex::new(None),
             cancellation,
-            bytes_counter,
+            progress,
         }
     }
 
@@ -535,7 +632,11 @@ impl ActiveJobs {
             .values()
             .map(|e| {
                 let mut job = e.job.clone();
-                job.bytes_completed = e.bytes_counter.load(Ordering::Relaxed);
+                let progress = progress_snapshot(&e.progress);
+                job.bytes_completed = progress.bytes_completed;
+                job.bytes_total = progress.bytes_total;
+                job.files_completed = progress.files_completed;
+                job.files_total = progress.files_total;
                 job
             })
             .collect()
@@ -656,7 +757,8 @@ impl ActiveJobs {
         let now_ms = unix_ms_now();
         let table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
         for entry in table.values() {
-            let cur_bytes = entry.bytes_counter.load(Ordering::Relaxed);
+            let progress = progress_snapshot(&entry.progress);
+            let cur_bytes = progress.bytes_completed;
             // swap returns the OLD value; cur_bytes/now_ms is the
             // new baseline for the next tick.
             let last_bytes = entry.last_progress_bytes.swap(cur_bytes, Ordering::Relaxed);
@@ -675,6 +777,9 @@ impl ActiveJobs {
             emit(ProgressSample {
                 transfer_id: entry.job.transfer_id.clone(),
                 bytes_completed: cur_bytes,
+                bytes_total: progress.bytes_total,
+                files_completed: progress.files_completed,
+                files_total: progress.files_total,
                 throughput_bps,
             });
         }
@@ -701,7 +806,8 @@ impl ActiveJobs {
         let mut table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
         let mut count: usize = 0;
         for entry in table.values_mut() {
-            let cur_bytes = entry.bytes_counter.load(Ordering::Relaxed);
+            let progress = progress_snapshot(&entry.progress);
+            let cur_bytes = progress.bytes_completed;
             let last_bytes = entry.last_progress_bytes.swap(cur_bytes, Ordering::Relaxed);
             let last_ms = entry.last_progress_unix_ms.swap(now_ms, Ordering::Relaxed);
             let delta_bytes = cur_bytes.saturating_sub(last_bytes);
@@ -714,6 +820,9 @@ impl ActiveJobs {
             let sample = ProgressSample {
                 transfer_id: entry.job.transfer_id.clone(),
                 bytes_completed: cur_bytes,
+                bytes_total: progress.bytes_total,
+                files_completed: progress.files_completed,
+                files_total: progress.files_total,
                 throughput_bps,
             };
             let event = build_event(&sample);
@@ -898,11 +1007,11 @@ pub struct ActiveJobGuard {
     /// handlers that opt in race the token against their
     /// transfer future.
     cancellation: CancellationToken,
-    /// Same atomic the [`TableEntry::bytes_counter`] holds —
-    /// kept here so Drop can read the final value without
+    /// Same counters the [`TableEntry`] holds — kept here so Drop can read
+    /// terminal values without
     /// re-acquiring the table lock just to inspect it before
     /// removal. Cloned Arc, not a separate counter.
-    bytes_counter: Arc<AtomicU64>,
+    progress: Arc<JobProgressCounters>,
 }
 
 /// Outcome handed to [`ActiveJobGuard::record_outcome`].
@@ -969,13 +1078,8 @@ impl ActiveJobGuard {
         self.start_unix_ms
     }
 
-    /// Current value of the per-row byte counter. Read by the
-    /// terminal-event builder (`TransferComplete.bytes`) so the
-    /// emitted event carries the same total `TransferRecord.bytes`
-    /// will freeze into the ring on Drop. Relaxed load matches
-    /// the c-1a contract — readers only need eventual visibility.
-    pub fn bytes_completed_load(&self) -> u64 {
-        self.bytes_counter.load(Ordering::Relaxed)
+    pub fn progress_snapshot(&self) -> JobProgressSnapshot {
+        progress_snapshot(&self.progress)
     }
 
     /// Wall-clock duration since registration, in milliseconds.
@@ -1022,7 +1126,15 @@ impl ActiveJobGuard {
     /// orphaned atomic, no row to resurrect.
     #[allow(dead_code)]
     pub fn bytes_counter(&self) -> ByteProgressSink {
-        ByteProgressSink::from_counter(Arc::clone(&self.bytes_counter))
+        ByteProgressSink::from_counter(Arc::clone(&self.progress.bytes_completed))
+    }
+
+    /// Cloneable handle for manifest totals, completed files, terminal
+    /// convergence, and carrier outcome.
+    pub fn progress(&self) -> ActiveJobProgress {
+        ActiveJobProgress {
+            counters: Arc::clone(&self.progress),
+        }
     }
 
     /// Capture the transfer's outcome before Drop. Spawn
@@ -1078,8 +1190,8 @@ impl Drop for ActiveJobGuard {
                 // inside its Drop), but reading off the entry
                 // is equivalent and keeps the lookup paired
                 // with the row being drained.
-                let bytes = entry.bytes_counter.load(Ordering::Relaxed);
-                let record = build_record(entry.job, outcome, bytes);
+                let progress = progress_snapshot(&entry.progress);
+                let record = build_record(entry.job, outcome, progress);
                 push_recent(&self.inner.recent, record, self.inner.recent_limit);
                 // rec-1: nudge the persistence writer (if armed). Drop
                 // is synchronous and on the runtime, so we must not do
@@ -1096,7 +1208,11 @@ impl Drop for ActiveJobGuard {
     }
 }
 
-fn build_record(row: ActiveJob, outcome: Option<RecordedOutcome>, bytes: u64) -> TransferRecord {
+fn build_record(
+    row: ActiveJob,
+    outcome: Option<RecordedOutcome>,
+    progress: JobProgressSnapshot,
+) -> TransferRecord {
     let drop_unix_ms = unix_ms_now();
     let duration_ms = drop_unix_ms.saturating_sub(row.start_unix_ms);
     let (ok, error_message) = match outcome {
@@ -1111,7 +1227,9 @@ fn build_record(row: ActiveJob, outcome: Option<RecordedOutcome>, bytes: u64) ->
         path: row.path,
         start_unix_ms: row.start_unix_ms,
         duration_ms,
-        bytes,
+        bytes: progress.bytes_completed,
+        files: progress.files_completed,
+        tcp_fallback_used: progress.tcp_fallback_used,
         ok,
         error_message,
     }
@@ -1521,6 +1639,8 @@ mod tests {
             start_unix_ms: 1,
             duration_ms: 2,
             bytes: 3,
+            files: 4,
+            tcp_fallback_used: true,
             ok: true,
             error_message: String::new(),
         }
@@ -2029,7 +2149,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drop_records_final_bytes_in_recent() {
+    async fn drop_records_final_progress_in_recent() {
         let table = ActiveJobs::new();
         {
             let guard = table.register(
@@ -2038,8 +2158,7 @@ mod tests {
                 "m".to_string(),
                 "/".to_string(),
             );
-            let sink = guard.bytes_counter();
-            sink.report(5 * 1024 * 1024);
+            guard.progress().finish(7, 5 * 1024 * 1024, true);
             guard.record_outcome(true, None);
         }
         let recent = table.recent();
@@ -2049,6 +2168,8 @@ mod tests {
             5 * 1024 * 1024,
             "recent record must carry final byte count"
         );
+        assert_eq!(recent[0].files, 7);
+        assert!(recent[0].tcp_fallback_used);
         assert!(recent[0].ok);
     }
 

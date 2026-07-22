@@ -75,7 +75,7 @@ or hardware experiment.
 - [ ] Windows file attributes and ADS are preserved across local and remote
       transfers, including the tar threshold that currently changes fidelity;
       single-file and batched copies produce the same metadata result.
-- [ ] Delegated and served-session progress is complete: live bytes are emitted,
+- [x] Delegated and served-session progress is complete: live bytes are emitted,
       daemon rows report accurate bytes, and total/completed file and byte
       denominators are nonzero and correct through GetState, TransferProgress,
       TransferComplete, CLI, and TUI consumers.
@@ -170,10 +170,11 @@ performance ratios are measured or graded.
    allocation through metadata hydration. All six review corrections are fixed;
    current-head hosted Windows confirmation remains. Records:
    `.review/results/rel-4-windows-metadata-r1.claude.{json,verdict.md}`.
-5. **rel-5 — complete progress reporting `[~ 2/3]`.** Delegated live byte
-   snapshots and served-session job-row bytes for both responder roles are
-   implemented and mutation-proved. Next thread exact byte/file denominators
-   through `ActiveJobs` and every daemon consumer.
+5. **rel-5 — complete progress reporting `[x]`.** Delegated and served-session
+   producers now populate one shared job account with exact manifest byte/file
+   denominators, completed bytes/files, and final carrier outcome. GetState,
+   TransferProgress, TransferComplete, persisted recents, CLI, and TUI retain
+   and render those values; focused mutations prove each accounting lane.
 6. **rel-6 — full known-issue reconciliation.** Audit every unchecked/current
    `REVIEW.md`, STATE, bug-doc, ignored-test, and current-plan item against code.
    Fix each real product defect one commit at a time; close stale records only

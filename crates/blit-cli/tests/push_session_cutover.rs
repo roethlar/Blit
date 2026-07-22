@@ -272,6 +272,7 @@ fn push_verb_reports_w6_1_progress_events() {
         totals.manifest_files, file_count as u64,
         "need-batch denominator must count every needed file"
     );
+    assert_eq!(totals.manifest_bytes, byte_count);
     assert_eq!(totals.files, file_count as u64, "files counted once each");
     assert_eq!(
         file_completes, file_count,
@@ -453,6 +454,7 @@ fn push_verb_resume_patches_changed_partials_blockwise() {
         totals.manifest_files, 1,
         "the resumed need is the denominator"
     );
+    assert_eq!(totals.manifest_bytes, v2.len() as u64);
     assert_eq!(totals.files, 1, "a resumed file completes exactly once");
     assert!(
         totals.bytes > 0 && totals.bytes < v2.len() as u64,

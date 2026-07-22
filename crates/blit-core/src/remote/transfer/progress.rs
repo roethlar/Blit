@@ -25,8 +25,9 @@ use tokio::sync::mpsc::UnboundedSender;
 ///     `FileComplete`.
 /// - `FileComplete.path` is the source-relative wire path (POSIX
 ///   separators), never an absolute local path.
-/// - `ManifestBatch { files }` is the enumeration denominator ("N of M
-///   files"); it never adds to transferred totals. Its meaning is
+/// - `ManifestBatch { files, bytes }` is the enumeration denominator
+///   ("N of M files" and expected payload bytes); it never adds to
+///   transferred totals. Its meaning is
 ///   direction-flavored (pull: full source manifest; push: need-list
 ///   batches; delegated: post-hoc summary) — consumers must treat it
 ///   as "expected files", nothing stronger.
@@ -35,8 +36,9 @@ use tokio::sync::mpsc::UnboundedSender;
 /// consumers must not re-derive per-direction folding rules.
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
-    /// Enumeration denominator: `files` more files are expected.
-    ManifestBatch { files: usize },
+    /// Enumeration denominator: `files` more files and their declared
+    /// payload `bytes` are expected.
+    ManifestBatch { files: usize, bytes: u64 },
     /// Transfer delta: `bytes` more bytes moved; `files` more files
     /// finished on the aggregate lane (0 on per-file-lane producers).
     Payload { files: usize, bytes: u64 },
@@ -56,6 +58,10 @@ pub struct ProgressTotals {
     /// Files announced by enumeration (`ManifestBatch`) — the
     /// denominator, never part of transferred totals.
     pub manifest_files: u64,
+    /// Bytes represented by the announced manifest entries. This is the
+    /// byte denominator paired with `manifest_files`; it never adds to the
+    /// transferred-byte count.
+    pub manifest_bytes: u64,
     /// Files finished, counted once each via either lane.
     pub files: u64,
     /// Bytes transferred (`Payload` only).
@@ -66,8 +72,9 @@ impl ProgressTotals {
     /// Fold one event into the running totals.
     pub fn apply(&mut self, event: &ProgressEvent) {
         match event {
-            ProgressEvent::ManifestBatch { files } => {
+            ProgressEvent::ManifestBatch { files, bytes } => {
                 self.manifest_files = self.manifest_files.saturating_add(*files as u64);
+                self.manifest_bytes = self.manifest_bytes.saturating_add(*bytes);
             }
             ProgressEvent::Payload { files, bytes } => {
                 self.files = self.files.saturating_add(*files as u64);
@@ -231,8 +238,12 @@ mod progress_totals_tests {
     #[test]
     fn manifest_batch_is_denominator_only() {
         let mut totals = ProgressTotals::default();
-        totals.apply(&ProgressEvent::ManifestBatch { files: 12 });
+        totals.apply(&ProgressEvent::ManifestBatch {
+            files: 12,
+            bytes: 4096,
+        });
         assert_eq!(totals.manifest_files, 12);
+        assert_eq!(totals.manifest_bytes, 4096);
         assert_eq!(totals.files, 0);
         assert_eq!(totals.bytes, 0);
         assert!(!totals.started());
@@ -597,8 +608,10 @@ impl RemoteTransferProgress {
 
     /// Announce `files` more expected files (the denominator). Never
     /// adds to transferred totals.
-    pub fn report_manifest_batch(&self, files: usize) {
-        let _ = self.sender.send(ProgressEvent::ManifestBatch { files });
+    pub fn report_manifest_batch(&self, files: usize, bytes: u64) {
+        let _ = self
+            .sender
+            .send(ProgressEvent::ManifestBatch { files, bytes });
     }
 
     /// Report a transfer delta. `bytes` is the only byte channel in

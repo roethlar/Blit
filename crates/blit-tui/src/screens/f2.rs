@@ -221,9 +221,7 @@ fn render_active_table(
         Constraint::Length(14),
         Constraint::Length(20),
         Constraint::Min(20),
-        // d-15: bytes column carries "bytes · NN%" so we
-        // need 18 chars for worst-case "1023.99 MiB · 100%".
-        Constraint::Length(18),
+        Constraint::Length(32),
         Constraint::Length(12),
         Constraint::Length(10),
     ];
@@ -233,7 +231,7 @@ fn render_active_table(
         Cell::from("kind"),
         Cell::from("peer"),
         Cell::from("module/path"),
-        Cell::from("bytes"),
+        Cell::from("progress"),
         Cell::from("throughput"),
         Cell::from("age"),
     ])
@@ -272,7 +270,7 @@ fn render_recent_table(frame: &mut Frame, area: Rect, state: &TransfersState) {
         Constraint::Length(14),
         Constraint::Length(20),
         Constraint::Min(20),
-        Constraint::Length(10),
+        Constraint::Length(31),
         Constraint::Length(10),
         Constraint::Length(12),
     ];
@@ -282,7 +280,7 @@ fn render_recent_table(frame: &mut Frame, area: Rect, state: &TransfersState) {
         Cell::from("kind"),
         Cell::from("peer"),
         Cell::from("module/path"),
-        Cell::from("bytes"),
+        Cell::from("bytes/files"),
         Cell::from("duration"),
         Cell::from("throughput"),
     ])
@@ -435,7 +433,11 @@ fn active_row_to_table_row(row: &ActiveRow, now_unix_ms: u64) -> Row<'static> {
         Cell::from(kind_label(row.kind).to_string()),
         Cell::from(row.peer.clone()),
         Cell::from(module_path(&row.module, &row.path)),
-        Cell::from(format_bytes_progress(row.bytes_completed, row.bytes_total)),
+        Cell::from(format!(
+            "{} · {}",
+            format_bytes_progress(row.bytes_completed, row.bytes_total),
+            format_files_progress(row.files_completed, row.files_total),
+        )),
         Cell::from(if row.throughput_bps == 0 {
             "-".to_string()
         } else {
@@ -489,7 +491,18 @@ fn recent_row_to_table_row(row: &RecentRow) -> Row<'static> {
         Cell::from(kind_label(row.kind).to_string()),
         Cell::from(row.peer.clone()),
         Cell::from(module_path(&row.module, &row.path)),
-        Cell::from(format_bytes(row.bytes)),
+        Cell::from(format!(
+            "{} · {} files · {}",
+            format_bytes(row.bytes),
+            row.files,
+            if !row.ok {
+                "-"
+            } else if row.tcp_fallback_used {
+                "gRPC"
+            } else {
+                "TCP"
+            },
+        )),
         Cell::from(if row.ok {
             format_ms(row.duration_ms)
         } else {
@@ -536,6 +549,14 @@ fn format_recent_throughput(row: &RecentRow) -> String {
         format!("{:.1} KiB/s", bytes_per_sec / KIB)
     } else {
         format!("{} B/s", bytes_per_sec.round() as u64)
+    }
+}
+
+fn format_files_progress(completed: u64, total: u64) -> String {
+    if total == 0 {
+        format!("{completed} files")
+    } else {
+        format!("{completed}/{total} files")
     }
 }
 
@@ -778,6 +799,8 @@ mod tests {
             path: String::new(),
             duration_ms,
             bytes,
+            files: 0,
+            tcp_fallback_used: false,
             ok,
             error_message: String::new(),
             source_daemon: String::new(),
@@ -908,6 +931,12 @@ mod tests {
             format_bytes_progress(1024 * 1024, 4 * 1024 * 1024),
             "1.00 MiB · 25%"
         );
+    }
+
+    #[test]
+    fn format_files_progress_uses_known_denominator() {
+        assert_eq!(format_files_progress(2, 5), "2/5 files");
+        assert_eq!(format_files_progress(2, 0), "2 files");
     }
 
     #[test]

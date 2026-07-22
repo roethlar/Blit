@@ -33,6 +33,8 @@ pub struct ActiveRow {
     pub start_unix_ms: u64,
     pub bytes_completed: u64,
     pub bytes_total: u64,
+    pub files_completed: u64,
+    pub files_total: u64,
     pub throughput_bps: u64,
     /// m2f-1: the daemon whose Subscribe stream reported this
     /// transfer (distinct from `peer`, the transfer's other
@@ -53,6 +55,8 @@ impl From<ActiveTransfer> for ActiveRow {
             start_unix_ms: value.start_unix_ms,
             bytes_completed: value.bytes_completed,
             bytes_total: value.bytes_total,
+            files_completed: value.files_completed,
+            files_total: value.files_total,
             // Set by the caller from the snapshot's source daemon
             // (`From` can't see it — `ActiveTransfer` has no daemon).
             source_daemon: String::new(),
@@ -76,6 +80,8 @@ pub struct RecentRow {
     pub path: String,
     pub duration_ms: u64,
     pub bytes: u64,
+    pub files: u64,
+    pub tcp_fallback_used: bool,
     pub ok: bool,
     pub error_message: String,
     /// m2f-1: source daemon (see [`ActiveRow::source_daemon`]).
@@ -92,6 +98,8 @@ impl From<TransferRecord> for RecentRow {
             path: value.path,
             duration_ms: value.duration_ms,
             bytes: value.bytes,
+            files: value.files,
+            tcp_fallback_used: value.tcp_fallback_used,
             ok: value.ok,
             error_message: value.error_message,
             // Set by the caller from the snapshot's source daemon.
@@ -272,6 +280,8 @@ impl TransfersState {
                     start_unix_ms: s.start_unix_ms,
                     bytes_completed: 0,
                     bytes_total: 0,
+                    files_completed: 0,
+                    files_total: 0,
                     throughput_bps: 0,
                     source_daemon: source_daemon.to_string(),
                 });
@@ -281,6 +291,8 @@ impl TransfersState {
                 if let Some(row) = self.active.get_mut(&row_key(source_daemon, &p.transfer_id)) {
                     row.bytes_completed = p.bytes_completed;
                     row.bytes_total = p.bytes_total;
+                    row.files_completed = p.files_completed;
+                    row.files_total = p.files_total;
                     row.throughput_bps = p.throughput_bps;
                     true
                 } else {
@@ -309,6 +321,8 @@ impl TransfersState {
                     path,
                     duration_ms: c.duration_ms,
                     bytes: c.bytes,
+                    files: c.files,
+                    tcp_fallback_used: c.tcp_fallback_used,
                     ok: true,
                     error_message: String::new(),
                     source_daemon: row_daemon,
@@ -336,7 +350,9 @@ impl TransfersState {
                     module,
                     path,
                     duration_ms: 0,
-                    bytes: 0,
+                    bytes: removed.as_ref().map_or(0, |r| r.bytes_completed),
+                    files: removed.as_ref().map_or(0, |r| r.files_completed),
+                    tcp_fallback_used: false,
                     ok: false,
                     error_message: e.message,
                     source_daemon: row_daemon,
@@ -515,6 +531,8 @@ mod tests {
             start_unix_ms: 1,
             bytes_completed: bytes,
             bytes_total: 0,
+            files_completed: 0,
+            files_total: 0,
         }
     }
 
@@ -529,6 +547,7 @@ mod tests {
             duration_ms: 100,
             bytes: 0,
             files: 0,
+            tcp_fallback_used: false,
             ok,
             error_message: String::new(),
         }
@@ -613,10 +632,13 @@ mod tests {
                 duration_ms: 10,
                 bytes: 100,
                 files: 1,
-                tcp_fallback_used: false,
+                tcp_fallback_used: true,
             })),
         };
         state.apply_event("nas", complete, Instant::now());
+        let recent = state.recent_rows().next().expect("recent row");
+        assert_eq!(recent.files, 1);
+        assert!(recent.tcp_fallback_used);
         assert_eq!(
             state
                 .recent_rows()
@@ -1149,9 +1171,9 @@ mod tests {
                 payload: Some(daemon_event::Payload::TransferProgress(TransferProgress {
                     transfer_id: "t-1".to_string(),
                     bytes_completed: 4096,
-                    bytes_total: 0,
-                    files_completed: 0,
-                    files_total: 0,
+                    bytes_total: 8192,
+                    files_completed: 2,
+                    files_total: 4,
                     throughput_bps: 1_000_000,
                 })),
             },
@@ -1160,6 +1182,9 @@ mod tests {
         assert!(mutated);
         let row = state.active_rows()[0];
         assert_eq!(row.bytes_completed, 4096);
+        assert_eq!(row.bytes_total, 8192);
+        assert_eq!(row.files_completed, 2);
+        assert_eq!(row.files_total, 4);
         assert_eq!(row.throughput_bps, 1_000_000);
     }
 
@@ -1287,7 +1312,9 @@ mod tests {
                     path: "sub/file".to_string(),
                     start_unix_ms: 1,
                     bytes_completed: 500_000,
-                    bytes_total: 0,
+                    bytes_total: 1_000_000,
+                    files_completed: 2,
+                    files_total: 4,
                 }],
                 ..DaemonState::default()
             },
@@ -1306,9 +1333,13 @@ mod tests {
             })),
         };
         assert!(!state.apply_event("", started, Instant::now()));
-        // Snapshot's bytes_completed preserved.
+        // Snapshot progress is preserved, including file denominators that a
+        // reconnecting client receives before the next progress tick.
         let row = &state.active_rows()[0];
         assert_eq!(row.bytes_completed, 500_000);
+        assert_eq!(row.bytes_total, 1_000_000);
+        assert_eq!(row.files_completed, 2);
+        assert_eq!(row.files_total, 4);
     }
 
     /// a1-2 round-4 regression: the buffered Started +

@@ -1310,7 +1310,7 @@ async fn served_sessions_record_their_kind_and_endpoint() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn served_session_rows_record_bytes_for_both_roles() {
+async fn served_session_rows_record_progress_for_both_roles() {
     let daemon = Daemon::start(false).await;
     let src = tempfile::tempdir().unwrap();
     write_tree(src.path(), &small_tree());
@@ -1348,12 +1348,14 @@ async fn served_session_rows_record_bytes_for_both_roles() {
         .find(|r| r.kind == crate::active_jobs::ActiveJobKind::Push)
         .expect("served push record");
     assert_eq!(push.bytes, push_summary.bytes_transferred);
+    assert_eq!(push.files, push_summary.files_transferred);
 
     let pull = recent
         .iter()
         .find(|r| r.kind == crate::active_jobs::ActiveJobKind::PullSync)
         .expect("served pull record");
     assert_eq!(pull.bytes, pull_outcome.summary.bytes_transferred);
+    assert_eq!(pull.files, pull_outcome.summary.files_transferred);
     daemon.stop().await;
 }
 

@@ -33,6 +33,7 @@ use blit_core::transfer_session::SessionFault;
 use tokio::sync::mpsc;
 use tonic::Status;
 
+use crate::active_jobs::{ActiveJobProgress, JobProgressSnapshot};
 use crate::delegation_gate::{validate_source, GateDenial, HostResolver, LocatorView, StdResolver};
 use crate::metrics::TransferMetrics;
 use crate::runtime::{ModuleConfig, RootExport};
@@ -112,13 +113,13 @@ fn err_progress(phase: i32, message: impl Into<String>) -> DelegatedPullProgress
     }
 }
 
-fn delegated_bytes_progress(bytes_completed: u64) -> DelegatedPullProgress {
+fn delegated_bytes_progress(progress: JobProgressSnapshot) -> DelegatedPullProgress {
     DelegatedPullProgress {
         payload: Some(ProgressPayload::BytesProgress(BytesProgress {
-            files_completed: 0,
-            files_total: 0,
-            bytes_completed,
-            bytes_total: 0,
+            files_completed: progress.files_completed,
+            files_total: progress.files_total,
+            bytes_completed: progress.bytes_completed,
+            bytes_total: progress.bytes_total,
         })),
     }
 }
@@ -130,7 +131,7 @@ fn delegated_bytes_progress(bytes_completed: u64) -> DelegatedPullProgress {
 async fn relay_delegated_byte_progress<F, T>(
     transfer: F,
     tx: &mpsc::Sender<Result<DelegatedPullProgress, Status>>,
-    byte_progress: &blit_core::remote::transfer::ByteProgressSink,
+    job_progress: &ActiveJobProgress,
     tick: Duration,
 ) -> T
 where
@@ -139,21 +140,21 @@ where
     tokio::pin!(transfer);
     let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + tick, tick);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut last_emitted = 0u64;
+    let mut last_emitted = JobProgressSnapshot::default();
 
     loop {
         tokio::select! {
             biased;
             result = &mut transfer => {
-                let completed = byte_progress.load();
-                if completed > last_emitted {
+                let completed = job_progress.snapshot();
+                if completed != last_emitted {
                     let _ = tx.send(Ok(delegated_bytes_progress(completed))).await;
                 }
                 return result;
             }
             _ = ticker.tick() => {
-                let completed = byte_progress.load();
-                if completed > last_emitted
+                let completed = job_progress.snapshot();
+                if completed != last_emitted
                     && tx.try_send(Ok(delegated_bytes_progress(completed))).is_ok()
                 {
                     last_emitted = completed;
@@ -183,6 +184,7 @@ pub(crate) async fn handle_delegated_pull(
     tx: mpsc::Sender<Result<DelegatedPullProgress, Status>>,
     transfer_id: String,
     byte_progress: blit_core::remote::transfer::ByteProgressSink,
+    job_progress: ActiveJobProgress,
 ) -> bool {
     let resolver = StdResolver;
     let result = run_delegated_pull(
@@ -195,6 +197,7 @@ pub(crate) async fn handle_delegated_pull(
         &tx,
         &resolver,
         &byte_progress,
+        &job_progress,
     )
     .await;
 
@@ -223,6 +226,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     tx: &mpsc::Sender<Result<DelegatedPullProgress, Status>>,
     resolver: &R,
     byte_progress: &blit_core::remote::transfer::ByteProgressSink,
+    job_progress: &ActiveJobProgress,
 ) -> Result<(), DelegatedPullProgress> {
     use blit_core::generated::delegated_pull_error::Phase;
 
@@ -397,17 +401,39 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
             MirrorMode::Off
         },
         byte_progress: Some(byte_progress.clone()),
-        // The byte sink feeds both the jobs row and the cumulative response
-        // bridge above. The daemon has no per-file consumer here, and its
-        // stderr is a log rather than an operator terminal, so dial traces
-        // stay off (otp-10b-2 fields; verb-side only).
         progress: None,
         trace_data_plane: false,
     };
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let mut options = options;
+    options.progress = Some(blit_core::remote::transfer::RemoteTransferProgress::new(
+        progress_tx,
+    ));
+    let progress_for_events = job_progress.clone();
+    let relay_job_progress = async move {
+        while let Some(event) = progress_rx.recv().await {
+            progress_for_events.report_destination_event(&event);
+        }
+    };
+    let progress_for_finish = job_progress.clone();
+    let transfer = async move {
+        let (outcome, ()) = tokio::join!(
+            run_pull_session_with_client(client, &endpoint, dest_root, options),
+            relay_job_progress,
+        );
+        if let Ok(outcome) = &outcome {
+            progress_for_finish.finish(
+                outcome.summary.files_transferred,
+                outcome.summary.bytes_transferred,
+                outcome.summary.in_stream_carrier_used,
+            );
+        }
+        outcome
+    };
     let outcome = relay_delegated_byte_progress(
-        run_pull_session_with_client(client, &endpoint, dest_root, options),
+        transfer,
         tx,
-        byte_progress,
+        job_progress,
         Duration::from_millis(super::core::DEFAULT_PROGRESS_TICK_MS),
     )
     .await
@@ -476,22 +502,39 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn delegated_bytes_progress_emits_while_transfer_is_running_and_at_completion() {
-        let byte_progress = blit_core::remote::transfer::ByteProgressSink::new();
-        let relay_counter = byte_progress.clone();
+        let jobs = crate::active_jobs::ActiveJobs::new();
+        let guard = jobs.register(
+            crate::active_jobs::ActiveJobKind::DelegatedPull,
+            "peer".into(),
+            "module".into(),
+            String::new(),
+        );
+        let byte_progress = guard.bytes_counter();
+        let job_progress = guard.progress();
+        let relay_progress = job_progress.clone();
         let (tx, mut rx) = mpsc::channel(4);
         let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
         let relay = tokio::spawn(async move {
             relay_delegated_byte_progress(
                 async { finish_rx.await.expect("finish signal") },
                 &tx,
-                &relay_counter,
+                &relay_progress,
                 Duration::from_millis(100),
             )
             .await
         });
 
         tokio::task::yield_now().await;
+        job_progress.report_destination_event(
+            &blit_core::remote::transfer::ProgressEvent::ManifestBatch {
+                files: 2,
+                bytes: 1536,
+            },
+        );
         byte_progress.report(1024);
+        job_progress.report_destination_event(
+            &blit_core::remote::transfer::ProgressEvent::FileComplete { path: "a".into() },
+        );
         tokio::time::advance(Duration::from_millis(100)).await;
         tokio::task::yield_now().await;
         let live = rx.try_recv().expect("live progress tick");
@@ -500,9 +543,14 @@ mod tests {
             panic!("expected bytes progress");
         };
         assert_eq!(live.bytes_completed, 1024);
-        assert_eq!(live.files_completed, 0);
+        assert_eq!(live.bytes_total, 1536);
+        assert_eq!(live.files_completed, 1);
+        assert_eq!(live.files_total, 2);
 
         byte_progress.report(512);
+        job_progress.report_destination_event(
+            &blit_core::remote::transfer::ProgressEvent::FileComplete { path: "b".into() },
+        );
         finish_tx.send("done").expect("finish relay");
         assert_eq!(relay.await.expect("relay task"), "done");
         let final_update = rx.try_recv().expect("final progress update");
@@ -512,6 +560,7 @@ mod tests {
             panic!("expected bytes progress");
         };
         assert_eq!(final_update.bytes_completed, 1536);
+        assert_eq!(final_update.files_completed, 2);
     }
 
     fn wire_spec() -> TransferOperationSpec {
@@ -724,6 +773,13 @@ mod tests {
         let delegation = Arc::new(crate::delegation_gate::DelegationConfig::default());
         let metrics = TransferMetrics::disabled();
         let (tx, _rx) = mpsc::channel(8);
+        let jobs = crate::active_jobs::ActiveJobs::new();
+        let guard = jobs.register(
+            crate::active_jobs::ActiveJobKind::DelegatedPull,
+            "peer".into(),
+            "module".into(),
+            String::new(),
+        );
 
         let ok = handle_delegated_pull(
             req,
@@ -733,7 +789,8 @@ mod tests {
             metrics,
             tx,
             "t-test".to_string(),
-            blit_core::remote::transfer::ByteProgressSink::new(),
+            guard.bytes_counter(),
+            guard.progress(),
         )
         .await;
         assert!(

@@ -738,10 +738,14 @@ message ActiveTransfer {
   // delegated_pull (the only unary-request kind).
   string path = 5;
   uint64 start_unix_ms = 6;
-  // Byte-level progress fields. Always zero in milestone B —
-  // milestone C feeds them from the write-loop instrumentation.
+  // Byte-level progress from the shared job counters. bytes_total is the
+  // sum of declared payload bytes in needed manifest entries.
   uint64 bytes_completed = 7;
   uint64 bytes_total = 8;
+  // File-level progress from the same counters, retained in GetState so a
+  // reconnecting subscriber does not have to wait for the next live tick.
+  uint64 files_completed = 9;
+  uint64 files_total = 10;
 }
 
 message TransferRecord {
@@ -754,8 +758,7 @@ message TransferRecord {
   // `drop_unix_ms - start_unix_ms`, saturating at zero so a
   // backwards clock jump can't underflow.
   uint64 duration_ms = 7;
-  // Byte-level totals. Zero in milestone B — milestone C fills
-  // them from the write-loop instrumentation.
+  // Terminal payload bytes and completed files from the shared job counters.
   uint64 bytes = 8;
   uint64 files = 9;
   bool ok = 10;
@@ -764,6 +767,8 @@ message TransferRecord {
   // recorded" marker when the spawn task didn't reach the
   // outcome-capture call.
   string error_message = 11;
+  // True when payload used the in-stream gRPC carrier rather than TCP.
+  bool tcp_fallback_used = 12;
 }
 
 message Counters {
@@ -900,12 +905,11 @@ message TransferProgress {
   // Cumulative bytes that landed on disk (same source as
   // GetState.active[].bytes_completed).
   uint64 bytes_completed = 2;
-  // Total bytes expected, when known. 0 until a future C
-  // sub-slice wires it from the manifest stage.
+  // Sum of declared payload bytes in needed manifest entries.
   uint64 bytes_total = 3;
-  // Files completed; 0 until the files-counter slice wires it.
+  // Files whose payload records completed.
   uint64 files_completed = 4;
-  // Total files expected; 0 until the manifest stage wires it.
+  // Files in needed manifest entries.
   uint64 files_total = 5;
   // Instantaneous bytes-per-second over the most recent tick.
   // Future slice may replace with an EWMA so subscribers see
@@ -924,15 +928,10 @@ message TransferComplete {
   // per-row atomic that c-1a/c-1b wired (the same value
   // `TransferRecord.bytes` carries at GetState.recent[]).
   uint64 bytes = 2;
-  // Files completed. Always zero until a future C sub-slice
-  // wires the files counter; field reserved here so subscribers
-  // don't need a proto roll to render it.
+  // Files whose payload records completed.
   uint64 files = 3;
   uint64 duration_ms = 4;
-  // True when the transfer fell back to the gRPC control plane
-  // because the data plane couldn't be reserved. Always false
-  // in this slice — a future C sub-slice plumbs the bit through
-  // from the handler's result.
+  // True when payload used the in-stream gRPC carrier rather than TCP.
   bool tcp_fallback_used = 5;
 }
 

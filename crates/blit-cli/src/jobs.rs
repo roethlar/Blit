@@ -78,6 +78,8 @@ struct ActiveSnapshot {
     module: String,
     path: String,
     start_unix_ms: u64,
+    bytes_completed: u64,
+    files_completed: u64,
 }
 
 impl ActiveSnapshot {
@@ -98,6 +100,7 @@ impl ActiveSnapshot {
             duration_ms: c.duration_ms,
             bytes: c.bytes,
             files: c.files,
+            tcp_fallback_used: c.tcp_fallback_used,
             ok: true,
             error_message: String::new(),
         }
@@ -105,8 +108,8 @@ impl ActiveSnapshot {
 
     /// Merge with a `TransferError` to produce the same shape.
     /// `duration_ms` derives from `start_unix_ms` since the
-    /// event itself doesn't carry it; `bytes` / `files` stay
-    /// at zero (unknown on the error path).
+    /// event itself doesn't carry it; partial bytes/files come from the
+    /// initial active snapshot.
     fn to_finished_error(
         &self,
         e: &blit_core::generated::TransferError,
@@ -124,8 +127,9 @@ impl ActiveSnapshot {
             path: self.path.clone(),
             start_unix_ms: self.start_unix_ms,
             duration_ms,
-            bytes: 0,
-            files: 0,
+            bytes: self.bytes_completed,
+            files: self.files_completed,
+            tcp_fallback_used: false,
             ok: false,
             error_message: e.message.clone(),
         }
@@ -216,7 +220,7 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
     // metadata for terminal JSON merge).
     let state = jobs::query(&remote, 0).await?;
     let snap = jobs::watch_snapshot(&state, &args.transfer_id);
-    let active_snapshot = match &snap {
+    let mut active_snapshot = match &snap {
         WatchSnapshot::Finished(r) => {
             if args.json {
                 print_watch_json(&snap);
@@ -263,6 +267,8 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
                 module: a.module.clone(),
                 path: a.path.clone(),
                 start_unix_ms: a.start_unix_ms,
+                bytes_completed: a.bytes_completed,
+                files_completed: a.files_completed,
             }
         }
     };
@@ -307,6 +313,8 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
         match next_message {
             Ok(Some(event)) => match event.payload {
                 Some(daemon_event::Payload::TransferProgress(p)) => {
+                    active_snapshot.bytes_completed = p.bytes_completed;
+                    active_snapshot.files_completed = p.files_completed;
                     if args.json {
                         print_watch_progress_json(&p);
                     } else {
@@ -414,21 +422,28 @@ async fn reconcile_via_get_state(
 
 fn emit_human_active(a: &blit_core::generated::ActiveTransfer, note: Option<&str>) {
     let age_ms = age_ms_since(a.start_unix_ms);
+    let progress = format!(
+        "bytes={} files={}",
+        format_progress_pair(a.bytes_completed, a.bytes_total),
+        format_progress_pair(a.files_completed, a.files_total),
+    );
     if let Some(note) = note {
         eprintln!(
-            "[active] {} {} peer={} age={} ({})",
+            "[active] {} {} peer={} {} age={} ({})",
             jobs::kind_label(a.kind),
             module_path(&a.module, &a.path),
             a.peer,
+            progress,
             format_ms(age_ms),
             note,
         );
     } else {
         eprintln!(
-            "[active] {} {} peer={} age={}",
+            "[active] {} {} peer={} {} age={}",
             jobs::kind_label(a.kind),
             module_path(&a.module, &a.path),
             a.peer,
+            progress,
             format_ms(age_ms),
         );
     }
@@ -441,29 +456,53 @@ fn emit_human_finished(r: &blit_core::generated::TransferRecord) {
         format!("FAILED: {}", r.error_message)
     };
     eprintln!(
-        "[done] {} {} duration={} {}",
+        "[done] {} {} bytes={} files={} carrier={} duration={} {}",
         jobs::kind_label(r.kind),
         module_path(&r.module, &r.path),
+        r.bytes,
+        r.files,
+        if !r.ok {
+            "-"
+        } else if r.tcp_fallback_used {
+            "gRPC"
+        } else {
+            "TCP"
+        },
         format_ms(r.duration_ms),
         status,
     );
 }
 
 fn emit_human_progress(transfer_id: &str, p: &blit_core::generated::TransferProgress) {
+    eprintln!("{}", human_progress_line(transfer_id, p));
+}
+
+fn human_progress_line(transfer_id: &str, p: &blit_core::generated::TransferProgress) -> String {
     let bps = p.throughput_bps;
-    eprintln!(
-        "[progress] {} bytes={} throughput={}/s",
+    format!(
+        "[progress] {} bytes={} files={} throughput={}/s",
         transfer_id,
-        p.bytes_completed,
+        format_progress_pair(p.bytes_completed, p.bytes_total),
+        format_progress_pair(p.files_completed, p.files_total),
         format_bps(bps),
-    );
+    )
+}
+
+fn format_progress_pair(completed: u64, total: u64) -> String {
+    if total == 0 {
+        format!("{completed}/?")
+    } else {
+        format!("{completed}/{total}")
+    }
 }
 
 fn emit_human_complete(c: &blit_core::generated::TransferComplete) {
     eprintln!(
-        "[done] transfer {} bytes={} duration={} ok",
+        "[done] transfer {} bytes={} files={} carrier={} duration={} ok",
         c.transfer_id,
         c.bytes,
+        c.files,
+        if c.tcp_fallback_used { "gRPC" } else { "TCP" },
         format_ms(c.duration_ms),
     );
 }
@@ -481,8 +520,14 @@ fn format_bps(bps: u64) -> String {
 }
 
 fn print_watch_progress_json(p: &blit_core::generated::TransferProgress) {
-    use serde_json::json;
-    let body = json!({
+    let body = watch_progress_json(p);
+    if let Ok(line) = serde_json::to_string(&body) {
+        println!("{}", line);
+    }
+}
+
+fn watch_progress_json(p: &blit_core::generated::TransferProgress) -> serde_json::Value {
+    serde_json::json!({
         "state": "progress",
         "transfer_id": p.transfer_id,
         "bytes_completed": p.bytes_completed,
@@ -490,10 +535,7 @@ fn print_watch_progress_json(p: &blit_core::generated::TransferProgress) {
         "files_completed": p.files_completed,
         "files_total": p.files_total,
         "throughput_bps": p.throughput_bps,
-    });
-    if let Ok(line) = serde_json::to_string(&body) {
-        println!("{}", line);
-    }
+    })
 }
 
 // c-6 round 2: the standalone `print_watch_complete_json` /
@@ -504,8 +546,17 @@ fn print_watch_progress_json(p: &blit_core::generated::TransferProgress) {
 // schema identical regardless of which path produced it.
 
 fn print_watch_json(snap: &WatchSnapshot) {
+    let body = watch_json(snap);
+    // JSON-Lines: one object per poll, no trailing newline
+    // from to_string (println! adds it).
+    if let Ok(line) = serde_json::to_string(&body) {
+        println!("{}", line);
+    }
+}
+
+fn watch_json(snap: &WatchSnapshot) -> serde_json::Value {
     use serde_json::json;
-    let body = match snap {
+    match snap {
         WatchSnapshot::Active(a) => json!({
             "state": "active",
             "transfer_id": a.transfer_id,
@@ -516,6 +567,8 @@ fn print_watch_json(snap: &WatchSnapshot) {
             "start_unix_ms": a.start_unix_ms,
             "bytes_completed": a.bytes_completed,
             "bytes_total": a.bytes_total,
+            "files_completed": a.files_completed,
+            "files_total": a.files_total,
         }),
         WatchSnapshot::Finished(r) => json!({
             "state": "finished",
@@ -526,17 +579,15 @@ fn print_watch_json(snap: &WatchSnapshot) {
             "path": r.path,
             "start_unix_ms": r.start_unix_ms,
             "duration_ms": r.duration_ms,
+            "bytes": r.bytes,
+            "files": r.files,
+            "tcp_fallback_used": r.tcp_fallback_used,
             "ok": r.ok,
             "error_message": r.error_message,
         }),
         WatchSnapshot::NotFound => json!({
             "state": "not_found",
         }),
-    };
-    // JSON-Lines: one object per poll, no trailing newline
-    // from to_string (println! adds it).
-    if let Ok(line) = serde_json::to_string(&body) {
-        println!("{}", line);
     }
 }
 
@@ -618,6 +669,8 @@ fn print_json(state: &DaemonState) -> Result<()> {
                 "start_unix_ms": a.start_unix_ms,
                 "bytes_completed": a.bytes_completed,
                 "bytes_total": a.bytes_total,
+                "files_completed": a.files_completed,
+                "files_total": a.files_total,
             })
         })
         .collect();
@@ -635,6 +688,7 @@ fn print_json(state: &DaemonState) -> Result<()> {
                 "duration_ms": r.duration_ms,
                 "bytes": r.bytes,
                 "files": r.files,
+                "tcp_fallback_used": r.tcp_fallback_used,
                 "ok": r.ok,
                 "error_message": r.error_message,
             })
@@ -701,14 +755,16 @@ fn print_human(remote: &RemoteEndpoint, state: &DaemonState) {
     } else {
         println!("Active ({}):", state.active.len());
         for a in &state.active {
-            // `<id>  <kind>  <module>/<path>  peer=<peer>  age=<ms>`
+            // `<id> <kind> <module>/<path> peer=<peer> bytes=N/M files=N/M age=<ms>`
             let age_ms = age_ms_since(a.start_unix_ms);
             println!(
-                "  {}  {}  {}  peer={}  age={}",
+                "  {}  {}  {}  peer={}  bytes={}  files={}  age={}",
                 a.transfer_id,
                 jobs::kind_label(a.kind),
                 module_path(&a.module, &a.path),
                 a.peer,
+                format_progress_pair(a.bytes_completed, a.bytes_total),
+                format_progress_pair(a.files_completed, a.files_total),
                 format_ms(age_ms),
             );
         }
@@ -819,6 +875,36 @@ mod tests {
         assert_eq!(module_path("mod", "sub/dir"), "mod/sub/dir");
     }
 
+    #[test]
+    fn progress_json_preserves_byte_and_file_denominators() {
+        let value = watch_progress_json(&blit_core::generated::TransferProgress {
+            transfer_id: "t1".into(),
+            bytes_completed: 4096,
+            bytes_total: 8192,
+            files_completed: 2,
+            files_total: 4,
+            throughput_bps: 1024,
+        });
+        assert_eq!(value["bytes_completed"], 4096);
+        assert_eq!(value["bytes_total"], 8192);
+        assert_eq!(value["files_completed"], 2);
+        assert_eq!(value["files_total"], 4);
+        assert_eq!(
+            human_progress_line(
+                "t1",
+                &blit_core::generated::TransferProgress {
+                    transfer_id: "t1".into(),
+                    bytes_completed: 4096,
+                    bytes_total: 8192,
+                    files_completed: 2,
+                    files_total: 4,
+                    throughput_bps: 1024,
+                },
+            ),
+            "[progress] t1 bytes=4096/8192 files=2/4 throughput=1.02 KB/s"
+        );
+    }
+
     /// `ExitCode` doesn't implement `PartialEq`, so we compare
     /// via the `Debug` repr — stable across releases of std
     /// and good enough to pin the contract.
@@ -833,6 +919,8 @@ mod tests {
             module: "mod-a".to_string(),
             path: "sub/dir".to_string(),
             start_unix_ms: 1_700_000_000_000,
+            bytes_completed: 512,
+            files_completed: 2,
         }
     }
 
@@ -851,7 +939,7 @@ mod tests {
             bytes: 1024,
             files: 4,
             duration_ms: 1200,
-            tcp_fallback_used: false,
+            tcp_fallback_used: true,
         };
         let merged = snap.to_finished_complete(&complete);
         assert_eq!(merged.transfer_id, "t1-7");
@@ -863,8 +951,13 @@ mod tests {
         assert_eq!(merged.duration_ms, 1200);
         assert_eq!(merged.bytes, 1024);
         assert_eq!(merged.files, 4);
+        assert!(merged.tcp_fallback_used);
         assert!(merged.ok);
         assert!(merged.error_message.is_empty());
+        let json = watch_json(&WatchSnapshot::Finished(merged));
+        assert_eq!(json["bytes"], 1024);
+        assert_eq!(json["files"], 4);
+        assert_eq!(json["tcp_fallback_used"], true);
     }
 
     /// Same parity check on the stream-error path.
@@ -885,8 +978,8 @@ mod tests {
         // duration_ms is computed from now - start; just
         // sanity-check it's non-negative (saturating sub).
         let _ = merged.duration_ms;
-        assert_eq!(merged.bytes, 0);
-        assert_eq!(merged.files, 0);
+        assert_eq!(merged.bytes, 512);
+        assert_eq!(merged.files, 2);
         assert!(!merged.ok);
         assert_eq!(merged.error_message, "module not found");
     }

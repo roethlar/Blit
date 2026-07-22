@@ -1352,16 +1352,6 @@ async fn source_recv_half(
                     );
                     need_batch_seq += 1;
                 }
-                // otp-10a: the need list is the push-direction progress
-                // denominator ("N of M files"). Entries are unique by
-                // contract (a duplicate need faults below), so every
-                // batch is newly-requested work — same semantics as the
-                // old push driver's `report_manifest_batch`.
-                if let Some(p) = &progress {
-                    if !batch.entries.is_empty() {
-                        p.report_manifest_batch(batch.entries.len());
-                    }
-                }
                 for entry in batch.entries {
                     if entry.resume && !resume_session {
                         let _ = events.send(SourceEvent::Fault(SessionFault::protocol_violation(
@@ -1388,24 +1378,31 @@ async fn source_recv_half(
                             .remove(&entry.relative_path)
                     };
                     match header {
-                        Some(h) if entry.resume => {
-                            if let Some(probe) = &small_file_probe {
-                                probe.note_need_event_enqueue(&h.relative_path);
-                                let started = probe.start();
-                                let _ = events.send(SourceEvent::ResumeNeed(h));
-                                probe.note_need_event_send(started.elapsed());
-                            } else {
-                                let _ = events.send(SourceEvent::ResumeNeed(h));
-                            }
-                        }
                         Some(h) => {
+                            // The need list is the transfer denominator. Report
+                            // only after resolving the path to its retained
+                            // manifest header, so both file and byte totals are
+                            // exact and an invalid need contributes neither.
+                            if let Some(p) = &progress {
+                                p.report_manifest_batch(
+                                    1,
+                                    h.size
+                                        .saturating_add(crate::windows_metadata::payload_bytes(&h)),
+                                );
+                            }
+                            let path = h.relative_path.clone();
+                            let event = if entry.resume {
+                                SourceEvent::ResumeNeed(h)
+                            } else {
+                                SourceEvent::Need(h)
+                            };
                             if let Some(probe) = &small_file_probe {
-                                probe.note_need_event_enqueue(&h.relative_path);
+                                probe.note_need_event_enqueue(&path);
                                 let started = probe.start();
-                                let _ = events.send(SourceEvent::Need(h));
+                                let _ = events.send(event);
                                 probe.note_need_event_send(started.elapsed());
                             } else {
-                                let _ = events.send(SourceEvent::Need(h));
+                                let _ = events.send(event);
                             }
                         }
                         None => {
@@ -4691,7 +4688,16 @@ async fn diff_chunk_and_apply_local(
         needed_paths.push(header.relative_path.clone());
     }
     if let Some(p) = progress {
-        p.report_manifest_batch(fresh.len());
+        p.report_manifest_batch(
+            fresh.len(),
+            fresh.iter().fold(0u64, |total, header| {
+                total.saturating_add(
+                    header
+                        .size
+                        .saturating_add(crate::windows_metadata::payload_bytes(header)),
+                )
+            }),
+        );
     }
     let payloads = local.plan_chunk(fresh).await?;
     for payload in payloads {
@@ -4795,7 +4801,16 @@ async fn diff_chunk_and_send_needs(
         return Ok(());
     }
     if let Some(p) = progress {
-        p.report_manifest_batch(entries.len());
+        p.report_manifest_batch(
+            entries.len(),
+            fresh.iter().fold(0u64, |total, (header, _)| {
+                total.saturating_add(
+                    header
+                        .size
+                        .saturating_add(crate::windows_metadata::payload_bytes(header)),
+                )
+            }),
+        );
     }
     let batch = *need_batch_seq;
     let count = entries.len() as u64;

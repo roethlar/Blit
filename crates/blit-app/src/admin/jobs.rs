@@ -256,6 +256,8 @@ mod tests {
             start_unix_ms: 1,
             bytes_completed: 0,
             bytes_total: 0,
+            files_completed: 0,
+            files_total: 0,
         }
     }
 
@@ -270,6 +272,7 @@ mod tests {
             duration_ms: 100,
             bytes: 0,
             files: 0,
+            tcp_fallback_used: false,
             ok,
             error_message: err.to_string(),
         }

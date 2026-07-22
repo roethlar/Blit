@@ -107,6 +107,8 @@ mod tests {
             start_unix_ms: 1,
             duration_ms: 2,
             bytes: 3,
+            files: 4,
+            tcp_fallback_used: true,
             ok: true,
             error_message: String::new(),
         }
@@ -139,6 +141,21 @@ mod tests {
         let loaded = load(&path, 50);
         assert_eq!(loaded.len(), 2);
         assert!(loaded.iter().all(|r| r.transfer_id == "good"));
+    }
+
+    #[test]
+    fn load_old_record_without_progress_fields_defaults_to_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recents.jsonl");
+        let mut old = serde_json::to_value(rec("old")).unwrap();
+        let old = old.as_object_mut().unwrap();
+        old.remove("files");
+        old.remove("tcp_fallback_used");
+        std::fs::write(&path, format!("{}\n", serde_json::to_string(&old).unwrap())).unwrap();
+        let loaded = load(&path, 50);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].files, 0);
+        assert!(!loaded[0].tcp_fallback_used);
     }
 
     #[test]

@@ -33,7 +33,7 @@ use tonic::{Status, Streaming};
 
 use blit_core::generated::session_error::Code;
 use blit_core::generated::{SessionOpen, TransferFrame};
-use blit_core::remote::transfer::{ByteProgressSink, ProgressEvent, RemoteTransferProgress};
+use blit_core::remote::transfer::{ByteProgressSink, RemoteTransferProgress};
 use blit_core::transfer_session::transport::grpc_daemon_transport;
 use blit_core::transfer_session::{
     run_responder, DestinationInstruments, DestinationTarget, HelloConfig, OpenResolver,
@@ -43,6 +43,7 @@ use blit_core::transfer_session::{
 
 use super::util::{resolve_contained_path, resolve_module, resolve_relative_path};
 use crate::active_jobs::ActiveJobKind;
+use crate::active_jobs::ActiveJobProgress;
 use crate::runtime::{ModuleConfig, RootExport};
 
 /// The dispatcher's open hook (codex otp-10b-2 F4): called exactly once
@@ -148,18 +149,24 @@ pub(crate) async fn run_transfer_session(
     // to served sessions exactly as they did to the old handlers.
     policy: ResponderPolicy,
     byte_progress: ByteProgressSink,
+    job_progress: ActiveJobProgress,
     // Fires once at a successful open resolve with this session's job
     // kind + endpoint (codex otp-10b-2 F4).
     on_open: Arc<OnSessionOpen>,
 ) -> Result<(), Status> {
     let transport = grpc_daemon_transport(tx, inbound);
     let (source_progress_tx, mut source_progress_rx) = mpsc::unbounded_channel();
-    let source_byte_progress = byte_progress.clone();
+    let source_job_progress = job_progress.clone();
     let relay_source_bytes = async move {
         while let Some(event) = source_progress_rx.recv().await {
-            if let ProgressEvent::Payload { bytes, .. } = event {
-                source_byte_progress.report(bytes);
-            }
+            source_job_progress.report_source_event(&event);
+        }
+    };
+    let (destination_progress_tx, mut destination_progress_rx) = mpsc::unbounded_channel();
+    let destination_job_progress = job_progress.clone();
+    let relay_destination_progress = async move {
+        while let Some(event) = destination_progress_rx.recv().await {
+            destination_job_progress.report_destination_event(&event);
         }
     };
     // The same module→root resolver serves both roles; only the one the
@@ -185,11 +192,12 @@ pub(crate) async fn run_transfer_session(
             ..Default::default()
         },
         destination: DestinationInstruments {
+            progress: Some(RemoteTransferProgress::new(destination_progress_tx)),
             byte_progress: Some(byte_progress),
             ..Default::default()
         },
     };
-    let (outcome, ()) = tokio::join!(
+    let (outcome, (), ()) = tokio::join!(
         run_responder(
             HelloConfig::default(),
             transport,
@@ -199,13 +207,27 @@ pub(crate) async fn run_transfer_session(
             policy,
         ),
         relay_source_bytes,
+        relay_destination_progress,
     );
     match outcome {
         // Either role completing cleanly is a successful transfer; the
         // daemon record does not distinguish push- from pull-equivalent
         // (the jobs kind stays Push until the taxonomy is revisited at
         // cutover — see the dispatcher).
-        Ok(_) => Ok(()),
+        Ok(outcome) => {
+            let summary = match outcome {
+                blit_core::transfer_session::ResponderOutcome::Source(summary) => summary,
+                blit_core::transfer_session::ResponderOutcome::Destination(outcome) => {
+                    outcome.summary
+                }
+            };
+            job_progress.finish(
+                summary.files_transferred,
+                summary.bytes_transferred,
+                summary.in_stream_carrier_used,
+            );
+            Ok(())
+        }
         Err(report) => {
             // run_responder already emitted a SessionError frame to the
             // peer; surface the reason for the record.

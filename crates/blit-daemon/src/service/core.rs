@@ -231,12 +231,9 @@ pub(crate) fn tick_progress_once(
         payload: Some(daemon_event::Payload::TransferProgress(TransferProgress {
             transfer_id: sample.transfer_id.clone(),
             bytes_completed: sample.bytes_completed,
-            // bytes_total and files_* land in follow-up C sub-
-            // slices that wire the manifest stage and the
-            // files counter.
-            bytes_total: 0,
-            files_completed: 0,
-            files_total: 0,
+            bytes_total: sample.bytes_total,
+            files_completed: sample.files_completed,
+            files_total: sample.files_total,
             throughput_bps: sample.throughput_bps,
         })),
     })
@@ -313,17 +310,14 @@ pub(crate) fn build_transfer_finished_event(
     error_message: Option<&str>,
 ) -> DaemonEvent {
     if ok {
+        let progress = guard.progress_snapshot();
         DaemonEvent {
             payload: Some(daemon_event::Payload::TransferComplete(TransferComplete {
                 transfer_id: guard.transfer_id().to_string(),
-                bytes: guard.bytes_completed_load(),
-                // `files` is wired in a follow-up C sub-slice
-                // (file-level counter analogous to bytes).
-                files: 0,
+                bytes: progress.bytes_completed,
+                files: progress.files_completed,
                 duration_ms: guard.elapsed_ms(),
-                // `tcp_fallback_used` plumbs through the handler's
-                // result struct in a follow-up; false today.
-                tcp_fallback_used: false,
+                tcp_fallback_used: progress.tcp_fallback_used,
             })),
         }
     } else {
@@ -427,6 +421,7 @@ impl Blit for BlitService {
             let job = job;
             let cancel_token = job.cancellation_token().clone();
             let byte_progress = job.bytes_counter();
+            let job_progress = job.progress();
             // Session variant: cancel surfaces as a framed
             // SessionError{CANCELLED}, not a bare Status (codex F1).
             let (ok, err_msg) = resolve_transfer_session_outcome(
@@ -437,6 +432,7 @@ impl Blit for BlitService {
                     tx.clone(),
                     policy,
                     byte_progress,
+                    job_progress,
                     on_open,
                 ),
                 &tx,
@@ -620,6 +616,7 @@ impl Blit for BlitService {
         // the table row holds, so GetState sees live progress
         // while the transfer is in flight.
         let byte_progress = job.bytes_counter();
+        let job_progress = job.progress();
         let modules = Arc::clone(&self.modules);
         let default_root = self.default_root.clone();
         let delegation = Arc::clone(&self.delegation);
@@ -691,6 +688,7 @@ impl Blit for BlitService {
                     handler_tx,
                     transfer_id_for_started,
                     byte_progress,
+                    job_progress,
                 ),
                 tx.closed(),
                 cancel_token.cancelled(),
@@ -940,15 +938,11 @@ impl Blit for BlitService {
                 module: j.module,
                 path: j.path,
                 start_unix_ms: j.start_unix_ms,
-                // `bytes_completed` reads from the per-row atomic
-                // (c-1a-byte-counter-api). Stays at zero until
-                // c-1b wires the data-plane receive loop to call
-                // `ByteProgressSink::report`; the wire shape is
-                // already correct.
+                // Both fields read the shared live progress state.
                 bytes_completed: j.bytes_completed,
-                // `bytes_total` lands in a subsequent C slice
-                // from the manifest stage.
-                bytes_total: 0,
+                bytes_total: j.bytes_total,
+                files_completed: j.files_completed,
+                files_total: j.files_total,
             })
             .collect();
 
@@ -978,8 +972,8 @@ impl Blit for BlitService {
                 // (c-1a-byte-counter-api). Zero until c-1b
                 // wires the data-plane receive loop.
                 bytes: r.bytes,
-                // `files` lands in a subsequent C slice.
-                files: 0,
+                files: r.files,
+                tcp_fallback_used: r.tcp_fallback_used,
                 ok: r.ok,
                 error_message: r.error_message,
             })
@@ -1530,17 +1524,23 @@ mod tests {
         assert_eq!(row.peer, "10.0.0.5:443");
         assert_eq!(row.module, "mod-a");
         assert_eq!(row.path, "sub/dir");
-        // Byte-level fields are zero with no reports against
-        // the per-row counter — c-1a wired the atomic but no
-        // call site reports against it yet (c-1b lands the
-        // data-plane wiring); `bytes_total` lands in a later C
-        // slice from the manifest stage.
+        // Progress fields start at zero before either the byte sink or
+        // manifest/file event lane reports against the row.
         assert_eq!(row.bytes_completed, 0);
         assert_eq!(row.bytes_total, 0);
 
         // Confirm the wire field tracks the atomic by
         // reporting through the sink and re-snapshotting.
         guard.bytes_counter().report(4096);
+        guard.progress().report_destination_event(
+            &blit_core::remote::transfer::ProgressEvent::ManifestBatch {
+                files: 2,
+                bytes: 8192,
+            },
+        );
+        guard.progress().report_destination_event(
+            &blit_core::remote::transfer::ProgressEvent::FileComplete { path: "one".into() },
+        );
         let resp = svc
             .get_state(Request::new(GetStateRequest { recent_limit: 0 }))
             .await
@@ -1548,9 +1548,13 @@ mod tests {
         let state2 = resp.into_inner();
         assert_eq!(state2.active.len(), 1);
         assert_eq!(state2.active[0].bytes_completed, 4096);
+        assert_eq!(state2.active[0].bytes_total, 8192);
+        assert_eq!(state2.active[0].files_completed, 1);
+        assert_eq!(state2.active[0].files_total, 2);
 
         // Drop the active row + record outcome → it should now
         // appear in `recent[]`.
+        guard.progress().finish(1, 4096, true);
         guard.record_outcome(true, None);
         drop(guard);
 
@@ -1565,11 +1569,10 @@ mod tests {
         assert_eq!(rec.kind, WireKind::Pull as i32);
         assert!(rec.ok);
         assert_eq!(rec.error_message, "");
-        // `bytes` is the final value of the per-row atomic
-        // captured at Drop. The earlier `bytes_counter().report(4096)`
-        // is what lands here; `files` is a later C slice.
+        // Terminal bytes/files are frozen from the same counters.
         assert_eq!(rec.bytes, 4096);
-        assert_eq!(rec.files, 0);
+        assert_eq!(rec.files, 1);
+        assert!(rec.tcp_fallback_used);
     }
 
     #[tokio::test]
@@ -1891,8 +1894,7 @@ mod tests {
         // - TransferComplete variant is selected when ok=true.
         // - bytes field reflects the per-row counter.
         // - duration_ms is non-zero (start_unix_ms < unix_ms_now()).
-        // - files/tcp_fallback_used follow the documented zero/
-        //   false defaults until follow-up slices wire them.
+        // - files and carrier outcome come from the shared progress state.
         let svc = empty_service();
         let guard = svc.active_jobs.register(
             ActiveJobKind::DelegatedPull,
@@ -1900,20 +1902,18 @@ mod tests {
             "m".to_string(),
             "/".to_string(),
         );
-        // Land some bytes against the per-row atomic so the
-        // emitted event carries a non-zero `bytes` field.
-        guard.bytes_counter().report(2048);
+        guard.progress().finish(3, 2048, true);
 
         let ev = build_transfer_finished_event(&guard, true, None);
         match ev.payload.unwrap() {
             daemon_event::Payload::TransferComplete(c) => {
                 assert_eq!(c.transfer_id, guard.transfer_id());
                 assert_eq!(c.bytes, 2048);
-                assert_eq!(c.files, 0);
+                assert_eq!(c.files, 3);
                 // duration_ms is `unix_ms_now() - start_unix_ms`
                 // — small (test runs fast) but not negative.
                 let _ = c.duration_ms;
-                assert!(!c.tcp_fallback_used);
+                assert!(c.tcp_fallback_used);
             }
             other => panic!("expected TransferComplete, got {other:?}"),
         }
@@ -2099,10 +2099,22 @@ mod tests {
         // tick again. The second tick should show a non-zero
         // throughput corresponding to the bytes reported.
         guard.bytes_counter().report(50 * 1024);
+        guard.progress().report_destination_event(
+            &blit_core::remote::transfer::ProgressEvent::ManifestBatch {
+                files: 4,
+                bytes: 100 * 1024,
+            },
+        );
+        guard.progress().report_destination_event(
+            &blit_core::remote::transfer::ProgressEvent::FileComplete { path: "one".into() },
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let samples = svc.active_jobs.snapshot_progress_samples();
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].bytes_completed, 50 * 1024);
+        assert_eq!(samples[0].bytes_total, 100 * 1024);
+        assert_eq!(samples[0].files_completed, 1);
+        assert_eq!(samples[0].files_total, 4);
         // throughput_bps = 50 KiB / ~50ms ≈ 1 MiB/s. Loose bound
         // since sleep timing isn't precise; just confirm > 0 and
         // < a sane ceiling (10x expected).
