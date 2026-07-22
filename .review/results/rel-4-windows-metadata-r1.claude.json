@@ -1,0 +1,91 @@
+{
+  "record_type": "review_orchestrator_record",
+  "reviewer": {
+    "provider": "Anthropic",
+    "model": "claude-opus-4-8",
+    "cli": "Claude Code 2.1.217",
+    "reasoning_effort": "max"
+  },
+  "review_contract": {
+    "finding": "rel-4-windows-metadata",
+    "base_sha": "2ee9b630f8fe0ec95139e70e7d066a474b8532d0",
+    "reviewed_sha": "3013e101ee45b973d9ffe59c11f4655857e6fa6e",
+    "authoritative_worktree": "/tmp/blit-rev-3013e10-r2"
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "adjudication": "discarded",
+      "reason": "The launcher stopped draining the event pipe before a verdict. The process was terminated after confirming it had only read files and had not mutated the review tree."
+    },
+    {
+      "attempt": 2,
+      "session_id": "49148b3a-22be-456b-b41a-2f6c4eca4aab",
+      "subtype": "success",
+      "terminal_reason": "completed",
+      "duration_ms": 767342,
+      "num_turns": 47,
+      "adjudication": "authoritative",
+      "structured_output": {
+        "verdict": "findings",
+        "guard_confirmed": true,
+        "reviewed_sha": "3013e101ee45b973d9ffe59c11f4655857e6fa6e",
+        "base_sha": "2ee9b630f8fe0ec95139e70e7d066a474b8532d0",
+        "findings": [
+          {
+            "id": "rel4-r1-f1-tar-metadata-budget",
+            "severity": "HIGH",
+            "title": "Tar-shard header metadata lacks an aggregate allocation bound",
+            "evidence": "pipeline.rs reads one independently bounded metadata blob for every declared tar member and retains all decoded headers before checking the 256 MiB tar-body bound. The member-count ceiling is 1,048,576 and the per-item metadata ceiling is about 2.13 MiB; no shard-wide header budget exists.",
+            "predicted_failure": "A hostile peer can drive receiver memory toward terabytes before the existing body cap is reached; even a planner-sized 4096-file shard can request several GiB of header metadata."
+          },
+          {
+            "id": "rel4-r1-f2-attribute-convergence",
+            "severity": "HIGH",
+            "title": "Unsupported destination attributes can cause endless successful re-transfers",
+            "evidence": "destination_matches compares the full preserved mask, apply_attributes checks only SetFileAttributesW success, and the result is not read back. A volume that accepts the call but drops a bit differs again on every later run.",
+            "predicted_failure": "Files on exFAT/FAT32/SMB can be fully retransferred on every run without converging or warning."
+          },
+          {
+            "id": "rel4-r1-f3-source-ads-isolation",
+            "severity": "HIGH",
+            "title": "A recoverable source ADS problem aborts the entire session",
+            "evidence": "The source scan records and skips ordinary PermissionDenied/NotFound files, but every metadata enumeration/read/cap/drift error propagates through `?` and terminates the scan. Destination comparison similarly propagates errors while inspecting pre-existing streams.",
+            "predicted_failure": "One locked, changing, oversized, or otherwise unreadable named stream prevents every other file in a backup from transferring."
+          },
+          {
+            "id": "rel4-r1-f4-cross-platform-policy",
+            "severity": "MEDIUM",
+            "title": "Windows-to-non-Windows transfers have no explicit downgrade and can reject after partial resume writes",
+            "evidence": "Every Windows file carries metadata, every non-Windows sink rejects it, no option disables carriage, and resume blocks can land before the completion record reaches the platform rejection.",
+            "predicted_failure": "Windows-to-Linux/macOS copies have no usable policy choice; a resume attempt can leave a partial destination before reporting the incompatibility."
+          },
+          {
+            "id": "rel4-r1-f5-local-mtime-precision",
+            "severity": "MEDIUM",
+            "title": "Local Windows metadata application truncates mtime to whole seconds",
+            "evidence": "The metadata branch stamps FileTime from FileHeader.mtime_seconds instead of the prior source SystemTime. Windows always supplies metadata, so the lossy branch shadows the nanosecond-preserving local path for every file.",
+            "predicted_failure": "NTFS sub-second timestamps do not round-trip and exact-time comparison tools report copied files as different."
+          },
+          {
+            "id": "rel4-r1-f6-resume-hash-clone",
+            "severity": "LOW",
+            "title": "In-stream resume clones and discards every destination hash list",
+            "evidence": "The new metadata hydration wrapper clones hashes into TransferPayload::ResumeFile, then destructures only the hydrated header and continues using the original hashes. The clone occurs on metadata-free platforms too.",
+            "predicted_failure": "Large resumed files incur avoidable allocation and memory-copy churn on every platform."
+          }
+        ]
+      },
+      "guard": {
+        "baseline": "cargo test -p blit-core --lib: 388 passed",
+        "mutation": "Removed the metadata-mismatch Transfer arm; windows_metadata_difference_overrides_an_ordinary_skip failed with Skip instead of Transfer.",
+        "restoration": "Exact reviewed bytes restored; cargo test -p blit-core --lib: 388 passed; detached worktree clean at reviewed_sha."
+      },
+      "usage": {
+        "total_cost_usd": 3.934423,
+        "opus_output_tokens": 45831
+      }
+    }
+  ],
+  "authoritative_attempt": 2
+}

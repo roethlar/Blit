@@ -52,7 +52,13 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **Hosted Windows confirmation is pending.** Published run `29584631185`
+1. **Windows metadata review corrections are in progress.** The implementation
+   at `3013e10` passed local gates and strict Windows cross-compilation, but the
+   formal Opus review admitted six corrections before runtime acceptance. They
+   cover bounded tar-header allocation, attribute convergence, per-file ADS
+   isolation, cross-platform policy/preflight, local mtime precision, and a
+   resume allocation. Hosted Windows confirmation follows those fixes.
+2. **Hosted Windows confirmation is pending.** Published run `29584631185`
    failed because Windows buffered the guard's 64 MiB loopback handshake.
    rel-1 now exercises the same production timeout through a deterministic
    two-byte/one-byte in-memory blocked writer with local mutation proof. The
@@ -61,15 +67,15 @@ performance ceilings and hardware tuning remain post-release work.
    metadata guards also need current-head Windows confirmation. Findings:
    `release-win-ci-handshake-stall-test`, `windows-move-tree-hang`, and
    `windows-attrs-and-ads-lost-on-tar-path`.
-2. **Temporary-daemon startup is not yet deterministic or diagnosable.** The
+3. **Temporary-daemon startup is not yet deterministic or diagnosable.** The
    first rel-4 workspace gate had one daemon exit during `admin_verbs` startup;
    the exact test and complete suite then passed, while the harness discarded
    stderr and therefore lost the cause. `tests-harness-stderr-blackhole` must
    capture the process error and any remaining startup failure must be fixed.
-3. **Progress reporting is incomplete.** Delegated progress can be silent and
+4. **Progress reporting is incomplete.** Delegated progress can be silent and
    served-session byte/file totals can remain zero through daemon, RPC, CLI,
    and TUI consumers.
-4. **Current release artifacts are unproved.** The exact local head is not on
+5. **Current release artifacts are unproved.** The exact local head is not on
    GitHub, the latest published release-build jobs were skipped, and install /
    startup smoke checks for the produced CLI and daemon artifacts are not
    recorded.

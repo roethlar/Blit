@@ -159,12 +159,13 @@ performance ratios are measured or graded.
    source handle. `48c5a11` fixed that executed path, and unified-session
    cutover later deleted it. The exact bounded nested-tree test is re-enabled;
    current-head hosted confirmation joins rel-1's publication gate.
-4. **rel-4 — Windows metadata fidelity `[x locally/compiled]`.** Contract v4 is
-   amended and the bounded local/remote carriers plus guards are implemented;
-   current-head Windows runtime confirmation remains publication-gated. The
-   guards cover single versus ≥32-file behavior, ADS contents, attributes,
-   unsafe/duplicate stream refusal, manifest/payload drift, bounded framing,
-   and failure before successful completion reporting.
+4. **rel-4 — Windows metadata fidelity `[~ review fixes]`.** Contract v4 and
+   the first local/remote implementation are committed at `3013e10`. Formal
+   Opus review admitted six release-blocking corrections: aggregate tar-header
+   budgeting, attribute convergence, per-file ADS error isolation, an explicit
+   cross-platform downgrade with pre-write rejection, local sub-second mtime
+   preservation, and removal of a resume hash-list clone. Records:
+   `.review/results/rel-4-windows-metadata-r1.claude.{json,verdict.md}`.
 5. **rel-5 — complete progress reporting.** Implement the three recorded
    daemon/delegated progress gaps end to end, with producer, RPC, state-table,
    CLI, and TUI guards.
