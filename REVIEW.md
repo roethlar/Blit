@@ -26,7 +26,7 @@ Fable 5/max (D-2026-07-16-4).
 | ldt-1 | Acknowledged elastic membership with exact member and terminal outcomes | `[x]` | `f8f3c51` (neutral Claude accepted) |
 | ldt-2 | Live controller cutover; delete shape worker authority; shared ADD/REMOVE | `[x]` | `65a0f9f` (neutral Claude; one non-failing Low declined at intake) |
 | ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[x]` | `436e1bb` + review fix `406a7e5`; Claude r2 clean with independent guard |
-| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | Exact `a0c3e3f` completed all four f13 40-GiB arms with normal restoration: q→Windows matched REMOVE 4→1; Windows→q split ADD 4→9 vs REMOVE 4→1. Final analysis voided before grading because production SOURCE control actions use exact protobuf enum strings while synthetic analyzer traces use shorthand. `ldt-4-live-f14` owns that bounded analyzer fix, then review/restage/additive rerun. Fixed-cell 1.197/1.131 findings stay separate. Formal Fable held |
+| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | Exact `a0c3e3f` completed all four f13 40-GiB arms with normal restoration: q→Windows matched REMOVE 4→1; Windows→q split ADD 4→9 vs REMOVE 4→1. The f14 candidate now validates exact protobuf SOURCE actions, is 88-test mutation-proved, and diagnostically grades a copy of the retained void evidence as arm review 3 / decision review 1 / performance review 0. Tactical Opus review, exact restaging, and an additive rerun remain. Fixed-cell 1.197/1.131 findings stay separate. Formal Fable held |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 

@@ -442,7 +442,15 @@ advise but cannot accept the slice (D-2026-07-16-4).
    live arms all completed and exercised resize, but final analysis voided on
    `ldt-4-live-f14`: production SOURCE control events spell action as the exact
    protobuf enum while the analyzer's synthetic contract used shorthand.
-   Fix/review/restage and one additive rerun remain.
+   The bounded f14 candidate now derives the exact expected SOURCE enum string
+   from each validated dial operation while leaving dial and DESTINATION action
+   contracts unchanged. Synthetic SOURCE traces match production, a focused
+   guard pins both namespaces, and the full 88-test analyzer suite is
+   mutation-proved red/green. Diagnostic reanalysis of an additive copy of the
+   retained void session validates all four arms and reports the expected
+   `REVIEW_REQUIRED` (arm 3, decision 1, performance 0), without promoting that
+   void evidence to acceptance. Tactical Opus review, exact restaging, and one
+   fresh additive rerun remain.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.

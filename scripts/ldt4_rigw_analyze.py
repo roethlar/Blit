@@ -2104,6 +2104,7 @@ def _validate_control_lane(
 
     live = EXPECTED_FLOOR
     for epoch, action, target in operations:
+        source_action = f"DATA_PLANE_RESIZE_OP_{action}"
         source_events = {
             name: _one_epoch_event(source_control, name, epoch, f"{context} SOURCE")
             for name in SOURCE_CONTROL_FIELDS
@@ -2111,7 +2112,7 @@ def _validate_control_lane(
         for name in ("resize_proposed", "resize_send_begin", "resize_sent"):
             event = source_events[name]
             if (
-                event["action"] != action
+                event["action"] != source_action
                 or event["target_streams"] != target
                 or event["live_streams"] != live
             ):
@@ -2121,7 +2122,7 @@ def _validate_control_lane(
             raise AnalysisError(f"{context} SOURCE: resize_ack_received values disagree")
         settled = source_events["source_settled"]
         if (
-            settled["action"] != action
+            settled["action"] != source_action
             or settled["target_streams"] != target
             or settled["live_streams"] != target
             or settled["accepted"] is not True

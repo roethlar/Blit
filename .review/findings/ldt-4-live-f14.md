@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — all four horizon arms completed and retained, but the
 analyzer refused the first real resize operation because its synthetic action
 spelling did not match production evidence.
-**Status**: Open; implementation pending.
+**Status**: Candidate implemented; tactical review pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: pending
 
@@ -71,7 +71,20 @@ action values.
 
 ## Guard proof
 
-Pending.
+All 88 analyzer tests pass with production-shaped synthetic SOURCE events.
+Temporarily replacing the analyzer's exact enum-derived SOURCE action with the
+dial shorthand made 27 tests fail at the first SOURCE resize event; restoring
+the exact spelling returned all 88 tests to green. A focused assertion also
+pins SOURCE events to the two exact protobuf debug strings while independently
+pinning `dial_pending`/`dial_settlement` to `ADD`/`REMOVE`.
+
+An additive copy of retained void session
+`ldt4-20260722T013314Z-a0c3e3f18afd` was reanalyzed without `SESSION-VOID` as
+diagnostic evidence only. The analyzer now validates all four arms and returns
+the expected `REVIEW_REQUIRED`: arm review 3, decision review 1, performance
+review 0. q→Windows transitions match REMOVE 4→1; Windows→q remains the
+material ADD 4→9 versus REMOVE 4→1 mismatch. The original void session and all
+endpoint payloads/evidence remain unchanged.
 
 ## Coder dispute
 
@@ -79,9 +92,9 @@ None.
 
 ## Known gaps
 
-Implementation, mutation proof, diagnostic void-session reanalysis, full gates,
-tactical Opus review, exact restaging, and one fresh additive live rerun remain.
-The void session and all endpoint payloads/evidence stay retained unchanged.
+Full repository gates, tactical Opus review, exact restaging, and one fresh
+additive live rerun remain. The void session and all endpoint payloads/evidence
+stay retained unchanged.
 
 ## Reviewer comments
 

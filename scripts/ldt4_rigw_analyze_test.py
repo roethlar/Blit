@@ -464,7 +464,7 @@ class SyntheticSession:
                 source,
                 "SOURCE",
                 name,
-                action="ADD",
+                action="DATA_PLANE_RESIZE_OP_ADD",
                 epoch=1,
                 target_streams=5,
                 live_streams=4,
@@ -490,7 +490,7 @@ class SyntheticSession:
             source,
             "SOURCE",
             "source_settled",
-            action="ADD",
+            action="DATA_PLANE_RESIZE_OP_ADD",
             epoch=1,
             target_streams=5,
             live_streams=5,
@@ -546,7 +546,7 @@ class SyntheticSession:
                 source,
                 "SOURCE",
                 name,
-                action="REMOVE",
+                action="DATA_PLANE_RESIZE_OP_REMOVE",
                 epoch=2,
                 target_streams=4,
                 live_streams=5,
@@ -569,7 +569,7 @@ class SyntheticSession:
             source,
             "SOURCE",
             "source_settled",
-            action="REMOVE",
+            action="DATA_PLANE_RESIZE_OP_REMOVE",
             epoch=2,
             target_streams=4,
             live_streams=4,
@@ -862,6 +862,25 @@ class AnalyzerTests(unittest.TestCase):
 
     def test_registered_windows_endpoint_matches_current_identity(self) -> None:
         self.assertEqual(analyzer.WINDOWS_IP, "10.1.10.173")
+
+    def test_synthetic_source_control_actions_match_production_spelling(self) -> None:
+        events = self.session.read_events(self.session.run_rows[0])
+        control_actions = {
+            event["action"]
+            for event in events
+            if event["event"]
+            in {"resize_proposed", "resize_send_begin", "resize_sent", "source_settled"}
+        }
+        self.assertEqual(
+            control_actions,
+            {"DATA_PLANE_RESIZE_OP_ADD", "DATA_PLANE_RESIZE_OP_REMOVE"},
+        )
+        dial_actions = {
+            event["action"]
+            for event in events
+            if event["event"] in {"dial_pending", "dial_settlement"}
+        }
+        self.assertEqual(dial_actions, {"ADD", "REMOVE"})
 
     def test_sustained_parent_inventory_matches_retained_valid_evidence(self) -> None:
         self.assertEqual(
