@@ -67,6 +67,19 @@ fn erase_metadata_but_match_mtime(source: &Path, destination: &Path) {
     filetime::set_file_mtime(destination, source_time).expect("match destination mtime");
 }
 
+fn add_oversized_stale_stream_but_match_mtime(source: &Path, destination: &Path) {
+    set_attributes(destination, false);
+    let stale = fs::File::create(named_stream_path(destination, "stale"))
+        .expect("create stale destination ADS");
+    stale
+        .set_len(2 * 1024 * 1024 + 1)
+        .expect("make stale destination ADS exceed the contract cap");
+    let source_time = filetime::FileTime::from_last_modification_time(
+        &fs::metadata(source).expect("source metadata"),
+    );
+    filetime::set_file_mtime(destination, source_time).expect("match destination mtime");
+}
+
 fn create_batch(root: &Path) -> PathBuf {
     fs::create_dir_all(root).expect("create source batch");
     let metadata_file = root.join("f00.bin");
@@ -101,6 +114,13 @@ fn local_single_and_tar_batch_preserve_attributes_and_ads() {
     erase_metadata_but_match_mtime(&single, &single_dest);
     run_local_copy(&single, &single_dest);
     assert_metadata(&single_dest);
+    add_oversized_stale_stream_but_match_mtime(&single, &single_dest);
+    run_local_copy(&single, &single_dest);
+    assert_metadata(&single_dest);
+    assert!(
+        fs::metadata(named_stream_path(&single_dest, "stale")).is_err(),
+        "oversized stale destination stream must be removed by replacement"
+    );
 
     let batch = temp.path().join("batch");
     let batch_dest = temp.path().join("batch-dest");

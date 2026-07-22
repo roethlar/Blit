@@ -162,11 +162,10 @@ performance ratios are measured or graded.
 4. **rel-4 — Windows metadata fidelity `[~ review fixes]`.** Contract v4 and
    the first local/remote implementation are committed at `3013e10`. Formal
    Opus review admitted six release-blocking corrections. Aggregate tar-header
-   budgeting and durable attribute readback convergence are fixed with
-   mutation-sensitive guards; four remain: per-file ADS error isolation, an
-   explicit cross-platform downgrade with pre-write rejection, local
-   sub-second mtime preservation, and removal of a resume hash-list clone.
-   Records:
+   budgeting, durable attribute readback convergence, and per-file ADS error
+   isolation are fixed with mutation-sensitive guards; three remain: an
+   explicit cross-platform downgrade with pre-write rejection, local sub-second
+   mtime preservation, and removal of a resume hash-list clone. Records:
    `.review/results/rel-4-windows-metadata-r1.claude.{json,verdict.md}`.
 5. **rel-5 — complete progress reporting.** Implement the three recorded
    daemon/delegated progress gaps end to end, with producer, RPC, state-table,

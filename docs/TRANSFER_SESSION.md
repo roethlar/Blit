@@ -222,8 +222,12 @@ message WindowsNamedStream {
   its checksum must be exactly 32 bytes, and payload content must be exactly
   `size` bytes and match the checksum. Enumeration, hydration, framing, and
   receipt enforce the same constants before allocation or filesystem writes.
-  A source outside these bounds fails the transfer with the affected path; it
-  is never copied with metadata silently omitted.
+  A source outside these bounds is recorded as unreadable and omitted with its
+  affected path while unrelated files continue; the shared incomplete-scan
+  gate still refuses mirror/move deletion. It is never copied with metadata
+  silently omitted. An existing destination stream set outside these bounds is
+  a metadata mismatch: bounded replacement removes stale names without reading
+  their content instead of making comparison unusable.
 - A manifest header has `content == empty` for every descriptor, including a
   non-empty stream. Before a payload is queued, SOURCE reopens each stream,
   reads exactly its declared size, rejects growth/truncation/hash drift from

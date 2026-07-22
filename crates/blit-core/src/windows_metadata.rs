@@ -239,11 +239,31 @@ pub fn destination_matches(path: &Path, expected: Option<&WindowsFileMetadata>) 
     destination_matches_impl(path, expected)
 }
 
+#[cfg(any(windows, test))]
+fn destination_metadata_matches_with(
+    path: &Path,
+    expected: &WindowsFileMetadata,
+    read: impl FnOnce() -> Result<WindowsFileMetadata>,
+) -> Result<bool> {
+    let actual = match read().and_then(|actual| {
+        validate_manifest(Some(&actual))?;
+        Ok(actual)
+    }) {
+        Ok(actual) => actual,
+        Err(error) => {
+            log::warn!(
+                "destination Windows metadata on {} is not representable and will be replaced: {error:#}",
+                path.display()
+            );
+            return Ok(false);
+        }
+    };
+    Ok(actual == *expected)
+}
+
 #[cfg(windows)]
 fn destination_matches_impl(path: &Path, expected: &WindowsFileMetadata) -> Result<bool> {
-    let actual = read_windows_metadata(path, false)?;
-    validate_manifest(Some(&actual))?;
-    Ok(actual == *expected)
+    destination_metadata_matches_with(path, expected, || read_windows_metadata(path, false))
 }
 
 #[cfg(not(windows))]
@@ -397,10 +417,12 @@ mod windows_io {
         Ok(attributes)
     }
 
-    fn enumerate_named_streams(
+    const MAX_DESTINATION_STREAM_DESCRIPTORS: usize = 4096;
+
+    fn enumerate_named_stream_descriptors(
         path: &Path,
-        include_content: bool,
-    ) -> Result<Vec<WindowsNamedStream>> {
+        max_streams: usize,
+    ) -> Result<Vec<(String, u64)>> {
         let wide = wide_path(path);
         let mut data = WIN32_FIND_STREAM_DATA::default();
         let handle = match unsafe {
@@ -427,27 +449,16 @@ mod windows_io {
         };
 
         let mut streams = Vec::new();
-        let mut total_size = 0u64;
         loop {
             if let Some((name, size)) = parse_stream_data(&data)? {
-                if streams.len() >= MAX_WINDOWS_NAMED_STREAMS {
+                if streams.len() >= max_streams {
                     bail!(
                         "{} has more than {} Windows named streams",
                         path.display(),
-                        MAX_WINDOWS_NAMED_STREAMS
+                        max_streams
                     );
                 }
-                total_size = total_size
-                    .checked_add(size)
-                    .ok_or_else(|| eyre::eyre!("Windows named-stream size overflow"))?;
-                if total_size > MAX_WINDOWS_STREAM_BYTES_PER_FILE {
-                    bail!(
-                        "Windows named-stream bytes on {} exceed per-file cap {}",
-                        path.display(),
-                        MAX_WINDOWS_STREAM_BYTES_PER_FILE
-                    );
-                }
-                streams.push(read_named_stream(path, name, size, include_content)?);
+                streams.push((name, size));
             }
             data = WIN32_FIND_STREAM_DATA::default();
             match unsafe {
@@ -460,6 +471,29 @@ mod windows_io {
                         .with_context(|| format!("enumerating streams for {}", path.display()))
                 }
             }
+        }
+        Ok(streams)
+    }
+
+    fn enumerate_named_streams(
+        path: &Path,
+        include_content: bool,
+    ) -> Result<Vec<WindowsNamedStream>> {
+        let descriptors = enumerate_named_stream_descriptors(path, MAX_WINDOWS_NAMED_STREAMS)?;
+        let mut streams = Vec::with_capacity(descriptors.len());
+        let mut total_size = 0u64;
+        for (name, size) in descriptors {
+            total_size = total_size
+                .checked_add(size)
+                .ok_or_else(|| eyre::eyre!("Windows named-stream size overflow"))?;
+            if total_size > MAX_WINDOWS_STREAM_BYTES_PER_FILE {
+                bail!(
+                    "Windows named-stream bytes on {} exceed per-file cap {}",
+                    path.display(),
+                    MAX_WINDOWS_STREAM_BYTES_PER_FILE
+                );
+            }
+            streams.push(read_named_stream(path, name, size, include_content)?);
         }
         Ok(streams)
     }
@@ -546,18 +580,21 @@ mod windows_io {
     }
 
     pub(super) fn replace_streams_impl(path: &Path, metadata: &WindowsFileMetadata) -> Result<u64> {
-        let current = enumerate_named_streams(path, false)?;
+        // Replacement needs only current names. Do not hash/read destination
+        // stream content here: an oversized or over-count stale set is exactly
+        // what this repair path must be able to remove.
+        let current = enumerate_named_stream_descriptors(path, MAX_DESTINATION_STREAM_DESCRIPTORS)?;
         let desired: HashSet<String> = metadata
             .named_streams
             .iter()
             .map(|stream| stream.name.to_lowercase())
             .collect();
-        for stream in current {
-            if !desired.contains(&stream.name.to_lowercase()) {
-                std::fs::remove_file(named_stream_path(path, &stream.name)).with_context(|| {
+        for (name, _size) in current {
+            if !desired.contains(&name.to_lowercase()) {
+                std::fs::remove_file(named_stream_path(path, &name)).with_context(|| {
                     format!(
                         "deleting stale Windows named stream {:?} on {}",
-                        stream.name,
+                        name,
                         path.display()
                     )
                 })?;
@@ -783,6 +820,20 @@ mod tests {
             || Ok(requested | 0x0000_2100),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn unrepresentable_destination_metadata_requests_replacement() {
+        let expected = WindowsFileMetadata {
+            file_attributes: 0x20,
+            named_streams: Vec::new(),
+        };
+        let matches =
+            destination_metadata_matches_with(Path::new("destination.bin"), &expected, || {
+                Err(eyre::eyre!("named-stream bytes exceed cap"))
+            })
+            .expect("an unreadable destination metadata set is a replacement need");
+        assert!(!matches);
     }
 
     #[test]

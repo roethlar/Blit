@@ -293,20 +293,16 @@ fn spawn_manifest_task(
 
                 let mtime = unix_seconds(&entry.metadata);
                 let permissions = permissions_mode(&entry.metadata);
-                let windows_metadata =
-                    crate::windows_metadata::read_manifest(&absolute).map_err(|error| {
-                        eyre!(format!(
-                            "reading Windows metadata for {}: {error:#}",
-                            absolute.display()
-                        ))
-                    })?;
-                let header = FileHeader {
-                    relative_path: rel,
+                let Some(header) = file_header_with_windows_metadata(
+                    rel,
                     size,
-                    mtime_seconds: mtime,
+                    mtime,
                     permissions,
-                    checksum: vec![],
-                    windows_metadata,
+                    &absolute,
+                    &unreadable,
+                    crate::windows_metadata::read_manifest,
+                ) else {
+                    return Ok(());
                 };
                 manifest_tx
                     .blocking_send(header)
@@ -337,6 +333,36 @@ fn spawn_manifest_task(
     });
 
     (manifest_rx, handle)
+}
+
+fn file_header_with_windows_metadata(
+    relative_path: String,
+    size: u64,
+    mtime_seconds: i64,
+    permissions: u32,
+    absolute_path: &Path,
+    unreadable: &Arc<Mutex<Vec<String>>>,
+    read_metadata: impl FnOnce(&Path) -> Result<Option<crate::generated::WindowsFileMetadata>>,
+) -> Option<FileHeader> {
+    let windows_metadata = match read_metadata(absolute_path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            record_unreadable_entry(
+                unreadable,
+                &relative_path,
+                &format!("Windows metadata: {error:#}"),
+            );
+            return None;
+        }
+    };
+    Some(FileHeader {
+        relative_path,
+        size,
+        mtime_seconds,
+        permissions,
+        checksum: vec![],
+        windows_metadata,
+    })
 }
 
 fn record_unreadable_entry(list: &Arc<Mutex<Vec<String>>>, rel: &str, reason: &str) {
@@ -663,6 +689,39 @@ mod filtered_source_tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn windows_metadata_scan_error_marks_one_file_unreadable_and_keeps_neighbor() {
+        let unreadable: Arc<Mutex<Vec<String>>> = Arc::default();
+        let failed = file_header_with_windows_metadata(
+            "bad.bin".into(),
+            1,
+            0,
+            0,
+            Path::new("bad.bin"),
+            &unreadable,
+            |_| Err(eyre::eyre!("oversized named stream")),
+        );
+        assert!(
+            failed.is_none(),
+            "the affected file must not enter the manifest"
+        );
+
+        let neighbor = file_header_with_windows_metadata(
+            "good.bin".into(),
+            1,
+            0,
+            0,
+            Path::new("good.bin"),
+            &unreadable,
+            |_| Ok(None),
+        )
+        .expect("an unrelated readable file still enters the manifest");
+        assert_eq!(neighbor.relative_path, "good.bin");
+        let unreadable = unreadable.lock().unwrap();
+        assert_eq!(unreadable.len(), 1);
+        assert!(unreadable[0].contains("bad.bin (Windows metadata:"));
     }
 
     #[tokio::test(flavor = "current_thread")]

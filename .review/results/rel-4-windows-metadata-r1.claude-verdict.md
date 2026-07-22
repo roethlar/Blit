@@ -28,10 +28,11 @@ All six findings are admitted and remain release-blocking until fixed:
    back after applying it and fails the file on mismatch; a simulated
    successful setter that dropped HIDDEN turned the focused guard red when the
    convergence check was disabled.
-3. **High — per-file ADS isolation.** A recoverable source stream problem must
-   mark that file unreadable and preserve the mirror/move safety gate, not stop
-   every unrelated file. An unrepresentable destination stream set should be
-   treated as needing replacement rather than making comparison unusable.
+3. **Fixed — per-file ADS isolation.** A source metadata read failure now
+   records and omits only that file while preserving the shared incomplete-scan
+   gate. An unrepresentable destination set requests replacement, whose bounded
+   descriptor scan removes stale names without reading their oversized content.
+   Both error branches turned focused guards red when reverted.
 4. **Medium — cross-platform policy.** Windows-to-non-Windows copies need an
    explicit, warned downgrade choice. Strict preservation remains the default;
    rejection must happen before any resume block can change the destination.
