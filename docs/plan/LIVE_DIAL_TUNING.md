@@ -481,6 +481,13 @@ advise but cannot accept the slice (D-2026-07-16-4).
    pass mutation-sensitive analyzer/harness guards and tactical Opus 4.8/max
    review before additive staging; no outcome directly authorizes a controller
    change or regrades the fixed-cell findings.
+   The implementation now binds the exact prior inventory and source-manifest
+   bytes, validates the reversed schedule and all four causal outcomes with 98
+   analyzer tests, passes native Bash 3.2 self-test, and re-renders every fixed,
+   sustained, and horizon report byte-for-byte. Three isolated schedule,
+   digest, classifier, and exact-source mutations turn the intended guards
+   red. Full repository gates pass; tactical Opus review remains before
+   staging.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.

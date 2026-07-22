@@ -4,8 +4,8 @@
 Windows→q decision split, but its fixed arm order aliases initiator role with
 cold/warm Windows source state. Attributing that split to socket topology now
 could tune the one shared controller against the wrong cause.
-**Status**: Open; implementation, tactical review, staging, and live execution
-remain.
+**Status**: Fixed, mutation-proved, and full-gate green; tactical review,
+staging, and live execution remain.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: Pending
 
@@ -108,7 +108,30 @@ durations to regrade the fixed-cell performance findings.
 
 ## Guard proof
 
-Pending implementation.
+Native Bash 3.2.57 syntax and the four-arm no-SSH harness self-test pass. All
+98 analyzer tests pass. The synthetic `horizon_order` cases produce the four
+registered outcomes: `ORDER_TRACKING`, `ROLE_TRACKING`,
+`INCONCLUSIVE_CONTROL_CHANGED`, and `INCONCLUSIVE`. The exact valid horizon
+inventory and both exact source-manifest bytes are bound into the harness,
+measurement marker, analyzer, summary, and negative guards.
+
+Four isolated production mutations proved the new guards. Replacing
+the reversed first-role tuple with the old horizon order made the literal
+registration guard fail and the valid order case error on schedule identity.
+Changing one nibble of the reference inventory digest made its literal guard
+fail. Mislabeling the ADD-first classifier branch as role tracking made only
+the order-tracking case fail while the genuine role-tracking case stayed green.
+Disabling the exact source-manifest comparison made the dedicated guard fail
+because a self-consistent alternate source then passed analysis. Exact
+restoration returned all 98 tests and the harness self-test to green.
+
+Fresh pre-analysis copies of the retained fixed, sustained, and horizon inputs
+were reanalyzed with the changed analyzer. For each matrix, `input-files.csv`,
+`arms.csv`, `dial-samples.csv`, `pairs.csv`, `summary.json`, and `summary.md`
+matched the committed report byte-for-byte.
+
+Repository format, strict workspace clippy, the complete workspace suite, and
+the docs gate pass on the restored candidate tree.
 
 ## Coder dispute
 
@@ -116,10 +139,9 @@ None.
 
 ## Known gaps
 
-Implementation, mutation proof, full gates, tactical Opus 4.8/max review, exact
-additive staging, live execution, evidence retention, and independent analysis
-reproduction all remain. No controller policy change is authorized by this
-finding.
+Tactical Opus 4.8/max review, exact additive staging, live execution, evidence
+retention, and independent analysis reproduction remain. No controller policy
+change is authorized by this finding.
 
 ## Reviewer comments
 

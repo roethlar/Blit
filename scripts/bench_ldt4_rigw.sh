@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bench_ldt4_rigw.sh -- registered ldt-4 admission-horizon rig-W supplement harness.
+# bench_ldt4_rigw.sh -- registered ldt-4 reversed admission-horizon order harness.
 #
 # This runner is intentionally additive.  Endpoint session roots, active
 # destination containers, retained payloads, traces, and manifests are never
@@ -48,6 +48,10 @@ readonly PARENT_INVENTORY_SHA='713cb4624e6f64a3863b67101fb9a3f3df288306d3e6f418c
 readonly PREDECESSOR_SESSION='ldt4-20260722T001611Z-04e80082e12c'
 readonly PREDECESSOR_EVIDENCE='docs/bench/ldt4-rigw-sustained-2026-07-22'
 readonly PREDECESSOR_INVENTORY_SHA='17348aaa261b936e04c104553d7b5c4bbcf008968306a29c4dea922535110eef'
+readonly REFERENCE_SESSION='ldt4-20260722T022350Z-7050a2997ac5'
+readonly REFERENCE_EVIDENCE='docs/bench/ldt4-rigw-horizon-2026-07-22'
+readonly REFERENCE_INVENTORY_SHA='c6ed0cf96b9d888d0611d9264e6be4bd3e67433afbd604e74b2ca07cf89a031a'
+readonly REFERENCE_SOURCE_MANIFEST_SHA='df87fa1a8df6c455563232cafa0b2092d4f57771f798e74b86c3d67ac71f0c4d'
 readonly EVIDENCE_ROOT='/Users/michael/blit-ldt4-evidence'
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -399,8 +403,8 @@ emit_schedule() {
         direction=${cell%_*}
         fixture=horizon
         case "$cell" in
-            q_to_windows_horizon) first=source_init; second=destination_init ;;
-            windows_to_q_horizon) first=destination_init; second=source_init ;;
+            q_to_windows_horizon) first=destination_init; second=source_init ;;
+            windows_to_q_horizon) first=source_init; second=destination_init ;;
         esac
         sequence=$((sequence + 1))
         printf '%03d,%s,%s,%s,%s\n' "$sequence" "$cell" "$direction" "$fixture" "$first"
@@ -415,8 +419,8 @@ assert_schedule() {
     lines=$(printf '%s\n' "$schedule" | awk 'END { print NR }')
     [[ "$lines" -eq "$ARM_COUNT" ]] || die "schedule has $lines arms, expected $ARM_COUNT"
     horizon_sequence=$(printf '%s\n' "$schedule" | awk -F, '$4=="horizon" {print $2 ":" $5}' | paste -sd, -)
-    [[ "$horizon_sequence" == 'q_to_windows_horizon:source_init,q_to_windows_horizon:destination_init,windows_to_q_horizon:destination_init,windows_to_q_horizon:source_init' ]] \
-        || die 'schedule does not contain the exact four-arm horizon role pairs'
+    [[ "$horizon_sequence" == 'q_to_windows_horizon:destination_init,q_to_windows_horizon:source_init,windows_to_q_horizon:source_init,windows_to_q_horizon:destination_init' ]] \
+        || die 'schedule does not contain the exact reversed four-arm horizon role pairs'
 }
 
 write_q_manifest() {
@@ -629,6 +633,16 @@ verify_harness_identity() {
         || die "reviewed analyzer is not a plain executable: $ANALYZER"
 }
 
+verify_reference_evidence() {
+    local inventory="$REPO_ROOT/$REFERENCE_EVIDENCE/FINAL-SHA256.csv" inventory_sha
+    assert_q_registered_path "$inventory" file false \
+        || die "valid horizon reference inventory is unsafe or absent: $inventory"
+    inventory_sha=$(local_sha256 "$inventory") \
+        || die 'cannot hash valid horizon reference inventory'
+    [[ "$inventory_sha" == "$REFERENCE_INVENTORY_SHA" ]] \
+        || die "valid horizon reference inventory is $inventory_sha, expected $REFERENCE_INVENTORY_SHA"
+}
+
 q_embeds_clean_build() {
     local binary=$1
     LC_ALL=C grep -aFq "+$BUILD_ID" "$binary" \
@@ -746,6 +760,8 @@ initialize_evidence_files() {
         "session=$PARENT_SESSION evidence=$PARENT_EVIDENCE inventory_sha256=$PARENT_INVENTORY_SHA"
     exclusive_line "$OUT_DIR/predecessor-evidence.txt" \
         "session=$PREDECESSOR_SESSION evidence=$PREDECESSOR_EVIDENCE inventory_sha256=$PREDECESSOR_INVENTORY_SHA"
+    exclusive_line "$OUT_DIR/reference-evidence.txt" \
+        "session=$REFERENCE_SESSION evidence=$REFERENCE_EVIDENCE inventory_sha256=$REFERENCE_INVENTORY_SHA"
     exclusive_line "$OUT_DIR/artifact-build.txt" \
         "artifact_sha=$ARTIFACT_SHA build_id=$BUILD_ID cargo_lock_sha256=$lock_hash q_artifact_repo=$Q_ARTIFACT_REPO"
     exclusive_line "$OUT_DIR/staging-manifest.csv" \
@@ -1018,7 +1034,7 @@ Assert-Ldt4PlainPath '$WIN_HORIZON_STAGE_ROOT/fixtures/src_horizon' Directory | 
 }
 
 build_fixture_manifests() {
-    local fixture q_rel q_abs win_rel win_abs remote_win q_shape win_shape
+    local fixture q_rel q_abs win_rel win_abs remote_win q_shape win_shape source_manifest_sha
     for fixture in horizon; do
         q_rel="manifests/source/q_to_windows_${fixture}.csv"
         q_abs="$OUT_DIR/$q_rel"
@@ -1038,6 +1054,10 @@ build_fixture_manifests() {
             || session_void "Windows $fixture shape is $win_shape"
         cmp -s "$q_abs" "$win_abs" \
             || session_void "q and Windows $fixture fixtures differ by path, size, or content"
+        source_manifest_sha=$(local_sha256 "$q_abs") \
+            || session_void "cannot hash q $fixture source manifest"
+        [[ "$source_manifest_sha" == "$REFERENCE_SOURCE_MANIFEST_SHA" ]] \
+            || session_void "q and Windows $fixture source manifest differs from the exact valid horizon source"
         append_line "$OUT_DIR/fixture-manifests.csv" "q_to_windows,$fixture,$q_rel"
         append_line "$OUT_DIR/fixture-manifests.csv" "windows_to_q,$fixture,$win_rel"
         note "fixture $fixture content manifest verified on both endpoints ($q_shape)"
@@ -2562,8 +2582,8 @@ run_arm() {
 write_measurements_complete() {
     local marker="$OUT_DIR/MEASUREMENTS-COMPLETE"
     [[ ! -e "$marker" && ! -L "$marker" ]] || session_void 'measurement marker already exists'
-    (set -o noclobber; printf 'artifact_sha=%s\nharness_sha=%s\nmatrix=horizon\narm_count=4\nparent_inventory_sha256=%s\npredecessor_inventory_sha256=%s\n' \
-        "$ARTIFACT_SHA" "$EXPECTED_HARNESS_SHA" "$PARENT_INVENTORY_SHA" "$PREDECESSOR_INVENTORY_SHA" > "$marker") \
+    (set -o noclobber; printf 'artifact_sha=%s\nharness_sha=%s\nmatrix=horizon_order\narm_count=4\nparent_inventory_sha256=%s\npredecessor_inventory_sha256=%s\nreference_inventory_sha256=%s\nreference_source_manifest_sha256=%s\n' \
+        "$ARTIFACT_SHA" "$EXPECTED_HARNESS_SHA" "$PARENT_INVENTORY_SHA" "$PREDECESSOR_INVENTORY_SHA" "$REFERENCE_INVENTORY_SHA" "$REFERENCE_SOURCE_MANIFEST_SHA" > "$marker") \
         || session_void 'cannot create exclusive measurement marker'
 }
 
@@ -2709,6 +2729,13 @@ run_selftest() {
     [[ "$PREDECESSOR_SESSION|$PREDECESSOR_EVIDENCE|$PREDECESSOR_INVENTORY_SHA" == \
         'ldt4-20260722T001611Z-04e80082e12c|docs/bench/ldt4-rigw-sustained-2026-07-22|17348aaa261b936e04c104553d7b5c4bbcf008968306a29c4dea922535110eef' ]] \
         || die 'horizon predecessor-evidence binding changed'
+    [[ "$REFERENCE_SESSION|$REFERENCE_EVIDENCE|$REFERENCE_INVENTORY_SHA" == \
+        'ldt4-20260722T022350Z-7050a2997ac5|docs/bench/ldt4-rigw-horizon-2026-07-22|c6ed0cf96b9d888d0611d9264e6be4bd3e67433afbd604e74b2ca07cf89a031a' ]] \
+        || die 'horizon valid-reference evidence binding changed'
+    [[ "$REFERENCE_SOURCE_MANIFEST_SHA" == \
+        'df87fa1a8df6c455563232cafa0b2092d4f57771f798e74b86c3d67ac71f0c4d' ]] \
+        || die 'horizon valid-reference source manifest binding changed'
+    verify_reference_evidence
     [[ "$(active_destination q_to_windows horizon)" == 'D:/blit-test/ldt4-f13/sessions/selftest-ldt4/active/horizon' ]] \
         || die 'Windows active destination mapping selftest failed'
     sample=$(retained_destination windows_to_q ldt4-004)
@@ -3091,7 +3118,10 @@ for required in (
     "windows_to_q_horizon",
     "parent_inventory_sha256=%s",
     "predecessor_inventory_sha256=%s",
-    "--matrix horizon",
+    "reference_inventory_sha256=%s",
+    "reference_source_manifest_sha256=%s",
+    "verify_reference_evidence",
+    "--matrix horizon_order",
 ):
     if required not in text:
         raise SystemExit(f"horizon supplement binding disappeared: {required}")
@@ -3128,6 +3158,7 @@ main() {
     assert_q_registered_paths preflight
     assert_windows_registered_paths preflight
     verify_harness_identity
+    verify_reference_evidence
     artifact_hashes=$(verify_artifacts)
     reserve_evidence
     trap on_exit EXIT
@@ -3149,7 +3180,7 @@ main() {
     environment_gate end
     write_measurements_complete
     analysis_record=$(python3 "$ANALYZER" --session-dir "$OUT_DIR" \
-        --expected-harness-sha "$EXPECTED_HARNESS_SHA" --matrix horizon) \
+        --expected-harness-sha "$EXPECTED_HARNESS_SHA" --matrix horizon_order) \
         || session_void 'reviewed analyzer refused the complete measurement set'
     exclusive_line "$OUT_DIR/analyzer-result.txt" "$analysis_record"
     write_final_evidence_inventory \

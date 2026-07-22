@@ -79,6 +79,7 @@ SUSTAINED_FIRST_ROLE = ("source_init", "destination_init")
 HORIZON_FIXTURES = ("horizon",)
 HORIZON_CELL_ORDER = ("q_to_windows_horizon", "windows_to_q_horizon")
 HORIZON_FIRST_ROLE = ("source_init", "destination_init")
+HORIZON_ORDER_FIRST_ROLE = ("destination_init", "source_init")
 PARENT_SESSION = "ldt4-20260721T224319Z-96a4e3b03caf"
 PARENT_EVIDENCE = "docs/bench/ldt4-rigw-2026-07-21"
 PARENT_INVENTORY_SHA256 = "713cb4624e6f64a3863b67101fb9a3f3df288306d3e6f418c19501428711990b"
@@ -86,6 +87,14 @@ PREDECESSOR_SESSION = "ldt4-20260722T001611Z-04e80082e12c"
 PREDECESSOR_EVIDENCE = "docs/bench/ldt4-rigw-sustained-2026-07-22"
 PREDECESSOR_INVENTORY_SHA256 = (
     "17348aaa261b936e04c104553d7b5c4bbcf008968306a29c4dea922535110eef"
+)
+REFERENCE_SESSION = "ldt4-20260722T022350Z-7050a2997ac5"
+REFERENCE_EVIDENCE = "docs/bench/ldt4-rigw-horizon-2026-07-22"
+REFERENCE_INVENTORY_SHA256 = (
+    "c6ed0cf96b9d888d0611d9264e6be4bd3e67433afbd604e74b2ca07cf89a031a"
+)
+REFERENCE_SOURCE_MANIFEST_SHA256 = (
+    "df87fa1a8df6c455563232cafa0b2092d4f57771f798e74b86c3d67ac71f0c4d"
 )
 SUSTAINED_DESTINATION_BYTES = 10_737_418_240
 HORIZON_DESTINATION_BYTES = 85_899_345_920
@@ -591,6 +600,20 @@ def _expected_horizon_schedule_rows() -> list[tuple[str, str, str, str, str]]:
     return rows
 
 
+def _expected_horizon_order_schedule_rows() -> list[tuple[str, str, str, str, str]]:
+    rows: list[tuple[str, str, str, str, str]] = []
+    sequence = 0
+    for cell, first in zip(HORIZON_CELL_ORDER, HORIZON_ORDER_FIRST_ROLE):
+        direction = next(
+            candidate for candidate in DIRECTIONS if cell.startswith(f"{candidate}_")
+        )
+        second = next(role for role in INITIATORS if role != first)
+        for initiator in (first, second):
+            sequence += 1
+            rows.append((f"{sequence:03d}", cell, direction, "horizon", initiator))
+    return rows
+
+
 def _schedule_rows(matrix: str) -> list[tuple[str, str, str, str, str]]:
     if matrix == "fixed":
         return _expected_schedule_rows()
@@ -598,6 +621,8 @@ def _schedule_rows(matrix: str) -> list[tuple[str, str, str, str, str]]:
         return _expected_sustained_schedule_rows()
     if matrix == "horizon":
         return _expected_horizon_schedule_rows()
+    if matrix == "horizon_order":
+        return _expected_horizon_order_schedule_rows()
     raise AnalysisError(f"unregistered matrix {matrix!r}")
 
 
@@ -606,7 +631,7 @@ def _matrix_fixtures(matrix: str) -> tuple[str, ...]:
         return FIXTURES
     if matrix == "sustained":
         return SUSTAINED_FIXTURES
-    if matrix == "horizon":
+    if matrix in {"horizon", "horizon_order"}:
         return HORIZON_FIXTURES
     raise AnalysisError(f"unregistered matrix {matrix!r}")
 
@@ -616,7 +641,7 @@ def _matrix_cells(matrix: str) -> tuple[str, ...]:
         return CELL_ORDER
     if matrix == "sustained":
         return SUSTAINED_CELL_ORDER
-    if matrix == "horizon":
+    if matrix in {"horizon", "horizon_order"}:
         return HORIZON_CELL_ORDER
     raise AnalysisError(f"unregistered matrix {matrix!r}")
 
@@ -628,6 +653,8 @@ def _matrix_first_roles(matrix: str) -> tuple[str, ...]:
         return SUSTAINED_FIRST_ROLE
     if matrix == "horizon":
         return HORIZON_FIRST_ROLE
+    if matrix == "horizon_order":
+        return HORIZON_ORDER_FIRST_ROLE
     raise AnalysisError(f"unregistered matrix {matrix!r}")
 
 
@@ -752,7 +779,7 @@ def _load_runtime_gates(root: Path, matrix: str) -> None:
                 raise AnalysisError(
                     f"runtime-gates.csv line {line_number}: {field} is below the registered minimum"
                 )
-        if matrix in {"sustained", "horizon"}:
+        if matrix in {"sustained", "horizon", "horizon_order"}:
             destination_bytes = (
                 SUSTAINED_DESTINATION_BYTES
                 if matrix == "sustained"
@@ -987,6 +1014,13 @@ def _load_fixture_index(
             raise AnalysisError(
                 f"fixture {key}: got {manifest.files} files/{manifest.bytes} bytes, "
                 f"expected {wanted_files}/{wanted_bytes}"
+            )
+        if (
+            matrix == "horizon_order"
+            and manifest.file_sha256 != REFERENCE_SOURCE_MANIFEST_SHA256
+        ):
+            raise AnalysisError(
+                f"fixture {key}: manifest differs from the exact valid horizon source"
             )
         found[key] = manifest
     if set(found) != expected:
@@ -2778,6 +2812,17 @@ def _build_reports(
     return summary, arm_rows, pair_rows, sample_rows, "\n".join(lines)
 
 
+def _operation_family(arm: ArmResult) -> str:
+    actions = {action for _, action, _ in arm.dial.operations}
+    if not actions:
+        return "HOLD"
+    if actions == {"ADD"}:
+        return "ADD_ONLY"
+    if actions == {"REMOVE"}:
+        return "REMOVE_ONLY"
+    return "MIXED"
+
+
 def _build_sustained_reports(
     session_dir: Path,
     arms: Sequence[ArmResult],
@@ -2786,18 +2831,19 @@ def _build_sustained_reports(
     harness_sha: str,
     matrix: str,
 ) -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]], list[dict[str, str]], str]:
-    if matrix not in {"sustained", "horizon"}:
+    if matrix not in {"sustained", "horizon", "horizon_order"}:
         raise AnalysisError(f"unregistered controller-supplement matrix {matrix!r}")
     fixture = _matrix_fixtures(matrix)[0]
     cells = _matrix_cells(matrix)
-    accepted_arm_verdict = (
-        "SUSTAINED_ADD_ACCEPTED" if matrix == "sustained" else "HORIZON_ADD_ACCEPTED"
-    )
-    accepted_status = (
-        "STRUCTURALLY_VALID_SUSTAINED_ROLE_PARITY"
-        if matrix == "sustained"
-        else "STRUCTURALLY_VALID_HORIZON_ROLE_PARITY"
-    )
+    if matrix == "sustained":
+        accepted_arm_verdict = "SUSTAINED_ADD_ACCEPTED"
+        accepted_status = "STRUCTURALLY_VALID_SUSTAINED_ROLE_PARITY"
+    elif matrix == "horizon":
+        accepted_arm_verdict = "HORIZON_ADD_ACCEPTED"
+        accepted_status = "STRUCTURALLY_VALID_HORIZON_ROLE_PARITY"
+    else:
+        accepted_arm_verdict = "HORIZON_ORDER_OBSERVED"
+        accepted_status = ""
     arm_by_key = {(arm.row.cell, arm.row.initiator): arm for arm in arms}
     arm_rows: list[dict[str, str]] = []
     sample_rows: list[dict[str, str]] = []
@@ -2819,12 +2865,13 @@ def _build_sustained_reports(
             arm.row.duration_ms / Decimal(1000)
         )
         reasons = list(arm.review_reasons)
-        accepted_add = any(
-            action == "ADD" and target > EXPECTED_FLOOR
-            for _, action, target in arm.dial.operations
-        )
-        if not accepted_add or arm.dial.add_count < 1 or arm.dial.peak <= EXPECTED_FLOOR:
-            reasons.append("NO_ACCEPTED_ADD_ABOVE_FLOOR")
+        if matrix != "horizon_order":
+            accepted_add = any(
+                action == "ADD" and target > EXPECTED_FLOOR
+                for _, action, target in arm.dial.operations
+            )
+            if not accepted_add or arm.dial.add_count < 1 or arm.dial.peak <= EXPECTED_FLOOR:
+                reasons.append("NO_ACCEPTED_ADD_ABOVE_FLOOR")
         requirement_reasons[(arm.row.cell, arm.row.initiator)] = tuple(reasons)
         arm_rows.append(
             {
@@ -2895,14 +2942,40 @@ def _build_sustained_reports(
     decision_review_count = 0
     trace_timing_difference_count = 0
     material_fields = {"peak", "final", "add_count", "remove_count", "operation_sequence"}
+    control_stable = False
+    causal_classification = ""
     for cell in cells:
         source = arm_by_key[(cell, "source_init")]
         destination = arm_by_key[(cell, "destination_init")]
         differences = _role_differences(source, destination)
         material = [item for item in differences if item in material_fields]
         timing = [item for item in differences if item not in material_fields]
-        decision_review_count += int(bool(material))
+        if matrix != "horizon_order":
+            decision_review_count += int(bool(material))
         trace_timing_difference_count += int(bool(timing))
+        source_family = _operation_family(source)
+        destination_family = _operation_family(destination)
+        if matrix == "horizon_order" and cell == "q_to_windows_horizon":
+            control_stable = (
+                not material
+                and source_family == "REMOVE_ONLY"
+                and destination_family == "REMOVE_ONLY"
+            )
+            pair_verdict = (
+                "CONTROL_STABLE" if control_stable else "INCONCLUSIVE_CONTROL_CHANGED"
+            )
+        elif matrix == "horizon_order":
+            if not control_stable:
+                pair_verdict = "INCONCLUSIVE_CONTROL_CHANGED"
+            elif source_family == "ADD_ONLY" and destination_family == "REMOVE_ONLY":
+                pair_verdict = "ORDER_TRACKING"
+            elif source_family == "REMOVE_ONLY" and destination_family == "ADD_ONLY":
+                pair_verdict = "ROLE_TRACKING"
+            else:
+                pair_verdict = "INCONCLUSIVE"
+            causal_classification = pair_verdict
+        else:
+            pair_verdict = "REVIEW_REQUIRED" if material else "TRANSITIONS_MATCH"
         ratio = max(source.row.duration_ms, destination.row.duration_ms) / min(
             source.row.duration_ms, destination.row.duration_ms
         )
@@ -2940,30 +3013,46 @@ def _build_sustained_reports(
                 ),
                 "decision_differences": ";".join(material),
                 "trace_timing_differences": ";".join(timing),
-                "decision_verdict": "REVIEW_REQUIRED" if material else "TRANSITIONS_MATCH",
+                "decision_verdict": pair_verdict,
             }
         )
-        cell_summaries.append(
-            {
-                "cell": cell,
-                "source_init_ms": _decimal_text(source.row.duration_ms),
-                "destination_init_ms": _decimal_text(destination.row.duration_ms),
-                "source_operations": [list(operation) for operation in source.dial.operations],
-                "destination_operations": [
-                    list(operation) for operation in destination.dial.operations
-                ],
-                "decision_differences": material,
-                "trace_timing_differences": timing,
-                "verdict": "REVIEW_REQUIRED" if material else "TRANSITIONS_MATCH",
-            }
-        )
+        cell_summary = {
+            "cell": cell,
+            "source_init_ms": _decimal_text(source.row.duration_ms),
+            "destination_init_ms": _decimal_text(destination.row.duration_ms),
+            "source_operations": [list(operation) for operation in source.dial.operations],
+            "destination_operations": [
+                list(operation) for operation in destination.dial.operations
+            ],
+            "decision_differences": material,
+            "trace_timing_differences": timing,
+            "verdict": pair_verdict,
+        }
+        if matrix == "horizon_order":
+            cell_summary.update(
+                {
+                    "source_operation_family": source_family,
+                    "destination_operation_family": destination_family,
+                }
+            )
+        cell_summaries.append(cell_summary)
 
     arm_review_count = sum(bool(reasons) for reasons in requirement_reasons.values())
-    status = (
-        "REVIEW_REQUIRED"
-        if arm_review_count or decision_review_count
-        else accepted_status
-    )
+    if matrix == "horizon_order":
+        if not causal_classification:
+            raise AnalysisError("horizon_order causal classification was not produced")
+        decision_review_count = int(causal_classification.startswith("INCONCLUSIVE"))
+        status = (
+            "REVIEW_REQUIRED"
+            if arm_review_count or decision_review_count
+            else f"STRUCTURALLY_VALID_HORIZON_ORDER_{causal_classification}"
+        )
+    else:
+        status = (
+            "REVIEW_REQUIRED"
+            if arm_review_count or decision_review_count
+            else accepted_status
+        )
     summary: dict[str, Any] = {
         "schema": 1,
         "matrix": matrix,
@@ -2999,7 +3088,7 @@ def _build_sustained_reports(
         ],
         "cells": cell_summaries,
     }
-    if matrix == "horizon":
+    if matrix in {"horizon", "horizon_order"}:
         summary.update(
             {
                 "predecessor_session": PREDECESSOR_SESSION,
@@ -3007,11 +3096,33 @@ def _build_sustained_reports(
                 "predecessor_inventory_sha256": PREDECESSOR_INVENTORY_SHA256,
             }
         )
-    title = (
-        "# ldt-4 rig-W sustained controller supplement"
-        if matrix == "sustained"
-        else "# ldt-4 rig-W admission-horizon controller supplement"
-    )
+    if matrix == "horizon_order":
+        summary.update(
+            {
+                "reference_session": REFERENCE_SESSION,
+                "reference_evidence": REFERENCE_EVIDENCE,
+                "reference_inventory_sha256": REFERENCE_INVENTORY_SHA256,
+                "reference_source_manifest_sha256": REFERENCE_SOURCE_MANIFEST_SHA256,
+                "causal_classification": causal_classification,
+                "control_stable": control_stable,
+                "reference_operation_families": {
+                    "q_to_windows_horizon": {
+                        "source_init": "REMOVE_ONLY",
+                        "destination_init": "REMOVE_ONLY",
+                    },
+                    "windows_to_q_horizon": {
+                        "source_init": "REMOVE_ONLY",
+                        "destination_init": "ADD_ONLY",
+                    },
+                },
+            }
+        )
+    if matrix == "sustained":
+        title = "# ldt-4 rig-W sustained controller supplement"
+    elif matrix == "horizon":
+        title = "# ldt-4 rig-W admission-horizon controller supplement"
+    else:
+        title = "# ldt-4 rig-W reversed admission-horizon order supplement"
     lines = [
         title,
         "",
@@ -3020,14 +3131,29 @@ def _build_sustained_reports(
         f"Validated {len(arms)} {matrix} arms in two physical byte directions.",
         f"Parent fixed-matrix evidence: `{PARENT_EVIDENCE}` ({PARENT_INVENTORY_SHA256}).",
     ]
-    if matrix == "horizon":
+    if matrix in {"horizon", "horizon_order"}:
         lines.append(
             f"Predecessor sustained evidence: `{PREDECESSOR_EVIDENCE}` ({PREDECESSOR_INVENTORY_SHA256})."
         )
+    if matrix == "horizon_order":
+        lines.extend(
+            [
+                f"Reference valid horizon evidence: `{REFERENCE_EVIDENCE}` ({REFERENCE_INVENTORY_SHA256}).",
+                "Reference Windows→q families were SOURCE-init REMOVE-only and DESTINATION-init ADD-only.",
+                f"Causal classification: **{causal_classification}**.",
+                "q→Windows must remain a transition-matched REMOVE-only control before Windows→q can be classified.",
+                "ORDER_TRACKING means ADD followed first position after reversal; ROLE_TRACKING means ADD stayed with DESTINATION-init.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "Every arm must accept an ADD above the four-stream floor; accepted transition sequences must match within each initiator-layout pair.",
+                "Reason-only trailing sample differences are exported separately and do not override matching accepted membership transitions.",
+            ]
+        )
     lines.extend(
         [
-            "Every arm must accept an ADD above the four-stream floor; accepted transition sequences must match within each initiator-layout pair.",
-            "Reason-only trailing sample differences are exported separately and do not override matching accepted membership transitions.",
             "",
             "| Cell | source-init ms | destination-init ms | source operations | destination operations | verdict |",
             "|---|---:|---:|---|---|---|",
@@ -3093,6 +3219,19 @@ def _load_predecessor_evidence(session_dir: Path) -> None:
         )
 
 
+def _load_reference_evidence(session_dir: Path) -> None:
+    expected = (
+        f"session={REFERENCE_SESSION} evidence={REFERENCE_EVIDENCE} "
+        f"inventory_sha256={REFERENCE_INVENTORY_SHA256}"
+    )
+    if _read_single_lf_line(
+        session_dir / "reference-evidence.txt", "reference-evidence.txt"
+    ) != expected:
+        raise AnalysisError(
+            "reference-evidence.txt is not the exact valid horizon evidence binding"
+        )
+
+
 def _validate_measurements_complete(
     session_dir: Path, expected_harness_sha: str, matrix: str
 ) -> None:
@@ -3121,6 +3260,17 @@ def _validate_measurements_complete(
             f"parent_inventory_sha256={PARENT_INVENTORY_SHA256}\n"
             f"predecessor_inventory_sha256={PREDECESSOR_INVENTORY_SHA256}\n"
         )
+    elif matrix == "horizon_order":
+        expected_text = (
+            f"artifact_sha={ARTIFACT_SHA}\n"
+            f"harness_sha={expected_harness_sha}\n"
+            "matrix=horizon_order\n"
+            "arm_count=4\n"
+            f"parent_inventory_sha256={PARENT_INVENTORY_SHA256}\n"
+            f"predecessor_inventory_sha256={PREDECESSOR_INVENTORY_SHA256}\n"
+            f"reference_inventory_sha256={REFERENCE_INVENTORY_SHA256}\n"
+            f"reference_source_manifest_sha256={REFERENCE_SOURCE_MANIFEST_SHA256}\n"
+        )
     else:
         raise AnalysisError(f"unregistered matrix {matrix!r}")
     expected = expected_text.encode("ascii")
@@ -3148,17 +3298,19 @@ def analyze(
 
     # Provenance is validated before large evidence files are trusted.
     harness_sha = _load_provenance(session_dir, expected_harness_sha)
-    if matrix in {"sustained", "horizon"}:
+    if matrix in {"sustained", "horizon", "horizon_order"}:
         _load_parent_evidence(session_dir)
-    if matrix == "horizon":
+    if matrix in {"horizon", "horizon_order"}:
         _load_predecessor_evidence(session_dir)
+    if matrix == "horizon_order":
+        _load_reference_evidence(session_dir)
     _load_artifact_build(session_dir)
     staging = _load_staging_manifest(session_dir)
     _load_windows_runtime_evidence(session_dir, staging)
     _load_schedule(session_dir, matrix)
     _load_environment_gate(session_dir, "start")
     _load_environment_gate(session_dir, "end")
-    if matrix == "horizon":
+    if matrix in {"horizon", "horizon_order"}:
         _load_payload_volume_gate(session_dir, "start")
         _load_payload_volume_gate(session_dir, "end")
     _load_runtime_gates(session_dir, matrix)
@@ -3237,7 +3389,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--session-dir", required=True, type=Path)
     parser.add_argument("--expected-harness-sha", required=True)
     parser.add_argument(
-        "--matrix", choices=("fixed", "sustained", "horizon"), default="fixed"
+        "--matrix",
+        choices=("fixed", "sustained", "horizon", "horizon_order"),
+        default="fixed",
     )
     args = parser.parse_args(argv)
     try:

@@ -62,6 +62,7 @@ TEST_HORIZON_CELL_ORDER = (
     "windows_to_q_horizon",
 )
 TEST_HORIZON_FIRST_ROLE = ("source_init", "destination_init")
+TEST_HORIZON_ORDER_FIRST_ROLE = ("destination_init", "source_init")
 TEST_SOURCE_PATHS = {
     ("q_to_windows", "large"): "/Users/michael/blit-ldt4-staging/fixtures/src_large",
     ("q_to_windows", "small"): "/Users/michael/blit-ldt4-staging/fixtures/src_small",
@@ -120,13 +121,24 @@ def _manifest_payload(content_suffix: str = "") -> str:
 
 
 class SyntheticSession:
-    def __init__(self, root: Path, matrix: str = "fixed") -> None:
+    def __init__(
+        self,
+        root: Path,
+        matrix: str = "fixed",
+        order_families: Optional[dict[tuple[str, str], str]] = None,
+    ) -> None:
         self.root = root
         self.matrix = matrix
         self.safe_id = root.name
         self.fixture_rows: list[dict[str, str]] = []
         self.run_rows: list[dict[str, str]] = []
         self._session_number = 1
+        self.order_families = order_families or {
+            ("q_to_windows", "source_init"): "REMOVE_ONLY",
+            ("q_to_windows", "destination_init"): "REMOVE_ONLY",
+            ("windows_to_q", "source_init"): "ADD_ONLY",
+            ("windows_to_q", "destination_init"): "REMOVE_ONLY",
+        }
         if matrix == "fixed":
             completion = (
                 f"artifact_sha={analyzer.ARTIFACT_SHA}\n"
@@ -164,6 +176,34 @@ class SyntheticSession:
                 f"session={analyzer.PREDECESSOR_SESSION} "
                 f"evidence={analyzer.PREDECESSOR_EVIDENCE} "
                 f"inventory_sha256={analyzer.PREDECESSOR_INVENTORY_SHA256}\n",
+                encoding="ascii",
+            )
+        elif matrix == "horizon_order":
+            completion = (
+                f"artifact_sha={analyzer.ARTIFACT_SHA}\n"
+                f"harness_sha={TEST_HARNESS_SHA}\n"
+                "matrix=horizon_order\n"
+                "arm_count=4\n"
+                f"parent_inventory_sha256={analyzer.PARENT_INVENTORY_SHA256}\n"
+                f"predecessor_inventory_sha256={analyzer.PREDECESSOR_INVENTORY_SHA256}\n"
+                f"reference_inventory_sha256={analyzer.REFERENCE_INVENTORY_SHA256}\n"
+                f"reference_source_manifest_sha256={analyzer.REFERENCE_SOURCE_MANIFEST_SHA256}\n"
+            )
+            (root / "parent-evidence.txt").write_text(
+                f"session={analyzer.PARENT_SESSION} evidence={analyzer.PARENT_EVIDENCE} "
+                f"inventory_sha256={analyzer.PARENT_INVENTORY_SHA256}\n",
+                encoding="ascii",
+            )
+            (root / "predecessor-evidence.txt").write_text(
+                f"session={analyzer.PREDECESSOR_SESSION} "
+                f"evidence={analyzer.PREDECESSOR_EVIDENCE} "
+                f"inventory_sha256={analyzer.PREDECESSOR_INVENTORY_SHA256}\n",
+                encoding="ascii",
+            )
+            (root / "reference-evidence.txt").write_text(
+                f"session={analyzer.REFERENCE_SESSION} "
+                f"evidence={analyzer.REFERENCE_EVIDENCE} "
+                f"inventory_sha256={analyzer.REFERENCE_INVENTORY_SHA256}\n",
                 encoding="ascii",
             )
         else:
@@ -204,6 +244,7 @@ class SyntheticSession:
             "fixed": TEST_CELL_ORDER,
             "sustained": TEST_SUSTAINED_CELL_ORDER,
             "horizon": TEST_HORIZON_CELL_ORDER,
+            "horizon_order": TEST_HORIZON_CELL_ORDER,
         }[self.matrix]
         for cell in cells:
             direction = next(
@@ -215,6 +256,7 @@ class SyntheticSession:
             supplement_first_roles = {
                 "sustained": TEST_SUSTAINED_FIRST_ROLE,
                 "horizon": TEST_HORIZON_FIRST_ROLE,
+                "horizon_order": TEST_HORIZON_ORDER_FIRST_ROLE,
             }
             first_roles = TEST_FIRST_ROLE if self.matrix == "fixed" else (
                 supplement_first_roles[self.matrix][cells.index(cell)],
@@ -261,7 +303,7 @@ class SyntheticSession:
             (self.root / f"environment-{phase}.txt").write_text(
                 f"phase={phase} {environment_tail}", encoding="ascii"
             )
-            if self.matrix == "horizon":
+            if self.matrix in {"horizon", "horizon_order"}:
                 (self.root / f"payload-volume-{phase}.txt").write_text(
                     f"phase={phase} mount={analyzer.Q_PAYLOAD_VOLUME} "
                     f"uuid={analyzer.Q_PAYLOAD_VOLUME_UUID} "
@@ -312,6 +354,7 @@ class SyntheticSession:
             "fixed": analyzer.FIXTURES,
             "sustained": analyzer.SUSTAINED_FIXTURES,
             "horizon": analyzer.HORIZON_FIXTURES,
+            "horizon_order": analyzer.HORIZON_FIXTURES,
         }[self.matrix]
         for direction in analyzer.DIRECTIONS:
             for fixture in fixtures:
@@ -679,6 +722,138 @@ class SyntheticSession:
                 event["elapsed_ns"] = elapsed_ns
         return source, destination
 
+    @staticmethod
+    def _resequence(events: list[dict[str, object]], endpoint_index: int) -> None:
+        elapsed_ns = 0
+        for sequence, event in enumerate(events):
+            event["producer_seq"] = sequence
+            event["unix_ns"] = (endpoint_index + 1) * 10**18 + sequence
+            if endpoint_index == 0 and event["event"] == "dial_sample":
+                elapsed_ns += analyzer.DIAL_TUNER_TICK_NS
+            else:
+                elapsed_ns += 1_000_000 + endpoint_index * 9_000_000
+            event["elapsed_ns"] = elapsed_ns
+
+    def _force_operation_family(
+        self,
+        source: list[dict[str, object]],
+        destination: list[dict[str, object]],
+        family: str,
+    ) -> None:
+        if family == "MIXED":
+            return
+        if family == "ADD_ONLY":
+            source[:] = [
+                event
+                for event in source
+                if event.get("epoch") != 2
+                and not (
+                    event["event"] == "dial_sample"
+                    and event.get("reason") in {"cheap-down", "remove"}
+                )
+            ]
+            destination[:] = [event for event in destination if event.get("epoch") != 2]
+            for event in source + destination:
+                if event["event"] in {"membership_sealed", "data_plane_complete"}:
+                    event.update(live_streams=5, receiver_ceiling=32, peak_streams=5)
+        elif family == "REMOVE_ONLY":
+            source_tail = {
+                "first_payload_queued",
+                "socket_write_begin",
+                "first_socket_write",
+                "membership_sealed",
+                "data_plane_complete",
+            }
+            source[:] = [
+                event
+                for event in source
+                if (
+                    event.get("epoch") == 0
+                    and event["event"] in analyzer.SOCKET_EVENTS
+                )
+                or (
+                    event["event"] == "dial_sample"
+                    and event.get("reason") in {"cheap-down", "remove"}
+                )
+                or event.get("epoch") == 2
+                or event["event"] in source_tail
+            ]
+            destination[:] = [
+                event
+                for event in destination
+                if (
+                    event.get("epoch") == 0
+                    and event["event"] in analyzer.SOCKET_MEMBERSHIP_EVENTS
+                )
+                or event.get("epoch") == 2
+                or event["event"] in {"first_payload_received", "data_plane_complete"}
+                or (
+                    event["event"] == "receive_task_stopped"
+                    and event.get("epoch") == 0
+                )
+            ]
+            for event in source:
+                if event["event"] == "dial_sample":
+                    proposing = event.get("reason") == "remove"
+                    event.update(
+                        reason="remove" if proposing else "cooldown",
+                        epoch=1 if proposing else 0,
+                        live_streams=4,
+                        peak_streams=4,
+                        sample_streams=4,
+                        sample_blocked_ns=int(
+                            0.5 * analyzer.DIAL_TUNER_TICK_NS * 4
+                        ),
+                        chunk_bytes=analyzer.FLOOR_CHUNK_BYTES,
+                        prefetch_count=analyzer.FLOOR_PREFETCH,
+                        tcp_buffer_bytes=0,
+                    )
+                    if proposing:
+                        event["target_streams"] = 3
+                elif event.get("epoch") == 2:
+                    event["epoch"] = 1
+                    if "target_streams" in event:
+                        event["target_streams"] = 3
+                    event["live_streams"] = (
+                        3
+                        if event["event"]
+                        in {"resize_ack_received", "dial_settlement", "source_settled"}
+                        else 4
+                    )
+                    if "peak_streams" in event:
+                        event["peak_streams"] = 4
+                if event["event"] in {"membership_sealed", "data_plane_complete"}:
+                    event.update(live_streams=3, receiver_ceiling=32, peak_streams=4)
+            for event in destination:
+                if event.get("epoch") == 2:
+                    event["epoch"] = 1
+                    if "target_streams" in event:
+                        event["target_streams"] = 3
+                    event["live_streams"] = (
+                        4 if event["event"] == "resize_received" else 3
+                    )
+                if event["event"] == "data_plane_complete":
+                    event.update(live_streams=3, receiver_ceiling=32, peak_streams=4)
+        elif family == "HOLD":
+            source[:] = [
+                event
+                for event in source
+                if not event["event"].startswith("resize_")
+                and event["event"]
+                not in {"dial_sample", "dial_pending", "dial_settlement", "source_settled"}
+                and event.get("epoch", 0) == 0
+            ]
+            destination[:] = [
+                event for event in destination if event.get("epoch", 0) == 0
+            ]
+            for event in source + destination:
+                if event["event"] in {"membership_sealed", "data_plane_complete"}:
+                    event.update(live_streams=4, receiver_ceiling=32, peak_streams=4)
+        else:
+            raise ValueError(f"unsupported operation family: {family}")
+        self._resequence(source, 0)
+        self._resequence(destination, 1)
+
     def _write_trace(self, relative: str, events: list[dict[str, object]]) -> None:
         path = self.root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -695,6 +870,7 @@ class SyntheticSession:
             "fixed": TEST_CELL_ORDER,
             "sustained": TEST_SUSTAINED_CELL_ORDER,
             "horizon": TEST_HORIZON_CELL_ORDER,
+            "horizon_order": TEST_HORIZON_CELL_ORDER,
         }[self.matrix]
         for cell in cells:
             direction = next(
@@ -704,6 +880,7 @@ class SyntheticSession:
             supplement_first_roles = {
                 "sustained": TEST_SUSTAINED_FIRST_ROLE,
                 "horizon": TEST_HORIZON_FIRST_ROLE,
+                "horizon_order": TEST_HORIZON_ORDER_FIRST_ROLE,
             }
             pairs_and_roles = zip(range(1, 9), TEST_FIRST_ROLE) if self.matrix == "fixed" else (
                 (1, supplement_first_roles[self.matrix][cells.index(cell)]),
@@ -718,6 +895,12 @@ class SyntheticSession:
                     source_events, destination_events = self._events(
                         run_id, session_id, initiator
                     )
+                    if self.matrix == "horizon_order":
+                        self._force_operation_family(
+                            source_events,
+                            destination_events,
+                            self.order_families[(direction, initiator)],
+                        )
                     source_trace, destination_trace = analyzer._registered_trace_paths(
                         direction, initiator, run_id
                     )
@@ -730,7 +913,7 @@ class SyntheticSession:
                     source_path = TEST_SOURCE_PATHS[(direction, fixture)]
                     destination_root = (
                         TEST_DESTINATION_ROOTS[direction]
-                        if self.matrix != "horizon"
+                        if self.matrix not in {"horizon", "horizon_order"}
                         else TEST_HORIZON_DESTINATION_ROOTS[direction]
                     )
                     active_path = f"{destination_root}/{self.safe_id}/active/{fixture}"
@@ -794,6 +977,20 @@ class DialPolicyReplayTests(unittest.TestCase):
             (40, 42_949_672_960),
         )
 
+    def test_horizon_order_registration_is_literal(self) -> None:
+        self.assertEqual(
+            analyzer.HORIZON_ORDER_FIRST_ROLE,
+            ("destination_init", "source_init"),
+        )
+        self.assertEqual(
+            analyzer.REFERENCE_INVENTORY_SHA256,
+            "c6ed0cf96b9d888d0611d9264e6be4bd3e67433afbd604e74b2ca07cf89a031a",
+        )
+        self.assertEqual(
+            analyzer.REFERENCE_SOURCE_MANIFEST_SHA256,
+            "df87fa1a8df6c455563232cafa0b2092d4f57771f798e74b86c3d67ac71f0c4d",
+        )
+
     def test_replay_covers_hysteresis_cooldown_sustain_and_bound(self) -> None:
         maxed = {
             "chunk_bytes": analyzer.CEILING_CHUNK_BYTES,
@@ -851,6 +1048,13 @@ class AnalyzerTests(unittest.TestCase):
         patcher = mock.patch.dict(analyzer.EXPECTED_FIXTURES, TEST_FIXTURES, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
+        manifest_patcher = mock.patch.object(
+            analyzer,
+            "REFERENCE_SOURCE_MANIFEST_SHA256",
+            hashlib.sha256(_manifest_payload().encode("ascii")).hexdigest(),
+        )
+        manifest_patcher.start()
+        self.addCleanup(manifest_patcher.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name) / TEST_SAFE_ID
@@ -859,6 +1063,17 @@ class AnalyzerTests(unittest.TestCase):
 
     def analyze(self, expected_harness_sha: str = TEST_HARNESS_SHA) -> analyzer.AnalysisResult:
         return analyzer.analyze(self.root, expected_harness_sha)
+
+    def analyze_order(
+        self,
+        order_families: Optional[dict[tuple[str, str], str]] = None,
+    ) -> tuple[Path, analyzer.AnalysisResult]:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "ldt4-horizon-order-test"
+        root.mkdir()
+        SyntheticSession(root, "horizon_order", order_families)
+        return root, analyzer.analyze(root, TEST_HARNESS_SHA, "horizon_order")
 
     def test_registered_windows_endpoint_matches_current_identity(self) -> None:
         self.assertEqual(analyzer.WINDOWS_IP, "10.1.10.173")
@@ -1085,6 +1300,148 @@ class AnalyzerTests(unittest.TestCase):
             set(TEST_HORIZON_DESTINATION_ROOTS.values()),
         )
         self.assertEqual(len(session.run_rows), 4)
+
+    def test_valid_horizon_order_classifies_order_tracking(self) -> None:
+        root, result = self.analyze_order()
+        self.assertEqual(
+            result.status,
+            "STRUCTURALLY_VALID_HORIZON_ORDER_ORDER_TRACKING",
+        )
+        summary = json.loads((root / "analysis/summary.json").read_text())
+        self.assertEqual(summary["matrix"], "horizon_order")
+        self.assertEqual(summary["causal_classification"], "ORDER_TRACKING")
+        self.assertTrue(summary["control_stable"])
+        self.assertEqual(summary["reference_session"], analyzer.REFERENCE_SESSION)
+        self.assertEqual(
+            summary["reference_inventory_sha256"],
+            analyzer.REFERENCE_INVENTORY_SHA256,
+        )
+        self.assertEqual(
+            summary["reference_source_manifest_sha256"],
+            analyzer.REFERENCE_SOURCE_MANIFEST_SHA256,
+        )
+        self.assertEqual(
+            summary["reference_operation_families"]["windows_to_q_horizon"],
+            {"source_init": "REMOVE_ONLY", "destination_init": "ADD_ONLY"},
+        )
+        with (root / "analysis/pairs.csv").open(newline="") as handle:
+            pairs = list(csv.DictReader(handle))
+        self.assertEqual(
+            [row["decision_verdict"] for row in pairs],
+            ["CONTROL_STABLE", "ORDER_TRACKING"],
+        )
+        with (root / "analysis/arms.csv").open(newline="") as handle:
+            arms = list(csv.DictReader(handle))
+        self.assertEqual(
+            {row["arm_verdict"] for row in arms},
+            {"HORIZON_ORDER_OBSERVED"},
+        )
+        with (root / "schedule.csv").open(newline="") as handle:
+            schedule = list(csv.reader(handle))
+        self.assertEqual(
+            [row[4] for row in schedule],
+            [
+                "destination_init",
+                "source_init",
+                "source_init",
+                "destination_init",
+            ],
+        )
+
+    def test_horizon_order_classifies_role_tracking(self) -> None:
+        families = {
+            ("q_to_windows", "source_init"): "REMOVE_ONLY",
+            ("q_to_windows", "destination_init"): "REMOVE_ONLY",
+            ("windows_to_q", "source_init"): "REMOVE_ONLY",
+            ("windows_to_q", "destination_init"): "ADD_ONLY",
+        }
+        root, result = self.analyze_order(families)
+        self.assertEqual(
+            result.status,
+            "STRUCTURALLY_VALID_HORIZON_ORDER_ROLE_TRACKING",
+        )
+        summary = json.loads((root / "analysis/summary.json").read_text())
+        self.assertEqual(summary["causal_classification"], "ROLE_TRACKING")
+        self.assertEqual(summary["decision_review_count"], 0)
+
+    def test_horizon_order_changed_control_is_inconclusive(self) -> None:
+        families = {
+            ("q_to_windows", "source_init"): "ADD_ONLY",
+            ("q_to_windows", "destination_init"): "REMOVE_ONLY",
+            ("windows_to_q", "source_init"): "ADD_ONLY",
+            ("windows_to_q", "destination_init"): "REMOVE_ONLY",
+        }
+        root, result = self.analyze_order(families)
+        self.assertEqual(result.status, "REVIEW_REQUIRED")
+        summary = json.loads((root / "analysis/summary.json").read_text())
+        self.assertEqual(
+            summary["causal_classification"],
+            "INCONCLUSIVE_CONTROL_CHANGED",
+        )
+        self.assertFalse(summary["control_stable"])
+        self.assertEqual(summary["decision_review_count"], 1)
+
+    def test_horizon_order_same_windows_polarity_is_inconclusive(self) -> None:
+        families = {
+            ("q_to_windows", "source_init"): "REMOVE_ONLY",
+            ("q_to_windows", "destination_init"): "REMOVE_ONLY",
+            ("windows_to_q", "source_init"): "ADD_ONLY",
+            ("windows_to_q", "destination_init"): "ADD_ONLY",
+        }
+        root, result = self.analyze_order(families)
+        self.assertEqual(result.status, "REVIEW_REQUIRED")
+        summary = json.loads((root / "analysis/summary.json").read_text())
+        self.assertEqual(summary["causal_classification"], "INCONCLUSIVE")
+        self.assertTrue(summary["control_stable"])
+        self.assertEqual(summary["decision_review_count"], 1)
+
+    def test_horizon_order_reference_binding_is_exact(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "ldt4-horizon-order-reference"
+        root.mkdir()
+        SyntheticSession(root, "horizon_order")
+        (root / "reference-evidence.txt").write_text(
+            f"session={analyzer.REFERENCE_SESSION} "
+            f"evidence={analyzer.REFERENCE_EVIDENCE} "
+            f"inventory_sha256={'0' * 64}\n",
+            encoding="ascii",
+        )
+        with self.assertRaisesRegex(analyzer.AnalysisError, "valid horizon evidence binding"):
+            analyzer.analyze(root, TEST_HARNESS_SHA, "horizon_order")
+
+    def test_horizon_order_source_manifest_is_exact_reference(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "ldt4-horizon-order-source"
+        root.mkdir()
+        session = SyntheticSession(root, "horizon_order")
+        replacement = _manifest_payload("different")
+        for direction in analyzer.DIRECTIONS:
+            (root / f"manifests/source/{direction}_horizon.csv").write_text(
+                replacement,
+                encoding="ascii",
+            )
+        for row in session.run_rows:
+            (root / row["landed_manifest"]).write_text(replacement, encoding="ascii")
+        with self.assertRaisesRegex(analyzer.AnalysisError, "exact valid horizon source"):
+            analyzer.analyze(root, TEST_HARNESS_SHA, "horizon_order")
+
+    def test_horizon_order_schedule_must_be_exact_reversal(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "ldt4-horizon-order-schedule"
+        root.mkdir()
+        SyntheticSession(root, "horizon_order")
+        path = root / "schedule.csv"
+        rows = list(csv.reader(path.read_text(encoding="ascii").splitlines()))
+        rows[0][4], rows[1][4] = rows[1][4], rows[0][4]
+        path.write_text(
+            "".join(",".join(row) + "\n" for row in rows),
+            encoding="ascii",
+        )
+        with self.assertRaisesRegex(analyzer.AnalysisError, "horizon_order schedule"):
+            analyzer.analyze(root, TEST_HARNESS_SHA, "horizon_order")
 
     def test_horizon_predecessor_binding_is_exact(self) -> None:
         temporary = tempfile.TemporaryDirectory()
