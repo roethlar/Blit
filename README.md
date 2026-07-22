@@ -13,13 +13,13 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 - **Resumable Transfers**
   With `--resume`, eligible partial files continue through block-level Blake3 comparison across local, push, pull, and remote-to-remote transfers. Retries re-run the selected destination comparison (so normal comparison skips files now complete); partial-file continuation requires `--resume`.
 - **Hybrid Transport**
-  TCP data plane for high-throughput transfers (10+ Gbps), with gRPC fallback for diagnostics.
+  TCP data plane by default, with an in-stream gRPC carrier for diagnostics or when direct TCP is unavailable.
 - **Platform Optimization**
   Windows, Linux, and macOS optimized; per-filesystem capability detection (reflink, sparse, xattr) with platform-native fast-copy paths (`clonefile`, `copy_file_range`, `CopyFileEx`).
 - **gRPC API**
   Robust proto definitions in `proto/blit.proto` enable remote orchestration and integrations.
-- **Security Hardened**
-  Path traversal protection, block size limits, token verification. TLS via operator-provided SSH tunnels or VPN.
+- **Security Boundaries**
+  Path containment, bounded wire records, and per-session data-plane tokens. The daemon has no built-in TLS or user authentication; operate it only on a trusted network or through an SSH tunnel or VPN.
 - **Admin Utilities**
   Built into `blit`: daemon inspection and maintenance via mDNS discovery, module listing, remote `ls`/`find`/`du`/`df`/`rm`, shell completions, and performance profiling.
 - **Developer Experience**
@@ -33,19 +33,20 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 
 ```
 .
-├── crates/        # Rust workspace: core lib, CLI, daemon
+├── crates/        # Rust workspace
 │   ├── blit-core/
-│   ├── blit-cli/  # Produces the `blit` binary (admin verbs included)
-│   └── blit-daemon/
+│   ├── blit-app/
+│   ├── blit-cli/  # Produces `blit` (admin verbs included)
+│   ├── blit-daemon/
+│   ├── blit-prometheus-bridge/
+│   └── blit-tui/
 ├── proto/         # gRPC (protobuf) definitions
 ├── scripts/       # Helper scripts (Windows, etc.)
-├── tests/         # Integration test suite
 ├── test/          # Test data/resources
 ├── docs/          # Workflow/process docs
 ├── AGENTS.md      # Agent and collaboration framework
 ├── DEVLOG.md      # Development log/context
 ├── TODO.md        # Feature roadmap/tasks
-├── Windows_Build_Failures.txt # Special issues log
 └── report.xsl     # Output/report formatting
 ```
 
@@ -55,8 +56,9 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 
 ### Prerequisites
 
-- [Rust](https://www.rust-lang.org/tools/install) 1.56+ (edition 2021)
-- For gRPC: [protoc](https://grpc.io/docs/protoc-installation/) (auto-handled for most workflows)
+- The current stable [Rust toolchain](https://www.rust-lang.org/tools/install)
+  (the project does not declare an older minimum supported Rust version)
+- No separate `protoc` install is required; the build uses a vendored compiler
 - Windows, Linux, or macOS
 
 ### Building & Testing

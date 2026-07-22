@@ -2,6 +2,50 @@
 
 All notable changes to Blit are documented in this file.
 
+## [0.1.1] - Unreleased
+
+### Packages and compatibility
+
+- Release archives contain `blit` and `blit-daemon` for
+  `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, and
+  `x86_64-pc-windows-msvc`; each archive has a SHA-256 sidecar and embeds the
+  exact source commit in `BUILD.txt`.
+- Both executables report the same exact `0.1.1+<commit>` build identity.
+  Remote sessions require identical build identities and refuse mixed builds
+  before transferring data.
+- Packaged-release validation checks safe extraction, checksum and build
+  identity, CLI/daemon startup, one tiny local copy, and one tiny loopback
+  remote copy with exact byte comparison and bounded teardown.
+
+### Transfer correctness and operation
+
+- Local, push, pull, and remote-to-remote operations now use one role-based
+  transfer session instead of separate direction-specific transfer engines.
+- Windows file attributes and named `$DATA` streams are preserved across
+  supported local, TCP, in-stream, tar-batched, and resumed transfers. A
+  non-Windows destination refuses Windows metadata unless the operator
+  explicitly selects the warned metadata-drop option.
+- Transfer progress now carries declared and completed file/byte totals, live
+  served and delegated byte counts, and the final carrier through daemon state,
+  events, persisted recent rows, CLI output, and TUI output.
+- Retry re-runs destination comparison and skips files that already completed;
+  `--resume` additionally enables block-level continuation for eligible partial
+  files in every transfer layout.
+- Failure handling now preserves the first actionable file/worker fault across
+  shutdown races, bounds network and child-process waits, and reports daemon
+  startup diagnostics without blocking on stderr.
+
+### Security and known limitations
+
+- Blit has no built-in TLS and no user authentication. Module access controls
+  and per-session data-plane tokens are not an authentication system. Run the
+  daemon only on a trusted network or through an operator-managed VPN or SSH
+  tunnel.
+- These packages are correctness- and smoke-tested on the three listed target
+  triples. Hardware throughput ceilings are not release claims. Mac-to-Mac
+  Thunderbolt testing, further small-file tuning, and zero-copy optimization
+  remain post-release work.
+
 ## [0.1.0] - 2026-05-31
 
 ### Transfer Engine

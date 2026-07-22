@@ -72,9 +72,9 @@ or hardware experiment.
       refused startup failures. Daemon stderr is drained concurrently into a
       bounded tail, included in startup failures, and cannot block the child;
       transient early exits retry on fresh ports before the final failure.
-- [ ] The ignored Windows directory-tree move hang has a root-cause fix; the
+- [x] The ignored Windows directory-tree move hang has a root-cause fix; the
       integration test is re-enabled and passes repeatedly on Windows.
-- [ ] Windows file attributes and ADS are preserved across local and remote
+- [x] Windows file attributes and ADS are preserved across local and remote
       transfers, including the tar threshold that currently changes fidelity;
       single-file and batched copies produce the same metadata result.
 - [x] Delegated and served-session progress is complete: live bytes are emitted,
@@ -97,7 +97,7 @@ or hardware experiment.
       version/help, daemon startup/health, one small local copy, and one small
       same-build remote copy pass with exact content verification and clean
       teardown.
-- [ ] User-facing release notes state supported platforms, known limitations,
+- [x] User-facing release notes state supported platforms, known limitations,
       compatibility, and deferred performance work.
 - [ ] The release-candidate tree is clean; all verification evidence names its
       exact commit. Publication remains blocked until the owner approves the
@@ -225,7 +225,11 @@ performance ratios are measured or graded.
    test matrix and all three target package-smoke jobs after `4927a05` fixed and
    mutation-proved Windows extended-path equivalence. No throughput or
    large-write work.
-9. **rel-9 — release-candidate audit.** Reconcile the ledger against exact CI,
+9. **rel-9 — release-candidate audit `[~]`.** The existing 0.1.0 tag remains
+   fixed at its shipped May commit; the candidate is now 0.1.1 from one
+   workspace version source, with exact version-plus-commit packaged smoke.
+   User-facing notes state the supported triples, same-build requirement,
+   security limits, and deferred ceiling work. Reconcile the ledger against exact CI,
    artifacts, smoke evidence, known limitations, and open findings. Prepare the
    exact refs/remotes for owner approval; do not publish.
 

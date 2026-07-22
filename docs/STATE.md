@@ -1,21 +1,20 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (all hosted tests and packaged smoke green)
+Last updated: 2026-07-22 (0.1.1 notes ready; exact-candidate CI pending)
 
-- **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
-  `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
-  faults with retained harness evidence and full local gates green.
-  - Done: live evidence remains retained; no endpoint or daemon deletion/overwrite.
-  - In-flight: no completed/timed live transfer row yet.
-  - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
-    fresh `q`↔`netwatch-01` retry.
+- **RELEASE IDENTITY IS NOW 0.1.1:** the existing `v0.1.0` tag remains at its
+  shipped 2026-05-31 commit. The current candidate uses one workspace-owned
+  0.1.1 version, and packaged smoke now requires exact semantic version plus
+  commit identity instead of checking only the commit suffix.
 
 - **NEXT ACTION — RELEASE BLOCKERS ONLY:** use `docs/RELEASE_READINESS.md`.
   Exact run `29951872658` at `6fb4d3f` passed Docs Gate, strict Check, Linux,
   ARM macOS, Windows, and all three packaged smoke jobs. Each archive verified
   checksum/safe extraction, exact version/help, owned daemon readiness, tiny
   local and same-build remote byte identity, and bounded teardown before upload.
-  Next: truthful user-facing release notes and the final exact-candidate audit.
+  The user-facing 0.1.1 notes now state exact platforms, compatibility,
+  security limits, and deferred performance work. Next: full hosted validation
+  and the final audit on the exact candidate commit.
   No hardware transfer is required.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.

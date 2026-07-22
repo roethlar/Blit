@@ -1,7 +1,8 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** hosted run `29951872658` at `6fb4d3f`, 2026-07-22
+**As of:** local 0.1.1 candidate `b51e3c76`; latest complete hosted run
+`29951872658` at `6fb4d3f`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -130,6 +131,12 @@ performance ceilings and hardware tuning remain post-release work.
   - ARM macOS: `dac735d4d86830b9d163c694a6d0f96d2dd9386179a0798f0282f33652510b98`
   - Windows: `1fc3739e4ec9af70b8a392fa03a66a981627e2f239d667eaa91d44edac5b77d6`
   Checkout/upload ran on the Node-24 action majors without the prior warnings.
+- `b51e3c76` resolves the release-name collision without moving the existing
+  `v0.1.0` tag: all six workspace packages inherit 0.1.1 from one root value,
+  both shipped binaries report `0.1.1+<commit>`, and packaged smoke now requires
+  the exact workspace semantic version as well as the exact commit. The focused
+  smoke guard fails under the old commit-suffix-only check; formatting, exact
+  CLI/daemon version guards, and strict workspace clippy pass locally.
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
@@ -215,12 +222,9 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **User-facing release notes are stale.** They must state only the proven
-   platform triples, same-build compatibility rule, security/feature limits,
-   and deferred performance work.
-2. **The final release-candidate head is pending.** Truthful notes must land,
-   then the complete check/test/package/smoke matrix must pass at that exact
-   clean commit and every open ledger/finding must be audited once more.
+1. **The final release-candidate head is pending.** The complete
+   check/test/package/smoke matrix must pass at the exact clean 0.1.1 candidate
+   commit, then every open ledger and finding must be audited once more.
 
 ## Deferred until after release
 
