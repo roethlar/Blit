@@ -1,6 +1,6 @@
 # Complete the first cross-platform release
 
-**Status**: Active
+**Status**: Active (candidate complete; publication owner-gated)
 **Created**: 2026-07-22
 **Supersedes**: performance work as the pre-release critical path under
 D-2026-07-22-1; does not supersede shipped implementation plans
@@ -65,7 +65,7 @@ or hardware experiment.
 - [x] The Windows handshake-timeout guard deterministically exercises a blocked
       token write on every supported OS; its old Windows-success mutation turns
       the focused guard red.
-- [ ] Hosted CI is green on the exact release candidate for formatting, strict
+- [x] Hosted CI is green on the exact release candidate for formatting, strict
       clippy, Linux tests, macOS tests, and Windows tests.
 - [x] CLI integration fixtures positively prove their temporary daemon is ready
       before returning; repeated parallel workspace runs have no connection-
@@ -99,7 +99,7 @@ or hardware experiment.
       teardown.
 - [x] User-facing release notes state supported platforms, known limitations,
       compatibility, and deferred performance work.
-- [ ] The release-candidate tree is clean; all verification evidence names its
+- [x] The release-candidate tree is clean; all verification evidence names its
       exact commit. Publication remains blocked until the owner approves the
       exact refs and remotes.
 
@@ -226,13 +226,14 @@ performance ratios are measured or graded.
    test matrix and all three target package-smoke jobs after `4927a05` fixed and
    mutation-proved Windows extended-path equivalence. No throughput or
    large-write work.
-9. **rel-9 — release-candidate audit `[~]`.** The existing 0.1.0 tag remains
+9. **rel-9 — release-candidate audit `[x]`.** The existing 0.1.0 tag remains
    fixed at its shipped May commit; the candidate is now 0.1.1 from one
    workspace version source, with exact version-plus-commit packaged smoke.
    User-facing notes state the supported triples, same-build requirement,
-   security limits, and deferred ceiling work. Reconcile the ledger against exact CI,
-   artifacts, smoke evidence, known limitations, and open findings. Prepare the
-   exact refs/remotes for owner approval; do not publish.
+   security limits, and deferred ceiling work. Exact candidate `d1f1152d`
+   passed Docs Gate `29953569556`, CI `29953569652`, and all three packaged
+   smoke jobs; the canonical review ledger has no open row. Exact publication
+   refs remain for separate owner approval; do not publish.
 
 ## Open questions
 

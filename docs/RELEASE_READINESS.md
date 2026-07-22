@@ -1,8 +1,8 @@
 # Release readiness
 
-**Status:** Active release ledger
-**As of:** current 0.1.1 candidate; latest complete hosted run `29951872658`
-at `6fb4d3f`, 2026-07-22
+**Status:** Candidate validated; publication owner-gated
+**As of:** exact candidate `d1f1152d`, Docs Gate `29953569556`, and CI
+`29953569652`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -137,6 +137,15 @@ performance ceilings and hardware tuning remain post-release work.
   the exact workspace semantic version as well as the exact commit. The focused
   smoke guard fails under the old commit-suffix-only check; formatting, exact
   CLI/daemon version guards, and strict workspace clippy pass locally.
+- Exact candidate `d1f1152d` passed Docs Gate `29953569556` and CI
+  `29953569652`: strict formatting/lint, Linux, ARM macOS, Windows, and all
+  three package jobs. Each archive passed checksum and safe-extraction checks,
+  exact `0.1.1+<commit>` CLI/daemon identity, help, owned daemon readiness, a
+  tiny local copy, a tiny same-build loopback remote copy, exact byte identity,
+  and bounded teardown before upload. Archive SHA-256 values are:
+  - Linux: `988e821c64238e94a44bb07d57a9634f290f1bbb8b76c318a8e83dd65ee14ab5`
+  - ARM macOS: `d1d7d9e547f703a7b5216cb3227baaf6b2bea848a85599312439cdccff19b726`
+  - Windows: `2abf493a066cc8c14f843a0ef268628e38554259149e6ba7284f4d86ba16978d`
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
@@ -222,9 +231,8 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **The final release-candidate head is pending.** The complete
-   check/test/package/smoke matrix must pass at the exact clean 0.1.1 candidate
-   commit, then every open ledger and finding must be audited once more.
+- None in exact candidate `d1f1152d`. Release tagging and publication are a
+  separate owner gate and have not been performed.
 
 ## Deferred until after release
 

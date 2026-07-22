@@ -1,21 +1,19 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (0.1.1 notes ready; exact-candidate CI pending)
+Last updated: 2026-07-22 (0.1.1 candidate validated; publication owner-gated)
 
 - **RELEASE IDENTITY IS NOW 0.1.1:** the existing `v0.1.0` tag remains at its
   shipped 2026-05-31 commit. The current candidate uses one workspace-owned
   0.1.1 version, and packaged smoke now requires exact semantic version plus
   commit identity instead of checking only the commit suffix.
 
-- **NEXT ACTION — RELEASE BLOCKERS ONLY:** use `docs/RELEASE_READINESS.md`.
-  Exact run `29951872658` at `6fb4d3f` passed Docs Gate, strict Check, Linux,
-  ARM macOS, Windows, and all three packaged smoke jobs. Each archive verified
-  checksum/safe extraction, exact version/help, owned daemon readiness, tiny
-  local and same-build remote byte identity, and bounded teardown before upload.
-  The user-facing 0.1.1 notes now state exact platforms, compatibility,
-  security limits, and deferred performance work. Next: full hosted validation
-  and the final audit on the exact candidate commit.
-  No hardware transfer is required.
+- **0.1.1 RELEASE CANDIDATE VALIDATED:** exact commit `d1f1152d` passed Docs
+  Gate and CI run `29953569652`: strict Check, Linux, ARM macOS, Windows, and
+  all three packaged smoke jobs. The final audit found no open canonical review
+  row or release question. Artifact hashes and scope live only in
+  `docs/RELEASE_READINESS.md`. Next action is the separate owner gate for exact
+  tag/publication refs; no publication or hardware transfer is part of this
+  record.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -171,8 +169,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 - **Hosted run `29949207219` at `354f38e`:** check, all three OS test suites,
   and all three target archive/checksum/upload jobs passed. It proves the
   `fa79f0a` payload-seal correction and rel-7 archive construction.
-- **Release blocker:** the complete hosted matrix and final audit must pass on
-  the exact clean 0.1.1 candidate. See `docs/RELEASE_READINESS.md`.
+- **Publication gate:** the exact clean candidate is `d1f1152d`; tagging and
+  release publication still require the owner's separate exact approval.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):
   `docs/bench/otp12c-win-2026-07-13/` (198 runs) and
