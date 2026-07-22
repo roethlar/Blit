@@ -882,6 +882,36 @@ class AnalyzerTests(unittest.TestCase):
         }
         self.assertEqual(dial_actions, {"ADD", "REMOVE"})
 
+    def test_resize_proposed_rejects_dial_shorthand_action(self) -> None:
+        row = self.session.run_rows[0]
+        events = self.session.read_events(row)
+        proposed = next(
+            event
+            for event in events
+            if event["event"] == "resize_proposed" and event.get("epoch") == 1
+        )
+        proposed["action"] = "ADD"
+        self.session.write_events(row, events)
+        with self.assertRaisesRegex(
+            analyzer.AnalysisError, "resize_proposed values disagree"
+        ):
+            self.analyze()
+
+    def test_source_settled_rejects_dial_shorthand_action(self) -> None:
+        row = self.session.run_rows[0]
+        events = self.session.read_events(row)
+        settled = next(
+            event
+            for event in events
+            if event["event"] == "source_settled" and event.get("epoch") == 1
+        )
+        settled["action"] = "ADD"
+        self.session.write_events(row, events)
+        with self.assertRaisesRegex(
+            analyzer.AnalysisError, "source_settled values disagree"
+        ):
+            self.analyze()
+
     def test_sustained_parent_inventory_matches_retained_valid_evidence(self) -> None:
         self.assertEqual(
             analyzer.PARENT_INVENTORY_SHA256,

@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — all four horizon arms completed and retained, but the
 analyzer refused the first real resize operation because its synthetic action
 spelling did not match production evidence.
-**Status**: Candidate implemented; tactical review pending.
+**Status**: Candidate implemented; one Low review guard fix awaits re-review.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: pending
 
@@ -92,10 +92,17 @@ None.
 
 ## Known gaps
 
-Full repository gates, tactical Opus review, exact restaging, and one fresh
-additive live rerun remain. The void session and all endpoint payloads/evidence
-stay retained unchanged.
+The tactical Opus review confirmed the core fix and its 27-test mutation proof,
+then admitted one Low test gap as `ldt-4-live-f14-r1-f1`: deleting both action
+comparisons left all 88 tests green. Two independently mutation-proved rejection
+guards now close that gap. Full gates, tactical re-review, exact restaging, and
+one fresh additive live rerun remain. The void session and all endpoint
+payloads/evidence stay retained unchanged.
 
 ## Reviewer comments
 
-Pending.
+Claude Opus 4.8/max session `7a84f4a9-dab8-496a-a509-f2a28880cce2`
+reviewed exact resolved range
+`679253c7e2f12f4e313f0bfc26d2d044ce377e61..8385d2334b155cd1044fb9c11fb3a33f2e8078e0`,
+confirmed the core fix and required guard, and returned one Low finding. It is
+admitted as `ldt-4-live-f14-r1-f1`; re-review remains.

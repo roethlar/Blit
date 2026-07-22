@@ -449,8 +449,13 @@ advise but cannot accept the slice (D-2026-07-16-4).
    mutation-proved red/green. Diagnostic reanalysis of an additive copy of the
    retained void session validates all four arms and reports the expected
    `REVIEW_REQUIRED` (arm 3, decision 1, performance 0), without promoting that
-   void evidence to acceptance. Tactical Opus review, exact restaging, and one
-   fresh additive rerun remain.
+   void evidence to acceptance. Tactical Opus 4.8/max confirmed the exact
+   production/dial contracts and 27-test shorthand mutation, then found one Low
+   guard gap: deleting both SOURCE action comparisons still left all 88 tests
+   green. `ldt-4-live-f14-r1-f1` adds independent negative guards for
+   `resize_proposed` and `source_settled`; each fails alone when its comparison
+   is disabled, and restoration returns all 90 tests green. Re-review, exact
+   restaging, and one fresh additive rerun remain.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.
