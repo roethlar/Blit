@@ -61,7 +61,7 @@ use crate::remote::transfer::source::TransferSource;
 use crate::remote::transfer::stall_guard::{StallGuard, TRANSFER_STALL_TIMEOUT};
 use crate::remote::transfer::{
     execute_sink_pipeline_elastic, generate_sub_token, AbortOnDrop, DataPlaneSession,
-    ElasticPipelineControl, ElasticPipelineOutcome, LiveProbe, MembershipOutcome,
+    ElasticPipelineControl, ElasticPipelineOutcome, FaultedPath, LiveProbe, MembershipOutcome,
     RemoteTransferProgress, SharedStreamProbes, SinkMember, StreamId, StreamProbe,
     StreamProbeRegistry, SUB_TOKEN_LEN,
 };
@@ -107,7 +107,12 @@ fn dp_fault(msg: impl Into<String>) -> eyre::Report {
 /// classifier still sees a transient transport condition (codex
 /// otp-10a F5).
 fn dp_fault_io(err: &eyre::Report, msg: impl Into<String>) -> eyre::Report {
-    eyre::Report::new(SessionFault::refusal(Code::DataPlaneFailed, msg).with_io_kind_from(err))
+    let fault = SessionFault::refusal(Code::DataPlaneFailed, msg).with_io_kind_from(err);
+    let fault = match err.downcast_ref::<FaultedPath>() {
+        Some(FaultedPath(path)) => fault.with_path(path.clone()),
+        None => fault,
+    };
+    eyre::Report::new(fault)
 }
 
 pub(super) fn validate_epoch0_streams(
