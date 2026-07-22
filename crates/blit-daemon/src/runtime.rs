@@ -75,7 +75,11 @@ pub(crate) struct DaemonRuntime {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "blit-daemon", about = "Remote transfer daemon for blit v2")]
+#[command(
+    name = "blit-daemon",
+    version = blit_core::transfer_session::session_build_id(),
+    about = "Remote transfer daemon for blit v2"
+)]
 pub(crate) struct DaemonArgs {
     /// Path to the daemon configuration file (TOML). Defaults to /etc/blit/config.toml when present.
     #[arg(long)]
@@ -498,5 +502,25 @@ mod delegation_config_tests {
         };
         let runtime = load_runtime(&args).expect("config loads");
         assert!(!runtime.modules["alpha"].delegation_allowed);
+    }
+}
+
+#[cfg(test)]
+mod cli_surface_tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn version_reports_the_exact_session_build_identity() {
+        let error = DaemonArgs::try_parse_from(["blit-daemon", "--version"])
+            .expect_err("--version exits through clap's display path");
+        assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+        assert_eq!(
+            error.to_string().trim(),
+            format!(
+                "blit-daemon {}",
+                blit_core::transfer_session::session_build_id()
+            )
+        );
     }
 }

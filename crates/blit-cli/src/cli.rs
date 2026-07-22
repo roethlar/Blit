@@ -35,6 +35,7 @@ empty-dir presence, etc.), use `diff -r` or a similar tool.";
 
 #[derive(Parser)]
 #[command(name = "blit")]
+#[command(version = blit_core::transfer_session::session_build_id())]
 #[command(about = "A fast, AI-built file transfer tool (v2)")]
 #[command(after_help = "Run '<command> --help' for detailed options on each command.")]
 pub struct Cli {
@@ -608,7 +609,7 @@ mod tests {
     //! behavior that only surfaces at parse / generation time.
 
     use super::*;
-    use clap::CommandFactory;
+    use clap::{error::ErrorKind, CommandFactory};
 
     #[test]
     fn clap_definition_validates() {
@@ -617,6 +618,19 @@ mod tests {
         // them to run so a misconfigured arg/conflict surfaces here
         // rather than the first time a real user hits the bad path.
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn version_reports_the_exact_session_build_identity() {
+        let error = match Cli::try_parse_from(["blit", "--version"]) {
+            Ok(_) => panic!("--version must exit through clap's display path"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+        assert_eq!(
+            error.to_string().trim(),
+            format!("blit {}", blit_core::transfer_session::session_build_id())
+        );
     }
 
     /// retry-wait: the `--retry`/`--wait` flags parse, default to no
