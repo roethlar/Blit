@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** rel-5 progress complete, 2026-07-22
+**As of:** temporary-daemon diagnostics fixed, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -67,6 +67,14 @@ performance ceilings and hardware tuning remain post-release work.
   render the values. Mutations disabling manifest totals, file completion,
   carrier convergence, or delegated denominator consumption each make a
   focused guard fail.
+- The consolidated CLI integration harness now drains each temporary daemon's
+  stderr concurrently into a bounded 256 KiB tail. Startup failure kills and
+  reaps the child, waits for the drain, and includes the actual process stderr
+  in the panic; unrelated test panics also print retained daemon diagnostics.
+  A transient early exit retries on two fresh ports before failing. The first
+  full gate exposed the previously hidden cause (`Address already in use`);
+  after the retry fix, the complete suite passed. The invalid-option guard
+  fails if stderr capture is omitted or the retry budget is reduced to one.
 
 ## Release blockers
 
@@ -79,12 +87,7 @@ performance ceilings and hardware tuning remain post-release work.
    metadata guards also need current-head Windows confirmation. Findings:
    `release-win-ci-handshake-stall-test`, `windows-move-tree-hang`, and
    `windows-attrs-and-ads-lost-on-tar-path`.
-2. **Temporary-daemon startup is not yet deterministic or diagnosable.** The
-   first rel-4 workspace gate had one daemon exit during `admin_verbs` startup;
-   the exact test and complete suite then passed, while the harness discarded
-   stderr and therefore lost the cause. `tests-harness-stderr-blackhole` must
-   capture the process error and any remaining startup failure must be fixed.
-3. **Current release artifacts are unproved.** The exact local head is not on
+2. **Current release artifacts are unproved.** The exact local head is not on
    GitHub, the latest published release-build jobs were skipped, and install /
    startup smoke checks for the produced CLI and daemon artifacts are not
    recorded.

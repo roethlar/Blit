@@ -143,7 +143,7 @@ Coder loop: pick the topmost `[ ]` row. W2.3 requires a `docs/plan/` doc with
 | w5-3-daemon-status-helpers | Medium | internal_err({:#}) + io_to_status helpers; sweep ~69 chain-amputating + 116 Status::internal sites | `[ ]` | — | — |
 | w5-4-mpsc-sendfail-vocabulary | Medium | One honest mpsc send-failure vocabulary; prefer joining the exited task's real error | `[ ]` | — | — |
 | w5-5-logger-trait-cleanup | Low | Logger trait permanently-noop error channel cleanup | `[ ]` | — | — |
-| w9-6-test-misc | Low | Harness stderr capture; tuning-tier unit tests | `[ ]` | — | — |
+| w9-6-test-misc | Low | Fixed: the consolidated daemon harness concurrently drains a bounded stderr tail, reports it on startup failure/test panic, kills+reaps before a readiness panic, and retries early exits on fresh ports; omitting stderr or reducing the retry budget makes the invalid-option guard fail. The old tuning ladder received its tier pins in `2a8a490` and was later deleted when tuning moved onto the live dial. | `[x]` | master | — |
 | w10-docs-batch | Medium | Docs batch: AGENTS.md ghost names, WORKFLOW_PHASE_2 re-status, --resume/--retry help scoping (help+manpage+README), comment-truth sweep | `[ ]` | — | — |
 
 ## Currently pending review

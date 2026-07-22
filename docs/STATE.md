@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (rel-5 progress reporting complete)
+Last updated: 2026-07-22 (temporary-daemon diagnostics fixed)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -19,7 +19,9 @@ Last updated: 2026-07-22 (rel-5 progress reporting complete)
   runtime confirmation is publication-gated. rel-4's formal Opus review
   admitted six corrections, now all fixed one per commit with focused proofs.
   rel-5 carries exact byte/file totals and carrier outcome through daemon, CLI,
-  and TUI consumers. No rig work is queued.
+  and TUI consumers. Temporary daemons now retain bounded stderr, include it in
+  startup failures, and retry transient early exits on fresh ports. No rig work
+  is queued.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -176,9 +178,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   the nondeterministic 64 MiB socket-buffer premise with a two-byte in-memory
   blocked writer and has local red/green proof. Hosted Windows confirmation
   awaits owner-approved publication. Finding: `release-win-ci-handshake-stall-test`.
-- **Release blockers:** hosted Windows rel-1/rel-3/rel-4 confirmation,
-  temporary-daemon startup diagnostics, and artifact/install proof remain
-  unresolved. See
+- **Release blockers:** hosted Windows rel-1/rel-3/rel-4 confirmation and
+  artifact/install proof remain unresolved. See
   `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):

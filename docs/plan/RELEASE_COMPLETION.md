@@ -69,7 +69,9 @@ or hardware experiment.
       clippy, Linux tests, macOS tests, and Windows tests.
 - [x] CLI integration fixtures positively prove their temporary daemon is ready
       before returning; repeated parallel workspace runs have no connection-
-      refused startup failures.
+      refused startup failures. Daemon stderr is drained concurrently into a
+      bounded tail, included in startup failures, and cannot block the child;
+      transient early exits retry on fresh ports before the final failure.
 - [ ] The ignored Windows directory-tree move hang has a root-cause fix; the
       integration test is re-enabled and passes repeatedly on Windows.
 - [ ] Windows file attributes and ADS are preserved across local and remote

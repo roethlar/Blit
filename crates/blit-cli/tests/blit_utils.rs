@@ -31,6 +31,30 @@ fn daemon_readiness_waits_for_the_owned_module_identity() {
     );
 }
 
+#[test]
+fn daemon_startup_failure_includes_captured_stderr() {
+    const INVALID_FLAG: &str = "--blit-test-invalid-startup-option";
+    let panic = std::panic::catch_unwind(|| {
+        let _ = TestContext::builder()
+            .extra_daemon_args([INVALID_FLAG])
+            .build();
+    })
+    .expect_err("invalid daemon option must fail startup");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("startup panic carries text");
+    assert!(
+        message.contains(INVALID_FLAG),
+        "startup panic must include the daemon's captured stderr:\n{message}"
+    );
+    assert!(
+        message.contains("after 3 attempt(s)"),
+        "an early daemon exit must exhaust the bounded startup retry:\n{message}"
+    );
+}
+
 // ── scan ──────────────────────────────────────────────────────────────
 
 #[test]

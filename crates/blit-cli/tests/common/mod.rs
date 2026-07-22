@@ -19,10 +19,11 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -305,6 +306,94 @@ pub struct SpawnedDaemon {
     pub daemon: ChildGuard,
 }
 
+const CAPTURED_STDERR_LIMIT: usize = 256 * 1024;
+const DAEMON_STARTUP_ATTEMPTS: usize = 3;
+
+#[derive(Default)]
+struct CapturedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn append_bounded(output: &mut CapturedOutput, chunk: &[u8]) {
+    if chunk.len() >= CAPTURED_STDERR_LIMIT {
+        output.bytes.clear();
+        output
+            .bytes
+            .extend_from_slice(&chunk[chunk.len() - CAPTURED_STDERR_LIMIT..]);
+        output.truncated = true;
+        return;
+    }
+
+    let overflow = output
+        .bytes
+        .len()
+        .saturating_add(chunk.len())
+        .saturating_sub(CAPTURED_STDERR_LIMIT);
+    if overflow > 0 {
+        output.bytes.copy_within(overflow.., 0);
+        output.bytes.truncate(output.bytes.len() - overflow);
+        output.truncated = true;
+    }
+    output.bytes.extend_from_slice(chunk);
+}
+
+struct StderrCapture {
+    output: Arc<Mutex<CapturedOutput>>,
+    drain: Option<thread::JoinHandle<()>>,
+}
+
+impl StderrCapture {
+    fn start(mut stderr: std::process::ChildStderr) -> Self {
+        let output = Arc::new(Mutex::new(CapturedOutput::default()));
+        let drain_output = Arc::clone(&output);
+        let drain = thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        let mut output = drain_output.lock().unwrap_or_else(|e| e.into_inner());
+                        append_bounded(&mut output, &chunk[..count]);
+                    }
+                    Err(error) => {
+                        let mut output = drain_output.lock().unwrap_or_else(|e| e.into_inner());
+                        append_bounded(
+                            &mut output,
+                            format!("\n[harness failed to drain daemon stderr: {error}]\n")
+                                .as_bytes(),
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            output,
+            drain: Some(drain),
+        }
+    }
+
+    fn finish(&mut self) {
+        if let Some(drain) = self.drain.take() {
+            let _ = drain.join();
+        }
+    }
+
+    fn text(&self) -> String {
+        let output = self.output.lock().unwrap_or_else(|e| e.into_inner());
+        let body = String::from_utf8_lossy(&output.bytes);
+        if output.truncated {
+            format!(
+                "[earlier daemon stderr truncated; showing last {} bytes]\n{}",
+                CAPTURED_STDERR_LIMIT, body
+            )
+        } else {
+            body.into_owned()
+        }
+    }
+}
+
 /// Spawn one daemon under `workspace`: writes `<name>.toml`, creates
 /// `module_dir` if missing, picks a fresh port, waits for readiness.
 /// `TestContext` routes through this; dual-daemon tests call it (via
@@ -318,54 +407,7 @@ pub fn spawn_daemon(
     ensure_daemon_built();
 
     fs::create_dir_all(module_dir).expect("module dir");
-    let port = pick_unused_port();
-
-    let config = DaemonConfig {
-        daemon: DaemonSection {
-            bind: "127.0.0.1".into(),
-            port,
-            no_mdns: true,
-        },
-        modules: vec![ModuleSection {
-            name: "test".into(),
-            path: module_dir.to_path_buf(),
-            comment: None,
-            read_only: opts.read_only,
-            delegation_allowed: true,
-        }],
-        delegation: opts.delegation.then(|| DelegationSection {
-            allow_delegated_pull: true,
-            // Loopback sources must be authorized by IP/CIDR form, not
-            // hostname form. This mirrors the production SSRF rule.
-            allowed_source_hosts: vec!["127.0.0.1".to_string()],
-        }),
-    };
     let config_path = workspace.join(format!("{name}.toml"));
-    let toml = toml::to_string(&config).expect("serialize config");
-    fs::write(&config_path, toml).expect("write config");
-
-    let mut cmd = Command::new(daemon_bin());
-    cmd.arg("--config")
-        .arg(&config_path)
-        .arg("--bind")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(port.to_string());
-    for arg in &opts.extra_args {
-        cmd.arg(arg);
-    }
-    // stderr policy: discard. The pre-w9-3 shared harness piped stderr
-    // "for debugging" but nothing ever read it — zero diagnostics in
-    // practice plus a latent pipe-buffer deadlock once a chatty daemon
-    // wrote 64 KiB. Real capture (drain thread, dump on readiness
-    // failure) is w9-6 (tests-harness-stderr-blackhole).
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn daemon");
-
     // The daemon canonicalizes exported roots before serving them. Matching
     // the unique temporary module path proves the RPC response came from this
     // child, rather than from any process that happened to own the port first.
@@ -374,30 +416,92 @@ pub fn spawn_daemon(
         .enable_all()
         .build()
         .expect("daemon readiness runtime");
-    wait_for_owned_readiness(
-        50,
-        Duration::from_millis(100),
-        || {
-            child
-                .try_wait()
-                .map(|status| status.map(|status| status.to_string()))
-                .map_err(|err| format!("poll spawned daemon: {err}"))
-        },
-        || daemon_identity_matches(&readiness_runtime, port, &expected_module_path),
-    )
-    .unwrap_or_else(|reason| {
-        panic!(
-            "daemon {name} was not ready on port {port}: {reason}; \
-             port taken or config rejected"
-        )
-    });
-    let daemon = ChildGuard::new(child);
 
-    SpawnedDaemon {
-        port,
-        module_dir: module_dir.to_path_buf(),
-        daemon,
+    for attempt in 1..=DAEMON_STARTUP_ATTEMPTS {
+        let port = pick_unused_port();
+        let config = DaemonConfig {
+            daemon: DaemonSection {
+                bind: "127.0.0.1".into(),
+                port,
+                no_mdns: true,
+            },
+            modules: vec![ModuleSection {
+                name: "test".into(),
+                path: module_dir.to_path_buf(),
+                comment: None,
+                read_only: opts.read_only,
+                delegation_allowed: true,
+            }],
+            delegation: opts.delegation.then(|| DelegationSection {
+                allow_delegated_pull: true,
+                // Loopback sources must be authorized by IP/CIDR form, not
+                // hostname form. This mirrors the production SSRF rule.
+                allowed_source_hosts: vec!["127.0.0.1".to_string()],
+            }),
+        };
+        let toml = toml::to_string(&config).expect("serialize config");
+        fs::write(&config_path, toml).expect("write config");
+
+        let mut cmd = Command::new(daemon_bin());
+        cmd.arg("--config")
+            .arg(&config_path)
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string());
+        for arg in &opts.extra_args {
+            cmd.arg(arg);
+        }
+        // Drain stderr concurrently so daemon logging cannot fill an unread pipe.
+        // The bounded tail is retained for readiness failures and test panics.
+        let mut child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn daemon");
+        let stderr = child.stderr.take().expect("take daemon stderr");
+        let mut daemon = ChildGuard::new(child, StderrCapture::start(stderr));
+
+        let readiness = wait_for_owned_readiness(
+            50,
+            Duration::from_millis(100),
+            || {
+                daemon
+                    .child
+                    .as_mut()
+                    .expect("daemon child present during readiness")
+                    .try_wait()
+                    .map(|status| status.map(|status| status.to_string()))
+                    .map_err(|err| format!("poll spawned daemon: {err}"))
+            },
+            || daemon_identity_matches(&readiness_runtime, port, &expected_module_path),
+        );
+        match readiness {
+            Ok(()) => {
+                return SpawnedDaemon {
+                    port,
+                    module_dir: module_dir.to_path_buf(),
+                    daemon,
+                };
+            }
+            Err(reason) => {
+                daemon.terminate();
+                let stderr = daemon.take_diagnostics();
+                if attempt < DAEMON_STARTUP_ATTEMPTS
+                    && reason.starts_with("spawned daemon exited during startup")
+                {
+                    continue;
+                }
+                panic!(
+                    "daemon {name} was not ready on port {port} after {attempt} attempt(s): \
+                     {reason}; port taken or config rejected\ndaemon stderr:\n{stderr}"
+                );
+            }
+        }
     }
+
+    unreachable!("daemon startup loop always returns or panics")
 }
 
 pub struct TestContext {
@@ -517,11 +621,17 @@ pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::process::Ou
 
 pub struct ChildGuard {
     pub child: Option<std::process::Child>,
+    stderr: StderrCapture,
+    diagnostics_reported: bool,
 }
 
 impl ChildGuard {
-    pub fn new(child: std::process::Child) -> Self {
-        Self { child: Some(child) }
+    fn new(child: std::process::Child, stderr: StderrCapture) -> Self {
+        Self {
+            child: Some(child),
+            stderr,
+            diagnostics_reported: false,
+        }
     }
 
     /// Kill + reap now instead of at scope end — for tests that must
@@ -531,12 +641,25 @@ impl ChildGuard {
             let _ = child.kill();
             let _ = child.wait();
         }
+        self.stderr.finish();
+    }
+
+    fn take_diagnostics(&mut self) -> String {
+        self.diagnostics_reported = true;
+        self.stderr.text()
     }
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
+        let report = thread::panicking() && !self.diagnostics_reported;
         self.terminate();
+        if report {
+            let stderr = self.take_diagnostics();
+            if !stderr.trim().is_empty() {
+                eprintln!("captured daemon stderr during test panic:\n{stderr}");
+            }
+        }
     }
 }
 
