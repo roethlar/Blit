@@ -1936,17 +1936,9 @@ async fn source_send_half(
                                 fault = peer_fault_signalled(&mut fault_signal) => {
                                     return Err(eyre::Report::new(fault));
                                 }
-                                prepared = source.prepare_payload(TransferPayload::ResumeFile {
-                                    header,
-                                    block_size: hashes.block_size,
-                                    dest_hashes: hashes.hashes.clone(),
-                                }) => prepared?,
+                                prepared = prepare_in_stream_resume(&source, header, hashes) => prepared?,
                             };
-                            let PreparedPayload::ResumeFile { header, .. } = prepared else {
-                                return Err(eyre::eyre!(
-                                    "resume metadata preparation returned a non-resume payload"
-                                ));
-                            };
+                            let (header, block_size, dest_hashes) = prepared;
                             // codex 7b-2 G2: the whole in-stream record names
                             // its file on failure, matching the data-plane
                             // carrier's outer wrap. Same fault race as the
@@ -1960,7 +1952,8 @@ async fn source_send_half(
                                     tx,
                                     &source,
                                     &header,
-                                    &hashes,
+                                    block_size,
+                                    dest_hashes,
                                     instruments.progress.as_ref(),
                                 ) => {
                                     res.map_err(|e| tag_path(e, &header.relative_path))?;
@@ -2917,6 +2910,35 @@ fn tar_payload_shape(payloads: &[TransferPayload]) -> (usize, usize) {
     })
 }
 
+/// Hydrate an in-stream resume header while moving the destination hash list
+/// through the shared payload-preparation hook. The data-plane path already
+/// consumes the same composite payload directly; returning all three parts
+/// lets the in-stream path reuse the hash allocation instead of cloning it
+/// solely to recover the hydrated header.
+async fn prepare_in_stream_resume(
+    source: &Arc<dyn TransferSource>,
+    header: FileHeader,
+    hashes: BlockHashList,
+) -> Result<(FileHeader, u32, Vec<Vec<u8>>)> {
+    let prepared = source
+        .prepare_payload(TransferPayload::ResumeFile {
+            header,
+            block_size: hashes.block_size,
+            dest_hashes: hashes.hashes,
+        })
+        .await?;
+    match prepared {
+        PreparedPayload::ResumeFile {
+            header,
+            block_size,
+            dest_hashes,
+        } => Ok((header, block_size, dest_hashes)),
+        _ => Err(eyre::eyre!(
+            "resume metadata preparation returned a non-resume payload"
+        )),
+    }
+}
+
 /// otp-7a: the SOURCE-side block phase for one resume-flagged need over
 /// the IN-STREAM carrier — a session free helper, deliberately not a
 /// `TransferSource` method (plan D3: it needs only `open_file` + blake3,
@@ -2937,7 +2959,8 @@ async fn send_resume_block_records(
     tx: &mut Box<dyn FrameTx>,
     source: &Arc<dyn TransferSource>,
     header: &FileHeader,
-    hashes: &BlockHashList,
+    block_size: u32,
+    dest_hashes: Vec<Vec<u8>>,
     progress: Option<&RemoteTransferProgress>,
 ) -> Result<()> {
     use crate::remote::transfer::resume_diff::{ResumeBlockDiff, ResumeDiffEvent};
@@ -2946,13 +2969,7 @@ async fn send_resume_block_records(
     // stays unarmed: the control lane carries no receive stall guard,
     // so a silent scan cannot trip one (codex 7b-1 F1 is a data-plane
     // concern; `DataPlaneSink` arms it there).
-    let mut diff = ResumeBlockDiff::open(
-        source,
-        header,
-        hashes.block_size as usize,
-        hashes.hashes.clone(),
-    )
-    .await?;
+    let mut diff = ResumeBlockDiff::open(source, header, block_size as usize, dest_hashes).await?;
     let mut stale_bytes: u64 = 0;
     while let Some(event) = diff.next_event().await? {
         match event {
@@ -5626,6 +5643,36 @@ mod tests {
             std::fs::read(&partial).expect("read unchanged partial"),
             before,
             "preflight refusal must leave a resume-capable partial untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_stream_resume_reuses_destination_hash_allocation_during_prepare() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source: Arc<dyn TransferSource> =
+            Arc::new(FsTransferSource::new(tmp.path().join("unused-source-root")));
+        let dest_hashes: Vec<Vec<u8>> = (0..128)
+            .map(|index| vec![index as u8; blake3::OUT_LEN])
+            .collect();
+        let original_allocation = dest_hashes.as_ptr() as usize;
+        let hashes = BlockHashList {
+            relative_path: "resume.bin".into(),
+            block_size: MIN_RESUME_BLOCK_SIZE as u32,
+            hashes: dest_hashes,
+        };
+
+        let (header, block_size, prepared_hashes) =
+            prepare_in_stream_resume(&source, tar_test_header("resume.bin".into()), hashes)
+                .await
+                .expect("prepare resume payload");
+
+        assert_eq!(header.relative_path, "resume.bin");
+        assert_eq!(block_size, MIN_RESUME_BLOCK_SIZE as u32);
+        assert_eq!(prepared_hashes.len(), 128);
+        assert_eq!(
+            prepared_hashes.as_ptr() as usize,
+            original_allocation,
+            "metadata preparation must move, not clone, the destination hashes"
         );
     }
 

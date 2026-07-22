@@ -325,7 +325,9 @@ push/pull-specific message.
   the CARRIER's ceiling — 2 MiB in-stream (tonic frame limit,
   D-2026-07-10-1), 64 MiB data plane (the wire block record bound,
   D-2026-07-10-2) — with a shared 64 KiB floor and 65_536-hash list
-  cap; both ends read the carrier from grant presence.
+  cap; both ends read the carrier from grant presence. In-stream metadata
+  hydration moves that destination hash vector into the block diff without a
+  second allocation.
   **Windows metadata records (contract v4):** every binary FILE and each
   TAR_SHARD member carries the payload form of `WindowsFileMetadata` after its
   existing path/size/mtime/permissions fields. BLOCK_COMPLETE carries the

@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** rel-4 formal review fixes 5/6, 2026-07-22
+**As of:** rel-4 formal review fixes 6/6, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -49,22 +49,13 @@ performance ceilings and hardware tuning remain post-release work.
   format, strict clippy, workspace tests, docs, and strict all-target Windows
   cross-compilation pass. Actual Windows filesystem behavior is still pending
   the publication-gated hosted run.
+- All six formal rel-4 review corrections are fixed one per commit with focused
+  mutation proofs. The final allocation fix moves the destination resume-hash
+  vector through metadata hydration and directly into the in-stream block diff.
 
 ## Release blockers
 
-1. **Windows metadata review corrections are in progress.** The implementation
-   at `3013e10` passed local gates and strict Windows cross-compilation, but the
-   formal Opus review admitted six corrections before runtime acceptance. The
-   aggregate tar-header allocation is now bounded before metadata allocation,
-   planning counts declared ADS bytes, the durable attribute contract requires
-   readback convergence, and source/destination ADS inspection failures are
-   isolated to replacement or the affected unreadable file. Cross-platform
-   copies now reject before resume can write unless the warned
-   `--drop-windows-metadata` policy strips metadata at the source. Local file
-   and tar paths now restore the source's sub-second mtime after ADS apply. One
-   correction remains: the resume hash-list allocation. Hosted Windows
-   confirmation follows that fix.
-2. **Hosted Windows confirmation is pending.** Published run `29584631185`
+1. **Hosted Windows confirmation is pending.** Published run `29584631185`
    failed because Windows buffered the guard's 64 MiB loopback handshake.
    rel-1 now exercises the same production timeout through a deterministic
    two-byte/one-byte in-memory blocked writer with local mutation proof. The
@@ -73,15 +64,15 @@ performance ceilings and hardware tuning remain post-release work.
    metadata guards also need current-head Windows confirmation. Findings:
    `release-win-ci-handshake-stall-test`, `windows-move-tree-hang`, and
    `windows-attrs-and-ads-lost-on-tar-path`.
-3. **Temporary-daemon startup is not yet deterministic or diagnosable.** The
+2. **Temporary-daemon startup is not yet deterministic or diagnosable.** The
    first rel-4 workspace gate had one daemon exit during `admin_verbs` startup;
    the exact test and complete suite then passed, while the harness discarded
    stderr and therefore lost the cause. `tests-harness-stderr-blackhole` must
    capture the process error and any remaining startup failure must be fixed.
-4. **Progress reporting is incomplete.** Delegated progress can be silent and
+3. **Progress reporting is incomplete.** Delegated progress can be silent and
    served-session byte/file totals can remain zero through daemon, RPC, CLI,
    and TUI consumers.
-5. **Current release artifacts are unproved.** The exact local head is not on
+4. **Current release artifacts are unproved.** The exact local head is not on
    GitHub, the latest published release-build jobs were skipped, and install /
    startup smoke checks for the produced CLI and daemon artifacts are not
    recorded.

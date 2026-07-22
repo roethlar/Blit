@@ -44,8 +44,12 @@ All six findings are admitted and remain release-blocking until fixed:
    precision; wire receives retain their header timestamp. Forcing the old
    whole-second fallback turned both focused guards red, and exact restoration
    returned them green. The Windows fixture checks single and tar paths.
-6. **Low — resume hash clone.** Hydrate Windows metadata without cloning and
-   discarding the destination block-hash vector on every platform.
+6. **Fixed — resume hash clone.** In-stream metadata hydration now moves the
+   original destination hash vector through preparation and directly into the
+   block diff. A pointer-identity guard proves allocation reuse on every
+   platform; restoring the clone turned it red, and exact restoration returned
+   it green.
 
-No finding is being waived as bookkeeping. Each receives its own fix commit,
-guard proof, and verification record before rel-4 can be considered accepted.
+All six findings received their own fix commit, guard proof, and verification
+record. Rel-4's remaining release gate is hosted Windows runtime confirmation,
+not an open review correction.
