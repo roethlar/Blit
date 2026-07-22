@@ -64,10 +64,13 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            archive: tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
+            archive: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            archive: zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -77,10 +80,73 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
-      - name: Upload artifacts
+      - name: Package Unix release
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          package="blit-${TARGET}"
+          bin_dir="target/${TARGET}/release"
+          stage="${RUNNER_TEMP}/${package}"
+          archive="dist/${package}.tar.gz"
+          checksum="${archive}.sha256"
+
+          test -x "${bin_dir}/blit"
+          test -x "${bin_dir}/blit-daemon"
+          test ! -e "${stage}"
+          mkdir -p "${stage}" dist
+          cp "${bin_dir}/blit" "${stage}/"
+          cp "${bin_dir}/blit-daemon" "${stage}/"
+          cp README.md LICENSE CHANGELOG.md "${stage}/"
+          printf '%s\n' "${GITHUB_SHA}" > "${stage}/BUILD.txt"
+          tar -C "${RUNNER_TEMP}" -czf "${archive}" "${package}"
+          python3 -c 'import hashlib, pathlib, sys; p = pathlib.Path(sys.argv[1]); print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")' "${archive}" > "${checksum}"
+          test -s "${archive}"
+          test -s "${checksum}"
+      - name: Package Windows release
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $package = "blit-$env:TARGET"
+          $binDir = Join-Path "target" "$env:TARGET/release"
+          $stage = Join-Path $env:RUNNER_TEMP $package
+          $archive = Join-Path "dist" "$package.zip"
+          $checksum = "$archive.sha256"
+
+          foreach ($binary in @("blit.exe", "blit-daemon.exe")) {
+            $path = Join-Path $binDir $binary
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "required release binary is missing: $path"
+            }
+          }
+          if (Test-Path -LiteralPath $stage) {
+            throw "release staging path already exists: $stage"
+          }
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          New-Item -ItemType Directory -Path "dist" -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $binDir "blit.exe") -Destination $stage
+          Copy-Item -LiteralPath (Join-Path $binDir "blit-daemon.exe") -Destination $stage
+          Copy-Item -LiteralPath "README.md", "LICENSE", "CHANGELOG.md" -Destination $stage
+          Set-Content -LiteralPath (Join-Path $stage "BUILD.txt") -Value $env:GITHUB_SHA
+          Compress-Archive -Path $stage -DestinationPath $archive
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath $checksum -Value "$hash  $package.zip"
+          foreach ($path in @($archive, $checksum)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
+                (Get-Item -LiteralPath $path).Length -eq 0) {
+              throw "required release artifact is missing or empty: $path"
+            }
+          }
+      - name: Upload release archive
         uses: actions/upload-artifact@v4
         with:
           name: blit-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/blit${{ matrix.os == 'windows-latest' && '.exe' || '' }}
-            target/${{ matrix.target }}/release/blit-daemon${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+            dist/blit-${{ matrix.target }}.${{ matrix.archive }}
+            dist/blit-${{ matrix.target }}.${{ matrix.archive }}.sha256
+          if-no-files-found: error
