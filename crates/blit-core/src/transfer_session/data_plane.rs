@@ -1042,9 +1042,11 @@ fn phase_dial_observer(phase: &BoundSessionPhaseTrace) -> DialObserver {
 pub(super) struct SourceDataPlane {
     payload_tx: Option<mpsc::Sender<TransferPayload>>,
     control: Option<ElasticPipelineControl>,
-    // `AbortOnDrop<T>` wraps a `JoinHandle<T>`; the task's output is
-    // `Result<ElasticPipelineOutcome>`, so `T` is that (not the JoinHandle).
-    pipeline: Option<AbortOnDrop<Result<ElasticPipelineOutcome>>>,
+    // The queue path must be able to take and drain a failed pipeline through
+    // `&self`, because its send future is selected alongside resize/control
+    // work. The mutex is ownership coordination, not hot-path data: it is
+    // touched only after the payload receiver closes or during teardown.
+    pipeline: tokio::sync::Mutex<Option<AbortOnDrop<Result<ElasticPipelineOutcome>>>>,
     tuner: Option<AbortOnDrop<()>>,
     resize_rx: Option<mpsc::UnboundedReceiver<ResizeProposal>>,
     // The byte SENDER owns the live dial, bounded by the byte RECEIVER's
@@ -1067,6 +1069,35 @@ pub(super) struct SourceDataPlane {
     phase_trace: Option<BoundSessionPhaseTrace>,
     small_file_probe: Option<BoundSmallFileProbe>,
     queue_trace_armed: AtomicBool,
+}
+
+/// Preserve the first worker failure instead of replacing it with the
+/// producer-side symptom that the payload receiver closed. This restores the
+/// pipeline error contract the pre-session sender already enforced.
+async fn drain_send_pipeline_outcome(
+    pipeline: AbortOnDrop<Result<ElasticPipelineOutcome>>,
+) -> Result<ElasticPipelineOutcome> {
+    match pipeline.join().await {
+        Ok(Ok(outcome)) => Ok(outcome),
+        Ok(Err(error)) => Err(dp_fault_io(
+            &error,
+            format!("data-plane send pipeline failed: {error:#}"),
+        )),
+        Err(join) => Err(dp_fault(format!(
+            "data-plane send pipeline panicked: {join}"
+        ))),
+    }
+}
+
+async fn drain_send_pipeline_error(
+    pipeline: AbortOnDrop<Result<ElasticPipelineOutcome>>,
+) -> eyre::Report {
+    match drain_send_pipeline_outcome(pipeline).await {
+        Ok(_) => {
+            dp_fault("data-plane send pipeline closed cleanly before all payloads were admitted")
+        }
+        Err(error) => error,
+    }
 }
 
 fn start_source_tuner(
@@ -1289,7 +1320,7 @@ async fn start_source_data_plane(
     Ok(SourceDataPlane {
         payload_tx: Some(payload_tx),
         control: Some(control),
-        pipeline: Some(pipeline),
+        pipeline: tokio::sync::Mutex::new(Some(pipeline)),
         tuner: Some(tuner),
         resize_rx: Some(resize_rx),
         dial,
@@ -1615,35 +1646,39 @@ impl SourceDataPlane {
         })?;
         let result =
             if self.phase_trace.is_none() || !self.queue_trace_armed.load(Ordering::Relaxed) {
-                tx.send(payload).await.map_err(|_| {
-                    dp_fault("data-plane send pipeline closed before all payloads sent")
-                })
+                tx.send(payload).await.map_err(|_| ())
             } else {
-                let permit = tx.reserve().await.map_err(|_| {
-                    dp_fault("data-plane send pipeline closed before all payloads sent")
-                })?;
-                let queued_at = if self.queue_trace_armed.load(Ordering::Relaxed)
-                    && self
-                        .queue_trace_armed
-                        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
-                        .is_ok()
-                {
-                    self.phase_trace.as_ref().map(BoundSessionPhaseTrace::stamp)
-                } else {
-                    None
-                };
-                permit.send(payload);
-                if let (Some(trace), Some(queued_at)) = (&self.phase_trace, queued_at) {
-                    trace.first_payload_queued_at(queued_at);
+                match tx.reserve().await {
+                    Ok(permit) => {
+                        let queued_at = if self.queue_trace_armed.load(Ordering::Relaxed)
+                            && self
+                                .queue_trace_armed
+                                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
+                                .is_ok()
+                        {
+                            self.phase_trace.as_ref().map(BoundSessionPhaseTrace::stamp)
+                        } else {
+                            None
+                        };
+                        permit.send(payload);
+                        if let (Some(trace), Some(queued_at)) = (&self.phase_trace, queued_at) {
+                            trace.first_payload_queued_at(queued_at);
+                        }
+                        Ok(())
+                    }
+                    Err(_) => Err(()),
                 }
-                Ok(())
             };
-        if result.is_ok() {
-            if let Some((probe, members, started)) = tar_probe {
-                probe.note_tar_queue(started.elapsed(), members);
-            }
+        if result.is_err() {
+            let pipeline = self.pipeline.lock().await.take().ok_or_else(|| {
+                dp_fault("data-plane send pipeline handle missing after payload queue closed")
+            })?;
+            return Err(drain_send_pipeline_error(pipeline).await);
         }
-        result
+        if let Some((probe, members, started)) = tar_probe {
+            probe.note_tar_queue(started.elapsed(), members);
+        }
+        Ok(())
     }
 
     /// Declare that every payload has been queued without waiting for the
@@ -1706,15 +1741,13 @@ impl SourceDataPlane {
             .map_err(|err| dp_fault(format!("finishing data-plane membership: {err:#}")));
         let pipeline = self
             .pipeline
-            .as_mut()
-            .expect("SourceDataPlane::finish called once");
-        let joined = pipeline
-            .join_mut()
+            .lock()
             .await
-            .map_err(|err| dp_fault(format!("data-plane send pipeline panicked: {err}")));
-        self.pipeline = None;
+            .take()
+            .expect("SourceDataPlane::finish called once");
+        let joined = drain_send_pipeline_outcome(pipeline).await;
         self.control = None;
-        let elastic = joined??;
+        let elastic = joined?;
         close_result?;
         finish_result?;
         if resize_pending {
@@ -1756,13 +1789,13 @@ impl SourceDataPlane {
             None => false,
         };
         self.control = None;
-        if let Some(pipeline) = self.pipeline.as_mut() {
+        let pipeline = self.pipeline.lock().await.take();
+        if let Some(pipeline) = pipeline {
             let joined = if supervisor_drained {
-                pipeline.join_mut().await
+                pipeline.join().await
             } else {
-                pipeline.abort_and_join_mut().await
+                pipeline.abort_and_join().await
             };
-            self.pipeline = None;
             if let Err(err) = joined {
                 if !err.is_cancelled() {
                     log::debug!("data-plane pipeline teardown join failed: {err}");
@@ -2282,6 +2315,8 @@ impl TransferSink for NeedListSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::transfer::source::FsTransferSource;
+    use tempfile::tempdir;
 
     struct DropFlag(Arc<AtomicBool>);
 
@@ -2352,6 +2387,55 @@ mod tests {
         assert!(
             dropped.load(Ordering::SeqCst),
             "sibling receive task must be destroyed before finish returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_queue_surfaces_the_pipeline_worker_error() {
+        let tmp = tempdir().unwrap();
+        let source: Arc<dyn TransferSource> =
+            Arc::new(FsTransferSource::new(tmp.path().to_path_buf()));
+        let (payload_tx, payload_rx) = mpsc::channel(1);
+        drop(payload_rx);
+        let pipeline = AbortOnDrop::new(tokio::spawn(async {
+            Err::<ElasticPipelineOutcome, _>(eyre::eyre!("injected source worker failure"))
+        }));
+        let (control, _commands) = ElasticPipelineControl::channel();
+        let plane = SourceDataPlane {
+            payload_tx: Some(payload_tx),
+            control: Some(control),
+            pipeline: tokio::sync::Mutex::new(Some(pipeline)),
+            tuner: None,
+            resize_rx: None,
+            dial: TransferDial::conservative().shared(),
+            next_member_id: AtomicU32::new(1),
+            source,
+            session_token: Vec::new(),
+            pool: Arc::new(BufferPool::for_data_plane(
+                crate::buffer::DATA_PLANE_BUFFER_FLOOR,
+                1,
+            )),
+            trace: false,
+            sockets: SourceSockets::Dial {
+                host: "127.0.0.1".into(),
+                tcp_port: 0,
+            },
+            phase_trace: None,
+            small_file_probe: None,
+            queue_trace_armed: AtomicBool::new(false),
+        };
+
+        let error = plane
+            .queue(TransferPayload::File(FileHeader {
+                relative_path: "unused.bin".into(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("closed payload queue must surface its worker failure");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("injected source worker failure"),
+            "worker cause was replaced by a queue symptom: {rendered}"
         );
     }
 
