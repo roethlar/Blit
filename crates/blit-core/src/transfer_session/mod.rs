@@ -1242,11 +1242,12 @@ async fn drive_source(
     let responder_data_plane = negotiated.responder_data_plane.take();
     let (mut tx, rx) = transport.split();
     let sent: Arc<StdMutex<HashMap<String, FileHeader>>> = Arc::default();
-    // Set by the send half the moment ManifestComplete goes out. On
-    // an ordered transport, a NeedComplete arriving while this is
-    // still false is provably premature — the peer cannot have
-    // received what we have not sent (contract: NeedComplete only
-    // after ManifestComplete received + all entries diffed).
+    // Set by the send half immediately before ManifestComplete is handed to
+    // the ordered transport. FrameTx::send enqueues asynchronously, so the
+    // peer can receive the frame and answer before the send future resumes;
+    // setting this after `.await` would reject that legitimate fast reply.
+    // A NeedComplete arriving while this is still false is provably premature
+    // because the source has not yet reached its manifest queue boundary.
     let manifest_sent = Arc::new(AtomicBool::new(false));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     // Fault side-channel (codex otp-8 F1): the in-stream send path
@@ -1807,6 +1808,7 @@ async fn source_send_half(
                 SessionPhaseFields::default(),
             );
         }
+        manifest_sent.store(true, Ordering::Release);
         tx.send(frame(Frame::ManifestComplete(ManifestComplete {
             scan_complete,
         })))
@@ -1820,7 +1822,6 @@ async fn source_send_half(
                 },
             );
         }
-        manifest_sent.store(true, Ordering::Release);
         #[cfg(test)]
         if let Some(gate) = &instruments.dial_terminal_test_gate {
             gate.hold().await;
