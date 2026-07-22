@@ -144,10 +144,13 @@ def run_command(
     return completed
 
 
-def assert_cli_surface(client: Path, daemon: Path, expected_commit: str) -> None:
+def assert_build_identities(
+    client_version: str,
+    daemon_version: str,
+    expected_version: str,
+    expected_commit: str,
+) -> None:
     short_commit = expected_commit[:12]
-    client_version = run_command([str(client), "--version"]).stdout.strip()
-    daemon_version = run_command([str(daemon), "--version"]).stdout.strip()
     client_prefix = "blit "
     daemon_prefix = "blit-daemon "
     if not client_version.startswith(client_prefix):
@@ -161,10 +164,24 @@ def assert_cli_surface(client: Path, daemon: Path, expected_commit: str) -> None
             f"client/daemon build identities differ: {client_identity!r} != "
             f"{daemon_identity!r}"
         )
-    if not client_identity.endswith(f"+{short_commit}"):
+    expected_identity = f"{expected_version}+{short_commit}"
+    if client_identity != expected_identity:
         raise SmokeError(
-            f"build identity {client_identity!r} does not name clean commit {short_commit}"
+            f"build identity {client_identity!r} does not match {expected_identity!r}"
         )
+
+
+def assert_cli_surface(
+    client: Path,
+    daemon: Path,
+    expected_version: str,
+    expected_commit: str,
+) -> None:
+    client_version = run_command([str(client), "--version"]).stdout.strip()
+    daemon_version = run_command([str(daemon), "--version"]).stdout.strip()
+    assert_build_identities(
+        client_version, daemon_version, expected_version, expected_commit
+    )
     for executable in (client, daemon):
         help_text = run_command([str(executable), "--help"]).stdout
         if "Usage:" not in help_text:
@@ -338,7 +355,11 @@ def run_transfer_smoke(client: Path, daemon: Path, workspace: Path) -> None:
         raise SmokeError(f"{failure}\n{daemon_diagnostics(stdout_path, stderr_path)}")
 
 
-def smoke(archive: Path, checksum: Path, expected_commit: str) -> str:
+def smoke(
+    archive: Path, checksum: Path, expected_version: str, expected_commit: str
+) -> str:
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", expected_version):
+        raise SmokeError("--expected-version must be a semantic version")
     if not re.fullmatch(r"[0-9a-fA-F]{40}", expected_commit):
         raise SmokeError("--expected-commit must be a full 40-character Git commit")
     expected_commit = expected_commit.lower()
@@ -357,7 +378,7 @@ def smoke(archive: Path, checksum: Path, expected_commit: str) -> str:
         for executable in (client, daemon):
             if not executable.is_file():
                 raise SmokeError(f"required executable is missing: {executable}")
-        assert_cli_surface(client, daemon, expected_commit)
+        assert_cli_surface(client, daemon, expected_version, expected_commit)
         run_transfer_smoke(client, daemon, workspace)
     return digest
 
@@ -366,6 +387,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--checksum", type=Path, required=True)
+    parser.add_argument("--expected-version", required=True)
     parser.add_argument("--expected-commit", required=True)
     return parser.parse_args(argv)
 
@@ -373,7 +395,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
-        digest = smoke(args.archive, args.checksum, args.expected_commit)
+        digest = smoke(
+            args.archive, args.checksum, args.expected_version, args.expected_commit
+        )
     except (OSError, SmokeError, tarfile.TarError, zipfile.BadZipFile) as error:
         print(f"release-smoke: FAIL: {error}", file=sys.stderr)
         return 1

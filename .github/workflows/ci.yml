@@ -83,6 +83,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      - name: Resolve workspace release version
+        id: release-version
+        shell: bash
+        run: |
+          version="$(cargo metadata --format-version 1 --no-deps | \
+            ${{ matrix.python }} -c 'import json, sys; data = json.load(sys.stdin); versions = {package["version"] for package in data["packages"]}; assert len(versions) == 1, f"workspace package versions differ: {sorted(versions)}"; print(versions.pop())')"
+          printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
       - name: Package Unix release
@@ -152,6 +159,7 @@ jobs:
           ${{ matrix.python }} scripts/release_smoke.py
           --archive dist/blit-${{ matrix.target }}.${{ matrix.archive }}
           --checksum dist/blit-${{ matrix.target }}.${{ matrix.archive }}.sha256
+          --expected-version ${{ steps.release-version.outputs.version }}
           --expected-commit ${{ github.sha }}
       - name: Upload release archive
         uses: actions/upload-artifact@v6

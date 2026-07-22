@@ -11,6 +11,22 @@ import release_smoke
 
 
 class ReleaseSmokeTests(unittest.TestCase):
+    def test_build_identity_requires_the_workspace_version_and_commit(self) -> None:
+        commit = "0123456789abcdef0123456789abcdef01234567"
+        release_smoke.assert_build_identities(
+            "blit 0.1.1+0123456789ab",
+            "blit-daemon 0.1.1+0123456789ab",
+            "0.1.1",
+            commit,
+        )
+        with self.assertRaisesRegex(release_smoke.SmokeError, "does not match"):
+            release_smoke.assert_build_identities(
+                "blit 0.1.0+0123456789ab",
+                "blit-daemon 0.1.0+0123456789ab",
+                "0.1.1",
+                commit,
+            )
+
     def test_windows_extended_paths_compare_by_their_filesystem_spelling(self) -> None:
         self.assertEqual(
             release_smoke.strip_windows_extended_prefix(

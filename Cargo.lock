@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "blit-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blit-core",
  "chrono",
@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "blit-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blit-app",
  "blit-core",
@@ -300,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "blit-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "blit-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -375,7 +375,7 @@ dependencies = [
 
 [[package]]
 name = "blit-prometheus-bridge"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blit-app",
  "blit-core",
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "blit-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blit-app",
  "blit-core",
