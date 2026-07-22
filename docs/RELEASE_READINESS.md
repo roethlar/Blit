@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** hosted run `29946548540`; repairs through `82e3cb0`, 2026-07-22
+**As of:** hosted run `29947092127`; repairs through `8fb0a0d`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -72,6 +72,15 @@ performance ceilings and hardware tuning remain post-release work.
   workloads. `82e3cb0` makes every paired role assertion print both completed
   endpoint results, so the next hosted failure will retain the destination's
   reason instead of stopping at the source result.
+- Exact-head run `29947092127` passed check, Linux, and macOS, including the
+  prior manifest and structured-path failures. Windows passed the SOURCE-
+  initiated 10,000-file session but caught an interrupted resize settlement in
+  the mirrored layout: elastic membership reached 7 while the dial remained at
+  6. The manifest scan raced ACK processing against its next header, allowing a
+  ready header to cancel the ACK after worker admission but before dial
+  settlement. `8fb0a0d` selects only raw inputs and completes the chosen state
+  transition outside the race. Its two-byte guard times out with the old
+  selection and passes in 0.12 seconds with the fix; no hardware transfer ran.
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
@@ -157,11 +166,9 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **The Windows destination-close cause and a clean full hosted suite are
-   pending after `82e3cb0`.** The exact handshake, nested-move, metadata, and
-   destination-initiated 10,000-file guards are proven on hosted Windows. The
-   next exact run must retain both endpoint failures for the SOURCE-initiated
-   close; that defect must be fixed, then all three OS suites must pass together.
+1. **A clean full hosted suite is pending after `8fb0a0d`.** Linux and macOS
+   passed together at `9924a7e`; Windows's exact scan/resize race is fixed and
+   mutation-proved locally. The next exact run must pass all three OS suites.
 2. **Current release artifacts are unproved.** Release-build jobs were skipped
    after the failed test matrix, and packaged archives, checksums, plus install /
    startup smoke checks for the CLI and daemon are not recorded.

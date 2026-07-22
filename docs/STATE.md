@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (hosted release guards passed; full-suite repair under validation)
+Last updated: 2026-07-22 (scan/resize cancellation fixed; hosted validation next)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -11,13 +11,12 @@ Last updated: 2026-07-22 (hosted release guards passed; full-suite repair under 
     fresh `q`↔`netwatch-01` retry.
 
 - **NEXT ACTION — RELEASE BLOCKERS ONLY:** use `docs/RELEASE_READINESS.md`.
-  Hosted Windows run `29944148295` at `28cf989` passed the deterministic
-  handshake guard, nested remote moves, and both local/remote attributes + ADS
-  guards. The same run exposed an ownerless terminal resize epoch in both role
-  layouts; Linux also lost the CLI error from a failed move assertion.
-  `309f8b6` mutation-proves and settles that shutdown handoff, and `f679a1a`
-  preserves future move diagnostics. Next: one clean hosted suite, then current
-  artifacts and install/startup smoke. No hardware transfer is required.
+  Exact run `29947092127` passed check, Linux, and macOS. Windows exposed one
+  scan/resize cancellation race: a ready manifest header could interrupt an
+  accepted worker update before dial settlement. `8fb0a0d` fixes and mutation-
+  proves the atomic handoff with two one-byte files. Next: one clean hosted
+  suite, then current artifacts and install/startup smoke. No hardware transfer
+  is required.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -170,13 +169,11 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Blocked / waiting (owner declarations and explicitly dated external blockers; checkpoints are owner-only)
 
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
-- **Hosted run `29946548540` at `b8ad928`:** docs/check passed; the prior macOS
-  manifest race did not recur. Linux/macOS caught a structured-path regression
-  from worker-error preservation, fixed by `2b35c04`. Windows identified the
-  remaining symptom as a destination-forced TCP close; `82e3cb0` now preserves
-  both completed endpoint results so its cause cannot be hidden again.
-- **Release blockers as of `82e3cb0`:** fix the Windows destination-close cause,
-  pass one full hosted suite, then prove artifacts/install/startup. See
+- **Hosted run `29947092127` at `9924a7e`:** docs/check/Linux/macOS passed.
+  Windows's SOURCE-initiated 10,000-file session passed; the mirrored layout
+  caught the scan/resize cancellation now fixed by `8fb0a0d`.
+- **Release blockers as of `8fb0a0d`:** pass one full hosted suite, then prove
+  packaged artifacts, checksums, install, and startup. See
   `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):
