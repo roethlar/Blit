@@ -437,8 +437,9 @@ advise but cannot accept the slice (D-2026-07-16-4).
    correct and fail-closed, admitting one Low guard gap because synthetic tests
    hid the analyzer's production horizon tuple. The literal tuple pin is
    mutation-proved with 87 tests and exact `a0c3e3f` re-reviewed clean by the
-   same Opus session with an independent red/green guard. Exact staging and
-   live execution remain.
+   same Opus session with an independent red/green guard. Exact `a0c3e3f` is
+   additively staged on q with native Bash 3.2/87-test guards green; live
+   execution remains.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.

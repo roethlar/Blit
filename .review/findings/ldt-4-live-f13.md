@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — the f12 byte drain lasted up to 20.7 seconds, but its
 five payloads queued in milliseconds and stopped the tuner before any sample,
 so ldt-4 still has no live membership transition.
-**Status**: Fixed and tactically reviewed clean; exact staging pending.
+**Status**: Fixed, tactically reviewed clean, and exactly staged; live run pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `af13fdb` (candidate); `a0c3e3f` (review guard)
 
@@ -107,14 +107,27 @@ every arm and exact material transition parity within each pair.
 - `cargo fmt --all -- --check`, strict workspace clippy, the complete workspace
   test suite, and `scripts/agent/check-docs.sh` pass.
 
+## Staging proof
+
+- New complete-history bundle `/Users/michael/blit-ldt4-stage-a0c3e3f.bundle`
+  verifies locally and on q at SHA-256
+  `922a286e5fa68cbe77f3647cb82e27b13783c498668cec37006389d196ee8709`.
+- New retained q checkout
+  `/Users/michael/Dev/blit_v2_harness_a0c3e3f` is detached and clean at exact
+  reviewed code head `a0c3e3f18afd5528c6f636ee54708f4d8d5127e9`, with 1,980 commits and no
+  replacement refs.
+- q-native Bash 3.2 syntax/four-arm no-SSH self-test and all 87 analyzer tests
+  pass. `/Volumes/Apps/blit-ldt4-f13` remains absent; staging created no fixture,
+  endpoint session, daemon, or transfer.
+
 ## Coder dispute
 
 None.
 
 ## Known gaps
 
-Exact additive staging and one fresh quiet four-arm run remain. The fixed
-matrix's two performance findings remain separate.
+One fresh quiet four-arm run remains. The fixed matrix's two performance
+findings remain separate.
 
 ## Reviewer comments
 
