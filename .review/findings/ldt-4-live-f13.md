@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — the f12 byte drain lasted up to 20.7 seconds, but its
 five payloads queued in milliseconds and stopped the tuner before any sample,
 so ldt-4 still has no live membership transition.
-**Status**: Fixed, tactically reviewed clean, and exactly staged; live run pending.
+**Status**: Fixed, reviewed, and staged; first live run voided by analyzer f14.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `af13fdb` (candidate); `a0c3e3f` (review guard)
 
@@ -126,8 +126,10 @@ None.
 
 ## Known gaps
 
-One fresh quiet four-arm run remains. The fixed matrix's two performance
-findings remain separate.
+All four fresh arms completed, but `ldt-4-live-f14` owns the exact SOURCE
+control-action analyzer mismatch that voided final analysis. Fix/review/restage
+and one additive rerun remain. The fixed matrix's two performance findings
+remain separate.
 
 ## Reviewer comments
 
