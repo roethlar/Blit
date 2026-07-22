@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** hosted run `29950306815`; repairs through `2a27c4b`, 2026-07-22
+**As of:** hosted run `29951211161`; repairs through `bcedcf0f`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -115,6 +115,12 @@ performance ceilings and hardware tuning remain post-release work.
   normalization is removed and passes when restored. `2a27c4b` upgrades every
   checkout plus artifact upload to the official Node-24 majors after the same
   hosted logs identified both deprecated actions.
+- Run `29951211161` passed check, Linux, and macOS. Windows exposed a teardown
+  guard that injected the source fault immediately and then assumed destination
+  TCP receive tasks had already started. `bcedcf0f` holds that fault at a
+  bounded gate until the test observes a receive task, then retains the exact
+  assertion that every attached task stopped. Removing the hold makes the guard
+  fail at the gate; both layouts, formatting, and strict lint pass restored.
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
@@ -202,7 +208,8 @@ performance ceilings and hardware tuning remain post-release work.
 
 1. **Hosted install/startup smoke is pending.** ARM macOS and Linux passed the
    full runner at `0e61ac8`; `4927a05` fixes the Windows-only canonical-path
-   comparison. The next exact head must pass all three before each upload.
+   comparison, and `bcedcf0f` fixes the newly exposed Windows teardown-test
+   ordering. The next exact head must pass all three before each upload.
 2. **The final release-candidate head is pending.** The smoke implementation
    and truthful release notes must land, then the complete check/test/package/
    smoke matrix must pass at that exact clean commit.
