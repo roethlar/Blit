@@ -75,6 +75,10 @@ performance ceilings and hardware tuning remain post-release work.
   full gate exposed the previously hidden cause (`Address already in use`);
   after the retry fix, the complete suite passed. The invalid-option guard
   fails if stderr capture is omitted or the retry budget is reduced to one.
+- Session mirror and explicit daemon purge now use one contained deletion
+  executor. It preserves filtered-mirror scope and cancellation while making
+  recursive purge clear Windows read-only trees before deletion. Opposite-mode
+  mutations make the existing filtered-mirror and recursive-purge guards fail.
 
 ## Release blockers
 

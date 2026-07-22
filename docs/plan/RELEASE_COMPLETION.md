@@ -181,7 +181,9 @@ performance ratios are measured or graded.
    `REVIEW.md`, STATE, bug-doc, ignored-test, and current-plan item against code.
    Fix each real product defect one commit at a time; close stale records only
    with direct code/test evidence. The release ledger must reach zero unresolved
-   defects.
+   defects. `w7-1` is closed: the session mirror and explicit daemon purge use
+   one contained deletion executor; the old parallel enumerator no longer
+   exists.
 7. **rel-7 — reproducible artifacts.** Build the supported target matrix from
    one exact commit, preserve build identity, generate checksums, and fail if a
    required artifact is absent.

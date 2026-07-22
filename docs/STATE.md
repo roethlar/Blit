@@ -20,8 +20,8 @@ Last updated: 2026-07-22 (temporary-daemon diagnostics fixed)
   admitted six corrections, now all fixed one per commit with focused proofs.
   rel-5 carries exact byte/file totals and carrier outcome through daemon, CLI,
   and TUI consumers. Temporary daemons now retain bounded stderr, include it in
-  startup failures, and retry transient early exits on fresh ports. No rig work
-  is queued.
+  startup failures, and retry transient early exits. rel-6 has begun: mirror
+  and explicit purge now share one contained deletion executor (`w7-1`).
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session

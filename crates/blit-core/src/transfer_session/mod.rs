@@ -3486,72 +3486,24 @@ fn mirror_delete_pass(
         source_files,
         filter,
     )?;
-
-    let contained = |target: &Path| -> Result<()> {
-        if let Some(root) = canonical_dst_root {
-            crate::path_safety::verify_contained(root, target).map_err(|e| {
-                eyre::eyre!("mirror delete containment {}: {e:#}", target.display())
-            })?;
-        }
-        Ok(())
-    };
-
     // codex otp-9b F2: a dropped session future (client disconnect,
-    // CancelJob) cannot abort a running blocking task — the caller's
-    // drop-guard flips this flag instead, and the pass stops deleting
-    // at the next filesystem op rather than running to completion
-    // behind a job already recorded cancelled.
-    let check_abort = || -> Result<()> {
-        if abort.load(Ordering::Acquire) {
-            return Err(eyre::eyre!("mirror delete pass aborted: session cancelled"));
-        }
-        Ok(())
-    };
-
-    let mut deleted_files = 0u64;
-    let mut deleted_dirs = 0u64;
-    for file in &plan.files {
-        check_abort()?;
-        contained(file)?;
-        if !execute {
-            deleted_files += 1;
-            continue;
-        }
-        // Windows refuses to delete a read-only file; clear the attribute
-        // first, matching the daemon purge (admin.rs) and local mirror
-        // (engine/mirror.rs) executors (codex otp-6b F2).
-        #[cfg(windows)]
-        crate::win_fs::clear_readonly_recursive(file);
-        match std::fs::remove_file(file) {
-            Ok(()) => deleted_files += 1,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(eyre::eyre!("mirror delete {}: {e}", file.display())),
-        }
-    }
-    for dir in &plan.dirs {
-        check_abort()?;
-        contained(dir)?;
-        if !execute {
-            deleted_dirs += 1;
-            continue;
-        }
-        #[cfg(windows)]
-        crate::win_fs::clear_readonly_recursive(dir);
-        match std::fs::remove_dir(dir) {
-            Ok(()) => deleted_dirs += 1,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            // FilteredSubset: the dir still holds out-of-scope files the
-            // filter excluded from enumeration; leaving it is the scope
-            // contract, not a failure (engine/mirror.rs R58-F6). `Some(66)`
-            // is ENOTEMPTY on macOS/BSD, which maps to a different ErrorKind.
-            Err(e)
-                if tolerate_nonempty_dirs
-                    && (e.kind() == std::io::ErrorKind::DirectoryNotEmpty
-                        || e.raw_os_error() == Some(66)) => {}
-            Err(e) => return Err(eyre::eyre!("mirror delete dir {}: {e}", dir.display())),
-        }
-    }
-    Ok((deleted_files, deleted_dirs))
+    // CancelJob) cannot abort a running blocking task — the shared executor
+    // checks this drop-guard before every filesystem operation.
+    let stats = crate::deletion::execute_deletion_plan(
+        &plan.files,
+        &plan.dirs,
+        crate::deletion::DeletionOptions {
+            operation: "mirror delete",
+            canonical_root: canonical_dst_root,
+            abort: Some(abort),
+            execute,
+            directory_mode: crate::deletion::DirectoryMode::EmptyOnly {
+                tolerate_nonempty: tolerate_nonempty_dirs,
+            },
+        },
+    )
+    .map_err(eyre::Report::new)?;
+    Ok((stats.files, stats.dirs))
 }
 
 async fn destination_session(

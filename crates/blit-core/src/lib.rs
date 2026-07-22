@@ -3,6 +3,7 @@ pub mod checksum;
 pub mod config;
 pub mod copy;
 pub mod delete;
+pub mod deletion;
 pub mod dial;
 pub mod enumeration;
 pub mod fs_capability;

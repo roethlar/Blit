@@ -4,25 +4,12 @@ use blit_core::fs_enum::FileFilter;
 use blit_core::generated::{DiskUsageEntry, FilesystemStatsResponse, FindEntry};
 use std::collections::HashMap;
 use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use sysinfo::Disks;
 use tokio::task;
 use tonic::Status;
 
 use super::util::{metadata_mtime_seconds, pathbuf_to_display, resolve_relative_path};
-
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct DeletionStats {
-    pub files: u64,
-    pub dirs: u64,
-}
-
-impl DeletionStats {
-    pub(crate) fn total(self) -> u64 {
-        self.files + self.dirs
-    }
-}
 
 pub(crate) fn sanitize_request_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, Status> {
     let mut sanitized = Vec::new();
@@ -47,7 +34,7 @@ pub(crate) async fn delete_rel_paths(
     module_path: PathBuf,
     canonical_root: PathBuf,
     rel_paths: Vec<PathBuf>,
-) -> Result<DeletionStats, Status> {
+) -> Result<blit_core::deletion::DeletionStats, Status> {
     task::spawn_blocking(move || delete_rel_paths_sync(&module_path, &canonical_root, rel_paths))
         .await
         .map_err(|err| Status::internal(format!("purge task failed: {}", err)))?
@@ -57,94 +44,35 @@ fn delete_rel_paths_sync(
     module_path: &Path,
     canonical_root: &Path,
     rel_paths: Vec<PathBuf>,
-) -> Result<DeletionStats, Status> {
-    let mut files = Vec::new();
-    let mut dirs = Vec::new();
+) -> Result<blit_core::deletion::DeletionStats, Status> {
+    let (files, dirs) = blit_core::deletion::classify_explicit_targets(
+        module_path,
+        canonical_root,
+        rel_paths,
+        "purge",
+    )
+    .map_err(deletion_status)?;
+    blit_core::deletion::execute_deletion_plan(
+        &files,
+        &dirs,
+        blit_core::deletion::DeletionOptions {
+            operation: "purge",
+            canonical_root: Some(canonical_root),
+            abort: None,
+            execute: true,
+            directory_mode: blit_core::deletion::DirectoryMode::Recursive,
+        },
+    )
+    .map_err(deletion_status)
+}
 
-    for rel in rel_paths {
-        if rel.as_os_str().is_empty() || rel == Path::new(".") {
-            continue;
+fn deletion_status(error: blit_core::deletion::DeletionError) -> Status {
+    match error {
+        error @ blit_core::deletion::DeletionError::Containment { .. } => {
+            Status::permission_denied(error.to_string())
         }
-
-        let target = module_path.join(&rel);
-        // F2: containment check before any filesystem operation.
-        // Verified against canonical_root so post-push-mutated
-        // module_path doesn't bypass the original boundary.
-        blit_core::path_safety::verify_contained(canonical_root, &target)
-            .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
-        let metadata = match std::fs::symlink_metadata(&target) {
-            Ok(meta) => meta,
-            Err(err) if err.kind() == ErrorKind::NotFound => continue,
-            Err(err) => {
-                return Err(Status::internal(format!(
-                    "stat {}: {}",
-                    target.display(),
-                    err
-                )));
-            }
-        };
-
-        if metadata.file_type().is_dir() {
-            dirs.push(rel);
-        } else {
-            files.push(rel);
-        }
+        error => Status::internal(error.to_string()),
     }
-
-    let mut stats = DeletionStats::default();
-
-    for rel in files {
-        let target = module_path.join(&rel);
-        #[cfg(windows)]
-        {
-            blit_core::win_fs::clear_readonly_recursive(&target);
-        }
-        match std::fs::remove_file(&target) {
-            Ok(_) => {
-                stats.files += 1;
-            }
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) if err.kind() == ErrorKind::IsADirectory => {
-                match std::fs::remove_dir_all(&target) {
-                    Ok(_) => {
-                        stats.dirs += 1;
-                    }
-                    Err(inner) if inner.kind() == ErrorKind::NotFound => {}
-                    Err(inner) => {
-                        return Err(Status::internal(format!(
-                            "remove_dir_all {}: {}",
-                            target.display(),
-                            inner
-                        )));
-                    }
-                }
-            }
-            Err(err) => {
-                return Err(Status::internal(format!(
-                    "remove_file {}: {}",
-                    target.display(),
-                    err
-                )));
-            }
-        }
-    }
-
-    for rel in dirs {
-        let target = module_path.join(&rel);
-        match std::fs::remove_dir_all(&target) {
-            Ok(_) => stats.dirs += 1,
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => {
-                return Err(Status::internal(format!(
-                    "remove_dir_all {}: {}",
-                    target.display(),
-                    err
-                )));
-            }
-        }
-    }
-
-    Ok(stats)
 }
 
 pub(crate) fn split_completion_prefix(raw: &str) -> Result<(PathBuf, String, String), Status> {
