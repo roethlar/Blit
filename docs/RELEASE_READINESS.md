@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** hosted run `29949207219`; repairs through `4062947`, 2026-07-22
+**As of:** hosted run `29950306815`; repairs through `2a27c4b`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -106,6 +106,15 @@ performance ceilings and hardware tuning remain post-release work.
   checksum-name guard turns red when mutated. The previously uploaded ARM
   macOS archive passed the full runner locally with SHA-256
   `a1913899649ca1a633306dcb6f5b727f66d254c1fd3763388ae6769828b5364d`.
+- Run `29950306815` at `0e61ac8` passed check and all three OS suites. Packaged
+  smoke passed on ARM macOS (`b5d9e94a…963e4f42`) and Linux
+  (`e962e8a0…4bc26792`). Windows started the packaged daemon and received the
+  exact configured module, but its standard canonical `\\?\C:\…` path spelling
+  did not string-compare equal to the ordinary `C:\…` spelling. `4927a05`
+  normalizes extended drive and UNC prefixes; its exact guard fails when the
+  normalization is removed and passes when restored. `2a27c4b` upgrades every
+  checkout plus artifact upload to the official Node-24 majors after the same
+  hosted logs identified both deprecated actions.
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
@@ -191,9 +200,9 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **Hosted install/startup smoke is pending.** The ARM macOS artifact passed
-   the new full runner locally; the exact `4062947` workflow must pass the same
-   bounded checks on Linux, ARM macOS, and Windows before each upload.
+1. **Hosted install/startup smoke is pending.** ARM macOS and Linux passed the
+   full runner at `0e61ac8`; `4927a05` fixes the Windows-only canonical-path
+   comparison. The next exact head must pass all three before each upload.
 2. **The final release-candidate head is pending.** The smoke implementation
    and truthful release notes must land, then the complete check/test/package/
    smoke matrix must pass at that exact clean commit.

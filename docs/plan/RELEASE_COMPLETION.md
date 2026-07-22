@@ -221,8 +221,10 @@ performance ratios are measured or graded.
 8. **rel-8 — bounded install/startup smoke `[~]`.** `4062947` verifies archive
    checksum/safe extraction, exact CLI/daemon build identity and help, owned
    daemon readiness, tiny local and loopback-remote byte integrity, and bounded
-   teardown before upload. The prior ARM macOS artifact passed locally; hosted
-   Linux/macOS/Windows proof remains. No throughput or large-write work.
+   teardown before upload. Hosted Linux and ARM macOS passed at `0e61ac8`;
+   `4927a05` fixes and mutation-proves Windows extended-path equivalence after
+   its daemon returned the correct module. Exact Windows proof remains. No
+   throughput or large-write work.
 9. **rel-9 — release-candidate audit.** Reconcile the ledger against exact CI,
    artifacts, smoke evidence, known limitations, and open findings. Prepare the
    exact refs/remotes for owner approval; do not publish.
