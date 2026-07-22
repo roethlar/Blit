@@ -27,7 +27,12 @@ fn test_remote_move_local_to_remote() {
         .arg(&dest_remote);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
-    assert!(output.status.success(), "blit move failed");
+    assert!(
+        output.status.success(),
+        "blit move failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify destination file exists at module root (merged).
     let dest_file = ctx.module_dir.join("move_me.txt");
