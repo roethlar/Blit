@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (rel-4 formal review fixes 6/6 complete)
+Last updated: 2026-07-22 (rel-5 progress fixes 1/3 complete)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -176,7 +176,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   blocked writer and has local red/green proof. Hosted Windows confirmation
   awaits owner-approved publication. Finding: `release-win-ci-handshake-stall-test`.
 - **Release blockers:** hosted Windows rel-1/rel-3/rel-4 confirmation,
-  incomplete progress, temporary-daemon startup diagnostics, and
+  progress fixes 2/3, temporary-daemon startup diagnostics, and
   artifact/install proof remain unresolved. See
   `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control

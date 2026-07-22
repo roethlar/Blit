@@ -13,13 +13,16 @@
 //! `docs/plan/ONE_TRANSFER_PATH.md` §Design (Delegated transfer) for
 //! the session reroute.
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use blit_core::generated::{
-    delegated_pull_progress::Payload as ProgressPayload, session_error, ComparisonMode,
-    DelegatedPullError, DelegatedPullProgress, DelegatedPullRequest, DelegatedPullStarted,
-    DelegatedPullSummary, ManifestBatch as ProtoManifestBatch, MirrorMode, TransferOperationSpec,
+    delegated_pull_progress::Payload as ProgressPayload, session_error, BytesProgress,
+    ComparisonMode, DelegatedPullError, DelegatedPullProgress, DelegatedPullRequest,
+    DelegatedPullStarted, DelegatedPullSummary, ManifestBatch as ProtoManifestBatch, MirrorMode,
+    TransferOperationSpec,
 };
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
 use blit_core::remote::transfer::operation_spec::NormalizedTransferOperation;
@@ -106,6 +109,57 @@ fn err_progress(phase: i32, message: impl Into<String>) -> DelegatedPullProgress
             upstream_message: message.into(),
             phase,
         })),
+    }
+}
+
+fn delegated_bytes_progress(bytes_completed: u64) -> DelegatedPullProgress {
+    DelegatedPullProgress {
+        payload: Some(ProgressPayload::BytesProgress(BytesProgress {
+            files_completed: 0,
+            files_total: 0,
+            bytes_completed,
+            bytes_total: 0,
+        })),
+    }
+}
+
+/// Run a delegated session while relaying cumulative bytes onto its response
+/// stream. Tick sends are non-blocking: a slow client may miss an intermediate
+/// snapshot, then receives the newest cumulative value on a later tick. The
+/// final changed value is sent before the caller can publish its summary.
+async fn relay_delegated_byte_progress<F, T>(
+    transfer: F,
+    tx: &mpsc::Sender<Result<DelegatedPullProgress, Status>>,
+    byte_progress: &blit_core::remote::transfer::ByteProgressSink,
+    tick: Duration,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    tokio::pin!(transfer);
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + tick, tick);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_emitted = 0u64;
+
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut transfer => {
+                let completed = byte_progress.load();
+                if completed > last_emitted {
+                    let _ = tx.send(Ok(delegated_bytes_progress(completed))).await;
+                }
+                return result;
+            }
+            _ = ticker.tick() => {
+                let completed = byte_progress.load();
+                if completed > last_emitted
+                    && tx.try_send(Ok(delegated_bytes_progress(completed))).is_ok()
+                {
+                    last_emitted = completed;
+                }
+            }
+        }
     }
 }
 
@@ -343,21 +397,26 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
             MirrorMode::Off
         },
         byte_progress: Some(byte_progress.clone()),
-        // The delegated dst daemon has no per-file progress consumer —
-        // its live lane is the jobs-row byte counter above — and its
-        // stderr is the daemon log, not an operator terminal, so dial
-        // traces stay off (otp-10b-2 fields; verb-side only).
+        // The byte sink feeds both the jobs row and the cumulative response
+        // bridge above. The daemon has no per-file consumer here, and its
+        // stderr is a log rather than an operator terminal, so dial traces
+        // stay off (otp-10b-2 fields; verb-side only).
         progress: None,
         trace_data_plane: false,
     };
-    let outcome = run_pull_session_with_client(client, &endpoint, dest_root, options)
-        .await
-        .map_err(|err| {
-            err_progress(
-                session_error_phase(&err) as i32,
-                format!("delegated transfer: {err:#}"),
-            )
-        })?;
+    let outcome = relay_delegated_byte_progress(
+        run_pull_session_with_client(client, &endpoint, dest_root, options),
+        tx,
+        byte_progress,
+        Duration::from_millis(super::core::DEFAULT_PROGRESS_TICK_MS),
+    )
+    .await
+    .map_err(|err| {
+        err_progress(
+            session_error_phase(&err) as i32,
+            format!("delegated transfer: {err:#}"),
+        )
+    })?;
 
     // Optional manifest_batch event for symmetry with normal pull
     // progress shape (CLIs may render an aggregate count).
@@ -414,6 +473,46 @@ mod tests {
     //! End-to-end byte-path isolation: the remote_remote.rs pins.
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn delegated_bytes_progress_emits_while_transfer_is_running_and_at_completion() {
+        let byte_progress = blit_core::remote::transfer::ByteProgressSink::new();
+        let relay_counter = byte_progress.clone();
+        let (tx, mut rx) = mpsc::channel(4);
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let relay = tokio::spawn(async move {
+            relay_delegated_byte_progress(
+                async { finish_rx.await.expect("finish signal") },
+                &tx,
+                &relay_counter,
+                Duration::from_millis(100),
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        byte_progress.report(1024);
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        let live = rx.try_recv().expect("live progress tick");
+        let ProgressPayload::BytesProgress(live) = live.expect("progress item").payload.unwrap()
+        else {
+            panic!("expected bytes progress");
+        };
+        assert_eq!(live.bytes_completed, 1024);
+        assert_eq!(live.files_completed, 0);
+
+        byte_progress.report(512);
+        finish_tx.send("done").expect("finish relay");
+        assert_eq!(relay.await.expect("relay task"), "done");
+        let final_update = rx.try_recv().expect("final progress update");
+        let ProgressPayload::BytesProgress(final_update) =
+            final_update.expect("progress item").payload.unwrap()
+        else {
+            panic!("expected bytes progress");
+        };
+        assert_eq!(final_update.bytes_completed, 1536);
+    }
 
     fn wire_spec() -> TransferOperationSpec {
         TransferOperationSpec {

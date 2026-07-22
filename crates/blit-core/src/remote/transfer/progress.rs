@@ -134,6 +134,12 @@ impl ByteProgressSink {
     pub fn report(&self, delta: u64) {
         self.counter.fetch_add(delta, Ordering::Relaxed);
     }
+
+    /// Read the cumulative byte count. Progress bridges use this to publish
+    /// periodic snapshots without owning a second counter.
+    pub fn load(&self) -> u64 {
+        self.counter.load(Ordering::Relaxed)
+    }
 }
 
 impl Default for ByteProgressSink {
@@ -259,7 +265,7 @@ mod tests {
         let sink = ByteProgressSink::new();
         sink.report(100);
         sink.report(50);
-        assert_eq!(sink.counter.load(Ordering::Relaxed), 150);
+        assert_eq!(sink.load(), 150);
     }
 
     #[test]

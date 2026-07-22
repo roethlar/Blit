@@ -170,9 +170,10 @@ performance ratios are measured or graded.
    allocation through metadata hydration. All six review corrections are fixed;
    current-head hosted Windows confirmation remains. Records:
    `.review/results/rel-4-windows-metadata-r1.claude.{json,verdict.md}`.
-5. **rel-5 — complete progress reporting.** Implement the three recorded
-   daemon/delegated progress gaps end to end, with producer, RPC, state-table,
-   CLI, and TUI guards.
+5. **rel-5 — complete progress reporting `[~ 1/3]`.** Delegated live byte
+   snapshots are implemented and mutation-proved through the existing RPC,
+   CLI, and TUI consumer chain. Next wire served-session byte counters, then
+   exact byte/file denominators through `ActiveJobs`.
 6. **rel-6 — full known-issue reconciliation.** Audit every unchecked/current
    `REVIEW.md`, STATE, bug-doc, ignored-test, and current-plan item against code.
    Fix each real product defect one commit at a time; close stale records only

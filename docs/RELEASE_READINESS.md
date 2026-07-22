@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** rel-4 formal review fixes 6/6, 2026-07-22
+**As of:** rel-5 progress fixes 1/3, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -52,6 +52,10 @@ performance ceilings and hardware tuning remain post-release work.
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
+- Delegated transfers now emit cumulative byte snapshots while the transfer is
+  live and once more before the summary when the final count changed. The
+  existing RPC consumer converts them to CLI/TUI deltas; disabling the periodic
+  producer makes the focused paused-time guard fail.
 
 ## Release blockers
 
@@ -69,9 +73,9 @@ performance ceilings and hardware tuning remain post-release work.
    the exact test and complete suite then passed, while the harness discarded
    stderr and therefore lost the cause. `tests-harness-stderr-blackhole` must
    capture the process error and any remaining startup failure must be fixed.
-3. **Progress reporting is incomplete.** Delegated progress can be silent and
-   served-session byte/file totals can remain zero through daemon, RPC, CLI,
-   and TUI consumers.
+3. **Progress reporting is incomplete.** Served-session byte counters and
+   daemon byte/file denominators can remain zero through daemon, RPC, CLI, and
+   TUI consumers. Delegated live byte reporting is fixed locally.
 4. **Current release artifacts are unproved.** The exact local head is not on
    GitHub, the latest published release-build jobs were skipped, and install /
    startup smoke checks for the produced CLI and daemon artifacts are not
