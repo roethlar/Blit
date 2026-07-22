@@ -1,0 +1,53 @@
+{
+  "record_type": "tactical_code_review",
+  "reviewer": {
+    "provider": "Anthropic",
+    "model": "claude-opus-4-8",
+    "cli": "Claude Code 2.1.217",
+    "reasoning_effort": "max"
+  },
+  "review_contract": {
+    "finding_ids": ["ldt-4-live-f14"],
+    "base_sha": "679253c7e2f12f4e313f0bfc26d2d044ce377e61",
+    "reviewed_sha": "8385d2334b155cd1044fb9c11fb3a33f2e8078e0",
+    "worktree": "/private/tmp/blit-opus-ldt4-f14-8385d23",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "7a84f4a9-dab8-496a-a509-f2a28880cce2",
+    "terminal_reason": "completed",
+    "authoritative_completion": "terminal structured output after production-contract tracing, focused verification, two independent mutations, exact restoration, and identity checks"
+  },
+  "structured_output": {
+    "verdict": "findings",
+    "guard_confirmed": true,
+    "base_sha": "679253c7e2f12f4e313f0bfc26d2d044ce377e61",
+    "reviewed_sha": "8385d2334b155cd1044fb9c11fb3a33f2e8078e0",
+    "summary": "The core fix is correct and exact: dial operations remain ADD/REMOVE while SOURCE control events require only DATA_PLANE_RESIZE_OP_ADD/REMOVE. Synthetic and production namespaces match, with no normalization, relaxation, or DESTINATION contract change. One Low rejection-test gap remained.",
+    "guard_proof": "The reviewer changed source_action back to dial shorthand. The suite failed in 27 tests at the intended first SOURCE resize mismatch; exact restoration returned all 88 analyzer tests green. As a coverage probe, deleting both SOURCE action comparisons left all 88 tests green.",
+    "findings": [
+      {
+        "id": "ldt-4-live-f14-r1-f1",
+        "severity": "LOW",
+        "title": "Reject SOURCE action relaxation instead of pinning fixture spelling alone",
+        "predicted_failure": "A future analyzer relaxation or normalization can pass all local tests and accept malformed SOURCE control-lane evidence during a hardware run."
+      }
+    ]
+  },
+  "checks": {
+    "analyzer_tests": "88 passed before and after restoration",
+    "required_guard": "source_action = action produced 16 failures plus 11 errors, all rooted at the intended SOURCE resize mismatch",
+    "coverage_probe": "replacing both SOURCE action comparisons with constant False left all 88 tests green",
+    "production_contract": "SOURCE uses protobuf as_str_name; dial observer remains ADD/REMOVE; DESTINATION custom actions unchanged",
+    "docs_gate": "pass",
+    "cargo_fmt": "pass",
+    "diagnostic_reanalysis": "not independently repeated by the reviewer; treated as evidence-only and non-accepting",
+    "independent_postcheck": "clean detached 8385d2334b155cd1044fb9c11fb3a33f2e8078e0 with exact reviewed hashes restored",
+    "sha256": {
+      "scripts/bench_ldt4_rigw.sh": "6b33590a2024d456e38c6ff7a9b955fefa9670454f0a45f3c863b582e85d4ab6",
+      "scripts/ldt4_rigw_analyze.py": "3dd4cac47f03823e4b8e5c4a074f1f185911dce7026227217e03596911a552ca",
+      "scripts/ldt4_rigw_analyze_test.py": "74470156f8922de8a9c13547d50c1ad49e7522b607ac849a2da4c4b25b917eee"
+    }
+  },
+  "policy_note": "This is tactical advisory code review, not a formal openreview acceptance verdict."
+}

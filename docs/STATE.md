@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (f14 candidate diagnostically validates retained arms)
+Last updated: 2026-07-22 (exact 7050a29 review clean; restaging next)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,7 +10,7 @@ Last updated: 2026-07-22 (f14 candidate diagnostically validates retained arms)
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — RE-REVIEW `ldt-4-live-f14-r1-f1`:** Opus confirmed the f14 core but proved deleting both action checks left 88 tests green. Two negative shorthand-rejection guards now fail independently when their comparison is disabled and return all 90 tests green after restoration. Re-review exact fix, then restage and rerun additively.
+- **NEXT ACTION — RESTAGE EXACT `7050a29`:** Opus confirmed the f14 core, admitted one Low rejection-test gap, and re-reviewed its two-guard fix clean with both independent mutations and all 90 tests green after restoration. Create a new complete-history bundle and detached q checkout, rerun native guards, then execute one fresh additive four-arm horizon session.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 HAS VALID DATA, NOT ACCEPTANCE:** exact fixed session `ldt4-20260721T224319Z-96a4e3b03caf` remains at `docs/bench/ldt4-rigw-2026-07-21/` (arm review 0, decision review 14, performance review 2). Exact sustained session `ldt4-20260722T001611Z-04e80082e12c` is retained and independently reproduced at `docs/bench/ldt4-rigw-sustained-2026-07-22/` (arm review 4, decision/performance review 0): role transitions matched empty, but all arms had zero tuner samples because the five-file workload queued before the first tick. Adaptive proof remains open; `q_to_windows_large` 1.197 and `q_to_windows_mixed` 1.131 remain separate performance findings.
@@ -28,7 +28,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted. Exact `96a4e3b` fixed evidence and exact `04e8008` f12 evidence remain `REVIEW_REQUIRED`, not acceptance. Exact `a0c3e3f` completed all four f13 horizon arms: q→Windows role pairs matched REMOVE 4→1, while Windows→q split ADD 4→9 versus REMOVE 4→1. The f14 candidate fixes only exact SOURCE action validation; diagnostic reanalysis reaches the expected arm/decision review instead of refusing. Opus confirmed the core and found one Low rejection-test gap; the two-guard fix is independently mutation-proved at 90 tests and awaits re-review. Nothing is graded until review, restaging, and a fresh run complete. Fixed-cell performance findings remain separate; formal Fable is held.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted. Exact `96a4e3b` fixed evidence and exact `04e8008` f12 evidence remain `REVIEW_REQUIRED`, not acceptance. Exact `a0c3e3f` completed all four f13 horizon arms: q→Windows role pairs matched REMOVE 4→1, while Windows→q split ADD 4→9 versus REMOVE 4→1. Exact `7050a29` fixes only SOURCE action validation and its rejection guards; diagnostic reanalysis reaches the expected arm/decision review instead of refusing. Opus confirmed the core, admitted one Low, and re-reviewed its independently mutation-proved 90-test fix clean. Nothing is graded until exact restaging and a fresh run complete. Fixed-cell performance findings remain separate; formal Fable is held.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -56,7 +56,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `96a4e3b` fixed evidence and exact `04e8008` f12 evidence are retained and independently reproduced. f12 role pairs match but had zero samples. Exact `a0c3e3f` then completed all four 40×1 GiB f13 arms and exposed real direction/role transition differences. The f14 exact SOURCE-action correction is implemented and diagnostically validates those retained arms. Opus confirmed it and admitted one Low rejection-test gap; the 90-test fix awaits re-review, then restage/rerun. Address fixed-cell performance separately. Formal Fable openreview is held.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `96a4e3b` fixed evidence and exact `04e8008` f12 evidence are retained and independently reproduced. f12 role pairs match but had zero samples. Exact `a0c3e3f` then completed all four 40×1 GiB f13 arms and exposed real direction/role transition differences. Exact `7050a29` corrects SOURCE-action validation and diagnostically validates those retained arms. Opus confirmed the core and re-reviewed its one admitted Low guard fix clean; restage/rerun remain. Address fixed-cell performance separately. Formal Fable openreview is held.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).

@@ -1,0 +1,44 @@
+{
+  "record_type": "tactical_code_re_review",
+  "reviewer": {
+    "provider": "Anthropic",
+    "model": "claude-opus-4-8",
+    "cli": "Claude Code 2.1.217",
+    "reasoning_effort": "max"
+  },
+  "review_contract": {
+    "finding_ids": ["ldt-4-live-f14-r1-f1"],
+    "base_sha": "8385d2334b155cd1044fb9c11fb3a33f2e8078e0",
+    "reviewed_sha": "7050a2997ac597a1b8982e7f4acbfa0b12572340",
+    "worktree": "/private/tmp/blit-opus-ldt4-f14-8385d23",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "7a84f4a9-dab8-496a-a509-f2a28880cce2",
+    "terminal_reason": "completed",
+    "authoritative_completion": "terminal structured output after focused fix inspection, two isolated mutations, exact restoration, and identity checks"
+  },
+  "structured_output": {
+    "verdict": "clean",
+    "guard_confirmed": true,
+    "base_sha": "8385d2334b155cd1044fb9c11fb3a33f2e8078e0",
+    "reviewed_sha": "7050a2997ac597a1b8982e7f4acbfa0b12572340",
+    "summary": "The Low finding is closed exactly. The delta adds only two independent negative analyzer tests; production analyzer and fixture bytes are unchanged, and no action namespace or contract moved.",
+    "guard_proof": "Disabling only the shared resize-event action comparison made exactly test_resize_proposed_rejects_dial_shorthand_action fail. Disabling only the source_settled comparison made exactly test_source_settled_rejects_dial_shorthand_action fail. Each restoration returned all 90 tests green and the worktree to exact reviewed hashes.",
+    "findings": []
+  },
+  "checks": {
+    "analyzer_tests": "90 passed before and after restoration",
+    "resize_guard": "one isolated fail-open mutation produced exactly one intended failure",
+    "settled_guard": "one isolated fail-open mutation produced exactly one intended failure",
+    "scope": "analyzer blob and all fixture, dial, and DESTINATION action bytes unchanged",
+    "docs_gate": "pass",
+    "independent_postcheck": "clean detached 7050a2997ac597a1b8982e7f4acbfa0b12572340 with exact reviewed hashes restored",
+    "sha256": {
+      "scripts/bench_ldt4_rigw.sh": "6b33590a2024d456e38c6ff7a9b955fefa9670454f0a45f3c863b582e85d4ab6",
+      "scripts/ldt4_rigw_analyze.py": "3dd4cac47f03823e4b8e5c4a074f1f185911dce7026227217e03596911a552ca",
+      "scripts/ldt4_rigw_analyze_test.py": "7326b7548f423990ea881673fa488ad5b838989e32478429572d04e5a9875c5c"
+    }
+  },
+  "policy_note": "This is tactical advisory code review, not a formal openreview acceptance verdict."
+}

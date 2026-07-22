@@ -454,8 +454,10 @@ advise but cannot accept the slice (D-2026-07-16-4).
    guard gap: deleting both SOURCE action comparisons still left all 88 tests
    green. `ldt-4-live-f14-r1-f1` adds independent negative guards for
    `resize_proposed` and `source_settled`; each fails alone when its comparison
-   is disabled, and restoration returns all 90 tests green. Re-review, exact
-   restaging, and one fresh additive rerun remain.
+   is disabled, and restoration returns all 90 tests green. The same Opus
+   session re-reviewed exact `7050a29`, independently reproduced both isolated
+   failures, restored reviewed hashes, and returned clean with no findings.
+   Exact restaging and one fresh additive rerun remain.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.

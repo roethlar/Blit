@@ -2,9 +2,9 @@
 
 **Severity**: LOW — exact committed behavior is correct, but deleting both
 SOURCE action comparisons still passed every analyzer test.
-**Status**: Candidate implemented; tactical re-review pending.
+**Status**: Closed by clean tactical re-review at `7050a29`.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: pending
+**Commit**: `7050a29`
 
 ## Evidence
 
@@ -65,8 +65,8 @@ green suite.
 
 ## Known gaps
 
-Full gates and tactical re-review remain. Exact restaging and live execution
-belong to parent `ldt-4-live-f14`.
+None. Exact restaging and live execution belong to parent
+`ldt-4-live-f14`, not this guard fix.
 
 ## Reviewer comments
 
@@ -77,3 +77,10 @@ Session `7a84f4a9-dab8-496a-a509-f2a28880cce2` reviewed exact resolved range
 returned this one Low finding, and reported `guard_confirmed: true` with a clean
 review worktree. The originally supplied long base SHA was invalid; short
 `679253c` resolved to the exact base recorded here.
+
+The same session re-reviewed exact
+`8385d2334b155cd1044fb9c11fb3a33f2e8078e0..7050a2997ac597a1b8982e7f4acbfa0b12572340`.
+It independently disabled each comparison in isolation, observed exactly its
+dedicated new test turn red, restored exact hashes, returned all 90 tests green,
+and reported clean with `guard_confirmed: true`. Records:
+`.review/results/ldt-4-live-f14-r{1,2}.opus*`.
