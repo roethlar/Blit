@@ -6165,6 +6165,7 @@ mod tests {
 
     struct PrepareFaultSource {
         inner: FsTransferSource,
+        fault_gate: Arc<DialTerminalTestGate>,
     }
 
     #[async_trait::async_trait]
@@ -6175,7 +6176,11 @@ mod tests {
             _unreadable_paths: Arc<StdMutex<Vec<String>>>,
         ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
             let (_tx, rx) = mpsc::channel(1);
-            let task = tokio::spawn(async { Err(eyre::eyre!("injected TCP source fault")) });
+            let fault_gate = Arc::clone(&self.fault_gate);
+            let task = tokio::spawn(async move {
+                fault_gate.hold().await;
+                Err(eyre::eyre!("injected TCP source fault"))
+            });
             (rx, SourceScan::new(task))
         }
 
@@ -7247,8 +7252,10 @@ mod tests {
                 },
                 local_apply: None,
             };
+            let fault_gate = DialTerminalTestGate::new();
             let source: Arc<dyn TransferSource> = Arc::new(PrepareFaultSource {
                 inner: FsTransferSource::new(src_root),
+                fault_gate: Arc::clone(&fault_gate),
             });
             let (source_transport, destination_transport) = transport::in_process_pair();
             let session = tokio::spawn(async move {
@@ -7261,6 +7268,19 @@ mod tests {
                     ),
                 )
             });
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                fault_gate.wait_until_entered(),
+            )
+            .await
+            .expect("source fault reached its deterministic gate");
+            wait_for_captured_phase(
+                &events,
+                SessionPhaseRole::Destination,
+                "socket_trace_attached",
+            )
+            .await;
+            fault_gate.release();
             let (source_result, destination_result) =
                 tokio::time::timeout(std::time::Duration::from_secs(30), session)
                     .await
