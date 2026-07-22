@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (all known review rows reconciled locally)
+Last updated: 2026-07-22 (hosted release guards passed; full-suite repair under validation)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -11,18 +11,13 @@ Last updated: 2026-07-22 (all known review rows reconciled locally)
     fresh `q`↔`netwatch-01` retry.
 
 - **NEXT ACTION — RELEASE BLOCKERS ONLY:** use `docs/RELEASE_READINESS.md`.
-  rel-1's deterministic Windows CI guard is fixed locally; hosted confirmation
-  awaits an owner-approved publication. rel-1b proves temporary-daemon identity;
-  rel-2 restores TCP overlap and shard-level need claiming. rel-3 traced the
-  Windows move timeout to the already-fixed nested-path echo and re-enabled its
-  test. rel-4 Windows metadata is implemented and cross-compiled; its hosted
-  runtime confirmation is publication-gated. rel-4's formal Opus review
-  admitted six corrections, now all fixed one per commit with focused proofs.
-  rel-5 carries exact byte/file totals and carrier outcome through daemon, CLI,
-  and TUI consumers. Temporary daemons now retain bounded stderr, include it in
-  startup failures, and retry transient early exits. rel-6 has closed the
-  design-review queue through `w10`; dirty build IDs are exact without docs
-  churn. The final handshake row is closed against its local deterministic fix.
+  Hosted Windows run `29944148295` at `28cf989` passed the deterministic
+  handshake guard, nested remote moves, and both local/remote attributes + ADS
+  guards. The same run exposed an ownerless terminal resize epoch in both role
+  layouts; Linux also lost the CLI error from a failed move assertion.
+  `309f8b6` mutation-proves and settles that shutdown handoff, and `f679a1a`
+  preserves future move diagnostics. Next: one clean hosted suite, then current
+  artifacts and install/startup smoke. No hardware transfer is required.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -111,13 +106,13 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 2a. **RELEASE P2 EVIDENCE: `docs/plan/OTP12_PERF_FINDINGS.md`.** P1 is closed
     by D-2026-07-22-2. P2 is owned by release slice rel-2 and must be attributed
     and fixed from retained/code evidence without a new physical matrix.
-2b. **RELEASE BLOCKER — Windows metadata hosted confirmation; optional local
-   ceiling work remains post-release.** Full attributes/ADS support is locally
-   implemented under contract v5 and strict Windows cross-compilation passes.
+2b. **WINDOWS RELEASE GUARDS RECORDED; full-suite closure remains.** Full
+   attributes/ADS support is implemented under contract v5; hosted run
+   `29944148295` at `28cf989` passed both local/remote single/tar metadata guards.
    - **`docs/bugs/windows-attrs-and-ads-lost-on-tar-path.md` (D-2026-07-13-3)**
      — historical Windows attributes + ADS loss on both measured routes was
      count-dependent. rel-4 now carries and applies both across every carrier;
-     tiny local/remote single/tar Windows guards await hosted execution.
+     its exact hosted filesystem guards passed.
    - **POST-RELEASE: `docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft,
      D-2026-07-13-2)** — local
      apply **does not scale** (8 workers buy 1.05×; robocopy gets ~2.2× from 8
@@ -175,14 +170,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Blocked / waiting (owner declarations and explicitly dated external blockers; checkpoints are owner-only)
 
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
-- **Published Windows CI is red as of GitHub head `dcf9245`:** rel-1 replaces
-  the nondeterministic 64 MiB socket-buffer premise with a two-byte in-memory
-  blocked writer and has local red/green proof. Hosted Windows confirmation
-  awaits owner-approved publication. The code finding
-  `release-win-ci-handshake-stall-test` is locally closed.
-- **Release blockers:** hosted Windows rel-1/rel-3/rel-4 confirmation and
-  artifact/install proof remain unresolved. See
-  `docs/RELEASE_READINESS.md`.
+- **Hosted guard evidence at `28cf989`:** Windows run `29944148295` passed the
+  rel-1 handshake, rel-3 nested-move, and rel-4 metadata guards before two
+  later live-dial role tests exposed the terminal resize-accounting defect now
+  fixed by `309f8b6`.
+- **Release blockers as of `f679a1a`:** a clean full hosted suite and current
+  artifact/install proof remain unresolved. See `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):
   `docs/bench/otp12c-win-2026-07-13/` (198 runs) and

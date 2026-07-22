@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** all known review rows reconciled locally, 2026-07-22
+**As of:** hosted guard evidence at `28cf989`; terminal resize repair at `f679a1a`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -38,8 +38,8 @@ performance ceilings and hardware tuning remain post-release work.
 - rel-3 reconciled the Windows directory-move timeout to the old daemon's
   `nested\c.txt` need-list echo, not a source-delete handle. `48c5a11` fixed
   that native-separator mismatch and the unified session later deleted the old
-  path. The exact nested push-move test is active on Windows again; current-head
-  hosted confirmation remains publication-gated.
+  path. The exact nested push-move test passed on hosted Windows in run
+  `29944148295` at `28cf989`.
 - rel-4 defines contract v5 and implements bounded Windows attributes and named
   `$DATA` streams across local, TCP, in-stream, tar, and resume carriers. The
   destination retains and validates manifest descriptors before applying any
@@ -47,8 +47,14 @@ performance ceilings and hardware tuning remain post-release work.
   destinations refuse before creating a partial file, and ADS bytes count as
   payload. The guards fail under metadata-diff and hash-drift mutations; local
   format, strict clippy, workspace tests, docs, and strict all-target Windows
-  cross-compilation pass. Actual Windows filesystem behavior is still pending
-  the publication-gated hosted run.
+  cross-compilation pass. Hosted Windows run `29944148295` at `28cf989` passed
+  both local and remote single/tar attributes + ADS filesystem guards.
+- Hosted run `29944148295` then exposed a terminal live-dial race in both role
+  layouts: shutdown could leave a resize claim pending without a driver owner.
+  `309f8b6` reconciles that ownerless claim at the unchanged membership after
+  the tuner, proposal queue, and wire-owned request are closed. Its new
+  deterministic two-layout guard failed before the repair and passes after it.
+  `f679a1a` also preserves stdout/stderr when the Linux remote-move guard fails.
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
@@ -134,20 +140,15 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **Hosted Windows confirmation is pending.** Published run `29584631185`
-   failed because Windows buffered the guard's 64 MiB loopback handshake.
-   rel-1 now exercises the same production timeout through a deterministic
-   two-byte/one-byte in-memory blocked writer with local mutation proof. The
-   exact fix has not run on hosted Windows because publication is owner-gated.
-   The re-enabled nested push-move test and rel-4's single/tar plus local/remote
-   metadata guards also need current-head Windows confirmation. The underlying
-   code findings are closed locally; this blocker is the missing hosted
-   evidence for `release-win-ci-handshake-stall-test`, `windows-move-tree-hang`,
-   and `windows-attrs-and-ads-lost-on-tar-path`.
-2. **Current release artifacts are unproved.** The exact local head is not on
-   GitHub, the latest published release-build jobs were skipped, and install /
-   startup smoke checks for the produced CLI and daemon artifacts are not
-   recorded.
+1. **A clean full hosted suite is pending after `309f8b6`.** The exact Windows
+   handshake, nested-move, and metadata release guards are proven at `28cf989`,
+   but that run failed later on the now-fixed terminal resize accounting; its
+   Linux job also failed a move command without retaining the command error.
+   Full Linux/macOS/Windows confirmation must pass together on the repaired
+   head before release.
+2. **Current release artifacts are unproved.** Release-build jobs were skipped
+   after the failed test matrix, and packaged archives, checksums, plus install /
+   startup smoke checks for the CLI and daemon are not recorded.
 
 ## Deferred until after release
 
