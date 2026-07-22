@@ -309,6 +309,11 @@ pub struct SourceInstruments {
     /// microscopic cancellation handoff deterministic in terminal tests.
     #[cfg(test)]
     pub(crate) dial_proposal_test_gate: Option<Arc<DialTerminalTestGate>>,
+    /// Pauses an accepted membership change before the SOURCE publishes its
+    /// dial settlement. Tests use this to prove manifest progress cannot
+    /// cancel the second half of a resize acknowledgement.
+    #[cfg(test)]
+    pub(crate) dial_membership_test_gate: Option<Arc<DialTerminalTestGate>>,
 }
 
 pub struct DestinationSessionConfig {
@@ -1502,6 +1507,8 @@ struct SourceResizeState {
     proposals: Option<mpsc::UnboundedReceiver<crate::dial::ResizeProposal>>,
     pending: Option<data_plane::PendingResize>,
     last_ack: Option<DataPlaneResizeAck>,
+    #[cfg(test)]
+    membership_test_gate: Option<Arc<DialTerminalTestGate>>,
 }
 
 impl SourceResizeState {
@@ -1633,6 +1640,8 @@ async fn source_send_half(
         proposals,
         pending: None,
         last_ack: None,
+        #[cfg(test)]
+        membership_test_gate: instruments.dial_membership_test_gate.clone(),
     };
 
     let result: Result<TransferSummary> = async {
@@ -1746,19 +1755,50 @@ async fn source_send_half(
                     continue;
                 }
 
+                // Select only the next raw input. Processing a resize ACK can
+                // await socket acquisition and elastic-member admission; if
+                // that work lives inside a select arm's future, a concurrently
+                // ready manifest header can cancel it after membership changed
+                // but before the dial settles. Branch bodies run only after
+                // the losing futures are dropped, so an accepted ACK now
+                // completes as one cancellation-safe state transition.
                 let next_header = tokio::select! {
                     biased;
-                    input = wait_for_source_input(
-                        &mut events,
-                        &mut pending,
-                        &mut resume,
-                        &mut need_complete,
-                        data_plane.as_ref(),
-                        tx,
-                        &mut resize,
-                        small_file_probe.as_ref(),
-                    ) => {
-                        input?;
+                    event = events.recv() => {
+                        let event = event.ok_or_else(|| {
+                            eyre::Report::new(SessionFault::internal(
+                                "source receive half ended during manifest scan",
+                            ))
+                        })?;
+                        process_source_event(
+                            event,
+                            &mut pending,
+                            &mut resume,
+                            &mut need_complete,
+                            data_plane.as_ref(),
+                            &mut resize,
+                            small_file_probe.as_ref(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                    proposal = async {
+                        match resize.proposals.as_mut() {
+                            Some(proposals) => proposals.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        match proposal {
+                            Some(proposal) => {
+                                let dp = data_plane.as_ref().ok_or_else(|| {
+                                    eyre::Report::new(SessionFault::internal(
+                                        "live dial proposed a resize without a TCP data plane",
+                                    ))
+                                })?;
+                                send_resize_proposal(dp, tx, proposal, &mut resize).await?;
+                            }
+                            None => resize.proposals = None,
+                        }
                         continue;
                     }
                     header = header_rx.recv() => header,
@@ -2373,6 +2413,10 @@ async fn process_source_event(
                         pending_r.op.as_str_name(),
                         pending_r.target_streams
                     ))));
+                }
+                #[cfg(test)]
+                if let Some(gate) = &resize.membership_test_gate {
+                    gate.hold().await;
                 }
                 dp.dial()
                     .resize_settled(pending_r.epoch, pending_r.target_streams as usize, true);
@@ -5766,6 +5810,7 @@ mod tests {
             proposals: None,
             pending: None,
             last_ack: Some(settled),
+            membership_test_gate: None,
         };
         assert!(replay
             .take_pending_for_ack(&settled)
@@ -5781,6 +5826,7 @@ mod tests {
             proposals: None,
             pending: Some(pending_resize(DataPlaneResizeOp::Add, 2, 6)),
             last_ack: None,
+            membership_test_gate: None,
         };
         let future = DataPlaneResizeAck {
             epoch: 3,
@@ -6032,6 +6078,66 @@ mod tests {
                 .await
                 .map_err(|_| eyre::eyre!("payload test gate closed"))?;
             permit.forget();
+            self.inner.prepare_payload(payload).await
+        }
+
+        async fn check_availability(
+            &self,
+            headers: Vec<FileHeader>,
+            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        ) -> Result<Vec<FileHeader>> {
+            self.inner
+                .check_availability(headers, unreadable_paths)
+                .await
+        }
+
+        async fn open_file(
+            &self,
+            header: &FileHeader,
+        ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+            self.inner.open_file(header).await
+        }
+
+        fn root(&self) -> &Path {
+            self.inner.root()
+        }
+    }
+
+    /// Holds manifest delivery after the first entry so a resize ACK can be
+    /// paused mid-settlement, then makes the next header ready while that ACK
+    /// is still being processed.
+    struct ResizeDuringScanSource {
+        inner: FsTransferSource,
+        gate: Arc<DialTerminalTestGate>,
+    }
+
+    #[async_trait::async_trait]
+    impl TransferSource for ResizeDuringScanSource {
+        fn scan(
+            &self,
+            filter: Option<crate::fs_enum::FileFilter>,
+            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+            let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
+            let (tx, rx) = mpsc::channel(64);
+            let gate = Arc::clone(&self.gate);
+            let forwarder = tokio::spawn(async move {
+                let mut forwarded = 0usize;
+                while let Some(header) = inner_rx.recv().await {
+                    if tx.send(header).await.is_err() {
+                        return;
+                    }
+                    forwarded += 1;
+                    if forwarded == 1 {
+                        gate.hold().await;
+                    }
+                }
+            });
+            scan.add_auxiliary(forwarder);
+            (rx, scan)
+        }
+
+        async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
             self.inner.prepare_payload(payload).await
         }
 
@@ -6771,6 +6877,93 @@ mod tests {
         for role in [TransferRole::Source, TransferRole::Destination] {
             run_unsent_terminal_resize(role, 0.0, true).await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn manifest_progress_cannot_cancel_an_accepted_resize_settlement() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("source dir");
+        std::fs::create_dir_all(&dst_root).expect("destination dir");
+        std::fs::write(src_root.join("a.bin"), b"a").expect("first fixture");
+        std::fs::write(src_root.join("b.bin"), b"b").expect("second fixture");
+
+        let scan_gate = DialTerminalTestGate::new();
+        let membership_gate = DialTerminalTestGate::new();
+        let (sample_tx, sample_rx) = mpsc::unbounded_channel();
+        let source: Arc<dyn TransferSource> = Arc::new(ResizeDuringScanSource {
+            inner: FsTransferSource::new(src_root),
+            gate: Arc::clone(&scan_gate),
+        });
+        let source_cfg = SourceSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::Responder,
+            plan_options: PlanOptions::default(),
+            data_plane_host: None,
+            instruments: SourceInstruments {
+                dial_test_samples: Some(Arc::new(StdMutex::new(Some(sample_rx)))),
+                dial_membership_test_gate: Some(Arc::clone(&membership_gate)),
+                ..Default::default()
+            },
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::initiator(SessionOpen {
+                initiator_role: TransferRole::Destination as i32,
+                compare_mode: ComparisonMode::SizeMtime as i32,
+                in_stream_bytes: false,
+                ..Default::default()
+            }),
+            data_plane_host: Some("127.0.0.1".to_string()),
+            receiver_capacity: Some(constrained_profile(17)),
+            instruments: Default::default(),
+            local_apply: None,
+        };
+        let (source_transport, destination_transport) = transport::in_process_pair();
+        let session = tokio::spawn(async move {
+            tokio::join!(
+                run_source(source_cfg, source_transport, source),
+                run_destination(
+                    dest_cfg,
+                    destination_transport,
+                    DestinationTarget::Fixed(dst_root)
+                ),
+            )
+        });
+
+        scan_gate.wait_until_entered().await;
+        for _ in 0..3 {
+            let observed = submit_dial_sample(&sample_tx, 1024, 0.0).await;
+            assert_eq!(observed.proposal, None);
+        }
+        let (reply, _pending_reply) = tokio::sync::oneshot::channel();
+        sample_tx
+            .send(DialTestSample {
+                delta_bytes: 1024,
+                blocked_ratio: 0.0,
+                reply,
+            })
+            .expect("test tuner remains alive");
+        membership_gate.wait_until_entered().await;
+
+        // Make the next header ready while membership is already 5 but the
+        // dial still says 4. The manifest scan must not cancel the selected
+        // ACK-processing branch at this point.
+        scan_gate.release();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        membership_gate.release();
+
+        let (source_result, destination_result) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), session)
+                .await
+                .expect("resize-during-scan session timed out")
+                .expect("resize-during-scan task panicked");
+        let source_summary = source_result.expect("source succeeds");
+        let destination = destination_result.expect("destination succeeds");
+        assert_eq!(source_summary, destination.summary);
+        assert_eq!(source_summary.files_transferred, 2);
+        assert_eq!(destination.data_plane_streams, Some(5));
     }
 
     async fn run_accepted_terminal_resize(initiator_role: TransferRole, op: DataPlaneResizeOp) {

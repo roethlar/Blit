@@ -651,6 +651,8 @@ pub async fn run_local_session(
             dial_terminal_test_gate: None,
             #[cfg(test)]
             dial_proposal_test_gate: None,
+            #[cfg(test)]
+            dial_membership_test_gate: None,
         },
     };
     let dest_cfg = DestinationSessionConfig {
@@ -933,6 +935,8 @@ mod tests {
                 dial_terminal_test_gate: None,
                 #[cfg(test)]
                 dial_proposal_test_gate: None,
+                #[cfg(test)]
+                dial_membership_test_gate: None,
             },
         };
         let dest_cfg = DestinationSessionConfig {
