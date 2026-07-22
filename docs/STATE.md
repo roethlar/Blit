@@ -80,8 +80,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Queue (ordered)
 
 1. **`docs/plan/RELEASE_COMPLETION.md` (ACTIVE, D-2026-07-22-3).** No hardware
-   work. First repair the deterministic Windows CI guard, then fix every
-   remaining release blocker one per commit and prove current artifacts.
+   work. Repair each hosted cross-platform failure one per commit, then prove
+   the complete suite and current artifacts.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).
@@ -106,7 +106,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 2a. **RELEASE P2 EVIDENCE: `docs/plan/OTP12_PERF_FINDINGS.md`.** P1 is closed
     by D-2026-07-22-2. P2 is owned by release slice rel-2 and must be attributed
     and fixed from retained/code evidence without a new physical matrix.
-2b. **WINDOWS RELEASE GUARDS RECORDED; full-suite closure remains.** Full
+2b. **WINDOWS RELEASE GUARDS RECORDED; full-suite defects remain.** Full
    attributes/ADS support is implemented under contract v5; hosted run
    `29944148295` at `28cf989` passed both local/remote single/tar metadata guards.
    - **`docs/bugs/windows-attrs-and-ads-lost-on-tar-path.md` (D-2026-07-13-3)**
@@ -170,12 +170,13 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Blocked / waiting (owner declarations and explicitly dated external blockers; checkpoints are owner-only)
 
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
-- **Hosted guard evidence at `28cf989`:** Windows run `29944148295` passed the
-  rel-1 handshake, rel-3 nested-move, and rel-4 metadata guards before two
-  later live-dial role tests exposed the terminal resize-accounting defect now
-  fixed by `309f8b6`.
-- **Release blockers as of `f679a1a`:** a clean full hosted suite and current
-  artifact/install proof remain unresolved. See `docs/RELEASE_READINESS.md`.
+- **Hosted run `29945332738` at `025d61e`:** docs, check, and Linux passed.
+  macOS exposed a manifest-reply scheduling race fixed by `d08741b`; Windows
+  exposed a separate source-pipeline failure whose hidden worker cause is now
+  preserved by `833a859`. The exact causal rerun remains pending.
+- **Release blockers as of `833a859`:** fix the revealed Windows worker cause,
+  pass one full hosted suite, then prove artifacts/install/startup. See
+  `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):
   `docs/bench/otp12c-win-2026-07-13/` (198 runs) and

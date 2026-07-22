@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** hosted guard evidence at `28cf989`; terminal resize repair at `f679a1a`, 2026-07-22
+**As of:** hosted run `29945332738`; repairs through `833a859`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -55,6 +55,15 @@ performance ceilings and hardware tuning remain post-release work.
   the tuner, proposal queue, and wire-owned request are closed. Its new
   deterministic two-layout guard failed before the repair and passes after it.
   `f679a1a` also preserves stdout/stderr when the Linux remote-move guard fails.
+- Hosted run `29945332738` passed docs, formatting, strict lint, and Linux. Its
+  macOS failure was a source-side scheduling race: the destination could answer
+  a queued `ManifestComplete` before the source resumed to mark it sent.
+  `d08741b` marks the ordered queue boundary before awaiting the send; a valid
+  push and the genuinely-premature-message guard both pass locally. Windows
+  then failed a source-initiated 10,000-file role guard after its send pipeline
+  closed, but the session replaced the worker cause with that queue symptom.
+  `833a859` restores the existing first-error contract; its mutation guard fails
+  with the generic symptom and passes when the worker cause is preserved.
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
@@ -140,12 +149,11 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **A clean full hosted suite is pending after `309f8b6`.** The exact Windows
-   handshake, nested-move, and metadata release guards are proven at `28cf989`,
-   but that run failed later on the now-fixed terminal resize accounting; its
-   Linux job also failed a move command without retaining the command error.
-   Full Linux/macOS/Windows confirmation must pass together on the repaired
-   head before release.
+1. **The Windows source-pipeline cause and a clean full hosted suite are
+   pending after `833a859`.** The exact handshake, nested-move, metadata, and
+   destination-initiated 10,000-file guards are proven on hosted Windows. The
+   next exact run must expose the source-initiated worker cause; that defect
+   must be fixed, then Linux/macOS/Windows must pass together before release.
 2. **Current release artifacts are unproved.** Release-build jobs were skipped
    after the failed test matrix, and packaged archives, checksums, plus install /
    startup smoke checks for the CLI and daemon are not recorded.
