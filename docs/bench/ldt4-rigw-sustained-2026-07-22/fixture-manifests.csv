@@ -1,0 +1,3 @@
+direction,fixture,source_manifest
+q_to_windows,sustained,manifests/source/q_to_windows_sustained.csv
+windows_to_q,sustained,manifests/source/windows_to_q_sustained.csv

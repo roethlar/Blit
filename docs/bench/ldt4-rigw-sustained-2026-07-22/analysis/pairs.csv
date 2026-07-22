@@ -1,0 +1,3 @@
+cell,pair,source_init_ms,destination_init_ms,destination_minus_source_ms,slower_faster_ratio,source_peak,destination_peak,source_final,destination_final,source_adds,destination_adds,source_removes,destination_removes,source_operations,destination_operations,source_reasons,destination_reasons,source_reason_sequence,destination_reason_sequence,decision_differences,trace_timing_differences,decision_verdict
+q_to_windows_sustained,1,6412,4375,-2037,1.4656,4,4,4,4,0,0,0,0,[],[],{},{},[],[],,,TRANSITIONS_MATCH
+windows_to_q_sustained,1,20670,4616,-16054,4.477902946273830155979202773,4,4,4,4,0,0,0,0,[],[],{},{},[],[],,,TRANSITIONS_MATCH

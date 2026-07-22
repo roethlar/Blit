@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — the valid rig-W matrix completes before the live
 controller can change membership, so ldt-4 cannot prove adaptive ADD/REMOVE
 or role invariance under an actual transition.
-**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and exactly staged; live supplement pending.
+**Status**: Live run complete and safely `REVIEW_REQUIRED`; the five-file workload queued before the first tuner tick, so a new workload-shape finding is next.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `04e80082e12ce9836eda43afc70fb3b2d0eb07c9`
 
@@ -99,9 +99,12 @@ None.
 
 ## Known gaps
 
-One fresh quiet four-arm rig-W supplement remains. The two fixed-cell
-performance findings from the valid 96-arm run stay separate and cannot be
-hidden by the longer diagnostic payload.
+The structurally valid live supplement did not satisfy this finding's adaptive
+observable: all four arms completed, but every arm had zero tuner samples and
+no accepted ADD. A new finding must keep SOURCE payload admission backpressured
+across tuner ticks without exceeding q's additive retained-space floor. The two
+fixed-cell performance findings from the valid 96-arm run stay separate and
+cannot be hidden by a diagnostic payload.
 
 ## Reviewer comments
 
@@ -126,3 +129,12 @@ commits and no replacement refs, and passes native Bash 3.2 syntax, the
 four-arm no-SSH self-test, and all 81 analyzer tests. The bundle also carries
 the later review-record commit, but executable code remains pinned to the
 reviewed candidate.
+
+Live session `ldt4-20260722T001611Z-04e80082e12c` completed all four arms with
+no session void and normal byte-exact Windows restoration. Exact and
+independently reproduced analysis is `REVIEW_REQUIRED`: arm review 4, decision
+review 0, performance review 0. Every arm stayed at floor = peak = final = 4
+with zero samples. SOURCE received terminal demand in 3.1–5.2 ms and sealed
+membership in 3.3–5.4 ms, long before its 4.3–20.6 second data-plane drain
+completed; five files were fully queued before the first 500 ms tuner tick.
+Retained evidence: `docs/bench/ldt4-rigw-sustained-2026-07-22/`.

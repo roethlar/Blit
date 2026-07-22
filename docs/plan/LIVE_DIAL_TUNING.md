@@ -416,7 +416,14 @@ advise but cannot accept the slice (D-2026-07-16-4).
    bound to the original evidence digest, preserving its fixed matrix and
    avoiding another additive 96-arm payload-retention cost. Exact `04e8008` is
    mutation-proved, full-gate green, tactically reviewed clean, and additively
-   staged on q; live execution remains.
+   staged on q. Session `ldt4-20260722T001611Z-04e80082e12c` completed all
+   four arms with normal restoration, but exact independently reproduced
+   analysis is `REVIEW_REQUIRED`: arm review 4, decision/performance review 0.
+   Each pair matched empty operations; all arms had zero samples because five
+   files reached terminal SOURCE demand and queued before the first 500 ms
+   tuner tick, even while bytes drained for 4.3–20.6 seconds. A new finding
+   must keep admission backpressured across required busy ticks within q's
+   additive retained-space floor.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.

@@ -1,0 +1,102 @@
+{
+  "arm_count": 4,
+  "arm_review_count": 4,
+  "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+  "cells": [
+    {
+      "cell": "q_to_windows_sustained",
+      "decision_differences": [],
+      "destination_init_ms": "4375",
+      "destination_operations": [],
+      "source_init_ms": "6412",
+      "source_operations": [],
+      "trace_timing_differences": [],
+      "verdict": "TRANSITIONS_MATCH"
+    },
+    {
+      "cell": "windows_to_q_sustained",
+      "decision_differences": [],
+      "destination_init_ms": "4616",
+      "destination_operations": [],
+      "source_init_ms": "20670",
+      "source_operations": [],
+      "trace_timing_differences": [],
+      "verdict": "TRANSITIONS_MATCH"
+    }
+  ],
+  "decision_review_count": 0,
+  "fixture_manifests": [
+    {
+      "bytes": 5368709120,
+      "direction": "q_to_windows",
+      "files": 5,
+      "fixture": "sustained",
+      "path": "manifests/source/q_to_windows_sustained.csv",
+      "sha256": "a8f37c788f34339d0ca69ae3468f56baf661c0f69d64ee5e3f52852b307de57c"
+    },
+    {
+      "bytes": 5368709120,
+      "direction": "windows_to_q",
+      "files": 5,
+      "fixture": "sustained",
+      "path": "manifests/source/windows_to_q_sustained.csv",
+      "sha256": "a8f37c788f34339d0ca69ae3468f56baf661c0f69d64ee5e3f52852b307de57c"
+    }
+  ],
+  "floor_streams_observed": 4,
+  "harness_sha": "04e80082e12ce9836eda43afc70fb3b2d0eb07c9",
+  "input_file_count": 66,
+  "input_inventory_sha256": "9e939800a282a057415e3019df19ba144e0d32639690d4744a2da0f1838b684c",
+  "matrix": "sustained",
+  "no_sample_arm_count": 4,
+  "pair_count": 2,
+  "parent_evidence": "docs/bench/ldt4-rigw-2026-07-21",
+  "parent_inventory_sha256": "713cb4624e6f64a3863b67101fb9a3f3df288306d3e6f418c19501428711990b",
+  "parent_session": "ldt4-20260721T224319Z-96a4e3b03caf",
+  "performance_materiality_ratio": null,
+  "performance_review_count": 0,
+  "preselected_worker_target": null,
+  "receiver_safety_ceiling_observed": 32,
+  "schema": 1,
+  "staged_binaries": [
+    {
+      "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+      "build_id": "406a7e585459",
+      "endpoint": "q",
+      "role": "client",
+      "runtime_path": "/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit",
+      "sha256": "9a7358e3dadf5d9564911de49ff3d3c3d0261ddb1b1ac6dd84cb54eb9dbe3276",
+      "staged_path": "/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit"
+    },
+    {
+      "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+      "build_id": "406a7e585459",
+      "endpoint": "q",
+      "role": "daemon",
+      "runtime_path": "/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit-daemon",
+      "sha256": "220db3d7d5f29817a3c37a8c53b60543cc71fa59910dcf10b13d64c06d498a05",
+      "staged_path": "/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit-daemon"
+    },
+    {
+      "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+      "build_id": "406a7e585459",
+      "endpoint": "windows",
+      "role": "client",
+      "runtime_path": "D:/blit-test/bins/406a7e5/blit.exe",
+      "sha256": "772a8a3ffe2279b1fccb4e4ca64da1ec062a6f15d43d0a93bbdf97e3dae7af10",
+      "staged_path": "D:/blit-test/bins/406a7e5/blit.exe"
+    },
+    {
+      "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+      "build_id": "406a7e585459",
+      "endpoint": "windows",
+      "role": "daemon",
+      "runtime_path": "D:/blit-test/bins/active/blit-daemon.exe",
+      "sha256": "ae414e649cf64f042f9d2a61639371c57d2fc3107cc426fe5a27a057b6630322",
+      "staged_path": "D:/blit-test/bins/406a7e5/blit-daemon.exe"
+    }
+  ],
+  "status": "REVIEW_REQUIRED",
+  "timing_rule": "endpoint-local elapsed_ns only; no cross-host clock subtraction",
+  "trace_timing_difference_count": 0
+}

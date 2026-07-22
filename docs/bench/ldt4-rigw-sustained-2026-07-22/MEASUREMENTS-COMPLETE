@@ -1,0 +1,5 @@
+artifact_sha=406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77
+harness_sha=04e80082e12ce9836eda43afc70fb3b2d0eb07c9
+matrix=sustained
+arm_count=4
+parent_inventory_sha256=713cb4624e6f64a3863b67101fb9a3f3df288306d3e6f418c19501428711990b

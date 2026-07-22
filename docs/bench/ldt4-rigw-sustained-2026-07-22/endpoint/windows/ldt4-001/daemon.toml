@@ -1,0 +1,9 @@
+[daemon]
+bind = "0.0.0.0"
+port = 9031
+no_mdns = true
+
+[[module]]
+name = "ldt4"
+path = "D:/blit-test/ldt4-sessions/ldt4-20260722T001611Z-04e80082e12c"
+read_only = false
