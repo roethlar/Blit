@@ -457,7 +457,13 @@ advise but cannot accept the slice (D-2026-07-16-4).
    is disabled, and restoration returns all 90 tests green. The same Opus
    session re-reviewed exact `7050a29`, independently reproduced both isolated
    failures, restored reviewed hashes, and returned clean with no findings.
-   Exact restaging and one fresh additive rerun remain.
+   Exact `7050a29` is staged through new complete-history bundle
+   `/Users/michael/blit-ldt4-stage-7050a29.bundle` (SHA-256
+   `f885f21dfc35cb7c47a2778c6cddae5552e51b46f8ee3b909b1f9670edc87e00`)
+   and clean detached q checkout
+   `/Users/michael/Dev/blit_v2_harness_7050a29`. q's native Bash 3.2
+   syntax/self-test and all 90 analyzer tests pass. One fresh additive rerun
+   remains.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.
