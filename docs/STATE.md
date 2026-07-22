@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (valid horizon evidence recorded; order confound next)
+Last updated: 2026-07-22 (horizon-order experiment registered as f15)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,7 +10,7 @@ Last updated: 2026-07-22 (valid horizon evidence recorded; order confound next)
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — OWN HORIZON ORDER/CACHE CONFOUND:** exact `7050a29` fresh session `ldt4-20260722T022350Z-7050a2997ac5` is structurally valid and independently reproduced at `docs/bench/ldt4-rigw-horizon-2026-07-22/`. q→Windows matched REMOVE 4→1; Windows→q split ADD 4→10 versus REMOVE 4→1, but the fixed order makes the first Windows-source arm cold after 80 GiB of preceding destination writes and the second warm. Register a reviewed reversed-order supplement before changing controller policy.
+- **NEXT ACTION — IMPLEMENT `ldt-4-live-f15`:** exact `7050a29` fresh session `ldt4-20260722T022350Z-7050a2997ac5` is structurally valid and independently reproduced at `docs/bench/ldt4-rigw-horizon-2026-07-22/`. q→Windows matched REMOVE 4→1; Windows→q split ADD 4→10 versus REMOVE 4→1, but the fixed order makes the first Windows-source arm cold after 80 GiB of preceding destination writes and the second warm. f15 registers a separately bound `horizon_order` supplement that reverses both pairs and classifies order tracking versus role tracking before any controller change.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 HAS VALID DATA, NOT ACCEPTANCE:** exact fixed session `ldt4-20260721T224319Z-96a4e3b03caf`, sustained session `ldt4-20260722T001611Z-04e80082e12c`, and horizon session `ldt4-20260722T022350Z-7050a2997ac5` are independently reproduced under `docs/bench/`. The horizon exercised real resize: q→Windows matched REMOVE 4→1, while Windows→q split ADD 4→10 versus REMOVE 4→1 and 45.3 versus 34.7 seconds. Its fixed schedule confounds role with source-cache/order, so a reversed-order causal check precedes any policy change. Adaptive proof remains open; `q_to_windows_large` 1.197 and `q_to_windows_mixed` 1.131 remain separate performance findings.
@@ -28,7 +28,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted. Exact `96a4e3b`, `04e8008`, and fresh `7050a29` sessions are retained and independently reproduced. The horizon run proves admission/resize but is `REVIEW_REQUIRED`: q→Windows matched REMOVE 4→1; Windows→q split ADD 4→10 versus REMOVE 4→1, and the ADD arm was slower. The same split repeated in the earlier void run, but both used the same order after 80 GiB of Windows destination writes, so cache/order remains confounded with role. Reverse the order under a reviewed additive supplement before changing policy. Fixed-cell performance findings remain separate; formal Fable is held.
+- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted. Exact `96a4e3b`, `04e8008`, and fresh `7050a29` sessions are retained and independently reproduced. The horizon run proves admission/resize but is `REVIEW_REQUIRED`: q→Windows matched REMOVE 4→1; Windows→q split ADD 4→10 versus REMOVE 4→1, and the ADD arm was slower. The same split repeated in the earlier void run, but both used the same order after 80 GiB of Windows destination writes, so cache/order remains confounded with role. `ldt-4-live-f15` now owns the reviewed additive order reversal; no controller change is in scope. Fixed-cell performance findings remain separate; formal Fable is held.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -56,7 +56,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `96a4e3b`, `04e8008`, and fresh `7050a29` evidence are retained and independently reproduced. The valid horizon session exercised resize but its Windows→q ADD 4→10 versus REMOVE 4→1 split remains confounded by fixed cold/warm source order. Register/review/run a reversed-order supplement before any policy change, then address fixed-cell performance separately. Formal Fable openreview is held.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `96a4e3b`, `04e8008`, and fresh `7050a29` evidence are retained and independently reproduced. The valid horizon session exercised resize but its Windows→q ADD 4→10 versus REMOVE 4→1 split remains confounded by fixed cold/warm source order. Implement/review/run `ldt-4-live-f15`'s registered `horizon_order` supplement before any policy change, then address fixed-cell performance separately. Formal Fable openreview is held.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).

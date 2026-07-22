@@ -473,6 +473,14 @@ advise but cannot accept the slice (D-2026-07-16-4).
    of destination writes and the second immediately rereads the same 40 GiB
    source. A new reviewed finding must reverse pair order before attributing
    the split to socket layout or changing controller policy.
+   `ldt-4-live-f15` registers that causal check as a distinct
+   `horizon_order` matrix bound to the valid horizon inventory. It reverses
+   both role pairs under the unchanged artifact, fixture, volumes, and policy,
+   then classifies the Windows→q result as order tracking, role tracking, or
+   inconclusive only if the reversed q→Windows control remains stable. It must
+   pass mutation-sensitive analyzer/harness guards and tactical Opus 4.8/max
+   review before additive staging; no outcome directly authorizes a controller
+   change or regrades the fixed-cell findings.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.
