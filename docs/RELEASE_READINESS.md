@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** filter-normalization record reconciled, 2026-07-22
+**As of:** wire metadata/path helpers consolidated, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -91,6 +91,11 @@ performance ceilings and hardware tuning remain post-release work.
   deletion converts through that helper, and the old hand-mapped push handler
   was deleted at the one-path cutover. Existing malformed-glob and two-role
   filter/mirror guards pass.
+- Filesystem-to-wire metadata and request-path conversion now have one owner in
+  blit-core. Transfer manifests, daemon admin responses, delegated requests,
+  app listings, and TUI local rows share the same signed-mtime and POSIX-path
+  rules; Unix transfer permissions share the same owner as well. The old
+  per-crate converters and manual slash joins are deleted.
 
 ## Release blockers
 

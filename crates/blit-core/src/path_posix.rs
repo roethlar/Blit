@@ -43,6 +43,17 @@ pub fn relative_path_to_posix(path: &Path) -> String {
         .join("/")
 }
 
+/// Render a relative path for request fields whose module-root identity is
+/// `"."` rather than the manifest convention's empty string.
+pub fn request_path_to_posix(path: &Path) -> String {
+    let path = relative_path_to_posix(path);
+    if path.is_empty() {
+        ".".to_string()
+    } else {
+        path
+    }
+}
+
 /// Render a relative path expressed as a string (e.g. user input or a
 /// wire-supplied value of unknown provenance) as canonical POSIX form,
 /// applying the same component-aware semantics as
@@ -97,6 +108,19 @@ mod tests {
     fn nested_relative_path_via_pathbuf() {
         let p: PathBuf = ["foo", "bar", "baz.txt"].iter().collect();
         assert_eq!(relative_path_to_posix(&p), "foo/bar/baz.txt");
+    }
+
+    #[test]
+    fn request_path_uses_dot_for_module_root() {
+        assert_eq!(request_path_to_posix(Path::new("")), ".");
+        assert_eq!(request_path_to_posix(Path::new(".")), ".");
+        assert_eq!(request_path_to_posix(Path::new("a/b")), "a/b");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn request_path_preserves_posix_literal_backslash() {
+        assert_eq!(request_path_to_posix(Path::new("a/1\\4.pst")), "a/1\\4.pst");
     }
 
     /// **Regression**: the user-reported `blit mirror` failure on macOS

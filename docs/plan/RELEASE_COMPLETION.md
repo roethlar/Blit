@@ -187,7 +187,9 @@ performance ratios are measured or graded.
    and hash the same executable-input set, including untracked source bytes,
    while documentation changes do not churn peer compatibility. `w7-2` is
    closed as stale: its unsafe handler was deleted, and both current session
-   roles validate and consume filters through the shared chokepoint.
+   roles validate and consume filters through the shared chokepoint. `w7-3` is
+   closed: request paths, signed filesystem mtime, and transfer permissions now
+   have one blit-core conversion owner with the per-crate twins deleted.
 7. **rel-7 — reproducible artifacts.** Build the supported target matrix from
    one exact commit, preserve build identity, generate checksums, and fail if a
    required artifact is absent.

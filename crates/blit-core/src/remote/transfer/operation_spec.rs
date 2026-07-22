@@ -275,15 +275,7 @@ pub fn delegated_spec_from_options(
         }
     };
 
-    let path_str = if rel_path.as_os_str().is_empty() {
-        ".".to_string()
-    } else {
-        rel_path
-            .iter()
-            .map(|component| component.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/")
-    };
+    let path_str = crate::path_posix::request_path_to_posix(&rel_path);
 
     // ComparisonMode covers only the "given the file is being
     // considered, what counts as a match?" axis; the orthogonal

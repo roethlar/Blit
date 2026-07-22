@@ -9,7 +9,9 @@ use sysinfo::Disks;
 use tokio::task;
 use tonic::Status;
 
-use super::util::{metadata_mtime_seconds, pathbuf_to_display, resolve_relative_path};
+use super::util::resolve_relative_path;
+use blit_core::path_posix::request_path_to_posix;
+use blit_core::wire_metadata::mtime_seconds;
 
 pub(crate) fn sanitize_request_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, Status> {
     let mut sanitized = Vec::new();
@@ -184,7 +186,7 @@ pub(crate) fn stream_disk_usage(
     if !start_abs.exists() {
         return Err(Status::not_found(format!(
             "start path not found for disk usage: {}",
-            pathbuf_to_display(&start_rel)
+            request_path_to_posix(&start_rel)
         )));
     }
 
@@ -269,7 +271,7 @@ pub(crate) fn stream_disk_usage(
 
     entries.sort_by(|a, b| {
         a.0.cmp(&b.0)
-            .then_with(|| pathbuf_to_display(&a.1).cmp(&pathbuf_to_display(&b.1)))
+            .then_with(|| request_path_to_posix(&a.1).cmp(&request_path_to_posix(&b.1)))
     });
 
     for (depth, path, usage) in entries {
@@ -279,7 +281,7 @@ pub(crate) fn stream_disk_usage(
             }
         }
         let entry = DiskUsageEntry {
-            relative_path: pathbuf_to_display(&path),
+            relative_path: request_path_to_posix(&path),
             byte_total: usage.bytes,
             file_count: usage.files,
             dir_count: usage.dirs,
@@ -322,7 +324,7 @@ pub(crate) fn stream_find_entries(
     if !start_abs.exists() {
         return Err(Status::not_found(format!(
             "start path not found for find: {}",
-            pathbuf_to_display(&start_rel)
+            request_path_to_posix(&start_rel)
         )));
     }
 
@@ -369,7 +371,7 @@ pub(crate) fn stream_find_entries(
                 return Ok(());
             }
 
-            let rel_display = pathbuf_to_display(&rel_path);
+            let rel_display = request_path_to_posix(&rel_path);
             if let Some(ref glob_matcher) = matcher {
                 // Match against the relative path AND its file-name
                 // tail. Users typically write `--pattern '*.txt'`
@@ -392,7 +394,7 @@ pub(crate) fn stream_find_entries(
                 relative_path: rel_display,
                 is_dir,
                 size: if is_dir { 0 } else { metadata.len() },
-                mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
+                mtime_seconds: mtime_seconds(&metadata).unwrap_or(0),
             };
             sender
                 .blocking_send(Ok(entry))
@@ -479,7 +481,7 @@ pub(crate) fn filesystem_stats_for_path(path: &Path) -> Result<FilesystemStatsRe
     })?;
 
     Ok(FilesystemStatsResponse {
-        module: pathbuf_to_display(path),
+        module: request_path_to_posix(path),
         total_bytes: disk.total_space(),
         used_bytes: disk.total_space().saturating_sub(disk.available_space()),
         free_bytes: disk.available_space(),

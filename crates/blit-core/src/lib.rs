@@ -24,6 +24,7 @@ pub mod transfer_session;
 #[cfg(windows)]
 pub mod win_fs;
 pub(crate) mod windows_metadata;
+pub mod wire_metadata;
 pub mod zero_copy;
 
 #[cfg(test)]

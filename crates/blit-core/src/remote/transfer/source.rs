@@ -319,8 +319,8 @@ fn spawn_manifest_task(
                     }
                 }
 
-                let mtime = unix_seconds(&entry.metadata);
-                let permissions = permissions_mode(&entry.metadata);
+                let mtime = crate::wire_metadata::mtime_seconds(&entry.metadata).unwrap_or(0);
+                let permissions = crate::wire_metadata::permissions_mode(&entry.metadata);
                 let Some(header) = file_header_with_windows_metadata_policy(
                     rel,
                     size,
@@ -430,33 +430,6 @@ fn record_unreadable_entry(list: &Arc<Mutex<Vec<String>>>, rel: &str, reason: &s
     log::warn!("scan skipping '{}' ({})", rel, reason);
     if let Ok(mut guard) = list.lock() {
         guard.push(format!("{} ({})", rel, reason));
-    }
-}
-
-fn unix_seconds(metadata: &std::fs::Metadata) -> i64 {
-    use std::time::UNIX_EPOCH;
-    match metadata.modified() {
-        Ok(time) => match time.duration_since(UNIX_EPOCH) {
-            Ok(dur) => dur.as_secs() as i64,
-            Err(err) => {
-                let duration = err.duration();
-                -(duration.as_secs() as i64)
-            }
-        },
-        Err(_) => 0,
-    }
-}
-
-fn permissions_mode(metadata: &std::fs::Metadata) -> u32 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        0
     }
 }
 

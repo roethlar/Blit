@@ -2,9 +2,7 @@ use super::admin::{
     delete_rel_paths, filesystem_stats_for_path, list_completions, sanitize_request_paths,
     split_completion_prefix, stream_disk_usage, stream_find_entries,
 };
-use super::util::{
-    metadata_mtime_seconds, resolve_contained_path, resolve_module, resolve_relative_path,
-};
+use super::util::{resolve_contained_path, resolve_module, resolve_relative_path};
 use super::{DiskUsageSender, FindSender};
 use crate::active_jobs::{ActiveJobKind, ActiveJobs, CancelOutcome};
 use crate::metrics::TransferMetrics;
@@ -782,7 +780,8 @@ impl Blit for BlitService {
                         name,
                         is_dir: false,
                         size: metadata.len(),
-                        mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
+                        mtime_seconds: blit_core::wire_metadata::mtime_seconds(&metadata)
+                            .unwrap_or(0),
                     };
                     Ok(vec![info])
                 } else if metadata.is_dir() {
@@ -807,7 +806,8 @@ impl Blit for BlitService {
                             name,
                             is_dir: meta.is_dir(),
                             size: meta.len(),
-                            mtime_seconds: metadata_mtime_seconds(&meta).unwrap_or(0),
+                            mtime_seconds: blit_core::wire_metadata::mtime_seconds(&meta)
+                                .unwrap_or(0),
                         });
                     }
                     infos.sort_by(|a, b| a.name.cmp(&b.name));

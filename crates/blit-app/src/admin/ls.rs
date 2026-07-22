@@ -12,7 +12,6 @@ use eyre::{Context, Result};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
 
 /// One row of a directory listing. Same shape for local and
 /// remote modes so the CLI's formatter doesn't care which side
@@ -112,7 +111,7 @@ pub fn list_local(path: &Path) -> Result<LocalListing> {
                 name: entry.file_name().to_string_lossy().into_owned(),
                 is_dir,
                 size,
-                mtime_seconds: metadata_mtime_seconds(&meta).unwrap_or(0),
+                mtime_seconds: blit_core::wire_metadata::mtime_seconds(&meta).unwrap_or(0),
             });
         }
         Ok(LocalListing::Directory { entries })
@@ -126,22 +125,8 @@ pub fn list_local(path: &Path) -> Result<LocalListing> {
                 name,
                 is_dir: false,
                 size: metadata.len(),
-                mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
+                mtime_seconds: blit_core::wire_metadata::mtime_seconds(&metadata).unwrap_or(0),
             },
         })
-    }
-}
-
-/// Local helper duplicating `blit_cli::util::metadata_mtime_seconds`
-/// so the CLI's util.rs split (paused per reviewer) doesn't block
-/// this move. Consolidated when util.rs lands in blit-app.
-fn metadata_mtime_seconds(meta: &fs::Metadata) -> Option<i64> {
-    let modified = meta.modified().ok()?;
-    match modified.duration_since(UNIX_EPOCH) {
-        Ok(duration) => Some(duration.as_secs() as i64),
-        Err(err) => {
-            let dur = err.duration();
-            Some(-(dur.as_secs() as i64))
-        }
     }
 }

@@ -60,7 +60,7 @@ use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::transfer::RemoteTransferProgress;
 use blit_core::remote::{RemoteEndpoint, RemotePath};
 use eyre::{bail, eyre, Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tonic::Code;
 
@@ -426,24 +426,19 @@ pub fn map_delegated_error(phase: i32, message: &str) -> eyre::Report {
 pub fn destination_spec_fields(dst: &RemoteEndpoint) -> Result<(String, String)> {
     match &dst.path {
         RemotePath::Module { module, rel_path } => {
-            Ok((module.clone(), normalize_for_request(rel_path)))
+            Ok((
+                module.clone(),
+                blit_core::path_posix::request_path_to_posix(rel_path),
+            ))
         }
-        RemotePath::Root { rel_path } => Ok((String::new(), normalize_for_request(rel_path))),
+        RemotePath::Root { rel_path } => Ok((
+            String::new(),
+            blit_core::path_posix::request_path_to_posix(rel_path),
+        )),
         RemotePath::Discovery => bail!(
             "remote destination must include a module or root (e.g., server:/module/ or server://path){}",
             crate::endpoints::local_path_hint(&dst.host)
         ),
-    }
-}
-
-fn normalize_for_request(path: &Path) -> String {
-    if path.as_os_str().is_empty() {
-        ".".to_string()
-    } else {
-        path.iter()
-            .map(|component| component.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/")
     }
 }
 

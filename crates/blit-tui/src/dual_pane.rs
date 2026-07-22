@@ -12,7 +12,6 @@ use eyre::{Context, Result};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 pub type EntryId = String;
 
@@ -584,7 +583,7 @@ fn entry_from_path(path: &Path, metadata: &fs::Metadata) -> Result<BrowserEntry>
     let kind = kind_from_metadata(metadata);
     let mut entry = BrowserEntry::new(path.to_string_lossy().into_owned(), name, kind);
     entry.size = size_for_kind(metadata, kind);
-    entry.mtime_seconds = metadata_mtime_seconds(metadata);
+    entry.mtime_seconds = blit_core::wire_metadata::mtime_seconds(metadata);
     entry.read_only = metadata.permissions().readonly();
     Ok(entry)
 }
@@ -597,7 +596,7 @@ fn entry_from_dir_child(path: &Path, metadata: fs::Metadata) -> BrowserEntry {
     let kind = kind_from_metadata(&metadata);
     let mut entry = BrowserEntry::new(path.to_string_lossy().into_owned(), name, kind);
     entry.size = size_for_kind(&metadata, kind);
-    entry.mtime_seconds = metadata_mtime_seconds(&metadata);
+    entry.mtime_seconds = blit_core::wire_metadata::mtime_seconds(&metadata);
     entry.read_only = metadata.permissions().readonly();
     entry
 }
@@ -709,14 +708,6 @@ fn remote_parent_id(endpoint: &RemoteEndpoint) -> String {
     remote_parent_location(endpoint)
         .map(|location| location.display())
         .unwrap_or_else(|| "..".to_string())
-}
-
-fn metadata_mtime_seconds(metadata: &fs::Metadata) -> Option<i64> {
-    let modified = metadata.modified().ok()?;
-    match modified.duration_since(UNIX_EPOCH) {
-        Ok(duration) => Some(duration.as_secs() as i64),
-        Err(err) => Some(-(err.duration().as_secs() as i64)),
-    }
 }
 
 fn parent_entry_id(path: &Path) -> String {

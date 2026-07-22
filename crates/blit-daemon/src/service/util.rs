@@ -1,6 +1,5 @@
 use crate::runtime::{ModuleConfig, RootExport};
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -108,27 +107,4 @@ pub(crate) fn resolve_contained_path(module: &ModuleConfig, rel: &Path) -> Resul
 pub(crate) fn resolve_contained_wire(module: &ModuleConfig, wire: &str) -> Result<PathBuf, Status> {
     blit_core::path_safety::contained_join(&module.canonical_root, wire)
         .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))
-}
-
-pub(crate) fn metadata_mtime_seconds(meta: &fs::Metadata) -> Option<i64> {
-    use std::time::UNIX_EPOCH;
-
-    let modified = meta.modified().ok()?;
-    match modified.duration_since(UNIX_EPOCH) {
-        Ok(duration) => Some(duration.as_secs() as i64),
-        Err(err) => {
-            let dur = err.duration();
-            Some(-(dur.as_secs() as i64))
-        }
-    }
-}
-
-pub(crate) fn pathbuf_to_display(path: &Path) -> String {
-    if path == Path::new(".") {
-        return ".".to_string();
-    }
-    path.components()
-        .map(|comp| comp.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
 }
