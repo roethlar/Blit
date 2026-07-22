@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** w10 documentation/help reconciliation, 2026-07-22
+**As of:** all known review rows reconciled locally, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -125,8 +125,9 @@ performance ceilings and hardware tuning remain post-release work.
   its blit-core dependency are gone and guarded against reintroduction.
 - Public reliability help now states the actual unified-session contract:
   retry re-applies the selected destination comparison, while `--resume`
-  continues eligible partial files block-wise for local, push, pull, and remote-to-remote. A
-  generated-help test failed before the correction and passes after it. False
+  continues eligible partial files block-wise for local, push, pull, and
+  remote-to-remote. A generated-help test failed before the correction and
+  passes after it. False
   Phase 2 shipped claims, the nonexistent `FileStream` payload description,
   and the deleted static-tuning path are corrected to current or explicitly
   historical truth. No transfer or hardware test was used.
@@ -139,9 +140,10 @@ performance ceilings and hardware tuning remain post-release work.
    two-byte/one-byte in-memory blocked writer with local mutation proof. The
    exact fix has not run on hosted Windows because publication is owner-gated.
    The re-enabled nested push-move test and rel-4's single/tar plus local/remote
-   metadata guards also need current-head Windows confirmation. Findings:
-   `release-win-ci-handshake-stall-test`, `windows-move-tree-hang`, and
-   `windows-attrs-and-ads-lost-on-tar-path`.
+   metadata guards also need current-head Windows confirmation. The underlying
+   code findings are closed locally; this blocker is the missing hosted
+   evidence for `release-win-ci-handshake-stall-test`, `windows-move-tree-hang`,
+   and `windows-attrs-and-ads-lost-on-tar-path`.
 2. **Current release artifacts are unproved.** The exact local head is not on
    GitHub, the latest published release-build jobs were skipped, and install /
    startup smoke checks for the produced CLI and daemon artifacts are not

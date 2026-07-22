@@ -6,7 +6,7 @@ rather than the intended production timeout behavior.
 **Status**: Fixed locally — deterministic guard and mutation proof pass;
 hosted Windows confirmation awaits the next owner-approved publication
 **Branch**: `master`
-**Commit**: This rel-1 implementation commit
+**Commit**: `bfefbdc`
 
 ## Evidence
 
@@ -19,8 +19,9 @@ The test sends a 64 MiB handshake to a loopback peer that never reads and
 assumes `write_all` must block until its 200 ms timeout. On the hosted Windows
 runner the socket stack accepted the entire write, so `dial_data_plane_with_timeouts`
 returned `Ok(TcpStream)` and `expect_err("stalled handshake must time out")`
-panicked. The current local head retains the same test shape in
-`crates/blit-core/src/remote/transfer/socket.rs`.
+panicked. At finding intake, the local head retained the same test shape in
+`crates/blit-core/src/remote/transfer/socket.rs`; `bfefbdc` replaced it as
+described below.
 
 ## Predicted observable failure
 

@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (w10 documentation/help truth reconciled)
+Last updated: 2026-07-22 (all known review rows reconciled locally)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -22,7 +22,7 @@ Last updated: 2026-07-22 (w10 documentation/help truth reconciled)
   and TUI consumers. Temporary daemons now retain bounded stderr, include it in
   startup failures, and retry transient early exits. rel-6 has closed the
   design-review queue through `w10`; dirty build IDs are exact without docs
-  churn. The remaining handshake row is fixed locally and awaits ledger close.
+  churn. The final handshake row is closed against its local deterministic fix.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -127,9 +127,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    performance status flip are not release gates (D-2026-07-22-1).
 4. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
    resumes/re-derives after ONE_TRANSFER_PATH ships.
-5. **Design-review queue reconciled through `w10`.** The remaining unchecked
-   handshake row has a locally mutation-proved fix; hosted confirmation stays
-   a release blocker rather than a reason to misclassify the code repair.
+5. **All `REVIEW.md` rows are reconciled locally.** Hosted Windows confirmation
+   and release artifacts remain evidence blockers; they are not open code rows.
 6. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
    Pro daemon CPU-bound below 10 GbE from SSD cache). Executes AFTER
    cutover as a runtime-selected write strategy in the unified receive
@@ -179,7 +178,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 - **Published Windows CI is red as of GitHub head `dcf9245`:** rel-1 replaces
   the nondeterministic 64 MiB socket-buffer premise with a two-byte in-memory
   blocked writer and has local red/green proof. Hosted Windows confirmation
-  awaits owner-approved publication. Finding: `release-win-ci-handshake-stall-test`.
+  awaits owner-approved publication. The code finding
+  `release-win-ci-handshake-stall-test` is locally closed.
 - **Release blockers:** hosted Windows rel-1/rel-3/rel-4 confirmation and
   artifact/install proof remain unresolved. See
   `docs/RELEASE_READINESS.md`.

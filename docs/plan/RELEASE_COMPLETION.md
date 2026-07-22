@@ -85,7 +85,7 @@ or hardware experiment.
       and fix, with deterministic, mutation-sensitive software proof and
       retained-evidence reanalysis. It is not deferred as "performance," and
       it does not require a new data-moving hardware matrix.
-- [ ] Every open `REVIEW.md` item and current-state known issue is reconciled
+- [x] Every open `REVIEW.md` item and current-state known issue is reconciled
       against code: fixed with a guard, proven already fixed and closed, or
       classified as a non-defect only by an explicit owner decision. No known
       product defect is deferred merely to reach the release.
@@ -177,7 +177,7 @@ performance ratios are measured or graded.
    denominators, completed bytes/files, and final carrier outcome. GetState,
    TransferProgress, TransferComplete, persisted recents, CLI, and TUI retain
    and render those values; focused mutations prove each accounting lane.
-6. **rel-6 — full known-issue reconciliation.** Audit every unchecked/current
+6. **rel-6 — full known-issue reconciliation `[x]`.** Audit every unchecked/current
    `REVIEW.md`, STATE, bug-doc, ignored-test, and current-plan item against code.
    Fix each real product defect one commit at a time; close stale records only
    with direct code/test evidence. The release ledger must reach zero unresolved
@@ -210,6 +210,10 @@ performance ratios are measured or graded.
    shipped claims are historical, and pipeline/whitepaper/audit descriptions
    match the unified session and live dial. A focused generated-help guard was
    red before the wording correction and green afterward; no transfer ran.
+   The final unchecked row is closed against `bfefbdc`: the Windows-sensitive
+   64 MiB loopback premise was replaced by the deterministic two-byte/one-byte
+   blocked writer, with the production timeout helper and retry semantics under
+   guard. Hosted Windows execution remains rel-7 evidence, not unfinished code.
 7. **rel-7 — reproducible artifacts.** Build the supported target matrix from
    one exact commit, preserve build identity, generate checksums, and fail if a
    required artifact is absent.
