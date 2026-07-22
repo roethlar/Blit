@@ -2040,7 +2040,7 @@ async fn source_send_half(
         if let Some(dp) = &mut data_plane {
             dp.stop_tuner().await?;
             stop_resize_intake(dp, &mut resize);
-            dp.close_payloads()?;
+            dp.close_payloads_preserving_pipeline_error().await?;
             settle_inflight_resize(
                 &mut events,
                 &mut pending,

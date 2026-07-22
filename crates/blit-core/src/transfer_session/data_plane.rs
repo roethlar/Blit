@@ -1720,6 +1720,24 @@ impl SourceDataPlane {
         Ok(())
     }
 
+    /// Seal payload admission without replacing a worker failure that already
+    /// closed the membership command lane. The supervisor owns the structured
+    /// file/IO cause; a failed `Seal` send is only the producer-side symptom.
+    pub(super) async fn close_payloads_preserving_pipeline_error(&mut self) -> Result<()> {
+        let close_error = match self.close_payloads() {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        let pipeline = self.pipeline.lock().await.take();
+        match pipeline {
+            Some(pipeline) => match drain_send_pipeline_outcome(pipeline).await {
+                Err(worker_error) => Err(worker_error),
+                Ok(_) => Err(close_error),
+            },
+            None => Err(close_error),
+        }
+    }
+
     /// Signal end-of-stream, drain the pipeline (each worker emits its
     /// socket's END record on drain), and return the bytes sent. Must be
     /// awaited before `SourceDone` goes out so the destination's receive
@@ -2442,6 +2460,56 @@ mod tests {
             rendered.contains("injected source worker failure"),
             "worker cause was replaced by a queue symptom: {rendered}"
         );
+    }
+
+    #[tokio::test]
+    async fn source_close_surfaces_a_worker_error_that_won_the_seal_race() {
+        let tmp = tempdir().unwrap();
+        let source: Arc<dyn TransferSource> =
+            Arc::new(FsTransferSource::new(tmp.path().to_path_buf()));
+        let (payload_tx, _payload_rx) = mpsc::channel(1);
+        let pipeline = AbortOnDrop::new(tokio::spawn(async {
+            Err::<ElasticPipelineOutcome, _>(
+                eyre::Report::new(FaultedPath("big.bin".into()))
+                    .wrap_err("injected early worker failure"),
+            )
+        }));
+        let (control, commands) = ElasticPipelineControl::channel();
+        drop(commands);
+        let mut plane = SourceDataPlane {
+            payload_tx: Some(payload_tx),
+            control: Some(control),
+            pipeline: tokio::sync::Mutex::new(Some(pipeline)),
+            tuner: None,
+            resize_rx: None,
+            dial: TransferDial::conservative().shared(),
+            next_member_id: AtomicU32::new(1),
+            source,
+            session_token: Vec::new(),
+            pool: Arc::new(BufferPool::for_data_plane(
+                crate::buffer::DATA_PLANE_BUFFER_FLOOR,
+                1,
+            )),
+            trace: false,
+            sockets: SourceSockets::Dial {
+                host: "127.0.0.1".into(),
+                tcp_port: 0,
+            },
+            phase_trace: None,
+            small_file_probe: None,
+            queue_trace_armed: AtomicBool::new(false),
+        };
+
+        let error = plane
+            .close_payloads_preserving_pipeline_error()
+            .await
+            .expect_err("the worker cause must replace the failed Seal symptom");
+        let fault = error
+            .downcast_ref::<SessionFault>()
+            .expect("the worker cause becomes a structured data-plane fault");
+        assert_eq!(fault.relative_path.as_deref(), Some("big.bin"));
+        assert!(fault.message.contains("injected early worker failure"));
+        assert!(!fault.message.contains("before it was sealed"));
     }
 
     /// codex otp-4b-1 F1: the data-plane receive must enforce the same
