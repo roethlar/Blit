@@ -17,9 +17,12 @@ the exact restore returned all 388 blit-core library tests to green.
 
 All six findings are admitted and remain release-blocking until fixed:
 
-1. **High — tar metadata allocation budget.** A tar member has a metadata cap,
-   but the retained set of all member headers has no aggregate cap. Add one and
-   prove hostile length/count combinations fail before large allocation.
+1. **Fixed — tar metadata allocation budget.** The binary receiver now applies
+   one aggregate header budget before each metadata allocation, the sender
+   preflights the same bound, the member-count cap matches the planner, and tar
+   planning/in-stream splitting include declared ADS payload bytes. The focused
+   guard turned red when the budgeted metadata read was bypassed and returned
+   green after exact restoration.
 2. **High — attribute convergence.** Some destination filesystems may accept
    an attribute call without retaining every bit. Restrict preservation to a
    durable contract and verify the applied result so repeat runs converge or

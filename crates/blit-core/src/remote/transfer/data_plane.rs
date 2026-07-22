@@ -21,8 +21,23 @@ pub const DATA_PLANE_RECORD_BLOCK_COMPLETE: u8 = 3;
 pub const DATA_PLANE_RECORD_END: u8 = 0xFF;
 const WINDOWS_METADATA_PRESENT: u8 = 1;
 const WINDOWS_METADATA_ABSENT: u8 = 0;
-const MAX_WINDOWS_METADATA_WIRE_BYTES: usize =
+pub(crate) const MAX_WINDOWS_METADATA_WIRE_BYTES: usize =
     crate::windows_metadata::MAX_WINDOWS_STREAM_BYTES_PER_FILE as usize + 128 * 1024;
+/// Aggregate encoded header budget for one binary tar-shard record. This is
+/// separate from the per-file metadata cap: without it, a peer can multiply a
+/// valid 2 MiB metadata record by the shard member count and exhaust memory
+/// before the tar-body length is even read.
+pub(crate) const MAX_TAR_SHARD_HEADER_WIRE_BYTES: usize =
+    crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES as usize;
+
+fn windows_metadata_wire_len(metadata: Option<&WindowsFileMetadata>) -> usize {
+    match metadata {
+        None => 1,
+        Some(metadata) => 1usize
+            .saturating_add(std::mem::size_of::<u32>())
+            .saturating_add(metadata.encoded_len()),
+    }
+}
 
 async fn write_windows_metadata<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
@@ -61,13 +76,29 @@ async fn write_windows_metadata<W: tokio::io::AsyncWrite + Unpin>(
 pub(crate) async fn read_windows_metadata<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<Option<WindowsFileMetadata>> {
+    read_windows_metadata_with_budget(reader, usize::MAX)
+        .await
+        .map(|(metadata, _wire_bytes)| metadata)
+}
+
+pub(crate) async fn read_windows_metadata_with_budget<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    remaining_wire_bytes: usize,
+) -> Result<(Option<WindowsFileMetadata>, usize)> {
+    if remaining_wire_bytes < 1 {
+        bail!("Windows metadata exceeds remaining tar-shard header budget");
+    }
     let presence = reader
         .read_u8()
         .await
         .context("reading Windows metadata presence")?;
     match presence {
-        WINDOWS_METADATA_ABSENT => Ok(None),
+        WINDOWS_METADATA_ABSENT => Ok((None, 1)),
         WINDOWS_METADATA_PRESENT => {
+            const PREFIX_BYTES: usize = 1 + std::mem::size_of::<u32>();
+            if remaining_wire_bytes < PREFIX_BYTES {
+                bail!("Windows metadata exceeds remaining tar-shard header budget");
+            }
             let len = reader
                 .read_u32()
                 .await
@@ -79,6 +110,13 @@ pub(crate) async fn read_windows_metadata<R: tokio::io::AsyncRead + Unpin>(
                     MAX_WINDOWS_METADATA_WIRE_BYTES
                 );
             }
+            if len > remaining_wire_bytes - PREFIX_BYTES {
+                bail!(
+                    "encoded Windows metadata is {} bytes, exceeds remaining tar-shard header budget {}",
+                    len,
+                    remaining_wire_bytes - PREFIX_BYTES
+                );
+            }
             let mut encoded = vec![0u8; len];
             reader
                 .read_exact(&mut encoded)
@@ -87,10 +125,35 @@ pub(crate) async fn read_windows_metadata<R: tokio::io::AsyncRead + Unpin>(
             let metadata = WindowsFileMetadata::decode(encoded.as_slice())
                 .context("decoding Windows metadata")?;
             crate::windows_metadata::validate_payload(Some(&metadata))?;
-            Ok(Some(metadata))
+            Ok((Some(metadata), PREFIX_BYTES + len))
         }
         other => bail!("invalid Windows metadata presence tag {other}"),
     }
+}
+
+fn tar_shard_header_wire_bytes(headers: &[FileHeader]) -> Result<usize> {
+    let mut total = std::mem::size_of::<u32>();
+    for header in headers {
+        let fixed = std::mem::size_of::<u32>()
+            + header.relative_path.len()
+            + std::mem::size_of::<u64>()
+            + std::mem::size_of::<i64>()
+            + std::mem::size_of::<u32>();
+        total = total
+            .checked_add(fixed)
+            .and_then(|value| {
+                value.checked_add(windows_metadata_wire_len(header.windows_metadata.as_ref()))
+            })
+            .ok_or_else(|| eyre::eyre!("tar-shard header byte count overflow"))?;
+        if total > MAX_TAR_SHARD_HEADER_WIRE_BYTES {
+            bail!(
+                "tar-shard headers are {} bytes, exceed aggregate cap {}",
+                total,
+                MAX_TAR_SHARD_HEADER_WIRE_BYTES
+            );
+        }
+    }
+    Ok(total)
 }
 
 /// ue-r2-2: length of the per-epoch resize credential a data socket
@@ -601,6 +664,10 @@ impl<P: Probe> DataPlaneSession<P> {
         headers: Vec<FileHeader>,
         data: &[u8],
     ) -> Result<()> {
+        // Fail before writing the record tag: the receiver retains all decoded
+        // headers until the bounded tar body arrives, so the sender enforces
+        // the same aggregate header budget.
+        tar_shard_header_wire_bytes(&headers)?;
         let shard_len = headers.len();
         let preview = headers
             .first()

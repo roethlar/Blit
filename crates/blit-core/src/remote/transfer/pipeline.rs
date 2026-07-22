@@ -1426,10 +1426,10 @@ async fn read_i64<R: AsyncRead + Unpin>(socket: &mut R) -> Result<i64> {
 /// PATH_MAX (4096) but bounded so a hostile peer can't trigger a
 /// many-GB allocation by sending u32::MAX as a path length.
 const MAX_WIRE_PATH_LEN: usize = 64 * 1024;
-/// Maximum file count per tar shard. The planner targets up to a few
-/// thousand entries per shard; this bound prevents a wire-driven
-/// `Vec::with_capacity(u32::MAX)` allocation.
-const MAX_WIRE_TAR_SHARD_FILES: usize = 1_048_576;
+/// Maximum file count per tar shard. The shared planner cannot emit more than
+/// 4096 members. Exact same-build peers reject a larger count before reserving
+/// a peer-sized header vector.
+const MAX_WIRE_TAR_SHARD_FILES: usize = 4096;
 /// Maximum tar shard payload size (in bytes). Single source of truth
 /// is `tar_safety::MAX_TAR_SHARD_BYTES` so the wire-side reader
 /// rejects shards the receive-side helper would reject anyway.
@@ -1481,6 +1481,14 @@ async fn read_file_header<R: AsyncRead + Unpin>(socket: &mut R) -> Result<FileHe
 async fn read_tar_shard<R: AsyncRead + Unpin>(
     socket: &mut R,
 ) -> Result<(Vec<FileHeader>, Vec<u8>)> {
+    read_tar_shard_with_header_budget(socket, super::data_plane::MAX_TAR_SHARD_HEADER_WIRE_BYTES)
+        .await
+}
+
+async fn read_tar_shard_with_header_budget<R: AsyncRead + Unpin>(
+    socket: &mut R,
+    max_header_bytes: usize,
+) -> Result<(Vec<FileHeader>, Vec<u8>)> {
     let count = read_u32(socket).await? as usize;
     if count > MAX_WIRE_TAR_SHARD_FILES {
         bail!(
@@ -1490,6 +1498,9 @@ async fn read_tar_shard<R: AsyncRead + Unpin>(
         );
     }
     let mut headers = Vec::with_capacity(count);
+    let mut remaining_header_bytes = max_header_bytes
+        .checked_sub(std::mem::size_of::<u32>())
+        .ok_or_else(|| eyre!("tar-shard aggregate header budget is too small"))?;
     for _ in 0..count {
         let path = read_string(socket).await?;
         crate::path_safety::validate_wire_path(&path)
@@ -1497,7 +1508,20 @@ async fn read_tar_shard<R: AsyncRead + Unpin>(
         let size = read_u64(socket).await?;
         let mtime = read_i64(socket).await?;
         let permissions = read_u32(socket).await?;
-        let windows_metadata = super::data_plane::read_windows_metadata(socket).await?;
+        let fixed_bytes = std::mem::size_of::<u32>()
+            + path.len()
+            + std::mem::size_of::<u64>()
+            + std::mem::size_of::<i64>()
+            + std::mem::size_of::<u32>();
+        remaining_header_bytes = remaining_header_bytes
+            .checked_sub(fixed_bytes)
+            .ok_or_else(|| eyre!("tar-shard headers exceed aggregate byte cap"))?;
+        let (windows_metadata, metadata_wire_bytes) =
+            super::data_plane::read_windows_metadata_with_budget(socket, remaining_header_bytes)
+                .await?;
+        remaining_header_bytes = remaining_header_bytes
+            .checked_sub(metadata_wire_bytes)
+            .ok_or_else(|| eyre!("tar-shard headers exceed aggregate byte cap"))?;
         headers.push(FileHeader {
             relative_path: path,
             size,
@@ -1532,6 +1556,43 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn tar_shard_rejects_aggregate_metadata_before_allocating_payload() {
+        use tokio::io::AsyncWriteExt as _;
+
+        async fn write_header(writer: &mut tokio::io::DuplexStream, path: &str) {
+            writer
+                .write_all(&(path.len() as u32).to_be_bytes())
+                .await
+                .unwrap();
+            writer.write_all(path.as_bytes()).await.unwrap();
+            writer.write_all(&0u64.to_be_bytes()).await.unwrap();
+            writer.write_all(&0i64.to_be_bytes()).await.unwrap();
+            writer.write_all(&0u32.to_be_bytes()).await.unwrap();
+            // Present, zero-byte protobuf payload: valid metadata, five wire
+            // bytes. Two complete headers cost 64 bytes including count.
+            writer.write_all(&[1]).await.unwrap();
+            writer.write_all(&0u32.to_be_bytes()).await.unwrap();
+        }
+
+        let (mut writer, mut reader) = tokio::io::duplex(256);
+        let write = tokio::spawn(async move {
+            writer.write_all(&2u32.to_be_bytes()).await.unwrap();
+            write_header(&mut writer, "a").await;
+            write_header(&mut writer, "b").await;
+            writer.write_all(&0u64.to_be_bytes()).await.unwrap();
+        });
+
+        let error = read_tar_shard_with_header_budget(&mut reader, 63)
+            .await
+            .expect_err("the second metadata prefix must exceed the residual budget");
+        assert!(
+            format!("{error:#}").contains("remaining tar-shard header budget"),
+            "unexpected error: {error:#}"
+        );
+        write.await.unwrap();
+    }
 
     /// Sink that fails the first `write_payload` with a recognisable
     /// message. Used by the POST_REVIEW_FIXES §1.1b regression test

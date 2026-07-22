@@ -161,8 +161,9 @@ performance ratios are measured or graded.
    current-head hosted confirmation joins rel-1's publication gate.
 4. **rel-4 — Windows metadata fidelity `[~ review fixes]`.** Contract v4 and
    the first local/remote implementation are committed at `3013e10`. Formal
-   Opus review admitted six release-blocking corrections: aggregate tar-header
-   budgeting, attribute convergence, per-file ADS error isolation, an explicit
+   Opus review admitted six release-blocking corrections. Aggregate tar-header
+   budgeting is fixed with a mutation-sensitive pre-allocation guard; five
+   remain: attribute convergence, per-file ADS error isolation, an explicit
    cross-platform downgrade with pre-write rejection, local sub-second mtime
    preservation, and removal of a resume hash-list clone. Records:
    `.review/results/rel-4-windows-metadata-r1.claude.{json,verdict.md}`.

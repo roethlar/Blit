@@ -187,7 +187,12 @@ pub fn plan_transfer_payloads(
         let absolute = source_root.join(rel_path);
         entries.push(FileEntry {
             path: absolute,
-            size: header.size,
+            // Tar payload cost includes named-stream content. Planning only on
+            // the unnamed stream could multiply a valid 2 MiB metadata payload
+            // by thousands of members before the receiver sees the tar body.
+            size: header
+                .size
+                .saturating_add(crate::windows_metadata::payload_bytes(header)),
             is_directory: false,
         });
     }

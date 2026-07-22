@@ -2701,7 +2701,31 @@ async fn prefer_peer_fault(
     }
 }
 
-/// Split any planned tar shard whose encoded `TarShardHeader` member
+/// Conservative encoded cost of one hydrated `TarShardHeader` member.
+/// Manifest headers declare named-stream sizes but omit their content; the
+/// source hydrates that content only after planning. Account for those future
+/// bytes and their nested protobuf delimiters before choosing a shard shape.
+fn in_stream_tar_header_cost(header: &FileHeader) -> usize {
+    use prost::Message;
+
+    let stream_count = header
+        .windows_metadata
+        .as_ref()
+        .map_or(0, |metadata| metadata.named_streams.len());
+    let content_bytes =
+        usize::try_from(crate::windows_metadata::payload_bytes(header)).unwrap_or(usize::MAX);
+    header
+        .encoded_len()
+        .saturating_add(5)
+        .saturating_add(content_bytes)
+        // Content-field and nested-message delimiters can grow when payload
+        // bytes are hydrated. Twelve bytes per stream plus outer slack is
+        // deliberately conservative for the 2 MiB per-file contract cap.
+        .saturating_add(stream_count.saturating_mul(12))
+        .saturating_add(16)
+}
+
+/// Split any planned tar shard whose hydrated `TarShardHeader` member
 /// list would exceed `max_encoded` into consecutive smaller shards
 /// (codex otp-8 F2 — the in-stream carrier's frame-limit bound; cap
 /// rationale at [`MAX_IN_STREAM_TAR_HEADER_BYTES`]). Order and file
@@ -2711,7 +2735,6 @@ fn bound_in_stream_tar_headers(
     payloads: Vec<TransferPayload>,
     max_encoded: usize,
 ) -> Vec<TransferPayload> {
-    use prost::Message;
     let mut out = Vec::with_capacity(payloads.len());
     for payload in payloads {
         match payload {
@@ -2719,18 +2742,22 @@ fn bound_in_stream_tar_headers(
                 let mut cur: Vec<FileHeader> = Vec::new();
                 let mut cur_bytes = 0usize;
                 for header in headers {
-                    // One repeated-field entry costs its message bytes
-                    // plus tag + length delimiter; 5 covers any header
-                    // a filesystem can produce.
-                    let cost = header.encoded_len() + 5;
+                    let cost = in_stream_tar_header_cost(&header);
                     if !cur.is_empty() && cur_bytes + cost > max_encoded {
                         out.push(TransferPayload::TarShard {
                             headers: std::mem::take(&mut cur),
                         });
                         cur_bytes = 0;
                     }
-                    cur_bytes += cost;
-                    cur.push(header);
+                    if cost > max_encoded {
+                        // One member cannot be split further. The individual
+                        // file carrier has its own bounded record and avoids
+                        // creating an oversized tar-header frame.
+                        out.push(TransferPayload::File(header));
+                    } else {
+                        cur_bytes += cost;
+                        cur.push(header);
+                    }
                 }
                 if !cur.is_empty() {
                     out.push(TransferPayload::TarShard { headers: cur });
@@ -7474,7 +7501,6 @@ mod tests {
     /// and file set are preserved and non-shard payloads pass through.
     #[test]
     fn tar_shard_headers_split_under_the_in_stream_bound() {
-        use prost::Message;
         let headers: Vec<FileHeader> = (0..40)
             .map(|i| tar_test_header(format!("{i:0>100}")))
             .collect();
@@ -7499,7 +7525,7 @@ mod tests {
         assert!(shards.len() > 1, "an oversized shard must split");
         let mut flat: Vec<String> = Vec::new();
         for shard in &shards {
-            let encoded: usize = shard.iter().map(|h| h.encoded_len() + 5).sum();
+            let encoded: usize = shard.iter().map(in_stream_tar_header_cost).sum();
             assert!(
                 encoded <= 512,
                 "each split shard's encoded members fit the bound (got {encoded})"
@@ -7519,8 +7545,8 @@ mod tests {
         );
         assert_eq!(out.len(), 1, "a small shard passes through whole");
 
-        // A single header over the bound is still emitted, alone —
-        // there is nothing below one file to split to.
+        // A single header over the tar bound falls back to the individual
+        // file carrier instead of emitting an oversized one-member shard.
         let out = bound_in_stream_tar_headers(
             vec![TransferPayload::TarShard {
                 headers: vec![tar_test_header("x".repeat(600))],
@@ -7528,6 +7554,38 @@ mod tests {
             512,
         );
         assert_eq!(out.len(), 1);
+        assert!(matches!(out[0], TransferPayload::File(_)));
+    }
+
+    #[test]
+    fn tar_shard_bound_includes_declared_windows_stream_content() {
+        use prost::Message;
+
+        let mut header = tar_test_header("metadata.bin".into());
+        header.windows_metadata = Some(crate::generated::WindowsFileMetadata {
+            file_attributes: 0x20,
+            named_streams: vec![crate::generated::WindowsNamedStream {
+                name: "meta".into(),
+                size: 300,
+                checksum: vec![0; blake3::OUT_LEN],
+                content: Vec::new(),
+            }],
+        });
+        assert!(
+            header.encoded_len() + 5 < 256,
+            "manifest-only encoding must fit the synthetic bound"
+        );
+
+        let out = bound_in_stream_tar_headers(
+            vec![TransferPayload::TarShard {
+                headers: vec![header],
+            }],
+            256,
+        );
+        assert!(
+            matches!(out.as_slice(), [TransferPayload::File(_)]),
+            "declared stream content must prevent an oversized tar header"
+        );
     }
 
     /// codex otp-8 F2, the wiring guard: `send_payload_records` itself
