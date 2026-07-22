@@ -548,6 +548,14 @@ fn copy_resolved_file_payload(
         did_copy = true;
     }
 
+    // Windows CopyFileEx preserves the source attributes, so a fresh copy of
+    // a read-only source makes the destination read-only again after the
+    // pre-copy preparation above. Clear that bit once more before replacing
+    // named streams; apply_attributes below restores the exact source mask.
+    if did_copy {
+        crate::windows_metadata::prepare_destination(dst, header.windows_metadata.as_ref())?;
+    }
+
     let windows_bytes =
         crate::windows_metadata::replace_streams(dst, header.windows_metadata.as_ref())?;
 
