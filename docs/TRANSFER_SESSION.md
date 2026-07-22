@@ -2,6 +2,7 @@
 
 **Status**: Active (contract; the session is the ONLY remote transfer
 path since cutover, otp-10c-2)
+**Contract version**: 4 (Windows file attributes + named `$DATA` streams)
 **Created**: 2026-07-05
 **Plan**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4)
 **Decision refs**: D-2026-07-05-1 (one path), D-2026-07-05-2
@@ -59,6 +60,16 @@ doc explains the state machine the proto cannot.
    per-stream send telemetry. Workload file/byte totals do not select a
    terminal worker count. The DESTINATION's advertised capacity is a
    safety ceiling, not a target.
+7. **Carrier-independent Windows metadata (contract v4).** A Windows SOURCE
+   describes the settable file attributes and every named `$DATA` stream in
+   `FileHeader.windows_metadata`; it does so for every regular file, including
+   a file with no named streams. The manifest carries stream descriptors and
+   hashes but no stream content. A granted file, tar-shard, or resume payload
+   carries the same descriptors plus the complete named-stream content. The
+   DESTINATION validates payload metadata against the retained manifest header
+   and applies it only after the unnamed file data has landed. Local and remote
+   carriers use the same representation and validation; planner choice cannot
+   change fidelity.
 
 `docs/plan/LIVE_DIAL_TUNING.md` is the implementation and evidence record for
 invariant 6. Its ldt-2 cutover removed sf-2's static shape target and made the
@@ -162,15 +173,73 @@ INITIATOR                                RESPONDER
 | 19 | `TransferSummary summary` | DESTINATION | closing |
 | 20 | `SessionError error` | both | any |
 
-Reused messages (`FileHeader`, `FileData`, `TarShard*`,
+Shared messages (`FileHeader`, `FileData`, `TarShard*`,
 `BlockTransfer*`, `BlockHashList`, `ManifestComplete`,
 `DataPlaneResize`/`Ack`, `FilterSpec`, `ComparisonMode`,
-`MirrorMode`, `ResumeSettings`, `CapacityProfile`) keep their
-existing shapes — the session reuses the engine's payload vocabulary
-verbatim. New messages (`SessionHello`, `SessionOpen`,
+`MirrorMode`, `ResumeSettings`, `CapacityProfile`) are the engine's payload
+vocabulary. Contract v4 extends `FileHeader` as specified below. New session
+messages (`SessionHello`, `SessionOpen`,
 `SessionAccept`, `DataPlaneGrant`, `NeedBatch`/`NeedEntry`,
 `NeedComplete`, `SourceDone`, `TransferSummary`, `SessionError`) are
 defined in the proto with their field numbers.
+
+### `FileHeader` Windows metadata (contract v4)
+
+`FileHeader` adds field 6, `optional WindowsFileMetadata windows_metadata`.
+The nested shapes are:
+
+```
+message WindowsFileMetadata {
+  uint32 file_attributes = 1;
+  repeated WindowsNamedStream named_streams = 2;
+}
+message WindowsNamedStream {
+  string name = 1;
+  uint64 size = 2;
+  bytes checksum = 3; // Blake3, exactly 32 bytes
+  bytes content = 4;  // empty in a manifest; exact `size` bytes in a payload
+}
+```
+
+- `file_attributes` contains only the attributes directly round-trippable by
+  `GetFileAttributesW` / `SetFileAttributesW`: READONLY, HIDDEN, SYSTEM,
+  ARCHIVE, TEMPORARY, OFFLINE, and NOT_CONTENT_INDEXED (mask `0x00003127`).
+  Structural or separately-managed bits such as DIRECTORY, REPARSE_POINT,
+  SPARSE_FILE, COMPRESSED, and ENCRYPTED are never represented by this field.
+  Zero means the destination applies `FILE_ATTRIBUTE_NORMAL`.
+- Named streams are data only: enumeration accepts the default `::$DATA` but
+  does not serialize it, accepts `:name:$DATA` as a named stream, and rejects
+  every other stream type. The serialized `name` is only `name`, never either
+  colon or the `$DATA` suffix. A name must be non-empty valid Unicode, at most
+  1,024 UTF-8 bytes, contain no NUL, control character, `:`, `/`, or `\`, and
+  not be `.` or `..`. Names must be unique under Unicode lowercase comparison.
+- One file may carry at most 64 named streams and at most 2 MiB of named-stream
+  content in aggregate. Each descriptor's `size` must fit that aggregate cap,
+  its checksum must be exactly 32 bytes, and payload content must be exactly
+  `size` bytes and match the checksum. Enumeration, hydration, framing, and
+  receipt enforce the same constants before allocation or filesystem writes.
+  A source outside these bounds fails the transfer with the affected path; it
+  is never copied with metadata silently omitted.
+- A manifest header has `content == empty` for every descriptor, including a
+  non-empty stream. Before a payload is queued, SOURCE reopens each stream,
+  reads exactly its declared size, rejects growth/truncation/hash drift from
+  the manifest descriptor, and fills `content`. A payload with missing,
+  duplicate, extra, incomplete, or changed stream data is a protocol failure.
+  The DESTINATION retains the granted manifest header and compares the payload
+  attributes plus ordered-by-name descriptors before claiming the need.
+- On Windows, destination comparison treats a metadata mismatch as a need
+  even when the ordinary size/time or checksum comparison would skip; explicit
+  `ignore_existing` still means no change to an existing destination. Applying
+  metadata replaces the named-stream set: stale destination streams are
+  deleted, declared streams are written completely, then the declared
+  attributes are applied. Any failure fails the file/session; metadata errors
+  are not best-effort warnings. On a non-Windows DESTINATION, a present
+  `windows_metadata` is refused rather than silently discarded.
+- `FileHeader.size` remains the unnamed stream's size. File and byte completion
+  is published only after named streams and attributes have been applied.
+  Cancellation or a metadata failure therefore cannot produce a successful
+  per-file completion or final transfer summary. Named-stream bytes count as
+  transferred payload bytes; manifest descriptor bytes do not.
 
 Deliberately absent: `PeerCapabilities` (same build = same
 features), `spec_version` negotiation (the hello's exact match
@@ -227,6 +296,12 @@ push/pull-specific message.
   D-2026-07-10-1), 64 MiB data plane (the wire block record bound,
   D-2026-07-10-2) — with a shared 64 KiB floor and 65_536-hash list
   cap; both ends read the carrier from grant presence.
+  **Windows metadata records (contract v4):** every binary FILE and each
+  TAR_SHARD member carries the payload form of `WindowsFileMetadata` after its
+  existing path/size/mtime/permissions fields. BLOCK_COMPLETE carries the
+  payload metadata for the resumed file. Length/count fields use the same caps
+  above; the receiver validates them before allocation and validates the whole
+  payload against the retained manifest header before claiming the need.
 - **In-stream carrier:** requested via `SessionOpen.in_stream_bytes`
   (operator `--force-grpc` diagnostics) or granted by the responder
   when it cannot bind a data plane (`SessionAccept` with no grant).
@@ -247,6 +322,10 @@ push/pull-specific message.
   records never interleave. TCP data-plane payload is governed separately by
   the need-authorized overlap rule above. DESTINATION-lane frames (need batches,
   acks, summary) are unaffected — they travel the other direction.
+  Contract v4 applies the manifest/payload distinction above to both
+  `file_begin` and every `TarShardHeader.files` member. Header-size splitting
+  includes the encoded Windows metadata, so no metadata-heavy shard can cross
+  the existing in-stream protobuf-frame ceiling.
 - **Local (in-process, otp-11):** both roles run in one process over
   the in-process frame channel — no RPC, no sockets — with the LOCAL
   byte-carrier: a process-local destination extension (`LocalApply`,
@@ -269,6 +348,10 @@ push/pull-specific message.
   same process would immediately deserialize. Strategy selection
   (tar-shard vs file vs block) stays planner-owned and reads workload
   shape + capability, never role/initiator/transport.
+  Contract v4 is not bypassed by this optimization: local payload preparation
+  hydrates and validates the same manifest descriptors, and the filesystem sink
+  applies the same exact named-stream replacement and attributes after either
+  the file-copy cascade or tar extraction completes.
 
 ## Errors, cancel, stall
 
@@ -300,6 +383,12 @@ push/pull-specific message.
   silently degrades a content-compare request to a weaker mode. A
   missing checksum on either side of a comparison degrades to
   transfer (conservative, never a false skip).
+- **Windows metadata failure (contract v4):** enumeration, payload hydration,
+  destination comparison, validation, stream replacement, and attribute apply
+  are correctness steps, not best-effort decoration. An error names the file,
+  aborts the session, joins owned workers, and suppresses that file's completion
+  plus the final success summary. Cancellation races metadata work through the
+  existing session cancellation path and has the same no-success rule.
 - `CancelJob` interop: the responder registers the session in
   `ActiveJobs` at OPEN (same transfer_id contract as today); the
   cancel token races the session exactly as w4-3 wired, and the
