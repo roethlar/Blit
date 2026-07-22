@@ -436,8 +436,9 @@ advise but cannot accept the slice (D-2026-07-16-4).
    analysis, and full-repository green. Opus 4.8/max found the candidate
    correct and fail-closed, admitting one Low guard gap because synthetic tests
    hid the analyzer's production horizon tuple. The literal tuple pin is
-   mutation-proved with 87 tests; tactical re-review, exact staging, and live
-   execution remain.
+   mutation-proved with 87 tests and exact `a0c3e3f` re-reviewed clean by the
+   same Opus session with an independent red/green guard. Exact staging and
+   live execution remain.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.

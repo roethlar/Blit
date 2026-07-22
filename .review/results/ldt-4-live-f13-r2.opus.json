@@ -1,0 +1,48 @@
+{
+  "record_type": "tactical_code_re_review",
+  "reviewer": {
+    "provider": "Anthropic",
+    "model": "claude-opus-4-8",
+    "cli": "Claude Code 2.1.217",
+    "reasoning_effort": "max"
+  },
+  "review_contract": {
+    "finding_ids": [
+      "ldt-4-live-f13-r1-f1"
+    ],
+    "base_sha": "af13fdb444c94c29f9260fa710918c338d95dd5e",
+    "reviewed_sha": "a0c3e3f18afd5528c6f636ee54708f4d8d5127e9",
+    "worktree": "/private/tmp/blit-opus-ldt4-f13-af13fdb",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "ec904253-4a0d-4eb9-b080-071b77fda80c",
+    "terminal_reason": "completed",
+    "authoritative_completion": "terminal schema-constrained structured_output after focused fix inspection, production mutation, exact restoration, and identity checks"
+  },
+  "structured_output": {
+    "verdict": "clean",
+    "guard_confirmed": true,
+    "base_sha": "af13fdb444c94c29f9260fa710918c338d95dd5e",
+    "reviewed_sha": "a0c3e3f18afd5528c6f636ee54708f4d8d5127e9",
+    "summary": "The one-finding fix is correct and exactly scoped. The production horizon tuple is now independently pinned outside the synthetic fixture patch, the tiny synthetic sessions are unchanged, and no production or harness behavior changed.",
+    "guard_proof": "The reviewer changed only analyzer EXPECTED_FIXTURES['horizon'] from 40/40 GiB to 25/25 GiB. Exactly the new literal test failed for the intended tuple mismatch. Exact restoration returned all 87 analyzer tests, Bash syntax, and the four-arm self-test green with a clean detached worktree.",
+    "findings": []
+  },
+  "checks": {
+    "analyzer_tests": "87 passed before and after restoration",
+    "isolated_guard": "new constant assertion passes in 0.000s without SyntheticSession construction",
+    "synthetic_fixture": "TEST_FIXTURES['horizon'] remains (2, 3)",
+    "bash_syntax": "pass",
+    "bash_3_2_selftest": "PASS (4 arms, no SSH)",
+    "cargo_fmt": "pass",
+    "docs_gate": "pass",
+    "independent_postcheck": "clean detached a0c3e3f18afd5528c6f636ee54708f4d8d5127e9 with exact reviewed hashes restored",
+    "sha256": {
+      "scripts/bench_ldt4_rigw.sh": "6b33590a2024d456e38c6ff7a9b955fefa9670454f0a45f3c863b582e85d4ab6",
+      "scripts/ldt4_rigw_analyze.py": "11f83a49eadd823c7eaa89280333d6a4e47892505402b6bc06e9b715b6032a8c",
+      "scripts/ldt4_rigw_analyze_test.py": "52d85cfb25f1674617b1251e98ae79b72b18ecdb58c5af90220f497d4d35fd13"
+    }
+  },
+  "policy_note": "This is tactical advisory code review, not a formal openreview acceptance verdict."
+}

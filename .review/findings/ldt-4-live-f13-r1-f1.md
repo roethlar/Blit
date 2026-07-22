@@ -2,9 +2,9 @@
 
 **Severity**: LOW — the committed values agree, but analyzer-only shape drift
 could pass every pre-rig gate and void the session only after the transfers.
-**Status**: Fixed in candidate; tactical re-review pending.
+**Status**: Closed by clean tactical re-review at `a0c3e3f`.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: pending
+**Commit**: `a0c3e3f`
 
 ## Evidence
 
@@ -59,7 +59,8 @@ the existing suite could not detect the drift.
 
 ## Known gaps
 
-Claude Opus 4.8/max tactical re-review remains before exact staging.
+None. Exact staging and the live run belong to parent finding
+`ldt-4-live-f13`, not this guard fix.
 
 ## Reviewer comments
 
@@ -70,3 +71,10 @@ Claude Code 2.1.217 reviewed exact
 in session `ec904253-4a0d-4eb9-b080-071b77fda80c`, returned one Low finding,
 and reported `guard_confirmed: true`. The structured record is
 `.review/results/ldt-4-live-f13-r1.opus.json`.
+
+The same Opus session re-reviewed exact
+`af13fdb444c94c29f9260fa710918c338d95dd5e..a0c3e3f18afd5528c6f636ee54708f4d8d5127e9`,
+independently made the production 40→25 tuple mutation, observed exactly the
+new test turn red, restored exact hashes, and returned clean with
+`guard_confirmed: true`. Record:
+`.review/results/ldt-4-live-f13-r2.opus-verdict.md`.
