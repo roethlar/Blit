@@ -3,9 +3,9 @@
 **Severity**: MEDIUM — the valid rig-W matrix completes before the live
 controller can change membership, so ldt-4 cannot prove adaptive ADD/REMOVE
 or role invariance under an actual transition.
-**Status**: Fixed, mutation-proved, and full-gate green; tactical review and exact staging pending.
+**Status**: Fixed, mutation-proved, full-gate green, and tactically reviewed clean; exact staging pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: pending
+**Commit**: `04e80082e12ce9836eda43afc70fb3b2d0eb07c9`
 
 ## Evidence
 
@@ -99,10 +99,19 @@ None.
 
 ## Known gaps
 
-Tactical review, exact additive staging, and one fresh quiet four-arm rig-W
-supplement remain. The two fixed-cell performance findings from the valid
-96-arm run stay separate and cannot be hidden by the longer diagnostic payload.
+Exact additive staging and one fresh quiet four-arm rig-W supplement remain.
+The two fixed-cell performance findings from the valid 96-arm run stay separate
+and cannot be hidden by the longer diagnostic payload.
 
 ## Reviewer comments
 
-Pending.
+Tactical Grok 4.5/high review over exact
+`12ae72c4b6a5f1c33803213c9c74dba12692a937..04e80082e12ce9836eda43afc70fb3b2d0eb07c9`
+returned `clean`, no findings, with `guard_confirmed: true`. The first response
+was discarded because its claimed tool work was absent from the exported
+transcript; the same session then resumed, executed the checks, turned the
+accepted-ADD guard red with a production mutation, restored exact bytes, and
+finished clean. The primary agent independently rechecked exact identity, Bash
+syntax, the four-arm self-test, and all 81 analyzer tests. Record:
+`.review/results/ldt-4-live-f12-r1.grok-verdict.md`. This is tactical advisory
+review, not formal `openreview` acceptance.

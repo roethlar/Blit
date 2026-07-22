@@ -1,0 +1,48 @@
+{
+  "record_type": "tactical_code_review",
+  "reviewer": {
+    "provider": "xAI",
+    "model": "grok-4.5",
+    "cli": "grok 0.2.106 (bde89716f679)",
+    "reasoning_effort": "high"
+  },
+  "review_contract": {
+    "finding_ids": [
+      "ldt-4-live-f12"
+    ],
+    "base_sha": "12ae72c4b6a5f1c33803213c9c74dba12692a937",
+    "reviewed_sha": "04e80082e12ce9836eda43afc70fb3b2d0eb07c9",
+    "worktree": "/private/tmp/blit-grok-ldt4-f12-04e8008",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "019f8721-e6f8-7f62-b1a2-80270b792192",
+    "authoritative_completion": "terminal schema-constrained structuredOutput after actual repository inspection, focused verification, production mutation, exact restoration, and identity checks",
+    "envelope_note": "The first response claimed tool and mutation work that its exported transcript did not contain, so it was discarded. The same session resumed under actual-execution requirements. The later CLI envelope included multiple interim schema-shaped messages and non-authoritative internal chatter; only the terminal structuredOutput is recorded as the verdict."
+  },
+  "structured_output": {
+    "verdict": "clean",
+    "guard_confirmed": true,
+    "base_sha": "12ae72c4b6a5f1c33803213c9c74dba12692a937",
+    "reviewed_sha": "04e80082e12ce9836eda43afc70fb3b2d0eb07c9",
+    "summary": "The exact reviewed range adds an additive four-arm sustained supplement bound to the retained valid 96-arm session and inventory digest, without rerunning the fixed matrix or changing its performance grading. Staging and capacity checks remain fail-closed, every sustained arm must accept ADD above the four-stream floor, and each initiator-layout pair must match material accepted membership transitions.",
+    "guard_proof": "The reviewer changed the production accepted-ADD-above-floor requirement so the NO_ACCEPTED_ADD_ABOVE_FLOOR condition could not be recorded. The focused sustained analyzer test turned red because arm_review_count fell from 1 to 0. Exact restoration returned Bash syntax, the four-arm no-SSH self-test, and all 81 analyzer tests green; the detached worktree ended clean at the reviewed SHA.",
+    "findings": []
+  },
+  "checks": {
+    "identity": "clean detached 04e80082e12ce9836eda43afc70fb3b2d0eb07c9 with one-commit parent 12ae72c4b6a5f1c33803213c9c74dba12692a937",
+    "bash_syntax": "pass",
+    "bash_3_2_selftest": "PASS (4 arms, no SSH)",
+    "analyzer_tests": "81 passed",
+    "scope_audit": "separate four-arm sustained supplement bound to the exact parent evidence, with no fixed-matrix rerun or performance regrading",
+    "capacity_audit": "stable sustained sources and retained destinations are pre-reserved additively above the endpoint free-space floor",
+    "guard_mutation": "production NO_ACCEPTED_ADD_ABOVE_FLOOR recording disabled; focused sustained analyzer test failed because the required arm review disappeared; exact restoration returned green",
+    "independent_postcheck": "primary agent re-proved exact HEAD, clean status, Bash syntax, four-arm self-test, 81 analyzer tests, and SHA-256 identity for all three executable files",
+    "sha256": {
+      "scripts/bench_ldt4_rigw.sh": "57c5d4732df4c1f33527f1fef8cc1f0bb85c5cfd4f3cc0b236126b2578dd8d97",
+      "scripts/ldt4_rigw_analyze.py": "32e7be5880d6f248cb066b18056385f9ce945e0bf68f44cfa0f639de2a3b44d4",
+      "scripts/ldt4_rigw_analyze_test.py": "a6b4d0a2b0b746c3c10d3f3082992cc174685c2fa4cb9d563f312652a7837aae"
+    }
+  },
+  "policy_note": "This is tactical advisory code review, not a formal openreview acceptance verdict."
+}
