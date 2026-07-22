@@ -11,6 +11,20 @@ import release_smoke
 
 
 class ReleaseSmokeTests(unittest.TestCase):
+    def test_windows_extended_paths_compare_by_their_filesystem_spelling(self) -> None:
+        self.assertEqual(
+            release_smoke.strip_windows_extended_prefix(
+                r"\\?\C:\Users\runner\Temp\remote-root"
+            ),
+            r"C:\Users\runner\Temp\remote-root",
+        )
+        self.assertEqual(
+            release_smoke.strip_windows_extended_prefix(
+                r"\\?\UNC\server\share\remote-root"
+            ),
+            r"\\server\share\remote-root",
+        )
+
     def test_checksum_requires_the_exact_archive_name_and_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

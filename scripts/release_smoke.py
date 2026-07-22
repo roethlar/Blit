@@ -185,6 +185,21 @@ def free_loopback_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def strip_windows_extended_prefix(path: str) -> str:
+    if path.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + path[len("\\\\?\\UNC\\") :]
+    if path.startswith("\\\\?\\"):
+        return path[len("\\\\?\\") :]
+    return path
+
+
+def comparable_filesystem_path(path: os.PathLike[str] | str) -> str:
+    resolved = os.path.realpath(path)
+    if os.name == "nt":
+        resolved = strip_windows_extended_prefix(resolved)
+    return os.path.normcase(os.path.normpath(resolved))
+
+
 def daemon_diagnostics(stdout_path: Path, stderr_path: Path) -> str:
     def tail(path: Path) -> str:
         if not path.exists():
@@ -219,7 +234,7 @@ def wait_for_owned_daemon(
     timeout: float = 20.0,
 ) -> None:
     deadline = time.monotonic() + timeout
-    expected_root = os.path.normcase(os.path.realpath(remote_root))
+    expected_root = comparable_filesystem_path(remote_root)
     last_error = "daemon did not answer"
     while time.monotonic() < deadline:
         status = process.poll()
@@ -243,8 +258,7 @@ def wait_for_owned_daemon(
                 owned = any(
                     isinstance(module, dict)
                     and module.get("name") == "test"
-                    and os.path.normcase(os.path.realpath(module.get("path", "")))
-                    == expected_root
+                    and comparable_filesystem_path(module.get("path", "")) == expected_root
                     for module in modules
                 )
                 if owned:
