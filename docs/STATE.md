@@ -74,10 +74,10 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/RELEASE_READINESS.md` (ACTIVE, D-2026-07-22-1).** No hardware
-   work. First: repair the deterministic Windows CI guard under an approved
-   code plan. Then resolve the Windows move/metadata release scope and produce
-   and smoke-test current release artifacts.
+1. **`docs/plan/RELEASE_COMPLETION.md` (DRAFT) refines the active
+   `docs/RELEASE_READINESS.md` ledger.** No hardware work. After owner approval,
+   first repair the deterministic Windows CI guard, then fix the remaining
+   release ledger one blocker per commit and prove current release artifacts.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).
@@ -143,7 +143,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
   D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
   D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b).
-- Active release ledger: **`docs/RELEASE_READINESS.md` (D-2026-07-22-1)**.
+- Active release ledger: **`docs/RELEASE_READINESS.md` (D-2026-07-22-1)**;
+  completion plan awaiting approval: **`docs/plan/RELEASE_COMPLETION.md`**.
 - Historical live-tuning record: **`docs/plan/LIVE_DIAL_TUNING.md`**; exact
   session audit: **`docs/bench/ldt4-evidence-audit-2026-07-22/`**.
 - Active plans: `docs/plan/SMALL_FILE_CEILING.md` (**paused** at
