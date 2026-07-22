@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (ldt-4 sustained live evidence retained; workload-shape finding next)
+Last updated: 2026-07-22 (ldt-4-live-f13 admission-horizon finding open)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,7 +10,7 @@ Last updated: 2026-07-22 (ldt-4 sustained live evidence retained; workload-shape
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — OWN THE POST-f12 WORKLOAD-SHAPE FINDING:** exact `04e8008` completed four structurally valid sustained arms with normal restoration, but every arm had zero tuner samples/ADD. Five 1 GiB files reached terminal SOURCE demand in 3.1–5.2 ms and queued before the first 500 ms tick even though byte drains lasted 4.3–20.6 seconds. Design a capacity-safe fixture that keeps admission backpressured across busy ticks; fixed-cell performance stays separate.
+- **NEXT ACTION — IMPLEMENT `ldt-4-live-f13`:** exact `04e8008` completed four valid arms, but five files queued before the first tick. f13 registers 40×1 GiB: the initial 25-payload admission bound forces at least 15 GiB to finish before tuner shutdown, beyond the earliest ADD horizon. Fresh additive q payload roots use the exact pinned local Apps SSD; internal evidence/quietness floors and fixed-cell performance remain separate.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 HAS VALID DATA, NOT ACCEPTANCE:** exact fixed session `ldt4-20260721T224319Z-96a4e3b03caf` remains at `docs/bench/ldt4-rigw-2026-07-21/` (arm review 0, decision review 14, performance review 2). Exact sustained session `ldt4-20260722T001611Z-04e80082e12c` is retained and independently reproduced at `docs/bench/ldt4-rigw-sustained-2026-07-22/` (arm review 4, decision/performance review 0): role transitions matched empty, but all arms had zero tuner samples because the five-file workload queued before the first tick. Adaptive proof remains open; `q_to_windows_large` 1.197 and `q_to_windows_mixed` 1.131 remain separate performance findings.
@@ -56,7 +56,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `96a4e3b` fixed evidence and exact `04e8008` sustained evidence are retained and independently reproduced. The sustained role pairs match, but all four arms had zero samples because five large files queued before the first tuner tick. Own and repair that admission-backpressure workload shape within q's retained-space floor, then address fixed-cell performance separately. Formal Fable openreview is held.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `96a4e3b` fixed evidence and exact `04e8008` f12 evidence are retained and independently reproduced. f12 role pairs match but had zero samples. `ldt-4-live-f13` owns a 40×1 GiB admission-horizon fixture and fresh exact-pinned q Apps-volume roots; implement/review/stage/run it, then address fixed-cell performance separately. Formal Fable openreview is held.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).

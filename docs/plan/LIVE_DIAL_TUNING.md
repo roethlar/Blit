@@ -424,6 +424,14 @@ advise but cannot accept the slice (D-2026-07-16-4).
    tuner tick, even while bytes drained for 4.3–20.6 seconds. A new finding
    must keep admission backpressured across required busy ticks within q's
    additive retained-space floor.
+   `ldt-4-live-f13` registers 40 separate 1 GiB payloads. The initial SOURCE
+   mpsc/forwarder/shared-queue/workers can admit at most 25 whole-file payloads,
+   so at least 15 GiB must finish before terminal admission; the 10Gbase-T line
+   ceiling makes that longer than the earliest tick-7 ADD. Because q's internal
+   volume cannot retain another large pair above its no-delete floor, f13 pins
+   fresh roots to q's exact local Apps APFS SSD UUID while retaining the
+   internal evidence and quietness gates. Implementation, Opus tactical review,
+   staging, and live execution remain.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.

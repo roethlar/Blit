@@ -114,6 +114,14 @@ review loop from rig-W benchmarking** — the contention that destroyed a
   under `.177` but no `.173` entry. D-2026-07-21-1 directs ldt-4 to adapt to
   `.173`; add only the already verified matching key under that address after
   exact code review. Never bypass host-key checking.
+- **ldt-4 diagnostic payload volume (observed 2026-07-22 at `1dcd220`):**
+  q's `/Volumes/Apps` is mounted, writable, case-sensitive APFS on a local
+  PCI-Express solid-state device, volume UUID
+  `33BAD653-9FA1-4236-966F-5BC4B221B34F`, with about 11.7 TB free. It is not a
+  substitute for the registered internal-volume quietness/free-space gate.
+  `ldt-4-live-f13` may use fresh additive roots there only after re-proving the
+  exact mount/UUID/filesystem/protocol/writable identity live; never allow a
+  missing mount to fall through to the system disk.
 - **CURRENT IDENTITY/STAGING (2026-07-21):** q now reports resolver-derived
   `hostname=Q.local`; stable macOS `LocalHostName=Q` and `ComputerName=Q` are
   unchanged. Exact `322a161` is staged at

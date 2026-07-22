@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — the valid rig-W matrix completes before the live
 controller can change membership, so ldt-4 cannot prove adaptive ADD/REMOVE
 or role invariance under an actual transition.
-**Status**: Live run complete and safely `REVIEW_REQUIRED`; the five-file workload queued before the first tuner tick, so a new workload-shape finding is next.
+**Status**: Superseded by `ldt-4-live-f13` after a structurally valid live run proved the five-file workload queued before the first tuner tick.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `04e80082e12ce9836eda43afc70fb3b2d0eb07c9`
 

@@ -26,7 +26,7 @@ Fable 5/max (D-2026-07-16-4).
 | ldt-1 | Acknowledged elastic membership with exact member and terminal outcomes | `[x]` | `f8f3c51` (neutral Claude accepted) |
 | ldt-2 | Live controller cutover; delete shape worker authority; shared ADD/REMOVE | `[x]` | `65a0f9f` (neutral Claude; one non-failing Low declined at intake) |
 | ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[x]` | `436e1bb` + review fix `406a7e5`; Claude r2 clean with independent guard |
-| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | Exact `96a4e3b` fixed session remains valid at `docs/bench/ldt4-rigw-2026-07-21/`. Exact `04e8008` sustained session `ldt4-20260722T001611Z-04e80082e12c` also completed four valid arms and is independently reproduced at `docs/bench/ldt4-rigw-sustained-2026-07-22/`, but returned arm review 4: all role pairs matched while every arm had zero samples/ADD because five files queued before the first tuner tick. Own a capacity-safe admission-backpressure workload next. Fixed-cell 1.197/1.131 performance findings remain separate. Formal Fable held |
+| ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[~]` | Exact `96a4e3b` fixed evidence and exact `04e8008` f12 evidence are retained and independently reproduced. f12 returned arm review 4: role pairs matched, but five files queued before the first tuner tick. `ldt-4-live-f13` registers 40×1 GiB so at least 15 GiB must complete before terminal admission, using fresh roots on q's exact pinned local Apps SSD to preserve the internal no-delete floor. Implement/review/stage/run it. Fixed-cell 1.197/1.131 performance findings remain separate. Formal Fable held |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 
