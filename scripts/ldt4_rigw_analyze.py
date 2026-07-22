@@ -70,7 +70,15 @@ EXPECTED_FIXTURES: dict[str, tuple[int, int]] = {
     "large": (1, 1_073_741_824),
     "small": (10_000, 40_960_000),
     "mixed": (5_001, 547_110_912),
+    "sustained": (5, 5_368_709_120),
 }
+SUSTAINED_FIXTURES = ("sustained",)
+SUSTAINED_CELL_ORDER = ("q_to_windows_sustained", "windows_to_q_sustained")
+SUSTAINED_FIRST_ROLE = ("source_init", "destination_init")
+PARENT_SESSION = "ldt4-20260721T224319Z-96a4e3b03caf"
+PARENT_EVIDENCE = "docs/bench/ldt4-rigw-2026-07-21"
+PARENT_INVENTORY_SHA256 = "713cb4624e6f64a3863b67101fb9a3f3df288306d3e6f418c19501428711990b"
+SUSTAINED_DESTINATION_BYTES = 10_737_418_240
 EXPECTED_FLOOR = 4
 EXPECTED_CEILING = 32
 FLOOR_CHUNK_BYTES = 16 * 1024 * 1024
@@ -448,8 +456,8 @@ def _windows_path(value: str) -> bool:
 def _registered_source_path(direction: str, fixture: str) -> str:
     if direction == "q_to_windows":
         return f"/Users/michael/blit-ldt4-staging/fixtures/src_{fixture}"
-    if fixture == "small":
-        return "D:/blit-test/ldt4-staging/fixtures/src_small"
+    if fixture in {"small", "sustained"}:
+        return f"D:/blit-test/ldt4-staging/fixtures/src_{fixture}"
     return f"D:/blit-test/rigw-module/src_{fixture}"
 
 
@@ -535,14 +543,37 @@ def _expected_schedule_rows() -> list[tuple[str, str, str, str, str]]:
     return rows
 
 
-def _load_schedule(root: Path) -> None:
+def _expected_sustained_schedule_rows() -> list[tuple[str, str, str, str, str]]:
+    rows: list[tuple[str, str, str, str, str]] = []
+    sequence = 0
+    for cell, first in zip(SUSTAINED_CELL_ORDER, SUSTAINED_FIRST_ROLE):
+        direction = next(
+            candidate for candidate in DIRECTIONS if cell.startswith(f"{candidate}_")
+        )
+        second = next(role for role in INITIATORS if role != first)
+        for initiator in (first, second):
+            sequence += 1
+            rows.append((f"{sequence:03d}", cell, direction, "sustained", initiator))
+    return rows
+
+
+def _schedule_rows(matrix: str) -> list[tuple[str, str, str, str, str]]:
+    if matrix == "fixed":
+        return _expected_schedule_rows()
+    if matrix == "sustained":
+        return _expected_sustained_schedule_rows()
+    raise AnalysisError(f"unregistered matrix {matrix!r}")
+
+
+def _load_schedule(root: Path, matrix: str) -> None:
     path = root / "schedule.csv"
     _plain_file(path, "schedule.csv")
-    expected = "".join(",".join(row) + "\n" for row in _expected_schedule_rows()).encode(
+    expected = "".join(",".join(row) + "\n" for row in _schedule_rows(matrix)).encode(
         "ascii"
     )
     if path.read_bytes() != expected:
-        raise AnalysisError("schedule.csv is not the exact registered 96-arm schedule")
+        label = "96-arm" if matrix == "fixed" else "sustained"
+        raise AnalysisError(f"schedule.csv is not the exact registered {label} schedule")
 
 
 def _gate_decimal(value: str, field: str, maximum: Decimal) -> Decimal:
@@ -606,16 +637,18 @@ def _load_environment_gate(root: Path, phase: str) -> None:
     )
 
 
-def _load_runtime_gates(root: Path) -> None:
+def _load_runtime_gates(root: Path, matrix: str) -> None:
     rows = _read_csv(root / "runtime-gates.csv", RUNTIME_GATE_FIELDS, "runtime-gates.csv")
-    expected_schedule = _expected_schedule_rows()
+    expected_schedule = _schedule_rows(matrix)
     expected = [
-        (schedule[0], schedule[1], str((index // 2) % len(PAIRS) + 1))
+        (schedule[0], schedule[1], str((index // 2) % len(PAIRS) + 1 if matrix == "fixed" else 1))
         for index, schedule in enumerate(expected_schedule)
         if index % 2 == 0
     ]
     if len(rows) != len(expected):
-        raise AnalysisError("runtime-gates.csv must contain exactly 48 pair-boundary rows")
+        raise AnalysisError(
+            f"runtime-gates.csv must contain exactly {len(expected)} pair-boundary rows"
+        )
     q_quiet_re = re.compile(
         r"^q_load1=((?:0|[1-9][0-9]*)(?:\.[0-9]+)?);"
         r"q_spotlight_cpu=((?:0|[1-9][0-9]*)(?:\.[0-9]+)?);"
@@ -634,6 +667,21 @@ def _load_runtime_gates(root: Path) -> None:
             if not UINT_RE.fullmatch(value) or int(value) < MIN_FREE_BYTES:
                 raise AnalysisError(
                     f"runtime-gates.csv line {line_number}: {field} is below the registered minimum"
+                )
+        if matrix == "sustained":
+            q_required = MIN_FREE_BYTES + SUSTAINED_DESTINATION_BYTES
+            windows_required = MIN_FREE_BYTES + (
+                SUSTAINED_DESTINATION_BYTES
+                if row["cell"] == "q_to_windows_sustained"
+                else 0
+            )
+            if int(row["q_free_bytes"]) < q_required:
+                raise AnalysisError(
+                    f"runtime-gates.csv line {line_number}: q_free_bytes cannot retain the remaining sustained destinations"
+                )
+            if int(row["windows_free_bytes"]) < windows_required:
+                raise AnalysisError(
+                    f"runtime-gates.csv line {line_number}: windows_free_bytes cannot retain the remaining sustained destinations"
                 )
         q_match = q_quiet_re.fullmatch(row["q_quiet"])
         windows_match = windows_quiet_re.fullmatch(row["windows_quiet"])
@@ -823,12 +871,17 @@ def _load_manifest(root: Path, relative: str, cache: dict[str, Manifest]) -> Man
 
 
 def _load_fixture_index(
-    root: Path, cache: dict[str, Manifest]
+    root: Path, cache: dict[str, Manifest], matrix: str
 ) -> dict[tuple[str, str], Manifest]:
     rows = _read_csv(
         root / "fixture-manifests.csv", FIXTURE_INDEX_FIELDS, "fixture-manifests.csv"
     )
-    expected = {(direction, fixture) for direction in DIRECTIONS for fixture in FIXTURES}
+    registered_fixtures = FIXTURES if matrix == "fixed" else SUSTAINED_FIXTURES
+    expected = {
+        (direction, fixture)
+        for direction in DIRECTIONS
+        for fixture in registered_fixtures
+    }
     found: dict[tuple[str, str], Manifest] = {}
     for line, row in enumerate(rows, start=2):
         key = (row["direction"], row["fixture"])
@@ -848,8 +901,10 @@ def _load_fixture_index(
             )
         found[key] = manifest
     if set(found) != expected:
-        raise AnalysisError("fixture-manifests.csv must contain all six direction/fixture cells")
-    for fixture in FIXTURES:
+        raise AnalysisError(
+            f"fixture-manifests.csv must contain every {matrix} direction/fixture cell"
+        )
+    for fixture in registered_fixtures:
         q_source = found[("q_to_windows", fixture)]
         windows_source = found[("windows_to_q", fixture)]
         if q_source.entries != windows_source.entries:
@@ -911,9 +966,11 @@ def _load_runs(
     root: Path,
     fixtures: dict[tuple[str, str], Manifest],
     manifest_cache: dict[str, Manifest],
+    matrix: str,
 ) -> list[RunRow]:
     raw_rows = _read_csv(root / "runs.csv", RUN_FIELDS, "runs.csv")
-    expected_count = len(DIRECTIONS) * len(FIXTURES) * len(PAIRS) * len(INITIATORS)
+    schedule_rows = _schedule_rows(matrix)
+    expected_count = len(schedule_rows)
     if len(raw_rows) != expected_count:
         raise AnalysisError(f"runs.csv must contain exactly {expected_count} rows")
     if not SAFE_SESSION_ID_RE.fullmatch(root.name):
@@ -932,7 +989,8 @@ def _load_runs(
         line = index + 2
         direction = raw["direction"]
         fixture = raw["fixture"]
-        if direction not in DIRECTIONS or fixture not in FIXTURES:
+        registered_fixtures = FIXTURES if matrix == "fixed" else SUSTAINED_FIXTURES
+        if direction not in DIRECTIONS or fixture not in registered_fixtures:
             raise AnalysisError(f"runs.csv line {line}: unregistered direction/fixture")
         expected_cell = _cell(direction, fixture)
         if raw["cell"] != expected_cell:
@@ -943,8 +1001,11 @@ def _load_runs(
         if initiator not in INITIATORS:
             raise AnalysisError(f"runs.csv line {line}: invalid initiator {initiator!r}")
         pair = _csv_int(raw["pair"], "pair", line, minimum=1)
-        if pair not in PAIRS:
-            raise AnalysisError(f"runs.csv line {line}: pair must be 1..8")
+        registered_pairs = PAIRS if matrix == "fixed" else (1,)
+        if pair not in registered_pairs:
+            raise AnalysisError(
+                f"runs.csv line {line}: pair is outside the registered {matrix} matrix"
+            )
         expected_run_id = f"ldt4-{index + 1:03d}"
         if raw["run_id"] != expected_run_id or raw["run_id"] in seen_run_ids:
             raise AnalysisError(
@@ -1070,8 +1131,9 @@ def _load_runs(
             )
         )
 
-    if set(paths_by_cell) != set(_expected_cells()):
-        raise AnalysisError("runs.csv does not cover all six cells")
+    expected_cells = CELL_ORDER if matrix == "fixed" else SUSTAINED_CELL_ORDER
+    if set(paths_by_cell) != set(expected_cells):
+        raise AnalysisError(f"runs.csv does not cover every {matrix} cell")
     if len(rows) % 2:
         raise AnalysisError("runs.csv role-pair schedule is not adjacent")
     for offset in range(0, len(rows), 2):
@@ -1087,14 +1149,25 @@ def _load_runs(
         groups_by_cell[first.cell].append((first.pair, first.initiator))
     actual_group_order = [(rows[offset].cell, rows[offset].pair) for offset in range(0, len(rows), 2)]
     expected_group_order = [
-        (cell, pair) for cell in CELL_ORDER for pair in PAIRS
+        (schedule_rows[index][1], (index // 2) % len(PAIRS) + 1 if matrix == "fixed" else 1)
+        for index in range(0, len(schedule_rows), 2)
     ]
     if actual_group_order != expected_group_order:
         raise AnalysisError("runs.csv global cell/pair order differs from the registered schedule")
-    for cell in _expected_cells():
-        wanted = list(zip(PAIRS, FIRST_ROLE))
+    for cell in expected_cells:
+        if matrix == "fixed":
+            wanted = list(zip(PAIRS, FIRST_ROLE))
+        else:
+            cell_index = SUSTAINED_CELL_ORDER.index(cell)
+            wanted = [(1, SUSTAINED_FIRST_ROLE[cell_index])]
         if groups_by_cell[cell] != wanted:
-            raise AnalysisError(f"runs.csv {cell}: expected pair 1..8 ABBAABBA first-role order")
+            if matrix == "fixed":
+                raise AnalysisError(
+                    f"runs.csv {cell}: expected pair 1..8 ABBAABBA first-role order"
+                )
+            raise AnalysisError(
+                f"runs.csv {cell}: first-role order differs from the registered {matrix} schedule"
+            )
     return rows
 
 
@@ -2615,6 +2688,237 @@ def _build_reports(
     return summary, arm_rows, pair_rows, sample_rows, "\n".join(lines)
 
 
+def _build_sustained_reports(
+    session_dir: Path,
+    arms: Sequence[ArmResult],
+    fixtures: dict[tuple[str, str], Manifest],
+    staging: Sequence[dict[str, str]],
+    harness_sha: str,
+) -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]], list[dict[str, str]], str]:
+    arm_by_key = {(arm.row.cell, arm.row.initiator): arm for arm in arms}
+    arm_rows: list[dict[str, str]] = []
+    sample_rows: list[dict[str, str]] = []
+    requirement_reasons: dict[tuple[str, str], tuple[str, ...]] = {}
+    for arm in arms:
+        source_endpoint = "q" if arm.row.direction == "q_to_windows" else "netwatch-01"
+        destination_endpoint = (
+            "netwatch-01" if arm.row.direction == "q_to_windows" else "q"
+        )
+        client_endpoint = (
+            source_endpoint if arm.row.initiator == "source_init" else destination_endpoint
+        )
+        client_complete_elapsed_ns = (
+            arm.source_complete_elapsed_ns
+            if arm.row.initiator == "source_init"
+            else arm.destination_complete_elapsed_ns
+        )
+        throughput = (Decimal(arm.row.bytes) / Decimal(1024 * 1024)) / (
+            arm.row.duration_ms / Decimal(1000)
+        )
+        reasons = list(arm.review_reasons)
+        accepted_add = any(
+            action == "ADD" and target > EXPECTED_FLOOR
+            for _, action, target in arm.dial.operations
+        )
+        if not accepted_add or arm.dial.add_count < 1 or arm.dial.peak <= EXPECTED_FLOOR:
+            reasons.append("NO_ACCEPTED_ADD_ABOVE_FLOOR")
+        requirement_reasons[(arm.row.cell, arm.row.initiator)] = tuple(reasons)
+        arm_rows.append(
+            {
+                "cell": arm.row.cell,
+                "pair": str(arm.row.pair),
+                "initiator": arm.row.initiator,
+                "run_id": arm.row.run_id,
+                "session_id": arm.row.session_id,
+                "source_endpoint": source_endpoint,
+                "destination_endpoint": destination_endpoint,
+                "client_endpoint": client_endpoint,
+                "duration_ms": _decimal_text(arm.row.duration_ms),
+                "throughput_mib_s": _decimal_text(throughput.quantize(Decimal("0.001"))),
+                "floor_streams": str(arm.dial.floor),
+                "peak_streams": str(arm.dial.peak),
+                "final_streams": str(arm.dial.final),
+                "receiver_ceiling": str(arm.dial.ceiling),
+                "accepted_adds": str(arm.dial.add_count),
+                "accepted_removes": str(arm.dial.remove_count),
+                "sample_count": str(len(arm.dial.samples)),
+                "sample_observation": "sampled" if arm.dial.samples else "no-sample",
+                "operations": json.dumps(
+                    [
+                        {"epoch": epoch, "action": action, "target_streams": target}
+                        for epoch, action, target in arm.dial.operations
+                    ],
+                    separators=(",", ":"),
+                ),
+                "reason_counts": _counter_json(arm.dial.reasons),
+                "reason_sequence": json.dumps(
+                    [sample["reason"] for sample in arm.dial.samples],
+                    separators=(",", ":"),
+                ),
+                "source_complete_elapsed_ns": str(arm.source_complete_elapsed_ns),
+                "destination_complete_elapsed_ns": str(
+                    arm.destination_complete_elapsed_ns
+                ),
+                "client_complete_elapsed_ns": str(client_complete_elapsed_ns),
+                "review_reasons": json.dumps(tuple(reasons), separators=(",", ":")),
+                "arm_verdict": "REVIEW_REQUIRED" if reasons else "SUSTAINED_ADD_ACCEPTED",
+                "source_path": arm.row.source_path,
+                "active_destination_path": arm.row.active_destination_path,
+                "archive_path": arm.row.archive_path,
+                "landed_manifest": arm.row.landed_manifest,
+                "landed_manifest_sha256": hashlib.sha256(
+                    (session_dir / arm.row.landed_manifest).read_bytes()
+                ).hexdigest(),
+                "source_trace": arm.row.source_trace,
+                "destination_trace": arm.row.destination_trace,
+            }
+        )
+        for sample in arm.dial.samples:
+            sample_rows.append(
+                {
+                    "cell": arm.row.cell,
+                    "pair": str(arm.row.pair),
+                    "initiator": arm.row.initiator,
+                    "run_id": arm.row.run_id,
+                    **{
+                        key: str(value).lower() if isinstance(value, bool) else str(value)
+                        for key, value in sample.items()
+                    },
+                }
+            )
+
+    pair_rows: list[dict[str, str]] = []
+    cell_summaries: list[dict[str, Any]] = []
+    decision_review_count = 0
+    trace_timing_difference_count = 0
+    material_fields = {"peak", "final", "add_count", "remove_count", "operation_sequence"}
+    for cell in SUSTAINED_CELL_ORDER:
+        source = arm_by_key[(cell, "source_init")]
+        destination = arm_by_key[(cell, "destination_init")]
+        differences = _role_differences(source, destination)
+        material = [item for item in differences if item in material_fields]
+        timing = [item for item in differences if item not in material_fields]
+        decision_review_count += int(bool(material))
+        trace_timing_difference_count += int(bool(timing))
+        ratio = max(source.row.duration_ms, destination.row.duration_ms) / min(
+            source.row.duration_ms, destination.row.duration_ms
+        )
+        pair_rows.append(
+            {
+                "cell": cell,
+                "pair": "1",
+                "source_init_ms": _decimal_text(source.row.duration_ms),
+                "destination_init_ms": _decimal_text(destination.row.duration_ms),
+                "destination_minus_source_ms": _decimal_text(
+                    destination.row.duration_ms - source.row.duration_ms
+                ),
+                "slower_faster_ratio": _decimal_text(ratio),
+                "source_peak": str(source.dial.peak),
+                "destination_peak": str(destination.dial.peak),
+                "source_final": str(source.dial.final),
+                "destination_final": str(destination.dial.final),
+                "source_adds": str(source.dial.add_count),
+                "destination_adds": str(destination.dial.add_count),
+                "source_removes": str(source.dial.remove_count),
+                "destination_removes": str(destination.dial.remove_count),
+                "source_operations": json.dumps(source.dial.operations, separators=(",", ":")),
+                "destination_operations": json.dumps(
+                    destination.dial.operations, separators=(",", ":")
+                ),
+                "source_reasons": _counter_json(source.dial.reasons),
+                "destination_reasons": _counter_json(destination.dial.reasons),
+                "source_reason_sequence": json.dumps(
+                    [sample["reason"] for sample in source.dial.samples],
+                    separators=(",", ":"),
+                ),
+                "destination_reason_sequence": json.dumps(
+                    [sample["reason"] for sample in destination.dial.samples],
+                    separators=(",", ":"),
+                ),
+                "decision_differences": ";".join(material),
+                "trace_timing_differences": ";".join(timing),
+                "decision_verdict": "REVIEW_REQUIRED" if material else "TRANSITIONS_MATCH",
+            }
+        )
+        cell_summaries.append(
+            {
+                "cell": cell,
+                "source_init_ms": _decimal_text(source.row.duration_ms),
+                "destination_init_ms": _decimal_text(destination.row.duration_ms),
+                "source_operations": [list(operation) for operation in source.dial.operations],
+                "destination_operations": [
+                    list(operation) for operation in destination.dial.operations
+                ],
+                "decision_differences": material,
+                "trace_timing_differences": timing,
+                "verdict": "REVIEW_REQUIRED" if material else "TRANSITIONS_MATCH",
+            }
+        )
+
+    arm_review_count = sum(bool(reasons) for reasons in requirement_reasons.values())
+    status = (
+        "REVIEW_REQUIRED"
+        if arm_review_count or decision_review_count
+        else "STRUCTURALLY_VALID_SUSTAINED_ROLE_PARITY"
+    )
+    summary: dict[str, Any] = {
+        "schema": 1,
+        "matrix": "sustained",
+        "status": status,
+        "artifact_sha": ARTIFACT_SHA,
+        "harness_sha": harness_sha,
+        "parent_session": PARENT_SESSION,
+        "parent_evidence": PARENT_EVIDENCE,
+        "parent_inventory_sha256": PARENT_INVENTORY_SHA256,
+        "arm_count": len(arms),
+        "no_sample_arm_count": sum(not arm.dial.samples for arm in arms),
+        "arm_review_count": arm_review_count,
+        "pair_count": len(SUSTAINED_CELL_ORDER),
+        "floor_streams_observed": EXPECTED_FLOOR,
+        "receiver_safety_ceiling_observed": EXPECTED_CEILING,
+        "preselected_worker_target": None,
+        "decision_review_count": decision_review_count,
+        "trace_timing_difference_count": trace_timing_difference_count,
+        "performance_review_count": 0,
+        "performance_materiality_ratio": None,
+        "timing_rule": "endpoint-local elapsed_ns only; no cross-host clock subtraction",
+        "staged_binaries": list(staging),
+        "fixture_manifests": [
+            {
+                "direction": direction,
+                "fixture": "sustained",
+                "path": fixtures[(direction, "sustained")].relative_path,
+                "sha256": fixtures[(direction, "sustained")].file_sha256,
+                "files": fixtures[(direction, "sustained")].files,
+                "bytes": fixtures[(direction, "sustained")].bytes,
+            }
+            for direction in DIRECTIONS
+        ],
+        "cells": cell_summaries,
+    }
+    lines = [
+        "# ldt-4 rig-W sustained controller supplement",
+        "",
+        f"Status: **{status}**",
+        "",
+        f"Validated {len(arms)} sustained arms in two physical byte directions.",
+        f"Parent fixed-matrix evidence: `{PARENT_EVIDENCE}` ({PARENT_INVENTORY_SHA256}).",
+        "Every arm must accept an ADD above the four-stream floor; accepted transition sequences must match within each initiator-layout pair.",
+        "Reason-only trailing sample differences are exported separately and do not override matching accepted membership transitions.",
+        "",
+        "| Cell | source-init ms | destination-init ms | source operations | destination operations | verdict |",
+        "|---|---:|---:|---|---|---|",
+    ]
+    for cell in cell_summaries:
+        lines.append(
+            f"| {cell['cell']} | {cell['source_init_ms']} | {cell['destination_init_ms']} | "
+            f"`{json.dumps(cell['source_operations'], separators=(',', ':'))}` | "
+            f"`{json.dumps(cell['destination_operations'], separators=(',', ':'))}` | {cell['verdict']} |"
+        )
+    lines.append("")
+    return summary, arm_rows, pair_rows, sample_rows, "\n".join(lines)
+
+
 def _load_provenance(session_dir: Path, expected_harness_sha: str) -> str:
     path = session_dir / "provenance.csv"
     rows = _read_csv(path, ("name", "sha"), "provenance.csv")
@@ -2641,14 +2945,39 @@ def _validate_expected_harness_sha(value: str) -> None:
         raise AnalysisError("expected harness SHA must be distinct from the artifact SHA")
 
 
-def _validate_measurements_complete(session_dir: Path, expected_harness_sha: str) -> None:
+def _load_parent_evidence(session_dir: Path) -> None:
+    expected = (
+        f"session={PARENT_SESSION} evidence={PARENT_EVIDENCE} "
+        f"inventory_sha256={PARENT_INVENTORY_SHA256}"
+    )
+    if _read_single_lf_line(
+        session_dir / "parent-evidence.txt", "parent-evidence.txt"
+    ) != expected:
+        raise AnalysisError("parent-evidence.txt is not the exact valid 96-arm binding")
+
+
+def _validate_measurements_complete(
+    session_dir: Path, expected_harness_sha: str, matrix: str
+) -> None:
     path = session_dir / "MEASUREMENTS-COMPLETE"
     _plain_file(path, "MEASUREMENTS-COMPLETE")
-    expected = (
-        f"artifact_sha={ARTIFACT_SHA}\n"
-        f"harness_sha={expected_harness_sha}\n"
-        "arm_count=96\n"
-    ).encode("ascii")
+    if matrix == "fixed":
+        expected_text = (
+            f"artifact_sha={ARTIFACT_SHA}\n"
+            f"harness_sha={expected_harness_sha}\n"
+            "arm_count=96\n"
+        )
+    elif matrix == "sustained":
+        expected_text = (
+            f"artifact_sha={ARTIFACT_SHA}\n"
+            f"harness_sha={expected_harness_sha}\n"
+            "matrix=sustained\n"
+            "arm_count=4\n"
+            f"parent_inventory_sha256={PARENT_INVENTORY_SHA256}\n"
+        )
+    else:
+        raise AnalysisError(f"unregistered matrix {matrix!r}")
+    expected = expected_text.encode("ascii")
     if path.read_bytes() != expected:
         raise AnalysisError("MEASUREMENTS-COMPLETE content is not the exact registered binding")
 
@@ -2658,11 +2987,13 @@ def _write_csv_exclusive(path: Path, fields: Sequence[str], rows: Iterable[dict[
         handle.write(_csv_payload(fields, rows))
 
 
-def analyze(session_dir: Path, expected_harness_sha: str) -> AnalysisResult:
+def analyze(
+    session_dir: Path, expected_harness_sha: str, matrix: str = "fixed"
+) -> AnalysisResult:
     session_dir = session_dir.absolute()
     _plain_directory(session_dir, "session directory")
     _validate_expected_harness_sha(expected_harness_sha)
-    _validate_measurements_complete(session_dir, expected_harness_sha)
+    _validate_measurements_complete(session_dir, expected_harness_sha, matrix)
     if (session_dir / "SESSION-VOID").exists():
         raise AnalysisError("SESSION-VOID exists; refusing to analyze a void session")
     output_dir = session_dir / "analysis"
@@ -2671,21 +3002,28 @@ def analyze(session_dir: Path, expected_harness_sha: str) -> AnalysisResult:
 
     # Provenance is validated before large evidence files are trusted.
     harness_sha = _load_provenance(session_dir, expected_harness_sha)
+    if matrix == "sustained":
+        _load_parent_evidence(session_dir)
     _load_artifact_build(session_dir)
     staging = _load_staging_manifest(session_dir)
     _load_windows_runtime_evidence(session_dir, staging)
-    _load_schedule(session_dir)
+    _load_schedule(session_dir, matrix)
     _load_environment_gate(session_dir, "start")
     _load_environment_gate(session_dir, "end")
-    _load_runtime_gates(session_dir)
+    _load_runtime_gates(session_dir, matrix)
     manifest_cache: dict[str, Manifest] = {}
-    fixtures = _load_fixture_index(session_dir, manifest_cache)
-    rows = _load_runs(session_dir, fixtures, manifest_cache)
+    fixtures = _load_fixture_index(session_dir, manifest_cache, matrix)
+    rows = _load_runs(session_dir, fixtures, manifest_cache, matrix)
     trace_cache: dict[str, list[dict[str, Any]]] = {}
     arms = [_validate_arm(session_dir, row, trace_cache) for row in rows]
-    summary, arm_rows, pair_rows, sample_rows, markdown = _build_reports(
-        session_dir, arms, fixtures, staging, harness_sha
-    )
+    if matrix == "fixed":
+        summary, arm_rows, pair_rows, sample_rows, markdown = _build_reports(
+            session_dir, arms, fixtures, staging, harness_sha
+        )
+    else:
+        summary, arm_rows, pair_rows, sample_rows, markdown = _build_sustained_reports(
+            session_dir, arms, fixtures, staging, harness_sha
+        )
     inventory_rows, inventory_sha = _inventory_input_files(session_dir)
     summary["input_file_count"] = len(inventory_rows)
     summary["input_inventory_sha256"] = inventory_sha
@@ -2747,9 +3085,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session-dir", required=True, type=Path)
     parser.add_argument("--expected-harness-sha", required=True)
+    parser.add_argument("--matrix", choices=("fixed", "sustained"), default="fixed")
     args = parser.parse_args(argv)
     try:
-        result = analyze(args.session_dir, args.expected_harness_sha)
+        result = analyze(args.session_dir, args.expected_harness_sha, args.matrix)
     except (AnalysisError, OSError, UnicodeError) as exc:
         print(f"ldt-4 analysis refused: {exc}", file=sys.stderr)
         return 2

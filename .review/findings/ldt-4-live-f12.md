@@ -1,9 +1,9 @@
-# ldt-4-live-f12 — add a sustained controller-exercise cell
+# ldt-4-live-f12 — add a sustained controller-exercise supplement
 
 **Severity**: MEDIUM — the valid rig-W matrix completes before the live
 controller can change membership, so ldt-4 cannot prove adaptive ADD/REMOVE
 or role invariance under an actual transition.
-**Status**: Open; implementation and guard proof pending.
+**Status**: Fixed, mutation-proved, and full-gate green; tactical review and exact staging pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: pending
 
@@ -36,48 +36,62 @@ decision review without any transition to compare.
 
 ## What
 
-Keep the original 96-arm fixed-fixture matrix and its performance grading
-unchanged. Append one adjacent initiator-layout pair in each physical byte
-direction using a dedicated 5 GiB sustained fixture. Treat these four arms as
-controller-exercise evidence, not replacements for the fixed performance
-cells. Require every sustained arm to accept at least one ADD above the
-four-stream floor and require each role pair to agree on its accepted
-membership-transition sequence.
+Keep the original 96-arm fixed-fixture evidence and its performance grading
+unchanged. Run a separate four-arm supplement, bound to that valid evidence's
+exact session and inventory digest, with one adjacent initiator-layout pair in
+each physical byte direction using a dedicated 5 GiB sustained fixture. Require
+every supplemental arm to accept at least one ADD above the four-stream floor
+and require each role pair to agree on its accepted membership-transition
+sequence.
 
 ## Approach
 
 - Additively stage `src_sustained` on both endpoints as five distinct 1 GiB
   files copied from the already validated canonical large fixture. Verify the
   exact five-file/5 GiB manifests are byte-identical before any arm.
-- Preserve the existing first 96 schedule rows byte-for-byte, then append four
-  sustained rows: one adjacent source-init/destination-init pair for
-  q→Windows and one counter-ordered adjacent pair for Windows→q.
+- Bind the supplement to the retained 96-arm session, evidence path, and exact
+  copied-payload inventory digest. Its own schedule contains only four rows:
+  one adjacent source-init/destination-init pair for q→Windows and one
+  counter-ordered adjacent pair for Windows→q.
 - Before staging or running, prove enough q and Windows free space remains for
   the new stable source, all four retained destinations, and the existing
   33,000,000,000-byte floor. Do not delete or overwrite prior evidence,
   fixtures, or retained payloads.
-- Extend the analyzer's exact schedule, fixture, runtime-gate, completion, and
-  inventory contracts to the 100-arm matrix. Keep performance grading scoped
-  to the original six cells. Add a separate sustained verdict that requires
-  an accepted ADD in all four arms and exact accepted-operation/target parity
-  within each initiator-layout pair.
+- Extend the analyzer with an exact sustained-supplement mode covering its
+  four-arm schedule, parent binding, fixture, runtime-gate, completion, and
+  inventory contracts. The sustained verdict requires an accepted ADD in all
+  four arms and exact accepted-operation/target parity within each
+  initiator-layout pair. Reason-only trailing-sample timing differences remain
+  exported but do not override matching accepted membership transitions.
 - Add structural and analyzer tests that fail if the sustained rows disappear,
-  the fixture is shortened, the original 96 rows change, or the required
+  the fixture is shortened, the parent binding changes, or the required
   transition/parity verdict is weakened. Mutation-prove the new guard red,
   restore it, then run the full repository gates.
 
-## Files expected
+## Files changed
 
 - `scripts/bench_ldt4_rigw.sh` — additive sustained fixture, registered four
   diagnostic arms, capacity gates, and structural guards.
-- `scripts/ldt4_rigw_analyze.py` — exact 100-arm contract and sustained
-  transition/parity verdict separate from fixed-cell performance.
+- `scripts/ldt4_rigw_analyze.py` — exact four-arm supplemental contract and
+  sustained transition/parity verdict separate from fixed-cell performance.
 - `scripts/ldt4_rigw_analyze_test.py` — valid sustained fixtures/traces and
   rejection tests for absent transitions or pair mismatch.
 
 ## Guard proof
 
-Pending.
+- Bash syntax and the four-arm no-SSH structural self-test pass.
+- All 81 analyzer tests pass, including a valid supplemental matrix, exact
+  parent binding, and missing-ADD/pair-mismatch review cases.
+- Mutation 1: replacing the production accepted-ADD requirement with
+  `if False` made
+  `test_sustained_arm_without_add_and_pair_mismatch_require_review` fail
+  because `arm_review_count` fell from 1 to 0. Restoring the requirement
+  returned focused green.
+- Mutation 2: replacing the production material transition comparison with an
+  empty list made the same test fail because `decision_review_count` fell from
+  1 to 0. Restoring the comparison returned focused green.
+- Full repository gates pass: rustfmt check, strict workspace clippy, complete
+  workspace tests, and `scripts/agent/check-docs.sh`.
 
 ## Coder dispute
 
@@ -85,9 +99,9 @@ None.
 
 ## Known gaps
 
-After implementation, review, and exact staging, one fresh quiet rig-W run is
-required. The two fixed-cell performance findings from the valid 96-arm run
-remain separate and must not be hidden by the longer diagnostic payload.
+Tactical review, exact additive staging, and one fresh quiet four-arm rig-W
+supplement remain. The two fixed-cell performance findings from the valid
+96-arm run stay separate and cannot be hidden by the longer diagnostic payload.
 
 ## Reviewer comments
 

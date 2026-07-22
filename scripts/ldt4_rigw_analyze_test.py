@@ -29,6 +29,7 @@ TEST_FIXTURES = {
     "large": (2, 3),
     "small": (2, 3),
     "mixed": (2, 3),
+    "sustained": (2, 3),
 }
 TEST_HARNESS_SHA = "1" * 40
 TEST_SAFE_ID = "ldt4-test-session"
@@ -50,13 +51,20 @@ TEST_FIRST_ROLE = (
     "destination_init",
     "source_init",
 )
+TEST_SUSTAINED_CELL_ORDER = (
+    "q_to_windows_sustained",
+    "windows_to_q_sustained",
+)
+TEST_SUSTAINED_FIRST_ROLE = ("source_init", "destination_init")
 TEST_SOURCE_PATHS = {
     ("q_to_windows", "large"): "/Users/michael/blit-ldt4-staging/fixtures/src_large",
     ("q_to_windows", "small"): "/Users/michael/blit-ldt4-staging/fixtures/src_small",
     ("q_to_windows", "mixed"): "/Users/michael/blit-ldt4-staging/fixtures/src_mixed",
+    ("q_to_windows", "sustained"): "/Users/michael/blit-ldt4-staging/fixtures/src_sustained",
     ("windows_to_q", "large"): "D:/blit-test/rigw-module/src_large",
     ("windows_to_q", "small"): "D:/blit-test/ldt4-staging/fixtures/src_small",
     ("windows_to_q", "mixed"): "D:/blit-test/rigw-module/src_mixed",
+    ("windows_to_q", "sustained"): "D:/blit-test/ldt4-staging/fixtures/src_sustained",
 }
 TEST_DESTINATION_ROOTS = {
     "q_to_windows": "D:/blit-test/ldt4-sessions",
@@ -100,17 +108,35 @@ def _manifest_payload(content_suffix: str = "") -> str:
 
 
 class SyntheticSession:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, matrix: str = "fixed") -> None:
         self.root = root
+        self.matrix = matrix
+        self.safe_id = root.name
         self.fixture_rows: list[dict[str, str]] = []
         self.run_rows: list[dict[str, str]] = []
         self._session_number = 1
-        (root / "MEASUREMENTS-COMPLETE").write_text(
-            f"artifact_sha={analyzer.ARTIFACT_SHA}\n"
-            f"harness_sha={TEST_HARNESS_SHA}\n"
-            "arm_count=96\n",
-            encoding="ascii",
-        )
+        if matrix == "fixed":
+            completion = (
+                f"artifact_sha={analyzer.ARTIFACT_SHA}\n"
+                f"harness_sha={TEST_HARNESS_SHA}\n"
+                "arm_count=96\n"
+            )
+        elif matrix == "sustained":
+            completion = (
+                f"artifact_sha={analyzer.ARTIFACT_SHA}\n"
+                f"harness_sha={TEST_HARNESS_SHA}\n"
+                "matrix=sustained\n"
+                "arm_count=4\n"
+                f"parent_inventory_sha256={analyzer.PARENT_INVENTORY_SHA256}\n"
+            )
+            (root / "parent-evidence.txt").write_text(
+                f"session={analyzer.PARENT_SESSION} evidence={analyzer.PARENT_EVIDENCE} "
+                f"inventory_sha256={analyzer.PARENT_INVENTORY_SHA256}\n",
+                encoding="ascii",
+            )
+        else:
+            raise ValueError(f"unsupported synthetic matrix: {matrix}")
+        (root / "MEASUREMENTS-COMPLETE").write_text(completion, encoding="ascii")
         _write_csv(
             root / "provenance.csv",
             ("name", "sha"),
@@ -139,18 +165,23 @@ class SyntheticSession:
         self._write_fixtures()
         self._write_runs()
 
-    @staticmethod
-    def _schedule_rows() -> list[tuple[str, str, str, str, str]]:
+    def _schedule_rows(self) -> list[tuple[str, str, str, str, str]]:
         rows: list[tuple[str, str, str, str, str]] = []
         sequence = 0
-        for cell in TEST_CELL_ORDER:
+        cells = TEST_CELL_ORDER if self.matrix == "fixed" else TEST_SUSTAINED_CELL_ORDER
+        for cell in cells:
             direction = next(
                 candidate
                 for candidate in ("q_to_windows", "windows_to_q")
                 if cell.startswith(f"{candidate}_")
             )
             fixture = cell[len(direction) + 1 :]
-            for first in TEST_FIRST_ROLE:
+            first_roles = (
+                TEST_FIRST_ROLE
+                if self.matrix == "fixed"
+                else (TEST_SUSTAINED_FIRST_ROLE[cells.index(cell)],)
+            )
+            for first in first_roles:
                 second = (
                     "destination_init" if first == "source_init" else "source_init"
                 )
@@ -200,9 +231,9 @@ class SyntheticSession:
                 {
                     "sequence": schedule[0],
                     "cell": schedule[1],
-                    "pair": str((index // 2) % 8 + 1),
-                    "q_free_bytes": "40000000000",
-                    "windows_free_bytes": "40000000000",
+                    "pair": str((index // 2) % 8 + 1 if self.matrix == "fixed" else 1),
+                    "q_free_bytes": "50000000000",
+                    "windows_free_bytes": "50000000000",
                     "q_quiet": (
                         "q_load1=1.25;q_spotlight_cpu=2.5;"
                         "time_machine_auto=0;time_machine_running=0"
@@ -230,8 +261,9 @@ class SyntheticSession:
         )
 
     def _write_fixtures(self) -> None:
+        fixtures = analyzer.FIXTURES if self.matrix == "fixed" else analyzer.SUSTAINED_FIXTURES
         for direction in analyzer.DIRECTIONS:
-            for fixture in analyzer.FIXTURES:
+            for fixture in fixtures:
                 relative = f"manifests/source/{direction}_{fixture}.csv"
                 path = self.root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -608,12 +640,18 @@ class SyntheticSession:
         )
 
     def _write_runs(self) -> None:
-        for cell in TEST_CELL_ORDER:
+        cells = TEST_CELL_ORDER if self.matrix == "fixed" else TEST_SUSTAINED_CELL_ORDER
+        for cell in cells:
             direction = next(
                 value for value in analyzer.DIRECTIONS if cell.startswith(f"{value}_")
             )
             fixture = cell.removeprefix(f"{direction}_")
-            for pair, first in zip(range(1, 9), TEST_FIRST_ROLE):
+            pairs_and_roles = (
+                zip(range(1, 9), TEST_FIRST_ROLE)
+                if self.matrix == "fixed"
+                else ((1, TEST_SUSTAINED_FIRST_ROLE[cells.index(cell)]),)
+            )
+            for pair, first in pairs_and_roles:
                 second = next(role for role in analyzer.INITIATORS if role != first)
                 for initiator in (first, second):
                     number = self._session_number
@@ -634,8 +672,8 @@ class SyntheticSession:
                     landed_path.write_text(_manifest_payload(), encoding="ascii")
                     source_path = TEST_SOURCE_PATHS[(direction, fixture)]
                     destination_root = TEST_DESTINATION_ROOTS[direction]
-                    active_path = f"{destination_root}/{TEST_SAFE_ID}/active/{fixture}"
-                    archive_path = f"{destination_root}/{TEST_SAFE_ID}/retained/{run_id}"
+                    active_path = f"{destination_root}/{self.safe_id}/active/{fixture}"
+                    archive_path = f"{destination_root}/{self.safe_id}/retained/{run_id}"
                     duration = 8000 if initiator == "source_init" else 8100
                     self.run_rows.append(
                         {
@@ -758,10 +796,22 @@ class AnalyzerTests(unittest.TestCase):
     def test_registered_windows_endpoint_matches_current_identity(self) -> None:
         self.assertEqual(analyzer.WINDOWS_IP, "10.1.10.173")
 
-    def make_zero_sample_arm(self, row: dict[str, str], phase_span_ns: int) -> None:
+    def test_sustained_parent_inventory_matches_retained_valid_evidence(self) -> None:
+        self.assertEqual(
+            analyzer.PARENT_INVENTORY_SHA256,
+            "713cb4624e6f64a3863b67101fb9a3f3df288306d3e6f418c19501428711990b",
+        )
+
+    def make_zero_sample_arm(
+        self,
+        row: dict[str, str],
+        phase_span_ns: int,
+        session: Optional[SyntheticSession] = None,
+    ) -> None:
+        selected = session or self.session
         source = [
             event
-            for event in self.session.read_events(row)
+            for event in selected.read_events(row)
             if not event["event"].startswith("dial_")
             and event["event"] not in analyzer.SOURCE_CONTROL_FIELDS
             and not (
@@ -788,7 +838,7 @@ class AnalyzerTests(unittest.TestCase):
 
         destination = [
             event
-            for event in self.session.read_events(row, "destination")
+            for event in selected.read_events(row, "destination")
             if event["event"] not in analyzer.DESTINATION_CONTROL_FIELDS
             and not (
                 event["event"].startswith("socket_") and event.get("epoch", 0) > 0
@@ -801,8 +851,8 @@ class AnalyzerTests(unittest.TestCase):
             event for event in destination if event["event"] == "data_plane_complete"
         )
         destination_complete.update(live_streams=4, peak_streams=4)
-        self.session.write_events(row, source)
-        self.session.write_events(row, destination, "destination")
+        selected.write_events(row, source)
+        selected.write_events(row, destination, "destination")
 
     def test_valid_matrix_writes_immutable_adaptive_reports(self) -> None:
         self.assertEqual(analyzer.CELL_ORDER, TEST_CELL_ORDER)
@@ -826,6 +876,67 @@ class AnalyzerTests(unittest.TestCase):
         self.assertTrue((result.output_dir / "dial-samples.csv").is_file())
         with self.assertRaisesRegex(analyzer.AnalysisError, "already exists"):
             self.analyze()
+
+    def test_valid_sustained_supplement_requires_add_and_transition_parity(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "ldt4-sustained-test"
+        root.mkdir()
+        session = SyntheticSession(root, "sustained")
+        result = analyzer.analyze(root, TEST_HARNESS_SHA, "sustained")
+        self.assertEqual(result.arm_count, 4)
+        self.assertEqual(result.arm_review_count, 0)
+        self.assertEqual(result.decision_review_count, 0)
+        self.assertEqual(result.performance_review_count, 0)
+        self.assertEqual(result.status, "STRUCTURALLY_VALID_SUSTAINED_ROLE_PARITY")
+        summary = json.loads((result.output_dir / "summary.json").read_text())
+        self.assertEqual(summary["matrix"], "sustained")
+        self.assertEqual(summary["parent_inventory_sha256"], analyzer.PARENT_INVENTORY_SHA256)
+        self.assertEqual(summary["pair_count"], 2)
+        with (result.output_dir / "arms.csv").open(newline="") as handle:
+            arms = list(csv.DictReader(handle))
+        self.assertEqual({row["arm_verdict"] for row in arms}, {"SUSTAINED_ADD_ACCEPTED"})
+        self.assertEqual({row["accepted_adds"] for row in arms}, {"1"})
+        with (result.output_dir / "pairs.csv").open(newline="") as handle:
+            pairs = list(csv.DictReader(handle))
+        self.assertEqual({row["decision_verdict"] for row in pairs}, {"TRANSITIONS_MATCH"})
+        self.assertEqual(len(session.run_rows), 4)
+
+    def test_sustained_arm_without_add_and_pair_mismatch_require_review(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "ldt4-sustained-no-add"
+        root.mkdir()
+        session = SyntheticSession(root, "sustained")
+        row = session.row(
+            direction="q_to_windows",
+            fixture="sustained",
+            pair=1,
+            initiator="destination_init",
+        )
+        self.make_zero_sample_arm(row, analyzer.DIAL_TUNER_TICK_NS - 1, session)
+        result = analyzer.analyze(root, TEST_HARNESS_SHA, "sustained")
+        self.assertEqual(result.status, "REVIEW_REQUIRED")
+        self.assertEqual(result.arm_review_count, 1)
+        self.assertEqual(result.decision_review_count, 1)
+        with (result.output_dir / "arms.csv").open(newline="") as handle:
+            arms = list(csv.DictReader(handle))
+        changed = next(item for item in arms if item["run_id"] == row["run_id"])
+        self.assertIn("NO_ACCEPTED_ADD_ABOVE_FLOOR", changed["review_reasons"])
+
+    def test_sustained_parent_binding_is_exact(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "ldt4-sustained-parent"
+        root.mkdir()
+        SyntheticSession(root, "sustained")
+        (root / "parent-evidence.txt").write_text(
+            f"session={analyzer.PARENT_SESSION} evidence={analyzer.PARENT_EVIDENCE} "
+            f"inventory_sha256={'0' * 64}\n",
+            encoding="ascii",
+        )
+        with self.assertRaisesRegex(analyzer.AnalysisError, "exact valid 96-arm binding"):
+            analyzer.analyze(root, TEST_HARNESS_SHA, "sustained")
 
     def test_source_path_must_be_the_registered_physical_fixture(self) -> None:
         self.session.run_rows[1]["source_path"] = "/different/source"
