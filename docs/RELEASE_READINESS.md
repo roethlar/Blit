@@ -1,11 +1,11 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** local `master` at `f2fe4de`, 2026-07-22
+**As of:** local `master` at `9c399cc`, 2026-07-22
 
-This is the concise release boundary after D-2026-07-22-1. Correctness,
-supported-platform CI, packaging, installation, and startup are release work.
-Performance ceilings and hardware tuning are post-release work.
+This is the concise release boundary after D-2026-07-22-3. Every known broken
+behavior is release work regardless of its internal classification. Optional
+performance ceilings and hardware tuning remain post-release work.
 
 ## Proven
 
@@ -34,26 +34,22 @@ Performance ceilings and hardware tuning are post-release work.
 2. **Windows directory-tree move can hang.** The integration test is ignored on
    Windows after repeated hangs; the product behavior remains unresolved.
 3. **Windows attributes and alternate data streams are silently lost on the
-   tar path.** This is a correctness blocker if the first release claims
-   Windows metadata fidelity; otherwise the limitation must be explicit.
-4. **Current release artifacts are unproved.** The exact local head is not on
+   tar path.** Full fidelity is required for this release.
+4. **Progress reporting is incomplete.** Delegated progress can be silent and
+   served-session byte/file totals can remain zero through daemon, RPC, CLI,
+   and TUI consumers.
+5. **P2 is unresolved.** Unified TCP small-file push is 10–20% slower than the
+   old path in retained same-session evidence. It requires code attribution and
+   a direct software guard, not another hardware matrix.
+6. **Current release artifacts are unproved.** The exact local head is not on
    GitHub, the latest published release-build jobs were skipped, and install /
    startup smoke checks for the produced CLI and daemon artifacts are not
    recorded.
 
-## Release-scope decisions still needed
-
-- Decide whether live delegated/served-session progress completeness is in the
-  first release. Three recorded Medium findings leave delegated progress
-  silent and some daemon byte/file totals at zero; transfer correctness is not
-  affected.
-- Decide whether Windows metadata fidelity is promised in the first release.
-  The loss itself is measured and not ambiguous.
-
 ## Deferred until after release
 
-- P2 performance attribution, ldt-4 causal tuning, fixed-cell throughput
-  asymmetries, MTU follow-ups, and all further hardware matrices.
+- ldt-4 causal tuning, unexplained ceiling asymmetries not tied to a known
+  broken behavior, MTU follow-ups, and further hardware matrices.
 - Mac↔Mac Thunderbolt ceiling testing.
 - Small-file and zero-copy performance work, performance refactors, and other
   ceiling optimization.

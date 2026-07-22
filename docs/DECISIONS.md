@@ -365,3 +365,20 @@ Format:
   `OTP12_PERF_FINDINGS` where it required another P1 rig/counterfactual/final
   run. It preserves the ban on unapproved data-moving hardware work and does
   not close the separate P2 finding.
+
+## D-2026-07-22-3 — Every known broken behavior blocks release
+- Decision: Activate `docs/plan/RELEASE_COMPLETION.md`. Every known broken
+  product behavior must be fixed before release, including P2, Windows metadata
+  loss, incomplete progress, CI failures, move hangs, packaging, installation,
+  and startup gaps. Classification is agent bookkeeping, not an owner decision
+  or a deferral mechanism. Owner, 2026-07-22, verbatim: **"I don't care how you
+  classify the broken things. all of them need to be fixed. accounting is your
+  problem. you are the only consumer of that. fix it. I need a working app."**
+- Why: the owner needs one working cross-platform application, not an internal
+  taxonomy or a release assembled by waiving known failures. Optional ceiling
+  research remains distinct from a measured product regression or broken
+  behavior.
+- Supersedes: D-2026-07-22-1 only where it deferred a known broken behavior
+  such as P2, every unresolved release-scope question in STATE/readiness, and
+  the Draft gate in `RELEASE_COMPLETION.md`. It preserves the ban on
+  unapproved data-moving hardware tests and all outward-git approval gates.

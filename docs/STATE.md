@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (release-first evidence audit, D-2026-07-22-1)
+Last updated: 2026-07-22 (complete-release activation, D-2026-07-22-3)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -11,9 +11,9 @@ Last updated: 2026-07-22 (release-first evidence audit, D-2026-07-22-1)
     fresh `q`↔`netwatch-01` retry.
 
 - **NEXT ACTION — RELEASE BLOCKERS ONLY:** use `docs/RELEASE_READINESS.md`.
-  Fix the deterministic Windows CI guard first under an approved code plan,
-  then resolve Windows move/metadata scope and prove release artifacts. No
-  performance rig or endpoint work is in the pre-release queue.
+  Fix the deterministic Windows CI guard first, then move through every known
+  broken behavior under the active completion plan. No performance rig or
+  endpoint work is in the pre-release queue.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -42,11 +42,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **RELEASE READINESS ACTIVE (D-2026-07-22-1):** ldt-1..3 are accepted;
+- **RELEASE COMPLETION ACTIVE (D-2026-07-22-3):** ldt-1..3 are accepted;
   ldt-4 is closed as evidence, not as a tuning win. The complete first horizon
   session is valid after corrected reanalysis; its repeat was unnecessary.
-  Performance and Thunderbolt work are post-release. Current blockers and
-  unknowns are canonical in `docs/RELEASE_READINESS.md`.
+  Every known broken behavior is release-blocking; optional ceiling and
+  Thunderbolt work remain post-release. Current blockers are canonical in
+  `docs/RELEASE_READINESS.md`.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -74,10 +75,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/RELEASE_COMPLETION.md` (DRAFT) refines the active
-   `docs/RELEASE_READINESS.md` ledger.** No hardware work. After owner approval,
-   first repair the deterministic Windows CI guard, then fix the remaining
-   release ledger one blocker per commit and prove current release artifacts.
+1. **`docs/plan/RELEASE_COMPLETION.md` (ACTIVE, D-2026-07-22-3).** No hardware
+   work. First repair the deterministic Windows CI guard, then fix every
+   remaining release blocker one per commit and prove current artifacts.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).
@@ -99,14 +99,11 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    **otp-12d and otp-13 are POST-RELEASE (D-2026-07-22-1).** Their retained
    pre-fix evidence remains usable for what it records; no performance
    acceptance matrix is a shipping prerequisite.
-2a. **POST-RELEASE P2 ONLY: `docs/plan/OTP12_PERF_FINDINGS.md`.** P1 is
-    closed by D-2026-07-22-2 from direct old-red/new-green worker-parity proof;
-    no P1 rig or final run remains. P2, pf-final residue, otp-12d, and otp-13
-    remain outside the release queue unless the owner explicitly moves them.
-2b. **RELEASE SCOPE — Windows metadata fidelity; local performance is
-   post-release.** The measured metadata loss is a correctness blocker if the
-   first release promises Windows metadata fidelity. The owner must either
-   include the wire-contract fix or explicitly exclude that guarantee.
+2a. **RELEASE P2 EVIDENCE: `docs/plan/OTP12_PERF_FINDINGS.md`.** P1 is closed
+    by D-2026-07-22-2. P2 is owned by release slice rel-2 and must be attributed
+    and fixed from retained/code evidence without a new physical matrix.
+2b. **RELEASE BLOCKER — Windows metadata fidelity; optional local ceiling work
+   remains post-release.** Full attributes/ADS fidelity is required.
    - **`docs/bugs/windows-attrs-and-ads-lost-on-tar-path.md` (D-2026-07-13-3)**
      — Windows attributes + ADS silently dropped, exit 0, **both routes
      (measured)**; loss is **conditional on file count**
@@ -143,8 +140,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
   D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
   D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b).
-- Active release ledger: **`docs/RELEASE_READINESS.md` (D-2026-07-22-1)**;
-  completion plan awaiting approval: **`docs/plan/RELEASE_COMPLETION.md`**.
+- Active release ledger: **`docs/RELEASE_READINESS.md`**; governing plan:
+  **`docs/plan/RELEASE_COMPLETION.md` (D-2026-07-22-3)**.
 - Historical live-tuning record: **`docs/plan/LIVE_DIAL_TUNING.md`**; exact
   session audit: **`docs/bench/ldt4-evidence-audit-2026-07-22/`**.
 - Active plans: `docs/plan/SMALL_FILE_CEILING.md` (**paused** at
@@ -172,8 +169,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 - **Windows CI is red as of published GitHub head `dcf9245`:** run
   `29584631185` failed the nondeterministic handshake-stall test and skipped
   release artifacts. Finding: `release-win-ci-handshake-stall-test`.
-- **Release scope:** Windows directory-tree move hangs remain unresolved;
-  Windows attributes/ADS are silently lost on the tar path. See
+- **Release blockers:** Windows directory-tree move hangs, attributes/ADS loss,
+  incomplete progress, P2, and artifact/install proof remain unresolved. See
   `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):
@@ -183,8 +180,6 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Open questions
 
-- **(OPEN — release scope)** Decide whether the first release promises Windows
-  metadata fidelity and complete delegated/served-session progress reporting.
 - **(SLOTTED 2026-07-12 — owner ack)** `docs/WHITEPAPER.md` §8 (~line
   592) describes the deleted `determine_remote_tuning` — fix folded
   into **w10-docs-batch**; no one-off edit.
