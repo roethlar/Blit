@@ -280,6 +280,19 @@ async fn small_tree_byte_identical_under_both_initiators() {
     );
 }
 
+fn expect_session_success(
+    source: eyre::Result<TransferSummary>,
+    destination: eyre::Result<DestinationOutcome>,
+    context: &str,
+) -> (TransferSummary, DestinationOutcome) {
+    match (source, destination) {
+        (Ok(summary), Ok(outcome)) => (summary, outcome),
+        (source, destination) => panic!(
+            "{context} failed\nsource result:\n{source:#?}\ndestination result:\n{destination:#?}"
+        ),
+    }
+}
+
 #[tokio::test]
 async fn tiny_file_tree_tar_shard_records_under_both_initiators() {
     // 200 tiny files under nested dirs; force_tar makes the planner's
@@ -1345,8 +1358,11 @@ async fn tcp_payload_overlaps_open_manifest_under_either_initiator() {
             payload_landed_while_manifest_open,
             "TCP payload waited for ManifestComplete with {initiator_role:?} initiating"
         );
-        let summary = source_result.expect("source succeeds");
-        let outcome = dest_result.expect("destination succeeds");
+        let (summary, outcome) = expect_session_success(
+            source_result,
+            dest_result,
+            &format!("manifest overlap with {initiator_role:?} initiating"),
+        );
         assert_eq!(summary, outcome.summary);
         assert_eq!(summary.files_transferred, FILE_COUNT as u64);
         assert_trees_identical(&src_root, &dst_root);
@@ -1403,8 +1419,11 @@ async fn many_tiny_files_transfer_with_live_workers_when_source_initiates() {
     .await
     .expect("session run timed out");
 
-    let summary = source_result.expect("source succeeds");
-    let outcome = dest_result.expect("destination succeeds");
+    let (summary, outcome) = expect_session_success(
+        source_result,
+        dest_result,
+        "10,000-file SOURCE-initiated session",
+    );
     assert!(
         !summary.in_stream_carrier_used,
         "the adaptive guard must ride the TCP data plane"
@@ -1492,8 +1511,11 @@ async fn payload_completion_does_not_wait_for_a_tuner_decision_under_either_init
             .await
             .expect("session run timed out")
             .expect("session task panicked");
-        let summary = source_result.expect("source succeeds");
-        let outcome = dest_result.expect("destination succeeds");
+        let (summary, outcome) = expect_session_success(
+            source_result,
+            dest_result,
+            &format!("payload completion with {initiator_role:?} initiating"),
+        );
         assert_eq!(summary, outcome.summary);
         assert_eq!(summary.files_transferred, FILE_COUNT as u64);
         let streams = outcome
@@ -1599,8 +1621,11 @@ async fn run_phase_trace_case(initiator_role: TransferRole, trace_enabled: bool)
     .await
     .expect("phase trace session timed out");
 
-    let summary = source_result.expect("source succeeds");
-    let mut outcome = dest_result.expect("destination succeeds");
+    let (summary, mut outcome) = expect_session_success(
+        source_result,
+        dest_result,
+        &format!("phase trace with {initiator_role:?} initiating"),
+    );
     assert_eq!(summary, outcome.summary);
     assert_trees_identical(&src_root, &dst_root);
     outcome.needed_paths.sort();
@@ -2071,8 +2096,11 @@ async fn run_small_file_probe_case(
     .await
     .expect("small-file probe session timed out");
 
-    let summary = source_result.expect("source succeeds");
-    let mut outcome = dest_result.expect("destination succeeds");
+    let (summary, mut outcome) = expect_session_success(
+        source_result,
+        dest_result,
+        &format!("small-file probe with {initiator_role:?} initiating"),
+    );
     assert_eq!(summary, outcome.summary);
     assert_trees_identical(&src_root, &dst_root);
     outcome.needed_paths.sort();
