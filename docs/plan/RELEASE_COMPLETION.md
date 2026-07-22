@@ -156,12 +156,12 @@ performance ratios are measured or graded.
    exact old/new executed paths and existing observers, name the responsible
    code delta, fix it, and add a direct mutation-sensitive guard. Do not run a
    physical performance matrix or a large-write test.
-3. **rel-3 — Windows directory-tree move completion `[x locally]`.** The
+3. **rel-3 — Windows directory-tree move completion `[x]`.** The
    retained log identified a native-separator need-list stall, not a held
    source handle. `48c5a11` fixed that executed path, and unified-session
-   cutover later deleted it. The exact bounded nested-tree test is re-enabled;
-   current-head hosted confirmation joins rel-1's publication gate.
-4. **rel-4 — Windows metadata fidelity `[~ hosted]`.** Contract v5 and
+   cutover later deleted it. The exact bounded nested-tree test is re-enabled
+   and passed on hosted Windows in run `29944148295` at `28cf989`.
+4. **rel-4 — Windows metadata fidelity `[x]`.** Contract v5 and
    the first local/remote implementation are committed at `3013e10`. Formal
    Opus review admitted six release-blocking corrections. Aggregate tar-header
    budgeting, durable attribute readback convergence, and per-file ADS error
@@ -170,7 +170,8 @@ performance ratios are measured or graded.
    Local file and tar apply now preserve the source's sub-second mtime after
    ADS replacement, and in-stream resume moves the original destination hash
    allocation through metadata hydration. All six review corrections are fixed;
-   current-head hosted Windows confirmation remains. Records:
+   hosted Windows run `29944148295` at `28cf989` passed the exact local and
+   remote single/tar filesystem guards. Records:
    `.review/results/rel-4-windows-metadata-r1.claude.{json,verdict.md}`.
 5. **rel-5 — complete progress reporting `[x]`.** Delegated and served-session
    producers now populate one shared job account with exact manifest byte/file

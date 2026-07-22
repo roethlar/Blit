@@ -171,9 +171,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 - **Hosted run `29949207219` at `354f38e`:** check, all three OS test suites,
   and all three target archive/checksum/upload jobs passed. It proves the
   `fa79f0a` payload-seal correction and rel-7 archive construction.
-- **Release blockers as of `6fb4d3f`:** reconcile truthful release notes, then
-  run the final exact-candidate audit. See
-  `docs/RELEASE_READINESS.md`.
+- **Release blocker:** the complete hosted matrix and final audit must pass on
+  the exact clean 0.1.1 candidate. See `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):
   `docs/bench/otp12c-win-2026-07-13/` (198 runs) and

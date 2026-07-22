@@ -1,8 +1,9 @@
 # Windows file attributes and alternate data streams are silently lost — and it depends on the file COUNT
 
-**Status**: Implemented locally under release rel-4; strict Windows
-cross-compilation and platform-neutral guards pass. Actual Windows local/remote
-runtime confirmation remains publication-gated.
+**Status**: **RESOLVED.** Release rel-4 implemented contract v5; hosted Windows
+run `29944148295` at `28cf989` passed the exact local and remote single-file and
+tar-batched filesystem guards for attributes, named `$DATA` streams, metadata-
+only repair, and stale-stream replacement.
 **Found**: 2026-07-13, while benchmarking blit vs robocopy on a local
 `D: -> E:` copy (`docs/bench/win-local-ab-2026-07-13/`). Surfaced by the codex
 review of `4402987`, then reproduced directly.
@@ -22,7 +23,7 @@ metadata is gone.
 
 ## Resolution
 
-Contract v4 adds bounded Windows attributes and named `$DATA` stream
+Contract v5 adds bounded Windows attributes and named `$DATA` stream
 descriptors/content to `FileHeader` and resume completion records. Windows
 sources enumerate descriptors for the manifest, re-read and hash-check stream
 content before payload send, and every local/remote file, tar, in-stream, TCP,
@@ -34,9 +35,10 @@ destinations reject present Windows metadata before creating a file.
 The platform-neutral validation, framing, need-claim, and mutation guards pass,
 and every Windows target compiles under strict clippy. The tiny Windows-only
 integration guard exercises single-file and 32-file tar local copies plus
-remote copies, attributes, ADS contents, and metadata-only repair. It has not
-executed on current-head Windows because publication remains owner-gated, so
-this finding is not release-accepted yet.
+remote copies, attributes, ADS contents, metadata-only repair, and stale-stream
+replacement. Hosted Windows run `29944148295` at `28cf989` passed those exact
+local and remote filesystem guards; later exact run `29951872658` at `6fb4d3f`
+passed the complete Windows suite.
 
 ## Reproduced (netwatch-01, blit `f35702a`, local `D:` → `E:`)
 
