@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (horizon-order experiment registered as f15)
+Last updated: 2026-07-22 (release-first evidence audit, D-2026-07-22-1)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,10 +10,18 @@ Last updated: 2026-07-22 (horizon-order experiment registered as f15)
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — COMMIT/REVIEW `ldt-4-live-f15`:** the separately bound `horizon_order` supplement now reverses both pairs and classifies order tracking versus role tracking before any controller change. Exact prior inventory/source manifests, schedule, and classifier are mutation-proved; 98 analyzer tests, Bash 3.2 syntax/self-test, byte-identical fixed/sustained/horizon reanalysis, and full repository gates pass. Commit the candidate, then use Opus 4.8/max tactical review before exact additive staging.
+- **NEXT ACTION — RELEASE BLOCKERS ONLY:** use `docs/RELEASE_READINESS.md`.
+  Fix the deterministic Windows CI guard first under an approved code plan,
+  then resolve Windows move/metadata scope and prove release artifacts. No
+  performance rig or endpoint work is in the pre-release queue.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
-- **ldt-4 HAS VALID DATA, NOT ACCEPTANCE:** exact fixed session `ldt4-20260721T224319Z-96a4e3b03caf`, sustained session `ldt4-20260722T001611Z-04e80082e12c`, and horizon session `ldt4-20260722T022350Z-7050a2997ac5` are independently reproduced under `docs/bench/`. The horizon exercised real resize: q→Windows matched REMOVE 4→1, while Windows→q split ADD 4→10 versus REMOVE 4→1 and 45.3 versus 34.7 seconds. Its fixed schedule confounds role with source-cache/order, so a reversed-order causal check precedes any policy change. Adaptive proof remains open; `q_to_windows_large` 1.197 and `q_to_windows_mixed` 1.131 remain separate performance findings.
+- **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
+  `ldt4-20260722T013314Z-a0c3e3f18afd` was valid after corrected-analyzer
+  reanalysis; fresh `7050a29` was redundant confirmation. The live controller
+  resized, but fixed order confounds the Windows→q ADD/REMOVE split with source
+  warmth. No policy change follows. Full session ledger and write cost:
+  `docs/bench/ldt4-evidence-audit-2026-07-22/`.
 
 - **BASELINE RE-RECORD (D-2026-07-14-1, owner 2026-07-14) — a prerequisite slice for `pf-final`, NOT for pf-1.** Both committed ceilings were recorded at **MTU 1500** before the fabric went jumbo, and pf-0 showed jumbo makes both arms 3–4% faster — so a jumbo build graded against them is **LENIENT** and could let a regression pass. Each rig's baseline is **re-recorded once with its ORIGINAL old build at MTU 9000**, then re-frozen (rig W `bench_otp12_win.sh:105`; rig Z `bench_otp12_zoey.sh:102`; rig D unaffected). Constraints — same old build per rig, `BASELINE_SUMMARY` stays override-free, pf-0's start-AND-end MSS gate applies — in **D-2026-07-14-1**.
 - **pf-0 DONE — MTU is KILLED as a material cause of P1 (2026-07-14, `docs/bench/otp12-jumbo-win-2026-07-13/`).** A-B-B-A on `q` (9000/1500/1500/9000), **256 timed runs, 0 voided**, MSS gate held start AND end of every session. `Δ_9000 = 236`, `Δ_1500 = 229`, measured noise floor **N_Δ = 78 ms**, **r = −3.1% → KILLED**. The null is **not vacuous** — `wm_tcp_large` ran 3–4% faster at jumbo on **both** arms, so the manipulation reached the wire; the benefit is **symmetric**, which is why it cannot explain an **asymmetry**. codex NOT READY → **7/7 accepted** (`11f0c2a`): every finding was a *claim* outrunning the *data* (it recomputed and confirmed all the numbers). **Two limits that now bind pf-1**: (a) the run is **NOT powered** to exclude a *contributing*-size effect (20% of Δ = 46 ms < the 78 ms floor) — it excludes a DOMINANT one only; (b) 78 ms is **between**-session noise, so cross-session grading of a counterfactual is dead, and **pf-1 must measure its own paired within-session floor and register a resolution check before grading**.
@@ -21,14 +29,21 @@ Last updated: 2026-07-22 (horizon-order experiment registered as f15)
 - **P1 REPRODUCES ON A SECOND MAC (2026-07-13, `docs/bench/otp12-q-baseline-2026-07-13/`).** `wm_tcp_mixed` = **1.385 FAIL** on `q`↔netwatch-01 **at MTU 9000**, while all three controls PASS at **1.002–1.043** in the same session (so rig noise is ~2–4% and P1 is 10× outside it). **P1 is a property of the macOS↔Windows PAIRING, not of one machine** — the assumption **H1** rests on (corrected 2026-07-14: H5/H6/H7 are **P2** hypotheses; the earlier "H1/H5/H6/H7" was wrong), never tested until now. **And jumbo does NOT dissolve P1** — pf-0 has now measured the matched 1500 arm and killed MTU outright (above).
 - **RIG-W HOST AND QUIETNESS RULES:** `.agents/machines.md` is canonical. ldt-4 must establish quietness live on `q` and `netwatch-01`; recorded readiness is never substituted for the run gate.
 - Recent code state: every transfer rides the ONE session. ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at review fix `406a7e5` after clean neutral r2 (`.review/findings/ldt-3.md`).
-- **P1 (the headline invariance criterion) — the one thing between blit and shipping.** Historical acceptance sessions fail rig W (`wm_tcp_mixed` 1.237 and 1.300 — do NOT read that as a regression, it is **two different Mac NICs**), but **PASS 8/8 with Linux on both ends** (`docs/bench/otp12-perf-2026-07-13/`; P1's own cell 1.092/1.003). Exact current-build `8e019ef` reverses and point-passes in the reduced rig-W diagnostic, but its 329 ms floor and failing gRPC control make that non-reproduction non-acceptance evidence. P1 remains **platform-INTERACTING, not pure layout**, and **NOT exonerated**. **P1 HAS NO ESCAPE HATCH** (codex r5 F1): D-2026-07-12-1 waives only a *cross-direction* miss for a cell that ALREADY passes invariance. So: meet the formal ≤1.10 bar on a gradeable run, or the owner amends acceptance criterion 1. Neither is assumed.
+- **P1 is a known post-release performance finding, not a shipping gate
+  (D-2026-07-22-1).** Historical rig-W sessions fail `wm_tcp_mixed`; Linux
+  passes 8/8. The result remains platform-interacting and unexplained, but no
+  further hardware run is authorized before release.
 - **⚠ THREE of my claims were reported and RETRACTED on 2026-07-13**, all the same root cause — trusting an instrument I had not validated: (1) "P1 is code" (a harness that keyed durability to the *initiator*, not the destination); (2) "P1 is acceptable platform residue" (D-2026-07-12-1 does not cover it); (3) "macOS can't send jumbo / the switch is broken" (it was `net.inet.raw.maxdgram` capping *ping*; TCP was always fine — it cost the owner a pointless adapter swap). **Verify the instrument before believing the measurement.**
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **LIVE_DIAL_TUNING ACTIVE (D-2026-07-16-2):** ldt-1..3 are accepted. Exact `96a4e3b`, `04e8008`, and fresh `7050a29` sessions are retained and independently reproduced. The horizon run proves admission/resize but is `REVIEW_REQUIRED`: q→Windows matched REMOVE 4→1; Windows→q split ADD 4→10 versus REMOVE 4→1, and the ADD arm was slower. The same split repeated in the earlier void run, but both used the same order after 80 GiB of Windows destination writes, so cache/order remains confounded with role. `ldt-4-live-f15` now owns the reviewed additive order reversal; no controller change is in scope. Fixed-cell performance findings remain separate; formal Fable is held.
+- **RELEASE READINESS ACTIVE (D-2026-07-22-1):** ldt-1..3 are accepted;
+  ldt-4 is closed as evidence, not as a tuning win. The complete first horizon
+  session is valid after corrected reanalysis; its repeat was unnecessary.
+  Performance and Thunderbolt work are post-release. Current blockers and
+  unknowns are canonical in `docs/RELEASE_READINESS.md`.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -56,7 +71,10 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `96a4e3b`, `04e8008`, and fresh `7050a29` evidence are retained and independently reproduced. The valid horizon session exercised resize but its Windows→q ADD 4→10 versus REMOVE 4→1 split remains confounded by fixed cold/warm source order. `ldt-4-live-f15`'s registered `horizon_order` supplement is implemented, mutation-proved, and full-gate green; tactical Opus review, exact staging, and live execution remain before any policy change. Formal Fable openreview is held.
+1. **`docs/RELEASE_READINESS.md` (ACTIVE, D-2026-07-22-1).** No hardware
+   work. First: repair the deterministic Windows CI guard under an approved
+   code plan. Then resolve the Windows move/metadata release scope and produce
+   and smoke-test current release artifacts.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).
@@ -74,54 +92,31 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    (`docs/bench/otp12c-win-2026-07-13/`) + the delegated rig-D
    matrix (`docs/bench/otp12c-delegated-2026-07-13/`, 5/7 PASS at
    RUNS=4; both FAIL cells PASS at RUNS=8 — see Blocked; rig D 7/7).
-   **otp-12d and otp-13 are DEFERRED, not next** — otp-12c's rows are
-   PRE-FIX, and `docs/plan/OTP12_PERF_FINDINGS.md` (pf-final) voids
-   pre-fix new arms for acceptance. Assembling the acceptance matrix now
-   would build otp-13's artifact from void rows.
-2a. **`docs/plan/OTP12_PERF_FINDINGS.md` (ACTIVE, D-2026-07-13-1).**
-    pf-0 is complete: MTU was killed as a dominant cause. **The owner selected
-    pf-1 instrumentation on rig W on 2026-07-15.** The TCP phase-trace slice
-    and reduced paired q↔netwatch-01 harness must each clear review before rig
-    time. Round-10 candidate `5a7e7ec` passed launcher and preflight; its first
-    registered arm then voided at 1247 ms settle before durability or CSV
-    append because three sequential clock-probe SSH startups consumed about
-    1.1 s. G11 batches the unchanged three independently bracketed samples,
-    fails closed on channel/process errors, and preflight-times the complete
-    path against 750 ms headroom. Round-11 independent Grok discarded an
-    unsupported no-tool response, then proved the old sampler red, restored
-    green, and accepted exact candidate `aa0785c`. Its launcher and preflight
-    passed at 396/403 ms. The registered run appended one completed-arm row,
-    then G12 failed before the paired trace-off q client launched because Bash
-    3.2 nounset rejects an empty array expansion. The entire session is void;
-    no row was analyzed or graded. G12 is fixed at `cd78ab9`, Bash-3.2 guard-proved,
-    and accepted by round-12 Grok at exact identity `d5e9dda`. Its additive live run
-    completed eight arms, then G13 exposed the mid-run load gate counting the
-    benchmark's own one-minute load history; that session is also void. G13 at `0cbb16a`
-    keeps the fixed load ceiling with bounded runtime recovery and is Bash-3.2 guard-proved.
-    Claude Fable 5/max accepted exact `d7345f1`. Two additive live sessions
-    cleared G13 through 16 arms, then G14 exposed delayed Spotlight work at the
-    same pair-3 gate; both sessions are void. G14 preserves the 10% bar with
-    bounded runtime recovery and is Bash-3.2 guard-proved at `942c88e`.
-    Round-14 Claude accepted exact `1f62ce5`. Its additive run completed all 32
-    block-1 arms and exercised G14, then G15 exposed Windows SSH consuming
-    blocks 2–4 from the loop's stdin; the analyzer correctly voided 32/128.
-    G15 isolates SSH stdin and is mutation-proved at `7bdaf8b`; round-15 Claude accepted exact `8e019ef`. Its additive registered run completed all 128 arms and the analyzer accepted the exact evidence now recorded under `docs/bench/otp12-pf1-rigw-2026-07-15/`. Its pre-ldt-2 target traces prove historical 8/8 static stream parity under both initiator layouts. The target's historical P1 direction did not reproduce, but the 329 ms resolution floor and failing gRPC control forbid a causal grade. Grok supplementary and Claude Fable 5/max authoritative reviews accepted exact record `7ecc2f9`. Continue the separately required P2 small-fixture instrumentation and `0f922de` historical control. Further P1 rig work requires a plan amendment; no Mac↔Mac data has been taken, and worker parity is no longer a blocker. Then: pf-1 → pf-final (all rigs) → otp-12d → otp-13.
-2b. **AFTER otp-12 — the Windows/local pair, planned TOGETHER** (same tar
-   path, opposite directions: a fidelity fix ADDS per-file work to a path
-   already losing to robocopy, so planning them apart optimises one against
-   the other). Both docs own their detail; do not restate it here.
+   **otp-12d and otp-13 are POST-RELEASE (D-2026-07-22-1).** Their retained
+   pre-fix evidence remains usable for what it records; no performance
+   acceptance matrix is a shipping prerequisite.
+2a. **POST-RELEASE: `docs/plan/OTP12_PERF_FINDINGS.md`.** pf-0 killed MTU
+    as a dominant P1 cause. The accepted 128-arm `8e019ef` record proves
+    historical static orientation parity but cannot grade causation because
+    its resolution floor exceeded the gap and its gRPC control failed. Exact
+    evidence: `docs/bench/otp12-pf1-rigw-2026-07-15/`. No further P1/P2 rig
+    work, pf-final run, otp-12d, or otp-13 occurs before release.
+2b. **RELEASE SCOPE — Windows metadata fidelity; local performance is
+   post-release.** The measured metadata loss is a correctness blocker if the
+   first release promises Windows metadata fidelity. The owner must either
+   include the wire-contract fix or explicitly exclude that guarantee.
    - **`docs/bugs/windows-attrs-and-ads-lost-on-tar-path.md` (D-2026-07-13-3)**
      — Windows attributes + ADS silently dropped, exit 0, **both routes
      (measured)**; loss is **conditional on file count**
      (`transfer_plan.rs:103-109`). Unlanded Windows support, NOT a regression.
      **Fix = WIRE CONTRACT change** → amend `TRANSFER_SESSION.md` first.
-   - **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft, D-2026-07-13-2)** — local
+   - **POST-RELEASE: `docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft,
+     D-2026-07-13-2)** — local
      apply **does not scale** (8 workers buy 1.05×; robocopy gets ~2.2× from 8
      threads) and ships **one** worker. At EQUAL concurrency blit BEATS
      robocopy; at 8-vs-8 it loses 1.9×. `docs/bench/win-local-ab-2026-07-13/`.
-3. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
-   Shipped (zero-copy resolved — D-2026-07-05-3). Follow-ups largely
-   absorbed by otp-2/otp-12's rig matrices.
+3. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
+   performance status flip are not release gates (D-2026-07-22-1).
 4. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
    resumes/re-derives after ONE_TRANSFER_PATH ships.
 5. **PAUSED: design-review queue** (`REVIEW.md`; w7-1 topmost open row —
@@ -135,19 +130,20 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    inside its `…/blit-temp/` folder — nothing written outside it, ever;
    no daemon runs on zoey without a fresh go.
 7. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
-8. **Mac↔Mac Thunderbolt Bridge ceiling/control experiment — QUEUED LAST.**
+8. **POST-RELEASE ONLY: Mac↔Mac Thunderbolt Bridge ceiling/control experiment.**
    The detailed scope and prerequisites live in `TODO.md` under “Deferred
    design calls.” Draft and approve its own plan before implementation or rig
-   work. It follows required ldt-4 Mac↔Windows evidence and does not substitute
-   for it; its purpose is a same-OS control and a higher-bandwidth path for
-   measuring where the live controller should tune above the 10 GbE ceiling.
+   work. D-2026-07-22-1 removes it from the release queue; its purpose remains
+   a same-OS control and higher-bandwidth controller ceiling after release.
 
 ## Authoritative docs right now
 
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
   D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
   D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b).
-- Active correction: **`docs/plan/LIVE_DIAL_TUNING.md` (D-2026-07-16-2)** — restore live telemetry ADD/REMOVE before further transfer acceptance measurements.
+- Active release ledger: **`docs/RELEASE_READINESS.md` (D-2026-07-22-1)**.
+- Historical live-tuning record: **`docs/plan/LIVE_DIAL_TUNING.md`**; exact
+  session audit: **`docs/bench/ldt4-evidence-audit-2026-07-22/`**.
 - Active plans: `docs/plan/SMALL_FILE_CEILING.md` (**paused** at
   sf-2) and **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** (code-
   complete; measurement gates remain). REV4 superseded v1/REV2/REV3
@@ -170,19 +166,22 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Blocked / waiting (owner declarations and explicitly dated external blockers; checkpoints are owner-only)
 
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
-- **ldt-4 rig-W endpoint (as of `31c12c9`, 2026-07-21):** q's registered `en8`/`.54` link is restored at MTU 9000/10Gbase-T and routes to Windows on `en8`. Stale `.177` has incomplete ARP/no TCP 22; DNS plus strict-host-key SSH prove `NETWATCH-01` now owns `.173` with the same trusted keys. D-2026-07-21-1 directs the exact pin to follow `.173`; review/staging remain before live retry. Never bypass host-key checking.
+- **Windows CI is red as of published GitHub head `dcf9245`:** run
+  `29584631185` failed the nondeterministic handshake-stall test and skipped
+  release artifacts. Finding: `release-win-ci-handshake-stall-test`.
+- **Release scope:** Windows directory-tree move hangs remain unresolved;
+  Windows attributes/ADS are silently lost on the tar path. See
+  `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):
   `docs/bench/otp12c-win-2026-07-13/` (198 runs) and
   `otp12c-delegated-2026-07-13/` (**rig D 7/7 PASS**). Codex: FAIL →
   **7/7 accepted**. Detail: DEVLOG 2026-07-13.
-- **Three 10 GbE gate declarations**: ue-1, ue-2 (pass/fail or
-  re-scope), REV4 → Shipped. (Zero-copy RESOLVED — D-2026-07-05-3.)
 
 ## Open questions
 
-- **(OPEN, ripe — data in hand)** REV4 → Shipped flip: awaits the
-  three declarations in Blocked (zero-copy resolved, D-2026-07-05-3).
+- **(OPEN — release scope)** Decide whether the first release promises Windows
+  metadata fidelity and complete delegated/served-session progress reporting.
 - **(SLOTTED 2026-07-12 — owner ack)** `docs/WHITEPAPER.md` §8 (~line
   592) describes the deleted `determine_remote_tuning` — fix folded
   into **w10-docs-batch**; no one-off edit.

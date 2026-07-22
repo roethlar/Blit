@@ -3,7 +3,8 @@
 **Severity**: MEDIUM — all four horizon arms completed and retained, but the
 analyzer refused the first real resize operation because its synthetic action
 spelling did not match production evidence.
-**Status**: Closed by fresh structurally valid session at exact `7050a29`.
+**Status**: Closed by corrected reanalysis of the complete immutable first
+session at exact `7050a29`; the fresh session was redundant confirmation.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `8385d23` + review guard fix `7050a29`
 
@@ -22,9 +23,10 @@ Windows→q arm emitted 33 samples and accepted ADD `4→5→6→7→8→9`; the
 emitted 31 samples and accepted REMOVE `4→3→2→1`. The latter pair is a material
 transition mismatch that the analyzer must report, not hide.
 
-Instead, final analysis stopped at the first arm with
-`resize_proposed values disagree with epoch 1`, and the harness correctly
-created `SESSION-VOID`. The arm-1 observer events carry
+Instead, the original final analysis stopped at the first arm with
+`resize_proposed values disagree with epoch 1`, and the harness created its
+automatic `SESSION-VOID` marker. That marker records the analyzer failure; it
+does not invalidate the complete raw evidence. The arm-1 observer events carry
 `action="DATA_PLANE_RESIZE_OP_REMOVE"` in `resize_proposed`,
 `resize_send_begin`, `resize_sent`, and `source_settled`. ADD evidence carries
 `DATA_PLANE_RESIZE_OP_ADD`. `_validate_control_lane` compares these fields to
@@ -95,12 +97,13 @@ None.
 The tactical Opus review confirmed the core fix and its 27-test mutation proof,
 then admitted one Low test gap as `ldt-4-live-f14-r1-f1`: deleting both action
 comparisons left all 88 tests green. Two independently mutation-proved rejection
-guards close that gap, and Opus re-reviewed exact `7050a29` clean. Exact
-None. Fresh session `ldt4-20260722T022350Z-7050a2997ac5` completed all four
-arms, the analyzer validated the exact SOURCE actions, Windows restored
-normally, and no `SESSION-VOID` exists. The resulting controller-policy review
-belongs to a new finding; the earlier void session and all endpoint
-payloads/evidence stay retained unchanged.
+guards close that gap, and Opus re-reviewed exact `7050a29` clean.
+Corrected-analyzer reanalysis of
+`ldt4-20260722T013314Z-a0c3e3f18afd` validated all four arms and returned
+`REVIEW_REQUIRED` (arm 3, decision 1, performance 0). Fresh session
+`ldt4-20260722T022350Z-7050a2997ac5` repeated the result but was not required to
+make the first session valid. Both sessions and their endpoint payloads remain
+retained unchanged.
 
 ## Reviewer comments
 

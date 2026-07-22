@@ -1,12 +1,14 @@
 # Restore live dial tuning to TransferSession
 
-**Status**: Active
+**Status**: Historical — ldt-1..3 accepted; ldt-4 evidence recorded and
+further hardware tuning deferred until after release by D-2026-07-22-1
 **Created**: 2026-07-16
 **Supersedes**: The shape-only stream-policy wording in
 `docs/plan/ONE_TRANSFER_PATH.md` and `docs/TRANSFER_SESSION.md`; restores the
 still-binding D-2026-06-20-1/-2 design
 **Decision ref**: D-2026-06-20-1, D-2026-06-20-2, D-2026-06-20-5;
-D-2026-07-16-2 (owner activated after neutral Claude review)
+D-2026-07-16-2 (owner activated after neutral Claude review),
+D-2026-07-22-1 (hardware continuation deferred after evidence audit)
 
 ## Goal
 
@@ -439,17 +441,20 @@ advise but cannot accept the slice (D-2026-07-16-4).
    mutation-proved with 87 tests and exact `a0c3e3f` re-reviewed clean by the
    same Opus session with an independent red/green guard. Exact `a0c3e3f` is
    additively staged on q with native Bash 3.2/87-test guards green. Its four
-   live arms all completed and exercised resize, but final analysis voided on
-   `ldt-4-live-f14`: production SOURCE control events spell action as the exact
-   protobuf enum while the analyzer's synthetic contract used shorthand.
+   live arms all completed and exercised resize. Final analysis then rejected
+   the evidence on `ldt-4-live-f14`: production SOURCE control events spell
+   action as the exact protobuf enum while the analyzer's synthetic contract
+   used shorthand. That rejection was an analyzer defect, not an evidence
+   defect.
    The bounded f14 candidate now derives the exact expected SOURCE enum string
    from each validated dial operation while leaving dial and DESTINATION action
    contracts unchanged. Synthetic SOURCE traces match production, a focused
    guard pins both namespaces, and the full 88-test analyzer suite is
-   mutation-proved red/green. Diagnostic reanalysis of an additive copy of the
-   retained void session validates all four arms and reports the expected
-   `REVIEW_REQUIRED` (arm 3, decision 1, performance 0), without promoting that
-   void evidence to acceptance. Tactical Opus 4.8/max confirmed the exact
+   mutation-proved red/green. Corrected reanalysis of an additive copy of the
+   immutable retained session validates all four arms and reports the expected
+   `REVIEW_REQUIRED` (arm 3, decision 1, performance 0). That corrected
+   interpretation is valid evidence; the original `SESSION-VOID` remains only
+   as the harness's historical result. Tactical Opus 4.8/max confirmed the exact
    production/dial contracts and 27-test shorthand mutation, then found one Low
    guard gap: deleting both SOURCE action comparisons still left all 88 tests
    green. `ldt-4-live-f14-r1-f1` adds independent negative guards for
@@ -462,9 +467,9 @@ advise but cannot accept the slice (D-2026-07-16-4).
    `f885f21dfc35cb7c47a2778c6cddae5552e51b46f8ee3b909b1f9670edc87e00`)
    and clean detached q checkout
    `/Users/michael/Dev/blit_v2_harness_7050a29`. q's native Bash 3.2
-   syntax/self-test and all 90 analyzer tests pass. Fresh session
-   `ldt4-20260722T022350Z-7050a2997ac5` completed all four arms with normal
-   restoration and exact independently reproduced analysis at
+   syntax/self-test and all 90 analyzer tests pass. The unnecessary fresh
+   session `ldt4-20260722T022350Z-7050a2997ac5` nevertheless completed all four
+   arms with normal restoration and exact independently reproduced analysis at
    `docs/bench/ldt4-rigw-horizon-2026-07-22/`: arm review 3, decision review 1,
    performance review 0. q→Windows matched REMOVE 4→1 at 47.7/47.7 seconds.
    Windows→q split ADD 4→10 versus REMOVE 4→1 at 45.3/34.7 seconds; the same
@@ -481,13 +486,14 @@ advise but cannot accept the slice (D-2026-07-16-4).
    pass mutation-sensitive analyzer/harness guards and tactical Opus 4.8/max
    review before additive staging; no outcome directly authorizes a controller
    change or regrades the fixed-cell findings.
-   The implementation now binds the exact prior inventory and source-manifest
+   The unexecuted implementation binds the exact prior inventory and source-manifest
    bytes, validates the reversed schedule and all four causal outcomes with 98
    analyzer tests, passes native Bash 3.2 self-test, and re-renders every fixed,
    sustained, and horizon report byte-for-byte. Three isolated schedule,
    digest, classifier, and exact-source mutations turn the intended guards
-   red. Full repository gates pass; tactical Opus review remains before
-   staging.
+   red. Full repository gates pass. D-2026-07-22-1 cancels review, staging, and
+   live execution before release; the code remains as post-release diagnostic
+   machinery and has no product-runtime effect.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.

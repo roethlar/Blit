@@ -3,7 +3,8 @@
 **Severity**: MEDIUM — the registered run cannot pass Windows preflight or
 produce evidence while the harness dials a DHCP address the endpoint no longer
 owns.
-**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and additively staged; live retry advanced to separate hostname finding f6.
+**Status**: Closed — fixed, mutation-proved, reviewed, and validated by the
+complete 96-arm session.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `322a1611230e78c2268d91c45e6bd1e7ed24f953`
 
@@ -68,11 +69,9 @@ None.
 
 ## Known gaps
 
-Exact `322a161` is additively staged and q strictly authenticates `.173` with
-the already trusted matching keyset. Its live retry cleared Windows SSH and all
-three fixture manifests, then exposed separate stable-q-identity finding
-`ldt-4-live-f6` before any arm or daemon preparation. A completed live run
-remains.
+None. The endpoint correction cleared live and exact harness `96a4e3b` later
+completed all 96 arms. Session classification is recorded in
+`docs/bench/ldt4-evidence-audit-2026-07-22/`.
 
 ## Reviewer comments
 

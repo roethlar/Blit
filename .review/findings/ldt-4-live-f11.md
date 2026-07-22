@@ -22,10 +22,11 @@ The remote session has exactly 22 arm directories, matching the 21 completed
 arms plus this committed reservation effect. The two local `ldt4-022` evidence
 directories are also empty.
 
-`runs.csv` contains its header plus 21 provisional rows and
+`runs.csv` contains its header plus 21 completed rows and
 `runtime-gates.csv` contains its header plus 11 accepted gate samples. No arm
 22 transfer started, no arm 22 row was appended, no analyzer ran, and the
-session has no analysis output. Every provisional row is invalid and ungraded.
+session has no analysis output. The completed rows remain valid arm evidence,
+but this prefix cannot grade the incomplete 96-arm matrix.
 
 Cleanup succeeded. q and Windows have no port-9031 listener, Blit process, or
 session harness process. Windows restored the prior active daemon at SHA-256

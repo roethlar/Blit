@@ -25,8 +25,10 @@ The wrapper's prospective-file array ends with unparenthesized
 per-arm directory. `ldt4-002`'s Windows log directory is empty, proving the
 controller and client were not created.
 
-The session is void: `runs.csv` contains one provisional data row plus its
-header and must not be analyzed or graded. Both port 9031 listeners are closed,
+The harness marked the session void: `runs.csv` contains one completed,
+byte-identical data row plus its header. That row remains valid evidence for
+arm 1, but the one-arm prefix cannot grade the registered 96-arm matrix. Both
+port 9031 listeners are closed,
 no Blit process remains, and the prior active Windows daemon is restored at
 SHA-256
 `1510d8d04e503967baf250c19cfcd7af4363bc9a22038f68396ea6eb45890512`.

@@ -4,10 +4,10 @@
 Windows→q decision split, but its fixed arm order aliases initiator role with
 cold/warm Windows source state. Attributing that split to socket topology now
 could tune the one shared controller against the wrong cause.
-**Status**: Fixed, mutation-proved, and full-gate green; tactical review,
-staging, and live execution remain.
+**Status**: Closed without execution — D-2026-07-22-1 defers the causal hardware
+experiment until after release. The inert diagnostic implementation remains.
 **Branch**: `master` (repo policy forbids agent-created branches)
-**Commit**: Pending
+**Commit**: `43f156d`
 
 ## Evidence
 
@@ -139,9 +139,10 @@ None.
 
 ## Known gaps
 
-Tactical Opus 4.8/max review, exact additive staging, live execution, evidence
-retention, and independent analysis reproduction remain. No controller policy
-change is authorized by this finding.
+No staging or live execution occurred, so this finding has no hardware result.
+D-2026-07-22-1 moves any causal follow-up after release and requires explicit
+approval for a later large SSD-write test. No controller policy change is
+authorized.
 
 ## Reviewer comments
 

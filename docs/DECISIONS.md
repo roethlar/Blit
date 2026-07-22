@@ -329,3 +329,23 @@ Format:
   `9926bf7` and repeated in the harness/analyzer. It does not weaken endpoint
   identity, host-key verification, MAC/interface/link gates, exact-artifact
   review, or the additive evidence contract.
+
+## D-2026-07-22-1 — Release correctness before further hardware tuning
+- Decision: Stop all pre-release data-moving performance experiments. Treat a
+  harness or analyzer rejection as a tool outcome, not automatic invalidation
+  of complete raw evidence: repair the interpreter and reanalyze immutable,
+  unambiguous evidence instead of rerunning it. Move ldt-4 causal tuning,
+  Mac↔Mac Thunderbolt testing, P1 performance closure, and other hardware
+  ceilings after release. Any later large SSD-write test requires explicit
+  owner approval.
+- Why: the complete first horizon session was unnecessarily repeated after an
+  analyzer expected `ADD`/`REMOVE` instead of production's exact protobuf enum
+  spelling, consuming another 160 GiB of destination writes. Performance
+  research has delayed a complete release without exposing a data-correctness
+  failure. Release work is now limited to correctness, supported-platform CI,
+  packaging, installation, startup, and explicit scope decisions.
+- Supersedes: D-2026-07-16-2 only where it requires ldt-4 live continuation;
+  the P1 performance criterion as a shipping gate in `docs/STATE.md`; the
+  pre-release scheduling of `OTP12_PERF_FINDINGS`, performance acceptance
+  residue, and the Thunderbolt experiment. It preserves accepted ldt-1..3
+  code, all retained evidence, and every endpoint identity and safety rule.

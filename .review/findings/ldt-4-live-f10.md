@@ -28,8 +28,9 @@ Windows' active daemon was restored to the prior SHA-256
 the tested daemon remains retained at SHA-256
 `ae414e649cf64f042f9d2a61639371c57d2fc3107cc426fe5a27a057b6630322`.
 
-The session is void: `runs.csv` contains 38 provisional data rows plus its
-header. No analyzer ran, and no row may be analyzed or graded.
+The harness marked the session void: `runs.csv` contains 38 completed data rows
+plus its header. No analyzer ran. The rows remain valid arm evidence, but this
+prefix cannot grade the incomplete 96-arm matrix.
 
 ## Predicted observable failure
 

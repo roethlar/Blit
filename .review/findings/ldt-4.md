@@ -4,12 +4,11 @@
 on rig-W `q`↔`netwatch-01` with identical physical paths under both initiator
 layouts and both byte directions.
 
-**Status**: Live repairs continue fail-closed. Exact `a39f0c5` cleared additive
-staging, fixtures, and the live environment gate, then its first arm exposed
-`ldt-4-live-f4`: PowerShell split two generated start-command paths across
-lines. The fix is mutation-proved at `d53b5fd`; tactical code review and a fresh
-additive live run are next. Formal Fable openreview is on owner-directed
-capacity hold.
+**Status**: Closed as a pre-release evidence slice by D-2026-07-22-1. Exact
+`96a4e3b` completed all 96 fixed arms; later supplements exercised real resize.
+The first complete horizon session is valid after corrected-analyzer
+reanalysis, its fresh repeat was redundant, and causal tuning is post-release.
+Canonical session ledger: `docs/bench/ldt4-evidence-audit-2026-07-22/`.
 
 **Branch**: `master`
 
@@ -144,24 +143,10 @@ exactly, and make no worker-count target part of acceptance.
 
 ## Known gaps
 
-- Exact product and harness artifacts are staged additively and three void sessions
-  are retained, but no completed/timed live arm or transfer datum exists. The
-  fixes through `d53b5fd` are tactical Grok-clean; `ldt-4-live-f4` is fixed and
-  guarded there, with tactical code review and a fresh run remaining. Formal
-  Fable openreview is deferred by the owner while that model is out of capacity.
-  Hosted Windows CI also remains unobserved.
-- Canonical-fixture Fable round one admitted two Low corrections: use the
-  existing exclusive atomic rename helper for stable promotion, and reject a
-  canonical manifest's wrong shape before copying it. Both corrections are
-  fixed and mutation-proved with full local gates green; final exact-head Fable
-  review is clean.
-- Some fixed fixtures may finish before the tuner has a useful live sample or
-  resize opportunity. The analyzer explicitly marks a missing sample at or
-  after the first tuner tick `REVIEW_REQUIRED`; deterministic ldt-2 guards, not
-  a short hardware arm, remain the proof that ADD and REMOVE work.
-- Client execution has no per-arm deadline. Process identity and signal cleanup
-  are scoped, and interruption retains a void session, but an unresponsive arm
-  can require operator interruption rather than timing out automatically.
+- The Windows→q ADD/REMOVE split is confounded with cold/warm source order.
+- Fixed-cell q→Windows ratios 1.197 and 1.131 remain performance findings.
+- Both are post-release under D-2026-07-22-1; no controller change or further
+  hardware run is authorized before release.
 
 ## Reviewer comments
 
