@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** foundation dead code removed, 2026-07-22
+**As of:** control-plane duplicate reconciled, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -104,6 +104,10 @@ performance ceilings and hardware tuning remain post-release work.
   dead enumeration helpers and exports are deleted. The earlier otp-11b slice
   had already removed parallel-copy/stat leftovers. A source-structure guard
   fails if any retired path or public name returns.
+- The recorded zero-caller control-plane payload sender is already absent:
+  otp-10c-2 deleted it with the legacy gRPC sinks, fallback module, and four
+  old drivers. Current payload code contains only session-used preparation and
+  planning helpers.
 
 ## Release blockers
 
