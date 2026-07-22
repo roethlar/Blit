@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** hosted run `29947092127`; repairs through `8fb0a0d`, 2026-07-22
+**As of:** hosted run `29948151621`; repairs through `4bb3389`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -81,6 +81,11 @@ performance ceilings and hardware tuning remain post-release work.
   settlement. `8fb0a0d` selects only raw inputs and completes the chosen state
   transition outside the race. Its two-byte guard times out with the old
   selection and passes in 0.12 seconds with the fix; no hardware transfer ran.
+- Exact-head run `29948151621` at `532ece0` has passed check, Linux, and macOS;
+  Windows remains in progress. Both release executables now expose the exact
+  shared session build identity through `--version` at `4bb3389`. Focused CLI
+  and daemon parser guards fail when that interface is removed and pass with
+  exact output when restored; formatting and strict workspace clippy pass.
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
@@ -166,12 +171,13 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **A clean full hosted suite is pending after `8fb0a0d`.** Linux and macOS
-   passed together at `9924a7e`; Windows's exact scan/resize race is fixed and
-   mutation-proved locally. The next exact run must pass all three OS suites.
+1. **A clean full hosted suite is pending.** Run `29948151621` at `532ece0`
+   passed check, Linux, and macOS; its Windows job remains in progress. After
+   that result, the exact release-candidate head must pass all three OS suites.
 2. **Current release artifacts are unproved.** Release-build jobs were skipped
-   after the failed test matrix, and packaged archives, checksums, plus install /
-   startup smoke checks for the CLI and daemon are not recorded.
+   after the prior failed test matrix. Exact `--version` identity now exists,
+   but packaged archives, checksums, plus install / startup smoke checks for the
+   CLI and daemon are not recorded.
 
 ## Deferred until after release
 
