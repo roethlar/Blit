@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** rel-4 formal review fixes 4/6, 2026-07-22
+**As of:** rel-4 formal review fixes 5/6, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -40,7 +40,7 @@ performance ceilings and hardware tuning remain post-release work.
   that native-separator mismatch and the unified session later deleted the old
   path. The exact nested push-move test is active on Windows again; current-head
   hosted confirmation remains publication-gated.
-- rel-4 defines contract v4 and implements bounded Windows attributes and named
+- rel-4 defines contract v5 and implements bounded Windows attributes and named
   `$DATA` streams across local, TCP, in-stream, tar, and resume carriers. The
   destination retains and validates manifest descriptors before applying any
   payload, metadata mismatch overrides an ordinary content skip, non-Windows
@@ -60,9 +60,10 @@ performance ceilings and hardware tuning remain post-release work.
    readback convergence, and source/destination ADS inspection failures are
    isolated to replacement or the affected unreadable file. Cross-platform
    copies now reject before resume can write unless the warned
-   `--drop-windows-metadata` policy strips metadata at the source. Two
-   corrections remain: local mtime precision and a resume allocation. Hosted
-   Windows confirmation follows those fixes.
+   `--drop-windows-metadata` policy strips metadata at the source. Local file
+   and tar paths now restore the source's sub-second mtime after ADS apply. One
+   correction remains: the resume hash-list allocation. Hosted Windows
+   confirmation follows that fix.
 2. **Hosted Windows confirmation is pending.** Published run `29584631185`
    failed because Windows buffered the guard's 64 MiB loopback handshake.
    rel-1 now exercises the same production timeout through a deterministic

@@ -16,6 +16,7 @@ use common::{cli_bin, run_with_timeout, TestContext};
 
 const REQUIRED_ATTRIBUTES: u32 = 0x1 | 0x2 | 0x4 | 0x20; // READONLY | HIDDEN | SYSTEM | ARCHIVE
 const ADS_CONTENT: &[u8] = b"rel-4-ads";
+const SUBSECOND_NANOS: u32 = 123_456_700;
 
 fn named_stream_path(path: &Path, name: &str) -> PathBuf {
     let mut value: OsString = path.as_os_str().to_owned();
@@ -40,7 +41,32 @@ fn set_attributes(path: &Path, enabled: bool) {
 fn create_metadata_file(path: &Path) {
     fs::write(path, b"x").expect("write primary stream");
     fs::write(named_stream_path(path, "meta"), ADS_CONTENT).expect("write ADS");
+    filetime::set_file_mtime(
+        path,
+        filetime::FileTime::from_unix_time(1_700_000_000, SUBSECOND_NANOS),
+    )
+    .expect("set sub-second source mtime");
     set_attributes(path, true);
+}
+
+fn assert_mtime_matches(source: &Path, destination: &Path) {
+    let source_time = filetime::FileTime::from_last_modification_time(
+        &fs::metadata(source).expect("source metadata"),
+    );
+    let destination_time = filetime::FileTime::from_last_modification_time(
+        &fs::metadata(destination).expect("destination metadata"),
+    );
+    assert_ne!(
+        source_time.nanoseconds(),
+        0,
+        "source fixture must retain sub-second precision"
+    );
+    assert_eq!(
+        destination_time,
+        source_time,
+        "mtime precision differs for {}",
+        destination.display()
+    );
 }
 
 fn assert_metadata(path: &Path) {
@@ -111,12 +137,15 @@ fn local_single_and_tar_batch_preserve_attributes_and_ads() {
     create_metadata_file(&single);
     run_local_copy(&single, &single_dest);
     assert_metadata(&single_dest);
+    assert_mtime_matches(&single, &single_dest);
     erase_metadata_but_match_mtime(&single, &single_dest);
     run_local_copy(&single, &single_dest);
     assert_metadata(&single_dest);
+    assert_mtime_matches(&single, &single_dest);
     add_oversized_stale_stream_but_match_mtime(&single, &single_dest);
     run_local_copy(&single, &single_dest);
     assert_metadata(&single_dest);
+    assert_mtime_matches(&single, &single_dest);
     assert!(
         fs::metadata(named_stream_path(&single_dest, "stale")).is_err(),
         "oversized stale destination stream must be removed by replacement"
@@ -128,6 +157,7 @@ fn local_single_and_tar_batch_preserve_attributes_and_ads() {
     let batch_arg = PathBuf::from(format!("{}\\", batch.display()));
     run_local_copy(&batch_arg, &batch_dest);
     assert_metadata(&batch_dest.join("f00.bin"));
+    assert_mtime_matches(&batch_metadata_file, &batch_dest.join("f00.bin"));
 
     set_attributes(&single, false);
     set_attributes(&single_dest, false);

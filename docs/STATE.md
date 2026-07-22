@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (rel-4 formal review fixes 4/6 complete)
+Last updated: 2026-07-22 (rel-4 formal review fixes 5/6 complete)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -18,8 +18,8 @@ Last updated: 2026-07-22 (rel-4 formal review fixes 4/6 complete)
   test. rel-4 Windows metadata is implemented and cross-compiled; its hosted
   runtime confirmation is publication-gated. rel-4's formal Opus review
   admitted six corrections being fixed one per commit; aggregate tar-header
-  allocation, attribute convergence, per-file ADS isolation, and strict/explicit
-  cross-platform policy are fixed; two corrections remain. No rig work is queued.
+  allocation, attribute convergence, per-file ADS isolation, strict/explicit
+  cross-platform policy, and local mtime precision are fixed; one correction remains.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -110,7 +110,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
     and fixed from retained/code evidence without a new physical matrix.
 2b. **RELEASE BLOCKER — Windows metadata hosted confirmation; optional local
    ceiling work remains post-release.** Full attributes/ADS support is locally
-   implemented under contract v4 and strict Windows cross-compilation passes.
+   implemented under contract v5 and strict Windows cross-compilation passes.
    - **`docs/bugs/windows-attrs-and-ads-lost-on-tar-path.md` (D-2026-07-13-3)**
      — historical Windows attributes + ADS loss on both measured routes was
      count-dependent. rel-4 now carries and applies both across every carrier;

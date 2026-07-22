@@ -39,8 +39,11 @@ All six findings are admitted and remain release-blocking until fixed:
    delegated opens; SOURCE skips metadata inspection and strips it before the
    manifest. Focused guards prove both the untouched partial-file refusal and
    the explicit lossy session path.
-5. **Medium — local mtime precision.** Restamp local Windows files from the
-   source `SystemTime`, preserving sub-second precision after ADS application.
+5. **Fixed — local mtime precision.** Local file and tar-shard apply reread the
+   source `SystemTime` after ADS replacement and restore its full available
+   precision; wire receives retain their header timestamp. Forcing the old
+   whole-second fallback turned both focused guards red, and exact restoration
+   returned them green. The Windows fixture checks single and tar paths.
 6. **Low — resume hash clone.** Hydrate Windows metadata without cloning and
    discarding the destination block-hash vector on every platform.
 

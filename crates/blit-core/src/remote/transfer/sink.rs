@@ -275,6 +275,7 @@ impl TransferSink for FsTransferSink {
                             |((_, _, queued), worker)| worker.saturating_duration_since(*queued),
                         );
                         write_tar_shard_payload(
+                            &src_root,
                             &dst_root,
                             canonical_dst_root.as_deref(),
                             &headers,
@@ -537,8 +538,6 @@ fn copy_resolved_file_payload(
     crate::windows_metadata::prepare_destination(dst, header.windows_metadata.as_ref())?;
 
     let mut did_copy = false;
-    let mut clone_succeeded = false;
-
     if config.resume {
         let outcome = resume_copy_file(src, dst, 0)
             .with_context(|| format!("resume copy {}", header.relative_path))?;
@@ -546,27 +545,20 @@ fn copy_resolved_file_payload(
     } else if crate::copy::file_needs_copy_with_mode(src, dst, config.compare_mode)? {
         let sizer = BufferSizer::default();
         let logger = NoopLogger;
-        let outcome = copy_file(src, dst, &sizer, false, &logger)
+        copy_file(src, dst, &sizer, false, &logger)
             .with_context(|| format!("copy {}", header.relative_path))?;
         did_copy = true;
-        clone_succeeded = outcome.clone_succeeded;
     }
 
     let windows_bytes =
         crate::windows_metadata::replace_streams(dst, header.windows_metadata.as_ref())?;
 
-    if config.preserve_times && header.windows_metadata.is_some() && header.mtime_seconds > 0 {
-        let ft = FileTime::from_unix_time(header.mtime_seconds, 0);
-        if let Err(e) = filetime::set_file_mtime(dst, ft) {
-            log::warn!("set mtime on {}: {}", dst.display(), e);
-        }
-    } else if config.preserve_times && did_copy && !clone_succeeded {
-        if let Ok(meta) = std::fs::metadata(src) {
-            if let Ok(modified) = meta.modified() {
-                let ft = FileTime::from_system_time(modified);
-                if let Err(e) = filetime::set_file_mtime(dst, ft) {
-                    log::warn!("set mtime on {}: {}", dst.display(), e);
-                }
+    if config.preserve_times {
+        let fallback =
+            (header.mtime_seconds > 0).then(|| FileTime::from_unix_time(header.mtime_seconds, 0));
+        if let Some(ft) = source_file_mtime(src, fallback) {
+            if let Err(e) = filetime::set_file_mtime(dst, ft) {
+                log::warn!("set mtime on {}: {}", dst.display(), e);
             }
         }
     }
@@ -578,8 +570,37 @@ fn copy_resolved_file_payload(
     })
 }
 
+/// Read the local source timestamp at apply time so local copies retain the
+/// precision that the second-granularity wire header cannot represent. The
+/// header value remains a fallback when the source timestamp cannot be read.
+fn source_file_mtime(source: &Path, fallback: Option<FileTime>) -> Option<FileTime> {
+    std::fs::metadata(source)
+        .and_then(|metadata| metadata.modified())
+        .map(FileTime::from_system_time)
+        .ok()
+        .or(fallback)
+}
+
+/// Replace wire-derived tar timestamps with local source timestamps. An empty
+/// source root is the transfer-session convention for a wire receive, which
+/// must keep using the timestamp carried by its header.
+fn restamp_local_tar_mtimes(src_root: &Path, files: &mut [super::tar_safety::ExtractedFile]) {
+    if src_root.as_os_str().is_empty() {
+        return;
+    }
+    for file in files {
+        let source = if file.rel.is_empty() {
+            src_root.to_path_buf()
+        } else {
+            src_root.join(&file.rel)
+        };
+        file.mtime = source_file_mtime(&source, file.mtime);
+    }
+}
+
 /// Extract an in-memory tar shard to the destination directory.
 fn write_tar_shard_payload(
+    src_root: &Path,
     dst_root: &Path,
     canonical_dst_root: Option<&Path>,
     headers: &[FileHeader],
@@ -644,7 +665,9 @@ fn write_tar_shard_payload(
     // Honor the sink's preserve_times toggle by stripping mtimes that
     // the helper would otherwise apply. Permissions are best-effort
     // either way (matches the historical FsTransferSink policy).
-    if !config.preserve_times {
+    if config.preserve_times {
+        restamp_local_tar_mtimes(src_root, &mut extracted);
+    } else {
         for f in &mut extracted {
             f.mtime = None;
         }
@@ -1234,6 +1257,25 @@ mod tests {
         assert_eq!(std::fs::read(&dst).unwrap(), b"root payload");
     }
 
+    #[test]
+    fn source_mtime_keeps_subsecond_precision_over_wire_fallback() {
+        let tmp = tempdir().unwrap();
+        let source = tmp.path().join("source.bin");
+        std::fs::write(&source, b"x").unwrap();
+        let requested = FileTime::from_unix_time(1_700_000_000, 123_456_700);
+        filetime::set_file_mtime(&source, requested).unwrap();
+        let expected = FileTime::from_last_modification_time(&std::fs::metadata(&source).unwrap());
+        assert_ne!(expected.nanoseconds(), 0, "fixture lost sub-second mtime");
+
+        let actual = source_file_mtime(
+            &source,
+            Some(FileTime::from_unix_time(expected.unix_seconds(), 0)),
+        )
+        .unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
     #[tokio::test]
     async fn fs_sink_copies_file() {
         let tmp = tempdir().unwrap();
@@ -1468,6 +1510,56 @@ mod tests {
         assert_eq!(outcome.files_written, 2);
         assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), content_a);
         assert_eq!(std::fs::read(dst.join("sub/b.txt")).unwrap(), content_b);
+    }
+
+    #[tokio::test]
+    async fn local_tar_shard_preserves_source_subsecond_mtime() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let content = b"timestamped tar member";
+        let source = src.join("member.bin");
+        std::fs::write(&source, content).unwrap();
+        filetime::set_file_mtime(
+            &source,
+            FileTime::from_unix_time(1_700_000_000, 123_456_700),
+        )
+        .unwrap();
+        let source_time =
+            FileTime::from_last_modification_time(&std::fs::metadata(&source).unwrap());
+        assert_ne!(
+            source_time.nanoseconds(),
+            0,
+            "fixture lost sub-second mtime"
+        );
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut tar_header = tar::Header::new_gnu();
+        tar_header.set_size(content.len() as u64);
+        tar_header.set_mode(0o644);
+        tar_header.set_cksum();
+        builder
+            .append_data(&mut tar_header, "member.bin", &content[..])
+            .unwrap();
+        let data = builder.into_inner().unwrap();
+
+        let mut file_header = make_file_header("member.bin", content.len() as u64);
+        file_header.mtime_seconds = source_time.unix_seconds();
+        let sink = FsTransferSink::new(src, dst.clone(), FsSinkConfig::default());
+        sink.write_payload(PreparedPayload::TarShard {
+            headers: vec![file_header],
+            data,
+        })
+        .await
+        .unwrap();
+
+        let destination_time = FileTime::from_last_modification_time(
+            &std::fs::metadata(dst.join("member.bin")).unwrap(),
+        );
+        assert_eq!(destination_time, source_time);
     }
 
     #[tokio::test]

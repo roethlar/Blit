@@ -60,7 +60,7 @@ doc explains the state machine the proto cannot.
    per-stream send telemetry. Workload file/byte totals do not select a
    terminal worker count. The DESTINATION's advertised capacity is a
    safety ceiling, not a target.
-7. **Carrier-independent Windows metadata (contract v4).** A Windows SOURCE
+7. **Carrier-independent Windows metadata (introduced in contract v4).** A Windows SOURCE
    describes the settable file attributes and every named `$DATA` stream in
    `FileHeader.windows_metadata`; it does so for every regular file, including
    a file with no named streams. The manifest carries stream descriptors and
@@ -352,7 +352,7 @@ push/pull-specific message.
   records never interleave. TCP data-plane payload is governed separately by
   the need-authorized overlap rule above. DESTINATION-lane frames (need batches,
   acks, summary) are unaffected — they travel the other direction.
-  Contract v4 applies the manifest/payload distinction above to both
+  Contract v5 applies the manifest/payload distinction above to both
   `file_begin` and every `TarShardHeader.files` member. Header-size splitting
   includes the encoded Windows metadata, so no metadata-heavy shard can cross
   the existing in-stream protobuf-frame ceiling.
@@ -378,10 +378,13 @@ push/pull-specific message.
   same process would immediately deserialize. Strategy selection
   (tar-shard vs file vs block) stays planner-owned and reads workload
   shape + capability, never role/initiator/transport.
-  Contract v4 is not bypassed by this optimization: local payload preparation
+  Contract v5 is not bypassed by this optimization: local payload preparation
   hydrates and validates the same manifest descriptors, and the filesystem sink
   applies the same exact named-stream replacement and attributes after either
-  the file-copy cascade or tar extraction completes.
+  the file-copy cascade or tar extraction completes. After named streams land,
+  both local paths reread the source `SystemTime` and restamp the destination,
+  preserving sub-second precision unavailable in `FileHeader.mtime_seconds`;
+  wire receives retain the timestamp precision carried by their header.
 
 ## Errors, cancel, stall
 
@@ -413,7 +416,7 @@ push/pull-specific message.
   silently degrades a content-compare request to a weaker mode. A
   missing checksum on either side of a comparison degrades to
   transfer (conservative, never a false skip).
-- **Windows metadata failure (contract v4):** enumeration, payload hydration,
+- **Windows metadata failure (contract v5):** enumeration, payload hydration,
   destination comparison, validation, stream replacement, and attribute apply
   are correctness steps, not best-effort decoration. An error names the file,
   aborts the session, joins owned workers, and suppresses that file's completion
