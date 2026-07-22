@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** hosted run `29949207219` at `354f38e`, 2026-07-22
+**As of:** hosted run `29949207219`; repairs through `4062947`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -98,6 +98,14 @@ performance ceilings and hardware tuning remain post-release work.
   `.tar.gz`; Windows is `.zip`; each contains both executables, release
   documents, and `BUILD.txt` with the full commit, and each has an uploaded
   SHA-256 sidecar. Missing binaries or empty output fail the package job.
+- `4062947` adds one cross-platform packaged-release runner before artifact
+  upload. It verifies the sidecar and safe extraction; full and embedded commit
+  identity; CLI/daemon version and help; an owned loopback daemon's module
+  readiness; one tiny local and one tiny same-build remote copy with exact byte
+  equality; and bounded teardown. Its checksum/path-safety guards pass, and the
+  checksum-name guard turns red when mutated. The previously uploaded ARM
+  macOS archive passed the full runner locally with SHA-256
+  `a1913899649ca1a633306dcb6f5b727f66d254c1fd3763388ae6769828b5364d`.
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
@@ -183,9 +191,9 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **Install/startup smoke is unproved.** The uploaded archives have not yet
-   been extracted into clean temporary environments and executed for exact
-   version/help, daemon readiness, tiny local/remote integrity, and teardown.
+1. **Hosted install/startup smoke is pending.** The ARM macOS artifact passed
+   the new full runner locally; the exact `4062947` workflow must pass the same
+   bounded checks on Linux, ARM macOS, and Windows before each upload.
 2. **The final release-candidate head is pending.** The smoke implementation
    and truthful release notes must land, then the complete check/test/package/
    smoke matrix must pass at that exact clean commit.

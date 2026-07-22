@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (full matrix and archives green; smoke next)
+Last updated: 2026-07-22 (packaged smoke implemented; hosted proof next)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -14,9 +14,11 @@ Last updated: 2026-07-22 (full matrix and archives green; smoke next)
   Exact run `29949207219` at `354f38e` passed check, Linux, ARM macOS, Windows,
   and all three release archive/checksum/upload jobs. This proves `fa79f0a` and
   produces the required `.tar.gz`/`.zip` target artifacts from one commit.
-  Next: execute each archive in a clean temporary environment for exact
-  version/help, daemon readiness, one tiny local copy, one tiny loopback remote
-  copy, byte identity, and bounded teardown. No hardware transfer is required.
+  `4062947` now smoke-checks checksum and safe extraction, exact shared build
+  identity/help, owned daemon readiness, two tiny byte-exact copies, and bounded
+  teardown before upload. The prior ARM macOS archive passed this runner locally
+  with checksum `a1913899…8b5364d`. Next: hosted three-platform smoke, then
+  truthful release notes. No hardware transfer is required.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -172,8 +174,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 - **Hosted run `29949207219` at `354f38e`:** check, all three OS test suites,
   and all three target archive/checksum/upload jobs passed. It proves the
   `fa79f0a` payload-seal correction and rel-7 archive construction.
-- **Release blockers as of `354f38e`:** prove clean-environment install,
-  version/help, startup, tiny local/remote integrity, and daemon teardown. See
+- **Release blockers as of `4062947`:** prove clean-environment smoke on all
+  three hosted targets, then reconcile truthful release notes. See
   `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):
