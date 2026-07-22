@@ -323,8 +323,8 @@ pub struct DestinationSessionConfig {
     /// same profile drives the wire advertisement, epoch-0 floor, and resize
     /// admission in either connection layout.
     pub receiver_capacity: Option<CapacityProfile>,
-    /// Caller-side observability hooks (otp-10b-2). All default-off; the
-    /// daemon DESTINATION responder runs with the defaults. Symmetric
+    /// Caller-side observability hooks (otp-10b-2). All default-off unless
+    /// the caller or daemon responder attaches its own instruments. Symmetric
     /// with [`SourceSessionConfig::instruments`].
     pub instruments: DestinationInstruments,
     /// otp-11: the LOCAL byte-carrier. When set, this destination
@@ -369,6 +369,16 @@ pub struct DestinationInstruments {
     /// High-volume aggregate observer for otp-12 small-file attribution.
     /// Separate from the low-frequency phase trace and disabled by default.
     pub small_file_probe: SmallFileProbe,
+}
+
+/// Observability hooks for either role a serving responder may assume.
+/// The initiator's declared role selects exactly one side; keeping both in
+/// one value lets daemon dispatchers attach one jobs row before `SessionOpen`
+/// reveals whether this process will send or receive the payload.
+#[derive(Clone, Default)]
+pub struct ResponderInstruments {
+    pub source: SourceInstruments,
+    pub destination: DestinationInstruments,
 }
 
 /// A session-terminating fault: either end refusing, aborting, or
@@ -3304,6 +3314,7 @@ pub async fn run_responder(
     transport: FrameTransport,
     source_target: SourceResponderTarget,
     dest_target: DestinationTarget,
+    instruments: ResponderInstruments,
     // Operator policy from the serving daemon's runtime config
     // (`--force-grpc-data`, `--no-server-checksums`).
     policy: ResponderPolicy,
@@ -3355,16 +3366,12 @@ pub async fn run_responder(
             };
             // A DESTINATION responder (push) binds+accepts its receive
             // sockets — it never dials, so it needs no data-plane host.
-            // Served destination (push-equivalent): no instruments — the
-            // serving daemon has no progress line; wiring the daemon
-            // row's byte counter through here is the core.rs jobs-row
-            // follow-up.
             let outcome = drive_destination(
                 &mut transport,
                 negotiated,
                 &dst_root,
                 None,
-                DestinationInstruments::default(),
+                instruments.destination,
                 // The serving daemon never applies locally — the local
                 // carrier exists only inside run_local_session's process.
                 None,
@@ -3405,13 +3412,12 @@ pub async fn run_responder(
             // The SOURCE owns its planner knobs; a daemon-served source
             // has no client-supplied ones (§Transport selection). A SOURCE
             // responder binds+accepts its send sockets (otp-5b) — it never
-            // dials, so it needs no data-plane host. No instruments: the
-            // serving daemon has no progress line, and an incomplete scan
+            // dials, so it needs no data-plane host. An incomplete scan
             // already travels as `ManifestComplete{scan_complete}`.
             let summary = drive_source(
                 PlanOptions::default(),
                 None,
-                SourceInstruments::default(),
+                instruments.source,
                 negotiated,
                 transport,
                 source,

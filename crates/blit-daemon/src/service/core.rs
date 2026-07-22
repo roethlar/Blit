@@ -426,6 +426,7 @@ impl Blit for BlitService {
             let guard = guard;
             let job = job;
             let cancel_token = job.cancellation_token().clone();
+            let byte_progress = job.bytes_counter();
             // Session variant: cancel surfaces as a framed
             // SessionError{CANCELLED}, not a bare Status (codex F1).
             let (ok, err_msg) = resolve_transfer_session_outcome(
@@ -435,6 +436,7 @@ impl Blit for BlitService {
                     inbound,
                     tx.clone(),
                     policy,
+                    byte_progress,
                     on_open,
                 ),
                 &tx,

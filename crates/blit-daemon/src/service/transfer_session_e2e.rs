@@ -1309,6 +1309,54 @@ async fn served_sessions_record_their_kind_and_endpoint() {
     daemon.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn served_session_rows_record_bytes_for_both_roles() {
+    let daemon = Daemon::start(false).await;
+    let src = tempfile::tempdir().unwrap();
+    write_tree(src.path(), &small_tree());
+
+    let push_summary = run_push_session(
+        &daemon.endpoint,
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions::default(),
+    )
+    .await
+    .expect("push session");
+    assert!(push_summary.bytes_transferred > 0);
+
+    let dest = tempfile::tempdir().unwrap();
+    let pull_outcome = run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions::default(),
+    )
+    .await
+    .expect("pull session");
+    assert!(pull_outcome.summary.bytes_transferred > 0);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let recent = loop {
+        let recent = daemon.active_jobs.recent();
+        if recent.len() >= 2 || std::time::Instant::now() > deadline {
+            break recent;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+
+    let push = recent
+        .iter()
+        .find(|r| r.kind == crate::active_jobs::ActiveJobKind::Push)
+        .expect("served push record");
+    assert_eq!(push.bytes, push_summary.bytes_transferred);
+
+    let pull = recent
+        .iter()
+        .find(|r| r.kind == crate::active_jobs::ActiveJobKind::PullSync)
+        .expect("served pull record");
+    assert_eq!(pull.bytes, pull_outcome.summary.bytes_transferred);
+    daemon.stop().await;
+}
+
 // ---------------------------------------------------------------------------
 // otp-9a: the pull session-client surface the delegated reroute (otp-9b)
 // consumes — mirror + filter through PullSessionOptions, and the caller's

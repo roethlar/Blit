@@ -20,10 +20,9 @@
 //! assembly + outcome mapping.
 //!
 //! Both roles ride the TCP data plane by default (otp-4b/5b), with the
-//! in-stream carrier as the fallback. Progress-byte wiring
-//! (`with_byte_progress`) is not threaded into served-session rows yet —
-//! they report `bytes_completed=0` (REVIEW.md w6-2b, re-scoped to this
-//! dispatcher at otp-10c-2).
+//! in-stream carrier as the fallback. The dispatcher's one jobs-row byte
+//! sink is attached to destination writes directly and to source payload
+//! progress through a small relay, so either served role reports live bytes.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,10 +33,12 @@ use tonic::{Status, Streaming};
 
 use blit_core::generated::session_error::Code;
 use blit_core::generated::{SessionOpen, TransferFrame};
+use blit_core::remote::transfer::{ByteProgressSink, ProgressEvent, RemoteTransferProgress};
 use blit_core::transfer_session::transport::grpc_daemon_transport;
 use blit_core::transfer_session::{
-    run_responder, DestinationTarget, HelloConfig, OpenResolver, ResolvedEndpoint, ResponderPolicy,
-    SessionFault, SourceResponderTarget,
+    run_responder, DestinationInstruments, DestinationTarget, HelloConfig, OpenResolver,
+    ResolvedEndpoint, ResponderInstruments, ResponderPolicy, SessionFault, SourceInstruments,
+    SourceResponderTarget,
 };
 
 use super::util::{resolve_contained_path, resolve_module, resolve_relative_path};
@@ -146,11 +147,21 @@ pub(crate) async fn run_transfer_session(
     // (codex otp-10a F3) and `--no-server-checksums` (otp-10b-1) apply
     // to served sessions exactly as they did to the old handlers.
     policy: ResponderPolicy,
+    byte_progress: ByteProgressSink,
     // Fires once at a successful open resolve with this session's job
     // kind + endpoint (codex otp-10b-2 F4).
     on_open: Arc<OnSessionOpen>,
 ) -> Result<(), Status> {
     let transport = grpc_daemon_transport(tx, inbound);
+    let (source_progress_tx, mut source_progress_rx) = mpsc::unbounded_channel();
+    let source_byte_progress = byte_progress.clone();
+    let relay_source_bytes = async move {
+        while let Some(event) = source_progress_rx.recv().await {
+            if let ProgressEvent::Payload { bytes, .. } = event {
+                source_byte_progress.report(bytes);
+            }
+        }
+    };
     // The same module→root resolver serves both roles; only the one the
     // initiator's declared role selects is consulted. Two clones so each
     // target owns its resolver (the closure clones its captured handles
@@ -168,14 +179,27 @@ pub(crate) async fn run_transfer_session(
         on_open,
         ActiveJobKind::Push,
     );
-    let outcome = run_responder(
-        HelloConfig::default(),
-        transport,
-        SourceResponderTarget::Resolve(source_resolver),
-        DestinationTarget::Resolve(dest_resolver),
-        policy,
-    )
-    .await;
+    let instruments = ResponderInstruments {
+        source: SourceInstruments {
+            progress: Some(RemoteTransferProgress::new(source_progress_tx)),
+            ..Default::default()
+        },
+        destination: DestinationInstruments {
+            byte_progress: Some(byte_progress),
+            ..Default::default()
+        },
+    };
+    let (outcome, ()) = tokio::join!(
+        run_responder(
+            HelloConfig::default(),
+            transport,
+            SourceResponderTarget::Resolve(source_resolver),
+            DestinationTarget::Resolve(dest_resolver),
+            instruments,
+            policy,
+        ),
+        relay_source_bytes,
+    );
     match outcome {
         // Either role completing cleanly is a successful transfer; the
         // daemon record does not distinguish push- from pull-equivalent
