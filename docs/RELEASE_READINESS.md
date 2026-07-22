@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** hosted run `29948151621`; repairs through `4bb3389`, 2026-07-22
+**As of:** hosted run `29948151621`; repairs through `5fc6f03`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -81,8 +81,8 @@ performance ceilings and hardware tuning remain post-release work.
   settlement. `8fb0a0d` selects only raw inputs and completes the chosen state
   transition outside the race. Its two-byte guard times out with the old
   selection and passes in 0.12 seconds with the fix; no hardware transfer ran.
-- Exact-head run `29948151621` at `532ece0` has passed check, Linux, and macOS;
-  Windows remains in progress. Both release executables now expose the exact
+- Exact-head run `29948151621` at `532ece0` passed check and the complete Linux,
+  macOS, and Windows test matrix. Both release executables now expose the exact
   shared session build identity through `--version` at `4bb3389`. Focused CLI
   and daemon parser guards fail when that interface is removed and pass with
   exact output when restored; formatting and strict workspace clippy pass.
@@ -171,13 +171,13 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **A clean full hosted suite is pending.** Run `29948151621` at `532ece0`
-   passed check, Linux, and macOS; its Windows job remains in progress. After
-   that result, the exact release-candidate head must pass all three OS suites.
-2. **Current release artifacts are unproved.** Release-build jobs were skipped
-   after the prior failed test matrix. Exact `--version` identity now exists,
-   but packaged archives, checksums, plus install / startup smoke checks for the
-   CLI and daemon are not recorded.
+1. **The exact release-candidate suite is pending.** Run `29948151621` at
+   `532ece0` passed check and all three OS test suites, proving the last hosted
+   runtime fix. The final artifact/smoke head must repeat that complete matrix.
+2. **Current release artifacts are unproved.** `5fc6f03` constructs the three
+   required target archives, includes both binaries and the exact full commit,
+   emits SHA-256 sidecars, and fails on missing output. Hosted archive evidence
+   plus install / startup smoke checks for the CLI and daemon are not recorded.
 
 ## Deferred until after release
 
