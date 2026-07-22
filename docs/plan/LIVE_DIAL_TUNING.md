@@ -462,8 +462,17 @@ advise but cannot accept the slice (D-2026-07-16-4).
    `f885f21dfc35cb7c47a2778c6cddae5552e51b46f8ee3b909b1f9670edc87e00`)
    and clean detached q checkout
    `/Users/michael/Dev/blit_v2_harness_7050a29`. q's native Bash 3.2
-   syntax/self-test and all 90 analyzer tests pass. One fresh additive rerun
-   remains.
+   syntax/self-test and all 90 analyzer tests pass. Fresh session
+   `ldt4-20260722T022350Z-7050a2997ac5` completed all four arms with normal
+   restoration and exact independently reproduced analysis at
+   `docs/bench/ldt4-rigw-horizon-2026-07-22/`: arm review 3, decision review 1,
+   performance review 0. q→Windows matched REMOVE 4→1 at 47.7/47.7 seconds.
+   Windows→q split ADD 4→10 versus REMOVE 4→1 at 45.3/34.7 seconds; the same
+   split repeated within 7/10 ms of the earlier void run. Both sessions used
+   the same fixed order, however: the first Windows-source arm follows 80 GiB
+   of destination writes and the second immediately rereads the same 40 GiB
+   source. A new reviewed finding must reverse pair order before attributing
+   the split to socket layout or changing controller policy.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.

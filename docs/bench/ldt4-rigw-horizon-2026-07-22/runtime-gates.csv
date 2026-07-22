@@ -1,0 +1,3 @@
+sequence,cell,pair,q_free_bytes,windows_free_bytes,q_quiet,windows_quiet
+001,q_to_windows_horizon,1,11536349069312,2329313992704,q_load1=2.04;q_spotlight_cpu=0.0;time_machine_auto=0;time_machine_running=0,windows_cpu_avg=3.33
+003,windows_to_q_horizon,1,11536349069312,2243414294528,q_load1=1.38;q_spotlight_cpu=0.0;time_machine_auto=0;time_machine_running=0,windows_cpu_avg=2.67

@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — all four horizon arms completed and retained, but the
 analyzer refused the first real resize operation because its synthetic action
 spelling did not match production evidence.
-**Status**: Exact reviewed `7050a29` staged; fresh live rerun pending.
+**Status**: Closed by fresh structurally valid session at exact `7050a29`.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `8385d23` + review guard fix `7050a29`
 
@@ -96,7 +96,10 @@ The tactical Opus review confirmed the core fix and its 27-test mutation proof,
 then admitted one Low test gap as `ldt-4-live-f14-r1-f1`: deleting both action
 comparisons left all 88 tests green. Two independently mutation-proved rejection
 guards close that gap, and Opus re-reviewed exact `7050a29` clean. Exact
-One fresh additive live rerun remains. The void session and all endpoint
+None. Fresh session `ldt4-20260722T022350Z-7050a2997ac5` completed all four
+arms, the analyzer validated the exact SOURCE actions, Windows restored
+normally, and no `SESSION-VOID` exists. The resulting controller-policy review
+belongs to a new finding; the earlier void session and all endpoint
 payloads/evidence stay retained unchanged.
 
 ## Reviewer comments

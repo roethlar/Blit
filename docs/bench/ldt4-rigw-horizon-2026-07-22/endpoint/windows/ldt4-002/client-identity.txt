@@ -1,0 +1,7 @@
+run_id=ldt4-002
+pid=10900
+parent_pid=12172
+executable=D:/blit-test/bins/406a7e5/blit.exe
+command=d:/blit-test/bins/406a7e5/blit.exe copy 10.1.10.54:9031:/ldt4/src_horizon d:/blit-test/ldt4-f13/sessions/ldt4-20260722t022350z-7050a2997ac5/active/horizon/ --yes
+trace_session_phases=1
+trace_run_id=ldt4-002

@@ -1,0 +1,1 @@
+phase=start mount=/Volumes/Apps uuid=33BAD653-9FA1-4236-966F-5BC4B221B34F filesystem=case-sensitive_apfs protocol=PCI-Express solid_state=true writable=true backing=/dev/disk8s1 free_bytes=11536349069312

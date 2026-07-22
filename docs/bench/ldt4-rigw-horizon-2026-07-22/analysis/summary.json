@@ -1,0 +1,196 @@
+{
+  "arm_count": 4,
+  "arm_review_count": 3,
+  "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+  "cells": [
+    {
+      "cell": "q_to_windows_horizon",
+      "decision_differences": [],
+      "destination_init_ms": "47740",
+      "destination_operations": [
+        [
+          1,
+          "REMOVE",
+          3
+        ],
+        [
+          2,
+          "REMOVE",
+          2
+        ],
+        [
+          3,
+          "REMOVE",
+          1
+        ]
+      ],
+      "source_init_ms": "47661",
+      "source_operations": [
+        [
+          1,
+          "REMOVE",
+          3
+        ],
+        [
+          2,
+          "REMOVE",
+          2
+        ],
+        [
+          3,
+          "REMOVE",
+          1
+        ]
+      ],
+      "trace_timing_differences": [
+        "reason_distribution",
+        "reason_sequence"
+      ],
+      "verdict": "TRANSITIONS_MATCH"
+    },
+    {
+      "cell": "windows_to_q_horizon",
+      "decision_differences": [
+        "peak",
+        "final",
+        "add_count",
+        "remove_count",
+        "operation_sequence"
+      ],
+      "destination_init_ms": "45282",
+      "destination_operations": [
+        [
+          1,
+          "ADD",
+          5
+        ],
+        [
+          2,
+          "ADD",
+          6
+        ],
+        [
+          3,
+          "ADD",
+          7
+        ],
+        [
+          4,
+          "ADD",
+          8
+        ],
+        [
+          5,
+          "ADD",
+          9
+        ],
+        [
+          6,
+          "ADD",
+          10
+        ]
+      ],
+      "source_init_ms": "34710",
+      "source_operations": [
+        [
+          1,
+          "REMOVE",
+          3
+        ],
+        [
+          2,
+          "REMOVE",
+          2
+        ],
+        [
+          3,
+          "REMOVE",
+          1
+        ]
+      ],
+      "trace_timing_differences": [
+        "reason_distribution",
+        "reason_sequence"
+      ],
+      "verdict": "REVIEW_REQUIRED"
+    }
+  ],
+  "decision_review_count": 1,
+  "fixture_manifests": [
+    {
+      "bytes": 42949672960,
+      "direction": "q_to_windows",
+      "files": 40,
+      "fixture": "horizon",
+      "path": "manifests/source/q_to_windows_horizon.csv",
+      "sha256": "df87fa1a8df6c455563232cafa0b2092d4f57771f798e74b86c3d67ac71f0c4d"
+    },
+    {
+      "bytes": 42949672960,
+      "direction": "windows_to_q",
+      "files": 40,
+      "fixture": "horizon",
+      "path": "manifests/source/windows_to_q_horizon.csv",
+      "sha256": "df87fa1a8df6c455563232cafa0b2092d4f57771f798e74b86c3d67ac71f0c4d"
+    }
+  ],
+  "floor_streams_observed": 4,
+  "harness_sha": "7050a2997ac597a1b8982e7f4acbfa0b12572340",
+  "input_file_count": 68,
+  "input_inventory_sha256": "1e281445822fac317e1739194a6c19505bd9295c892e7987d52d100e62d8f386",
+  "matrix": "horizon",
+  "no_sample_arm_count": 0,
+  "pair_count": 2,
+  "parent_evidence": "docs/bench/ldt4-rigw-2026-07-21",
+  "parent_inventory_sha256": "713cb4624e6f64a3863b67101fb9a3f3df288306d3e6f418c19501428711990b",
+  "parent_session": "ldt4-20260721T224319Z-96a4e3b03caf",
+  "performance_materiality_ratio": null,
+  "performance_review_count": 0,
+  "predecessor_evidence": "docs/bench/ldt4-rigw-sustained-2026-07-22",
+  "predecessor_inventory_sha256": "17348aaa261b936e04c104553d7b5c4bbcf008968306a29c4dea922535110eef",
+  "predecessor_session": "ldt4-20260722T001611Z-04e80082e12c",
+  "preselected_worker_target": null,
+  "receiver_safety_ceiling_observed": 32,
+  "schema": 1,
+  "staged_binaries": [
+    {
+      "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+      "build_id": "406a7e585459",
+      "endpoint": "q",
+      "role": "client",
+      "runtime_path": "/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit",
+      "sha256": "9a7358e3dadf5d9564911de49ff3d3c3d0261ddb1b1ac6dd84cb54eb9dbe3276",
+      "staged_path": "/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit"
+    },
+    {
+      "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+      "build_id": "406a7e585459",
+      "endpoint": "q",
+      "role": "daemon",
+      "runtime_path": "/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit-daemon",
+      "sha256": "220db3d7d5f29817a3c37a8c53b60543cc71fa59910dcf10b13d64c06d498a05",
+      "staged_path": "/Users/michael/Dev/blit_v2_artifact_406a7e5/target/release/blit-daemon"
+    },
+    {
+      "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+      "build_id": "406a7e585459",
+      "endpoint": "windows",
+      "role": "client",
+      "runtime_path": "D:/blit-test/bins/406a7e5/blit.exe",
+      "sha256": "772a8a3ffe2279b1fccb4e4ca64da1ec062a6f15d43d0a93bbdf97e3dae7af10",
+      "staged_path": "D:/blit-test/bins/406a7e5/blit.exe"
+    },
+    {
+      "artifact_sha": "406a7e5854593b7a7a151f9b6d9cdf1be8a9cd77",
+      "build_id": "406a7e585459",
+      "endpoint": "windows",
+      "role": "daemon",
+      "runtime_path": "D:/blit-test/bins/active/blit-daemon.exe",
+      "sha256": "ae414e649cf64f042f9d2a61639371c57d2fc3107cc426fe5a27a057b6630322",
+      "staged_path": "D:/blit-test/bins/406a7e5/blit-daemon.exe"
+    }
+  ],
+  "status": "REVIEW_REQUIRED",
+  "timing_rule": "endpoint-local elapsed_ns only; no cross-host clock subtraction",
+  "trace_timing_difference_count": 2
+}
