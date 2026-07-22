@@ -62,12 +62,12 @@ or hardware experiment.
       destination-only zero-capacity cap); `a76b785..42b9b38` proves parity,
       and ldt-2 preserves it under the current adaptive controller. No new
       physical transfer was used.
-- [ ] The Windows handshake-timeout guard deterministically exercises a blocked
+- [x] The Windows handshake-timeout guard deterministically exercises a blocked
       token write on every supported OS; its old Windows-success mutation turns
       the focused guard red.
 - [ ] Hosted CI is green on the exact release candidate for formatting, strict
       clippy, Linux tests, macOS tests, and Windows tests.
-- [ ] CLI integration fixtures positively prove their temporary daemon is ready
+- [x] CLI integration fixtures positively prove their temporary daemon is ready
       before returning; repeated parallel workspace runs have no connection-
       refused startup failures.
 - [ ] The ignored Windows directory-tree move hang has a root-cause fix; the

@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** local `master` at `9c399cc`, 2026-07-22
+**As of:** local release work through rel-1b, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -23,6 +23,12 @@ performance ceilings and hardware tuning remain post-release work.
 - Every complete ldt-4 live payload had exact manifest identity and normal
   endpoint restoration. The complete and partial session classification is in
   `docs/bench/ldt4-evidence-audit-2026-07-22/`.
+- rel-1 replaced the Windows-sensitive socket-buffer timeout test with a
+  deterministic blocked in-memory writer and mutation-proved the timeout arm.
+- rel-1b replaced temporary-daemon TCP readiness with a bounded `ListModules`
+  identity check against the fixture's unique canonical module root. Its guard
+  rejects a foreign listener under mutation proof; all 23 `blit_utils` tests
+  pass locally.
 
 ## Release blockers
 
@@ -32,21 +38,17 @@ performance ceilings and hardware tuning remain post-release work.
    two-byte/one-byte in-memory blocked writer with local mutation proof. The
    exact fix has not run on hosted Windows because publication is owner-gated.
    Finding: `release-win-ci-handshake-stall-test`.
-2. **CLI integration daemon startup is flaky.** A rel-1 workspace run failed
-   two `blit_utils` tests with connection refused; both isolated reruns passed.
-   The fixture needs bounded positive readiness, not a timing assumption.
-   Finding: `release-cli-daemon-test-startup-race`.
-3. **Windows directory-tree move can hang.** The integration test is ignored on
+2. **Windows directory-tree move can hang.** The integration test is ignored on
    Windows after repeated hangs; the product behavior remains unresolved.
-4. **Windows attributes and alternate data streams are silently lost on the
+3. **Windows attributes and alternate data streams are silently lost on the
    tar path.** Full fidelity is required for this release.
-5. **Progress reporting is incomplete.** Delegated progress can be silent and
+4. **Progress reporting is incomplete.** Delegated progress can be silent and
    served-session byte/file totals can remain zero through daemon, RPC, CLI,
    and TUI consumers.
-6. **P2 is unresolved.** Unified TCP small-file push is 10–20% slower than the
+5. **P2 is unresolved.** Unified TCP small-file push is 10–20% slower than the
    old path in retained same-session evidence. It requires code attribution and
    a direct software guard, not another hardware matrix.
-7. **Current release artifacts are unproved.** The exact local head is not on
+6. **Current release artifacts are unproved.** The exact local head is not on
    GitHub, the latest published release-build jobs were skipped, and install /
    startup smoke checks for the produced CLI and daemon artifacts are not
    recorded.

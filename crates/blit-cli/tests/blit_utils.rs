@@ -1,9 +1,35 @@
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
 mod common;
 use common::{run_with_timeout, TestContext};
+
+#[test]
+fn daemon_readiness_waits_for_the_owned_module_identity() {
+    let expected = Path::new("owned-module-root");
+    let probes = ["foreign-module-root", "owned-module-root"];
+    let mut probes = probes.into_iter();
+    let mut probe_count = 0;
+
+    common::wait_for_owned_readiness(
+        2,
+        Duration::ZERO,
+        || Ok(None),
+        || {
+            probe_count += 1;
+            let path = probes.next().expect("one identity per probe");
+            common::exported_modules_include_path([path], expected)
+        },
+    )
+    .expect("the second probe belongs to the spawned daemon");
+
+    assert_eq!(
+        probe_count, 2,
+        "foreign listeners must not satisfy readiness"
+    );
+}
 
 // ── scan ──────────────────────────────────────────────────────────────
 

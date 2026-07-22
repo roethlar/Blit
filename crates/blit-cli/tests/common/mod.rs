@@ -26,8 +26,10 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+use blit_core::generated::{blit_client::BlitClient, ListModulesRequest};
 use serde::Serialize;
 use tempfile::tempdir;
+use tonic::transport::Endpoint;
 use wait_timeout::ChildExt;
 
 // ---------------------------------------------------------------
@@ -186,6 +188,11 @@ pub fn pick_unused_port() -> u16 {
 }
 
 /// Poll until something listens on `127.0.0.1:port` (50 × 100 ms).
+///
+/// Fake servers own their bound listener before this runs, so a TCP-level
+/// readiness check is sufficient for them. Real daemon processes must use
+/// [`wait_for_owned_readiness`], which proves application identity as well as a
+/// listening socket.
 pub fn wait_for_port(port: u16, label: &str) {
     for _ in 0..50 {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
@@ -194,6 +201,83 @@ pub fn wait_for_port(port: u16, label: &str) {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("{label} failed to listen on {port}");
+}
+
+pub(crate) fn exported_modules_include_path<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+    expected_path: &Path,
+) -> bool {
+    paths
+        .into_iter()
+        .any(|path| Path::new(path) == expected_path)
+}
+
+/// Wait for the spawned process to answer a positive identity probe.
+///
+/// A bare TCP connect can hit a foreign daemon during the probe-to-bind port
+/// gap. The process can then lose its bind and exit after the harness has
+/// already returned. Keeping the liveness check and the identity probe in one
+/// loop prevents that false-ready state.
+pub(crate) fn wait_for_owned_readiness(
+    attempts: usize,
+    pause: Duration,
+    mut exited: impl FnMut() -> Result<Option<String>, String>,
+    mut identity_matches: impl FnMut() -> bool,
+) -> Result<(), String> {
+    for attempt in 0..attempts {
+        if let Some(status) = exited()? {
+            return Err(format!("spawned daemon exited during startup ({status})"));
+        }
+        if identity_matches() {
+            return Ok(());
+        }
+        if attempt + 1 < attempts {
+            thread::sleep(pause);
+        }
+    }
+    Err("spawned daemon did not answer its identity probe".to_string())
+}
+
+fn daemon_identity_matches(
+    runtime: &tokio::runtime::Runtime,
+    port: u16,
+    expected_module_path: &Path,
+) -> bool {
+    // Avoid constructing a tonic runtime/probe until a listener exists. The
+    // TCP check is only an optimization; the module-path match below is the
+    // readiness proof.
+    if TcpStream::connect(("127.0.0.1", port)).is_err() {
+        return false;
+    }
+
+    let uri = format!("http://127.0.0.1:{port}");
+    runtime.block_on(async {
+        let endpoint = match Endpoint::from_shared(uri) {
+            Ok(endpoint) => endpoint
+                .connect_timeout(Duration::from_millis(250))
+                .timeout(Duration::from_millis(250)),
+            Err(_) => return false,
+        };
+        let channel =
+            match tokio::time::timeout(Duration::from_millis(250), endpoint.connect()).await {
+                Ok(Ok(channel)) => channel,
+                _ => return false,
+            };
+        let response = match tokio::time::timeout(
+            Duration::from_millis(250),
+            BlitClient::new(channel).list_modules(ListModulesRequest {}),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response.into_inner(),
+            _ => return false,
+        };
+
+        exported_modules_include_path(
+            response.modules.iter().map(|module| module.path.as_str()),
+            expected_module_path,
+        )
+    })
 }
 
 /// Per-daemon knobs — everything the deleted harness clones existed
@@ -282,27 +366,32 @@ pub fn spawn_daemon(
         .spawn()
         .expect("spawn daemon");
 
-    // Readiness poll with a child-death check: a daemon that exits
-    // during startup (port stolen by an unrelated process, config
-    // rejected) fails fast with the real reason instead of a generic
-    // 5s timeout — and, crucially, never leaves the test silently
-    // talking to some other test's daemon on the same port.
-    let mut ready = false;
-    for _ in 0..50 {
-        if let Some(status) = child.try_wait().expect("poll spawned daemon") {
-            panic!(
-                "daemon {name} exited during startup ({status}); \
-                 port {port} taken or config rejected"
-            );
-        }
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            ready = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
+    // The daemon canonicalizes exported roots before serving them. Matching
+    // the unique temporary module path proves the RPC response came from this
+    // child, rather than from any process that happened to own the port first.
+    let expected_module_path = module_dir.canonicalize().expect("canonical module dir");
+    let readiness_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("daemon readiness runtime");
+    wait_for_owned_readiness(
+        50,
+        Duration::from_millis(100),
+        || {
+            child
+                .try_wait()
+                .map(|status| status.map(|status| status.to_string()))
+                .map_err(|err| format!("poll spawned daemon: {err}"))
+        },
+        || daemon_identity_matches(&readiness_runtime, port, &expected_module_path),
+    )
+    .unwrap_or_else(|reason| {
+        panic!(
+            "daemon {name} was not ready on port {port}: {reason}; \
+             port taken or config rejected"
+        )
+    });
     let daemon = ChildGuard::new(child);
-    assert!(ready, "daemon {name} failed to listen on {port}");
 
     SpawnedDaemon {
         port,
