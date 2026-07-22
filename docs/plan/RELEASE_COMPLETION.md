@@ -191,7 +191,9 @@ performance ratios are measured or graded.
    closed: request paths, signed filesystem mtime, and transfer permissions now
    have one blit-core conversion owner with the per-crate twins deleted. `w7-5`
    is closed: CLI and TUI byte/rate output use one binary-unit presenter, and
-   the decimal and screen-local formatting ladders are deleted.
+   the decimal and screen-local formatting ladders are deleted. `w8-1` is
+   closed: all recorded abandoned foundation modules/helpers are gone, with
+   zero-copy still governed separately by the later FAST decision.
 7. **rel-7 — reproducible artifacts.** Build the supported target matrix from
    one exact commit, preserve build identity, generate checksums, and fail if a
    required artifact is absent.

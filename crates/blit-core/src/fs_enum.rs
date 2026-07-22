@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::enumeration::{EntryKind, EnumeratedEntry, FileEnumerator};
+use crate::enumeration::{EnumeratedEntry, FileEnumerator};
 // Filesystem enumeration and categorization (Unix focus)
 
 /// Entry with size information for categorization
@@ -14,13 +14,6 @@ pub struct FileEntry {
     pub path: PathBuf,
     pub size: u64,
     pub is_directory: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct SymlinkEntry {
-    pub path: PathBuf,
-    pub target: PathBuf,
-    pub target_is_dir: bool,
 }
 
 /// Copy job with optional resume offset
@@ -422,95 +415,12 @@ pub fn enumerate_directory_filtered(
         .collect())
 }
 
-/// Enumerate symlinks under `root`, applying `filter` rules. Does not follow symlinks.
-#[cfg(not(windows))]
-pub fn enumerate_symlinks(root: &Path, filter: &mut FileFilter) -> Result<Vec<SymlinkEntry>> {
-    let enumerator = FileEnumerator::new(filter.clone_without_cache()).include_symlinks(true);
-    let entries = enumerator.enumerate_local(root)?;
-    Ok(entries
-        .into_iter()
-        .filter_map(|entry| match entry.kind {
-            EntryKind::Symlink { target } => {
-                let target = target?;
-                let target_is_dir = std::fs::metadata(&entry.absolute_path)
-                    .map(|md| md.is_dir())
-                    .unwrap_or(false);
-                Some(SymlinkEntry {
-                    path: entry.absolute_path,
-                    target,
-                    target_is_dir,
-                })
-            }
-            _ => None,
-        })
-        .collect())
-}
-
 #[cfg(windows)]
 pub fn enumerate_directory_filtered(
     root: &Path,
     filter: &mut FileFilter,
 ) -> Result<Vec<FileEntry>> {
     let enumerator = FileEnumerator::new(filter.clone_without_cache());
-    let entries = enumerator.enumerate_local(root)?;
-    Ok(entries
-        .into_iter()
-        .filter_map(EnumeratedEntry::into_file_entry)
-        .collect())
-}
-
-#[cfg(windows)]
-pub fn enumerate_symlinks(root: &Path, filter: &mut FileFilter) -> Result<Vec<SymlinkEntry>> {
-    let enumerator = FileEnumerator::new(filter.clone_without_cache()).include_symlinks(true);
-    let entries = enumerator.enumerate_local(root)?;
-    Ok(entries
-        .into_iter()
-        .filter_map(|entry| match entry.kind {
-            EntryKind::Symlink { target } => {
-                let target = target?;
-                let target_is_dir = std::fs::metadata(&entry.absolute_path)
-                    .map(|md| md.is_dir())
-                    .unwrap_or(false);
-                Some(SymlinkEntry {
-                    path: entry.absolute_path,
-                    target,
-                    target_is_dir,
-                })
-            }
-            _ => None,
-        })
-        .collect())
-}
-
-/// Categorize files by size for optimal copy strategy
-pub fn categorize_files(entries: Vec<CopyJob>) -> (Vec<CopyJob>, Vec<CopyJob>, Vec<CopyJob>) {
-    const SMALL_LIMIT: u64 = 1_048_576; // 1MB
-    const MEDIUM_LIMIT: u64 = 104_857_600; // 100MB
-    let mut small = Vec::new(); // < 1MB - tar streaming candidates
-    let mut medium = Vec::new(); // 1-100MB - parallel copy
-    let mut large = Vec::new(); // > 100MB - chunked copy
-
-    for job in entries {
-        if job.entry.size < SMALL_LIMIT {
-            small.push(job);
-        } else if job.entry.size < MEDIUM_LIMIT {
-            medium.push(job);
-        } else {
-            large.push(job);
-        }
-    }
-
-    (small, medium, large)
-}
-
-/// Enumerate files while following directory links and treating symlinked files as files.
-/// Applies filters and avoids simple symlink cycles by tracking visited canonical directories.
-/// Enumerate files while dereferencing symlinks. Filters are applied to final paths.
-pub fn enumerate_directory_deref_filtered(
-    root: &Path,
-    filter: &mut FileFilter,
-) -> Result<Vec<FileEntry>> {
-    let enumerator = FileEnumerator::new(filter.clone_without_cache()).follow_symlinks(true);
     let entries = enumerator.enumerate_local(root)?;
     Ok(entries
         .into_iter()

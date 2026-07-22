@@ -1,10 +1,8 @@
-mod chunked;
 mod clone;
 mod metadata;
 mod mmap;
 pub mod resume;
 
-pub use chunked::chunked_copy_file;
 pub use mmap::mmap_copy_file;
 pub use resume::{resume_copy_file, ResumeCopyOutcome};
 

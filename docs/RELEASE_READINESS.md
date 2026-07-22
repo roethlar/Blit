@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** presenter formatting consolidated, 2026-07-22
+**As of:** foundation dead code removed, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -100,6 +100,10 @@ performance ceilings and hardware tuning remain post-release work.
   watch, local-transfer summaries, and all five TUI surfaces. The decimal jobs
   formatter and private screen ladders are deleted; reverting the shared
   binary divisor makes its boundary guard fail.
+- The abandoned tar streamer, old delete planner, chunked-copy variant, and
+  dead enumeration helpers and exports are deleted. The earlier otp-11b slice
+  had already removed parallel-copy/stat leftovers. A source-structure guard
+  fails if any retired path or public name returns.
 
 ## Release blockers
 

@@ -2,7 +2,6 @@ pub mod buffer;
 pub mod checksum;
 pub mod config;
 pub mod copy;
-pub mod delete;
 pub mod deletion;
 pub mod dial;
 pub mod enumeration;
@@ -18,7 +17,6 @@ pub mod perf_history;
 pub mod perf_predictor;
 pub mod remote;
 pub mod stderr_log;
-pub mod tar_stream;
 pub mod transfer_plan;
 pub mod transfer_session;
 #[cfg(windows)]

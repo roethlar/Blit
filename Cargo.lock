@@ -316,7 +316,6 @@ dependencies = [
  "futures",
  "globset",
  "hostname",
- "indicatif",
  "libc",
  "log",
  "md5",
