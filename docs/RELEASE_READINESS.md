@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** dirty build identity stabilized, 2026-07-22
+**As of:** filter-normalization record reconciled, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -86,6 +86,11 @@ performance ceilings and hardware tuning remain post-release work.
   cause false `BUILD_MISMATCH` failures. Both rules fail under mutation, and the
   real three-case containment suite passes from one dirty tree without forcing
   either profile to resample.
+- The recorded filter-normalization split is no longer present. Both session
+  roles validate peer globs at open through `filter_from_spec`, filtered mirror
+  deletion converts through that helper, and the old hand-mapped push handler
+  was deleted at the one-path cutover. Existing malformed-glob and two-role
+  filter/mirror guards pass.
 
 ## Release blockers
 

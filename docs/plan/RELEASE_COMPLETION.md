@@ -185,7 +185,9 @@ performance ratios are measured or graded.
    one contained deletion executor; the old parallel enumerator no longer
    exists. The dirty-build profile-skew defect is closed: all profiles watch
    and hash the same executable-input set, including untracked source bytes,
-   while documentation changes do not churn peer compatibility.
+   while documentation changes do not churn peer compatibility. `w7-2` is
+   closed as stale: its unsafe handler was deleted, and both current session
+   roles validate and consume filters through the shared chokepoint.
 7. **rel-7 — reproducible artifacts.** Build the supported target matrix from
    one exact commit, preserve build identity, generate checksums, and fail if a
    required artifact is absent.
