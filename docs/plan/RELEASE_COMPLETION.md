@@ -197,7 +197,9 @@ performance ratios are measured or graded.
    closed as stale: otp-10c-2 already deleted the zero-caller control-plane
    payload duplicate with its legacy sinks and fallback module. `w8-3` is
    closed: the inert watch flag, app stubs, unused/misplaced CLI dependencies,
-   dead daemon helpers, and stale dead-code suppressions are removed.
+   dead daemon helpers, and stale dead-code suppressions are removed. `w5-3`
+   is closed: current daemon filesystem boundaries preserve NotFound and
+   PermissionDenied, while other wrapped errors retain full source chains.
 7. **rel-7 — reproducible artifacts.** Build the supported target matrix from
    one exact commit, preserve build identity, generate checksums, and fail if a
    required artifact is absent.

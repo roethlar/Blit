@@ -9,7 +9,7 @@ use sysinfo::Disks;
 use tokio::task;
 use tonic::Status;
 
-use super::util::resolve_relative_path;
+use super::util::{internal_err, io_to_status, resolve_relative_path};
 use blit_core::path_posix::request_path_to_posix;
 use blit_core::wire_metadata::mtime_seconds;
 
@@ -39,7 +39,7 @@ pub(crate) async fn delete_rel_paths(
 ) -> Result<blit_core::deletion::DeletionStats, Status> {
     task::spawn_blocking(move || delete_rel_paths_sync(&module_path, &canonical_root, rel_paths))
         .await
-        .map_err(|err| Status::internal(format!("purge task failed: {}", err)))?
+        .map_err(|err| internal_err("purge task failed", err))?
 }
 
 fn delete_rel_paths_sync(
@@ -73,7 +73,7 @@ fn deletion_status(error: blit_core::deletion::DeletionError) -> Status {
         error @ blit_core::deletion::DeletionError::Containment { .. } => {
             Status::permission_denied(error.to_string())
         }
-        error => Status::internal(error.to_string()),
+        error => internal_err("purge deletion failed", error),
     }
 }
 
@@ -112,11 +112,11 @@ pub(crate) fn list_completions(
 ) -> Result<Vec<String>, Status> {
     let mut results = Vec::new();
     let entries = fs::read_dir(search_root)
-        .map_err(|err| Status::internal(format!("read_dir {}: {}", search_root.display(), err)))?;
+        .map_err(|err| io_to_status(format!("read_dir {}", search_root.display()), err))?;
 
     for entry in entries {
         let entry = entry.map_err(|err| {
-            Status::internal(format!("read_dir entry {}: {}", search_root.display(), err))
+            io_to_status(format!("read_dir entry {}", search_root.display()), err)
         })?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if !leaf_prefix.is_empty() && !name.starts_with(leaf_prefix) {
@@ -224,7 +224,7 @@ pub(crate) fn stream_disk_usage(
 
     let metadata = start_abs
         .metadata()
-        .map_err(|err| Status::internal(format!("stat {}: {}", start_abs.display(), err)))?;
+        .map_err(|err| io_to_status(format!("stat {}", start_abs.display()), err))?;
 
     if start_abs.is_file() {
         add_file(&mut accum, &start_rel, metadata.len(), max_depth);
@@ -254,7 +254,7 @@ pub(crate) fn stream_disk_usage(
                 }
                 Ok(())
             })
-            .map_err(|err| Status::internal(format!("disk usage enumeration failed: {err}")))?;
+            .map_err(|err| internal_err("disk usage enumeration failed", err))?;
     }
 
     let mut entries: Vec<(usize, PathBuf, UsageAccum)> = accum
@@ -405,7 +405,7 @@ pub(crate) fn stream_find_entries(
 
     let metadata = start_abs
         .metadata()
-        .map_err(|err| Status::internal(format!("stat {}: {}", start_abs.display(), err)))?;
+        .map_err(|err| io_to_status(format!("stat {}", start_abs.display()), err))?;
 
     if start_abs.is_file() {
         maybe_emit(start_rel.clone(), metadata, false)?;
@@ -432,18 +432,17 @@ pub(crate) fn stream_find_entries(
             maybe_emit(rel_from_root, entry.metadata, is_dir)?;
             Ok(())
         })
-        .map_err(|err| Status::internal(format!("find enumeration failed: {err}")))?;
+        .map_err(|err| internal_err("find enumeration failed", err))?;
 
     Ok(())
 }
 
 pub(crate) fn filesystem_stats_for_path(path: &Path) -> Result<FilesystemStatsResponse, Status> {
     let canonical = fs::canonicalize(path).map_err(|err| {
-        Status::internal(format!(
-            "failed to resolve filesystem stats path {}: {}",
-            path.display(),
-            err
-        ))
+        io_to_status(
+            format!("failed to resolve filesystem stats path {}", path.display()),
+            err,
+        )
     })?;
 
     // On Windows, fs::canonicalize returns extended-length paths with \\?\ prefix,
@@ -616,5 +615,26 @@ mod disk_usage_depth_tests {
             paths.len() > 2,
             "unbounded (None) must stream nested descendant paths; got {paths:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod status_mapping_tests {
+    use super::*;
+    use tempfile::tempdir;
+    use tonic::Code;
+
+    #[test]
+    fn missing_filesystem_paths_cross_as_not_found() {
+        let temp = tempdir().expect("tempdir");
+        let missing = temp.path().join("missing");
+
+        let completion_error =
+            list_completions(&missing, "", "", true, true).expect_err("missing completion root");
+        assert_eq!(completion_error.code(), Code::NotFound);
+
+        let stats_error =
+            filesystem_stats_for_path(&missing).expect_err("missing filesystem stats root");
+        assert_eq!(stats_error.code(), Code::NotFound);
     }
 }

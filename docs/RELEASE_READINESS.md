@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** dead-code hygiene complete, 2026-07-22
+**As of:** daemon status mapping fixed, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -113,6 +113,10 @@ performance ceilings and hardware tuning remain post-release work.
   empty app transfer module, unused perf report wrapper, genuinely dead daemon
   helpers, and stale dead-code suppressions are removed. Restoring the retired
   flag makes its parser guard fail.
+- Daemon filesystem errors now retain actionable gRPC codes: missing paths are
+  NotFound and permission failures are PermissionDenied. Other wrapped errors
+  keep their complete source chains. Both mapping rules fail under mutation,
+  and current admin handlers prove the missing-path behavior end to end.
 
 ## Release blockers
 

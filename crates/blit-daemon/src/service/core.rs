@@ -2,7 +2,9 @@ use super::admin::{
     delete_rel_paths, filesystem_stats_for_path, list_completions, sanitize_request_paths,
     split_completion_prefix, stream_disk_usage, stream_find_entries,
 };
-use super::util::{resolve_contained_path, resolve_module, resolve_relative_path};
+use super::util::{
+    internal_err, io_to_status, resolve_contained_path, resolve_module, resolve_relative_path,
+};
 use super::{DiskUsageSender, FindSender};
 use crate::active_jobs::{ActiveJobKind, ActiveJobs, CancelOutcome};
 use crate::metrics::TransferMetrics;
@@ -765,9 +767,8 @@ impl Blit for BlitService {
         let target = resolve_contained_path(&module, &requested)?;
         let response_entries =
             tokio::task::spawn_blocking(move || -> Result<Vec<FileInfo>, Status> {
-                let metadata = fs::metadata(&target).map_err(|err| {
-                    Status::internal(format!("stat {}: {}", target.display(), err))
-                })?;
+                let metadata = fs::metadata(&target)
+                    .map_err(|err| io_to_status(format!("stat {}", target.display()), err))?;
 
                 if metadata.is_file() {
                     let name = requested
@@ -785,19 +786,15 @@ impl Blit for BlitService {
                 } else if metadata.is_dir() {
                     let mut infos = Vec::new();
                     let entries = fs::read_dir(&target).map_err(|err| {
-                        Status::internal(format!("read_dir {}: {}", target.display(), err))
+                        io_to_status(format!("read_dir {}", target.display()), err)
                     })?;
                     for entry in entries {
                         let entry = entry.map_err(|err| {
-                            Status::internal(format!(
-                                "read_dir entry {}: {}",
-                                target.display(),
-                                err
-                            ))
+                            io_to_status(format!("read_dir entry {}", target.display()), err)
                         })?;
                         let path = entry.path();
                         let meta = entry.metadata().map_err(|err| {
-                            Status::internal(format!("metadata {}: {}", path.display(), err))
+                            io_to_status(format!("metadata {}", path.display()), err)
                         })?;
                         let name = entry.file_name().to_string_lossy().into_owned();
                         infos.push(FileInfo {
@@ -818,7 +815,7 @@ impl Blit for BlitService {
                 }
             })
             .await
-            .map_err(|err| Status::internal(format!("list task failed: {}", err)))??;
+            .map_err(|err| internal_err("list task failed", err))??;
 
         Ok(Response::new(ListResponse {
             entries: response_entries,
@@ -875,7 +872,7 @@ impl Blit for BlitService {
             )
         })
         .await
-        .map_err(|err| Status::internal(format!("completion task failed: {}", err)))??;
+        .map_err(|err| internal_err("completion task failed", err))??;
 
         Ok(Response::new(CompletionResponse {
             completions: entries,
@@ -1090,10 +1087,7 @@ impl Blit for BlitService {
                 }
                 Err(join_err) => {
                     let _ = err_sender
-                        .send(Err(Status::internal(format!(
-                            "disk usage worker failed: {}",
-                            join_err
-                        ))))
+                        .send(Err(internal_err("disk usage worker failed", join_err)))
                         .await;
                 }
             }
@@ -1155,10 +1149,7 @@ impl Blit for BlitService {
                 }
                 Err(join_err) => {
                     let _ = err_sender
-                        .send(Err(Status::internal(format!(
-                            "find worker failed: {}",
-                            join_err
-                        ))))
+                        .send(Err(internal_err("find worker failed", join_err)))
                         .await;
                 }
             }

@@ -1,9 +1,29 @@
 use crate::runtime::{ModuleConfig, RootExport};
 use std::collections::HashMap;
+use std::fmt::Display;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::Status;
+
+/// Convert an internal error at the daemon boundary without flattening an
+/// `eyre::Report` source chain. Alternate Display is ordinary Display for
+/// simple error types and the complete `outer: source` chain for reports.
+pub(crate) fn internal_err(context: impl Display, error: impl Display) -> Status {
+    Status::internal(format!("{context}: {error:#}"))
+}
+
+/// Preserve actionable filesystem error kinds on the gRPC boundary.
+pub(crate) fn io_to_status(context: impl Display, error: io::Error) -> Status {
+    let kind = error.kind();
+    let message = format!("{context}: {error}");
+    match kind {
+        io::ErrorKind::NotFound => Status::not_found(message),
+        io::ErrorKind::PermissionDenied => Status::permission_denied(message),
+        _ => Status::internal(message),
+    }
+}
 
 pub(crate) async fn resolve_module(
     modules: &Arc<Mutex<HashMap<String, ModuleConfig>>>,
@@ -94,4 +114,40 @@ pub(crate) fn resolve_contained_path(module: &ModuleConfig, rel: &Path) -> Resul
     blit_core::path_safety::verify_contained(&module.canonical_root, &target)
         .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
     Ok(target)
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use tonic::Code;
+
+    #[test]
+    fn io_status_preserves_actionable_kinds() {
+        let missing = io_to_status(
+            "opening source",
+            io::Error::new(io::ErrorKind::NotFound, "gone"),
+        );
+        assert_eq!(missing.code(), Code::NotFound);
+        assert_eq!(missing.message(), "opening source: gone");
+
+        let denied = io_to_status(
+            "opening source",
+            io::Error::new(io::ErrorKind::PermissionDenied, "blocked"),
+        );
+        assert_eq!(denied.code(), Code::PermissionDenied);
+
+        let other = io_to_status("opening source", io::Error::other("broken"));
+        assert_eq!(other.code(), Code::Internal);
+    }
+
+    #[test]
+    fn internal_status_retains_report_chain() {
+        let report = eyre::eyre!("leaf cause").wrap_err("middle context");
+        let status = internal_err("outer context", &report);
+        assert_eq!(status.code(), Code::Internal);
+        assert_eq!(
+            status.message(),
+            "outer context: middle context: leaf cause"
+        );
+    }
 }
