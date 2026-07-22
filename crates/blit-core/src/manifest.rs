@@ -180,6 +180,7 @@ mod tests {
             mtime_seconds: mtime,
             permissions: 0o644,
             checksum,
+            windows_metadata: None,
         }
     }
 

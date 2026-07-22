@@ -41,7 +41,7 @@ use eyre::{bail, eyre, Context, Result};
 use filetime::{set_file_mtime, FileTime};
 use tar::{Archive, EntryType};
 
-use crate::generated::FileHeader;
+use crate::generated::{FileHeader, WindowsFileMetadata};
 use crate::path_safety;
 
 /// Default per-entry / per-shard byte cap. Tar shards target 4–64 MiB;
@@ -95,6 +95,8 @@ pub struct ExtractedFile {
     pub permissions: Option<u32>,
     /// Original size from `FileHeader.size`. Equals `contents.len()`.
     pub size: u64,
+    /// Contract-v4 Windows payload metadata, validated before extraction.
+    pub windows_metadata: Option<WindowsFileMetadata>,
 }
 
 /// Walk a tar-shard buffer and return validated `ExtractedFile`s
@@ -140,6 +142,8 @@ pub fn safe_extract_tar_shard(
         let header = expected.remove(&rel_string).ok_or_else(|| {
             eyre!("tar shard produced unexpected entry '{rel_string}' (not in manifest)")
         })?;
+        crate::windows_metadata::validate_payload(header.windows_metadata.as_ref())
+            .with_context(|| format!("validating Windows metadata for {rel_string:?}"))?;
 
         // Size validation BEFORE any allocation (R6-F1). The tar
         // header's size and the manifest's FileHeader.size must
@@ -200,6 +204,7 @@ pub fn safe_extract_tar_shard(
             None
         };
         let size = header.size;
+        let windows_metadata = header.windows_metadata;
 
         out.push(ExtractedFile {
             rel: rel_string,
@@ -208,6 +213,7 @@ pub fn safe_extract_tar_shard(
             mtime,
             permissions,
             size,
+            windows_metadata,
         });
     }
 
@@ -228,8 +234,10 @@ pub fn write_extracted_file(file: &ExtractedFile) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating directory {}", parent.display()))?;
     }
+    crate::windows_metadata::prepare_destination(&file.dest_path, file.windows_metadata.as_ref())?;
     std::fs::write(&file.dest_path, &file.contents)
         .with_context(|| format!("writing {}", file.dest_path.display()))?;
+    crate::windows_metadata::replace_streams(&file.dest_path, file.windows_metadata.as_ref())?;
     // POST_REVIEW_FIXES §1.1: best-effort metadata, but failures
     // must be visible. R42-F1 caught this site as still silent
     // after the first sweep; this helper is shared by pull
@@ -251,6 +259,7 @@ pub fn write_extracted_file(file: &ExtractedFile) -> Result<()> {
             log::warn!("set permissions on {}: {}", file.dest_path.display(), e);
         }
     }
+    crate::windows_metadata::apply_attributes(&file.dest_path, file.windows_metadata.as_ref())?;
     Ok(())
 }
 
@@ -268,6 +277,7 @@ mod tests {
             mtime_seconds: 0,
             permissions: 0o644,
             checksum: vec![],
+            windows_metadata: None,
         }
     }
 
@@ -401,6 +411,7 @@ mod tests {
             mtime: Some(FileTime::from_unix_time(1_577_836_800, 0)),
             permissions: Some(0o600),
             size: 7,
+            windows_metadata: None,
         };
         write_extracted_file(&f).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"payload");

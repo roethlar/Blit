@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** local release work through rel-3, 2026-07-22
+**As of:** local release work through the rel-4 candidate, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -40,6 +40,15 @@ performance ceilings and hardware tuning remain post-release work.
   that native-separator mismatch and the unified session later deleted the old
   path. The exact nested push-move test is active on Windows again; current-head
   hosted confirmation remains publication-gated.
+- rel-4 defines contract v4 and implements bounded Windows attributes and named
+  `$DATA` streams across local, TCP, in-stream, tar, and resume carriers. The
+  destination retains and validates manifest descriptors before applying any
+  payload, metadata mismatch overrides an ordinary content skip, non-Windows
+  destinations refuse before creating a partial file, and ADS bytes count as
+  payload. The guards fail under metadata-diff and hash-drift mutations; local
+  format, strict clippy, workspace tests, docs, and strict all-target Windows
+  cross-compilation pass. Actual Windows filesystem behavior is still pending
+  the publication-gated hosted run.
 
 ## Release blockers
 
@@ -48,11 +57,15 @@ performance ceilings and hardware tuning remain post-release work.
    rel-1 now exercises the same production timeout through a deterministic
    two-byte/one-byte in-memory blocked writer with local mutation proof. The
    exact fix has not run on hosted Windows because publication is owner-gated.
-   The re-enabled nested push-move test also needs current-head Windows
-   confirmation. Findings: `release-win-ci-handshake-stall-test` and
-   `windows-move-tree-hang`.
-2. **Windows attributes and alternate data streams are silently lost on the
-   tar path.** Full fidelity is required for this release.
+   The re-enabled nested push-move test and rel-4's single/tar plus local/remote
+   metadata guards also need current-head Windows confirmation. Findings:
+   `release-win-ci-handshake-stall-test`, `windows-move-tree-hang`, and
+   `windows-attrs-and-ads-lost-on-tar-path`.
+2. **Temporary-daemon startup is not yet deterministic or diagnosable.** The
+   first rel-4 workspace gate had one daemon exit during `admin_verbs` startup;
+   the exact test and complete suite then passed, while the harness discarded
+   stderr and therefore lost the cause. `tests-harness-stderr-blackhole` must
+   capture the process error and any remaining startup failure must be fixed.
 3. **Progress reporting is incomplete.** Delegated progress can be silent and
    served-session byte/file totals can remain zero through daemon, RPC, CLI,
    and TUI consumers.

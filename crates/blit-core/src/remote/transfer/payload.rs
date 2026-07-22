@@ -50,16 +50,29 @@ pub async fn prepare_payload(
     source_root: PathBuf,
 ) -> Result<PreparedPayload> {
     match payload {
-        TransferPayload::File(header) => Ok(PreparedPayload::File(header)),
-        TransferPayload::TarShard { headers } => {
-            let headers_clone = headers.clone();
-            let source_root_clone = source_root.clone();
-            let data =
-                task::spawn_blocking(move || build_tar_shard(&source_root_clone, &headers_clone))
-                    .await
-                    .map_err(|err| eyre!("tar shard worker failed: {err}"))??;
-            Ok(PreparedPayload::TarShard { headers, data })
+        TransferPayload::File(mut header) => {
+            if header.windows_metadata.is_none() {
+                return Ok(PreparedPayload::File(header));
+            }
+            task::spawn_blocking(move || {
+                let source_path = source_path_for_header(&source_root, &header);
+                crate::windows_metadata::hydrate_payload_header(&source_path, &mut header)?;
+                Ok(PreparedPayload::File(header))
+            })
+            .await
+            .map_err(|err| eyre!("file payload metadata worker failed: {err}"))?
         }
+        TransferPayload::TarShard { headers } => task::spawn_blocking(move || {
+            let mut headers = headers;
+            for header in &mut headers {
+                let source_path = source_path_for_header(&source_root, header);
+                crate::windows_metadata::hydrate_payload_header(&source_path, header)?;
+            }
+            let data = build_tar_shard(&source_root, &headers)?;
+            Ok(PreparedPayload::TarShard { headers, data })
+        })
+        .await
+        .map_err(|err| eyre!("tar shard worker failed: {err}"))?,
         // Resume payloads can only originate on the receive side (parsed
         // off the wire by DataPlaneSource); the file-system source never
         // produces them.
@@ -70,14 +83,37 @@ pub async fn prepare_payload(
         // file inside the sink write (DataPlaneSink), where the record's
         // strict serialization lives. Pass through.
         TransferPayload::ResumeFile {
-            header,
+            mut header,
             block_size,
             dest_hashes,
-        } => Ok(PreparedPayload::ResumeFile {
-            header,
-            block_size,
-            dest_hashes,
-        }),
+        } => {
+            if header.windows_metadata.is_none() {
+                return Ok(PreparedPayload::ResumeFile {
+                    header,
+                    block_size,
+                    dest_hashes,
+                });
+            }
+            task::spawn_blocking(move || {
+                let source_path = source_path_for_header(&source_root, &header);
+                crate::windows_metadata::hydrate_payload_header(&source_path, &mut header)?;
+                Ok(PreparedPayload::ResumeFile {
+                    header,
+                    block_size,
+                    dest_hashes,
+                })
+            })
+            .await
+            .map_err(|err| eyre!("resume payload metadata worker failed: {err}"))?
+        }
+    }
+}
+
+fn source_path_for_header(source_root: &Path, header: &FileHeader) -> PathBuf {
+    if header.relative_path.is_empty() {
+        source_root.to_path_buf()
+    } else {
+        source_root.join(&header.relative_path)
     }
 }
 
@@ -119,6 +155,7 @@ pub enum PreparedPayload {
         total_size: u64,
         mtime_seconds: i64,
         permissions: u32,
+        windows_metadata: Option<crate::generated::WindowsFileMetadata>,
     },
     /// otp-7b: a resume-flagged file's whole block phase, send-side only
     /// (see [`TransferPayload::ResumeFile`]). Consumed by `DataPlaneSink`,

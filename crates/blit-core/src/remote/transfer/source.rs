@@ -293,12 +293,20 @@ fn spawn_manifest_task(
 
                 let mtime = unix_seconds(&entry.metadata);
                 let permissions = permissions_mode(&entry.metadata);
+                let windows_metadata =
+                    crate::windows_metadata::read_manifest(&absolute).map_err(|error| {
+                        eyre!(format!(
+                            "reading Windows metadata for {}: {error:#}",
+                            absolute.display()
+                        ))
+                    })?;
                 let header = FileHeader {
                     relative_path: rel,
                     size,
                     mtime_seconds: mtime,
                     permissions,
                     checksum: vec![],
+                    windows_metadata,
                 };
                 manifest_tx
                     .blocking_send(header)
@@ -813,6 +821,7 @@ mod filtered_source_tests {
             mtime_seconds: 0,
             permissions: 0,
             checksum: vec![],
+            windows_metadata: None,
         }
     }
 
@@ -1017,6 +1026,7 @@ mod checksumming_source_tests {
             mtime_seconds: 0,
             permissions: 0,
             checksum: vec![],
+            windows_metadata: None,
         }
     }
 

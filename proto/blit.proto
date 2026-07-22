@@ -213,6 +213,24 @@ message FileHeader {
   int64 mtime_seconds = 3;
   uint32 permissions = 4;
   bytes checksum = 5;  // Blake3 hash (32 bytes), empty if not computed
+  // Contract v4: present for every regular file enumerated by a Windows
+  // source. Manifest headers carry descriptors/hashes with empty `content`;
+  // payload headers carry the complete validated named-stream bytes.
+  optional WindowsFileMetadata windows_metadata = 6;
+}
+
+message WindowsFileMetadata {
+  // SetFileAttributesW-compatible mask; see docs/TRANSFER_SESSION.md.
+  uint32 file_attributes = 1;
+  repeated WindowsNamedStream named_streams = 2;
+}
+
+message WindowsNamedStream {
+  // Bare stream name: no leading colon and no :$DATA suffix.
+  string name = 1;
+  uint64 size = 2;
+  bytes checksum = 3; // Blake3 (exactly 32 bytes)
+  bytes content = 4;  // manifest: empty; payload: exactly `size` bytes
 }
 
 message FileData {
@@ -261,6 +279,7 @@ message BlockTransfer {
 message BlockTransferComplete {
   string relative_path = 1;              // File that's now complete
   uint64 total_bytes = 2;                // Final file size (for truncation if needed)
+  optional WindowsFileMetadata windows_metadata = 3; // contract-v4 payload form
 }
 
 message ListRequest { string module = 1; string path = 2; }

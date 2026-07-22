@@ -1,10 +1,11 @@
 use eyre::{bail, Context, Result};
 use futures::StreamExt;
+use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::buffer::BufferPool;
-use crate::generated::FileHeader;
+use crate::generated::{FileHeader, WindowsFileMetadata};
 
 use super::payload::{prepared_payload_stream, PreparedPayload, TransferPayload};
 use super::progress::{LiveProbe, NoProbe, Probe, StreamProbe};
@@ -18,6 +19,79 @@ pub const DATA_PLANE_RECORD_TAR_SHARD: u8 = 1;
 pub const DATA_PLANE_RECORD_BLOCK: u8 = 2;
 pub const DATA_PLANE_RECORD_BLOCK_COMPLETE: u8 = 3;
 pub const DATA_PLANE_RECORD_END: u8 = 0xFF;
+const WINDOWS_METADATA_PRESENT: u8 = 1;
+const WINDOWS_METADATA_ABSENT: u8 = 0;
+const MAX_WINDOWS_METADATA_WIRE_BYTES: usize =
+    crate::windows_metadata::MAX_WINDOWS_STREAM_BYTES_PER_FILE as usize + 128 * 1024;
+
+async fn write_windows_metadata<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    metadata: Option<&WindowsFileMetadata>,
+) -> Result<()> {
+    let Some(metadata) = metadata else {
+        writer
+            .write_all(&[WINDOWS_METADATA_ABSENT])
+            .await
+            .context("writing Windows metadata presence")?;
+        return Ok(());
+    };
+    crate::windows_metadata::validate_payload(Some(metadata))?;
+    let encoded = metadata.encode_to_vec();
+    if encoded.len() > MAX_WINDOWS_METADATA_WIRE_BYTES {
+        bail!(
+            "encoded Windows metadata is {} bytes, exceeds wire cap {}",
+            encoded.len(),
+            MAX_WINDOWS_METADATA_WIRE_BYTES
+        );
+    }
+    writer
+        .write_all(&[WINDOWS_METADATA_PRESENT])
+        .await
+        .context("writing Windows metadata presence")?;
+    writer
+        .write_all(&(encoded.len() as u32).to_be_bytes())
+        .await
+        .context("writing Windows metadata length")?;
+    writer
+        .write_all(&encoded)
+        .await
+        .context("writing Windows metadata")
+}
+
+pub(crate) async fn read_windows_metadata<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+) -> Result<Option<WindowsFileMetadata>> {
+    let presence = reader
+        .read_u8()
+        .await
+        .context("reading Windows metadata presence")?;
+    match presence {
+        WINDOWS_METADATA_ABSENT => Ok(None),
+        WINDOWS_METADATA_PRESENT => {
+            let len = reader
+                .read_u32()
+                .await
+                .context("reading Windows metadata length")? as usize;
+            if len > MAX_WINDOWS_METADATA_WIRE_BYTES {
+                bail!(
+                    "encoded Windows metadata is {} bytes, exceeds wire cap {}",
+                    len,
+                    MAX_WINDOWS_METADATA_WIRE_BYTES
+                );
+            }
+            let mut encoded = vec![0u8; len];
+            reader
+                .read_exact(&mut encoded)
+                .await
+                .context("reading Windows metadata")?;
+            let metadata = WindowsFileMetadata::decode(encoded.as_slice())
+                .context("decoding Windows metadata")?;
+            crate::windows_metadata::validate_payload(Some(&metadata))?;
+            Ok(Some(metadata))
+        }
+        other => bail!("invalid Windows metadata presence tag {other}"),
+    }
+}
 
 /// ue-r2-2: length of the per-epoch resize credential a data socket
 /// echoes after the one-time token when resize was negotiated
@@ -264,21 +338,36 @@ impl<P: Probe> DataPlaneSession<P> {
                     if let Err(err) = self.send_file(source.clone(), &header).await {
                         return Err(err.wrap_err(format!("sending {}", header.relative_path)));
                     }
-                    self.bytes_sent = self.bytes_sent.saturating_add(header.size);
+                    let payload_bytes = header
+                        .size
+                        .saturating_add(crate::windows_metadata::payload_bytes(&header));
+                    self.bytes_sent = self.bytes_sent.saturating_add(payload_bytes);
                     if let Some(progress) = progress {
-                        progress.report_payload(0, header.size);
+                        progress.report_payload(0, payload_bytes);
                         progress.report_file_complete(header.relative_path.clone());
                     }
                 }
                 PreparedPayload::TarShard { headers, data } => {
-                    let shard_bytes: u64 = headers.iter().map(|h| h.size).sum();
+                    let shard_bytes: u64 = headers
+                        .iter()
+                        .map(|header| {
+                            header
+                                .size
+                                .saturating_add(crate::windows_metadata::payload_bytes(header))
+                        })
+                        .sum();
                     if let Err(err) = self.send_prepared_tar_shard(headers.clone(), &data).await {
                         return Err(err.wrap_err("sending tar shard"));
                     }
                     self.bytes_sent = self.bytes_sent.saturating_add(shard_bytes);
                     if let Some(progress) = progress {
                         for header in &headers {
-                            progress.report_payload(0, header.size);
+                            progress.report_payload(
+                                0,
+                                header
+                                    .size
+                                    .saturating_add(crate::windows_metadata::payload_bytes(header)),
+                            );
                             progress.report_file_complete(header.relative_path.clone());
                         }
                     }
@@ -374,6 +463,7 @@ impl<P: Probe> DataPlaneSession<P> {
             .write_all(&header.permissions.to_be_bytes())
             .await
             .context("writing permissions")?;
+        write_windows_metadata(&mut self.stream, header.windows_metadata.as_ref()).await?;
 
         // Double-buffered I/O: overlaps source reads with network writes
         self.send_file_double_buffered(reader, header, rel).await?;
@@ -564,6 +654,7 @@ impl<P: Probe> DataPlaneSession<P> {
                 .write_all(&header.permissions.to_be_bytes())
                 .await
                 .context("writing shard permissions")?;
+            write_windows_metadata(&mut self.stream, header.windows_metadata.as_ref()).await?;
         }
 
         self.stream
@@ -680,6 +771,7 @@ impl<P: Probe> DataPlaneSession<P> {
         total_size: u64,
         mtime_seconds: i64,
         permissions: u32,
+        windows_metadata: Option<&WindowsFileMetadata>,
     ) -> Result<()> {
         let path_bytes = relative_path.as_bytes();
         if path_bytes.len() > u32::MAX as usize {
@@ -721,6 +813,19 @@ impl<P: Probe> DataPlaneSession<P> {
             .write_all(&permissions.to_be_bytes())
             .await
             .context("writing permissions")?;
+        write_windows_metadata(&mut self.stream, windows_metadata).await?;
+
+        self.bytes_sent = self.bytes_sent.saturating_add(
+            windows_metadata
+                .map(|metadata| {
+                    metadata
+                        .named_streams
+                        .iter()
+                        .map(|stream| stream.size)
+                        .sum()
+                })
+                .unwrap_or(0),
+        );
 
         Ok(())
     }
@@ -1062,5 +1167,38 @@ mod underflow_tests {
             received as u64, declared,
             "must send exactly header.size bytes, never the reader's excess"
         );
+    }
+}
+
+#[cfg(test)]
+mod windows_metadata_codec_tests {
+    use super::*;
+    use crate::generated::WindowsNamedStream;
+
+    #[tokio::test]
+    async fn binary_metadata_codec_round_trips_presence_and_payload() {
+        let content = b"named-stream".to_vec();
+        let metadata = WindowsFileMetadata {
+            file_attributes: 0x23,
+            named_streams: vec![WindowsNamedStream {
+                name: "meta".into(),
+                size: content.len() as u64,
+                checksum: blake3::hash(&content).as_bytes().to_vec(),
+                content,
+            }],
+        };
+        let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);
+        let sent = metadata.clone();
+        let write = tokio::spawn(async move {
+            write_windows_metadata(&mut writer, Some(&sent))
+                .await
+                .unwrap();
+            write_windows_metadata(&mut writer, None).await.unwrap();
+        });
+        let decoded = read_windows_metadata(&mut reader).await.unwrap();
+        let absent = read_windows_metadata(&mut reader).await.unwrap();
+        write.await.unwrap();
+        assert_eq!(decoded, Some(metadata));
+        assert_eq!(absent, None);
     }
 }

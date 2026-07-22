@@ -870,6 +870,7 @@ async fn file_record_for_resume_flagged_path_is_protocol_violation() {
         mtime_seconds: 1_600_001_600,
         permissions: 0o644,
         checksum: vec![],
+        windows_metadata: None,
     };
     peer.send(wire(Frame::ManifestEntry(header.clone())))
         .await
@@ -2910,6 +2911,7 @@ async fn mirror_refused_when_source_scan_incomplete() {
         mtime_seconds: 1_600_000_000,
         permissions: 0o644,
         checksum: vec![],
+        windows_metadata: None,
     })))
     .await
     .unwrap();
@@ -3066,6 +3068,7 @@ async fn cancel_mid_file_record_surfaces_the_peers_fault() {
         mtime_seconds: 1_600_000_000,
         permissions: 0o644,
         checksum: vec![],
+        windows_metadata: None,
     };
     peer.send(wire(Frame::ManifestEntry(header.clone())))
         .await
@@ -3172,6 +3175,7 @@ async fn incomplete_scan_refused_when_completeness_required() {
         mtime_seconds: 1_600_000_000,
         permissions: 0o644,
         checksum: vec![],
+        windows_metadata: None,
     })))
     .await
     .unwrap();
@@ -3432,6 +3436,7 @@ async fn in_stream_payload_before_manifest_complete_is_protocol_violation() {
         mtime_seconds: 1_600_000_000,
         permissions: 0o644,
         checksum: vec![],
+        windows_metadata: None,
     };
     peer.send(wire(Frame::ManifestEntry(header.clone())))
         .await
@@ -3690,6 +3695,7 @@ async fn manifest_entry_after_manifest_complete_is_protocol_violation() {
         mtime_seconds: 1,
         permissions: 0o644,
         checksum: vec![],
+        windows_metadata: None,
     })))
     .await
     .unwrap();

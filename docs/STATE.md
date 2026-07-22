@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (rel-3 Windows nested-move reconciliation)
+Last updated: 2026-07-22 (rel-4 Windows metadata local candidate)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -15,7 +15,8 @@ Last updated: 2026-07-22 (rel-3 Windows nested-move reconciliation)
   awaits an owner-approved publication. rel-1b proves temporary-daemon identity;
   rel-2 restores TCP overlap and shard-level need claiming. rel-3 traced the
   Windows move timeout to the already-fixed nested-path echo and re-enabled its
-  test. Windows metadata fidelity is next; no rig work is queued.
+  test. rel-4 Windows metadata is implemented and cross-compiled; its hosted
+  runtime confirmation is publication-gated. No rig work is queued.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -104,13 +105,13 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 2a. **RELEASE P2 EVIDENCE: `docs/plan/OTP12_PERF_FINDINGS.md`.** P1 is closed
     by D-2026-07-22-2. P2 is owned by release slice rel-2 and must be attributed
     and fixed from retained/code evidence without a new physical matrix.
-2b. **RELEASE BLOCKER — Windows metadata fidelity; optional local ceiling work
-   remains post-release.** Full attributes/ADS fidelity is required.
+2b. **RELEASE BLOCKER — Windows metadata hosted confirmation; optional local
+   ceiling work remains post-release.** Full attributes/ADS support is locally
+   implemented under contract v4 and strict Windows cross-compilation passes.
    - **`docs/bugs/windows-attrs-and-ads-lost-on-tar-path.md` (D-2026-07-13-3)**
-     — Windows attributes + ADS silently dropped, exit 0, **both routes
-     (measured)**; loss is **conditional on file count**
-     (`transfer_plan.rs:103-109`). Unlanded Windows support, NOT a regression.
-     **Fix = WIRE CONTRACT change** → amend `TRANSFER_SESSION.md` first.
+     — historical Windows attributes + ADS loss on both measured routes was
+     count-dependent. rel-4 now carries and applies both across every carrier;
+     tiny local/remote single/tar Windows guards await hosted execution.
    - **POST-RELEASE: `docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft,
      D-2026-07-13-2)** — local
      apply **does not scale** (8 workers buy 1.05×; robocopy gets ~2.2× from 8
@@ -172,9 +173,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   the nondeterministic 64 MiB socket-buffer premise with a two-byte in-memory
   blocked writer and has local red/green proof. Hosted Windows confirmation
   awaits owner-approved publication. Finding: `release-win-ci-handshake-stall-test`.
-- **Release blockers:** Windows attributes/ADS loss, incomplete progress, and
-  artifact/install proof remain unresolved. Hosted Windows must confirm rel-1
-  and the re-enabled rel-3 nested move test. See
+- **Release blockers:** hosted Windows rel-1/rel-3/rel-4 confirmation,
+  incomplete progress, temporary-daemon startup diagnostics, and
+  artifact/install proof remain unresolved. See
   `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):

@@ -1,9 +1,8 @@
 # Windows file attributes and alternate data streams are silently lost — and it depends on the file COUNT
 
-**Status**: Confirmed, reproduced, **queued behind otp-12** (owner, 2026-07-13:
-*"we started this as a linux alternative to robocopy, and full windows support
-was always a goal… but obviously not landed. so, good, let's address that.
-after this current phase is complete."*)
+**Status**: Implemented locally under release rel-4; strict Windows
+cross-compilation and platform-neutral guards pass. Actual Windows local/remote
+runtime confirmation remains publication-gated.
 **Found**: 2026-07-13, while benchmarking blit vs robocopy on a local
 `D: -> E:` copy (`docs/bench/win-local-ab-2026-07-13/`). Surfaced by the codex
 review of `4402987`, then reproduced directly.
@@ -20,6 +19,24 @@ to be in the same transfer.** No warning, no error, exit code 0.
 
 Copy a file alone → metadata survives. Copy it alongside 39 siblings →
 metadata is gone.
+
+## Resolution
+
+Contract v4 adds bounded Windows attributes and named `$DATA` stream
+descriptors/content to `FileHeader` and resume completion records. Windows
+sources enumerate descriptors for the manifest, re-read and hash-check stream
+content before payload send, and every local/remote file, tar, in-stream, TCP,
+and resume sink validates then applies streams, mtime, and attributes in that
+order. Destination metadata differences now request a repair even when primary
+content would be skipped; explicit `ignore-existing` still skips. Non-Windows
+destinations reject present Windows metadata before creating a file.
+
+The platform-neutral validation, framing, need-claim, and mutation guards pass,
+and every Windows target compiles under strict clippy. The tiny Windows-only
+integration guard exercises single-file and 32-file tar local copies plus
+remote copies, attributes, ADS contents, and metadata-only repair. It has not
+executed on current-head Windows because publication remains owner-gated, so
+this finding is not release-accepted yet.
 
 ## Reproduced (netwatch-01, blit `f35702a`, local `D:` → `E:`)
 
@@ -114,35 +131,15 @@ ordinary backup.
 - **ACLs** — robocopy does not copy them either without `/COPY:S`, so this is
   not a blit-vs-robocopy gap.
 
-## Fixing it will touch the WIRE CONTRACT — flag before starting
+## Wire-contract disposition
 
-The tar shard is not a local implementation detail; **it is the wire payload
-format for small files**. Carrying attributes/ADS through it means extending
-the shard header, which is a **frame change** →
-`docs/TRANSFER_SESSION.md` must be amended through the codex loop **before**
-any code (the same stop-and-amend rule `OTP12_PERF_FINDINGS.md` operates
-under). Same-build-both-ends (D-2026-07-05-2) means no compatibility surface
-is created, but the contract doc still governs.
-
-Candidate directions (NOT a plan — a plan gets written when this is picked up):
-1. Extend the tar shard header with a platform-metadata block (attributes +
-   named streams). Wire change; preserves the batching win.
-2. Route small files on the **local** carrier through `CopyFileExW` per file
-   (no wire change, local only) — but that leaves the remote path broken and
-   makes local/remote fidelity differ, which is worse than the status quo.
-3. Post-pass: after extraction, re-apply attributes/ADS from the manifest.
-   Requires the manifest to carry them — still a wire change, smaller blast
-   radius than reshaping the shard body.
-
-Direction 1 vs 3 is a real design decision and belongs to the owner.
+`docs/TRANSFER_SESSION.md` was amended to contract v4 before implementation.
+Same-build peers remain mandatory, so mixed v3/v4 sessions are refused at
+open rather than silently dropping metadata.
 
 ## Interaction with the perf work
 
-This makes the local benchmark's comparison **more** unfavourable to blit, not
-less: blit is not doing *more* work than robocopy and paying for it — it is
-doing **less** (no attributes, no ADS, no empty dirs) and **still** losing
-1.9× at equal thread counts (`docs/bench/win-local-ab-2026-07-13/`). Any fix
-here adds per-file work to the tar path, so it will make the small-file
-numbers worse before they get better. Sequence accordingly:
-`LOCAL_SMALL_FILE_PATH.md` (D-2026-07-13-2) and this finding should be planned
-together when otp-12 clears.
+The historical benchmark compared a build that did less fidelity work than
+the rel-4 implementation. Those timings remain root-cause evidence for the old
+loss but are not a performance baseline for the corrected app. Optional local
+small-file ceiling work remains post-release.

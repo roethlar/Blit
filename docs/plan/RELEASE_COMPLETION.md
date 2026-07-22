@@ -159,11 +159,12 @@ performance ratios are measured or graded.
    source handle. `48c5a11` fixed that executed path, and unified-session
    cutover later deleted it. The exact bounded nested-tree test is re-enabled;
    current-head hosted confirmation joins rel-1's publication gate.
-4. **rel-4 — Windows metadata fidelity.** Amend the transfer contract first;
-   then enumerate, transport, validate, and apply bounded attributes/ADS for
-   local and remote file/tar carriers. Guard single versus ≥32-file behavior,
-   ADS contents, attributes, unsafe/duplicate stream refusal, cancellation,
-   and failure without partial success reporting.
+4. **rel-4 — Windows metadata fidelity `[x locally/compiled]`.** Contract v4 is
+   amended and the bounded local/remote carriers plus guards are implemented;
+   current-head Windows runtime confirmation remains publication-gated. The
+   guards cover single versus ≥32-file behavior, ADS contents, attributes,
+   unsafe/duplicate stream refusal, manifest/payload drift, bounded framing,
+   and failure before successful completion reporting.
 5. **rel-5 — complete progress reporting.** Implement the three recorded
    daemon/delegated progress gaps end to end, with producer, RPC, state-table,
    CLI, and TUI guards.

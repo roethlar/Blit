@@ -1232,9 +1232,11 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                 let file_size = read_u64(socket).await?;
                 let mtime = read_i64(socket).await?;
                 let perms = read_u32(socket).await?;
+                let windows_metadata = super::data_plane::read_windows_metadata(socket).await?;
                 header.size = file_size;
                 header.mtime_seconds = mtime;
                 header.permissions = perms;
+                header.windows_metadata = windows_metadata;
                 // Use AsyncReadExt::take to give the sink exactly
                 // file_size bytes of the wire. tokio's Take is the
                 // canonical way to limit a borrowed AsyncRead.
@@ -1367,18 +1369,29 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                     .await
                     .context("reading block complete permissions")
                     .map_err(tag)?;
+                let windows_metadata = super::data_plane::read_windows_metadata(socket)
+                    .await
+                    .context("reading block complete Windows metadata")
+                    .map_err(tag)?;
                 let path_for_progress = progress.map(|_| path.clone());
                 let payload = PreparedPayload::FileBlockComplete {
                     relative_path: path,
                     total_size,
                     mtime_seconds: mtime,
                     permissions: perms,
+                    windows_metadata,
                 };
                 let outcome = sink
                     .write_payload(payload)
                     .await
                     .context("writing payload")?;
                 if let Some(p) = progress {
+                    // Resume blocks already reported the primary-file bytes.
+                    // Completion reports only newly applied ADS bytes, when
+                    // any; preserve the existing two-event shape otherwise.
+                    if outcome.bytes_written > 0 {
+                        p.report_payload(0, outcome.bytes_written);
+                    }
                     p.report_file_complete(path_for_progress.unwrap_or_default());
                 }
                 total.merge(&outcome);
@@ -1461,6 +1474,7 @@ async fn read_file_header<R: AsyncRead + Unpin>(socket: &mut R) -> Result<FileHe
         mtime_seconds: 0,
         permissions: 0,
         checksum: vec![],
+        windows_metadata: None,
     })
 }
 
@@ -1483,12 +1497,14 @@ async fn read_tar_shard<R: AsyncRead + Unpin>(
         let size = read_u64(socket).await?;
         let mtime = read_i64(socket).await?;
         let permissions = read_u32(socket).await?;
+        let windows_metadata = super::data_plane::read_windows_metadata(socket).await?;
         headers.push(FileHeader {
             relative_path: path,
             size,
             mtime_seconds: mtime,
             permissions,
             checksum: vec![],
+            windows_metadata,
         });
     }
     let tar_size = read_u64(socket).await?;
@@ -1897,6 +1913,7 @@ mod tests {
         v.extend_from_slice(&(content.len() as u64).to_be_bytes());
         v.extend_from_slice(&mtime.to_be_bytes());
         v.extend_from_slice(&perms.to_be_bytes());
+        v.push(0); // no Windows metadata
         v.extend_from_slice(content);
         v
     }
@@ -1915,6 +1932,7 @@ mod tests {
             v.extend_from_slice(&size.to_be_bytes());
             v.extend_from_slice(&mtime.to_be_bytes());
             v.extend_from_slice(&perms.to_be_bytes());
+            v.push(0); // no Windows metadata
         }
         v.extend_from_slice(&tar_size.to_be_bytes());
         v.extend_from_slice(tar_data);
@@ -1942,6 +1960,7 @@ mod tests {
         // either shape).
         v.extend_from_slice(&0i64.to_be_bytes());
         v.extend_from_slice(&0o644u32.to_be_bytes());
+        v.push(0); // no Windows metadata
         v
     }
 

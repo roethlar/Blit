@@ -72,7 +72,9 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// v3: `SessionError.Code::CHECKSUM_DISABLED` + populated
 /// `FileHeader.checksum` on a `COMPARISON_MODE_CHECKSUM` session
 /// (otp-10b-1 — content compare on the session).
-pub const CONTRACT_VERSION: u32 = 3;
+/// v4: explicit Windows settable attributes and bounded named `$DATA`
+/// descriptors/content on manifest and payload records (rel-4).
+pub const CONTRACT_VERSION: u32 = 4;
 
 /// Payload chunk size on the in-stream carrier. Same unit the gRPC
 /// control plane uses today; the data plane (otp-4) has its own.
@@ -1917,6 +1919,22 @@ async fn source_send_half(
                     }
                     None => {
                         for (header, hashes) in ready {
+                            let prepared = tokio::select! {
+                                biased;
+                                fault = peer_fault_signalled(&mut fault_signal) => {
+                                    return Err(eyre::Report::new(fault));
+                                }
+                                prepared = source.prepare_payload(TransferPayload::ResumeFile {
+                                    header,
+                                    block_size: hashes.block_size,
+                                    dest_hashes: hashes.hashes.clone(),
+                                }) => prepared?,
+                            };
+                            let PreparedPayload::ResumeFile { header, .. } = prepared else {
+                                return Err(eyre::eyre!(
+                                    "resume metadata preparation returned a non-resume payload"
+                                ));
+                            };
                             // codex 7b-2 G2: the whole in-stream record names
                             // its file on failure, matching the data-plane
                             // carrier's outer wrap. Same fault race as the
@@ -2802,12 +2820,23 @@ async fn send_payload_records(
                     .await?;
                     remaining -= got as u64;
                 }
-                report_files(&[(header.relative_path.clone(), header.size)]);
+                report_files(&[(
+                    header.relative_path.clone(),
+                    header
+                        .size
+                        .saturating_add(crate::windows_metadata::payload_bytes(&header)),
+                )]);
             }
             PreparedPayload::TarShard { headers, data } => {
                 let shard_files: Vec<(String, u64)> = headers
                     .iter()
-                    .map(|h| (h.relative_path.clone(), h.size))
+                    .map(|h| {
+                        (
+                            h.relative_path.clone(),
+                            h.size
+                                .saturating_add(crate::windows_metadata::payload_bytes(h)),
+                        )
+                    })
                     .collect();
                 tx.send(frame(Frame::TarShardHeader(TarShardHeader {
                     files: headers,
@@ -2903,13 +2932,17 @@ async fn send_resume_block_records(
     tx.send(frame(Frame::BlockComplete(BlockTransferComplete {
         relative_path: header.relative_path.clone(),
         total_bytes: header.size,
+        windows_metadata: header.windows_metadata.clone(),
     })))
     .await?;
     // codex otp-10a F6: a resumed file finishes like any other (w6-1:
     // per-file lane, counted once); its bytes are the stale blocks
     // actually sent — the same convention as the data-plane carrier.
     if let Some(p) = progress {
-        p.report_payload(0, stale_bytes);
+        p.report_payload(
+            0,
+            stale_bytes.saturating_add(crate::windows_metadata::payload_bytes(header)),
+        );
         p.report_file_complete(header.relative_path.clone());
     }
     Ok(())
@@ -3613,6 +3646,7 @@ async fn destination_session_inner(
     // against the diff (fix-review F1).
     let mut granted: HashSet<String> = HashSet::new();
     let outstanding: data_plane::OutstandingNeeds = Arc::new(StdMutex::new(HashSet::new()));
+    let granted_headers: data_plane::GrantedHeaders = Arc::default();
 
     // Data plane (otp-4b/5b): when a TCP data plane is in play, payload
     // bytes arrive on sockets (not the control lane). Set it up NOW —
@@ -3630,6 +3664,7 @@ async fn destination_session_inner(
     let recv_sink: Arc<dyn TransferSink> = Arc::new(data_plane::NeedListSink::new(
         Arc::clone(&sink),
         Arc::clone(&outstanding),
+        Arc::clone(&granted_headers),
         // otp-7b: only a resume session accepts block records on the
         // data plane; the sink validates + claims them against the same
         // shared grant state the in-stream arms use.
@@ -3765,6 +3800,16 @@ async fn destination_session_inner(
                         header.relative_path
                     )));
                 }
+                crate::windows_metadata::validate_manifest(header.windows_metadata.as_ref())
+                    .map_err(|error| {
+                        violation_for(
+                            &header.relative_path,
+                            format!(
+                                "invalid manifest Windows metadata for '{}': {error:#}",
+                                header.relative_path
+                            ),
+                        )
+                    })?;
                 // otp-6b: retain the full source path set for the mirror
                 // diff (the need list keeps only files needing transfer).
                 if mirror_enabled {
@@ -3798,6 +3843,7 @@ async fn destination_session_inner(
                             &resume_headers,
                             &mut granted,
                             &outstanding,
+                            &granted_headers,
                             &mut needed_paths,
                             progress.as_ref(),
                             phase_trace.as_ref(),
@@ -3867,6 +3913,7 @@ async fn destination_session_inner(
                         &resume_headers,
                         &mut granted,
                         &outstanding,
+                        &granted_headers,
                         &mut needed_paths,
                         progress.as_ref(),
                         phase_trace.as_ref(),
@@ -3914,6 +3961,45 @@ async fn destination_session_inner(
                         header.relative_path
                     )));
                 }
+                let manifest_header = granted_headers
+                    .lock()
+                    .expect("granted-headers lock poisoned")
+                    .get(&header.relative_path)
+                    .cloned()
+                    .ok_or_else(|| {
+                        violation_for(
+                            &header.relative_path,
+                            format!(
+                                "payload for '{}' has no retained manifest grant",
+                                header.relative_path
+                            ),
+                        )
+                    })?;
+                crate::windows_metadata::validate_payload_against_manifest(
+                    header.windows_metadata.as_ref(),
+                    manifest_header.windows_metadata.as_ref(),
+                )
+                .map_err(|error| {
+                    violation_for(
+                        &header.relative_path,
+                        format!(
+                            "invalid Windows metadata for '{}': {error:#}",
+                            header.relative_path
+                        ),
+                    )
+                })?;
+                if header.size != manifest_header.size
+                    || header.mtime_seconds != manifest_header.mtime_seconds
+                    || header.permissions != manifest_header.permissions
+                {
+                    return Err(violation_for(
+                        &header.relative_path,
+                        format!(
+                            "payload header for '{}' changed after the manifest",
+                            header.relative_path
+                        ),
+                    ));
+                }
                 if !outstanding
                     .lock()
                     .expect("outstanding-needs lock poisoned")
@@ -3924,6 +4010,10 @@ async fn destination_session_inner(
                         header.relative_path
                     )));
                 }
+                granted_headers
+                    .lock()
+                    .expect("granted-headers lock poisoned")
+                    .remove(&header.relative_path);
                 let outcome = receive_file_record(transport, sink.as_ref(), &header).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
@@ -3979,6 +4069,9 @@ async fn destination_session_inner(
                 // Zero-block record: nothing transferred, the file is
                 // complete (identical content, metadata stamped).
                 if let Some(p) = &progress {
+                    if outcome.bytes_written > 0 {
+                        p.report_payload(0, outcome.bytes_written);
+                    }
                     p.report_file_complete(header.relative_path.clone());
                 }
             }
@@ -4003,6 +4096,47 @@ async fn destination_session_inner(
                                  requires its block record",
                                 h.relative_path
                             )));
+                        }
+                    }
+                }
+                {
+                    let retained = granted_headers
+                        .lock()
+                        .expect("granted-headers lock poisoned");
+                    for header in &shard.files {
+                        let manifest = retained.get(&header.relative_path).ok_or_else(|| {
+                            violation_for(
+                                &header.relative_path,
+                                format!(
+                                    "tar shard entry '{}' has no retained manifest grant",
+                                    header.relative_path
+                                ),
+                            )
+                        })?;
+                        crate::windows_metadata::validate_payload_against_manifest(
+                            header.windows_metadata.as_ref(),
+                            manifest.windows_metadata.as_ref(),
+                        )
+                        .map_err(|error| {
+                            violation_for(
+                                &header.relative_path,
+                                format!(
+                                    "invalid Windows metadata for '{}': {error:#}",
+                                    header.relative_path
+                                ),
+                            )
+                        })?;
+                        if header.size != manifest.size
+                            || header.mtime_seconds != manifest.mtime_seconds
+                            || header.permissions != manifest.permissions
+                        {
+                            return Err(violation_for(
+                                &header.relative_path,
+                                format!(
+                                    "tar shard header for '{}' changed after the manifest",
+                                    header.relative_path
+                                ),
+                            ));
                         }
                     }
                 }
@@ -4040,6 +4174,14 @@ async fn destination_session_inner(
                                 h.relative_path
                             )));
                         }
+                    }
+                }
+                {
+                    let mut retained = granted_headers
+                        .lock()
+                        .expect("granted-headers lock poisoned");
+                    for header in &shard.files {
+                        retained.remove(&header.relative_path);
                     }
                 }
                 // Capture member paths for the per-file progress lane
@@ -4535,6 +4677,8 @@ async fn diff_chunk_and_send_needs(
     granted: &mut HashSet<String>,
     // Not-yet-delivered COMPLETION set (shared with the receive).
     outstanding: &data_plane::OutstandingNeeds,
+    // Retained manifest descriptors for ordinary payload validation.
+    granted_headers: &data_plane::GrantedHeaders,
     needed_paths: &mut Vec<String>,
     // otp-10b-2: w6-1 denominator — each NeedBatch sent reports a
     // ManifestBatch (files this DESTINATION requested), mirroring what
@@ -4566,12 +4710,18 @@ async fn diff_chunk_and_send_needs(
         .filter(|(header, _)| granted.insert(header.relative_path.clone()))
         .collect();
     let entries: Vec<NeedEntry> = {
+        let mut retained = granted_headers
+            .lock()
+            .expect("granted-headers lock poisoned");
         let mut out = outstanding.lock().expect("outstanding-needs lock poisoned");
         fresh
             .iter()
             .map(|(header, resume)| {
                 needed_paths.push(header.relative_path.clone());
                 out.insert(header.relative_path.clone());
+                if !*resume {
+                    retained.insert(header.relative_path.clone(), header.clone());
+                }
                 NeedEntry {
                     relative_path: header.relative_path.clone(),
                     resume: *resume,
@@ -4699,6 +4849,7 @@ async fn diff_chunk_verdicts(
 /// compare says it must transfer. Absent/empty/non-file targets are
 /// plain full transfers. Session gating (ResumeSettings.enabled) is the
 /// caller's, not this verdict's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NeedVerdict {
     Skip,
     Transfer { resume_eligible: bool },
@@ -4770,7 +4921,21 @@ fn destination_needs(
         target.map(|(size, mtime)| (size, mtime, target_hash.as_slice())),
         opts,
     );
-    Ok(match status {
+    let metadata_matches = match status {
+        FileStatus::Unchanged => {
+            crate::windows_metadata::destination_matches(&dst, header.windows_metadata.as_ref())?
+        }
+        _ => true,
+    };
+    Ok(finalize_need_verdict(status, target, metadata_matches))
+}
+
+fn finalize_need_verdict(
+    status: FileStatus,
+    target: Option<(u64, i64)>,
+    metadata_matches: bool,
+) -> NeedVerdict {
+    match status {
         // Modified ⇒ a regular file exists at the dest (`target` was
         // Some); it is resume-eligible when non-empty (plan D2 — an
         // empty partial has nothing to hash, full transfer is strictly
@@ -4781,8 +4946,11 @@ fn destination_needs(
         FileStatus::New => NeedVerdict::Transfer {
             resume_eligible: false,
         },
+        FileStatus::Unchanged if !metadata_matches => NeedVerdict::Transfer {
+            resume_eligible: target.is_some_and(|(size, _)| size > 0),
+        },
         _ => NeedVerdict::Skip,
-    })
+    }
 }
 
 /// Blake3 of one whole local file, abortable between 64 KiB chunks —
@@ -5053,11 +5221,25 @@ async fn finish_block_record(
             ),
         ));
     }
+    crate::windows_metadata::validate_payload_against_manifest(
+        complete.windows_metadata.as_ref(),
+        header.windows_metadata.as_ref(),
+    )
+    .map_err(|error| {
+        violation_for(
+            &header.relative_path,
+            format!(
+                "invalid Windows metadata for '{}': {error:#}",
+                header.relative_path
+            ),
+        )
+    })?;
     sink.write_payload(PreparedPayload::FileBlockComplete {
         relative_path: header.relative_path.clone(),
         total_size: complete.total_bytes,
         mtime_seconds: header.mtime_seconds,
         permissions: header.permissions,
+        windows_metadata: complete.windows_metadata.clone(),
     })
     .await
     .map_err(|e| tag_path(e, &header.relative_path))
@@ -5245,6 +5427,30 @@ async fn receive_tar_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_metadata_difference_overrides_an_ordinary_skip() {
+        assert_eq!(
+            finalize_need_verdict(FileStatus::Unchanged, Some((1, 1)), false),
+            NeedVerdict::Transfer {
+                resume_eligible: true,
+            }
+        );
+        assert_eq!(
+            finalize_need_verdict(FileStatus::Unchanged, Some((0, 1)), false),
+            NeedVerdict::Transfer {
+                resume_eligible: false,
+            }
+        );
+        assert_eq!(
+            finalize_need_verdict(FileStatus::Unchanged, Some((1, 1)), true),
+            NeedVerdict::Skip
+        );
+        assert_eq!(
+            finalize_need_verdict(FileStatus::SkippedExisting, Some((1, 1)), false),
+            NeedVerdict::Skip
+        );
+    }
 
     fn resize_request(
         op: DataPlaneResizeOp,
@@ -7259,6 +7465,7 @@ mod tests {
             mtime_seconds: 1_600_000_000,
             permissions: 0o644,
             checksum: Vec::new(),
+            windows_metadata: None,
         }
     }
 

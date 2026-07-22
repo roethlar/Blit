@@ -226,6 +226,7 @@ impl TransferSink for FsTransferSink {
                 total_size,
                 mtime_seconds,
                 permissions,
+                windows_metadata,
             } => {
                 let outcome = write_file_block_complete(
                     &self.dst_root,
@@ -234,6 +235,7 @@ impl TransferSink for FsTransferSink {
                     total_size,
                     mtime_seconds,
                     permissions,
+                    windows_metadata,
                 )
                 .await?;
                 outcome
@@ -365,6 +367,10 @@ impl TransferSink for FsTransferSink {
                 .with_context(|| format!("creating directory {}", parent.display()))?;
         }
 
+        crate::windows_metadata::validate_payload(header.windows_metadata.as_ref())
+            .with_context(|| format!("validating Windows metadata for {}", header.relative_path))?;
+        crate::windows_metadata::prepare_destination(&dst, header.windows_metadata.as_ref())?;
+
         {
             use tokio::io::AsyncWriteExt as _;
             let mut file = tokio::fs::File::create(&dst)
@@ -402,6 +408,9 @@ impl TransferSink for FsTransferSink {
         // is its END marker plus the OS's own flush; matches rsync's
         // default behavior. Add a config flag if a caller needs sync.
 
+        let windows_bytes =
+            crate::windows_metadata::replace_streams(&dst, header.windows_metadata.as_ref())?;
+
         if self.config.preserve_times && header.mtime_seconds > 0 {
             let ft = FileTime::from_unix_time(header.mtime_seconds, 0);
             // Best-effort: cross-fs, root-owned, or ACL-protected
@@ -426,10 +435,11 @@ impl TransferSink for FsTransferSink {
         }
         #[cfg(not(unix))]
         let _ = header.permissions;
+        crate::windows_metadata::apply_attributes(&dst, header.windows_metadata.as_ref())?;
 
         Ok(SinkOutcome {
             files_written: 1,
-            bytes_written: header.size,
+            bytes_written: header.size.saturating_add(windows_bytes),
         })
     }
 
@@ -522,6 +532,10 @@ fn copy_resolved_file_payload(
             .with_context(|| format!("creating directory {}", parent.display()))?;
     }
 
+    crate::windows_metadata::validate_payload(header.windows_metadata.as_ref())
+        .with_context(|| format!("validating Windows metadata for {}", header.relative_path))?;
+    crate::windows_metadata::prepare_destination(dst, header.windows_metadata.as_ref())?;
+
     let mut did_copy = false;
     let mut clone_succeeded = false;
 
@@ -538,7 +552,15 @@ fn copy_resolved_file_payload(
         clone_succeeded = outcome.clone_succeeded;
     }
 
-    if config.preserve_times && did_copy && !clone_succeeded {
+    let windows_bytes =
+        crate::windows_metadata::replace_streams(dst, header.windows_metadata.as_ref())?;
+
+    if config.preserve_times && header.windows_metadata.is_some() && header.mtime_seconds > 0 {
+        let ft = FileTime::from_unix_time(header.mtime_seconds, 0);
+        if let Err(e) = filetime::set_file_mtime(dst, ft) {
+            log::warn!("set mtime on {}: {}", dst.display(), e);
+        }
+    } else if config.preserve_times && did_copy && !clone_succeeded {
         if let Ok(meta) = std::fs::metadata(src) {
             if let Ok(modified) = meta.modified() {
                 let ft = FileTime::from_system_time(modified);
@@ -548,10 +570,11 @@ fn copy_resolved_file_payload(
             }
         }
     }
+    crate::windows_metadata::apply_attributes(dst, header.windows_metadata.as_ref())?;
 
     Ok(SinkOutcome {
         files_written: 1,
-        bytes_written: if did_copy { header.size } else { 0 },
+        bytes_written: (if did_copy { header.size } else { 0 }).saturating_add(windows_bytes),
     })
 }
 
@@ -641,8 +664,16 @@ fn write_tar_shard_payload(
                     std::fs::create_dir_all(parent)
                         .with_context(|| format!("create dir {}", parent.display()))?;
                 }
+                crate::windows_metadata::prepare_destination(
+                    &f.dest_path,
+                    f.windows_metadata.as_ref(),
+                )?;
                 std::fs::write(&f.dest_path, &f.contents)
                     .with_context(|| format!("write {}", f.dest_path.display()))?;
+                let windows_bytes = crate::windows_metadata::replace_streams(
+                    &f.dest_path,
+                    f.windows_metadata.as_ref(),
+                )?;
                 if let Some(ft) = f.mtime {
                     if let Err(e) = filetime::set_file_mtime(&f.dest_path, ft) {
                         log::warn!("set mtime on {}: {}", f.dest_path.display(), e);
@@ -658,7 +689,11 @@ fn write_tar_shard_payload(
                         log::warn!("set permissions on {}: {}", f.dest_path.display(), e);
                     }
                 }
-                Ok(f.size)
+                crate::windows_metadata::apply_attributes(
+                    &f.dest_path,
+                    f.windows_metadata.as_ref(),
+                )?;
+                Ok(f.size.saturating_add(windows_bytes))
             })
             .collect();
         let mut files_written = 0usize;
@@ -695,6 +730,11 @@ fn write_tar_shard_payload(
             }
             let mkdir = mkdir_started.elapsed();
 
+            crate::windows_metadata::prepare_destination(
+                &f.dest_path,
+                f.windows_metadata.as_ref(),
+            )?;
+
             let open_started = std::time::Instant::now();
             let mut file = std::fs::File::create(&f.dest_path)
                 .with_context(|| format!("open {}", f.dest_path.display()))?;
@@ -708,6 +748,10 @@ fn write_tar_shard_payload(
             let close = close_started.elapsed();
 
             let metadata_started = std::time::Instant::now();
+            let windows_bytes = crate::windows_metadata::replace_streams(
+                &f.dest_path,
+                f.windows_metadata.as_ref(),
+            )?;
             if let Some(ft) = f.mtime {
                 if let Err(e) = filetime::set_file_mtime(&f.dest_path, ft) {
                     log::warn!("set mtime on {}: {}", f.dest_path.display(), e);
@@ -722,9 +766,10 @@ fn write_tar_shard_payload(
                     log::warn!("set permissions on {}: {}", f.dest_path.display(), e);
                 }
             }
+            crate::windows_metadata::apply_attributes(&f.dest_path, f.windows_metadata.as_ref())?;
             let metadata = metadata_started.elapsed();
             Ok((
-                f.size,
+                f.size.saturating_add(windows_bytes),
                 Some((mkdir, open, write, close, metadata, total_started.elapsed())),
             ))
         })
@@ -829,6 +874,7 @@ async fn write_file_block_complete(
     total_size: u64,
     mtime_seconds: i64,
     permissions: u32,
+    windows_metadata: Option<crate::generated::WindowsFileMetadata>,
 ) -> Result<SinkOutcome> {
     // R46-F3: contained resolve when canonical root is available.
     let dst = match canonical_dst_root {
@@ -839,6 +885,7 @@ async fn write_file_block_complete(
         None => crate::path_safety::safe_join(dst_root, relative_path)
             .with_context(|| format!("validating block-complete path {:?}", relative_path))?,
     };
+    crate::windows_metadata::prepare_destination(&dst, windows_metadata.as_ref())?;
     {
         let file = tokio::fs::OpenOptions::new()
             .write(true)
@@ -854,6 +901,7 @@ async fn write_file_block_complete(
     }
     // Stamp mtime + perms after the file handle is closed (same race
     // dance as write_file_stream — see commit 946bd77).
+    let windows_bytes = crate::windows_metadata::replace_streams(&dst, windows_metadata.as_ref())?;
     if mtime_seconds > 0 {
         let ft = FileTime::from_unix_time(mtime_seconds, 0);
         if let Err(e) = filetime::set_file_mtime(&dst, ft) {
@@ -870,9 +918,10 @@ async fn write_file_block_complete(
     }
     #[cfg(not(unix))]
     let _ = permissions;
+    crate::windows_metadata::apply_attributes(&dst, windows_metadata.as_ref())?;
     Ok(SinkOutcome {
         files_written: 1,
-        bytes_written: 0,
+        bytes_written: windows_bytes,
     })
 }
 
@@ -910,7 +959,9 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
         let mut session = self.session.lock().await;
         match payload {
             PreparedPayload::File(header) => {
-                let size = header.size;
+                let size = header
+                    .size
+                    .saturating_add(crate::windows_metadata::payload_bytes(&header));
                 // otp-7b-2: name the file structurally on failure, so a
                 // mid-record fault reaches the end-of-operation summary.
                 session
@@ -928,7 +979,14 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                 })
             }
             PreparedPayload::TarShard { headers, data } => {
-                let bytes: u64 = headers.iter().map(|h| h.size).sum();
+                let bytes: u64 = headers
+                    .iter()
+                    .map(|header| {
+                        header
+                            .size
+                            .saturating_add(crate::windows_metadata::payload_bytes(header))
+                    })
+                    .sum();
                 let count = headers.len();
                 session
                     .send_prepared_tar_shard(headers, &data)
@@ -998,12 +1056,14 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                             header.size,
                             header.mtime_seconds,
                             header.permissions,
+                            header.windows_metadata.as_ref(),
                         )
                         .await
                         .context("sending resume block complete")?;
                     Ok(SinkOutcome {
                         files_written: 1,
-                        bytes_written,
+                        bytes_written: bytes_written
+                            .saturating_add(crate::windows_metadata::payload_bytes(&header)),
                     })
                 }
                 .await;
@@ -1031,7 +1091,7 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
             .with_context(|| format!("relaying {}", header.relative_path))?;
         Ok(SinkOutcome {
             files_written: 1,
-            bytes_written: size,
+            bytes_written: size.saturating_add(crate::windows_metadata::payload_bytes(header)),
         })
     }
 
@@ -1078,11 +1138,18 @@ impl TransferSink for NullSink {
         match payload {
             PreparedPayload::File(header) => Ok(SinkOutcome {
                 files_written: 1,
-                bytes_written: header.size,
+                bytes_written: header
+                    .size
+                    .saturating_add(crate::windows_metadata::payload_bytes(&header)),
             }),
             PreparedPayload::TarShard { headers, data } => Ok(SinkOutcome {
                 files_written: headers.len(),
-                bytes_written: data.len() as u64,
+                bytes_written: (data.len() as u64).saturating_add(
+                    headers
+                        .iter()
+                        .map(crate::windows_metadata::payload_bytes)
+                        .sum(),
+                ),
             }),
             PreparedPayload::FileBlock { bytes, .. } => Ok(SinkOutcome {
                 files_written: 0,
@@ -1145,6 +1212,7 @@ mod tests {
             mtime_seconds: 0,
             permissions: 0o644,
             checksum: Vec::new(),
+            windows_metadata: None,
         }
     }
 

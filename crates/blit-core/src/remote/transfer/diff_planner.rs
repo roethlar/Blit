@@ -88,6 +88,7 @@ mod tests {
             mtime_seconds: 0,
             permissions: 0,
             checksum: vec![],
+            windows_metadata: None,
         }
     }
 

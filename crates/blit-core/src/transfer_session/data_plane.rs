@@ -75,6 +75,10 @@ use super::{SessionFault, SourceInstruments};
 /// the in-stream carrier uses via its inline `outstanding.remove`.
 pub(super) type OutstandingNeeds = Arc<StdMutex<HashSet<String>>>;
 
+/// Manifest headers for ordinary (non-resume) granted needs. Payload metadata
+/// is validated against this retained descriptor before the need is claimed.
+pub(super) type GrantedHeaders = Arc<StdMutex<HashMap<String, FileHeader>>>;
+
 /// Headers of resume-granted needs (otp-7a/7b), keyed by relative path
 /// and retained until the grant's block record completes. Shared
 /// between the destination's control loop (which inserts each header
@@ -1802,6 +1806,7 @@ impl SourceDataPlane {
 pub(super) struct NeedListSink {
     inner: Arc<dyn TransferSink>,
     outstanding: OutstandingNeeds,
+    granted_headers: GrantedHeaders,
     small_file_probe: Option<BoundSmallFileProbe>,
     /// `Some` iff the session negotiated resume (otp-7b): the shared
     /// grant map + resumed counter block records are validated and
@@ -1813,15 +1818,120 @@ impl NeedListSink {
     pub(super) fn new(
         inner: Arc<dyn TransferSink>,
         outstanding: OutstandingNeeds,
+        granted_headers: GrantedHeaders,
         resume: Option<ResumeRecv>,
         small_file_probe: Option<BoundSmallFileProbe>,
     ) -> Self {
         Self {
             inner,
             outstanding,
+            granted_headers,
             resume,
             small_file_probe,
         }
+    }
+
+    fn validate_and_claim_header(&self, payload: &FileHeader) -> Result<()> {
+        let manifest = self
+            .granted_headers
+            .lock()
+            .expect("granted-headers lock poisoned")
+            .get(&payload.relative_path)
+            .cloned()
+            .ok_or_else(|| {
+                eyre::Report::new(
+                    SessionFault::protocol_violation(format!(
+                        "data-plane payload for '{}' has no retained manifest grant",
+                        payload.relative_path
+                    ))
+                    .with_path(payload.relative_path.as_str()),
+                )
+            })?;
+        crate::windows_metadata::validate_payload_against_manifest(
+            payload.windows_metadata.as_ref(),
+            manifest.windows_metadata.as_ref(),
+        )
+        .map_err(|error| {
+            eyre::Report::new(
+                SessionFault::protocol_violation(format!(
+                    "invalid Windows metadata for '{}': {error:#}",
+                    payload.relative_path
+                ))
+                .with_path(payload.relative_path.as_str()),
+            )
+        })?;
+        if payload.size != manifest.size
+            || payload.mtime_seconds != manifest.mtime_seconds
+            || payload.permissions != manifest.permissions
+        {
+            return Err(eyre::Report::new(
+                SessionFault::protocol_violation(format!(
+                    "data-plane payload header for '{}' changed after the manifest",
+                    payload.relative_path
+                ))
+                .with_path(payload.relative_path.as_str()),
+            ));
+        }
+        self.granted_headers
+            .lock()
+            .expect("granted-headers lock poisoned")
+            .remove(&payload.relative_path);
+        self.claim(&payload.relative_path)
+    }
+
+    fn validate_and_claim_shard_headers(&self, payloads: &[FileHeader]) -> Result<()> {
+        {
+            let manifests = self
+                .granted_headers
+                .lock()
+                .expect("granted-headers lock poisoned");
+            for payload in payloads {
+                let manifest = manifests.get(&payload.relative_path).ok_or_else(|| {
+                    eyre::Report::new(
+                        SessionFault::protocol_violation(format!(
+                            "data-plane tar member '{}' has no retained manifest grant",
+                            payload.relative_path
+                        ))
+                        .with_path(payload.relative_path.as_str()),
+                    )
+                })?;
+                crate::windows_metadata::validate_payload_against_manifest(
+                    payload.windows_metadata.as_ref(),
+                    manifest.windows_metadata.as_ref(),
+                )
+                .map_err(|error| {
+                    eyre::Report::new(
+                        SessionFault::protocol_violation(format!(
+                            "invalid Windows metadata for '{}': {error:#}",
+                            payload.relative_path
+                        ))
+                        .with_path(payload.relative_path.as_str()),
+                    )
+                })?;
+                if payload.size != manifest.size
+                    || payload.mtime_seconds != manifest.mtime_seconds
+                    || payload.permissions != manifest.permissions
+                {
+                    return Err(eyre::Report::new(
+                        SessionFault::protocol_violation(format!(
+                            "data-plane tar header for '{}' changed after the manifest",
+                            payload.relative_path
+                        ))
+                        .with_path(payload.relative_path.as_str()),
+                    ));
+                }
+            }
+        }
+        {
+            let mut manifests = self
+                .granted_headers
+                .lock()
+                .expect("granted-headers lock poisoned");
+            for payload in payloads {
+                manifests.remove(&payload.relative_path);
+            }
+        }
+        self.claim_shard(payloads)
     }
 
     /// Remove `path` from the outstanding set, or fault: a path that is
@@ -2000,7 +2110,14 @@ impl NeedListSink {
     /// `finish_block_record` checks. The resumed COUNT happens in
     /// `write_payload` only after the finalization write lands, matching
     /// the in-stream ordering.
-    fn claim_block_complete(&self, path: &str, total_size: u64) -> Result<()> {
+    fn claim_block_complete(
+        &self,
+        path: &str,
+        total_size: u64,
+        mtime_seconds: i64,
+        permissions: u32,
+        windows_metadata: Option<&crate::generated::WindowsFileMetadata>,
+    ) -> Result<()> {
         let Some(resume) = &self.resume else {
             return Err(eyre::Report::new(SessionFault::protocol_violation(
                 "resume block record on the data plane of a non-resume session",
@@ -2010,7 +2127,8 @@ impl NeedListSink {
             .headers
             .lock()
             .expect("resume-headers lock poisoned")
-            .remove(path)
+            .get(path)
+            .cloned()
             .ok_or_else(|| {
                 eyre::Report::new(
                     SessionFault::protocol_violation(format!(
@@ -2030,6 +2148,31 @@ impl NeedListSink {
                 .with_path(path),
             ));
         }
+        if mtime_seconds != header.mtime_seconds || permissions != header.permissions {
+            return Err(eyre::Report::new(
+                SessionFault::protocol_violation(format!(
+                    "block-complete metadata for '{path}' changed after the manifest"
+                ))
+                .with_path(path),
+            ));
+        }
+        crate::windows_metadata::validate_payload_against_manifest(
+            windows_metadata,
+            header.windows_metadata.as_ref(),
+        )
+        .map_err(|error| {
+            eyre::Report::new(
+                SessionFault::protocol_violation(format!(
+                    "invalid Windows metadata for '{path}': {error:#}"
+                ))
+                .with_path(path),
+            )
+        })?;
+        resume
+            .headers
+            .lock()
+            .expect("resume-headers lock poisoned")
+            .remove(path);
         self.claim(path)
     }
 }
@@ -2040,13 +2183,13 @@ impl TransferSink for NeedListSink {
         match &payload {
             PreparedPayload::File(header) => {
                 self.reject_resume_flagged(&header.relative_path)?;
-                self.claim(&header.relative_path)?;
+                self.validate_and_claim_header(header)?;
             }
             PreparedPayload::TarShard { headers, .. } => {
                 for header in headers {
                     self.reject_resume_flagged(&header.relative_path)?;
                 }
-                self.claim_shard(headers)?;
+                self.validate_and_claim_shard_headers(headers)?;
             }
             // otp-7b: resume block records ride the data plane. A
             // mid-record block validates against its live grant (claimed
@@ -2065,9 +2208,17 @@ impl TransferSink for NeedListSink {
             PreparedPayload::FileBlockComplete {
                 relative_path,
                 total_size,
-                ..
+                mtime_seconds,
+                permissions,
+                windows_metadata,
             } => {
-                self.claim_block_complete(relative_path, *total_size)?;
+                self.claim_block_complete(
+                    relative_path,
+                    *total_size,
+                    *mtime_seconds,
+                    *permissions,
+                    windows_metadata.as_ref(),
+                )?;
                 let path = relative_path.clone();
                 let outcome = self
                     .inner
@@ -2114,7 +2265,7 @@ impl TransferSink for NeedListSink {
         reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
     ) -> Result<SinkOutcome> {
         self.reject_resume_flagged(&header.relative_path)?;
-        self.claim(&header.relative_path)?;
+        self.validate_and_claim_header(header)?;
         self.inner
             .write_file_stream(header, reader)
             .await
@@ -2216,9 +2367,17 @@ mod tests {
 
         let outstanding: OutstandingNeeds =
             Arc::new(StdMutex::new(HashSet::from(["a.txt".to_string()])));
+        let granted_headers: GrantedHeaders = Arc::new(StdMutex::new(HashMap::from([(
+            "a.txt".to_string(),
+            FileHeader {
+                relative_path: "a.txt".to_string(),
+                ..Default::default()
+            },
+        )])));
         let sink = NeedListSink::new(
             Arc::new(NullSink::new()),
             Arc::clone(&outstanding),
+            granted_headers,
             None,
             None,
         );
@@ -2229,6 +2388,22 @@ mod tests {
                 ..Default::default()
             })
         };
+
+        // Metadata that was absent from the manifest is rejected before the
+        // need or retained header is consumed, so no sink can publish success.
+        let err = sink
+            .write_payload(PreparedPayload::File(FileHeader {
+                relative_path: "a.txt".to_string(),
+                windows_metadata: Some(crate::generated::WindowsFileMetadata {
+                    file_attributes: 0,
+                    named_streams: vec![],
+                }),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("metadata mismatch must fault before claim");
+        assert!(format!("{err:#}").contains("Windows metadata"));
+        assert!(outstanding.lock().expect("lock").contains("a.txt"));
 
         // Off-need-list path faults with a SessionFault.
         let err = sink
@@ -2260,6 +2435,7 @@ mod tests {
                 total_size: 0,
                 mtime_seconds: 0,
                 permissions: 0,
+                windows_metadata: None,
             })
             .await
             .expect_err("resume block on a non-resume session must fault");
@@ -2291,6 +2467,7 @@ mod tests {
         let sink = NeedListSink::new(
             Arc::new(NullSink::new()),
             Arc::clone(&outstanding),
+            GrantedHeaders::default(),
             Some(ResumeRecv {
                 headers: Arc::clone(&headers),
                 resumed: Arc::clone(&resumed),
@@ -2349,13 +2526,13 @@ mod tests {
                 total_size: 99,
                 mtime_seconds: 0,
                 permissions: 0,
+                windows_metadata: None,
             })
             .await
             .expect_err("completion at the wrong size must fault");
 
-        // The grant was consumed by the failed completion attempt above
-        // (the session would abort there); re-arm it to exercise the
-        // happy-path completion claim.
+        // Replacing the same retained grant is harmless and keeps this setup
+        // explicit for the happy-path completion claim.
         headers.lock().expect("lock").insert(
             "part.bin".to_string(),
             FileHeader {
@@ -2369,6 +2546,7 @@ mod tests {
             total_size: 100,
             mtime_seconds: 0,
             permissions: 0,
+            windows_metadata: None,
         })
         .await
         .expect("correct completion claims");
@@ -2389,6 +2567,7 @@ mod tests {
                 total_size: 100,
                 mtime_seconds: 0,
                 permissions: 0,
+                windows_metadata: None,
             })
             .await
             .expect_err("duplicate completion must fault");
