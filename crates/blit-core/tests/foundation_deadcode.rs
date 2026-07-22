@@ -10,6 +10,7 @@ fn abandoned_foundation_paths_stay_deleted() {
         "copy/parallel.rs",
         "copy/stats.rs",
         "copy/file_copy/chunked.rs",
+        "logger.rs",
     ] {
         assert!(
             !source_root.join(relative).exists(),
@@ -41,6 +42,10 @@ fn abandoned_foundation_paths_stay_deleted() {
         "enumerate_symlinks",
         "categorize_files",
         "enumerate_directory_deref_filtered",
+        "pub mod logger;",
+        "NoopLogger",
+        "TextLogger",
+        "&dyn Logger",
     ] {
         assert!(
             !public_surface.contains(retired_name),

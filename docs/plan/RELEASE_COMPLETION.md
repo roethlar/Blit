@@ -203,6 +203,8 @@ performance ratios are measured or graded.
    `w5-4` is closed: current daemon response-channel closure is one shared
    `Cancelled` boundary, and live transfer pipelines retain their worker or
    peer-fault preference instead of the deleted drivers' fixed-string errors.
+   `w5-5` is closed: the always-no-op production copy logger facade and its
+   threaded parameter are deleted; copy failures still propagate as `Result`.
 7. **rel-7 — reproducible artifacts.** Build the supported target matrix from
    one exact commit, preserve build identity, generate checksums, and fail if a
    required artifact is absent.

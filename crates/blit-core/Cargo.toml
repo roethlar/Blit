@@ -13,7 +13,6 @@ filetime = "0.2"
 once_cell = "1.21"
 rayon = "1.12"
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
 async-trait = "0.1"

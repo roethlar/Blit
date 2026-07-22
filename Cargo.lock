@@ -305,7 +305,6 @@ dependencies = [
  "async-trait",
  "base64",
  "blake3",
- "chrono",
  "crossbeam-channel",
  "directories",
  "eyre",

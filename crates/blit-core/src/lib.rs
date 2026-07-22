@@ -7,7 +7,6 @@ pub mod dial;
 pub mod enumeration;
 pub mod fs_capability;
 pub mod fs_enum;
-pub mod logger;
 pub mod manifest;
 pub mod mdns;
 pub mod mirror_planner;

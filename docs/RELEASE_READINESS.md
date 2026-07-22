@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** stream send-failure boundary fixed, 2026-07-22
+**As of:** dead copy logger removed, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -120,6 +120,9 @@ performance ceilings and hardware tuning remain post-release work.
 - A dropped admin response stream is now a `Cancelled` request with one honest
   peer-disconnect message, not an `Internal` daemon failure. Both current
   stream handlers prove that boundary, and the status-code mutation fails.
+- The copy engine no longer accepts a logger that was always a production
+  no-op. Errors still return with caller context; the unused file logger and
+  its blit-core dependency are gone and guarded against reintroduction.
 
 ## Release blockers
 

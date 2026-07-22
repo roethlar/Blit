@@ -7,7 +7,6 @@ pub use mmap::mmap_copy_file;
 pub use resume::{resume_copy_file, ResumeCopyOutcome};
 
 use crate::buffer::BufferSizer;
-use crate::logger::Logger;
 use eyre::{eyre, Result};
 use std::fs;
 #[cfg(not(windows))]
@@ -32,10 +31,7 @@ pub fn copy_file(
     dst: &Path,
     buffer_sizer: &BufferSizer,
     is_network: bool,
-    logger: &dyn Logger,
 ) -> Result<FileCopyOutcome> {
-    logger.start(src, dst);
-
     #[cfg(windows)]
     if !is_network {
         match windows::windows_copyfile(src, dst) {
@@ -49,7 +45,6 @@ pub fn copy_file(
                         dst.display()
                     );
                 }
-                logger.copy_done(src, dst, bytes);
                 return Ok(FileCopyOutcome {
                     bytes_copied: bytes,
                     clone_succeeded,
@@ -209,16 +204,7 @@ pub fn copy_file(
         })
     })();
 
-    match result {
-        Ok(outcome) => {
-            logger.copy_done(src, dst, outcome.bytes_copied);
-            Ok(outcome)
-        }
-        Err(e) => {
-            logger.error("copy", src, &e.to_string());
-            Err(e)
-        }
-    }
+    result
 }
 
 #[cfg(test)]
@@ -232,7 +218,6 @@ mod fallback_tests {
     //! fallback transition with no production change.
     use super::*;
     use crate::buffer::BufferSizer;
-    use crate::logger::NoopLogger;
 
     /// Whatever fast path applies on this platform, the copy must be
     /// byte-identical and report the right size.
@@ -244,7 +229,7 @@ mod fallback_tests {
         let data: Vec<u8> = (0u8..=255).cycle().take(100_000).collect();
         std::fs::write(&src, &data).unwrap();
 
-        let outcome = copy_file(&src, &dst, &BufferSizer::default(), false, &NoopLogger).unwrap();
+        let outcome = copy_file(&src, &dst, &BufferSizer::default(), false).unwrap();
         assert_eq!(outcome.bytes_copied, data.len() as u64);
         assert_eq!(std::fs::read(&dst).unwrap(), data);
     }
@@ -271,7 +256,7 @@ mod fallback_tests {
         // Pre-create dst so clonefile hits EEXIST and the chain advances.
         std::fs::write(&dst, b"stale pre-existing contents").unwrap();
 
-        let outcome = copy_file(&src, &dst, &BufferSizer::default(), false, &NoopLogger).unwrap();
+        let outcome = copy_file(&src, &dst, &BufferSizer::default(), false).unwrap();
         assert_eq!(outcome.bytes_copied, data.len() as u64);
         assert_eq!(
             std::fs::read(&dst).unwrap(),

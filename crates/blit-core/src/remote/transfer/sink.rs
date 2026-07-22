@@ -14,7 +14,6 @@ use crate::buffer::BufferSizer;
 use crate::checksum::ChecksumType;
 use crate::copy::{copy_file, resume_copy_file};
 use crate::generated::{ComparisonMode, FileHeader};
-use crate::logger::NoopLogger;
 use crate::remote::transfer::payload::PreparedPayload;
 use crate::remote::transfer::progress::{ByteProgressSink, NoProbe, Probe};
 use crate::remote::transfer::small_file_probe::{BoundSmallFileProbe, MemberTimingReport};
@@ -544,8 +543,7 @@ fn copy_resolved_file_payload(
         did_copy = outcome.bytes_transferred > 0;
     } else if crate::copy::file_needs_copy_with_mode(src, dst, config.compare_mode)? {
         let sizer = BufferSizer::default();
-        let logger = NoopLogger;
-        copy_file(src, dst, &sizer, false, &logger)
+        copy_file(src, dst, &sizer, false)
             .with_context(|| format!("copy {}", header.relative_path))?;
         did_copy = true;
     }
