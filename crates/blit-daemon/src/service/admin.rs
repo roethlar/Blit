@@ -9,7 +9,7 @@ use sysinfo::Disks;
 use tokio::task;
 use tonic::Status;
 
-use super::util::{internal_err, io_to_status, resolve_relative_path};
+use super::util::{internal_err, io_to_status, resolve_relative_path, response_channel_closed};
 use blit_core::path_posix::request_path_to_posix;
 use blit_core::wire_metadata::mtime_seconds;
 
@@ -288,7 +288,7 @@ pub(crate) fn stream_disk_usage(
         };
         sender
             .blocking_send(Ok(entry))
-            .map_err(|_| Status::internal("client dropped disk usage stream"))?;
+            .map_err(|_| response_channel_closed("sending disk usage result"))?;
     }
 
     Ok(())
@@ -398,7 +398,7 @@ pub(crate) fn stream_find_entries(
             };
             sender
                 .blocking_send(Ok(entry))
-                .map_err(|_| Status::internal("client dropped find stream"))?;
+                .map_err(|_| response_channel_closed("sending find result"))?;
             sent += 1;
             Ok(())
         };
@@ -636,5 +636,47 @@ mod status_mapping_tests {
         let stats_error =
             filesystem_stats_for_path(&missing).expect_err("missing filesystem stats root");
         assert_eq!(stats_error.code(), Code::NotFound);
+    }
+
+    #[test]
+    fn closed_admin_streams_cross_as_cancelled_with_one_vocabulary() {
+        let temp = tempdir().expect("tempdir");
+        let file = temp.path().join("entry");
+        std::fs::File::create(&file).expect("create empty fixture");
+        let module_root = std::fs::canonicalize(temp.path()).expect("canonical tempdir");
+
+        let (disk_sender, disk_receiver) = tokio::sync::mpsc::channel(1);
+        drop(disk_receiver);
+        let disk_error = stream_disk_usage(
+            module_root.clone(),
+            PathBuf::from("entry"),
+            None,
+            &disk_sender,
+        )
+        .expect_err("closed disk-usage stream");
+        assert_eq!(disk_error.code(), Code::Cancelled);
+        assert_eq!(
+            disk_error.message(),
+            "response channel closed (peer disconnected): sending disk usage result"
+        );
+
+        let (find_sender, find_receiver) = tokio::sync::mpsc::channel(1);
+        drop(find_receiver);
+        let find_error = stream_find_entries(
+            module_root,
+            PathBuf::from("entry"),
+            String::new(),
+            true,
+            true,
+            false,
+            None,
+            &find_sender,
+        )
+        .expect_err("closed find stream");
+        assert_eq!(find_error.code(), Code::Cancelled);
+        assert_eq!(
+            find_error.message(),
+            "response channel closed (peer disconnected): sending find result"
+        );
     }
 }

@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** daemon status mapping fixed, 2026-07-22
+**As of:** stream send-failure boundary fixed, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -117,6 +117,9 @@ performance ceilings and hardware tuning remain post-release work.
   NotFound and permission failures are PermissionDenied. Other wrapped errors
   keep their complete source chains. Both mapping rules fail under mutation,
   and current admin handlers prove the missing-path behavior end to end.
+- A dropped admin response stream is now a `Cancelled` request with one honest
+  peer-disconnect message, not an `Internal` daemon failure. Both current
+  stream handlers prove that boundary, and the status-code mutation fails.
 
 ## Release blockers
 

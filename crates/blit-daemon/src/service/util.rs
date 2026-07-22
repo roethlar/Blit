@@ -25,6 +25,14 @@ pub(crate) fn io_to_status(context: impl Display, error: io::Error) -> Status {
     }
 }
 
+/// A response sender closes when the RPC consumer has gone away. That is a
+/// client cancellation boundary, not evidence of an internal daemon fault.
+pub(crate) fn response_channel_closed(context: impl Display) -> Status {
+    Status::cancelled(format!(
+        "response channel closed (peer disconnected): {context}"
+    ))
+}
+
 pub(crate) async fn resolve_module(
     modules: &Arc<Mutex<HashMap<String, ModuleConfig>>>,
     default_root: Option<&RootExport>,
@@ -148,6 +156,16 @@ mod status_tests {
         assert_eq!(
             status.message(),
             "outer context: middle context: leaf cause"
+        );
+    }
+
+    #[test]
+    fn closed_response_channel_is_cancellation() {
+        let status = response_channel_closed("sending result");
+        assert_eq!(status.code(), Code::Cancelled);
+        assert_eq!(
+            status.message(),
+            "response channel closed (peer disconnected): sending result"
         );
     }
 }
