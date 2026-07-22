@@ -14,7 +14,7 @@ use std::time::Duration;
 mod common;
 use common::{cli_bin, run_with_timeout, TestContext};
 
-const REQUIRED_ATTRIBUTES: u32 = 0x1 | 0x2 | 0x4; // READONLY | HIDDEN | SYSTEM
+const REQUIRED_ATTRIBUTES: u32 = 0x1 | 0x2 | 0x4 | 0x20; // READONLY | HIDDEN | SYSTEM | ARCHIVE
 const ADS_CONTENT: &[u8] = b"rel-4-ads";
 
 fn named_stream_path(path: &Path, name: &str) -> PathBuf {
@@ -30,6 +30,7 @@ fn set_attributes(path: &Path, enabled: bool) {
         .arg(format!("{switch}R"))
         .arg(format!("{switch}H"))
         .arg(format!("{switch}S"))
+        .arg(format!("{switch}A"))
         .arg(path)
         .status()
         .expect("run attrib");
@@ -52,7 +53,7 @@ fn assert_metadata(path: &Path) {
     assert_eq!(
         attributes & REQUIRED_ATTRIBUTES,
         REQUIRED_ATTRIBUTES,
-        "ReadOnly/Hidden/System attributes missing on {}: 0x{attributes:08x}",
+        "durable attributes missing on {}: 0x{attributes:08x}",
         path.display()
     );
 }

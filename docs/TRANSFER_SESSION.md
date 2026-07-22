@@ -201,12 +201,16 @@ message WindowsNamedStream {
 }
 ```
 
-- `file_attributes` contains only the attributes directly round-trippable by
-  `GetFileAttributesW` / `SetFileAttributesW`: READONLY, HIDDEN, SYSTEM,
-  ARCHIVE, TEMPORARY, OFFLINE, and NOT_CONTENT_INDEXED (mask `0x00003127`).
-  Structural or separately-managed bits such as DIRECTORY, REPARSE_POINT,
-  SPARSE_FILE, COMPRESSED, and ENCRYPTED are never represented by this field.
-  Zero means the destination applies `FILE_ATTRIBUTE_NORMAL`.
+- `file_attributes` contains only the durable attributes that ordinary files
+  can be required to retain across supported Windows filesystems: READONLY,
+  HIDDEN, SYSTEM, and ARCHIVE (mask `0x00000027`). Volatile or storage-policy
+  bits such as TEMPORARY, OFFLINE, and NOT_CONTENT_INDEXED, plus structural or
+  separately-managed bits such as DIRECTORY, REPARSE_POINT, SPARSE_FILE,
+  COMPRESSED, and ENCRYPTED, are never represented by this field. Zero means
+  the destination applies `FILE_ATTRIBUTE_NORMAL`. After
+  `SetFileAttributesW` succeeds, the destination reads the durable mask back;
+  a mismatch fails the file instead of reporting success and retransferring it
+  on every later run.
 - Named streams are data only: enumeration accepts the default `::$DATA` but
   does not serialize it, accepts `:name:$DATA` as a named stream, and rejects
   every other stream type. The serialized `name` is only `name`, never either

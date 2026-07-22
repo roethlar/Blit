@@ -23,10 +23,11 @@ All six findings are admitted and remain release-blocking until fixed:
    planning/in-stream splitting include declared ADS payload bytes. The focused
    guard turned red when the budgeted metadata read was bypassed and returned
    green after exact restoration.
-2. **High — attribute convergence.** Some destination filesystems may accept
-   an attribute call without retaining every bit. Restrict preservation to a
-   durable contract and verify the applied result so repeat runs converge or
-   fail honestly instead of retransferring forever.
+2. **Fixed — attribute convergence.** The contract now carries only durable
+   READONLY, HIDDEN, SYSTEM, and ARCHIVE bits. The destination reads that mask
+   back after applying it and fails the file on mismatch; a simulated
+   successful setter that dropped HIDDEN turned the focused guard red when the
+   convergence check was disabled.
 3. **High — per-file ADS isolation.** A recoverable source stream problem must
    mark that file unreadable and preserve the mirror/move safety gate, not stop
    every unrelated file. An unrepresentable destination stream set should be

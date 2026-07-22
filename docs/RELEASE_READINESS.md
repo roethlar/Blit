@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** rel-4 formal review fix 1/6, 2026-07-22
+**As of:** rel-4 formal review fixes 2/6, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -56,10 +56,11 @@ performance ceilings and hardware tuning remain post-release work.
    at `3013e10` passed local gates and strict Windows cross-compilation, but the
    formal Opus review admitted six corrections before runtime acceptance. The
    aggregate tar-header allocation is now bounded before metadata allocation,
-   and planning counts declared ADS bytes. Five corrections remain: attribute
-   convergence, per-file ADS isolation, cross-platform policy/preflight, local
-   mtime precision, and a resume allocation. Hosted Windows confirmation
-   follows those fixes.
+   planning counts declared ADS bytes, and the durable attribute contract now
+   requires successful readback convergence. Four corrections remain:
+   per-file ADS isolation, cross-platform policy/preflight, local mtime
+   precision, and a resume allocation. Hosted Windows confirmation follows
+   those fixes.
 2. **Hosted Windows confirmation is pending.** Published run `29584631185`
    failed because Windows buffered the guard's 64 MiB loopback handshake.
    rel-1 now exercises the same production timeout through a deterministic

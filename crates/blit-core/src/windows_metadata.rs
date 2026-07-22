@@ -14,7 +14,13 @@ use eyre::{bail, Context, Result};
 use crate::generated::WindowsNamedStream;
 use crate::generated::{FileHeader, WindowsFileMetadata};
 
-pub const WINDOWS_SETTABLE_ATTRIBUTE_MASK: u32 = 0x0000_3127;
+/// Durable ordinary-file attributes that Blit promises to preserve.
+pub const WINDOWS_PRESERVED_ATTRIBUTE_MASK: u32 = 0x0000_0027;
+/// Complete subset accepted by `SetFileAttributesW`. Only used while clearing
+/// READONLY on an existing destination so unrelated volatile policy bits are
+/// not destroyed by preparation.
+#[cfg(windows)]
+const WINDOWS_SET_FILE_ATTRIBUTES_API_MASK: u32 = 0x0000_3127;
 pub const MAX_WINDOWS_NAMED_STREAMS: usize = 64;
 pub const MAX_WINDOWS_STREAM_NAME_BYTES: usize = 1024;
 pub const MAX_WINDOWS_STREAM_BYTES_PER_FILE: u64 = 2 * 1024 * 1024;
@@ -34,7 +40,7 @@ pub fn validate_payload(metadata: Option<&WindowsFileMetadata>) -> Result<()> {
 }
 
 fn validate_common(metadata: &WindowsFileMetadata, payload: bool) -> Result<()> {
-    let unsupported = metadata.file_attributes & !WINDOWS_SETTABLE_ATTRIBUTE_MASK;
+    let unsupported = metadata.file_attributes & !WINDOWS_PRESERVED_ATTRIBUTE_MASK;
     if unsupported != 0 {
         bail!("unsupported Windows file-attribute bits 0x{unsupported:08x}");
     }
@@ -264,6 +270,28 @@ pub fn apply_attributes(path: &Path, metadata: Option<&WindowsFileMetadata>) -> 
     apply_attributes_impl(path, metadata)
 }
 
+/// Apply the durable attribute mask and require readback convergence. Some
+/// filesystems can return success from the setter without retaining every bit;
+/// that is an honest file failure, not a successful transfer that should loop
+/// forever on the next comparison.
+#[cfg(any(windows, test))]
+fn set_and_verify_attributes(
+    path: &Path,
+    desired: u32,
+    set: impl FnOnce(u32) -> Result<()>,
+    read: impl FnOnce() -> Result<u32>,
+) -> Result<()> {
+    set(desired)?;
+    let actual = read()? & WINDOWS_PRESERVED_ATTRIBUTE_MASK;
+    if actual != desired {
+        bail!(
+            "Windows attributes did not converge on {}: requested 0x{desired:08x}, read back 0x{actual:08x}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Clear a pre-existing read-only bit before replacing unnamed or named data.
 /// The exact source attribute set is restored by [`apply_attributes`] after all bytes land.
 pub fn prepare_destination(path: &Path, metadata: Option<&WindowsFileMetadata>) -> Result<()> {
@@ -339,7 +367,7 @@ mod windows_io {
         path: &Path,
         include_content: bool,
     ) -> Result<WindowsFileMetadata> {
-        let attributes = file_attributes(path)? & WINDOWS_SETTABLE_ATTRIBUTE_MASK;
+        let attributes = file_attributes(path)? & WINDOWS_PRESERVED_ATTRIBUTE_MASK;
         let mut named_streams = enumerate_named_streams(path, include_content)?;
         named_streams.sort_by(|left, right| {
             left.name
@@ -554,14 +582,21 @@ mod windows_io {
     }
 
     pub(super) fn apply_attributes_impl(path: &Path, metadata: &WindowsFileMetadata) -> Result<()> {
-        let attributes = if metadata.file_attributes == 0 {
-            FILE_ATTRIBUTE_NORMAL
-        } else {
-            FILE_FLAGS_AND_ATTRIBUTES(metadata.file_attributes)
-        };
         let wide = wide_path(path);
-        unsafe { SetFileAttributesW(PCWSTR(wide.as_ptr()), attributes) }
-            .with_context(|| format!("setting Windows attributes on {}", path.display()))
+        set_and_verify_attributes(
+            path,
+            metadata.file_attributes,
+            |desired| {
+                let attributes = if desired == 0 {
+                    FILE_ATTRIBUTE_NORMAL
+                } else {
+                    FILE_FLAGS_AND_ATTRIBUTES(desired)
+                };
+                unsafe { SetFileAttributesW(PCWSTR(wide.as_ptr()), attributes) }
+                    .with_context(|| format!("setting Windows attributes on {}", path.display()))
+            },
+            || file_attributes(path),
+        )
     }
 
     pub(super) fn prepare_destination_impl(path: &Path) -> Result<()> {
@@ -569,7 +604,7 @@ mod windows_io {
         if current & FILE_ATTRIBUTE_READONLY.0 == 0 {
             return Ok(());
         }
-        let cleared = current & WINDOWS_SETTABLE_ATTRIBUTE_MASK & !FILE_ATTRIBUTE_READONLY.0;
+        let cleared = current & WINDOWS_SET_FILE_ATTRIBUTES_API_MASK & !FILE_ATTRIBUTE_READONLY.0;
         let attributes = if cleared == 0 {
             FILE_ATTRIBUTE_NORMAL
         } else {
@@ -703,6 +738,51 @@ mod tests {
             named_streams: vec![bad_hash],
         };
         assert!(validate_payload(Some(&bad_hash)).is_err());
+    }
+
+    #[test]
+    fn attribute_contract_is_durable_and_requires_readback_convergence() {
+        let durable = WindowsFileMetadata {
+            file_attributes: WINDOWS_PRESERVED_ATTRIBUTE_MASK,
+            named_streams: Vec::new(),
+        };
+        validate_manifest(Some(&durable)).expect("all four durable bits are supported");
+
+        for volatile in [0x0000_0100, 0x0000_1000, 0x0000_2000] {
+            let metadata = WindowsFileMetadata {
+                file_attributes: volatile,
+                named_streams: Vec::new(),
+            };
+            assert!(
+                validate_manifest(Some(&metadata)).is_err(),
+                "volatile attribute 0x{volatile:08x} entered the durable contract"
+            );
+        }
+
+        let requested = 0x0000_0023;
+        let mut set_value = None;
+        let error = set_and_verify_attributes(
+            Path::new("destination.bin"),
+            requested,
+            |attributes| {
+                set_value = Some(attributes);
+                Ok(())
+            },
+            // Simulate a filesystem that accepts the call but drops HIDDEN.
+            || Ok(requested & !0x2),
+        )
+        .expect_err("successful setter without durable readback must fail");
+        assert_eq!(set_value, Some(requested));
+        assert!(format!("{error:#}").contains("did not converge"));
+
+        set_and_verify_attributes(
+            Path::new("destination.bin"),
+            requested,
+            |_| Ok(()),
+            // Non-contract attributes do not affect convergence.
+            || Ok(requested | 0x0000_2100),
+        )
+        .unwrap();
     }
 
     #[test]

@@ -220,7 +220,7 @@ message FileHeader {
 }
 
 message WindowsFileMetadata {
-  // SetFileAttributesW-compatible mask; see docs/TRANSFER_SESSION.md.
+  // Durable preserved attribute mask; see docs/TRANSFER_SESSION.md.
   uint32 file_attributes = 1;
   repeated WindowsNamedStream named_streams = 2;
 }
