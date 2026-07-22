@@ -50,6 +50,9 @@ pub struct PushSessionOptions {
     pub compare_mode: ComparisonMode,
     pub ignore_existing: bool,
     pub require_complete_scan: bool,
+    /// Explicitly discard Windows attributes and named data streams at the
+    /// SOURCE. False preserves strictly and may reject a non-Windows target.
+    pub drop_windows_metadata: bool,
     pub plan_options: PlanOptions,
     /// Force the in-stream byte carrier instead of the TCP data plane
     /// (otp-4b). Default `false` = the responder grants a data plane and
@@ -94,6 +97,7 @@ impl Default for PushSessionOptions {
             compare_mode: ComparisonMode::SizeMtime,
             ignore_existing: false,
             require_complete_scan: false,
+            drop_windows_metadata: false,
             plan_options: PlanOptions::default(),
             in_stream_bytes: false,
             resume: false,
@@ -129,6 +133,7 @@ pub async fn run_push_session(
         compare_mode: options.compare_mode as i32,
         ignore_existing: options.ignore_existing,
         require_complete_scan: options.require_complete_scan,
+        drop_windows_metadata: options.drop_windows_metadata,
         // otp-4b: default to the TCP data plane; the responder grants it
         // in SessionAccept unless this asks for the in-stream fallback.
         in_stream_bytes: options.in_stream_bytes,
@@ -213,6 +218,9 @@ pub struct PullSessionOptions {
     pub compare_mode: ComparisonMode,
     pub ignore_existing: bool,
     pub require_complete_scan: bool,
+    /// Explicitly discard Windows attributes and named data streams at the
+    /// SOURCE. False preserves strictly and may reject a non-Windows target.
+    pub drop_windows_metadata: bool,
     /// Force the in-stream byte carrier instead of the TCP data plane
     /// (otp-5b). Default `false` = the SOURCE responder grants a data
     /// plane and this DESTINATION initiator dials + receives over TCP
@@ -257,6 +265,7 @@ impl Default for PullSessionOptions {
             compare_mode: ComparisonMode::SizeMtime,
             ignore_existing: false,
             require_complete_scan: false,
+            drop_windows_metadata: false,
             in_stream_bytes: false,
             resume: false,
             resume_block_size: 0,
@@ -310,6 +319,7 @@ pub async fn run_pull_session_with_client(
         compare_mode: options.compare_mode as i32,
         ignore_existing: options.ignore_existing,
         require_complete_scan: options.require_complete_scan,
+        drop_windows_metadata: options.drop_windows_metadata,
         // otp-5b: default to the TCP data plane; the SOURCE responder
         // grants it in SessionAccept unless this asks for the in-stream
         // fallback.

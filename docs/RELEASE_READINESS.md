@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** rel-4 formal review fixes 3/6, 2026-07-22
+**As of:** rel-4 formal review fixes 4/6, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -58,9 +58,11 @@ performance ceilings and hardware tuning remain post-release work.
    aggregate tar-header allocation is now bounded before metadata allocation,
    planning counts declared ADS bytes, the durable attribute contract requires
    readback convergence, and source/destination ADS inspection failures are
-   isolated to replacement or the affected unreadable file. Three corrections
-   remain: cross-platform policy/preflight, local mtime precision, and a resume
-   allocation. Hosted Windows confirmation follows those fixes.
+   isolated to replacement or the affected unreadable file. Cross-platform
+   copies now reject before resume can write unless the warned
+   `--drop-windows-metadata` policy strips metadata at the source. Two
+   corrections remain: local mtime precision and a resume allocation. Hosted
+   Windows confirmation follows those fixes.
 2. **Hosted Windows confirmation is pending.** Published run `29584631185`
    failed because Windows buffered the guard's 64 MiB loopback handshake.
    rel-1 now exercises the same production timeout through a deterministic

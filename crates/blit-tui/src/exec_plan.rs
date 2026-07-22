@@ -86,6 +86,7 @@ pub(crate) fn build_f3_pull_execution(
         force_grpc: false,
         trace_data_plane: false,
         require_complete_scan: kind == f3pull::PullKind::Move,
+        drop_windows_metadata: false,
         resume: false,
         resume_block_size: 0,
         compare_mode,
@@ -131,6 +132,7 @@ pub(crate) fn build_f1_push_execution(
         force_grpc: false,
         trace_data_plane: false,
         require_complete_scan: mirror,
+        drop_windows_metadata: false,
         resume: false,
         resume_block_size: 0,
         // codex otp-10a F1 via the ONE mapping (codex otp-10b-2 F6):

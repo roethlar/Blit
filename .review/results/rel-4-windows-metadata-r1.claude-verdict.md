@@ -33,9 +33,12 @@ All six findings are admitted and remain release-blocking until fixed:
    gate. An unrepresentable destination set requests replacement, whose bounded
    descriptor scan removes stale names without reading their oversized content.
    Both error branches turned focused guards red when reverted.
-4. **Medium — cross-platform policy.** Windows-to-non-Windows copies need an
-   explicit, warned downgrade choice. Strict preservation remains the default;
-   rejection must happen before any resume block can change the destination.
+4. **Fixed — cross-platform policy.** Strict preservation now rejects during
+   destination manifest comparison before any Need/resume grant. The warned
+   `--drop-windows-metadata` choice travels through local, push, pull, and
+   delegated opens; SOURCE skips metadata inspection and strips it before the
+   manifest. Focused guards prove both the untouched partial-file refusal and
+   the explicit lossy session path.
 5. **Medium — local mtime precision.** Restamp local Windows files from the
    source `SystemTime`, preserving sub-second precision after ADS application.
 6. **Low — resume hash clone.** Hydrate Windows metadata without cloning and

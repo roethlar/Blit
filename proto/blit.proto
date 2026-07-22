@@ -381,6 +381,8 @@ message TransferOperationSpec {
   //      field and reserved tag 12 because capacity belongs to the session
   //      handshake. The service now requires same-build peers, so the old
   //      mixed-version rationale is no longer an active contract.
+  //   3: added `drop_windows_metadata`. Bumped so delegated peers
+  //      cannot silently ignore an explicitly requested lossy policy.
   uint32 spec_version = 1;
 
   // Origin-side module name. Empty means "use default root export".
@@ -448,6 +450,13 @@ message TransferOperationSpec {
   // spec-level copy had no readers.
   reserved 12;
   reserved "receiver_capacity";
+
+  // Explicit lossy cross-platform policy. When true, the SOURCE removes
+  // Windows attributes and named data streams before manifest emission.
+  // False is strict preservation: a destination that cannot represent
+  // present Windows metadata rejects the entry before granting payload or
+  // resume work.
+  bool drop_windows_metadata = 13;
 }
 
 // Source-side filter rules. Applied at the origin's TransferSource
@@ -991,6 +1000,10 @@ message SessionOpen {
   // receiver advertises capacity — D-2026-06-20-1/-2; absent/0 =
   // unknown hardware value, conservative, never "old peer").
   CapacityProfile receiver_capacity = 12;
+  // Explicit lossy cross-platform policy. False preserves strictly. True
+  // makes the SOURCE strip Windows attributes and named data streams before
+  // manifest emission, so no metadata payload is read or sent.
+  bool drop_windows_metadata = 13;
 }
 
 // Responder's reply. Refusals are SessionError frames, never silent

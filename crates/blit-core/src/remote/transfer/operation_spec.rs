@@ -44,7 +44,9 @@ use crate::generated::{
 ///     field, and reopen the remote-source-move data-loss case
 ///     where partial source scans silently delete unread files.
 ///     Bumping forces v1 daemons to fail closed (R51-F3).
-pub const SUPPORTED_SPEC_VERSION: u32 = 2;
+///   - 3: added `drop_windows_metadata`. Exact versioning prevents a
+///     delegated peer from silently ignoring the explicit lossy policy.
+pub const SUPPORTED_SPEC_VERSION: u32 = 3;
 
 /// Normalized, internal-friendly view of a transfer operation. Folds
 /// proto-`Unspecified` into concrete defaults, converts `FilterSpec`
@@ -87,6 +89,9 @@ pub struct NormalizedTransferOperation {
     /// purge dest extras) but carries the same scan-completeness
     /// requirement that a mirror operation does.
     pub require_complete_scan: bool,
+    /// Explicitly discard Windows attributes and named data streams at the
+    /// SOURCE. False preserves strictly.
+    pub drop_windows_metadata: bool,
 }
 
 impl NormalizedTransferOperation {
@@ -135,6 +140,7 @@ impl NormalizedTransferOperation {
             force_grpc: spec.force_grpc,
             ignore_existing: spec.ignore_existing,
             require_complete_scan: spec.require_complete_scan,
+            drop_windows_metadata: spec.drop_windows_metadata,
         })
     }
 
@@ -246,6 +252,9 @@ pub struct DelegatedSpecOptions {
     /// scan was incomplete. Set for a move-shaped delegation (the
     /// caller deletes the source after the transfer succeeds).
     pub require_complete_scan: bool,
+    /// Explicitly discard Windows attributes and named data streams at the
+    /// source daemon before it emits the manifest.
+    pub drop_windows_metadata: bool,
 }
 
 /// Build the delegated trigger's wire [`TransferOperationSpec`] from a
@@ -318,6 +327,7 @@ pub fn delegated_spec_from_options(
         force_grpc: options.force_grpc,
         ignore_existing: options.ignore_existing,
         require_complete_scan: options.require_complete_scan,
+        drop_windows_metadata: options.drop_windows_metadata,
     })
 }
 
@@ -453,6 +463,7 @@ mod delegated_spec_tests {
             force_grpc: true,
             ignore_existing: true,
             require_complete_scan: true,
+            drop_windows_metadata: true,
             resume: true,
             block_size: 4096,
             filter: Some(filter.clone()),
@@ -462,6 +473,7 @@ mod delegated_spec_tests {
         assert!(spec.force_grpc);
         assert!(spec.ignore_existing);
         assert!(spec.require_complete_scan);
+        assert!(spec.drop_windows_metadata);
         let resume = spec.resume.expect("resume settings present");
         assert!(resume.enabled);
         assert_eq!(resume.block_size, 4096);
@@ -472,6 +484,7 @@ mod delegated_spec_tests {
         assert!(normalized.force_grpc);
         assert!(normalized.ignore_existing);
         assert!(normalized.require_complete_scan);
+        assert!(normalized.drop_windows_metadata);
         assert!(normalized.resume.enabled);
         assert!(normalized.filter.is_some());
     }
@@ -493,6 +506,7 @@ mod tests {
             force_grpc: false,
             ignore_existing: false,
             require_complete_scan: false,
+            drop_windows_metadata: false,
         }
     }
 
@@ -629,5 +643,13 @@ mod tests {
     fn missing_resume_defaults_to_disabled() {
         let normalized = NormalizedTransferOperation::from_spec(empty_spec()).unwrap();
         assert!(!normalized.resume.enabled);
+    }
+
+    #[test]
+    fn drop_windows_metadata_passes_through_normalization() {
+        let mut spec = empty_spec();
+        spec.drop_windows_metadata = true;
+        let normalized = NormalizedTransferOperation::from_spec(spec).unwrap();
+        assert!(normalized.drop_windows_metadata);
     }
 }

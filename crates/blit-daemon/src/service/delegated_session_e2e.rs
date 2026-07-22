@@ -109,7 +109,7 @@ impl Daemon {
 
 fn spec(source_module: &str) -> TransferOperationSpec {
     TransferOperationSpec {
-        spec_version: 2,
+        spec_version: blit_core::remote::transfer::operation_spec::SUPPORTED_SPEC_VERSION,
         module: source_module.into(),
         source_path: String::new(),
         ..Default::default()

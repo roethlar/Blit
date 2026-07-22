@@ -249,6 +249,28 @@ message WindowsNamedStream {
   per-file completion or final transfer summary. Named-stream bytes count as
   transferred payload bytes; manifest descriptor bytes do not.
 
+### Cross-platform Windows metadata policy (contract v5)
+
+Strict preservation is the default. If a manifest entry contains
+`windows_metadata` and the DESTINATION platform cannot represent it, the
+destination rejects that entry during manifest comparison: after safe path
+resolution, but before filesystem comparison, `NeedBatch`, `BlockHashList`, or
+any payload grant. An existing partial file is therefore unchanged, including
+when resume was requested.
+
+The only downgrade is the explicit CLI flag `--drop-windows-metadata`, which
+prints a warning that Windows attributes and named data streams are permanently
+discarded. It travels as `SessionOpen.drop_windows_metadata = 13`; delegated
+remote-to-remote requests carry the same bit in `TransferOperationSpec` v3.
+When set, the SOURCE omits Windows metadata before manifest emission. The
+filesystem source also skips metadata enumeration and named-stream hashing, so
+an unrepresentable stream set cannot prevent the unnamed file from being
+copied under the user's explicit lossy choice. Payload preparation consequently
+does not hydrate or send named-stream bytes. The policy is role- and
+carrier-independent: local, push, pull, and delegated transfers all enter the
+same SOURCE scan and DESTINATION diff chokepoints. Session contract v5 exact
+matching prevents a peer from silently ignoring the policy.
+
 Deliberately absent: `PeerCapabilities` (same build = same
 features), `spec_version` negotiation (the hello's exact match
 replaces it), any delete list (mirror is destination-local), any

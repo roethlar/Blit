@@ -299,6 +299,7 @@ async fn run_remote_push_transfer_inner(
         // the unreadable accumulator fails the call, and the deferred
         // print + source-delete gate never fire.
         require_complete_scan: mirror_mode,
+        drop_windows_metadata: args.drop_windows_metadata,
         resume: args.resume,
         resume_block_size: 0, // destination default (1 MiB)
         compare_mode,
@@ -431,6 +432,7 @@ async fn run_remote_pull_transfer_inner(
         // source is deleted after this returns. Mirror needs no flag:
         // the session refuses an incomplete-scan mirror on its own.
         require_complete_scan: move_verb,
+        drop_windows_metadata: args.drop_windows_metadata,
         resume: args.resume,
         resume_block_size: 0, // destination default (1 MiB)
         compare_mode,

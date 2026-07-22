@@ -74,7 +74,8 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// (otp-10b-1 — content compare on the session).
 /// v4: explicit Windows settable attributes and bounded named `$DATA`
 /// descriptors/content on manifest and payload records (rel-4).
-pub const CONTRACT_VERSION: u32 = 4;
+/// v5: explicit source-side Windows metadata downgrade policy.
+pub const CONTRACT_VERSION: u32 = 5;
 
 /// Payload chunk size on the in-stream carrier. Same unit the gRPC
 /// control plane uses today; the data plane (otp-4) has its own.
@@ -1666,6 +1667,17 @@ async fn source_send_half(
             } else {
                 scan_source
             };
+        // Contract v5: strict preservation is the default. The only lossy
+        // path is an explicit OPEN policy, applied at the SOURCE before a
+        // header enters the manifest. This also prevents named-stream payload
+        // hydration, so discarded metadata consumes no data-plane bytes.
+        let scan_source: Arc<dyn TransferSource> = if negotiated.open.drop_windows_metadata {
+            Arc::new(
+                crate::remote::transfer::source::WindowsMetadataDroppingSource::new(scan_source),
+            )
+        } else {
+            scan_source
+        };
         // otp-10a: callers that must not treat a partial transfer as success
         // (the push verb, `blit move`'s source-delete gate) supply their own
         // accumulator via `SourceInstruments` and inspect it after the
@@ -4906,6 +4918,11 @@ fn destination_needs(
         ))
     })?;
 
+    // Strict cross-platform preservation is decided before any NeedBatch or
+    // BlockHashList can be emitted. A resume-capable partial must never be
+    // touched and then rejected later by the sink.
+    crate::windows_metadata::validate_destination_support(header.windows_metadata.as_ref())?;
+
     let target = match std::fs::metadata(&dst) {
         Ok(meta) if meta.is_file() => {
             let mtime = match meta.modified() {
@@ -5455,6 +5472,104 @@ async fn receive_tar_record(
 mod tests {
     use super::*;
 
+    #[cfg(not(windows))]
+    struct WindowsMetadataInjectingSource {
+        inner: FsTransferSource,
+    }
+
+    #[cfg(not(windows))]
+    #[async_trait::async_trait]
+    impl TransferSource for WindowsMetadataInjectingSource {
+        fn scan(
+            &self,
+            filter: Option<crate::fs_enum::FileFilter>,
+            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+            let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
+            let (tx, rx) = mpsc::channel(64);
+            let task = tokio::spawn(async move {
+                while let Some(mut header) = inner_rx.recv().await {
+                    header.windows_metadata = Some(crate::generated::WindowsFileMetadata {
+                        file_attributes: 0x20,
+                        named_streams: Vec::new(),
+                    });
+                    if tx.send(header).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            scan.add_auxiliary(task);
+            (rx, scan)
+        }
+
+        async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
+            self.inner.prepare_payload(payload).await
+        }
+
+        async fn check_availability(
+            &self,
+            headers: Vec<FileHeader>,
+            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        ) -> Result<Vec<FileHeader>> {
+            self.inner
+                .check_availability(headers, unreadable_paths)
+                .await
+        }
+
+        async fn open_file(
+            &self,
+            header: &FileHeader,
+        ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+            self.inner.open_file(header).await
+        }
+
+        fn root(&self) -> &Path {
+            self.inner.root()
+        }
+    }
+
+    #[cfg(not(windows))]
+    async fn run_windows_metadata_policy_session(
+        src_root: &Path,
+        dst_root: &Path,
+        drop_windows_metadata: bool,
+    ) -> (Result<TransferSummary>, Result<DestinationOutcome>) {
+        let open = SessionOpen {
+            initiator_role: TransferRole::Source as i32,
+            compare_mode: ComparisonMode::IgnoreTimes as i32,
+            in_stream_bytes: true,
+            drop_windows_metadata,
+            ..Default::default()
+        };
+        let source_cfg = SourceSessionConfig {
+            instruments: Default::default(),
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::initiator(open),
+            plan_options: PlanOptions::default(),
+            data_plane_host: None,
+        };
+        let destination_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::Responder,
+            data_plane_host: None,
+            receiver_capacity: None,
+            instruments: Default::default(),
+            local_apply: None,
+        };
+        let source: Arc<dyn TransferSource> = Arc::new(WindowsMetadataInjectingSource {
+            inner: FsTransferSource::new(src_root.to_path_buf()),
+        });
+        let (source_transport, destination_transport) = transport::in_process_pair();
+        tokio::join!(
+            run_source(source_cfg, source_transport, source),
+            run_destination(
+                destination_cfg,
+                destination_transport,
+                DestinationTarget::Fixed(dst_root.to_path_buf())
+            )
+        )
+    }
+
     #[test]
     fn windows_metadata_difference_overrides_an_ordinary_skip() {
         assert_eq!(
@@ -5476,6 +5591,73 @@ mod tests {
         assert_eq!(
             finalize_need_verdict(FileStatus::SkippedExisting, Some((1, 1)), false),
             NeedVerdict::Skip
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unsupported_windows_metadata_is_rejected_before_resume_grant() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let partial = tmp.path().join("partial.bin");
+        std::fs::write(&partial, b"existing partial").expect("write partial");
+        let before = std::fs::read(&partial).expect("read partial");
+        let header = FileHeader {
+            relative_path: "partial.bin".into(),
+            size: before.len() as u64 + 10,
+            mtime_seconds: 0,
+            permissions: 0,
+            checksum: Vec::new(),
+            windows_metadata: Some(crate::generated::WindowsFileMetadata {
+                file_attributes: 0x20,
+                named_streams: Vec::new(),
+            }),
+        };
+
+        let error = destination_needs(
+            &header,
+            tmp.path(),
+            None,
+            &CompareOptions::default(),
+            &AtomicBool::new(false),
+        )
+        .expect_err("a non-Windows destination must reject strict metadata preservation");
+        assert!(format!("{error:#}").contains("--drop-windows-metadata"));
+        assert_eq!(
+            std::fs::read(&partial).expect("read unchanged partial"),
+            before,
+            "preflight refusal must leave a resume-capable partial untouched"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn session_open_policy_rejects_strict_then_strips_explicitly() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).expect("source directory");
+        std::fs::create_dir_all(&dst).expect("destination directory");
+        std::fs::write(src.join("file.bin"), b"complete source bytes").expect("source file");
+        std::fs::write(dst.join("file.bin"), b"partial").expect("partial destination");
+
+        let before = std::fs::read(dst.join("file.bin")).expect("read partial");
+        let (strict_source, strict_destination) =
+            run_windows_metadata_policy_session(&src, &dst, false).await;
+        assert!(strict_source.is_err());
+        let strict_error = strict_destination.expect_err("strict destination rejects metadata");
+        assert!(format!("{strict_error:#}").contains("--drop-windows-metadata"));
+        assert_eq!(
+            std::fs::read(dst.join("file.bin")).expect("read untouched partial"),
+            before
+        );
+
+        let (lossy_source, lossy_destination) =
+            run_windows_metadata_policy_session(&src, &dst, true).await;
+        lossy_source.expect("explicit lossy source succeeds");
+        lossy_destination.expect("explicit lossy destination succeeds");
+        assert_eq!(
+            std::fs::read(dst.join("file.bin")).expect("read transferred file"),
+            b"complete source bytes"
         );
     }
 

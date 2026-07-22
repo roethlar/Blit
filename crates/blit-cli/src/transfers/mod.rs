@@ -171,6 +171,8 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
         }
     }
 
+    warn_if_dropping_windows_metadata(args);
+
     // For mirror operations, prompt unless --yes or --dry-run
     if mode.is_mirror() && !args.dry_run {
         let prompt = format!(
@@ -367,6 +369,8 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
         );
     }
 
+    warn_if_dropping_windows_metadata(args);
+
     // Prompt for confirmation before move (which deletes source)
     let src_display = display_endpoint(&src_endpoint);
     let dst_display = display_endpoint(&dst_endpoint);
@@ -559,6 +563,15 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
     }
 }
 
+const DROP_WINDOWS_METADATA_WARNING: &str =
+    "warning: --drop-windows-metadata permanently discards Windows file attributes and named data streams";
+
+fn warn_if_dropping_windows_metadata(args: &TransferArgs) {
+    if args.drop_windows_metadata {
+        eprintln!("{DROP_WINDOWS_METADATA_WARNING}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,6 +612,7 @@ mod tests {
             force_grpc: false,
             detach: false,
             resume: false,
+            drop_windows_metadata: false,
             retry: 0,
             wait: 5,
             null: false,
@@ -647,6 +661,7 @@ mod tests {
             force_grpc: false,
             detach: false,
             resume: false,
+            drop_windows_metadata: false,
             retry: 0,
             wait: 5,
             null: false,
@@ -701,6 +716,7 @@ mod tests {
             force_grpc: false,
             detach,
             resume: false,
+            drop_windows_metadata: false,
             retry: 0,
             wait: 5,
             null: false,

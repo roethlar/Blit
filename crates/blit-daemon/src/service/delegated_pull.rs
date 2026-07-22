@@ -331,6 +331,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
             .unwrap_or(ComparisonMode::SizeMtime),
         ignore_existing: spec.ignore_existing,
         require_complete_scan: spec.require_complete_scan,
+        drop_windows_metadata: spec.drop_windows_metadata,
         in_stream_bytes: spec.force_grpc,
         resume: spec.resume.as_ref().is_some_and(|r| r.enabled),
         resume_block_size: spec.resume.as_ref().map_or(0, |r| r.block_size),
@@ -416,7 +417,7 @@ mod tests {
 
     fn wire_spec() -> TransferOperationSpec {
         TransferOperationSpec {
-            spec_version: 2,
+            spec_version: blit_core::remote::transfer::operation_spec::SUPPORTED_SPEC_VERSION,
             module: "m".into(),
             source_path: ".".into(),
             filter: None,
@@ -426,6 +427,7 @@ mod tests {
             force_grpc: false,
             ignore_existing: false,
             require_complete_scan: false,
+            drop_windows_metadata: false,
         }
     }
 

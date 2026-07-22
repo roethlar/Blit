@@ -157,6 +157,18 @@ pub trait TransferSource: Send + Sync {
         unreadable_paths: Arc<Mutex<Vec<String>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan);
 
+    /// Scan under the explicit lossy policy. Implementations that can avoid
+    /// inspecting Windows metadata should override this; the default remains
+    /// correct for abstract/test sources by stripping their emitted headers.
+    fn scan_without_windows_metadata(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        let (header_rx, scan) = self.scan(filter, unreadable_paths);
+        strip_windows_metadata_from_scan(header_rx, scan)
+    }
+
     /// Prepares a payload for transfer (e.g. opens a file or builds a tar shard).
     async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload>;
 
@@ -199,6 +211,21 @@ impl TransferSource for FsTransferSource {
             self.root.clone(),
             filter.unwrap_or_default(),
             unreadable_paths,
+            true,
+        );
+        (headers, SourceScan::new(task))
+    }
+
+    fn scan_without_windows_metadata(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        let (headers, task) = spawn_manifest_task(
+            self.root.clone(),
+            filter.unwrap_or_default(),
+            unreadable_paths,
+            false,
         );
         (headers, SourceScan::new(task))
     }
@@ -250,6 +277,7 @@ fn spawn_manifest_task(
     root: PathBuf,
     filter: FileFilter,
     unreadable: Arc<Mutex<Vec<String>>>,
+    preserve_windows_metadata: bool,
 ) -> (
     mpsc::Receiver<FileHeader>,
     tokio::task::JoinHandle<Result<u64>>,
@@ -293,13 +321,14 @@ fn spawn_manifest_task(
 
                 let mtime = unix_seconds(&entry.metadata);
                 let permissions = permissions_mode(&entry.metadata);
-                let Some(header) = file_header_with_windows_metadata(
+                let Some(header) = file_header_with_windows_metadata_policy(
                     rel,
                     size,
                     mtime,
                     permissions,
                     &absolute,
                     &unreadable,
+                    preserve_windows_metadata,
                     crate::windows_metadata::read_manifest,
                 ) else {
                     return Ok(());
@@ -333,6 +362,38 @@ fn spawn_manifest_task(
     });
 
     (manifest_rx, handle)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn file_header_with_windows_metadata_policy(
+    relative_path: String,
+    size: u64,
+    mtime_seconds: i64,
+    permissions: u32,
+    absolute_path: &Path,
+    unreadable: &Arc<Mutex<Vec<String>>>,
+    preserve_windows_metadata: bool,
+    read_metadata: impl FnOnce(&Path) -> Result<Option<crate::generated::WindowsFileMetadata>>,
+) -> Option<FileHeader> {
+    if !preserve_windows_metadata {
+        return Some(FileHeader {
+            relative_path,
+            size,
+            mtime_seconds,
+            permissions,
+            checksum: Vec::new(),
+            windows_metadata: None,
+        });
+    }
+    file_header_with_windows_metadata(
+        relative_path,
+        size,
+        mtime_seconds,
+        permissions,
+        absolute_path,
+        unreadable,
+        read_metadata,
+    )
 }
 
 fn file_header_with_windows_metadata(
@@ -462,40 +523,28 @@ pub struct FilteredSource {
     filter: FileFilter,
 }
 
-impl FilteredSource {
-    pub fn new(inner: Arc<dyn TransferSource>, filter: FileFilter) -> Self {
-        Self { inner, filter }
+/// Explicit lossy-policy decorator. It removes Windows attributes and named
+/// stream descriptors before the manifest leaves the SOURCE. Payload planning
+/// therefore never hydrates, reads, or sends the discarded stream content.
+pub struct WindowsMetadataDroppingSource {
+    inner: Arc<dyn TransferSource>,
+}
+
+impl WindowsMetadataDroppingSource {
+    pub fn new(inner: Arc<dyn TransferSource>) -> Self {
+        Self { inner }
     }
 }
 
 #[async_trait]
-impl TransferSource for FilteredSource {
+impl TransferSource for WindowsMetadataDroppingSource {
     fn scan(
         &self,
-        // Ignored: the wrapper carries the filter that's been calculated
-        // by the orchestrator. Inner source emits unfiltered headers.
-        _filter: Option<FileFilter>,
+        filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-        let (header_rx, mut scan) = self.inner.scan(None, unreadable_paths);
-        if self.filter.is_empty() {
-            // Fast path — no filter installed, return the inner channel
-            // directly so we don't add a per-header forwarding hop.
-            return (header_rx, scan);
-        }
-        let filter = self.filter.clone_without_cache();
-        let (tx, rx_filtered) = mpsc::channel::<FileHeader>(64);
-        // R59 finding #4: pass the inner source root so filter_headers
-        // can fall back to the root's basename when relative_path is
-        // empty. For single-file push, FsTransferSource emits the
-        // entry with relative_path = "" (see open_file at source.rs:100);
-        // pre-fix filter_headers asked allows_entry to match against
-        // an empty PathBuf, so basename globs like `*.txt` silently
-        // rejected the file.
-        let source_root = self.inner.root().to_path_buf();
-        let task = tokio::spawn(filter_headers(header_rx, tx, filter, source_root));
-        scan.add_auxiliary(task);
-        (rx_filtered, scan)
+        self.inner
+            .scan_without_windows_metadata(filter, unreadable_paths)
     }
 
     async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
@@ -521,6 +570,91 @@ impl TransferSource for FilteredSource {
 
     fn root(&self) -> &Path {
         self.inner.root()
+    }
+}
+
+impl FilteredSource {
+    pub fn new(inner: Arc<dyn TransferSource>, filter: FileFilter) -> Self {
+        Self { inner, filter }
+    }
+}
+
+#[async_trait]
+impl TransferSource for FilteredSource {
+    fn scan(
+        &self,
+        // Ignored: the wrapper carries the filter that's been calculated
+        // by the orchestrator. Inner source emits unfiltered headers.
+        _filter: Option<FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        self.scan_with_metadata_policy(unreadable_paths, true)
+    }
+
+    fn scan_without_windows_metadata(
+        &self,
+        _filter: Option<FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        self.scan_with_metadata_policy(unreadable_paths, false)
+    }
+
+    async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn check_availability(
+        &self,
+        headers: Vec<FileHeader>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+    ) -> Result<Vec<FileHeader>> {
+        self.inner
+            .check_availability(headers, unreadable_paths)
+            .await
+    }
+
+    async fn open_file(
+        &self,
+        header: &FileHeader,
+    ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        self.inner.open_file(header).await
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+impl FilteredSource {
+    fn scan_with_metadata_policy(
+        &self,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        preserve_windows_metadata: bool,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        let (header_rx, mut scan) = if preserve_windows_metadata {
+            self.inner.scan(None, unreadable_paths)
+        } else {
+            self.inner
+                .scan_without_windows_metadata(None, unreadable_paths)
+        };
+        if self.filter.is_empty() {
+            // Fast path — no filter installed, return the inner channel
+            // directly so we don't add a per-header forwarding hop.
+            return (header_rx, scan);
+        }
+        let filter = self.filter.clone_without_cache();
+        let (tx, rx_filtered) = mpsc::channel::<FileHeader>(64);
+        // R59 finding #4: pass the inner source root so filter_headers
+        // can fall back to the root's basename when relative_path is
+        // empty. For single-file push, FsTransferSource emits the
+        // entry with relative_path = "" (see open_file at source.rs:100);
+        // pre-fix filter_headers asked allows_entry to match against
+        // an empty PathBuf, so basename globs like `*.txt` silently
+        // rejected the file.
+        let source_root = self.inner.root().to_path_buf();
+        let task = tokio::spawn(filter_headers(header_rx, tx, filter, source_root));
+        scan.add_auxiliary(task);
+        (rx_filtered, scan)
     }
 }
 
@@ -554,7 +688,56 @@ impl TransferSource for ChecksummingSource {
         filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-        let (mut header_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
+        self.scan_with_metadata_policy(filter, unreadable_paths, true)
+    }
+
+    fn scan_without_windows_metadata(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        self.scan_with_metadata_policy(filter, unreadable_paths, false)
+    }
+
+    async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn check_availability(
+        &self,
+        headers: Vec<FileHeader>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+    ) -> Result<Vec<FileHeader>> {
+        self.inner
+            .check_availability(headers, unreadable_paths)
+            .await
+    }
+
+    async fn open_file(
+        &self,
+        header: &FileHeader,
+    ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        self.inner.open_file(header).await
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+impl ChecksummingSource {
+    fn scan_with_metadata_policy(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+        preserve_windows_metadata: bool,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        let (mut header_rx, mut scan) = if preserve_windows_metadata {
+            self.inner.scan(filter, unreadable_paths)
+        } else {
+            self.inner
+                .scan_without_windows_metadata(filter, unreadable_paths)
+        };
         let (tx, rx_hashed) = mpsc::channel::<FileHeader>(64);
         let inner = Arc::clone(&self.inner);
         // codex otp-10b-1 F2: the hashing task must not outlive its
@@ -586,31 +769,23 @@ impl TransferSource for ChecksummingSource {
         scan.add_auxiliary(task);
         (rx_hashed, scan)
     }
+}
 
-    async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
-        self.inner.prepare_payload(payload).await
-    }
-
-    async fn check_availability(
-        &self,
-        headers: Vec<FileHeader>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
-    ) -> Result<Vec<FileHeader>> {
-        self.inner
-            .check_availability(headers, unreadable_paths)
-            .await
-    }
-
-    async fn open_file(
-        &self,
-        header: &FileHeader,
-    ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
-        self.inner.open_file(header).await
-    }
-
-    fn root(&self) -> &Path {
-        self.inner.root()
-    }
+fn strip_windows_metadata_from_scan(
+    mut header_rx: mpsc::Receiver<FileHeader>,
+    mut scan: SourceScan,
+) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+    let (tx, rx_stripped) = mpsc::channel::<FileHeader>(64);
+    let task = tokio::spawn(async move {
+        while let Some(mut header) = header_rx.recv().await {
+            header.windows_metadata = None;
+            if tx.send(header).await.is_err() {
+                break;
+            }
+        }
+    });
+    scan.add_auxiliary(task);
+    (rx_stripped, scan)
 }
 
 /// Blake3 of one header's content via the source's `open_file`.
@@ -722,6 +897,25 @@ mod filtered_source_tests {
         let unreadable = unreadable.lock().unwrap();
         assert_eq!(unreadable.len(), 1);
         assert!(unreadable[0].contains("bad.bin (Windows metadata:"));
+    }
+
+    #[test]
+    fn explicit_lossy_fs_scan_does_not_inspect_windows_metadata() {
+        let unreadable: Arc<Mutex<Vec<String>>> = Arc::default();
+        let header = file_header_with_windows_metadata_policy(
+            "file.bin".into(),
+            7,
+            11,
+            0,
+            Path::new("file.bin"),
+            &unreadable,
+            false,
+            |_| panic!("lossy source scan must not enumerate or hash named streams"),
+        )
+        .expect("the primary file still enters the manifest");
+        assert_eq!(header.relative_path, "file.bin");
+        assert!(header.windows_metadata.is_none());
+        assert!(unreadable.lock().unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -890,6 +1084,40 @@ mod filtered_source_tests {
             out.push(h.relative_path);
         }
         out
+    }
+
+    #[tokio::test]
+    async fn explicit_lossy_source_strips_windows_metadata_before_manifest() {
+        let mut metadata_header = header("metadata.bin", 10);
+        metadata_header.windows_metadata = Some(crate::generated::WindowsFileMetadata {
+            file_attributes: 0x20,
+            named_streams: vec![crate::generated::WindowsNamedStream {
+                name: "tag".into(),
+                size: 3,
+                checksum: blake3::hash(b"tag").as_bytes().to_vec(),
+                content: Vec::new(),
+            }],
+        });
+        let inner: Arc<dyn TransferSource> = Arc::new(StubSource::new(vec![
+            metadata_header,
+            header("plain.bin", 5),
+        ]));
+        let source = WindowsMetadataDroppingSource::new(inner);
+        let (mut rx, mut scan) = source.scan(None, Arc::new(Mutex::new(Vec::new())));
+
+        let mut emitted = Vec::new();
+        while let Some(header) = rx.recv().await {
+            emitted.push(header);
+        }
+        assert_eq!(scan.finish().await.expect("scan completes"), 2);
+        assert_eq!(emitted.len(), 2);
+        assert_eq!(emitted[0].relative_path, "metadata.bin");
+        assert!(
+            emitted
+                .iter()
+                .all(|header| header.windows_metadata.is_none()),
+            "the lossy policy must remove metadata from every emitted header"
+        );
     }
 
     #[tokio::test]

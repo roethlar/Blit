@@ -270,3 +270,32 @@ fn local_move_rejects_size_only_flag() {
         "src/file.txt must survive — move --size-only rejected before any work"
     );
 }
+
+#[test]
+fn windows_metadata_downgrade_warns_and_copies_primary_bytes() {
+    let tmp = tempdir().expect("tempdir");
+    let src = tmp.path().join("source.bin");
+    let dst = tmp.path().join("destination.bin");
+    fs::write(&src, b"primary bytes").unwrap();
+
+    let mut cmd = Command::new(cli_bin());
+    cmd.arg("copy")
+        .arg("--drop-windows-metadata")
+        .arg(&src)
+        .arg(&dst);
+    let output = run_with_timeout(cmd, Duration::from_secs(15));
+    assert!(
+        output.status.success(),
+        "explicit metadata downgrade must copy the primary file; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "warning: --drop-windows-metadata permanently discards Windows file attributes and named data streams"
+        ),
+        "the lossy choice must be warned on stderr; got:\n{stderr}"
+    );
+    assert_eq!(fs::read(dst).unwrap(), b"primary bytes");
+}

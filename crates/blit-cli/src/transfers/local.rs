@@ -210,6 +210,7 @@ fn build_local_options(
         perf_history: ctx.perf_history_enabled,
         checksum: args.checksum,
         ignore_existing: args.ignore_existing,
+        drop_windows_metadata: args.drop_windows_metadata,
         compare_mode,
         delete_scope,
         resume: args.resume,

@@ -89,6 +89,7 @@ fn delegated_pull_options(
         resume: args.resume,
         block_size: 0,
         require_complete_scan: move_verb,
+        drop_windows_metadata: args.drop_windows_metadata,
     }
 }
 
@@ -320,6 +321,7 @@ mod delegated_options_tests {
             force_grpc: false,
             detach: false,
             resume: false,
+            drop_windows_metadata: false,
             retry: 0,
             wait: 5,
             null: false,

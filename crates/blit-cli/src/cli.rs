@@ -265,6 +265,12 @@ pub struct TransferArgs {
     /// Resume interrupted transfers using block-level comparison
     #[arg(long, help_heading = "Reliability")]
     pub resume: bool,
+    /// Discard Windows file attributes and named data streams.
+    ///
+    /// This is a lossy cross-platform escape hatch. Without it, Blit refuses
+    /// to copy Windows metadata to a destination that cannot preserve it.
+    #[arg(long, help_heading = "Reliability")]
+    pub drop_windows_metadata: bool,
     /// Retry the transfer up to N times on a transient failure (network
     /// drop, stall timeout). 0 (default) disables retries. Because
     /// transfers are resumable, each retry continues rather than
@@ -636,6 +642,22 @@ mod tests {
         };
         assert_eq!(args.retry, 3);
         assert_eq!(args.wait, 10);
+    }
+
+    #[test]
+    fn windows_metadata_downgrade_is_explicit_and_defaults_strict() {
+        let cli = Cli::try_parse_from(["blit", "copy", "src", "dst"]).expect("parse defaults");
+        let Commands::Copy(args) = cli.command else {
+            panic!("expected Copy");
+        };
+        assert!(!args.drop_windows_metadata);
+
+        let cli = Cli::try_parse_from(["blit", "copy", "--drop-windows-metadata", "src", "dst"])
+            .expect("parse explicit downgrade");
+        let Commands::Copy(args) = cli.command else {
+            panic!("expected Copy");
+        };
+        assert!(args.drop_windows_metadata);
     }
 
     #[test]

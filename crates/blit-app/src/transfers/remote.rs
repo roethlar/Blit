@@ -91,6 +91,9 @@ pub struct PushExecution {
     pub force_grpc: bool,
     pub trace_data_plane: bool,
     pub require_complete_scan: bool,
+    /// Explicitly discard Windows attributes and named data streams at the
+    /// source before manifest emission.
+    pub drop_windows_metadata: bool,
     /// otp-10a: negotiate the resume block phase (`--resume`) — changed
     /// destination partials are patched block-wise instead of
     /// re-transferred whole. `resume_block_size` in bytes; 0 lets the
@@ -165,6 +168,7 @@ pub async fn run_remote_push(
         compare_mode: execution.compare_mode,
         ignore_existing: execution.ignore_existing,
         require_complete_scan: execution.require_complete_scan,
+        drop_windows_metadata: execution.drop_windows_metadata,
         // `--force-grpc`: the session's in-stream byte carrier is the
         // gRPC-fallback lane (otp-8).
         in_stream_bytes: execution.force_grpc,
@@ -217,6 +221,9 @@ pub struct PullExecution {
     /// refuses a partial source scan (`ScanIncomplete` at
     /// ManifestComplete) BEFORE the caller deletes the remote source.
     pub require_complete_scan: bool,
+    /// Explicitly discard Windows attributes and named data streams at the
+    /// source before manifest emission.
+    pub drop_windows_metadata: bool,
     pub resume: bool,
     pub resume_block_size: u32,
     /// See [`PushExecution::compare_mode`] — the same mapping serves
@@ -266,6 +273,7 @@ pub async fn run_remote_pull(
         compare_mode: execution.compare_mode,
         ignore_existing: execution.ignore_existing,
         require_complete_scan: execution.require_complete_scan,
+        drop_windows_metadata: execution.drop_windows_metadata,
         // `--force-grpc`: the session's in-stream byte carrier is the
         // gRPC-fallback lane (otp-8).
         in_stream_bytes: execution.force_grpc,

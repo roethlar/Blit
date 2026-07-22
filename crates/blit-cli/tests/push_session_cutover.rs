@@ -49,6 +49,7 @@ fn push_execution(src: &Path, port: u16) -> PushExecution {
         force_grpc: false,
         trace_data_plane: false,
         require_complete_scan: false,
+        drop_windows_metadata: false,
         resume: false,
         resume_block_size: 0,
         compare_mode: ComparisonMode::SizeMtime,

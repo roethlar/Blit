@@ -150,6 +150,9 @@ pub struct LocalMirrorOptions {
     /// comparison mode. Orthogonal to `checksum`; matches the wire
     /// `ignore_existing` for full route parity.
     pub ignore_existing: bool,
+    /// Explicitly discard Windows attributes and named data streams at the
+    /// SOURCE. False preserves strictly.
+    pub drop_windows_metadata: bool,
     pub checksum: bool,
     /// R58-F7: comparison policy — `--size-only` / `--ignore-times` /
     /// `--force` honored on local copy/mirror the same way the remote
@@ -181,6 +184,7 @@ impl Default for LocalMirrorOptions {
             verbose: false,
             perf_history: true,
             ignore_existing: false,
+            drop_windows_metadata: false,
             checksum: false,
             compare_mode: LocalCompareMode::default(),
             delete_scope: LocalMirrorDeleteScope::default(),
@@ -441,25 +445,15 @@ impl TransferSource for DestSubtreeExcludedSource {
         filter: Option<FileFilter>,
         unreadable_paths: Arc<StdMutex<Vec<String>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-        let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
-        let (tx, rx) = mpsc::channel(64);
-        let exact = self.exclude_rel.clone();
-        let prefix = format!("{}/", self.exclude_rel);
-        let handle = tokio::spawn(async move {
-            let mut forwarded = 0u64;
-            while let Some(header) = inner_rx.recv().await {
-                if header.relative_path == exact || header.relative_path.starts_with(&prefix) {
-                    continue;
-                }
-                forwarded += 1;
-                if tx.send(header).await.is_err() {
-                    break;
-                }
-            }
-            Ok(forwarded)
-        });
-        scan.replace_primary(handle);
-        (rx, scan)
+        self.scan_with_metadata_policy(filter, unreadable_paths, true)
+    }
+
+    fn scan_without_windows_metadata(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable_paths: Arc<StdMutex<Vec<String>>>,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        self.scan_with_metadata_policy(filter, unreadable_paths, false)
     }
 
     async fn prepare_payload(
@@ -488,6 +482,40 @@ impl TransferSource for DestSubtreeExcludedSource {
 
     fn root(&self) -> &Path {
         self.inner.root()
+    }
+}
+
+impl DestSubtreeExcludedSource {
+    fn scan_with_metadata_policy(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        preserve_windows_metadata: bool,
+    ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        let (mut inner_rx, mut scan) = if preserve_windows_metadata {
+            self.inner.scan(filter, unreadable_paths)
+        } else {
+            self.inner
+                .scan_without_windows_metadata(filter, unreadable_paths)
+        };
+        let (tx, rx) = mpsc::channel(64);
+        let exact = self.exclude_rel.clone();
+        let prefix = format!("{}/", self.exclude_rel);
+        let handle = tokio::spawn(async move {
+            let mut forwarded = 0u64;
+            while let Some(header) = inner_rx.recv().await {
+                if header.relative_path == exact || header.relative_path.starts_with(&prefix) {
+                    continue;
+                }
+                forwarded += 1;
+                if tx.send(header).await.is_err() {
+                    break;
+                }
+            }
+            Ok(forwarded)
+        });
+        scan.replace_primary(handle);
+        (rx, scan)
     }
 }
 
@@ -538,6 +566,7 @@ pub async fn run_local_session(
         initiator_role: TransferRole::Source as i32,
         compare_mode: compare_mode as i32,
         ignore_existing: options.ignore_existing,
+        drop_windows_metadata: options.drop_windows_metadata,
         // The local carrier moves no bytes on any lane; in-stream keeps
         // the responder from binding a TCP data plane.
         in_stream_bytes: true,

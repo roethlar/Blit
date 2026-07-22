@@ -1,4 +1,4 @@
-//! Contract-v4 Windows file attributes and named `$DATA` streams.
+//! Contract-v5 Windows file attributes and named `$DATA` streams.
 //!
 //! The protobuf shapes are platform-neutral so every carrier can validate a
 //! peer without trusting Windows path syntax. Filesystem enumeration and apply
@@ -37,6 +37,29 @@ pub fn validate_payload(metadata: Option<&WindowsFileMetadata>) -> Result<()> {
         validate_common(metadata, true)?;
     }
     Ok(())
+}
+
+/// Validate metadata and require that this destination platform can preserve
+/// it. The destination diff calls this before emitting any Need or resume hash
+/// grant, so strict cross-platform refusal precedes every possible write.
+pub fn validate_destination_support(metadata: Option<&WindowsFileMetadata>) -> Result<()> {
+    validate_manifest(metadata)?;
+    if metadata.is_some() {
+        validate_destination_support_impl()?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_destination_support_impl() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn validate_destination_support_impl() -> Result<()> {
+    bail!(
+        "this destination cannot preserve Windows file attributes and named data streams; rerun with --drop-windows-metadata to discard them explicitly"
+    )
 }
 
 fn validate_common(metadata: &WindowsFileMetadata, payload: bool) -> Result<()> {
@@ -232,10 +255,10 @@ fn read_payload(path: &Path) -> Result<Option<WindowsFileMetadata>> {
 }
 
 pub fn destination_matches(path: &Path, expected: Option<&WindowsFileMetadata>) -> Result<bool> {
+    validate_destination_support(expected)?;
     let Some(expected) = expected else {
         return Ok(true);
     };
-    validate_manifest(Some(expected))?;
     destination_matches_impl(path, expected)
 }
 
