@@ -304,6 +304,11 @@ pub struct SourceInstruments {
     /// sleeps or scheduler assumptions.
     #[cfg(test)]
     pub(crate) dial_terminal_test_gate: Option<Arc<DialTerminalTestGate>>,
+    /// Pauses an injected tuner after it claims a resize epoch but before it
+    /// hands the proposal to the session driver. This makes the otherwise
+    /// microscopic cancellation handoff deterministic in terminal tests.
+    #[cfg(test)]
+    pub(crate) dial_proposal_test_gate: Option<Arc<DialTerminalTestGate>>,
 }
 
 pub struct DestinationSessionConfig {
@@ -2006,6 +2011,7 @@ async fn source_send_half(
                 small_file_probe.as_ref(),
             )
             .await?;
+            refuse_orphaned_terminal_resize(dp, &resize)?;
         }
 
         // Close the data plane BEFORE SourceDone so the destination's receive
@@ -2600,6 +2606,42 @@ fn stop_resize_intake(data_plane: &data_plane::SourceDataPlane, resize: &mut Sou
             data_plane.refuse_unsent_resize(proposal);
         }
     }
+}
+
+/// Reconcile the one cancellation gap between the tuner claiming an epoch
+/// and handing its proposal to the session driver. At this terminal point the
+/// tuner is stopped, its proposal queue is drained, and every wire-owned
+/// request has settled, so a dial-only pending epoch has no peer-visible
+/// effect and must be refused at the unchanged membership.
+fn refuse_orphaned_terminal_resize(
+    data_plane: &data_plane::SourceDataPlane,
+    resize: &SourceResizeState,
+) -> Result<()> {
+    if resize.pending.is_some() {
+        return Err(eyre::Report::new(SessionFault::internal(
+            "terminal resize reconciliation ran with a wire request still pending",
+        )));
+    }
+    if !data_plane.dial().resize_pending() {
+        return Ok(());
+    }
+    let epoch = data_plane
+        .dial()
+        .resize_epoch()
+        .checked_add(1)
+        .ok_or_else(|| {
+            eyre::Report::new(SessionFault::internal(
+                "orphaned data-plane resize epoch space exhausted",
+            ))
+        })?;
+    let live = data_plane.dial().live_streams();
+    data_plane.dial().resize_settled(epoch, live, false);
+    if data_plane.dial().resize_pending() {
+        return Err(eyre::Report::new(SessionFault::internal(
+            "orphaned data-plane resize did not settle",
+        )));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6582,7 +6624,11 @@ mod tests {
         .unwrap_or_else(|_| panic!("timed out waiting for {endpoint_role:?}/{name}"));
     }
 
-    async fn run_unsent_terminal_resize(initiator_role: TransferRole, blocked_ratio: f64) {
+    async fn run_unsent_terminal_resize(
+        initiator_role: TransferRole,
+        blocked_ratio: f64,
+        pause_before_handoff: bool,
+    ) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let src_root = tmp.path().join("src");
         let dst_root = tmp.path().join("dst");
@@ -6618,6 +6664,7 @@ mod tests {
             captured_events.lock().unwrap().push(event);
         });
         let gate = DialTerminalTestGate::new();
+        let proposal_gate = pause_before_handoff.then(DialTerminalTestGate::new);
         let (sample_tx, sample_rx) = mpsc::unbounded_channel();
         let source_cfg = SourceSessionConfig {
             hello: HelloConfig::default(),
@@ -6628,6 +6675,7 @@ mod tests {
                 session_phase_trace: phase_trace.clone(),
                 dial_test_samples: Some(Arc::new(StdMutex::new(Some(sample_rx)))),
                 dial_terminal_test_gate: Some(Arc::clone(&gate)),
+                dial_proposal_test_gate: proposal_gate.clone(),
                 ..Default::default()
             },
         };
@@ -6676,6 +6724,9 @@ mod tests {
             })
             .expect("test tuner remains alive");
         wait_for_captured_phase(&events, SessionPhaseRole::Source, "dial_pending").await;
+        if let Some(proposal_gate) = &proposal_gate {
+            proposal_gate.wait_until_entered().await;
+        }
         gate.release();
 
         let (source_result, destination_result) =
@@ -6709,8 +6760,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn need_complete_refuses_ready_unsent_add_and_remove_in_both_layouts() {
         for role in [TransferRole::Source, TransferRole::Destination] {
-            run_unsent_terminal_resize(role, 0.0).await;
-            run_unsent_terminal_resize(role, 1.0).await;
+            run_unsent_terminal_resize(role, 0.0, false).await;
+            run_unsent_terminal_resize(role, 1.0, false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn terminal_shutdown_refuses_resize_claimed_before_driver_handoff() {
+        for role in [TransferRole::Source, TransferRole::Destination] {
+            run_unsent_terminal_resize(role, 0.0, true).await;
         }
     }
 

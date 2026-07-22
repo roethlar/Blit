@@ -188,6 +188,8 @@ pub async fn run_push_session(
             dial_test_samples: None,
             #[cfg(test)]
             dial_terminal_test_gate: None,
+            #[cfg(test)]
+            dial_proposal_test_gate: None,
         },
     };
     let summary = run_source(cfg, transport, source).await?;

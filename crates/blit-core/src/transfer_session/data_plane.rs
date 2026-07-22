@@ -1083,6 +1083,7 @@ fn start_source_tuner(
             .take()
             .ok_or_else(|| dp_fault("dial test sample source already consumed"))?;
         let dial = Arc::clone(dial);
+        let proposal_gate = _instruments.dial_proposal_test_gate.clone();
         let handle = tokio::spawn(async move {
             while let Some(sample) = samples.recv().await {
                 // The injected values replace only the clock/kernel read. The
@@ -1123,6 +1124,9 @@ fn start_source_tuner(
                 };
                 let proposal = decision.and_then(|decision| decision.proposal);
                 if let Some(proposal) = proposal {
+                    if let Some(gate) = &proposal_gate {
+                        gate.hold().await;
+                    }
                     if resize_tx.send(proposal).is_err() {
                         dial.resize_settled(proposal.epoch, dial.live_streams(), false);
                     } else {
