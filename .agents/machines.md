@@ -33,6 +33,14 @@ every Linux target in play).
 
 ## Network / MTU (rig-critical — read before touching MTU)
 
+- **Direct Mac-to-Mac Thunderbolt pair (observed 2026-07-22):** Nagatha
+  (`Mac16,5`, 48 GiB) and Q (`Mac16,10`, 16 GiB) negotiate 40 Gb/s. Their
+  `Thunderbolt Bridge` services use persistent isolated addresses
+  `172.31.254.1/30` and `172.31.254.2/30`, respectively, with no router or DNS;
+  both are `bridge0`, MTU 1500. Do not return to automatic `169.254/16` while
+  the other link-local interfaces are active: route selection was ambiguous
+  before the isolated subnet. Certified ceiling/results:
+  `docs/bench/thunderbolt-macmac-2026-07-22/README.md`.
 - **THE macOS PING TRAP (cost ~1h on 2026-07-13; do not repeat).**
   macOS caps **raw sockets** at 8192 bytes via `net.inet.raw.maxdgram`,
   and `ping` uses a raw socket. So DF pings above ~8164 payload FAIL

@@ -382,3 +382,21 @@ Format:
   such as P2, every unresolved release-scope question in STATE/readiness, and
   the Draft gate in `RELEASE_COMPLETION.md`. It preserves the ban on
   unapproved data-moving hardware tests and all outward-git approval gates.
+
+## D-2026-07-22-4 — Run one conservative Thunderbolt ceiling probe before publication
+- Decision: Move the Mac-to-Mac direct Thunderbolt probe ahead of publication
+  as a narrow exception to D-2026-07-22-1. SSD writes are approved only
+  conservatively; certify the physical link and routing first, measure the
+  bidirectional RAM/network ceiling, then compare exact-candidate Blit against
+  unencrypted rsync once on the same byte direction and medium. Owner,
+  2026-07-22: **"would like to do the thunderbolt test first to probe the
+  ceiling vs rsync, ssd writes approved but stay conservative"**, followed by
+  **"go"** for the isolated Thunderbolt configuration and zero-disk test.
+- Why: a direct 40 Gb/s path can expose engine headroom hidden by the 10 GbE
+  rigs, while a RAM destination and APFS-cloned source fixture avoid another
+  large write cycle. The completed probe is recorded in
+  `docs/bench/thunderbolt-macmac-2026-07-22/README.md`.
+- Supersedes: D-2026-07-22-1 only for this completed, explicitly approved
+  probe's pre-publication ordering. It does not turn optional tuning into a
+  release gate, approve a repeated or formal matrix, weaken the large-write
+  approval rule, authorize code changes, or authorize publication.

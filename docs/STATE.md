@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (0.1.1 candidate validated; publication owner-gated)
+Last updated: 2026-07-22 (0.1.1 candidate validated; Thunderbolt probe complete)
 
 - **RELEASE IDENTITY IS NOW 0.1.1:** the existing `v0.1.0` tag remains at its
   shipped 2026-05-31 commit. The current candidate uses one workspace-owned
@@ -11,9 +11,9 @@ Last updated: 2026-07-22 (0.1.1 candidate validated; publication owner-gated)
   Gate and CI run `29953569652`: strict Check, Linux, ARM macOS, Windows, and
   all three packaged smoke jobs. The final audit found no open canonical review
   row or release question. Artifact hashes and scope live only in
-  `docs/RELEASE_READINESS.md`. Next action is the separate owner gate for exact
-  tag/publication refs; no publication or hardware transfer is part of this
-  record.
+  `docs/RELEASE_READINESS.md`. D-2026-07-22-4 subsequently authorized one
+  conservative Thunderbolt probe before publication; it changed no code and
+  does not change the validated candidate or authorize tag/publication refs.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -42,6 +42,13 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
+- **MAC-TO-MAC THUNDERBOLT PROBE COMPLETE (D-2026-07-22-4):** the direct
+  40 Gb/s link sustained 37.7–37.9 Gb/s TCP with zero retransmissions. Exact
+  candidate `d1f1152d` moved the verified 8 GiB RAM-destination fixture in
+  2.40 s (28.6 Gb/s), versus Apple openrsync in 18.99 s (3.62 Gb/s): Blit was
+  7.9x faster and reached 75.7% of the wire ceiling. No payload hit either
+  SSD. Evidence and limits:
+  `docs/bench/thunderbolt-macmac-2026-07-22/README.md`.
 - **RELEASE COMPLETION ACTIVE (D-2026-07-22-3):** ldt-1..3 are accepted;
   ldt-4 is closed as evidence, not as a tuning win. The complete first horizon
   session is valid after corrected reanalysis; its repeat was unnecessary.
@@ -129,11 +136,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    inside its `…/blit-temp/` folder — nothing written outside it, ever;
    no daemon runs on zoey without a fresh go.
 7. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
-8. **POST-RELEASE ONLY: Mac↔Mac Thunderbolt Bridge ceiling/control experiment.**
-   The detailed scope and prerequisites live in `TODO.md` under “Deferred
-   design calls.” Draft and approve its own plan before implementation or rig
-   work. D-2026-07-22-1 removes it from the release queue; its purpose remains
-   a same-OS control and higher-bandwidth controller ceiling after release.
+8. **`[x]` Mac↔Mac Thunderbolt Bridge ceiling probe (D-2026-07-22-4).** The
+   owner explicitly moved one conservative probe before publication. Link,
+   route, bidirectional iperf, exact-candidate Blit, unencrypted rsync,
+   byte-for-byte integrity, and cleanup are recorded in
+   `docs/bench/thunderbolt-macmac-2026-07-22/README.md`. Any tuning code or
+   formal/repeated matrix still needs its own approved plan.
 
 ## Authoritative docs right now
 
