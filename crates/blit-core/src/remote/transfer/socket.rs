@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use eyre::Context as _;
 use socket2::{SockRef, TcpKeepalive};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// Bounded wait for a data-plane accept (w1-4: one shared pair — this
@@ -160,7 +160,26 @@ async fn dial_data_plane_with_timeouts(
         }
     };
     configure_data_socket(&stream, tcp_buffer_size).context("setting TCP_NODELAY")?;
-    match tokio::time::timeout(token_timeout, stream.write_all(handshake)).await {
+    write_handshake_with_timeout(&mut stream, handshake, addr, token_timeout).await?;
+    Ok(stream)
+}
+
+/// Write the data-plane handshake under the production timeout policy.
+///
+/// Keeping the timeout around a generic async writer lets the guard use a
+/// bounded in-memory pipe whose capacity is known, instead of guessing how
+/// much a particular operating system will buffer on loopback. Production
+/// still calls this exact helper with its configured [`TcpStream`].
+async fn write_handshake_with_timeout<W>(
+    writer: &mut W,
+    handshake: &[u8],
+    addr: &str,
+    token_timeout: Duration,
+) -> eyre::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    match tokio::time::timeout(token_timeout, writer.write_all(handshake)).await {
         Ok(written) => {
             written.with_context(|| format!("writing data-plane handshake token to {addr}"))?
         }
@@ -175,7 +194,7 @@ async fn dial_data_plane_with_timeouts(
             )));
         }
     }
-    Ok(stream)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -293,36 +312,26 @@ mod tests {
         assert_eq!(&buf, b"tok-123");
     }
 
-    /// A stalled handshake (peer accepted but never reads, socket
-    /// buffers full) fails within the token bound — with
+    /// A stalled handshake (peer holds the reader open but never reads)
+    /// fails within the token bound — with
     /// `io::ErrorKind::TimedOut` in the chain so the retry classifier
-    /// treats it as transient. This is the deterministic pin of the
-    /// bounded-failure SHAPE (a real black hole can't be fabricated
-    /// portably; the stalled write exercises the same timeout arm).
+    /// treats it as transient. The one-byte in-memory capacity makes
+    /// the two-byte `write_all` block deterministically on every OS;
+    /// production uses this exact timeout helper with its TCP stream.
     #[tokio::test]
     async fn dial_token_write_stall_times_out_bounded_and_retryable() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr").to_string();
-
-        // Handshake far larger than any default socket-buffer pair, so
-        // write_all must block on a peer that never reads. The accepted
-        // socket is held (not read) for the duration of the dial.
-        let big_handshake = vec![0xA5u8; 64 * 1024 * 1024];
+        let (mut writer, _held_reader) = tokio::io::duplex(1);
         let start = std::time::Instant::now();
-        let (dialed, accepted) = tokio::join!(
-            dial_data_plane_with_timeouts(
-                &addr,
-                &big_handshake,
-                None,
-                Duration::from_secs(5),
-                Duration::from_millis(200),
-            ),
-            listener.accept(),
-        );
-        let _held_open = accepted.expect("accept");
-        let err = dialed.expect_err("stalled handshake must time out");
+        let err = write_handshake_with_timeout(
+            &mut writer,
+            &[0xA5, 0x5A],
+            "deterministic-test-writer",
+            Duration::from_millis(50),
+        )
+        .await
+        .expect_err("stalled handshake must time out");
         assert!(
-            start.elapsed() < Duration::from_secs(5),
+            start.elapsed() < Duration::from_secs(2),
             "failure must arrive within the bound, not the OS timeout"
         );
         assert!(

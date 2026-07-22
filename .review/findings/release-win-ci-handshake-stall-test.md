@@ -3,9 +3,10 @@
 **Severity**: MEDIUM — the latest published Windows CI job is red and release
 artifact jobs are skipped, while the failure demonstrates a false test premise
 rather than the intended production timeout behavior.
-**Status**: Open
+**Status**: Fixed locally — deterministic guard and mutation proof pass;
+hosted Windows confirmation awaits the next owner-approved publication
 **Branch**: `master`
-**Commit**: Pending
+**Commit**: This rel-1 implementation commit
 
 ## Evidence
 
@@ -29,10 +30,18 @@ test jobs, no release artifacts are produced.
 
 ## What
 
-Replace the operating-system buffer-size assumption with a deterministic
-blocked-write setup that exercises the same token-write timeout and preserves
-the retryable `TimedOut` assertions on every supported platform.
+The production token-write timeout now lives in a generic async-writer helper.
+Production passes its configured `TcpStream`; the guard passes a two-byte
+handshake into a one-byte Tokio in-memory pipe while holding the reader open.
+The second byte therefore blocks by construction on every OS, with no kernel
+socket-buffer assumption and no 64 MiB allocation.
+
+The guard still asserts bounded completion, an `io::ErrorKind::TimedOut` in the
+error chain, and retry classification. Mutation proof replaced the timeout arm
+with success: the focused test failed at `expect_err`; restoring the arm made it
+green.
 
 ## Known gaps
 
-No fix is implemented. The exact local head has not run on hosted Windows.
+The exact local fix has not run on hosted Windows because publication remains
+owner-gated. The full release candidate still requires green hosted Windows CI.

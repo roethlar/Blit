@@ -67,6 +67,9 @@ or hardware experiment.
       the focused guard red.
 - [ ] Hosted CI is green on the exact release candidate for formatting, strict
       clippy, Linux tests, macOS tests, and Windows tests.
+- [ ] CLI integration fixtures positively prove their temporary daemon is ready
+      before returning; repeated parallel workspace runs have no connection-
+      refused startup failures.
 - [ ] The ignored Windows directory-tree move hang has a root-cause fix; the
       integration test is re-enabled and passes repeatedly on Windows.
 - [ ] Windows file attributes and ADS are preserved across local and remote
@@ -144,6 +147,9 @@ performance ratios are measured or graded.
 1. **rel-1 — deterministic Windows CI timeout guard.** Replace the loopback
    buffer-size assumption, prove the old Windows-success behavior red, run full
    local gates, and obtain a green Windows-focused run before broader work.
+1b. **rel-1b — CLI integration daemon readiness.** Own the temporary daemon
+    lifecycle, replace startup timing with bounded positive readiness, and
+    mutation-prove that clients cannot run before the listener is ready.
 2. **rel-2 — P2 small-file regression.** Reconcile retained timings against the
    exact old/new executed paths and existing observers, name the responsible
    code delta, fix it, and add a direct mutation-sensitive guard. Do not run a

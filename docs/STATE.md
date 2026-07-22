@@ -11,9 +11,10 @@ Last updated: 2026-07-22 (complete-release activation, D-2026-07-22-3)
     fresh `q`↔`netwatch-01` retry.
 
 - **NEXT ACTION — RELEASE BLOCKERS ONLY:** use `docs/RELEASE_READINESS.md`.
-  Fix the deterministic Windows CI guard first, then move through every known
-  broken behavior under the active completion plan. No performance rig or
-  endpoint work is in the pre-release queue.
+  rel-1's deterministic Windows CI guard is fixed locally; hosted confirmation
+  awaits an owner-approved publication. rel-1b next fixes the newly reproduced
+  CLI daemon-startup race; then continue with P2 from retained/code evidence.
+  No performance rig or endpoint work is in the queue.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -166,9 +167,14 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Blocked / waiting (owner declarations and explicitly dated external blockers; checkpoints are owner-only)
 
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
-- **Windows CI is red as of published GitHub head `dcf9245`:** run
-  `29584631185` failed the nondeterministic handshake-stall test and skipped
-  release artifacts. Finding: `release-win-ci-handshake-stall-test`.
+- **Published Windows CI is red as of GitHub head `dcf9245`:** rel-1 replaces
+  the nondeterministic 64 MiB socket-buffer premise with a two-byte in-memory
+  blocked writer and has local red/green proof. Hosted Windows confirmation
+  awaits owner-approved publication. Finding: `release-win-ci-handshake-stall-test`.
+- **CLI integration startup is flaky:** rel-1's full workspace run failed two
+  `blit_utils` commands with connection refused; both isolated reruns passed.
+  rel-1b owns positive daemon readiness. Finding:
+  `release-cli-daemon-test-startup-race`.
 - **Release blockers:** Windows directory-tree move hangs, attributes/ADS loss,
   incomplete progress, P2, and artifact/install proof remain unresolved. See
   `docs/RELEASE_READINESS.md`.

@@ -26,22 +26,27 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **Windows CI is red.** Published run `29584631185` failed only
-   `dial_token_write_stall_times_out_bounded_and_retryable`: Windows buffered
-   the 64 MiB loopback handshake, so the test's forced-stall premise was false.
-   Release artifact jobs were skipped. The exact local head has not run on
-   hosted Windows. Finding: `release-win-ci-handshake-stall-test`.
-2. **Windows directory-tree move can hang.** The integration test is ignored on
+1. **Hosted Windows confirmation is pending.** Published run `29584631185`
+   failed because Windows buffered the guard's 64 MiB loopback handshake.
+   rel-1 now exercises the same production timeout through a deterministic
+   two-byte/one-byte in-memory blocked writer with local mutation proof. The
+   exact fix has not run on hosted Windows because publication is owner-gated.
+   Finding: `release-win-ci-handshake-stall-test`.
+2. **CLI integration daemon startup is flaky.** A rel-1 workspace run failed
+   two `blit_utils` tests with connection refused; both isolated reruns passed.
+   The fixture needs bounded positive readiness, not a timing assumption.
+   Finding: `release-cli-daemon-test-startup-race`.
+3. **Windows directory-tree move can hang.** The integration test is ignored on
    Windows after repeated hangs; the product behavior remains unresolved.
-3. **Windows attributes and alternate data streams are silently lost on the
+4. **Windows attributes and alternate data streams are silently lost on the
    tar path.** Full fidelity is required for this release.
-4. **Progress reporting is incomplete.** Delegated progress can be silent and
+5. **Progress reporting is incomplete.** Delegated progress can be silent and
    served-session byte/file totals can remain zero through daemon, RPC, CLI,
    and TUI consumers.
-5. **P2 is unresolved.** Unified TCP small-file push is 10–20% slower than the
+6. **P2 is unresolved.** Unified TCP small-file push is 10–20% slower than the
    old path in retained same-session evidence. It requires code attribution and
    a direct software guard, not another hardware matrix.
-6. **Current release artifacts are unproved.** The exact local head is not on
+7. **Current release artifacts are unproved.** The exact local head is not on
    GitHub, the latest published release-build jobs were skipped, and install /
    startup smoke checks for the produced CLI and daemon artifacts are not
    recorded.
