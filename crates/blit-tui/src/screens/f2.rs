@@ -71,6 +71,7 @@
 //! Subscribe stream rather than the per-reply path.
 
 use crate::state::{ActiveRow, RecentRow, TransfersState};
+use blit_app::display::{format_bps, format_bytes};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -441,7 +442,7 @@ fn active_row_to_table_row(row: &ActiveRow, now_unix_ms: u64) -> Row<'static> {
         Cell::from(if row.throughput_bps == 0 {
             "-".to_string()
         } else {
-            format!("{}/s", format_bytes(row.throughput_bps))
+            format_bps(row.throughput_bps)
         }),
         Cell::from(format_age_from_unix_ms(now_unix_ms, row.start_unix_ms)),
     ])
@@ -516,14 +517,8 @@ fn recent_row_to_table_row(row: &RecentRow) -> Row<'static> {
 /// d-20: average throughput for a completed F2 recent
 /// row. Hidden ("-") when the rate would be misleading
 /// (failed transfer, zero bytes, sub-millisecond
-/// duration). Same shape as d-10's `format_rate` on F4
-/// transfer Done — the operator gets a consistent
-/// "X MiB/s" reading on both surfaces.
-///
-/// d-25: tier list now matches F4 — B/s, KiB/s, MiB/s,
-/// GiB/s, TiB/s. Pre-d-25 the F2 ceiling was GiB/s, so
-/// a 2 TiB/s transfer rendered as "2048.0 GiB/s" while
-/// F4 rendered the same number as "2.0 TiB/s".
+/// duration). The shared presenter formatter keeps the
+/// units and precision consistent with live rows and F4.
 fn format_recent_throughput(row: &RecentRow) -> String {
     if !row.ok {
         return "-".to_string();
@@ -531,25 +526,15 @@ fn format_recent_throughput(row: &RecentRow) -> String {
     if row.bytes == 0 || row.duration_ms == 0 {
         return "-".to_string();
     }
-    let bytes_per_sec = ((row.bytes as u128).saturating_mul(1000) / row.duration_ms as u128) as f64;
-    if bytes_per_sec < 1.0 {
+    let bytes_per_sec = (row.bytes as u128)
+        .saturating_mul(1000)
+        .checked_div(row.duration_ms as u128)
+        .unwrap_or(0)
+        .min(u64::MAX as u128) as u64;
+    if bytes_per_sec == 0 {
         return "-".to_string();
     }
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    const TIB: f64 = GIB * 1024.0;
-    if bytes_per_sec >= TIB {
-        format!("{:.1} TiB/s", bytes_per_sec / TIB)
-    } else if bytes_per_sec >= GIB {
-        format!("{:.1} GiB/s", bytes_per_sec / GIB)
-    } else if bytes_per_sec >= MIB {
-        format!("{:.1} MiB/s", bytes_per_sec / MIB)
-    } else if bytes_per_sec >= KIB {
-        format!("{:.1} KiB/s", bytes_per_sec / KIB)
-    } else {
-        format!("{} B/s", bytes_per_sec.round() as u64)
-    }
+    format_bps(bytes_per_sec)
 }
 
 fn format_files_progress(completed: u64, total: u64) -> String {
@@ -570,27 +555,6 @@ fn module_path(module: &str, path: &str) -> String {
         (true, false) => path.to_string(),
         (false, true) => module.to_string(),
         (false, false) => format!("{module}/{path}"),
-    }
-}
-
-/// d-25: aligned with F4's `format_bytes` — tier list is
-/// B, KiB, MiB, GiB, TiB. This formatter feeds three F2
-/// surfaces: recent-row byte total, active-row
-/// bytes-progress column (via `format_bytes_progress`),
-/// and active-row throughput column (via the
-/// `{}/s` wrapper on `row.throughput_bps`). All three
-/// inherit the TiB tier in one shot.
-fn format_bytes(n: u64) -> String {
-    if n >= 1 << 40 {
-        format!("{:.2} TiB", n as f64 / (1u64 << 40) as f64)
-    } else if n >= 1 << 30 {
-        format!("{:.2} GiB", n as f64 / (1u64 << 30) as f64)
-    } else if n >= 1 << 20 {
-        format!("{:.2} MiB", n as f64 / (1u64 << 20) as f64)
-    } else if n >= 1 << 10 {
-        format!("{:.2} KiB", n as f64 / (1u64 << 10) as f64)
-    } else {
-        format!("{n} B")
     }
 }
 
@@ -827,16 +791,16 @@ mod tests {
 
     #[test]
     fn recent_throughput_kibibytes() {
-        // 1 KiB in 1s = 1.0 KiB/s.
+        // 1 KiB in 1s = 1.00 KiB/s.
         let r = recent_row(1024, 1000, true);
-        assert_eq!(format_recent_throughput(&r), "1.0 KiB/s");
+        assert_eq!(format_recent_throughput(&r), "1.00 KiB/s");
     }
 
     #[test]
     fn recent_throughput_mebibytes() {
         // 100 MiB in 10s = 10 MiB/s.
         let r = recent_row(100 * 1024 * 1024, 10_000, true);
-        assert_eq!(format_recent_throughput(&r), "10.0 MiB/s");
+        assert_eq!(format_recent_throughput(&r), "10.00 MiB/s");
     }
 
     #[test]
@@ -854,7 +818,7 @@ mod tests {
         // 2 TiB in 1s = 2 TiB/s. Hypothetical for unit
         // coverage; mirrors F4's same-shape test.
         let r = recent_row(2u64 << 40, 1000, true);
-        assert_eq!(format_recent_throughput(&r), "2.0 TiB/s");
+        assert_eq!(format_recent_throughput(&r), "2.00 TiB/s");
     }
 
     /// d-25: just under 1 TiB/s stays on the GiB/s tier;
@@ -863,12 +827,12 @@ mod tests {
     fn recent_throughput_tib_boundary_promotes_unit() {
         // Exactly 1 TiB/s
         let r = recent_row(1u64 << 40, 1000, true);
-        assert_eq!(format_recent_throughput(&r), "1.0 TiB/s");
+        assert_eq!(format_recent_throughput(&r), "1.00 TiB/s");
         // 1024 GiB/s = 1 TiB/s sits on the boundary —
         // already covered by the previous case. Test the
         // last "GiB/s tier" case: 1023 GiB/s.
         let r = recent_row(1023u64 << 30, 1000, true);
-        assert_eq!(format_recent_throughput(&r), "1023.0 GiB/s");
+        assert_eq!(format_recent_throughput(&r), "1023.00 GiB/s");
     }
 
     #[test]

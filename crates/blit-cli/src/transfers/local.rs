@@ -1,6 +1,6 @@
 use crate::cli::TransferArgs;
 use crate::context::AppContext;
-use blit_app::display::format_bytes;
+use blit_app::display::{format_bps, format_bytes};
 use blit_core::transfer_session::{LocalMirrorOptions, LocalMirrorSummary, TransferOutcome};
 use eyre::{bail, Result};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -307,8 +307,8 @@ fn print_summary(
         // worker unless the hidden debug limiter widened it — print
         // the EFFECTIVE count, not the options default (num_cpus).
         println!(
-            "• Throughput: {}/s | Workers used: {}",
-            format_bytes(throughput as u64),
+            "• Throughput: {} | Workers used: {}",
+            format_bps(throughput as u64),
             if debug_mode { workers } else { 1 }
         );
     }

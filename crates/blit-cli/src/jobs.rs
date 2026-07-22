@@ -480,11 +480,11 @@ fn emit_human_progress(transfer_id: &str, p: &blit_core::generated::TransferProg
 fn human_progress_line(transfer_id: &str, p: &blit_core::generated::TransferProgress) -> String {
     let bps = p.throughput_bps;
     format!(
-        "[progress] {} bytes={} files={} throughput={}/s",
+        "[progress] {} bytes={} files={} throughput={}",
         transfer_id,
         format_progress_pair(p.bytes_completed, p.bytes_total),
         format_progress_pair(p.files_completed, p.files_total),
-        format_bps(bps),
+        blit_app::display::format_bps(bps),
     )
 }
 
@@ -505,18 +505,6 @@ fn emit_human_complete(c: &blit_core::generated::TransferComplete) {
         if c.tcp_fallback_used { "gRPC" } else { "TCP" },
         format_ms(c.duration_ms),
     );
-}
-
-fn format_bps(bps: u64) -> String {
-    if bps >= 1_000_000_000 {
-        format!("{:.2} GB", bps as f64 / 1_000_000_000.0)
-    } else if bps >= 1_000_000 {
-        format!("{:.2} MB", bps as f64 / 1_000_000.0)
-    } else if bps >= 1_000 {
-        format!("{:.2} KB", bps as f64 / 1_000.0)
-    } else {
-        format!("{} B", bps)
-    }
 }
 
 fn print_watch_progress_json(p: &blit_core::generated::TransferProgress) {
@@ -901,7 +889,7 @@ mod tests {
                     throughput_bps: 1024,
                 },
             ),
-            "[progress] t1 bytes=4096/8192 files=2/4 throughput=1.02 KB/s"
+            "[progress] t1 bytes=4096/8192 files=2/4 throughput=1.00 KiB/s"
         );
     }
 

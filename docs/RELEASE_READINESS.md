@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** wire metadata/path helpers consolidated, 2026-07-22
+**As of:** presenter formatting consolidated, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -96,6 +96,10 @@ performance ceilings and hardware tuning remain post-release work.
   app listings, and TUI local rows share the same signed-mtime and POSIX-path
   rules; Unix transfer permissions share the same owner as well. The old
   per-crate converters and manual slash joins are deleted.
+- Byte counts and throughput now use one binary-unit presenter across jobs
+  watch, local-transfer summaries, and all five TUI surfaces. The decimal jobs
+  formatter and private screen ladders are deleted; reverting the shared
+  binary divisor makes its boundary guard fail.
 
 ## Release blockers
 

@@ -13,8 +13,8 @@
 /// (1024-based) units. Returns `"0 B"` for zero.
 pub fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    if bytes == 0 {
-        return "0 B".to_string();
+    if bytes < 1024 {
+        return format!("{bytes} B");
     }
     let mut size = bytes as f64;
     let mut unit = 0;
@@ -25,6 +25,12 @@ pub fn format_bytes(bytes: u64) -> String {
     format!("{size:.2} {}", UNITS[unit])
 }
 
+/// Render bytes per second with binary units and the same precision as
+/// [`format_bytes`]. The suffix is included in the returned string.
+pub fn format_bps(bytes_per_second: u64) -> String {
+    format!("{}/s", format_bytes(bytes_per_second))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -32,6 +38,7 @@ mod tests {
     #[test]
     fn zero_is_b() {
         assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
     }
 
     #[test]
@@ -46,5 +53,15 @@ mod tests {
         // 8 PiB still renders in TiB — the formatter doesn't
         // know about PiB / EiB.
         assert!(format_bytes(8 * 1024u64.pow(5)).ends_with("TiB"));
+    }
+
+    #[test]
+    fn bps_uses_binary_boundaries_and_includes_suffix() {
+        assert_eq!(format_bps(0), "0 B/s");
+        assert_eq!(format_bps(1023), "1023 B/s");
+        assert_eq!(format_bps(1024), "1.00 KiB/s");
+        assert_eq!(format_bps(1 << 20), "1.00 MiB/s");
+        assert_eq!(format_bps(1 << 30), "1.00 GiB/s");
+        assert_eq!(format_bps(1 << 40), "1.00 TiB/s");
     }
 }

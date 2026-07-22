@@ -5,6 +5,7 @@
 //! transfer execution land in later slices.
 
 use crate::dual_pane::{BrowserEntry, DualPaneState, PaneFetchStatus, PaneId, PaneState};
+use blit_app::display::format_bytes;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -206,18 +207,7 @@ fn render_actions(frame: &mut Frame, area: Rect, state: &DualPaneState, accent: 
 }
 
 fn format_size(size: Option<u64>) -> String {
-    let Some(size) = size else {
-        return String::new();
-    };
-    if size < 1024 {
-        format!("{size} B")
-    } else if size < 1024 * 1024 {
-        format!("{:.1} KiB", size as f64 / 1024.0)
-    } else if size < 1024 * 1024 * 1024 {
-        format!("{:.1} MiB", size as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1} GiB", size as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+    size.map(format_bytes).unwrap_or_default()
 }
 
 fn format_mtime(mtime_seconds: Option<i64>) -> String {
@@ -256,7 +246,7 @@ mod tests {
         assert!(text.contains("Right: Local /dst"));
         assert!(text.contains("[Copy -> Right]"));
         assert!(text.contains("photos"));
-        assert!(text.contains("4.0 KiB"));
+        assert!(text.contains("4.00 KiB"));
     }
 
     #[test]

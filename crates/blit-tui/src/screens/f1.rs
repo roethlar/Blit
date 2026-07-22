@@ -26,6 +26,7 @@
 //! └──────────────────────────────────────────────────┘
 
 use crate::daemons::{DaemonDetail, DaemonRow, DaemonsState, DiscoveryStatus};
+use blit_app::display::{format_bps, format_bytes};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -135,7 +136,7 @@ fn render_push(frame: &mut Frame, area: Rect, status: &PushStatusDisplay) {
             // settles (suppressed for the first ~1s).
             let frag = if *bytes > 0 || *files > 0 {
                 let rate = if *bytes_per_sec > 0 {
-                    format!(" · {}/s", format_bytes(*bytes_per_sec))
+                    format!(" · {}", format_bps(*bytes_per_sec))
                 } else {
                     String::new()
                 };
@@ -608,23 +609,6 @@ fn local_detail_lines(
 /// Format an uptime in seconds as e.g. "3d 4h 12m" or
 /// "1m 32s" — readable at glance, doesn't try to be
 /// millisecond-exact.
-/// d-54: byte formatter for the per-module capacity line. Same
-/// IEC tiers as the F2/F4 formatters (d-25); duplicated per the
-/// existing per-screen convention.
-fn format_bytes(n: u64) -> String {
-    if n >= 1 << 40 {
-        format!("{:.2} TiB", n as f64 / (1u64 << 40) as f64)
-    } else if n >= 1 << 30 {
-        format!("{:.2} GiB", n as f64 / (1u64 << 30) as f64)
-    } else if n >= 1 << 20 {
-        format!("{:.2} MiB", n as f64 / (1u64 << 20) as f64)
-    } else if n >= 1 << 10 {
-        format!("{:.2} KiB", n as f64 / (1u64 << 10) as f64)
-    } else {
-        format!("{n} B")
-    }
-}
-
 fn format_uptime(secs: u64) -> String {
     let days = secs / 86_400;
     let hours = (secs % 86_400) / 3600;

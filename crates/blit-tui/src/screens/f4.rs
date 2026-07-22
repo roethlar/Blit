@@ -31,6 +31,7 @@ use crate::diagnostics::{DiagnosticsState, DiagnosticsStatus};
 use crate::profile::{ProfileFetchStatus, ProfileState};
 use crate::transfer::{TransferState, TransferStatus};
 use crate::verify::{VerifyFocus, VerifyState, VerifyStatus};
+use blit_app::display::{format_bps, format_bytes};
 use blit_app::profile::{PredictorReport, ProfileReport, ProfileSummary};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -106,10 +107,8 @@ mod elapsed_tests {
 /// a misleading "0 B/s" for a 1-file copy that completed
 /// instantly.
 ///
-/// Units climb in factors of 1024 (binary): B/s, KiB/s,
-/// MiB/s, GiB/s, TiB/s. The Done banner sits next to the
-/// byte total which already uses raw bytes; using the
-/// binary scale keeps the two consistent.
+/// The shared presenter formatter owns binary units and
+/// precision so the Done banner matches every other rate.
 fn format_rate(bytes: u64, duration: Duration) -> Option<String> {
     if bytes == 0 {
         return None;
@@ -118,26 +117,15 @@ fn format_rate(bytes: u64, duration: Duration) -> Option<String> {
     if ms == 0 {
         return None;
     }
-    let bytes_per_sec = ((bytes as u128).saturating_mul(1000) / ms) as f64;
-    if bytes_per_sec < 1.0 {
+    let bytes_per_sec = (bytes as u128)
+        .saturating_mul(1000)
+        .checked_div(ms)
+        .unwrap_or(0)
+        .min(u64::MAX as u128) as u64;
+    if bytes_per_sec == 0 {
         return None;
     }
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    const TIB: f64 = GIB * 1024.0;
-    let label = if bytes_per_sec >= TIB {
-        format!("{:.1} TiB/s", bytes_per_sec / TIB)
-    } else if bytes_per_sec >= GIB {
-        format!("{:.1} GiB/s", bytes_per_sec / GIB)
-    } else if bytes_per_sec >= MIB {
-        format!("{:.1} MiB/s", bytes_per_sec / MIB)
-    } else if bytes_per_sec >= KIB {
-        format!("{:.1} KiB/s", bytes_per_sec / KIB)
-    } else {
-        format!("{} B/s", bytes_per_sec.round() as u64)
-    };
-    Some(label)
+    Some(format_bps(bytes_per_sec))
 }
 
 #[cfg(test)]
@@ -165,16 +153,16 @@ mod rate_tests {
 
     #[test]
     fn format_rate_kibibytes_per_second() {
-        // 1 KiB in 1s = 1.0 KiB/s.
+        // 1 KiB in 1s = 1.00 KiB/s.
         let s = format_rate(1024, Duration::from_secs(1)).expect("rate");
-        assert_eq!(s, "1.0 KiB/s");
+        assert_eq!(s, "1.00 KiB/s");
     }
 
     #[test]
     fn format_rate_mebibytes_per_second() {
         // 100 MiB in 10s = 10 MiB/s.
         let s = format_rate(100 * 1024 * 1024, Duration::from_secs(10)).expect("rate");
-        assert_eq!(s, "10.0 MiB/s");
+        assert_eq!(s, "10.00 MiB/s");
     }
 
     #[test]
@@ -182,7 +170,7 @@ mod rate_tests {
         // 2 GiB in 1s = 2 GiB/s. (Hypothetical for unit
         // testing; F4 doesn't normally see these speeds.)
         let s = format_rate(2 * 1024 * 1024 * 1024, Duration::from_secs(1)).expect("rate");
-        assert_eq!(s, "2.0 GiB/s");
+        assert_eq!(s, "2.00 GiB/s");
     }
 }
 
@@ -694,20 +682,6 @@ fn span_days(records: &[blit_core::perf_history::PerformanceRecord]) -> u64 {
     }
     let span_ms = max - min;
     (span_ms / (24 * 60 * 60 * 1000)) as u64
-}
-
-fn format_bytes(n: u64) -> String {
-    if n >= 1 << 40 {
-        format!("{:.2} TiB", n as f64 / (1u64 << 40) as f64)
-    } else if n >= 1 << 30 {
-        format!("{:.2} GiB", n as f64 / (1u64 << 30) as f64)
-    } else if n >= 1 << 20 {
-        format!("{:.2} MiB", n as f64 / (1u64 << 20) as f64)
-    } else if n >= 1 << 10 {
-        format!("{:.2} KiB", n as f64 / (1u64 << 10) as f64)
-    } else {
-        format!("{n} B")
-    }
 }
 
 fn format_since(now: Instant, then: Instant) -> String {

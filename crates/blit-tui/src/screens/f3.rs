@@ -62,6 +62,7 @@
 //!   empty module/directory).
 
 use crate::browse::{BrowseFetchStatus, BrowseRow, BrowseRowKind, BrowseState, BrowseView};
+use blit_app::display::{format_bps, format_bytes};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -431,7 +432,7 @@ fn render_footer(
             // settles (suppressed for the first ~1s).
             let frag = if *bytes > 0 || *files > 0 {
                 let rate = if *bytes_per_sec > 0 {
-                    format!(" · {}/s", format_bytes(*bytes_per_sec))
+                    format!(" · {}", format_bps(*bytes_per_sec))
                 } else {
                     String::new()
                 };
@@ -580,18 +581,6 @@ fn kind_label(kind: &BrowseRowKind) -> &'static str {
         BrowseRowKind::Module { read_only: false } => "module",
         BrowseRowKind::Directory => "dir",
         BrowseRowKind::File => "file",
-    }
-}
-
-fn format_bytes(n: u64) -> String {
-    if n >= 1 << 30 {
-        format!("{:.2} GiB", n as f64 / (1u64 << 30) as f64)
-    } else if n >= 1 << 20 {
-        format!("{:.2} MiB", n as f64 / (1u64 << 20) as f64)
-    } else if n >= 1 << 10 {
-        format!("{:.2} KiB", n as f64 / (1u64 << 10) as f64)
-    } else {
-        format!("{n} B")
     }
 }
 

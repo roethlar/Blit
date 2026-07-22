@@ -189,7 +189,9 @@ performance ratios are measured or graded.
    closed as stale: its unsafe handler was deleted, and both current session
    roles validate and consume filters through the shared chokepoint. `w7-3` is
    closed: request paths, signed filesystem mtime, and transfer permissions now
-   have one blit-core conversion owner with the per-crate twins deleted.
+   have one blit-core conversion owner with the per-crate twins deleted. `w7-5`
+   is closed: CLI and TUI byte/rate output use one binary-unit presenter, and
+   the decimal and screen-local formatting ladders are deleted.
 7. **rel-7 — reproducible artifacts.** Build the supported target matrix from
    one exact commit, preserve build identity, generate checksums, and fail if a
    required artifact is absent.
