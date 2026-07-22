@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — the f12 byte drain lasted up to 20.7 seconds, but its
 five payloads queued in milliseconds and stopped the tuner before any sample,
 so ldt-4 still has no live membership transition.
-**Status**: Fixed in candidate; tactical review pending.
+**Status**: Fixed in candidate; admitted review guard fix pending re-review.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: pending
 
@@ -113,10 +113,17 @@ None.
 
 ## Known gaps
 
-Claude Opus 4.8/max tactical review, exact additive staging, and one fresh
-quiet four-arm run remain. The fixed matrix's two performance findings remain
-separate.
+Claude Opus 4.8/max tactical re-review of the admitted analyzer-shape guard
+fix, exact additive staging, and one fresh quiet four-arm run remain. The fixed
+matrix's two performance findings remain separate.
 
 ## Reviewer comments
 
-Pending.
+Claude Opus 4.8/max reviewed exact
+`75211b3a4725f8ae1952fa9f517cd593943e8b37..af13fdb444c94c29f9260fa710918c338d95dd5e`
+in session `ec904253-4a0d-4eb9-b080-071b77fda80c`, reported
+`guard_confirmed: true`, and found the committed implementation correct and
+fail-closed. One Low guard gap was admitted as `ldt-4-live-f13-r1-f1`: the
+analyzer's real 40-file/40-GiB tuple was hidden by synthetic fixture patching.
+The separate fix is mutation-proved; tactical re-review remains. Record:
+`.review/results/ldt-4-live-f13-r1.opus-verdict.md`.

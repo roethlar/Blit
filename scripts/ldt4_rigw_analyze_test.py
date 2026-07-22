@@ -788,6 +788,12 @@ class SyntheticSession:
 
 
 class DialPolicyReplayTests(unittest.TestCase):
+    def test_horizon_fixture_shape_matches_registered_admission_horizon(self) -> None:
+        self.assertEqual(
+            analyzer.EXPECTED_FIXTURES["horizon"],
+            (40, 42_949_672_960),
+        )
+
     def test_replay_covers_hysteresis_cooldown_sustain_and_bound(self) -> None:
         maxed = {
             "chunk_bytes": analyzer.CEILING_CHUNK_BYTES,

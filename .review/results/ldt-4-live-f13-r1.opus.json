@@ -1,0 +1,54 @@
+{
+  "record_type": "tactical_code_review",
+  "reviewer": {
+    "provider": "Anthropic",
+    "model": "claude-opus-4-8",
+    "cli": "Claude Code 2.1.217",
+    "reasoning_effort": "max"
+  },
+  "review_contract": {
+    "finding_ids": [
+      "ldt-4-live-f13"
+    ],
+    "base_sha": "75211b3a4725f8ae1952fa9f517cd593943e8b37",
+    "reviewed_sha": "af13fdb444c94c29f9260fa710918c338d95dd5e",
+    "worktree": "/private/tmp/blit-opus-ldt4-f13-af13fdb",
+    "formal_openreview": false
+  },
+  "session": {
+    "id": "ec904253-4a0d-4eb9-b080-071b77fda80c",
+    "terminal_reason": "completed",
+    "authoritative_completion": "terminal schema-constrained structured_output after repository inspection, focused verification, two production mutations, exact restoration, and identity checks"
+  },
+  "structured_output": {
+    "verdict": "findings",
+    "guard_confirmed": true,
+    "base_sha": "75211b3a4725f8ae1952fa9f517cd593943e8b37",
+    "reviewed_sha": "af13fdb444c94c29f9260fa710918c338d95dd5e",
+    "summary": "The candidate is correct and fail-closed, preserves fixed and sustained modes, and has no committed correctness defect. One Low guard gap allows the analyzer's registered horizon shape to drift independently of the harness without a pre-rig test failure.",
+    "guard_proof": "The reviewer relaxed the production payload-volume UUID pin. Exactly test_horizon_payload_volume_identity_is_exact turned red because the substituted UUID was accepted. Exact restoration returned 86 analyzer tests, Bash syntax, and the four-arm self-test green with a clean detached worktree.",
+    "findings": [
+      {
+        "id": "ldt-4-live-f13-r1-f1",
+        "severity": "LOW",
+        "title": "Pin the analyzer's registered 40-file/40-GiB horizon shape outside the synthetic fixture patch",
+        "predicted_failure": "An analyzer-only drift to 25 files passes all existing local gates, then voids the live session after staging and transfer because runs.csv no longer matches the analyzer's registered shape."
+      }
+    ]
+  },
+  "checks": {
+    "bash_syntax": "pass",
+    "bash_3_2_selftest": "PASS (4 arms, no SSH)",
+    "analyzer_tests": "86 passed",
+    "retained_f12_compatibility": "all six analysis outputs byte-identical",
+    "predecessor_digest": "17348aaa261b936e04c104553d7b5c4bbcf008968306a29c4dea922535110eef matches the retained FINAL-SHA256.csv",
+    "coverage_probe": "changing analyzer EXPECTED_FIXTURES['horizon'] from 40/40 GiB to 25/25 GiB left all 86 tests and the harness self-test green",
+    "independent_postcheck": "clean detached af13fdb444c94c29f9260fa710918c338d95dd5e with reviewed file hashes restored exactly",
+    "sha256": {
+      "scripts/bench_ldt4_rigw.sh": "6b33590a2024d456e38c6ff7a9b955fefa9670454f0a45f3c863b582e85d4ab6",
+      "scripts/ldt4_rigw_analyze.py": "11f83a49eadd823c7eaa89280333d6a4e47892505402b6bc06e9b715b6032a8c",
+      "scripts/ldt4_rigw_analyze_test.py": "9ac41a0a01eb7da90148de44902bfd136462e47eb75888db787e046e40e62487"
+    }
+  },
+  "policy_note": "This is tactical advisory code review, not a formal openreview acceptance verdict."
+}

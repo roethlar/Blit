@@ -433,8 +433,11 @@ advise but cannot accept the slice (D-2026-07-16-4).
    internal evidence and quietness gates. The candidate is Bash-3.2
    self-tested, mutation-proved at the exact 40-file horizon, covered by 86
    analyzer tests, backward-compatible byte-for-byte with retained f12
-   analysis, and full-repository green. Opus 4.8/max tactical review, exact
-   staging, and live execution remain.
+   analysis, and full-repository green. Opus 4.8/max found the candidate
+   correct and fail-closed, admitting one Low guard gap because synthetic tests
+   hid the analyzer's production horizon tuple. The literal tuple pin is
+   mutation-proved with 87 tests; tactical re-review, exact staging, and live
+   execution remain.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.
