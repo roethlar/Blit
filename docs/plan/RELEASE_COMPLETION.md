@@ -214,9 +214,10 @@ performance ratios are measured or graded.
    64 MiB loopback premise was replaced by the deterministic two-byte/one-byte
    blocked writer, with the production timeout helper and retry semantics under
    guard. Hosted Windows execution remains rel-7 evidence, not unfinished code.
-7. **rel-7 — reproducible artifacts.** Build the supported target matrix from
-   one exact commit, preserve build identity, generate checksums, and fail if a
-   required artifact is absent.
+7. **rel-7 — reproducible artifacts `[x]`.** Exact run `29949207219` at
+   `354f38e` passed the complete test matrix, then built and uploaded all three
+   target archives with both binaries, full commit identity, and SHA-256
+   sidecars. Missing or empty required output fails construction.
 8. **rel-8 — bounded install/startup smoke.** In clean temporary environments,
    verify CLI and daemon startup plus small local and remote integrity transfers
    on macOS, Linux, and Windows. Retain logs and exact artifact hashes; no

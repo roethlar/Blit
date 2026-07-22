@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** hosted run `29948702562`; repairs through `fa79f0a`, 2026-07-22
+**As of:** hosted run `29949207219` at `354f38e`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -93,6 +93,11 @@ performance ceilings and hardware tuning remain post-release work.
   file/IO fault. The forced-order guard fails with the old masking behavior;
   the guard, exact end-to-end test, formatting, and strict lint pass after the
   fix. Release-build jobs correctly remained blocked after the failed matrix.
+- Exact run `29949207219` at `354f38e` passed check, Linux, ARM macOS, and
+  Windows, then built and uploaded all three target packages. Linux/macOS are
+  `.tar.gz`; Windows is `.zip`; each contains both executables, release
+  documents, and `BUILD.txt` with the full commit, and each has an uploaded
+  SHA-256 sidecar. Missing binaries or empty output fail the package job.
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
@@ -178,13 +183,12 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **The exact release-candidate suite is pending.** `fa79f0a` fixes the
-   payload-seal fault masking exposed by Linux in run `29948702562`. The next
-   exact head must pass check plus all three OS suites before packaging runs.
-2. **Current release artifacts are unproved.** `5fc6f03` constructs the three
-   required target archives, includes both binaries and the exact full commit,
-   emits SHA-256 sidecars, and fails on missing output. Hosted archive evidence
-   plus install / startup smoke checks for the CLI and daemon are not recorded.
+1. **Install/startup smoke is unproved.** The uploaded archives have not yet
+   been extracted into clean temporary environments and executed for exact
+   version/help, daemon readiness, tiny local/remote integrity, and teardown.
+2. **The final release-candidate head is pending.** The smoke implementation
+   and truthful release notes must land, then the complete check/test/package/
+   smoke matrix must pass at that exact clean commit.
 
 ## Deferred until after release
 
