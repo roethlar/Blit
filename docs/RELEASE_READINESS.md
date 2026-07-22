@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** hosted run `29945332738`; repairs through `833a859`, 2026-07-22
+**As of:** hosted run `29946548540`; repairs through `82e3cb0`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -64,6 +64,14 @@ performance ceilings and hardware tuning remain post-release work.
   closed, but the session replaced the worker cause with that queue symptom.
   `833a859` restores the existing first-error contract; its mutation guard fails
   with the generic symptom and passes when the worker cause is preserved.
+- Hosted run `29946548540` confirmed the prior macOS manifest race no longer
+  occurred. Linux and macOS instead caught that `833a859` retained the worker
+  message but dropped its typed file identity; `2b35c04` preserves both, and the
+  exact daemon end-to-end guard passes locally. Windows exposed the worker cause
+  as a destination-forced TCP close during tar writes in two SOURCE-initiated
+  workloads. `82e3cb0` makes every paired role assertion print both completed
+  endpoint results, so the next hosted failure will retain the destination's
+  reason instead of stopping at the source result.
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
@@ -149,11 +157,11 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **The Windows source-pipeline cause and a clean full hosted suite are
-   pending after `833a859`.** The exact handshake, nested-move, metadata, and
+1. **The Windows destination-close cause and a clean full hosted suite are
+   pending after `82e3cb0`.** The exact handshake, nested-move, metadata, and
    destination-initiated 10,000-file guards are proven on hosted Windows. The
-   next exact run must expose the source-initiated worker cause; that defect
-   must be fixed, then Linux/macOS/Windows must pass together before release.
+   next exact run must retain both endpoint failures for the SOURCE-initiated
+   close; that defect must be fixed, then all three OS suites must pass together.
 2. **Current release artifacts are unproved.** Release-build jobs were skipped
    after the failed test matrix, and packaged archives, checksums, plus install /
    startup smoke checks for the CLI and daemon are not recorded.

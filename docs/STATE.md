@@ -170,11 +170,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Blocked / waiting (owner declarations and explicitly dated external blockers; checkpoints are owner-only)
 
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
-- **Hosted run `29945332738` at `025d61e`:** docs, check, and Linux passed.
-  macOS exposed a manifest-reply scheduling race fixed by `d08741b`; Windows
-  exposed a separate source-pipeline failure whose hidden worker cause is now
-  preserved by `833a859`. The exact causal rerun remains pending.
-- **Release blockers as of `833a859`:** fix the revealed Windows worker cause,
+- **Hosted run `29946548540` at `b8ad928`:** docs/check passed; the prior macOS
+  manifest race did not recur. Linux/macOS caught a structured-path regression
+  from worker-error preservation, fixed by `2b35c04`. Windows identified the
+  remaining symptom as a destination-forced TCP close; `82e3cb0` now preserves
+  both completed endpoint results so its cause cannot be hidden again.
+- **Release blockers as of `82e3cb0`:** fix the Windows destination-close cause,
   pass one full hosted suite, then prove artifacts/install/startup. See
   `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
