@@ -79,7 +79,7 @@ or hardware experiment.
       daemon rows report accurate bytes, and total/completed file and byte
       denominators are nonzero and correct through GetState, TransferProgress,
       TransferComplete, CLI, and TUI consumers.
-- [ ] P2's measured unified TCP small-file regression has a named code cause
+- [x] P2's measured unified TCP small-file regression has a named code cause
       and fix, with deterministic, mutation-sensitive software proof and
       retained-evidence reanalysis. It is not deferred as "performance," and
       it does not require a new data-moving hardware matrix.
@@ -150,7 +150,7 @@ performance ratios are measured or graded.
 1b. **rel-1b — CLI integration daemon readiness.** Own the temporary daemon
     lifecycle, replace startup timing with bounded positive readiness, and
     mutation-prove that clients cannot run before the listener is ready.
-2. **rel-2 — P2 small-file regression.** Reconcile retained timings against the
+2. **rel-2 — P2 small-file regression `[x]`.** Reconcile retained timings against the
    exact old/new executed paths and existing observers, name the responsible
    code delta, fix it, and add a direct mutation-sensitive guard. Do not run a
    physical performance matrix or a large-write test.

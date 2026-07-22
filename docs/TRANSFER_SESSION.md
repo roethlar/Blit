@@ -82,8 +82,9 @@ INITIATOR                                RESPONDER
   |                                                                 |
   |  SOURCE streams:  ManifestEntry* ... ManifestComplete          |
   |  DEST streams:    NeedBatch* ... NeedComplete                  |
-  |  SOURCE streams:  payload (data plane sockets, or in-stream    |
-  |                   frames when the in-stream carrier is chosen) |
+  |  SOURCE TCP data-plane payload may overlap the still-open      |
+  |  manifest after its matching NeedBatch; in-stream payload      |
+  |  starts only after ManifestComplete.                           |
   |  SOURCE resize:   ResizeRequest -> DEST ResizeAck (per epoch)  |
   |                                                                 |
   |  resume exception (RELIABLE): a NeedBatch entry flagged         |
@@ -110,6 +111,18 @@ INITIATOR                                RESPONDER
   has been received AND the destination has finished diffing every
   received manifest entry. Mirror deletions additionally require the
   scan-complete guard, as above.
+- **TCP scan/transfer overlap:** for an ordinary copy that does not require a
+  complete scan, SOURCE may queue a need-authorized TCP payload while later
+  manifest entries are still being enumerated. The data sockets are a separate
+  authenticated lane, and DESTINATION inserts every requested path into its
+  outstanding set before sending the corresponding `NeedBatch`, so the same
+  strict need-list claim still gates every early payload. Mirror and
+  `require_complete_scan` operations retain the stronger pre-write refusal:
+  they do not queue payload until `ManifestComplete{scan_complete=true}` has
+  passed. `NeedComplete`, `SourceDone`, final outstanding-set validation, and
+  mirror deletion ordering are unchanged. This is an ordering correction, not
+  a new frame or a mixed-build compatibility surface; exact build matching is
+  still mandatory.
 - **Flow control is the transport's, deliberately:** manifest, need,
   and in-stream payload frames ride gRPC/HTTP-2 stream flow control;
   each end holds only bounded internal queues (the engine's existing
@@ -230,8 +243,9 @@ push/pull-specific message.
   records complete with `block_complete`. Payload records may begin
   only AFTER the source's `ManifestComplete` — this per-transport
   ordering rule applies identically to both roles and mirrors the
-  design-4-proven fallback ordering, so manifest frames and payload
-  records never interleave. DESTINATION-lane frames (need batches,
+  design-4-proven fallback ordering, so in-stream manifest frames and payload
+  records never interleave. TCP data-plane payload is governed separately by
+  the need-authorized overlap rule above. DESTINATION-lane frames (need batches,
   acks, summary) are unaffected — they travel the other direction.
 - **Local (in-process, otp-11):** both roles run in one process over
   the in-process frame channel — no RPC, no sockets — with the LOCAL

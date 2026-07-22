@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** local release work through rel-1b, 2026-07-22
+**As of:** local release work through rel-2, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -29,6 +29,12 @@ performance ceilings and hardware tuning remain post-release work.
   identity check against the fixture's unique canonical module root. Its guard
   rejects a foreign listener under mutation proof; all 23 `blit_utils` tests
   pass locally.
+- rel-2 reconciled retained P2 evidence to two exact TCP-path deltas: unified
+  payload waited for `ManifestComplete` instead of overlapping scan/diff, and
+  tar receive claimed the need-list mutex once per file instead of once per
+  shard. Both are fixed with mutation-sensitive role/operation-count guards;
+  no hardware transfer was rerun. Finding:
+  `release-p2-tcp-small-file-regression`.
 
 ## Release blockers
 
@@ -45,10 +51,7 @@ performance ceilings and hardware tuning remain post-release work.
 4. **Progress reporting is incomplete.** Delegated progress can be silent and
    served-session byte/file totals can remain zero through daemon, RPC, CLI,
    and TUI consumers.
-5. **P2 is unresolved.** Unified TCP small-file push is 10–20% slower than the
-   old path in retained same-session evidence. It requires code attribution and
-   a direct software guard, not another hardware matrix.
-6. **Current release artifacts are unproved.** The exact local head is not on
+5. **Current release artifacts are unproved.** The exact local head is not on
    GitHub, the latest published release-build jobs were skipped, and install /
    startup smoke checks for the produced CLI and daemon artifacts are not
    recorded.

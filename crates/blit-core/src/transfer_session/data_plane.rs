@@ -1866,6 +1866,59 @@ impl NeedListSink {
         }
     }
 
+    /// Claim one tar shard while holding the outstanding-set mutex once.
+    /// This preserves the single-file claim's ordered failure behavior (an
+    /// invalid later member faults after earlier members were claimed) without
+    /// paying one lock/unlock pair per small file.
+    fn claim_shard(&self, headers: &[FileHeader]) -> Result<()> {
+        let rejected = if let Some(probe) = &self.small_file_probe {
+            let wait_started = probe.start();
+            let mut outstanding = self
+                .outstanding
+                .lock()
+                .expect("outstanding-needs lock poisoned");
+            let wait = wait_started.elapsed();
+            let hold_started = probe.start();
+            let mut rejected = None;
+            let mut removed = 0usize;
+            for header in headers {
+                if outstanding.remove(&header.relative_path) {
+                    removed += 1;
+                } else {
+                    rejected = Some(header.relative_path.clone());
+                    break;
+                }
+            }
+            drop(outstanding);
+            let hold = hold_started.elapsed();
+            probe.note_claim(SmallFileCarrier::Tcp, headers.len(), 1, removed, wait, hold);
+            rejected
+        } else {
+            let mut outstanding = self
+                .outstanding
+                .lock()
+                .expect("outstanding-needs lock poisoned");
+            let mut rejected = None;
+            for header in headers {
+                if !outstanding.remove(&header.relative_path) {
+                    rejected = Some(header.relative_path.clone());
+                    break;
+                }
+            }
+            rejected
+        };
+        match rejected {
+            None => Ok(()),
+            Some(path) => Err(eyre::Report::new(
+                SessionFault::protocol_violation(format!(
+                    "data-plane payload for '{path}' which is not an outstanding need \
+                     (off the need list, or a duplicate delivery)"
+                ))
+                .with_path(path),
+            )),
+        }
+    }
+
     /// codex otp-7a F3, data-plane parity: a resume-flagged grant may
     /// be satisfied ONLY by its block record — a whole-file or tar-shard
     /// delivery for it bypasses the hash choreography this end committed
@@ -1993,9 +2046,7 @@ impl TransferSink for NeedListSink {
                 for header in headers {
                     self.reject_resume_flagged(&header.relative_path)?;
                 }
-                for header in headers {
-                    self.claim(&header.relative_path)?;
-                }
+                self.claim_shard(headers)?;
             }
             // otp-7b: resume block records ride the data plane. A
             // mid-record block validates against its live grant (claimed

@@ -1671,8 +1671,72 @@ async fn source_send_half(
         let unreadable: Arc<StdMutex<Vec<String>>> =
             instruments.unreadable.clone().unwrap_or_default();
         let (mut header_rx, mut scan) = scan_source.scan(None, Arc::clone(&unreadable));
+        // The TCP carrier owns a separate authenticated lane, so an ordinary
+        // copy can restore the old push driver's scan/transfer overlap as soon
+        // as DESTINATION has authorized a batch through NeedBatch. Mirror and
+        // complete-scan operations intentionally retain their pre-write gate:
+        // their refusal/deletion semantics depend on ManifestComplete.
+        let early_tcp_payloads = data_plane.is_some()
+            && !negotiated.open.mirror_enabled
+            && !negotiated.open.require_complete_scan;
+        let mut planner_batch_seq = 0u64;
         let scan_result: Result<u64> = async {
-            while let Some(header) = header_rx.recv().await {
+            loop {
+                // NeedBatch can arrive while enumeration is blocked between
+                // entries. Service the SOURCE controller independently of
+                // scan progress; otherwise the data plane remains idle until
+                // ManifestComplete and small-file TCP loses all overlap.
+                drain_ready_source_events(
+                    &mut events,
+                    &mut pending,
+                    &mut resume,
+                    &mut need_complete,
+                    data_plane.as_ref(),
+                    tx,
+                    &mut resize,
+                    small_file_probe.as_ref(),
+                )
+                .await?;
+                if early_tcp_payloads && !pending.is_empty() {
+                    queue_tcp_payload_batch(
+                        std::mem::take(&mut pending),
+                        &source,
+                        plan_options,
+                        data_plane
+                            .as_ref()
+                            .expect("early TCP payloads require a data plane"),
+                        &mut events,
+                        &mut pending,
+                        &mut resume,
+                        &mut need_complete,
+                        tx,
+                        &mut resize,
+                        phase_trace.as_ref(),
+                        small_file_probe.as_ref(),
+                        &mut planner_batch_seq,
+                    )
+                    .await?;
+                    continue;
+                }
+
+                let next_header = tokio::select! {
+                    biased;
+                    input = wait_for_source_input(
+                        &mut events,
+                        &mut pending,
+                        &mut resume,
+                        &mut need_complete,
+                        data_plane.as_ref(),
+                        tx,
+                        &mut resize,
+                        small_file_probe.as_ref(),
+                    ) => {
+                        input?;
+                        continue;
+                    }
+                    header = header_rx.recv() => header,
+                };
+                let Some(header) = next_header else { break };
                 if let Some(probe) = &small_file_probe {
                     let wait_started = probe.start();
                     let mut sent = sent.lock().expect("sent-manifest lock poisoned");
@@ -1688,20 +1752,6 @@ async fn source_send_half(
                         .insert(header.relative_path.clone(), header.clone());
                 }
                 tx.send(frame(Frame::ManifestEntry(header))).await?;
-                // Faults detected by the receive half abort the stream now, not after
-                // the full scan. A deterministic or unusually early live sample is
-                // serviced through the same SOURCE controller here as during payloads.
-                drain_ready_source_events(
-                    &mut events,
-                    &mut pending,
-                    &mut resume,
-                    &mut need_complete,
-                    data_plane.as_ref(),
-                    tx,
-                    &mut resize,
-                    small_file_probe.as_ref(),
-                )
-                .await?;
             }
             scan.finish().await
         }
@@ -1751,10 +1801,9 @@ async fn source_send_half(
         }
 
         // Payload phase. The byte carrier is either the TCP data plane
-        // (dialed above) or the in-stream record grammar (fallback). Needs
-        // accumulated while a batch was being sent become the next planner
-        // batch (contract §Transport selection); payloads only flow after
-        // ManifestComplete.
+        // (dialed above) or the in-stream record grammar (fallback). Any TCP
+        // needs not already queued during the scan, plus every in-stream need,
+        // are handled here after ManifestComplete.
         // The in-stream carrier reuses one read buffer across records; the
         // data plane owns its own pooled buffers, so skip that allocation.
         let mut read_buf = if data_plane.is_none() {
@@ -1762,7 +1811,6 @@ async fn source_send_half(
         } else {
             Vec::new()
         };
-        let mut planner_batch_seq = 0u64;
         loop {
             drain_ready_source_events(
                 &mut events,
@@ -1779,52 +1827,20 @@ async fn source_send_half(
                 let batch = std::mem::take(&mut pending);
                 match &mut data_plane {
                     Some(dp) => {
-                        let batch_count = batch.len() as u64;
-                        if let Some(trace) = &phase_trace {
-                            trace.event(
-                                "planner_begin",
-                                SessionPhaseFields {
-                                    batch: Some(planner_batch_seq),
-                                    count: Some(batch_count),
-                                    ..Default::default()
-                                },
-                            );
-                        }
-                        let planner_input = batch.len();
-                        let planner_started = small_file_probe.as_ref().map(|probe| probe.start());
-                        let payloads =
-                            diff_planner::plan_push_payloads(batch, source.root(), plan_options)?;
-                        if let (Some(probe), Some(started)) = (&small_file_probe, planner_started) {
-                            let (tar_shards, tar_members) = tar_payload_shape(&payloads);
-                            probe.note_planner(
-                                started.elapsed(),
-                                planner_input,
-                                payloads.len(),
-                                tar_shards,
-                                tar_members,
-                            );
-                        }
-                        if let Some(trace) = &phase_trace {
-                            trace.event(
-                                "planner_end",
-                                SessionPhaseFields {
-                                    batch: Some(planner_batch_seq),
-                                    count: Some(payloads.len() as u64),
-                                    ..Default::default()
-                                },
-                            );
-                        }
-                        planner_batch_seq += 1;
-                        queue_payloads_while_servicing_events(
-                            payloads,
+                        queue_tcp_payload_batch(
+                            batch,
+                            &source,
+                            plan_options,
+                            dp,
                             &mut events,
                             &mut pending,
                             &mut resume,
                             &mut need_complete,
-                            dp,
                             tx,
                             &mut resize,
+                            phase_trace.as_ref(),
                             small_file_probe.as_ref(),
+                            &mut planner_batch_seq,
                         )
                         .await?;
                         // A cancel while earlier batches are actively moving
@@ -2412,6 +2428,74 @@ async fn send_resize_proposal(
         resize.pending = Some(pending);
     }
     Ok(())
+}
+
+/// Plan and admit one need-authorized batch to the TCP data plane. Shared by
+/// the scan-overlap path and the post-manifest tail so batching, probes, phase
+/// traces, and control-lane servicing cannot diverge between them.
+#[allow(clippy::too_many_arguments)]
+async fn queue_tcp_payload_batch(
+    batch: Vec<FileHeader>,
+    source: &Arc<dyn TransferSource>,
+    plan_options: PlanOptions,
+    data_plane: &data_plane::SourceDataPlane,
+    events: &mut mpsc::UnboundedReceiver<SourceEvent>,
+    pending: &mut Vec<FileHeader>,
+    resume: &mut ResumeSendState,
+    need_complete: &mut bool,
+    tx: &mut Box<dyn FrameTx>,
+    resize: &mut SourceResizeState,
+    phase_trace: Option<&BoundSessionPhaseTrace>,
+    small_file_probe: Option<&BoundSmallFileProbe>,
+    planner_batch_seq: &mut u64,
+) -> Result<()> {
+    let batch_count = batch.len() as u64;
+    if let Some(trace) = phase_trace {
+        trace.event(
+            "planner_begin",
+            SessionPhaseFields {
+                batch: Some(*planner_batch_seq),
+                count: Some(batch_count),
+                ..Default::default()
+            },
+        );
+    }
+    let planner_input = batch.len();
+    let planner_started = small_file_probe.map(BoundSmallFileProbe::start);
+    let payloads = diff_planner::plan_push_payloads(batch, source.root(), plan_options)?;
+    if let (Some(probe), Some(started)) = (small_file_probe, planner_started) {
+        let (tar_shards, tar_members) = tar_payload_shape(&payloads);
+        probe.note_planner(
+            started.elapsed(),
+            planner_input,
+            payloads.len(),
+            tar_shards,
+            tar_members,
+        );
+    }
+    if let Some(trace) = phase_trace {
+        trace.event(
+            "planner_end",
+            SessionPhaseFields {
+                batch: Some(*planner_batch_seq),
+                count: Some(payloads.len() as u64),
+                ..Default::default()
+            },
+        );
+    }
+    *planner_batch_seq += 1;
+    queue_payloads_while_servicing_events(
+        payloads,
+        events,
+        pending,
+        resume,
+        need_complete,
+        data_plane,
+        tx,
+        resize,
+        small_file_probe,
+    )
+    .await
 }
 
 /// Feed one planned batch into the shared bounded data-plane queue while

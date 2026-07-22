@@ -1,6 +1,6 @@
 # otp-12 perf findings — investigate + fix before acceptance (design)
 
-**Status**: Active
+**Status**: Historical performance record; P1 and P2 release discrepancies closed
 **Approved**: D-2026-07-13-1 — owner, 2026-07-13, verbatim:
 **"one more round with codex on the plan then just write the code and
 reviewloop slice by slice. that converges faster than plans with no
@@ -35,7 +35,25 @@ The later rig's noisy controls limit millisecond attribution; they do not
 invalidate this direct old-red/new-green code proof. All P1-only investigation,
 rig fallback, counterfactual, and final-rerun requirements below are historical
 and no longer operative. Full reconciliation:
-`docs/bench/p1-evidence-reconciliation-2026-07-22/`. P2 remains open.
+`docs/bench/p1-evidence-reconciliation-2026-07-22/`.
+
+**P2 CLOSED OFFLINE (2026-07-22, D-2026-07-22-3):** retained evidence and
+exact old/current executed paths identify two TCP-specific regressions. Old
+push at `0f922de` queued need-authorized TCP payload during the open manifest;
+the unified source waited independently for the next scan entry and did not
+plan payload until after `ManifestComplete`, eliminating scan/diff/transfer
+overlap. Unified TCP tar receive also acquired the need-list mutex once per
+member, while in-stream claimed once per shard and old served push bypassed
+that decorator. rel-2 restores early TCP queueing for ordinary copies and
+claims each tar shard under one lock. Mirror, complete-scan, and in-stream
+ordering remain gated. Two direct guards cover both initiator roles and the
+claim operation count; disabling either correction turns its guard red. No
+hardware transfer was rerun. The numerical ceiling is therefore unremeasured,
+but the product discrepancy has a concrete fix under the release plan's
+offline acceptance boundary. Full record:
+`.review/findings/release-p2-tcp-small-file-regression.md`. P2-only rig,
+counterfactual, and final-matrix requirements below are retained as historical
+ceiling methodology and are not pre-release gates.
 **Created**: 2026-07-12
 **Parent**: `docs/plan/ONE_TRANSFER_PATH.md` (Active), whose Constraints
 say the quiet part: "Unification that slows the fast direction fails
@@ -455,7 +473,7 @@ never at risk.
   live — so neither framing nor "fixed-count opening" discriminates.
   What survives of H4 is ramp cadence/shard-boundary timing only, and
   it is subordinate to H5.
-- **H5 (P2, prime suspect; added by review 2026-07-12)**: lost
+- **H5 (P2, FIXED 2026-07-22)**: lost
   scan/diff/transfer overlap on the TCP plane — current code withholds
   every TCP payload until `ManifestComplete`
   (`transfer_session/mod.rs`), while old push negotiated and queued
@@ -465,10 +483,13 @@ never at risk.
   parity 1.001, Windows gRPC faster; NOT "gRPC uniformly at parity" —
   review round 3). NOTE: an H5 fix
   reorders session phases and multi-ADD/pipelined epochs conflict with
-  the one-token/one-ADD contract (`TRANSFER_SESSION.md` §Phase
-  ordering), so any H5 fix triggers this plan's Contract
-  stop-and-amend rule BEFORE implementation.
-- **H6 (P2; added by review round 2, 2026-07-12)**: per-member
+  the one-token/one-ADD contract (`TRANSFER_SESSION.md` §Phase ordering).
+  rel-2 amended that contract first, then restored need-authorized TCP
+  queueing during an open manifest. Its deterministic gate holds scan open
+  after one diff chunk and proves a destination payload completes before
+  `ManifestComplete` under both initiator roles; disabling overlap turns it
+  red.
+- **H6 (P2, FIXED 2026-07-22)**: per-member
   need-claim locking on the TCP receive plane — TCP receive
   (`NeedListSink`) takes a separate mutex/hash-set claim per member
   (`NeedListSink::claim`, called per member by its tar-shard
@@ -503,7 +524,10 @@ never at risk.
   the granularity of a local mutex/hash-set claim, not any frame), so it
   does NOT trip the Contract rule. Grade its recovery against `Δ_P2` on
   the uniform scale. If per-member claiming is the cost, batch-claiming
-  recovers it; if not, H6 dies with a number rather than a shrug.
+  recovers it; if not, H6 dies with a number rather than a shrug. rel-2
+  implements that production-safe counterfactual unconditionally: the
+  retained probe guard observes one lock per tar shard (5 for 256 members),
+  and restoring the per-member loop fails at 256 versus 5.
 
 - **H7 (P2; added by review round 4 — the SHARED-controller candidate
   the gRPC caveat predicted)**: HEAD's need/manifest bookkeeping is
@@ -521,6 +545,10 @@ never at risk.
   bookkeeping timings scaled against file count, plus the wall-time
   counterfactual (a task-local/batch-inline path behind a debug flag).
   H7 and H6 are independent and may BOTH contribute.
+  Rel-2 does not remove this shared bookkeeping. It affects both carriers,
+  while the retained gRPC result improved or held parity, and it is not needed
+  to account for the two concrete TCP-only deltas fixed above. Reducing it is
+  post-release ceiling work unless new evidence shows a user-visible defect.
 
 ## Method (the investigation slice — no behavior changes)
 

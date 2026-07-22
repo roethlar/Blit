@@ -1164,6 +1164,194 @@ async fn block_hashes_without_a_held_resume_need_fault_the_source() {
     );
 }
 
+/// Delegates file access to `FsTransferSource` but pauses manifest delivery
+/// after one destination diff chunk. The inner enumerator may continue only
+/// into its bounded channel; `ManifestComplete` cannot be sent until the test
+/// releases this gate.
+struct GatedManifestSource {
+    inner: FsTransferSource,
+    gate_after: usize,
+    gate_reached: Arc<tokio::sync::Semaphore>,
+    gate_release: Arc<tokio::sync::Semaphore>,
+}
+
+#[async_trait::async_trait]
+impl TransferSource for GatedManifestSource {
+    fn scan(
+        &self,
+        filter: Option<blit_core::fs_enum::FileFilter>,
+        unreadable_paths: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
+        let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let gate_after = self.gate_after;
+        let gate_reached = Arc::clone(&self.gate_reached);
+        let gate_release = Arc::clone(&self.gate_release);
+        let forwarder = tokio::spawn(async move {
+            let mut forwarded = 0usize;
+            while let Some(header) = inner_rx.recv().await {
+                if tx.send(header).await.is_err() {
+                    return;
+                }
+                forwarded += 1;
+                if forwarded == gate_after {
+                    gate_reached.add_permits(1);
+                    gate_release
+                        .acquire()
+                        .await
+                        .expect("manifest overlap gate remains open")
+                        .forget();
+                }
+            }
+        });
+        scan.add_auxiliary(forwarder);
+        (rx, scan)
+    }
+
+    async fn prepare_payload(&self, payload: TransferPayload) -> eyre::Result<PreparedPayload> {
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn check_availability(
+        &self,
+        headers: Vec<FileHeader>,
+        unreadable_paths: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> eyre::Result<Vec<FileHeader>> {
+        self.inner
+            .check_availability(headers, unreadable_paths)
+            .await
+    }
+
+    async fn open_file(
+        &self,
+        header: &FileHeader,
+    ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        self.inner.open_file(header).await
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tcp_payload_overlaps_open_manifest_under_either_initiator() {
+    // P2 regression guard: DESTINATION diffs and requests the first 128
+    // entries while SOURCE enumeration is deliberately paused before entry
+    // 129. A completed destination payload while that gate is still held is
+    // direct proof that TCP no longer waits for ManifestComplete. This uses
+    // 129 one-byte files and loopback only; it is a choreography test, not a
+    // storage or throughput run.
+    const DIFF_CHUNK: usize = 128;
+    const FILE_COUNT: usize = DIFF_CHUNK + 1;
+    const OVERLAP_TIMEOUT: Duration = Duration::from_secs(10);
+
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        for i in 0..FILE_COUNT {
+            std::fs::write(src_root.join(format!("f{i:03}.bin")), b"x").unwrap();
+        }
+
+        let open = SessionOpen {
+            initiator_role: initiator_role as i32,
+            compare_mode: ComparisonMode::SizeMtime as i32,
+            in_stream_bytes: false,
+            ..Default::default()
+        };
+        let (source_endpoint, dest_endpoint, source_host, dest_host) = match initiator_role {
+            TransferRole::Source => (
+                SessionEndpoint::initiator(open),
+                SessionEndpoint::Responder,
+                Some("127.0.0.1".into()),
+                None,
+            ),
+            TransferRole::Destination => (
+                SessionEndpoint::Responder,
+                SessionEndpoint::initiator(open),
+                None,
+                Some("127.0.0.1".into()),
+            ),
+            TransferRole::Unspecified => unreachable!(),
+        };
+        let source_cfg = SourceSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: source_endpoint,
+            plan_options: PlanOptions {
+                force_tar: true,
+                small_count_target: Some(DIFF_CHUNK),
+                ..Default::default()
+            },
+            data_plane_host: source_host,
+            instruments: Default::default(),
+        };
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: dest_endpoint,
+            data_plane_host: dest_host,
+            receiver_capacity: None,
+            instruments: DestinationInstruments {
+                progress: Some(RemoteTransferProgress::new(progress_tx)),
+                ..Default::default()
+            },
+            local_apply: None,
+        };
+
+        let gate_reached = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate_release = Arc::new(tokio::sync::Semaphore::new(0));
+        let source: Arc<dyn TransferSource> = Arc::new(GatedManifestSource {
+            inner: FsTransferSource::new(src_root.clone()),
+            gate_after: DIFF_CHUNK,
+            gate_reached: Arc::clone(&gate_reached),
+            gate_release: Arc::clone(&gate_release),
+        });
+        let (source_transport, dest_transport) = in_process_pair();
+        let session = tokio::spawn({
+            let dst_root = dst_root.clone();
+            async move {
+                tokio::join!(
+                    run_source(source_cfg, source_transport, source),
+                    run_destination(dest_cfg, dest_transport, DestinationTarget::Fixed(dst_root)),
+                )
+            }
+        });
+
+        tokio::time::timeout(OVERLAP_TIMEOUT, gate_reached.acquire())
+            .await
+            .expect("manifest reached the deterministic overlap gate")
+            .expect("manifest overlap gate remains open")
+            .forget();
+        let payload_landed_while_manifest_open = tokio::time::timeout(OVERLAP_TIMEOUT, async {
+            while let Some(event) = progress_rx.recv().await {
+                if matches!(event, ProgressEvent::FileComplete { .. }) {
+                    return;
+                }
+            }
+        })
+        .await
+        .is_ok();
+        gate_release.add_permits(1);
+
+        let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, session)
+            .await
+            .expect("overlap session timed out")
+            .expect("overlap session task panicked");
+        assert!(
+            payload_landed_while_manifest_open,
+            "TCP payload waited for ManifestComplete with {initiator_role:?} initiating"
+        );
+        let summary = source_result.expect("source succeeds");
+        let outcome = dest_result.expect("destination succeeds");
+        assert_eq!(summary, outcome.summary);
+        assert_eq!(summary.files_transferred, FILE_COUNT as u64);
+        assert_trees_identical(&src_root, &dst_root);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn many_tiny_files_transfer_with_live_workers_when_source_initiates() {
     // Workload shape no longer selects a worker target. Production telemetry
@@ -1512,14 +1700,19 @@ fn assert_phase_trace_partial_order(events: &[SessionPhaseEvent], initiator: Tra
     let manifest = one_phase_event(events, source, "manifest_complete_sent", None);
     one_phase_event(events, destination, "manifest_complete_received", None);
     let queued = one_phase_event(events, source, "first_payload_queued", None);
+    let first_need_received = one_phase_batch(events, source, "need_batch_received", 0);
     let first_write = events
         .iter()
         .filter(|event| event.endpoint_role == source && event.event == "first_socket_write")
         .min_by_key(|event| event.elapsed_ns)
         .expect("at least one source socket writes payload");
     assert!(manifest_begin.elapsed_ns <= manifest.elapsed_ns);
-    assert!(manifest.elapsed_ns < queued.elapsed_ns);
+    assert!(first_need_received.elapsed_ns <= queued.elapsed_ns);
     assert!(queued.elapsed_ns <= first_write.elapsed_ns);
+    assert!(
+        phase_position(events, source, "need_batch_received", None, Some(0),)
+            < phase_position(events, source, "first_payload_queued", None, None,)
+    );
     assert!(
         phase_position(events, source, "manifest_complete_send_begin", None, None,)
             < phase_position(
@@ -1983,12 +2176,8 @@ fn assert_small_file_probe_inventory(
     assert_eq!(claims.members, FILE_COUNT);
     assert_eq!(claims.successful_removes, FILE_COUNT);
     assert_eq!(
-        claims.lock_acquisitions,
-        if carrier == SmallFileCarrier::Tcp {
-            FILE_COUNT
-        } else {
-            shard_count
-        }
+        claims.lock_acquisitions, shard_count,
+        "both carriers claim each tar shard under one need-list lock"
     );
     assert_eq!(claims.lock_wait.samples, claims.lock_acquisitions);
     assert_eq!(claims.lock_hold.samples, claims.lock_acquisitions);
@@ -3207,7 +3396,7 @@ fn hello_frame() -> TransferFrame {
 }
 
 #[tokio::test]
-async fn payload_record_before_manifest_complete_is_protocol_violation() {
+async fn in_stream_payload_before_manifest_complete_is_protocol_violation() {
     let tmp = tempfile::tempdir().unwrap();
     let dst_root = tmp.path().join("dst");
     std::fs::create_dir_all(&dst_root).unwrap();
@@ -3227,10 +3416,9 @@ async fn payload_record_before_manifest_complete_is_protocol_violation() {
         DestinationTarget::Fixed(dst_root),
     ));
 
-    // Scripted source peer: valid handshake, then a payload record
-    // while its manifest is still open — the contract's example
-    // violation ("payload records may begin only AFTER the source's
-    // ManifestComplete").
+    // Scripted in-stream source peer: valid handshake, then a payload record
+    // while its manifest is still open. TCP payload uses a separate lane and
+    // may overlap after NeedBatch; this control-lane record may not.
     peer.send(hello_frame()).await.unwrap();
     assert!(matches!(recv_or_panic(&mut peer).await, Frame::Hello(_)));
     peer.send(wire(Frame::Open(basic_open(TransferRole::Source))))
