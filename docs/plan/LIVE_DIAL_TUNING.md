@@ -415,8 +415,8 @@ advise but cannot accept the slice (D-2026-07-16-4).
    membership. `ldt-4-live-f12` owns a separate four-arm sustained supplement
    bound to the original evidence digest, preserving its fixed matrix and
    avoiding another additive 96-arm payload-retention cost. Exact `04e8008` is
-   mutation-proved, full-gate green, and tactically reviewed clean; exact
-   staging and live execution remain.
+   mutation-proved, full-gate green, tactically reviewed clean, and additively
+   staged on q; live execution remains.
    Keep the `q_to_windows_large` 1.197 and
    `q_to_windows_mixed` 1.131 performance asymmetries separate so longer
    payloads cannot hide their fixed overhead.

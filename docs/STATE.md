@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (ldt-4 sustained supplement tactically reviewed clean; exact staging next)
+Last updated: 2026-07-22 (ldt-4 sustained supplement exactly staged; live run next)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -10,7 +10,7 @@ Last updated: 2026-07-22 (ldt-4 sustained supplement tactically reviewed clean; 
   - Next: run tactical Grok/Opus 4.8 on exact `d53b5fd`, then additively stage and run one quiet
     fresh `q`↔`netwatch-01` retry.
 
-- **NEXT ACTION — STAGE `ldt-4-live-f12`:** exact `04e8008` runs a separate four-arm 5 GiB sustained supplement bound to the valid 96-arm evidence digest. It is mutation-proved/full-gate green and tactical Grok review is clean. Additively stage that exact code, re-prove endpoint capacity and quietness, then run the live supplement; fixed-cell performance stays separate.
+- **NEXT ACTION — RUN `ldt-4-live-f12`:** exact `04e8008` is mutation-proved/full-gate green, tactically reviewed clean, and additively staged in a clean detached q checkout. Re-prove live endpoint capacity and quietness, then run its four-arm 5 GiB sustained supplement bound to the valid 96-arm evidence digest; fixed-cell performance stays separate.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 HAS VALID DATA, NOT ACCEPTANCE:** exact session `ldt4-20260721T224319Z-96a4e3b03caf` completed 96 structurally valid arms with normal Windows restoration. Retained evidence and the independently reproduced analyzer output live at `docs/bench/ldt4-rigw-2026-07-21/`. Result: arm review 0, decision review 14, performance review 2. The short matrix never changed membership, so adaptive proof remains open; `q_to_windows_large` 1.197 and `q_to_windows_mixed` 1.131 remain separate performance findings.
@@ -56,7 +56,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `96a4e3b` completed 96 valid rig-W arms; retained evidence at `docs/bench/ldt4-rigw-2026-07-21/` independently reproduces arm review 0, decision review 14, performance review 2. No arm left the four-stream floor. Exact `04e8008` supplies the mutation-proved/full-gate-green four-arm sustained supplement bound to that evidence and is tactically reviewed clean; stage/run it, then address fixed-cell performance separately. Formal Fable openreview is held.
+1. **`docs/plan/LIVE_DIAL_TUNING.md` (ACTIVE, D-2026-07-16-2).** ldt-1..3 are accepted. Exact `96a4e3b` completed 96 valid rig-W arms; retained evidence at `docs/bench/ldt4-rigw-2026-07-21/` independently reproduces arm review 0, decision review 14, performance review 2. No arm left the four-stream floor. Exact `04e8008` supplies the mutation-proved/full-gate-green four-arm sustained supplement bound to that evidence and is tactically reviewed clean and staged; run it, then address fixed-cell performance separately. Formal Fable openreview is held.
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).

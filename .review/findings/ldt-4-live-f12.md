@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — the valid rig-W matrix completes before the live
 controller can change membership, so ldt-4 cannot prove adaptive ADD/REMOVE
 or role invariance under an actual transition.
-**Status**: Fixed, mutation-proved, full-gate green, and tactically reviewed clean; exact staging pending.
+**Status**: Fixed, mutation-proved, full-gate green, tactically reviewed clean, and exactly staged; live supplement pending.
 **Branch**: `master` (repo policy forbids agent-created branches)
 **Commit**: `04e80082e12ce9836eda43afc70fb3b2d0eb07c9`
 
@@ -99,9 +99,9 @@ None.
 
 ## Known gaps
 
-Exact additive staging and one fresh quiet four-arm rig-W supplement remain.
-The two fixed-cell performance findings from the valid 96-arm run stay separate
-and cannot be hidden by the longer diagnostic payload.
+One fresh quiet four-arm rig-W supplement remains. The two fixed-cell
+performance findings from the valid 96-arm run stay separate and cannot be
+hidden by the longer diagnostic payload.
 
 ## Reviewer comments
 
@@ -115,3 +115,14 @@ finished clean. The primary agent independently rechecked exact identity, Bash
 syntax, the four-arm self-test, and all 81 analyzer tests. Record:
 `.review/results/ldt-4-live-f12-r1.grok-verdict.md`. This is tactical advisory
 review, not formal `openreview` acceptance.
+
+Exact additive staging is complete. Complete-history bundle
+`/Users/michael/blit-ldt4-stage-04e8008.bundle` is retained on both Macs with
+matching SHA-256
+`f8c2e931576c6abf299892afa9ee28c11d80338853c2614248388aa8c6c081f8`.
+New q checkout `/Users/michael/Dev/blit_v2_harness_04e8008` is clean and
+detached at exact `04e80082e12ce9836eda43afc70fb3b2d0eb07c9`, has 1,974
+commits and no replacement refs, and passes native Bash 3.2 syntax, the
+four-arm no-SSH self-test, and all 81 analyzer tests. The bundle also carries
+the later review-record commit, but executable code remains pinned to the
+reviewed candidate.
