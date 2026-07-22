@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** hosted run `29951211161`; repairs through `bcedcf0f`, 2026-07-22
+**As of:** hosted run `29951872658` at `6fb4d3f`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -121,6 +121,15 @@ performance ceilings and hardware tuning remain post-release work.
   bounded gate until the test observes a receive task, then retains the exact
   assertion that every attached task stopped. Removing the hold makes the guard
   fail at the gate; both layouts, formatting, and strict lint pass restored.
+- Exact run `29951872658` at `6fb4d3f` passed Docs Gate, strict Check, Linux,
+  ARM macOS, Windows, and all three package jobs. Every packaged smoke verified
+  its checksum, safe extraction, exact commit/build identity, CLI/daemon help,
+  owned daemon readiness, tiny local and same-build remote byte identity, and
+  bounded teardown before upload. Exact artifact SHA-256 values are:
+  - Linux: `525a3377365da96808e66684a8fb2766afcc53a58b30317d907c01755dd2b081`
+  - ARM macOS: `dac735d4d86830b9d163c694a6d0f96d2dd9386179a0798f0282f33652510b98`
+  - Windows: `1fc3739e4ec9af70b8a392fa03a66a981627e2f239d667eaa91d44edac5b77d6`
+  Checkout/upload ran on the Node-24 action majors without the prior warnings.
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
@@ -206,13 +215,12 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **Hosted install/startup smoke is pending.** ARM macOS and Linux passed the
-   full runner at `0e61ac8`; `4927a05` fixes the Windows-only canonical-path
-   comparison, and `bcedcf0f` fixes the newly exposed Windows teardown-test
-   ordering. The next exact head must pass all three before each upload.
-2. **The final release-candidate head is pending.** The smoke implementation
-   and truthful release notes must land, then the complete check/test/package/
-   smoke matrix must pass at that exact clean commit.
+1. **User-facing release notes are stale.** They must state only the proven
+   platform triples, same-build compatibility rule, security/feature limits,
+   and deferred performance work.
+2. **The final release-candidate head is pending.** Truthful notes must land,
+   then the complete check/test/package/smoke matrix must pass at that exact
+   clean commit and every open ledger/finding must be audited once more.
 
 ## Deferred until after release
 

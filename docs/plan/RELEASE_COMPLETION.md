@@ -89,11 +89,11 @@ or hardware experiment.
       against code: fixed with a guard, proven already fixed and closed, or
       classified as a non-defect only by an explicit owner decision. No known
       product defect is deferred merely to reach the release.
-- [ ] Release artifacts are produced from one exact commit for
+- [x] Release artifacts are produced from one exact commit for
       `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, and
       `x86_64-pc-windows-msvc`, with embedded version/build identity and
       recorded checksums. Linux/macOS ship `.tar.gz`; Windows ships `.zip`.
-- [ ] Each artifact installs or runs in a clean temporary environment; CLI
+- [x] Each artifact installs or runs in a clean temporary environment; CLI
       version/help, daemon startup/health, one small local copy, and one small
       same-build remote copy pass with exact content verification and clean
       teardown.
@@ -218,13 +218,13 @@ performance ratios are measured or graded.
    `354f38e` passed the complete test matrix, then built and uploaded all three
    target archives with both binaries, full commit identity, and SHA-256
    sidecars. Missing or empty required output fails construction.
-8. **rel-8 — bounded install/startup smoke `[~]`.** `4062947` verifies archive
+8. **rel-8 — bounded install/startup smoke `[x]`.** `4062947` verifies archive
    checksum/safe extraction, exact CLI/daemon build identity and help, owned
    daemon readiness, tiny local and loopback-remote byte integrity, and bounded
-   teardown before upload. Hosted Linux and ARM macOS passed at `0e61ac8`;
-   `4927a05` fixes and mutation-proves Windows extended-path equivalence after
-   its daemon returned the correct module. Exact Windows proof remains. No
-   throughput or large-write work.
+   teardown before upload. Exact run `29951872658` at `6fb4d3f` passed the full
+   test matrix and all three target package-smoke jobs after `4927a05` fixed and
+   mutation-proved Windows extended-path equivalence. No throughput or
+   large-write work.
 9. **rel-9 — release-candidate audit.** Reconcile the ledger against exact CI,
    artifacts, smoke evidence, known limitations, and open findings. Prepare the
    exact refs/remotes for owner approval; do not publish.

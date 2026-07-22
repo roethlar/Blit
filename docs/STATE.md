@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (Windows teardown guard fixed; hosted proof next)
+Last updated: 2026-07-22 (all hosted tests and packaged smoke green)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -11,19 +11,12 @@ Last updated: 2026-07-22 (Windows teardown guard fixed; hosted proof next)
     fresh `q`↔`netwatch-01` retry.
 
 - **NEXT ACTION — RELEASE BLOCKERS ONLY:** use `docs/RELEASE_READINESS.md`.
-  Exact run `29949207219` at `354f38e` passed check, Linux, ARM macOS, Windows,
-  and all three release archive/checksum/upload jobs. This proves `fa79f0a` and
-  produces the required `.tar.gz`/`.zip` target artifacts from one commit.
-  `4062947` now smoke-checks checksum and safe extraction, exact shared build
-  identity/help, owned daemon readiness, two tiny byte-exact copies, and bounded
-  teardown before upload. Linux and ARM macOS passed at `0e61ac8`; Windows's
-  correct `\\?\C:\…` canonical module path exposed a smoke-only spelling bug.
-  `4927a05` normalizes that standard prefix under mutation proof. `2a27c4b`
-  also moves checkout/upload actions to Node 24. Run `29951211161` then exposed
-  a Windows test that injected a source fault before asserting TCP receive tasks
-  had started; `bcedcf0f` now holds the fault until the task is observed, under
-  bounded mutation proof. Next: hosted three-platform smoke, then truthful
-  release notes. No hardware transfer is required.
+  Exact run `29951872658` at `6fb4d3f` passed Docs Gate, strict Check, Linux,
+  ARM macOS, Windows, and all three packaged smoke jobs. Each archive verified
+  checksum/safe extraction, exact version/help, owned daemon readiness, tiny
+  local and same-build remote byte identity, and bounded teardown before upload.
+  Next: truthful user-facing release notes and the final exact-candidate audit.
+  No hardware transfer is required.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -179,8 +172,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 - **Hosted run `29949207219` at `354f38e`:** check, all three OS test suites,
   and all three target archive/checksum/upload jobs passed. It proves the
   `fa79f0a` payload-seal correction and rel-7 archive construction.
-- **Release blockers as of `bcedcf0f`:** prove clean-environment smoke on all
-  three hosted targets, then reconcile truthful release notes. See
+- **Release blockers as of `6fb4d3f`:** reconcile truthful release notes, then
+  run the final exact-candidate audit. See
   `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):
