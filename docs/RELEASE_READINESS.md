@@ -1,7 +1,7 @@
 # Release readiness
 
 **Status:** Active release ledger
-**As of:** hosted run `29948151621`; repairs through `5fc6f03`, 2026-07-22
+**As of:** hosted run `29948702562`; repairs through `fa79f0a`, 2026-07-22
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -86,6 +86,13 @@ performance ceilings and hardware tuning remain post-release work.
   shared session build identity through `--version` at `4bb3389`. Focused CLI
   and daemon parser guards fail when that interface is removed and pass with
   exact output when restored; formatting and strict workspace clippy pass.
+- Run `29948702562` passed check, macOS, and Windows. Linux forced a payload
+  worker failure to win just before the source sealed membership: the failed
+  `Seal` send then replaced the worker's structured `big.bin` error. `fa79f0a`
+  joins the already-failed pipeline at that boundary and returns its original
+  file/IO fault. The forced-order guard fails with the old masking behavior;
+  the guard, exact end-to-end test, formatting, and strict lint pass after the
+  fix. Release-build jobs correctly remained blocked after the failed matrix.
 - All six formal rel-4 review corrections are fixed one per commit with focused
   mutation proofs. The final allocation fix moves the destination resume-hash
   vector through metadata hydration and directly into the in-stream block diff.
@@ -171,9 +178,9 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-1. **The exact release-candidate suite is pending.** Run `29948151621` at
-   `532ece0` passed check and all three OS test suites, proving the last hosted
-   runtime fix. The final artifact/smoke head must repeat that complete matrix.
+1. **The exact release-candidate suite is pending.** `fa79f0a` fixes the
+   payload-seal fault masking exposed by Linux in run `29948702562`. The next
+   exact head must pass check plus all three OS suites before packaging runs.
 2. **Current release artifacts are unproved.** `5fc6f03` constructs the three
    required target archives, includes both binaries and the exact full commit,
    emits SHA-256 sidecars, and fails on missing output. Hosted archive evidence

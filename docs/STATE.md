@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-22 (full hosted matrix green; archive proof next)
+Last updated: 2026-07-22 (payload-seal masking fixed; hosted proof next)
 
 - **HANDOFF 2026-07-17, HEAD `d53b5fd`:** `a39f0c5` surfaced the generated
   `start.cmd` split; `d53b5fd` fixed and mutation-proved both array-concatenation
@@ -11,13 +11,13 @@ Last updated: 2026-07-22 (full hosted matrix green; archive proof next)
     fresh `q`↔`netwatch-01` retry.
 
 - **NEXT ACTION — RELEASE BLOCKERS ONLY:** use `docs/RELEASE_READINESS.md`.
-  Exact-head run `29948151621` at `532ece0` passed check plus the complete
-  Linux, macOS, and Windows test matrix. `4bb3389` exposes the exact shared
-  session build ID through both executables' `--version`; `5fc6f03` packages
-  both binaries, release documents, and the full commit into target-specific
-  `.tar.gz`/`.zip` archives with SHA-256 sidecars. Next: prove those archives
-  in hosted CI, then add bounded install/startup smoke. No hardware transfer is
-  required.
+  Run `29948702562` passed check, macOS, and Windows, but Linux caught a second
+  first-error race: a worker's structured `big.bin` read failure could close
+  membership just before sealing, allowing the failed-Seal symptom to replace
+  it. `fa79f0a` joins that failed worker and preserves its file/IO cause; its
+  forced-order guard is mutation-proved. Next: hosted proof, then prove the
+  `5fc6f03` checksummed archives and add bounded install/startup smoke. No
+  hardware transfer is required.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
 - **ADAPTIVE ROLE PARITY IS ACCEPTED IN ldt-2.** Deterministic real-session traces in both socket layouts emit identical ADD epochs through 17, REMOVE 4→1, idle/hysteresis holds, and receiver bounds. The old exact-eight result remains historical static-policy evidence, not an adaptive target.
 - **ldt-4 EVIDENCE IS FINAL FOR RELEASE:** the first complete horizon session
@@ -170,11 +170,11 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Blocked / waiting (owner declarations and explicitly dated external blockers; checkpoints are owner-only)
 
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
-- **Hosted run `29948151621` at `532ece0`:** check and all three OS test suites
-  passed. It validates the scan/resize cancellation fix from `8fb0a0d` without
-  a hardware transfer; its pre-packaging raw-binary build jobs remain active.
-- **Release blockers as of `5fc6f03`:** prove the new packaged archives and
-  checksums in hosted CI, then prove install and startup smoke. See
+- **Hosted run `29948702562` at `47cc125`:** check/macOS/Windows passed. Linux
+  caught the payload-seal error masking now fixed and mutation-proved by
+  `fa79f0a`; archive jobs correctly stayed blocked after the failed matrix.
+- **Release blockers as of `fa79f0a`:** prove the fix and new packaged archives
+  in hosted CI, then prove install and startup smoke. See
   `docs/RELEASE_READINESS.md`.
 - **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
   evidence, NOT acceptance evidence; Queue 2a):
