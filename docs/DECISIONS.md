@@ -470,3 +470,16 @@ Format:
   payload path and supplies the missing attribution without another transfer.
 - Supersedes: nothing. It preserves every hardware-run, SSD-write, release,
   publication, tag, transfer-policy, retry, and repeat gate.
+
+## D-2026-07-23-5 — Run one terminal data-plane hardware validation
+- Decision: Activate `docs/plan/TERMINAL_DATA_PLANE_VALIDATION.md`. Run the
+  accepted terminal observer exactly once over Q-to-Nagatha Thunderbolt with an
+  8 GiB read-only Q source and a fresh Nagatha RAM destination. Q SSD writes
+  remain below 32 decimal MB and exclude payload; no retry or comparison run is
+  authorized. Owner, 2026-07-23: **"go"**.
+- Why: the retained 35.578 and 19.153 Gb/s samples share the same data-path
+  code, while the accepted terminal observer can now distinguish socket
+  backpressure from time outside socket writes in one bounded observation.
+- Supersedes: D-2026-07-23-4 only where it withheld later physical validation.
+  It preserves every transfer-policy, repeat, larger-write, release,
+  publication, tag, and push gate.

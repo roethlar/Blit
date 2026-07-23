@@ -42,10 +42,10 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **TERMINAL DATA-PLANE ATTRIBUTION COMPLETE:** exact `6507444d` preserves
-  final SOURCE payload and blocked-write totals for short traced sessions.
-  Five mutation proofs and all local gates pass; no formal review verdict
-  exists, and no hardware transfer or release action ran.
+- **TERMINAL DATA-PLANE VALIDATION ACTIVE (D-2026-07-23-5):** one 8 GiB
+  Q-to-Nagatha run, RAM destination, under 32 MB Q SSD allocation, no payload
+  SSD write or retry; terminal blocked-write capacity selects what follows:
+  `docs/plan/TERMINAL_DATA_PLANE_VALIDATION.md`.
 - **THUNDERBOLT LIFECYCLE ATTRIBUTED (D-2026-07-23-3):** exact instrumented
   candidate `a3be4a64` completed one 8 GiB Q-to-Nagatha RAM transfer with all
   hashes matching. Only 13.645 ms was observed outside its 3.587845-second data
