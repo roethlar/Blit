@@ -36,8 +36,9 @@ no new hardware transfer.
 ## Constraints
 
 - The large-file data-path files have no diff from the fast candidate
-  `d1f1152d` through plan-draft HEAD. The 35.578 Gb/s and 19.153 Gb/s RAM
-  observations therefore do not identify a product-code regression.
+  `d1f1152d` through plan-draft commit `7954b06a`. The 35.578 Gb/s and
+  19.153 Gb/s RAM observations therefore do not identify a product-code
+  regression.
 - Reuse the existing `LiveProbe` counters for `bytes_sent` and
   `write_blocked_nanos`. Add no payload-loop clock read, atomic update, buffer
   touch, log call, or measurement branch.
@@ -48,19 +49,22 @@ no new hardware transfer.
   authority. Terminal retention may observe a probe but must never register,
   unregister, settle, resize, keep a task alive, or affect worker eligibility.
 - Snapshot retained probes only after the elastic send pipeline has joined, so
-  terminal counters are final. Counter mismatch, serialization failure, or
-  writer failure is diagnostic-only and cannot alter the transfer result.
+  terminal counters are final. Serialization or writer failure is
+  diagnostic-only and cannot alter the transfer result.
 - Extend the existing schema-1 session-phase vocabulary without changing its
   prefix or required fields. Emit one SOURCE-only `dial_terminal_sample` with
-  `sample_bytes`, `sample_blocked_ns`, `sample_streams`, final/peak stream
-  counts, and `sample_valid`. Do not invent a `blocked_ratio` inside the
-  product: analysis derives stream-time capacity from the existing monotonic
-  phase and membership timeline.
-- `sample_valid` is true only after successful pipeline completion when the
-  probe byte sum equals the successful send outcome. Zero-byte and mismatch
-  records remain visible but invalid; they do not fail or retry the transfer.
+  new optional `terminal_payload_bytes`, `terminal_blocked_ns`, and
+  `terminal_streams` fields plus the existing final/peak membership fields.
+  Do not reuse periodic `sample_*` fields with different semantics or invent a
+  `blocked_ratio` inside the product: analysis derives stream-time capacity
+  from the existing monotonic phase and membership timeline.
+- `terminal_payload_bytes` is exactly the retained probes' `bytes_sent` sum.
+  It is intentionally not compared with `SinkOutcome.bytes_written`, which
+  can include transfer bytes outside the timed primary-payload writes, such as
+  Windows metadata or alternate data streams. A successful zero-byte fold is
+  valid diagnostic evidence.
 - SOURCE-initiator and SOURCE-responder layouts use the same retention,
-  aggregation, event, and validity code. Connection topology may not enter the
+  aggregation, and event code. Connection topology may not enter the
   calculation.
 - Tests use captured events and synthetic counters, never wall-clock sleeps or
   hardware timing. New behavior guards receive red/restored-green mutation
@@ -81,14 +85,15 @@ no new hardware transfer.
 - [ ] Terminal retention is independent of live membership. Normal completion,
       REMOVE, and terminal ADD/END may unregister probes from the live registry
       without erasing their final diagnostic counters or changing settlement.
-- [ ] The record is valid only when successful probe bytes equal successful
-      send-outcome bytes. Mismatch and zero-byte cases emit an invalid record
-      without changing the returned result or creating a retry.
+- [ ] `terminal_streams` counts all retained probes included in the fold and
+      is not written into periodic `sample_streams`, whose meaning remains
+      active streams at a sampler tick. The payload sum is not compared with
+      `SinkOutcome.bytes_written`; a successful zero-byte fold remains valid.
 - [ ] Trace-off sessions emit no terminal sample and allocate no retained-probe
       collection. The payload copy loop, `Probe` implementations, tuner policy,
       and live registry have no new work or decision input.
 - [ ] Deterministic captured-event tests cover exact aggregate math,
-      short-session terminal emission, trace-off silence, mismatch invalidity,
+      short-session terminal emission, trace-off silence, zero-byte validity,
       initial-plus-ADD retention, REMOVE retention, and identical
       SOURCE-initiator/SOURCE-responder semantics.
 - [ ] Every new guard is mutation-proved by temporarily reverting its
@@ -117,17 +122,17 @@ the tuner or elastic membership code. A clone retains only the counter
 allocation and cannot keep a socket, worker, queue, or task alive.
 
 After `SourceDataPlane::finish` joins the elastic pipeline, fold the retained
-probe snapshots with saturating arithmetic. Compare aggregate probe bytes with
-`ElasticPipelineOutcome.outcome.bytes_written`, then emit one
+probe snapshots with saturating arithmetic, then emit one
 `dial_terminal_sample` through the existing bound phase trace. Emit
-`data_plane_complete` afterward as today. The terminal record uses the existing
-optional schema-1 sample and membership fields; it carries no calculated ratio
-and has no effect on success or failure.
+`data_plane_complete` afterward as today. The terminal record uses new
+optional schema-1 terminal fields and the existing membership fields; it
+carries no calculated ratio and has no effect on success or failure. It does
+not compare the payload-only probe sum with the broader send outcome.
 
 ### Interpretation boundary
 
 For a session whose membership is fixed, offline analysis divides terminal
-`sample_blocked_ns` by the first-socket-write-to-data-plane-complete duration
+`terminal_blocked_ns` by the first-socket-write-to-data-plane-complete duration
 times the stream count. For a resized session, the existing monotonic
 `dial_settlement` timeline supplies the membership-time integral. A high
 fraction means the SOURCE workers spent most available stream time awaiting
@@ -139,22 +144,22 @@ must not claim which member of that second class dominates.
 ### Affected code and tests
 
 - `crates/blit-core/src/transfer_session/data_plane.rs` — optional retained
-  probes, exact terminal fold, validity comparison, and SOURCE terminal event.
-- `crates/blit-core/src/remote/transfer/session_phase.rs` — reuse the existing
-  optional sample fields for the closed `dial_terminal_sample` event; add no
-  required schema field.
+  probes, exact terminal fold, and SOURCE terminal event.
+- `crates/blit-core/src/remote/transfer/session_phase.rs` — add optional,
+  explicitly named terminal fields for the closed `dial_terminal_sample`
+  event; add no required schema field and preserve periodic sample semantics.
 - `crates/blit-core/src/remote/transfer/progress.rs` only if a small pure helper
   beside `StreamProbe` is the narrowest way to expose saturating terminal
   aggregation. The live counters and `Probe` hot-path contract do not change.
 - Existing `blit-core` data-plane and role tests — captured event order,
-  counter math, validity, trace-off silence, membership retention, and role
-  parity.
+  counter math, field semantics, trace-off silence, membership retention, and
+  role parity.
 
 ## Slices
 
 1. **tdp-1 — terminal telemetry.** Retain diagnostic probe clones only for
    traced SOURCE sessions, aggregate their existing final counters after the
-   pipeline join, emit the validity-checked terminal sample, add deterministic
+   pipeline join, emit the explicitly named terminal fields, add deterministic
    role/membership guards, and mutation-prove each new behavior.
 2. **tdp-2 — verification and review closure.** Run the complete repository
    gates, adjudicate any risk-selected review findings one per commit, record

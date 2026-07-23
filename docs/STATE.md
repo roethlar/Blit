@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-23 (end-to-end Thunderbolt lifecycle attribution complete)
+Last updated: 2026-07-23 (terminal data-plane attribution plan drafted)
 
 - **RELEASE IDENTITY IS NOW 0.1.1:** the existing `v0.1.0` tag remains at its
   shipped 2026-05-31 commit. The current candidate uses one workspace-owned
