@@ -415,3 +415,19 @@ Format:
 - Supersedes: D-2026-07-22-4 only where its conservative approval did not name
   a numeric budget. It does not approve more than this one plan, any failed-arm
   retry, a repeated/formal matrix, a product change, or publication.
+
+## D-2026-07-23-1 — Profile the remaining Thunderbolt RAM-path gap once
+- Decision: Activate `docs/plan/THUNDERBOLT_RAM_PROFILE.md` for one
+  exact-candidate Q-to-Nagatha run using the same warm 8 GiB APFS-cloned source
+  shape, a RAM-disk destination, existing session-phase telemetry, and process
+  CPU/memory accounting. No SSD payload, rsync or iperf arm, reverse direction,
+  retry, repeat, product change, or publication is authorized. Owner approved
+  the stated RAM-only profiling next action with **"go"** on 2026-07-23.
+- Why: the SSD-backed reduction is already attributed chiefly to Q's physical
+  source reads. The unresolved 28.6 versus 37.9 Gb/s gap is the warm engine
+  path; one observed run can distinguish CPU, fixed-phase, backpressure, and
+  controller-lifetime limits without another wear-heavy transfer.
+- Supersedes: D-2026-07-22-1 only for this one pre-publication diagnostic and
+  D-2026-07-22-4 only where it required a separate approval for later tuning
+  observation. It preserves every code-plan, large-write, repeat, git-publication,
+  tag, and release gate.
