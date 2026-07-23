@@ -32,10 +32,11 @@ Last updated: 2026-07-23 (Blit 0.1.1 released)
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
-## Handoff — 2026-07-23 at `b8371d90`
-- Done: Blit 0.1.1 is tagged on both remotes and publicly released with all six
-  verified assets; the publication pushed no `master` branch.
-- Next: resume the post-release Queue 1. Two stale rules move only on new approval.
+## Handoff — 2026-07-23 at `544adf81`
+- Done: Blit 0.1.1 is publicly released from exact validated candidate
+  `d1f1152d`; current post-release diagnostics and firewall-test work are closed.
+- Next: re-ground `ONE_TRANSFER_PATH`, identify its first unblocked post-release
+  slice, and stop for an approved plan/go before code or hardware work.
 
 ## Now (active work)
 
