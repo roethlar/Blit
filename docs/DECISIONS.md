@@ -431,3 +431,19 @@ Format:
   D-2026-07-22-4 only where it required a separate approval for later tuning
   observation. It preserves every code-plan, large-write, repeat, git-publication,
   tag, and release gate.
+
+## D-2026-07-23-2 — Retire Fable and use Claude Opus 4.8/max for reviews
+- Decision: The already-running end-to-end transfer latency plan review was the
+  final Fable review. Every future formal `openreview` uses Claude CLI with
+  `--model claude-opus-4-8 --effort max`; Fable is not a review fallback. If
+  that exact reviewer is unavailable, the review fails closed and is reported
+  rather than silently rerouted. Owner, 2026-07-23: **"after this run, stop
+  using fable for reviews."** This applies with the owner's earlier approval to
+  switch reviews to Claude Opus 4.8/max.
+- Why: the owner explicitly retired Fable after the in-flight run and selected
+  Opus 4.8/max as its replacement. The in-flight Fable attempt ended without a
+  verdict after reaching its session limit, so it carries no acceptance.
+- Supersedes: D-2026-07-15-1 and D-2026-07-16-4 on reviewer identity, plus the
+  Fable selection in D-2026-07-16-3. It preserves risk-based review frequency,
+  Grok's advisory-only role, D-2026-07-16-1's neutral prompt, exact-SHA and
+  independent-guard requirements, finding adjudication, and git safety.

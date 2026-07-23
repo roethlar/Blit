@@ -58,14 +58,16 @@ execute it exactly:
   review slice and apply the risk-based review selection below; selected
   reviews use synchronous unprimed `.agents/playbooks/openreview.md`.
 
-**Review policy (D-2026-07-16-4, refining D-2026-07-16-3): formal
+**Review policy (D-2026-07-23-2, superseding the reviewer selection in
+D-2026-07-16-4 and D-2026-07-16-3): formal
 `openreview` is selected in proportion to risk and uncertainty, not required
 for every code or plan change.** Grok may provide ordinary advisory second eyes
 and tactical slice checks when they add value, but a Grok result is never a
 formal `openreview` acceptance verdict. Every formal `openreview` uses Claude
-CLI with `--model claude-fable-5 --effort max`; cost is controlled by selecting
-fewer formal reviews, not by substituting the acceptance reviewer. Codex is not
-an independent reviewer when Codex authored the change. Per D-2026-07-16-1 and
+CLI with `--model claude-opus-4-8 --effort max`; Fable is retired for all future
+reviews. If that exact reviewer is unavailable, fail closed and report it rather
+than falling back silently. Codex is not an independent reviewer when Codex
+authored the change. Per D-2026-07-16-1 and
 the `openreview` playbook,
 the substantive prompt remains the neutral best-way question only: no
 plan-conformance request, issue list, framing, or steering, including on a

@@ -18,7 +18,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 Plan: `docs/plan/LIVE_DIAL_TUNING.md` (Active, D-2026-07-16-2). Review selection:
 Grok may provide advisory second eyes, but formal `openreview` uses Claude
-Fable 5/max (D-2026-07-16-4).
+Opus 4.8/max (D-2026-07-23-2).
 
 | ID | Title | Status | Commit(s) |
 |----|-------|--------|-----------|

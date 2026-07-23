@@ -354,9 +354,9 @@ review passes.
 
 ## Slices
 
-When formal review is selected, the slice is one committed whole-change Fable
-openreview candidate before any one-finding-per-commit review fixes. Grok may
-advise but cannot accept the slice (D-2026-07-16-4).
+When formal review is selected, the slice is one committed whole-change Claude
+Opus 4.8/max openreview candidate before any one-finding-per-commit review
+fixes. Grok may advise but cannot accept the slice (D-2026-07-23-2).
 
 1. **ldt-1 — acknowledged elastic membership.** Make pipeline ADD/REMOVE
    return exact membership outcomes; bind probes to member IDs; preserve the

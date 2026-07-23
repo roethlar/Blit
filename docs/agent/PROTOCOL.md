@@ -54,8 +54,8 @@ Turn a talked-through idea into a durable plan before any implementation.
    active plan).
 5. Commit the plan doc and apply D-2026-07-16-3/-4's risk-based review
    selection. Grok may provide an advisory draft second eye when it adds value,
-   but cannot accept the draft. Any selected formal review uses Claude Fable
-   5/max through synchronous unprimed `openreview`
+   but cannot accept the draft. Per D-2026-07-23-2, any selected formal review
+   uses Claude Opus 4.8/max through synchronous unprimed `openreview`
    (`.agents/playbooks/openreview.md`) and D-2026-07-16-1's neutral best-way
    question with no framing or steering. The docs gate is
    `bash scripts/agent/check-docs.sh`. Adjudicate any returned findings before
@@ -132,12 +132,13 @@ Pick up the next unit of review-queue work.
    on `master` (no agent branches), pass the validation suite, commit, and write
    the slice record. Apply D-2026-07-16-3/-4's risk-based review selection:
    Grok may provide an advisory slice second eye, but cannot accept the slice.
-   Any selected formal review or re-review uses Claude Fable 5/max through
+   Per D-2026-07-23-2, any selected formal review or re-review uses Claude Opus
+   4.8/max through
    synchronous unprimed `openreview` with exact base/head,
    D-2026-07-16-1's neutral best-way question, and a reviewer-chosen isolated
    red/green guard with fail-closed `guard_confirmed: true`. Adjudicate every
    returned finding through `codereview` intake, fix admitted findings one
-   commit at a time on `master`, re-review with Fable when needed, record the
+   commit at a time on `master`, re-review with Opus 4.8/max when needed, record the
    verdict under `.review/results/`, and update
    the `REVIEW.md` row. No sentinel — the async hand-off is retired.
 3. Finish with the `handoff` procedure.

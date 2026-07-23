@@ -86,8 +86,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   resume/re-derive on the unified baseline. Principle: ceiling-driven,
   never competitor-relative (D-2026-07-04-4 — do not re-litigate).
 - **Background**: REV4 code-complete, gates DATA-COMPLETE (declarations in Blocked);
-  D-2026-07-16-3/-4 makes review risk-based: Grok is advisory for ordinary
-  second eyes/slice checks; every formal `openreview` uses Claude Fable 5/max.
+  review is risk-based: Grok is advisory for ordinary second eyes/slice checks;
+  D-2026-07-23-2 retires Fable and assigns every formal `openreview` to Claude
+  Opus 4.8/max.
 
 ## Queue (ordered)
 
@@ -164,8 +165,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   complete; measurement gates remain). REV4 superseded v1/REV2/REV3
   (history only).
 - Process: `.agents/playbooks/openreview.md` — synchronous unprimed review when
-  risk-selected under D-2026-07-16-3/-4: Grok may advise, but every formal
-  `openreview` uses Claude Fable 5/max;
+  risk-selected under D-2026-07-16-3/-4 and D-2026-07-23-2: Grok may advise,
+  but every formal `openreview` uses Claude Opus 4.8/max;
   `.agents/playbooks/codereview.md` supplies finding intake and triage only.
   `docs/agent/GPT_REVIEW_LOOP.md` is historical;
   `.review/README.md` is retired as the grading mechanism (its
