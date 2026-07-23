@@ -42,7 +42,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **MACOS TEST FIREWALL CLEANUP DRAFTED (D-2026-07-23-6):** exact admission
+- **MACOS TEST FIREWALL CLEANUP ACTIVE (D-2026-07-23-6):** exact admission
   through verified removal, no install/login: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md`.
 - **THUNDERBOLT LIFECYCLE ATTRIBUTED (D-2026-07-23-3):** exact instrumented
   candidate `a3be4a64` completed one 8 GiB Q-to-Nagatha RAM transfer with all

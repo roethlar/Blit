@@ -501,3 +501,5 @@ Format:
 - Supersedes: the installation/signing direction proposed after
   D-2026-07-23-5. It preserves every live-firewall, hardware-run, release,
   publication, tag, and push gate.
+- Plan approval: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md` activated by the
+  owner on 2026-07-23: **"go"**.

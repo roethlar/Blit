@@ -1,6 +1,6 @@
 # macOS test firewall cleanup
 
-**Status**: Draft
+**Status**: Active
 **Created**: 2026-07-23
 **Supersedes**: nothing
 **Decision ref**: D-2026-07-23-6
