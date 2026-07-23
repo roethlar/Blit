@@ -1,9 +1,9 @@
 # Terminal data-plane attribution
 
-**Status**: Draft
+**Status**: Active
 **Created**: 2026-07-23
 **Supersedes**: nothing
-**Decision ref**: pending owner approval
+**Decision ref**: D-2026-07-23-4
 
 ## Goal
 

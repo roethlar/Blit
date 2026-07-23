@@ -458,3 +458,15 @@ Format:
   performance change can be justified.
 - Supersedes: nothing. It preserves the separate release, publication, tag,
   transfer-policy-change, SSD-write, retry, and repeat gates.
+
+## D-2026-07-23-4 — Activate terminal data-plane attribution
+- Decision: Activate `docs/plan/TERMINAL_DATA_PLANE_ATTRIBUTION.md`. Preserve
+  the existing final SOURCE-stream payload and blocked-write counters for
+  traced sessions and emit their terminal aggregate after the send pipeline
+  joins. No hardware transfer or transfer-policy change is authorized. Owner,
+  2026-07-23: **"Continue."**
+- Why: short high-speed transfers can finish before the periodic sampler emits
+  a record. Terminal aggregation reuses counters already maintained on the
+  payload path and supplies the missing attribution without another transfer.
+- Supersedes: nothing. It preserves every hardware-run, SSD-write, release,
+  publication, tag, transfer-policy, retry, and repeat gate.

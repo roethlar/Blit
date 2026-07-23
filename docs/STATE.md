@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-23 (terminal data-plane attribution plan drafted)
+Last updated: 2026-07-23 (terminal data-plane attribution activated)
 
 - **RELEASE IDENTITY IS NOW 0.1.1:** the existing `v0.1.0` tag remains at its
   shipped 2026-05-31 commit. The current candidate uses one workspace-owned
@@ -92,7 +92,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/TERMINAL_DATA_PLANE_ATTRIBUTION.md` (DRAFT):** preserve the
+1. **`docs/plan/TERMINAL_DATA_PLANE_ATTRIBUTION.md` (ACTIVE, D-2026-07-23-4):** preserve the
    existing terminal SOURCE probe totals; no hardware transfer is authorized.
 2. **`docs/plan/RELEASE_COMPLETION.md` (ACTIVE, D-2026-07-22-3).** No hardware
    work. Repair each hosted cross-platform failure one per commit, then prove
