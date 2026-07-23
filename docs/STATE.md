@@ -92,8 +92,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **PERFORMANCE NEXT:** use the retained lifecycle and session evidence to
-   draft the next ceiling plan; no additional hardware transfer is authorized.
+1. **`docs/plan/TERMINAL_DATA_PLANE_ATTRIBUTION.md` (DRAFT):** preserve the
+   existing terminal SOURCE probe totals; no hardware transfer is authorized.
 2. **`docs/plan/RELEASE_COMPLETION.md` (ACTIVE, D-2026-07-22-3).** No hardware
    work. Repair each hosted cross-platform failure one per commit, then prove
    the complete suite and current artifacts.
@@ -151,8 +151,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Authoritative docs right now
 
-- Historical performance plan: **`docs/plan/END_TO_END_TRANSFER_LATENCY.md`**
-  (D-2026-07-23-3); etl-1..5 are complete. Final evidence:
+- Current performance draft: **`docs/plan/TERMINAL_DATA_PLANE_ATTRIBUTION.md`**;
+  historical etl-1..5 evidence:
   `docs/bench/end-to-end-transfer-latency-2026-07-23/`.
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
   D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
