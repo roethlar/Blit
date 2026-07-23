@@ -13,6 +13,10 @@
   historical cleanup record. Its later provenance is unestablished. Do not
   reuse or remove it without exact owner approval; removal requires
   administrator authorization.
+- The same inventory contains a second proven ephemeral test path,
+  `/private/tmp/blit-tb-candidate.Ki87md/unpacked/blit-aarch64-apple-darwin/blit-daemon`.
+  D-2026-07-23-6 requires exact test-owned cleanup; neither path is a product
+  install or may be adopted as a reusable rule.
 
 ## Additional Linux hosts — BUILD ONLY (owner rule, 2026-07-12)
 

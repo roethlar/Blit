@@ -487,3 +487,17 @@ Format:
   exact new daemon's firewall entry: **"then no."** The run was canceled before
   listener or payload, all temporary test state was removed, and D-2026-07-23-4
   again governs physical validation.
+
+## D-2026-07-23-6 — Tests own and remove their macOS firewall rules
+- Decision: A macOS hardware test that creates an Application Firewall rule
+  owns that rule through exact verified removal after the test. Cleanup must
+  remove the exact path before deleting its binary or detaching its volume,
+  retain complete before/after inventories, and fail visibly rather than claim
+  success when removal is unproved. Owner, 2026-07-23: **"the fix is to CLEAN
+  UP THE RULES AFTER YOU FINISH TESTING."**
+- Why: transient unsigned daemon paths are test artifacts. Installing a daemon,
+  adding a login service, signing the product, or leaving persistent benchmark
+  rules changes the wrong scope and does not repair the false cleanup record.
+- Supersedes: the installation/signing direction proposed after
+  D-2026-07-23-5. It preserves every live-firewall, hardware-run, release,
+  publication, tag, and push gate.
