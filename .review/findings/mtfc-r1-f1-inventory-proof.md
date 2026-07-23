@@ -4,7 +4,7 @@
 Application Firewall rule live while clearing its recovery ledger.
 **Status**: In progress
 **Branch**: `master` (repo no-agent-branch rule)
-**Commit**: pending
+**Commit**: `68460a7b`
 
 ## Evidence
 
@@ -51,8 +51,24 @@ that proves the ledger cannot be cleared falsely.
 
 ## Guard proof
 
-Pending. The under-count case must turn red if the observed-ownership gate is
-removed; the format case must turn red if blank-line tolerance is removed.
+- `mtfc_test_success_with_spaces_and_unrelated_entry` runs every inventory
+  phase with blank lines plus expanded entry/status whitespace. Removing the
+  production blank-line filter made the suite fail at case 1 with
+  `malformed firewall inventory entry`; exact restoration returned 16/16.
+- `mtfc_test_post_add_undercount_retains_ledger` hides the exact path only
+  after successful add. Weakening `mtfc_rule_observed == 1` to the vacuous
+  `>= 0` made the case return 71 and clear its ledger instead of required exit
+  90; exact restoration retained the ledger, recovered the rule, and returned
+  16/16.
+- The production parser consumed the target's read-only real inventory with
+  50 declared entries, 50 parsed entries, and one exact allowed match for the
+  named stale test path.
+
+Final gates on the restored bytes: Bash syntax, 16-case focused suite, docs,
+`git diff --check`, formatting, strict workspace clippy, and the complete
+workspace suite all pass. One earlier full workspace attempt had the unrelated
+small-file timing aggregate report zero; its exact focused rerun and two later
+complete workspace runs passed.
 
 ## Known gaps
 

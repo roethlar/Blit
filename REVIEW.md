@@ -35,7 +35,7 @@ D-2026-07-23-6). Formal review uses Claude Opus 4.8/max.
 
 | ID | Title | Status | Commit(s) |
 |----|-------|--------|-----------|
-| mtfc-r1-f1-inventory-proof | Prove real inventory parsing and observed cleanup ownership | `[~]` | candidate `d35a0b12`; first review attempt invalid; fix pending |
+| mtfc-r1-f1-inventory-proof | Prove real inventory parsing and observed cleanup ownership | `[~]` | candidate `d35a0b12`; first review attempt invalid; fix `68460a7b`; formal review pending |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 
