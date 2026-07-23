@@ -26,7 +26,8 @@ pub use data_plane::{
 };
 pub use faulted_path::FaultedPath;
 pub use lifecycle_trace::{
-    TransferLifecycleEvent, TransferLifecycleOutcome, TransferLifecycleTrace,
+    outcome_for_report, TransferLifecycleEvent, TransferLifecycleFailure, TransferLifecycleOutcome,
+    TransferLifecycleTrace,
 };
 pub use payload::{
     build_tar_shard, payload_file_count, plan_transfer_payloads, prepare_payload,

@@ -6,7 +6,7 @@ use blit_app::transfers::remote::{
     DelegatedPullOutcome,
 };
 use blit_core::generated::DelegatedPullSummary;
-use blit_core::remote::transfer::operation_spec::DelegatedSpecOptions;
+use blit_core::remote::transfer::{operation_spec::DelegatedSpecOptions, TransferLifecycleTrace};
 use blit_core::remote::RemoteEndpoint;
 
 use super::remote::spawn_progress_monitor_with_options;
@@ -24,6 +24,7 @@ pub async fn run_remote_to_remote_direct(
     dst: RemoteEndpoint,
     mirror_mode: bool,
     move_verb: bool,
+    lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<()> {
     run_remote_to_remote_direct_inner(
         args,
@@ -32,6 +33,7 @@ pub async fn run_remote_to_remote_direct(
         mirror_mode,
         move_verb,
         false, // defer_output
+        lifecycle_trace,
     )
     .await
     .map(|_| ())
@@ -46,6 +48,7 @@ pub async fn run_remote_to_remote_direct_deferred(
     dst: RemoteEndpoint,
     mirror_mode: bool,
     move_verb: bool,
+    lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredDelegatedState> {
     run_remote_to_remote_direct_inner(
         args,
@@ -54,6 +57,7 @@ pub async fn run_remote_to_remote_direct_deferred(
         mirror_mode,
         move_verb,
         true, // defer_output
+        lifecycle_trace,
     )
     .await
 }
@@ -114,6 +118,7 @@ async fn run_remote_to_remote_direct_inner(
     mirror_mode: bool,
     move_verb: bool,
     defer_output: bool,
+    lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredDelegatedState> {
     let filter_spec = super::build_filter_spec(args)?;
     let options = delegated_pull_options(args, filter_spec, mirror_mode, move_verb);
@@ -141,7 +146,7 @@ async fn run_remote_to_remote_direct_inner(
         // RPCs, so a misbehaving caller can't escape the
         // CLI in-byte-path guarantee.
         detach: args.detach,
-        lifecycle_trace: Default::default(),
+        lifecycle_trace: lifecycle_trace.clone(),
     };
 
     // --detach exit-after-Started path. Opens the stream
@@ -191,11 +196,14 @@ async fn run_remote_to_remote_direct_inner(
             src: dst_for_state.clone(), // source endpoint not surfaced on Started
             dst: dst_for_state,
         };
-        if args.json {
-            print_detach_json(&transfer_id);
-        } else {
-            print_detach_human(&transfer_id, &dst_host_hint);
-        }
+        super::render_result(lifecycle_trace, || {
+            if args.json {
+                print_detach_json(&transfer_id);
+            } else {
+                print_detach_human(&transfer_id, &dst_host_hint);
+            }
+            Ok(())
+        })?;
         return Ok(state);
     }
 
@@ -221,7 +229,10 @@ async fn run_remote_to_remote_direct_inner(
 
     let state = outcome?;
     if !defer_output {
-        print_deferred_delegated_result(args, &state);
+        super::render_result(lifecycle_trace, || {
+            print_deferred_delegated_result(args, &state);
+            Ok(())
+        })?;
     }
     Ok(state)
 }

@@ -814,20 +814,7 @@ fn negotiated_session_token(negotiated: &Negotiated) -> Option<&[u8]> {
 }
 
 fn establishment_outcome(err: &eyre::Report) -> crate::remote::transfer::TransferLifecycleOutcome {
-    use crate::generated::session_error::Code;
-    use crate::remote::transfer::TransferLifecycleOutcome;
-
-    match err.downcast_ref::<SessionFault>().map(|fault| fault.code) {
-        Some(
-            Code::BuildMismatch
-            | Code::ModuleUnknown
-            | Code::ReadOnly
-            | Code::DelegationRefused
-            | Code::ScanIncomplete
-            | Code::ChecksumDisabled,
-        ) => TransferLifecycleOutcome::Refused,
-        _ => TransferLifecycleOutcome::Error,
-    }
+    crate::remote::transfer::outcome_for_report(err)
 }
 
 fn bind_small_file_probe(

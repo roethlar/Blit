@@ -183,7 +183,7 @@ the no-repeat rule follow the completed 2026-07-23 RAM profile.
 2. **etl-2 — shared core boundaries `[x]`.** Carry the trace through remote push,
    pull, and delegated initiation; emit connect, RPC, establish, session-body,
    and terminal spans; add role-parity and failure-path integration guards.
-3. **etl-3 — CLI lifecycle.** Carry one trace from async-main entry through
+3. **etl-3 — CLI lifecycle `[x]`.** Carry one trace from async-main entry through
    parse/context, route dispatch, result rendering, and command terminal;
    mutation-prove the complete successful timeline and trace-off silence.
 4. **etl-4 — verification and review closure.** Run the RAM-backed full

@@ -1,6 +1,7 @@
 use crate::cli::TransferArgs;
 use crate::context::AppContext;
 use blit_app::display::{format_bps, format_bytes};
+use blit_core::remote::transfer::TransferLifecycleTrace;
 use blit_core::transfer_session::{LocalMirrorOptions, LocalMirrorSummary, TransferOutcome};
 use eyre::{bail, Result};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -18,8 +19,19 @@ pub async fn run_local_transfer(
     src_path: &Path,
     dest_path: &Path,
     mirror: bool,
+    lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<LocalMirrorSummary> {
-    run_local_transfer_inner(ctx, args, src_path, dest_path, mirror, false, false).await
+    run_local_transfer_inner(
+        ctx,
+        args,
+        src_path,
+        dest_path,
+        mirror,
+        false,
+        false,
+        Some(lifecycle_trace),
+    )
+    .await
 }
 
 /// Same as [`run_local_transfer`] but for the MOVE verb: the caller
@@ -38,7 +50,7 @@ pub async fn run_local_transfer_deferred(
     dest_path: &Path,
     mirror: bool,
 ) -> Result<LocalMirrorSummary> {
-    run_local_transfer_inner(ctx, args, src_path, dest_path, mirror, true, true).await
+    run_local_transfer_inner(ctx, args, src_path, dest_path, mirror, true, true, None).await
 }
 
 /// Print the standard summary block for a completed local
@@ -84,6 +96,7 @@ async fn run_local_transfer_inner(
     mirror: bool,
     defer_output: bool,
     move_verb: bool,
+    lifecycle_trace: Option<&TransferLifecycleTrace>,
 ) -> Result<LocalMirrorSummary> {
     if !src_path.exists() {
         bail!("source path does not exist: {}", src_path.display());
@@ -130,13 +143,19 @@ async fn run_local_transfer_inner(
 
     let elapsed = start.elapsed();
     if !defer_output {
-        if json_output {
-            print_summary_json(mirror, &summary, elapsed, src_path, dest_path);
-        } else {
-            print_summary(
-                mirror, dry_run, null_sink, verbose, debug_mode, workers, &summary, elapsed,
-            );
-        }
+        super::render_result(
+            lifecycle_trace.expect("inline local output has a lifecycle trace"),
+            || {
+                if json_output {
+                    print_summary_json(mirror, &summary, elapsed, src_path, dest_path);
+                } else {
+                    print_summary(
+                        mirror, dry_run, null_sink, verbose, debug_mode, workers, &summary, elapsed,
+                    );
+                }
+                Ok(())
+            },
+        )?;
     }
 
     Ok(summary)

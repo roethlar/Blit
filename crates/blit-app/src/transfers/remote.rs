@@ -58,7 +58,8 @@ use blit_core::remote::transfer::session_client::{
 };
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::transfer::{
-    RemoteTransferProgress, SessionPhaseRole, TransferLifecycleOutcome, TransferLifecycleTrace,
+    RemoteTransferProgress, SessionPhaseRole, TransferLifecycleFailure, TransferLifecycleOutcome,
+    TransferLifecycleTrace,
 };
 use blit_core::remote::{RemoteEndpoint, RemotePath};
 use eyre::{bail, eyre, Context, Result};
@@ -403,26 +404,31 @@ fn report_bytes_progress(
 /// CLI-facing report.
 pub fn map_delegated_error(phase: i32, message: &str) -> eyre::Report {
     let phase = DelegatedPullPhase::try_from(phase).unwrap_or(DelegatedPullPhase::Unknown);
-    match phase {
+    let display = match phase {
         DelegatedPullPhase::DelegationRejected => {
-            eyre!("delegation rejected by destination daemon: {message}")
+            format!("delegation rejected by destination daemon: {message}")
         }
         DelegatedPullPhase::ConnectSource => {
             // Remote→remote is delegated-only (D-2026-07-11-1 removed
             // the CLI relay), so the unreachable-source topology has no
             // flag to point at — the manual two-hop is the workaround.
-            eyre!(
+            format!(
                 "destination daemon cannot reach source ({message}); if this host can \
                  reach both daemons, pull to a local path first, then push it"
             )
         }
-        DelegatedPullPhase::Negotiate => eyre!("source refused delegated pull: {message}"),
-        DelegatedPullPhase::Transfer => eyre!("delegated transfer failed: {message}"),
+        DelegatedPullPhase::Negotiate => format!("source refused delegated pull: {message}"),
+        DelegatedPullPhase::Transfer => format!("delegated transfer failed: {message}"),
         DelegatedPullPhase::Apply => {
-            eyre!("destination failed to apply delegated transfer: {message}")
+            format!("destination failed to apply delegated transfer: {message}")
         }
-        DelegatedPullPhase::Unknown => eyre!("delegated transfer failed: {message}"),
-    }
+        DelegatedPullPhase::Unknown => format!("delegated transfer failed: {message}"),
+    };
+    delegated_report(delegated_phase_outcome(phase as i32), display)
+}
+
+fn delegated_report(outcome: TransferLifecycleOutcome, message: impl Into<String>) -> eyre::Report {
+    eyre::Report::new(TransferLifecycleFailure::new(outcome, message))
 }
 
 fn delegated_status_outcome(status: &tonic::Status) -> TransferLifecycleOutcome {
@@ -547,26 +553,24 @@ where
             response
         }
         Err(status) => {
-            lifecycle_trace.record(
-                "delegated_rpc_open_end",
-                Some(delegated_status_outcome(&status)),
-            );
-            return Err(if status.code() == Code::Unimplemented {
-                eyre!(
-                    "destination daemon does not implement DelegatedPull; upgrade the destination \
-                     daemon"
-                )
+            let outcome = delegated_status_outcome(&status);
+            lifecycle_trace.record("delegated_rpc_open_end", Some(outcome));
+            let message = if status.code() == Code::Unimplemented {
+                "destination daemon does not implement DelegatedPull; upgrade the destination \
+                 daemon"
+                    .to_string()
             } else if status.code() == Code::Unavailable {
-                eyre!(
+                format!(
                     "destination daemon is unavailable for delegated pull ({})",
                     status.message()
                 )
             } else {
-                eyre!(
+                format!(
                     "delegated remote-to-remote transfer failed: {}",
                     status.message()
                 )
-            });
+            };
+            return Err(delegated_report(outcome, message));
         }
     };
     let mut stream = response.into_inner();
@@ -581,11 +585,13 @@ where
             Ok(Some(message)) => message,
             Ok(None) => break,
             Err(status) => {
-                failure = Some(if status.code() == Code::Unavailable {
-                    eyre!("delegation stream lost ({})", status.message())
+                failure_outcome = delegated_status_outcome(&status);
+                let message = if status.code() == Code::Unavailable {
+                    format!("delegation stream lost ({})", status.message())
                 } else {
-                    eyre!("delegation stream failed: {}", status.message())
-                });
+                    format!("delegation stream failed: {}", status.message())
+                };
+                failure = Some(delegated_report(failure_outcome, message));
                 break;
             }
         };
@@ -717,26 +723,24 @@ pub async fn run_delegated_pull_until_started(
             response
         }
         Err(status) => {
-            lifecycle_trace.record(
-                "delegated_rpc_open_end",
-                Some(delegated_status_outcome(&status)),
-            );
-            return Err(if status.code() == Code::Unimplemented {
-                eyre!(
-                    "destination daemon does not implement DelegatedPull; \
-                     cannot detach against this daemon"
-                )
+            let outcome = delegated_status_outcome(&status);
+            lifecycle_trace.record("delegated_rpc_open_end", Some(outcome));
+            let message = if status.code() == Code::Unimplemented {
+                "destination daemon does not implement DelegatedPull; \
+                 cannot detach against this daemon"
+                    .to_string()
             } else if status.code() == Code::Unavailable {
-                eyre!(
+                format!(
                     "destination daemon is unavailable for delegated pull ({})",
                     status.message()
                 )
             } else {
-                eyre!(
+                format!(
                     "delegated remote-to-remote transfer failed: {}",
                     status.message()
                 )
-            });
+            };
+            return Err(delegated_report(outcome, message));
         }
     };
     let mut stream = response.into_inner();
@@ -764,11 +768,12 @@ pub async fn run_delegated_pull_until_started(
                         "delegated_body_return",
                         Some(TransferLifecycleOutcome::Refused),
                     );
-                    return Err(eyre!(
+                    return Err(delegated_report(
+                        TransferLifecycleOutcome::Refused,
                         "destination daemon is older than m-jobs-3 and cannot detach \
                          this transfer (Started.transfer_id was empty, and dropping \
                          the stream would cancel the transfer on an older daemon). \
-                         Upgrade the destination daemon, or retry without --detach."
+                         Upgrade the destination daemon, or retry without --detach.",
                     ));
                 }
                 // Dropping `stream` here closes the receiver
@@ -807,13 +812,14 @@ pub async fn run_delegated_pull_until_started(
             Err(eyre!("delegated pull stream closed before Started"))
         }
         Err(status) => {
-            lifecycle_trace.record(
-                "delegated_body_return",
-                Some(delegated_status_outcome(&status)),
-            );
-            Err(eyre!(
-                "delegation stream failed before Started: {}",
-                status.message()
+            let outcome = delegated_status_outcome(&status);
+            lifecycle_trace.record("delegated_body_return", Some(outcome));
+            Err(delegated_report(
+                outcome,
+                format!(
+                    "delegation stream failed before Started: {}",
+                    status.message()
+                ),
             ))
         }
     }

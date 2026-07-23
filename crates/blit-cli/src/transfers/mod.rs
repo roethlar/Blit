@@ -21,6 +21,9 @@ use blit_app::transfers::dispatch::{select_transfer_route, TransferKind, Transfe
 use blit_app::transfers::filter::{self, FilterInputs};
 use blit_app::transfers::resolution::resolve_destination;
 use blit_core::fs_enum::FileFilter;
+use blit_core::remote::transfer::{
+    SessionPhaseRole, TransferLifecycleOutcome, TransferLifecycleTrace,
+};
 use blit_core::remote::RemotePath;
 
 /// Build a `FilterInputs` view over a `TransferArgs`. Lives here
@@ -98,18 +101,106 @@ fn confirm_destructive_operation(message: &str, skip_prompt: bool) -> Result<boo
     Ok(decision == "y" || decision == "yes")
 }
 
-pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferKind) -> Result<()> {
-    let src_endpoint = parse_transfer_endpoint(&args.source)?;
-    let raw_dst = parse_transfer_endpoint(&args.destination)?;
-    let pre_resolve_display = display_endpoint(&raw_dst);
-    let dst_endpoint = resolve_destination(&args.source, &args.destination, &src_endpoint, raw_dst);
+struct PreparedTransferRoute {
+    route: TransferRoute,
+    pre_resolve_display: String,
+    src_display: String,
+    dst_display: String,
+}
+
+fn prepare_transfer_route(
+    args: &TransferArgs,
+    mode: TransferKind,
+    lifecycle_trace: &TransferLifecycleTrace,
+) -> Result<PreparedTransferRoute> {
+    lifecycle_trace.record("transfer_route_select_begin", None);
+    let prepared = (|| {
+        let src_endpoint = parse_transfer_endpoint(&args.source)?;
+        let raw_dst = parse_transfer_endpoint(&args.destination)?;
+        let pre_resolve_display = display_endpoint(&raw_dst);
+        let dst_endpoint =
+            resolve_destination(&args.source, &args.destination, &src_endpoint, raw_dst);
+        let src_display = display_endpoint(&src_endpoint);
+        let dst_display = display_endpoint(&dst_endpoint);
+        let route = select_transfer_route(src_endpoint, dst_endpoint, mode);
+        Ok(PreparedTransferRoute {
+            route,
+            pre_resolve_display,
+            src_display,
+            dst_display,
+        })
+    })();
+
+    match &prepared {
+        Ok(prepared) => {
+            match &prepared.route {
+                TransferRoute::LocalToRemote { .. } => {
+                    lifecycle_trace.attach_initiator_role(SessionPhaseRole::Source);
+                }
+                TransferRoute::RemoteToLocal { .. }
+                | TransferRoute::RemoteToRemoteDelegated { .. } => {
+                    lifecycle_trace.attach_initiator_role(SessionPhaseRole::Destination);
+                }
+                TransferRoute::LocalToLocal { .. } => {}
+            }
+            lifecycle_trace.record(
+                "transfer_route_select_end",
+                Some(TransferLifecycleOutcome::Success),
+            );
+        }
+        Err(err) => lifecycle_trace.record(
+            "transfer_route_select_end",
+            Some(blit_core::remote::transfer::outcome_for_report(err)),
+        ),
+    }
+    prepared
+}
+
+pub(super) fn render_result(
+    lifecycle_trace: &TransferLifecycleTrace,
+    render: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    lifecycle_trace.record("result_render_begin", None);
+    let result = render();
+    lifecycle_trace.record(
+        "result_render_end",
+        Some(crate::lifecycle_result_outcome(&result)),
+    );
+    result
+}
+
+pub async fn run_transfer(
+    ctx: &AppContext,
+    args: &TransferArgs,
+    mode: TransferKind,
+    lifecycle_trace: &TransferLifecycleTrace,
+) -> Result<()> {
+    lifecycle_trace.record("transfer_dispatch_begin", None);
+    let result = run_transfer_inner(ctx, args, mode, lifecycle_trace).await;
+    lifecycle_trace.record(
+        "transfer_dispatch_end",
+        Some(crate::lifecycle_result_outcome(&result)),
+    );
+    result
+}
+
+async fn run_transfer_inner(
+    ctx: &AppContext,
+    args: &TransferArgs,
+    mode: TransferKind,
+    lifecycle_trace: &TransferLifecycleTrace,
+) -> Result<()> {
+    let PreparedTransferRoute {
+        route,
+        pre_resolve_display,
+        src_display,
+        dst_display,
+    } = prepare_transfer_route(args, mode, lifecycle_trace)?;
 
     let operation = match mode {
         TransferKind::Copy => "copy",
         TransferKind::Mirror => "mirror",
     };
-    let src_display = display_endpoint(&src_endpoint);
-    let dst_display = display_endpoint(&dst_endpoint);
 
     // R54-F1 (data-loss / silent bug): `--null` only works
     // correctly for LOCAL COPY. Outside that envelope it's
@@ -140,9 +231,7 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
                  only) for read-path benchmarking."
             );
         }
-        if matches!(src_endpoint, Endpoint::Remote(_))
-            || matches!(dst_endpoint, Endpoint::Remote(_))
-        {
+        if !matches!(&route, TransferRoute::LocalToLocal { .. }) {
             bail!(
                 "--null is not supported with remote endpoints: \
                  the remote push/pull paths don't implement null \
@@ -159,13 +248,15 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
     // misuse fails before any RPCs fire — clearer than
     // letting the daemon emit a phased error mid-stream.
     if args.detach {
-        match (&src_endpoint, &dst_endpoint) {
-            (Endpoint::Local(_), _) | (_, Endpoint::Local(_)) => bail!(
+        match &route {
+            TransferRoute::LocalToLocal { .. }
+            | TransferRoute::LocalToRemote { .. }
+            | TransferRoute::RemoteToLocal { .. } => bail!(
                 "--detach is only supported for remote→remote transfers \
                  (the CLI is in the byte path for any local endpoint, so \
                  disconnecting would drop the bytes)"
             ),
-            (Endpoint::Remote(_), Endpoint::Remote(_)) => {
+            TransferRoute::RemoteToRemoteDelegated { .. } => {
                 // Delegated remote→remote — detach is valid.
             }
         }
@@ -198,12 +289,12 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
         }
     }
 
-    match select_transfer_route(src_endpoint, dst_endpoint, mode) {
+    match route {
         TransferRoute::LocalToLocal { src, dst, mirror } => {
             if !src.exists() {
                 bail!("source path does not exist: {}", src.display());
             }
-            run_local_transfer(ctx, args, &src, &dst, mirror)
+            run_local_transfer(ctx, args, &src, &dst, mirror, lifecycle_trace)
                 .await
                 .map(|_| ())
         }
@@ -213,13 +304,18 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             }
             ensure_remote_push_supported(args)?;
             ensure_remote_destination_supported(&dst)?;
-            run_remote_push_transfer(args, src, dst, mirror).await
+            run_remote_push_transfer(args, src, dst, mirror, lifecycle_trace).await
         }
         TransferRoute::RemoteToLocal { src, dst, mirror } => {
             ensure_remote_pull_supported(args)?;
             ensure_remote_source_supported(&src)?;
             run_remote_pull_transfer(
-                args, src, &dst, mirror, false, // not a move — source survives
+                args,
+                src,
+                &dst,
+                mirror,
+                false, // not a move — source survives
+                lifecycle_trace,
             )
             .await
         }
@@ -227,17 +323,44 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
             ensure_remote_pull_supported(args)?;
-            run_remote_to_remote_direct(args, src, dst, mirror, false /* not a move */).await
+            run_remote_to_remote_direct(
+                args,
+                src,
+                dst,
+                mirror,
+                false, /* not a move */
+                lifecycle_trace,
+            )
+            .await
         }
     }
 }
 
-pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
-    let src_endpoint = parse_transfer_endpoint(&args.source)?;
-    let raw_dst = parse_transfer_endpoint(&args.destination)?;
-    let pre_resolve_display = display_endpoint(&raw_dst);
-    let dst_endpoint = resolve_destination(&args.source, &args.destination, &src_endpoint, raw_dst);
+pub async fn run_move(
+    ctx: &AppContext,
+    args: &TransferArgs,
+    lifecycle_trace: &TransferLifecycleTrace,
+) -> Result<()> {
+    lifecycle_trace.record("transfer_dispatch_begin", None);
+    let result = run_move_inner(ctx, args, lifecycle_trace).await;
+    lifecycle_trace.record(
+        "transfer_dispatch_end",
+        Some(crate::lifecycle_result_outcome(&result)),
+    );
+    result
+}
 
+async fn run_move_inner(
+    ctx: &AppContext,
+    args: &TransferArgs,
+    lifecycle_trace: &TransferLifecycleTrace,
+) -> Result<()> {
+    let PreparedTransferRoute {
+        route,
+        pre_resolve_display,
+        src_display,
+        dst_display,
+    } = prepare_transfer_route(args, TransferKind::Copy, lifecycle_trace)?;
     if args.dry_run {
         bail!("move does not support --dry-run");
     }
@@ -372,8 +495,6 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
     warn_if_dropping_windows_metadata(args);
 
     // Prompt for confirmation before move (which deletes source)
-    let src_display = display_endpoint(&src_endpoint);
-    let dst_display = display_endpoint(&dst_endpoint);
     let prompt = format!(
         "Move will transfer '{}' to '{}' and delete the source. Continue?",
         src_display, dst_display
@@ -393,8 +514,12 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
         }
     }
 
-    match (src_endpoint, dst_endpoint) {
-        (Endpoint::Local(src_path), Endpoint::Local(dst_path)) => {
+    match route {
+        TransferRoute::LocalToLocal {
+            src: src_path,
+            dst: dst_path,
+            ..
+        } => {
             if !src_path.exists() {
                 bail!("source path does not exist: {}", src_path.display());
             }
@@ -457,18 +582,24 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             // summary now so JSON consumers see one self-contained
             // success document (or no output at all on the failure
             // path above).
-            local::print_local_transfer_summary(
-                ctx,
-                args,
-                false,
-                &summary,
-                summary.duration,
-                &src_path,
-                &dst_path,
-            )?;
+            render_result(lifecycle_trace, || {
+                local::print_local_transfer_summary(
+                    ctx,
+                    args,
+                    false,
+                    &summary,
+                    summary.duration,
+                    &src_path,
+                    &dst_path,
+                )
+            })?;
             Ok(())
         }
-        (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
+        TransferRoute::RemoteToLocal {
+            src: remote,
+            dst: dst_path,
+            ..
+        } => {
             ensure_remote_pull_supported(args)?;
             ensure_remote_source_supported(&remote)?;
             // move_verb=true: the session refuses partial source
@@ -485,6 +616,7 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
                 &dst_path,
                 false,
                 true,
+                lifecycle_trace,
             )
             .await?;
 
@@ -496,10 +628,17 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
                 _ => bail!("unsupported remote source for move"),
             };
             delete_remote_path(&remote, &rel_path).await?;
-            remote::print_deferred_pull_result(args, &state);
+            render_result(lifecycle_trace, || {
+                remote::print_deferred_pull_result(args, &state);
+                Ok(())
+            })?;
             Ok(())
         }
-        (Endpoint::Local(src_path), Endpoint::Remote(remote)) => {
+        TransferRoute::LocalToRemote {
+            src: src_path,
+            dst: remote,
+            ..
+        } => {
             if !src_path.exists() {
                 bail!("source path does not exist: {}", src_path.display());
             }
@@ -516,6 +655,7 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
                 src_path.clone(),
                 remote.clone(),
                 false,
+                lifecycle_trace,
             )
             .await?;
 
@@ -527,10 +667,13 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
                 fs::remove_file(&src_path)
                     .with_context(|| format!("removing {}", src_path.display()))?;
             }
-            remote::print_deferred_push_result(args, &state);
+            render_result(lifecycle_trace, || {
+                remote::print_deferred_push_result(args, &state);
+                Ok(())
+            })?;
             Ok(())
         }
-        (Endpoint::Remote(src), Endpoint::Remote(dst)) => {
+        TransferRoute::RemoteToRemoteDelegated { src, dst, .. } => {
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
             ensure_remote_pull_supported(args)?;
@@ -546,6 +689,7 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
                 dst,
                 false,
                 true,
+                lifecycle_trace,
             )
             .await?;
 
@@ -557,7 +701,10 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
                 _ => bail!("unsupported remote source for move"),
             };
             delete_remote_path(&src, &rel_path).await?;
-            remote_remote_direct::print_deferred_delegated_result(args, &state);
+            render_result(lifecycle_trace, || {
+                remote_remote_direct::print_deferred_delegated_result(args, &state);
+                Ok(())
+            })?;
             Ok(())
         }
     }
@@ -575,6 +722,7 @@ fn warn_if_dropping_windows_metadata(args: &TransferArgs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -627,7 +775,14 @@ mod tests {
             delete_scope: "subset".into(),
         };
 
-        runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;
+        runtime().block_on(run_local_transfer(
+            &ctx,
+            &args,
+            &src,
+            &dest,
+            false,
+            &TransferLifecycleTrace::disabled(),
+        ))?;
         let copied = std::fs::read(dest.join("hello.txt"))?;
         assert_eq!(copied, b"hello");
         Ok(())
@@ -676,7 +831,14 @@ mod tests {
             delete_scope: "subset".into(),
         };
 
-        runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;
+        runtime().block_on(run_local_transfer(
+            &ctx,
+            &args,
+            &src,
+            &dest,
+            false,
+            &TransferLifecycleTrace::disabled(),
+        ))?;
         assert!(!dest.join("hello.txt").exists());
         Ok(())
     }
@@ -747,7 +909,12 @@ mod tests {
         let ctx = ctx();
         let args = gate_args(src.to_str().unwrap(), dst.to_str().unwrap(), true, true);
         let err = runtime()
-            .block_on(run_transfer(&ctx, &args, TransferKind::Copy))
+            .block_on(run_transfer(
+                &ctx,
+                &args,
+                TransferKind::Copy,
+                &TransferLifecycleTrace::disabled(),
+            ))
             .expect_err("local→local must reject --detach");
         let msg = format!("{err:#}");
         assert!(
@@ -761,9 +928,60 @@ mod tests {
         let ctx = ctx();
         let args = gate_args("host-a:/m/", "host-b:/m/", true, true);
         let err = runtime()
-            .block_on(run_move(&ctx, &args))
+            .block_on(run_move(&ctx, &args, &TransferLifecycleTrace::disabled()))
             .expect_err("move + --detach must bail");
         let msg = format!("{err:#}");
         assert!(msg.contains("move does not support --detach"), "got: {msg}");
+    }
+
+    fn captured_trace() -> (
+        TransferLifecycleTrace,
+        Arc<Mutex<Vec<blit_core::remote::transfer::TransferLifecycleEvent>>>,
+    ) {
+        let events: Arc<Mutex<Vec<_>>> = Arc::default();
+        let captured = Arc::clone(&events);
+        (
+            TransferLifecycleTrace::capture("cli-route", move |event| {
+                captured.lock().unwrap().push(event);
+            }),
+            events,
+        )
+    }
+
+    #[test]
+    fn route_selection_records_one_vocabulary_and_both_initiator_roles() {
+        for (source, destination, expected_role) in [
+            ("./local-source", "host-a:/test/", SessionPhaseRole::Source),
+            (
+                "host-a:/test/",
+                "./local-destination",
+                SessionPhaseRole::Destination,
+            ),
+        ] {
+            let (trace, events) = captured_trace();
+            let args = gate_args(source, destination, false, true);
+            prepare_transfer_route(&args, TransferKind::Copy, &trace).expect("route resolves");
+
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].event, "transfer_route_select_begin");
+            assert_eq!(events[1].event, "transfer_route_select_end");
+            assert_eq!(events[1].initiator_role, Some(expected_role));
+            assert_eq!(events[1].outcome, Some(TransferLifecycleOutcome::Success));
+        }
+    }
+
+    #[test]
+    fn result_render_always_closes_its_boundary_with_the_real_outcome() {
+        let (trace, events) = captured_trace();
+        let err = render_result(&trace, || Err(eyre::eyre!("render failed")))
+            .expect_err("render error propagates");
+        assert_eq!(err.to_string(), "render failed");
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event, "result_render_begin");
+        assert_eq!(events[1].event, "result_render_end");
+        assert_eq!(events[1].outcome, Some(TransferLifecycleOutcome::Error));
     }
 }

@@ -10,7 +10,9 @@ use blit_app::transfers::compare::{comparison_mode, move_comparison_mode, Compar
 use blit_app::transfers::remote::{
     run_remote_pull, run_remote_push, PullExecution, PullVerbOutcome, PushExecution,
 };
-use blit_core::remote::transfer::{ProgressEvent, ProgressTotals, RemoteTransferProgress};
+use blit_core::remote::transfer::{
+    ProgressEvent, ProgressTotals, RemoteTransferProgress, TransferLifecycleTrace,
+};
 use blit_core::remote::RemoteEndpoint;
 
 use blit_app::endpoints::format_remote_endpoint;
@@ -172,10 +174,19 @@ pub async fn run_remote_push_transfer(
     source: PathBuf,
     remote: RemoteEndpoint,
     mirror_mode: bool,
+    lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<()> {
-    run_remote_push_transfer_inner(args, source, remote, mirror_mode, false, false)
-        .await
-        .map(|_| ())
+    run_remote_push_transfer_inner(
+        args,
+        source,
+        remote,
+        mirror_mode,
+        false,
+        false,
+        lifecycle_trace,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// R51-F4: move's variant of [`run_remote_push_transfer`]. Returns
@@ -195,8 +206,18 @@ pub async fn run_remote_push_transfer_deferred(
     source: PathBuf,
     remote: RemoteEndpoint,
     mirror_mode: bool,
+    lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredPushState> {
-    run_remote_push_transfer_inner(args, source, remote, mirror_mode, true, true).await
+    run_remote_push_transfer_inner(
+        args,
+        source,
+        remote,
+        mirror_mode,
+        true,
+        true,
+        lifecycle_trace,
+    )
+    .await
 }
 
 pub struct DeferredPushState {
@@ -246,6 +267,7 @@ async fn run_remote_push_transfer_inner(
     mirror_mode: bool,
     move_verb: bool,
     defer_output: bool,
+    lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredPushState> {
     let show_progress = args.effective_progress() || args.verbose;
     let (progress_handle, progress_task) = spawn_progress_monitor_with_options(
@@ -305,7 +327,7 @@ async fn run_remote_push_transfer_inner(
         compare_mode,
         ignore_existing: args.ignore_existing,
         remote_label: format_remote_endpoint(&remote),
-        lifecycle_trace: Default::default(),
+        lifecycle_trace: lifecycle_trace.clone(),
     };
 
     // Push has no caller-side destructive step (mirror-delete is
@@ -332,7 +354,10 @@ async fn run_remote_push_transfer_inner(
         destination: outcome.destination,
     };
     if !defer_output {
-        print_deferred_push_result(args, &state);
+        super::render_result(lifecycle_trace, || {
+            print_deferred_push_result(args, &state);
+            Ok(())
+        })?;
     }
     Ok(state)
 }
@@ -343,6 +368,7 @@ pub async fn run_remote_pull_transfer(
     dest_root: &Path,
     mirror_mode: bool,
     move_verb: bool,
+    lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<()> {
     run_remote_pull_transfer_inner(
         args,
@@ -351,6 +377,7 @@ pub async fn run_remote_pull_transfer(
         mirror_mode,
         move_verb,
         false, // emit success summary inline (copy/mirror default)
+        lifecycle_trace,
     )
     .await
     .map(|_| ())
@@ -366,8 +393,18 @@ pub async fn run_remote_pull_transfer_deferred(
     dest_root: &Path,
     mirror_mode: bool,
     move_verb: bool,
+    lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredPullState> {
-    run_remote_pull_transfer_inner(args, remote, dest_root, mirror_mode, move_verb, true).await
+    run_remote_pull_transfer_inner(
+        args,
+        remote,
+        dest_root,
+        mirror_mode,
+        move_verb,
+        true,
+        lifecycle_trace,
+    )
+    .await
 }
 
 pub fn print_deferred_pull_result(args: &TransferArgs, state: &DeferredPullState) {
@@ -385,6 +422,7 @@ async fn run_remote_pull_transfer_inner(
     mirror_mode: bool,
     move_verb: bool,
     defer_output: bool,
+    lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredPullState> {
     // Filter parity: the wire FilterSpec rides `SessionOpen.filter`
     // (otp-10b-2); the daemon SOURCE applies it through the universal
@@ -439,7 +477,7 @@ async fn run_remote_pull_transfer_inner(
         compare_mode,
         ignore_existing: args.ignore_existing,
         remote_label: format_remote_endpoint(&remote),
-        lifecycle_trace: Default::default(),
+        lifecycle_trace: lifecycle_trace.clone(),
     };
 
     // Mirror deletions run in-session at SourceDone (the one delete
@@ -470,7 +508,10 @@ async fn run_remote_pull_transfer_inner(
     // source-delete step succeeds — so a post-transfer failure
     // never leaves a success-looking JSON document on stdout.
     if !defer_output {
-        print_deferred_pull_result(args, &state);
+        super::render_result(lifecycle_trace, || {
+            print_deferred_pull_result(args, &state);
+            Ok(())
+        })?;
     }
 
     Ok(state)

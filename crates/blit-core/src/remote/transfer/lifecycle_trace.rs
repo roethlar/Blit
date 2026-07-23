@@ -20,6 +20,66 @@ pub enum TransferLifecycleOutcome {
     Error,
 }
 
+/// Preserve a known lifecycle outcome when an API must return an
+/// [`eyre::Report`] whose human-facing message cannot carry structured phase
+/// identity. The marker is diagnostic-only: its `Display` is exactly the
+/// product error text callers would otherwise receive.
+#[derive(Debug)]
+pub struct TransferLifecycleFailure {
+    outcome: TransferLifecycleOutcome,
+    message: String,
+}
+
+impl TransferLifecycleFailure {
+    pub fn new(outcome: TransferLifecycleOutcome, message: impl Into<String>) -> Self {
+        Self {
+            outcome,
+            message: message.into(),
+        }
+    }
+
+    pub fn outcome(&self) -> TransferLifecycleOutcome {
+        self.outcome
+    }
+}
+
+impl std::fmt::Display for TransferLifecycleFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TransferLifecycleFailure {}
+
+/// Classify a returned transfer error for its enclosing lifecycle boundary.
+/// Typed markers win over display text so presentation changes cannot silently
+/// turn a refusal into a generic error (or vice versa).
+pub fn outcome_for_report(report: &eyre::Report) -> TransferLifecycleOutcome {
+    use crate::generated::session_error::Code;
+    use crate::remote::transfer::session_client::TransferOpenRefusal;
+    use crate::transfer_session::SessionFault;
+
+    if let Some(failure) = report.downcast_ref::<TransferLifecycleFailure>() {
+        return failure.outcome();
+    }
+
+    let fault = report
+        .downcast_ref::<TransferOpenRefusal>()
+        .map(|refusal| &refusal.0)
+        .or_else(|| report.downcast_ref::<SessionFault>());
+    match fault.map(|fault| fault.code) {
+        Some(
+            Code::BuildMismatch
+            | Code::ModuleUnknown
+            | Code::ReadOnly
+            | Code::DelegationRefused
+            | Code::ScanIncomplete
+            | Code::ChecksumDisabled,
+        ) => TransferLifecycleOutcome::Refused,
+        _ => TransferLifecycleOutcome::Error,
+    }
+}
+
 /// One structured lifecycle timing record.
 #[derive(Clone, Debug, Serialize)]
 pub struct TransferLifecycleEvent {
@@ -386,5 +446,34 @@ mod tests {
         assert_eq!(value["run_id"], "writer-run");
         assert_eq!(value["initiator_role"], "SOURCE");
         assert_eq!(value["outcome"], "REFUSED");
+    }
+
+    #[test]
+    fn report_outcome_uses_typed_refusal_identity_not_error_text() {
+        use crate::generated::session_error::Code;
+        use crate::remote::transfer::session_client::TransferOpenRefusal;
+        use crate::transfer_session::SessionFault;
+
+        let open_refusal = eyre::Report::new(TransferOpenRefusal(SessionFault::refusal(
+            Code::ModuleUnknown,
+            "arbitrary presentation text",
+        )));
+        assert_eq!(
+            outcome_for_report(&open_refusal),
+            TransferLifecycleOutcome::Refused
+        );
+
+        let delegated = eyre::Report::new(TransferLifecycleFailure::new(
+            TransferLifecycleOutcome::Refused,
+            "another arbitrary message",
+        ));
+        assert_eq!(
+            outcome_for_report(&delegated),
+            TransferLifecycleOutcome::Refused
+        );
+        assert_eq!(
+            outcome_for_report(&eyre::eyre!("ordinary failure")),
+            TransferLifecycleOutcome::Error
+        );
     }
 }
