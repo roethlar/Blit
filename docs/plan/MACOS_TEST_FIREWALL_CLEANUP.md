@@ -1,6 +1,6 @@
 # macOS test firewall cleanup
 
-**Status**: Active
+**Status**: Shipped
 **Created**: 2026-07-23
 **Supersedes**: nothing
 **Decision ref**: D-2026-07-23-6
@@ -89,36 +89,36 @@ target paths and every non-ephemeral firewall entry are outside this plan.
 
 ## Acceptance criteria
 
-- [ ] A new macOS test helper owns exactly one temporary application rule from
+- [x] A new macOS test helper owns exactly one temporary application rule from
       absent preflight through add, unblock, test command, remove, and verified
       absence.
-- [ ] The helper never installs or starts Blit automatically. The daemon and
+- [x] The helper never installs or starts Blit automatically. The daemon and
       wrapped command run as the invoking user and only for that invocation.
-- [ ] Exact inventories and command outcomes are retained before add, after
+- [x] Exact inventories and command outcomes are retained before add, after
       admission, and after removal. Evidence includes the path, session ID,
       timestamps, exit codes, and whether cleanup superseded the command result.
-- [ ] A command exit zero, nonzero exit, `INT`, and `TERM` all remove the exact
+- [x] A command exit zero, nonzero exit, `INT`, and `TERM` all remove the exact
       owned rule and clear the ledger only after zero exact inventory matches.
-- [ ] Add failure, unblock failure, malformed inventory, duplicate exact path,
+- [x] Add failure, unblock failure, malformed inventory, duplicate exact path,
       removal failure, lost authorization, and post-remove persistence all
       fail closed. Removal failure retains the ledger and blocks scratch
       deletion.
-- [ ] An existing firewall entry is never adopted or removed. An unresolved
+- [x] An existing firewall entry is never adopted or removed. An unresolved
       owned ledger blocks a new rule until exact recovery succeeds.
-- [ ] Deterministic fake-backed tests cover paths containing spaces, exact
+- [x] Deterministic fake-backed tests cover paths containing spaces, exact
       rather than substring matching, unrelated-entry preservation, duplicate
       entries, stale ledgers with present and absent rules, signal cleanup, and
       cleanup failure overriding command success.
-- [ ] Each new behavioral guard is mutation-proved by changing production
+- [x] Each new behavioral guard is mutation-proved by changing production
       helper behavior, observing the targeted test fail, restoring it, and
       observing it pass.
-- [ ] Relevant existing macOS hardware procedures point to the helper and
+- [x] Relevant existing macOS hardware procedures point to the helper and
       explicitly forbid deleting the binary or detaching its volume before the
       helper's verified cleanup marker.
-- [ ] The docs gate, shell syntax/static checks available in the repo, focused
+- [x] The docs gate, shell syntax/static checks available in the repo, focused
       helper suite, repository verification entry point, and `git diff --check`
       pass.
-- [ ] After implementation acceptance, the two exact proven ephemeral test
+- [x] After implementation acceptance, the two exact proven ephemeral test
       paths listed above are presented to the owner for one-time removal.
       No live firewall mutation occurs without that separate exact approval;
       complete before/after inventories are retained.
@@ -182,16 +182,18 @@ old defect; it is not used as a template.
 
 ## Slices
 
-1. **mtfc-1 — helper and deterministic guards.** Implement the exact owned-rule
-   lifecycle and durable recovery state, add fake-backed tests, mutation-prove
-   the failure paths, and commit without touching the host firewall.
-2. **mtfc-2 — integration and verification.** Route relevant future macOS
-   hardware guidance through the helper, run the complete local gates, record
-   accepted behavior, and close implementation without a hardware transfer.
-3. **mtfc-3 — optional one-time residue cleanup.** Only after separate exact
-   owner approval, remove the two proven ephemeral test entries, retain full
-   before/after inventories, update machine state, and commit the evidence.
+1. **mtfc-1 `[x]` — helper and deterministic guards.** Exact lifecycle,
+   recovery, evidence, and 16 fake-backed cases landed in `36d2bacb`.
+2. **mtfc-2 `[x]` — integration and verification.** Future Mac hardware
+   guidance routes through the helper; admission proof was strengthened in
+   `68460a7b` and mutation-proved in `65ae700d`. Bash syntax, the focused
+   suite, docs, formatting, strict Clippy, and two complete workspace runs
+   passed on the restored bytes. No hardware transfer or firewall mutation ran.
+3. **mtfc-3 not authorized — optional one-time residue cleanup.** The owner
+   was shown both exact paths and declined removal. They remain recorded in
+   `.agents/machines.md`; any later removal requires a new exact approval.
 
 ## Open questions
 
-- None. Live cleanup remains separately gated after implementation.
+- None. The shipped helper has no active review or implementation work. The
+  optional historical residue cleanup remains separately gated.

@@ -31,13 +31,20 @@ currently skip `--remove`, clear the ledger, and claim success even if the
 post-add ownership check never observed the rule. That recreates the
 detectable stale-rule failure this slice must prevent.
 
-The bounded correction will tolerate harmless inventory whitespace while
-still validating the declared complete entry count, exercise a realistic
-format variant, and require a rule observed after successful add before a
-zero-count cleanup may clear the ledger. A simulated post-add undercount must
-retain the ledger, return cleanup failure, and recover only after the exact
-entry is visible again. The corrected committed range then receives a fresh
-contract-compliant Opus review.
+The bounded correction tolerates harmless inventory whitespace while still
+validating the declared complete entry count, exercises a realistic format
+variant, and requires a rule observed after successful add before a zero-count
+cleanup may clear the ledger. A simulated post-add undercount retains the
+ledger, returns cleanup failure, and recovers only after the exact entry is
+visible again. The correction landed in `68460a7b` and its mutation proof in
+`65ae700d`.
 
 No live firewall mutation, sudo command, hardware transfer, push, branch
 operation, or retained-artifact deletion occurred.
+
+## Closure
+
+This attempt remains non-authoritative and no reviewer verdict is claimed.
+Per D-2026-07-23-7, a fresh external review is not pending because the owner
+did not authorize one. The admitted finding is closed by the local code and
+guard evidence above.

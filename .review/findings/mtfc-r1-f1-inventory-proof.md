@@ -2,7 +2,7 @@
 
 **Severity**: HIGH — an under-count after successful admission can leave an
 Application Firewall rule live while clearing its recovery ledger.
-**Status**: In progress
+**Status**: Verified locally; external review not authorized
 **Branch**: `master` (repo no-agent-branch rule)
 **Commit**: `68460a7b`
 
@@ -75,3 +75,10 @@ complete workspace runs passed.
 No live mutation is authorized. The read-only target inventory validates
 current command access and layout only; it is not committed because it contains
 machine-specific application paths.
+
+## Closure
+
+The candidate came from a non-authoritative review attempt, was independently
+admitted against the code, fixed in `68460a7b`, and mutation-proved in
+`65ae700d`. No reviewer verdict is claimed. Per D-2026-07-23-7, no further
+external review is pending without a new explicit owner approval.

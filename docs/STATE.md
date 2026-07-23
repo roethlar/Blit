@@ -1,17 +1,15 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-23 (terminal data-plane attribution complete)
+Last updated: 2026-07-23 (macOS test firewall helper closed locally)
 
 - **RELEASE IDENTITY IS NOW 0.1.1:** the existing `v0.1.0` tag remains at its
   shipped 2026-05-31 commit. The current candidate uses one workspace-owned
   0.1.1 version, and packaged smoke now requires exact semantic version plus
   commit identity instead of checking only the commit suffix.
 
-- **0.1.1 RELEASE CANDIDATE VALIDATED:** exact commit `d1f1152d` passed Docs
-  Gate and CI run `29953569652`: strict Check, Linux, ARM macOS, Windows, and
-  all three packaged smoke jobs. The final audit found no open canonical review
-  row or release question. Artifact hashes and scope live only in
-  `docs/RELEASE_READINESS.md`. D-2026-07-22-4 subsequently authorized one
+- **0.1.1 RELEASE CANDIDATE VALIDATED:** exact `d1f1152d` passed Docs Gate,
+  every hosted OS suite, and all packaged smoke jobs. Artifact hashes and scope
+  live only in `docs/RELEASE_READINESS.md`. D-2026-07-22-4 subsequently authorized one
   conservative Thunderbolt probe before publication; it changed no code and
   does not change the validated candidate or authorize tag/publication refs.
 - **ONE TRANSFER PATH IS PROVED.** There is one `Transfer` RPC. When the caller is DESTINATION, it connects to the SOURCE daemon; that daemon sends through the same SOURCE pipeline. Push/pull-facing adapters only select roles. The connection initiator still opens sockets to the responder for NAT/firewall reachability; that topology does not select byte logic or worker policy.
@@ -40,10 +38,17 @@ Last updated: 2026-07-23 (terminal data-plane attribution complete)
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
+## Handoff — 2026-07-23 at `979b1f43`
+- Done: the macOS firewall helper and local guard closure are committed; no
+  external review, transfer, firewall mutation, or push is active.
+- Next: resume Queue 1 release work. The two stale rules move only on new exact approval.
+
 ## Now (active work)
 
-- **MACOS TEST FIREWALL CLEANUP ACTIVE (D-2026-07-23-6):** exact admission
-  through verified removal, no install/login: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md`.
+- **MACOS TEST FIREWALL CLEANUP SHIPPED LOCALLY (D-2026-07-23-6):** the exact
+  lifecycle helper, 16 fake-backed cases, real read-only parser check, and
+  mutation guards are complete. No external review is pending under
+  D-2026-07-23-7. Plan: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md`.
 - **THUNDERBOLT LIFECYCLE ATTRIBUTED (D-2026-07-23-3):** exact instrumented
   candidate `a3be4a64` completed one 8 GiB Q-to-Nagatha RAM transfer with all
   hashes matching. Only 13.645 ms was observed outside its 3.587845-second data
@@ -87,10 +92,6 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   `[x]`; **sf-3a+ blocked** until ONE_TRANSFER_PATH ships, then
   resume/re-derive on the unified baseline. Principle: ceiling-driven,
   never competitor-relative (D-2026-07-04-4 — do not re-litigate).
-- **Background**: REV4 code-complete, gates DATA-COMPLETE (declarations in
-  Blocked); D-2026-07-23-2 retires Fable and assigns any selected formal
-  `openreview` to Claude Opus 4.8/max.
-
 ## Queue (ordered)
 
 1. **`docs/plan/RELEASE_COMPLETION.md` (ACTIVE, D-2026-07-22-3).** No hardware
@@ -150,8 +151,6 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Authoritative docs right now
 
-- Historical performance instrumentation: `docs/plan/TERMINAL_DATA_PLANE_ATTRIBUTION.md`
-  and `docs/bench/end-to-end-transfer-latency-2026-07-23/`.
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
   D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
   D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b).
@@ -181,8 +180,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Blocked / waiting (owner declarations and explicitly dated external blockers; checkpoints are owner-only)
 
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
-- **Two stale test firewall entries await separately approved cleanup;** do not
-  reuse/remove before the helper is accepted. Paths: `.agents/machines.md`.
+- **Two stale test firewall entries await separately approved cleanup;** the
+  helper is shipped, but these historical entries remain untouched. Exact
+  paths and the no-reuse/no-removal gate: `.agents/machines.md`.
 - **Hosted run `29949207219` at `354f38e`:** check, all three OS test suites,
   and all three target archive/checksum/upload jobs passed. It proves the
   `fa79f0a` payload-seal correction and rel-7 archive construction.

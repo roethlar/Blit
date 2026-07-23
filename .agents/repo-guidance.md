@@ -65,9 +65,13 @@ for every code or plan change.** Grok may provide ordinary advisory second eyes
 and tactical slice checks when they add value, but a Grok result is never a
 formal `openreview` acceptance verdict. Every formal `openreview` uses Claude
 CLI with `--model claude-opus-4-8 --effort max`; Fable is retired for all future
-reviews. If that exact reviewer is unavailable, fail closed and report it rather
-than falling back silently. Codex is not an independent reviewer when Codex
-authored the change. Per D-2026-07-16-1 and
+reviews. **Per D-2026-07-23-7, selection is only a recommendation: every
+external or paid review dispatch, formal or advisory, requires the owner's
+explicit approval for that exact invocation. Prior model selection is not
+dispatch approval, and an invalid, failed, or interrupted attempt is never
+retried automatically.** If the selected reviewer is unavailable, report it
+rather than falling back silently. Codex is not an independent reviewer when
+Codex authored the change. Per D-2026-07-16-1 and
 the `openreview` playbook,
 the substantive prompt remains the neutral best-way question only: no
 plan-conformance request, issue list, framing, or steering, including on a

@@ -503,3 +503,19 @@ Format:
   publication, tag, and push gate.
 - Plan approval: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md` activated by the
   owner on 2026-07-23: **"go"**.
+
+## D-2026-07-23-7 — External reviews require per-dispatch owner approval
+- Decision: Risk-based review selection may recommend a review, but no agent
+  may dispatch an external or paid reviewer—formal or advisory—without the
+  owner's explicit approval for that exact invocation. A prior model choice or
+  permission to use a model is not approval to spend on a review. An invalid,
+  failed, or interrupted attempt is not retried without fresh approval. Owner,
+  2026-07-23: **"why are you doing unprompted reviews with other agents and
+  spending my money when I did not explicitly approve that?"**
+- Why: review cost and external agent use are owner-controlled actions. Local
+  verification and finding adjudication may continue without inventing an
+  external acceptance gate.
+- Supersedes: the autonomous-dispatch implication of D-2026-07-23-2 and
+  D-2026-07-16-3/-4. It preserves their risk rubric as a recommendation,
+  Claude Opus 4.8/max as the only eligible formal reviewer, Fable retirement,
+  neutral prompts, exact-SHA/guard requirements, and all git safety gates.

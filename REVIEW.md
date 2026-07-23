@@ -13,6 +13,9 @@ See `.review/findings/<id>.md` for per-finding details.
   older rows may carry Codex/GPT-specific names;
   rows graded before 2026-07-04 carry `<id>.verified.json` from the
   retired async loop)
+- A row explicitly labeled local closure may use `[x]` without claiming a
+  reviewer verdict when external review was not authorized; its finding record
+  must carry the local guard proof and the non-review closure.
 
 ## Live dial tuning correction — plan and implementation review
 
@@ -30,12 +33,13 @@ Opus 4.8/max (D-2026-07-23-2).
 
 ## macOS temporary firewall cleanup
 
-Plan: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md` (Active,
-D-2026-07-23-6). Formal review uses Claude Opus 4.8/max.
+Plan: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md` (Shipped,
+D-2026-07-23-6). External review requires per-dispatch owner approval
+(D-2026-07-23-7).
 
 | ID | Title | Status | Commit(s) |
 |----|-------|--------|-----------|
-| mtfc-r1-f1-inventory-proof | Prove real inventory parsing and observed cleanup ownership | `[~]` | candidate `d35a0b12`; first review attempt invalid; fix `68460a7b`; formal review pending |
+| mtfc-r1-f1-inventory-proof | Prove real inventory parsing and observed cleanup ownership | `[x]` | local closure: invalid attempt yielded an independently admitted finding; fix `68460a7b`, guard proof `65ae700d`; no reviewer verdict claimed |
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 
