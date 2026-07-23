@@ -1,0 +1,17 @@
+start_utc=2026-07-23T00:59:17Z
+Name       Mtu   Network       Address            Ipkts Ierrs     Ibytes    Opkts Oerrs     Obytes  Coll
+bridge0    1500  <Link#15>   36:f6:db:0f:cf:c0 10622743     0 204335370057 19547486     0 321874118060     0
+bridge0    1500  fe80::c4a:7 fe80:f::c4a:7a2:c 10622743     - 204335370057 19547486     - 321874118060     -
+bridge0    1500  172.31.254/30 172.31.254.1    10622743     - 204335370057 19547486     - 321874118060     -
+ 92.4   604 /System/Library/CoreServices/osanalyticshelper
+ 21.5   811 /usr/libexec/spotlightknowledged.updater
+ 18.0 19659 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
+ 17.8   650 /System/Library/CoreServices/WindowManager.app/Contents/MacOS/WindowManager
+ 13.6   417 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  5.7 97031 claude
+  3.5 97214 claude
+  2.9  1877 /Applications/AMasterLauncher.app/Contents/MacOS/AMasterLauncher
+  2.5 28333 /Applications/Vivaldi.app/Contents/Frameworks/Vivaldi Framework.framework/Versions/8.1.4087.56/Helpers/Vivaldi Helper (Renderer).app/Contents/MacOS/Vivaldi Helper (Renderer)
+  1.5   714 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/corespotlightd
+  1.2   656 /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock
+  1.1 25121 /opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex

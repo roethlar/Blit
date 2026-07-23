@@ -1,0 +1,28 @@
+session=tbramprofile-20260723T005535Z-d1f1152d
+candidate=d1f1152dd16b8c2bf8409cb5637135e3f89068c0
+product_diff_candidate_to_head=none
+archive_sha256=d1d7d9e547f703a7b5216cb3227baaf6b2bea848a85599312439cdccff19b726
+client_sha256=dc3cd55ad10903ef695db904f97ea3f6c0c7e6a300e4a163b95e766bced3cca0
+daemon_sha256=652a8e641d1211ab9d4a254f56b6f2d9db0626c71a39d8861fee522ebbc74018
+source=Q.local 172.31.254.2/30 bridge0 mtu=1500 Mac16,10 memory=17179869184
+destination=Nagatha 172.31.254.1/30 bridge0 mtu=1500 Mac16,5 memory=51539607552
+direct_peer_speed_both=40_Gb/s
+ping_q_to_nagatha_ms=0.313
+ping_nagatha_to_q_ms=0.500
+seed=/Users/michael/blit-bench-work/src_large/large_1024M.bin
+seed_size=1073741824
+seed_blocks_512=2097152
+payload_files=8
+payload_bytes=8589934592
+sha256_each=cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc
+q_free_blocks_before_clones=1784767913
+q_free_blocks_after_clones=1784767913
+q_block_size=4096
+clone_allocation_delta_bytes=0
+staged_client_size=11038096
+staged_client_blocks_512=21560
+staged_client_allocated_bytes=11038720
+destination_fs=APFS_RAM_disk
+destination_capacity=12_GiB
+port=19041
+repeat_count=0

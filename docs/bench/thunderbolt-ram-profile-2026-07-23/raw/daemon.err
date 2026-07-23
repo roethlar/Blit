@@ -1,0 +1,49 @@
+blitd: default root export: /Volumes/TBRAMPROF_005535/destination.noindex
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":0,"unix_ns":1784768358418286000,"elapsed_ns":236792,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"socket_accept_begin","epoch":0,"socket":0}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":1,"unix_ns":1784768358422405000,"elapsed_ns":4355667,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"socket_accept_end","epoch":0,"socket":0}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":2,"unix_ns":1784768358422408000,"elapsed_ns":4359333,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"socket_trace_attached","epoch":0,"socket":0}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":3,"unix_ns":1784768358422411000,"elapsed_ns":4361583,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"socket_accept_begin","epoch":0,"socket":1}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":4,"unix_ns":1784768358422574000,"elapsed_ns":4525042,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"manifest_complete_received"}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":5,"unix_ns":1784768358422865000,"elapsed_ns":4816167,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"need_batch_send_begin","batch":0,"count":8}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":6,"unix_ns":1784768358422869000,"elapsed_ns":4820167,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"need_batch_sent","batch":0,"count":8}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":7,"unix_ns":1784768358422889000,"elapsed_ns":4839875,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"need_complete_sent"}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":8,"unix_ns":1784768358423541000,"elapsed_ns":5491917,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"first_payload_received","epoch":0,"socket":0}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":9,"unix_ns":1784768358425965000,"elapsed_ns":7915792,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"socket_accept_end","epoch":0,"socket":1}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":10,"unix_ns":1784768358425968000,"elapsed_ns":7918500,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"socket_trace_attached","epoch":0,"socket":1}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":11,"unix_ns":1784768358425970000,"elapsed_ns":7920583,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"socket_accept_begin","epoch":0,"socket":2}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":12,"unix_ns":1784768358425973000,"elapsed_ns":7924042,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"first_payload_received","epoch":0,"socket":1}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":13,"unix_ns":1784768358431050000,"elapsed_ns":13000792,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"socket_accept_end","epoch":0,"socket":2}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":14,"unix_ns":1784768358431053000,"elapsed_ns":13004333,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"socket_trace_attached","epoch":0,"socket":2}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":15,"unix_ns":1784768358431056000,"elapsed_ns":13006583,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"socket_accept_begin","epoch":0,"socket":3}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":16,"unix_ns":1784768358431059000,"elapsed_ns":13009875,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"first_payload_received","epoch":0,"socket":2}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":17,"unix_ns":1784768358440975000,"elapsed_ns":22925833,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"socket_accept_end","epoch":0,"socket":3}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":18,"unix_ns":1784768358440985000,"elapsed_ns":22935500,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"socket_trace_attached","epoch":0,"socket":3}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":19,"unix_ns":1784768358440992000,"elapsed_ns":22942750,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"first_payload_received","epoch":0,"socket":3}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":20,"unix_ns":1784768360300749000,"elapsed_ns":1882691458,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"receive_task_stopped","epoch":0,"socket":0}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":21,"unix_ns":1784768360309919000,"elapsed_ns":1891861333,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"receive_task_stopped","epoch":0,"socket":2}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":22,"unix_ns":1784768360353426000,"elapsed_ns":1935368333,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"receive_task_stopped","epoch":0,"socket":3}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":23,"unix_ns":1784768360356884000,"elapsed_ns":1938826750,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"receive_task_stopped","epoch":0,"socket":1}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":24,"unix_ns":1784768360356914000,"elapsed_ns":1938855917,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"data_plane_complete","live_streams":4,"receiver_ceiling":32,"peak_streams":4}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":25,"unix_ns":1784768360356941000,"elapsed_ns":1938883083,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"summary_send_begin"}
+[session-phase] {"schema":1,"run_id":"tbramprofile-20260723T005535Z-d1f1152d","session_id":"2d835d5ce55bdd57","producer_seq":26,"unix_ns":1784768360356944000,"elapsed_ns":1938886458,"endpoint_role":"DESTINATION","initiator_role":"SOURCE","event":"summary_sent"}
+time: command terminated abnormally
+real 161.62
+user 0.66
+sys 3.85
+            27918336  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                2066  page reclaims
+                   1  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   8  messages sent
+              118562  messages received
+                   0  signals received
+                 638  voluntary context switches
+              345341  involuntary context switches
+         19884012289  instructions retired
+         17226626584  cycles elapsed
+            19661256  peak memory footprint

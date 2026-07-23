@@ -8,6 +8,36 @@ Write to it via the `handoff` procedure; prune STATE.md overflow here.
 
 ---
 
+## 2026-07-23T01:05:29Z — Thunderbolt RAM path attributed without SSD payload
+
+Completed the one-run `THUNDERBOLT_RAM_PROFILE` diagnostic authorized by
+D-2026-07-23-1 against exact candidate `d1f1152d`. Q sent eight warm APFS
+clones (8 GiB logical, zero source free-block delta) to a fresh Nagatha APFS
+RAM disk. All eight destination files matched the retained seed hash. No
+benchmark payload reached either SSD; the only material generated SSD file
+was the exact staged client at 11,038,720 allocated bytes.
+
+The client completed externally in 2.38 seconds (28.874 Gb/s), while the
+structured phase trace measured 1.931515 seconds from first data record write
+to data-plane completion (35.578 Gb/s, 93.9% of the certified 37.9 Gb/s
+same-direction TCP ceiling). Of the 0.566821-second excess over ideal wire
+time, 0.448485 seconds (79.1%) lay outside the measured payload interval. Four
+streams and 16 MiB sender buffers therefore already approach the wire; Q's
+16 GiB RAM and stream count are not evidenced limits. The observer begins
+after connection, Transfer RPC opening, and HELLO/OPEN/ACCEPT establishment,
+and ends before final CLI rendering/exit, so a later instrumentation slice
+must divide that outside interval before any tuning change is justified.
+
+Payload admission sealed at four streams before the first 500 ms tuner tick,
+so the valid trace contains no dial samples or resize. The orchestration zsh
+then failed while assigning the completed SSH result to its read-only
+`status` variable; this lost only the direct outer exit-code line and
+post-run counters. Terminal client success JSON, correlated daemon terminal
+events, eight destination hashes, and process absence retained the result;
+no repeat ran. Exact paths were cleaned, the daemon reaped, its listener
+closed, and the RAM disk detached. Evidence:
+`docs/bench/thunderbolt-ram-profile-2026-07-23/`.
+
 ## 2026-07-04T05:45:00Z — D-2026-07-04-1: codex loop goes repo-wide; w4-1 graded and closed
 
 Owner directive mid-session: **"use codex review loop for all code and

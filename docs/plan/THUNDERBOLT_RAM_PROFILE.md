@@ -1,7 +1,8 @@
 # Mac-to-Mac Thunderbolt RAM-path profile
 
-**Status**: Active
+**Status**: Historical
 **Created**: 2026-07-23
+**Completed**: 2026-07-23
 **Supersedes**: nothing
 **Decision ref**: D-2026-07-23-1
 
@@ -64,32 +65,39 @@ existing observer cannot separate.
 
 ## Acceptance criteria
 
-- [ ] Exact candidate hashes, host identities, route, link, seed, source-clone
+- [x] Exact candidate hashes, host identities, route, link, seed, source-clone
       allocation, RAM-disk identity, free memory, listener state, and run ID
       are recorded before timing.
-- [ ] Exactly one 8,589,934,592-byte Blit transfer exits zero, reports eight
+- [x] Exactly one 8,589,934,592-byte Blit transfer exits zero, reports eight
       files and `tcp_fallback: false`, and writes only to Nagatha's RAM disk.
-- [ ] All eight destination files have the expected size and SHA-256 before
+      The outer zsh recorder lost the direct SSH status after completion by
+      assigning to its read-only `status` variable; terminal client success,
+      the correlated daemon summary, and all destination hashes establish
+      semantic success without a repeat.
+- [x] All eight destination files have the expected size and SHA-256 before
       the RAM disk is detached.
-- [ ] Source and destination phase traces correlate on one session ID and
+- [x] Source and destination phase traces correlate on one session ID and
       record connection/startup events, first queue/write/receive events, every
       dial sample actually emitted, all decisions or settlements, and terminal
       state. A zero-sample trace is accepted only when the phase ordering and
       code prove payload admission closed before the first 500 ms tuner tick;
       it is evidence of the controller lifetime, never a reason to repeat.
-- [ ] Complete client and daemon `/usr/bin/time -lp` records exist. Analysis
+- [x] Complete client and daemon `/usr/bin/time -lp` records exist. Analysis
       reports total throughput, fixed pre-first-byte time, sampled steady-state
       bytes and blocked ratios, live/peak/final streams, chunk/prefetch values,
       client and daemon CPU cores consumed, and peak RSS.
-- [ ] The verdict names the evidenced dominant class: fixed session overhead,
+      The pre-registered zero-sample outcome occurred, and the observer begins
+      after connection/RPC/session establishment, so the result explicitly
+      records those unavailable fields as an unresolved observer gap.
+- [x] The verdict names the evidenced dominant class: fixed session overhead,
       sender/user-kernel work, receiver/user-kernel work, socket backpressure,
       tail/work distribution, or unresolved observer gap. It must not name a
       product fix without evidence that excludes the other classes.
-- [ ] The exact source clones, staged client copy, daemon, listener, session
+- [x] The exact source clones, staged client copy, daemon, listener, session
       scratch, and RAM disk are removed or stopped. The retained seed, static
       Thunderbolt addresses, candidate artifact in Trash, and prior evidence
       remain untouched.
-- [ ] Evidence and limits are committed; `bash scripts/agent/check-docs.sh`
+- [x] Evidence and limits are committed; `bash scripts/agent/check-docs.sh`
       and `git diff --check` pass. No Rust/proto or other code changes exist.
 
 ## Design
@@ -128,12 +136,12 @@ do not add instrumentation or repeat the transfer inside this plan.
 
 ## Slices
 
-1. **tb-ram-profile-1 — plan and safety gate.** Commit this Draft, obtain the
+1. **[x] tb-ram-profile-1 — plan and safety gate.** Commit this Draft, obtain the
    owner activation decision, and perform no endpoint mutation before Active.
-2. **tb-ram-profile-2 — one instrumented RAM run.** Re-prove all gates, create
+2. **[x] tb-ram-profile-2 — one instrumented RAM run.** Re-prove all gates, create
    only the bounded clone metadata and RAM destinations, run exactly once,
    validate bytes, and clean up exact paths.
-3. **tb-ram-profile-3 — attribution record.** Analyze retained traces and
+3. **[x] tb-ram-profile-3 — attribution record.** Analyze retained traces and
    process accounting, record the bounded verdict and limitations, close the
    plan as Historical, run docs verification, and commit.
 

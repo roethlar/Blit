@@ -1,0 +1,8 @@
+The single transfer completed before the outer zsh wrapper failed.
+Exact wrapper error: zsh:5: read-only variable: status
+
+Consequence: the wrapper did not append the direct SSH exit-code line or its
+post-run timestamp/interface snapshot. It did not launch another command or
+transfer. Semantic completion is proved by raw/client.out, both correlated
+session traces, the eight destination sizes and hashes in integrity.txt, and
+the absence of a surviving client process. No retry or repeat ran.

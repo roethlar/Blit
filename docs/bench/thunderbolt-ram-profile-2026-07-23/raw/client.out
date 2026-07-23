@@ -1,0 +1,9 @@
+{
+  "bytes_transferred": 8589934592,
+  "destination": "172.31.254.1:19041:/default/",
+  "entries_deleted": 0,
+  "files_resumed": 0,
+  "files_transferred": 8,
+  "operation": "push",
+  "tcp_fallback": false
+}
