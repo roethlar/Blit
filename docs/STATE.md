@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-23 (Thunderbolt RAM path attributed; release work resumes)
+Last updated: 2026-07-23 (end-to-end latency plan drafted; release deferred)
 
 - **RELEASE IDENTITY IS NOW 0.1.1:** the existing `v0.1.0` tag remains at its
   shipped 2026-05-31 commit. The current candidate uses one workspace-owned
@@ -47,8 +47,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   the 37.9 Gb/s same-direction TCP ceiling; external time was 28.874 Gb/s.
   79.1% of the excess over ideal wire time was outside the observed payload
   interval. Four streams and Q's 16 GiB RAM are not evidenced limits. The
-  next useful target is separately planned observation around connection,
-  RPC/session establishment, and CLI teardown—not a transfer-policy change.
+  next useful target is the Draft end-to-end lifecycle instrument around
+  connection, RPC/session establishment, and CLI teardown—not a policy change.
   No payload hit SSD. Evidence:
   `docs/bench/thunderbolt-ram-profile-2026-07-23/README.md`.
 - **THUNDERBOLT SSD FOLLOW-UP IS COMPLETE:** exact candidate `d1f1152d`
@@ -91,13 +91,15 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/RELEASE_COMPLETION.md` (ACTIVE, D-2026-07-22-3).** No hardware
+1. **`docs/plan/END_TO_END_TRANSFER_LATENCY.md` (Draft):** default-off
+   lifecycle timing followed by one 8 GiB RAM-destination validation.
+2. **`docs/plan/RELEASE_COMPLETION.md` (ACTIVE, D-2026-07-22-3).** No hardware
    work. Repair each hosted cross-platform failure one per commit, then prove
    the complete suite and current artifacts.
-1a. **RELEASE P2 EVIDENCE: `docs/plan/OTP12_PERF_FINDINGS.md`.** P1 is closed
+2a. **RELEASE P2 EVIDENCE: `docs/plan/OTP12_PERF_FINDINGS.md`.** P1 is closed
     by D-2026-07-22-2. P2 is owned by release slice rel-2 and must be attributed
     and fixed from retained/code evidence without a new physical matrix.
-1b. **WINDOWS RELEASE GUARDS RECORDED; full-suite defects remain.** Full
+2b. **WINDOWS RELEASE GUARDS RECORDED; full-suite defects remain.** Full
     attributes/ADS support is implemented under contract v5; hosted run
     `29944148295` at `28cf989` passed both local/remote single/tar metadata guards.
    - **`docs/bugs/windows-attrs-and-ads-lost-on-tar-path.md` (D-2026-07-13-3)**
@@ -109,7 +111,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
      apply **does not scale** (8 workers buy 1.05×; robocopy gets ~2.2× from 8
      threads) and ships **one** worker. At EQUAL concurrency blit BEATS
      robocopy; at 8-vs-8 it loses 1.9×. `docs/bench/win-local-ab-2026-07-13/`.
-2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
+3. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13 with risk-selected neutral `openreview`
    (reviewer authority D-2026-07-16-4).
    otp-1, otp-3, otp-4a,
@@ -130,13 +132,13 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    **otp-12d and otp-13 are POST-RELEASE (D-2026-07-22-1).** Their retained
    pre-fix evidence remains usable for what it records; no performance
    acceptance matrix is a shipping prerequisite.
-3. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
+4. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
    performance status flip are not release gates (D-2026-07-22-1).
-4. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
+5. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
    resumes/re-derives after ONE_TRANSFER_PATH ships.
-5. **All `REVIEW.md` rows are reconciled locally.** Hosted Windows confirmation
+6. **All `REVIEW.md` rows are reconciled locally.** Hosted Windows confirmation
    and release artifacts remain evidence blockers; they are not open code rows.
-6. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
+7. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
    Pro daemon CPU-bound below 10 GbE from SSD cache). Executes AFTER
    cutover as a runtime-selected write strategy in the unified receive
    sink (design: eval doc §If-FAST-evidence; dead module deletes in
@@ -144,16 +146,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    **Standing owner safety rule**: ALL activity on rig `zoey` stays
    inside its `…/blit-temp/` folder — nothing written outside it, ever;
    no daemon runs on zoey without a fresh go.
-7. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
-8. **`[x]` Mac↔Mac Thunderbolt Bridge ceiling probe (D-2026-07-22-4).** The
-   owner explicitly moved one conservative probe before publication. Link,
-   route, bidirectional iperf, exact-candidate Blit, unencrypted rsync,
-   byte-for-byte integrity, and cleanup are recorded in
-   `docs/bench/thunderbolt-macmac-2026-07-22/README.md`. Any tuning code or
-   formal/repeated matrix still needs its own approved plan.
+8. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
 
 ## Authoritative docs right now
 
+- Draft next plan: **`docs/plan/END_TO_END_TRANSFER_LATENCY.md`**; no code
+  begins until owner activation.
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
   D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
   D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b).
