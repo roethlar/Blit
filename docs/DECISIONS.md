@@ -519,3 +519,17 @@ Format:
   D-2026-07-16-3/-4. It preserves their risk rubric as a recommendation,
   Claude Opus 4.8/max as the only eligible formal reviewer, Fable retirement,
   neutral prompts, exact-SHA/guard requirements, and all git safety gates.
+
+## D-2026-07-23-8 — Publish Blit 0.1.1
+- Decision: Create annotated tag `v0.1.1` at exact validated candidate
+  `d1f1152d`, push that tag to LAN Gitea and GitHub, and publish the GitHub
+  release with the three validated platform archives and their SHA-256
+  sidecars. Later `master` changes are not part of the release, and the
+  publication action does not push either `master` branch. Owner, 2026-07-23:
+  **"go"** after the exact publication target, destinations, and asset scope
+  were presented.
+- Why: `d1f1152d` passed the full hosted three-platform suite and every packaged
+  smoke job with no known release blocker. Publishing only its tag preserves
+  that exact evidence boundary.
+- Supersedes: the publication hold in D-2026-07-22-3. It preserves all future
+  push, tag, release, history-rewrite, hardware-run, and external-review gates.

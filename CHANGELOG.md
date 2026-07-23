@@ -2,7 +2,7 @@
 
 All notable changes to Blit are documented in this file.
 
-## [0.1.1] - Unreleased
+## [0.1.1] - 2026-07-23
 
 ### Packages and compatibility
 

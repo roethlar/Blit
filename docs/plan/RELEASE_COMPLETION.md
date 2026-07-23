@@ -1,6 +1,6 @@
 # Complete the first cross-platform release
 
-**Status**: Active (candidate complete; publication owner-gated)
+**Status**: Shipped
 **Created**: 2026-07-22
 **Supersedes**: performance work as the pre-release critical path under
 D-2026-07-22-1; does not supersede shipped implementation plans
@@ -232,10 +232,18 @@ performance ratios are measured or graded.
    User-facing notes state the supported triples, same-build requirement,
    security limits, and deferred ceiling work. Exact candidate `d1f1152d`
    passed Docs Gate `29953569556`, CI `29953569652`, and all three packaged
-   smoke jobs; the canonical review ledger has no open row. Exact publication
-   refs remain for separate owner approval; do not publish.
+   smoke jobs; the canonical review ledger has no open row. The annotated
+   `v0.1.1` tag was pushed to both configured remotes and the public GitHub
+   release was published with the six validated archive/checksum assets under
+   D-2026-07-23-8.
+
+## Outcome
+
+Blit 0.1.1 was released from exact candidate `d1f1152d` on 2026-07-23:
+https://github.com/roethlar/Blit/releases/tag/v0.1.1. The tag peels to the
+validated commit on both LAN Gitea and GitHub. The public release is neither a
+draft nor a prerelease, and all three archive digests match the release ledger.
 
 ## Open questions
 
-- None. New defects found during reconciliation enter this plan automatically;
-  classification never removes them from the release boundary.
+- None. This plan is complete.

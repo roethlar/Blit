@@ -1,8 +1,8 @@
 # Release readiness
 
-**Status:** Candidate validated; publication owner-gated
-**As of:** exact candidate `d1f1152d`, Docs Gate `29953569556`, and CI
-`29953569652`, 2026-07-22
+**Status:** Released as Blit 0.1.1
+**As of:** annotated tag `v0.1.1` at exact candidate `d1f1152d`, Docs Gate
+`29953569556`, CI `29953569652`, and public GitHub release, 2026-07-23
 
 This is the concise release boundary after D-2026-07-22-3. Every known broken
 behavior is release work regardless of its internal classification. Optional
@@ -231,8 +231,9 @@ performance ceilings and hardware tuning remain post-release work.
 
 ## Release blockers
 
-- None in exact candidate `d1f1152d`. Release tagging and publication are a
-  separate owner gate and have not been performed.
+- None. Exact candidate `d1f1152d` is published as `v0.1.1` with all six
+  validated archive/checksum assets:
+  https://github.com/roethlar/Blit/releases/tag/v0.1.1.
 
 ## Deferred until after release
 
@@ -241,5 +242,3 @@ performance ceilings and hardware tuning remain post-release work.
 - Mac↔Mac Thunderbolt ceiling testing.
 - Small-file and zero-copy performance work, performance refactors, and other
   ceiling optimization.
-
-No new hardware result is required to make the release decision.
