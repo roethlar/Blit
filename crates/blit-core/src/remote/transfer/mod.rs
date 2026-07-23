@@ -2,6 +2,7 @@ pub mod abort_on_drop;
 pub mod data_plane;
 pub mod diff_planner;
 pub mod faulted_path;
+pub mod lifecycle_trace;
 pub mod operation_spec;
 pub mod payload;
 pub mod pipeline;
@@ -24,6 +25,9 @@ pub use data_plane::{
     DATA_PLANE_RECORD_FILE, DATA_PLANE_RECORD_TAR_SHARD, RECEIVE_CHUNK_SIZE, SUB_TOKEN_LEN,
 };
 pub use faulted_path::FaultedPath;
+pub use lifecycle_trace::{
+    TransferLifecycleEvent, TransferLifecycleOutcome, TransferLifecycleTrace,
+};
 pub use payload::{
     build_tar_shard, payload_file_count, plan_transfer_payloads, prepare_payload,
     prepared_payload_stream, PreparedPayload, TransferPayload, DEFAULT_PAYLOAD_PREFETCH,

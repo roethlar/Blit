@@ -177,7 +177,7 @@ the no-repeat rule follow the completed 2026-07-23 RAM profile.
 
 ## Slices
 
-1. **etl-1 — trace primitive.** Add the default-off lifecycle record,
+1. **etl-1 — trace primitive `[x]`.** Add the default-off lifecycle record,
    asynchronous emitter, explicit context, session-ID attachment, flush, and
    deterministic unit tests without wiring it into product transfer calls.
 2. **etl-2 — shared core boundaries.** Carry the trace through remote push,

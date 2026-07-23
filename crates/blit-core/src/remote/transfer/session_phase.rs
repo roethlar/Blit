@@ -252,10 +252,9 @@ impl SessionPhaseTrace {
         initiator_role: SessionPhaseRole,
     ) -> Option<BoundSessionPhaseTrace> {
         let emitter = self.emitter.clone()?;
-        let digest = blake3::hash(session_token).to_hex();
         Some(BoundSessionPhaseTrace {
             emitter,
-            session_id: Arc::from(&digest.as_str()[..16]),
+            session_id: session_trace_id(session_token),
             endpoint_role,
             initiator_role,
             origin: Instant::now(),
@@ -264,7 +263,7 @@ impl SessionPhaseTrace {
     }
 }
 
-fn trace_env_run_id(mut read: impl FnMut(&str) -> Option<String>) -> Option<String> {
+pub(super) fn trace_env_run_id(mut read: impl FnMut(&str) -> Option<String>) -> Option<String> {
     let enabled = read(TRACE_ENV).is_some_and(|value| {
         matches!(
             value.trim().to_ascii_lowercase().as_str(),
@@ -272,6 +271,11 @@ fn trace_env_run_id(mut read: impl FnMut(&str) -> Option<String>) -> Option<Stri
         )
     });
     enabled.then(|| read(RUN_ID_ENV).unwrap_or_else(|| format!("pid-{}", std::process::id())))
+}
+
+pub(super) fn session_trace_id(session_token: &[u8]) -> Arc<str> {
+    let digest = blake3::hash(session_token).to_hex();
+    Arc::from(&digest.as_str()[..16])
 }
 
 fn json_line(event: &SessionPhaseEvent) -> String {
