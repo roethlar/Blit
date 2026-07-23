@@ -157,7 +157,7 @@ must not claim which member of that second class dominates.
 
 ## Slices
 
-1. **tdp-1 — terminal telemetry.** Retain diagnostic probe clones only for
+1. **tdp-1 — terminal telemetry `[x]`.** Retain diagnostic probe clones only for
    traced SOURCE sessions, aggregate their existing final counters after the
    pipeline join, emit the explicitly named terminal fields, add deterministic
    role/membership guards, and mutation-prove each new behavior.
@@ -165,6 +165,22 @@ must not claim which member of that second class dominates.
    gates, adjudicate any risk-selected review findings one per commit, record
    exact accepted heads and mutation evidence, then close the plan and current
    state without performing a hardware transfer.
+
+## tdp-1 mutation evidence
+
+On 2026-07-23, targeted guards failed under each temporary production
+mutation and passed again after restoration:
+
+- saturating terminal sums changed to wrapping sums;
+- initial probe retention removed;
+- accepted ADD probe retention removed after ADD/REMOVE churn;
+- `dial_terminal_sample` renamed so the required event disappeared;
+- `terminal_streams` removed from schema emission.
+
+The restored targeted guards cover exact/zero-byte sums, SOURCE-only emission,
+trace-off silence, no-periodic-sample completion, initial plus ADD retention,
+retired-stream retention, final/peak membership separation, both initiator
+layouts, event order, and terminal-field serialization.
 
 ## Open questions
 

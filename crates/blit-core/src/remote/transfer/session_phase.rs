@@ -68,6 +68,12 @@ pub struct SessionPhaseEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_ratio: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_payload_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_blocked_ns: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_streams: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefetch_count: Option<u32>,
@@ -97,6 +103,9 @@ pub(crate) struct SessionPhaseFields {
     pub(crate) sample_streams: Option<u32>,
     pub(crate) sample_valid: Option<bool>,
     pub(crate) blocked_ratio: Option<f64>,
+    pub(crate) terminal_payload_bytes: Option<u64>,
+    pub(crate) terminal_blocked_ns: Option<u64>,
+    pub(crate) terminal_streams: Option<u32>,
     pub(crate) chunk_bytes: Option<u64>,
     pub(crate) prefetch_count: Option<u32>,
     pub(crate) tcp_buffer_bytes: Option<u64>,
@@ -378,6 +387,9 @@ impl BoundSessionPhaseTrace {
             sample_streams: fields.sample_streams,
             sample_valid: fields.sample_valid,
             blocked_ratio: fields.blocked_ratio,
+            terminal_payload_bytes: fields.terminal_payload_bytes,
+            terminal_blocked_ns: fields.terminal_blocked_ns,
+            terminal_streams: fields.terminal_streams,
             chunk_bytes: fields.chunk_bytes,
             prefetch_count: fields.prefetch_count,
             tcp_buffer_bytes: fields.tcp_buffer_bytes,
@@ -452,7 +464,15 @@ mod tests {
                 SessionPhaseRole::Destination,
             )
             .unwrap();
-        bound.event("probe", SessionPhaseFields::default());
+        bound.event(
+            "dial_terminal_sample",
+            SessionPhaseFields {
+                terminal_payload_bytes: Some(4096),
+                terminal_blocked_ns: Some(123),
+                terminal_streams: Some(4),
+                ..Default::default()
+            },
+        );
         bound.flush();
         assert_eq!(flushes.load(AtomicOrdering::Relaxed), 1);
         let line = lines.lock().unwrap().pop().unwrap();
@@ -461,6 +481,10 @@ mod tests {
         assert_eq!(value["schema"], 1);
         assert_eq!(value["run_id"], "unit-run");
         assert_eq!(value["endpoint_role"], "SOURCE");
+        assert_eq!(value["terminal_payload_bytes"], 4096);
+        assert_eq!(value["terminal_blocked_ns"], 123);
+        assert_eq!(value["terminal_streams"], 4);
+        assert!(value.get("sample_bytes").is_none());
         let session_id = value["session_id"].as_str().unwrap();
         assert_eq!(session_id.len(), 16);
         assert!(!line.contains("never-log-this-session-token"));

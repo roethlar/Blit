@@ -964,6 +964,43 @@ fn dial_action(add: bool) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TerminalProbeTotals {
+    payload_bytes: u64,
+    blocked_ns: u64,
+    streams: u32,
+}
+
+fn terminal_probe_totals(probes: &[StreamProbe]) -> TerminalProbeTotals {
+    let (payload_bytes, blocked_ns) =
+        probes
+            .iter()
+            .fold((0_u64, 0_u64), |(payload_bytes, blocked_ns), probe| {
+                let snapshot = probe.snapshot();
+                (
+                    payload_bytes.saturating_add(snapshot.bytes_sent),
+                    blocked_ns.saturating_add(snapshot.write_blocked_nanos),
+                )
+            });
+    TerminalProbeTotals {
+        payload_bytes,
+        blocked_ns,
+        streams: dial_u32(probes.len()),
+    }
+}
+
+fn retain_terminal_probe(
+    terminal_probes: &Option<StdMutex<Vec<StreamProbe>>>,
+    probe: &StreamProbe,
+) {
+    if let Some(probes) = terminal_probes {
+        probes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(probe.clone());
+    }
+}
+
 fn phase_dial_observer(phase: &BoundSessionPhaseTrace) -> DialObserver {
     let phase = phase.clone();
     DialObserver::new(move |event| match event {
@@ -1072,6 +1109,10 @@ pub(super) struct SourceDataPlane {
     /// identical — only this transport action flips (otp-5b-2).
     sockets: SourceSockets,
     phase_trace: Option<BoundSessionPhaseTrace>,
+    /// Diagnostic-only clones of every initial and accepted ADD probe.
+    /// Unlike the live registry, retirement never removes these handles.
+    /// The collection exists only when session-phase tracing is active.
+    terminal_probes: Option<StdMutex<Vec<StreamProbe>>>,
     small_file_probe: Option<BoundSmallFileProbe>,
     queue_trace_armed: AtomicBool,
 }
@@ -1214,11 +1255,15 @@ async fn start_source_data_plane(
     ));
     let trace = instruments.trace_data_plane;
     let probes: SharedStreamProbes = Arc::new(StdMutex::new(StreamProbeRegistry::default()));
+    let terminal_probes = phase_trace
+        .as_ref()
+        .map(|_| StdMutex::new(Vec::with_capacity(initial)));
     let mut sinks = Vec::with_capacity(initial);
 
     for socket_id in 0..initial {
         let member_id = StreamId(socket_id as u32);
         let probe = StreamProbe::new(member_id);
+        retain_terminal_probe(&terminal_probes, &probe);
         let (begin_event, end_event) = match &sockets {
             SourceSockets::Dial { .. } => ("socket_dial_begin", "socket_dial_end"),
             SourceSockets::Accept { .. } => ("socket_accept_begin", "socket_accept_end"),
@@ -1336,6 +1381,7 @@ async fn start_source_data_plane(
         trace,
         sockets,
         phase_trace,
+        terminal_probes,
         small_file_probe,
         queue_trace_armed: AtomicBool::new(queue_trace_armed),
     })
@@ -1622,6 +1668,7 @@ impl SourceDataPlane {
             session.uses_probe(&probe),
             "ADD session and member registry must share one probe"
         );
+        retain_terminal_probe(&self.terminal_probes, &probe);
         let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
             session,
             Arc::clone(&self.source),
@@ -1786,6 +1833,32 @@ impl SourceDataPlane {
             )));
         }
         if let Some(trace) = &self.phase_trace {
+            let totals = self
+                .terminal_probes
+                .as_ref()
+                .map(|probes| {
+                    let probes = probes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    terminal_probe_totals(&probes)
+                })
+                .unwrap_or(TerminalProbeTotals {
+                    payload_bytes: 0,
+                    blocked_ns: 0,
+                    streams: 0,
+                });
+            trace.event(
+                "dial_terminal_sample",
+                SessionPhaseFields {
+                    live_streams: Some(dial_u32(self.dial.live_streams())),
+                    terminal_payload_bytes: Some(totals.payload_bytes),
+                    terminal_blocked_ns: Some(totals.blocked_ns),
+                    terminal_streams: Some(totals.streams),
+                    receiver_ceiling: Some(dial_u32(self.dial.ceiling_max_streams())),
+                    peak_streams: Some(dial_u32(self.dial.peak_streams())),
+                    ..Default::default()
+                },
+            );
             trace.event(
                 "data_plane_complete",
                 SessionPhaseFields {
@@ -2349,6 +2422,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn terminal_probe_totals_saturate_and_include_every_retained_probe() {
+        let first = StreamProbe::new(StreamId(1));
+        first.record_bytes(u64::MAX - 5);
+        first.add_write_blocked(u64::MAX - 7);
+        let removed = StreamProbe::new(StreamId(2));
+        removed.record_bytes(10);
+        removed.add_write_blocked(20);
+        let terminal_add = StreamProbe::new(StreamId(3));
+
+        assert_eq!(
+            terminal_probe_totals(&[first, removed, terminal_add]),
+            TerminalProbeTotals {
+                payload_bytes: u64::MAX,
+                blocked_ns: u64::MAX,
+                streams: 3,
+            }
+        );
+    }
+
     /// The grant starts at the canonical receiver-bounded floor without
     /// consulting manifest shape and carries two independent credentials.
     #[tokio::test]
@@ -2444,6 +2537,7 @@ mod tests {
                 tcp_port: 0,
             },
             phase_trace: None,
+            terminal_probes: None,
             small_file_probe: None,
             queue_trace_armed: AtomicBool::new(false),
         };
@@ -2496,6 +2590,7 @@ mod tests {
                 tcp_port: 0,
             },
             phase_trace: None,
+            terminal_probes: None,
             small_file_probe: None,
             queue_trace_armed: AtomicBool::new(false),
         };

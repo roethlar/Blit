@@ -7552,6 +7552,60 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn short_sessions_emit_one_terminal_sample_without_a_periodic_sample() {
+        let phases = [(4, 0, 0.0, 0)];
+        for role in [TransferRole::Source, TransferRole::Destination] {
+            for file_bytes in [0, 17] {
+                let run = run_dial_trace_script_with_fixture(
+                    role,
+                    constrained_profile(4),
+                    &phases,
+                    true,
+                    1,
+                    file_bytes,
+                )
+                .await;
+                assert!(
+                    !run.events.iter().any(|event| event.event == "dial_sample"),
+                    "injected sampler emitted without an input for {role:?}/{file_bytes}"
+                );
+                let terminal: Vec<_> = run
+                    .events
+                    .iter()
+                    .filter(|event| {
+                        event.endpoint_role == SessionPhaseRole::Source
+                            && event.event == "dial_terminal_sample"
+                    })
+                    .collect();
+                assert_eq!(terminal.len(), 1, "one terminal sample for {role:?}");
+                let terminal = terminal[0];
+                assert_eq!(terminal.terminal_payload_bytes, Some(file_bytes as u64));
+                assert!(terminal.terminal_blocked_ns.is_some());
+                assert_eq!(terminal.terminal_streams, Some(4));
+                assert_eq!(terminal.live_streams, Some(4));
+                assert_eq!(terminal.peak_streams, Some(4));
+                assert_eq!(terminal.receiver_ceiling, Some(4));
+                assert_eq!(terminal.sample_bytes, None);
+                assert_eq!(terminal.sample_blocked_ns, None);
+                assert_eq!(terminal.sample_streams, None);
+                assert!(!run.events.iter().any(|event| {
+                    event.endpoint_role == SessionPhaseRole::Destination
+                        && event.event == "dial_terminal_sample"
+                }));
+                let complete = run
+                    .events
+                    .iter()
+                    .find(|event| {
+                        event.endpoint_role == SessionPhaseRole::Source
+                            && event.event == "data_plane_complete"
+                    })
+                    .expect("SOURCE completion follows the terminal sample");
+                assert!(terminal.producer_seq < complete.producer_seq);
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn dial_observer_is_inert_and_reports_peak_separately_from_final() {
         let phases = [(7, 1024, 0.0, 0), (1, 1024, 1.0, 0), (3, 1024, 0.0, 0)];
         let mut observed_runs = Vec::new();
@@ -7582,6 +7636,34 @@ mod tests {
             assert_eq!(off.final_streams, 3);
             assert_eq!(on.final_streams, 3);
             assert_eq!(on.add_tokens.len(), 5, "4→7 then 1→3 opens five sockets");
+
+            let terminal: Vec<_> = on
+                .events
+                .iter()
+                .filter(|event| {
+                    event.endpoint_role == SessionPhaseRole::Source
+                        && event.event == "dial_terminal_sample"
+                })
+                .collect();
+            assert_eq!(terminal.len(), 1);
+            assert_eq!(
+                terminal[0].terminal_payload_bytes,
+                Some(31 * 129 * 1024),
+                "terminal fold covers all payload-only stream counters"
+            );
+            assert!(terminal[0].terminal_blocked_ns.is_some());
+            assert_eq!(
+                terminal[0].terminal_streams,
+                Some(9),
+                "initial, removed, and later ADD probes all survive"
+            );
+            assert_eq!(terminal[0].live_streams, Some(3));
+            assert_eq!(terminal[0].peak_streams, Some(7));
+            assert_eq!(terminal[0].receiver_ceiling, Some(17));
+            assert!(!on.events.iter().any(|event| {
+                event.endpoint_role == SessionPhaseRole::Destination
+                    && event.event == "dial_terminal_sample"
+            }));
 
             let samples: Vec<_> = on
                 .events
