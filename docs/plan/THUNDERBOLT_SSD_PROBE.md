@@ -1,7 +1,7 @@
 # SSD-backed direct-Thunderbolt comparison
 
-**Status**: Active — both one-shot arms and all hash checks are complete;
-cleanup is blocked only until the evidence commit lands
+**Status**: Complete — both one-shot arms, all hash checks, the evidence
+commit, and exact-path cleanup are complete
 **Created**: 2026-07-22
 **Depends on**: D-2026-07-22-4 and the certified RAM/wire probe in
 `docs/bench/thunderbolt-macmac-2026-07-22/README.md`
@@ -191,9 +191,9 @@ Thunderbolt addresses while the cable stays connected.
 - [x] Exactly one Blit and one rsync data-moving arm run; no retry or repeat.
 - [x] Both tools transfer exactly twelve files / 12,884,901,888 bytes and every
       destination hash matches its source.
-- [ ] Raw evidence and limitations are committed before generated data is
+- [x] Raw evidence and limitations are committed before generated data is
       removed.
-- [ ] All listeners and generated data are removed with the seed and unrelated
+- [x] All listeners and generated data are removed with the seed and unrelated
       paths untouched.
 - [x] No product code, release candidate, tag, remote ref, or publication state
       changes as part of this plan.

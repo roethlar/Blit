@@ -49,12 +49,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   7.9x faster and reached about 76% of the wire ceiling. No payload hit either
   SSD. Evidence and limits:
   `docs/bench/thunderbolt-macmac-2026-07-22/README.md`.
-- **THUNDERBOLT SSD FOLLOW-UP DATA IS COMPLETE:** exact candidate `d1f1152d`
+- **THUNDERBOLT SSD FOLLOW-UP IS COMPLETE:** exact candidate `d1f1152d`
   moved 12 GiB SSD-to-SSD in 7.73 s (13.335 Gb/s); Apple openrsync took
   33.81 s (3.049 Gb/s), so Blit was 4.37x faster. All 36 files hash-match;
   exact allocated writes were 38.884 GB under the 40 GB ceiling. Evidence:
-  `docs/bench/thunderbolt-ssd-2026-07-22/`. Cleanup follows its evidence
-  commit; no repeat is authorized.
+  `docs/bench/thunderbolt-ssd-2026-07-22/`. Exact-path cleanup is complete;
+  Q's retained seed remains; no repeat is authorized.
 - **RELEASE COMPLETION ACTIVE (D-2026-07-22-3):** ldt-1..3 are accepted;
   ldt-4 is closed as evidence, not as a tuning win. The complete first horizon
   session is valid after corrected reanalysis; its repeat was unnecessary.

@@ -128,5 +128,9 @@ file's allocated 512-byte blocks.
 - Timing alone does not authorize a product change or another transfer. Any
   attribution or tuning starts with read-only code/counter analysis.
 
-Raw client and daemon output is in `raw/`. Cleanup is recorded after this
-evidence commit, as required by the plan.
+Raw client and daemon output is in `raw/`. After the evidence commit landed,
+both temporary listeners were confirmed stopped; the twelve Q fixture files,
+twenty-four Nagatha destination files, copied candidate client, empty lock
+file, and session roots were removed by exact validated paths. Q's retained
+1 GiB seed and both static Thunderbolt Bridge addresses remain unchanged. The
+local scratch-log directory was moved to Trash.
