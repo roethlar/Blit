@@ -1,0 +1,2 @@
+blitd: default root export: /Users/michael/blit-bench-work/tbssd-20260723T001314Z-d1f1152d/blit-dst.noindex
+blitd v2 listening on 172.31.254.1:19031

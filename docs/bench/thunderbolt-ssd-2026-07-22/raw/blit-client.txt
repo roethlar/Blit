@@ -1,0 +1,13 @@
+Manifest enumeration complete in 462.83µs (12 entries)
+{
+  "bytes_transferred": 12884901888,
+  "destination": "172.31.254.1:19031:/default/",
+  "entries_deleted": 0,
+  "files_resumed": 0,
+  "files_transferred": 12,
+  "operation": "push",
+  "tcp_fallback": false
+}
+real 7.73
+user 0.29
+sys 2.88

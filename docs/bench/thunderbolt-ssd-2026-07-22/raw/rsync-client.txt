@@ -1,0 +1,15 @@
+Number of files: 13
+Number of files transferred: 12
+Total file size: 12884901888 B
+Total transferred file size: 12884901888 B
+Unmatched data: 12884901888 B
+Matched data: 0 B
+File list size: 529 B
+Total sent: 12886475885 B
+Total received: 310 B
+
+sent 12886475885 bytes  received 310 bytes  381741209 bytes/sec
+total size is 12884901888  speedup is 1.00
+real 33.81
+user 10.53
+sys 4.41
