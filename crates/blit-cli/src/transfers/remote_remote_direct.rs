@@ -141,6 +141,7 @@ async fn run_remote_to_remote_direct_inner(
         // RPCs, so a misbehaving caller can't escape the
         // CLI in-byte-path guarantee.
         detach: args.detach,
+        lifecycle_trace: Default::default(),
     };
 
     // --detach exit-after-Started path. Opens the stream

@@ -92,6 +92,7 @@ pub(crate) fn build_f3_pull_execution(
         compare_mode,
         ignore_existing: false,
         remote_label,
+        lifecycle_trace: Default::default(),
     }
 }
 
@@ -149,6 +150,7 @@ pub(crate) fn build_f1_push_execution(
         // No ignore-existing toggle on the F1 trigger.
         ignore_existing: false,
         remote_label,
+        lifecycle_trace: Default::default(),
     }
 }
 
@@ -178,5 +180,6 @@ pub(crate) fn build_delegated_execution(
         trace_data_plane: false,
         dst_label,
         detach: false,
+        lifecycle_trace: Default::default(),
     }
 }

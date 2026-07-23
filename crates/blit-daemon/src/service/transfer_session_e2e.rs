@@ -34,15 +34,19 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use blit_core::fs_enum::FileFilter;
 use blit_core::generated::blit_server::BlitServer;
 use blit_core::generated::{session_error, ComparisonMode};
 use blit_core::remote::transfer::session_client::{
-    run_pull_session, run_push_session, PullSessionOptions, PushSessionOptions,
+    connect_transfer_client_with_trace, run_pull_session, run_push_session, PullSessionOptions,
+    PushSessionOptions,
 };
 use blit_core::remote::transfer::source::FsTransferSource;
+use blit_core::remote::transfer::{
+    SessionPhaseRole, TransferLifecycleEvent, TransferLifecycleOutcome, TransferLifecycleTrace,
+};
 use blit_core::remote::{RemoteEndpoint, RemotePath};
 use blit_core::transfer_session::SessionFault;
 use tokio::sync::oneshot;
@@ -224,6 +228,64 @@ fn fault_of(err: &eyre::Report) -> &SessionFault {
         .unwrap_or_else(|| panic!("expected a SessionFault, got: {err:#}"))
 }
 
+fn lifecycle_capture(
+    run_id: &str,
+) -> (
+    TransferLifecycleTrace,
+    Arc<Mutex<Vec<TransferLifecycleEvent>>>,
+) {
+    let events: Arc<Mutex<Vec<TransferLifecycleEvent>>> = Arc::default();
+    let captured = Arc::clone(&events);
+    (
+        TransferLifecycleTrace::capture(run_id, move |event| {
+            captured.lock().expect("lifecycle capture lock").push(event);
+        }),
+        events,
+    )
+}
+
+fn assert_success_lifecycle(events: &[TransferLifecycleEvent], role: SessionPhaseRole) {
+    let names = events.iter().map(|event| event.event).collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "control_connect_begin",
+            "control_connect_end",
+            "transfer_rpc_open_begin",
+            "transfer_rpc_open_end",
+            "session_establish_begin",
+            "session_establish_end",
+            "session_body_return",
+        ]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.producer_seq)
+            .collect::<Vec<_>>(),
+        (0..events.len() as u64).collect::<Vec<_>>()
+    );
+    assert!(events
+        .iter()
+        .all(|event| event.initiator_role == Some(role)));
+    assert!(events[..5].iter().all(|event| event.session_id.is_none()));
+    assert!(events[5..]
+        .iter()
+        .all(|event| event.session_id.as_deref().is_some_and(|id| !id.is_empty())));
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| event.outcome)
+            .collect::<Vec<_>>(),
+        vec![
+            TransferLifecycleOutcome::Success,
+            TransferLifecycleOutcome::Success,
+            TransferLifecycleOutcome::Success,
+            TransferLifecycleOutcome::Success,
+        ]
+    );
+}
+
 // --- otp-4b-3: deterministic mid-transfer cancel over the data plane ---
 
 /// A `TransferSource` that puts a transfer into a provably-stuck
@@ -382,6 +444,128 @@ async fn mid_transfer_cancel_surfaces_cancelled_over_the_data_plane() {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lifecycle_boundaries_are_role_symmetric_and_session_correlated() {
+    let daemon = Daemon::start(false).await;
+    let src = tempfile::tempdir().unwrap();
+    write_tree(src.path(), &[("a.txt", b"alpha", 1_600_000_001)]);
+
+    let (push_trace, push_events) = lifecycle_capture("push-lifecycle");
+    run_push_session(
+        &daemon.endpoint,
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions {
+            lifecycle_trace: push_trace,
+            ..PushSessionOptions::default()
+        },
+    )
+    .await
+    .expect("traced push succeeds");
+
+    let dest = tempfile::tempdir().unwrap();
+    let (pull_trace, pull_events) = lifecycle_capture("pull-lifecycle");
+    run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions {
+            lifecycle_trace: pull_trace,
+            ..PullSessionOptions::default()
+        },
+    )
+    .await
+    .expect("traced pull succeeds");
+
+    {
+        let push_events = push_events.lock().expect("push lifecycle events");
+        let pull_events = pull_events.lock().expect("pull lifecycle events");
+        assert_success_lifecycle(&push_events, SessionPhaseRole::Source);
+        assert_success_lifecycle(&pull_events, SessionPhaseRole::Destination);
+        assert_ne!(
+            push_events
+                .last()
+                .and_then(|event| event.session_id.as_ref()),
+            pull_events
+                .last()
+                .and_then(|event| event.session_id.as_ref()),
+            "independent sessions must not share a derived session id"
+        );
+    }
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lifecycle_refusal_ends_establishment_without_a_session_body() {
+    let daemon = Daemon::start(false).await;
+    let src = tempfile::tempdir().unwrap();
+    write_tree(src.path(), &[("a.txt", b"alpha", 1_600_000_001)]);
+    let (trace, events) = lifecycle_capture("refused-lifecycle");
+
+    let err = run_push_session(
+        &daemon.endpoint_for_missing_module(),
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions {
+            lifecycle_trace: trace,
+            ..PushSessionOptions::default()
+        },
+    )
+    .await
+    .expect_err("unknown module refuses the traced session");
+    assert_eq!(fault_of(&err).code, session_error::Code::ModuleUnknown);
+
+    {
+        let events = events.lock().expect("refused lifecycle events");
+        assert_eq!(
+            events.iter().map(|event| event.event).collect::<Vec<_>>(),
+            [
+                "control_connect_begin",
+                "control_connect_end",
+                "transfer_rpc_open_begin",
+                "transfer_rpc_open_end",
+                "session_establish_begin",
+                "session_establish_end",
+            ]
+        );
+        assert_eq!(
+            events.last().and_then(|event| event.outcome),
+            Some(TransferLifecycleOutcome::Refused)
+        );
+        assert!(events.iter().all(|event| event.session_id.is_none()));
+    }
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn lifecycle_connect_error_ends_before_rpc_open() {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("reserve loopback port");
+    let port = listener.local_addr().expect("reserved address").port();
+    drop(listener);
+    let endpoint = RemoteEndpoint {
+        host: "127.0.0.1".into(),
+        port,
+        path: RemotePath::Module {
+            module: "test".into(),
+            rel_path: PathBuf::new(),
+        },
+    };
+    let (trace, events) = lifecycle_capture("connect-error-lifecycle");
+
+    let _err = connect_transfer_client_with_trace(&endpoint, &trace)
+        .await
+        .expect_err("a closed loopback port must refuse the control connection");
+
+    let events = events.lock().expect("connect-error lifecycle events");
+    assert_eq!(
+        events.iter().map(|event| event.event).collect::<Vec<_>>(),
+        ["control_connect_begin", "control_connect_end"]
+    );
+    assert_eq!(
+        events.last().and_then(|event| event.outcome),
+        Some(TransferLifecycleOutcome::Error)
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn session_lands_bytes_over_the_data_plane() {

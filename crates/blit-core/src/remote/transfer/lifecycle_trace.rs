@@ -152,6 +152,16 @@ impl TransferLifecycleTrace {
         }
     }
 
+    /// Flush admitted records without blocking an async runtime worker on the
+    /// writer's rendezvous. Join failure remains diagnostic-only.
+    pub async fn flush_async(&self) {
+        if !self.is_enabled() {
+            return;
+        }
+        let trace = self.clone();
+        let _ = tokio::task::spawn_blocking(move || trace.flush()).await;
+    }
+
     fn from_env_with(
         read: impl FnMut(&str) -> Option<String>,
         writer: impl FnOnce(String, Instant) -> Self,

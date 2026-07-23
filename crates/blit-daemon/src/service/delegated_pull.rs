@@ -27,7 +27,11 @@ use blit_core::generated::{
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
 use blit_core::remote::transfer::operation_spec::NormalizedTransferOperation;
 use blit_core::remote::transfer::session_client::{
-    connect_transfer_client, run_pull_session_with_client, PullSessionOptions, TransferOpenRefusal,
+    connect_transfer_client_with_trace, run_pull_session_with_client, PullSessionOptions,
+    TransferOpenRefusal,
+};
+use blit_core::remote::transfer::{
+    SessionPhaseRole, TransferLifecycleOutcome, TransferLifecycleTrace,
 };
 use blit_core::transfer_session::SessionFault;
 use tokio::sync::mpsc;
@@ -113,6 +117,25 @@ fn err_progress(phase: i32, message: impl Into<String>) -> DelegatedPullProgress
     }
 }
 
+fn delegated_terminal_outcome(progress: &DelegatedPullProgress) -> TransferLifecycleOutcome {
+    use blit_core::generated::delegated_pull_error::Phase;
+    let Some(ProgressPayload::Error(error)) = &progress.payload else {
+        return TransferLifecycleOutcome::Error;
+    };
+    match Phase::try_from(error.phase).unwrap_or(Phase::Unknown) {
+        Phase::DelegationRejected | Phase::Negotiate => TransferLifecycleOutcome::Refused,
+        _ => TransferLifecycleOutcome::Error,
+    }
+}
+
+async fn finish_delegated_lifecycle(
+    lifecycle_trace: &TransferLifecycleTrace,
+    outcome: TransferLifecycleOutcome,
+) {
+    lifecycle_trace.record("delegated_terminal", Some(outcome));
+    lifecycle_trace.flush_async().await;
+}
+
 fn delegated_bytes_progress(progress: JobProgressSnapshot) -> DelegatedPullProgress {
     DelegatedPullProgress {
         payload: Some(ProgressPayload::BytesProgress(BytesProgress {
@@ -187,6 +210,8 @@ pub(crate) async fn handle_delegated_pull(
     job_progress: ActiveJobProgress,
 ) -> bool {
     let resolver = StdResolver;
+    let lifecycle_trace = TransferLifecycleTrace::from_env();
+    lifecycle_trace.attach_initiator_role(SessionPhaseRole::Destination);
     let result = run_delegated_pull(
         req,
         modules,
@@ -198,19 +223,23 @@ pub(crate) async fn handle_delegated_pull(
         &resolver,
         &byte_progress,
         &job_progress,
+        &lifecycle_trace,
     )
     .await;
 
-    match result {
-        Ok(()) => true,
+    let (ok, terminal_outcome) = match result {
+        Ok(()) => (true, TransferLifecycleOutcome::Success),
         Err(error_progress) => {
+            let terminal_outcome = delegated_terminal_outcome(&error_progress);
             // Surface the phased error to the CLI. We use a one-shot
             // send-and-ignore here: if the CLI has already disconnected we
             // can't (and don't need to) report.
             let _ = tx.send(Ok(error_progress)).await;
-            false
+            (false, terminal_outcome)
         }
-    }
+    };
+    finish_delegated_lifecycle(&lifecycle_trace, terminal_outcome).await;
+    ok
 }
 
 /// Inner driver. Splitting the error-emit path out of the public
@@ -227,6 +256,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     resolver: &R,
     byte_progress: &blit_core::remote::transfer::ByteProgressSink,
     job_progress: &ActiveJobProgress,
+    lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<(), DelegatedPullProgress> {
     use blit_core::generated::delegated_pull_error::Phase;
 
@@ -341,16 +371,18 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
             rel_path: PathBuf::from(&spec.source_path),
         },
     };
-    let client = connect_transfer_client(&endpoint).await.map_err(|err| {
-        err_progress(
-            Phase::ConnectSource as i32,
-            format!(
-                "connecting to source {}:{}: {err:#}",
-                resolved.ip(),
-                resolved.port()
-            ),
-        )
-    })?;
+    let client = connect_transfer_client_with_trace(&endpoint, lifecycle_trace)
+        .await
+        .map_err(|err| {
+            err_progress(
+                Phase::ConnectSource as i32,
+                format!(
+                    "connecting to source {}:{}: {err:#}",
+                    resolved.ip(),
+                    resolved.port()
+                ),
+            )
+        })?;
 
     // Send the "started" progress event so CLI knows the dst→src
     // handshake is underway. The diagnostic source_data_plane_endpoint
@@ -403,6 +435,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
         byte_progress: Some(byte_progress.clone()),
         progress: None,
         trace_data_plane: false,
+        lifecycle_trace: lifecycle_trace.clone(),
     };
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let mut options = options;
@@ -499,6 +532,37 @@ mod tests {
     //! End-to-end byte-path isolation: the remote_remote.rs pins.
 
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn delegated_terminal_records_and_flushes_each_outcome_class() {
+        for outcome in [
+            TransferLifecycleOutcome::Success,
+            TransferLifecycleOutcome::Refused,
+            TransferLifecycleOutcome::Error,
+        ] {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&events);
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let captured_flushes = Arc::clone(&flushes);
+            let trace = TransferLifecycleTrace::capture_with_flush(
+                "delegated-terminal-test",
+                move |event| captured.lock().unwrap().push(event),
+                move || {
+                    captured_flushes.fetch_add(1, Ordering::Relaxed);
+                },
+            );
+
+            finish_delegated_lifecycle(&trace, outcome).await;
+
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].event, "delegated_terminal");
+            assert_eq!(events[0].outcome, Some(outcome));
+            assert_eq!(flushes.load(Ordering::Relaxed), 1);
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn delegated_bytes_progress_emits_while_transfer_is_running_and_at_completion() {

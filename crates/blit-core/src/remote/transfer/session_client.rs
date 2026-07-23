@@ -34,7 +34,10 @@ use crate::generated::{
 };
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::source::TransferSource;
-use crate::remote::transfer::{ByteProgressSink, RemoteTransferProgress};
+use crate::remote::transfer::{
+    ByteProgressSink, RemoteTransferProgress, SessionPhaseRole, TransferLifecycleOutcome,
+    TransferLifecycleTrace,
+};
 use crate::transfer_plan::PlanOptions;
 use crate::transfer_session::transport::{grpc_client_transport, GRPC_CHANNEL_FRAMES};
 use crate::transfer_session::{
@@ -89,6 +92,8 @@ pub struct PushSessionOptions {
     /// otp-10a: emit `[data-plane-client]` connect traces on the data
     /// plane sockets this SOURCE dials (`--trace-data-plane`).
     pub trace_data_plane: bool,
+    /// Explicit process-local lifecycle context. Disabled by default.
+    pub lifecycle_trace: TransferLifecycleTrace,
 }
 
 impl Default for PushSessionOptions {
@@ -107,6 +112,7 @@ impl Default for PushSessionOptions {
             mirror_kind: MirrorMode::Off,
             progress: None,
             trace_data_plane: false,
+            lifecycle_trace: TransferLifecycleTrace::disabled(),
         }
     }
 }
@@ -120,11 +126,14 @@ pub async fn run_push_session(
     source: Arc<dyn TransferSource>,
     options: PushSessionOptions,
 ) -> Result<TransferSummary> {
+    let lifecycle_trace = options.lifecycle_trace.clone();
+    lifecycle_trace.attach_initiator_role(SessionPhaseRole::Source);
+
     // The responder resolves module→root; the initiator's own local
     // path never crosses the wire (contract §SessionOpen).
     let (module, path) = endpoint_module_path(endpoint)?;
 
-    let mut client = connect_transfer_client(endpoint).await?;
+    let mut client = connect_transfer_client_with_trace(endpoint, &lifecycle_trace).await?;
 
     let open = SessionOpen {
         initiator_role: TransferRole::Source as i32,
@@ -157,11 +166,20 @@ pub async fn run_push_session(
     // response stream immediately (it spawns the session), so this
     // await resolves before any frame flows — no deadlock.
     let (out_tx, out_rx) = mpsc::channel(GRPC_CHANNEL_FRAMES);
-    let inbound = client
-        .transfer(ReceiverStream::new(out_rx))
-        .await
-        .map_err(|status| eyre::Report::new(transfer_open_refusal(status)))?
-        .into_inner();
+    lifecycle_trace.record("transfer_rpc_open_begin", None);
+    let inbound = match client.transfer(ReceiverStream::new(out_rx)).await {
+        Ok(response) => {
+            lifecycle_trace.record(
+                "transfer_rpc_open_end",
+                Some(TransferLifecycleOutcome::Success),
+            );
+            response.into_inner()
+        }
+        Err(status) => {
+            lifecycle_trace.record("transfer_rpc_open_end", Some(rpc_status_outcome(&status)));
+            return Err(eyre::Report::new(transfer_open_refusal(status)));
+        }
+    };
     let transport = grpc_client_transport(out_tx, inbound);
 
     // otp-10a: own the unreadable-scan accumulator so a partial source
@@ -183,6 +201,7 @@ pub async fn run_push_session(
             unreadable: Some(Arc::clone(&unreadable)),
             trace_data_plane: options.trace_data_plane,
             session_phase_trace: Default::default(),
+            lifecycle_trace,
             small_file_probe: Default::default(),
             #[cfg(test)]
             dial_test_samples: None,
@@ -261,6 +280,8 @@ pub struct PullSessionOptions {
     /// otp-10b-2: emit `[data-plane-client]` connect traces on the data
     /// plane sockets this DESTINATION dials (`--trace-data-plane`).
     pub trace_data_plane: bool,
+    /// Explicit process-local lifecycle context. Disabled by default.
+    pub lifecycle_trace: TransferLifecycleTrace,
 }
 
 impl Default for PullSessionOptions {
@@ -279,6 +300,7 @@ impl Default for PullSessionOptions {
             byte_progress: None,
             progress: None,
             trace_data_plane: false,
+            lifecycle_trace: TransferLifecycleTrace::disabled(),
         }
     }
 }
@@ -300,7 +322,10 @@ pub async fn run_pull_session(
     dest_root: PathBuf,
     options: PullSessionOptions,
 ) -> Result<DestinationOutcome> {
-    let client = connect_transfer_client(endpoint).await?;
+    options
+        .lifecycle_trace
+        .attach_initiator_role(SessionPhaseRole::Destination);
+    let client = connect_transfer_client_with_trace(endpoint, &options.lifecycle_trace).await?;
     run_pull_session_with_client(client, endpoint, dest_root, options).await
 }
 
@@ -314,6 +339,8 @@ pub async fn run_pull_session_with_client(
     dest_root: PathBuf,
     options: PullSessionOptions,
 ) -> Result<DestinationOutcome> {
+    let lifecycle_trace = options.lifecycle_trace.clone();
+    lifecycle_trace.attach_initiator_role(SessionPhaseRole::Destination);
     let (module, path) = endpoint_module_path(endpoint)?;
 
     let open = SessionOpen {
@@ -342,11 +369,20 @@ pub async fn run_pull_session_with_client(
     };
 
     let (out_tx, out_rx) = mpsc::channel(GRPC_CHANNEL_FRAMES);
-    let inbound = client
-        .transfer(ReceiverStream::new(out_rx))
-        .await
-        .map_err(|status| eyre::Report::new(transfer_open_refusal(status)))?
-        .into_inner();
+    lifecycle_trace.record("transfer_rpc_open_begin", None);
+    let inbound = match client.transfer(ReceiverStream::new(out_rx)).await {
+        Ok(response) => {
+            lifecycle_trace.record(
+                "transfer_rpc_open_end",
+                Some(TransferLifecycleOutcome::Success),
+            );
+            response.into_inner()
+        }
+        Err(status) => {
+            lifecycle_trace.record("transfer_rpc_open_end", Some(rpc_status_outcome(&status)));
+            return Err(eyre::Report::new(transfer_open_refusal(status)));
+        }
+    };
     let transport = grpc_client_transport(out_tx, inbound);
 
     let cfg = DestinationSessionConfig {
@@ -361,6 +397,7 @@ pub async fn run_pull_session_with_client(
             byte_progress: options.byte_progress,
             trace_data_plane: options.trace_data_plane,
             session_phase_trace: Default::default(),
+            lifecycle_trace,
             small_file_probe: Default::default(),
         },
         local_apply: None,
@@ -463,19 +500,55 @@ fn transfer_open_refusal(status: tonic::Status) -> TransferOpenRefusal {
     ))
 }
 
+fn rpc_status_outcome(status: &tonic::Status) -> TransferLifecycleOutcome {
+    match status.code() {
+        tonic::Code::PermissionDenied
+        | tonic::Code::Unauthenticated
+        | tonic::Code::Unimplemented
+        | tonic::Code::FailedPrecondition
+        | tonic::Code::InvalidArgument => TransferLifecycleOutcome::Refused,
+        _ => TransferLifecycleOutcome::Error,
+    }
+}
+
 /// Build a `BlitClient` over `endpoint`'s control-plane URI with a
 /// bounded connect (audit-2's 30 s policy, inherited from the old
 /// drivers' connect path).
 /// `pub` since otp-9b: the delegated dst daemon connects separately
 /// from running the session so connect failures keep their own phase.
 pub async fn connect_transfer_client(endpoint: &RemoteEndpoint) -> Result<BlitClient<Channel>> {
+    connect_transfer_client_with_trace(endpoint, &TransferLifecycleTrace::disabled()).await
+}
+
+/// [`connect_transfer_client`] with explicit lifecycle boundaries for an
+/// initiating process.
+pub async fn connect_transfer_client_with_trace(
+    endpoint: &RemoteEndpoint,
+    lifecycle_trace: &TransferLifecycleTrace,
+) -> Result<BlitClient<Channel>> {
     let uri = endpoint.control_plane_uri();
-    let conn = Endpoint::from_shared(uri.clone())
-        .map_err(|e| eyre!("invalid endpoint uri {uri}: {e}"))?
-        .connect_timeout(Duration::from_secs(30));
-    let channel = tokio::time::timeout(Duration::from_secs(30), conn.connect())
-        .await
-        .map_err(|_| eyre!("timed out connecting to {uri}"))?
-        .map_err(|e| eyre!("connecting to {uri}: {e}"))?;
+    lifecycle_trace.record("control_connect_begin", None);
+    let conn = match Endpoint::from_shared(uri.clone()) {
+        Ok(endpoint) => endpoint.connect_timeout(Duration::from_secs(30)),
+        Err(err) => {
+            lifecycle_trace.record("control_connect_end", Some(TransferLifecycleOutcome::Error));
+            return Err(eyre!("invalid endpoint uri {uri}: {err}"));
+        }
+    };
+    let channel = match tokio::time::timeout(Duration::from_secs(30), conn.connect()).await {
+        Ok(Ok(channel)) => channel,
+        Ok(Err(err)) => {
+            lifecycle_trace.record("control_connect_end", Some(TransferLifecycleOutcome::Error));
+            return Err(eyre!("connecting to {uri}: {err}"));
+        }
+        Err(_) => {
+            lifecycle_trace.record("control_connect_end", Some(TransferLifecycleOutcome::Error));
+            return Err(eyre!("timed out connecting to {uri}"));
+        }
+    };
+    lifecycle_trace.record(
+        "control_connect_end",
+        Some(TransferLifecycleOutcome::Success),
+    );
     Ok(BlitClient::new(channel))
 }

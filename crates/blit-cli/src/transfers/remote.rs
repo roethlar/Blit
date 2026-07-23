@@ -305,6 +305,7 @@ async fn run_remote_push_transfer_inner(
         compare_mode,
         ignore_existing: args.ignore_existing,
         remote_label: format_remote_endpoint(&remote),
+        lifecycle_trace: Default::default(),
     };
 
     // Push has no caller-side destructive step (mirror-delete is
@@ -438,6 +439,7 @@ async fn run_remote_pull_transfer_inner(
         compare_mode,
         ignore_existing: args.ignore_existing,
         remote_label: format_remote_endpoint(&remote),
+        lifecycle_trace: Default::default(),
     };
 
     // Mirror deletions run in-session at SourceDone (the one delete

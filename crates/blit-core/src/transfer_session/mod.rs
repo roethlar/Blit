@@ -292,6 +292,9 @@ pub struct SourceInstruments {
     /// Disabled by default; production probes may also enable it with
     /// `BLIT_TRACE_SESSION_PHASES=1` on each endpoint.
     pub session_phase_trace: SessionPhaseTrace,
+    /// End-to-end lifecycle boundaries owned by the initiating process.
+    /// Responders and local sessions leave this disabled.
+    pub lifecycle_trace: crate::remote::transfer::TransferLifecycleTrace,
     /// High-volume aggregate observer for otp-12 small-file attribution.
     /// Separate from the low-frequency phase trace and disabled by default.
     pub small_file_probe: SmallFileProbe,
@@ -376,6 +379,9 @@ pub struct DestinationInstruments {
     /// Kept separate from the per-file `trace_data_plane` output so the
     /// observer does not dominate a small-file timing run.
     pub session_phase_trace: SessionPhaseTrace,
+    /// End-to-end lifecycle boundaries owned by the initiating process.
+    /// Responders and local sessions leave this disabled.
+    pub lifecycle_trace: crate::remote::transfer::TransferLifecycleTrace,
     /// High-volume aggregate observer for otp-12 small-file attribution.
     /// Separate from the low-frequency phase trace and disabled by default.
     pub small_file_probe: SmallFileProbe,
@@ -782,17 +788,7 @@ fn bind_session_phase_trace(
     negotiated: &Negotiated,
     endpoint_role: SessionPhaseRole,
 ) -> Option<BoundSessionPhaseTrace> {
-    let session_token = negotiated
-        .responder_data_plane
-        .as_ref()
-        .map(data_plane::ResponderDataPlane::session_token)
-        .or_else(|| {
-            negotiated
-                .accept
-                .data_plane
-                .as_ref()
-                .map(|grant| grant.session_token.as_slice())
-        })?;
+    let session_token = negotiated_session_token(negotiated)?;
     let initiator_role = match TransferRole::try_from(negotiated.open.initiator_role).ok()? {
         TransferRole::Source => SessionPhaseRole::Source,
         TransferRole::Destination => SessionPhaseRole::Destination,
@@ -803,12 +799,8 @@ fn bind_session_phase_trace(
         .bind(session_token, endpoint_role, initiator_role)
 }
 
-fn bind_small_file_probe(
-    probe: SmallFileProbe,
-    negotiated: &Negotiated,
-    endpoint_role: SessionPhaseRole,
-) -> Option<BoundSmallFileProbe> {
-    let session_token = negotiated
+fn negotiated_session_token(negotiated: &Negotiated) -> Option<&[u8]> {
+    negotiated
         .responder_data_plane
         .as_ref()
         .map(data_plane::ResponderDataPlane::session_token)
@@ -818,7 +810,32 @@ fn bind_small_file_probe(
                 .data_plane
                 .as_ref()
                 .map(|grant| grant.session_token.as_slice())
-        });
+        })
+}
+
+fn establishment_outcome(err: &eyre::Report) -> crate::remote::transfer::TransferLifecycleOutcome {
+    use crate::generated::session_error::Code;
+    use crate::remote::transfer::TransferLifecycleOutcome;
+
+    match err.downcast_ref::<SessionFault>().map(|fault| fault.code) {
+        Some(
+            Code::BuildMismatch
+            | Code::ModuleUnknown
+            | Code::ReadOnly
+            | Code::DelegationRefused
+            | Code::ScanIncomplete
+            | Code::ChecksumDisabled,
+        ) => TransferLifecycleOutcome::Refused,
+        _ => TransferLifecycleOutcome::Error,
+    }
+}
+
+fn bind_small_file_probe(
+    probe: SmallFileProbe,
+    negotiated: &Negotiated,
+    endpoint_role: SessionPhaseRole,
+) -> Option<BoundSmallFileProbe> {
+    let session_token = negotiated_session_token(negotiated);
     let initiator_role = match TransferRole::try_from(negotiated.open.initiator_role).ok()? {
         TransferRole::Source => SessionPhaseRole::Source,
         TransferRole::Destination => SessionPhaseRole::Destination,
@@ -1081,6 +1098,48 @@ async fn establish(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn establish_traced(
+    transport: &mut FrameTransport,
+    hello: &HelloConfig,
+    endpoint: &SessionEndpoint,
+    local_role: TransferRole,
+    validate_open: &OpenValidator,
+    resolve_open: Option<&OpenResolver>,
+    local_receiver_capacity: Option<&CapacityProfile>,
+    lifecycle_trace: &crate::remote::transfer::TransferLifecycleTrace,
+) -> Result<Negotiated> {
+    use crate::remote::transfer::TransferLifecycleOutcome;
+
+    lifecycle_trace.record("session_establish_begin", None);
+    match establish(
+        transport,
+        hello,
+        endpoint,
+        local_role,
+        validate_open,
+        resolve_open,
+        local_receiver_capacity,
+    )
+    .await
+    {
+        Ok(negotiated) => {
+            if let Some(token) = negotiated_session_token(&negotiated) {
+                lifecycle_trace.attach_session_token(token);
+            }
+            lifecycle_trace.record(
+                "session_establish_end",
+                Some(TransferLifecycleOutcome::Success),
+            );
+            Ok(negotiated)
+        }
+        Err(err) => {
+            lifecycle_trace.record("session_establish_end", Some(establishment_outcome(&err)));
+            Err(err)
+        }
+    }
+}
+
 /// Receive one frame during establish; peer errors and closes become
 /// terminal faults.
 async fn expect_frame(transport: &mut FrameTransport) -> Result<Frame> {
@@ -1179,7 +1238,10 @@ pub async fn run_source(
     transport: FrameTransport,
     source: Arc<dyn TransferSource>,
 ) -> Result<TransferSummary> {
+    use crate::remote::transfer::TransferLifecycleOutcome;
+
     let mut transport = transport;
+    let lifecycle_trace = cfg.instruments.lifecycle_trace.clone();
     if let SessionEndpoint::Initiator { open } = &cfg.endpoint {
         // Own-config coherence: a source initiator declares SOURCE.
         let declared = TransferRole::try_from(open.initiator_role);
@@ -1191,7 +1253,7 @@ pub async fn run_source(
         }
     }
 
-    let negotiated = establish(
+    let negotiated = establish_traced(
         &mut transport,
         &cfg.hello,
         &cfg.endpoint,
@@ -1204,10 +1266,11 @@ pub async fn run_source(
         // `run_responder`, not here (otp-5).
         None,
         None,
+        &lifecycle_trace,
     )
     .await?;
 
-    drive_source(
+    let result = drive_source(
         cfg.plan_options,
         cfg.data_plane_host,
         cfg.instruments,
@@ -1215,7 +1278,16 @@ pub async fn run_source(
         transport,
         source,
     )
-    .await
+    .await;
+    lifecycle_trace.record(
+        "session_body_return",
+        Some(if result.is_ok() {
+            TransferLifecycleOutcome::Success
+        } else {
+            TransferLifecycleOutcome::Error
+        }),
+    );
+    result
 }
 
 /// The SOURCE session body after establish: spawn the receive half,
@@ -3279,7 +3351,10 @@ pub async fn run_destination(
     transport: FrameTransport,
     target: DestinationTarget,
 ) -> Result<DestinationOutcome> {
+    use crate::remote::transfer::TransferLifecycleOutcome;
+
     let mut transport = transport;
+    let lifecycle_trace = cfg.instruments.lifecycle_trace.clone();
     let mut receiver_capacity = cfg
         .receiver_capacity
         .unwrap_or_else(crate::dial::local_receiver_capacity);
@@ -3311,7 +3386,7 @@ pub async fn run_destination(
         DestinationTarget::Fixed(_) => None,
     };
 
-    let negotiated = establish(
+    let negotiated = establish_traced(
         &mut transport,
         &cfg.hello,
         &endpoint,
@@ -3319,6 +3394,7 @@ pub async fn run_destination(
         &destination_open_validator,
         resolve_open,
         Some(&receiver_capacity),
+        &lifecycle_trace,
     )
     .await?;
 
@@ -3339,7 +3415,7 @@ pub async fn run_destination(
         },
     };
 
-    drive_destination(
+    let result = drive_destination(
         &mut transport,
         negotiated,
         &dst_root,
@@ -3347,7 +3423,16 @@ pub async fn run_destination(
         cfg.instruments,
         cfg.local_apply,
     )
-    .await
+    .await;
+    lifecycle_trace.record(
+        "session_body_return",
+        Some(if result.is_ok() {
+            TransferLifecycleOutcome::Success
+        } else {
+            TransferLifecycleOutcome::Error
+        }),
+    );
+    result
 }
 
 /// The DESTINATION session body: run the diff/receive loop and map a

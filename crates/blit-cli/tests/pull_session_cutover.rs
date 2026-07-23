@@ -55,6 +55,7 @@ fn pull_execution(port: u16, dest_root: &Path) -> PullExecution {
         compare_mode: ComparisonMode::SizeMtime,
         ignore_existing: false,
         remote_label: format!("127.0.0.1:{port}:/test/"),
+        lifecycle_trace: Default::default(),
     }
 }
 
