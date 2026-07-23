@@ -63,12 +63,32 @@ case "$mtfc_fake_action" in
             printf 'not an inventory\n'
             exit 0
         fi
-        mtfc_fake_count=$(wc -l <"$FAKE_FIREWALL_DB" | tr -d ' ')
+        mtfc_fake_count=0
+        while IFS= read -r mtfc_fake_entry; do
+            if [[ -n "${FAKE_HIDE_PATH:-}" &&
+                "$mtfc_fake_entry" == "$FAKE_HIDE_PATH" ]]; then
+                continue
+            fi
+            mtfc_fake_count=$((mtfc_fake_count + 1))
+        done <"$FAKE_FIREWALL_DB"
         printf 'Total number of apps = %s \n' "$mtfc_fake_count"
+        if [[ "${FAKE_INVENTORY_STYLE:-}" == "spaced" ]]; then
+            printf '\n'
+        fi
         mtfc_fake_index=1
         while IFS= read -r mtfc_fake_entry; do
-            printf '%s : %s \n' "$mtfc_fake_index" "$mtfc_fake_entry"
-            printf '             (Allow incoming connections)\n'
+            if [[ -n "${FAKE_HIDE_PATH:-}" &&
+                "$mtfc_fake_entry" == "$FAKE_HIDE_PATH" ]]; then
+                continue
+            fi
+            if [[ "${FAKE_INVENTORY_STYLE:-}" == "spaced" ]]; then
+                printf '  %s   :   %s   \n' \
+                    "$mtfc_fake_index" "$mtfc_fake_entry"
+                printf '             ( Allow   incoming connections )\n\n'
+            else
+                printf '%s : %s \n' "$mtfc_fake_index" "$mtfc_fake_entry"
+                printf '             (Allow incoming connections)\n'
+            fi
             mtfc_fake_index=$((mtfc_fake_index + 1))
         done <"$FAKE_FIREWALL_DB"
         ;;
@@ -163,7 +183,7 @@ mtfc_run_case() {
 mtfc_test_success_with_spaces_and_unrelated_entry() {
     mtfc_prepare_case success
     printf '%s.backup\n' "$mtfc_case_canonical" >"$mtfc_case_db"
-    mtfc_run_case "$mtfc_wrapper" \
+    FAKE_INVENTORY_STYLE=spaced mtfc_run_case "$mtfc_wrapper" \
         --app "$mtfc_case_app" \
         --session success \
         --evidence "$mtfc_case_evidence" \
@@ -439,6 +459,38 @@ mtfc_test_malformed_inventory_fails_before_mutation() {
     mtfc_mark_pass "malformed inventory fails before authorization or mutation"
 }
 
+mtfc_test_post_add_undercount_retains_ledger() {
+    mtfc_prepare_case undercount
+    FAKE_HIDE_PATH="$mtfc_case_canonical" mtfc_run_case "$mtfc_wrapper" \
+        --app "$mtfc_case_app" \
+        --session undercount \
+        --evidence "$mtfc_case_evidence" \
+        -- /bin/sh -c 'exit 0'
+    mtfc_rc=$?
+    mtfc_assert_eq 90 "$mtfc_rc" \
+        "unobserved successful add fails cleanup closed"
+    mtfc_assert_eq "$mtfc_case_canonical" \
+        "$(cat "$mtfc_case_db")" "under-count retained live rule"
+    [[ -f "$mtfc_case_state/owned-rule.v1" ]] ||
+        mtfc_fail "under-count cleared the owned-rule ledger"
+    mtfc_assert_file_contains "$mtfc_case_evidence/summary.txt" \
+        "cleanup_verified=false" "under-count cleanup summary"
+    mtfc_assert_file_contains "$mtfc_case_evidence/summary.txt" \
+        "cleanup_superseded_command=true" "under-count supersession"
+
+    mtfc_recovery_evidence="$mtfc_case_root/recovery-evidence"
+    mtfc_run_case "$mtfc_wrapper" \
+        --recover \
+        --evidence "$mtfc_recovery_evidence"
+    mtfc_recovery_rc=$?
+    mtfc_assert_eq 0 "$mtfc_recovery_rc" "under-count recovery"
+    mtfc_assert_eq "" "$(cat "$mtfc_case_db")" \
+        "under-count recovery removed exact rule"
+    mtfc_assert_path_absent "$mtfc_case_state/owned-rule.v1" \
+        "under-count recovery cleared ledger"
+    mtfc_mark_pass "post-add under-count retains recovery state and exit 90"
+}
+
 mtfc_test_signal_cleanup() {
     mtfc_signal_name=$1
     mtfc_signal_rc=$2
@@ -476,8 +528,9 @@ mtfc_test_initial_authorization_failure_is_nonmutating
 mtfc_test_absent_stale_ledger_recovers_without_remove
 mtfc_test_absent_stale_ledger_blocks_new_work
 mtfc_test_malformed_inventory_fails_before_mutation
+mtfc_test_post_add_undercount_retains_ledger
 mtfc_test_signal_cleanup INT 130
 mtfc_test_signal_cleanup TERM 143
 
-mtfc_assert_eq 15 "$mtfc_passed" "test count"
+mtfc_assert_eq 16 "$mtfc_passed" "test count"
 printf 'PASS: %s (%d cases)\n' "$mtfc_wrapper" "$mtfc_passed"

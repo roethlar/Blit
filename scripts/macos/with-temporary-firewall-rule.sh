@@ -149,23 +149,28 @@ import re
 import sys
 
 wanted = sys.argv[1]
-lines = open(sys.argv[2], encoding="utf-8").read().splitlines()
+lines = [
+    line
+    for line in open(sys.argv[2], encoding="utf-8").read().splitlines()
+    if line.strip()
+]
 if not lines:
     raise SystemExit("empty firewall inventory")
-header = re.fullmatch(r"Total number of apps = ([0-9]+)\s*", lines[0])
+header = re.fullmatch(r"\s*Total number of apps\s*=\s*([0-9]+)\s*", lines[0])
 if not header:
     raise SystemExit("malformed firewall inventory header")
 declared = int(header.group(1))
 entries = []
 index = 1
 while index < len(lines):
-    path_match = re.fullmatch(r"\s*[0-9]+\s+:\s(.*?)\s*", lines[index])
+    path_match = re.fullmatch(r"\s*[0-9]+\s*:\s*(.*?)\s*", lines[index])
     if not path_match or index + 1 >= len(lines):
         raise SystemExit("malformed firewall inventory entry")
     status_match = re.fullmatch(
-        r"\s+\((Allow|Block) incoming connections\)\s*", lines[index + 1]
+        r"\s*\(\s*(Allow|Block)\s+incoming\s+connections\s*\)\s*",
+        lines[index + 1],
     )
-    if not status_match:
+    if not status_match or not path_match.group(1):
         raise SystemExit("malformed firewall inventory status")
     entries.append((path_match.group(1), status_match.group(1)))
     index += 2
@@ -370,15 +375,20 @@ mtfc_cleanup_needed=0
 mtfc_child_pid=
 mtfc_command_started=false
 mtfc_command_rc=not-run
+mtfc_add_succeeded=0
+mtfc_rule_observed=0
 
 mtfc_cleanup_rule() {
     mtfc_capture_inventory before-remove "$mtfc_app_path" || return 1
     if [[ "$mtfc_inventory_count" -gt 0 ]]; then
+        mtfc_rule_observed=1
         mtfc_run_capture remove "$mtfc_sudo_tool" -n \
             "$mtfc_firewall_tool" --remove "$mtfc_app_path" || return 1
     fi
     mtfc_capture_inventory after-remove "$mtfc_app_path" || return 1
     [[ "$mtfc_inventory_count" -eq 0 ]] || return 1
+    [[ "$mtfc_add_succeeded" -eq 0 || "$mtfc_rule_observed" -eq 1 ]] ||
+        return 1
     mtfc_clear_ledger || return 1
     return 0
 }
@@ -445,14 +455,19 @@ mtfc_cleanup_needed=1
 mtfc_write_ledger ||
     mtfc_die "cannot write durable owned-rule ledger: $mtfc_state_file"
 
-mtfc_run_capture add "$mtfc_sudo_tool" -n \
-    "$mtfc_firewall_tool" --add "$mtfc_app_path" || exit 69
+if mtfc_run_capture add "$mtfc_sudo_tool" -n \
+    "$mtfc_firewall_tool" --add "$mtfc_app_path"; then
+    mtfc_add_succeeded=1
+else
+    exit 69
+fi
 mtfc_run_capture unblock "$mtfc_sudo_tool" -n \
     "$mtfc_firewall_tool" --unblockapp "$mtfc_app_path" || exit 70
 mtfc_capture_inventory after-add "$mtfc_app_path" || exit 71
 [[ "$mtfc_inventory_count" -eq 1 &&
     "$mtfc_inventory_allow" -eq 1 &&
     "$mtfc_inventory_block" -eq 0 ]] || exit 71
+mtfc_rule_observed=1
 
 "${mtfc_command[@]}" &
 mtfc_command_started=true
