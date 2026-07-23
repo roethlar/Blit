@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-23 (end-to-end latency plan active; release deferred)
+Last updated: 2026-07-23 (etl-4 accepted; one RAM validation next)
 
 - **RELEASE IDENTITY IS NOW 0.1.1:** the existing `v0.1.0` tag remains at its
   shipped 2026-05-31 commit. The current candidate uses one workspace-owned
@@ -47,9 +47,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   the 37.9 Gb/s same-direction TCP ceiling; external time was 28.874 Gb/s.
   79.1% of the excess over ideal wire time was outside the observed payload
   interval. Four streams and Q's 16 GiB RAM are not evidenced limits. The
-  active work is the end-to-end lifecycle instrument around
-  connection, RPC/session establishment, and CLI teardown—not a policy change.
-  No payload hit SSD. Evidence:
+  active work is the end-to-end lifecycle instrument around connection,
+  RPC/session establishment, and CLI teardown—not a policy change. etl-1..4
+  are accepted at `dd1ac0ad`; etl-5 is one 8 GiB RAM-only validation. Evidence:
   `docs/bench/thunderbolt-ram-profile-2026-07-23/README.md`.
 - **THUNDERBOLT SSD FOLLOW-UP IS COMPLETE:** exact candidate `d1f1152d`
   moved 12 GiB SSD-to-SSD in 7.73 s (13.335 Gb/s); Apple openrsync took
@@ -152,8 +152,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Authoritative docs right now
 
 - Active performance plan: **`docs/plan/END_TO_END_TRANSFER_LATENCY.md`**
-  (D-2026-07-23-3); etl-1/2 are formally accepted; etl-3 is mutation-proved,
-  full-gate green, and awaiting formal Opus review.
+  (D-2026-07-23-3); etl-1..4 are formally accepted at `dd1ac0ad`; etl-5 is
+  the one authorized RAM-destination hardware validation.
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
   D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
   D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b).

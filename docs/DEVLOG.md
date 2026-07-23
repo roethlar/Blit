@@ -8,6 +8,25 @@ Write to it via the `handoff` procedure; prune STATE.md overflow here.
 
 ---
 
+## 2026-07-23T05:25:22Z — etl-3/etl-4 formally accepted
+
+Exact instrument head `dd1ac0adf029b3f9c72f17acf13c6f423aac9264`
+completed etl-3 implementation, mutation proof, and the RAM-backed full
+workspace gates. Neutral Claude Opus 4.8/max review returned CLEAN with no
+findings and independently proved the push-role guard red then green after
+exact restoration. Review evidence:
+`.review/results/end-to-end-transfer-lifecycle-etl3-r1.opus-{verdict.md,jsonl}`.
+
+etl-4 scope proof found the product diff from release candidate `d1f1152d`
+confined to the planned lifecycle trace, explicit context propagation,
+diagnostic outcome identity, low-frequency boundaries, and guards. Proto and
+Cargo manifests are unchanged; payload, stream/worker, buffer, retry,
+filesystem, carrier, and wire policy are unchanged. The first independent
+review compile hit a full 16 GiB RAM disk; after proving two sibling build
+caches idle, the reviewer removed only those regenerable RAM caches and reran
+green. No SSD payload or hardware transfer ran. etl-5 is next: exactly one
+approved 8 GiB Q-to-Nagatha RAM-destination validation, then cleanup.
+
 ## 2026-07-23T01:05:29Z — Thunderbolt RAM path attributed without SSD payload
 
 Completed the one-run `THUNDERBOLT_RAM_PROFILE` diagnostic authorized by

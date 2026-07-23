@@ -75,26 +75,26 @@ outside its measured payload body.
 
 ## Acceptance criteria
 
-- [ ] A default-off lifecycle trace emits compact structured records with one
+- [x] A default-off lifecycle trace emits compact structured records with one
       run ID, producer sequence, wall timestamp, monotonic elapsed time, event,
       and terminal outcome; session ID and initiator role appear once known.
-- [ ] The initiating timeline distinguishes, at minimum: async-main entry,
+- [x] The initiating timeline distinguishes, at minimum: async-main entry,
       argument parse/context completion, transfer dispatch/route selection,
       control connect begin/end, Transfer RPC open begin/end, session
       establishment begin/end, session body return, result render begin/end,
       and command terminal. The external-time residual before the first and
       after the last event is calculated rather than silently assigned.
-- [ ] Push and pull use one event vocabulary and explicit trace propagation.
+- [x] Push and pull use one event vocabulary and explicit trace propagation.
       Delegated remote-to-remote initiation emits the applicable core spans.
-- [ ] Existing `[session-phase]` schema-1 output and trace-on/off behavior are
+- [x] Existing `[session-phase]` schema-1 output and trace-on/off behavior are
       byte-shape compatible; no proto, transfer decision, or payload hot path
       changes.
-- [ ] Deterministic injected-emitter tests prove lifecycle order, one terminal
+- [x] Deterministic injected-emitter tests prove lifecycle order, one terminal
       result on success/refusal/error, run/session correlation, trace-off
       silence, and flush behavior for both initiator roles. Every new guard is
       mutation-proved by reverting its production change, observing failure,
       restoring it, and observing the complete suite pass.
-- [ ] `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --
+- [x] `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --
       -D warnings`, `cargo test --workspace`,
       `bash scripts/agent/check-docs.sh`, and `git diff --check` pass with test
       counts not reduced. Product code differs from `d1f1152d` only by this
@@ -186,13 +186,29 @@ the no-repeat rule follow the completed 2026-07-23 RAM profile.
 3. **etl-3 — CLI lifecycle `[x]`.** Carry one trace from async-main entry through
    parse/context, route dispatch, result rendering, and command terminal;
    mutation-prove the complete successful timeline and trace-off silence.
-4. **etl-4 — verification and review closure.** Run the RAM-backed full
+4. **etl-4 — verification and review closure `[x]`.** Run the RAM-backed full
    workspace gates, adjudicate selected review findings one per commit, and
    prove the final instrument differs from `d1f1152d` only in diagnostic scope.
 5. **etl-5 — one RAM validation and attribution.** Build/hash the exact
    instrumented candidate, execute the one approved 8 GiB RAM-destination run,
    validate integrity and write allocation, clean up, record the bounded
    attribution, and close this plan as Historical.
+
+## etl-4 closure evidence
+
+Exact instrument head `dd1ac0adf029b3f9c72f17acf13c6f423aac9264`
+passed the RAM-backed workspace format, strict all-target Clippy, complete
+test, docs, and diff gates. Formal Opus 4.8/max reviews accepted etl-1, etl-2,
+and etl-3 with independent red/green guards and no findings.
+
+The product diff from release candidate `d1f1152d` is confined to the affected
+code and tests named by this plan: the lifecycle trace primitive, explicit
+trace-context propagation, low-frequency lifecycle boundaries, structured
+diagnostic outcome preservation, and their guards. There is no diff in the
+proto or Cargo manifests and no change to the payload data plane, stream or
+worker policy, buffers, retry policy, carrier choice, filesystem behavior, or
+wire contract. The CLI route/result rewrites were independently checked as
+behavior-preserving funnels for balanced boundaries and one terminal flush.
 
 ## Open questions
 
