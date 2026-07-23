@@ -1,8 +1,7 @@
 # SSD-backed direct-Thunderbolt comparison
 
-**Status**: Active — owner approved the SSD-backed test after the plan was
-drafted and raised its one-shot write ceiling to 40 GB; D1 realizes that as
-36 GiB / 38.7 GB of benchmark payload writes with no repeat
+**Status**: Active — both one-shot arms and all hash checks are complete;
+cleanup is blocked only until the evidence commit lands
 **Created**: 2026-07-22
 **Depends on**: D-2026-07-22-4 and the certified RAM/wire probe in
 `docs/bench/thunderbolt-macmac-2026-07-22/README.md`
@@ -186,15 +185,15 @@ Thunderbolt addresses while the cable stays connected.
 ## Acceptance criteria
 
 - [x] D1 is approved and the plan is Active before the first fixture byte.
-- [ ] All preflight identities and free-space gates pass.
-- [ ] Physical source allocation and total benchmark payload writes stay
+- [x] All preflight identities and free-space gates pass.
+- [x] Physical source allocation and total benchmark payload writes stay
       within the approved 36 GiB / 38.7 GB hard cap.
-- [ ] Exactly one Blit and one rsync data-moving arm run; no retry or repeat.
-- [ ] Both tools transfer exactly twelve files / 12,884,901,888 bytes and every
+- [x] Exactly one Blit and one rsync data-moving arm run; no retry or repeat.
+- [x] Both tools transfer exactly twelve files / 12,884,901,888 bytes and every
       destination hash matches its source.
 - [ ] Raw evidence and limitations are committed before generated data is
       removed.
 - [ ] All listeners and generated data are removed with the seed and unrelated
       paths untouched.
-- [ ] No product code, release candidate, tag, remote ref, or publication state
+- [x] No product code, release candidate, tag, remote ref, or publication state
       changes as part of this plan.
