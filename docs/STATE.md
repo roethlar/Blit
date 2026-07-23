@@ -152,8 +152,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Authoritative docs right now
 
 - Active performance plan: **`docs/plan/END_TO_END_TRANSFER_LATENCY.md`**
-  (D-2026-07-23-3); etl-1 trace primitive and etl-2 shared core boundaries are
-  mutation-proved, and etl-3 CLI lifecycle is next.
+  (D-2026-07-23-3); etl-1 and etl-2 are mutation-proved and formally accepted
+  by clean Claude Opus 4.8/max reviews, and etl-3 CLI lifecycle is next.
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
   D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
   D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b).
