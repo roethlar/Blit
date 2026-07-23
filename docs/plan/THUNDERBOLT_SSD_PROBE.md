@@ -1,6 +1,6 @@
 # SSD-backed direct-Thunderbolt comparison
 
-**Status**: Complete — both one-shot arms, all hash checks, the evidence
+**Status**: Historical — both one-shot arms, all hash checks, the evidence
 commit, and exact-path cleanup are complete
 **Created**: 2026-07-22
 **Depends on**: D-2026-07-22-4 and the certified RAM/wire probe in
