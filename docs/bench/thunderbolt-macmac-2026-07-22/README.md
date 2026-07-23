@@ -7,7 +7,7 @@ The direct Thunderbolt path is healthy and nearly saturates its 40 Gb/s link:
 retransmissions. Exact 0.1.1 candidate `d1f1152d` moved an 8 GiB fixture at
 28.6 Gb/s in 2.40 seconds. Apple openrsync moved the same fixture over its
 unencrypted daemon protocol at 3.62 Gb/s in 18.99 seconds. Blit was 7.9x
-faster and reached 75.7% of the measured TCP ceiling.
+faster and reached about 76% of the measured TCP ceiling.
 
 This is one explicitly approved, conservative ceiling probe, not a formal
 acceptance matrix. It establishes a real product headroom gap between Blit and
@@ -119,7 +119,8 @@ does not grade rsync on an unrelated encryption bottleneck.
 - Blit is 7.9x faster than this macOS-native rsync baseline for the exact
   large-file fixture and route.
 - Blit has about 24% headroom remaining below the measured TCP ceiling. The
-  elapsed-time floor at 37.8 Gb/s is about 1.82 seconds; Blit took 2.40.
+  elapsed-time floor at the same-direction 37.9 Gb/s is about 1.81 seconds;
+  Blit took 2.40.
 - The probe is one direction, one warm large-file shape, and one sample per
   tool. It isolates the engine and wire from destination storage, but does not
   represent cold-cache, real-disk, small-file, or mixed-tree behavior.

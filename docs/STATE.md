@@ -46,7 +46,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   40 Gb/s link sustained 37.7–37.9 Gb/s TCP with zero retransmissions. Exact
   candidate `d1f1152d` moved the verified 8 GiB RAM-destination fixture in
   2.40 s (28.6 Gb/s), versus Apple openrsync in 18.99 s (3.62 Gb/s): Blit was
-  7.9x faster and reached 75.7% of the wire ceiling. No payload hit either
+  7.9x faster and reached about 76% of the wire ceiling. No payload hit either
   SSD. Evidence and limits:
   `docs/bench/thunderbolt-macmac-2026-07-22/README.md`.
 - **RELEASE COMPLETION ACTIVE (D-2026-07-22-3):** ldt-1..3 are accepted;
