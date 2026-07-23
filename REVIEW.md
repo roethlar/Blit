@@ -28,6 +28,15 @@ Opus 4.8/max (D-2026-07-23-2).
 | ldt-3 | Lifecycle, observer, terminal-race, and full-gate closure | `[x]` | `436e1bb` + review fix `406a7e5`; Claude r2 clean with independent guard |
 | ldt-4 | Quiet rig-W `q`↔`netwatch-01` adaptive and role-invariance evidence | `[x]` | Evidence audit: the complete first horizon session was valid after corrected-analyzer reanalysis; fresh `7050a29` was redundant confirmation. Both show q→Windows REMOVE parity and a Windows→q ADD/REMOVE split with the ADD arm slower, but fixed order confounds role with cache/warmth. D-2026-07-22-1 closes pre-release hardware work without a controller change; exact ledger: `docs/bench/ldt4-evidence-audit-2026-07-22/`. Fixed-cell 1.197/1.131 findings are post-release. |
 
+## macOS temporary firewall cleanup
+
+Plan: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md` (Active,
+D-2026-07-23-6). Formal review uses Claude Opus 4.8/max.
+
+| ID | Title | Status | Commit(s) |
+|----|-------|--------|-----------|
+| mtfc-r1-f1-inventory-proof | Prove real inventory parsing and observed cleanup ownership | `[~]` | candidate `d35a0b12`; first review attempt invalid; fix pending |
+
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 
 Plan: `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md` (Active). Loop:
