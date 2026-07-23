@@ -49,6 +49,11 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   7.9x faster and reached about 76% of the wire ceiling. No payload hit either
   SSD. Evidence and limits:
   `docs/bench/thunderbolt-macmac-2026-07-22/README.md`.
+- **THUNDERBOLT SSD FOLLOW-UP IS ACTIVE:**
+  `docs/plan/THUNDERBOLT_SSD_PROBE.md` fixes one Q-to-Nagatha 12 GiB source,
+  one Blit destination, and one rsync destination: 36 GiB / 38.7 GB of
+  benchmark payload writes beneath the owner's 40 GB ceiling, with no retry or
+  repeat. D1 is approved; all plan gates apply before the first fixture byte.
 - **RELEASE COMPLETION ACTIVE (D-2026-07-22-3):** ldt-1..3 are accepted;
   ldt-4 is closed as evidence, not as a tuning win. The complete first horizon
   session is valid after corrected reanalysis; its repeat was unnecessary.

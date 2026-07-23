@@ -400,3 +400,18 @@ Format:
   probe's pre-publication ordering. It does not turn optional tuning into a
   release gate, approve a repeated or formal matrix, weaken the large-write
   approval rule, authorize code changes, or authorize publication.
+
+## D-2026-07-22-5 — Cap the SSD-backed Thunderbolt follow-up at 40 GB
+- Decision: Activate `docs/plan/THUNDERBOLT_SSD_PROBE.md` with up to 40 GB of
+  total plan-created SSD writes when the larger fixture materially improves
+  the evidence. Realize the ceiling as one physical 12 GiB source plus one
+  12 GiB destination per tool: 36 GiB / 38.7 decimal GB of benchmark payload,
+  at most 100 MiB of tooling/config/log overhead, one arm per tool, and no
+  automatic retry or repeat. Owner, 2026-07-22: **"you can write up to 40gb if
+  that will give you more data"**.
+- Why: twelve 1 GiB files lengthen the Blit arm by 50% versus the RAM probe,
+  exceed Q's comfortable file-cache working set, and remain below the owner's
+  ceiling across source creation and both destination writes.
+- Supersedes: D-2026-07-22-4 only where its conservative approval did not name
+  a numeric budget. It does not approve more than this one plan, any failed-arm
+  retry, a repeated/formal matrix, a product change, or publication.
