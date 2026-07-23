@@ -1,0 +1,96 @@
+final_preflight_utc=2026-07-23T05:34:33Z
+source_count=8
+size=1073741824 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_01.bin
+size=1073741824 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_02.bin
+size=1073741824 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_03.bin
+size=1073741824 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_04.bin
+size=1073741824 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_05.bin
+size=1073741824 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_06.bin
+size=1073741824 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_07.bin
+size=1073741824 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_08.bin
+c3ebc375d69fdae84f40a72efbc6daac28b635f7e92af4e5648ee3480ac8181d  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/blit
+staged_client_size=11098000 staged_client_blocks512=21680
+blit 0.1.1+a3be4a64fbfb
+route:
+   route to: 172.31.254.1
+destination: 172.31.254.1
+  interface: bridge0
+      flags: <UP,HOST,DONE,LLINFO,WASCLONED,IFSCOPE,IFREF>
+ recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+       0         0         0         0         0         0      1500       960
+bridge_before:
+Name       Mtu   Network       Address            Ipkts Ierrs     Ibytes    Opkts Oerrs     Obytes  Coll
+bridge0    1500  <Link#17>   36:a5:09:de:dd:80  9828973     0 160940370189 21793218     0 425909921608     0
+bridge0    1500  fe80::1ced: fe80:11::1ced:7f0  9828973     - 160940370189 21793218     - 425909921608     -
+bridge0    1500  172.31.254/30 172.31.254.2     9828973     - 160940370189 21793218     - 425909921608     -
+memory:
+The system has 17179869184 (1048576 pages with a page size of 16384).
+
+Stats:
+Pages free: 9955
+Pages purgeable: 13282
+Pages purged: 491587
+
+Swap I/O:
+Swapins: 1872
+Swapouts: 2428
+
+Page Q counts:
+Pages active: 186440
+Pages inactive: 656363
+Pages speculative: 619
+Pages throttled: 0
+Pages wired down: 114181
+
+Compressor Stats:
+Pages used by compressor: 46018
+Pages decompressed: 96903
+Pages compressed: 285455
+
+File I/O:
+Pageins: 38958066
+Pageouts: 8302
+
+System-wide memory free percentage: 84%
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                    10111.
+Pages active:                                 186444.
+Pages inactive:                               656364.
+Pages speculative:                               622.
+Pages throttled:                                   0.
+Pages wired down:                             114181.
+Pages purgeable:                               13282.
+"Translation faults":                       75593443.
+Pages copy-on-write:                         8335844.
+Pages zero filled:                          39249922.
+Pages reactivated:                            381053.
+Pages purged:                                 491587.
+File-backed pages:                            603490.
+Anonymous pages:                              239940.
+Pages stored in compressor:                   155495.
+Pages occupied by compressor:                  46018.
+Decompressions:                                96903.
+Compressions:                                 285455.
+Pageins:                                    38958069.
+Pageouts:                                       8302.
+Swapins:                                        1872.
+Swapouts:                                       2428.
+top_cpu:
+ %CPU   PID COMM             ARGS
+  7.7 75401 sshd-session: mi sshd-session: michael [priv]
+  2.9   141 /usr/libexec/ope /usr/libexec/opendirectoryd
+  1.4 75405 zsh              zsh -c \012root=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64\012  date -u "+final_preflight_utc=%Y-%m-%dT%H:%M:%SZ"\012  echo source_count=$(find "$root/source" -type f -maxdepth 1 | wc -l | tr -d " ")\012  find "$root/source" -type f -maxdepth 1 -print | sort | xargs stat -f "size=%z path=%N"\012  shasum -a 256 "$root/blit"\012  stat -f "staged_client_size=%z staged_client_blocks512=%b" "$root/blit"\012  "$root/blit" --version\012  echo route:\012  route -n get 172.31.254.1\012  echo bridge_before:\012  netstat -ibn -I bridge0\012  echo memory:\012  memory_pressure\012  vm_stat\012  echo top_cpu:\012  ps -Ao pcpu,pid,comm,args -r | head -n 16\012  echo relevant_processes:\012  pgrep -fl "cargo|rustc|blit-daemon|/blit " || true\012  echo fs_free_blocks=$(python3 -c "import os; print(os.statvfs(\"$root\").f_bfree)")\012
+  0.9     1 /sbin/launchd    /sbin/launchd
+  0.5   167 /usr/sbin/notify /usr/sbin/notifyd
+  0.3 75404 sshd-session: mi sshd-session: michael@notty
+  0.3   100 /usr/libexec/log /usr/libexec/logd
+  0.1   112 /usr/libexec/con /usr/libexec/configd
+  0.0 72354 /System/Library/ /System/Library/PrivateFrameworks/StreamingZip.framework/Versions/A/XPCServices/com.apple.StreamingUnzipService.privileged.xpc/Contents/MacOS/com.apple.StreamingUnzipService.privileged
+  0.0 71099 /usr/libexec/Per /usr/libexec/PerfPowerServices
+  0.0 68879 /System/Library/ /System/Library/PrivateFrameworks/ContactsDonation.framework/Versions/A/Support/contactsdonationagent
+  0.0 68880 /System/Library/ /System/Library/PrivateFrameworks/AvatarPersistence.framework/Support/avatarsd
+  0.0 68878 /System/Library/ /System/Library/PrivateFrameworks/Noticeboard.framework/Versions/A/Resources/nbstated
+  0.0 68877 /System/Library/ /System/Library/PrivateFrameworks/Noticeboard.framework/Versions/A/Resources/nbagent.app/Contents/MacOS/nbagent
+  0.0 68856 /System/Library/ /System/Library/PrivateFrameworks/IntelligenceTasksEngine.framework/Support/intelligencetasksd
+relevant_processes:
+fs_free_blocks=8617364

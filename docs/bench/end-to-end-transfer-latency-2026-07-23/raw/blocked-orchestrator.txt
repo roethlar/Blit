@@ -1,0 +1,15 @@
+outer_start_utc=2026-07-23T05:34:49Z
+outer_start_epoch_ns=1784784889000000000
+client_ssh_exit=255
+outer_end_utc=2026-07-23T05:36:49Z
+outer_end_epoch_ns=1784785009000000000
+nagatha_bridge_after:
+Name       Mtu   Network       Address            Ipkts Ierrs     Ibytes    Opkts Oerrs     Obytes  Coll
+bridge0    1500  <Link#15>   36:f6:db:0f:cf:c0 10838409     0 212939540444 19802510     0 321892297692     0
+bridge0    1500  fe80::c4a:7 fe80:f::c4a:7a2:c 10838409     - 212939540444 19802510     - 321892297692     -
+bridge0    1500  172.31.254/30 172.31.254.1    10838409     - 212939540444 19802510     - 321892297692     -
+q_bridge_after:
+Name       Mtu   Network       Address            Ipkts Ierrs     Ibytes    Opkts Oerrs     Obytes  Coll
+bridge0    1500  <Link#17>   36:a5:09:de:dd:80  9828980     0 160940370639 21793264     0 425909931130     0
+bridge0    1500  fe80::1ced: fe80:11::1ced:7f0  9828980     - 160940370639 21793264     - 425909931130     -
+bridge0    1500  172.31.254/30 172.31.254.2     9828980     - 160940370639 21793264     - 425909931130     -

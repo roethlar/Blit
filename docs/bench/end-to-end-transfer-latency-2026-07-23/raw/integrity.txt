@@ -1,0 +1,26 @@
+client_reported_files=8
+client_reported_bytes=8589934592
+client_tcp_fallback=false
+destination_files=8
+size=1073741824 blocks512=2097912 path=/Volumes/BLITETL5_052951/destination.noindex/file_01.bin
+size=1073741824 blocks512=2114368 path=/Volumes/BLITETL5_052951/destination.noindex/file_02.bin
+size=1073741824 blocks512=2115328 path=/Volumes/BLITETL5_052951/destination.noindex/file_03.bin
+size=1073741824 blocks512=2112168 path=/Volumes/BLITETL5_052951/destination.noindex/file_04.bin
+size=1073741824 blocks512=2116952 path=/Volumes/BLITETL5_052951/destination.noindex/file_05.bin
+size=1073741824 blocks512=2098304 path=/Volumes/BLITETL5_052951/destination.noindex/file_06.bin
+size=1073741824 blocks512=2112520 path=/Volumes/BLITETL5_052951/destination.noindex/file_07.bin
+size=1073741824 blocks512=2115712 path=/Volumes/BLITETL5_052951/destination.noindex/file_08.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Volumes/BLITETL5_052951/destination.noindex/file_01.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Volumes/BLITETL5_052951/destination.noindex/file_02.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Volumes/BLITETL5_052951/destination.noindex/file_03.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Volumes/BLITETL5_052951/destination.noindex/file_04.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Volumes/BLITETL5_052951/destination.noindex/file_05.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Volumes/BLITETL5_052951/destination.noindex/file_06.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Volumes/BLITETL5_052951/destination.noindex/file_07.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Volumes/BLITETL5_052951/destination.noindex/file_08.bin
+lifecycle_client_count=18
+session_client_count=30
+session_daemon_count=27
+q_free_blocks_after_transfer=8614619
+seed_size=1073741824 seed_blocks512=2097152
+staged_client_size=11098000 staged_client_blocks512=21680

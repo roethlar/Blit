@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-23 (etl-4 accepted; one RAM validation next)
+Last updated: 2026-07-23 (end-to-end Thunderbolt lifecycle attribution complete)
 
 - **RELEASE IDENTITY IS NOW 0.1.1:** the existing `v0.1.0` tag remains at its
   shipped 2026-05-31 commit. The current candidate uses one workspace-owned
@@ -42,15 +42,15 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **THUNDERBOLT RAM PATH ATTRIBUTED (D-2026-07-23-1):** exact candidate
-  `d1f1152d` moved the traced 8 GiB payload body at 35.578 Gb/s, 93.9% of
-  the 37.9 Gb/s same-direction TCP ceiling; external time was 28.874 Gb/s.
-  79.1% of the excess over ideal wire time was outside the observed payload
-  interval. Four streams and Q's 16 GiB RAM are not evidenced limits. The
-  active work is the end-to-end lifecycle instrument around connection,
-  RPC/session establishment, and CLI teardown—not a policy change. etl-1..4
-  are accepted at `dd1ac0ad`; etl-5 is one 8 GiB RAM-only validation. Evidence:
-  `docs/bench/thunderbolt-ram-profile-2026-07-23/README.md`.
+- **THUNDERBOLT LIFECYCLE ATTRIBUTED (D-2026-07-23-3):** exact instrumented
+  candidate `a3be4a64` completed one 8 GiB Q-to-Nagatha RAM transfer with all
+  hashes matching. Only 13.645 ms was observed outside its 3.587845-second data
+  span: connect + RPC open + establishment totaled 4.687 ms, while rendering
+  through terminal took 0.041 ms. The historical 0.448-second gap did not recur
+  and is outside these fixed product stages. This sample's body rate was 19.153
+  Gb/s versus the prior 35.578 Gb/s, but one observation cannot classify that
+  difference or select a policy change. Cleanup is complete and no repeat is
+  authorized. Evidence: `docs/bench/end-to-end-transfer-latency-2026-07-23/`.
 - **THUNDERBOLT SSD FOLLOW-UP IS COMPLETE:** exact candidate `d1f1152d`
   moved 12 GiB SSD-to-SSD in 7.73 s (13.335 Gb/s); Apple openrsync took
   33.81 s (3.049 Gb/s), so Blit was 4.37x faster. All 36 files hash-match;
@@ -92,8 +92,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/END_TO_END_TRANSFER_LATENCY.md` (ACTIVE, D-2026-07-23-3):** default-off
-   lifecycle timing followed by one 8 GiB RAM-destination validation.
+1. **PERFORMANCE NEXT:** use the retained lifecycle and session evidence to
+   draft the next ceiling plan; no additional hardware transfer is authorized.
 2. **`docs/plan/RELEASE_COMPLETION.md` (ACTIVE, D-2026-07-22-3).** No hardware
    work. Repair each hosted cross-platform failure one per commit, then prove
    the complete suite and current artifacts.
@@ -151,9 +151,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Authoritative docs right now
 
-- Active performance plan: **`docs/plan/END_TO_END_TRANSFER_LATENCY.md`**
-  (D-2026-07-23-3); etl-1..4 are formally accepted at `dd1ac0ad`; etl-5 is
-  the one authorized RAM-destination hardware validation.
+- Historical performance plan: **`docs/plan/END_TO_END_TRANSFER_LATENCY.md`**
+  (D-2026-07-23-3); etl-1..5 are complete. Final evidence:
+  `docs/bench/end-to-end-transfer-latency-2026-07-23/`.
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
   D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
   D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b).

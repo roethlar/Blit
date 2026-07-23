@@ -1,6 +1,6 @@
 # End-to-end transfer latency attribution
 
-**Status**: Active
+**Status**: Historical
 **Created**: 2026-07-23
 **Supersedes**: nothing
 **Decision ref**: D-2026-07-23-3
@@ -99,19 +99,19 @@ outside its measured payload body.
       `bash scripts/agent/check-docs.sh`, and `git diff --check` pass with test
       counts not reduced. Product code differs from `d1f1152d` only by this
       diagnostic instrumentation and any admitted review fixes.
-- [ ] One exact instrumented build is identified and hashed, then exactly one
+- [x] One exact instrumented build is identified and hashed, then exactly one
       8,589,934,592-byte Q-to-Nagatha transfer writes to a fresh RAM disk,
       reports eight files with `tcp_fallback: false`, and produces matching
       size/SHA-256 for every destination file. No comparison or repeat runs.
-- [ ] The retained evidence reports every lifecycle span, the existing
+- [x] The retained evidence reports every lifecycle span, the existing
       data-body span, process CPU/memory, the external residual, observer
       limits, and SSD allocation. It identifies the dominant reducible class
       or states that the remaining gap is outside product-observable code.
-- [ ] The exact clones, staged client, daemon, listener, build RAM disk,
+- [x] The exact clones, staged client, daemon, listener, build RAM disk,
       destination RAM disk, and session scratch are removed or stopped. The
       retained seed, static Thunderbolt addresses, prior candidate artifact,
       and all earlier evidence remain untouched.
-- [ ] Instrumentation, review records, validation evidence, plan closure, and
+- [x] Instrumentation, review records, validation evidence, plan closure, and
       current state are committed one coherent slice at a time. Nothing is
       pushed, tagged, or published without a separate exact owner approval.
 
@@ -189,7 +189,7 @@ the no-repeat rule follow the completed 2026-07-23 RAM profile.
 4. **etl-4 — verification and review closure `[x]`.** Run the RAM-backed full
    workspace gates, adjudicate selected review findings one per commit, and
    prove the final instrument differs from `d1f1152d` only in diagnostic scope.
-5. **etl-5 — one RAM validation and attribution.** Build/hash the exact
+5. **etl-5 — one RAM validation and attribution `[x]`.** Build/hash the exact
    instrumented candidate, execute the one approved 8 GiB RAM-destination run,
    validate integrity and write allocation, clean up, record the bounded
    attribution, and close this plan as Historical.
@@ -209,6 +209,30 @@ proto or Cargo manifests and no change to the payload data plane, stream or
 worker policy, buffers, retry policy, carrier choice, filesystem behavior, or
 wire contract. The CLI route/result rewrites were independently checked as
 behavior-preserving funnels for balanced boundaries and one terminal flush.
+
+## etl-5 closure evidence
+
+Exact candidate `a3be4a64fbfb7a7ff3e867d40a3b75ba582a1517`, whose
+product tree is identical to reviewed instrument head `dd1ac0ad`, completed the
+one 8 GiB Q-to-Nagatha RAM-destination transfer as run
+`etl5-20260723T054219Z-a3be4a64`. The client exited zero with eight files,
+8,589,934,592 bytes, and `tcp_fallback: false`; all source and destination
+sizes and SHA-256 values match.
+
+The historical 0.448-second outside-body interval did not recur. The exact
+session data body was 3.587845 seconds and the complete client process reported
+3.60 seconds. The new trace observed 13.645 ms outside the data span; control
+connect, RPC open, and session establishment together consumed 4.687 ms, while
+render-through-terminal consumed 0.041 ms. External timer rounding bounds the
+unobserved process residual at 0–3.449 ms. The earlier gap is therefore not in
+the measured fixed product stages and remains either cold pre-main work,
+external wrapper/environment state, or a non-reproducing condition.
+
+The successful body rate was 19.153 Gb/s, below the prior 35.578 Gb/s sample.
+The authorized one-observation design cannot classify that difference or
+select a tuning change. Complete attribution, the zero-payload macOS firewall
+setup incident, integrity, 11,112,448-byte Q SSD allocation, and cleanup proof
+are retained in `docs/bench/end-to-end-transfer-latency-2026-07-23/`.
 
 ## Open questions
 

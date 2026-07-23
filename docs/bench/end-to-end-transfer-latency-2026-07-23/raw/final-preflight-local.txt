@@ -1,0 +1,145 @@
+final_preflight_utc=2026-07-23T05:34:32Z
+build_identity:
+a3be4a64fbfb7a7ff3e867d40a3b75ba582a1517
+c3ebc375d69fdae84f40a72efbc6daac28b635f7e92af4e5648ee3480ac8181d  /Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit
+2b6273860274f8151e0574e1addbc84eacadf0e220bcf37fd41a8ac2c22a1da4  /Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit-daemon
+blit 0.1.1+a3be4a64fbfb
+blit-daemon 0.1.1+a3be4a64fbfb
+destination_ram:
+   Device Identifier:         disk8s1
+   Device Node:               /dev/disk8s1
+   Whole:                     No
+   Part of Whole:             disk8
+
+   Volume Name:               BLITETL5_052951
+   Mounted:                   Yes
+   Mount Point:               /Volumes/BLITETL5_052951
+
+   Partition Type:            41504653-0000-11AA-AA11-00306543ECAC
+   File System Personality:   APFS
+   Type (Bundle):             apfs
+   Name (User Visible):       APFS
+   Owners:                    Disabled
+
+   OS Can Be Installed:       Yes
+   Media Type:                Generic
+   Protocol:                  Disk Image
+   SMART Status:              Not Supported
+   Volume UUID:               FB38FF8E-E58D-4CDC-BBD4-EE45D0780B78
+   Disk / Partition UUID:     FB38FF8E-E58D-4CDC-BBD4-EE45D0780B78
+
+   Disk Size:                 12.9 GB (12884901888 Bytes) (exactly 25165824 512-Byte-Units)
+   Device Block Size:         4096 Bytes
+
+   Volume Used Space:         28.7 KB (28672 Bytes) (exactly 56 512-Byte-Units)
+   Container Total Space:     12.9 GB (12884901888 Bytes) (exactly 25165824 512-Byte-Units)
+   Container Free Space:      12.8 GB (12849618944 Bytes) (exactly 25096912 512-Byte-Units)
+   Allocation Block Size:     4096 Bytes
+
+   Media OS Use Only:         No
+   Media Read-Only:           No
+   Volume Read-Only:          No
+
+   Device Location:           External
+   Removable Media:           Removable
+   Media Removal:             Software-Activated
+
+   Solid State:               Info not available
+
+   This disk is an APFS Volume.  APFS Information:
+   APFS Container:            disk8
+   APFS Physical Store:       disk7
+   Encrypted:                 No
+   FileVault:                 No
+   Sealed:                    No
+   Locked:                    No
+
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk8s1    12Gi    28Ki    12Gi     1%       5  125M    0%   /Volumes/BLITETL5_052951
+/dev/disk6s1    16Gi   2.8Gi    13Gi    18%    9.4k  138M    0%   /Volumes/BLIT_ETL_BUILD
+destination_before:
+listener:
+COMMAND     PID    USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+blit-daem 67264 michael    9u  IPv4 0x757f4f178ddc1319      0t0  TCP 172.31.254.1:19041 (LISTEN)
+route:
+   route to: 172.31.254.2
+destination: 172.31.254.2
+  interface: bridge0
+      flags: <UP,HOST,DONE,LLINFO,WASCLONED,IFSCOPE,IFREF>
+ recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+       0         0         0         0         0         0      1500       961
+bridge_before:
+Name       Mtu   Network       Address            Ipkts Ierrs     Ibytes    Opkts Oerrs     Obytes  Coll
+bridge0    1500  <Link#15>   36:f6:db:0f:cf:c0 10838402     0 212939539845 19802458     0 321892285216     0
+bridge0    1500  fe80::c4a:7 fe80:f::c4a:7a2:c 10838402     - 212939539845 19802458     - 321892285216     -
+bridge0    1500  172.31.254/30 172.31.254.1    10838402     - 212939539845 19802458     - 321892285216     -
+memory:
+The system has 51539607552 (3145728 pages with a page size of 16384).
+
+Stats:
+Pages free: 103903
+Pages purgeable: 6433
+Pages purged: 6634967
+
+Swap I/O:
+Swapins: 1198875
+Swapouts: 1630157
+
+Page Q counts:
+Pages active: 1050760
+Pages inactive: 1032258
+Pages speculative: 17875
+Pages throttled: 0
+Pages wired down: 257481
+
+Compressor Stats:
+Pages used by compressor: 622519
+Pages decompressed: 13148824
+Pages compressed: 19890301
+
+File I/O:
+Pageins: 43529708
+Pageouts: 576555
+
+System-wide memory free percentage: 71%
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   104074.
+Pages active:                                1050763.
+Pages inactive:                              1032259.
+Pages speculative:                             17879.
+Pages throttled:                                   0.
+Pages wired down:                             257481.
+Pages purgeable:                                6433.
+"Translation faults":                     2111426806.
+Pages copy-on-write:                        98486298.
+Pages zero filled:                        1395809159.
+Pages reactivated:                          18163255.
+Pages purged:                                6634967.
+File-backed pages:                            606907.
+Anonymous pages:                             1493994.
+Pages stored in compressor:                  1127862.
+Pages occupied by compressor:                 622519.
+Decompressions:                             13148824.
+Compressions:                               19890301.
+Pageins:                                    43529709.
+Pageouts:                                     576555.
+Swapins:                                     1198875.
+Swapouts:                                    1630157.
+top_cpu:
+ %CPU   PID COMM             ARGS
+ 11.6 19659 /System/Applicat /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
+  8.7 96815 /Applications/Ch /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/150.0.7871.124/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=renderer --user-data-dir=/Users/michael/Library/Application Support/Codex --standard-schemes=app --secure-schemes=app,sentry-ipc --bypasscsp-schemes=sentry-ipc --fetch-schemes=app,sentry-ipc --cors-schemes=sentry-ipc --streaming-schemes=app --disable-blink-features=ReplacedNormalFlowStackingInlinePaint --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=26 --time-ticks-at-unix-epoch=-1784471515417631 --launch-time-ticks=305424937290 --shared-files --metrics-shmem-handle=1752395122,r,867021428308642157,18441725940592636417,2097152 --field-trial-handle=1718379636,r,15046157518763003441,8244579160880684747,262144 --enable-features=OwlAuth,OwlAutofillAndPasswords,OwlDownloads,OwlPermissions,OwlPrinting,OwlWebViewEnhancements --disable-features=DropInputEventsWhilePaintHolding,OwlExtensions,OwlHistory,OwlOpenAIGoLinks --variations-seed-version --pseudonymization-salt-handle=1935764596,r,15134578525188522466,15181714714939459855,4 --trace-process-track-uuid=3190709010674959568 --seatbelt-client=280
+  7.9   650 /System/Library/ /System/Library/CoreServices/WindowManager.app/Contents/MacOS/WindowManager
+  7.5   417 /System/Library/ /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer -daemon
+  5.8 25121 /opt/homebrew/li /opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex -a never -s danger-full-access resume
+  5.1 37578 /usr/libexec/spo /usr/libexec/spotlightknowledged.updater -u
+  5.1 22580 /Applications/Vi /Applications/Vivaldi.app/Contents/Frameworks/Vivaldi Framework.framework/Versions/8.1.4087.56/Helpers/Vivaldi Helper (Renderer).app/Contents/MacOS/Vivaldi Helper (Renderer) --type=renderer --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=10 --time-ticks-at-unix-epoch=-1784471515428206 --running-vivaldi --launch-time-ticks=295431051584 --shared-files --field-trial-handle=1718379636,r,5585625057207376880,9003159731860878091,262144 --variations-seed-version --pseudonymization-salt-handle=1935764596,r,13043665181559951926,7901605031618841211,4 --trace-process-track-uuid=3190708995682289984 --seatbelt-client=127
+  4.3 97031 claude           claude -c
+  4.2 67275 /bin/zsh         /bin/zsh -c scratch=/Volumes/BLIT_ETL_BUILD/etl5-20260723T052951Z-a3be4a64\012{\012  date -u '+final_preflight_utc=%Y-%m-%dT%H:%M:%SZ'\012  echo 'build_identity:'\012  git rev-parse HEAD\012  git status --porcelain=v1\012  shasum -a 256 /Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit /Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit-daemon\012  /Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit --version\012  /Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit-daemon --version\012  echo 'destination_ram:'\012  diskutil info /Volumes/BLITETL5_052951\012  df -h /Volumes/BLITETL5_052951 /Volumes/BLIT_ETL_BUILD\012  echo 'destination_before:'\012  find /Volumes/BLITETL5_052951/destination.noindex -mindepth 1 -print\012  echo 'listener:'\012  lsof -nP -iTCP:19041 -sTCP:LISTEN\012  echo 'route:'\012  route -n get 172.31.254.2\012  echo 'bridge_before:'\012  netstat -ibn -I bridge0\012  echo 'memory:'\012  memory_pressure\012  vm_stat\012  echo 'top_cpu:'\012  ps -Ao pcpu,pid,comm,args -r | head -n 16\012  echo 'build_processes:'\012  pgrep -fl 'cargo|rustc' || true\012} > "$scratch/final-preflight-local.txt" 2>&1\012ssh -o BatchMode=yes q '\012root=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64\012  date -u "+final_preflight_utc=%Y-%m-%dT%H:%M:%SZ"\012  echo source_count=$(find "$root/source" -type f -maxdepth 1 | wc -l | tr -d " ")\012  find "$root/source" -type f -maxdepth 1 -print | sort | xargs stat -f "size=%z path=%N"\012  shasum -a 256 "$root/blit"\012  stat -f "staged_client_size=%z staged_client_blocks512=%b" "$root/blit"\012  "$root/blit" --version\012  echo route:\012  route -n get 172.31.254.1\012  echo bridge_before:\012  netstat -ibn -I bridge0\012  echo memory:\012  memory_pressure\012  vm_stat\012  echo top_cpu:\012  ps -Ao pcpu,pid,comm,args -r | head -n 16\012  echo relevant_processes:\012  pgrep -fl "cargo|rustc|blit-daemon|/blit " || true\012  echo fs_free_blocks=$(python3 -c "import os; print(os.statvfs(\"$root\").f_bfree)")\012' > "$scratch/final-preflight-q.txt" 2>&1\012printf 'LOCAL FINAL PREFLIGHT\n'\012egrep 'final_preflight|a3be4a64|c3ebc375|2b627386|blit 0|blit-daemon 0|Mount Point|Protocol|Disk Size|Container Free|Filesystem|LISTEN|interface:|gateway:|System-wide memory free|build_processes' "$scratch/final-preflight-local.txt" || true\012printf 'Q FINAL PREFLIGHT\n'\012egrep 'final_preflight|source_count|size=1073741824|c3ebc375|staged_client|blit 0|interface:|gateway:|System-wide memory free|relevant_processes|fs_free_blocks' "$scratch/final-preflight-q.txt" || true\012printf 'LOCAL TOP\n'\012sed -n '/top_cpu:/,/build_processes:/p' "$scratch/final-preflight-local.txt"\012printf 'Q TOP\n'\012sed -n '/top_cpu:/,/relevant_processes:/p' "$scratch/final-preflight-q.txt"
+  2.6 29298 /Applications/Ch /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/150.0.7871.124/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service) --type=gpu-process --user-data-dir=/Users/michael/Library/Application Support/Codex --start-stack-profiler --gpu-preferences=UAAAAAAAAAAgAQAEAAAAAAAAAAAAAGAAOAAAAAAAAAADAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAABgAAAAAAAAAGAAAAAAAAAAIAAAAAAAAAAgAAAAAAAAACAAAAAAAAAA= --shared-files --metrics-shmem-handle=1752395122,r,3029134659102946368,3354400358343413833,262144 --field-trial-handle=1718379636,r,15046157518763003441,8244579160880684747,262144 --enable-features=OwlAuth,OwlAutofillAndPasswords,OwlDownloads,OwlPermissions,OwlPrinting,OwlWebViewEnhancements --disable-features=DropInputEventsWhilePaintHolding,OwlExtensions,OwlHistory,OwlOpenAIGoLinks --variations-seed-version --pseudonymization-salt-handle=1935764596,r,15134578525188522466,15181714714939459855,4 --trace-process-track-uuid=3190708988185955192 --seatbelt-client=41
+  1.0   375 /usr/libexec/dis /usr/libexec/diskarbitrationd
+  1.0   714 /System/Library/ /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/corespotlightd
+  1.0 97214 claude           claude -c
+  0.8 25373 /opt/homebrew/li /opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex-code-mode-host
+  0.7     1 /sbin/launchd    /sbin/launchd
+build_processes:

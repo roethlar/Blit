@@ -1,0 +1,8 @@
+actual_preflight_utc=2026-07-23T05:42:49Z
+Incoming connection to /Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit-daemon is permitted.
+50 : /Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit-daemon
+             (Allow incoming connections)
+COMMAND     PID    USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+blit-daem 77287 michael    9u  IPv4 0x99ceedf6add579ec      0t0  TCP 172.31.254.1:19041 (LISTEN)
+destination_entries=0
+System-wide memory free percentage: 71%

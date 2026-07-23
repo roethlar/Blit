@@ -1,0 +1,54 @@
+daemon_config:
+[daemon]
+bind = "172.31.254.1"
+port = 19041
+no_mdns = true
+root = "/Volumes/BLITETL5_052951/destination.noindex"
+destination_disk_before_detach:
+   Device Identifier:         disk8s1
+   Device Node:               /dev/disk8s1
+   Whole:                     No
+   Part of Whole:             disk8
+
+   Volume Name:               BLITETL5_052951
+   Mounted:                   Yes
+   Mount Point:               /Volumes/BLITETL5_052951
+
+   Partition Type:            41504653-0000-11AA-AA11-00306543ECAC
+   File System Personality:   APFS
+   Type (Bundle):             apfs
+   Name (User Visible):       APFS
+   Owners:                    Disabled
+
+   OS Can Be Installed:       Yes
+   Media Type:                Generic
+   Protocol:                  Disk Image
+   SMART Status:              Not Supported
+   Volume UUID:               FB38FF8E-E58D-4CDC-BBD4-EE45D0780B78
+   Disk / Partition UUID:     FB38FF8E-E58D-4CDC-BBD4-EE45D0780B78
+
+   Disk Size:                 12.9 GB (12884901888 Bytes) (exactly 25165824 512-Byte-Units)
+   Device Block Size:         4096 Bytes
+
+   Volume Used Space:         8.6 GB (8644313088 Bytes) (exactly 16883424 512-Byte-Units)
+   Container Total Space:     12.9 GB (12884901888 Bytes) (exactly 25165824 512-Byte-Units)
+   Container Free Space:      4.2 GB (4205334528 Bytes) (exactly 8213544 512-Byte-Units)
+   Allocation Block Size:     4096 Bytes
+
+   Media OS Use Only:         No
+   Media Read-Only:           No
+   Volume Read-Only:          No
+
+   Device Location:           External
+   Removable Media:           Removable
+   Media Removal:             Software-Activated
+
+   Solid State:               Info not available
+
+   This disk is an APFS Volume.  APFS Information:
+   APFS Container:            disk8
+   APFS Physical Store:       disk7
+   Encrypted:                 No
+   FileVault:                 No
+   Sealed:                    No
+   Locked:                    No

@@ -1,0 +1,188 @@
+run_id=etl5-20260723T052951Z-a3be4a64
+candidate_head=a3be4a64fbfb7a7ff3e867d40a3b75ba582a1517
+reviewed_product_head=dd1ac0adf029b3f9c72f17acf13c6f423aac9264
+preflight_utc=2026-07-23T05:30:33Z
+Nagatha
+ProductName:		macOS
+ProductVersion:		26.5.2
+BuildVersion:		25F84
+Mac16,5
+51539607552
+bridge0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	options=63<RXCSUM,TXCSUM,TSO4,TSO6>
+	ether 36:f6:db:0f:cf:c0
+	inet6 fe80::c4a:7a2:c607:2456%bridge0 prefixlen 64 secured scopeid 0xf
+	inet 172.31.254.1 netmask 0xfffffffc broadcast 172.31.254.3
+	Configuration:
+		id 0:0:0:0:0:0 priority 0 hellotime 0 fwddelay 0
+		maxage 0 holdcnt 0 proto stp maxaddr 100 timeout 1200
+		root id 0:0:0:0:0:0 priority 0 ifcost 0 port 0
+		ipfilter disabled flags 0x0
+	member: en1 flags=3<LEARNING,DISCOVER>
+	        ifmaxaddr 0 port 10 priority 0 path cost 0
+	member: en2 flags=3<LEARNING,DISCOVER>
+	        ifmaxaddr 0 port 11 priority 0 path cost 0
+	member: en3 flags=3<LEARNING,DISCOVER>
+	        ifmaxaddr 0 port 12 priority 0 path cost 0
+	Address cache:
+		36:a5:9:de:dd:80 Vlan1 en3 1173 flags=0<>
+	nd6 options=201<PERFORMNUD,DAD>
+	media: autoselect
+	status: active
+   route to: 172.31.254.2
+destination: 172.31.254.0
+       mask: 255.255.255.252
+  interface: bridge0
+      flags: <UP,DONE,CLONING,STATIC>
+ recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+       0         0         0         0         0         0      1500    -20686
+Thunderbolt/USB4:
+
+    Thunderbolt/USB4 Bus 2:
+
+      Vendor Name: Apple Inc.
+      Device Name: MacBook Pro
+      UID: 0x05AC849E17C3F3F2
+      Route String: 0
+      Domain UUID: CEAF0505-F6EC-4123-A6BF-AF8CE53CBB78
+      Port:
+          Status: Device connected
+          Link Status: 0x2
+          Speed: 40 Gb/s
+          Receptacle: 3
+          Micro Firmware Version: 0.0.0
+
+        Mac mini:
+
+          Vendor Name: Apple Inc.
+          Device Name: Mac16,10
+          Device ID: 0xA
+          Vendor ID: 0x0A27
+          Domain UUID: 6A93237E-33AD-472A-B3CE-6B2E93E0C11C
+          Services:
+            Internet Protocol:
+              Protocol ID: 1
+              Protocol Version: 1
+              Protocol Revision: 1
+              Service UUID: 2978CD34-8D6B-46A0-884F-DBCFDABCF759
+
+    Thunderbolt/USB4 Bus 1:
+
+      Vendor Name: Apple Inc.
+      Device Name: MacBook Pro
+      UID: 0x05AC849E17C3F3F1
+      Route String: 0
+      Domain UUID: 8F96D9DF-FE31-40FA-AFCB-A9487E2C7E6F
+      Port:
+          Status: Device connected
+          Link Status: 0x2
+          Speed: 80 Gb/s
+          Receptacle: 2
+          Micro Firmware Version: 0.0.0
+
+        iVANKY Fusiondock Ultra:
+
+          Vendor Name: iVANKY
+          Device Name: iVANKY Fusiondock Ultra
+          Mode: USB4 v2
+          Device ID: 0x16
+          Vendor ID: 0x341D
+          Device Revision: 0x1
+          UID: 0x808714C4E1995200
+          Route String: 1
+          Firmware Version: 64.1
+          Port (Upstream):
+              Status: Device connected
+              Link Status: 0x2
+              Speed: 80 Gb/s
+              Micro Firmware Version: 1.11.0
+          Port:
+              Status: No device connected
+              Link Status: 0x7
+              Speed: Up to 120 Gb/s
+              Micro Firmware Version: 1.11.0
+          Port:
+              Status: No device connected
+              Link Status: 0x7
+              Speed: Up to 120 Gb/s
+              Micro Firmware Version: 1.11.0
+          Port:
+              Status: Device connected
+              Link Status: 0x2
+              Speed: 40 Gb/s
+              Micro Firmware Version: 1.11.0
+
+            Express 1M2:
+
+              Vendor Name: Other World Computing
+              Device Name: Express 1M2
+              Mode: USB4
+              Device ID: 0xDE79
+              Vendor ID: 0x1E91
+              Device Revision: 0x5A
+              UID: 0x174C4709AAF53A40
+              Route String: 701
+              Firmware Version: 12.34
+              Port (Upstream):
+                  Status: Device connected
+                  Link Status: 0x2
+                  Speed: 40 Gb/s
+                  Micro Firmware Version: 0.0.0
+
+    Thunderbolt/USB4 Bus 0:
+
+      Vendor Name: Apple Inc.
+      Device Name: MacBook Pro
+      UID: 0x05AC849E17C3F3F0
+      Route String: 0
+      Domain UUID: 90B8A16A-B91A-4092-90CB-3E69FEE0B91F
+      Port:
+          Status: Device connected
+          Link Status: 0x2
+          Speed: 80 Gb/s
+          Receptacle: 1
+          Micro Firmware Version: 0.0.0
+
+        iVANKY Fusiondock Ultra:
+
+          Vendor Name: iVANKY
+          Device Name: iVANKY Fusiondock Ultra
+          Mode: USB4 v2
+          Device ID: 0x18
+          Vendor ID: 0x341D
+          Device Revision: 0x1
+          UID: 0x80877E4800CC9900
+          Route String: 1
+          Firmware Version: 64.1
+          Port (Upstream):
+              Status: Device connected
+              Link Status: 0x2
+              Speed: 80 Gb/s
+              Micro Firmware Version: 1.11.0
+          Port:
+              Status: No device connected
+              Link Status: 0x7
+              Speed: Up to 120 Gb/s
+              Micro Firmware Version: 1.11.0
+          Port:
+              Status: No device connected
+              Link Status: 0x7
+              Speed: Up to 120 Gb/s
+              Micro Firmware Version: 1.11.0
+          Port:
+              Status: No device connected
+              Link Status: 0x7
+              Speed: Up to 120 Gb/s
+              Micro Firmware Version: 1.11.0
+
+listener_19041:
+relevant_processes:
+volume_name_conflict:
+PING 172.31.254.2 (172.31.254.2) from 172.31.254.1: 56 data bytes
+64 bytes from 172.31.254.2: icmp_seq=0 ttl=64 time=0.435 ms
+64 bytes from 172.31.254.2: icmp_seq=1 ttl=64 time=0.332 ms
+64 bytes from 172.31.254.2: icmp_seq=2 ttl=64 time=0.422 ms
+
+--- 172.31.254.2 ping statistics ---
+3 packets transmitted, 3 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 0.332/0.396/0.435/0.046 ms

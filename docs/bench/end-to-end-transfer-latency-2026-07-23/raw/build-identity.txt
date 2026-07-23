@@ -1,0 +1,13 @@
+candidate_head=a3be4a64fbfb7a7ff3e867d40a3b75ba582a1517
+reviewed_product_head=dd1ac0adf029b3f9c72f17acf13c6f423aac9264
+product_diff_reviewed_to_candidate=none
+c3ebc375d69fdae84f40a72efbc6daac28b635f7e92af4e5648ee3480ac8181d  /Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit
+2b6273860274f8151e0574e1addbc84eacadf0e220bcf37fd41a8ac2c22a1da4  /Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit-daemon
+size=11098000 blocks512=21680 path=/Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit
+size=11131488 blocks512=21744 path=/Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit-daemon
+blit 0.1.1+a3be4a64fbfb
+blit-daemon 0.1.1+a3be4a64fbfb
+clone_metadata_allocated_bytes=12288
+staged_client_allocated_bytes=11100160
+total_q_ssd_allocation_bytes=11112448
+allocation_budget_decimal_bytes=32000000

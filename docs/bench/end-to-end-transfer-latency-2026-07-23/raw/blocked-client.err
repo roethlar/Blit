@@ -1,0 +1,31 @@
+[transfer-lifecycle] {"schema":1,"run_id":"etl5-20260723T052951Z-a3be4a64","producer_seq":0,"unix_ns":1784784889577355000,"elapsed_ns":43334,"event":"async_main_enter"}
+[transfer-lifecycle] {"schema":1,"run_id":"etl5-20260723T052951Z-a3be4a64","producer_seq":1,"unix_ns":1784784889577751000,"elapsed_ns":479875,"event":"argument_parse_end","outcome":"SUCCESS"}
+[transfer-lifecycle] {"schema":1,"run_id":"etl5-20260723T052951Z-a3be4a64","producer_seq":2,"unix_ns":1784784889577753000,"elapsed_ns":481500,"event":"context_load_begin"}
+[transfer-lifecycle] {"schema":1,"run_id":"etl5-20260723T052951Z-a3be4a64","producer_seq":3,"unix_ns":1784784889577807000,"elapsed_ns":535750,"event":"context_load_end","outcome":"SUCCESS"}
+[transfer-lifecycle] {"schema":1,"run_id":"etl5-20260723T052951Z-a3be4a64","producer_seq":4,"unix_ns":1784784889577828000,"elapsed_ns":557000,"event":"transfer_dispatch_begin"}
+[transfer-lifecycle] {"schema":1,"run_id":"etl5-20260723T052951Z-a3be4a64","producer_seq":5,"unix_ns":1784784889577830000,"elapsed_ns":558042,"event":"transfer_route_select_begin"}
+[transfer-lifecycle] {"schema":1,"run_id":"etl5-20260723T052951Z-a3be4a64","producer_seq":6,"unix_ns":1784784889577913000,"elapsed_ns":641167,"event":"transfer_route_select_end","initiator_role":"SOURCE","outcome":"SUCCESS"}
+[transfer-lifecycle] {"schema":1,"run_id":"etl5-20260723T052951Z-a3be4a64","producer_seq":7,"unix_ns":1784784889577997000,"elapsed_ns":725792,"event":"control_connect_begin","initiator_role":"SOURCE"}
+[transfer-lifecycle] {"schema":1,"run_id":"etl5-20260723T052951Z-a3be4a64","producer_seq":8,"unix_ns":1784784889578998000,"elapsed_ns":1726292,"event":"control_connect_end","initiator_role":"SOURCE","outcome":"SUCCESS"}
+[transfer-lifecycle] {"schema":1,"run_id":"etl5-20260723T052951Z-a3be4a64","producer_seq":9,"unix_ns":1784784889579038000,"elapsed_ns":1766792,"event":"transfer_rpc_open_begin","initiator_role":"SOURCE"}
+time: command terminated abnormally
+real 120.24
+user 0.00
+sys 0.00
+            10240000  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 827  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   3  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  87  involuntary context switches
+            41493040  instructions retired
+            19299477  cycles elapsed
+             2851224  peak memory footprint

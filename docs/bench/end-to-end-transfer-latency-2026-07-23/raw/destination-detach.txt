@@ -1,0 +1,2 @@
+"disk7" ejected.
+destination_ram_after_cleanup=detached

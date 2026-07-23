@@ -1,0 +1,3 @@
+c3ebc375d69fdae84f40a72efbc6daac28b635f7e92af4e5648ee3480ac8181d  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/blit
+staged_client_size=11098000 staged_client_blocks512=21680 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/blit
+blit 0.1.1+a3be4a64fbfb

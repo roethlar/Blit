@@ -1,0 +1,125 @@
+host=Q
+ProductName:		macOS
+ProductVersion:		26.5.2
+BuildVersion:		25F84
+Mac16,10
+17179869184
+bridge0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	options=63<RXCSUM,TXCSUM,TSO4,TSO6>
+	ether 36:a5:09:de:dd:80
+	inet6 fe80::1ced:7f00:a3b:cbb9%bridge0 prefixlen 64 secured scopeid 0x11
+	inet 172.31.254.2 netmask 0xfffffffc broadcast 172.31.254.3
+	Configuration:
+		id 0:0:0:0:0:0 priority 0 hellotime 0 fwddelay 0
+		maxage 0 holdcnt 0 proto stp maxaddr 100 timeout 1200
+		root id 0:0:0:0:0:0 priority 0 ifcost 0 port 0
+		ipfilter disabled flags 0x0
+	member: en2 flags=3<LEARNING,DISCOVER>
+	        ifmaxaddr 0 port 11 priority 0 path cost 0
+	member: en3 flags=3<LEARNING,DISCOVER>
+	        ifmaxaddr 0 port 12 priority 0 path cost 0
+	member: en4 flags=3<LEARNING,DISCOVER>
+	        ifmaxaddr 0 port 13 priority 0 path cost 0
+	Address cache:
+		36:f6:db:f:cf:c0 Vlan1 en4 1200 flags=0<>
+	nd6 options=201<PERFORMNUD,DAD>
+	media: autoselect
+	status: active
+   route to: 172.31.254.1
+destination: 172.31.254.1
+  interface: bridge0
+      flags: <UP,HOST,DONE,LLINFO,WASCLONED,IFSCOPE,IFREF>
+ recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+       0         0         0         0         0         0      1500      1198
+Thunderbolt/USB4:
+
+    Thunderbolt/USB4 Bus 3:
+
+      Vendor Name: Apple Inc.
+      Device Name: Mac mini
+      UID: 0x05ACCECFB1F7B763
+      Route String: 0
+      Domain UUID: 6A93237E-33AD-472A-B3CE-6B2E93E0C11C
+      Port:
+          Status: Device connected
+          Link Status: 0x2
+          Speed: 40 Gb/s
+          Receptacle: 4
+          Micro Firmware Version: 0.0.0
+
+        MacBook Pro:
+
+          Vendor Name: Apple Inc.
+          Device Name: Mac16,5
+          Device ID: 0xA
+          Vendor ID: 0x0A27
+          Domain UUID: CEAF0505-F6EC-4123-A6BF-AF8CE53CBB78
+          Services:
+            Internet Protocol:
+              Protocol ID: 1
+              Protocol Version: 1
+              Protocol Revision: 1
+              Service UUID: B7A664A5-03C2-4AD2-93AB-F47CDA504984
+
+    Thunderbolt/USB4 Bus 1:
+
+      Vendor Name: Apple Inc.
+      Device Name: Mac mini
+      UID: 0x05ACCECFB1F7B761
+      Route String: 0
+      Domain UUID: 1111F41A-60BB-4A79-8187-CBC3A51C57E6
+      Port:
+          Status: No device connected
+          Link Status: 0x100
+          Speed: Up to 40 Gb/s
+          Receptacle: 2
+          Micro Firmware Version: 0.0.0
+
+    Thunderbolt/USB4 Bus 0:
+
+      Vendor Name: Apple Inc.
+      Device Name: Mac mini
+      UID: 0x05ACCECFB1F7B760
+      Route String: 0
+      Domain UUID: 45CE6D0A-AF06-49D5-920A-849BDDB52D43
+      Port:
+          Status: Device connected
+          Link Status: 0x2
+          Speed: 40 Gb/s
+          Receptacle: 1
+          Micro Firmware Version: 0.0.0
+
+        T3-10G:
+
+          Vendor Name: AKiTiO
+          Device Name: T3-10G
+          Mode: Thunderbolt 3
+          Device ID: 0x312
+          Vendor ID: 0x0041
+          Device Revision: 0x1
+          UID: 0x0041D6B588C15100
+          Route String: 1
+          Firmware Version: 33.1
+          Port (Upstream):
+              Status: Device connected
+              Link Status: 0x2
+              Speed: 40 Gb/s
+              Link Controller Firmware Version: 0.35.0
+
+relevant_processes:
+session_path:
+absent
+seed_stat:
+path=/Users/michael/blit-bench-work/src_large/large_1024M.bin size=1073741824 blocks512=2097152 device=16777233 inode=54631524
+seed_sha256:
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/src_large/large_1024M.bin
+source_fs:
+free_blocks=0 block_size=4096 fs=/ mount=1784768497
+PING 172.31.254.1 (172.31.254.1) from 172.31.254.2: 56 data bytes
+64 bytes from 172.31.254.1: icmp_seq=0 ttl=64 time=0.278 ms
+64 bytes from 172.31.254.1: icmp_seq=1 ttl=64 time=0.398 ms
+64 bytes from 172.31.254.1: icmp_seq=2 ttl=64 time=0.409 ms
+
+--- 172.31.254.1 ping statistics ---
+3 packets transmitted, 3 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 0.278/0.362/0.409/0.059 ms

@@ -1,0 +1,16 @@
+size=1073741824 blocks512=2097152 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_01.bin
+size=1073741824 blocks512=2097152 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_02.bin
+size=1073741824 blocks512=2097152 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_03.bin
+size=1073741824 blocks512=2097152 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_04.bin
+size=1073741824 blocks512=2097152 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_05.bin
+size=1073741824 blocks512=2097152 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_06.bin
+size=1073741824 blocks512=2097152 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_07.bin
+size=1073741824 blocks512=2097152 path=/Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_08.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_01.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_02.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_03.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_04.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_05.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_06.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_07.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_08.bin

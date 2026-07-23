@@ -1,0 +1,8 @@
+Timestamp               Ty Process[PID:TID]
+2026-07-23 01:34:49.650 Df socketfilterfw[502:7548d5] [com.apple.ALF.ApplicationFirewall:fw] Enqueuing new inbound flow for blit-daemon with identifier: blit_daemon-2a0289a1dea8a768
+2026-07-23 01:34:49.651 Df socketfilterfw[502:7548d5] [com.apple.ALF.ApplicationFirewall:fw] Prompting for a filtering decision on: blit-daemon
+2026-07-23 01:34:49.652 Df socketfilterfw[502:17b2] [com.apple.ALF.ApplicationFirewall:fw] doask: sending prompt for a filtering decision on: blit-daemon
+2026-07-23 01:39:44.039 Df socketfilterfw[502:75d05d] [com.apple.ALF.ApplicationFirewall:fw] Enqueuing new inbound flow for blit-daemon with identifier: blit_daemon-2a0289a1dea8a768
+2026-07-23 01:39:44.039 Df socketfilterfw[502:75d05d] [com.apple.ALF.ApplicationFirewall:fw] Not prompting user until existing response received
+2026-07-23 01:40:45.840 Df socketfilterfw[502:75d05d] [com.apple.ALF.ApplicationFirewall:fw] Could not get designated requirement for process: file:///private/tmp/blit-tb-candidate.Ki87md/unpacked/blit-aarch64-apple-darwin/blit-daemon
+2026-07-23 01:40:46.006 Df socketfilterfw[502:75d05d] [com.apple.ALF.ApplicationFirewall:fw] Not prompting user until existing response received

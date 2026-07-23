@@ -1,0 +1,4 @@
+q_free_blocks_before_clones=8620393
+q_free_blocks_after_clones=8620390
+q_block_size=4096
+clone_allocation_delta_nonzero

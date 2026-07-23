@@ -1,0 +1,16 @@
+run_id=etl5-20260723T054219Z-a3be4a64
+outer_start_utc=2026-07-23T05:43:20Z
+outer_start_epoch_ns=1784785400354196000
+client_ssh_exit=0
+outer_end_utc=2026-07-23T05:43:24Z
+outer_end_epoch_ns=1784785404181348000
+nagatha_bridge_after:
+Name       Mtu   Network       Address            Ipkts Ierrs     Ibytes    Opkts Oerrs     Obytes  Coll
+bridge0    1500  <Link#15>   36:f6:db:0f:cf:c0 11020923     0 221546920683 19999320     0 321905577064     0
+bridge0    1500  fe80::c4a:7 fe80:f::c4a:7a2:c 11020923     - 221546920683 19999320     - 321905577064     -
+bridge0    1500  172.31.254/30 172.31.254.1    11020923     - 221546920683 19999320     - 321905577064     -
+q_bridge_after:
+Name       Mtu   Network       Address            Ipkts Ierrs     Ibytes    Opkts Oerrs     Obytes  Coll
+bridge0    1500  <Link#17>   36:a5:09:de:dd:80  9925428     0 160946838295 22191670     0 443210334384     0
+bridge0    1500  fe80::1ced: fe80:11::1ced:7f0  9925428     - 160946838295 22191670     - 443210334384     -
+bridge0    1500  172.31.254/30 172.31.254.2     9925428     - 160946838295 22191670     - 443210334384     -

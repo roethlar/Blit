@@ -1,0 +1,4 @@
+q_session_root_after_cleanup=absent
+retained_seed_size=1073741824 retained_seed_blocks512=2097152
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/src_large/large_1024M.bin
+q_free_blocks_after_cleanup=8617399

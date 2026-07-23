@@ -1,0 +1,12 @@
+actual_preflight_utc=2026-07-23T05:42:50Z
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_01.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_02.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_03.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_04.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_05.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_06.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_07.bin
+cb3db617ccc43978fad2e426c45510fcc9df5a5e83bda281d7e8c94c8fae28cc  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/source/file_08.bin
+c3ebc375d69fdae84f40a72efbc6daac28b635f7e92af4e5648ee3480ac8181d  /Users/michael/blit-bench-work/etl5-20260723T052951Z-a3be4a64/blit
+source_count=8
+System-wide memory free percentage: 83%
