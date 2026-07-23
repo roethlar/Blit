@@ -42,10 +42,6 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **TERMINAL DATA-PLANE VALIDATION ACTIVE (D-2026-07-23-5):** one 8 GiB
-  Q-to-Nagatha run, RAM destination, under 32 MB Q SSD allocation, no payload
-  SSD write or retry; terminal blocked-write capacity selects what follows:
-  `docs/plan/TERMINAL_DATA_PLANE_VALIDATION.md`.
 - **THUNDERBOLT LIFECYCLE ATTRIBUTED (D-2026-07-23-3):** exact instrumented
   candidate `a3be4a64` completed one 8 GiB Q-to-Nagatha RAM transfer with all
   hashes matching. Only 13.645 ms was observed outside its 3.587845-second data
@@ -183,6 +179,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Blocked / waiting (owner declarations and explicitly dated external blockers; checkpoints are owner-only)
 
 - **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
+- **Terminal hardware validation canceled:** no listener or payload ran.
+  A stale prior-test firewall entry remains machine residue and may not be
+  reused or removed without exact owner approval; see `.agents/machines.md`.
 - **Hosted run `29949207219` at `354f38e`:** check, all three OS test suites,
   and all three target archive/checksum/upload jobs passed. It proves the
   `fa79f0a` payload-seal correction and rel-7 archive construction.

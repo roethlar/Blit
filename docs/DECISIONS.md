@@ -483,3 +483,7 @@ Format:
 - Supersedes: D-2026-07-23-4 only where it withheld later physical validation.
   It preserves every transfer-policy, repeat, larger-write, release,
   publication, tag, and push gate.
+- Outcome: The owner declined the administrator authorization required for the
+  exact new daemon's firewall entry: **"then no."** The run was canceled before
+  listener or payload, all temporary test state was removed, and D-2026-07-23-4
+  again governs physical validation.

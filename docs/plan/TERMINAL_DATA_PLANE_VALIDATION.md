@@ -1,6 +1,6 @@
 # Terminal data-plane hardware validation
 
-**Status**: Active
+**Status**: Historical — canceled before listener or payload
 **Created**: 2026-07-23
 **Supersedes**: nothing
 **Decision ref**: D-2026-07-23-5
@@ -96,10 +96,43 @@ justify a tuning change by itself.
 
 1. **tdpv-1 — activation `[x]`.** Record the one-run limits, interpretation
    rule, owner approval, and exact cleanup requirements.
-2. **tdpv-2 — one observation.** Build and hash the exact candidate on RAM,
-   satisfy every stop-before-payload gate, execute one 8 GiB RAM-destination
-   transfer, validate integrity, calculate the terminal attribution, clean all
-   temporary state, retain the evidence, and close the plan as Historical.
+2. **tdpv-2 — canceled before observation `[x]`.** The candidate was built and
+   hashed on RAM, but the owner declined the new administrator authorization
+   required for the exact daemon's Application Firewall entry. No listener,
+   daemon, client invocation, or payload transfer ran. All temporary state was
+   removed and the plan closed without an attribution result.
+
+## Cancellation and cleanup
+
+Exact candidate `7aef1fedaf2f8721c009ec773a69a94df4860791` had no
+product diff after accepted observer head `6507444d`. Its RAM-built client was
+SHA-256 `9441c132c6bf24018d9afdf27829864fcdeaab43238fba98ec8378b5f4725f4b`;
+its daemon was
+`10cb2394b081b586d5ebf2aa007d53257f9ea9c45021b66ccc7735b5e2f2737b`.
+Both identified as `0.1.1+7aef1fedaf2f`.
+
+The direct peer initially was physically absent. After the cable was reseated,
+both bridges recovered their retained `/30` addresses, became active, and
+passed bidirectional zero-loss pings. Nagatha then created fresh build and
+destination RAM disks; Q created eight APFS clones and staged the 11,118,496
+byte client. No benchmark payload was allocated or moved.
+
+The exact new RAM daemon had no Application Firewall entry. The CLI add attempt
+stopped at expired administrator authorization, and the later standard
+authorization dialog was canceled by the owner before its command ran. The
+daemon never started, port 19041 never listened, the destination remained
+empty, and no client transfer process ran.
+
+Cleanup removed Q's exact session root, staged client, and eight clones; the
+retained seed remained 1,073,741,824 bytes with 2,097,152 512-byte blocks.
+Nagatha detached the exact 12 GiB destination and 16 GiB build RAM devices.
+There is no current-candidate firewall entry or listener.
+
+A read-only firewall inventory exposed an older entry for
+`/Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit-daemon`, conflicting
+with the historical ETL cleanup record. Its provenance after that recorded
+check is unestablished. It was neither reused nor removed; exact administrator
+approval would be required to remove it.
 
 ## Open questions
 

@@ -7,6 +7,12 @@
 - NOPASSWD sudoers rule for the zoey pool-drain/purge helper.
 - zig + cargo-zigbuild toolchain (aarch64-musl static daemon builds).
 - ssh ControlMaster sockets configured for the rigs.
+- As of 2026-07-23, macOS Application Firewall inventory contains the stale
+  prior-test path
+  `/Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit-daemon` despite its
+  historical cleanup record. Its later provenance is unestablished. Do not
+  reuse or remove it without exact owner approval; removal requires
+  administrator authorization.
 
 ## Additional Linux hosts — BUILD ONLY (owner rule, 2026-07-12)
 
