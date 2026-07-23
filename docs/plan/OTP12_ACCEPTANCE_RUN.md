@@ -239,8 +239,11 @@ New plumbing this requires, each keyed by ROLE not verb:
    so both initiators read the same physical inodes; no fixture copy or
    move on the Mac (codex design F6)), local launch, pid file,
    stale-refusal, PID-scoped teardown. macOS application firewall must
-   admit `blit-daemon` — gated by a preflight smoke transfer from
-   Windows, not assumed.
+   admit `blit-daemon` only through
+   `scripts/macos/with-temporary-firewall-rule.sh`; the wrapper must enclose
+   the complete daemon/smoke/run/teardown command and report verified cleanup
+   before its binary or backing volume is removed. Admission remains gated by
+   a preflight smoke transfer from Windows, not assumed.
 2. **A Windows client** (`blit.exe`, new build, built natively alongside
    the daemon). Its timed window is measured ON Windows —
    `[Diagnostics.Stopwatch]` bracketing the `blit.exe copy` inside one ssh
@@ -410,7 +413,9 @@ state).
 - **otp-12b — rig W**: `bench_otp12_win.sh` covering converge-up block +
   invariance block; same two-commit shape. Preflight gates: bundle
   delivered + old exes copied aside + new native build (daemon + client);
-  Mac daemon smoke from Windows (firewall).
+  Mac daemon smoke from Windows through the temporary-firewall wrapper. Exit
+  90 or a retained owned-rule ledger blocks scratch deletion and every later
+  run until the wrapper's exact `--recover` mode succeeds.
 - **otp-12c — rig D**: `bench_otp12_delegated.sh`; same shape. Preflight
   gates: fresh skippy staging on the pool; `sudo -n` drop_caches on skippy;
   delegation config both daemons; reachability smokes in both directions

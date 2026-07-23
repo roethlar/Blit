@@ -117,6 +117,18 @@ cargo test --workspace
   `.agents/repo-map.json` mirror was retired 2026-07-08 with the toolkit's
   JSON layer).
 
+## macOS Hardware-Test Firewall Rules
+
+- Any test that temporarily admits an unsigned macOS `blit-daemon` through
+  Application Firewall must run its complete command through
+  `scripts/macos/with-temporary-firewall-rule.sh`.
+- Never reuse a stale rule or issue ad hoc `socketfilterfw` mutations. Do not
+  delete the daemon path, its scratch, or its backing volume until the wrapper
+  exits with verified cleanup in `summary.txt`.
+- If the wrapper reports exit 90 or leaves its owned-rule ledger, preserve the
+  executable path and run only its `--recover` mode. A new test remains blocked
+  until exact-path removal and complete-inventory absence are proved.
+
 ## Remotes & Sync
 
 - `origin` — `http://q:3000/michael/blit_v2.git` (**LAN gitea**). This is
