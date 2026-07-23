@@ -447,3 +447,14 @@ Format:
   Fable selection in D-2026-07-16-3. It preserves risk-based review frequency,
   Grok's advisory-only role, D-2026-07-16-1's neutral prompt, exact-SHA and
   independent-guard requirements, finding adjudication, and git safety.
+
+## D-2026-07-23-3 — Activate end-to-end transfer latency attribution
+- Decision: Activate `docs/plan/END_TO_END_TRANSFER_LATENCY.md`. Add default-off
+  diagnostic lifecycle timing without changing transfer policy, then perform
+  exactly one approved 8 GiB Q-to-Nagatha RAM-destination validation under the
+  plan's SSD-write and no-repeat limits. Owner, 2026-07-23: **"go"**.
+- Why: the clean Opus 4.8/max review verified the plan and its evidence; the
+  remaining 0.448-second external interval must be observed before any further
+  performance change can be justified.
+- Supersedes: nothing. It preserves the separate release, publication, tag,
+  transfer-policy-change, SSD-write, retry, and repeat gates.

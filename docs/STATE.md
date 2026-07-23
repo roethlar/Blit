@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-23 (end-to-end latency plan drafted; release deferred)
+Last updated: 2026-07-23 (end-to-end latency plan active; release deferred)
 
 - **RELEASE IDENTITY IS NOW 0.1.1:** the existing `v0.1.0` tag remains at its
   shipped 2026-05-31 commit. The current candidate uses one workspace-owned
@@ -47,7 +47,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   the 37.9 Gb/s same-direction TCP ceiling; external time was 28.874 Gb/s.
   79.1% of the excess over ideal wire time was outside the observed payload
   interval. Four streams and Q's 16 GiB RAM are not evidenced limits. The
-  next useful target is the Draft end-to-end lifecycle instrument around
+  active work is the end-to-end lifecycle instrument around
   connection, RPC/session establishment, and CLI teardown—not a policy change.
   No payload hit SSD. Evidence:
   `docs/bench/thunderbolt-ram-profile-2026-07-23/README.md`.
@@ -92,7 +92,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Queue (ordered)
 
-1. **`docs/plan/END_TO_END_TRANSFER_LATENCY.md` (Draft):** default-off
+1. **`docs/plan/END_TO_END_TRANSFER_LATENCY.md` (ACTIVE, D-2026-07-23-3):** default-off
    lifecycle timing followed by one 8 GiB RAM-destination validation.
 2. **`docs/plan/RELEASE_COMPLETION.md` (ACTIVE, D-2026-07-22-3).** No hardware
    work. Repair each hosted cross-platform failure one per commit, then prove
@@ -151,8 +151,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Authoritative docs right now
 
-- Draft next plan: **`docs/plan/END_TO_END_TRANSFER_LATENCY.md`**; no code
-  begins until owner activation.
+- Active performance plan: **`docs/plan/END_TO_END_TRANSFER_LATENCY.md`**
+  (D-2026-07-23-3); etl-1 trace primitive is next.
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
   D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
   D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b).

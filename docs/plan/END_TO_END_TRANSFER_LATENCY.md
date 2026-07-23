@@ -1,9 +1,9 @@
 # End-to-end transfer latency attribution
 
-**Status**: Draft
+**Status**: Active
 **Created**: 2026-07-23
 **Supersedes**: nothing
-**Decision ref**: pending owner activation
+**Decision ref**: D-2026-07-23-3
 
 ## Goal
 
@@ -71,7 +71,7 @@ outside its measured payload body.
   failure, listener conflict, hash mismatch, or RAM-disk failure stops before
   timing and does not authorize a retry.
 - The owner approved inclusion of exactly one later 8 GiB RAM-destination
-  validation on 2026-07-23. Plan activation is still a separate gate.
+  validation and activated this plan on 2026-07-23.
 
 ## Acceptance criteria
 
@@ -196,5 +196,4 @@ the no-repeat rule follow the completed 2026-07-23 RAM profile.
 
 ## Open questions
 
-- None. The owner approved the one-run validation constraint; activation of
-  this Draft remains the only gate before implementation.
+- None.
