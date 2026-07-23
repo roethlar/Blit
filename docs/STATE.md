@@ -53,8 +53,11 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   moved 12 GiB SSD-to-SSD in 7.73 s (13.335 Gb/s); Apple openrsync took
   33.81 s (3.049 Gb/s), so Blit was 4.37x faster. All 36 files hash-match;
   exact allocated writes were 38.884 GB under the 40 GB ceiling. Evidence:
-  `docs/bench/thunderbolt-ssd-2026-07-22/`. Exact-path cleanup is complete;
-  Q's retained seed remains; no repeat is authorized.
+  `docs/bench/thunderbolt-ssd-2026-07-22/`. One later no-write cold read put
+  Q's source SSD at 1.931 GB/s; Blit's 1.667 GB/s is 86.3% of that source-only
+  rate, attributing most of the RAM-to-SSD reduction to source reads rather
+  than RAM capacity or Thunderbolt. Exact-path cleanup is complete; Q's
+  retained seed remains; no repeat is authorized.
 - **RELEASE COMPLETION ACTIVE (D-2026-07-22-3):** ldt-1..3 are accepted;
   ldt-4 is closed as evidence, not as a tuning win. The complete first horizon
   session is valid after corrected reanalysis; its repeat was unnecessary.

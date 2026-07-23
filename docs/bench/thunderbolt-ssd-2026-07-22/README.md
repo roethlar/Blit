@@ -66,6 +66,28 @@ the physical 12 GiB source after cache eviction. The destination directories
 used `.noindex` suffixes to avoid deliberate Spotlight indexing of the test
 payload.
 
+## Read-only source attribution
+
+After cleanup, one no-write diagnostic used the retained 1 GiB seed to bound
+Q's physical source-read rate. Q was quiet, the seed still had its full
+1,073,741,824-byte physical allocation, and `/usr/sbin/purge` ran before one
+`dd` read into `/dev/null`. The read completed in 0.555940 seconds at
+1.931 GB/s (15.451 Gb/s); there was no repeat and no destination file.
+
+The SSD-backed Blit arm's 1.667 GB/s is 86.3% of that source-only rate. This
+localizes most of the RAM-to-SSD reduction to Q's physical source-read ceiling:
+the complete network, destination write, and Blit path together cost only the
+remaining 13.7% relative to the one-file source read. It does not prove that
+Nagatha's writes contribute nothing, because the source diagnostic was a
+shorter 1 GiB read while the transfer sustained 12 GiB.
+
+Read-only code inspection also ruled out the 16 GiB RAM capacity as the direct
+limit. Epoch 0 starts four streams; each sender holds two lazy 16 MiB buffers,
+about 128 MiB total at that count (384 MiB even if all twelve files were live).
+Large files stream rather than being materialized in memory. The receiver's
+same fixed 1 MiB double-buffered loop sustained the earlier 3.58 GB/s RAM arm,
+so that loop is not by itself a 1.667 GB/s ceiling.
+
 ## Blit arm
 
 The exact daemon bound only to `172.31.254.1:19031`, disabled mDNS, and
@@ -123,10 +145,12 @@ file's allocated 512-byte blocks.
   no build, test, review, or other deliberate load ran during either arm.
 - The repeated file content is incompressible for practical purposes and
   neither tool compressed it, but all twelve files contain the same bytes.
-- The result isolates a combined SSD path. It does not identify which SSD or
-  filesystem stage owns the 53.4% reduction from the RAM-backed Blit result.
-- Timing alone does not authorize a product change or another transfer. Any
-  attribution or tuning starts with read-only code/counter analysis.
+- The transfer result alone isolated a combined SSD path. The later no-write
+  source diagnostic attributes most of the reduction to Q's physical reads,
+  but does not measure Nagatha's destination-write rate independently.
+- Neither result proves a product defect or authorizes a product change or
+  another transfer. The remaining RAM-to-wire headroom needs RAM-only
+  observation under a separately approved tuning plan.
 
 Raw client and daemon output is in `raw/`. After the evidence commit landed,
 both temporary listeners were confirmed stopped; the twelve Q fixture files,
