@@ -1,6 +1,6 @@
 # Terminal data-plane attribution
 
-**Status**: Active
+**Status**: Historical
 **Created**: 2026-07-23
 **Supersedes**: nothing
 **Decision ref**: D-2026-07-23-4
@@ -75,40 +75,40 @@ no new hardware transfer.
 
 ## Acceptance criteria
 
-- [ ] A short successful TCP session that produces no periodic `dial_sample`
+- [x] A short successful TCP session that produces no periodic `dial_sample`
       emits exactly one SOURCE `dial_terminal_sample` after all send workers
       finish and before the SOURCE `data_plane_complete` record.
-- [ ] The terminal record's payload bytes and blocked-write nanoseconds equal
+- [x] The terminal record's payload bytes and blocked-write nanoseconds equal
       the saturating sum of every initial and ADDed stream's final existing
       `LiveProbe` counters. Its stream count names all probes included in that
       sum; final and peak membership retain their existing meanings.
-- [ ] Terminal retention is independent of live membership. Normal completion,
+- [x] Terminal retention is independent of live membership. Normal completion,
       REMOVE, and terminal ADD/END may unregister probes from the live registry
       without erasing their final diagnostic counters or changing settlement.
-- [ ] `terminal_streams` counts all retained probes included in the fold and
+- [x] `terminal_streams` counts all retained probes included in the fold and
       is not written into periodic `sample_streams`, whose meaning remains
       active streams at a sampler tick. The payload sum is not compared with
       `SinkOutcome.bytes_written`; a successful zero-byte fold remains valid.
-- [ ] Trace-off sessions emit no terminal sample and allocate no retained-probe
+- [x] Trace-off sessions emit no terminal sample and allocate no retained-probe
       collection. The payload copy loop, `Probe` implementations, tuner policy,
       and live registry have no new work or decision input.
-- [ ] Deterministic captured-event tests cover exact aggregate math,
+- [x] Deterministic captured-event tests cover exact aggregate math,
       short-session terminal emission, trace-off silence, zero-byte validity,
       initial-plus-ADD retention, REMOVE retention, and identical
       SOURCE-initiator/SOURCE-responder semantics.
-- [ ] Every new guard is mutation-proved by temporarily reverting its
+- [x] Every new guard is mutation-proved by temporarily reverting its
       production behavior, observing the targeted guard fail, restoring it,
       and observing it pass.
-- [ ] `cargo fmt --all -- --check`, strict workspace Clippy, the full workspace
+- [x] `cargo fmt --all -- --check`, strict workspace Clippy, the full workspace
       suite, `bash scripts/agent/check-docs.sh`, and `git diff --check` pass
       without reducing the prior test baseline.
-- [ ] Product changes are confined to terminal observation and its tests. No
+- [x] Product changes are confined to terminal observation and its tests. No
       transfer policy, payload framing, proto, result, progress, filesystem,
       or error/cancellation contract changes.
-- [ ] The implementation, mutation proof, selected review record, plan/state
-      closure, and any admitted review fixes are committed one coherent slice
-      at a time. Nothing is pushed, tagged, published, or run on hardware
-      without separate exact owner approval.
+- [x] The implementation, mutation proof, verification, and plan/state closure
+      are committed one coherent slice at a time. Formal review is not an
+      acceptance requirement for this closure. Nothing is pushed, tagged,
+      published, or run on hardware without separate exact owner approval.
 
 ## Design
 
@@ -161,7 +161,7 @@ must not claim which member of that second class dominates.
    traced SOURCE sessions, aggregate their existing final counters after the
    pipeline join, emit the explicitly named terminal fields, add deterministic
    role/membership guards, and mutation-prove each new behavior.
-2. **tdp-2 — verification and review closure.** Run the complete repository
+2. **tdp-2 — verification and closure `[x]`.** Run the complete repository
    gates, adjudicate any risk-selected review findings one per commit, record
    exact accepted heads and mutation evidence, then close the plan and current
    state without performing a hardware transfer.
@@ -182,7 +182,22 @@ trace-off silence, no-periodic-sample completion, initial plus ADD retention,
 retired-stream retention, final/peak membership separation, both initiator
 layouts, event order, and terminal-field serialization.
 
+## tdp-2 closure evidence
+
+Exact implementation head `6507444dbc839cf6c5d4392b1f50aa4cf1f9832a`
+passed `cargo fmt --all -- --check`, strict workspace Clippy, the complete
+workspace test suite, the docs gate, and `git diff --check`. The product diff
+is confined to optional session-phase fields, traced SOURCE probe retention,
+terminal aggregation/emission, and deterministic guards. It changes no
+payload loop, transfer policy, wire contract, filesystem behavior, or
+trace-off collection allocation.
+
+On 2026-07-23 the owner ended the optional formal review and directed the
+remaining closure work to continue without restarting it. No formal review
+verdict was accepted or retained. Both aborted raw streams and the disposable
+review worktree were removed. No hardware transfer, payload allocation,
+release, push, tag, or publication occurred in this plan.
+
 ## Open questions
 
-- None. Hardware validation is deliberately outside this plan and remains
-  blocked on a fresh exact owner approval.
+- None. Hardware validation remains outside this historical plan.
