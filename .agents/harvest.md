@@ -19,8 +19,10 @@ Governance rules from this repo that other repos would benefit from.
 - **Why it generalizes:** Any repo that ever had an `-s ours`, `--strategy=ours`,
   or botched octopus merge silently breaks every ancestry-based merged check,
   and an agent acting on those checks deletes unlanded work or "merges" a no-op.
-- **Proposed home:** `AGENTS.template.md` (a git-safety bullet) or a note in
-  `procedures/migration.md`'s battle-earned-rules guidance.
+- **Outcome — adopted upstream:** landed as the git-safety bullet "Never
+  conclude a branch is merged from ancestry alone" in the toolkit's
+  `AGENTS.template.md`, and is installed here in `AGENTS.md`'s Git Safety
+  section.
 
 ### CI gate tying code changes to the state file
 
@@ -36,4 +38,4 @@ Governance rules from this repo that other repos would benefit from.
   being updated, and prose rules alone demonstrably drift; a two-line CI check
   converts the convention into an invariant.
 - **Proposed home:** `AGENTS.template.md` (state-file section) or a new optional
-  snippet in `templates/` that greenfield runs can offer when the repo has CI.
+  snippet in `templates/` that greenfield runs can offer when the repo has CI. <!-- lint: allow (owner ruled leave-it, 2026-07-25: toolkit-repo path, harvest proposal still open) -->

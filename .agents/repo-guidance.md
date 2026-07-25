@@ -92,8 +92,8 @@ Only the terminal schema-valid result is the acceptance record. Do not
 calculate token or monetary usage as a review-health signal; if heartbeats
 stop, inspect the live session rather than starting a duplicate review. The
 `.review/README.md` async
-sentinel hand-off is retired; its `findings/`/`results/` records and `REVIEW.md`
-remain the record store.
+sentinel hand-off is retired; its `.review/findings/` and `.review/results/`
+records and `REVIEW.md` remain the record store.
 
 Claude Code exposes these as `/catchup`, `/plan`, … via `.claude/commands/`;
 Antigravity exposes `catchup`/`handoff` as workspace skills in
@@ -160,7 +160,7 @@ cargo test --workspace
 ## Earned Practices
 
 These are absolute; they exist because an unapproved `git merge -s ours`
-octopus (commit `c793df2`) was pushed to `origin/master` without the owner's
+octopus (commit `c793df2`) was pushed to `origin/master` without the owner's <!-- lint: allow (owner ruled leave-it, 2026-07-25: git remote-tracking ref, not a repo path) -->
 consent (`docs/DECISIONS.md` D-2026-06-07-1).
 
 - **No agent-created branches.** Agents never create git branches on their

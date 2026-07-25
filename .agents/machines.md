@@ -46,8 +46,8 @@ every Linux target in play).
 - **Direct Mac-to-Mac Thunderbolt pair (observed 2026-07-22):** Nagatha
   (`Mac16,5`, 48 GiB) and Q (`Mac16,10`, 16 GiB) negotiate 40 Gb/s. Their
   `Thunderbolt Bridge` services use persistent isolated addresses
-  `172.31.254.1/30` and `172.31.254.2/30`, respectively, with no router or DNS;
-  both are `bridge0`, MTU 1500. Do not return to automatic `169.254/16` while
+  `172.31.254.1/30` and `172.31.254.2/30`, respectively, with no router or DNS; <!-- lint: allow (owner ruled leave-it, 2026-07-25: IPv4 CIDR addresses, not repo paths) -->
+  both are `bridge0`, MTU 1500. Do not return to automatic `169.254/16` while <!-- lint: allow (owner ruled leave-it, 2026-07-25: IPv4 link-local prefix, not a repo path) -->
   the other link-local interfaces are active: route selection was ambiguous
   before the isolated subnet. Certified ceiling/results:
   `docs/bench/thunderbolt-macmac-2026-07-22/README.md`.
@@ -97,7 +97,7 @@ every Linux target in play).
   `/etc/systemd/network/enp0s*.network` (originals backed up as
   `*.premtu`). Proven by `networkctl reload && networkctl reconfigure`
   with the static IP intact — no reboot needed. **TRAP: `/` is an
-  overlayfs** (`lowerdir=/mnt/.rofs` read-only + writable upper), so a
+  overlayfs** (`lowerdir=/mnt/.rofs` read-only + writable upper), so a <!-- lint: allow (owner ruled leave-it, 2026-07-25: overlayfs mount option on zoey, not a repo path) -->
   UniFi *firmware update* can replace the base image and silently drop
   this. Re-check after any UNAS update:
   `ssh root@zoey 'cat /sys/class/net/enp0s0/mtu'` → want 9000.
@@ -270,11 +270,11 @@ retraction: a cost billed to one arm and not the other.)
   a bench end). Platform-vs-role confounds on a two-host rig therefore
   cannot be broken by rig juggling and need a code-level counterfactual
   (see `docs/plan/OTP12_PERF_FINDINGS.md`).
-- zoey: binaries staged 2026-07-10 in `blit-temp/` — **corrected
+- zoey: binaries staged 2026-07-10 in `blit-temp/` — **corrected <!-- lint: allow (owner ruled leave-it, 2026-07-25: staging dir on zoey, not a repo path) -->
   2026-07-12**: the staged daemon embeds `731023bfc8a1.dirty.…`, NOT
   `e757dcc` as previously recorded (otp-2 README carries the full
   correction note; daemon code is identical between the two commits).
   Kept untouched as the otp-2 artifact; otp-12a stages clean sha-named
   rebuilds beside it (`blit-daemon-e757dcc`, `blit-daemon-<run sha>`).
-  blit-temp path: `/volume/a595ddbf-d201-4e55-8183-ec78c8cd83e0/.srv/`
-  `.unifi-drive/michael/.data/blit-temp`.
+  blit-temp path:
+  `/volume/a595ddbf-d201-4e55-8183-ec78c8cd83e0/.srv/.unifi-drive/michael/.data/blit-temp`.
