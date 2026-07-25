@@ -42,7 +42,7 @@ now referenced from `.agents/repo-guidance.md` instead of `AGENTS.md` directly.
 | `docs/plan/*` | Plan docs with mandatory `**Status**:` headers | leave | - | Status vocabulary is lint-enforced. |
 | `docs/audit/*`, `docs/reviews/*` | Audit and review reports (historical/reference) | leave | - | |
 | `.serena/memories/` | Tool-local scratch | leave | - | Declared non-authoritative by `AGENTS.md` Universal Invariants. |
-| `.agents/playbooks/reviewloop.md` | New playbook — portable workflow template for reviews | migrate | `.agents/playbooks/reviewloop.md` | Copied from templates. |
+| `.agents/playbooks/codereview.md` | New playbook — portable workflow template for reviews | migrate | `.agents/playbooks/codereview.md` | Copied from templates. |
 | `.agents/hooks.json` | New agy hook file | migrate | `.agents/hooks.json` | Copied from templates. |
 | `.codex/hooks.json` | New codex hook file | migrate | `.codex/hooks.json` | Copied from templates. |
 | `.codex/agents-md-tripwire.py` | New codex tripwire script | migrate | `.codex/agents-md-tripwire.py` | Copied from templates. |
@@ -97,13 +97,13 @@ Ran bootstrap updater on 2026-07-05 to reconcile the governance files to version
 - `AGENTS.md` is replaced with the verbatim copy of the new template.
 - `.agents/repo-guidance.md` is updated to note the drafted playbook template.
 - New hooks drafted: `.agents/hooks.json` (agy), `.codex/hooks.json` & `.codex/agents-md-tripwire.py` (codex), `.grok/hooks/reground.json` (grok).
-- New playbook drafted: `.agents/playbooks/reviewloop.md`.
+- New playbook drafted: `.agents/playbooks/codereview.md`.
 - `.agents/repo-map.json` and `.agents/artifact-manifest.json` updated to record the new stamps (HEAD `1ff36c712de9f8372238b5608227a0cd6f9ad232`).
 
 ## 2026-07-16 review-workflow refresh note
 
 The governance refresh at `602941f` replaced the historical
-`.agents/playbooks/reviewloop.md` entry above with two installed workflows:
+`.agents/playbooks/codereview.md` entry above with two installed workflows:
 `.agents/playbooks/openreview.md` for unprimed whole-change review and
 `.agents/playbooks/codereview.md` for finding-focused machinery. Blit's
 repo-specific D-2026-07-16-1 rule routes every Claude dispatch, including
