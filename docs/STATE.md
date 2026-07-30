@@ -107,13 +107,20 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    **otp-12d and otp-13 are POST-RELEASE (D-2026-07-22-1).** Their retained
    pre-fix evidence remains usable for what it records; no performance
    acceptance matrix is a shipping prerequisite.
-2. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft, D-2026-07-13-2):** local
+2. **`docs/plan/PER_FILE_ERROR_CONTAINMENT.md` (Draft, 2026-07-30):** a
+   single file's survivable error aborts the whole session today
+   (first-error-wins pipeline; no failure vocabulary in `TransferSummary`),
+   and SMB-synthesized HIDDEN on dot-named files can never converge —
+   violates the D-2026-07-09-1 principle; found via the owner's
+   `D:\Apps → H:\apps` (Samba) mirror abort. Awaiting Q1 ruling + Active
+   flip; owner directed implementation via Opus 5 agents after the flip.
+3. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft, D-2026-07-13-2):** local
    apply ships one worker and does not scale; resume only under an active plan.
-3. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
+4. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
    performance status flip are not release gates (D-2026-07-22-1).
-4. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
+5. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
    resumes/re-derives after ONE_TRANSFER_PATH ships.
-5. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
+6. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
    Pro daemon CPU-bound below 10 GbE from SSD cache). Executes AFTER
    cutover as a runtime-selected write strategy in the unified receive
    sink (design: eval doc §If-FAST-evidence; dead module deletes in
@@ -121,7 +128,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    **Standing owner safety rule**: ALL activity on rig `zoey` stays
    inside its `…/blit-temp/` folder — nothing written outside it, ever;
    no daemon runs on zoey without a fresh go.
-6. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
+7. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
 
 ## Authoritative docs right now
 
