@@ -31,6 +31,11 @@ xhigh` over each landed slice's pinned range as it lands.
 | cr-pfc2-1 | Root-wide write failures (EROFS-class) incorrectly contained — mirror to read-only mount exits 0 | `[x]` | HIGH; fixed `2ad65743`; codex per-finding verification **accepted**, guard_confirmed=true, SHAs pin-verified, 2026-07-31T03:37Z (`.review/findings/cr-pfc2-1.md`, `.review/results/cr-pfc2-1.codex.json`) |
 | cr-pfc2-2 | Push initiator reports FileComplete on transmission, before destination confirmation | `[ ]` | MEDIUM; admitted; fix bound to pfc-4's wire failure report (`.review/findings/cr-pfc2-2.md`) |
 | clp-1-range | Defect hunt over `d5c039ec..1b670533` (live progress row wiring) | `[x]` | `1b670533` — **clean, no material issue**. Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0; capability_ok=true; SHAs pin-verified; detached dispatch; record `.review/results/clp-1-range.codex.json` |
+| clp-2-range | Defect hunt over `246acb54..9532ee20` (render polish + log routing) | `[x]` | `9532ee20` — **findings: 4** (3 admitted below, 1 declined at intake — `.review/cr-clp2-4.contested.md`). Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0; capability_ok=true; SHAs pin-verified; record `.review/results/clp-2-range.codex.json` |
+| cr-clp2-1 | Redirected log lines bypass control-byte sanitization | `[ ]` | MEDIUM; admitted (`.review/findings/cr-clp2-1.md`) |
+| cr-clp2-2 | Blocking terminal I/O inside the async drain task | `[ ]` | MEDIUM; admitted (`.review/findings/cr-clp2-2.md`) |
+| cr-clp2-3 | Fixed drain deadline can discard queued `-v` lines on success | `[ ]` | LOW; admitted (`.review/findings/cr-clp2-3.md`) |
+| cr-clp2-4 | Perf-history diagnostic byte change on sink-less runs | `[-]` | LOW; declined at intake — facade migration is the repo convention (`.review/cr-clp2-4.contested.md`) |
 
 ## Live dial tuning correction — plan and implementation review
 
