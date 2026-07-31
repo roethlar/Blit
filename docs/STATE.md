@@ -107,13 +107,16 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    **otp-12d and otp-13 are POST-RELEASE (D-2026-07-22-1).** Their retained
    pre-fix evidence remains usable for what it records; no performance
    acceptance matrix is a shipping prerequisite.
-2. **`docs/plan/PER_FILE_ERROR_CONTAINMENT.md` (Draft, 2026-07-30):** a
+2. **`docs/plan/PER_FILE_ERROR_CONTAINMENT.md` (ACTIVE, D-2026-07-30-1):** a
    single file's survivable error aborts the whole session today
    (first-error-wins pipeline; no failure vocabulary in `TransferSummary`),
    and SMB-synthesized HIDDEN on dot-named files can never converge —
    violates the D-2026-07-09-1 principle; found via the owner's
-   `D:\Apps → H:\apps` (Samba) mirror abort. Awaiting Q1 ruling + Active
-   flip; owner directed implementation via Opus 5 agents after the flip.
+   `D:\Apps → H:\apps` (Samba) mirror abort. Q1 settled (mirror deletes
+   proceed; move source-deletion refuses while failures exist).
+   Implementation in progress via Opus 5 agents, slices pfc-1..5, one
+   commit per slice on `master`. No external review dispatch approved
+   (D-2026-07-23-7).
 3. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft, D-2026-07-13-2):** local
    apply ships one worker and does not scale; resume only under an active plan.
 4. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
@@ -134,7 +137,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
   D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
-  D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b).
+  D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b);
+  **`docs/plan/PER_FILE_ERROR_CONTAINMENT.md` (ACTIVE, D-2026-07-30-1 —
+  governs pfc-1..5, the current implementation work).**
 - Shipped release record: **`docs/RELEASE_READINESS.md`** and
   **`docs/plan/RELEASE_COMPLETION.md`**.
 - Historical live-tuning record: **`docs/plan/LIVE_DIAL_TUNING.md`**; exact

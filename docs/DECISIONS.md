@@ -533,3 +533,28 @@ Format:
   that exact evidence boundary.
 - Supersedes: the publication hold in D-2026-07-22-3. It preserves all future
   push, tag, release, history-rewrite, hardware-run, and external-review gates.
+
+## D-2026-07-30-1 — PER_FILE_ERROR_CONTAINMENT flipped Draft → Active (Q1 settled)
+- Decision: `docs/plan/PER_FILE_ERROR_CONTAINMENT.md` is **Active** (owner,
+  2026-07-30: **"plan then use opus-5 agents to fix the code"**, then, after
+  the plan draft and the single open question were presented, **"go with
+  recommendations"**). Q1 is settled as recommended: **(a)** mirror's
+  extraneous-delete phase still runs when per-file write failures occurred —
+  the delete set's integrity is guaranteed by the existing otp-6b
+  complete-scan refusal, and a write-failed file is in the source manifest so
+  it is never classified extraneous; **(b)** move's source deletion refuses
+  entirely while any per-file failure exists (convergence-on-retry,
+  D-2026-07-09-1 Q2 model). Implementation is dispatched to Opus 5
+  implementation agents slice by slice (pfc-1..5), one slice per commit, on
+  `master`, under the repo's verification gates. No external or paid review
+  dispatch is approved by this entry (D-2026-07-23-7 stands; review
+  selection per slice remains a recommendation needing its own approval).
+- Why: the owner's D-2026-07-09-1 principle ("if we abort the whole thing
+  when we could have fixed or surfaced a single error, we are violating all
+  of those") condemns the current first-error-wins session posture, and the
+  2026-07-30 `D:\Apps → H:\apps` Samba mirror abort proved the
+  synthesized-HIDDEN convergence defect in the field. The owner explicitly
+  rejected fixing targets instead of the tool ("the fix is not to modify
+  every target system to work with the file copy tool").
+- Supersedes: nothing (the plan doc's Open-questions section is rewritten as
+  resolved in the same commit).

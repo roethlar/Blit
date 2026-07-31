@@ -1,10 +1,11 @@
 # Per-File Error Containment
 
-**Status**: Draft — awaiting owner ruling on Q1 (mirror-delete / move-source
-posture under per-file failures) and the Active flip
+**Status**: Active (D-2026-07-30-1; Q1 settled — mirror deletes proceed,
+move source-deletion refuses while any per-file failure exists)
 **Created**: 2026-07-30
 **Supersedes**: nothing
-**Decision ref**: pending (D-2026-07-09-1 supplies the governing principle)
+**Decision ref**: D-2026-07-30-1 (D-2026-07-09-1 supplies the governing
+principle)
 
 ## Goal
 
@@ -219,9 +220,11 @@ One coherent, testable change per slice — sized for the review loop.
 
 ## Open questions
 
-- **Q1 (owner):** under per-file write failures, (a) does mirror's
-  extraneous-delete phase still run, and (b) does move's source deletion
-  refuse entirely while any failure exists? Recommendation: (a) yes — the
-  delete set's integrity is guaranteed by the existing complete-scan
-  refusal, and failed files are never in the extraneous set; (b) yes —
-  refuse source deletion, report, re-run to converge.
+- None. **Q1 is settled (D-2026-07-30-1, owner "go with recommendations"):**
+  (a) mirror's extraneous-delete phase still runs under per-file write
+  failures — the delete set's integrity is guaranteed by the existing
+  complete-scan refusal (`transfer_session/mod.rs:4039`), and a write-failed
+  file is in the source manifest so it is never classified extraneous;
+  (b) move's source deletion refuses entirely while any per-file failure
+  exists (`files_failed_total != 0` ⇒ no source deletion; re-run to
+  converge, then delete).
