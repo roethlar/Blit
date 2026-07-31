@@ -43,6 +43,7 @@ xhigh` over each landed slice's pinned range as it lands.
 | cr-pfc4-1 | Delegated pulls discard the destination failure report | `[x]` | HIGH; fixed `2b5c091b`; codex verification **accepted**, guard_confirmed=true (`.review/results/cr-pfc4-1.codex.json`) |
 | cr-pfc4-2 | Entry-count cap does not bound the encoded summary frame | `[x]` | MEDIUM; fixed `71e87e1b`; codex verification **accepted**, guard_confirmed=true (`.review/results/cr-pfc4-2.codex.json`) |
 | cr-pfc4-3 | All-failed reconciliation reads as never-started progress | `[x]` | LOW; fixed `f2916090`; codex verification **accepted**, guard_confirmed=true (`.review/results/cr-pfc4-3.codex.json`) |
+| pfc-5-range | Defect hunt over `7d4ffbae..da015ed5` (failure block, exit 2, source-delete gate everywhere) | `[x]` | `da015ed5` — **clean, no material issue**. Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0; capability_ok=true; SHAs pin-verified; record `.review/results/pfc-5-range.codex.json` |
 
 ## Live dial tuning correction — plan and implementation review
 
