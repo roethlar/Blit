@@ -498,14 +498,13 @@ fn spawn_manifest_task(
                 heartbeat.tick(enumerated);
             }
             Ok(())
-        })?;
-        for suppressed in &scan_outcome.suppressed_errors {
-            record_unreadable_entry(
-                &unreadable,
-                &suppressed.path,
-                &format!("scan suppressed: {}", suppressed.message),
-            );
-        }
+        });
+        // cr-ls1-4: record the walk BEFORE `?` propagates. A scan that dies
+        // partway through a large tree spent that time walking, and
+        // reporting ENUMERATE as zero on the failure path would read as
+        // "enumeration was instant" — a truncated measurement disguised as a
+        // fast one. The report's `session_failed` flag is what tells a
+        // reader the number is a floor.
         if let Some(started) = walk_started {
             // Walk total minus the send wait already folded into
             // EnumerateBackpressure. `saturating_sub` because the two clocks
@@ -516,6 +515,14 @@ fn spawn_manifest_task(
             phase_probe.record(
                 LocalPhase::Enumerate,
                 started.elapsed().saturating_sub(backpressure),
+            );
+        }
+        let scan_outcome = scan_outcome?;
+        for suppressed in &scan_outcome.suppressed_errors {
+            record_unreadable_entry(
+                &unreadable,
+                &suppressed.path,
+                &format!("scan suppressed: {}", suppressed.message),
             );
         }
         heartbeat.finish(enumerated);

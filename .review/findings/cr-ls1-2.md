@@ -1,7 +1,10 @@
 # cr-ls1-2 — The compare-subtraction guard is vacuous, and the landing records claimed otherwise
 
 **Severity**: MEDIUM (the code defect); the FALSE RECORD is the more serious half
-**Status**: FIXED — awaiting reviewer verification
+**Status**: VERIFIED-CLOSED. Round-2 dispatch over `a0b5d83d..35948e70`
+returned **`guard_confirmed: true`** — the same reviewer that proved this
+guard vacuous confirmed the replacement holds. Record:
+`.review/results/ls-1-range.codex.r2.json`.
 **Source**: `ls-1-range` codex dispatch over `a0b5d83d..d67b44fd`
 Reviewer provenance (generation pass): codex / gpt-5.6-sol / xhigh /
 workspace-write (detached, disposable worktree); codex-cli 0.146.0.

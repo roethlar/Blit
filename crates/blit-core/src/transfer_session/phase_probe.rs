@@ -26,7 +26,6 @@
 //! refuses to encourage: see `phases_do_not_partition_wall_time`.
 
 use serde::Serialize;
-use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -158,6 +157,17 @@ pub struct LocalPhaseReport {
     /// Present so a reader cannot mistake the spans for a partition without
     /// having been told otherwise in the artifact itself.
     pub phases_overlap: bool,
+    /// The session did not complete cleanly, so at least one phase may be
+    /// truncated.
+    ///
+    /// cr-ls1-4: the probe deliberately emits on failed runs — a run that
+    /// died slowly is exactly the one worth timing — but a failure
+    /// short-circuits the work inside a span, so the recorded numbers are a
+    /// floor rather than a measurement. Without this flag a truncated
+    /// ENUMERATE reads as "enumeration was fast" and sends attribution at
+    /// the wrong phase, which is the class of error this instrument exists
+    /// to avoid.
+    pub session_failed: bool,
     pub phases: Vec<(LocalPhase, PhaseAggregate)>,
 }
 
@@ -237,12 +247,23 @@ impl LocalPhaseProbe {
 
     fn stderr_writer(run_id: String) -> Self {
         Self::capture(run_id, |report| {
-            // Diagnostic-only: a serialization or write failure must never
-            // change a transfer's result.
+            // cr-ls1-3: route through the shared line sink, NOT raw stderr.
+            // clp-2 made the live progress row the sole owner of
+            // transfer-time stderr, and an interactive run enables that row
+            // automatically — a direct write would interleave with the row's
+            // control sequences or be scrolled away, losing the one artifact
+            // this probe exists to produce. `route_line` falls back to
+            // stderr when no row is installed, so non-interactive runs are
+            // unchanged.
+            //
+            // Deliberately not `log::info!`: that path prefixes
+            // `binary: LEVEL:` and is filtered by `BLIT_LOG`, so an operator
+            // running with default logging would get no artifact at all.
+            //
+            // Diagnostic-only: a serialization failure must never change a
+            // transfer's result.
             if let Ok(line) = serde_json::to_string(&report) {
-                let mut err = std::io::stderr().lock();
-                let _ = writeln!(err, "[local-phase] {line}");
-                let _ = err.flush();
+                crate::stderr_log::route_line(&format!("[local-phase] {line}"));
             }
         })
     }
@@ -353,7 +374,7 @@ impl LocalPhaseProbe {
 
     /// Emit the breakdown exactly once per session. A second call is ignored
     /// so a retry or an error path cannot double-report.
-    pub fn emit(&self, session_wall: Duration) {
+    pub fn emit(&self, session_wall: Duration, session_failed: bool) {
         let Some(context) = &self.context else {
             return;
         };
@@ -369,6 +390,7 @@ impl LocalPhaseProbe {
                 .as_nanos(),
             session_wall_ns: u64::try_from(session_wall.as_nanos()).unwrap_or(u64::MAX),
             phases_overlap: true,
+            session_failed,
             phases: LocalPhase::ALL
                 .iter()
                 .map(|phase| (*phase, context.phases[phase.index()].snapshot()))
@@ -426,7 +448,7 @@ mod tests {
         let probe = LocalPhaseProbe::disabled();
         assert!(!probe.is_enabled());
         probe.record(LocalPhase::Compare, Duration::from_secs(1));
-        probe.emit(Duration::from_secs(2));
+        probe.emit(Duration::from_secs(2), false);
         // Nothing to assert against but the absence of a panic and of an
         // emitter: the default probe holds no context to emit through.
         assert!(probe.context.is_none());
@@ -444,7 +466,7 @@ mod tests {
         probe.record(LocalPhase::Compare, Duration::from_millis(10));
         probe.record(LocalPhase::Compare, Duration::from_millis(30));
         probe.record(LocalPhase::Compare, Duration::from_millis(20));
-        probe.emit(Duration::from_millis(100));
+        probe.emit(Duration::from_millis(100), false);
 
         let reports = sink.lock().expect("sink poisoned");
         let report = reports.first().expect("one report");
@@ -465,7 +487,7 @@ mod tests {
     #[test]
     fn every_phase_appears_even_when_never_entered() {
         let (probe, sink) = capturing();
-        probe.emit(Duration::from_millis(5));
+        probe.emit(Duration::from_millis(5), false);
         let reports = sink.lock().expect("sink poisoned");
         let report = reports.first().expect("one report");
         assert_eq!(report.phases.len(), LocalPhase::ALL.len());
@@ -487,7 +509,7 @@ mod tests {
         let (probe, sink) = capturing();
         probe.record(LocalPhase::Enumerate, Duration::from_millis(80));
         probe.record(LocalPhase::Compare, Duration::from_millis(80));
-        probe.emit(Duration::from_millis(100));
+        probe.emit(Duration::from_millis(100), false);
 
         let reports = sink.lock().expect("sink poisoned");
         let report = reports.first().expect("one report");
@@ -503,8 +525,8 @@ mod tests {
     #[test]
     fn emit_is_once_per_session() {
         let (probe, sink) = capturing();
-        probe.emit(Duration::from_millis(1));
-        probe.emit(Duration::from_millis(1));
+        probe.emit(Duration::from_millis(1), false);
+        probe.emit(Duration::from_millis(1), false);
         assert_eq!(sink.lock().expect("sink poisoned").len(), 1);
     }
 
@@ -514,7 +536,7 @@ mod tests {
         let clone = probe.clone();
         probe.record(LocalPhase::Apply, Duration::from_millis(1));
         clone.record(LocalPhase::Apply, Duration::from_millis(1));
-        clone.emit(Duration::from_millis(10));
+        clone.emit(Duration::from_millis(10), false);
 
         let reports = sink.lock().expect("sink poisoned");
         let apply = reports
@@ -546,7 +568,7 @@ mod tests {
             // microseconds.
             probe.record(LocalPhase::AttributeRepair, Duration::from_secs(3600));
         });
-        probe.emit(Duration::from_millis(1));
+        probe.emit(Duration::from_millis(1), false);
 
         let reports = sink.lock().expect("sink poisoned");
         let report = reports.first().expect("one report");
@@ -573,7 +595,7 @@ mod tests {
         probe.measure_excluding(LocalPhase::Compare, LocalPhase::AttributeRepair, || {
             std::thread::sleep(Duration::from_millis(5));
         });
-        probe.emit(Duration::from_millis(10));
+        probe.emit(Duration::from_millis(10), false);
 
         let reports = sink.lock().expect("sink poisoned");
         let compare = reports
@@ -596,6 +618,47 @@ mod tests {
         probe.measure_excluding(LocalPhase::Compare, LocalPhase::AttributeRepair, || {});
         probe.span_excluding(LocalPhase::Compare, LocalPhase::AttributeRepair);
         assert_eq!(probe.total(LocalPhase::Compare), Duration::ZERO);
+    }
+
+    /// cr-ls1-4: a failed session's report must SAY it is truncated.
+    #[test]
+    fn a_failed_session_is_marked_in_the_report() {
+        let (probe, sink) = capturing();
+        probe.emit(Duration::from_millis(1), true);
+        let reports = sink.lock().expect("sink poisoned");
+        assert!(
+            reports.first().expect("one report").session_failed,
+            "a truncated report that does not admit it reads as a fast one"
+        );
+    }
+
+    #[test]
+    fn a_clean_session_is_not_marked_failed() {
+        let (probe, sink) = capturing();
+        probe.emit(Duration::from_millis(1), false);
+        let reports = sink.lock().expect("sink poisoned");
+        assert!(!reports.first().expect("one report").session_failed);
+    }
+
+    /// cr-ls1-3: the artifact is one line, machine-readable, and carries its
+    /// marker — the properties that make routing it through the row-aware
+    /// sink worth doing rather than writing raw stderr.
+    #[test]
+    fn the_report_serializes_to_one_parseable_line() {
+        let (probe, sink) = capturing();
+        probe.record(LocalPhase::Compare, Duration::from_millis(3));
+        probe.emit(Duration::from_millis(9), false);
+
+        let reports = sink.lock().expect("sink poisoned");
+        let json = serde_json::to_string(reports.first().expect("one report"))
+            .expect("the report serializes");
+        assert!(!json.contains('\n'), "one line, so a row cannot split it");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["schema"], 1);
+        assert_eq!(parsed["session_failed"], false);
+        assert_eq!(parsed["phases_overlap"], true);
+        // Phase names are stable identifiers, not Debug output.
+        assert!(json.contains("APPLY_BACKPRESSURE"));
     }
 
     #[test]

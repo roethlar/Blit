@@ -86,7 +86,14 @@ impl Drop for LineRedirect {
 
 /// Send one already-formatted line to the installed sink, or to stderr
 /// when there is none.
-fn route_line(line: &str) {
+/// Emit one already-formatted line through the active line sink, or to
+/// stderr when none is installed.
+///
+/// Public for diagnostics that must honour the live progress row's
+/// sole-writer contract without going through `log` — the log path prefixes
+/// `binary: LEVEL:` and is subject to `BLIT_LOG` filtering, neither of which
+/// a machine-read artifact line can tolerate (cr-ls1-3).
+pub fn route_line(line: &str) {
     // Clone the handle out and release the lock before calling it: the
     // sink writes to a terminal, and one that logged while holding the
     // read lock would deadlock against a concurrent redirect.

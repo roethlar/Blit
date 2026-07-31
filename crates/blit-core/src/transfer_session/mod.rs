@@ -4959,12 +4959,18 @@ async fn diff_chunk_and_apply_local(
     // (pfc-6 repairs in place at diff time), so its own measured total is
     // subtracted below rather than double-counted here — otherwise a
     // repair-heavy run would report the same nanoseconds twice.
+    // cr-ls1-4: close the span BEFORE `?` propagates. A diff that fails
+    // after substantial work would otherwise record COMPARE as zero, and a
+    // truncated zero reads as "compare was fast" — the exact misattribution
+    // this instrument exists to prevent, arriving through the error path
+    // instead of the success path.
     let compare_span = local
         .phase_probe
         .span_excluding(LocalPhase::Compare, LocalPhase::AttributeRepair);
-    let needed =
-        diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts, repair).await?;
+    let verdicts =
+        diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts, repair).await;
     compare_span.finish();
+    let needed = verdicts?;
 
     let fresh: Vec<FileHeader> = needed
         .into_iter()
@@ -4989,13 +4995,16 @@ async fn diff_chunk_and_apply_local(
             }),
         );
     }
+    // cr-ls1-4: same shape — record before `?`, so a planner that fails
+    // slowly is reported as slow rather than as absent.
     let plan_started = local.phase_probe.is_enabled().then(Instant::now);
-    let payloads = local.plan_chunk(fresh).await?;
+    let planned = local.plan_chunk(fresh).await;
     if let Some(started) = plan_started {
         local
             .phase_probe
             .record(LocalPhase::Plan, started.elapsed());
     }
+    let payloads = planned?;
     for payload in payloads {
         // cr-ls1-1: this await is where a slow sink actually costs wall
         // time — the queue is bounded, so once the pipeline falls behind,

@@ -1,7 +1,10 @@
 # cr-ls1-1 — APPLY measures only the tail drain, so apply backpressure lands in no phase
 
 **Severity**: HIGH
-**Status**: FIXED — awaiting reviewer verification
+**Status**: VERIFIED-CLOSED. Round-2 dispatch over `a0b5d83d..35948e70`
+returned `guard_confirmed: true` and did not re-raise this finding; the
+reviewer independently ran the red/green itself. Record:
+`.review/results/ls-1-range.codex.r2.json`.
 **Source**: `ls-1-range` codex dispatch over `a0b5d83d..d67b44fd`
 Reviewer provenance (generation pass): codex / gpt-5.6-sol / xhigh /
 workspace-write (detached, disposable worktree); codex-cli 0.146.0.

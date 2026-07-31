@@ -767,7 +767,13 @@ pub async fn run_local_session(
     );
     // ls-1: emit before the fault match, so a failed session still yields its
     // breakdown — a run that died slowly is exactly the one worth timing.
-    phase_probe.emit(started.elapsed());
+    // cr-ls1-4: and say so in the artifact. On a failure the spans are a
+    // floor, not a measurement, because the work inside them stopped early;
+    // an unflagged truncated phase would read as a fast one.
+    phase_probe.emit(
+        started.elapsed(),
+        dest_result.is_err() || source_result.is_err(),
+    );
     // The destination is the scorer and holds the primary fault
     // (refusals, apply failures, delete failures); a source-only
     // failure (scan abort) surfaces when the destination succeeded.
@@ -1242,7 +1248,7 @@ mod tests {
             run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_slow.clone())),
         );
         dest_result.expect("slow-sink session still succeeds");
-        slow_probe.emit(std::time::Duration::from_secs(1));
+        slow_probe.emit(std::time::Duration::from_secs(1), false);
 
         let captured = slow_reports.lock().expect("sink poisoned");
         let report = captured.first().expect("one report");
