@@ -169,13 +169,16 @@ fn verb_compare_flags(args: &TransferArgs) -> CompareFlags {
     }
 }
 
+/// Returns the push state so the caller can read the destination's
+/// per-file failure report for the exit status (pfc-5); the summary is
+/// already printed inline.
 pub async fn run_remote_push_transfer(
     args: &TransferArgs,
     source: PathBuf,
     remote: RemoteEndpoint,
     mirror_mode: bool,
     lifecycle_trace: &TransferLifecycleTrace,
-) -> Result<()> {
+) -> Result<DeferredPushState> {
     run_remote_push_transfer_inner(
         args,
         source,
@@ -186,7 +189,6 @@ pub async fn run_remote_push_transfer(
         lifecycle_trace,
     )
     .await
-    .map(|_| ())
 }
 
 /// R51-F4: move's variant of [`run_remote_push_transfer`]. Returns
@@ -230,6 +232,12 @@ pub fn print_deferred_push_result(args: &TransferArgs, state: &DeferredPushState
         print_push_json(&state.summary, &state.destination);
     } else {
         describe_push_result(&state.summary, &state.destination);
+        // pfc-5: the end-of-operation block follows the summary, never
+        // replaces it — a partial run still reports what landed.
+        super::failures::print_failure_block(
+            state.summary.files_failed,
+            &super::failures::failures_from_wire(&state.summary.failures),
+        );
     }
 }
 
@@ -362,6 +370,9 @@ async fn run_remote_push_transfer_inner(
     Ok(state)
 }
 
+/// Returns the pull state so the caller can read the destination's
+/// per-file failure report for the exit status (pfc-5); the summary is
+/// already printed inline.
 pub async fn run_remote_pull_transfer(
     args: &TransferArgs,
     remote: RemoteEndpoint,
@@ -369,7 +380,7 @@ pub async fn run_remote_pull_transfer(
     mirror_mode: bool,
     move_verb: bool,
     lifecycle_trace: &TransferLifecycleTrace,
-) -> Result<()> {
+) -> Result<DeferredPullState> {
     run_remote_pull_transfer_inner(
         args,
         remote,
@@ -380,7 +391,6 @@ pub async fn run_remote_pull_transfer(
         lifecycle_trace,
     )
     .await
-    .map(|_| ())
 }
 
 /// R51-F4: move's variant of `run_remote_pull_transfer` — runs the
@@ -412,6 +422,12 @@ pub fn print_deferred_pull_result(args: &TransferArgs, state: &DeferredPullState
         print_pull_json(&state.summary, &state.dest_root);
     } else {
         describe_pull_result(&state.summary, &state.dest_root);
+        // pfc-5: the end-of-operation block follows the summary, never
+        // replaces it — a partial run still reports what landed.
+        super::failures::print_failure_block(
+            state.summary.files_failed,
+            &super::failures::failures_from_wire(&state.summary.failures),
+        );
     }
 }
 
@@ -525,6 +541,12 @@ fn print_pull_json(summary: &blit_core::generated::TransferSummary, dest_root: &
     // always 0 on the session; the R46-F6 mirror_purge object — the
     // wire carries one entries_deleted count) are gone; files_resumed
     // is new.
+    // pfc-5: `files_failed` / `failures` are the machine half of the
+    // human failure block, in the one shape every route emits. The
+    // process still exits with the partial-failure status, so a consumer
+    // that only checks the status is not misled by a document that
+    // otherwise looks like a clean pull.
+    let failures = super::failures::failures_from_wire(&summary.failures);
     let summary = json!({
         "operation": "pull",
         "destination": dest_root.to_string_lossy(),
@@ -533,6 +555,8 @@ fn print_pull_json(summary: &blit_core::generated::TransferSummary, dest_root: &
         "files_resumed": summary.files_resumed,
         "entries_deleted": summary.entries_deleted,
         "tcp_fallback": summary.in_stream_carrier_used,
+        "files_failed": summary.files_failed,
+        "failures": super::failures::failures_json(&failures),
     });
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
 }
@@ -543,6 +567,8 @@ fn print_push_json(summary: &blit_core::generated::TransferSummary, destination:
     // summary. Keys that only the deleted driver could fill
     // (files_requested, bytes_zero_copy, first_payload_ms) are gone;
     // files_resumed is new with push-side --resume.
+    // pfc-5: same two fields, same shape, as every other route's document.
+    let failures = super::failures::failures_from_wire(&summary.failures);
     let summary = json!({
         "operation": "push",
         "destination": destination,
@@ -551,6 +577,8 @@ fn print_push_json(summary: &blit_core::generated::TransferSummary, destination:
         "files_resumed": summary.files_resumed,
         "entries_deleted": summary.entries_deleted,
         "tcp_fallback": summary.in_stream_carrier_used,
+        "files_failed": summary.files_failed,
+        "failures": super::failures::failures_json(&failures),
     });
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
 }

@@ -296,6 +296,44 @@ tolerance tests fail.
   (same-build refusal is the defense — a decoder clamp would be
   defense-in-depth if peers ever loosen).
 
+### pfc-5 landing notes
+
+- The pfc-2 interim non-mirror interlock is REMOVED; containment applies
+  to every session kind. Its replacement, the Q1(b) gate
+  (`refuse_source_delete_on_failures`), lives in **blit-app** — one
+  shared function serving BOTH shipped surfaces — after the verify round
+  caught that gating only the CLI would have left blit-tui's four move
+  routes deleting sources whose files never landed. All eight
+  source-deleting routes (CLI local/push/pull/delegated + TUI
+  local/push/pull/delegated) call it ahead of any deletion.
+- CLI surfacing: end-of-operation failure block (count, capped list,
+  elided-remainder note, re-run hint) on all four routes incl. delegated
+  (consuming cr-pfc4-1's accessors); exit code 2
+  (`EXIT_PARTIAL_FAILURE`) for completed-with-failures; JSON gains
+  `files_failed` + `failures` and still exits 2. The block prints
+  outside `print_summary` deliberately: a run whose only file failed
+  classifies UpToDate and that fn early-returns.
+- audit-17 is CLOSED end to end: a non-mirror copy with one rejected
+  filename completes, lands siblings, names the file with its reason,
+  and exits 2 (integration-proven against the real binary).
+- Recorded gaps / follow-ups:
+  - TUI failure-report RENDERING stays a non-goal per this plan (the
+    TUI gates moves — data safety — but still shows a partial-failure
+    transfer as green); a TUI slice needs its own owner go.
+  - The remote routes' block/exit-2 have no e2e harness (blit-tui/cli
+    suites lack a two-daemon fixture); the surface fn is shared with
+    the proven local path and the wire carriage is daemon-e2e-proven.
+  - A DETACHED delegated transfer completing with failures has no
+    surfacing path (the job record holds the summary; jobs UI work).
+  - "Up to date: 0 changed" + `"outcome": "up_to_date"` still renders
+    when the only file failed (the block right below contradicts it) —
+    cosmetic-adjacent classification follow-up.
+  - The lifecycle trace records Success for an exit-2 run (session
+    succeeded, files failed) — semantics noted, not changed.
+  - The three remote TUI move-route gates are compile-verified (same
+    shared function; no TUI two-daemon fixture) — recorded honestly;
+    the local TUI route is red/green-proven.
+
 ### Half C — metadata-only attribute repair (pfc-6, D-2026-07-31-1)
 
 Field evidence (2026-07-31, `H:\apps` pre-existing backup regions, e.g.

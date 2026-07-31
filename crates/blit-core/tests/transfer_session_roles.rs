@@ -2914,9 +2914,10 @@ fn contained_failure_tree() -> Vec<FileSpec> {
 
 /// Drive one MIRROR session over trees where exactly one destination
 /// file cannot be written, with the given initiator role and byte
-/// carrier. Mirror because the pfc-2 interim interlock keeps a contained
-/// failure session-fatal on non-mirror sessions until pfc-5 replaces it
-/// with the source-deletion gate.
+/// carrier. Mirror so the same session also exercises the delete phase
+/// running under a contained failure (Q1(a)); since pfc-5 containment
+/// applies to non-mirror sessions too, and Q1(b) is the caller's
+/// source-delete gate.
 async fn run_contained_failure_session(
     initiator_role: TransferRole,
     in_stream: bool,

@@ -257,8 +257,8 @@ async fn delegated_mirror_purges_extraneous_locally() {
 }
 
 /// cr-pfc4-1: a delegated MIRROR is the topology where the destination
-/// contains a per-file failure and still reports (a non-mirror session
-/// keeps it fatal — a source delete may follow). The destination's
+/// contains a per-file failure and still deletes extraneous entries
+/// (Q1(a)). The destination's
 /// report must survive the re-encode into `DelegatedPullSummary` and
 /// reach the initiating CLI: exact count plus the failing path. Pre-fix
 /// the re-encode dropped both fields, so this delegated mirror reported

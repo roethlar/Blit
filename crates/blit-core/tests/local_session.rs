@@ -423,10 +423,11 @@ async fn mirror_deletes_unrelated_destination_dirs_and_reports_split() -> Result
 
 /// pfc-4: a local run's summary carries the same per-file failure
 /// report the wire carriers return, so one renderer serves both. Mirror
-/// because the pfc-2 interim interlock keeps a contained failure
-/// session-fatal on non-mirror sessions until pfc-5 replaces it with
-/// the source-deletion gate. The blocked file is a directory sitting
-/// where its file belongs — attributable to that one path.
+/// here so the same run also pins Q1(a) — the delete phase runs under a
+/// contained failure (pfc-5 extended containment to non-mirror sessions;
+/// that half is pinned in `transfer_session::local`'s unit tests). The
+/// blocked file is a directory sitting where its file belongs —
+/// attributable to that one path.
 #[tokio::test]
 async fn local_summary_carries_the_contained_failure_report() -> Result<()> {
     let tmp = tempdir()?;

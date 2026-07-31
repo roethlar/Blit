@@ -12,6 +12,7 @@
 
 pub mod compare;
 pub mod dispatch;
+pub mod failures;
 pub mod filter;
 pub mod local;
 pub mod remote;

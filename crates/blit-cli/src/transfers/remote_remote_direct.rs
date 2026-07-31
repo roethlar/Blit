@@ -25,7 +25,7 @@ pub async fn run_remote_to_remote_direct(
     mirror_mode: bool,
     move_verb: bool,
     lifecycle_trace: &TransferLifecycleTrace,
-) -> Result<()> {
+) -> Result<DeferredDelegatedState> {
     run_remote_to_remote_direct_inner(
         args,
         src,
@@ -36,7 +36,6 @@ pub async fn run_remote_to_remote_direct(
         lifecycle_trace,
     )
     .await
-    .map(|_| ())
 }
 
 /// R51-F4: move's variant of [`run_remote_to_remote_direct`].
@@ -108,6 +107,10 @@ pub fn print_deferred_delegated_result(args: &TransferArgs, state: &DeferredDele
         print_delegated_json(&state.summary, &state.src, &state.dst);
     } else {
         describe_delegated_result(&state.summary, &state.src, &state.dst);
+        // pfc-5 / cr-pfc4-1: the delegated re-encode carries the same
+        // report, read through the outcome's accessors, and renders through
+        // the one block every route shares.
+        super::failures::print_failure_block(state.files_failed(), &state.contained_failures());
     }
 }
 
@@ -267,6 +270,8 @@ fn print_delegated_json(
     dst: &RemoteEndpoint,
 ) {
     use serde_json::json;
+    // pfc-5: same two fields, same shape, as every other route's document.
+    let failures = super::failures::failures_from_wire(&summary.failures);
     let body = json!({
         "operation": "delegated_pull",
         "source": format_remote_endpoint(src),
@@ -277,6 +282,8 @@ fn print_delegated_json(
         "entries_deleted": summary.entries_deleted,
         "tcp_fallback": summary.tcp_fallback_used,
         "source_peer_observed": summary.source_peer_observed,
+        "files_failed": summary.files_failed,
+        "failures": super::failures::failures_json(&failures),
     });
     println!("{}", serde_json::to_string_pretty(&body).unwrap());
 }

@@ -1044,17 +1044,18 @@ mod tests {
         (src_root, dst_root)
     }
 
-    /// D-2026-07-30-1 Q1(b), enforced in-session: a contained per-file
-    /// failure must never authorize deleting the source. A non-mirror
-    /// session may be `blit move`, whose caller deletes the source on
-    /// success, and no declaration distinguishes the two here — so the
-    /// failure stays fatal instead of reporting a short success.
+    /// pfc-5, replacing pfc-2's interim `!mirror_enabled` refusal (which
+    /// this test previously pinned): containment now applies to NON-mirror
+    /// sessions too — audit-17's closure shape, a plain `copy` surviving one
+    /// file the destination filesystem rejects. Q1(b) moved to the caller's
+    /// source-delete gate, which reads the `files_failed` this summary
+    /// carries; the session no longer guesses whether a delete follows.
     #[tokio::test]
-    async fn per_file_failure_refuses_a_session_whose_caller_may_delete_the_source() {
+    async fn non_mirror_session_contains_a_per_file_failure_and_reports_it() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (src_root, dst_root) = one_blocked_file_fixture(tmp.path());
 
-        let err = run_local_session(
+        let summary = run_local_session(
             &src_root,
             &dst_root,
             LocalMirrorOptions {
@@ -1064,21 +1065,26 @@ mod tests {
             },
         )
         .await
-        .expect_err("a contained failure must not report success to a source-deleting caller");
-        let message = format!("{err:#}");
-        assert!(
-            message.contains("deletes the source afterwards"),
-            "unexpected error: {message}"
+        .expect("one file's write failure must not fault a non-mirror session");
+
+        assert_eq!(summary.files_failed, 1);
+        assert_eq!(summary.failures.len(), 1);
+        assert_eq!(summary.failures[0].relative_path, "blocked.bin");
+        assert_eq!(
+            summary.copied_files, 1,
+            "the failed file is never a copied file"
         );
-        assert!(
-            message.contains("blocked.bin"),
-            "the refusal names the failed file: {message}"
+        assert_eq!(
+            std::fs::metadata(dst_root.join("ok.bin"))
+                .expect("the rest of the manifest landed")
+                .len(),
+            1_048_577
         );
     }
 
-    /// The same failure in a mirror — the one shape that proves no source
-    /// delete follows (R46-F1: a move never mirrors) — is contained: the
-    /// session completes and the rest of the manifest lands.
+    /// The same failure in a mirror is contained the same way, and the
+    /// delete phase still runs (Q1(a)): the session completes and the rest
+    /// of the manifest lands.
     #[tokio::test]
     async fn mirror_contains_a_per_file_failure_and_transfers_the_rest() {
         let tmp = tempfile::tempdir().expect("tempdir");

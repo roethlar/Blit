@@ -4676,40 +4676,25 @@ async fn destination_session_inner(
                         "SourceDone with {unresumed} resume grant(s) never completed by a block record"
                     )));
                 }
-                // D-2026-07-30-1 Q1(b): a contained per-file failure must
-                // never authorize deleting the source. Mirroring is the one
-                // declaration that proves no source delete follows (R46-F1:
-                // `blit move` passes mirror=false on every route, so a
-                // mirror is never a move). A move itself declares nothing
-                // the destination can read — the push and local carriers
-                // gate scan completeness caller-side, so they arrive
-                // indistinguishable from a copy. Until the report reaches
-                // the caller's source-delete gate, every non-mirror session
-                // therefore keeps a per-file failure session-fatal:
-                // reporting a short success is what would let the only copy
-                // of a failed file be deleted.
-                let source_delete_may_follow = !mirror_enabled;
-                if source_delete_may_follow && contained_failures.files_failed_total != 0 {
-                    let named = contained_failures
-                        .failures
-                        .iter()
-                        .take(3)
-                        .map(|failure| format!("{}: {}", failure.relative_path, failure.reason))
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    return Err(eyre::Report::new(SessionFault::internal(format!(
-                        "transfer refused: {} file(s) could not be written and this \
-                         operation deletes the source afterwards — reporting success \
-                         would destroy their only copy; first {}: {named}. Resolve and \
-                         re-run.",
-                        contained_failures.files_failed_total,
-                        contained_failures.failures.len().min(3),
-                    ))));
-                }
+                // D-2026-07-30-1 Q1(b) is enforced at the CALLER's
+                // source-delete step (pfc-5), never here: the contained
+                // report rides the summary's `files_failed`, and every
+                // source-deleting route refuses to delete while it is
+                // non-zero. A session therefore contains per-file failures
+                // under every declaration, mirror or not — pfc-2's interim
+                // `!mirror_enabled` refusal existed only while the report
+                // had no caller-side gate to reach.
+                //
                 // otp-6b: run the mirror delete pass now — after every payload
                 // is written, so the dest tree is final and no about-to-arrive
                 // file is misjudged extraneous. All blocking FS work (enumerate
                 // + delete) runs on the blocking pool.
+                //
+                // Q1(a): the pass still runs under contained per-file
+                // failures. The extraneous set is computed against a
+                // complete source manifest (incomplete scans already refused
+                // above), and a write-failed file is IN that manifest, so it
+                // is never classified extraneous.
                 let entries_deleted: u64 = if mirror_enabled {
                     let dst = dst_root.to_path_buf();
                     let canonical = canonical_dst_root.clone();

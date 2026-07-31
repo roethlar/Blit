@@ -76,21 +76,54 @@ pub fn print_local_transfer_summary(
     // Only presentation fields are read here; the compare mode (and
     // thus the move_verb flag) is irrelevant to printing.
     let options = build_local_options(ctx, args, mirror, false)?;
-    if args.json {
+    emit_summary(
+        args.json,
+        mirror,
+        options.dry_run,
+        options.null_sink,
+        options.verbose,
+        options.debug_mode,
+        options.workers,
+        summary,
+        elapsed,
+        src_path,
+        dest_path,
+    );
+    Ok(())
+}
+
+/// The whole end-of-operation output for a local run: the summary in the
+/// caller's chosen format, then the per-file failure block (pfc-5).
+///
+/// One function so the inline (copy/mirror) and deferred (move) paths stay
+/// byte-identical, and so the block cannot be attached to only one of
+/// them. The block is emitted OUTSIDE `print_summary` deliberately:
+/// that function returns early for the up-to-date and empty-source
+/// outcomes, and a run whose only planned file failed classifies as
+/// up-to-date (zero copied files) — exactly the run that must not report
+/// a clean summary and nothing else.
+#[allow(clippy::too_many_arguments)]
+fn emit_summary(
+    json_output: bool,
+    mirror: bool,
+    dry_run: bool,
+    null_sink: bool,
+    verbose: bool,
+    debug_mode: bool,
+    workers: usize,
+    summary: &LocalMirrorSummary,
+    elapsed: Duration,
+    src_path: &Path,
+    dest_path: &Path,
+) {
+    if json_output {
         print_summary_json(mirror, summary, elapsed, src_path, dest_path);
     } else {
         print_summary(
-            mirror,
-            options.dry_run,
-            options.null_sink,
-            options.verbose,
-            options.debug_mode,
-            options.workers,
-            summary,
-            elapsed,
+            mirror, dry_run, null_sink, verbose, debug_mode, workers, summary, elapsed,
         );
+        crate::transfers::failures::print_failure_block(summary.files_failed, &summary.failures);
     }
-    Ok(())
 }
 
 async fn run_local_transfer_inner(
@@ -151,13 +184,19 @@ async fn run_local_transfer_inner(
         super::render_result(
             lifecycle_trace.expect("inline local output has a lifecycle trace"),
             || {
-                if json_output {
-                    print_summary_json(mirror, &summary, elapsed, src_path, dest_path);
-                } else {
-                    print_summary(
-                        mirror, dry_run, null_sink, verbose, debug_mode, workers, &summary, elapsed,
-                    );
-                }
+                emit_summary(
+                    json_output,
+                    mirror,
+                    dry_run,
+                    null_sink,
+                    verbose,
+                    debug_mode,
+                    workers,
+                    &summary,
+                    elapsed,
+                    src_path,
+                    dest_path,
+                );
                 Ok(())
             },
         )?;
@@ -872,6 +911,10 @@ fn print_summary_json(
         TransferOutcome::UpToDate => "up_to_date",
         TransferOutcome::SourceEmpty => "source_empty",
     };
+    // pfc-5: the machine half of the human failure block, in the one shape
+    // every route emits. The process still exits with the partial-failure
+    // status, so a consumer that only checks the status is not misled by a
+    // document that otherwise looks like a clean run.
     let output = json!({
         "operation": if mirror { "mirror" } else { "copy" },
         "source": src.to_string_lossy(),
@@ -884,6 +927,8 @@ fn print_summary_json(
         "duration_ms": duration.as_millis() as u64,
         "dry_run": summary.dry_run,
         "outcome": outcome,
+        "files_failed": summary.files_failed,
+        "failures": crate::transfers::failures::failures_json(&summary.failures),
     });
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
 }

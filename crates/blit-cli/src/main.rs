@@ -69,29 +69,30 @@ async fn run_cli(lifecycle_trace: &TransferLifecycleTrace) -> Result<ExitCode> {
     lifecycle_trace.record("context_load_end", Some(TransferLifecycleOutcome::Success));
 
     let exit_code = match command {
+        // pfc-5: the transfer verbs' status carries the destination's
+        // per-file failure verdict — 0 when every file landed, 2 when the
+        // operation completed with files that did not. Propagated directly,
+        // like `check` and `jobs` below.
         Commands::Copy(args) => {
             let wait = Duration::from_secs(args.wait);
             run_with_retries(args.retry, wait, |_n| {
                 run_transfer(&ctx, &args, TransferKind::Copy, lifecycle_trace)
             })
-            .await?;
-            ExitCode::SUCCESS
+            .await?
         }
         Commands::Mirror(args) => {
             let wait = Duration::from_secs(args.wait);
             run_with_retries(args.retry, wait, |_n| {
                 run_transfer(&ctx, &args, TransferKind::Mirror, lifecycle_trace)
             })
-            .await?;
-            ExitCode::SUCCESS
+            .await?
         }
         Commands::Move(args) => {
             let wait = Duration::from_secs(args.wait);
             run_with_retries(args.retry, wait, |_n| {
                 run_move(&ctx, &args, lifecycle_trace)
             })
-            .await?;
-            ExitCode::SUCCESS
+            .await?
         }
         Commands::Scan(args) => {
             scan::run_scan(args).await?;
@@ -129,9 +130,10 @@ async fn run_cli(lifecycle_trace: &TransferLifecycleTrace) -> Result<ExitCode> {
             profile::run_profile(args)?;
             ExitCode::SUCCESS
         }
-        // `check` is the only command whose exit code carries semantic
-        // info (0 identical / 1 differences / 2 errors), so we propagate
-        // it directly. Other commands return Ok(()) and use the default 0.
+        // `check`'s exit code carries semantic info (0 identical /
+        // 1 differences / 2 errors), so we propagate it directly — as do
+        // the transfer verbs above and `jobs` below. The remaining
+        // commands return Ok(()) and use the default 0.
         Commands::Check(args) => run_check(&args).await?,
         Commands::Diagnostics { command } => match command {
             DiagnosticsCommand::Perf(args) => {

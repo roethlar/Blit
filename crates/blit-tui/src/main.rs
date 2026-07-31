@@ -3262,6 +3262,7 @@ fn spawn_f3_pull(
     progress_tx: mpsc::Sender<F3PullProgress>,
 ) {
     use blit_app::admin::rm::delete_remote_path;
+    use blit_app::transfers::failures::{failures_from_wire, refuse_source_delete_on_failures};
     use blit_app::transfers::remote::run_remote_pull;
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
     use f3pull::PullKind;
@@ -3330,19 +3331,34 @@ fn spawn_f3_pull(
                     // wasn't removed).
                     PullKind::Move => {
                         let source = move_source.expect("move_source set for Move");
-                        match blit_app::admin::rm::extract_module_and_path(&source) {
-                            Ok((_, rel_path)) => {
-                                let wire = del_wire_path(&rel_path);
-                                match delete_remote_path(&source, &wire).await {
-                                    Ok(removed) => Ok((transferred.0, transferred.1, removed)),
-                                    Err(err) => Err(format!(
-                                        "received but failed to delete remote source: {err:#}"
-                                    )),
+                        // pfc-5 / Q1(b): a complete scan no longer
+                        // implies every file landed — the session
+                        // contains destination write failures and
+                        // reports them instead of faulting (pfc-2's
+                        // `!mirror_enabled` interlock is gone), so the
+                        // remote-source delete is gated on the
+                        // destination-attested count. The failed file's
+                        // only copy is the one we are about to delete.
+                        match refuse_source_delete_on_failures(
+                            &blit_app::endpoints::format_remote_endpoint(&source),
+                            outcome.summary.files_failed,
+                            &failures_from_wire(&outcome.summary.failures),
+                        ) {
+                            Err(err) => Err(format!("{err:#}")),
+                            Ok(()) => match blit_app::admin::rm::extract_module_and_path(&source) {
+                                Ok((_, rel_path)) => {
+                                    let wire = del_wire_path(&rel_path);
+                                    match delete_remote_path(&source, &wire).await {
+                                        Ok(removed) => Ok((transferred.0, transferred.1, removed)),
+                                        Err(err) => Err(format!(
+                                            "received but failed to delete remote source: {err:#}"
+                                        )),
+                                    }
                                 }
-                            }
-                            Err(err) => Err(format!(
-                                "received but cannot resolve remote source to delete: {err:#}"
-                            )),
+                                Err(err) => Err(format!(
+                                    "received but cannot resolve remote source to delete: {err:#}"
+                                )),
+                            },
                         }
                     }
                 }
@@ -3369,6 +3385,7 @@ fn spawn_f1_push(
     tx: mpsc::Sender<F1PushReply>,
     progress_tx: mpsc::Sender<F1PushProgress>,
 ) {
+    use blit_app::transfers::failures::{failures_from_wire, refuse_source_delete_on_failures};
     use blit_app::transfers::remote::run_remote_push;
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
     use f3pull::PullKind;
@@ -3416,11 +3433,25 @@ fn spawn_f1_push(
                     // a successful push. A delete failure surfaces as
                     // the op's error (the push already landed, but the
                     // operator must know the source wasn't removed).
-                    Some(src) => match remove_local_source(&src) {
-                        Ok(()) => Ok(transferred),
-                        Err(err) => {
-                            Err(format!("pushed but failed to delete local source: {err:#}"))
-                        }
+                    //
+                    // pfc-5 / Q1(b): "successful" is no longer the same
+                    // as "complete" — the destination contains per-file
+                    // write failures and reports them (pfc-2's
+                    // `!mirror_enabled` interlock is gone), so the
+                    // delete is gated on the destination-attested count
+                    // first.
+                    Some(src) => match refuse_source_delete_on_failures(
+                        &src.display().to_string(),
+                        outcome.summary.files_failed,
+                        &failures_from_wire(&outcome.summary.failures),
+                    ) {
+                        Err(err) => Err(format!("{err:#}")),
+                        Ok(()) => match remove_local_source(&src) {
+                            Ok(()) => Ok(transferred),
+                            Err(err) => {
+                                Err(format!("pushed but failed to delete local source: {err:#}"))
+                            }
+                        },
                     },
                     None => Ok(transferred),
                 }
@@ -3466,6 +3497,7 @@ fn spawn_f1_delegated_pull(
     progress_tx: mpsc::Sender<F1PushProgress>,
 ) {
     use blit_app::admin::rm::{delete_remote_path, extract_module_and_path};
+    use blit_app::transfers::failures::refuse_source_delete_on_failures;
     use blit_app::transfers::remote::run_delegated_pull;
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
     tokio::spawn(async move {
@@ -3513,19 +3545,33 @@ fn spawn_f1_delegated_pull(
                     // surfaces as the op's error (the copy already
                     // landed, but the operator must know the source
                     // wasn't removed).
-                    Some(source) => match extract_module_and_path(&source) {
-                        Ok((_, rel_path)) => {
-                            let wire = del_wire_path(&rel_path);
-                            match delete_remote_path(&source, &wire).await {
-                                Ok(_) => Ok(transferred),
-                                Err(err) => Err(format!(
-                                    "delegated but failed to delete remote source: {err:#}"
-                                )),
+                    //
+                    // pfc-5 / Q1(b): gated on the destination's
+                    // per-file failure report first (pfc-2's
+                    // `!mirror_enabled` interlock is gone). The
+                    // delegated re-encode is a second summary message,
+                    // so the count is read through cr-pfc4-1's
+                    // accessors rather than off a `TransferSummary`.
+                    Some(source) => match refuse_source_delete_on_failures(
+                        &blit_app::endpoints::format_remote_endpoint(&source),
+                        outcome.files_failed(),
+                        &outcome.contained_failures(),
+                    ) {
+                        Err(err) => Err(format!("{err:#}")),
+                        Ok(()) => match extract_module_and_path(&source) {
+                            Ok((_, rel_path)) => {
+                                let wire = del_wire_path(&rel_path);
+                                match delete_remote_path(&source, &wire).await {
+                                    Ok(_) => Ok(transferred),
+                                    Err(err) => Err(format!(
+                                        "delegated but failed to delete remote source: {err:#}"
+                                    )),
+                                }
                             }
-                        }
-                        Err(err) => Err(format!(
-                            "delegated but cannot resolve remote source to delete: {err:#}"
-                        )),
+                            Err(err) => Err(format!(
+                                "delegated but cannot resolve remote source to delete: {err:#}"
+                            )),
+                        },
                     },
                     None => Ok(transferred),
                 }
@@ -4109,7 +4155,10 @@ fn spawn_local_transfer(
 ///    skipped during the copy, so removing them from the
 ///    source side would lose data. This is the R47-F4
 ///    data-loss gate; the TUI must enforce it too.
-/// 3. Otherwise delete the source (`remove_dir_all` for
+/// 3. If `summary.files_failed` is non-zero, refuse for the
+///    mirror-image reason — the destination could not write
+///    those files (pfc-5 / Q1(b) gate, shared with the CLI).
+/// 4. Otherwise delete the source (`remove_dir_all` for
 ///    directories, `remove_file` for files).
 ///
 /// Surfaces the `LocalMirrorSummary` on success (so the
@@ -4187,6 +4236,20 @@ async fn perform_local_move(
             preview,
         ));
     }
+
+    // pfc-5 / Q1(b): the destination-side half of the same
+    // data-loss rule — the scan gate above covers only files the
+    // SOURCE could not read, while a file the destination could
+    // not write is still only at the source. pfc-2's in-session
+    // `!mirror_enabled` interlock used to fail the call before
+    // this point; the session now contains such a failure and
+    // returns `Ok`, so the refusal lives here, beside the delete.
+    blit_app::transfers::failures::refuse_source_delete_on_failures(
+        &source.display().to_string(),
+        summary.files_failed,
+        &summary.failures,
+    )
+    .map_err(|err| format!("{err:#}"))?;
 
     if source.is_dir() {
         tokio::fs::remove_dir_all(source)
@@ -8845,6 +8908,53 @@ mod tests {
             "the source bytes must land before the source is deleted"
         );
         assert!(!src.exists(), "source removed after a successful move");
+    }
+
+    /// pfc-5 / Q1(b) data-loss guard: a local move whose destination
+    /// could not write every file must refuse the source delete
+    /// entirely. pfc-2's in-session `!mirror_enabled` interlock used
+    /// to fail the call before the delete could run; the session now
+    /// contains the failure and returns `Ok` with `files_failed >= 1`,
+    /// so without the gate in [`perform_local_move`] the blocked
+    /// file's ONLY copy is deleted. Both source files survive — the
+    /// refusal is whole-verb, not per-file.
+    #[tokio::test]
+    async fn perform_local_move_refuses_source_delete_when_a_file_did_not_land() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).expect("src dir");
+        std::fs::create_dir_all(&dst).expect("dst dir");
+        std::fs::write(src.join("landed.txt"), b"alpha").expect("landed");
+        std::fs::write(src.join("blocked.txt"), b"never lands").expect("blocked");
+        // A DIRECTORY occupying the destination path is the portable
+        // way to fail exactly one file's write (the same fixture the
+        // sink's containment tests and the CLI's use).
+        std::fs::create_dir_all(dst.join("blocked.txt")).expect("block the destination path");
+
+        let err = perform_local_move(&src, &dst)
+            .await
+            .expect_err("a file that did not land must block the source delete");
+        assert!(err.contains("refusing to remove source"), "{err}");
+        assert!(
+            err.contains("blocked.txt"),
+            "the refusal names what did not land: {err}"
+        );
+
+        assert_eq!(
+            std::fs::read(src.join("blocked.txt")).expect("the failed file's only copy survives"),
+            b"never lands"
+        );
+        assert_eq!(
+            std::fs::read(src.join("landed.txt")).expect("the whole source survives the refusal"),
+            b"alpha"
+        );
+        // Containment, not rollback: what the destination could write
+        // is still there.
+        assert_eq!(
+            std::fs::read(dst.join("landed.txt")).expect("the sibling landed"),
+            b"alpha"
+        );
     }
 
     /// d-68: a remote source + remote dest copy routes to the

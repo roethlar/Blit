@@ -1,4 +1,5 @@
 mod endpoints;
+pub(crate) mod failures;
 mod local;
 mod remote;
 mod remote_remote_direct;
@@ -15,6 +16,9 @@ use crate::context::AppContext;
 use eyre::{bail, Context, Result};
 use std::fs;
 use std::io::{self, Write};
+use std::process::ExitCode;
+
+use failures::{exit_for_failures, refuse_source_delete_on_failures};
 
 use crate::rm::delete_remote_path;
 use blit_app::transfers::dispatch::{select_transfer_route, TransferKind, TransferRoute};
@@ -169,12 +173,17 @@ pub(super) fn render_result(
     result
 }
 
+/// pfc-5: the verb's exit status carries the per-file failure report's
+/// verdict — `ExitCode::SUCCESS` when every file landed,
+/// [`failures::EXIT_PARTIAL_FAILURE`] when the operation completed with
+/// files that did not. A session that faulted still returns `Err` and
+/// keeps its existing status.
 pub async fn run_transfer(
     ctx: &AppContext,
     args: &TransferArgs,
     mode: TransferKind,
     lifecycle_trace: &TransferLifecycleTrace,
-) -> Result<()> {
+) -> Result<ExitCode> {
     lifecycle_trace.record("transfer_dispatch_begin", None);
     let result = run_transfer_inner(ctx, args, mode, lifecycle_trace).await;
     lifecycle_trace.record(
@@ -189,7 +198,7 @@ async fn run_transfer_inner(
     args: &TransferArgs,
     mode: TransferKind,
     lifecycle_trace: &TransferLifecycleTrace,
-) -> Result<()> {
+) -> Result<ExitCode> {
     let PreparedTransferRoute {
         route,
         pre_resolve_display,
@@ -272,7 +281,7 @@ async fn run_transfer_inner(
         );
         if !confirm_destructive_operation(&prompt, args.yes)? {
             println!("Aborted.");
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
     }
 
@@ -294,9 +303,9 @@ async fn run_transfer_inner(
             if !src.exists() {
                 bail!("source path does not exist: {}", src.display());
             }
-            run_local_transfer(ctx, args, &src, &dst, mirror, lifecycle_trace)
-                .await
-                .map(|_| ())
+            let summary =
+                run_local_transfer(ctx, args, &src, &dst, mirror, lifecycle_trace).await?;
+            Ok(exit_for_failures(summary.files_failed))
         }
         TransferRoute::LocalToRemote { src, dst, mirror } => {
             if !src.exists() {
@@ -304,12 +313,13 @@ async fn run_transfer_inner(
             }
             ensure_remote_push_supported(args)?;
             ensure_remote_destination_supported(&dst)?;
-            run_remote_push_transfer(args, src, dst, mirror, lifecycle_trace).await
+            let state = run_remote_push_transfer(args, src, dst, mirror, lifecycle_trace).await?;
+            Ok(exit_for_failures(state.summary.files_failed))
         }
         TransferRoute::RemoteToLocal { src, dst, mirror } => {
             ensure_remote_pull_supported(args)?;
             ensure_remote_source_supported(&src)?;
-            run_remote_pull_transfer(
+            let state = run_remote_pull_transfer(
                 args,
                 src,
                 &dst,
@@ -317,13 +327,14 @@ async fn run_transfer_inner(
                 false, // not a move — source survives
                 lifecycle_trace,
             )
-            .await
+            .await?;
+            Ok(exit_for_failures(state.summary.files_failed))
         }
         TransferRoute::RemoteToRemoteDelegated { src, dst, mirror } => {
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
             ensure_remote_pull_supported(args)?;
-            run_remote_to_remote_direct(
+            let state = run_remote_to_remote_direct(
                 args,
                 src,
                 dst,
@@ -331,16 +342,23 @@ async fn run_transfer_inner(
                 false, /* not a move */
                 lifecycle_trace,
             )
-            .await
+            .await?;
+            // cr-pfc4-1's accessor: the delegated re-encode is a second
+            // summary message, so the count is read through it rather than
+            // off a `TransferSummary`.
+            Ok(exit_for_failures(state.files_failed()))
         }
     }
 }
 
+/// Move's status is `ExitCode::SUCCESS` or an `Err`: the source-deletion
+/// gate refuses the whole verb while any file failed to land (Q1(b)), so
+/// a completed move never carries per-file failures to report.
 pub async fn run_move(
     ctx: &AppContext,
     args: &TransferArgs,
     lifecycle_trace: &TransferLifecycleTrace,
-) -> Result<()> {
+) -> Result<ExitCode> {
     lifecycle_trace.record("transfer_dispatch_begin", None);
     let result = run_move_inner(ctx, args, lifecycle_trace).await;
     lifecycle_trace.record(
@@ -354,7 +372,7 @@ async fn run_move_inner(
     ctx: &AppContext,
     args: &TransferArgs,
     lifecycle_trace: &TransferLifecycleTrace,
-) -> Result<()> {
+) -> Result<ExitCode> {
     let PreparedTransferRoute {
         route,
         pre_resolve_display,
@@ -501,7 +519,7 @@ async fn run_move_inner(
     );
     if !confirm_destructive_operation(&prompt, args.yes)? {
         println!("Aborted.");
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     if !args.json {
@@ -570,6 +588,15 @@ async fn run_move_inner(
                 );
             }
 
+            // pfc-5 / Q1(b): the destination-side half of the same rule —
+            // a file the destination could not write is still only at the
+            // source.
+            refuse_source_delete_on_failures(
+                &src_path.display().to_string(),
+                summary.files_failed,
+                &summary.failures,
+            )?;
+
             if src_path.is_dir() {
                 fs::remove_dir_all(&src_path)
                     .with_context(|| format!("removing {}", src_path.display()))?;
@@ -593,7 +620,7 @@ async fn run_move_inner(
                     &dst_path,
                 )
             })?;
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         }
         TransferRoute::RemoteToLocal {
             src: remote,
@@ -620,6 +647,13 @@ async fn run_move_inner(
             )
             .await?;
 
+            // pfc-5 / Q1(b): refuse before the remote source is touched.
+            refuse_source_delete_on_failures(
+                &format_remote_endpoint(&remote),
+                state.summary.files_failed,
+                &failures::failures_from_wire(&state.summary.failures),
+            )?;
+
             // Delete remote source
             let rel_path = match &remote.path {
                 RemotePath::Module { rel_path, .. } | RemotePath::Root { rel_path } => {
@@ -632,7 +666,7 @@ async fn run_move_inner(
                 remote::print_deferred_pull_result(args, &state);
                 Ok(())
             })?;
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         }
         TransferRoute::LocalToRemote {
             src: src_path,
@@ -659,6 +693,13 @@ async fn run_move_inner(
             )
             .await?;
 
+            // pfc-5 / Q1(b): refuse before the local source is removed.
+            refuse_source_delete_on_failures(
+                &src_path.display().to_string(),
+                state.summary.files_failed,
+                &failures::failures_from_wire(&state.summary.failures),
+            )?;
+
             // Delete local source
             if src_path.is_dir() {
                 fs::remove_dir_all(&src_path)
@@ -671,7 +712,7 @@ async fn run_move_inner(
                 remote::print_deferred_push_result(args, &state);
                 Ok(())
             })?;
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         }
         TransferRoute::RemoteToRemoteDelegated { src, dst, .. } => {
             ensure_remote_source_supported(&src)?;
@@ -693,6 +734,15 @@ async fn run_move_inner(
             )
             .await?;
 
+            // pfc-5 / Q1(b): refuse before the remote source is touched.
+            // The delegated re-encode is a second summary message, so the
+            // report is read through cr-pfc4-1's accessors.
+            refuse_source_delete_on_failures(
+                &format_remote_endpoint(&src),
+                state.files_failed(),
+                &state.contained_failures(),
+            )?;
+
             // Delete remote source
             let rel_path = match &src.path {
                 RemotePath::Module { rel_path, .. } | RemotePath::Root { rel_path } => {
@@ -705,7 +755,7 @@ async fn run_move_inner(
                 remote_remote_direct::print_deferred_delegated_result(args, &state);
                 Ok(())
             })?;
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         }
     }
 }

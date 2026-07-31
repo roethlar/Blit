@@ -26,15 +26,19 @@ pub use blit_core::remote::retry::is_retryable;
 ///
 /// Each retry re-runs the caller's destination comparison. Callers that enable
 /// resume can also continue eligible partial files at block granularity.
-pub async fn run_with_retries<F, Fut>(retries: u32, wait: Duration, mut attempt: F) -> Result<()>
+/// Generic over the attempt's success value: retry classification reads
+/// only the error, so a verb whose success carries information (pfc-5's
+/// exit status) returns it through unchanged. A completed attempt is never
+/// retried, whatever it reports.
+pub async fn run_with_retries<F, Fut, T>(retries: u32, wait: Duration, mut attempt: F) -> Result<T>
 where
     F: FnMut(u32) -> Fut,
-    Fut: Future<Output = Result<()>>,
+    Fut: Future<Output = Result<T>>,
 {
     let mut attempt_no = 0u32;
     loop {
         match attempt(attempt_no).await {
-            Ok(()) => return Ok(()),
+            Ok(value) => return Ok(value),
             Err(err) => {
                 if attempt_no >= retries || !is_retryable(&err) {
                     return Err(err);
