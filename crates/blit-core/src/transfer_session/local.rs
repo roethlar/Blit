@@ -192,6 +192,14 @@ pub struct LocalMirrorOptions {
     /// program can work out for itself must not become user-facing surface
     /// (FAST, SIMPLE, RELIABLE — see `.agents/repo-guidance.md`).
     pub checkers: usize,
+    /// Pre-built comparison pool. `None` (production) builds one from
+    /// [`LocalMirrorOptions::checkers`].
+    ///
+    /// cr-ls1-9: injectable for the same reason `phase_probe` is — so a test
+    /// can hold the very pool the session uses and assert the production diff
+    /// actually dispatched onto it. Without that, removing the wiring at the
+    /// call site leaves every checker test green.
+    pub checker_pool: Option<CheckerPool>,
     /// ls-1 wall-clock breakdown. Default permits environment activation
     /// (`BLIT_TRACE_LOCAL_PHASES=1` + `BLIT_TRACE_RUN_ID`) and is otherwise
     /// inert; a caller that needs deterministic behaviour installs its own
@@ -220,6 +228,7 @@ impl Default for LocalMirrorOptions {
             resume: false,
             null_sink: false,
             checkers: 0,
+            checker_pool: None,
             phase_probe: LocalPhaseProbe::default(),
         }
     }
@@ -620,7 +629,10 @@ pub async fn run_local_session(
     let phase_probe = options.phase_probe.clone().or_from_env();
     // One dedicated comparison pool per session, built before any chunk so
     // its threads are not respawned per chunk.
-    let checker_pool = CheckerPool::new(options.checkers)?;
+    let checker_pool = match options.checker_pool.clone() {
+        Some(pool) => pool,
+        None => CheckerPool::new(options.checkers)?,
+    };
 
     if !src_root.exists() {
         return Err(eyre!("source path does not exist: {}", src_root.display()));

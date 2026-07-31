@@ -35,19 +35,19 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Handoff — 2026-07-31
 - Done: pfc-1..6 + clp-1..2 landed and reviewed; D-2026-07-31-4 makes local
   speed priority-1; ls-1 step (0) instrument landed but its review FAILED.
-- Next: 1.64× shipped (runtime-adaptive comparison concurrency, no new CLI).
-  r5 review owed. Remaining levers: named-stream enumeration, directory-level
-  stat, wire-carrier concurrency. pfc Shipped is the owner's.
+- Next: 1.64× shipped (runtime-adaptive comparison concurrency, no new CLI);
+  r5's 2 findings fixed, **r6 owed**. Remaining levers: named-stream
+  enumeration, directory-level stat, wire-carrier concurrency. pfc Shipped
+  is the owner's.
 
 ## Now (active work)
 
 - **MACOS TEST FIREWALL CLEANUP SHIPPED LOCALLY (D-2026-07-23-6):** helper,
   16 fake-backed cases, parser check and mutation guards complete; no review
   pending. Plan: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md`.
-- **THUNDERBOLT LIFECYCLE ATTRIBUTED (D-2026-07-23-3), SSD FOLLOW-UP
-  COMPLETE:** both closed, no repeats authorized; records in DEVLOG
-  2026-07-23 and `docs/bench/end-to-end-transfer-latency-2026-07-23/` +
-  `docs/bench/thunderbolt-ssd-2026-07-22/`.
+- **THUNDERBOLT LIFECYCLE + SSD FOLLOW-UP COMPLETE (D-2026-07-23-3):** both
+  closed, no repeats authorized; records in DEVLOG 2026-07-23 and
+  `docs/bench/{end-to-end-transfer-latency,thunderbolt-ssd}-*/`.
 - **RELEASE COMPLETION SHIPPED:** exact candidate `d1f1152d` passed every gate
   and is published as `v0.1.1`; ceiling/Thunderbolt tuning is post-release.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,

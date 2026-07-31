@@ -1583,21 +1583,26 @@ mod metadata_repair {
     }
 }
 
-/// Every `--checkers` setting is plumbed end to end and produces IDENTICAL
-/// verdicts.
+/// The production diff dispatches onto the checker pool, and every setting
+/// agrees on the same work.
 ///
-/// Scope note, because this slice has a history of over-claiming: this does
-/// NOT prove the checks run concurrently. A local NVMe comparison is far too
-/// fast for a wall-clock assertion to be anything but flaky, and a file-set
-/// assertion cannot see concurrency at all — that is exactly how the
-/// cr-ls1-8 guard passed while guarding nothing. **Concurrency is proven at
-/// the pool level** by `transfer_session::checkers::tests::
-/// work_really_runs_concurrently`, which measures peak in-flight work and
-/// asserts the threads are the dedicated `blit-checker-*` ones. What THIS
-/// test owns is that the option reaches the session, that 1 and 16 both run,
-/// and that concurrency does not change the answer.
+/// Scope note, because this slice has a history of over-claiming — three
+/// separate things need three separate guards and only together do they
+/// cover the feature:
+/// 1. **Concurrency really happens**: `checkers::tests::
+///    work_really_runs_concurrently` (peak in-flight > 1 on dedicated
+///    `blit-checker-*` threads).
+/// 2. **The production diff uses the pool**: the `installs()` assertion
+///    below. cr-ls1-9 — the reviewer removed the wiring at the diff call
+///    site and the previous version of this test stayed green, because its
+///    converged phase has identical sequential and parallel outcomes and its
+///    changed phase expected zero copies from runs that had nothing left to
+///    copy.
+/// 3. **Concurrency does not change the answer**: the per-setting loop.
 #[tokio::test]
-async fn every_checker_setting_gives_identical_verdicts() -> Result<()> {
+async fn the_diff_uses_the_checker_pool_and_every_setting_agrees() -> Result<()> {
+    use blit_core::transfer_session::CheckerPool;
+
     // Enough files to span several diff chunks, and a converged tree so the
     // run is pure comparison with no copying involved.
     const FILES: usize = 400;
@@ -1610,37 +1615,41 @@ async fn every_checker_setting_gives_identical_verdicts() -> Result<()> {
     }
     run_local_session(&src, &dest, options()).await?;
 
-    // 0 (default), 1 (forced sequential) and 16 (well past the default) must
-    // agree. A concurrency bug that dropped or duplicated verdicts would show
-    // as a differing copied/scanned count here.
-    let mut verdicts = Vec::new();
-    for checkers in [0usize, 1, 16] {
-        let summary = run_local_session(
-            &src,
-            &dest,
-            LocalMirrorOptions {
-                checkers,
-                ..options()
-            },
-        )
-        .await?;
-        verdicts.push((checkers, summary.copied_files, summary.scanned_files));
-    }
-    let (_, first_copied, first_scanned) = verdicts[0];
-    assert_eq!(first_copied, 0, "the tree is converged, nothing to copy");
-    for (checkers, copied, scanned) in &verdicts {
-        assert_eq!(
-            (*copied, *scanned),
-            (first_copied, first_scanned),
-            "--checkers {checkers} disagreed with the default: {verdicts:?}"
-        );
-    }
+    // THE WIRING ASSERTION (cr-ls1-9). Hold the very pool the session will
+    // use and prove the production diff dispatched onto it. Deleting the
+    // `Some(&local.checker_pool)` at the diff call site takes this to zero;
+    // every other checker test stays green through that deletion, which is
+    // how the previous version of this test passed while the feature was
+    // effectively gone.
+    let pool = CheckerPool::new(0).expect("pool");
+    let summary = run_local_session(
+        &src,
+        &dest,
+        LocalMirrorOptions {
+            checker_pool: Some(pool.clone()),
+            ..options()
+        },
+    )
+    .await?;
+    assert_eq!(summary.copied_files, 0, "the tree is converged");
+    assert!(
+        pool.installs() > 0,
+        "the destination diff never dispatched onto the checker pool — the \
+         production wiring is gone, whatever the other tests say"
+    );
 
-    // And a changed subset must still be found at every setting, so the
-    // agreement above is not just "all of them found nothing".
-    fs::write(src.join("f0000.txt"), b"changed content")?;
-    fs::write(src.join("f0399.txt"), b"changed content")?;
+    // Every setting must agree on the SAME work. Each run gets a freshly
+    // diverged tree, so all three actually have something to find rather
+    // than the first run converging the tree for the others.
     for checkers in [0usize, 1, 16] {
+        // Vary the LENGTH, not just the bytes. Equal-length rewrites inside
+        // one mtime tick compare as unchanged under size+mtime, so a
+        // same-size edit would leave later runs with nothing to find and the
+        // loop would assert against a converged tree — the same shape of
+        // mistake cr-ls1-9 was about.
+        let body = vec![b'x'; 64 + checkers * 32];
+        fs::write(src.join("f0000.txt"), &body)?;
+        fs::write(src.join("f0399.txt"), &body)?;
         let summary = run_local_session(
             &src,
             &dest,
@@ -1650,10 +1659,15 @@ async fn every_checker_setting_gives_identical_verdicts() -> Result<()> {
             },
         )
         .await?;
-        let expected = if checkers == 0 { 2 } else { 0 };
         assert_eq!(
-            summary.copied_files, expected,
-            "--checkers {checkers} found the wrong number of changed files"
+            summary.copied_files, 2,
+            "checkers={checkers} found {} changed files, expected 2",
+            summary.copied_files
+        );
+        assert_eq!(
+            summary.scanned_files, FILES,
+            "checkers={checkers} scanned {} files, expected {FILES}",
+            summary.scanned_files
         );
     }
     Ok(())

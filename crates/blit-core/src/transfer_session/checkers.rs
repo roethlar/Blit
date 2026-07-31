@@ -193,6 +193,13 @@ pub struct CheckerPool {
     pool: Arc<rayon::ThreadPool>,
     threads: usize,
     policy: Arc<CheckerPolicy>,
+    /// Times [`CheckerPool::install`] has run.
+    ///
+    /// cr-ls1-9: this exists so a test can prove the PRODUCTION diff actually
+    /// routes through this pool. Without it, deleting the wiring at the call
+    /// site leaves the pool's own unit tests green and the feature silently
+    /// gone — which is exactly what the reviewer demonstrated.
+    installs: Arc<AtomicU64>,
 }
 
 impl CheckerPool {
@@ -219,7 +226,14 @@ impl CheckerPool {
             pool: Arc::new(pool),
             threads,
             policy: Arc::new(policy),
+            installs: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// How many times work has been dispatched onto this pool. Zero after a
+    /// whole session means the diff never used it.
+    pub fn installs(&self) -> u64 {
+        self.installs.load(Ordering::Relaxed)
     }
 
     /// Resolve a requested count to the count that will actually be used.
@@ -254,6 +268,7 @@ impl CheckerPool {
     /// Run `op` inside the pool, so any rayon parallelism it starts is
     /// confined to these threads instead of the global pool.
     pub fn install<T: Send>(&self, op: impl FnOnce() -> T + Send) -> T {
+        self.installs.fetch_add(1, Ordering::Relaxed);
         self.pool.install(op)
     }
 }

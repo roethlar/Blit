@@ -298,6 +298,13 @@ async fn run_transfer_inner(
         }
     }
 
+    // cr-ls1-10: one gate for every non-local route, placed here rather than
+    // per-arm so a future route cannot be added that silently swallows the
+    // pin.
+    if !matches!(route, TransferRoute::LocalToLocal { .. }) {
+        reject_unsupported_checker_pin(args)?;
+    }
+
     match route {
         TransferRoute::LocalToLocal { src, dst, mirror } => {
             if !src.exists() {
@@ -530,6 +537,11 @@ async fn run_move_inner(
                 pre_resolve_display, dst_display
             );
         }
+    }
+
+    // cr-ls1-10: same gate on the move dispatch.
+    if !matches!(route, TransferRoute::LocalToLocal { .. }) {
+        reject_unsupported_checker_pin(args)?;
     }
 
     match route {
@@ -769,11 +781,51 @@ fn warn_if_dropping_windows_metadata(args: &TransferArgs) {
     }
 }
 
+/// cr-ls1-10: refuse a checker pin on routes that cannot honour it.
+///
+/// Only the local route runs a comparison pool; every wire carrier still
+/// diffs sequentially. Accepting `--checkers N` there and running unchanged
+/// would silently invalidate whatever measurement the pin was set up to take
+/// — and the flag exists ONLY to take measurements, so a pin that quietly
+/// does nothing defeats its single purpose. Refusing is the honest failure.
+pub(crate) fn reject_unsupported_checker_pin(args: &TransferArgs) -> Result<()> {
+    if args.checkers != 0 {
+        bail!(
+            "--checkers is a local-route diagnostic and is not implemented for remote transfers; \
+             remove it, or run the measurement against a local destination"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    /// cr-ls1-10: a diagnostic pin that silently does nothing is worse than
+    /// no pin, because its whole purpose is to make a measurement
+    /// trustworthy. Remote routes have no comparison pool, so they refuse.
+    #[test]
+    fn a_checker_pin_is_refused_where_it_cannot_take_effect() {
+        let mut args = TransferArgs {
+            checkers: 4,
+            ..gate_args("host:/src/", "/dst/", false, true)
+        };
+        let error = reject_unsupported_checker_pin(&args)
+            .expect_err("a remote route must refuse a pin it cannot honour");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("--checkers") && message.contains("not implemented for remote"),
+            "the refusal must say what is wrong and what to do: {message}"
+        );
+
+        // 0 is "discover at runtime", which every route supports.
+        args.checkers = 0;
+        reject_unsupported_checker_pin(&args)
+            .expect("the adaptive default is valid on every route");
+    }
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
