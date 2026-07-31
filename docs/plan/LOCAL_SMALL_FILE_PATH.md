@@ -174,6 +174,19 @@ environmental/config cause is held to the same bar as a code cause.
   - Bar: red/green guard on the summary text; no transfer logic touched; no
     change to any JSON field's meaning (fields may be added).
 - **ls-1 (HARD GATE) — attribution, no behavior change.**
+  **(0) PHASE BREAKDOWN FIRST (owner go, 2026-07-31).** Split the wall clock
+  into **enumerate / compare / apply / attribute-repair** and report the share
+  each takes, on the owner's real shape — a large tree to an **SMB**
+  destination — not only the local NVMe fixtures. Rationale, from the
+  2026-07-31 field check: run 2 copied **0 files, 0 B and still took
+  283.92 s**, so a large share of that workload's wall time is in
+  enumerate+compare, which **L1–L4 do not touch at all** (every one of them
+  is an apply-path hypothesis). Without this split, ls-1 can return a clean
+  attribution for a minority of the time and the fix leaves the owner's case
+  where it started. **(0) runs before (a)–(c) and its result selects which
+  phase gets attributed.** If a non-apply phase dominates, this plan's
+  hypothesis set is incomplete and ls-1 says so in the probe record rather
+  than attributing inside whichever phase happens to be instrumented.
   (a) the equal-concurrency A/B (`ROBO_MT=1`/`BLIT_WORKERS=0` and
   `ROBO_MT=8`/`BLIT_WORKERS=8`) — establishes `Δ_local` and grades **L3**;
   (b) build the `0f922de` client natively on netwatch-01 and A/B old-vs-new
@@ -181,6 +194,9 @@ environmental/config cause is held to the same bar as a code cause.
   (c) instrument the local apply (behind the existing debug flag): per-file
   open counts, tar encode/decode time, `create_dir_all` time, so L1/L2/L4 have
   numbers before anyone edits them.
+  The bi-stability control still binds all of (0)–(c): no cross-session
+  comparison of blit arms until the 4-arm single-session run explains the
+  1388/2225 ms split.
   Probe record committed and codex-reviewed **before any fix slice exists**.
 - **ls-2..n** — one fix slice per CONFIRMED cause, smallest change first,
   A/B'd against the unmodified build on the same rig.
