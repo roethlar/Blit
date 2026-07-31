@@ -5005,10 +5005,21 @@ async fn diff_chunk_and_apply_local(
             .record(LocalPhase::Plan, started.elapsed());
     }
     for payload in payloads {
+        // cr-ls1-1: this await is where a slow sink actually costs wall
+        // time — the queue is bounded, so once the pipeline falls behind,
+        // the diff loop blocks here rather than in COMPARE, PLAN or the
+        // tail drain. Leaving it untimed meant the dominant cost on an SMB
+        // destination belonged to no phase at all.
+        let queue_started = local.phase_probe.is_enabled().then(Instant::now);
         let queued = match run.as_ref() {
             Some(r) => r.queue(payload).await.is_ok(),
             None => false,
         };
+        if let Some(started) = queue_started {
+            local
+                .phase_probe
+                .record(LocalPhase::ApplyBackpressure, started.elapsed());
+        }
         if !queued {
             // The pipeline died mid-run: surface ITS error as the root
             // cause — a bare "stopped early" would hide the write

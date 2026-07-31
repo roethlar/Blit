@@ -1,7 +1,7 @@
 # cr-ls1-1 — APPLY measures only the tail drain, so apply backpressure lands in no phase
 
 **Severity**: HIGH
-**Status**: admitted
+**Status**: FIXED — awaiting reviewer verification
 **Source**: `ls-1-range` codex dispatch over `a0b5d83d..d67b44fd`
 Reviewer provenance (generation pass): codex / gpt-5.6-sol / xhigh /
 workspace-write (detached, disposable worktree); codex-cli 0.146.0.
@@ -54,3 +54,33 @@ is non-vacuous under a genuinely slow sink, not merely present.
 - Red/green proven by revert, with the revert shown to actually red the
   intended assertion (see cr-ls1-2: a guard that stays green under revert
   does not count).
+
+## Fix
+
+New `LocalPhase::ApplyBackpressure` times the `run.queue(payload).await`
+call in `diff_chunk_and_apply_local` — the single seam where the bounded
+queue blocks the diff loop. Same shape as the ENUMERATE_BACKPRESSURE split
+already used on the source side, deliberately, because it is the same
+problem: a bounded channel making one party's slowness look like another
+party's cost, or like nobody's.
+
+APPLY (drain) is kept rather than replaced. The two together distinguish
+"the writer was still working after the reader finished" (drain) from "the
+writer paced the reader throughout" (backpressure), which is the
+distinction needed to pick a phase to attribute.
+
+**Guard**: `transfer_session::local::tests::a_slow_sink_is_attributed_to_apply_backpressure`.
+A `SlowSink` wrapper adds a fixed 40 ms per payload behind the real sink,
+with `DEFAULT_PAYLOAD_PREFETCH * 4` files each just over 1 MiB so every one
+plans as its own `File` payload and the queue provably backs up. Asserts
+both that every push is sampled and that the accumulated wait clears a
+floor derived from `(FILES - queue_depth) * delay / 2`.
+
+The floor half matters: the FIRST version of this fixture used only 8 files
+and passed with 17,700 ns of backpressure — the entire backlog fit in the
+queue, nothing ever blocked, and the test would have "passed" while
+testing nothing. Caught by the assertion failing, not by inspection.
+
+**Guard proof**: removing the timing span at the queue seam reds the test
+on `backpressure.samples > 0`; restore verified byte-identical by SHA-256
+(`976D71B1…49205`), green again after.

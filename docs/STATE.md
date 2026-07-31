@@ -84,13 +84,14 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    **ls-1 step (0) instrument landed 2026-07-31 — and its review FAILED.**
    Default-off `LocalPhaseProbe` emits a per-session phase breakdown against
    a wall denominator, but the `ls-1-range` codex dispatch returned
-   `guard_confirmed: false` with 2 open findings: **cr-ls1-1 (HIGH)** the
-   APPLY phase times only the tail drain, so apply backpressure lands in no
-   phase and a slow sink can dominate while reporting ~zero; **cr-ls1-2
-   (MEDIUM)** the compare-subtraction guard is vacuous, and the landing
-   records falsely claimed both subtractions were red/green proven (only
-   enumerate's was — correction recorded). **The instrument must not be used
-   for attribution until both close.** No benchmark has been run.
+   `guard_confirmed: false` with 2 findings. **cr-ls1-1 (HIGH) FIXED** —
+   apply backpressure has its own phase now (the queue await was inside no
+   span, so a slow sink could dominate while APPLY read ~zero); guarded by a
+   deliberately slow sink past the queue depth, red/green proven.
+   **cr-ls1-2 (MEDIUM) OPEN** — the compare-subtraction guard is vacuous,
+   and the landing records falsely claimed both subtractions were red/green
+   proven (only enumerate's was — correction recorded). **Not usable for
+   attribution until cr-ls1-2 closes and the re-review passes.**
    **`ls-0` (summary-display fix) is carved out** of that gate: display text
    only, cannot move any number ls-1 records. NOT the closed P1 asymmetry
    defect (D-2026-07-22-2); labels deliberately kept apart.

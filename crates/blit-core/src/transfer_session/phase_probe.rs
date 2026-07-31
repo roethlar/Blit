@@ -61,15 +61,25 @@ pub enum LocalPhase {
     AttributeRepair,
     /// Turning diff verdicts into payloads (planner + shard assembly).
     Plan,
+    /// Time the diff loop spent blocked handing a payload to the apply
+    /// pipeline's bounded queue. This is where a SLOW SINK actually shows up.
+    ///
+    /// cr-ls1-1: the first cut of this module measured only [`LocalPhase::Apply`]
+    /// (the tail drain) and left this wait inside no span at all, which meant
+    /// a sink slower than the planner — the expected shape on an SMB
+    /// destination — could dominate the wall clock while APPLY reported near
+    /// zero. A phase breakdown that can lose the dominant cost is worse than
+    /// none, because it reads as authoritative.
+    ApplyBackpressure,
     /// Apply DRAIN: from the moment the diff stops queueing payloads to the
     /// moment the apply pipeline finishes. Not total apply cost — the
-    /// pipeline runs concurrently with the diff, so work that kept up with
-    /// compare is invisible here by design. Read it as "how far the writer
-    /// lagged the reader": a long drain means apply is the bottleneck, a
-    /// near-zero drain means apply kept pace and the wall clock belongs to an
-    /// earlier phase. Instrumenting inside the pipeline itself would mean
-    /// editing `execute_sink_pipeline_streaming`, which the remote routes
-    /// share; ls-1 measures the local route without changing shared code.
+    /// pipeline runs concurrently with the diff. Read together with
+    /// [`LocalPhase::ApplyBackpressure`]: a long drain means the writer was
+    /// still working after the reader finished, a long backpressure means the
+    /// writer was pacing the reader throughout. Instrumenting inside the
+    /// pipeline itself would mean editing `execute_sink_pipeline_streaming`,
+    /// which the remote routes share; ls-1 measures the local route without
+    /// changing shared code.
     Apply,
     /// The mirror delete pass.
     Delete,
@@ -78,12 +88,13 @@ pub enum LocalPhase {
 impl LocalPhase {
     /// Every phase, in the order a session encounters them. Fixed so the
     /// report's field order is stable across runs and diffable.
-    pub const ALL: [LocalPhase; 7] = [
+    pub const ALL: [LocalPhase; 8] = [
         LocalPhase::Enumerate,
         LocalPhase::EnumerateBackpressure,
         LocalPhase::Compare,
         LocalPhase::AttributeRepair,
         LocalPhase::Plan,
+        LocalPhase::ApplyBackpressure,
         LocalPhase::Apply,
         LocalPhase::Delete,
     ];
@@ -95,8 +106,9 @@ impl LocalPhase {
             LocalPhase::Compare => 2,
             LocalPhase::AttributeRepair => 3,
             LocalPhase::Plan => 4,
-            LocalPhase::Apply => 5,
-            LocalPhase::Delete => 6,
+            LocalPhase::ApplyBackpressure => 5,
+            LocalPhase::Apply => 6,
+            LocalPhase::Delete => 7,
         }
     }
 }
@@ -153,7 +165,7 @@ type ReportEmitter = dyn Fn(LocalPhaseReport) + Send + Sync + 'static;
 
 struct ProbeContext {
     run_id: Arc<str>,
-    phases: [AtomicPhase; 7],
+    phases: [AtomicPhase; 8],
     emit: Arc<ReportEmitter>,
     emitted: OnceLock<()>,
 }

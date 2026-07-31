@@ -1675,6 +1675,14 @@ mod phase_breakdown {
             samples(report, LocalPhase::Apply) > 0,
             "the apply drain is measured"
         );
+        // cr-ls1-1: the queue wait is timed too. On this fast fixture it is
+        // near zero, which is the point — the phase must exist and be
+        // sampled even when it costs nothing, so a run where it costs
+        // everything cannot be mistaken for a run where apply was free.
+        assert!(
+            samples(report, LocalPhase::ApplyBackpressure) > 0,
+            "handing payloads to the apply queue is measured"
+        );
         // Not a mirror, so no delete pass ran: a measured zero, not a gap.
         assert_eq!(samples(report, LocalPhase::Delete), 0);
         Ok(())

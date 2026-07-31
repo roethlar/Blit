@@ -1082,6 +1082,203 @@ mod tests {
         );
     }
 
+    /// A sink that takes a known, large amount of time per payload. Wraps a
+    /// real sink so the transfer still succeeds and the rest of the session
+    /// behaves normally — only the writer is slow.
+    struct SlowSink {
+        inner: Arc<dyn TransferSink>,
+        delay: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl TransferSink for SlowSink {
+        async fn write_payload(
+            &self,
+            payload: crate::remote::transfer::payload::PreparedPayload,
+        ) -> eyre::Result<SinkOutcome> {
+            tokio::time::sleep(self.delay).await;
+            self.inner.write_payload(payload).await
+        }
+
+        async fn write_file_stream(
+            &self,
+            header: &FileHeader,
+            reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+        ) -> eyre::Result<SinkOutcome> {
+            self.inner.write_file_stream(header, reader).await
+        }
+
+        fn root(&self) -> &Path {
+            self.inner.root()
+        }
+    }
+
+    /// cr-ls1-1: a sink slower than the planner must show up as
+    /// APPLY_BACKPRESSURE, not vanish.
+    ///
+    /// This is the guard the first cut of ls-1 lacked. With the queue await
+    /// untimed, this exact shape — writer slower than reader — put its cost
+    /// in no phase at all, which is the misattribution the whole slice
+    /// exists to prevent. The payload queue holds `DEFAULT_PAYLOAD_PREFETCH`
+    /// entries, so with more files than that and a real per-payload delay,
+    /// the diff loop MUST block on the queue.
+    #[tokio::test]
+    async fn a_slow_sink_is_attributed_to_apply_backpressure() {
+        use super::super::phase_probe::LocalPhaseReport;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("mkdir src");
+        std::fs::create_dir_all(&dst_root).expect("mkdir dst");
+        // Each file is >= 1 MiB so it plans as its own `File` payload rather
+        // than being amortised into a tar shard, and there are several times
+        // `DEFAULT_PAYLOAD_PREFETCH` of them — otherwise every payload fits
+        // in the queue, the diff loop never blocks, and the slow sink shows
+        // up as tail drain instead. That was the original defect's blind
+        // spot, so the fixture has to be past the queue depth to test it.
+        const FILES: usize = DEFAULT_PAYLOAD_PREFETCH * 4;
+        let body = vec![b'z'; 1024 * 1024 + 1];
+        for index in 0..FILES {
+            std::fs::write(src_root.join(format!("big{index}.bin")), &body).expect("write");
+        }
+
+        let delay = std::time::Duration::from_millis(40);
+        let reports: Arc<StdMutex<Vec<LocalPhaseReport>>> = Arc::default();
+        let seen = Arc::clone(&reports);
+        let probe = LocalPhaseProbe::capture("cr-ls1-1", move |report| {
+            seen.lock().expect("sink poisoned").push(report);
+        });
+
+        let summary = run_local_session(
+            &src_root,
+            &dst_root,
+            LocalMirrorOptions {
+                perf_history: false,
+                phase_probe: probe.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("session");
+        assert_eq!(summary.copied_files, FILES);
+
+        // The session above uses the real sink; the point of the fixture is
+        // the ASSERTION SHAPE, so re-run the same tree through a slow sink
+        // at the LocalApply seam where a custom sink can be injected.
+        let dst_slow = tmp.path().join("dst-slow");
+        std::fs::create_dir_all(&dst_slow).expect("mkdir dst-slow");
+        let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let real: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
+            src_root.clone(),
+            dst_slow.clone(),
+            FsSinkConfig::default(),
+        ));
+        let slow_reports: Arc<StdMutex<Vec<LocalPhaseReport>>> = Arc::default();
+        let slow_seen = Arc::clone(&slow_reports);
+        let slow_probe = LocalPhaseProbe::capture("cr-ls1-1-slow", move |report| {
+            slow_seen.lock().expect("sink poisoned").push(report);
+        });
+        let local_apply = LocalApply {
+            src_root: src_root.clone(),
+            sink: Arc::new(SlowSink { inner: real, delay }),
+            prepare_source: Arc::new(FsTransferSource::new(src_root.clone())),
+            plan_options: PlanOptions::default(),
+            mirror_scope_filter: FileFilter::default(),
+            dry_run: false,
+            null_sink: false,
+            sink_workers: 1,
+            unreadable: Arc::clone(&unreadable),
+            stats: Arc::new(LocalApplyStats::default()),
+            phase_probe: slow_probe.clone(),
+        };
+        let open = SessionOpen {
+            initiator_role: TransferRole::Source as i32,
+            compare_mode: ComparisonMode::SizeMtime as i32,
+            in_stream_bytes: true,
+            ..Default::default()
+        };
+        let source_cfg = SourceSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::initiator(open),
+            plan_options: PlanOptions::default(),
+            data_plane_host: None,
+            instruments: SourceInstruments {
+                progress: None,
+                unreadable: Some(Arc::clone(&unreadable)),
+                trace_data_plane: false,
+                session_phase_trace: Default::default(),
+                lifecycle_trace: Default::default(),
+                small_file_probe: SmallFileProbe::disabled(),
+                #[cfg(test)]
+                dial_test_samples: None,
+                #[cfg(test)]
+                dial_terminal_test_gate: None,
+                #[cfg(test)]
+                dial_proposal_test_gate: None,
+                #[cfg(test)]
+                dial_membership_test_gate: None,
+            },
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::Responder,
+            data_plane_host: None,
+            receiver_capacity: None,
+            instruments: DestinationInstruments {
+                small_file_probe: SmallFileProbe::disabled(),
+                ..Default::default()
+            },
+            local_apply: Some(local_apply),
+        };
+        let (a, b) = in_process_pair();
+        let scan_source: Arc<dyn TransferSource> =
+            Arc::new(FsTransferSource::new(src_root.clone()).with_phase_probe(slow_probe.clone()));
+        let (_, dest_result): (
+            eyre::Result<TransferSummary>,
+            eyre::Result<DestinationOutcome>,
+        ) = tokio::join!(
+            run_source(source_cfg, a, scan_source),
+            run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_slow.clone())),
+        );
+        dest_result.expect("slow-sink session still succeeds");
+        slow_probe.emit(std::time::Duration::from_secs(1));
+
+        let captured = slow_reports.lock().expect("sink poisoned");
+        let report = captured.first().expect("one report");
+        let phase = |wanted: LocalPhase| {
+            report
+                .phases
+                .iter()
+                .find(|(candidate, _)| *candidate == wanted)
+                .map(|(_, aggregate)| aggregate.clone())
+                .expect("every phase is reported")
+        };
+
+        let backpressure = phase(LocalPhase::ApplyBackpressure);
+        assert!(
+            backpressure.samples > 0,
+            "every queue push is timed — this reads 0 if the span is removed"
+        );
+        // The binding half. With FILES payloads at `delay` each, one sink
+        // worker, and a queue only DEFAULT_PAYLOAD_PREFETCH deep, the diff
+        // loop must block for roughly (FILES - depth) * delay. Assert a
+        // conservative fraction of that so the guard is decisive without
+        // being timing-flaky: anything at or below one delay means the queue
+        // never actually backed up and the fixture stopped testing the
+        // defect.
+        let blocked_pushes = (FILES - DEFAULT_PAYLOAD_PREFETCH) as u64;
+        let expected_floor = delay.as_nanos() as u64 * blocked_pushes / 2;
+        assert!(
+            backpressure.total_ns >= expected_floor,
+            "a slow sink must cost measurable APPLY_BACKPRESSURE: got {} ns \
+             across {} samples, expected at least {} ns",
+            backpressure.total_ns,
+            backpressure.samples,
+            expected_floor
+        );
+    }
+
     /// A source tree with one file whose destination position is blocked
     /// by a directory — the portable way to fail exactly one file's write.
     /// Both files are sized past the planner's 1 MiB small-file cut so each
