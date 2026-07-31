@@ -1583,6 +1583,56 @@ mod metadata_repair {
     }
 }
 
+/// The destination diff runs its per-file work in parallel across a chunk
+/// (ls-1 fix). Parallelism is where ordering and partial-result bugs hide,
+/// so pin both: a workload spanning many chunks where only a scattered
+/// subset needs transferring must land exactly that subset, and nothing
+/// else, regardless of thread scheduling.
+#[tokio::test]
+async fn a_parallel_diff_selects_exactly_the_changed_files() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+
+    // Several chunks' worth (the diff chunks at 128).
+    const FILES: usize = 500;
+    for idx in 0..FILES {
+        fs::write(src.join(format!("f{idx:04}.txt")), format!("v1-{idx}"))?;
+    }
+    let first = run_local_session(&src, &dest, options()).await?;
+    assert_eq!(first.copied_files, FILES);
+
+    // Change a scattered subset, spanning chunk boundaries and including
+    // the first and last entries.
+    let changed: Vec<usize> = vec![0, 1, 127, 128, 129, 255, 256, 300, 498, 499];
+    for idx in &changed {
+        let path = src.join(format!("f{idx:04}.txt"));
+        fs::write(&path, format!("v2-{idx}-longer-content"))?;
+    }
+
+    let second = run_local_session(&src, &dest, options()).await?;
+    assert_eq!(
+        second.copied_files,
+        changed.len(),
+        "exactly the changed files transfer — no more (a parallel diff that \
+         dropped or duplicated verdicts would miss this)"
+    );
+    for idx in 0..FILES {
+        let expected = if changed.contains(&idx) {
+            format!("v2-{idx}-longer-content")
+        } else {
+            format!("v1-{idx}")
+        };
+        assert_eq!(
+            fs::read_to_string(dest.join(format!("f{idx:04}.txt")))?,
+            expected,
+            "f{idx:04} has the wrong content after a parallel diff"
+        );
+    }
+    Ok(())
+}
+
 /// ls-1 step (0): the wall-clock breakdown, pinned end to end on a real
 /// local session. `docs/plan/LOCAL_SMALL_FILE_PATH.md`.
 mod phase_breakdown {

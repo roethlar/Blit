@@ -35,9 +35,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Handoff — 2026-07-31
 - Done: pfc-1..6 + clp-1..2 landed and reviewed; D-2026-07-31-4 makes local
   speed priority-1; ls-1 step (0) instrument landed but its review FAILED.
-- Next: step (0) is RUN and says COMPARE owns ~100% of the wall clock;
-  attribute INSIDE compare before fixing. Round-3 review of the ls-0 +
-  cr-ls1-3/-4 range still owed. pfc Shipped is the owner's.
+- Next: compare is attributed and parallelised (1.34× measured), but the SMB
+  metadata path saturates — round-trip elimination is the real lever and
+  needs a scoped slice. Round-3 review owed. pfc Shipped is the owner's.
 
 ## Now (active work)
 
@@ -74,25 +74,24 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    ruled it "should have been resolved before this was declared
    release-worthy." Recorded 2026-07-13, shipped in 0.1.1 anyway under
    D-2026-07-13-2's BEHIND sequencing, whose blockers are both now gone.
-   **ls-1 step (0) IS RUN — COMPARE owns the wall clock**
-   (`docs/bench/ls1-phase-2026-07-31/`). A converged dry run of the owner's
-   real tree (46,041 files, `D:\Apps` → SMB `H:\apps`) took 273.57 s,
-   reproducing their 283.92 s no-op: COMPARE 273.51 s (100%, ~5.9 ms/file),
-   ENUMERATE 2.99 s (1.1%), apply side all ZERO. **This falsifies L1–L4 for
-   this complaint** — every one is an apply-path hypothesis and apply is
-   zero here; a bigger worker count would not have moved this number.
-   Single-worker apply stays a real defect, but it is not why a converged
-   mirror takes 4.5 minutes. Next: sub-phase attribution INSIDE compare
-   (SMB round-trip vs Windows metadata enumeration vs blit's own per-file
-   work; the diff is also chunk-serial) before any fix is attempted.
-   **`ls-1` is a hard measurement gate — no fix code before it lands.** The
-   instrument's review history (r1 FAILED `guard_confirmed: false` → 2
-   findings fixed → r2 `guard_confirmed: true`, both verified-closed, + 2
-   new MEDIUMs cr-ls1-3/-4 also fixed; **round 3 owed**) is in `REVIEW.md`
-   and `.review/findings/cr-ls1-*.md`; the r1 records had falsely claimed
-   both subtractions were guard-proven, corrected there. **`ls-0` LANDED**:
-   the summary separates copied from repaired files and labels the rate as
-   a whole-run average. NOT the closed P1 defect (D-2026-07-22-2).
+   **ls-1 step (0) IS RUN and attributed** — full evidence and caveats in
+   `docs/bench/ls1-phase-2026-07-31/`. A converged dry run of the owner's
+   real tree (46,041 files → SMB) reproduced their no-op at 273.57 s with
+   **COMPARE at 100% of wall** and the apply side at ZERO, which
+   **falsifies L1–L4 for this complaint** (all four are apply-path). Inside
+   compare: metadata read 62.1% (3.65 ms/file), stat 18.1%.
+   **The diff now runs per-file work in parallel — 1.34× on SMB, 1.36× on
+   local NVMe, no regression.** **The bigger result is negative: 26×
+   concurrency bought 1.34×** because the SMB metadata path SATURATES, so
+   the binding constraint is the NUMBER of round trips per file, not their
+   order. Next lever is round-trip elimination (directory-level enumeration,
+   ~1 op/dir vs 2 ops/file) — a scoped slice, since named-stream verdict
+   correctness (rel-4/pfc-6) must survive it.
+   The instrument's review history (r1 FAILED → fixed → r2
+   `guard_confirmed: true` + 2 new MEDIUMs also fixed; **round 3 owed**) is
+   in `REVIEW.md` and `.review/findings/cr-ls1-*.md`. **`ls-0` LANDED**: the
+   summary separates copied from repaired files and labels the rate as a
+   whole-run average. NOT the closed P1 defect (D-2026-07-22-2).
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13; any external review requires exact owner approval under
    D-2026-07-23-7. **otp-1 … otp-12c are all `[x]`** — closed-slice record

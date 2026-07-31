@@ -56,6 +56,17 @@ pub enum LocalPhase {
     /// Destination-side diff of a manifest chunk against the filesystem,
     /// excluding the attribute repairs it may trigger.
     Compare,
+    /// The `std::fs::metadata` stat of one destination file inside the diff.
+    /// Sub-phase of [`LocalPhase::Compare`], reported alongside it rather
+    /// than subtracted from it — step (0) showed COMPARE owning ~100% of a
+    /// converged run's wall clock, so the next question is which of its own
+    /// per-file operations that is.
+    CompareStat,
+    /// Reading the destination's Windows metadata (durable attributes plus
+    /// named-stream enumeration) to judge metadata convergence. Only runs
+    /// when size/mtime already matched — which on a CONVERGED tree is every
+    /// single file, so it is paid 46,041 times in the owner's case.
+    CompareMetadata,
     /// pfc-6 in-place attribute repair performed during the diff.
     AttributeRepair,
     /// Turning diff verdicts into payloads (planner + shard assembly).
@@ -87,10 +98,12 @@ pub enum LocalPhase {
 impl LocalPhase {
     /// Every phase, in the order a session encounters them. Fixed so the
     /// report's field order is stable across runs and diffable.
-    pub const ALL: [LocalPhase; 8] = [
+    pub const ALL: [LocalPhase; 10] = [
         LocalPhase::Enumerate,
         LocalPhase::EnumerateBackpressure,
         LocalPhase::Compare,
+        LocalPhase::CompareStat,
+        LocalPhase::CompareMetadata,
         LocalPhase::AttributeRepair,
         LocalPhase::Plan,
         LocalPhase::ApplyBackpressure,
@@ -103,11 +116,13 @@ impl LocalPhase {
             LocalPhase::Enumerate => 0,
             LocalPhase::EnumerateBackpressure => 1,
             LocalPhase::Compare => 2,
-            LocalPhase::AttributeRepair => 3,
-            LocalPhase::Plan => 4,
-            LocalPhase::ApplyBackpressure => 5,
-            LocalPhase::Apply => 6,
-            LocalPhase::Delete => 7,
+            LocalPhase::CompareStat => 3,
+            LocalPhase::CompareMetadata => 4,
+            LocalPhase::AttributeRepair => 5,
+            LocalPhase::Plan => 6,
+            LocalPhase::ApplyBackpressure => 7,
+            LocalPhase::Apply => 8,
+            LocalPhase::Delete => 9,
         }
     }
 }
@@ -175,7 +190,7 @@ type ReportEmitter = dyn Fn(LocalPhaseReport) + Send + Sync + 'static;
 
 struct ProbeContext {
     run_id: Arc<str>,
-    phases: [AtomicPhase; 8],
+    phases: [AtomicPhase; 10],
     emit: Arc<ReportEmitter>,
     emitted: OnceLock<()>,
 }

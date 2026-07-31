@@ -5217,26 +5217,48 @@ async fn diff_chunk_verdicts(
     // async control loop.
     let repair = Arc::clone(repair);
     tokio::task::spawn_blocking(move || -> Result<Vec<(FileHeader, bool)>> {
-        let mut needed = Vec::new();
-        for header in chunk {
-            if abort.load(Ordering::Acquire) {
-                eyre::bail!("destination diff aborted: session ended");
-            }
-            match destination_needs(
-                &header,
-                &dst_root_owned,
-                canonical.as_deref(),
-                &opts,
-                &abort,
-                &repair,
-            )? {
-                NeedVerdict::Skip => {}
-                NeedVerdict::Transfer { resume_eligible } => {
-                    needed.push((header, resume_eligible));
+        use rayon::prelude::*;
+
+        // ls-1 fix: the per-file diff runs in PARALLEL across the chunk.
+        //
+        // Measured on the owner's tree (`docs/bench/ls1-phase-2026-07-31/`):
+        // a converged 46,041-file run spent 100% of its 273 s wall clock in
+        // this function, of which 62% was the destination metadata read
+        // (3.65 ms/file) and 18% the stat (1.06 ms/file). Both are blocking
+        // round trips to an SMB server, and they were being issued strictly
+        // one after another — roughly 138,000 serial round trips. The work
+        // is latency-bound, not CPU-bound or bandwidth-bound, which is
+        // exactly the shape that parallelises.
+        //
+        // Ordering is preserved: `map` over an indexed parallel iterator
+        // then `collect` keeps chunk order, so the need list a source sees
+        // does not depend on thread scheduling. Errors keep first-error-wins
+        // via `Result` collection. Safe to run concurrently because each
+        // iteration touches one distinct destination path — the shared state
+        // it does touch (the abort flag, the repair counter, the phase
+        // probe) is atomics only.
+        let verdicts: Vec<Option<(FileHeader, bool)>> = chunk
+            .into_par_iter()
+            .map(|header| -> Result<Option<(FileHeader, bool)>> {
+                if abort.load(Ordering::Acquire) {
+                    eyre::bail!("destination diff aborted: session ended");
                 }
-            }
-        }
-        Ok(needed)
+                match destination_needs(
+                    &header,
+                    &dst_root_owned,
+                    canonical.as_deref(),
+                    &opts,
+                    &abort,
+                    &repair,
+                )? {
+                    NeedVerdict::Skip => Ok(None),
+                    NeedVerdict::Transfer { resume_eligible } => {
+                        Ok(Some((header, resume_eligible)))
+                    }
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(verdicts.into_iter().flatten().collect())
     })
     .await
     .map_err(|err| eyre::eyre!("destination diff task panicked: {err}"))?
@@ -5314,7 +5336,18 @@ fn destination_needs(
     // touched and then rejected later by the sink.
     crate::windows_metadata::validate_destination_support(header.windows_metadata.as_ref())?;
 
-    let target = match std::fs::metadata(&dst) {
+    // ls-1 sub-attribution: on a converged tree this stat and the metadata
+    // read below are the ONLY destination I/O the diff performs, and step
+    // (0) put ~100% of the wall clock in COMPARE. Timing them separately is
+    // what says whether the cost is one SMB round trip per file or three.
+    let stat_span = repair.phase_probe.is_enabled().then(Instant::now);
+    let stat_result = std::fs::metadata(&dst);
+    if let Some(started) = stat_span {
+        repair
+            .phase_probe
+            .record(LocalPhase::CompareStat, started.elapsed());
+    }
+    let target = match stat_result {
         Ok(meta) if meta.is_file() => {
             let mtime = match meta.modified() {
                 Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
@@ -5358,7 +5391,21 @@ fn destination_needs(
     );
     let metadata = match status {
         FileStatus::Unchanged => {
-            crate::windows_metadata::destination_verdict(&dst, header.windows_metadata.as_ref())?
+            // Reached for EVERY file on a converged tree, which is the
+            // owner's case: size and mtime match, so the only remaining
+            // question is metadata, and answering it costs attribute +
+            // named-stream enumeration on the destination.
+            let span = repair.phase_probe.is_enabled().then(Instant::now);
+            let verdict = crate::windows_metadata::destination_verdict(
+                &dst,
+                header.windows_metadata.as_ref(),
+            );
+            if let Some(started) = span {
+                repair
+                    .phase_probe
+                    .record(LocalPhase::CompareMetadata, started.elapsed());
+            }
+            verdict?
         }
         _ => DestinationMetadataVerdict::Converged,
     };
