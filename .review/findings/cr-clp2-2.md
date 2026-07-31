@@ -4,7 +4,7 @@
 the drain task; on a current-thread runtime that stalls transfer futures
 and timers. Also a direct violation of the repo's no-blocking-in-async
 style law.
-**Status**: Open
+**Status**: In progress — fixed, awaiting per-finding reviewer verdict
 **Branch**: — (default-branch mode)
 **Commit**: (filled at landing)
 
@@ -54,3 +54,5 @@ call from async context.
 
 ## Reviewer comments
 (pending per-finding verification)
+
+As built: `ThreadedRowOutput` (unbounded std mpsc sender) is the only handle the async side holds; a dedicated writer thread runs `row_writer_loop` applying messages/lines to the real ProgressBar; the log-redirect sink and the drain task share the one channel so ordering is production order; the initial row message also rides the channel; `finish` drops the redirect (closing the last sender), joins the writer off-thread bounded by the grace, then clears the bar. Guard `the_writer_loop_applies_queued_writes_in_order` FAILED red with the Line arm dropped, green restored. The no-blocking property is structural: the async side contains only channel sends (stated per the playbook's untestable-property clause).

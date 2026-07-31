@@ -386,6 +386,45 @@ fn row_line_sink<O: RowOutput>(output: O) -> blit_core::stderr_log::LineSink {
     std::sync::Arc::new(move |line: &str| output.println(&sanitize_row_text(line)))
 }
 
+/// What the writer thread applies to the terminal. One ordered channel
+/// carries both kinds so `-v` lines and repaints interleave exactly as
+/// produced.
+enum RowWrite {
+    Message(String),
+    Line(String),
+}
+
+/// Non-blocking handle the async side holds (cr-clp2-2): terminal I/O
+/// — indicatif's internal lock plus the stderr write — lives on the
+/// dedicated writer thread, so the drain task and the log-redirect
+/// closure only ever perform an unbounded channel send.
+#[derive(Clone)]
+struct ThreadedRowOutput(std::sync::mpsc::Sender<RowWrite>);
+
+impl RowOutput for ThreadedRowOutput {
+    fn set_message(&self, message: String) {
+        // A send after the writer exited has nowhere to draw; dropping
+        // it is the degraded path, never a panic on shutdown races.
+        let _ = self.0.send(RowWrite::Message(message));
+    }
+
+    fn println(&self, line: &str) {
+        let _ = self.0.send(RowWrite::Line(line.to_string()));
+    }
+}
+
+/// The writer thread's body: apply queued writes until every sender is
+/// gone. Generic over the output so the ordering contract is testable
+/// on a recorder.
+fn row_writer_loop<O: RowOutput>(rx: std::sync::mpsc::Receiver<RowWrite>, output: O) {
+    for write in rx {
+        match write {
+            RowWrite::Message(message) => output.set_message(message),
+            RowWrite::Line(line) => output.println(&line),
+        }
+    }
+}
+
 impl RowOutput for ProgressBar {
     fn set_message(&self, message: String) {
         ProgressBar::set_message(self, message);
@@ -468,6 +507,7 @@ async fn join_drained(consumer: JoinHandle<()>, grace: Duration) -> bool {
 struct LiveProgressRow {
     bar: ProgressBar,
     consumer: JoinHandle<()>,
+    writer: std::thread::JoinHandle<()>,
     _log_redirect: blit_core::stderr_log::LineRedirect,
 }
 
@@ -506,29 +546,40 @@ impl LiveProgressRow {
                 .tick_strings(&["-", "\\", "|", "/"]),
         );
         bar.enable_steady_tick(Duration::from_millis(120));
-        // Until the first event lands the row still says what is running.
-        bar.set_message(format!(
-            "{} {} → {}",
-            if mirror { "Mirroring" } else { "Copying" },
-            src_path.display(),
-            dest_path.display()
-        ));
 
         // clp-2 residue (a): the `log` backend writes raw stderr, and a
         // library warn (an unreadable source entry, a contained write
         // failure) scrolls the row exactly as the old enumeration line
         // did. Route it through the row for as long as the row lives;
         // the guard restores the raw backend even on the error path.
-        let log_redirect = blit_core::stderr_log::redirect_lines(row_line_sink(bar.clone()));
+        // cr-clp2-2: terminal I/O rides a dedicated writer thread; the
+        // async side (drain task, log-redirect closure) only performs
+        // unbounded channel sends. One channel keeps `-v` lines and
+        // repaints in production order.
+        let (write_tx, write_rx) = std::sync::mpsc::channel::<RowWrite>();
+        let writer = std::thread::spawn({
+            let bar = bar.clone();
+            move || row_writer_loop(write_rx, bar)
+        });
+        let threaded = ThreadedRowOutput(write_tx);
+        // Until the first event lands the row still says what is running.
+        threaded.set_message(format!(
+            "{} {} → {}",
+            if mirror { "Mirroring" } else { "Copying" },
+            src_path.display(),
+            dest_path.display()
+        ));
+        let log_redirect = blit_core::stderr_log::redirect_lines(row_line_sink(threaded.clone()));
 
         let (tx, rx) = mpsc::unbounded_channel::<ProgressEvent>();
-        let consumer = tokio::spawn(drain_progress_lane(rx, bar.clone(), verbose));
+        let consumer = tokio::spawn(drain_progress_lane(rx, threaded, verbose));
 
         Some((
             RemoteTransferProgress::new(tx),
             Self {
                 bar,
                 consumer,
+                writer,
                 _log_redirect: log_redirect,
             },
         ))
@@ -545,8 +596,26 @@ impl LiveProgressRow {
     /// path, where a blocking enumeration task can survive holding a
     /// sink clone that keeps the lane open.
     async fn finish(self, session_succeeded: bool) {
-        drain_for_outcome(self.consumer, session_succeeded, ROW_DRAIN_GRACE).await;
-        self.bar.finish_and_clear();
+        let Self {
+            bar,
+            consumer,
+            writer,
+            _log_redirect: log_redirect,
+        } = self;
+        drain_for_outcome(consumer, session_succeeded, ROW_DRAIN_GRACE).await;
+        // Restore the backend now: its sender must drop for the writer
+        // thread to see the channel close.
+        drop(log_redirect);
+        // The writer applies what is queued and ends. Join off the
+        // async thread; a wedged terminal degrades to detaching it.
+        let _ = tokio::time::timeout(
+            ROW_DRAIN_GRACE,
+            tokio::task::spawn_blocking(move || {
+                let _ = writer.join();
+            }),
+        )
+        .await;
+        bar.finish_and_clear();
     }
 }
 
@@ -1103,6 +1172,10 @@ mod live_row_loop_tests {
         fn lines(&self) -> Vec<String> {
             self.0.lock().expect("recorder poisoned").lines.clone()
         }
+
+        fn messages(&self) -> Vec<String> {
+            self.0.lock().expect("recorder poisoned").messages.clone()
+        }
     }
 
     impl RowOutput for Recorder {
@@ -1135,6 +1208,26 @@ mod live_row_loop_tests {
             vec!["blit: warn: scan skipping 'x' (denied)".to_string()],
             "the redirect sink must hand backend lines to the row output"
         );
+    }
+
+    /// cr-clp2-2: the writer thread applies every queued write, both
+    /// kinds, in production order, and ends when the senders drop.
+    #[test]
+    fn the_writer_loop_applies_queued_writes_in_order() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let recorder = Recorder::default();
+        let out = ThreadedRowOutput(tx);
+        out.set_message("m1".into());
+        out.println("l1");
+        out.set_message("m2".into());
+        drop(out);
+        row_writer_loop(rx, recorder.clone());
+        assert_eq!(
+            recorder.messages(),
+            vec!["m1".to_string(), "m2".to_string()],
+            "messages arrive in order"
+        );
+        assert_eq!(recorder.lines(), vec!["l1".to_string()], "lines arrive");
     }
 
     /// cr-clp2-1: a routed warn interpolating a control-byte filename
