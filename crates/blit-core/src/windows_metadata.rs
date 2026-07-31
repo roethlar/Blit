@@ -298,15 +298,33 @@ pub enum DestinationMetadataVerdict {
     Streams,
 }
 
-pub fn destination_verdict(
+/// Judge whether a destination file's Windows metadata converges with the
+/// manifest, reusing an attribute mask the caller may ALREADY have obtained
+/// from the destination.
+///
+/// ls-1: the destination diff stats every file immediately before asking for
+/// this verdict, and on Windows `std::fs::Metadata` already carries the
+/// attribute DWORD. Reading it again with `GetFileAttributesW` is a second
+/// round trip for a value we hold — measured at ~1 ms of the ~4.7 ms per-file
+/// destination cost on the owner's SMB share
+/// (`docs/bench/ls1-phase-2026-07-31/`), paid 46,041 times on a converged
+/// mirror.
+///
+/// Passing `Some` is also strictly MORE consistent than passing `None`: the
+/// attributes and the size/mtime then come from one observation of the file
+/// instead of two, closing a TOCTOU window rather than opening one. `None`
+/// keeps the original read-it-here behaviour for callers with no stat in
+/// hand.
+pub fn destination_verdict_using(
     path: &Path,
     expected: Option<&WindowsFileMetadata>,
+    known_attributes: Option<u32>,
 ) -> Result<DestinationMetadataVerdict> {
     validate_destination_support(expected)?;
     let Some(expected) = expected else {
         return Ok(DestinationMetadataVerdict::Converged);
     };
-    destination_verdict_impl(path, expected)
+    destination_verdict_impl(path, expected, known_attributes)
 }
 
 #[cfg(any(windows, test))]
@@ -352,14 +370,18 @@ fn destination_metadata_verdict_with(
 fn destination_verdict_impl(
     path: &Path,
     expected: &WindowsFileMetadata,
+    known_attributes: Option<u32>,
 ) -> Result<DestinationMetadataVerdict> {
-    destination_metadata_verdict_with(path, expected, || read_windows_metadata(path, false))
+    destination_metadata_verdict_with(path, expected, || {
+        read_windows_metadata_using(path, false, known_attributes)
+    })
 }
 
 #[cfg(not(windows))]
 fn destination_verdict_impl(
     path: &Path,
     _expected: &WindowsFileMetadata,
+    _known_attributes: Option<u32>,
 ) -> Result<DestinationMetadataVerdict> {
     bail!(
         "destination {} cannot preserve Windows file metadata on this platform",
@@ -496,7 +518,22 @@ mod windows_io {
         path: &Path,
         include_content: bool,
     ) -> Result<WindowsFileMetadata> {
-        let attributes = file_attributes(path)? & WINDOWS_PRESERVED_ATTRIBUTE_MASK;
+        read_windows_metadata_using(path, include_content, None)
+    }
+
+    /// ls-1: `known_attributes` lets a caller that already stat'ed the file
+    /// skip the `GetFileAttributesW` round trip. The mask applied here is the
+    /// same one `file_attributes` applies, so a supplied value is equivalent
+    /// to a freshly read one — it just costs nothing.
+    pub(super) fn read_windows_metadata_using(
+        path: &Path,
+        include_content: bool,
+        known_attributes: Option<u32>,
+    ) -> Result<WindowsFileMetadata> {
+        let attributes = match known_attributes {
+            Some(raw) => raw & WINDOWS_PRESERVED_ATTRIBUTE_MASK,
+            None => file_attributes(path)? & WINDOWS_PRESERVED_ATTRIBUTE_MASK,
+        };
         let mut named_streams = enumerate_named_streams(path, include_content)?;
         named_streams.sort_by(|left, right| {
             left.name
@@ -783,7 +820,8 @@ mod windows_io {
 
 #[cfg(windows)]
 use windows_io::{
-    apply_attributes_impl, prepare_destination_impl, read_windows_metadata, replace_streams_impl,
+    apply_attributes_impl, prepare_destination_impl, read_windows_metadata,
+    read_windows_metadata_using, replace_streams_impl,
 };
 
 #[cfg(test)]
@@ -1133,8 +1171,85 @@ mod tests {
         repair_attributes(&destination, Some(&manifest))
             .expect("the diff's manifest descriptor is a valid repair request");
         assert_eq!(
-            destination_verdict(&destination, Some(&manifest)).unwrap(),
+            destination_verdict_using(&destination, Some(&manifest), None).unwrap(),
             DestinationMetadataVerdict::Converged
+        );
+    }
+
+    #[cfg(windows)]
+    fn set_raw_attributes(path: &Path, attributes: u32) {
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_FLAGS_AND_ATTRIBUTES};
+        let wide: Vec<u16> = {
+            use std::os::windows::ffi::OsStrExt;
+            path.as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        };
+        unsafe { SetFileAttributesW(PCWSTR(wide.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(attributes)) }
+            .expect("setting fixture attributes");
+    }
+
+    /// ls-1: supplying the attribute mask from a stat the caller already did
+    /// must produce the SAME verdict as reading it here. That equivalence is
+    /// the whole justification for skipping a destination round trip, so it
+    /// is pinned across all four quadrants — converged and diverged, supplied
+    /// and read.
+    #[cfg(windows)]
+    #[test]
+    fn a_supplied_attribute_mask_matches_reading_it() {
+        use std::os::windows::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let destination = dir.path().join("file.bin");
+        std::fs::write(&destination, b"payload").expect("write");
+
+        // Set a bit OUTSIDE `WINDOWS_PRESERVED_ATTRIBUTE_MASK`
+        // (NOT_CONTENT_INDEXED, 0x2000). Without it a plain temp file's raw
+        // attributes already sit inside the mask, masking is a no-op, and
+        // this test cannot tell a masked path from an unmasked one — which
+        // is exactly how it passed on its first draft while guarding
+        // nothing.
+        set_raw_attributes(&destination, 0x20 | 0x2000);
+
+        let read_back = std::fs::metadata(&destination).expect("stat");
+        let supplied = read_back.file_attributes();
+        assert_ne!(
+            supplied & !WINDOWS_PRESERVED_ATTRIBUTE_MASK,
+            0,
+            "the fixture must carry a non-preserved bit or it guards nothing"
+        );
+
+        // Quadrant 1+2: a manifest whose attributes match what is on disk.
+        let converged = WindowsFileMetadata {
+            file_attributes: supplied & WINDOWS_PRESERVED_ATTRIBUTE_MASK,
+            named_streams: Vec::new(),
+        };
+        assert_eq!(
+            destination_verdict_using(&destination, Some(&converged), None).unwrap(),
+            destination_verdict_using(&destination, Some(&converged), Some(supplied)).unwrap(),
+            "supplied and read must agree on a converged file"
+        );
+        assert_eq!(
+            destination_verdict_using(&destination, Some(&converged), Some(supplied)).unwrap(),
+            DestinationMetadataVerdict::Converged
+        );
+
+        // Quadrant 3+4: a manifest demanding a bit the destination lacks.
+        let diverged = WindowsFileMetadata {
+            file_attributes: (supplied & WINDOWS_PRESERVED_ATTRIBUTE_MASK) | 0x01, // READONLY
+            named_streams: Vec::new(),
+        };
+        assert_eq!(
+            destination_verdict_using(&destination, Some(&diverged), None).unwrap(),
+            destination_verdict_using(&destination, Some(&diverged), Some(supplied)).unwrap(),
+            "supplied and read must agree on a diverged file too — otherwise \
+             the round-trip skip would silently change verdicts"
+        );
+        assert_eq!(
+            destination_verdict_using(&destination, Some(&diverged), Some(supplied)).unwrap(),
+            DestinationMetadataVerdict::AttributesOnly
         );
     }
 

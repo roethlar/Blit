@@ -25,7 +25,47 @@ The remaining ~54 s of COMPARE is the rest of the per-file work (path-safety
 join, cross-platform support validation, status computation) plus chunk
 overhead.
 
-## The fix that worked, and how little it bought
+## OUTCOME (read this before the parallelism sections below)
+
+The parallelisation described below was **reverted** after round-3 review
+(cr-ls1-5..8) found it broke the compare-span subtraction, ran blocking
+destination I/O on rayon's global pool shared with the apply path and daemon
+sessions, made error selection and concurrent attribute repair
+schedule-dependent, and shipped with a vacuous guard. It bought 1.34× and is
+not worth that exposure.
+
+**What shipped instead is round-trip elimination**, which is what the
+measurement actually pointed at:
+
+| build | wall | vs baseline |
+|---|---:|---:|
+| baseline, sequential | 273.57 s | — |
+| **attribute reuse, sequential (SHIPPED)** | **221.59 s** | **1.23×** |
+| parallel diff (reverted) | 203.86 s | 1.34× |
+
+`destination_needs` stats each destination file and then asked the metadata
+verdict to re-read the same file's attributes via `GetFileAttributesW`. On
+Windows the stat already carries the attribute DWORD, so that was a wasted
+round trip. Removing it:
+
+| sub-phase | before | after |
+|---|---:|---:|
+| COMPARE_METADATA | 3.653 ms/file | **2.556 ms/file** |
+| COMPARE_STAT | 1.064 ms/file | 1.081 ms/file |
+
+The arithmetic reconciles: 46,041 × 1.097 ms saved = 50.5 s, and the wall
+clock fell 51.98 s. Sequential, no pool contention, and strictly *more*
+consistent than before — attributes and size/mtime now come from one
+observation instead of two.
+
+**COMPARE_METADATA is still the largest single term at 2.556 ms/file**, and
+it is now essentially pure named-stream (`FindFirstStreamW`) enumeration.
+That is the next target, and unlike the attribute read it cannot simply be
+deleted: detecting a stray destination stream is a correctness requirement
+from rel-4. The stat (1.081 ms/file) is separately eliminable via
+directory-level enumeration.
+
+## The fix that did not work, and how little it bought
 
 The diff was a plain sequential `for header in chunk` inside one
 `spawn_blocking` — roughly 138,000 blocking round trips issued strictly one

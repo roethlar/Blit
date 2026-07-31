@@ -35,9 +35,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Handoff — 2026-07-31
 - Done: pfc-1..6 + clp-1..2 landed and reviewed; D-2026-07-31-4 makes local
   speed priority-1; ls-1 step (0) instrument landed but its review FAILED.
-- Next: compare is attributed and parallelised (1.34× measured), but the SMB
-  metadata path saturates — round-trip elimination is the real lever and
-  needs a scoped slice. Round-3 review owed. pfc Shipped is the owner's.
+- Next: 1.23× shipped via round-trip elimination; parallel diff reverted on
+  r3 findings. Next levers are named-stream enumeration (correctness-bound)
+  and directory-level stat. r4 review owed. pfc Shipped is the owner's.
 
 ## Now (active work)
 
@@ -80,13 +80,15 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    **COMPARE at 100% of wall** and the apply side at ZERO, which
    **falsifies L1–L4 for this complaint** (all four are apply-path). Inside
    compare: metadata read 62.1% (3.65 ms/file), stat 18.1%.
-   **The diff now runs per-file work in parallel — 1.34× on SMB, 1.36× on
-   local NVMe, no regression.** **The bigger result is negative: 26×
-   concurrency bought 1.34×** because the SMB metadata path SATURATES, so
-   the binding constraint is the NUMBER of round trips per file, not their
-   order. Next lever is round-trip elimination (directory-level enumeration,
-   ~1 op/dir vs 2 ops/file) — a scoped slice, since named-stream verdict
-   correctness (rel-4/pfc-6) must survive it.
+   **SHIPPED: round-trip elimination — 273.57 s → 221.59 s (1.23×)**, from
+   reusing the stat's attribute DWORD instead of re-reading it with
+   `GetFileAttributesW` (metadata 3.653 → 2.556 ms/file). Sequential, no pool
+   contention, more TOCTOU-consistent. **A parallel diff was tried, REVERTED**:
+   26× concurrency bought only 1.34× (the SMB metadata path saturates) and
+   r3 found 4 MEDIUM defects incl. blocking I/O on rayon's global pool shared
+   with apply and daemon sessions (cr-ls1-5..8). Remaining: named-stream
+   enumeration 2.556 ms/file (correctness-bound, rel-4), stat 1.081 ms/file
+   (eliminable via directory-level enumeration).
    The instrument's review history (r1 FAILED → fixed → r2
    `guard_confirmed: true` + 2 new MEDIUMs also fixed; **round 3 owed**) is
    in `REVIEW.md` and `.review/findings/cr-ls1-*.md`. **`ls-0` LANDED**: the

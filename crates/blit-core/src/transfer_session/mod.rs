@@ -5216,49 +5216,49 @@ async fn diff_chunk_verdicts(
     // rides this blocking chunk with the stats and hashes — never the
     // async control loop.
     let repair = Arc::clone(repair);
+    // The per-file diff is SEQUENTIAL, deliberately.
+    //
+    // ls-1 tried parallelising it across the chunk and reverted. Two reasons,
+    // and the measurement is the weaker one:
+    //
+    // 1. It barely worked. 26× effective concurrency bought 1.34× throughput
+    //    on the owner's SMB share, because per-call latency inflated 24×
+    //    under load (`docs/bench/ls1-phase-2026-07-31/`). The destination
+    //    metadata path saturates, so the binding constraint is the NUMBER of
+    //    round trips per file, not the order they are issued in.
+    // 2. It was unsafe in three ways the review caught (cr-ls1-5..7): it ran
+    //    blocking destination I/O on rayon's GLOBAL pool, which the tar-shard
+    //    apply path and concurrent daemon sessions also use, so a slow diff
+    //    could stall unrelated transfers; rayon does not deterministically
+    //    surface the first of several errors; and because duplicate manifest
+    //    paths are deduplicated AFTER the diff, two closures could repair the
+    //    same destination file at once.
+    //
+    // Round-trip elimination is the lever instead — see `destination_needs`,
+    // which now answers the attribute half of the metadata verdict from the
+    // stat it already performed. If parallelism is revisited it needs its own
+    // bounded destination-I/O executor, not the shared CPU pool.
     tokio::task::spawn_blocking(move || -> Result<Vec<(FileHeader, bool)>> {
-        use rayon::prelude::*;
-
-        // ls-1 fix: the per-file diff runs in PARALLEL across the chunk.
-        //
-        // Measured on the owner's tree (`docs/bench/ls1-phase-2026-07-31/`):
-        // a converged 46,041-file run spent 100% of its 273 s wall clock in
-        // this function, of which 62% was the destination metadata read
-        // (3.65 ms/file) and 18% the stat (1.06 ms/file). Both are blocking
-        // round trips to an SMB server, and they were being issued strictly
-        // one after another — roughly 138,000 serial round trips. The work
-        // is latency-bound, not CPU-bound or bandwidth-bound, which is
-        // exactly the shape that parallelises.
-        //
-        // Ordering is preserved: `map` over an indexed parallel iterator
-        // then `collect` keeps chunk order, so the need list a source sees
-        // does not depend on thread scheduling. Errors keep first-error-wins
-        // via `Result` collection. Safe to run concurrently because each
-        // iteration touches one distinct destination path — the shared state
-        // it does touch (the abort flag, the repair counter, the phase
-        // probe) is atomics only.
-        let verdicts: Vec<Option<(FileHeader, bool)>> = chunk
-            .into_par_iter()
-            .map(|header| -> Result<Option<(FileHeader, bool)>> {
-                if abort.load(Ordering::Acquire) {
-                    eyre::bail!("destination diff aborted: session ended");
+        let mut needed = Vec::new();
+        for header in chunk {
+            if abort.load(Ordering::Acquire) {
+                eyre::bail!("destination diff aborted: session ended");
+            }
+            match destination_needs(
+                &header,
+                &dst_root_owned,
+                canonical.as_deref(),
+                &opts,
+                &abort,
+                &repair,
+            )? {
+                NeedVerdict::Skip => {}
+                NeedVerdict::Transfer { resume_eligible } => {
+                    needed.push((header, resume_eligible));
                 }
-                match destination_needs(
-                    &header,
-                    &dst_root_owned,
-                    canonical.as_deref(),
-                    &opts,
-                    &abort,
-                    &repair,
-                )? {
-                    NeedVerdict::Skip => Ok(None),
-                    NeedVerdict::Transfer { resume_eligible } => {
-                        Ok(Some((header, resume_eligible)))
-                    }
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(verdicts.into_iter().flatten().collect())
+            }
+        }
+        Ok(needed)
     })
     .await
     .map_err(|err| eyre::eyre!("destination diff task panicked: {err}"))?
@@ -5347,6 +5347,21 @@ fn destination_needs(
             .phase_probe
             .record(LocalPhase::CompareStat, started.elapsed());
     }
+    // ls-1: on Windows the stat above ALREADY carries the attribute DWORD, so
+    // capture it here and let the metadata verdict reuse it instead of
+    // spending a second destination round trip on `GetFileAttributesW`.
+    #[cfg(windows)]
+    let stat_attributes = {
+        use std::os::windows::fs::MetadataExt;
+        stat_result
+            .as_ref()
+            .ok()
+            .filter(|meta| meta.is_file())
+            .map(|meta| meta.file_attributes())
+    };
+    #[cfg(not(windows))]
+    let stat_attributes: Option<u32> = None;
+
     let target = match stat_result {
         Ok(meta) if meta.is_file() => {
             let mtime = match meta.modified() {
@@ -5393,12 +5408,14 @@ fn destination_needs(
         FileStatus::Unchanged => {
             // Reached for EVERY file on a converged tree, which is the
             // owner's case: size and mtime match, so the only remaining
-            // question is metadata, and answering it costs attribute +
-            // named-stream enumeration on the destination.
+            // question is metadata. ls-1: the attribute half is answered
+            // from the stat we already did, leaving only named-stream
+            // enumeration to cost a round trip.
             let span = repair.phase_probe.is_enabled().then(Instant::now);
-            let verdict = crate::windows_metadata::destination_verdict(
+            let verdict = crate::windows_metadata::destination_verdict_using(
                 &dst,
                 header.windows_metadata.as_ref(),
+                stat_attributes,
             );
             if let Some(started) = span {
                 repair

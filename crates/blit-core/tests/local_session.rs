@@ -1583,13 +1583,18 @@ mod metadata_repair {
     }
 }
 
-/// The destination diff runs its per-file work in parallel across a chunk
-/// (ls-1 fix). Parallelism is where ordering and partial-result bugs hide,
-/// so pin both: a workload spanning many chunks where only a scattered
-/// subset needs transferring must land exactly that subset, and nothing
-/// else, regardless of thread scheduling.
+/// A workload spanning many diff chunks where only a scattered subset
+/// changed must transfer exactly that subset with correct content
+/// everywhere.
+///
+/// Kept after the ls-1 parallel-diff revert, but with an honest name and
+/// claim. It was originally added AS the guard for parallelising the diff,
+/// and cr-ls1-8 proved it was not one: the reviewer swapped `into_par_iter`
+/// for `into_iter` and it stayed green. It never tested parallelism — it
+/// tests chunk-boundary selection correctness, which is worth having on its
+/// own and is what it now says it does.
 #[tokio::test]
-async fn a_parallel_diff_selects_exactly_the_changed_files() -> Result<()> {
+async fn a_multi_chunk_diff_selects_exactly_the_changed_files() -> Result<()> {
     let tmp = tempdir()?;
     let src = tmp.path().join("src");
     let dest = tmp.path().join("dest");
@@ -1615,8 +1620,7 @@ async fn a_parallel_diff_selects_exactly_the_changed_files() -> Result<()> {
     assert_eq!(
         second.copied_files,
         changed.len(),
-        "exactly the changed files transfer — no more (a parallel diff that \
-         dropped or duplicated verdicts would miss this)"
+        "exactly the changed files transfer, no more"
     );
     for idx in 0..FILES {
         let expected = if changed.contains(&idx) {
@@ -1627,7 +1631,7 @@ async fn a_parallel_diff_selects_exactly_the_changed_files() -> Result<()> {
         assert_eq!(
             fs::read_to_string(dest.join(format!("f{idx:04}.txt")))?,
             expected,
-            "f{idx:04} has the wrong content after a parallel diff"
+            "f{idx:04} has the wrong content after a multi-chunk diff"
         );
     }
     Ok(())
