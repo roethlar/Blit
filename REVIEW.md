@@ -36,6 +36,9 @@ xhigh` over each landed slice's pinned range as it lands.
 | cr-clp2-2 | Blocking terminal I/O inside the async drain task | `[x]` | MEDIUM; fixed `6f26b181` + repair `031bef89`; r1 reopened, r2 (T5 repair-delta) **accepted**, guard_confirmed=true (`.review/results/cr-clp2-2.codex.r2.json`) |
 | cr-clp2-3 | Fixed drain deadline can discard queued `-v` lines on success | `[x]` | LOW; fixed `5fbe9abb`; codex verification **accepted**, guard_confirmed=true (`.review/results/cr-clp2-3.codex.json`) |
 | cr-clp2-4 | Perf-history diagnostic byte change on sink-less runs | `[-]` | LOW; declined at intake — facade migration is the repo convention (`.review/cr-clp2-4.contested.md`) |
+| pfc-3-range | Defect hunt over `ff38f0e6..3ae5bf4d` (tar-shard containment + exact identity) | `[x]` | `3ae5bf4d` — **findings: 2, both admitted below**. Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0; capability_ok=true; SHAs pin-verified; record `.review/results/pfc-3-range.codex.json` |
+| cr-pfc3-1 | Disk-full (ENOSPC/StorageFull family) contained instead of volume-fatal | `[ ]` | HIGH; admitted; fix queued behind pfc-4's landing — same files in flight (`.review/findings/cr-pfc3-1.md`) |
+| cr-pfc3-2 | Rayon fold classifies at collect time — dead-root TOCTOU | `[ ]` | HIGH; admitted; fix queued behind pfc-4's landing (`.review/findings/cr-pfc3-2.md`) |
 
 ## Live dial tuning correction — plan and implementation review
 
