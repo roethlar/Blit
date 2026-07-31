@@ -27,6 +27,7 @@ xhigh` over each landed slice's pinned range as it lands.
 | ID | Title | Status | Commit(s) |
 |----|-------|--------|-----------|
 | pfc-1-range | Defect hunt over `0ef4cc7c..8c9a63d5` (synthesized-HIDDEN attribute tolerance) | `[x]` | `8c9a63d5` — **clean, no material issue**. Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0; capability_ok=true; SHAs pin-verified; 2026-07-31T01:54Z; record `.review/results/pfc-1-range.codex.json` |
+| pfc-2-range | Defect hunt over `4d2b888f..575e47e7` (per-file failure containment) | `[!]` | Dispatch 2026-07-31T~02:05Z **interrupted by the orchestrator shell's 600 s wall-clock budget** (worker recycled; no verdict artifact; the review child died mid-run). Not retried per D-2026-07-23-7 — redispatch with a larger budget awaits an explicit owner go. |
 
 ## Live dial tuning correction — plan and implementation review
 
