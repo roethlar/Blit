@@ -246,9 +246,34 @@ environmental/config cause is held to the same bar as a code cause.
     - The backpressure guard proves the SPLIT exists, not that the measured
       wait is correct under real contention. A slow-destination fixture
       would be needed for that.
-    - Steps (a), (b) and (c) of ls-1 are untouched. Step (0) still has to be
-      RUN on the owner's shape (large tree, SMB destination) before anything
-      is attributed.
+    - Steps (a), (b) and (c) of ls-1 are untouched.
+
+  **ls-1 step (0) RUN, 2026-07-31 — result: COMPARE owns the wall clock.**
+  Evidence: `docs/bench/ls1-phase-2026-07-31/`. A converged dry run of the
+  owner's real tree (`D:\Apps` → `H:\apps`, 46,041 files) took 273.57 s and
+  reproduced their 283.92 s no-op. COMPARE = 273.51 s (100% of wall, 360
+  chunk samples ≈ 5.9 ms per file). ENUMERATE = 2.99 s (1.1%).
+  ENUMERATE_BACKPRESSURE = 269.40 s — the source walk blocked on the bounded
+  channel waiting for the destination. PLAN, APPLY_BACKPRESSURE, APPLY,
+  DELETE all zero.
+
+  **This falsifies L1–L4 as an explanation of the owner's complaint.** All
+  four are apply-path hypotheses; the entire apply side is zero on this
+  workload. Single-worker apply stays a real defect and stays priority-1,
+  but it is NOT what makes a converged mirror take four and a half minutes,
+  and raising the worker count would not have moved this number. The
+  hypothesis set is incomplete, exactly as the cr-ls1-1 reviewer warned.
+
+  **The next question is a sub-phase question inside COMPARE**: is the
+  ~5.9 ms per file SMB round-trip latency, Windows metadata enumeration
+  (attributes + ADS), or blit's own per-file work in the diff? The diff is
+  also chunk-serial (360 chunks, one at a time), so concurrency inside the
+  compare is an obvious candidate — but it must be attributed before it is
+  attempted, on the same rule that produced this result.
+
+  Caveats carried: one run, no variance estimate; dry run performs no
+  attribute repair so the owner's 5,445-repair first run is unmeasured; the
+  copying case is unmeasured.
 - **ls-2..n** — one fix slice per CONFIRMED cause, smallest change first,
   A/B'd against the unmodified build on the same rig.
 - **ls-final** — re-run the full local matrix (`large`/`small`/`mixed`) at both

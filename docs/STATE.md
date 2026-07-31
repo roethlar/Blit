@@ -35,8 +35,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Handoff — 2026-07-31
 - Done: pfc-1..6 + clp-1..2 landed and reviewed; D-2026-07-31-4 makes local
   speed priority-1; ls-1 step (0) instrument landed but its review FAILED.
-- Next: ls-0 landed and 4 ls-1 findings fixed; round-3 review, then RUN
-  step (0) on the owner's shape. pfc Shipped is the owner's.
+- Next: step (0) is RUN and says COMPARE owns ~100% of the wall clock;
+  attribute INSIDE compare before fixing. Round-3 review of the ls-0 +
+  cr-ls1-3/-4 range still owed. pfc Shipped is the owner's.
 
 ## Now (active work)
 
@@ -73,26 +74,24 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    ruled it "should have been resolved before this was declared
    release-worthy." Recorded 2026-07-13, shipped in 0.1.1 anyway under
    D-2026-07-13-2's BEHIND sequencing, whose blockers are both now gone.
-   **The fix is not a bigger default worker count** — blit wins at 1 thread
-   and loses ~2× at 8 (1.67× vs robocopy 3.63×), so it does not convert
-   concurrency into throughput; those figures are flagged untrusted
-   (bi-stable), which is what `ls-1` exists to settle.
-   **`ls-1` is a hard measurement gate — no fix code before it lands.**
-   **ls-1 step (0) instrument landed 2026-07-31 — and its review FAILED.**
-   Default-off `LocalPhaseProbe` emits a per-session phase breakdown against
-   a wall denominator, but the `ls-1-range` codex dispatch returned
-   `guard_confirmed: false` with 2 findings, **both FIXED**: cr-ls1-1 (HIGH,
-   the queue await sat in no span so a slow sink could dominate while APPLY
-   read ~zero) and cr-ls1-2 (MEDIUM, the subtraction guard was vacuous — now
-   a `NestedSpan` with a categorical guard the reviewer's own revert reds).
-   The landing records had falsely claimed both subtractions
-   were proven; correction recorded. Round 2 returned **`guard_confirmed:
-   true`** (both verified-closed) plus 2 new MEDIUMs, **also fixed**:
-   cr-ls1-3 (the artifact bypassed clp-2's sole-stderr-writer row) and
-   cr-ls1-4 (`?` skipped span closes, so failed runs reported truncated
-   phases as fast ones — spans now close before propagation and the report
-   carries `session_failed`). Round 3 pending. **`ls-0` LANDED**: the
-   summary now separates copied from repaired files and labels the rate as
+   **ls-1 step (0) IS RUN — COMPARE owns the wall clock**
+   (`docs/bench/ls1-phase-2026-07-31/`). A converged dry run of the owner's
+   real tree (46,041 files, `D:\Apps` → SMB `H:\apps`) took 273.57 s,
+   reproducing their 283.92 s no-op: COMPARE 273.51 s (100%, ~5.9 ms/file),
+   ENUMERATE 2.99 s (1.1%), apply side all ZERO. **This falsifies L1–L4 for
+   this complaint** — every one is an apply-path hypothesis and apply is
+   zero here; a bigger worker count would not have moved this number.
+   Single-worker apply stays a real defect, but it is not why a converged
+   mirror takes 4.5 minutes. Next: sub-phase attribution INSIDE compare
+   (SMB round-trip vs Windows metadata enumeration vs blit's own per-file
+   work; the diff is also chunk-serial) before any fix is attempted.
+   **`ls-1` is a hard measurement gate — no fix code before it lands.** The
+   instrument's review history (r1 FAILED `guard_confirmed: false` → 2
+   findings fixed → r2 `guard_confirmed: true`, both verified-closed, + 2
+   new MEDIUMs cr-ls1-3/-4 also fixed; **round 3 owed**) is in `REVIEW.md`
+   and `.review/findings/cr-ls1-*.md`; the r1 records had falsely claimed
+   both subtractions were guard-proven, corrected there. **`ls-0` LANDED**:
+   the summary separates copied from repaired files and labels the rate as
    a whole-run average. NOT the closed P1 defect (D-2026-07-22-2).
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13; any external review requires exact owner approval under
