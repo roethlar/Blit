@@ -177,8 +177,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   and triage only. `docs/agent/GPT_REVIEW_LOOP.md` is historical;
   `.review/README.md` is retired as the grading mechanism (its
   `findings/`/`results/` records and the REVIEW.md index remain live).
-- Review loop: `REVIEW.md` (no open rows) + `.review/findings/` +
-  `.review/results/`.
+- Review loop: `REVIEW.md` (no open rows) + `.review/findings|results/`.
 - Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (module delete ratified
   D-2026-06-12-1, executes w8-1; **capability unparked D-2026-07-05-3** —
   post-cutover write strategy), `TUI_REWORK.md` (gated on Round 1),
