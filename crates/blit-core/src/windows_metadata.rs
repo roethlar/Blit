@@ -6,6 +6,8 @@
 //! Windows metadata instead of silently discarding it.
 
 use std::collections::HashSet;
+#[cfg(any(windows, test))]
+use std::ffi::OsStr;
 use std::path::Path;
 
 use eyre::{bail, Context, Result};
@@ -24,6 +26,31 @@ const WINDOWS_SET_FILE_ATTRIBUTES_API_MASK: u32 = 0x0000_3127;
 pub const MAX_WINDOWS_NAMED_STREAMS: usize = 64;
 pub const MAX_WINDOWS_STREAM_NAME_BYTES: usize = 1024;
 pub const MAX_WINDOWS_STREAM_BYTES_PER_FILE: u64 = 2 * 1024 * 1024;
+/// `FILE_ATTRIBUTE_HIDDEN`: the one durable bit a destination may hold without
+/// the source having asked for it. See [`attributes_converge`].
+#[cfg(any(windows, test))]
+const WINDOWS_ATTRIBUTE_HIDDEN: u32 = 0x0000_0002;
+
+/// True when `actual` equals `desired`, or when the only divergence is a
+/// destination-synthesized HIDDEN bit on a dot-named file. SMB servers running
+/// Samba's default `hide dot files = yes` report HIDDEN for every final path
+/// component that begins with '.': the bit is the server describing the name,
+/// not a metadata defect, and no setter call can clear it. The tolerance is
+/// extra-only, HIDDEN-only, and dot-names-only. Both the apply and the compare
+/// path judge convergence here so the two can never drift.
+#[cfg(any(windows, test))]
+fn attributes_converge(file_name: Option<&OsStr>, desired: u32, actual: u32) -> bool {
+    if actual == desired {
+        return true;
+    }
+    if desired & WINDOWS_ATTRIBUTE_HIDDEN != 0 {
+        return false;
+    }
+    if actual != desired | WINDOWS_ATTRIBUTE_HIDDEN {
+        return false;
+    }
+    file_name.is_some_and(|name| name.to_string_lossy().starts_with('.'))
+}
 
 pub fn validate_manifest(metadata: Option<&WindowsFileMetadata>) -> Result<()> {
     if let Some(metadata) = metadata {
@@ -281,7 +308,18 @@ fn destination_metadata_matches_with(
             return Ok(false);
         }
     };
-    Ok(actual == *expected)
+    // Destructure so a future WindowsFileMetadata field breaks this compare
+    // at build time instead of being silently ignored.
+    let WindowsFileMetadata {
+        file_attributes: actual_attributes,
+        named_streams: actual_streams,
+    } = &actual;
+    Ok(*actual_streams == expected.named_streams
+        && attributes_converge(
+            path.file_name(),
+            expected.file_attributes,
+            *actual_attributes,
+        ))
 }
 
 #[cfg(windows)]
@@ -316,7 +354,9 @@ pub fn apply_attributes(path: &Path, metadata: Option<&WindowsFileMetadata>) -> 
 /// Apply the durable attribute mask and require readback convergence. Some
 /// filesystems can return success from the setter without retaining every bit;
 /// that is an honest file failure, not a successful transfer that should loop
-/// forever on the next comparison.
+/// forever on the next comparison. Convergence is judged by
+/// [`attributes_converge`], the sole tolerance being the destination-synthesized
+/// HIDDEN bit that no setter call can clear.
 #[cfg(any(windows, test))]
 fn set_and_verify_attributes(
     path: &Path,
@@ -326,7 +366,7 @@ fn set_and_verify_attributes(
 ) -> Result<()> {
     set(desired)?;
     let actual = read()? & WINDOWS_PRESERVED_ATTRIBUTE_MASK;
-    if actual != desired {
+    if !attributes_converge(path.file_name(), desired, actual) {
         bail!(
             "Windows attributes did not converge on {}: requested 0x{desired:08x}, read back 0x{actual:08x}",
             path.display()
@@ -843,6 +883,103 @@ mod tests {
             || Ok(requested | 0x0000_2100),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn synthesized_hidden_converges_only_on_dot_named_files() {
+        let dotted = Some(OsStr::new(".tcp_shot.png.XkR0Av"));
+        let plain = Some(OsStr::new("tcp_shot.png"));
+
+        // An extra HIDDEN bit is the server describing a dot name, and only a
+        // dot name: an ordinary name, or no final component at all, diverges.
+        assert!(attributes_converge(dotted, 0x20, 0x22));
+        assert!(!attributes_converge(plain, 0x20, 0x22));
+        assert!(!attributes_converge(None, 0x20, 0x22));
+        // The tolerance rides along with any other durable bits.
+        assert!(attributes_converge(dotted, 0x21, 0x23));
+
+        // Extra bits other than HIDDEN alone are never synthesized.
+        for extra in [0x1, 0x3, 0x4, 0x6] {
+            assert!(
+                !attributes_converge(dotted, 0x20, 0x20 | extra),
+                "extra bits 0x{extra:08x} beyond HIDDEN were tolerated"
+            );
+        }
+
+        // A missing bit is a genuine non-convergence on any name.
+        assert!(!attributes_converge(dotted, 0x21, 0x20));
+        assert!(!attributes_converge(dotted, 0x22, 0x20));
+        assert!(!attributes_converge(dotted, 0x23, 0x22));
+
+        // Exact equality converges regardless of the name.
+        assert!(attributes_converge(plain, 0x20, 0x20));
+        assert!(attributes_converge(None, 0x27, 0x27));
+        assert!(attributes_converge(dotted, 0x22, 0x22));
+
+        // Nothing is left to synthesize once the source itself asked for HIDDEN.
+        assert!(!attributes_converge(dotted, 0x22, 0x23));
+    }
+
+    #[test]
+    fn apply_tolerates_synthesized_hidden_only_on_dot_named_destinations() {
+        let requested = 0x0000_0020;
+        set_and_verify_attributes(
+            Path::new("apps/.tcp_shot.png.XkR0Av"),
+            requested,
+            |_| Ok(()),
+            // A default-config Samba share reports HIDDEN back for the dot name.
+            || Ok(requested | WINDOWS_ATTRIBUTE_HIDDEN),
+        )
+        .expect("a synthesized HIDDEN bit on a dot-named file is converged");
+
+        let error = set_and_verify_attributes(
+            Path::new("apps/tcp_shot.png.XkR0Av"),
+            requested,
+            |_| Ok(()),
+            || Ok(requested | WINDOWS_ATTRIBUTE_HIDDEN),
+        )
+        .expect_err("an unrequested HIDDEN bit on an ordinary name is a file failure");
+        assert!(format!("{error:#}").contains("did not converge"));
+    }
+
+    #[test]
+    fn compare_tolerates_synthesized_hidden_only_on_dot_named_destinations() {
+        let expected = WindowsFileMetadata {
+            file_attributes: 0x20,
+            named_streams: Vec::new(),
+        };
+        let synthesized = || -> Result<WindowsFileMetadata> {
+            Ok(WindowsFileMetadata {
+                file_attributes: 0x20 | WINDOWS_ATTRIBUTE_HIDDEN,
+                named_streams: Vec::new(),
+            })
+        };
+
+        assert!(destination_metadata_matches_with(
+            Path::new("apps/.tcp_shot.png.XkR0Av"),
+            &expected,
+            synthesized
+        )
+        .unwrap());
+        assert!(!destination_metadata_matches_with(
+            Path::new("apps/tcp_shot.png.XkR0Av"),
+            &expected,
+            synthesized
+        )
+        .unwrap());
+
+        let mut with_stream = expected.clone();
+        with_stream.named_streams.push({
+            let mut manifest = stream("meta", b"payload");
+            manifest.content.clear();
+            manifest
+        });
+        assert!(!destination_metadata_matches_with(
+            Path::new("apps/.tcp_shot.png.XkR0Av"),
+            &with_stream,
+            synthesized
+        )
+        .unwrap());
     }
 
     #[test]

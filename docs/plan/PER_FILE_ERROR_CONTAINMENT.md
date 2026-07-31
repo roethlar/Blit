@@ -32,7 +32,12 @@ aborted with `session INTERNAL: writing payload`.
 - No broad "ignore attribute mismatches" mode and no per-target
   configuration flags. The tolerance is exactly one semantically-justified
   case (extra HIDDEN on dot-named files); every other divergence remains an
-  error (now per-file, not session-fatal).
+  error (now per-file, not session-fatal). Accepted cost: nothing at read
+  time distinguishes a server-synthesized HIDDEN from one a user set by
+  hand on a dot-named destination file, so the latter is also tolerated
+  (and never repaired) — on capable filesystems the apply path still sets
+  the exact mask first, so the tolerance engages only when the setter
+  could not clear the bit or the compare path sees it.
 - No changes to target servers or their configs — the tool adapts, never the
   destination (owner directive, 2026-07-30).
 - Session-fatal error classes stay session-fatal: transport death, protocol

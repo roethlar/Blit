@@ -116,7 +116,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    proceed; move source-deletion refuses while failures exist).
    Implementation in progress via Opus 5 agents, slices pfc-1..5, one
    commit per slice on `master`. No external review dispatch approved
-   (D-2026-07-23-7).
+   (D-2026-07-23-7). **pfc-1 `[x]` landed** (shared `attributes_converge`
+   predicate, apply + compare, red/green-proven; the motivating mirror is
+   unblocked pending the owner's re-run). Next: pfc-2.
 3. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft, D-2026-07-13-2):** local
    apply ships one worker and does not scale; resume only under an active plan.
 4. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
