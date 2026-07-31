@@ -379,8 +379,11 @@ fn sanitize_row_text(text: &str) -> String {
 /// The sink the `log` backend routes through while a row is live — a
 /// named seam so the CLI half of the redirect wiring is provable
 /// without a terminal (the backend half is guarded in `stderr_log`).
+/// Backend lines interpolate wire filenames (an unreadable entry's
+/// warn), so they get the same control-byte sanitizing as every other
+/// rendered text path.
 fn row_line_sink<O: RowOutput>(output: O) -> blit_core::stderr_log::LineSink {
-    std::sync::Arc::new(move |line: &str| output.println(line))
+    std::sync::Arc::new(move |line: &str| output.println(&sanitize_row_text(line)))
 }
 
 impl RowOutput for ProgressBar {
@@ -1109,6 +1112,20 @@ mod live_row_loop_tests {
             recorder.lines(),
             vec!["blit: warn: scan skipping 'x' (denied)".to_string()],
             "the redirect sink must hand backend lines to the row output"
+        );
+    }
+
+    /// cr-clp2-1: a routed warn interpolating a control-byte filename
+    /// must not break the row or smuggle escapes to the terminal.
+    #[test]
+    fn a_backend_line_with_control_bytes_is_sanitized() {
+        let recorder = Recorder::default();
+        let sink = row_line_sink(recorder.clone());
+        sink("blit: warn: scan skipping 'evil\ndir/\x1b[31mx' (denied)");
+        let lines = recorder.lines();
+        assert!(
+            lines.len() == 1 && !lines[0].contains('\n') && !lines[0].contains('\x1b'),
+            "routed backend lines must be sanitized: {lines:?}"
         );
     }
 

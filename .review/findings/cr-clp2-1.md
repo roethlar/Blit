@@ -2,7 +2,7 @@
 
 **Severity**: MEDIUM — an unreadable unix filename carrying `\n`/ANSI in a
 routed warn breaks the single-row display or executes the escape.
-**Status**: Open
+**Status**: In progress — fixed, awaiting per-finding reviewer verdict
 **Branch**: — (default-branch mode)
 **Commit**: (filled at landing)
 
@@ -33,11 +33,10 @@ Sanitize inside `row_line_sink` before handing the line to
 passes through.
 
 ## Files changed
-(filled with the fix commit)
+- `crates/blit-cli/src/transfers/local.rs` — sanitize inside `row_line_sink`; new guard test `a_backend_line_with_control_bytes_is_sanitized`.
 
 ## Guard proof
-(planned) A control-byte line fed through `row_line_sink` reaches the
-recorder sanitized; red when the sanitize call is removed.
+As built: `a_backend_line_with_control_bytes_is_sanitized` — FAILED red with the sanitize call reverted to pass-through (verified this session), green restored; the clean-line pass-through test still pins non-mangling.
 
 ## Coder dispute (if any)
 None.
