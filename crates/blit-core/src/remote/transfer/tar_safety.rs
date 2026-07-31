@@ -274,21 +274,28 @@ pub fn write_extracted_file(file: &ExtractedFile) -> Result<()> {
 /// (cr-pfc2-1) ends the shard and stays session-fatal.
 ///
 /// This is the sequential counterpart of the sink's parallel writers and
-/// folds through the very same classifier, so the two can never drift on
-/// what counts as one member's failure. `bytes_written` counts payload
+/// classifies through the very same predicate, so the two can never drift
+/// on what counts as one member's failure. `bytes_written` counts payload
 /// bytes only — [`write_extracted_file`] applies named streams without
 /// reporting their size, and no consumer of this path counts them.
+///
+/// Each member's verdict is taken immediately after that member's own
+/// write, not deferred to the fold (cr-pfc3-2): the classifier probes
+/// live destination state, so a root that died during one member's write
+/// and recovered before the shard finished would otherwise have its
+/// root-caused error reclassified as that one member's failure.
 pub fn write_extracted_shard(dst_root: &Path, files: &[ExtractedFile]) -> Result<SinkOutcome> {
-    let results: Vec<(String, Result<(u64, ())>)> = files
+    let results: Vec<(String, super::sink::ClassifiedMember<()>)> = files
         .iter()
         .map(|file| {
+            let written = write_extracted_file(file).map(|()| (file.size, ()));
             (
                 file.rel.clone(),
-                write_extracted_file(file).map(|()| (file.size, ())),
+                super::sink::classify_shard_member(dst_root, &file.rel, written),
             )
         })
         .collect();
-    super::sink::fold_shard_member_results(dst_root, results, |()| {})
+    super::sink::fold_shard_member_results(results, |()| {})
 }
 
 #[cfg(test)]

@@ -331,6 +331,54 @@ fn per_file_failure(
     }
 }
 
+/// One shard member's write result carrying the verdict already taken on
+/// it. Produced by [`classify_shard_member`] in the worker that wrote the
+/// member and consumed by [`fold_shard_member_results`], which re-derives
+/// nothing.
+///
+/// cr-pfc3-2: [`failure_is_containable`] probes live destination state,
+/// so classifying a shard's members only after every worker has finished
+/// judges the destination as it is *then*, not as the failing write saw
+/// it. A destination root that dropped mid-shard and reconnected (SMB) or
+/// was recreated before the fold had its root-caused member errors
+/// reclassified as one file's failure each, and the mirror reported
+/// "incomplete" over a destination that had actually died. The verdict
+/// therefore travels with the member from the moment the error existed.
+pub(super) enum ClassifiedMember<S> {
+    /// The member landed: payload bytes plus its writer's observation
+    /// sample.
+    Written(u64, S),
+    /// The member failed and the shared classifier read that failure as
+    /// attributable to this member alone: recorded, shard continues.
+    Contained(eyre::Report),
+    /// The member failed and the shared classifier read that failure as
+    /// root-wide or volume-level: session-fatal, exactly as on the
+    /// single-file paths.
+    Fatal(eyre::Report),
+}
+
+/// Take one shard member's verdict *where its failure happened* — inside
+/// the worker that wrote it, while the destination is still in the state
+/// that write saw (cr-pfc3-2).
+///
+/// This is the only place a shard member is classified, and it decides
+/// through the same [`failure_is_containable`] predicate the single-file
+/// paths use, so the shard writers can never drift from them on what is
+/// per-file and what is session-fatal.
+pub(super) fn classify_shard_member<S>(
+    dst_root: &Path,
+    relative_path: &str,
+    result: Result<(u64, S)>,
+) -> ClassifiedMember<S> {
+    match result {
+        Ok((bytes, sample)) => ClassifiedMember::Written(bytes, sample),
+        Err(error) if failure_is_containable(dst_root, relative_path, &error) => {
+            ClassifiedMember::Contained(error)
+        }
+        Err(error) => ClassifiedMember::Fatal(error),
+    }
+}
+
 /// A pluggable write backend for the transfer pipeline.
 ///
 /// Implementations receive [`PreparedPayload`] items produced by a [`TransferSource`]
@@ -1123,17 +1171,20 @@ fn write_tar_shard_payload(
     // `tar_safety::write_extracted_file` but inlined so we can return
     // per-file byte counts for the SinkOutcome. Each member carries its
     // own result: a member the destination refuses is that member's
-    // failure, not the shard's (audit-17), and the fold below applies
-    // the shared classifier.
+    // failure, not the shard's (audit-17). Each worker also takes its own
+    // member's verdict through the shared classifier before handing the
+    // member on (cr-pfc3-2) — inside the closure is the only place the
+    // destination is still in the state that write saw.
     if probe.is_none() {
-        let results: Vec<(String, Result<(u64, ())>)> = extracted
+        let results: Vec<(String, ClassifiedMember<()>)> = extracted
             .into_par_iter()
             .map(|f: ExtractedFile| {
                 let written = write_shard_member(&f).map(|bytes| (bytes, ()));
-                (f.rel, written)
+                let member = classify_shard_member(dst_root, &f.rel, written);
+                (f.rel, member)
             })
             .collect();
-        return fold_shard_member_results(dst_root, results, |()| {});
+        return fold_shard_member_results(results, |()| {});
     }
 
     type MemberSample = (
@@ -1145,7 +1196,7 @@ fn write_tar_shard_payload(
         std::time::Duration,
     );
     let members_started = probe.map(|_| std::time::Instant::now());
-    let results: Vec<(String, Result<(u64, MemberSample)>)> = extracted
+    let results: Vec<(String, ClassifiedMember<MemberSample>)> = extracted
         .into_par_iter()
         .map(|f: ExtractedFile| {
             let written = (|| -> Result<(u64, MemberSample)> {
@@ -1184,19 +1235,19 @@ fn write_tar_shard_payload(
                     (mkdir, open, write, close, metadata, total_started.elapsed()),
                 ))
             })();
-            (f.rel, written)
+            // Same worker-time classification as the probe-less path
+            // above (cr-pfc3-2): this closure is where the error exists.
+            let member = classify_shard_member(dst_root, &f.rel, written);
+            (f.rel, member)
         })
         .collect();
     let member_parallel_wall = members_started.map(|started| started.elapsed());
 
     let mut member_timings = MemberTimingReport::default();
-    let outcome = fold_shard_member_results(
-        dst_root,
-        results,
-        |(mkdir, open, write, close, metadata, total)| {
+    let outcome =
+        fold_shard_member_results(results, |(mkdir, open, write, close, metadata, total)| {
             member_timings.record(mkdir, open, write, close, metadata, total);
-        },
-    )?;
+        })?;
 
     if let Some((probe, shard_id, started, blocking_pool_wait)) = probe {
         probe.note_shard_sink(
@@ -1257,37 +1308,43 @@ fn stamp_shard_member_metadata(file: &super::tar_safety::ExtractedFile) -> Resul
     Ok(windows_bytes)
 }
 
-/// Fold one shard's per-member write results into that shard's outcome.
+/// Fold one shard's already-classified member results into that shard's
+/// outcome.
 ///
-/// A member failure still attributable to that member is recorded and
-/// the shard keeps every other member — audit-17: one filename the
-/// destination filesystem rejected used to abort an ~88k-entry copy from
-/// inside the parallel-write closure. A failure the cr-pfc2-1 classifier
-/// reads as root-wide or volume-level returns `Err` and stays
-/// session-fatal, exactly as on the single-file paths; structural tar
-/// and containment failures never reach here at all, having already
-/// short-circuited the whole shard above.
+/// A member failure [`classify_shard_member`] read as that member's own
+/// is recorded and the shard keeps every other member — audit-17: one
+/// filename the destination filesystem rejected used to abort an ~88k-entry
+/// copy from inside the parallel-write closure. A failure the cr-pfc2-1 /
+/// cr-pfc3-1 classifier read as root-wide or volume-level returns `Err`
+/// and stays session-fatal, exactly as on the single-file paths;
+/// structural tar and containment failures never reach here at all,
+/// having already short-circuited the whole shard above.
+///
+/// This fold takes no destination root on purpose (cr-pfc3-2): every
+/// verdict was decided in the worker, at the moment its error existed,
+/// and re-deriving one here would judge the destination as it is after
+/// all the workers finished. With no root in hand the deferred
+/// classification cannot be reintroduced.
 ///
 /// `record_sample` receives each landed member's observation payload
 /// (`()` where nothing is observed), so the probed writer folds its
 /// timings through the same pass.
 pub(super) fn fold_shard_member_results<S>(
-    dst_root: &Path,
-    results: Vec<(String, Result<(u64, S)>)>,
+    results: Vec<(String, ClassifiedMember<S>)>,
     mut record_sample: impl FnMut(S),
 ) -> Result<SinkOutcome> {
     let mut outcome = SinkOutcome::default();
-    for (relative_path, result) in results {
-        match result {
-            Ok((bytes, sample)) => {
+    for (relative_path, member) in results {
+        match member {
+            ClassifiedMember::Written(bytes, sample) => {
                 outcome.files_written += 1;
                 outcome.bytes_written = outcome.bytes_written.saturating_add(bytes);
                 record_sample(sample);
             }
-            Err(error) if !failure_is_containable(dst_root, &relative_path, &error) => {
-                return Err(error);
+            ClassifiedMember::Fatal(error) => return Err(error),
+            ClassifiedMember::Contained(error) => {
+                outcome.record_failure(relative_path, format!("{error:#}"))
             }
-            Err(error) => outcome.record_failure(relative_path, format!("{error:#}")),
         }
     }
     Ok(outcome)
@@ -2770,6 +2827,22 @@ mod tests {
         eyre::Report::new(source).wrap_err("creating /dst/one.bin")
     }
 
+    /// One shard member handed to the fold exactly as a production worker
+    /// hands it over: its write result classified against the destination
+    /// as it stands at that moment (cr-pfc3-2). Tests that need the
+    /// window between the failure and the fold — the root recovering —
+    /// call `classify_shard_member` themselves so they can act in it.
+    fn classified_member(
+        dst_root: &Path,
+        relative_path: &str,
+        result: Result<(u64, ())>,
+    ) -> (String, ClassifiedMember<()>) {
+        (
+            relative_path.to_string(),
+            classify_shard_member(dst_root, relative_path, result),
+        )
+    }
+
     /// A read-only filesystem is root-wide, so it is refused containment
     /// and stays session-fatal even though the destination root is a
     /// perfectly live directory.
@@ -2971,14 +3044,15 @@ mod tests {
             );
         }
 
-        let results: Vec<(String, Result<(u64, ())>)> = vec![
-            ("landed.txt".to_string(), Ok((7, ()))),
-            (
-                "odd.txt".to_string(),
+        let results = vec![
+            classified_member(tmp.path(), "landed.txt", Ok((7, ()))),
+            classified_member(
+                tmp.path(),
+                "odd.txt",
                 Err(write_error(std::io::Error::from_raw_os_error(foreign[0]))),
             ),
         ];
-        let outcome = fold_shard_member_results(tmp.path(), results, |()| {})
+        let outcome = fold_shard_member_results(results, |()| {})
             .expect("a foreign-namespace code is still one member's failure");
         assert_eq!(outcome.files_written, 1);
         assert_eq!(outcome.files_failed_total, 1);
@@ -3396,17 +3470,18 @@ mod tests {
     #[test]
     fn tar_shard_member_on_a_read_only_volume_stays_fatal() {
         let tmp = tempdir().unwrap();
-        let results: Vec<(String, Result<(u64, ())>)> = vec![
-            ("landed.txt".to_string(), Ok((7, ()))),
-            (
-                "refused.txt".to_string(),
+        let results = vec![
+            classified_member(tmp.path(), "landed.txt", Ok((7, ()))),
+            classified_member(
+                tmp.path(),
+                "refused.txt",
                 Err(write_error(std::io::Error::from(
                     std::io::ErrorKind::ReadOnlyFilesystem,
                 ))),
             ),
         ];
 
-        let err = fold_shard_member_results(tmp.path(), results, |()| {})
+        let err = fold_shard_member_results(results, |()| {})
             .expect_err("a volume-level refusal inside a shard stays session-fatal");
         assert!(
             format!("{err:#}").contains("creating /dst/one.bin"),
@@ -3425,13 +3500,13 @@ mod tests {
     fn tar_shard_member_on_an_exhausted_volume_stays_fatal() {
         let tmp = tempdir().unwrap();
         for (label, source) in volume_full_signatures() {
-            let results: Vec<(String, Result<(u64, ())>)> = vec![
-                ("landed.txt".to_string(), Ok((7, ()))),
-                ("refused.txt".to_string(), Err(write_error(source))),
-                ("never-tried.txt".to_string(), Ok((3, ()))),
+            let results = vec![
+                classified_member(tmp.path(), "landed.txt", Ok((7, ()))),
+                classified_member(tmp.path(), "refused.txt", Err(write_error(source))),
+                classified_member(tmp.path(), "never-tried.txt", Ok((3, ()))),
             ];
 
-            let err = fold_shard_member_results(tmp.path(), results, |()| {})
+            let err = fold_shard_member_results(results, |()| {})
                 .expect_err("an exhausted volume inside a shard stays session-fatal");
             assert!(
                 format!("{err:#}").contains("creating /dst/one.bin"),
@@ -3446,23 +3521,227 @@ mod tests {
     #[test]
     fn tar_shard_member_denied_by_its_own_path_is_contained() {
         let tmp = tempdir().unwrap();
-        let results: Vec<(String, Result<(u64, ())>)> = vec![
-            ("landed.txt".to_string(), Ok((7, ()))),
-            (
-                "denied.txt".to_string(),
+        let results = vec![
+            classified_member(tmp.path(), "landed.txt", Ok((7, ()))),
+            classified_member(
+                tmp.path(),
+                "denied.txt",
                 Err(write_error(std::io::Error::from(
                     std::io::ErrorKind::PermissionDenied,
                 ))),
             ),
         ];
 
-        let outcome = fold_shard_member_results(tmp.path(), results, |()| {})
+        let outcome = fold_shard_member_results(results, |()| {})
             .expect("one denied member is still one member's failure");
         assert_eq!(outcome.files_written, 1);
         assert_eq!(outcome.bytes_written, 7);
         assert_eq!(outcome.files_failed_total, 1);
         assert_eq!(outcome.failures[0].relative_path, "denied.txt");
         assert!(!outcome.file_failed("landed.txt"));
+    }
+
+    // ─── Classify where the failure happened (cr-pfc3-2) ───────────────
+    //
+    // `failure_is_containable` probes live destination state, so the
+    // verdict is only sound while the destination is still in the state
+    // the failing write saw. Classifying a shard's members after every
+    // worker finished is a time-of-check/time-of-use split: an SMB root
+    // that dropped mid-shard and reconnected before the fold — or was
+    // recreated — had its root-caused member errors reclassified as
+    // per-file, and the mirror finished "incomplete" over a destination
+    // that had actually died.
+    //
+    // The recovery is what makes this deterministic: no threads and no
+    // timing window are needed. The verdict is taken by the production
+    // classifier against a dead root, the root is then restored, and only
+    // then does the fold run — the exact sequence the pre-fix fold
+    // observed, with the failure and the fold seeing opposite root states.
+
+    /// One shard member in the shape the rayon writers hand
+    /// `write_shard_member`, so a member error in these tests is produced
+    /// by the real production writer rather than synthesized.
+    fn shard_member(
+        dst_root: &Path,
+        rel: &str,
+        contents: &[u8],
+    ) -> crate::remote::transfer::tar_safety::ExtractedFile {
+        crate::remote::transfer::tar_safety::ExtractedFile {
+            rel: rel.to_string(),
+            dest_path: dst_root.join(rel),
+            contents: contents.to_vec(),
+            mtime: None,
+            permissions: None,
+            size: contents.len() as u64,
+            windows_metadata: None,
+        }
+    }
+
+    /// A regular file where the destination root belongs: the portable,
+    /// unprivileged stand-in for "the root is gone" — it fails every
+    /// member identically and `destination_root_live` reads it as dead,
+    /// exactly as a vanished SMB mount.
+    fn kill_root(dst_root: &Path) {
+        if dst_root.is_dir() {
+            std::fs::remove_dir_all(dst_root).unwrap();
+        }
+        std::fs::write(dst_root, b"the destination root is not a directory").unwrap();
+        assert!(
+            !destination_root_live(dst_root, "one.bin"),
+            "fixture must reproduce the dangerous case: a dead root"
+        );
+    }
+
+    /// The root comes back — the reconnect (or recreate) that used to
+    /// launder a dead-root shard into per-file failures.
+    fn revive_root(dst_root: &Path) {
+        std::fs::remove_file(dst_root).unwrap();
+        std::fs::create_dir(dst_root).unwrap();
+        assert!(
+            destination_root_live(dst_root, "one.bin"),
+            "the fold must run against a live root or this proves nothing"
+        );
+    }
+
+    /// cr-pfc3-2: a member whose write failed while the destination root
+    /// was dead stays session-fatal even though the root is live again by
+    /// the time the shard is folded. Pre-fix the fold called
+    /// `failure_is_containable` itself, so this same sequence contained
+    /// the root's failure as one member's own and the shard reported
+    /// success-with-a-skip.
+    #[test]
+    fn a_member_that_failed_on_a_dead_root_stays_fatal_after_the_root_recovers() {
+        let tmp = tempdir().unwrap();
+        let dst_root = tmp.path().join("root");
+        kill_root(&dst_root);
+
+        // The real member writer, failing for the real reason.
+        let member = shard_member(&dst_root, "deep/one.bin", b"payload");
+        let written = write_shard_member(&member).map(|bytes| (bytes, ()));
+        let chain = format!(
+            "{:#}",
+            written
+                .as_ref()
+                .expect_err("a dead root must fail the member write")
+        );
+        // The worker's verdict, taken while the root is still dead.
+        let verdict = classify_shard_member(&dst_root, &member.rel, written);
+
+        revive_root(&dst_root);
+
+        let err = fold_shard_member_results(vec![(member.rel.clone(), verdict)], |()| {})
+            .expect_err("a root that died during the write stays session-fatal");
+        assert_eq!(
+            format!("{err:#}"),
+            chain,
+            "the failing member's chain is handed back unchanged"
+        );
+    }
+
+    /// The same window, with healthy members either side: the shard is
+    /// still fatal and the recovered root does not turn the dead-root
+    /// error into a recorded per-member failure.
+    #[test]
+    fn a_dead_root_verdict_is_fatal_even_beside_members_that_landed() {
+        let tmp = tempdir().unwrap();
+        let dst_root = tmp.path().join("root");
+        std::fs::create_dir(&dst_root).unwrap();
+
+        // One member lands while the root is alive.
+        let landed = shard_member(&dst_root, "landed.bin", b"landed!");
+        let landed_result = write_shard_member(&landed).map(|bytes| (bytes, ()));
+        assert!(
+            landed_result.is_ok(),
+            "the fixture's healthy member must actually land"
+        );
+        let landed_verdict = classify_shard_member(&dst_root, &landed.rel, landed_result);
+
+        // Then the root dies under a concurrent member.
+        kill_root(&dst_root);
+        let refused = shard_member(&dst_root, "refused.bin", b"refused");
+        let refused_result = write_shard_member(&refused).map(|bytes| (bytes, ()));
+        assert!(
+            refused_result.is_err(),
+            "the member must fail against the dead root"
+        );
+        let refused_verdict = classify_shard_member(&dst_root, &refused.rel, refused_result);
+
+        revive_root(&dst_root);
+
+        assert!(
+            fold_shard_member_results(
+                vec![
+                    (landed.rel.clone(), landed_verdict),
+                    (refused.rel.clone(), refused_verdict),
+                ],
+                |()| {},
+            )
+            .is_err(),
+            "a dead-root member is session-fatal however many members landed"
+        );
+    }
+
+    /// The boundary in the other direction, which is what keeps the fix
+    /// honest: a verdict of "this member's own failure", taken while the
+    /// root was live, is still contained when the root dies before the
+    /// fold. The recorded verdict is honored in both directions — the
+    /// fold neither re-derives a contained verdict into a fatal one nor
+    /// the reverse — so a fix that simply called everything fatal would
+    /// fail here.
+    #[test]
+    fn a_member_denied_under_a_live_root_stays_contained_if_the_root_dies_later() {
+        let tmp = tempdir().unwrap();
+        let dst_root = tmp.path().join("root");
+        std::fs::create_dir(&dst_root).unwrap();
+
+        let results = vec![
+            classified_member(&dst_root, "landed.txt", Ok((7, ()))),
+            classified_member(
+                &dst_root,
+                "denied.txt",
+                Err(write_error(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                ))),
+            ),
+        ];
+
+        // The root dies after every member's verdict is recorded. The
+        // next payload of the session will see it; this shard's members
+        // were judged when their writes happened.
+        kill_root(&dst_root);
+
+        let outcome = fold_shard_member_results(results, |()| {})
+            .expect("a verdict taken under a live root stays that member's failure");
+        assert_eq!(outcome.files_written, 1);
+        assert_eq!(outcome.bytes_written, 7);
+        assert_eq!(outcome.files_failed_total, 1);
+        assert_eq!(outcome.failures[0].relative_path, "denied.txt");
+    }
+
+    /// A volume-exhaustion member error is refused containment at the
+    /// moment of classification too (cr-pfc3-1 rides the same seam), and
+    /// no later state of the destination can launder it: the root is live
+    /// throughout, so only the recorded verdict can make this fatal.
+    #[test]
+    fn a_volume_exhaustion_verdict_survives_the_fold() {
+        let tmp = tempdir().unwrap();
+        for (label, source) in volume_full_signatures() {
+            let results = vec![
+                classified_member(tmp.path(), "landed.txt", Ok((7, ()))),
+                classified_member(tmp.path(), "refused.txt", Err(write_error(source))),
+            ];
+            assert!(
+                destination_root_live(tmp.path(), "refused.txt"),
+                "{label}: the root stays live, so the verdict is the only signal"
+            );
+
+            let err = fold_shard_member_results(results, |()| {})
+                .expect_err("an exhausted volume stays session-fatal through the fold");
+            assert!(
+                format!("{err:#}").contains("creating /dst/one.bin"),
+                "{label}: the member's chain is handed back unchanged; got: {err:#}"
+            );
+        }
     }
 
     /// Records every warn the `log` facade emits. The facade takes one

@@ -3,8 +3,7 @@
 **Severity**: HIGH — a root that dies mid-shard and recovers before the
 fold reclassifies root-caused errors as per-file; the mirror finishes
 "incomplete" instead of session-fatal on a dead root.
-**Status**: Open — fix queued behind the pfc-4 landing (same files in
-flight)
+**Status**: In progress — fixed, awaiting per-finding reviewer verdict
 **Branch**: — (default-branch mode)
 **Commit**: (filled at landing)
 
@@ -52,3 +51,5 @@ None.
 
 ## Reviewer comments
 (pending per-finding verification after the fix)
+
+As built: `classify_shard_member` takes the verdict (`ClassifiedMember::{Contained, Fatal}`) IN the worker at error time, calling the one shared `failure_is_containable`; `fold_shard_member_results` honors recorded verdicts and re-derives nothing; the sequential wrapper shares the seam. Guards: the TOCTOU test produces the error on a dead root, revives the root, folds — Err (red under the fold-time revert, whose panic output shows the fold containing the dead-root error against the recovered root); the reverse-direction test pins that a live-root Contained verdict survives a root that dies later (defeats hardcoding Fatal); cr-pfc3-1's exhaustion boundary re-pinned on the new seam. SHA-verified restores; blit-core lib 464/0; workspace all green.
