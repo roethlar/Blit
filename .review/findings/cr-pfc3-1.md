@@ -3,9 +3,9 @@
 **Severity**: HIGH — a destination filling during a shard contains every
 subsequent member; at the landed slice a mirror exits 0 with an
 incomplete backup (same silent-incomplete class as cr-pfc2-1).
-**Status**: In progress — fixed, awaiting per-finding reviewer verdict
+**Status**: Verified
 **Branch**: — (default-branch mode)
-**Commit**: (filled at landing)
+**Commit**: `a48a961b`
 
 Reviewer provenance (generation pass): codex / gpt-5.6-sol / xhigh /
 standard; codex-cli 0.146.0; range `ff38f0e6..3ae5bf4d`
@@ -55,6 +55,6 @@ deliberate trade: an exhausted volume fails thousands of members and
 "success" would lie; convergence-on-retry re-runs after space is freed.
 
 ## Reviewer comments
-(pending per-finding verification after the fix)
+Reviewer: codex / gpt-5.6-sol / xhigh (T2 posture — HIGH routes to the escalated tier; the owner-pinned pair is this harness's ceiling, D-2026-07-31-3); codex-cli 0.146.0 (detached, disposable worktree). Reviewed `a48a961bc5086a383dd5a4fd204aa062121e4932` base `62e1f3bd13c11b10793c350734e2c0c3d2f9147b`. guard_confirmed **true** (reviewer ran the exhaustion-family strip red/green itself). Verdict: **accepted**, no comments. 2026-07-31T07:24Z. Record: `.review/results/cr-pfc3-1.codex.json`.
 
 As built: kinds StorageFull + QuotaExceeded joined ReadOnlyFilesystem in `io_error_says_volume_unwritable`; cfg-gated raw backstops gained unix ENOSPC 28 / windows ERROR_DISK_FULL 112 + ERROR_HANDLE_DISK_FULL 39 (EDQUOT deliberately kind-carried — 122 linux vs 69 macOS is not one portable list; recorded in code docs). Guard: stripping the exhaustion family reds exactly the 2 new fatality tests (single-file path AND shard fold — the RED shard output reproduces the finding's silent partial success verbatim) while all 4 boundary tests stay green; SHA-verified restore. blit-core lib 460/0; workspace 1655/0.
