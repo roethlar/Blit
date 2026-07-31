@@ -3,9 +3,9 @@
 **Severity**: HIGH — a root that dies mid-shard and recovers before the
 fold reclassifies root-caused errors as per-file; the mirror finishes
 "incomplete" instead of session-fatal on a dead root.
-**Status**: In progress — fixed, awaiting per-finding reviewer verdict
+**Status**: Verified
 **Branch**: — (default-branch mode)
-**Commit**: (filled at landing)
+**Commit**: `eb0ffd61`
 
 Reviewer provenance (generation pass): codex / gpt-5.6-sol / xhigh /
 standard; codex-cli 0.146.0; range `ff38f0e6..3ae5bf4d`
@@ -50,6 +50,6 @@ None.
 None.
 
 ## Reviewer comments
-(pending per-finding verification after the fix)
+Reviewer: codex / gpt-5.6-sol / xhigh (T2 posture; owner-pinned pair is the harness ceiling, D-2026-07-31-3); codex-cli 0.146.0 (detached, disposable worktree). Reviewed `eb0ffd61485f663cfd2364a020601e24084679be` base `136f342a5734088db0cd62d22ca3759b6d30368c`. guard_confirmed **true** (reviewer restored fold-time classification itself: 3 verdict-timing tests red, boundaries green, byte-identical restore). Verdict: **accepted**, no comments. 2026-07-31T07:41Z. Record: `.review/results/cr-pfc3-2.codex.json`.
 
 As built: `classify_shard_member` takes the verdict (`ClassifiedMember::{Contained, Fatal}`) IN the worker at error time, calling the one shared `failure_is_containable`; `fold_shard_member_results` honors recorded verdicts and re-derives nothing; the sequential wrapper shares the seam. Guards: the TOCTOU test produces the error on a dead root, revives the root, folds — Err (red under the fold-time revert, whose panic output shows the fold containing the dead-root error against the recovered root); the reverse-direction test pins that a live-root Contained verdict survives a root that dies later (defeats hardcoding Fatal); cr-pfc3-1's exhaustion boundary re-pinned on the new seam. SHA-verified restores; blit-core lib 464/0; workspace all green.
