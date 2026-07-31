@@ -37,6 +37,7 @@ use crate::remote::transfer::source::{
 use crate::remote::transfer::{RemoteTransferProgress, SmallFileProbe};
 use crate::transfer_plan::PlanOptions;
 
+use super::checkers::CheckerPool;
 use super::phase_probe::{LocalPhase, LocalPhaseProbe};
 use super::transport::in_process_pair;
 use super::{
@@ -183,6 +184,14 @@ pub struct LocalMirrorOptions {
     /// Discard writes (NullSink). Measures source read + pipeline
     /// throughput.
     pub null_sink: bool,
+    /// Parallel destination-comparison threads (`--checkers`). `0` selects
+    /// [`DEFAULT_CHECKERS`].
+    ///
+    /// The destination diff is latency-bound, not CPU-bound: each file costs
+    /// round trips to the destination, and on a network target that is where
+    /// essentially the whole wall clock goes. This is the knob that decides
+    /// how many of those are in flight at once.
+    pub checkers: usize,
     /// ls-1 wall-clock breakdown. Default permits environment activation
     /// (`BLIT_TRACE_LOCAL_PHASES=1` + `BLIT_TRACE_RUN_ID`) and is otherwise
     /// inert; a caller that needs deterministic behaviour installs its own
@@ -210,6 +219,7 @@ impl Default for LocalMirrorOptions {
             debug_mode: false,
             resume: false,
             null_sink: false,
+            checkers: 0,
             phase_probe: LocalPhaseProbe::default(),
         }
     }
@@ -324,6 +334,10 @@ pub struct LocalApply {
     /// here because `LocalApply` is the one value threaded through every
     /// destination-side local phase (diff, plan, apply, delete).
     pub(super) phase_probe: LocalPhaseProbe,
+    /// The session's dedicated destination-comparison pool (`--checkers`),
+    /// built once and shared by every chunk so threads are not respawned per
+    /// chunk.
+    pub(super) checker_pool: CheckerPool,
 }
 
 /// Destination-side counters for the local summary. Atomics because
@@ -604,6 +618,9 @@ pub async fn run_local_session(
     // ls-1: resolve the probe once, here, so every phase folds into one
     // accumulator and the environment is read exactly once per session.
     let phase_probe = options.phase_probe.clone().or_from_env();
+    // One dedicated comparison pool per session, built before any chunk so
+    // its threads are not respawned per chunk.
+    let checker_pool = CheckerPool::new(options.checkers)?;
 
     if !src_root.exists() {
         return Err(eyre!("source path does not exist: {}", src_root.display()));
@@ -708,6 +725,7 @@ pub async fn run_local_session(
         unreadable: Arc::clone(&unreadable),
         stats: Arc::clone(&stats),
         phase_probe: phase_probe.clone(),
+        checker_pool: checker_pool.clone(),
     };
 
     let source_cfg = SourceSessionConfig {
@@ -1032,6 +1050,7 @@ mod tests {
             unreadable: Arc::clone(&unreadable),
             stats: Arc::new(LocalApplyStats::default()),
             phase_probe: LocalPhaseProbe::disabled(),
+            checker_pool: CheckerPool::new(1).expect("checker pool"),
         };
         let source_cfg = SourceSessionConfig {
             hello: HelloConfig::default(),
@@ -1197,6 +1216,7 @@ mod tests {
             unreadable: Arc::clone(&unreadable),
             stats: Arc::new(LocalApplyStats::default()),
             phase_probe: slow_probe.clone(),
+            checker_pool: CheckerPool::new(1).expect("checker pool"),
         };
         let open = SessionOpen {
             initiator_role: TransferRole::Source as i32,
@@ -1828,6 +1848,7 @@ mod tests {
             unreadable: Arc::default(),
             stats: Arc::new(LocalApplyStats::default()),
             phase_probe: LocalPhaseProbe::disabled(),
+            checker_pool: CheckerPool::new(1).expect("checker pool"),
         };
         let open = SessionOpen {
             initiator_role: TransferRole::Source as i32,

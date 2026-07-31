@@ -35,9 +35,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Handoff — 2026-07-31
 - Done: pfc-1..6 + clp-1..2 landed and reviewed; D-2026-07-31-4 makes local
   speed priority-1; ls-1 step (0) instrument landed but its review FAILED.
-- Next: 1.23× shipped, review loop CLOSED (r4 clean). Remaining levers are
-  named-stream enumeration (correctness-bound, rel-4) and directory-level
-  stat — both need owner scoping. pfc Shipped is the owner's.
+- Next: 1.64× shipped (`--checkers`, runtime-adaptive). r5 review owed on the
+  checker range. Remaining levers: named-stream enumeration, directory-level
+  stat, wire-carrier checkers. pfc Shipped is the owner's.
 
 ## Now (active work)
 
@@ -70,37 +70,38 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 1. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (ACTIVE, D-2026-07-31-4) —
    PRIORITY-1, the owner's ruling on the 2026-07-31 field check.** Local
-   transfer is too slow and local apply ships one sink worker; the owner
-   ruled it "should have been resolved before this was declared
-   release-worthy." Recorded 2026-07-13, shipped in 0.1.1 anyway under
-   D-2026-07-13-2's BEHIND sequencing, whose blockers are both now gone.
-   **ls-1 step (0) IS RUN and attributed** — full evidence and caveats in
+   transfer is too slow; the owner ruled it "should have been resolved before
+   this was declared release-worthy." Recorded 2026-07-13, shipped in 0.1.1
+   anyway under D-2026-07-13-2's BEHIND sequencing, now superseded.
+   **ls-1 step (0) IS RUN and attributed** — evidence and caveats in
    `docs/bench/ls1-phase-2026-07-31/`. A converged dry run of the owner's
-   real tree (46,041 files → SMB) reproduced their no-op at 273.57 s with
-   **COMPARE at 100% of wall** and the apply side at ZERO, which
-   **falsifies L1–L4 for this complaint** (all four are apply-path). Inside
-   compare: metadata read 62.1% (3.65 ms/file), stat 18.1%.
-   **SHIPPED: round-trip elimination — 273.57 s → 221.59 s (1.23×)**, from
-   reusing the stat's attribute DWORD instead of re-reading it with
-   `GetFileAttributesW` (metadata 3.653 → 2.556 ms/file). Sequential, no pool
-   contention, more TOCTOU-consistent. **A parallel diff was tried, REVERTED**:
-   26× concurrency bought only 1.34× (the SMB metadata path saturates) and
-   r3 found 4 MEDIUM defects incl. blocking I/O on rayon's global pool shared
-   with apply and daemon sessions (cr-ls1-5..8). Remaining: named-stream
-   enumeration 2.556 ms/file (correctness-bound, rel-4), stat 1.081 ms/file
-   (eliminable via directory-level enumeration).
+   tree (46,041 files → SMB) reproduced their no-op at 273.57 s with **COMPARE
+   at 100% of wall** and apply at ZERO, **falsifying L1–L4 here** (all
+   apply-path).
+   **SHIPPED, 273.57 s → 166.38 s (1.64×; 1.71× vs the owner's original
+   283.92 s field run)**, in two parts. (a) Round-trip elimination: reuse the
+   stat's attribute DWORD instead of re-reading it with `GetFileAttributesW`
+   (metadata 3.653 → 2.556 ms/file). (b) **`--checkers`: a DEDICATED
+   destination-comparison pool whose concurrency is discovered at runtime**
+   (`AdaptiveCheckers`, the `dial.rs` rule: conservative floor, no probe
+   phase, one rung per chunk on measured throughput, settle on regression).
+   Adaptive lands within 0.4% of the best hand-tuned value, no flag needed.
+   **Correction on record: the earlier "the destination saturates" conclusion
+   was WRONG** — one datapoint on rayon's shared global pool; 8 dedicated
+   threads beat 32 shared by 33 s. See `.../checkers.md`. Remaining:
+   named-stream enumeration (rel-4-bound), directory-level stat, and the wire
+   carrier (needs a concurrent-session measurement first).
    **Review loop CLOSED: 4 rounds, 8 findings, all resolved, r4 CLEAN with
    `guard_confirmed: true`** — see `REVIEW.md`. **`ls-0` LANDED**: the
    summary separates copied from repaired files and labels the rate as a
    whole-run average. NOT the closed P1 defect (D-2026-07-22-2).
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13; any external review requires exact owner approval under
-   D-2026-07-23-7. **otp-1 … otp-12c are all `[x]`** — closed-slice record
-   and the otp-12a/b/c matrices live in `docs/history/state-archive.md`,
-   DEVLOG, and `docs/bench/otp12*/`; the one historical FAIL cell
-   (wm_tcp_mixed) is closed by D-2026-07-22-2. **otp-12d and otp-13 are
-   POST-RELEASE (D-2026-07-22-1)**; retained pre-fix evidence remains usable
-   for what it records, and no performance acceptance matrix is a shipping
+   D-2026-07-23-7. **otp-1 … otp-12c are all `[x]`** — closed-slice record and
+   the otp-12a/b/c matrices live in `docs/history/state-archive.md`, DEVLOG,
+   and `docs/bench/otp12*/`; the one historical FAIL cell (wm_tcp_mixed) is
+   closed by D-2026-07-22-2. **otp-12d and otp-13 are POST-RELEASE
+   (D-2026-07-22-1)**; no performance acceptance matrix is a shipping
    prerequisite.
 3. **`docs/plan/PER_FILE_ERROR_CONTAINMENT.md` (ACTIVE, D-2026-07-30-1) —
    CODE-COMPLETE, ONE ACCEPTANCE CRITERION LEFT (the owner's).** Root

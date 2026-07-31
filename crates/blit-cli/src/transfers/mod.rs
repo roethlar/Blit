@@ -806,6 +806,7 @@ mod tests {
             progress: false,
             yes: true, // Skip prompts in tests
             workers: None,
+            checkers: 0,
             trace_data_plane: false,
             force_grpc: false,
             detach: false,
@@ -862,6 +863,7 @@ mod tests {
             progress: false,
             yes: true, // Skip prompts in tests
             workers: None,
+            checkers: 0,
             trace_data_plane: false,
             force_grpc: false,
             detach: false,
@@ -924,6 +926,7 @@ mod tests {
             progress: false,
             yes,
             workers: None,
+            checkers: 0,
             trace_data_plane: false,
             force_grpc: false,
             detach,

@@ -334,6 +334,7 @@ mod delegated_options_tests {
             source: "a:/m/".into(),
             destination: "b:/m/".into(),
             dry_run: false,
+            checkers: 0,
             checksum,
             size_only,
             ignore_times: false,

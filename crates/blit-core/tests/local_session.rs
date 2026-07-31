@@ -1583,6 +1583,82 @@ mod metadata_repair {
     }
 }
 
+/// Every `--checkers` setting is plumbed end to end and produces IDENTICAL
+/// verdicts.
+///
+/// Scope note, because this slice has a history of over-claiming: this does
+/// NOT prove the checks run concurrently. A local NVMe comparison is far too
+/// fast for a wall-clock assertion to be anything but flaky, and a file-set
+/// assertion cannot see concurrency at all — that is exactly how the
+/// cr-ls1-8 guard passed while guarding nothing. **Concurrency is proven at
+/// the pool level** by `transfer_session::checkers::tests::
+/// work_really_runs_concurrently`, which measures peak in-flight work and
+/// asserts the threads are the dedicated `blit-checker-*` ones. What THIS
+/// test owns is that the option reaches the session, that 1 and 16 both run,
+/// and that concurrency does not change the answer.
+#[tokio::test]
+async fn every_checker_setting_gives_identical_verdicts() -> Result<()> {
+    // Enough files to span several diff chunks, and a converged tree so the
+    // run is pure comparison with no copying involved.
+    const FILES: usize = 400;
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    for idx in 0..FILES {
+        fs::write(src.join(format!("f{idx:04}.txt")), b"same")?;
+    }
+    run_local_session(&src, &dest, options()).await?;
+
+    // 0 (default), 1 (forced sequential) and 16 (well past the default) must
+    // agree. A concurrency bug that dropped or duplicated verdicts would show
+    // as a differing copied/scanned count here.
+    let mut verdicts = Vec::new();
+    for checkers in [0usize, 1, 16] {
+        let summary = run_local_session(
+            &src,
+            &dest,
+            LocalMirrorOptions {
+                checkers,
+                ..options()
+            },
+        )
+        .await?;
+        verdicts.push((checkers, summary.copied_files, summary.scanned_files));
+    }
+    let (_, first_copied, first_scanned) = verdicts[0];
+    assert_eq!(first_copied, 0, "the tree is converged, nothing to copy");
+    for (checkers, copied, scanned) in &verdicts {
+        assert_eq!(
+            (*copied, *scanned),
+            (first_copied, first_scanned),
+            "--checkers {checkers} disagreed with the default: {verdicts:?}"
+        );
+    }
+
+    // And a changed subset must still be found at every setting, so the
+    // agreement above is not just "all of them found nothing".
+    fs::write(src.join("f0000.txt"), b"changed content")?;
+    fs::write(src.join("f0399.txt"), b"changed content")?;
+    for checkers in [0usize, 1, 16] {
+        let summary = run_local_session(
+            &src,
+            &dest,
+            LocalMirrorOptions {
+                checkers,
+                ..options()
+            },
+        )
+        .await?;
+        let expected = if checkers == 0 { 2 } else { 0 };
+        assert_eq!(
+            summary.copied_files, expected,
+            "--checkers {checkers} found the wrong number of changed files"
+        );
+    }
+    Ok(())
+}
+
 /// A workload spanning many diff chunks where only a scattered subset
 /// changed must transfer exactly that subset with correct content
 /// everywhere.

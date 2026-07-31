@@ -13,11 +13,13 @@
 //! progress wiring land at otp-4; mirror otp-6; resume otp-7;
 //! delegated otp-9 (see the slice list in the plan).
 
+pub mod checkers;
 mod data_plane;
 pub mod local;
 pub mod phase_probe;
 pub mod transport;
 
+pub use checkers::{CheckerPool, DEFAULT_CHECKERS, MAX_CHECKERS};
 pub use local::{
     run_local_session, LocalCompareMode, LocalMirrorDeleteScope, LocalMirrorOptions,
     LocalMirrorSummary, TransferOutcome,
@@ -4964,12 +4966,28 @@ async fn diff_chunk_and_apply_local(
     // truncated zero reads as "compare was fast" — the exact misattribution
     // this instrument exists to prevent, arriving through the error path
     // instead of the success path.
-    let compare_span = local
-        .phase_probe
-        .span_excluding(LocalPhase::Compare, LocalPhase::AttributeRepair);
-    let verdicts =
-        diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts, repair).await;
-    compare_span.finish();
+    // cr-ls1-5: COMPARE is the plain wall span of the diff, NOT the span
+    // minus nested repair time. With checkers running concurrently, several
+    // repairs overlap each other and the enclosing span, so their summed
+    // durations can exceed the wall clock and a subtraction would saturate
+    // COMPARE to a meaningless zero. ATTRIBUTE_REPAIR is therefore reported
+    // as a COMPONENT of COMPARE rather than a sibling of it — the module
+    // docs already warn that phases overlap and do not partition.
+    let compare_started = local.phase_probe.is_enabled().then(Instant::now);
+    let verdicts = diff_chunk_verdicts(
+        chunk,
+        dst_root,
+        canonical_dst_root,
+        compare_opts,
+        repair,
+        Some(&local.checker_pool),
+    )
+    .await;
+    if let Some(started) = compare_started {
+        local
+            .phase_probe
+            .record(LocalPhase::Compare, started.elapsed());
+    }
     let needed = verdicts?;
 
     let fresh: Vec<FileHeader> = needed
@@ -5079,7 +5097,13 @@ async fn diff_chunk_and_send_needs(
     // is resume-flagged only when the session negotiated resume AND a
     // non-empty dest partial exists to diff against.
     let needed: Vec<(FileHeader, bool)> =
-        diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts, repair)
+        // Sequential on the wire carrier, deliberately and for now only.
+        // The same latency argument applies to a remote destination, but a
+        // daemon serves many sessions at once, which is precisely the
+        // resource-sharing hazard cr-ls1-6 raised — so remote checkers need
+        // their own measurement (concurrent sessions, not one) before they
+        // get a pool. Recorded in the plan rather than silently defaulted.
+        diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts, repair, None)
             .await?
             .into_iter()
             .map(|(header, resume_eligible)| (header, resume_enabled && resume_eligible))
@@ -5206,6 +5230,10 @@ async fn diff_chunk_verdicts(
     canonical_dst_root: Option<&Path>,
     compare_opts: &CompareOptions,
     repair: &Arc<AttributeRepair>,
+    // `checker_pool: None` runs the diff sequentially. Explicit rather than
+    // defaulted so a caller cannot acquire or lose concurrency by accident —
+    // the defect this slice exists to fix was a silently single-threaded diff.
+    checker_pool: Option<&CheckerPool>,
 ) -> Result<Vec<(FileHeader, bool)>> {
     let dst_root_owned = dst_root.to_path_buf();
     let canonical = canonical_dst_root.map(Path::to_path_buf);
@@ -5216,46 +5244,88 @@ async fn diff_chunk_verdicts(
     // rides this blocking chunk with the stats and hashes — never the
     // async control loop.
     let repair = Arc::clone(repair);
-    // The per-file diff is SEQUENTIAL, deliberately.
+    // The per-file diff runs on the session's DEDICATED checker pool
+    // (`--checkers`). This work is latency-bound — round trips to the
+    // destination — so concurrency is the lever, the same one
+    // `rclone --checkers` exposes.
     //
-    // ls-1 tried parallelising it across the chunk and reverted. Two reasons,
-    // and the measurement is the weaker one:
+    // The three hazards r3 found in the first attempt are addressed here
+    // rather than avoided:
     //
-    // 1. It barely worked. 26× effective concurrency bought 1.34× throughput
-    //    on the owner's SMB share, because per-call latency inflated 24×
-    //    under load (`docs/bench/ls1-phase-2026-07-31/`). The destination
-    //    metadata path saturates, so the binding constraint is the NUMBER of
-    //    round trips per file, not the order they are issued in.
-    // 2. It was unsafe in three ways the review caught (cr-ls1-5..7): it ran
-    //    blocking destination I/O on rayon's GLOBAL pool, which the tar-shard
-    //    apply path and concurrent daemon sessions also use, so a slow diff
-    //    could stall unrelated transfers; rayon does not deterministically
-    //    surface the first of several errors; and because duplicate manifest
-    //    paths are deduplicated AFTER the diff, two closures could repair the
-    //    same destination file at once.
-    //
-    // Round-trip elimination is the lever instead — see `destination_needs`,
-    // which now answers the attribute half of the metadata verdict from the
-    // stat it already performed. If parallelism is revisited it needs its own
-    // bounded destination-I/O executor, not the shared CPU pool.
+    // - cr-ls1-6: the pool is per-session and dedicated. Blocking destination
+    //   I/O never touches rayon's global pool, which the tar-shard apply path
+    //   and concurrent daemon sessions use, so a slow destination cannot
+    //   stall unrelated transfers.
+    // - cr-ls1-7a: errors are selected DETERMINISTICALLY. Results are
+    //   collected positionally and the earliest failing index wins, so which
+    //   error surfaces does not depend on thread scheduling.
+    // - cr-ls1-7b: a chunk containing two headers for the same destination
+    //   path falls back to sequential, because `destination_needs` can repair
+    //   attributes in place and two concurrent repairs of one file is a
+    //   write race. Duplicates are deduplicated downstream, not here, so this
+    //   function cannot assume they are absent.
+    let pool = checker_pool.cloned();
     tokio::task::spawn_blocking(move || -> Result<Vec<(FileHeader, bool)>> {
-        let mut needed = Vec::new();
-        for header in chunk {
+        use rayon::prelude::*;
+
+        let check = |header: &FileHeader| -> Result<Option<(FileHeader, bool)>> {
             if abort.load(Ordering::Acquire) {
                 eyre::bail!("destination diff aborted: session ended");
             }
             match destination_needs(
-                &header,
+                header,
                 &dst_root_owned,
                 canonical.as_deref(),
                 &opts,
                 &abort,
                 &repair,
             )? {
-                NeedVerdict::Skip => {}
+                NeedVerdict::Skip => Ok(None),
                 NeedVerdict::Transfer { resume_eligible } => {
-                    needed.push((header, resume_eligible));
+                    Ok(Some((header.clone(), resume_eligible)))
                 }
+            }
+        };
+
+        // cr-ls1-7b: same destination path twice in one chunk ⇒ sequential.
+        let mut seen: HashSet<&str> = HashSet::with_capacity(chunk.len());
+        let has_duplicate_paths = chunk
+            .iter()
+            .any(|header| !seen.insert(header.relative_path.as_str()));
+
+        let started = std::time::Instant::now();
+        let results: Vec<Result<Option<(FileHeader, bool)>>> = match &pool {
+            Some(pool) if !has_duplicate_paths => {
+                // Live concurrency comes from the controller, which learns it
+                // from the destination's own measured throughput. Bounded by
+                // SLICING rather than by pool size: rayon pools have a fixed
+                // thread count, so the pool is built at the ceiling and each
+                // slice admits at most `limit` checks at once.
+                let limit = pool.limit().max(1);
+                let mut out = Vec::with_capacity(chunk.len());
+                for slice in chunk.chunks(limit) {
+                    out.extend(pool.install(|| {
+                        slice
+                            .par_iter()
+                            .map(&check)
+                            .collect::<Vec<Result<Option<(FileHeader, bool)>>>>()
+                    }));
+                }
+                out
+            }
+            _ => chunk.iter().map(&check).collect(),
+        };
+        if let Some(pool) = &pool {
+            pool.observe(chunk.len(), started.elapsed());
+        }
+
+        // cr-ls1-7a: positional collection, earliest failure wins.
+        let mut needed = Vec::new();
+        for result in results {
+            match result {
+                Ok(Some(entry)) => needed.push(entry),
+                Ok(None) => {}
+                Err(error) => return Err(error),
             }
         }
         Ok(needed)

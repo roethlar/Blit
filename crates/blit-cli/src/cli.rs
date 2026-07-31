@@ -361,6 +361,24 @@ pub struct TransferArgs {
     #[arg(long, help_heading = "Performance / debug")]
     pub null: bool,
 
+    /// Number of parallel destination-comparison threads.
+    ///
+    /// Deciding whether a file needs transferring costs one or more round
+    /// trips to the destination, and on a network destination those are
+    /// latency-bound: a converged 46,041-file mirror to an SMB share spent
+    /// ~100% of its wall clock here (`docs/bench/ls1-phase-2026-07-31/`).
+    /// Issuing the checks concurrently is the difference between paying that
+    /// latency once per file and paying it once per batch.
+    ///
+    /// These threads are a DEDICATED pool: they never share with the apply
+    /// pipeline or with concurrent daemon sessions, so a slow destination
+    /// cannot stall unrelated transfers.
+    ///
+    /// `0` means "use the default". Raise it for high-latency destinations,
+    /// lower it if the destination server is the constrained resource.
+    #[arg(long, default_value_t = 0, help_heading = "Performance / debug")]
+    pub checkers: usize,
+
     // -- Hidden flags (don't appear in --help).
     /// Limit worker threads (advanced debugging only)
     #[arg(long, hide = true)]

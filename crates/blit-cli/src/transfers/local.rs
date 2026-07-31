@@ -784,6 +784,9 @@ fn build_local_options(
         delete_scope,
         resume: args.resume,
         null_sink: args.null,
+        // `--checkers`: parallel destination-comparison threads. 0 lets the
+        // session pick `DEFAULT_CHECKERS`.
+        checkers: args.checkers,
         filter: super::build_filter(args)?,
         ..LocalMirrorOptions::default()
     };

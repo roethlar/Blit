@@ -53,8 +53,14 @@ pub enum LocalPhase {
     /// destination's cost as the source's. Misattributing exactly this way is
     /// what ls-1 step (0) exists to prevent.
     EnumerateBackpressure,
-    /// Destination-side diff of a manifest chunk against the filesystem,
-    /// excluding the attribute repairs it may trigger.
+    /// Destination-side diff of a manifest chunk against the filesystem.
+    ///
+    /// This is the diff's WALL span and INCLUDES the sub-phases below.
+    /// cr-ls1-5: it used to subtract nested attribute-repair time, which
+    /// stopped being sound once checkers run concurrently — overlapping
+    /// repairs can sum past the wall clock and saturate the subtraction to
+    /// zero. The sub-phases are components of this number, not siblings of
+    /// it; see the module docs on phases overlapping.
     Compare,
     /// The `std::fs::metadata` stat of one destination file inside the diff.
     /// Sub-phase of [`LocalPhase::Compare`], reported alongside it rather
