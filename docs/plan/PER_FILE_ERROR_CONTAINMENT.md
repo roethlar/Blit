@@ -1,11 +1,12 @@
 # Per-File Error Containment
 
 **Status**: Active (D-2026-07-30-1; Q1 settled — mirror deletes proceed,
-move source-deletion refuses while any per-file failure exists)
+move source-deletion refuses while any per-file failure exists; pfc-6
+metadata-only repair added by owner go, D-2026-07-31-1)
 **Created**: 2026-07-30
 **Supersedes**: nothing
-**Decision ref**: D-2026-07-30-1 (D-2026-07-09-1 supplies the governing
-principle)
+**Decision ref**: D-2026-07-30-1, amended D-2026-07-31-1 (D-2026-07-09-1
+supplies the governing principle)
 
 ## Goal
 
@@ -88,6 +89,10 @@ aborted with `session INTERNAL: writing payload`.
       SOURCE and initiator DESTINATION), from the daemon DESTINATION back to
       the initiating CLI.
 - [ ] Q1 posture (as ruled by owner) implemented and guard-tested.
+- [ ] Metadata-only repair (pfc-6): a destination file with equal
+      size/mtime and matching streams but divergent attributes converges
+      with zero payload bytes re-sent; stream divergence still transfers
+      fully; repair failure degrades to full transfer, never a new fatal.
 - [ ] `cargo fmt --check`, `clippy -D warnings`, `cargo test --workspace`
       green; Windows parity suite run; docs gate passes.
 
@@ -192,6 +197,37 @@ tolerance tests fail.
    is never classified extraneous — copy failures do not corrupt the delete
    set.
 
+### Half C — metadata-only attribute repair (pfc-6, D-2026-07-31-1)
+
+Field evidence (2026-07-31, `H:\apps` pre-existing backup regions, e.g.
+`SysinternalsSuite`): destination files whose size and mtime exactly match
+the source read back attributes `Normal` (0x00) against source `Archive`
+(0x20). `finalize_need_verdict` treats Unchanged-with-metadata-mismatch as
+a full re-transfer (`transfer_session/mod.rs:5134-5159`), so a mirror over
+such a tree re-sends every byte to repair one attribute bit.
+
+Change: when `header_transfer_status` is `Unchanged` and
+`destination_matches` fails, split the divergence:
+
+- **Attributes-only divergence** (named streams match by name/size/checksum
+  — the manifest-level compare carries stream checksums via
+  `read_windows_metadata(path, false)`): the DESTINATION repairs in place
+  at diff time — `apply_attributes` with the manifest attributes, judged by
+  the shared pfc-1 `attributes_converge` predicate — and the file never
+  enters the need list. The destination owns its filesystem in every
+  topology, so this works identically for local and remote sessions.
+- **Any stream divergence** (name/size/checksum): full transfer as today —
+  stream bytes need the payload.
+- **Repair failure degrades to full transfer** (`NeedVerdict::Transfer`);
+  if the transfer's apply then also fails, the pfc-2 per-file containment
+  owns it. Repair never introduces a new session-fatal path.
+
+Counting: repaired files increment a destination-local repaired counter
+surfaced in the local summary (and the CLI line in pfc-5); the wire
+`TransferSummary` is not extended for it in this slice (pfc-4 owns wire
+changes; fold the counter there only if pfc-4 has not landed yet —
+otherwise a follow-up wire field needs its own slice note).
+
 ### Risks
 
 - Compare/apply drift if the tolerance predicate is duplicated — prevented
@@ -222,6 +258,13 @@ One coherent, testable change per slice — sized for the review loop.
    both-roles/both-carriers propagation + round-trip tests.
 5. **pfc-5** — CLI failure block + exit code + JSON fields + move
    source-deletion gate + mirror-delete posture per Q1 + integration tests.
+6. **pfc-6** (added D-2026-07-31-1) — metadata-only attribute repair at the
+   destination diff: attributes-only divergence repairs in place with zero
+   payload bytes; stream divergence still transfers; repair failure
+   degrades to full transfer. Guard: a size/mtime-equal, attribute-divergent
+   destination file converges with zero payload bytes (test fails when the
+   repair is reverted to full re-transfer... assert on bytes, not just
+   convergence); a stream-divergent file still re-copies.
 
 ## Open questions
 

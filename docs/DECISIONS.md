@@ -558,3 +558,25 @@ Format:
   every target system to work with the file copy tool").
 - Supersedes: nothing (the plan doc's Open-questions section is rewritten as
   resolved in the same commit).
+
+## D-2026-07-31-1 — pfc-6 metadata-only repair added; CLI_LIVE_PROGRESS drafted
+- Decision: Owner (2026-07-31, **"go both"**) approved (a) drafting
+  `docs/plan/CLI_LIVE_PROGRESS.md` (honest `-p`/`-v` on one stable row; the
+  TUI-scale output redesign stays a separate queued effort) and (b) adding
+  slice **pfc-6 — metadata-only attribute repair** to the Active
+  `docs/plan/PER_FILE_ERROR_CONTAINMENT.md`: an Unchanged file whose only
+  divergence is attributes (streams match by name/size/checksum) is
+  repaired in place at the destination diff with zero payload bytes;
+  stream divergence still transfers; repair failure degrades to full
+  transfer. pfc-6 joins the approved Opus 5 implementation queue behind
+  pfc-2..5. CLI_LIVE_PROGRESS remains Draft — implementation needs its own
+  Active flip.
+- Why: field evidence from the owner's `D:\Apps → H:\apps` mirror — the
+  pre-existing backup regions read back `Normal` vs source `Archive`, so
+  the metadata-repair path re-sends every byte of otherwise-identical
+  files (FAST violation); and the live run showed `-p` reduced to a
+  spinner that blit-core's unconditional once-per-second enumeration
+  `eprintln!` scrolls off-row (source.rs:336-346), with `-v` changing only
+  the end summary.
+- Supersedes: nothing. Extends D-2026-07-30-1's slice list in place (plan
+  doc amended same commit).

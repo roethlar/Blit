@@ -118,14 +118,23 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    commit per slice on `master`. No external review dispatch approved
    (D-2026-07-23-7). **pfc-1 `[x]` landed** (shared `attributes_converge`
    predicate, apply + compare, red/green-proven; the motivating mirror is
-   unblocked pending the owner's re-run). Next: pfc-2.
-3. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft, D-2026-07-13-2):** local
+   unblocked pending the owner's re-run). **pfc-6 metadata-only repair
+   added (D-2026-07-31-1)** — old-backup regions read back `Normal` vs
+   source `Archive` and currently full-re-copy to fix one bit. pfc-2 in
+   flight; then pfc-3..6.
+3. **`docs/plan/CLI_LIVE_PROGRESS.md` (Draft, D-2026-07-31-1):** `-p` is a
+   static spinner that blit-core's unconditional enumeration `eprintln!`
+   scrolls off-row; `-v` changes only the end summary. Two slices (clp-1
+   wiring, clp-2 render) make the flags truthful on one stable row.
+   Awaiting the owner's Active flip; the TUI-scale redesign stays a
+   separate queued TODO.
+4. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft, D-2026-07-13-2):** local
    apply ships one worker and does not scale; resume only under an active plan.
-4. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
+5. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
    performance status flip are not release gates (D-2026-07-22-1).
-5. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
+6. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
    resumes/re-derives after ONE_TRANSFER_PATH ships.
-6. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
+7. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
    Pro daemon CPU-bound below 10 GbE from SSD cache). Executes AFTER
    cutover as a runtime-selected write strategy in the unified receive
    sink (design: eval doc §If-FAST-evidence; dead module deletes in
@@ -133,7 +142,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    **Standing owner safety rule**: ALL activity on rig `zoey` stays
    inside its `…/blit-temp/` folder — nothing written outside it, ever;
    no daemon runs on zoey without a fresh go.
-7. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
+8. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
 
 ## Authoritative docs right now
 
