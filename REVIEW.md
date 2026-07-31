@@ -33,7 +33,7 @@ xhigh` over each landed slice's pinned range as it lands.
 | clp-1-range | Defect hunt over `d5c039ec..1b670533` (live progress row wiring) | `[x]` | `1b670533` — **clean, no material issue**. Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0; capability_ok=true; SHAs pin-verified; detached dispatch; record `.review/results/clp-1-range.codex.json` |
 | clp-2-range | Defect hunt over `246acb54..9532ee20` (render polish + log routing) | `[x]` | `9532ee20` — **findings: 4** (3 admitted below, 1 declined at intake — `.review/cr-clp2-4.contested.md`). Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0; capability_ok=true; SHAs pin-verified; record `.review/results/clp-2-range.codex.json` |
 | cr-clp2-1 | Redirected log lines bypass control-byte sanitization | `[x]` | MEDIUM; fixed `a6cf7a8c`; codex verification **accepted**, guard_confirmed=true (`.review/results/cr-clp2-1.codex.json`) |
-| cr-clp2-2 | Blocking terminal I/O inside the async drain task | `[~]` | MEDIUM; r1 **reopened** (finish() join/clear hazards, both confirmed); repair + T5 redispatch in flight (`.review/findings/cr-clp2-2.md`) |
+| cr-clp2-2 | Blocking terminal I/O inside the async drain task | `[x]` | MEDIUM; fixed `6f26b181` + repair `031bef89`; r1 reopened, r2 (T5 repair-delta) **accepted**, guard_confirmed=true (`.review/results/cr-clp2-2.codex.r2.json`) |
 | cr-clp2-3 | Fixed drain deadline can discard queued `-v` lines on success | `[x]` | LOW; fixed `5fbe9abb`; codex verification **accepted**, guard_confirmed=true (`.review/results/cr-clp2-3.codex.json`) |
 | cr-clp2-4 | Perf-history diagnostic byte change on sink-less runs | `[-]` | LOW; declined at intake — facade migration is the repo convention (`.review/cr-clp2-4.contested.md`) |
 

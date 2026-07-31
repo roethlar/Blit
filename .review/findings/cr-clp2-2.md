@@ -4,7 +4,7 @@
 the drain task; on a current-thread runtime that stalls transfer futures
 and timers. Also a direct violation of the repo's no-blocking-in-async
 style law.
-**Status**: In progress — fixed, awaiting per-finding reviewer verdict
+**Status**: Verified
 **Branch**: — (default-branch mode)
 **Commit**: (filled at landing)
 
@@ -60,3 +60,5 @@ As built: `ThreadedRowOutput` (unbounded std mpsc sender) is the only handle the
 Round 1: Reviewer codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0. Reviewed `6f26b1819ebb5ee4546a28dfd8a5892d057b56ce` base `5fbe9abbf7883b5fa570eb08f99b033d2965d8cd`. guard_confirmed true; verdict **reopened** (2026-07-31T05:10Z): (1) local.rs:613 — the timeout only drops the handle of an unabortable spawn_blocking task blocked in writer.join(); the runtime waits for it at shutdown, so a wedged writer still hangs CLI exit. (2) local.rs:618 — finish_and_clear() runs on the async side after the timeout and takes the same ProgressBar lock a wedged writer can hold. Record: `.review/results/cr-clp2-2.codex.r1.json`. Repair: the writer thread itself performs finish_and_clear as its final act and signals a oneshot; finish() awaits the signal bounded and never joins or touches the bar — no blocking-pool entry, no shared-lock touch.
 
 Repair (r2 candidate): the writer thread now runs `run_row_writer` — drain, `finish_and_clear` on ITS side, then a oneshot signal. `finish()` awaits the SIGNAL bounded; no `spawn_blocking` join (nothing enters the pool the runtime waits for at shutdown) and no bar access from the async side after finish begins (the shared-lock hazard is gone). The writer is a plain detached std thread process exit reaps. Guard `the_writer_clears_and_only_then_signals_done` (blocking clear + premature-signal revert) FAILED red with the send hoisted above the drain/clear, green restored.
+
+Round 2 (repair-delta redispatch, escalated: T5 — fresh session; the owner-pinned pair gpt-5.6-sol@xhigh is this harness's ceiling, D-2026-07-31-3): Reviewer codex / gpt-5.6-sol / xhigh; codex-cli 0.146.0. Reviewed `031bef896117948b3b0179b52a4c4b06f7081ed1` base `6f26b1819ebb5ee4546a28dfd8a5892d057b56ce` (the reopened head). guard_confirmed **true**; verdict **accepted**, no comments. 2026-07-31T05:19Z. Record: `.review/results/cr-clp2-2.codex.r2.json`.
