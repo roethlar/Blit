@@ -292,7 +292,11 @@ One coherent, testable change per slice — sized for the review loop.
    collect per-file failures; shard-level structural errors stay fatal;
    tests.
 4. **pfc-4** — proto `TransferSummary` extension + `CONTRACT_VERSION` bump +
-   both-roles/both-carriers propagation + round-trip tests.
+   both-roles/both-carriers propagation + round-trip tests. Also owns
+   review finding **cr-pfc2-2**: initiator-SOURCE completed-file accounting
+   must reconcile against the destination's returned failure report (a
+   sender-side FileComplete is not destination confirmation); and the
+   byte-accounting divergence from the pfc-2 landing notes.
 5. **pfc-5** — CLI failure block + exit code + JSON fields + move
    source-deletion gate + mirror-delete posture per Q1 + integration tests.
    Also removes pfc-2's interim non-mirror interlock: containment extends
