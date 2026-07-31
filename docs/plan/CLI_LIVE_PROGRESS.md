@@ -1,12 +1,12 @@
 # CLI Live Progress
 
-**Status**: Draft — awaiting the owner's Active flip
+**Status**: Active (D-2026-07-31-2, owner "flip clp")
 **Created**: 2026-07-31
 **Supersedes**: nothing (the queued "CLI transfer output redesign"
 TODO — persistent stats block, "probably a TUI", re-confirmed in
 D-2026-07-09-1's Why note — remains a separate, later effort; this plan
 only makes the existing `-p`/`-v` flags truthful on one stable row)
-**Decision ref**: pending
+**Decision ref**: D-2026-07-31-2
 
 ## Goal
 
@@ -150,4 +150,6 @@ One coherent, testable change per slice — sized for the review loop.
 
 ## Open questions
 
-- None at draft time. (Flip to Active is the pending owner gate.)
+- None. Flipped Active by the owner ("flip clp", D-2026-07-31-2).
+  Execution order: clp-1/clp-2 run after pfc-2 lands (clp rebases on
+  pfc-2's file-complete semantics), before pfc-3..6.

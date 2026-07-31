@@ -580,3 +580,21 @@ Format:
   the end summary.
 - Supersedes: nothing. Extends D-2026-07-30-1's slice list in place (plan
   doc amended same commit).
+
+## D-2026-07-31-2 — CLI_LIVE_PROGRESS flipped Draft → Active
+- Decision: `docs/plan/CLI_LIVE_PROGRESS.md` is **Active** (owner,
+  2026-07-31: **"flip clp"**). Slices clp-1 (progress-lane wiring: local
+  sessions construct the RemoteTransferProgress sink behind `-p`;
+  enumeration reports via the lane instead of raw `eprintln!` when a sink
+  is attached) and clp-2 (render: one stable width-safe status row, `-v`
+  per-file lines through the indicatif handle). Implementation uses the
+  same Opus 5 agent loop as the pfc plan. Execution order: after pfc-2
+  lands (clp rebases on its file-complete semantics), before pfc-3..6.
+  No external or paid review dispatch is approved (D-2026-07-23-7 stands).
+- Why: the owner's live mirror showed `-p` reduced to a spinner scrolled
+  off-row by the core's unconditional once-per-second enumeration print
+  and `-v` inert until the end summary; the draft was written from
+  verified code anchors and the flip is the approval the plan procedure
+  requires.
+- Supersedes: nothing (the TUI-scale "CLI transfer output redesign" TODO
+  remains queued and separate).

@@ -122,12 +122,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    added (D-2026-07-31-1)** — old-backup regions read back `Normal` vs
    source `Archive` and currently full-re-copy to fix one bit. pfc-2 in
    flight; then pfc-3..6.
-3. **`docs/plan/CLI_LIVE_PROGRESS.md` (Draft, D-2026-07-31-1):** `-p` is a
+3. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2):** `-p` is a
    static spinner that blit-core's unconditional enumeration `eprintln!`
    scrolls off-row; `-v` changes only the end summary. Two slices (clp-1
    wiring, clp-2 render) make the flags truthful on one stable row.
-   Awaiting the owner's Active flip; the TUI-scale redesign stays a
-   separate queued TODO.
+   Runs after pfc-2 lands, before pfc-3..6; the TUI-scale redesign stays
+   a separate queued TODO.
 4. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft, D-2026-07-13-2):** local
    apply ships one worker and does not scale; resume only under an active plan.
 5. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
