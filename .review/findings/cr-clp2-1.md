@@ -2,7 +2,7 @@
 
 **Severity**: MEDIUM — an unreadable unix filename carrying `\n`/ANSI in a
 routed warn breaks the single-row display or executes the escape.
-**Status**: In progress — fixed, awaiting per-finding reviewer verdict
+**Status**: Verified
 **Branch**: — (default-branch mode)
 **Commit**: (filled at landing)
 
@@ -45,4 +45,4 @@ None.
 None.
 
 ## Reviewer comments
-(pending per-finding verification)
+Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0 (detached, disposable worktree). Reviewed `a6cf7a8c5d8457ea91c31ce953f1744371200636` base `4179a144135531dcd71627878a39a663e0d0a705`. guard_confirmed: **true** (reviewer ran revert→red→restore→green itself). Verdict: **accepted**, no comments. 2026-07-31T04:59Z. Record: `.review/results/cr-clp2-1.codex.json`.
