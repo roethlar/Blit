@@ -125,9 +125,14 @@ fn emit_summary(
         // pfc-6, outside `print_summary` for the same reason the failure
         // block is: a run whose only work was an in-place attribute repair
         // copies nothing, classifies up-to-date, and that fn early-returns.
+        // ls-0: phrased as a sibling of the "• Copied:" line and explicitly
+        // "separate files", because the owner's reading of the old output
+        // was that a byte total and "no bytes re-sent" contradicted each
+        // other. They never did — the two sets are disjoint — but nothing
+        // on screen said so.
         if summary.files_repaired > 0 {
             println!(
-                "• Repaired metadata on {} file(s) — no bytes re-sent",
+                "• Repaired: {} separate file(s) — metadata only, no bytes re-sent",
                 summary.files_repaired
             );
         }
@@ -840,13 +845,18 @@ fn print_summary(
         TransferOutcome::Transferred => {}
     }
 
+    // ls-0: the header carries the DURATION only. It used to read
+    // "<op> complete: N files, B in T" directly above "Repaired metadata on
+    // M file(s) — no bytes re-sent", which the owner read as
+    // self-contradictory: two DISJOINT populations printed as if they were
+    // one. Copied and repaired files share no members (a repaired file is
+    // never planned and never copied — `local_session.rs` pins that), so
+    // each gets its own line and the header commits to neither count.
+    println!("{}{} complete in {:.2?}", operation, suffix, duration);
     println!(
-        "{}{} complete: {} files, {} in {:.2?}",
-        operation,
-        suffix,
+        "• Copied: {} file(s), {}",
         summary.copied_files,
-        format_bytes(summary.total_bytes),
-        duration
+        format_bytes(summary.total_bytes)
     );
 
     if summary.deleted_files > 0 || summary.deleted_dirs > 0 {
@@ -867,14 +877,24 @@ fn print_summary(
         } else {
             0.0
         };
+        // ls-0: this rate is COPIED BYTES over TOTAL wall time, so scanning,
+        // comparing and metadata repair all sit in the divisor while
+        // contributing no bytes. On the owner's field run it printed
+        // "1.11 MiB/s" for a transfer whose actual copy window was a small
+        // fraction of the 355 s — the number was not wrong, it was
+        // unlabelled. It now states what it averages over instead of
+        // implying a copy rate.
+        println!(
+            "• Average: {} over the whole run (includes scan and compare)",
+            format_bps(throughput as u64)
+        );
         // codex otp-11b B4: the session's apply pipeline runs one sink
         // worker unless the hidden debug limiter widened it — print
         // the EFFECTIVE count, not the options default (num_cpus).
-        println!(
-            "• Throughput: {} | Workers used: {}",
-            format_bps(throughput as u64),
-            if debug_mode { workers } else { 1 }
-        );
+        // ls-0 keeps this visible rather than tidying it away: one worker
+        // is the defect `docs/plan/LOCAL_SMALL_FILE_PATH.md` exists to fix,
+        // and hiding the symptom would only make it harder to see.
+        println!("• Workers used: {}", if debug_mode { workers } else { 1 });
     }
     if debug_mode {
         println!("• Debug limiter active – worker cap {} worker(s)", workers);

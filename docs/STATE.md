@@ -35,21 +35,20 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Handoff — 2026-07-31
 - Done: pfc-1..6 + clp-1..2 landed and reviewed; D-2026-07-31-4 makes local
   speed priority-1; ls-1 step (0) instrument landed but its review FAILED.
-- Next: both ls-1 findings fixed; re-dispatch the range review, then RUN
-  step (0) on the owner's shape. `ls-0` unscoped; pfc Shipped is the owner's.
+- Next: ls-0 landed and 4 ls-1 findings fixed; round-3 review, then RUN
+  step (0) on the owner's shape. pfc Shipped is the owner's.
 
 ## Now (active work)
 
 - **MACOS TEST FIREWALL CLEANUP SHIPPED LOCALLY (D-2026-07-23-6):** helper,
-  16 fake-backed cases, real parser check, and mutation guards complete; no
-  external review pending. Plan: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md`.
+  16 fake-backed cases, parser check and mutation guards complete; no review
+  pending. Plan: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md`.
 - **THUNDERBOLT LIFECYCLE ATTRIBUTED (D-2026-07-23-3), SSD FOLLOW-UP
   COMPLETE:** both closed, no repeats authorized; records in DEVLOG
   2026-07-23 and `docs/bench/end-to-end-transfer-latency-2026-07-23/` +
   `docs/bench/thunderbolt-ssd-2026-07-22/`.
 - **RELEASE COMPLETION SHIPPED:** exact candidate `d1f1152d` passed every gate
-  and is published as `v0.1.1`. Optional ceiling and Thunderbolt tuning remain
-  post-release work.
+  and is published as `v0.1.1`; ceiling/Thunderbolt tuning is post-release.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -74,24 +73,27 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    ruled it "should have been resolved before this was declared
    release-worthy." Recorded 2026-07-13, shipped in 0.1.1 anyway under
    D-2026-07-13-2's BEHIND sequencing, whose blockers are both now gone.
-   **The fix is not a bigger default worker count** — the plan's own
-   equal-concurrency data has blit winning at 1 thread and losing ~2× at 8
-   (scaling 1.67× vs robocopy 3.63×), so the defect is that blit does not
-   convert concurrency into throughput; those numbers are flagged untrusted
-   (bi-stable across sessions), which is what `ls-1` exists to settle.
+   **The fix is not a bigger default worker count** — blit wins at 1 thread
+   and loses ~2× at 8 (1.67× vs robocopy 3.63×), so it does not convert
+   concurrency into throughput; those figures are flagged untrusted
+   (bi-stable), which is what `ls-1` exists to settle.
    **`ls-1` is a hard measurement gate — no fix code before it lands.**
    **ls-1 step (0) instrument landed 2026-07-31 — and its review FAILED.**
    Default-off `LocalPhaseProbe` emits a per-session phase breakdown against
    a wall denominator, but the `ls-1-range` codex dispatch returned
-   `guard_confirmed: false` with 2 findings, **both now FIXED**: cr-ls1-1
-   (HIGH, the queue await sat in no span so a slow sink could dominate while
-   APPLY read ~zero — now its own phase, guarded by a slow sink past the
-   queue depth) and cr-ls1-2 (MEDIUM, the subtraction guard was vacuous —
-   now a named `NestedSpan` with a categorical guard the reviewer's own
-   revert reds). The landing records had falsely claimed both subtractions
-   were proven; correction recorded. **Not usable for attribution until the
-   range re-review passes.** **`ls-0` is carved out** of the gate: display
-   text only. NOT the closed P1 asymmetry defect (D-2026-07-22-2).
+   `guard_confirmed: false` with 2 findings, **both FIXED**: cr-ls1-1 (HIGH,
+   the queue await sat in no span so a slow sink could dominate while APPLY
+   read ~zero) and cr-ls1-2 (MEDIUM, the subtraction guard was vacuous — now
+   a `NestedSpan` with a categorical guard the reviewer's own revert reds).
+   The landing records had falsely claimed both subtractions
+   were proven; correction recorded. Round 2 returned **`guard_confirmed:
+   true`** (both verified-closed) plus 2 new MEDIUMs, **also fixed**:
+   cr-ls1-3 (the artifact bypassed clp-2's sole-stderr-writer row) and
+   cr-ls1-4 (`?` skipped span closes, so failed runs reported truncated
+   phases as fast ones — spans now close before propagation and the report
+   carries `session_failed`). Round 3 pending. **`ls-0` LANDED**: the
+   summary now separates copied from repaired files and labels the rate as
+   a whole-run average. NOT the closed P1 defect (D-2026-07-22-2).
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13; any external review requires exact owner approval under
    D-2026-07-23-7. **otp-1 … otp-12c are all `[x]`** — closed-slice record

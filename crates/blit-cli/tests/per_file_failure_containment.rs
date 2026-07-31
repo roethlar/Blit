@@ -79,9 +79,18 @@ fn non_mirror_copy_contains_the_failure_lands_the_rest_and_exits_two() {
         "a completed-with-failures copy exits {EXIT_PARTIAL_FAILURE}\nstdout:\n{stdout}\nstderr:\n{}",
         stderr_of(&output)
     );
+    // ls-0 renamed the header ("Copy complete: N files, B in T" became
+    // "Copy complete in T" plus a separate "• Copied:" line). The property
+    // under guard is unchanged: the normal summary still prints BEFORE the
+    // failure block, so a partial failure reads as "here is what landed,
+    // and here is what did not" rather than as a bare error.
     assert!(
-        stdout.contains("Copy complete:"),
+        stdout.contains("Copy complete in"),
         "the normal summary still prints first: {stdout}"
+    );
+    assert!(
+        stdout.contains("• Copied: 1 file(s)"),
+        "the landed files are still reported: {stdout}"
     );
     assert!(
         stdout.contains("1 file(s) could not be written"),
