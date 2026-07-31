@@ -17,6 +17,17 @@ See `.review/findings/<id>.md` for per-finding details.
   reviewer verdict when external review was not authorized; its finding record
   must carry the local guard proof and the non-review closure.
 
+## Per-file error containment + CLI live progress — landed-slice defect reviews
+
+Plans: `docs/plan/PER_FILE_ERROR_CONTAINMENT.md` (Active, D-2026-07-30-1 /
+D-2026-07-31-1), `docs/plan/CLI_LIVE_PROGRESS.md` (Active, D-2026-07-31-2).
+Standing dispatch (owner, D-2026-07-31-3): `codereview codex gpt-5.6-sol
+xhigh` over each landed slice's pinned range as it lands.
+
+| ID | Title | Status | Commit(s) |
+|----|-------|--------|-----------|
+| pfc-1-range | Defect hunt over `0ef4cc7c..8c9a63d5` (synthesized-HIDDEN attribute tolerance) | `[x]` | `8c9a63d5` — **clean, no material issue**. Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0; capability_ok=true; SHAs pin-verified; 2026-07-31T01:54Z; record `.review/results/pfc-1-range.codex.json` |
+
 ## Live dial tuning correction — plan and implementation review
 
 Plan: `docs/plan/LIVE_DIAL_TUNING.md` (Active, D-2026-07-16-2). Review selection:
