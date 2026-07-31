@@ -2,7 +2,7 @@
 
 **Severity**: HIGH — a mirror to a read-only destination volume can contain
 every failed write and exit 0, silently leaving the backup incomplete.
-**Status**: In progress — fixed, awaiting per-finding reviewer verdict
+**Status**: Verified
 **Branch**: — (default-branch mode; this repo lands fixes on `master`)
 **Commit**: filled at landing (fix commit on `master`, parent `9004535d`)
 
@@ -79,4 +79,12 @@ transient and not named by the finding; left contained, noted for pfc-4/5
 surfacing.
 
 ## Reviewer comments
-(pending per-finding verification dispatch after the fix)
+Reviewer: codex / gpt-5.6-sol / xhigh / standard
+Harness: codex-cli 0.146.0 (detached dispatch, disposable detached
+worktree at the fix commit; workspace-write scoped to the worktree).
+Reviewed SHA: `2ad657430758285a165020ceffb096bdf2edeb2a`;
+base SHA: `9004535d8bf3f2657b4472e52f89e2af7627c470`.
+guard_confirmed: **true** (reviewer independently executed
+revert → 3 volume tests red / boundary tests green → restore → green in
+its own worktree). Verdict: **accepted**. 2026-07-31T03:37Z. Comments:
+none. Record: `.review/results/cr-pfc2-1.codex.json` (committed).
