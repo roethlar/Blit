@@ -25,8 +25,142 @@ pub use super::data_plane::DataPlaneSession;
 /// Upper bound on the per-file failures one outcome reports.
 /// [`SinkOutcome::files_failed_total`] keeps counting past it, so a
 /// catastrophic run still carries an exact count behind a bounded list —
-/// the same list the summary and the wire carry.
+/// the same list the summary and the wire carry. The wire list is
+/// bounded by encoded bytes as well
+/// ([`MAX_WIRE_FAILURES_ENCODED_BYTES`]), so it can be shorter than this
+/// count when the entries are long.
 pub const MAX_REPORTED_FILE_FAILURES: usize = 64;
+
+/// Ceiling on one reported failure's `reason`, in bytes (cr-pfc4-2).
+/// A reason is a formatted `eyre` chain, whose length is bounded by
+/// nothing — a deep `with_context` stack over a long path grows it
+/// without limit. The report's job is to say WHY a file failed, and the
+/// head of that chain is what says it, so the head is what survives the
+/// bound.
+pub const MAX_FAILURE_REASON_BYTES: usize = 1024;
+
+/// Ceiling on one reported failure's `relative_path`, in bytes
+/// (cr-pfc4-2). Deliberately generous: the path is the report's
+/// identity half, so it is carried WHOLE for anything a real filesystem
+/// holds — 4 KiB clears every practical manifest path, including a
+/// Windows extended-length one. Past it the TAIL survives, because the
+/// tail is what names the file.
+pub const MAX_FAILURE_PATH_BYTES: usize = 4 * 1024;
+
+/// Aggregate budget for one summary's encoded `failures` list, in bytes
+/// (cr-pfc4-2).
+///
+/// [`MAX_REPORTED_FILE_FAILURES`] bounds how many entries the report
+/// carries, not how many bytes they encode to — 64 near-maximum
+/// path+reason strings encode to megabytes. The report rides the closing
+/// `Summary` frame, which is ONE protobuf frame under tonic's default
+/// 4 MiB decode limit, so an oversized report does not degrade the
+/// report: the peer rejects the whole frame, and a session that
+/// successfully contained its per-file failures faults at the very end
+/// and delivers no summary at all.
+///
+/// Same frame discipline, and the same deliberately conservative
+/// posture, as the in-stream carrier's `MAX_IN_STREAM_TAR_HEADER_BYTES`
+/// (D-2026-07-10-1): bound the sender's encoded bytes far below the
+/// limit instead of trusting the shape to stay small. 256 KiB leaves
+/// the summary's other fields, the frame envelope, and any future field
+/// more than an order of magnitude of headroom.
+pub const MAX_WIRE_FAILURES_ENCODED_BYTES: usize = 256 * 1024;
+
+/// Encoded overhead one `failures` entry costs its parent message: the
+/// repeated field's tag plus its length delimiter. Field 7 of
+/// `TransferSummary` tags in one byte and a per-entry-bounded entry's
+/// length varint fits in two, so 8 is deliberately conservative — the
+/// same "count the envelope, then round up" posture as
+/// `transfer_session`'s `in_stream_tar_header_cost`.
+const WIRE_FAILURE_ENVELOPE_BYTES: usize = 8;
+
+/// One per-entry-bounded failure must always fit the aggregate budget.
+/// A report that carries a non-zero count has to carry at least one
+/// name: "10 files failed" with an empty list tells an operator nothing
+/// to act on. Held here as a compile-time property of the constants
+/// rather than a runtime special case in [`SinkOutcome::wire_failures`].
+const _: () = assert!(
+    MAX_FAILURE_PATH_BYTES + MAX_FAILURE_REASON_BYTES + 2 * WIRE_FAILURE_ENVELOPE_BYTES
+        <= MAX_WIRE_FAILURES_ENCODED_BYTES,
+    "one bounded failure entry must always fit the aggregate byte budget"
+);
+
+/// Marker a bounded report string carries so a reader can tell a
+/// truncated string from a short one. ASCII on purpose: it is counted
+/// against a BYTE budget, so its own length must not depend on the text
+/// around it.
+const TRUNCATION_MARKER: &str = "[truncated]";
+
+/// Largest char boundary at or below `index`.
+///
+/// `str::floor_char_boundary` is still unstable, and this cannot be a
+/// plain byte slice: slicing mid-character panics, and a byte-sliced
+/// multibyte edge is not valid UTF-8 — exactly what a protobuf `string`
+/// field may not carry.
+fn floor_char_boundary(value: &str, index: usize) -> usize {
+    if index >= value.len() {
+        return value.len();
+    }
+    let mut at = index;
+    while at > 0 && !value.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// Smallest char boundary at or above `index` — the tail-preserving
+/// counterpart. Rounding UP only ever shortens the kept tail, so it can
+/// never break the byte bound it is computed against.
+fn ceil_char_boundary(value: &str, index: usize) -> usize {
+    if index >= value.len() {
+        return value.len();
+    }
+    let mut at = index;
+    while at < value.len() && !value.is_char_boundary(at) {
+        at += 1;
+    }
+    at
+}
+
+/// `value` bounded to `max_bytes`, keeping its HEAD and marking the cut.
+/// A value already inside the bound is copied byte-identically, so
+/// ordinary reports pass through untouched. The result never exceeds
+/// `max_bytes`: a bound too small for [`TRUNCATION_MARKER`] keeps
+/// content over annotation rather than overshoot (unreachable for the
+/// constants above, but the bound is honored unconditionally).
+fn bounded_head(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    if max_bytes <= TRUNCATION_MARKER.len() {
+        return value[..floor_char_boundary(value, max_bytes)].to_string();
+    }
+    let end = floor_char_boundary(value, max_bytes - TRUNCATION_MARKER.len());
+    let mut bounded = String::with_capacity(end + TRUNCATION_MARKER.len());
+    bounded.push_str(&value[..end]);
+    bounded.push_str(TRUNCATION_MARKER);
+    bounded
+}
+
+/// `value` bounded to `max_bytes`, keeping its TAIL and marking the cut.
+/// Same byte guarantee and same byte-identical passthrough as
+/// [`bounded_head`]; used for the path, whose tail is the filename.
+fn bounded_tail(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    if max_bytes <= TRUNCATION_MARKER.len() {
+        let start = ceil_char_boundary(value, value.len() - max_bytes);
+        return value[start..].to_string();
+    }
+    let keep = max_bytes - TRUNCATION_MARKER.len();
+    let start = ceil_char_boundary(value, value.len() - keep);
+    let mut bounded = String::with_capacity(TRUNCATION_MARKER.len() + value.len() - start);
+    bounded.push_str(TRUNCATION_MARKER);
+    bounded.push_str(&value[start..]);
+    bounded
+}
 
 /// One file the destination could not materialize, named for the
 /// end-of-operation summary. `relative_path` is the manifest-relative
@@ -39,11 +173,22 @@ pub struct FileFailure {
 }
 
 impl FileFailure {
-    /// Wire form of one contained failure (contract v6).
+    /// Wire form of one contained failure (contract v6), per-entry
+    /// bounded (cr-pfc4-2).
+    ///
+    /// The per-string bounds live HERE, not at the call site, so no
+    /// producer of a wire entry can put an unbounded string on the
+    /// closing summary frame: `reason` keeps its head up to
+    /// [`MAX_FAILURE_REASON_BYTES`], `relative_path` keeps its tail up
+    /// to [`MAX_FAILURE_PATH_BYTES`]. Both cut on a char boundary and
+    /// mark the cut; anything already inside its bound is copied
+    /// byte-identically. The in-memory record keeps its full strings —
+    /// the bound is the wire's, and the whole reason is already in the
+    /// log `record_failure` wrote.
     pub fn to_wire(&self) -> crate::generated::FileFailure {
         crate::generated::FileFailure {
-            relative_path: self.relative_path.clone(),
-            reason: self.reason.clone(),
+            relative_path: bounded_tail(&self.relative_path, MAX_FAILURE_PATH_BYTES),
+            reason: bounded_head(&self.reason, MAX_FAILURE_REASON_BYTES),
         }
     }
 
@@ -183,19 +328,55 @@ impl SinkOutcome {
             .extend(other.failures.iter().take(room).cloned());
     }
 
-    /// This report's carried details in wire form, bounded at
-    /// [`MAX_REPORTED_FILE_FAILURES`] (contract v6). The cap is
-    /// re-applied here rather than trusted from upstream: this is the
-    /// sender-side bound the wire contract states, and it must hold for
-    /// any producer of `failures`, not only the ones that build the list
-    /// through [`SinkOutcome::record_failure`]. `files_failed_total`
-    /// keeps the exact count the summary reports alongside it.
+    /// This report's carried details in wire form, bounded by BOTH the
+    /// entry count ([`MAX_REPORTED_FILE_FAILURES`]) and the encoded
+    /// bytes the closing summary frame can afford
+    /// ([`MAX_WIRE_FAILURES_ENCODED_BYTES`], contract v6).
+    ///
+    /// This is the one producer of the wire list: every summary
+    /// construction site calls it, and the delegated topology's
+    /// re-encode copies the already-bounded list off `TransferSummary`
+    /// (`delegated_summary::delegated_summary_from_session`) rather than
+    /// re-deriving one, so the bound is applied exactly once per report.
+    ///
+    /// Both halves are re-applied here rather than trusted from
+    /// upstream: this is the sender-side bound the wire contract states,
+    /// and it must hold for any producer of `failures`, not only the
+    /// ones that build the list through
+    /// [`SinkOutcome::record_failure`].
+    ///
+    /// cr-pfc4-2: the count cap alone bounds entries, not bytes. Each
+    /// entry is per-entry bounded by [`FileFailure::to_wire`], and the
+    /// aggregate budget then drops trailing entries once the encoded
+    /// cost would exceed it — measured against prost's own
+    /// `encoded_len`, plus the repeated field's envelope, so the number
+    /// bounded is the number the frame actually pays.
+    /// `files_failed_total` keeps the exact count the summary reports
+    /// alongside the list, so a list shortened by either bound reads as
+    /// "capped", never as "failures were forgotten".
     pub fn wire_failures(&self) -> Vec<crate::generated::FileFailure> {
-        self.failures
-            .iter()
-            .take(MAX_REPORTED_FILE_FAILURES)
-            .map(FileFailure::to_wire)
-            .collect()
+        use prost::Message as _;
+
+        let mut wire: Vec<crate::generated::FileFailure> = Vec::new();
+        let mut remaining = MAX_WIRE_FAILURES_ENCODED_BYTES;
+        for failure in self.failures.iter().take(MAX_REPORTED_FILE_FAILURES) {
+            let entry = failure.to_wire();
+            let cost = entry
+                .encoded_len()
+                .saturating_add(WIRE_FAILURE_ENVELOPE_BYTES);
+            // Trailing entries are dropped whole, never squeezed: a
+            // report is a prefix of the record in record order, so the
+            // first failures — the ones that explain what went wrong —
+            // are the ones that survive. The compile-time assertion on
+            // the constants guarantees the first entry always fits, so a
+            // non-zero count never ships an empty list.
+            let Some(left) = remaining.checked_sub(cost) else {
+                break;
+            };
+            remaining = left;
+            wire.push(entry);
+        }
+        wire
     }
 }
 
@@ -3126,6 +3307,230 @@ mod tests {
             MAX_REPORTED_FILE_FAILURES,
             "the conversion re-applies the wire bound"
         );
+    }
+
+    /// tonic's default decode limit — the ceiling the closing `Summary`
+    /// frame lives under (`transfer_session`'s frame discipline,
+    /// D-2026-07-10-1). Restated locally so this module's bound can be
+    /// asserted against the thing that actually rejects an oversized
+    /// frame, not just against its own constant.
+    const TONIC_DECODE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+
+    /// The encoded cost of a report as its parent summary pays it.
+    fn encoded_failures_cost(wire: &[crate::generated::FileFailure]) -> usize {
+        use prost::Message as _;
+
+        wire.iter()
+            .map(|entry| entry.encoded_len() + WIRE_FAILURE_ENVELOPE_BYTES)
+            .sum()
+    }
+
+    /// Build the summary exactly as the session's single construction
+    /// site does (`transfer_session::run_session`): the exact total plus
+    /// the sender-bounded list.
+    fn wire_summary(outcome: &SinkOutcome) -> crate::generated::TransferSummary {
+        crate::generated::TransferSummary {
+            files_transferred: 3,
+            bytes_transferred: 4096,
+            entries_deleted: 0,
+            in_stream_carrier_used: true,
+            files_resumed: 0,
+            files_failed: outcome.files_failed_total,
+            failures: outcome.wire_failures(),
+        }
+    }
+
+    /// cr-pfc4-2: the entry-count cap bounds entries, not BYTES. 64
+    /// near-maximum path+reason strings encode to megabytes, and the
+    /// report rides one `Summary` frame under tonic's 4 MiB decode
+    /// limit — so an unbounded report does not degrade the report, it
+    /// makes the peer reject the frame and the session that successfully
+    /// contained its failures fault at the very end with no summary at
+    /// all.
+    ///
+    /// The fixture is the observable failure: 70 entries whose paths sit
+    /// at the Windows extended-length ceiling and whose reasons are
+    /// 64 KiB eyre chains. Pre-fix that summary encodes to ~6 MiB.
+    #[test]
+    fn the_wire_report_stays_far_under_the_summary_frame_limit() {
+        use prost::Message as _;
+
+        // Near-maximum by construction, not by taste: 32_767 bytes is
+        // the Windows extended-length path ceiling, and a deep
+        // `with_context` chain over such a path is how a reason grows.
+        let deep_dir = "d".repeat(32_767);
+        let long_chain = "x".repeat(64 * 1024);
+        let mut outcome = SinkOutcome::written(3, 4096);
+        for index in 0..MAX_REPORTED_FILE_FAILURES + 6 {
+            outcome.record_failure(
+                format!("{deep_dir}/f{index}.bin"),
+                format!("synthetic {index}: {long_chain}"),
+            );
+        }
+        assert_eq!(
+            outcome.files_failed_total,
+            (MAX_REPORTED_FILE_FAILURES + 6) as u64,
+            "the exact total survives every bound"
+        );
+
+        // The unbounded report is what the frame would have had to
+        // carry — the fixture must genuinely blow the limit, or this
+        // test proves nothing.
+        let unbounded: usize = outcome
+            .failures
+            .iter()
+            .map(|failure| {
+                failure.relative_path.len() + failure.reason.len() + 2 * WIRE_FAILURE_ENVELOPE_BYTES
+            })
+            .sum();
+        assert!(
+            unbounded > TONIC_DECODE_LIMIT_BYTES,
+            "fixture must exceed the frame limit unbounded to exercise the fix (got {unbounded})"
+        );
+
+        let summary = wire_summary(&outcome);
+        let carried = encoded_failures_cost(&summary.failures);
+        assert!(
+            carried <= MAX_WIRE_FAILURES_ENCODED_BYTES,
+            "the aggregate byte budget bounds the report (got {carried})"
+        );
+        assert!(
+            summary.encoded_len() < TONIC_DECODE_LIMIT_BYTES,
+            "the whole summary frame must clear the decode limit (got {})",
+            summary.encoded_len()
+        );
+
+        // A bounded report is still a REPORT: the count alone names
+        // nothing an operator can act on.
+        assert!(
+            !summary.failures.is_empty(),
+            "a non-zero count must ship at least one named failure"
+        );
+        assert!(
+            summary.failures.len() < MAX_REPORTED_FILE_FAILURES,
+            "these entries are long enough that the byte budget binds \
+             before the count cap (got {})",
+            summary.failures.len()
+        );
+        // Order-preserving prefix, with both truncation directions doing
+        // their job: the reason's head says what happened, the path's
+        // tail says to which file.
+        assert!(summary.failures[0].reason.starts_with("synthetic 0: x"));
+        assert!(summary.failures[0].reason.ends_with(TRUNCATION_MARKER));
+        assert!(summary.failures[0].relative_path.ends_with("/f0.bin"));
+        assert!(summary.failures[0]
+            .relative_path
+            .starts_with(TRUNCATION_MARKER));
+        for entry in &summary.failures {
+            assert!(entry.relative_path.len() <= MAX_FAILURE_PATH_BYTES);
+            assert!(entry.reason.len() <= MAX_FAILURE_REASON_BYTES);
+        }
+
+        // The exact count is what tells the operator files are missing;
+        // it is never the list's length.
+        assert_eq!(
+            summary.files_failed,
+            (MAX_REPORTED_FILE_FAILURES + 6) as u64
+        );
+    }
+
+    /// The bound is a BYTE bound applied to UTF-8 text, so every cut
+    /// lands on a char boundary — a byte-sliced multibyte edge is not
+    /// valid UTF-8, and a protobuf `string` field may not carry it.
+    #[test]
+    fn report_string_bounds_cut_on_char_boundaries() {
+        let crab = "🦀"; // 4 bytes
+        let two_byte = "é"; // 2 bytes
+
+        let mut outcome = SinkOutcome::default();
+        outcome.record_failure(
+            format!("{}/tärget.bin", crab.repeat(20_000)),
+            two_byte.repeat(20_000),
+        );
+        let wire = outcome.wire_failures();
+        assert_eq!(wire.len(), 1);
+
+        assert!(wire[0].reason.len() <= MAX_FAILURE_REASON_BYTES);
+        assert!(wire[0].reason.ends_with(TRUNCATION_MARKER));
+        assert!(
+            wire[0]
+                .reason
+                .trim_end_matches(TRUNCATION_MARKER)
+                .chars()
+                .all(|c| c == 'é'),
+            "no character survived half-cut"
+        );
+
+        assert!(wire[0].relative_path.len() <= MAX_FAILURE_PATH_BYTES);
+        assert!(wire[0].relative_path.starts_with(TRUNCATION_MARKER));
+        assert!(
+            wire[0].relative_path.ends_with("/tärget.bin"),
+            "the tail names the file, so the tail is what survives"
+        );
+        assert!(
+            wire[0]
+                .relative_path
+                .trim_start_matches(TRUNCATION_MARKER)
+                .chars()
+                .all(|c| c == '🦀' || "/tärget.bin".contains(c)),
+            "no character survived half-cut"
+        );
+
+        // Every bound, including ones smaller than the marker itself, at
+        // every awkward offset inside a multibyte run: the byte bound is
+        // honored and the result is always valid UTF-8 (a `String`
+        // cannot be otherwise, so a mid-character cut would panic here).
+        let multibyte = format!("{}{}", crab.repeat(8), two_byte.repeat(8));
+        for max_bytes in 0..=multibyte.len() + 4 {
+            let head = bounded_head(&multibyte, max_bytes);
+            let tail = bounded_tail(&multibyte, max_bytes);
+            assert!(
+                head.len() <= max_bytes,
+                "head bound honored at {max_bytes} (got {})",
+                head.len()
+            );
+            assert!(
+                tail.len() <= max_bytes,
+                "tail bound honored at {max_bytes} (got {})",
+                tail.len()
+            );
+            assert!(
+                multibyte.contains(head.trim_end_matches(TRUNCATION_MARKER)),
+                "the kept head is a whole-character prefix of the input"
+            );
+            assert!(
+                multibyte.contains(tail.trim_start_matches(TRUNCATION_MARKER)),
+                "the kept tail is a whole-character suffix of the input"
+            );
+        }
+    }
+
+    /// The bounds must be invisible to every report a real run produces:
+    /// an ordinary failure reaches the wire byte-identically, marker-free
+    /// and round-trippable. A bound that rewrote ordinary reasons would
+    /// be a regression in the surface it exists to protect.
+    #[test]
+    fn an_ordinary_report_passes_through_byte_identical() {
+        let mut outcome = SinkOutcome::written(2, 20);
+        outcome.record_failure(
+            "dir/sub/one.bin",
+            "copy dir/sub/one.bin: Access is denied. (os error 5)",
+        );
+        outcome.record_failure("", "creating C:\\dst: The system cannot find the path");
+
+        let wire = outcome.wire_failures();
+        assert_eq!(wire.len(), 2);
+        for (entry, record) in wire.iter().zip(outcome.failures.iter()) {
+            assert_eq!(entry.relative_path, record.relative_path);
+            assert_eq!(entry.reason, record.reason);
+            assert!(!entry.relative_path.contains(TRUNCATION_MARKER));
+            assert!(!entry.reason.contains(TRUNCATION_MARKER));
+            assert_eq!(&FileFailure::from_wire(entry), record);
+        }
+        assert_eq!(outcome.files_failed_total, 2);
+        // The empty-path convention (the destination root IS the file)
+        // must not acquire a marker either.
+        assert_eq!(wire[1].relative_path, "");
     }
 
     /// The wire form round-trips both fields, so a peer's report reads

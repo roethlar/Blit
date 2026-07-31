@@ -4818,8 +4818,13 @@ async fn destination_session_inner(
                     files_resumed: files_resumed.load(Ordering::Relaxed),
                     // pfc-4 (contract v6): the destination is the scorer
                     // for failures too — this is the only end that knows
-                    // which files did not land. The list is capped at
-                    // MAX_REPORTED_FILE_FAILURES by the sender; the total
+                    // which files did not land. `wire_failures` applies
+                    // every sender-side bound the frame needs: the
+                    // MAX_REPORTED_FILE_FAILURES count cap, per-entry
+                    // string bounds, and the aggregate encoded-byte
+                    // budget that keeps THIS frame under the 4 MiB
+                    // decode limit (cr-pfc4-2 — same frame discipline as
+                    // MAX_IN_STREAM_TAR_HEADER_BYTES above). The total
                     // stays exact. Every carrier and both roles ride this
                     // one construction, so no lane can report a short
                     // success the initiator cannot see.

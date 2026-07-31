@@ -205,6 +205,12 @@ messages (`SessionHello`, `SessionOpen`,
   cannot produce an unbounded frame while the count stays exact. A
   `failures` list shorter than `files_failed` therefore means "capped",
   never "some failures were forgotten".
+- The sender's bound is a BYTE bound as well as an entry-count one
+  (cr-pfc4-2): each entry's `reason` is capped at 1 KiB and its
+  `relative_path` at 4 KiB (cut on a char boundary and marked;
+  head-preserving for the reason, tail-preserving for the path), and the
+  whole encoded list is capped at 256 KiB, so this frame clears the
+  4 MiB decode limit whatever the paths and error chains look like.
 - `relative_path` is the manifest-relative wire path (POSIX
   separators), empty for the single-file destination convention (the
   destination root IS the file — the same rule `FileHeader` uses).

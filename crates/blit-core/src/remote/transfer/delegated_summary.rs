@@ -17,11 +17,15 @@
 //! observe.
 //!
 //! The failure report is copied, never recomputed: the sender-side
-//! 64-entry cap ([`crate::remote::transfer::MAX_REPORTED_FILE_FAILURES`],
-//! applied by `SinkOutcome::wire_failures` at the summary's construction
-//! site) has already been applied, and `files_failed` is the exact total
-//! behind that bounded list. A second capping path here could only
-//! disagree with the authoritative one.
+//! bounds — the 64-entry cap
+//! ([`crate::remote::transfer::MAX_REPORTED_FILE_FAILURES`]), the
+//! per-entry string bounds, and the aggregate encoded-byte budget
+//! ([`crate::remote::transfer::sink::MAX_WIRE_FAILURES_ENCODED_BYTES`],
+//! cr-pfc4-2) — are all applied by `SinkOutcome::wire_failures` at the
+//! summary's construction site, and `files_failed` is the exact total
+//! behind the bounded list. Copying is therefore what makes this
+//! message's own frame bounded too, with no second bounding path that
+//! could disagree with the authoritative one.
 
 use crate::generated::{DelegatedPullSummary, TransferSummary};
 use crate::remote::transfer::sink::FileFailure;
@@ -141,6 +145,49 @@ mod tests {
             report,
             contained.failures[..MAX_REPORTED_FILE_FAILURES].to_vec(),
             "the initiator's report is the destination's own records"
+        );
+    }
+
+    /// cr-pfc4-2: the delegated re-encode is a second frame carrying the
+    /// same report, so it inherits the byte bound by copying instead of
+    /// re-deriving. A destination whose failures carry near-maximum
+    /// paths and reasons must therefore produce a `DelegatedPullSummary`
+    /// that clears the same 4 MiB decode limit the session summary does,
+    /// with the exact count intact.
+    #[test]
+    fn the_delegated_re_encode_inherits_the_summary_byte_bound() {
+        use prost::Message as _;
+
+        const TONIC_DECODE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+
+        let deep_dir = "d".repeat(32_767);
+        let long_chain = "x".repeat(64 * 1024);
+        let mut contained = SinkOutcome::written(3, 4096);
+        for index in 0..(MAX_REPORTED_FILE_FAILURES + 6) {
+            contained.record_failure(
+                format!("{deep_dir}/f{index}.bin"),
+                format!("synthetic {index}: {long_chain}"),
+            );
+        }
+        let summary = session_summary(&contained);
+        assert!(summary.encoded_len() < TONIC_DECODE_LIMIT_BYTES);
+
+        let delegated = delegated_summary_from_session(&summary, "127.0.0.1:9031".to_string());
+
+        assert!(
+            delegated.encoded_len() < TONIC_DECODE_LIMIT_BYTES,
+            "the delegated frame must clear the decode limit too (got {})",
+            delegated.encoded_len()
+        );
+        assert_eq!(
+            delegated.failures, summary.failures,
+            "the bound is inherited by copying, never re-derived"
+        );
+        assert!(!delegated.failures.is_empty(), "a report still names files");
+        assert_eq!(
+            delegated.files_failed,
+            (MAX_REPORTED_FILE_FAILURES + 6) as u64,
+            "the exact count survives the re-encode"
         );
     }
 

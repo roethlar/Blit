@@ -41,7 +41,7 @@ xhigh` over each landed slice's pinned range as it lands.
 | cr-pfc3-2 | Rayon fold classifies at collect time — dead-root TOCTOU | `[x]` | HIGH; fixed `eb0ffd61`; codex verification **accepted**, guard_confirmed=true (`.review/results/cr-pfc3-2.codex.json`) |
 | pfc-4-range | Defect hunt over `72079331..bdc3e4a4` (wire failure report, contract v6) | `[x]` | `bdc3e4a4` — **findings: 3, all admitted below**. Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0; capability_ok=true; SHAs pin-verified; record `.review/results/pfc-4-range.codex.json` |
 | cr-pfc4-1 | Delegated pulls discard the destination failure report | `[x]` | HIGH; fixed `2b5c091b`; codex verification **accepted**, guard_confirmed=true (`.review/results/cr-pfc4-1.codex.json`) |
-| cr-pfc4-2 | Entry-count cap does not bound the encoded summary frame | `[ ]` | MEDIUM; admitted (`.review/findings/cr-pfc4-2.md`) |
+| cr-pfc4-2 | Entry-count cap does not bound the encoded summary frame | `[~]` | MEDIUM; fixed (per-entry bounds + 256 KiB aggregate budget, two-variant guard); verification pending |
 | cr-pfc4-3 | All-failed reconciliation reads as never-started progress | `[~]` | LOW; fixed (started() counts reconciled-away work; guard red/green); verification pending |
 
 ## Live dial tuning correction — plan and implementation review

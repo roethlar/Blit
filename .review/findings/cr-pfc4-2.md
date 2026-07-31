@@ -4,7 +4,7 @@
 closing summary frame past the 4 MiB decode limit; the frame is
 rejected and the contained transfer ends as a session fault WITHOUT its
 failure report.
-**Status**: Open — fix queued behind cr-pfc3-1/-2 (same file in flight)
+**Status**: In progress — fixed, awaiting per-finding reviewer verdict
 **Branch**: — (default-branch mode)
 **Commit**: (filled at landing)
 
@@ -52,3 +52,5 @@ None.
 
 ## Reviewer comments
 (pending per-finding verification after the fix)
+
+As built: per-entry bounds (reason 1 KiB head-truncated, path 4 KiB TAIL-preserving, char-boundary-safe, marker '[truncated]') + 256 KiB aggregate encoded budget in `wire_failures` (the one producer; the delegated re-encode inherits by copying) + a compile-time const assert that one bounded entry fits the budget. files_failed stays exact; ordinary reports pass byte-identical; record_failure's warn still carries full strings. Guard proven in TWO red variants — full revert: 6,293,804 B > the 4 MiB decode limit (the finding's predicted failure verbatim); aggregate-only revert: 328,576 B > the 256 KiB budget — each half independently load-bearing. SHA-verified restore; blit-core lib 471/0; workspace 1668/0.
