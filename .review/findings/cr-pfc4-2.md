@@ -1,0 +1,54 @@
+# cr-pfc4-2: The count cap does not bound the encoded summary frame
+
+**Severity**: MEDIUM — 64 near-maximum path+reason strings can push the
+closing summary frame past the 4 MiB decode limit; the frame is
+rejected and the contained transfer ends as a session fault WITHOUT its
+failure report.
+**Status**: Open — fix queued behind cr-pfc3-1/-2 (same file in flight)
+**Branch**: — (default-branch mode)
+**Commit**: (filled at landing)
+
+Reviewer provenance (generation pass): codex / gpt-5.6-sol / xhigh /
+standard; codex-cli 0.146.0; range `72079331..bdc3e4a4`
+(`.review/results/pfc-4-range.codex.json`).
+
+## Evidence
+`sink.rs:193-198` (`wire_failures`) caps entry COUNT at 64 but bounds
+neither per-string nor aggregate encoded bytes;
+`transfer_session/mod.rs:4830-4832` sends the whole report in one frame
+under the documented 4 MiB decode limit (`mod.rs:99-100`).
+
+## Predicted observable failure
+Deep paths + long error chains × 64 entries > 4 MiB: the SOURCE rejects
+the closing Summary frame; the session that successfully contained its
+failures faults at the very end and delivers no report.
+
+## What
+The bounded-report constraint was implemented as an entry-count bound;
+the repo's frame discipline (D-2026-07-10-1 precedent) requires an
+encoded-byte bound.
+
+## Approach
+(planned) `wire_failures` applies, alongside the 64-entry cap: per-entry
+truncation (reason capped at ~1 KiB, path carried whole up to a sane
+bound with tail-preserving truncation past it) and a conservative
+aggregate encoded-byte budget (~256 KiB) that drops trailing entries
+once exceeded. `files_failed` stays the exact total. Same budget for
+the delegated copy (cr-pfc4-1).
+
+## Files changed
+(filled with the fix commit)
+
+## Guard proof
+(planned) A synthesized report with 64 huge entries encodes under the
+budget (assert on encoded_len) and round-trips; red when the byte
+budget is removed.
+
+## Coder dispute (if any)
+None.
+
+## Known gaps
+None.
+
+## Reviewer comments
+(pending per-finding verification after the fix)

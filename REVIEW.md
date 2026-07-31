@@ -39,6 +39,10 @@ xhigh` over each landed slice's pinned range as it lands.
 | pfc-3-range | Defect hunt over `ff38f0e6..3ae5bf4d` (tar-shard containment + exact identity) | `[x]` | `3ae5bf4d` — **findings: 2, both admitted below**. Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0; capability_ok=true; SHAs pin-verified; record `.review/results/pfc-3-range.codex.json` |
 | cr-pfc3-1 | Disk-full (ENOSPC/StorageFull family) contained instead of volume-fatal | `[ ]` | HIGH; admitted; fix queued behind pfc-4's landing — same files in flight (`.review/findings/cr-pfc3-1.md`) |
 | cr-pfc3-2 | Rayon fold classifies at collect time — dead-root TOCTOU | `[ ]` | HIGH; admitted; fix queued behind pfc-4's landing (`.review/findings/cr-pfc3-2.md`) |
+| pfc-4-range | Defect hunt over `72079331..bdc3e4a4` (wire failure report, contract v6) | `[x]` | `bdc3e4a4` — **findings: 3, all admitted below**. Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0; capability_ok=true; SHAs pin-verified; record `.review/results/pfc-4-range.codex.json` |
+| cr-pfc4-1 | Delegated pulls discard the destination failure report | `[ ]` | HIGH; admitted (`.review/findings/cr-pfc4-1.md`) |
+| cr-pfc4-2 | Entry-count cap does not bound the encoded summary frame | `[ ]` | MEDIUM; admitted (`.review/findings/cr-pfc4-2.md`) |
+| cr-pfc4-3 | All-failed reconciliation reads as never-started progress | `[ ]` | LOW; admitted (`.review/findings/cr-pfc4-3.md`) |
 
 ## Live dial tuning correction — plan and implementation review
 
