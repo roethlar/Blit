@@ -784,8 +784,9 @@ fn build_local_options(
         delete_scope,
         resume: args.resume,
         null_sink: args.null,
-        // `--checkers`: parallel destination-comparison threads. 0 lets the
-        // session pick `DEFAULT_CHECKERS`.
+        // 0 (the default, and what every real run uses) discovers the
+        // comparison concurrency at runtime. Non-zero comes only from the
+        // hidden diagnostic pin.
         checkers: args.checkers,
         filter: super::build_filter(args)?,
         ..LocalMirrorOptions::default()

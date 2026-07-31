@@ -1,11 +1,20 @@
-//! The destination-comparison thread pool (`--checkers`).
+//! The destination-comparison thread pool.
 //!
 //! Deciding whether a file needs transferring costs round trips to the
 //! destination. Measured on a converged 46,041-file mirror to an SMB share,
 //! that decision owned ~100% of the session's wall clock
 //! (`docs/bench/ls1-phase-2026-07-31/`) — the work is latency-bound, so the
-//! number of checks in flight is the lever, exactly as `rclone --checkers`
-//! treats it.
+//! number of checks in flight is the lever, as `rclone --checkers` treats it.
+//!
+//! # No user-facing knob
+//!
+//! The concurrency is DISCOVERED AT RUNTIME and there is no advertised flag
+//! for it. Per the owner's FAST, SIMPLE, RELIABLE principle
+//! (`.agents/repo-guidance.md`), SIMPLE constrains the user-facing surface:
+//! tuning the program can work out for itself must not become an option the
+//! user has to reason about. The hidden `--checkers` exists only so a
+//! diagnostic run can pin an exact value and compare it against the adaptive
+//! one.
 //!
 //! # Why a dedicated pool and not rayon's global one
 //!
@@ -148,7 +157,8 @@ impl Default for AdaptiveCheckers {
 /// How a session decides its comparison concurrency.
 #[derive(Debug)]
 pub enum CheckerPolicy {
-    /// Operator pinned an exact count with `--checkers N`.
+    /// Pinned to an exact count by the hidden diagnostic flag. Not a normal
+    /// run: every real invocation is [`CheckerPolicy::Adaptive`].
     Fixed(usize),
     /// Discovered at runtime from observed throughput.
     Adaptive(AdaptiveCheckers),
@@ -337,8 +347,8 @@ mod tests {
 
     #[test]
     fn a_pinned_count_never_moves() {
-        // `--checkers N` is an operator override; the controller must not
-        // second-guess it, or the flag would be advisory rather than a pin.
+        // The hidden diagnostic pin must hold exactly, or a comparison run
+        // against the adaptive policy would not be measuring what it claims.
         let policy = CheckerPolicy::from_request(3);
         assert_eq!(policy.limit(), 3);
         for _ in 0..10 {

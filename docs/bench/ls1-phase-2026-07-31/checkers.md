@@ -57,8 +57,12 @@ as noise.
 The adaptive run landed at 166.38 s, within **0.4%** of the best hand-tuned
 value, without being told anything.
 
-`--checkers N` remains as an operator pin, and a pinned value is never
-second-guessed by the controller.
+There is **no advertised flag** for this. Per D-2026-08-01-1, tuning the
+program can determine at runtime must be determined at runtime — SIMPLE
+constrains the user-facing contract, so a knob the user would have to reason
+about is a cost with no benefit. `--checkers` exists `hide = true`, for
+diagnostic runs like the sweep above and nothing else; a pinned value is
+never second-guessed by the controller.
 
 ## Design notes
 

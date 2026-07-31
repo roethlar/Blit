@@ -184,13 +184,13 @@ pub struct LocalMirrorOptions {
     /// Discard writes (NullSink). Measures source read + pipeline
     /// throughput.
     pub null_sink: bool,
-    /// Parallel destination-comparison threads (`--checkers`). `0` selects
-    /// [`DEFAULT_CHECKERS`].
+    /// Destination-comparison concurrency. **`0` — the value every real run
+    /// uses — discovers it at runtime.**
     ///
-    /// The destination diff is latency-bound, not CPU-bound: each file costs
-    /// round trips to the destination, and on a network target that is where
-    /// essentially the whole wall clock goes. This is the knob that decides
-    /// how many of those are in flight at once.
+    /// A non-zero value pins it and exists only for diagnostic comparison
+    /// runs; there is deliberately no advertised CLI flag, because tuning the
+    /// program can work out for itself must not become user-facing surface
+    /// (FAST, SIMPLE, RELIABLE — see `.agents/repo-guidance.md`).
     pub checkers: usize,
     /// ls-1 wall-clock breakdown. Default permits environment activation
     /// (`BLIT_TRACE_LOCAL_PHASES=1` + `BLIT_TRACE_RUN_ID`) and is otherwise

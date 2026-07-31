@@ -2,6 +2,30 @@
 <!-- Extends AGENTS.md; never overrides it. Rules and pointers only — state
      lives in .agents/state.md. -->
 
+## Product Principles — FAST, SIMPLE, RELIABLE
+
+The owner's deciding principle for this product, quoted in D-2026-07-09-1 and
+carried by every engine plan (`docs/plan/UNIFIED_TRANSFER_ENGINE*.md`,
+`OTP7_RESUME.md`, `SMALL_FILE_CEILING.md`): **"FAST, SIMPLE, RELIABLE file
+transfer."** Canonical statement lives there; this is a pointer, not a copy.
+
+The one that is easiest for an agent to violate without noticing is SIMPLE,
+because it constrains the USER-FACING surface, not the implementation —
+"internals may be complex underneath, but the behavioral contract must be
+FAST, SIMPLE, RELIABLE."
+
+Applied rules earned from actual rulings:
+
+- **A new user-visible CLI option is a violation unless the owner asked for
+  one.** Tuning that the program can work out at runtime must be worked out
+  at runtime. If a knob is genuinely needed for diagnostics, it ships
+  `#[arg(hide = true)]` like `--workers` and `--checkers` — usable, not
+  advertised. (Owner ruling, 2026-08-01, after `--checkers` was added as a
+  visible flag: *"I didn't ask for a new cli. adding a new cli option
+  violates SIMPLE. this can be a diagnostic option ONLY."*)
+- **Aborting a whole transfer over one survivable error violates all three**
+  (D-2026-07-09-1) — the origin of the per-file containment work.
+
 ## Mission Detail
 
 Blit is a high-performance, extensible file enumeration, planning, transfer,

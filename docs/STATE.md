@@ -35,9 +35,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Handoff — 2026-07-31
 - Done: pfc-1..6 + clp-1..2 landed and reviewed; D-2026-07-31-4 makes local
   speed priority-1; ls-1 step (0) instrument landed but its review FAILED.
-- Next: 1.64× shipped (`--checkers`, runtime-adaptive). r5 review owed on the
-  checker range. Remaining levers: named-stream enumeration, directory-level
-  stat, wire-carrier checkers. pfc Shipped is the owner's.
+- Next: 1.64× shipped (runtime-adaptive comparison concurrency, no new CLI).
+  r5 review owed. Remaining levers: named-stream enumeration, directory-level
+  stat, wire-carrier concurrency. pfc Shipped is the owner's.
 
 ## Now (active work)
 
@@ -81,16 +81,16 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    **SHIPPED, 273.57 s → 166.38 s (1.64×; 1.71× vs the owner's original
    283.92 s field run)**, in two parts. (a) Round-trip elimination: reuse the
    stat's attribute DWORD instead of re-reading it with `GetFileAttributesW`
-   (metadata 3.653 → 2.556 ms/file). (b) **`--checkers`: a DEDICATED
-   destination-comparison pool whose concurrency is discovered at runtime**
-   (`AdaptiveCheckers`, the `dial.rs` rule: conservative floor, no probe
-   phase, one rung per chunk on measured throughput, settle on regression).
-   Adaptive lands within 0.4% of the best hand-tuned value, no flag needed.
-   **Correction on record: the earlier "the destination saturates" conclusion
-   was WRONG** — one datapoint on rayon's shared global pool; 8 dedicated
-   threads beat 32 shared by 33 s. See `.../checkers.md`. Remaining:
-   named-stream enumeration (rel-4-bound), directory-level stat, and the wire
-   carrier (needs a concurrent-session measurement first).
+   (metadata 3.653 → 2.556 ms/file). (b) **a DEDICATED comparison pool whose
+   concurrency is discovered at runtime with NO user-facing flag**
+   (D-2026-08-01-1; `AdaptiveCheckers` follows the `dial.rs` rule —
+   conservative floor, no probe phase, one rung per chunk on measured
+   throughput, settle on regression), landing within 0.4% of the best
+   hand-tuned value on its own. **Correction: the earlier "destination
+   saturates" conclusion was WRONG** — one datapoint on rayon's shared pool;
+   8 dedicated threads beat 32 shared by 33 s. See `.../checkers.md`.
+   Remaining: named-stream enumeration (rel-4-bound), directory-level stat,
+   and the wire carrier (needs a concurrent-session measurement first).
    **Review loop CLOSED: 4 rounds, 8 findings, all resolved, r4 CLEAN with
    `guard_confirmed: true`** — see `REVIEW.md`. **`ls-0` LANDED**: the
    summary separates copied from repaired files and labels the rate as a

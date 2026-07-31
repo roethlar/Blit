@@ -621,6 +621,30 @@ Format:
   D-2026-07-23-7 (per-dispatch approval) stand for everything outside this
   standing scope.
 
+## D-2026-08-01-1 — Runtime tuning is discovered, never a user-facing CLI option
+- Decision: Owner (2026-08-01), rejecting a visible `--checkers` flag:
+  **"I didn't ask for a new cli. FAST, SIMPLE, RELIABLE. adding a new cli
+  option violates SIMPLE. this can be a diagnostic option ONLY."**
+  Tuning the program can determine at runtime **must** be determined at
+  runtime. A knob that exists only to help diagnose ships
+  `#[arg(hide = true)]` — usable, never advertised — alongside `--workers`
+  and `--trace-data-plane`.
+- Scope: this is about the ADVERTISED surface, not the implementation.
+  Internals may be as complex as the problem requires; the contract a user
+  reads must not grow a decision they should not have to make.
+- Enforcement: `cli::tests::runtime_tuning_knobs_stay_out_of_help` renders
+  each transfer subcommand's long help and fails if any of the diagnostic
+  flags appear. Rendered from the SUBCOMMAND deliberately — the first version
+  rendered the top-level command, whose help contains no subcommand
+  arguments, and passed with the flag fully visible.
+- Why it needed a decision entry: FAST, SIMPLE, RELIABLE was recorded only in
+  plan docs (D-2026-07-09-1, `UNIFIED_TRANSFER_ENGINE*.md`, `OTP7_RESUME.md`,
+  `SMALL_FILE_CEILING.md`) and not in `.agents/repo-guidance.md`, so an agent
+  that read the session-startup files and not the plan history could — and
+  did — violate it without noticing. A pointer now lives in repo-guidance
+  under "Product Principles"; the canonical statement stays in the plans.
+- Supersedes: nothing. Extends D-2026-07-09-1's principle to the CLI surface.
+
 ## D-2026-07-31-4 — Local transfer speed is priority-1; LOCAL_SMALL_FILE_PATH Active
 - Decision: Owner (2026-07-31), ruling on the pfc field check: local mirror
   performance is **too slow**, and single-worker local apply **"should have

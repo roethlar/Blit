@@ -361,28 +361,20 @@ pub struct TransferArgs {
     #[arg(long, help_heading = "Performance / debug")]
     pub null: bool,
 
-    /// Number of parallel destination-comparison threads.
-    ///
-    /// Deciding whether a file needs transferring costs one or more round
-    /// trips to the destination, and on a network destination those are
-    /// latency-bound: a converged 46,041-file mirror to an SMB share spent
-    /// ~100% of its wall clock here (`docs/bench/ls1-phase-2026-07-31/`).
-    /// Issuing the checks concurrently is the difference between paying that
-    /// latency once per file and paying it once per batch.
-    ///
-    /// These threads are a DEDICATED pool: they never share with the apply
-    /// pipeline or with concurrent daemon sessions, so a slow destination
-    /// cannot stall unrelated transfers.
-    ///
-    /// `0` means "use the default". Raise it for high-latency destinations,
-    /// lower it if the destination server is the constrained resource.
-    #[arg(long, default_value_t = 0, help_heading = "Performance / debug")]
-    pub checkers: usize,
-
     // -- Hidden flags (don't appear in --help).
     /// Limit worker threads (advanced debugging only)
     #[arg(long, hide = true)]
     pub workers: Option<usize>,
+    /// Pin destination-comparison concurrency (advanced diagnostics only)
+    ///
+    /// HIDDEN ON PURPOSE. Comparison concurrency is discovered at runtime and
+    /// needs no operator input — exposing a knob for it would be user-facing
+    /// surface that buys nothing, which is the SIMPLE half of FAST, SIMPLE,
+    /// RELIABLE. This exists so a diagnostic run can pin an exact value and
+    /// compare against the adaptive one; `0` (the default) means "work it out
+    /// at runtime", which is what every real run does.
+    #[arg(long, hide = true, default_value_t = 0)]
+    pub checkers: usize,
     /// Emit verbose TCP data-plane diagnostics (advanced debugging only)
     #[arg(long, hide = true)]
     pub trace_data_plane: bool,
@@ -636,6 +628,43 @@ mod tests {
         // them to run so a misconfigured arg/conflict surfaces here
         // rather than the first time a real user hits the bad path.
         Cli::command().debug_assert();
+    }
+
+    /// Tuning the program discovers for itself must not become user-facing
+    /// surface — SIMPLE constrains the advertised contract, not the
+    /// implementation (`.agents/repo-guidance.md`, owner ruling 2026-08-01).
+    ///
+    /// Asserted against the rendered help of a real subcommand rather than
+    /// against the attribute, so it fails if the flag becomes visible by any
+    /// route: dropping `hide`, moving it to a shared group, or a clap
+    /// default changing under us.
+    #[test]
+    fn runtime_tuning_knobs_stay_out_of_help() {
+        // Rendered from the SUBCOMMAND that actually carries these args. The
+        // first version of this test rendered the top-level `Cli`, whose help
+        // contains no subcommand arguments at all, so it passed with the flag
+        // fully visible — a guard that could not fail.
+        let mut command = Cli::command();
+        for subcommand in ["copy", "mirror", "move"] {
+            let help = command
+                .find_subcommand_mut(subcommand)
+                .unwrap_or_else(|| panic!("{subcommand} subcommand exists"))
+                .render_long_help()
+                .to_string();
+            assert!(
+                help.contains("--dry-run"),
+                "{subcommand} help does not look like real help; the \
+                 assertions below would prove nothing:\n{help}"
+            );
+            for hidden in ["--checkers", "--workers", "--trace-data-plane"] {
+                assert!(
+                    !help.contains(hidden),
+                    "{hidden} is advertised in `blit {subcommand} --help`; \
+                     runtime tuning is discovered, not configured, and a \
+                     diagnostic knob must stay a diagnostic knob:\n{help}"
+                );
+            }
+        }
     }
 
     #[test]
