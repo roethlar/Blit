@@ -146,20 +146,73 @@ fn destination_root_live(dst_root: &Path, relative_path: &str) -> bool {
     dst_root.is_dir()
 }
 
+/// Raw OS error codes that mean "this volume refuses writes" rather
+/// than "this one path was refused". Checked alongside
+/// [`std::io::ErrorKind::ReadOnlyFilesystem`]: the kind is the portable
+/// spelling, the numeric codes are what the OS actually returned and
+/// stay correct even where a platform's std mapping does not name the
+/// kind. The code namespaces are per-platform and overlap with
+/// unrelated meanings — unix 19 is `ENODEV`, Windows 30 is
+/// `ERROR_READ_FAULT` — so each list is cfg-gated to its own platform
+/// instead of merged into one set.
+#[cfg(unix)]
+const VOLUME_UNWRITABLE_OS_ERRORS: &[i32] = &[30]; // EROFS
+#[cfg(windows)]
+const VOLUME_UNWRITABLE_OS_ERRORS: &[i32] = &[19]; // ERROR_WRITE_PROTECT
+#[cfg(not(any(unix, windows)))]
+const VOLUME_UNWRITABLE_OS_ERRORS: &[i32] = &[];
+
+/// True when this one `io::Error` reports volume-level unwritability.
+fn io_error_says_volume_unwritable(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::ReadOnlyFilesystem
+        || error
+            .raw_os_error()
+            .is_some_and(|code| VOLUME_UNWRITABLE_OS_ERRORS.contains(&code))
+}
+
+/// cr-pfc2-1: true when `error`'s chain carries a volume-level
+/// unwritability signal — read-only filesystem, write-protected medium.
+/// That is a root-wide condition wearing a per-file error's clothes:
+/// [`destination_root_live`] sees a perfectly good directory (a
+/// read-only mount still reads as one), so without this check every
+/// payload's write failure would be contained and a mirror to a
+/// read-only mount would write nothing, delete nothing — a write-failed
+/// file stays in the source manifest, so it is never extraneous — and
+/// report success. The whole chain is walked because every write site
+/// wraps its `io::Error` in `with_context` before the classifier sees
+/// it.
+fn volume_unwritable(error: &eyre::Report) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(io_error_says_volume_unwritable)
+    })
+}
+
+/// True while `error` is still attributable to exactly one file under
+/// `dst_root`: the destination root is live AND the failure is not a
+/// volume-level condition every other payload of the session would hit
+/// identically. Both halves must hold — the root check alone cannot see
+/// a read-only mount, and the error-kind check alone cannot see a root
+/// that vanished.
+fn failure_is_containable(dst_root: &Path, relative_path: &str, error: &eyre::Report) -> bool {
+    destination_root_live(dst_root, relative_path) && !volume_unwritable(error)
+}
+
 /// Classify one file's write error: a recorded [`FileFailure`] the
 /// caller reports while continuing with the next file, or the same error
-/// back when the destination root itself is the problem. Only call this
-/// where the error is attributable to exactly one file — path-safety
-/// violations, transport errors and destination-root failures must keep
-/// returning `Err` (session-fatal). Callers resolve and
-/// containment-check the destination first, so a hostile path can never
-/// arrive here.
+/// back when the destination root itself, or the volume under it, is the
+/// problem. Only call this where the error is attributable to exactly
+/// one file — path-safety violations, transport errors and
+/// destination-root failures must keep returning `Err` (session-fatal).
+/// Callers resolve and containment-check the destination first, so a
+/// hostile path can never arrive here.
 fn per_file_failure(
     dst_root: &Path,
     relative_path: &str,
     error: eyre::Report,
 ) -> Result<SinkOutcome> {
-    if destination_root_live(dst_root, relative_path) {
+    if failure_is_containable(dst_root, relative_path, &error) {
         Ok(SinkOutcome::failed(relative_path, format!("{error:#}")))
     } else {
         Err(error)
@@ -386,8 +439,14 @@ impl TransferSink for FsTransferSink {
                 )?;
                 match patch_file_block(&dst, offset, bytes).await {
                     Ok(outcome) => outcome,
-                    Err(error) if !destination_root_live(&self.dst_root, &relative_path) => {
-                        return Err(error)
+                    Err(error)
+                        if !failure_is_containable(&self.dst_root, &relative_path, &error) =>
+                    {
+                        // cr-pfc2-1: a block failing because the volume
+                        // refuses writes must not be held and reported as
+                        // one file's failure at its completion record —
+                        // every block of every file fails the same way.
+                        return Err(error);
                     }
                     Err(error) => {
                         self.hold_resume_block_failure(&relative_path, &error);
@@ -573,8 +632,12 @@ impl TransferSink for FsTransferSink {
         .await;
         let mut file = match prepared {
             Ok(file) => file,
-            Err(error) if !destination_root_live(&self.dst_root, &header.relative_path) => {
-                return Err(error)
+            Err(error)
+                if !failure_is_containable(&self.dst_root, &header.relative_path, &error) =>
+            {
+                // Fatal class: the session ends here, so there is no next
+                // record to stay aligned with and nothing to drain.
+                return Err(error);
             }
             Err(error) => {
                 let mut drain = tokio::io::sink();
@@ -2433,6 +2496,128 @@ mod tests {
         assert!(
             format!("{err:#}").contains("creating directory"),
             "expected the parent-mkdir failure; got: {err:#}"
+        );
+    }
+
+    // ─── Volume-level unwritability (cr-pfc2-1) ───────────────────────
+    //
+    // A read-only filesystem or write-protected medium fails every write
+    // of the session identically while the destination root still reads
+    // as a live directory — `destination_root_live` alone cannot tell the
+    // two apart. Containing those per file is what would let a mirror to
+    // a read-only mount exit 0 having written nothing. Synthesized
+    // `io::Error` values keep this deterministic: no real read-only
+    // mount, no privileged setup, same verdict on every platform.
+
+    /// This platform's numeric spelling of "the volume refuses writes",
+    /// pinned here independently of the production constant so the fix
+    /// cannot be made vacuous by editing that constant alone.
+    #[cfg(unix)]
+    const VOLUME_UNWRITABLE_CODE: i32 = 30; // EROFS
+    #[cfg(windows)]
+    const VOLUME_UNWRITABLE_CODE: i32 = 19; // ERROR_WRITE_PROTECT
+
+    /// One file's write error in the exact `with_context` shape the
+    /// sink's write sites hand the classifier.
+    fn write_error(source: std::io::Error) -> eyre::Report {
+        eyre::Report::new(source).wrap_err("creating /dst/one.bin")
+    }
+
+    /// A read-only filesystem is root-wide, so it is refused containment
+    /// and stays session-fatal even though the destination root is a
+    /// perfectly live directory.
+    #[test]
+    fn read_only_filesystem_error_refuses_containment() {
+        let tmp = tempdir().unwrap();
+        assert!(
+            destination_root_live(tmp.path(), "one.bin"),
+            "fixture must reproduce the dangerous case: a live root"
+        );
+
+        let error = write_error(std::io::Error::from(std::io::ErrorKind::ReadOnlyFilesystem));
+        assert!(
+            !failure_is_containable(tmp.path(), "one.bin", &error),
+            "the write-path guards must read a read-only volume as fatal"
+        );
+
+        let err = per_file_failure(tmp.path(), "one.bin", error)
+            .expect_err("a read-only volume must stay session-fatal");
+        assert!(
+            format!("{err:#}").contains("creating /dst/one.bin"),
+            "the original chain is handed back unchanged; got: {err:#}"
+        );
+    }
+
+    /// The signature is found by raw OS code too, however deep in the
+    /// context chain the `io::Error` sits.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn write_protected_volume_raw_os_code_refuses_containment() {
+        let tmp = tempdir().unwrap();
+        let error = eyre::Report::new(std::io::Error::from_raw_os_error(VOLUME_UNWRITABLE_CODE))
+            .wrap_err("writing /dst/deep/one.bin")
+            .wrap_err("copy deep/one.bin");
+
+        assert!(
+            per_file_failure(tmp.path(), "deep/one.bin", error).is_err(),
+            "the volume signature is found however deep the chain"
+        );
+    }
+
+    /// The single-file destination convention (empty wire path — the root
+    /// IS the file) takes the other `destination_root_live` branch, and
+    /// is refused containment on a read-only volume just the same.
+    #[test]
+    fn read_only_volume_refuses_containment_for_single_file_destination() {
+        let tmp = tempdir().unwrap();
+        let dst_root = tmp.path().join("output.bin");
+        assert!(destination_root_live(&dst_root, ""));
+
+        let error = write_error(std::io::Error::from(std::io::ErrorKind::ReadOnlyFilesystem));
+        assert!(
+            per_file_failure(&dst_root, "", error).is_err(),
+            "a read-only volume is fatal for the file-root shape too"
+        );
+    }
+
+    /// Boundary in the other direction: an ordinary refusal of one path
+    /// carries no volume signature and contains exactly as pfc-2 landed.
+    #[test]
+    fn ordinary_permission_denied_still_contains_one_file() {
+        let tmp = tempdir().unwrap();
+        let error = write_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+
+        let outcome = per_file_failure(tmp.path(), "denied.bin", error)
+            .expect("one denied file is still one file's failure");
+        assert_eq!(outcome.files_written, 0);
+        assert_eq!(outcome.files_failed_total, 1);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].relative_path, "denied.bin");
+        assert!(
+            outcome.failures[0].reason.contains("creating /dst/one.bin"),
+            "the recorded reason keeps the chain; got: {}",
+            outcome.failures[0].reason
+        );
+    }
+
+    /// Raw OS codes live in per-platform namespaces: unix 19 is `ENODEV`
+    /// and Windows 30 is `ERROR_READ_FAULT`. Reading the other
+    /// platform's number as write-protection would turn an ordinary
+    /// per-file error into a session abort, so the lists stay cfg-gated.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn the_other_platforms_code_is_not_a_volume_signal() {
+        let tmp = tempdir().unwrap();
+        #[cfg(unix)]
+        let foreign = 19; // ENODEV here, ERROR_WRITE_PROTECT on Windows
+        #[cfg(windows)]
+        let foreign = 30; // ERROR_READ_FAULT here, EROFS on unix
+
+        let error = write_error(std::io::Error::from_raw_os_error(foreign));
+        assert!(
+            per_file_failure(tmp.path(), "one.bin", error).is_ok(),
+            "a code from the other platform's namespace must not be read \
+             as volume unwritability"
         );
     }
 
