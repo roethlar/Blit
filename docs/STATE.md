@@ -117,15 +117,22 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    Implementation in progress via Opus 5 agents, slices pfc-1..5, one
    commit per slice on `master`. No external review dispatch approved
    (D-2026-07-23-7; superseded for landed slices by D-2026-07-31-3's
-   standing codex dispatch — pfc-1 range reviewed **clean**). **pfc-1 `[x]`
+   standing codex dispatch — pfc-1 and clp-1 ranges reviewed **clean**;
+   pfc-2 range returned 2 findings, both admitted). **pfc-1 `[x]`
    landed** (shared `attributes_converge` predicate, apply + compare,
    red/green-proven). **pfc-2 `[x]` landed** (bounded per-file failure
    report in `SinkOutcome`, single-file write-path containment, pipeline
    continues past contained failures; interim posture: containment live
    for MIRROR sessions only, non-mirror stays fatal until pfc-5's
-   source-deletion gate — see plan "pfc-2 landing notes"). **pfc-6
-   metadata-only repair added (D-2026-07-31-1)**. Next: clp-1/clp-2
-   (D-2026-07-31-2 ordering), then pfc-3..6.
+   source-deletion gate — see plan "pfc-2 landing notes").
+   **cr-pfc2-1 fixed at `2ad65743`** (volume-level unwritability —
+   EROFS/write-protect — refuses containment, session-fatal again;
+   codex per-finding verification in flight); cr-pfc2-2 rides pfc-4.
+   **pfc-6 metadata-only repair added (D-2026-07-31-1)**. Next: clp-2,
+   then pfc-3..6. Note: the `2ad65743` commit message carries
+   `[state: skip]` in error (it is a behavior fix, not mechanical) —
+   this entry is its STATE record; the tag's docs-gate effect is moot
+   since this commit touches STATE for the range.
 3. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2):** **clp-1
    `[x]` landed** — local sessions thread one progress sink through both
    roles (`ProgressEvent::Enumerated` lane for the walk; as-built note in
