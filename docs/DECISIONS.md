@@ -598,3 +598,25 @@ Format:
   requires.
 - Supersedes: nothing (the TUI-scale "CLI transfer output redesign" TODO
   remains queued and separate).
+
+## D-2026-07-31-3 — Standing codex review of landed implementation slices
+- Decision: Owner (2026-07-31): **"codereview with codex gpt-5.6-sol xhigh
+  for all code changes made so far and as new ones land."** Each landed
+  implementation slice of the pfc/clp effort gets a `codereview` generation
+  dispatch — harness `codex`, model `gpt-5.6-sol` (owner word, verbatim),
+  effort `xhigh` — over that slice's pinned commit range, starting with
+  pfc-1 (`0ef4cc7c..8c9a63d5`). This owner instruction IS the per-dispatch
+  approval D-2026-07-23-7 requires for these codex dispatches, for this
+  effort, in this session's workflow; any other harness, model, or review
+  kind still needs its own approval. Codex is an eligible independent
+  reviewer here (Opus 5 agents authored the changes, not Codex —
+  D-2026-07-23-2's authorship bar). Returned findings use the codereview
+  playbook's intake/triage and one-finding-per-commit machinery with this
+  repo's record store (`.review/findings/`, `REVIEW.md`) and no-agent-branch
+  rule.
+- Why: independent cross-vendor eyes on each landed slice while the Opus 5
+  implement/verify loop continues; the owner named the exact harness, model,
+  and effort at dispatch per the playbook's dispatch grammar.
+- Supersedes: nothing. D-2026-07-23-2 (Opus 4.8 formal openreview) and
+  D-2026-07-23-7 (per-dispatch approval) stand for everything outside this
+  standing scope.
