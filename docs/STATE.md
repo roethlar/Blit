@@ -83,19 +83,15 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    **ls-1 step (0) instrument landed 2026-07-31 — and its review FAILED.**
    Default-off `LocalPhaseProbe` emits a per-session phase breakdown against
    a wall denominator, but the `ls-1-range` codex dispatch returned
-   `guard_confirmed: false` with 2 findings. **cr-ls1-1 (HIGH) FIXED** —
-   apply backpressure has its own phase now (the queue await was inside no
-   span, so a slow sink could dominate while APPLY read ~zero); guarded by a
-   deliberately slow sink past the queue depth, red/green proven.
-   **cr-ls1-2 (MEDIUM) FIXED** — the subtraction is now a named `NestedSpan`
-   operation with a categorical guard (an hour of nested time inside a
-   microsecond span: subtraction ⇒ exactly 0, none ⇒ non-zero), and the
-   reviewer's own revert now reds it. The landing records had falsely
-   claimed both subtractions were proven; correction recorded.
-   **Not usable for attribution until the range re-review passes.**
-   **`ls-0` (summary-display fix) is carved out** of that gate: display text
-   only, cannot move any number ls-1 records. NOT the closed P1 asymmetry
-   defect (D-2026-07-22-2); labels deliberately kept apart.
+   `guard_confirmed: false` with 2 findings, **both now FIXED**: cr-ls1-1
+   (HIGH, the queue await sat in no span so a slow sink could dominate while
+   APPLY read ~zero — now its own phase, guarded by a slow sink past the
+   queue depth) and cr-ls1-2 (MEDIUM, the subtraction guard was vacuous —
+   now a named `NestedSpan` with a categorical guard the reviewer's own
+   revert reds). The landing records had falsely claimed both subtractions
+   were proven; correction recorded. **Not usable for attribution until the
+   range re-review passes.** **`ls-0` is carved out** of the gate: display
+   text only. NOT the closed P1 asymmetry defect (D-2026-07-22-2).
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13; any external review requires exact owner approval under
    D-2026-07-23-7. **otp-1 … otp-12c are all `[x]`** — closed-slice record
