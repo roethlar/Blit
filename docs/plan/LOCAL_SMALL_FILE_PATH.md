@@ -217,7 +217,19 @@ environmental/config cause is held to the same bar as a code cause.
     test pins that the spans can exceed the wall total.
   - **Nested cost is subtracted, not double-billed**: ATTRIBUTE_REPAIR is
     measured inside the diff and subtracted from COMPARE; ENUMERATE
-    subtracts its own backpressure. Both subtractions are red/green proven.
+    subtracts its own backpressure. ~~Both subtractions are red/green
+    proven.~~ **CORRECTION (cr-ls1-2): that claim was false.** The
+    ENUMERATE subtraction is proven; the COMPARE subtraction is NOT — its
+    assertion holds whether or not the subtraction is present, and the
+    reviewer demonstrated it staying green under revert.
+  - **REVIEW FAILED (`ls-1-range`, codex gpt-5.6-sol xhigh,
+    `guard_confirmed: false`).** Two findings admitted and OPEN:
+    **cr-ls1-1 (HIGH)** — APPLY times only the tail drain, so the bounded
+    apply queue's wait is inside no span at all; on a slow sink (the target
+    SMB workload) apply can dominate while reporting near zero, which is
+    precisely the misattribution step (0) exists to prevent.
+    **cr-ls1-2 (MEDIUM)** — the compare-subtraction guard is vacuous.
+    The instrument must not be trusted for attribution until both close.
   - Guards: 11 unit + 5 integration tests. Two reverts proven to bite —
     dropping the repair `measure` wrapper reds the repair attribution test,
     dropping the backpressure split reds the sample-count assertion (that

@@ -33,13 +33,11 @@ Last updated: 2026-07-31 (pfc-1..6 + clp-1..2 landed; owner field check returned
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff — 2026-07-31
-- Done: pfc-1..6 + clp-1..2 landed and reviewed; owner's field check ruled
-  on (D-2026-07-31-4, local speed priority-1); `LOCAL_SMALL_FILE_PATH.md`
-  Active as Queue 1; ls-1 step (0) phase-probe instrument landed and
-  guard-proven.
-- Next: RUN step (0) on the owner's shape (large tree, SMB destination) and
-  attribute the dominant phase; `ls-0` (summary-display fix) is unblocked
-  but unscoped. The pfc Shipped flip remains the owner's alone.
+- Done: pfc-1..6 + clp-1..2 landed and reviewed; D-2026-07-31-4 makes local
+  speed priority-1; ls-1 step (0) instrument landed but its review FAILED.
+- Next: fix cr-ls1-1 (HIGH) and cr-ls1-2 (MEDIUM), one commit each, then
+  re-review before the instrument is trusted for any attribution. `ls-0` is
+  unblocked but unscoped; the pfc Shipped flip is the owner's alone.
 
 ## Now (active work)
 
@@ -83,13 +81,16 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    convert concurrency into throughput; those numbers are flagged untrusted
    (bi-stable across sessions), which is what `ls-1` exists to settle.
    **`ls-1` is a hard measurement gate — no fix code before it lands.**
-   **ls-1 step (0) instrument landed 2026-07-31**: default-off
-   `LocalPhaseProbe` emits a per-session phase breakdown (enumerate /
-   backpressure / compare / attribute-repair / plan / apply-drain / delete)
-   against a wall denominator; nested costs subtracted, not double-billed;
-   two reverts guard-proven. It is the measuring device only — **no
-   benchmark has been run and no phase is attributed yet.** Known gaps
-   (apply is drain-only; steps a/b/c untouched) in the plan's landing note.
+   **ls-1 step (0) instrument landed 2026-07-31 — and its review FAILED.**
+   Default-off `LocalPhaseProbe` emits a per-session phase breakdown against
+   a wall denominator, but the `ls-1-range` codex dispatch returned
+   `guard_confirmed: false` with 2 open findings: **cr-ls1-1 (HIGH)** the
+   APPLY phase times only the tail drain, so apply backpressure lands in no
+   phase and a slow sink can dominate while reporting ~zero; **cr-ls1-2
+   (MEDIUM)** the compare-subtraction guard is vacuous, and the landing
+   records falsely claimed both subtractions were red/green proven (only
+   enumerate's was — correction recorded). **The instrument must not be used
+   for attribution until both close.** No benchmark has been run.
    **`ls-0` (summary-display fix) is carved out** of that gate: display text
    only, cannot move any number ls-1 records. NOT the closed P1 asymmetry
    defect (D-2026-07-22-2); labels deliberately kept apart.
@@ -185,7 +186,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Blocked / waiting (owner declarations and explicitly dated external blockers; checkpoints are owner-only)
 
-- **Rig facts:** `.agents/machines.md` is canonical; do not restate host pairings here.
+- **Rig facts:** `.agents/machines.md` is canonical; no host pairings here.
 - **Two stale test firewall entries await separately approved cleanup;** the
   helper is shipped, but these historical entries remain untouched. Exact
   paths and the no-reuse/no-removal gate: `.agents/machines.md`.
@@ -193,8 +194,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Open questions
 
 - **Does the pfc plan flip to Shipped?** Its last acceptance criterion
-  (re-run convergence) is satisfied by the owner's field data — run 2
-  copied 0 files, 0 B — but the owner has not declared it, and checkpoints
-  are owner-only. The plan stays ACTIVE until they do. Everything else the
-  field check raised is now ruled and queued as D-2026-07-31-4 / Queue 1;
-  no open question remains there.
+  (re-run convergence) is satisfied by the owner's field data — run 2 copied
+  0 files, 0 B — but the owner has not declared it, and checkpoints are
+  owner-only. Stays ACTIVE until they do. Everything else the field check
+  raised is ruled and queued as D-2026-07-31-4 / Queue 1.
