@@ -142,7 +142,7 @@ async fn run_local_transfer_inner(
     // Clear the row BEFORE the result is propagated: a live steady-tick
     // row would otherwise redraw over the error the caller prints.
     if let Some(row) = progress_row {
-        row.finish().await;
+        row.finish(result.is_ok()).await;
     }
     let summary = result?;
 
@@ -537,9 +537,31 @@ impl LiveProgressRow {
     /// Let the consumer drain, then clear the row so the summary owns
     /// the terminal (the pre-clp `finish_and_clear`, unchanged). The log
     /// redirect is restored when `self` drops here.
-    async fn finish(self) {
-        join_drained(self.consumer, ROW_DRAIN_GRACE).await;
+    ///
+    /// cr-clp2-3: a SUCCESSFUL session has dropped every sink clone, so
+    /// the lane provably closes and the consumer ends on its own —
+    /// waiting unbounded loses nothing and never discards queued `-v`
+    /// lines. The bounded grace + abort exists only for the FAILED
+    /// path, where a blocking enumeration task can survive holding a
+    /// sink clone that keeps the lane open.
+    async fn finish(self, session_succeeded: bool) {
+        drain_for_outcome(self.consumer, session_succeeded, ROW_DRAIN_GRACE).await;
         self.bar.finish_and_clear();
+    }
+}
+
+/// The finish-path drain decision (cr-clp2-3), extracted so the
+/// success/failure split is testable: success ⇒ unbounded await of a
+/// provably closing lane; failure ⇒ bounded grace + abort.
+async fn drain_for_outcome(
+    consumer: JoinHandle<()>,
+    session_succeeded: bool,
+    grace: Duration,
+) -> bool {
+    if session_succeeded {
+        consumer.await.is_ok()
+    } else {
+        join_drained(consumer, grace).await
     }
 }
 
@@ -1290,6 +1312,48 @@ mod live_row_loop_tests {
 
         assert!(join_drained(consumer, ROW_DRAIN_GRACE).await);
         assert_eq!(recorder.last_message(), "enumerating • 1 files found");
+    }
+
+    /// A slow output stands in for a backpressured terminal: `println`
+    /// costs real time, so a queued backlog takes longer than any
+    /// grace to drain.
+    #[derive(Clone)]
+    struct SlowRecorder(Recorder, Duration);
+
+    impl RowOutput for SlowRecorder {
+        fn set_message(&self, message: String) {
+            self.0.set_message(message);
+        }
+
+        fn println(&self, line: &str) {
+            std::thread::sleep(self.1);
+            self.0.println(line);
+        }
+    }
+
+    /// cr-clp2-3: a SUCCESSFUL session drains the whole closed lane —
+    /// queued `-v` lines are never discarded by the failure-path grace,
+    /// however long the terminal takes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_successful_session_drains_every_queued_line_past_the_grace() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let slow = SlowRecorder(Recorder::default(), Duration::from_millis(2));
+        for i in 0..100 {
+            tx.send(ProgressEvent::FileComplete {
+                path: format!("f{i}"),
+            })
+            .expect("send");
+        }
+        drop(tx);
+        let consumer = tokio::spawn(drain_progress_lane(rx, slow.clone(), true));
+        // 100 × 2 ms of output far exceeds this grace; only the
+        // success branch (unbounded await) can deliver every line.
+        assert!(drain_for_outcome(consumer, true, Duration::from_millis(50)).await);
+        assert_eq!(
+            slow.0.lines().len(),
+            100,
+            "no queued -v line may be dropped on a successful session"
+        );
     }
 
     /// A sink clone that outlived the session keeps the lane open

@@ -2,7 +2,7 @@
 
 **Severity**: LOW — a fast small-file `-v` run can exit successfully with
 queued per-file lines silently dropped.
-**Status**: Open
+**Status**: In progress — fixed, awaiting per-finding reviewer verdict
 **Branch**: — (default-branch mode)
 **Commit**: (filled at landing)
 
@@ -50,3 +50,5 @@ None.
 
 ## Reviewer comments
 (pending per-finding verification)
+
+As built: `finish(session_succeeded)` routes through `drain_for_outcome` — success awaits the provably-closing lane unbounded, failure keeps the bounded grace + abort. Guard `a_successful_session_drains_every_queued_line_past_the_grace` (SlowRecorder, 100 queued lines past a 50 ms grace) FAILED red under the always-bounded revert, green restored; `finish_gives_up_on_a_lane_that_never_closes` still pins the failure path.

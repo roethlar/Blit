@@ -34,7 +34,7 @@ xhigh` over each landed slice's pinned range as it lands.
 | clp-2-range | Defect hunt over `246acb54..9532ee20` (render polish + log routing) | `[x]` | `9532ee20` — **findings: 4** (3 admitted below, 1 declined at intake — `.review/cr-clp2-4.contested.md`). Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0; capability_ok=true; SHAs pin-verified; record `.review/results/clp-2-range.codex.json` |
 | cr-clp2-1 | Redirected log lines bypass control-byte sanitization | `[~]` | MEDIUM; fixed (sanitize at the row_line_sink chokepoint; guard red/green); verification pending |
 | cr-clp2-2 | Blocking terminal I/O inside the async drain task | `[ ]` | MEDIUM; admitted (`.review/findings/cr-clp2-2.md`) |
-| cr-clp2-3 | Fixed drain deadline can discard queued `-v` lines on success | `[ ]` | LOW; admitted (`.review/findings/cr-clp2-3.md`) |
+| cr-clp2-3 | Fixed drain deadline can discard queued `-v` lines on success | `[~]` | LOW; fixed (success drains unbounded, failure keeps the grace; guard red/green); verification pending |
 | cr-clp2-4 | Perf-history diagnostic byte change on sink-less runs | `[-]` | LOW; declined at intake — facade migration is the repo convention (`.review/cr-clp2-4.contested.md`) |
 
 ## Live dial tuning correction — plan and implementation review
