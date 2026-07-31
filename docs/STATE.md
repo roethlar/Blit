@@ -114,14 +114,20 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    continues past contained failures; interim posture: containment live
    for MIRROR sessions only, non-mirror stays fatal until pfc-5's
    source-deletion gate — see plan "pfc-2 landing notes").
-   **cr-pfc2-1 fixed at `2ad65743`** (volume-level unwritability —
-   EROFS/write-protect — refuses containment, session-fatal again;
-   codex per-finding verification in flight); cr-pfc2-2 rides pfc-4.
-   **pfc-6 metadata-only repair added (D-2026-07-31-1)**. Next: clp-2,
-   then pfc-3..6. Note: the `2ad65743` commit message carries
-   `[state: skip]` in error (it is a behavior fix, not mechanical) —
-   this entry is its STATE record; the tag's docs-gate effect is moot
-   since this commit touches STATE for the range.
+   **cr-pfc2-1 verified-closed** at `2ad65743` (volume-level
+   unwritability fatal again; codex accepted, guard confirmed);
+   cr-pfc2-2 rides pfc-4. **pfc-3 `[x]` landed at `3ae5bf4d`**
+   (tar-shard writers contain per-member failures through the shared
+   classifier; exact per-outcome failed identity so a >64-failure shard
+   still completes healthy members; audit-17 contained at shard level,
+   full closure at pfc-5; range review pending). clp-2's review loop is
+   fully closed (cr-clp2-1/-3 verified; cr-clp2-2 verified after one
+   reopen→repair round — writer-owns-drain-clear-signal redesign;
+   cr-clp2-4 declined with record). **pfc-6 metadata-only repair added
+   (D-2026-07-31-1)**. Next: pfc-4 (wire failure report + cr-pfc2-2 +
+   byte-lane reconciliation incl. the shard case), then pfc-5, pfc-6.
+   (Historical note kept: `2ad65743` carried `[state: skip]` in error;
+   its STATE record landed at `53a151a7`.)
 3. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2): clp-1 and
    clp-2 both `[x]` landed** — one live row with truthful phases
    (enumerating → comparing/up-to-date → copying → deleting; dry runs
