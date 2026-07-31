@@ -4,9 +4,9 @@
 closing summary frame past the 4 MiB decode limit; the frame is
 rejected and the contained transfer ends as a session fault WITHOUT its
 failure report.
-**Status**: In progress — fixed, awaiting per-finding reviewer verdict
+**Status**: Verified
 **Branch**: — (default-branch mode)
-**Commit**: (filled at landing)
+**Commit**: `71e87e1b`
 
 Reviewer provenance (generation pass): codex / gpt-5.6-sol / xhigh /
 standard; codex-cli 0.146.0; range `72079331..bdc3e4a4`
@@ -51,6 +51,6 @@ None.
 None.
 
 ## Reviewer comments
-(pending per-finding verification after the fix)
+Reviewer: codex / gpt-5.6-sol / xhigh; codex-cli 0.146.0 (detached, disposable worktree). Reviewed `71e87e1bc7c3a98c907a4b1fe8c08936524bfa6b` base `15c74f1624b2fdb4e0c510aaafb6570983413119`. guard_confirmed **true** — reviewer removed both bounds itself: frame-limit/UTF-8/delegated tests red at 6,293,804 encoded bytes (>4 MiB) while ordinary pass-through stayed green; restored blob matches HEAD. Verdict: **accepted**. 2026-07-31T08:27Z. Record: `.review/results/cr-pfc4-2.codex.json`.
 
 As built: per-entry bounds (reason 1 KiB head-truncated, path 4 KiB TAIL-preserving, char-boundary-safe, marker '[truncated]') + 256 KiB aggregate encoded budget in `wire_failures` (the one producer; the delegated re-encode inherits by copying) + a compile-time const assert that one bounded entry fits the budget. files_failed stays exact; ordinary reports pass byte-identical; record_failure's warn still carries full strings. Guard proven in TWO red variants — full revert: 6,293,804 B > the 4 MiB decode limit (the finding's predicted failure verbatim); aggregate-only revert: 328,576 B > the 256 KiB budget — each half independently load-bearing. SHA-verified restore; blit-core lib 471/0; workspace 1668/0.
