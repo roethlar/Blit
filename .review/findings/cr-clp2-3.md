@@ -2,7 +2,7 @@
 
 **Severity**: LOW — a fast small-file `-v` run can exit successfully with
 queued per-file lines silently dropped.
-**Status**: In progress — fixed, awaiting per-finding reviewer verdict
+**Status**: Verified
 **Branch**: — (default-branch mode)
 **Commit**: (filled at landing)
 
@@ -49,6 +49,6 @@ None.
 None.
 
 ## Reviewer comments
-(pending per-finding verification)
+Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0 (detached, disposable worktree). Reviewed `5fbe9abbf7883b5fa570eb08f99b033d2965d8cd` base `a6cf7a8c5d8457ea91c31ce953f1744371200636`. guard_confirmed: **true**. Verdict: **accepted**, no comments. 2026-07-31T05:03Z. Record: `.review/results/cr-clp2-3.codex.json`.
 
 As built: `finish(session_succeeded)` routes through `drain_for_outcome` — success awaits the provably-closing lane unbounded, failure keeps the bounded grace + abort. Guard `a_successful_session_drains_every_queued_line_past_the_grace` (SlowRecorder, 100 queued lines past a 50 ms grace) FAILED red under the always-bounded revert, green restored; `finish_gives_up_on_a_lane_that_never_closes` still pins the failure path.
