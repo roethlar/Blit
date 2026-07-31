@@ -216,31 +216,56 @@ fn destination_root_live(dst_root: &Path, relative_path: &str) -> bool {
 }
 
 /// Raw OS error codes that mean "this volume refuses writes" rather
-/// than "this one path was refused". Checked alongside
-/// [`std::io::ErrorKind::ReadOnlyFilesystem`]: the kind is the portable
-/// spelling, the numeric codes are what the OS actually returned and
-/// stay correct even where a platform's std mapping does not name the
-/// kind. The code namespaces are per-platform and overlap with
-/// unrelated meanings — unix 19 is `ENODEV`, Windows 30 is
-/// `ERROR_READ_FAULT` — so each list is cfg-gated to its own platform
-/// instead of merged into one set.
+/// than "this one path was refused" — write-protection and exhaustion
+/// alike. Checked alongside the portable [`std::io::ErrorKind`]
+/// spellings ([`std::io::ErrorKind::ReadOnlyFilesystem`],
+/// [`std::io::ErrorKind::StorageFull`],
+/// [`std::io::ErrorKind::QuotaExceeded`]): the kinds are what std names,
+/// the numeric codes are what the OS actually returned and stay correct
+/// even where a platform's std mapping does not name the kind. The code
+/// namespaces are per-platform and overlap with unrelated meanings —
+/// unix 19 is `ENODEV` where Windows 19 is `ERROR_WRITE_PROTECT`, unix
+/// 30 is `EROFS` where Windows 30 is `ERROR_READ_FAULT`, unix 39 is
+/// `ENOTEMPTY` (an ordinary per-file error) where Windows 39 is
+/// `ERROR_HANDLE_DISK_FULL` — so each list is cfg-gated to its own
+/// platform instead of merged into one set.
+///
+/// `EDQUOT` is deliberately absent from the raw lists: its number is not
+/// portable across unix (122 on Linux, 69 on macOS/BSD), so one
+/// unix-wide list would either miss it or claim an unrelated code, while
+/// std maps it to [`std::io::ErrorKind::QuotaExceeded`] on every unix.
 #[cfg(unix)]
-const VOLUME_UNWRITABLE_OS_ERRORS: &[i32] = &[30]; // EROFS
+const VOLUME_UNWRITABLE_OS_ERRORS: &[i32] = &[
+    30, // EROFS
+    28, // ENOSPC
+];
 #[cfg(windows)]
-const VOLUME_UNWRITABLE_OS_ERRORS: &[i32] = &[19]; // ERROR_WRITE_PROTECT
+const VOLUME_UNWRITABLE_OS_ERRORS: &[i32] = &[
+    19,  // ERROR_WRITE_PROTECT
+    112, // ERROR_DISK_FULL
+    39,  // ERROR_HANDLE_DISK_FULL
+];
 #[cfg(not(any(unix, windows)))]
 const VOLUME_UNWRITABLE_OS_ERRORS: &[i32] = &[];
 
-/// True when this one `io::Error` reports volume-level unwritability.
+/// True when this one `io::Error` reports volume-level unwritability:
+/// the medium refuses writes (read-only mount, write-protected disk), or
+/// it has no room left for them (cr-pfc3-1: full volume, exhausted
+/// quota).
 fn io_error_says_volume_unwritable(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::ReadOnlyFilesystem
-        || error
-            .raw_os_error()
-            .is_some_and(|code| VOLUME_UNWRITABLE_OS_ERRORS.contains(&code))
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ReadOnlyFilesystem
+            | std::io::ErrorKind::StorageFull
+            | std::io::ErrorKind::QuotaExceeded
+    ) || error
+        .raw_os_error()
+        .is_some_and(|code| VOLUME_UNWRITABLE_OS_ERRORS.contains(&code))
 }
 
-/// cr-pfc2-1: true when `error`'s chain carries a volume-level
-/// unwritability signal — read-only filesystem, write-protected medium.
+/// cr-pfc2-1 + cr-pfc3-1: true when `error`'s chain carries a
+/// volume-level unwritability signal — read-only filesystem,
+/// write-protected medium, exhausted volume or quota.
 /// That is a root-wide condition wearing a per-file error's clothes:
 /// [`destination_root_live`] sees a perfectly good directory (a
 /// read-only mount still reads as one), so without this check every
@@ -250,6 +275,15 @@ fn io_error_says_volume_unwritable(error: &std::io::Error) -> bool {
 /// report success. The whole chain is walked because every write site
 /// wraps its `io::Error` in `with_context` before the classifier sees
 /// it.
+///
+/// Exhaustion (cr-pfc3-1) belongs to the same class: a destination that
+/// fills mid-run fails every remaining payload identically — inside a
+/// tar shard that is potentially thousands of members — so containing
+/// those would let a mirror report success over a demonstrably
+/// incomplete backup. The deliberate trade is that a transient `ENOSPC`
+/// (space freed again later in the same run) loses per-file
+/// continuation; re-running converges once there is room, whereas a
+/// falsely successful mirror does not.
 fn volume_unwritable(error: &eyre::Report) -> bool {
     error.chain().any(|cause| {
         cause
@@ -2834,6 +2868,123 @@ mod tests {
         );
     }
 
+    // ─── Volume exhaustion (cr-pfc3-1) ────────────────────────────────
+    //
+    // A destination that runs out of room fails every remaining payload
+    // of the session exactly as a read-only mount does, while the root
+    // still reads as a live directory. Containing those per file is what
+    // would let a mirror to a filled volume exit 0 over a demonstrably
+    // incomplete backup, so the disk-exhaustion family joins the pfc-2
+    // volume classifier. Synthesized `io::Error` values keep this
+    // deterministic: no real full volume, no privileged setup, same
+    // verdict on every platform.
+
+    /// This platform's numeric spellings of "the volume has no room",
+    /// pinned here independently of the production list so the fix cannot
+    /// be made vacuous by editing that list alone.
+    #[cfg(unix)]
+    const VOLUME_FULL_CODES: &[i32] = &[28]; // ENOSPC
+    #[cfg(windows)]
+    const VOLUME_FULL_CODES: &[i32] = &[112, 39]; // ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL
+    #[cfg(not(any(unix, windows)))]
+    const VOLUME_FULL_CODES: &[i32] = &[];
+
+    /// Every spelling of exhaustion the classifier must refuse: both
+    /// portable kinds plus this platform's raw codes. Where std already
+    /// decodes a raw code to one of the kinds (Windows 112 and 39 both
+    /// land on `StorageFull`) the kind branch answers first and the raw
+    /// entry is the backstop for platforms whose mapping does not name
+    /// it — the same division of labour as pfc-2's EROFS entry.
+    fn volume_full_signatures() -> Vec<(String, std::io::Error)> {
+        let mut signatures = vec![
+            (
+                "StorageFull kind".to_string(),
+                std::io::Error::from(std::io::ErrorKind::StorageFull),
+            ),
+            (
+                "QuotaExceeded kind".to_string(),
+                std::io::Error::from(std::io::ErrorKind::QuotaExceeded),
+            ),
+        ];
+        for code in VOLUME_FULL_CODES {
+            signatures.push((
+                format!("raw os error {code}"),
+                std::io::Error::from_raw_os_error(*code),
+            ));
+        }
+        signatures
+    }
+
+    /// A full volume — every spelling of it — is refused containment on
+    /// the single-file write path and stays session-fatal with its
+    /// context chain handed back intact, however deep in that chain the
+    /// `io::Error` sits.
+    #[test]
+    fn volume_exhaustion_refuses_containment_on_the_single_file_path() {
+        let tmp = tempdir().unwrap();
+        assert!(
+            destination_root_live(tmp.path(), "one.bin"),
+            "fixture must reproduce the dangerous case: a live root"
+        );
+
+        for (label, source) in volume_full_signatures() {
+            let error = write_error(source).wrap_err("copy one.bin");
+            assert!(
+                !failure_is_containable(tmp.path(), "one.bin", &error),
+                "{label} must read as volume-level, not one file's failure"
+            );
+
+            let err = per_file_failure(tmp.path(), "one.bin", error)
+                .expect_err("an exhausted volume must stay session-fatal");
+            assert!(
+                format!("{err:#}").contains("creating /dst/one.bin"),
+                "{label}: the original chain is handed back unchanged; got: {err:#}"
+            );
+        }
+    }
+
+    /// Disk-full numbers live in per-platform namespaces too, and the
+    /// collision is sharper than pfc-2's: unix 39 is `ENOTEMPTY`, an
+    /// ordinary per-file error, where Windows 39 is
+    /// `ERROR_HANDLE_DISK_FULL`; Windows 28 is `ERROR_OUT_OF_PAPER`
+    /// where unix 28 is `ENOSPC`. Reading the other platform's number as
+    /// exhaustion would abort a whole session over one file, so the
+    /// boundary is pinned on both the single-file path and the fold.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn the_other_platforms_disk_full_codes_are_not_volume_signals() {
+        let tmp = tempdir().unwrap();
+        // ERROR_DISK_FULL / ERROR_HANDLE_DISK_FULL there; EHOSTDOWN /
+        // ENOTEMPTY here.
+        #[cfg(unix)]
+        let foreign: &[i32] = &[112, 39];
+        // ENOSPC there; ERROR_OUT_OF_PAPER here.
+        #[cfg(windows)]
+        let foreign: &[i32] = &[28];
+
+        for &code in foreign {
+            let error = write_error(std::io::Error::from_raw_os_error(code));
+            assert!(
+                per_file_failure(tmp.path(), "one.bin", error).is_ok(),
+                "raw code {code} from the other platform's namespace must \
+                 not be read as volume exhaustion"
+            );
+        }
+
+        let results: Vec<(String, Result<(u64, ())>)> = vec![
+            ("landed.txt".to_string(), Ok((7, ()))),
+            (
+                "odd.txt".to_string(),
+                Err(write_error(std::io::Error::from_raw_os_error(foreign[0]))),
+            ),
+        ];
+        let outcome = fold_shard_member_results(tmp.path(), results, |()| {})
+            .expect("a foreign-namespace code is still one member's failure");
+        assert_eq!(outcome.files_written, 1);
+        assert_eq!(outcome.files_failed_total, 1);
+        assert_eq!(outcome.failures[0].relative_path, "odd.txt");
+    }
+
     /// The reported list is bounded; the total keeps counting past it, so
     /// a catastrophic run stays reportable without unbounded growth.
     #[test]
@@ -3261,6 +3412,32 @@ mod tests {
             format!("{err:#}").contains("creating /dst/one.bin"),
             "the original chain is handed back unchanged; got: {err:#}"
         );
+    }
+
+    /// cr-pfc3-1 inside the shard fold — the path the finding names as
+    /// the dangerous one: a destination that fills mid-shard fails every
+    /// remaining member, so a member's out-of-space error is not that
+    /// member's failure and the shard returns `Err` even though earlier
+    /// members landed. Both kinds and this platform's raw codes are
+    /// checked, since the fold shares one classifier with the
+    /// single-file paths and must never drift from it.
+    #[test]
+    fn tar_shard_member_on_an_exhausted_volume_stays_fatal() {
+        let tmp = tempdir().unwrap();
+        for (label, source) in volume_full_signatures() {
+            let results: Vec<(String, Result<(u64, ())>)> = vec![
+                ("landed.txt".to_string(), Ok((7, ()))),
+                ("refused.txt".to_string(), Err(write_error(source))),
+                ("never-tried.txt".to_string(), Ok((3, ()))),
+            ];
+
+            let err = fold_shard_member_results(tmp.path(), results, |()| {})
+                .expect_err("an exhausted volume inside a shard stays session-fatal");
+            assert!(
+                format!("{err:#}").contains("creating /dst/one.bin"),
+                "{label}: the member's chain is handed back unchanged; got: {err:#}"
+            );
+        }
     }
 
     /// Boundary the other way: an ordinary refusal of one member's own
