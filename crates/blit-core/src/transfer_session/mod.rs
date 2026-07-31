@@ -4096,6 +4096,13 @@ async fn destination_session_inner(
                     )
                     .await?;
                 }
+                // clp-2: every manifest entry has now been diffed, so the
+                // `ManifestBatch` denominator this end reported is final.
+                // Without the signal a consumer cannot tell an up-to-date
+                // tree (nothing needed, ever) from a scan still running.
+                if let Some(p) = progress.as_ref() {
+                    p.report_diff_complete();
+                }
                 // NeedComplete only after ManifestComplete received
                 // AND every entry diffed — both true here.
                 transport
@@ -4669,6 +4676,16 @@ async fn destination_session_inner(
                     // guard too — harmless, the task is already done.)
                     let abort = Arc::new(AtomicBool::new(false));
                     let _abort_guard = AbortFlagOnDrop(Arc::clone(&abort));
+                    // clp-2: the pass plans and deletes inside this one
+                    // blocking call, so this is the only point at which a
+                    // consumer can learn the copy is over and extraneous
+                    // entries are being removed. A dry run plans without
+                    // removing anything, so it must not announce deletion.
+                    if execute {
+                        if let Some(p) = progress.as_ref() {
+                            p.report_delete_begin();
+                        }
+                    }
                     let mut pass = tokio::task::spawn_blocking(move || {
                         mirror_delete_pass(
                             &dst,

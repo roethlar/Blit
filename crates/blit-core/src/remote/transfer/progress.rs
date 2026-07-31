@@ -37,6 +37,12 @@ use tokio::sync::mpsc::UnboundedSender;
 ///   destination diff may never need. Folding it into `ManifestBatch`
 ///   would double-count "M" on a local session, where both the source
 ///   walk and the destination diff report on the one channel.
+/// - `DiffComplete` and `DeleteBegin` are PHASE signals (clp-2), not
+///   counters: they carry nothing, move no total, and a consumer that
+///   only tracks numbers ignores them. They exist because the counters
+///   alone cannot distinguish an up-to-date tree from a scan still
+///   running (both sit at zero needed files), nor a mirror's delete
+///   pass from the copy that preceded it.
 ///
 /// [`ProgressTotals`] is the single shared fold for this contract;
 /// consumers must not re-derive per-direction folding rules.
@@ -56,6 +62,17 @@ pub enum ProgressEvent {
     /// finished. Deliberately carries no byte count — bytes ride
     /// [`ProgressEvent::Payload`] only.
     FileComplete { path: String },
+    /// Phase signal (clp-2): the DESTINATION has diffed the whole
+    /// source manifest, so the `ManifestBatch` denominator is final.
+    /// Zero needed files after this means "up to date", not "still
+    /// scanning".
+    DiffComplete,
+    /// Phase signal (clp-2): the DESTINATION's mirror-delete pass has
+    /// started. The pass plans and deletes inside one blocking call, so
+    /// there is no per-entry lane to report against; without this a
+    /// consumer would still show the copy phase while extraneous
+    /// destination entries are being removed.
+    DeleteBegin,
 }
 
 /// Running totals folded from a [`ProgressEvent`] stream under the
@@ -99,6 +116,8 @@ impl ProgressTotals {
             ProgressEvent::FileComplete { .. } => {
                 self.files = self.files.saturating_add(1);
             }
+            // Phase signals carry no counts by construction (clp-2).
+            ProgressEvent::DiffComplete | ProgressEvent::DeleteBegin => {}
         }
     }
 
@@ -301,6 +320,40 @@ mod progress_totals_tests {
         totals.apply(&rx.try_recv().expect("one enumeration event"));
         assert_eq!(totals.enumerated_files, 7);
         assert_eq!(totals.manifest_files, 0);
+    }
+
+    /// clp-2: the phase signals are counter-free. A consumer that only
+    /// folds numbers (the daemon's jobs row, the TUI footers) must see
+    /// no movement at all from them.
+    #[test]
+    fn phase_signals_move_no_totals() {
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::ManifestBatch {
+            files: 2,
+            bytes: 64,
+        });
+        let before = totals;
+        totals.apply(&ProgressEvent::DiffComplete);
+        totals.apply(&ProgressEvent::DeleteBegin);
+        assert_eq!(totals, before);
+        assert!(!totals.started());
+    }
+
+    /// Both phase reporters put their event on the one lane.
+    #[test]
+    fn reported_phase_signals_reach_the_lane() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = RemoteTransferProgress::new(tx);
+        progress.report_diff_complete();
+        progress.report_delete_begin();
+        assert!(matches!(
+            rx.try_recv().expect("diff-complete signal"),
+            ProgressEvent::DiffComplete
+        ));
+        assert!(matches!(
+            rx.try_recv().expect("delete-begin signal"),
+            ProgressEvent::DeleteBegin
+        ));
     }
 
     /// Totals saturate instead of wrapping on pathological inputs.
@@ -693,6 +746,19 @@ impl RemoteTransferProgress {
     /// report those via [`report_payload`](Self::report_payload).
     pub fn report_file_complete(&self, path: String) {
         let _ = self.sender.send(ProgressEvent::FileComplete { path });
+    }
+
+    /// Report that the destination's diff has consumed the whole source
+    /// manifest (clp-2). Phase signal only — see
+    /// [`ProgressEvent::DiffComplete`].
+    pub fn report_diff_complete(&self) {
+        let _ = self.sender.send(ProgressEvent::DiffComplete);
+    }
+
+    /// Report that the mirror-delete pass has started (clp-2). Phase
+    /// signal only — see [`ProgressEvent::DeleteBegin`].
+    pub fn report_delete_begin(&self) {
+        let _ = self.sender.send(ProgressEvent::DeleteBegin);
     }
 }
 

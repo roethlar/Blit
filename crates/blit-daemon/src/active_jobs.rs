@@ -338,6 +338,9 @@ impl ActiveJobProgress {
             // completed work: a jobs row tracks the manifest/need totals
             // it already folds above, so this lane contributes nothing.
             ProgressEvent::Enumerated { .. } => {}
+            // Phase signals (clp-2) carry no counts; a jobs row reports
+            // numbers, so they move nothing here.
+            ProgressEvent::DiffComplete | ProgressEvent::DeleteBegin => {}
         }
     }
 

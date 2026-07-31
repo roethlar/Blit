@@ -122,13 +122,19 @@ async fn run_local_transfer_inner(
 
     // `effective_progress` decides WHEN a row engages (unchanged); what
     // it shows is now the live lane instead of a fixed spinner message.
-    let progress_row = if args.effective_progress() {
-        let (sink, row) = LiveProgressRow::start(mirror, src_path, dest_path);
+    // Per-file lines are a `-v` feature of the row; `--json` keeps its
+    // stderr free of unstructured lines.
+    let progress_row = LiveProgressRow::start(
+        args.effective_progress(),
+        verbose && !json_output,
+        mirror,
+        src_path,
+        dest_path,
+    )
+    .map(|(sink, row)| {
         options.progress_events = Some(sink);
-        Some(row)
-    } else {
-        None
-    };
+        row
+    });
 
     let start = Instant::now();
     let result = blit_app::transfers::local::run(src_path, dest_path, options).await;
@@ -172,25 +178,50 @@ const ROW_REFRESH: Duration = Duration::from_millis(125);
 /// hang on the row.
 const ROW_DRAIN_GRACE: Duration = Duration::from_millis(500);
 
+/// The row's own column budget. indicatif's `{wide_msg}` re-clips the
+/// message against the live terminal width on every draw — that is what
+/// guarantees the row never wraps — so this is only the width the row
+/// lays itself out for. Chosen to fit the conventional 80-column
+/// terminal: wider terminals simply leave the row short instead of
+/// stretching a path across the screen, narrower ones are clipped by
+/// indicatif with the counters (rendered first) intact.
+const ROW_COLUMNS: usize = 80;
+
+/// Below this the current-file segment is an ellipsis and a couple of
+/// characters — noise rather than information, so the row drops it and
+/// keeps the counters.
+const MIN_FILE_SEGMENT: usize = 12;
+
 /// Phase the event stream has reached. Ordered, and the row only ever
 /// moves forward: a late enumeration event during the copy must not
-/// relabel the row. Mirror-delete has no event yet — it gets its label
-/// at clp-2, with the event that carries it.
+/// relabel the row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 enum LivePhase {
     #[default]
     Enumerating,
     Comparing,
     Copying,
+    Deleting,
 }
 
 /// Everything the live row renders. Counters ride blit-core's shared
 /// fold ([`ProgressTotals`], w6-1 — consumers must not re-derive the
-/// folding rules); only the phase is local.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// folding rules); the phase, the diff-finished fact, and the current
+/// file are local.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct LiveRowState {
     phase: LivePhase,
     totals: ProgressTotals,
+    /// The destination diffed the whole manifest: `manifest_files` is
+    /// final. Not a phase — it can arrive while the copy already runs —
+    /// but without it zero needed files is indistinguishable from a scan
+    /// still running, and an up-to-date tree says "enumerating" for the
+    /// whole run.
+    diff_complete: bool,
+    /// Most recent finished file, shown as the row's current-activity
+    /// segment. The per-file lane is the only cheap signal the session
+    /// already emits; there is no in-flight-file event to prefer.
+    current_file: Option<String>,
 }
 
 impl LiveRowState {
@@ -201,34 +232,227 @@ impl LiveRowState {
             ProgressEvent::Enumerated { .. } => LivePhase::Enumerating,
             // The destination diff decided these files need transfer.
             ProgressEvent::ManifestBatch { .. } => LivePhase::Comparing,
+            ProgressEvent::DiffComplete => {
+                self.diff_complete = true;
+                LivePhase::Comparing
+            }
             // Bytes are landing.
-            ProgressEvent::Payload { .. } | ProgressEvent::FileComplete { .. } => {
+            ProgressEvent::Payload { .. } => LivePhase::Copying,
+            ProgressEvent::FileComplete { path } => {
+                self.current_file = Some(sanitize_row_text(path));
                 LivePhase::Copying
             }
+            // The mirror's delete pass — no longer "copying".
+            ProgressEvent::DeleteBegin => LivePhase::Deleting,
         };
         self.phase = self.phase.max(phase);
     }
 }
 
-/// Render the row's message. Pure state → string (the row's only other
-/// content is the spinner), so the format is unit-testable.
-fn render_live_row(state: &LiveRowState) -> String {
+/// Render the row's message, laid out for `width` columns. Pure state →
+/// string (the row's only other content is the spinner), so the format
+/// and the truncation are unit-testable.
+///
+/// Columns are counted as `char`s: a double-width name can still render
+/// narrower than the budget, and indicatif's `{wide_msg}` makes the
+/// final cut against the real terminal anyway.
+fn render_live_row(state: &LiveRowState, width: usize) -> String {
     let totals = &state.totals;
-    match state.phase {
-        LivePhase::Enumerating => {
-            format!("enumerating • {} files found", totals.enumerated_files)
-        }
-        LivePhase::Comparing => format!(
-            "comparing • {} files found • {} to copy",
-            totals.enumerated_files, totals.manifest_files
-        ),
-        LivePhase::Copying => format!(
+    let copy_row = || {
+        format!(
             "copying • {}/{} files • {}",
             totals.files,
             totals.manifest_files,
             format_bytes(totals.bytes)
+        )
+    };
+    let (head, file) = match state.phase {
+        // The pass deletes inside one blocking call, so there is no
+        // count to move until it is over.
+        LivePhase::Deleting => (
+            "deleting • removing extraneous destination entries".to_string(),
+            None,
         ),
+        LivePhase::Copying => (copy_row(), state.current_file.as_deref()),
+        LivePhase::Enumerating | LivePhase::Comparing => {
+            if !state.diff_complete {
+                match state.phase {
+                    LivePhase::Enumerating => (
+                        format!("enumerating • {} files found", totals.enumerated_files),
+                        None,
+                    ),
+                    _ => (
+                        format!(
+                            "comparing • {} files found • {} to copy",
+                            totals.enumerated_files, totals.manifest_files
+                        ),
+                        None,
+                    ),
+                }
+            } else if totals.manifest_files == 0 {
+                // The diff wanted nothing: the walk is the whole story.
+                // (A mirror may still delete; that arrives as its own
+                // phase.)
+                (
+                    format!("up to date • {} files checked", totals.enumerated_files),
+                    None,
+                )
+            } else {
+                // Need list final, first byte not yet observed — the
+                // apply pipeline is already running, so the copy row is
+                // the honest one.
+                (copy_row(), state.current_file.as_deref())
+            }
+        }
+    };
+    fit_row(head, file, width)
+}
+
+/// Lay the counters and the current-file segment out inside `width`.
+/// The counters come first and are never sacrificed for the file name.
+fn fit_row(head: String, file: Option<&str>, width: usize) -> String {
+    let mut row = truncate_columns(&head, width);
+    let Some(file) = file else { return row };
+    const SEPARATOR: &str = " • ";
+    let remaining = width
+        .saturating_sub(row.chars().count())
+        .saturating_sub(SEPARATOR.chars().count());
+    if remaining < MIN_FILE_SEGMENT {
+        return row;
     }
+    row.push_str(SEPARATOR);
+    row.push_str(&truncate_path_head(file, remaining));
+    row
+}
+
+/// Shorten a path from the LEFT: the tail names the file, the leading
+/// directories are the disposable part.
+fn truncate_path_head(path: &str, width: usize) -> String {
+    let columns = path.chars().count();
+    if columns <= width {
+        return path.to_string();
+    }
+    let keep = width.saturating_sub(1);
+    let mut out = String::from("…");
+    out.extend(path.chars().skip(columns - keep));
+    out
+}
+
+/// Hard bound for text that must not push the row past `width`.
+fn truncate_columns(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    text.chars().take(width).collect()
+}
+
+/// Whether a live row attaches its sink to the transfer.
+///
+/// Two inputs, one rule. The caller must have asked for progress
+/// (`-p`, or the interactive-TTY default), AND indicatif must be able
+/// to draw: with stderr redirected the bar is hidden and draws nothing,
+/// while attaching the sink would still gate blit-core's enumeration
+/// heartbeat — the redirected log would lose its only liveness signal
+/// and gain nothing. Not attaching there keeps the legacy
+/// once-per-second lines flowing into the log (clp-2 residue c).
+fn live_row_attaches(progress_requested: bool, bar_hidden: bool) -> bool {
+    progress_requested && !bar_hidden
+}
+
+/// The row's output surface. `ProgressBar` in production; a test
+/// substitutes a recorder so the drain loop runs without a terminal.
+trait RowOutput: Send + Sync + 'static {
+    fn set_message(&self, message: String);
+    fn println(&self, line: &str);
+}
+
+/// A wire path may legally carry control bytes (a newline-bearing
+/// filename is valid on unix) or ANSI escapes; rendered raw they break
+/// the one-row invariant or smuggle sequences into the terminal.
+/// Rendered text only — the transfer always uses the untouched path.
+fn sanitize_row_text(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect()
+}
+
+/// The sink the `log` backend routes through while a row is live — a
+/// named seam so the CLI half of the redirect wiring is provable
+/// without a terminal (the backend half is guarded in `stderr_log`).
+fn row_line_sink<O: RowOutput>(output: O) -> blit_core::stderr_log::LineSink {
+    std::sync::Arc::new(move |line: &str| output.println(line))
+}
+
+impl RowOutput for ProgressBar {
+    fn set_message(&self, message: String) {
+        ProgressBar::set_message(self, message);
+    }
+
+    fn println(&self, line: &str) {
+        ProgressBar::println(self, line);
+    }
+}
+
+/// Consume the progress lane into one row until the channel closes.
+///
+/// Extracted from the spawn so the event → state → repaint decision is
+/// testable end to end (feed a channel, assert the rendered row).
+/// Events are drained continuously — the pipeline must never wait on
+/// the renderer — and folded into one repaint per tick.
+async fn drain_progress_lane(
+    mut rx: mpsc::UnboundedReceiver<ProgressEvent>,
+    output: impl RowOutput,
+    verbose: bool,
+) {
+    let mut state = LiveRowState::default();
+    let mut pending_repaint = false;
+    let mut ticker = interval(ROW_REFRESH);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        // Unbiased: the lane is unbounded so a producer never blocks on
+        // the renderer regardless of poll order, and fair polling keeps
+        // a hot event stream from starving the tick-arm repaint.
+        tokio::select! {
+            event = rx.recv() => match event {
+                Some(event) => {
+                    if verbose {
+                        if let ProgressEvent::FileComplete { path } = &event {
+                            // Through the row's handle, never raw
+                            // stderr: the line scrolls above the row and
+                            // the row is redrawn intact underneath it.
+                            output.println(&sanitize_row_text(path));
+                        }
+                    }
+                    state.apply(&event);
+                    pending_repaint = true;
+                }
+                None => break,
+            },
+            _ = ticker.tick() => {
+                if pending_repaint {
+                    output.set_message(render_live_row(&state, ROW_COLUMNS));
+                    pending_repaint = false;
+                }
+            }
+        }
+    }
+    if pending_repaint {
+        output.set_message(render_live_row(&state, ROW_COLUMNS));
+    }
+}
+
+/// Wait for the consumer to finish draining, bounded by `grace`.
+/// Returns false when the grace expired and the consumer was aborted: a
+/// blocking enumeration task cannot be aborted (`spawn_blocking`), so a
+/// failed session can still hold a sink clone and keep the lane open —
+/// the exit path must not hang on the row.
+async fn join_drained(consumer: JoinHandle<()>, grace: Duration) -> bool {
+    let abort = consumer.abort_handle();
+    if tokio::time::timeout(grace, consumer).await.is_err() {
+        abort.abort();
+        return false;
+    }
+    true
 }
 
 /// The live status row: one `ProgressBar` on stderr plus the task that
@@ -236,20 +460,45 @@ fn render_live_row(state: &LiveRowState) -> String {
 /// is the only writer of transfer-time stderr — anything that must
 /// print goes through [`ProgressBar::println`] / `suspend`, never raw
 /// `eprintln!` (that is what scrolled the pre-clp spinner off-row).
+/// That includes the `log` facade: `_log_redirect` routes every backend
+/// line through the same handle for the row's lifetime.
 struct LiveProgressRow {
     bar: ProgressBar,
     consumer: JoinHandle<()>,
+    _log_redirect: blit_core::stderr_log::LineRedirect,
 }
 
 impl LiveProgressRow {
-    /// Build the row and the sink the session reports into. A local
+    /// Build the row and the sink the session reports into, or `None`
+    /// when no row attaches (see [`live_row_attaches`]). A local
     /// session runs both roles in this process, so this ONE sink covers
-    /// enumeration, diff, and apply events, and this ONE task consumes
-    /// them.
-    fn start(mirror: bool, src_path: &Path, dest_path: &Path) -> (RemoteTransferProgress, Self) {
+    /// enumeration, diff, apply, and delete events, and this ONE task
+    /// consumes them.
+    fn start(
+        progress_requested: bool,
+        verbose: bool,
+        mirror: bool,
+        src_path: &Path,
+        dest_path: &Path,
+    ) -> Option<(RemoteTransferProgress, Self)> {
+        if !progress_requested {
+            // Probe nothing: constructing a bar on a terminal and
+            // dropping it writes to stderr, and a run that asked for no
+            // progress must touch stderr exactly as it did before.
+            return None;
+        }
+        // Whether indicatif can draw is a property of the draw target it
+        // picks for stderr, so the bar has to exist to answer it. A
+        // hidden bar draws nothing on drop.
         let bar = ProgressBar::new_spinner();
+        if !live_row_attaches(progress_requested, bar.is_hidden()) {
+            return None;
+        }
         bar.set_style(
-            ProgressStyle::with_template("{spinner} {msg}")
+            // `{wide_msg}` truncates the message to the live terminal
+            // width on every draw — the row cannot wrap, whatever the
+            // renderer produced or however the terminal is resized.
+            ProgressStyle::with_template("{spinner} {wide_msg}")
                 .unwrap()
                 .tick_strings(&["-", "\\", "|", "/"]),
         );
@@ -262,53 +511,31 @@ impl LiveProgressRow {
             dest_path.display()
         ));
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<ProgressEvent>();
-        let render_bar = bar.clone();
-        let consumer = tokio::spawn(async move {
-            let mut state = LiveRowState::default();
-            let mut pending_repaint = false;
-            let mut ticker = interval(ROW_REFRESH);
-            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    // Biased: drain the lane ahead of repainting, so a
-                    // producer never waits on the renderer.
-                    biased;
-                    event = rx.recv() => match event {
-                        Some(event) => {
-                            state.apply(&event);
-                            pending_repaint = true;
-                        }
-                        None => break,
-                    },
-                    _ = ticker.tick() => {
-                        if pending_repaint {
-                            render_bar.set_message(render_live_row(&state));
-                            pending_repaint = false;
-                        }
-                    }
-                }
-            }
-            if pending_repaint {
-                render_bar.set_message(render_live_row(&state));
-            }
-        });
+        // clp-2 residue (a): the `log` backend writes raw stderr, and a
+        // library warn (an unreadable source entry, a contained write
+        // failure) scrolls the row exactly as the old enumeration line
+        // did. Route it through the row for as long as the row lives;
+        // the guard restores the raw backend even on the error path.
+        let log_redirect = blit_core::stderr_log::redirect_lines(row_line_sink(bar.clone()));
 
-        (RemoteTransferProgress::new(tx), Self { bar, consumer })
+        let (tx, rx) = mpsc::unbounded_channel::<ProgressEvent>();
+        let consumer = tokio::spawn(drain_progress_lane(rx, bar.clone(), verbose));
+
+        Some((
+            RemoteTransferProgress::new(tx),
+            Self {
+                bar,
+                consumer,
+                _log_redirect: log_redirect,
+            },
+        ))
     }
 
     /// Let the consumer drain, then clear the row so the summary owns
-    /// the terminal (the pre-clp `finish_and_clear`, unchanged).
+    /// the terminal (the pre-clp `finish_and_clear`, unchanged). The log
+    /// redirect is restored when `self` drops here.
     async fn finish(self) {
-        let abort = self.consumer.abort_handle();
-        if tokio::time::timeout(ROW_DRAIN_GRACE, self.consumer)
-            .await
-            .is_err()
-        {
-            // A sink clone outlived the session; stop rendering rather
-            // than hold the exit open.
-            abort.abort();
-        }
+        join_drained(self.consumer, ROW_DRAIN_GRACE).await;
         self.bar.finish_and_clear();
     }
 }
@@ -564,7 +791,10 @@ mod live_row_tests {
             ProgressEvent::Enumerated { files: 100 },
         ]);
         assert_eq!(state.phase, LivePhase::Enumerating);
-        assert_eq!(render_live_row(&state), "enumerating • 1000 files found");
+        assert_eq!(
+            render_live_row(&state, ROW_COLUMNS),
+            "enumerating • 1000 files found"
+        );
     }
 
     /// Once the destination diff reports needed files, the row shows the
@@ -581,7 +811,7 @@ mod live_row_tests {
         ]);
         assert_eq!(state.phase, LivePhase::Comparing);
         assert_eq!(
-            render_live_row(&state),
+            render_live_row(&state, ROW_COLUMNS),
             "comparing • 1000 files found • 12 to copy"
         );
     }
@@ -589,6 +819,8 @@ mod live_row_tests {
     /// The copy row: files completed over files needed, plus bytes
     /// written. Bytes ride `Payload` only (the w6-1 contract), so the
     /// pair below counts one file and its bytes exactly once.
+    /// (clp-2 adapted the expected string: the row now ends with the
+    /// current-file segment, here the most recent completion.)
     #[test]
     fn copying_row_reports_completed_of_needed_and_bytes() {
         let state = fold(&[
@@ -613,12 +845,17 @@ mod live_row_tests {
             },
         ]);
         assert_eq!(state.phase, LivePhase::Copying);
-        assert_eq!(render_live_row(&state), "copying • 2/2 files • 2.00 KiB");
+        assert_eq!(
+            render_live_row(&state, ROW_COLUMNS),
+            "copying • 2/2 files • 2.00 KiB • b.txt"
+        );
     }
 
     /// pfc-2 (D-2026-07-30-1): a file whose write failed is contained
     /// and never reports a completion, while its bytes were already
-    /// reported. The row shows the honest completed count.
+    /// reported. The row shows the honest completed count — and, since
+    /// clp-2, the last file that did complete (the expected string grew
+    /// that segment; the counts are unchanged).
     #[test]
     fn contained_file_failure_is_not_counted_complete() {
         let state = fold(&[
@@ -638,7 +875,10 @@ mod live_row_tests {
                 bytes: 100,
             },
         ]);
-        assert_eq!(render_live_row(&state), "copying • 1/2 files • 200 B");
+        assert_eq!(
+            render_live_row(&state, ROW_COLUMNS),
+            "copying • 1/2 files • 200 B • ok.txt"
+        );
     }
 
     /// The phase never regresses: a local session interleaves the source
@@ -665,6 +905,420 @@ mod live_row_tests {
             },
         ]);
         assert_eq!(state.phase, LivePhase::Copying);
-        assert_eq!(render_live_row(&state), "copying • 1/2 files • 10 B");
+        assert_eq!(
+            render_live_row(&state, ROW_COLUMNS),
+            "copying • 1/2 files • 10 B • a.txt"
+        );
+    }
+
+    /// clp-2: an up-to-date tree used to say "enumerating" for the whole
+    /// run — the diff needed nothing, so no event ever moved the phase.
+    /// The diff-complete signal is what distinguishes "nothing to do"
+    /// from "still scanning".
+    #[test]
+    fn diff_complete_with_nothing_needed_reports_up_to_date() {
+        let state = fold(&[
+            ProgressEvent::Enumerated { files: 1000 },
+            ProgressEvent::DiffComplete,
+        ]);
+        assert_eq!(
+            render_live_row(&state, ROW_COLUMNS),
+            "up to date • 1000 files checked"
+        );
+    }
+
+    /// With the need list final and files to move, the row is the copy
+    /// row from the first tick — the apply pipeline is already running,
+    /// so "comparing" would be stale.
+    #[test]
+    fn diff_complete_with_work_pending_shows_the_copy_row() {
+        let state = fold(&[
+            ProgressEvent::Enumerated { files: 10 },
+            ProgressEvent::ManifestBatch {
+                files: 4,
+                bytes: 4096,
+            },
+            ProgressEvent::DiffComplete,
+        ]);
+        assert_eq!(
+            render_live_row(&state, ROW_COLUMNS),
+            "copying • 0/4 files • 0 B"
+        );
+    }
+
+    /// clp-2: the mirror-delete pass used to render as "copying" — the
+    /// copy was over and the row still claimed to be moving bytes.
+    #[test]
+    fn delete_pass_reports_deleting_and_outranks_the_copy_phase() {
+        let state = fold(&[
+            ProgressEvent::ManifestBatch {
+                files: 1,
+                bytes: 10,
+            },
+            ProgressEvent::Payload {
+                files: 0,
+                bytes: 10,
+            },
+            ProgressEvent::FileComplete {
+                path: "a.txt".into(),
+            },
+            ProgressEvent::DiffComplete,
+            ProgressEvent::DeleteBegin,
+        ]);
+        assert_eq!(state.phase, LivePhase::Deleting);
+        assert_eq!(
+            render_live_row(&state, ROW_COLUMNS),
+            "deleting • removing extraneous destination entries"
+        );
+    }
+
+    /// The current-file segment is the row's last field and the only one
+    /// that may be shortened: the counters always survive, and the file
+    /// name keeps its tail (the leading directories are disposable).
+    #[test]
+    fn a_long_current_file_is_truncated_from_the_left() {
+        let state = fold(&[
+            ProgressEvent::ManifestBatch {
+                files: 1,
+                bytes: 10,
+            },
+            ProgressEvent::Payload {
+                files: 0,
+                bytes: 10,
+            },
+            ProgressEvent::FileComplete {
+                path: "deeply/nested/directory/tree/with/a/long/path/report.pdf".into(),
+            },
+        ]);
+        let row = render_live_row(&state, ROW_COLUMNS);
+        assert!(
+            row.chars().count() <= ROW_COLUMNS,
+            "the row must fit its budget: {row:?}"
+        );
+        assert!(
+            row.starts_with("copying • 1/1 files • 10 B • "),
+            "the counters survive intact: {row:?}"
+        );
+        assert!(
+            row.ends_with("report.pdf"),
+            "the name's tail identifies the file: {row:?}"
+        );
+        assert!(row.contains('…'), "the cut is marked: {row:?}");
+    }
+
+    /// No width, no wrap: even a pathological name on a narrow terminal
+    /// stays inside the budget, and a budget too small for a useful
+    /// segment drops it rather than rendering an ellipsis and a letter.
+    #[test]
+    fn no_width_lets_the_current_file_push_the_row_over() {
+        let state = fold(&[
+            ProgressEvent::ManifestBatch {
+                files: 1,
+                bytes: 10,
+            },
+            ProgressEvent::FileComplete {
+                path: "x".repeat(500),
+            },
+        ]);
+        for width in [0usize, 1, 8, 20, 40, 80, 200] {
+            let row = render_live_row(&state, width);
+            assert!(
+                row.chars().count() <= width,
+                "width {width} exceeded by {row:?}"
+            );
+        }
+        assert_eq!(
+            render_live_row(&state, 30),
+            "copying • 1/1 files • 0 B",
+            "no room for a useful segment: the counters stand alone"
+        );
+    }
+
+    /// Multi-byte names are cut on character boundaries, never mid-byte
+    /// (a byte slice here would panic).
+    #[test]
+    fn truncation_respects_character_boundaries() {
+        let name = "报告/".repeat(40);
+        let cut = truncate_path_head(&name, 10);
+        assert_eq!(cut.chars().count(), 10);
+        assert!(cut.starts_with('…'));
+        assert!(name.ends_with(cut.trim_start_matches('…')));
+    }
+}
+
+/// The drain loop and the row-attachment rule — the parts of the row
+/// that are decisions rather than formatting.
+#[cfg(test)]
+mod live_row_loop_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Recorded {
+        messages: Vec<String>,
+        lines: Vec<String>,
+    }
+
+    /// Stands in for the `ProgressBar`, so the consumer task runs
+    /// exactly as it does in production without a terminal.
+    #[derive(Clone, Default)]
+    struct Recorder(Arc<Mutex<Recorded>>);
+
+    impl Recorder {
+        fn last_message(&self) -> String {
+            self.0
+                .lock()
+                .expect("recorder poisoned")
+                .messages
+                .last()
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().expect("recorder poisoned").lines.clone()
+        }
+    }
+
+    impl RowOutput for Recorder {
+        fn set_message(&self, message: String) {
+            self.0
+                .lock()
+                .expect("recorder poisoned")
+                .messages
+                .push(message);
+        }
+
+        fn println(&self, line: &str) {
+            self.0
+                .lock()
+                .expect("recorder poisoned")
+                .lines
+                .push(line.to_string());
+        }
+    }
+
+    /// clp-2 residue (a), CLI half: the named seam the row installs into
+    /// the log backend delivers a formatted line to the row's handle.
+    #[test]
+    fn a_backend_line_routes_to_the_row_handle() {
+        let recorder = Recorder::default();
+        let sink = row_line_sink(recorder.clone());
+        sink("blit: warn: scan skipping 'x' (denied)");
+        assert_eq!(
+            recorder.lines(),
+            vec!["blit: warn: scan skipping 'x' (denied)".to_string()],
+            "the redirect sink must hand backend lines to the row output"
+        );
+    }
+
+    /// The mid-transfer repaint: while the lane stays open, the tick arm
+    /// (not the post-loop flush) must render pending state.
+    #[tokio::test(start_paused = true)]
+    async fn the_ticker_repaints_while_the_lane_stays_open() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recorder = Recorder::default();
+        let consumer = tokio::spawn(drain_progress_lane(rx, recorder.clone(), false));
+        tx.send(ProgressEvent::Enumerated { files: 7 })
+            .expect("send");
+        // Paused clock: sleeping past the refresh interval fires the
+        // ticker while the sender is still alive.
+        tokio::time::sleep(3 * ROW_REFRESH).await;
+        assert!(
+            recorder.last_message().contains("enumerating"),
+            "the tick arm must repaint mid-lane, got {:?}",
+            recorder.last_message()
+        );
+        drop(tx);
+        consumer.await.expect("consumer");
+    }
+
+    /// A newline-bearing filename must not break the one-row invariant
+    /// on the row message or the -v line.
+    #[tokio::test]
+    async fn control_bytes_in_a_path_cannot_break_the_row() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recorder = Recorder::default();
+        let consumer = tokio::spawn(drain_progress_lane(rx, recorder.clone(), true));
+        tx.send(ProgressEvent::ManifestBatch { files: 1, bytes: 4 })
+            .expect("send");
+        tx.send(ProgressEvent::FileComplete {
+            path: "evil\ndir/\x1b[31mname.txt".to_string(),
+        })
+        .expect("send");
+        drop(tx);
+        consumer.await.expect("consumer");
+        assert!(
+            !recorder.last_message().contains('\n') && !recorder.last_message().contains('\x1b'),
+            "control bytes must be sanitized out of the row: {:?}",
+            recorder.last_message()
+        );
+        let lines = recorder.lines();
+        assert!(
+            lines.len() == 1 && !lines[0].contains('\n') && !lines[0].contains('\x1b'),
+            "control bytes must be sanitized out of -v lines: {lines:?}"
+        );
+    }
+
+    /// clp-2 residue (b): drive the whole consumer through a channel and
+    /// assert what the terminal would show. The closed lane ends the
+    /// loop, which repaints the state it drained.
+    #[tokio::test]
+    async fn the_drain_loop_renders_the_final_state_of_the_lane() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recorder = Recorder::default();
+        for event in [
+            ProgressEvent::Enumerated { files: 3 },
+            ProgressEvent::ManifestBatch {
+                files: 2,
+                bytes: 2048,
+            },
+            ProgressEvent::DiffComplete,
+            ProgressEvent::Payload {
+                files: 0,
+                bytes: 1024,
+            },
+            ProgressEvent::FileComplete {
+                path: "one.txt".into(),
+            },
+            ProgressEvent::Payload {
+                files: 0,
+                bytes: 1024,
+            },
+            ProgressEvent::FileComplete {
+                path: "two.txt".into(),
+            },
+        ] {
+            tx.send(event).expect("the consumer is alive");
+        }
+        drop(tx);
+
+        drain_progress_lane(rx, recorder.clone(), false).await;
+
+        assert_eq!(
+            recorder.last_message(),
+            "copying • 2/2 files • 2.00 KiB • two.txt"
+        );
+        assert!(
+            recorder.lines().is_empty(),
+            "no per-file lines without -v: {:?}",
+            recorder.lines()
+        );
+    }
+
+    /// `-v` with a live row: each completion prints through the row's
+    /// handle (never raw stderr) and the row keeps rendering underneath.
+    #[tokio::test]
+    async fn verbose_prints_each_completion_through_the_row() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recorder = Recorder::default();
+        for event in [
+            ProgressEvent::ManifestBatch {
+                files: 2,
+                bytes: 20,
+            },
+            ProgressEvent::FileComplete {
+                path: "one.txt".into(),
+            },
+            ProgressEvent::FileComplete {
+                path: "dir/two.txt".into(),
+            },
+        ] {
+            tx.send(event).expect("the consumer is alive");
+        }
+        drop(tx);
+
+        drain_progress_lane(rx, recorder.clone(), true).await;
+
+        assert_eq!(recorder.lines(), vec!["one.txt", "dir/two.txt"]);
+        assert_eq!(
+            recorder.last_message(),
+            "copying • 2/2 files • 0 B • dir/two.txt"
+        );
+    }
+
+    /// The mirror-delete phase survives the whole loop, not just the
+    /// fold: the last thing the terminal shows before the summary is the
+    /// delete pass, not a stale copy row.
+    #[tokio::test]
+    async fn the_drain_loop_ends_on_the_delete_phase() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recorder = Recorder::default();
+        for event in [
+            ProgressEvent::Enumerated { files: 4 },
+            ProgressEvent::DiffComplete,
+            ProgressEvent::DeleteBegin,
+        ] {
+            tx.send(event).expect("the consumer is alive");
+        }
+        drop(tx);
+
+        drain_progress_lane(rx, recorder.clone(), false).await;
+
+        assert_eq!(
+            recorder.last_message(),
+            "deleting • removing extraneous destination entries"
+        );
+    }
+
+    /// The finish path waits for the consumer when the lane closes.
+    #[tokio::test]
+    async fn finish_waits_for_a_consumer_that_ends() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recorder = Recorder::default();
+        tx.send(ProgressEvent::Enumerated { files: 1 })
+            .expect("the consumer is alive");
+        drop(tx);
+        let consumer = tokio::spawn(drain_progress_lane(rx, recorder.clone(), false));
+
+        assert!(join_drained(consumer, ROW_DRAIN_GRACE).await);
+        assert_eq!(recorder.last_message(), "enumerating • 1 files found");
+    }
+
+    /// A sink clone that outlived the session keeps the lane open
+    /// forever. The bounded drain gives up and aborts instead of
+    /// hanging the process exit. (The grace is a parameter so the test
+    /// does not spend the production half-second waiting.)
+    #[tokio::test]
+    async fn finish_gives_up_on_a_lane_that_never_closes() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recorder = Recorder::default();
+        tx.send(ProgressEvent::Enumerated { files: 1 })
+            .expect("the consumer is alive");
+        let consumer = tokio::spawn(drain_progress_lane(rx, recorder.clone(), false));
+
+        let started = Instant::now();
+        let grace = Duration::from_millis(50);
+        assert!(
+            !join_drained(consumer, grace).await,
+            "an open lane must hit the grace, not drain"
+        );
+        assert!(started.elapsed() >= grace);
+        drop(tx);
+    }
+
+    /// clp-2 residue (c): the row attaches only when it can actually
+    /// draw. With stderr redirected indicatif hides the bar, and a
+    /// hidden row would gate blit-core's enumeration heartbeat while
+    /// showing nothing — the log would lose its only liveness signal.
+    #[test]
+    fn the_row_attaches_only_when_requested_and_drawable() {
+        assert!(live_row_attaches(true, false));
+        assert!(
+            !live_row_attaches(true, true),
+            "redirected stderr keeps the legacy heartbeat lines"
+        );
+        assert!(!live_row_attaches(false, false));
+        assert!(!live_row_attaches(false, true));
+    }
+
+    /// The gate the row is built on: with no row requested nothing is
+    /// constructed and no sink is handed to the session.
+    #[test]
+    fn no_row_is_built_when_progress_was_not_requested() {
+        assert!(
+            LiveProgressRow::start(false, false, true, Path::new("src"), Path::new("dst"))
+                .is_none()
+        );
     }
 }

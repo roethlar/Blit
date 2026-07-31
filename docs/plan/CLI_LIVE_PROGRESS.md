@@ -172,6 +172,29 @@ One coherent, testable change per slice — sized for the review loop.
    `FsTransferSource::new` with a sink in hand) together with remote
    render support.
 
+## clp-2 landing notes
+
+- Landed with post-review hardenings: DeleteBegin gated on `execute` (a
+  dry run must not announce a deletion it will not perform;
+  guard-tested), the perf-history failure print moved to the log facade
+  (the last raw stderr writer on the local path), control bytes
+  sanitized out of row text and `-v` lines (guard-tested), `biased;`
+  dropped from the drain select (unbounded lane — fairness keeps the
+  tick arm from starving), the log-redirect CLI half pinned via the
+  `row_line_sink` seam, and the tick-arm repaint pinned under a paused
+  clock (tokio `test-util` added to blit-cli dev-deps).
+- Residue (d) — remote-route enumeration attachment — is DEFERRED to
+  the remote render work by design; the remote monitor ignores the new
+  phase signals via if-let, and `ProgressTotals`/daemon folds carry
+  explicit no-op arms.
+- Known gaps (recorded, not owed by clp): the `{wide_msg}` no-wrap
+  mechanism itself has no automated guard (needs a fake `TermLike`);
+  the renderer lays out for a fixed 80 columns (true width adaptation
+  needs a terminal-size dependency decision); `LineRedirect` restoration
+  is LIFO-only — a future concurrent-row design must revisit the seam;
+  column counting is char-based, not display-width (CJK under-fills,
+  never wraps).
+
 ## Open questions
 
 - None. Flipped Active by the owner ("flip clp", D-2026-07-31-2).

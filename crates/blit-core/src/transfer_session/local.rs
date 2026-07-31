@@ -773,7 +773,9 @@ fn record_local_history(summary: &LocalMirrorSummary, options: &LocalMirrorOptio
     let record = build_local_record(summary, options);
     if let Err(err) = crate::perf_history::append_local_record(&record) {
         if options.verbose {
-            eprintln!("Failed to update performance history: {err:?}");
+            // Through the log facade so a live progress row can route it
+            // above the row instead of being scrolled away by it.
+            log::warn!("failed to update performance history: {err:?}");
         }
     }
 }
@@ -1137,6 +1139,112 @@ mod tests {
         );
         assert_eq!(totals.files, 2);
         assert_eq!(totals.bytes, 11, "bytes ride the Payload lane only");
+    }
+
+    /// clp-2: the two phase facts the counters cannot express ride the
+    /// same one lane. The diff finishing is what tells an up-to-date
+    /// tree from a scan still running (both sit at zero needed files),
+    /// and the delete pass is what tells a mirror's purge from the copy
+    /// that preceded it. The purge signal is necessarily last: the pass
+    /// runs only after every apply has joined.
+    #[tokio::test]
+    async fn progress_sink_receives_the_phase_signals() {
+        use crate::remote::transfer::ProgressEvent;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("mkdir src");
+        std::fs::create_dir_all(&dst_root).expect("mkdir dst");
+        std::fs::write(src_root.join("a.txt"), b"first").expect("write");
+        std::fs::write(dst_root.join("extraneous.txt"), b"stale").expect("write");
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ProgressEvent>();
+        let summary = run_local_session(
+            &src_root,
+            &dst_root,
+            LocalMirrorOptions {
+                mirror: true,
+                progress: true,
+                progress_events: Some(RemoteTransferProgress::new(tx)),
+                perf_history: false,
+                ..LocalMirrorOptions::default()
+            },
+        )
+        .await
+        .expect("local mirror with progress attached");
+        assert_eq!(summary.deleted_files, 1, "the extraneous file is purged");
+
+        let mut diff_complete = 0usize;
+        let mut delete_begin = 0usize;
+        let mut last: Option<ProgressEvent> = None;
+        while let Ok(event) = rx.try_recv() {
+            match &event {
+                ProgressEvent::DiffComplete => diff_complete += 1,
+                ProgressEvent::DeleteBegin => delete_begin += 1,
+                _ => {}
+            }
+            last = Some(event);
+        }
+        assert_eq!(
+            diff_complete, 1,
+            "the destination reports its diff finishing exactly once"
+        );
+        assert_eq!(
+            delete_begin, 1,
+            "the mirror-delete pass announces itself exactly once"
+        );
+        assert!(
+            matches!(last, Some(ProgressEvent::DeleteBegin)),
+            "the purge is the last thing the lane reports, not a stale copy \
+             event: {last:?}"
+        );
+    }
+
+    /// A dry run plans the delete pass without removing anything, so the
+    /// row must never claim it is deleting.
+    #[tokio::test]
+    async fn dry_run_mirror_does_not_announce_deletion() {
+        use crate::remote::transfer::ProgressEvent;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("mkdir src");
+        std::fs::create_dir_all(&dst_root).expect("mkdir dst");
+        std::fs::write(src_root.join("a.txt"), b"first").expect("write");
+        std::fs::write(dst_root.join("extraneous.txt"), b"stale").expect("write");
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ProgressEvent>();
+        run_local_session(
+            &src_root,
+            &dst_root,
+            LocalMirrorOptions {
+                mirror: true,
+                dry_run: true,
+                progress: true,
+                progress_events: Some(RemoteTransferProgress::new(tx)),
+                perf_history: false,
+                ..LocalMirrorOptions::default()
+            },
+        )
+        .await
+        .expect("dry-run mirror with progress attached");
+        assert!(
+            dst_root.join("extraneous.txt").exists(),
+            "a dry run deletes nothing"
+        );
+
+        let mut delete_begin = 0usize;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, ProgressEvent::DeleteBegin) {
+                delete_begin += 1;
+            }
+        }
+        assert_eq!(
+            delete_begin, 0,
+            "a dry run must not announce a deletion it will not perform"
+        );
     }
 
     #[test]

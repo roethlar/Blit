@@ -122,17 +122,17 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    `[state: skip]` in error (it is a behavior fix, not mechanical) —
    this entry is its STATE record; the tag's docs-gate effect is moot
    since this commit touches STATE for the range.
-3. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2):** **clp-1
-   `[x]` landed** — local sessions thread one progress sink through both
-   roles (`ProgressEvent::Enumerated` lane for the walk; as-built note in
-   the plan), the enumeration heartbeat prints nothing when a sink is
-   attached (byte-identical otherwise), and the CLI renders one live
-   status row (phase/files/bytes) instead of the dead spinner.
-   **Owner: one real-TTY `blit mirror -p` eyeball is the only unverified
-   surface** (harness runs captured stderr). clp-2 (render polish +
-   review residue: log-backend routing through the row, drain-loop
-   coverage, redirected-stderr posture) next after cr-pfc2-1's fix;
-   then pfc-3..6. TUI-scale redesign stays a separate queued TODO.
+3. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2): clp-1 and
+   clp-2 both `[x]` landed** — one live row with truthful phases
+   (enumerating → comparing/up-to-date → copying → deleting; dry runs
+   never claim deletion), width-safe current-file segment, `-v` per-file
+   lines through the row handle, and the `log` backend routed through
+   the row while it lives (warns scroll above, never scroll it away).
+   Owner confirmed the row holds one line on a real TTY (2026-07-31);
+   the clp-2 additions (`-v` lines, phases, warn routing) still want one
+   real-TTY eyeball after rebuild. Residue (d) (remote-route
+   attachment) deferred to remote render work — see plan landing notes.
+   Next: pfc-3..6. TUI-scale redesign stays a separate queued TODO.
 4. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft, D-2026-07-13-2):** local
    apply ships one worker and does not scale; resume only under an active plan.
 5. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
