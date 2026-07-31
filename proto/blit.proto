@@ -1053,6 +1053,16 @@ message NeedComplete {}
 // SOURCE's promise that every requested payload byte is flushed.
 message SourceDone {}
 
+// One file the DESTINATION could not materialize while the rest of the
+// manifest still landed (D-2026-07-30-1). `relative_path` is the
+// manifest-relative wire path — empty for the single-file destination
+// convention (the destination root IS the file, same rule as
+// FileHeader). `reason` is the failure's rendered error chain.
+message FileFailure {
+  string relative_path = 1;
+  string reason = 2;
+}
+
 // DESTINATION → SOURCE at close: the end that wrote bytes and
 // executed deletes attests to the outcome (one summary shape for
 // every direction; it replaced the per-direction summaries at cutover).
@@ -1062,6 +1072,13 @@ message TransferSummary {
   uint64 entries_deleted = 3;   // mirror executed destination-local
   bool in_stream_carrier_used = 4;
   uint64 files_resumed = 5;
+  // Per-file failures the destination contained instead of faulting the
+  // session (contract v6). `files_failed` counts every one; `failures`
+  // carries at most MAX_REPORTED_FILE_FAILURES (64) of them — the
+  // sender caps the list so a catastrophic run cannot produce an
+  // unbounded frame, while the total stays exact.
+  uint64 files_failed = 6;
+  repeated FileFailure failures = 7;
 }
 
 // Structured refusal/abort — an end says why before closing.

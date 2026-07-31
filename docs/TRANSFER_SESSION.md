@@ -2,7 +2,9 @@
 
 **Status**: Active (contract; the session is the ONLY remote transfer
 path since cutover, otp-10c-2)
-**Contract version**: 4 (Windows file attributes + named `$DATA` streams)
+**Contract version**: 6 (`TransferSummary` per-file failure report; v5 =
+cross-platform Windows metadata policy, v4 = Windows file attributes +
+named `$DATA` streams)
 **Created**: 2026-07-05
 **Plan**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4)
 **Decision refs**: D-2026-07-05-1 (one path), D-2026-07-05-2
@@ -142,7 +144,9 @@ INITIATOR                                RESPONDER
   stream, and implementations must not introduce it.
 - `TransferSummary` always travels DESTINATION → SOURCE (the end
   that wrote bytes and executed deletes is the end that can attest
-  to them), then the initiator surfaces it to the operator.
+  to them), then the initiator surfaces it to the operator. Contract
+  v6 adds the per-file failure report to it (below): the destination
+  is the scorer for what did NOT land, too.
 
 ## Frame set and field numbers
 
@@ -180,8 +184,57 @@ Shared messages (`FileHeader`, `FileData`, `TarShard*`,
 vocabulary. Contract v4 extends `FileHeader` as specified below. New session
 messages (`SessionHello`, `SessionOpen`,
 `SessionAccept`, `DataPlaneGrant`, `NeedBatch`/`NeedEntry`,
-`NeedComplete`, `SourceDone`, `TransferSummary`, `SessionError`) are
-defined in the proto with their field numbers.
+`NeedComplete`, `SourceDone`, `TransferSummary`, `FileFailure`,
+`SessionError`) are defined in the proto with their field numbers.
+
+### `TransferSummary` per-file failure report (contract v6)
+
+`TransferSummary` adds field 6, `uint64 files_failed`, and field 7,
+`repeated FileFailure failures`, where
+`FileFailure{string relative_path = 1; string reason = 2}`.
+
+- The DESTINATION records a per-file failure when a file it could not
+  materialize is attributable to exactly that one file; the session
+  continues and the rest of the manifest lands (D-2026-07-30-1).
+  Failures that are not attributable to one file — containment or
+  path-safety violations, tar-shard structural parse errors,
+  destination-root unavailability, transport death — remain
+  session-fatal `SessionError`s and never appear here.
+- `files_failed` is the exact count. `failures` is a bounded sample of
+  it: the SENDER caps the list at 64 entries, so a catastrophic run
+  cannot produce an unbounded frame while the count stays exact. A
+  `failures` list shorter than `files_failed` therefore means "capped",
+  never "some failures were forgotten".
+- `relative_path` is the manifest-relative wire path (POSIX
+  separators), empty for the single-file destination convention (the
+  destination root IS the file — the same rule `FileHeader` uses).
+- The report rides the one existing summary frame, so it reaches the
+  initiator identically in both roles and on both byte carriers.
+- A file counted in `files_failed` is never counted in
+  `files_transferred` or `files_resumed`. `bytes_transferred` is the
+  byte lane's own measure — bytes the destination applied — and is
+  deliberately NOT filtered by file outcome: a whole-file write that
+  failed contributes nothing (its outcome carries zero bytes), but a
+  resume-block record that fails at its closing `BlockTransferComplete`
+  keeps the stale blocks it had already patched in place. The file
+  counters answer "which files converged"; the byte counter answers
+  "how much the destination wrote".
+- A SOURCE end reports optimistically on both lanes: it completes a
+  file when it finishes SENDING it, and reports that file's PLANNED
+  size, neither of which is destination confirmation. On receiving a
+  summary with `files_failed != 0` it reconciles both lanes against
+  this summary — it retracts exactly `files_failed` completions and
+  ADOPTS `bytes_transferred` as its byte total. Adoption, not
+  subtraction: the wire carries no per-failure byte attribution
+  (`failures` is a capped sample), so the exact byte delta is not
+  derivable from this report — only the authoritative total is.
+- The DESTINATION's live byte counter (the daemon's
+  `GetState.active[].bytes_completed`) is fed chunk-by-chunk DURING a
+  streamed write, before the flush and metadata tail that can still
+  fail that one file. When a failure there is contained, the
+  destination withdraws that file's streamed bytes from the live
+  counter, so the live lane converges on the total this summary reports
+  instead of claiming bytes the summary denies.
 
 ### `FileHeader` Windows metadata (contract v4)
 

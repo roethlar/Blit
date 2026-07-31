@@ -244,6 +244,12 @@ impl LiveRowState {
             }
             // The mirror's delete pass — no longer "copying".
             ProgressEvent::DeleteBegin => LivePhase::Deleting,
+            // pfc-4: the summary reconciliation only corrects the
+            // counters (`ProgressTotals::apply`, folded above) — it names
+            // no file and starts no phase, so the row keeps whatever
+            // phase it was in. pfc-5 owns rendering the failures
+            // themselves.
+            ProgressEvent::SummaryReconciled { .. } => self.phase,
         };
         self.phase = self.phase.max(phase);
     }

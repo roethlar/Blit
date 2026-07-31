@@ -2895,6 +2895,218 @@ async fn mirror_all_purges_out_of_scope_even_when_filtered() {
     assert!(dst_root.join("keep.txt").exists());
 }
 
+// ---------------------------------------------------------------------------
+// pfc-4: the destination's per-file failure report on the wire
+// ---------------------------------------------------------------------------
+
+/// The blocked file: a directory sitting exactly where the destination
+/// file belongs. Portable, attributable to that one path, and the same
+/// stand-in the sink-level containment tests use.
+const BLOCKED_FILE: &str = "blocked.txt";
+
+fn contained_failure_tree() -> Vec<FileSpec> {
+    vec![
+        ("landed-a.txt", b"alpha".to_vec(), 1_600_000_001),
+        (BLOCKED_FILE, b"never lands".to_vec(), 1_600_000_002),
+        ("sub/landed-b.txt", b"bravo".to_vec(), 1_600_000_003),
+    ]
+}
+
+/// Drive one MIRROR session over trees where exactly one destination
+/// file cannot be written, with the given initiator role and byte
+/// carrier. Mirror because the pfc-2 interim interlock keeps a contained
+/// failure session-fatal on non-mirror sessions until pfc-5 replaces it
+/// with the source-deletion gate.
+async fn run_contained_failure_session(
+    initiator_role: TransferRole,
+    in_stream: bool,
+    source_progress: Option<RemoteTransferProgress>,
+) -> (
+    eyre::Result<TransferSummary>,
+    eyre::Result<DestinationOutcome>,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&src_root).unwrap();
+    std::fs::create_dir_all(&dst_root).unwrap();
+    write_tree(&src_root, &contained_failure_tree());
+    std::fs::create_dir_all(dst_root.join(BLOCKED_FILE)).unwrap();
+
+    let open = SessionOpen {
+        initiator_role: initiator_role as i32,
+        compare_mode: ComparisonMode::SizeMtime as i32,
+        in_stream_bytes: in_stream,
+        mirror_enabled: true,
+        mirror_kind: MirrorMode::All as i32,
+        ..Default::default()
+    };
+    // Only the INITIATOR dials the data plane (contract §Transport); the
+    // responder binds. In-stream sessions dial nothing at all.
+    let dial_host = (!in_stream).then(|| "127.0.0.1".to_string());
+    let (source_endpoint, dest_endpoint) = match initiator_role {
+        TransferRole::Source => (SessionEndpoint::initiator(open), SessionEndpoint::Responder),
+        TransferRole::Destination => (SessionEndpoint::Responder, SessionEndpoint::initiator(open)),
+        TransferRole::Unspecified => panic!("fixture must pick a role"),
+    };
+    let source_cfg = SourceSessionConfig {
+        instruments: SourceInstruments {
+            progress: source_progress,
+            ..Default::default()
+        },
+        hello: HelloConfig::default(),
+        endpoint: source_endpoint,
+        plan_options: PlanOptions::default(),
+        data_plane_host: match initiator_role {
+            TransferRole::Source => dial_host.clone(),
+            _ => None,
+        },
+    };
+    let dest_cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: dest_endpoint,
+        data_plane_host: match initiator_role {
+            TransferRole::Destination => dial_host,
+            _ => None,
+        },
+        receiver_capacity: None,
+        instruments: Default::default(),
+        local_apply: None,
+    };
+    let (a, b) = in_process_pair();
+    let source = Arc::new(FsTransferSource::new(src_root.clone()));
+    let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, async {
+        tokio::join!(
+            run_source(source_cfg, a, source),
+            run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
+        )
+    })
+    .await
+    .expect("session run timed out");
+
+    if source_result.is_ok() && dest_result.is_ok() {
+        // The siblings still land: containment is per file, not per
+        // payload (the blocked member shares a tar shard with them).
+        assert_eq!(
+            std::fs::read(dst_root.join("landed-a.txt")).unwrap(),
+            b"alpha"
+        );
+        assert_eq!(
+            std::fs::read(dst_root.join("sub/landed-b.txt")).unwrap(),
+            b"bravo"
+        );
+    }
+    (source_result, dest_result)
+}
+
+/// pfc-4 wire parity: the destination's failure report survives the
+/// round trip to the INITIATOR under both role assignments and both
+/// byte carriers. The initiator-SOURCE case is the load-bearing one —
+/// that end learns of a destination failure ONLY through this summary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn contained_failures_reach_the_initiator_in_both_carriers_and_roles() {
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        for in_stream in [true, false] {
+            let (sr, dr) = run_contained_failure_session(initiator_role, in_stream, None).await;
+            let context = format!("initiator {initiator_role:?}, in_stream {in_stream}");
+            let (summary, outcome) =
+                expect_session_success(sr, dr, &format!("contained-failure mirror ({context})"));
+
+            assert_eq!(
+                summary, outcome.summary,
+                "the failure report must cross the wire intact ({context})"
+            );
+            assert_eq!(
+                summary.files_failed, 1,
+                "exactly one file could not be written ({context})"
+            );
+            assert_eq!(
+                summary.failures.len(),
+                1,
+                "the report names the failed file ({context})"
+            );
+            assert_eq!(
+                summary.failures[0].relative_path, BLOCKED_FILE,
+                "the report carries the manifest-relative wire path ({context})"
+            );
+            assert!(
+                !summary.failures[0].reason.is_empty(),
+                "a carried failure names its reason ({context})"
+            );
+            assert_eq!(
+                summary.files_transferred, 2,
+                "a failed file is never a transferred file ({context})"
+            );
+            assert_eq!(
+                summary.in_stream_carrier_used, in_stream,
+                "fixture must exercise the carrier it asked for ({context})"
+            );
+        }
+    }
+}
+
+/// cr-pfc2-2 plus the pfc-2 landing note's byte-accounting item: an
+/// initiator-SOURCE end completes a file when it finishes SENDING it and
+/// reports that file's PLANNED size, neither of which is destination
+/// confirmation. Once the summary arrives, BOTH of its final lanes must
+/// agree with the destination — no completion and no byte for the file
+/// the destination could not write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn initiator_source_totals_reconcile_against_the_destination_summary() {
+    for in_stream in [true, false] {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sr, dr) = run_contained_failure_session(
+            TransferRole::Source,
+            in_stream,
+            Some(RemoteTransferProgress::new(tx)),
+        )
+        .await;
+        let context = format!("in_stream {in_stream}");
+        let (summary, _outcome) = expect_session_success(
+            sr,
+            dr,
+            &format!("initiator-SOURCE contained-failure mirror ({context})"),
+        );
+
+        let mut totals = blit_core::remote::transfer::ProgressTotals::default();
+        let mut completed = 0u64;
+        let mut reported_bytes = 0u64;
+        while let Ok(event) = rx.try_recv() {
+            match &event {
+                ProgressEvent::FileComplete { .. } => completed += 1,
+                ProgressEvent::Payload { bytes, .. } => reported_bytes += bytes,
+                _ => {}
+            }
+            totals.apply(&event);
+        }
+        assert_eq!(
+            completed, 3,
+            "the send lane still completes every file it sent ({context})"
+        );
+        // The fixture's blocked file is the largest of the three, so the
+        // optimistic byte lane is strictly bigger than what landed —
+        // without the reconciliation the two lanes cannot agree.
+        assert!(
+            reported_bytes > summary.bytes_transferred,
+            "fixture must make the send lane's planned bytes exceed the \
+             landed bytes ({context}): reported {reported_bytes}, landed {}",
+            summary.bytes_transferred
+        );
+        assert_eq!(
+            totals.files, summary.files_transferred,
+            "the reconciled completed count must equal what landed ({context})"
+        );
+        assert_eq!(
+            totals.bytes, summary.bytes_transferred,
+            "the reconciled byte count must equal what landed ({context})"
+        );
+        assert_eq!(
+            totals.files_failed, summary.files_failed,
+            "the retraction is recorded as the failure count ({context})"
+        );
+    }
+}
+
 #[tokio::test]
 async fn mirror_refused_when_source_scan_incomplete() {
     // otp-6b: mirroring on an incomplete source scan could delete files the

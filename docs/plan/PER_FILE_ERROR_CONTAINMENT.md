@@ -266,6 +266,36 @@ tolerance tests fail.
 - Session-level end-to-end containment coverage (a real session with a
   blocked file, both carriers) is owed by pfc-5's integration tests.
 
+### pfc-4 landing notes
+
+- Wire: `TransferSummary` carries `files_failed` (exact total) +
+  `failures` (sender-capped at 64) as contract v6; the ONE summary
+  construction site covers both roles/carriers/daemon;
+  `LocalMirrorSummary` carries the same shape for pfc-5.
+  `docs/TRANSFER_SESSION.md` moved in lockstep, including the
+  resume-block byte semantics now stated as contract
+  (`bytes_transferred` = bytes the destination applied, stale resume
+  blocks of a later-failed file included).
+- cr-pfc2-2 closed at the TOTALS level via
+  `ProgressEvent::SummaryReconciled { files_failed, bytes_landed }`:
+  the SOURCE adopts the destination's authoritative byte total and
+  retracts failed completions once, at the summary boundary, gated on
+  `files_failed != 0` (unconditional adoption would erase dry-run
+  planned-byte progress). The per-file SOURCE event stream remains
+  optimistic by design — the wire cannot attribute per-file identity
+  past the cap; pfc-5 renders failed files from the summary list.
+- Live-counter withdrawal: a contained flush/metadata-tail failure
+  withdraws exactly its reported `header.size` from `ByteProgressSink`
+  (saturating), closing the pfc-2 byte-divergence item on all three
+  lanes.
+- Notes for pfc-5: `ProgressTotals.files_failed` is populated on SOURCE
+  lanes only (destination lanes filter completions instead — do not
+  read it as universal); `files_completed` is non-monotonic at exactly
+  one point (the reconciliation) and every delta consumer uses
+  saturating subtraction; the 64-entry wire cap is sender-side only
+  (same-build refusal is the defense — a decoder clamp would be
+  defense-in-depth if peers ever loosen).
+
 ### Half C — metadata-only attribute repair (pfc-6, D-2026-07-31-1)
 
 Field evidence (2026-07-31, `H:\apps` pre-existing backup regions, e.g.

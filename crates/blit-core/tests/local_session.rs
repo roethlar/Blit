@@ -421,6 +421,47 @@ async fn mirror_deletes_unrelated_destination_dirs_and_reports_split() -> Result
     Ok(())
 }
 
+/// pfc-4: a local run's summary carries the same per-file failure
+/// report the wire carriers return, so one renderer serves both. Mirror
+/// because the pfc-2 interim interlock keeps a contained failure
+/// session-fatal on non-mirror sessions until pfc-5 replaces it with
+/// the source-deletion gate. The blocked file is a directory sitting
+/// where its file belongs — attributable to that one path.
+#[tokio::test]
+async fn local_summary_carries_the_contained_failure_report() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    fs::write(src.join("landed.txt"), b"alpha")?;
+    fs::write(src.join("blocked.txt"), b"never lands")?;
+    fs::create_dir_all(dest.join("blocked.txt"))?;
+
+    let summary = run_local_session(
+        &src,
+        &dest,
+        LocalMirrorOptions {
+            mirror: true,
+            ..options()
+        },
+    )
+    .await?;
+
+    assert_eq!(summary.files_failed, 1);
+    assert_eq!(summary.failures.len(), 1);
+    assert_eq!(summary.failures[0].relative_path, "blocked.txt");
+    assert!(
+        !summary.failures[0].reason.is_empty(),
+        "a carried failure names its reason"
+    );
+    assert_eq!(
+        summary.copied_files, 1,
+        "a failed file is never a copied file"
+    );
+    assert_eq!(fs::read(dest.join("landed.txt"))?, b"alpha");
+    Ok(())
+}
+
 /// Port of `local_dry_run_does_not_create_destination` plus the
 /// mirror half: dry-run writes nothing, deletes nothing, and still
 /// reports the plan (would-copy and would-delete counts).

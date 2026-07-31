@@ -473,12 +473,11 @@ pub async fn execute_sink_pipeline_elastic(
                         .prepare_payload(payload)
                         .await
                         .context("preparing payload")?;
-                    let files: Vec<(String, u64)> = match &prepared {
-                        PreparedPayload::File(h) => vec![(h.relative_path.clone(), h.size)],
-                        PreparedPayload::TarShard { headers, .. } => headers
-                            .iter()
-                            .map(|h| (h.relative_path.clone(), h.size))
-                            .collect(),
+                    let files: Vec<String> = match &prepared {
+                        PreparedPayload::File(h) => vec![h.relative_path.clone()],
+                        PreparedPayload::TarShard { headers, .. } => {
+                            headers.iter().map(|h| h.relative_path.clone()).collect()
+                        }
                         // Raw resume-block payloads patch existing files;
                         // no file-completion event from one-block-at-a-
                         // time. The composite ResumeFile IS one whole
@@ -501,20 +500,34 @@ pub async fn execute_sink_pipeline_elastic(
                         .context("writing payload")?;
                     if let Some(p) = &progress {
                         // Contract (progress.rs): bytes ride Payload, one
-                        // FileComplete per file. `size` is the planned
-                        // manifest size — the value this lane has always
-                        // reported, now on the right variant. A file this
+                        // FileComplete per file. pfc-4 byte-lane
+                        // reconciliation: the bytes are the payload's
+                        // OUTCOME bytes, not the planned manifest sizes
+                        // this lane used to sum — a member the sink
+                        // contained as a per-file failure contributes
+                        // nothing, and a dry run reports the zero it
+                        // actually wrote. That is what the in-stream
+                        // receive lane has always reported, so both
+                        // carriers now agree on a payload with contained
+                        // failures. Reported once per payload; the loop
+                        // below carries completions only. A file this
                         // payload recorded as failed never completes on
                         // this lane (D-2026-07-30-1).
-                        for (name, size) in &files {
-                            p.report_payload(0, *size);
+                        if !files.is_empty() {
+                            p.report_payload(0, outcome.bytes_written);
+                        }
+                        for name in &files {
                             if !outcome.file_failed(name) {
                                 p.report_file_complete(name.clone());
                             }
                         }
                         // A resumed file finishes like any other (w6-1:
                         // counted once, per-file lane); its bytes are the
-                        // stale blocks actually sent.
+                        // stale blocks actually sent — already the
+                        // outcome's own count, unchanged here. Raw
+                        // resume-block payloads stay byteless on this
+                        // lane: the composite ResumeFile is the file's
+                        // one phase, and reporting both would double it.
                         if let Some(name) = resumed_file {
                             p.report_payload(0, outcome.bytes_written);
                             if !outcome.file_failed(&name) {
@@ -1305,7 +1318,15 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                     );
                 }
                 if let Some(p) = progress {
-                    p.report_payload(0, bytes);
+                    // pfc-4 byte-lane reconciliation: landed bytes, not
+                    // the archive's wire length. `bytes` above still
+                    // measures the record for the small-file probe (a
+                    // transport observation), but the progress lane must
+                    // report what the members actually wrote, so a shard
+                    // with a contained member reads the same here as on
+                    // the in-stream receive lane. Tar framing and padding
+                    // were never transferred file content either.
+                    p.report_payload(0, outcome.bytes_written);
                     for path in member_paths.unwrap_or_default() {
                         if !outcome.file_failed(&path) {
                             p.report_file_complete(path);
@@ -2266,7 +2287,158 @@ mod tests {
         }
         assert_eq!(completes, 3, "one byteless completion per file");
         assert_eq!(totals.files, 3);
-        assert_eq!(totals.bytes, 17, "planned sizes ride Payload exactly once");
+        // pfc-4 adapted the wording only: this lane now reports the
+        // payload's OUTCOME bytes rather than the planned manifest
+        // sizes. For a clean local copy the two are the same 17 bytes,
+        // so the number this test pins is unchanged.
+        assert_eq!(totals.bytes, 17, "landed bytes ride Payload exactly once");
+    }
+
+    /// pfc-4 byte-lane reconciliation. A tar shard with ONE contained
+    /// member must report the same payload bytes whichever carrier ran
+    /// it. The send/local pipeline lane used to sum planned manifest
+    /// sizes, so a blocked member's bytes were reported as moved; the
+    /// data-plane receive lane reported the archive's wire length, tar
+    /// headers and padding included. Both now report the outcome's
+    /// landed bytes — what the in-stream receive lane
+    /// (`transfer_session::mod`, the tar record arm) has always
+    /// reported. The blocked member is a directory sitting where its
+    /// file belongs: portable, and attributable to that member alone.
+    #[tokio::test]
+    async fn a_shard_with_a_contained_member_reports_the_same_bytes_on_both_carriers() {
+        const BLOCKED: &str = "blocked.bin";
+        const LANDED: [(&str, &[u8]); 2] = [("a.bin", b"alpha"), ("b.bin", b"bravo!")];
+
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        for (rel, contents) in LANDED {
+            std::fs::write(src.join(rel), contents).unwrap();
+        }
+        std::fs::write(src.join(BLOCKED), b"never lands").unwrap();
+
+        // Headers without Windows metadata so both lanes carry byte-
+        // identical members (the data-plane record encoding has its own
+        // metadata frame; this fixture is about payload bytes).
+        let source = Arc::new(FsTransferSource::new(src.clone()));
+        let unreadable = Arc::new(Mutex::new(Vec::new()));
+        let (mut header_rx, mut scan) = source.scan_without_windows_metadata(None, unreadable);
+        let mut headers = Vec::new();
+        while let Some(h) = header_rx.recv().await {
+            headers.push(h);
+        }
+        let _ = scan.finish().await.unwrap();
+        headers.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+        let landed_bytes: u64 = LANDED.iter().map(|(_, c)| c.len() as u64).sum();
+
+        // One destination per carrier, each with the same member blocked.
+        let make_dst = |name: &str| {
+            let dst = tmp.path().join(name);
+            std::fs::create_dir_all(dst.join(BLOCKED)).unwrap();
+            dst
+        };
+        let fs_sink = |dst: PathBuf| {
+            Arc::new(FsTransferSink::new(
+                src.clone(),
+                dst,
+                FsSinkConfig {
+                    preserve_times: false,
+                    dry_run: false,
+                    checksum: None,
+                    resume: false,
+                    compare_mode: ComparisonMode::SizeMtime,
+                },
+            ))
+        };
+        let payload_bytes = |events: &[ProgressEvent]| -> u64 {
+            events
+                .iter()
+                .map(|event| match event {
+                    ProgressEvent::Payload { bytes, .. } => *bytes,
+                    _ => 0,
+                })
+                .sum()
+        };
+        let completions = |events: &[ProgressEvent]| -> usize {
+            events
+                .iter()
+                .filter(|event| matches!(event, ProgressEvent::FileComplete { .. }))
+                .count()
+        };
+
+        // Carrier A: the send/local pipeline lane.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = RemoteTransferProgress::new(tx);
+        let send_outcome = execute_sink_pipeline(
+            Arc::clone(&source) as Arc<dyn TransferSource>,
+            vec![fs_sink(make_dst("dst-send"))],
+            vec![TransferPayload::TarShard {
+                headers: headers.clone(),
+            }],
+            1,
+            Some(&progress),
+        )
+        .await
+        .expect("a contained member must not fail the shard");
+        drop(progress);
+        let send_events = drain_events(&mut rx);
+
+        // Carrier B: the data-plane receive lane, fed the very archive
+        // the source prepared for carrier A.
+        let prepared = source
+            .prepare_payload(TransferPayload::TarShard {
+                headers: headers.clone(),
+            })
+            .await
+            .unwrap();
+        let (prepared_headers, data) = match prepared {
+            PreparedPayload::TarShard { headers, data } => (headers, data),
+            other => panic!("expected a prepared tar shard, got {other:?}"),
+        };
+        let entries: Vec<(&str, u64, i64, u32)> = prepared_headers
+            .iter()
+            .map(|h| {
+                (
+                    h.relative_path.as_str(),
+                    h.size,
+                    h.mtime_seconds,
+                    h.permissions,
+                )
+            })
+            .collect();
+        let mut wire = encode_tar_shard(&entries, data.len() as u64, &data);
+        wire.push(DATA_PLANE_RECORD_END);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = RemoteTransferProgress::new(tx);
+        let mut reader = wire.as_slice();
+        let receive_outcome = execute_receive_pipeline(
+            &mut reader,
+            fs_sink(make_dst("dst-receive")),
+            Some(&progress),
+        )
+        .await
+        .expect("a contained member must not fail the receive pipeline");
+        drop(progress);
+        let receive_events = drain_events(&mut rx);
+
+        assert_eq!(send_outcome.files_failed_total, 1);
+        assert_eq!(receive_outcome.files_failed_total, 1);
+        assert_eq!(
+            payload_bytes(&send_events),
+            payload_bytes(&receive_events),
+            "the two carriers must report the same bytes for the same shard"
+        );
+        assert_eq!(
+            payload_bytes(&send_events),
+            landed_bytes,
+            "a contained member contributes no payload bytes"
+        );
+        assert!(
+            data.len() as u64 > landed_bytes,
+            "fixture must keep archive framing distinguishable from landed bytes"
+        );
+        assert_eq!(completions(&send_events), LANDED.len());
+        assert_eq!(completions(&receive_events), LANDED.len());
     }
 
     /// POST_REVIEW_FIXES §1.1b regression. When a sink errors mid-

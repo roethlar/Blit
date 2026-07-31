@@ -12,7 +12,9 @@ use tokio::sync::mpsc::UnboundedSender;
 ///   exclusively as `Payload { bytes, .. }` deltas (chunk- or
 ///   file-granular, producer's choice). `FileComplete` carries no byte
 ///   field at all, so no fold can double-count a file's bytes — the
-///   class of bug filed as design-1.
+///   class of bug filed as design-1. `SummaryReconciled` is the ONE
+///   exception, and it is not a delta: it replaces the byte total with
+///   the destination's authoritative count (see below).
 /// - **Files are counted exactly once**, through exactly one of two
 ///   lanes per file:
 ///   - *per-file lane*: one `FileComplete { path }` per finished file,
@@ -37,6 +39,15 @@ use tokio::sync::mpsc::UnboundedSender;
 ///   destination diff may never need. Folding it into `ManifestBatch`
 ///   would double-count "M" on a local session, where both the source
 ///   walk and the destination diff report on the one channel.
+/// - `SummaryReconciled { files_failed, bytes_landed }` is the SOURCE
+///   side's one correction (pfc-4). A send-side completion is not
+///   destination confirmation, and a send-side byte report is the
+///   PLANNED record size, so both lanes are optimistic about a file the
+///   destination could not write. When the destination's summary
+///   reports per-file failures the SOURCE retracts exactly that many of
+///   its own completions and adopts the summary's byte total. Emitted
+///   once, at the summary boundary, only by a producer whose reports
+///   were optimistic.
 /// - `DiffComplete` and `DeleteBegin` are PHASE signals (clp-2), not
 ///   counters: they carry nothing, move no total, and a consumer that
 ///   only tracks numbers ignores them. They exist because the counters
@@ -73,6 +84,29 @@ pub enum ProgressEvent {
     /// consumer would still show the copy phase while extraneous
     /// destination entries are being removed.
     DeleteBegin,
+    /// Reconciliation (pfc-4, cr-pfc2-2): the destination's summary
+    /// reports that `files_failed` of the files this producer already
+    /// reported complete did not land, and that `bytes_landed` is the
+    /// byte total it actually wrote. A SOURCE-side producer completes a
+    /// file when it finishes SENDING it and reports that file's PLANNED
+    /// size, neither of which is destination confirmation; the
+    /// destination's `TransferSummary` is, and it arrives only at close.
+    /// The SOURCE emits this exactly once at that summary boundary so
+    /// its final counts are the ones that landed.
+    ///
+    /// `bytes_landed` REPLACES the running byte total instead of
+    /// subtracting from it: the wire carries no per-failure byte
+    /// attribution (the summary's `failures` list is a capped sample),
+    /// so the exact byte retraction is not derivable from the report —
+    /// only the authoritative total is.
+    ///
+    /// Destination-side producers never emit it — they already filter
+    /// completions and bytes against the write outcome, and a second
+    /// correction would subtract the same files twice.
+    SummaryReconciled {
+        files_failed: u64,
+        bytes_landed: u64,
+    },
 }
 
 /// Running totals folded from a [`ProgressEvent`] stream under the
@@ -92,10 +126,18 @@ pub struct ProgressTotals {
     /// Entries the SOURCE walk has discovered (`Enumerated`). Liveness
     /// only: never a denominator, never transferred work.
     pub enumerated_files: u64,
-    /// Files finished, counted once each via either lane.
+    /// Files finished, counted once each via either lane — net of any
+    /// `SummaryReconciled` retraction, so this is what LANDED.
     pub files: u64,
-    /// Bytes transferred (`Payload` only).
+    /// Bytes transferred (`Payload` deltas, replaced once by
+    /// `SummaryReconciled`'s authoritative total when the destination
+    /// reports per-file failures) — so this too is what LANDED.
     pub bytes: u64,
+    /// Files a `SummaryReconciled` retraction removed from `files`
+    /// (pfc-4): per-file failures the destination contained. Kept
+    /// separately so a consumer can say how many files did not land
+    /// without re-deriving it from the summary.
+    pub files_failed: u64,
 }
 
 impl ProgressTotals {
@@ -115,6 +157,18 @@ impl ProgressTotals {
             }
             ProgressEvent::FileComplete { .. } => {
                 self.files = self.files.saturating_add(1);
+            }
+            ProgressEvent::SummaryReconciled {
+                files_failed,
+                bytes_landed,
+            } => {
+                // Saturating: the retraction can never drive the landed
+                // count below zero, whatever a producer reports.
+                self.files = self.files.saturating_sub(*files_failed);
+                self.files_failed = self.files_failed.saturating_add(*files_failed);
+                // Not a delta — the destination's total is authoritative
+                // (see the variant's docs for why no delta exists).
+                self.bytes = *bytes_landed;
             }
             // Phase signals carry no counts by construction (clp-2).
             ProgressEvent::DiffComplete | ProgressEvent::DeleteBegin => {}
@@ -174,6 +228,24 @@ impl ByteProgressSink {
     /// operations.
     pub fn report(&self, delta: u64) {
         self.counter.fetch_add(delta, Ordering::Relaxed);
+    }
+
+    /// Take `delta` bytes back off the cumulative counter (pfc-4).
+    ///
+    /// The counter is reported chunk-by-chunk DURING a streamed write,
+    /// before the flush and metadata tail that can still fail that one
+    /// file; a failure contained there counts zero bytes for the file in
+    /// the authoritative `TransferSummary`, so the live lane has to give
+    /// the same bytes back or it reports work that the summary does not.
+    /// Saturating, and `Relaxed` for the same reason as
+    /// [`ByteProgressSink::report`]: readers need eventual visibility,
+    /// not synchronization.
+    pub fn withdraw(&self, delta: u64) {
+        let _ = self
+            .counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_sub(delta))
+            });
     }
 
     /// Read the cumulative byte count. Progress bridges use this to publish
@@ -339,6 +411,75 @@ mod progress_totals_tests {
         assert!(!totals.started());
     }
 
+    /// pfc-4 / cr-pfc2-2: a SOURCE lane completes a file when it
+    /// finishes sending it and reports that file's PLANNED size. When
+    /// the destination's summary reports that some of those files never
+    /// landed, the reconciliation removes exactly those from the
+    /// completed count, records them as failed, and replaces the byte
+    /// total with the destination's — here 20, the two files that did
+    /// land, against the 30 the send lane had reported. The denominator
+    /// is untouched: three files were still expected.
+    #[test]
+    fn a_summary_reconciliation_lands_both_lanes_on_the_destination_totals() {
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::ManifestBatch {
+            files: 3,
+            bytes: 30,
+        });
+        for path in ["a.bin", "b.bin", "c.bin"] {
+            totals.apply(&ProgressEvent::Payload {
+                files: 0,
+                bytes: 10,
+            });
+            totals.apply(&ProgressEvent::FileComplete { path: path.into() });
+        }
+        assert_eq!(totals.files, 3);
+        assert_eq!(totals.bytes, 30);
+
+        totals.apply(&ProgressEvent::SummaryReconciled {
+            files_failed: 1,
+            bytes_landed: 20,
+        });
+        assert_eq!(totals.files, 2, "only what landed is counted complete");
+        assert_eq!(totals.files_failed, 1);
+        assert_eq!(
+            totals.bytes, 20,
+            "the failed file's planned bytes are not landed bytes"
+        );
+        assert_eq!(totals.manifest_files, 3, "the denominator is unchanged");
+    }
+
+    /// The retraction can never drive the landed count below zero,
+    /// whatever a producer reports.
+    #[test]
+    fn a_summary_reconciliation_saturates_at_zero() {
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::FileComplete { path: "a".into() });
+        totals.apply(&ProgressEvent::Payload { files: 0, bytes: 7 });
+        totals.apply(&ProgressEvent::SummaryReconciled {
+            files_failed: 9,
+            bytes_landed: 0,
+        });
+        assert_eq!(totals.files, 0);
+        assert_eq!(totals.files_failed, 9);
+        assert_eq!(totals.bytes, 0, "nothing landed, so no bytes did either");
+    }
+
+    /// The reporter puts the reconciliation on the one lane.
+    #[test]
+    fn reported_summary_reconciliation_reaches_the_lane() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = RemoteTransferProgress::new(tx);
+        progress.report_summary_reconciled(4, 512);
+        assert!(matches!(
+            rx.try_recv().expect("reconciliation event"),
+            ProgressEvent::SummaryReconciled {
+                files_failed: 4,
+                bytes_landed: 512
+            }
+        ));
+    }
+
     /// Both phase reporters put their event on the one lane.
     #[test]
     fn reported_phase_signals_reach_the_lane() {
@@ -404,6 +545,20 @@ mod tests {
         let sink = ByteProgressSink::from_counter(Arc::clone(&counter));
         sink.report(4096);
         assert_eq!(counter.load(Ordering::Relaxed), 4096);
+    }
+
+    /// pfc-4: a contained tail failure gives back exactly the bytes it
+    /// had reported live, and a withdrawal can never drive the counter
+    /// below zero (the sink is shared, so a stray withdrawal must not
+    /// wrap into a colossal byte count).
+    #[test]
+    fn withdraw_gives_bytes_back_and_never_underflows() {
+        let sink = ByteProgressSink::new();
+        sink.report(300);
+        sink.withdraw(100);
+        assert_eq!(sink.load(), 200);
+        sink.withdraw(u64::MAX);
+        assert_eq!(sink.load(), 0);
     }
 }
 
@@ -759,6 +914,17 @@ impl RemoteTransferProgress {
     /// signal only — see [`ProgressEvent::DeleteBegin`].
     pub fn report_delete_begin(&self) {
         let _ = self.sender.send(ProgressEvent::DeleteBegin);
+    }
+
+    /// Reconcile this end's optimistic reports against the
+    /// destination's summary (pfc-4) — see
+    /// [`ProgressEvent::SummaryReconciled`]. SOURCE side only, once, at
+    /// the summary boundary.
+    pub fn report_summary_reconciled(&self, files_failed: u64, bytes_landed: u64) {
+        let _ = self.sender.send(ProgressEvent::SummaryReconciled {
+            files_failed,
+            bytes_landed,
+        });
     }
 }
 

@@ -38,6 +38,25 @@ pub struct FileFailure {
     pub reason: String,
 }
 
+impl FileFailure {
+    /// Wire form of one contained failure (contract v6).
+    pub fn to_wire(&self) -> crate::generated::FileFailure {
+        crate::generated::FileFailure {
+            relative_path: self.relative_path.clone(),
+            reason: self.reason.clone(),
+        }
+    }
+
+    /// The inverse, for a caller reading a peer's summary back into the
+    /// in-memory report (the local summary surface, pfc-5's renderer).
+    pub fn from_wire(wire: &crate::generated::FileFailure) -> Self {
+        Self {
+            relative_path: wire.relative_path.clone(),
+            reason: wire.reason.clone(),
+        }
+    }
+}
+
 /// Outcome of writing payload(s) to a sink.
 #[derive(Debug, Default, Clone)]
 pub struct SinkOutcome {
@@ -162,6 +181,21 @@ impl SinkOutcome {
         let room = MAX_REPORTED_FILE_FAILURES.saturating_sub(self.failures.len());
         self.failures
             .extend(other.failures.iter().take(room).cloned());
+    }
+
+    /// This report's carried details in wire form, bounded at
+    /// [`MAX_REPORTED_FILE_FAILURES`] (contract v6). The cap is
+    /// re-applied here rather than trusted from upstream: this is the
+    /// sender-side bound the wire contract states, and it must hold for
+    /// any producer of `failures`, not only the ones that build the list
+    /// through [`SinkOutcome::record_failure`]. `files_failed_total`
+    /// keeps the exact count the summary reports alongside it.
+    pub fn wire_failures(&self) -> Vec<crate::generated::FileFailure> {
+        self.failures
+            .iter()
+            .take(MAX_REPORTED_FILE_FAILURES)
+            .map(FileFailure::to_wire)
+            .collect()
     }
 }
 
@@ -744,12 +778,27 @@ impl TransferSink for FsTransferSink {
 
         // Metadata tail, past the last wire byte of the record: every
         // failure below concerns exactly this file.
-        let windows_bytes = match written
-            .and_then(|()| stamp_streamed_metadata(&dst, header, &self.config))
-        {
-            Ok(windows_bytes) => windows_bytes,
-            Err(error) => return per_file_failure(&self.dst_root, &header.relative_path, error),
-        };
+        let windows_bytes =
+            match written.and_then(|()| stamp_streamed_metadata(&dst, header, &self.config)) {
+                Ok(windows_bytes) => windows_bytes,
+                Err(error) => {
+                    // pfc-4 byte-lane reconciliation (the pfc-2 landing
+                    // note's owed item). The chunk hook above already
+                    // reported this file's payload to the LIVE counter —
+                    // exactly `header.size` bytes, since the stream returned
+                    // Ok — while the outcome below counts zero for a
+                    // contained failure and the summary reports zero with it.
+                    // Give those bytes back so the live lane never claims
+                    // work the authoritative summary denies. The sibling
+                    // containment route above (destination could not be
+                    // opened) drains with `None`, so it has nothing to
+                    // withdraw.
+                    if let Some(bp) = &self.byte_progress {
+                        bp.withdraw(header.size);
+                    }
+                    return per_file_failure(&self.dst_root, &header.relative_path, error);
+                }
+            };
 
         Ok(SinkOutcome::written(
             1,
@@ -1324,6 +1373,13 @@ async fn finalize_resumed_file(
 ///
 /// Each instance wraps a single TCP stream (DataPlaneSession). For multi-stream
 /// transfers, the pipeline executor creates multiple DataPlaneSink instances.
+///
+/// Its outcomes describe TRANSMISSION, not landing: this end sends bytes and
+/// cannot know whether the destination wrote them, so a clean outcome here
+/// carries the payload's planned sizes and never a `FileFailure`. Only the
+/// destination scores per-file failures, and the initiator learns them from
+/// the closing `TransferSummary` — where `source_send_half` reconciles this
+/// end's optimistic file and byte lanes (pfc-4, cr-pfc2-2).
 pub struct DataPlaneSink<P: Probe = NoProbe> {
     session: tokio::sync::Mutex<DataPlaneSession<P>>,
     source: Arc<dyn TransferSource>,
@@ -2520,6 +2576,95 @@ mod tests {
         );
     }
 
+    /// A destination that could not be opened never reported a byte to
+    /// the live counter (its record is drained with `None`), so the
+    /// pfc-4 withdrawal must not fire for it — a withdrawal here would
+    /// under-count the files that DID land.
+    #[tokio::test]
+    async fn write_file_stream_open_failure_withdraws_no_live_bytes() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(dst.join("blocked.bin")).unwrap();
+
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(64));
+        let sink = FsTransferSink::new(tmp.path().join("src"), dst, FsSinkConfig::default())
+            .with_byte_progress(ByteProgressSink::from_counter(std::sync::Arc::clone(
+                &counter,
+            )));
+        let header = make_file_header("blocked.bin", 7);
+        let mut reader: &[u8] = b"payload";
+        let outcome = sink
+            .write_file_stream(&header, &mut reader)
+            .await
+            .expect("an unopenable destination is one file's failure");
+
+        assert_eq!(outcome.files_failed_total, 1);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            64,
+            "no bytes were reported for this file, so none come back"
+        );
+    }
+
+    /// pfc-4 (the pfc-2 landing note's owed byte-accounting item): the
+    /// live byte counter is fed chunk-by-chunk DURING the streamed
+    /// write, before the metadata tail that can still fail the file. A
+    /// failure contained there counts zero bytes for the file in the
+    /// outcome — and in the `TransferSummary` built from it — so the
+    /// live counter must give the streamed bytes back.
+    ///
+    /// Windows-only because the tail is only reachable by a real
+    /// filesystem refusal: the production routes are a flush failure
+    /// (ENOSPC/EIO, not injectable portably) and this one, a named
+    /// stream the destination volume refuses. The wire contract caps a
+    /// stream name at `MAX_WINDOWS_STREAM_NAME_BYTES` (1,024) while NTFS
+    /// stops at 255 characters, so a 300-character name is a legitimate
+    /// payload this destination cannot materialize — the refusal lands
+    /// exactly where any stream-hostile volume's would. On non-Windows
+    /// the same header is refused by `prepare_destination` BEFORE any
+    /// byte is reported, which is the drained-open route the test above
+    /// pins.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_file_stream_withdraws_live_bytes_when_the_metadata_tail_fails() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let sink =
+            FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default())
+                .with_byte_progress(ByteProgressSink::from_counter(std::sync::Arc::clone(
+                    &counter,
+                )));
+
+        let content = b"stream content";
+        let mut header = make_file_header("tail.bin", 7);
+        header.windows_metadata = Some(crate::generated::WindowsFileMetadata {
+            file_attributes: 0,
+            named_streams: vec![crate::generated::WindowsNamedStream {
+                name: "s".repeat(300),
+                size: content.len() as u64,
+                checksum: blake3::hash(content).as_bytes().to_vec(),
+                content: content.to_vec(),
+            }],
+        });
+        let mut reader: &[u8] = b"payloadNEXT-RECORD";
+        let outcome = sink
+            .write_file_stream(&header, &mut reader)
+            .await
+            .expect("a refused metadata tail is one file's failure");
+
+        assert_eq!(outcome.files_failed_total, 1, "got: {outcome:?}");
+        assert_eq!(outcome.bytes_written, 0);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the live counter must not claim bytes the summary counts as zero"
+        );
+    }
+
     /// Classification boundary: a hostile wire path is a protocol
     /// violation, never one file's failure — it still aborts.
     #[tokio::test]
@@ -2717,6 +2862,56 @@ mod tests {
             "a failure past the cap is still named by identity"
         );
         assert!(!outcome.file_failed("never-seen.bin"));
+    }
+
+    /// pfc-4 (contract v6): the SENDER caps the list the wire carries at
+    /// MAX_REPORTED_FILE_FAILURES while `files_failed_total` stays
+    /// exact — one over the cap carries 64 details and a total of 65.
+    /// The cap is applied by the conversion itself, not inherited from
+    /// whoever filled `failures`, so no producer can put an unbounded
+    /// list on the wire.
+    #[test]
+    fn the_wire_report_is_capped_by_the_sender_while_the_total_stays_exact() {
+        let mut outcome = SinkOutcome::default();
+        for index in 0..MAX_REPORTED_FILE_FAILURES + 1 {
+            outcome.record_failure(format!("f{index}.bin"), format!("reason {index}"));
+        }
+        assert_eq!(outcome.files_failed_total, 65);
+        let wire = outcome.wire_failures();
+        assert_eq!(wire.len(), MAX_REPORTED_FILE_FAILURES);
+        assert_eq!(wire[0].relative_path, "f0.bin");
+        assert_eq!(wire[0].reason, "reason 0");
+        assert_eq!(
+            wire[MAX_REPORTED_FILE_FAILURES - 1].relative_path,
+            format!("f{}.bin", MAX_REPORTED_FILE_FAILURES - 1)
+        );
+
+        // An over-long list handed in directly (a future producer that
+        // does not build through `record_failure`) is still bounded.
+        let mut unbounded = SinkOutcome::default();
+        unbounded.failures = (0..MAX_REPORTED_FILE_FAILURES + 10)
+            .map(|index| FileFailure {
+                relative_path: format!("x{index}.bin"),
+                reason: "direct".into(),
+            })
+            .collect();
+        unbounded.files_failed_total = unbounded.failures.len() as u64;
+        assert_eq!(
+            unbounded.wire_failures().len(),
+            MAX_REPORTED_FILE_FAILURES,
+            "the conversion re-applies the wire bound"
+        );
+    }
+
+    /// The wire form round-trips both fields, so a peer's report reads
+    /// back into the in-memory shape the local summary carries.
+    #[test]
+    fn a_file_failure_round_trips_its_wire_form() {
+        let failure = FileFailure {
+            relative_path: "dir/one.bin".into(),
+            reason: "write dir/one.bin: Access is denied".into(),
+        };
+        assert_eq!(FileFailure::from_wire(&failure.to_wire()), failure);
     }
 
     /// Merging drops per-payload identity on purpose — a session's failed

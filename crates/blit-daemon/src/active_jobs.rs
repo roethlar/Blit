@@ -338,6 +338,27 @@ impl ActiveJobProgress {
             // completed work: a jobs row tracks the manifest/need totals
             // it already folds above, so this lane contributes nothing.
             ProgressEvent::Enumerated { .. } => {}
+            // pfc-4: the destination did not land these files, so a row
+            // that already counted them completed must give them back,
+            // and its byte lane must take the summary's authoritative
+            // total — the same reconciliation `ProgressTotals` applies.
+            // The byte half rides the same `report_payload_bytes` gate as
+            // `Payload`: only the source lane feeds this row's bytes from
+            // progress events (the destination lane's bytes come from
+            // `ByteProgressSink`), and only a SOURCE end emits this event
+            // at all. `finish` re-stores the same summary totals at
+            // close; this makes the live row converge before then.
+            ProgressEvent::SummaryReconciled {
+                files_failed,
+                bytes_landed,
+            } => {
+                atomic_saturating_sub(&self.counters.files_completed, *files_failed);
+                if report_payload_bytes {
+                    self.counters
+                        .bytes_completed
+                        .store(*bytes_landed, Ordering::Relaxed);
+                }
+            }
             // Phase signals (clp-2) carry no counts; a jobs row reports
             // numbers, so they move nothing here.
             ProgressEvent::DiffComplete | ProgressEvent::DeleteBegin => {}
@@ -373,6 +394,12 @@ impl ActiveJobProgress {
 fn atomic_saturating_add(counter: &AtomicU64, delta: u64) {
     let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
         Some(value.saturating_add(delta))
+    });
+}
+
+fn atomic_saturating_sub(counter: &AtomicU64, delta: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_sub(delta))
     });
 }
 
@@ -2126,6 +2153,78 @@ mod tests {
         sink_c.report(30);
         let snap = table.snapshot();
         assert_eq!(snap[0].bytes_completed, 60);
+    }
+
+    /// pfc-4: a source-lane row counts completions and PLANNED bytes as
+    /// the sender emits them. The destination's summary reconciliation
+    /// then gives back the files that did not land and replaces the byte
+    /// count with the authoritative one, so the live row stops claiming
+    /// work the summary denies before `finish` re-states it at close.
+    #[tokio::test]
+    async fn summary_reconciliation_corrects_a_source_lane_row() {
+        use blit_core::remote::transfer::ProgressEvent;
+
+        let table = ActiveJobs::new();
+        let guard = table.register(
+            ActiveJobKind::Push,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let progress = guard.progress();
+        for _ in 0..3 {
+            progress.report_source_event(&ProgressEvent::Payload {
+                files: 0,
+                bytes: 10,
+            });
+            progress.report_source_event(&ProgressEvent::FileComplete { path: "f".into() });
+        }
+        let snap = table.snapshot();
+        assert_eq!(snap[0].files_completed, 3);
+        assert_eq!(snap[0].bytes_completed, 30);
+
+        progress.report_source_event(&ProgressEvent::SummaryReconciled {
+            files_failed: 1,
+            bytes_landed: 20,
+        });
+        let snap = table.snapshot();
+        assert_eq!(snap[0].files_completed, 2, "the failed file is given back");
+        assert_eq!(
+            snap[0].bytes_completed, 20,
+            "the row takes the destination's byte total"
+        );
+    }
+
+    /// The byte half rides the same lane gate as `Payload`: a
+    /// destination-lane row's bytes come from `ByteProgressSink`, which
+    /// already reconciles itself, so the event must move only files
+    /// there. (No destination-side producer emits it — this pins the
+    /// fold's posture if one ever relays the event.)
+    #[tokio::test]
+    async fn summary_reconciliation_leaves_destination_lane_bytes_alone() {
+        use blit_core::remote::transfer::ProgressEvent;
+
+        let table = ActiveJobs::new();
+        let guard = table.register(
+            ActiveJobKind::Push,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let progress = guard.progress();
+        progress.report_destination_event(&ProgressEvent::FileComplete { path: "f".into() });
+        guard.bytes_counter().report(4096);
+
+        progress.report_destination_event(&ProgressEvent::SummaryReconciled {
+            files_failed: 1,
+            bytes_landed: 0,
+        });
+        let snap = table.snapshot();
+        assert_eq!(snap[0].files_completed, 0);
+        assert_eq!(
+            snap[0].bytes_completed, 4096,
+            "the destination lane's bytes are the byte sink's to correct"
+        );
     }
 
     #[tokio::test]

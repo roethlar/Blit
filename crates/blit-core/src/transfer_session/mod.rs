@@ -75,7 +75,9 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// v4: explicit Windows settable attributes and bounded named `$DATA`
 /// descriptors/content on manifest and payload records (rel-4).
 /// v5: explicit source-side Windows metadata downgrade policy.
-pub const CONTRACT_VERSION: u32 = 5;
+/// v6: `TransferSummary.files_failed` + capped `failures` list — the
+/// destination's per-file failure report (pfc-4, D-2026-07-30-1).
+pub const CONTRACT_VERSION: u32 = 6;
 
 /// Payload chunk size on the in-stream carrier. Same unit the gRPC
 /// control plane uses today; the data plane (otp-4) has its own.
@@ -2156,6 +2158,37 @@ async fn source_send_half(
                 if let Some(trace) = &phase_trace {
                     trace.event("summary_received", SessionPhaseFields::default());
                 }
+                // cr-pfc2-2: this end completed every file it SENT and
+                // reported that file's PLANNED size —
+                // `send_payload_records` and `send_resume_block_records`
+                // emit a completion plus manifest-sized bytes per record,
+                // and the data-plane sink's outcome reports transmission,
+                // not landing. The destination's summary is the first and
+                // only destination confirmation this end ever gets, so
+                // reconcile BOTH lanes here: retract exactly the failures
+                // it reports (the exact total, not the capped detail
+                // list) and adopt its byte total, which is the only
+                // landed-byte figure that exists — the wire carries no
+                // per-failure byte attribution to subtract. Only a SOURCE
+                // end that actually sent payload records has anything to
+                // reconcile: the LOCAL carrier's source sends none and, by
+                // construction in `local::run_local_session`, carries no
+                // progress sink at all.
+                //
+                // Gated on a non-zero failure count: with nothing
+                // contained the two lanes agree by construction, and
+                // adopting the summary unconditionally would erase a dry
+                // run's planned-byte progress (a preview's summary counts
+                // files but zero bytes — `write_file_stream`'s dry-run
+                // arm).
+                if summary.files_failed != 0 {
+                    if let Some(p) = instruments.progress.as_ref() {
+                        p.report_summary_reconciled(
+                            summary.files_failed,
+                            summary.bytes_transferred,
+                        );
+                    }
+                }
                 finish_small_file_probe(small_file_probe.as_ref()).await;
                 Ok(summary)
             }
@@ -2959,6 +2992,13 @@ async fn send_payload_records(
     // pipeline — per-file lane, planned manifest sizes, one
     // `Payload{0, size}` + `FileComplete` pair per file after its
     // record completes. Both carriers therefore report the same shape.
+    //
+    // Both halves are optimistic by construction: this end knows only
+    // that the record was SENT, so it cannot filter out a file the
+    // destination could not write. `source_send_half` reconciles the two
+    // lanes against the destination's summary at close (pfc-4,
+    // cr-pfc2-2) — do not add per-file filtering here, there is nothing
+    // to filter against.
     let report_files = |files: &[(String, u64)]| {
         if let Some(p) = progress {
             for (name, size) in files {
@@ -4771,11 +4811,25 @@ async fn destination_session_inner(
                     entries_deleted,
                     in_stream_carrier_used,
                     files_resumed: files_resumed.load(Ordering::Relaxed),
+                    // pfc-4 (contract v6): the destination is the scorer
+                    // for failures too — this is the only end that knows
+                    // which files did not land. The list is capped at
+                    // MAX_REPORTED_FILE_FAILURES by the sender; the total
+                    // stays exact. Every carrier and both roles ride this
+                    // one construction, so no lane can report a short
+                    // success the initiator cannot see.
+                    files_failed: contained_failures.files_failed_total,
+                    failures: contained_failures.wire_failures(),
                 };
                 if let Some(trace) = &phase_trace {
                     trace.event("summary_send_begin", SessionPhaseFields::default());
                 }
-                transport.send(frame(Frame::Summary(summary))).await?;
+                // Contract v6 made the summary non-Copy (it carries the
+                // capped failure list), so the frame takes a clone and
+                // this end keeps its own copy for `DestinationOutcome`.
+                transport
+                    .send(frame(Frame::Summary(summary.clone())))
+                    .await?;
                 if let Some(trace) = &phase_trace {
                     trace.event("summary_sent", SessionPhaseFields::default());
                 }
@@ -5403,6 +5457,14 @@ async fn receive_block_record(
     // One record's totals, per-file failures included: every block write
     // and the closing finalization merge into it, so a contained failure
     // reaches the session instead of dying at the record boundary.
+    //
+    // The merge keeps the applied blocks' bytes even when the closing
+    // record fails the file: those bytes WERE patched into the
+    // destination partial, and `bytes_transferred` measures what the
+    // destination wrote, not which files converged (contract v6,
+    // docs/TRANSFER_SESSION.md). `files_written` and the resumed count
+    // are the outcome-filtered lanes, and a patch block contributes zero
+    // to the former by construction (`patch_file_block`).
     let mut record = crate::remote::transfer::SinkOutcome::default();
     let mut block = first;
     loop {

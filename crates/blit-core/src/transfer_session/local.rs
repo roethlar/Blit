@@ -29,7 +29,7 @@ use crate::path_posix::relative_path_to_posix;
 use crate::remote::transfer::payload::{TransferPayload, DEFAULT_PAYLOAD_PREFETCH};
 use crate::remote::transfer::pipeline::execute_sink_pipeline_streaming;
 use crate::remote::transfer::sink::{
-    FsSinkConfig, FsTransferSink, NullSink, SinkOutcome, TransferSink,
+    FileFailure, FsSinkConfig, FsTransferSink, NullSink, SinkOutcome, TransferSink,
 };
 use crate::remote::transfer::source::{
     FilteredSource, FsTransferSource, SourceScan, TransferSource,
@@ -256,6 +256,15 @@ pub struct LocalMirrorSummary {
     /// `blit move`'s source-side delete — MUST inspect this and
     /// refuse when non-empty.
     pub unreadable_paths: Vec<String>,
+    /// Destination-side per-file failures the session contained instead
+    /// of aborting (pfc-4, D-2026-07-30-1). Exact count, including any
+    /// past the reported-detail cap.
+    pub files_failed: u64,
+    /// The named subset of `files_failed`, capped at
+    /// [`crate::remote::transfer::MAX_REPORTED_FILE_FAILURES`] — the
+    /// same bounded report the wire carries, so local and remote runs
+    /// render one shape.
+    pub failures: Vec<FileFailure>,
 }
 
 /// Process-local destination extension: apply needed files in-process
@@ -659,6 +668,12 @@ pub async fn run_local_session(
         plan_options: PlanOptions::default(),
         data_plane_host: None,
         instruments: SourceInstruments {
+            // The LOCAL carrier's source sends no payload record, so it
+            // has no per-file completion to report — the destination's
+            // apply pipeline owns the whole per-file lane. Keeping this
+            // `None` is also what keeps pfc-4's source-side completion
+            // retraction (`source_send_half`, cr-pfc2-2) out of a lane
+            // that never completed anything.
             progress: None,
             unreadable: Some(Arc::clone(&unreadable)),
             trace_data_plane: false,
@@ -755,6 +770,16 @@ pub async fn run_local_session(
         large_bytes: stats.large_bytes.load(Ordering::Relaxed),
         outcome: outcome_class,
         unreadable_paths,
+        // pfc-4: the destination's failure report, taken from the same
+        // summary the wire carriers return, so the local surface pfc-5
+        // renders is the remote one.
+        files_failed: outcome.summary.files_failed,
+        failures: outcome
+            .summary
+            .failures
+            .iter()
+            .map(FileFailure::from_wire)
+            .collect(),
     };
 
     record_local_history(&summary, &options);

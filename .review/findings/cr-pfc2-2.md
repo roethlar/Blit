@@ -2,8 +2,7 @@
 
 **Severity**: MEDIUM — initiator-SOURCE progress (verbose/JSON) counts a
 file as completed that is absent or incomplete at the destination.
-**Status**: Open — fix bound to slice pfc-4 (requires the wire failure
-report that slice introduces)
+**Status**: In progress — fixed inside the pfc-4 slice, per-finding verification pending
 **Branch**: — (default-branch mode)
 **Commit**: (lands with pfc-4)
 
@@ -57,3 +56,5 @@ contained failures per the pfc-2 interlock).
 
 ## Reviewer comments
 (pending pfc-4 fix + per-finding verification dispatch)
+
+As built (pfc-4): `ProgressEvent::SummaryReconciled { files_failed, bytes_landed }` — the SOURCE adopts the destination's authoritative byte total and retracts failed completions once at the summary boundary (exact `files_failed` total, correct past the 64 cap); the daemon jobs row applies the same on its source lane. Closure scope: TOTALS-level. The per-file SOURCE event stream remains optimistic by design (no per-file identity crosses the wire past the cap); pfc-5 renders failed files from the summary list. Guards (from the pfc-4 fix round, red/green-proven): `initiator_source_totals_reconcile_against_the_destination_summary` red under the fold-adoption revert (21 planned vs 10 landed); daemon `summary_reconciliation` red under the row-adoption revert; `write_file_stream` withdraw test red under the live-counter revert.
