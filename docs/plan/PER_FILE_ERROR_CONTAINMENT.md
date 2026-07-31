@@ -234,6 +234,38 @@ tolerance tests fail.
   arrives; a sender that never sends the completion is a protocol
   violation today, so the drop is unreachable — noted, not coded around.
 
+### pfc-3 landing notes
+
+- All shard writers fold per-member results through one helper
+  (`fold_shard_member_results`) gated on the SAME `failure_is_containable`
+  predicate as the single-file paths (cr-pfc2-1's volume check included —
+  guard-proven load-bearing on the shard paths). Structural tar parse and
+  R47-F1 containment verification stay fatal above the writers.
+- Exact per-outcome failed identity: `failed_paths`
+  (`HashSet`, post-review) is uncapped per payload — bounded by the
+  planner's member clamp (≤4096) — while the 64-cap bounds only the
+  carried `FileFailure` details. A merged outcome answers `file_failed`
+  conservatively (true for all); the ONLY completion lane reading a
+  merged outcome is the single-file resume block record, where
+  conservative equals exact — documented at `file_failed`; a future
+  multi-file merged outcome must never feed completion filtering.
+- `write_extracted_shard`/`write_extracted_file` have NO production
+  caller (the pre-unification consumers died with their drivers) —
+  sequential convenience wrappers, tests only; stale caller docs
+  corrected.
+- audit-17 shape is contained at the shard level (siblings land, the bad
+  member is named); a non-mirror `copy` still ends fatal at SourceDone
+  via the pfc-2 interlock until pfc-5 removes it.
+- Boundary pins (structural/traversal fatal tests) are pins, not
+  red/green guards — they short-circuit above the fold and go red under
+  no pfc-3 revert; recorded honestly.
+- **pfc-4 addition:** the pipeline byte lane reports planned sizes for
+  contained shard members while the in-stream lane reports
+  `bytes_written` — the carriers disagree on bytes for a failed-member
+  shard; pfc-4's byte-accounting reconciliation now covers this case.
+- Session-level end-to-end containment coverage (a real session with a
+  blocked file, both carriers) is owed by pfc-5's integration tests.
+
 ### Half C — metadata-only attribute repair (pfc-6, D-2026-07-31-1)
 
 Field evidence (2026-07-31, `H:\apps` pre-existing backup regions, e.g.

@@ -4405,8 +4405,14 @@ async fn destination_session_inner(
                 contained_failures.merge_failures(&outcome);
                 if let Some(p) = &progress {
                     p.report_payload(0, outcome.bytes_written);
+                    // pfc-3: a shard member the sink contained as its own
+                    // failure never landed, so it never completes — the
+                    // outcome answers per member (the data-plane carrier
+                    // filters the same way at `pipeline.rs`).
                     for path in member_paths.unwrap_or_default() {
-                        p.report_file_complete(path);
+                        if !outcome.file_failed(&path) {
+                            p.report_file_complete(path);
+                        }
                     }
                 }
             }

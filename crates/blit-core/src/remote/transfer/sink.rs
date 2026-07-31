@@ -48,6 +48,21 @@ pub struct SinkOutcome {
     pub failures: Vec<FileFailure>,
     /// Every per-file failure counted, including those past the cap.
     pub files_failed_total: u64,
+    /// Exact identity of the paths *this outcome's own payload* failed,
+    /// uncapped and separate from the reported list (pfc-3). One payload
+    /// is inherently bounded — the planner clamps a shard's member count
+    /// to at most 4096 (`count_target.clamp(128, 4096)`,
+    /// `transfer_plan.rs`), every other payload shape carries exactly one
+    /// file — while the reported list is a session-wide report that has
+    /// to stay capped for memory and the wire. Keeping identity here is
+    /// what lets a shard that failed more members than the cap still
+    /// name its healthy ones as complete.
+    /// [`SinkOutcome::merge_failures`] deliberately does not extend it:
+    /// the session-wide set has no such bound, and the resulting excess
+    /// of `files_failed_total` over this list is exactly the signal
+    /// [`SinkOutcome::file_failed`] reads as "identity is incomplete
+    /// here, answer conservatively".
+    failed_paths: std::collections::HashSet<String>,
 }
 
 impl SinkOutcome {
@@ -60,6 +75,7 @@ impl SinkOutcome {
             bytes_written,
             failures: Vec::new(),
             files_failed_total: 0,
+            failed_paths: std::collections::HashSet::new(),
         }
     }
 
@@ -90,6 +106,7 @@ impl SinkOutcome {
         };
         log::warn!("file failed, session continues: {named} ({reason})");
         self.files_failed_total = self.files_failed_total.saturating_add(1);
+        self.failed_paths.insert(relative_path.clone());
         if self.failures.len() < MAX_REPORTED_FILE_FAILURES {
             self.failures.push(FileFailure {
                 relative_path,
@@ -98,17 +115,27 @@ impl SinkOutcome {
         }
     }
 
-    /// Whether this outcome failed `relative_path`. Only the reported
-    /// list keeps identity, so an outcome that overflowed the cap answers
-    /// `true` for every path rather than let the progress lane report a
-    /// failed file as complete.
+    /// Whether this outcome failed `relative_path`.
+    ///
+    /// Exact for the outcome of one payload, however many members that
+    /// payload failed (pfc-3): a tar shard past the reported-list cap
+    /// still answers `false` for the members that landed, so the
+    /// progress lane completes them. A merged outcome carries a total
+    /// larger than the identity it kept and answers `true` for every
+    /// path rather than let a failed file be reported complete. The
+    /// completion lanes ask a payload's own outcome before any merge,
+    /// with ONE deliberate exception: the resume block-record lane
+    /// (`receive_block_record`) reads an outcome merged across one
+    /// FILE's block records, where the conservative answer coincides
+    /// with the exact one. Any future aggregator that merges a
+    /// MULTI-file outcome and feeds a completion lane would suppress
+    /// healthy files' completions — keep merged outcomes away from
+    /// completion filtering.
     pub fn file_failed(&self, relative_path: &str) -> bool {
-        if self.files_failed_total > self.failures.len() as u64 {
+        if self.files_failed_total > self.failed_paths.len() as u64 {
             return true;
         }
-        self.failures
-            .iter()
-            .any(|failure| failure.relative_path == relative_path)
+        self.failed_paths.contains(relative_path)
     }
 
     pub fn merge(&mut self, other: &SinkOutcome) {
@@ -120,6 +147,14 @@ impl SinkOutcome {
     /// Fold in `other`'s failure report without its written totals, for a
     /// caller that keeps those per lane (the session counts writes lane by
     /// lane but reports failures as one bounded list).
+    ///
+    /// Per-payload identity (`failed_paths`) is not folded in: a session's
+    /// failed set is unbounded, and the plan's bounded-report constraint
+    /// applies to everything a merged outcome carries. The merged total
+    /// then exceeds the identity kept, so [`SinkOutcome::file_failed`]
+    /// answers conservatively on the merged value — the safe direction.
+    /// The only completion lane that reads a merged outcome is the
+    /// single-file resume block record (see [`SinkOutcome::file_failed`]).
     pub fn merge_failures(&mut self, other: &SinkOutcome) {
         self.files_failed_total = self
             .files_failed_total
@@ -195,7 +230,16 @@ fn volume_unwritable(error: &eyre::Report) -> bool {
 /// identically. Both halves must hold — the root check alone cannot see
 /// a read-only mount, and the error-kind check alone cannot see a root
 /// that vanished.
-fn failure_is_containable(dst_root: &Path, relative_path: &str, error: &eyre::Report) -> bool {
+///
+/// Every containment decision in the transfer — single files, resume
+/// records, and tar-shard members — routes through this one predicate so
+/// the shard paths and the single-file paths can never drift apart on
+/// what is per-file and what is session-fatal.
+pub(super) fn failure_is_containable(
+    dst_root: &Path,
+    relative_path: &str,
+    error: &eyre::Report,
+) -> bool {
     destination_root_live(dst_root, relative_path) && !volume_unwritable(error)
 }
 
@@ -992,56 +1036,21 @@ fn write_tar_shard_payload(
     let parse_validate = parse_started.map(|started| started.elapsed());
 
     // Write in parallel. Each closure does its own create_dir_all +
-    // fs::write + best-effort mtime/permission application — same
-    // policy as `tar_safety::write_extracted_file` but inlined so we
-    // can return per-file byte counts for the SinkOutcome.
+    // write + best-effort mtime/permission application — same policy as
+    // `tar_safety::write_extracted_file` but inlined so we can return
+    // per-file byte counts for the SinkOutcome. Each member carries its
+    // own result: a member the destination refuses is that member's
+    // failure, not the shard's (audit-17), and the fold below applies
+    // the shared classifier.
     if probe.is_none() {
-        let results: Vec<Result<u64>> = extracted
+        let results: Vec<(String, Result<(u64, ())>)> = extracted
             .into_par_iter()
-            .map(|f: ExtractedFile| -> Result<u64> {
-                if let Some(parent) = f.dest_path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("create dir {}", parent.display()))?;
-                }
-                crate::windows_metadata::prepare_destination(
-                    &f.dest_path,
-                    f.windows_metadata.as_ref(),
-                )?;
-                std::fs::write(&f.dest_path, &f.contents)
-                    .with_context(|| format!("write {}", f.dest_path.display()))?;
-                let windows_bytes = crate::windows_metadata::replace_streams(
-                    &f.dest_path,
-                    f.windows_metadata.as_ref(),
-                )?;
-                if let Some(ft) = f.mtime {
-                    if let Err(e) = filetime::set_file_mtime(&f.dest_path, ft) {
-                        log::warn!("set mtime on {}: {}", f.dest_path.display(), e);
-                    }
-                }
-                #[cfg(unix)]
-                if let Some(perms) = f.permissions {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Err(e) = std::fs::set_permissions(
-                        &f.dest_path,
-                        std::fs::Permissions::from_mode(perms),
-                    ) {
-                        log::warn!("set permissions on {}: {}", f.dest_path.display(), e);
-                    }
-                }
-                crate::windows_metadata::apply_attributes(
-                    &f.dest_path,
-                    f.windows_metadata.as_ref(),
-                )?;
-                Ok(f.size.saturating_add(windows_bytes))
+            .map(|f: ExtractedFile| {
+                let written = write_shard_member(&f).map(|bytes| (bytes, ()));
+                (f.rel, written)
             })
             .collect();
-        let mut files_written = 0usize;
-        let mut bytes_written = 0u64;
-        for result in results {
-            bytes_written += result?;
-            files_written += 1;
-        }
-        return Ok(SinkOutcome::written(files_written, bytes_written));
+        return fold_shard_member_results(dst_root, results, |()| {});
     }
 
     type MemberSample = (
@@ -1053,76 +1062,58 @@ fn write_tar_shard_payload(
         std::time::Duration,
     );
     let members_started = probe.map(|_| std::time::Instant::now());
-    let results: Vec<Result<(u64, Option<MemberSample>)>> = extracted
+    let results: Vec<(String, Result<(u64, MemberSample)>)> = extracted
         .into_par_iter()
-        .map(|f: ExtractedFile| -> Result<(u64, Option<MemberSample>)> {
-            use std::io::Write as _;
+        .map(|f: ExtractedFile| {
+            let written = (|| -> Result<(u64, MemberSample)> {
+                use std::io::Write as _;
 
-            let total_started = std::time::Instant::now();
-            let mkdir_started = std::time::Instant::now();
-            if let Some(parent) = f.dest_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("create dir {}", parent.display()))?;
-            }
-            let mkdir = mkdir_started.elapsed();
-
-            crate::windows_metadata::prepare_destination(
-                &f.dest_path,
-                f.windows_metadata.as_ref(),
-            )?;
-
-            let open_started = std::time::Instant::now();
-            let mut file = std::fs::File::create(&f.dest_path)
-                .with_context(|| format!("open {}", f.dest_path.display()))?;
-            let open = open_started.elapsed();
-            let write_started = std::time::Instant::now();
-            file.write_all(&f.contents)
-                .with_context(|| format!("write {}", f.dest_path.display()))?;
-            let write = write_started.elapsed();
-            let close_started = std::time::Instant::now();
-            drop(file);
-            let close = close_started.elapsed();
-
-            let metadata_started = std::time::Instant::now();
-            let windows_bytes = crate::windows_metadata::replace_streams(
-                &f.dest_path,
-                f.windows_metadata.as_ref(),
-            )?;
-            if let Some(ft) = f.mtime {
-                if let Err(e) = filetime::set_file_mtime(&f.dest_path, ft) {
-                    log::warn!("set mtime on {}: {}", f.dest_path.display(), e);
+                let total_started = std::time::Instant::now();
+                let mkdir_started = std::time::Instant::now();
+                if let Some(parent) = f.dest_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("create dir {}", parent.display()))?;
                 }
-            }
-            #[cfg(unix)]
-            if let Some(perms) = f.permissions {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(e) =
-                    std::fs::set_permissions(&f.dest_path, std::fs::Permissions::from_mode(perms))
-                {
-                    log::warn!("set permissions on {}: {}", f.dest_path.display(), e);
-                }
-            }
-            crate::windows_metadata::apply_attributes(&f.dest_path, f.windows_metadata.as_ref())?;
-            let metadata = metadata_started.elapsed();
-            Ok((
-                f.size.saturating_add(windows_bytes),
-                Some((mkdir, open, write, close, metadata, total_started.elapsed())),
-            ))
+                let mkdir = mkdir_started.elapsed();
+
+                crate::windows_metadata::prepare_destination(
+                    &f.dest_path,
+                    f.windows_metadata.as_ref(),
+                )?;
+
+                let open_started = std::time::Instant::now();
+                let mut file = std::fs::File::create(&f.dest_path)
+                    .with_context(|| format!("open {}", f.dest_path.display()))?;
+                let open = open_started.elapsed();
+                let write_started = std::time::Instant::now();
+                file.write_all(&f.contents)
+                    .with_context(|| format!("write {}", f.dest_path.display()))?;
+                let write = write_started.elapsed();
+                let close_started = std::time::Instant::now();
+                drop(file);
+                let close = close_started.elapsed();
+
+                let metadata_started = std::time::Instant::now();
+                let windows_bytes = stamp_shard_member_metadata(&f)?;
+                let metadata = metadata_started.elapsed();
+                Ok((
+                    f.size.saturating_add(windows_bytes),
+                    (mkdir, open, write, close, metadata, total_started.elapsed()),
+                ))
+            })();
+            (f.rel, written)
         })
         .collect();
     let member_parallel_wall = members_started.map(|started| started.elapsed());
 
-    let mut files_written = 0usize;
-    let mut bytes_written = 0u64;
     let mut member_timings = MemberTimingReport::default();
-    for r in results {
-        let (bytes, sample) = r?;
-        bytes_written += bytes;
-        files_written += 1;
-        if let Some((mkdir, open, write, close, metadata, total)) = sample {
+    let outcome = fold_shard_member_results(
+        dst_root,
+        results,
+        |(mkdir, open, write, close, metadata, total)| {
             member_timings.record(mkdir, open, write, close, metadata, total);
-        }
-    }
+        },
+    )?;
 
     if let Some((probe, shard_id, started, blocking_pool_wait)) = probe {
         probe.note_shard_sink(
@@ -1139,7 +1130,84 @@ fn write_tar_shard_payload(
         );
     }
 
-    Ok(SinkOutcome::written(files_written, bytes_written))
+    Ok(outcome)
+}
+
+/// Write one tar-shard member: its own parent directory, its contents,
+/// then the metadata tail. Every failure here concerns exactly this
+/// member — the shard's structural parse and its containment checks
+/// already ran, serially, before any member was written.
+fn write_shard_member(file: &super::tar_safety::ExtractedFile) -> Result<u64> {
+    if let Some(parent) = file.dest_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create dir {}", parent.display()))?;
+    }
+    crate::windows_metadata::prepare_destination(&file.dest_path, file.windows_metadata.as_ref())?;
+    std::fs::write(&file.dest_path, &file.contents)
+        .with_context(|| format!("write {}", file.dest_path.display()))?;
+    let windows_bytes = stamp_shard_member_metadata(file)?;
+    Ok(file.size.saturating_add(windows_bytes))
+}
+
+/// Stamp a written shard member's metadata tail: named streams, mtime,
+/// Unix permissions, attributes. Returns the named-stream bytes applied.
+/// Shared by both rayon writers so the probed path measures exactly the
+/// work the probe-less path does.
+fn stamp_shard_member_metadata(file: &super::tar_safety::ExtractedFile) -> Result<u64> {
+    let windows_bytes =
+        crate::windows_metadata::replace_streams(&file.dest_path, file.windows_metadata.as_ref())?;
+    if let Some(ft) = file.mtime {
+        if let Err(e) = filetime::set_file_mtime(&file.dest_path, ft) {
+            log::warn!("set mtime on {}: {}", file.dest_path.display(), e);
+        }
+    }
+    #[cfg(unix)]
+    if let Some(perms) = file.permissions {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            std::fs::set_permissions(&file.dest_path, std::fs::Permissions::from_mode(perms))
+        {
+            log::warn!("set permissions on {}: {}", file.dest_path.display(), e);
+        }
+    }
+    crate::windows_metadata::apply_attributes(&file.dest_path, file.windows_metadata.as_ref())?;
+    Ok(windows_bytes)
+}
+
+/// Fold one shard's per-member write results into that shard's outcome.
+///
+/// A member failure still attributable to that member is recorded and
+/// the shard keeps every other member — audit-17: one filename the
+/// destination filesystem rejected used to abort an ~88k-entry copy from
+/// inside the parallel-write closure. A failure the cr-pfc2-1 classifier
+/// reads as root-wide or volume-level returns `Err` and stays
+/// session-fatal, exactly as on the single-file paths; structural tar
+/// and containment failures never reach here at all, having already
+/// short-circuited the whole shard above.
+///
+/// `record_sample` receives each landed member's observation payload
+/// (`()` where nothing is observed), so the probed writer folds its
+/// timings through the same pass.
+pub(super) fn fold_shard_member_results<S>(
+    dst_root: &Path,
+    results: Vec<(String, Result<(u64, S)>)>,
+    mut record_sample: impl FnMut(S),
+) -> Result<SinkOutcome> {
+    let mut outcome = SinkOutcome::default();
+    for (relative_path, result) in results {
+        match result {
+            Ok((bytes, sample)) => {
+                outcome.files_written += 1;
+                outcome.bytes_written = outcome.bytes_written.saturating_add(bytes);
+                record_sample(sample);
+            }
+            Err(error) if !failure_is_containable(dst_root, &relative_path, &error) => {
+                return Err(error);
+            }
+            Err(error) => outcome.record_failure(relative_path, format!("{error:#}")),
+        }
+    }
+    Ok(outcome)
 }
 
 /// Resume protocol: resolve one resume record's destination. Kept apart
@@ -2636,10 +2704,38 @@ mod tests {
             outcome.failures[MAX_REPORTED_FILE_FAILURES - 1].relative_path,
             format!("f{}.bin", MAX_REPORTED_FILE_FAILURES - 1)
         );
-        // Identity is lost past the cap, so no path may be reported as
-        // completed from an overflowed outcome.
+        // pfc-3 adapts the identity half of this contract. pfc-2 kept
+        // identity only in the capped list, so an overflowed outcome
+        // answered `true` for every path — safe, but it would suppress
+        // the completions of a tar shard's healthy members whenever the
+        // shard failed more than the cap. Identity now lives outside the
+        // cap, per outcome, so an overflowed outcome answers exactly. The
+        // bound the cap exists for is unchanged: `failures` above.
         assert!(outcome.file_failed("f0.bin"));
-        assert!(outcome.file_failed("never-seen.bin"));
+        assert!(
+            outcome.file_failed(&format!("f{}.bin", MAX_REPORTED_FILE_FAILURES + 3)),
+            "a failure past the cap is still named by identity"
+        );
+        assert!(!outcome.file_failed("never-seen.bin"));
+    }
+
+    /// Merging drops per-payload identity on purpose — a session's failed
+    /// set has no bound — so a merged outcome keeps pfc-2's conservative
+    /// answer. Nothing reads completions off a merged outcome: every
+    /// completion lane asks the payload's own outcome, before the merge.
+    #[test]
+    fn a_merged_outcome_answers_conservatively_for_every_path() {
+        let mut total = SinkOutcome::written(1, 10);
+        let mut other = SinkOutcome::default();
+        other.record_failure("b.bin", "synthetic");
+        total.merge(&other);
+
+        assert_eq!(total.files_failed_total, 1);
+        assert!(total.file_failed("b.bin"));
+        assert!(
+            total.file_failed("a.bin"),
+            "identity is not merged, so the merged answer stays conservative"
+        );
     }
 
     /// Merging holds the same bound and sums both totals, so the
@@ -2710,6 +2806,291 @@ mod tests {
             dst.join("resume.bin").is_dir(),
             "the finalization must not have run against the blocked path"
         );
+    }
+
+    // ─── Tar-shard per-member containment (pfc-3) ─────────────────────
+    //
+    // A shard is many files in one payload. Before pfc-3 the rayon
+    // writers folded `result?`, so the first member the destination
+    // refused abandoned every other member of the shard and faulted the
+    // session (audit-17). Structural and containment failures of the
+    // shard itself still short-circuit above the writers, and the
+    // cr-pfc2-1 classifier still decides what "one member's failure"
+    // means.
+
+    /// Build an in-memory tar shard and the manifest headers describing
+    /// it, in the exact shape `PreparedPayload::TarShard` carries.
+    fn shard_payload(members: &[(&str, &[u8])]) -> (Vec<FileHeader>, Vec<u8>) {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (rel, contents) in members {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, rel, *contents).unwrap();
+        }
+        let data = builder.into_inner().unwrap();
+        let headers = members
+            .iter()
+            .map(|(rel, contents)| make_file_header(rel, contents.len() as u64))
+            .collect();
+        (headers, data)
+    }
+
+    /// audit-17 regression: one shard member the destination filesystem
+    /// refuses is contained as that member's failure, and the rest of the
+    /// shard still lands. The field failure was `create_dir_all` inside
+    /// this parallel-write closure returning `Invalid argument` for a
+    /// name the destination could not represent, ~88k entries into a
+    /// copy; a regular file sitting where the member's parent directory
+    /// belongs is the portable stand-in — the same mkdir, refused for a
+    /// different reason.
+    #[tokio::test]
+    async fn tar_shard_member_with_an_unmakeable_parent_fails_alone() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        // A regular file occupies the directory the blocked member needs.
+        std::fs::write(dst.join("cache"), b"not a directory").unwrap();
+
+        let (headers, data) = shard_payload(&[
+            ("before.txt", b"before"),
+            ("cache/blocked.txt", b"blocked"),
+            ("after.txt", b"after!"),
+        ]);
+        let sink =
+            FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default());
+
+        let outcome = sink
+            .write_payload(PreparedPayload::TarShard { headers, data })
+            .await
+            .expect("one member's failure must not abort the whole shard");
+
+        assert_eq!(outcome.files_written, 2);
+        assert_eq!(outcome.files_failed_total, 1);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].relative_path, "cache/blocked.txt");
+        assert!(
+            !outcome.failures[0].reason.is_empty(),
+            "a recorded member failure carries its reason chain"
+        );
+        assert!(outcome.file_failed("cache/blocked.txt"));
+        assert!(!outcome.file_failed("before.txt"));
+        assert_eq!(std::fs::read(dst.join("before.txt")).unwrap(), b"before");
+        assert_eq!(std::fs::read(dst.join("after.txt")).unwrap(), b"after!");
+    }
+
+    /// pfc-3 cap identity: a shard that fails more members than the
+    /// report can carry still names its healthy members as landed, so
+    /// their completions are never suppressed. The carried details stay
+    /// capped and the total stays exact.
+    #[tokio::test]
+    async fn tar_shard_past_the_report_cap_still_completes_its_healthy_members() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let blocked: Vec<String> = (0..MAX_REPORTED_FILE_FAILURES + 6)
+            .map(|index| format!("blocked{index}.txt"))
+            .collect();
+        // A directory where each blocked member's file belongs: the
+        // portable way to fail exactly those members and no others.
+        for rel in &blocked {
+            std::fs::create_dir_all(dst.join(rel)).unwrap();
+        }
+        let healthy = ["healthy-a.txt", "healthy-b.txt"];
+        let mut members: Vec<(&str, &[u8])> = blocked
+            .iter()
+            .map(|rel| (rel.as_str(), &b"x"[..]))
+            .collect();
+        members.extend(healthy.iter().map(|rel| (*rel, &b"landed"[..])));
+        let (headers, data) = shard_payload(&members);
+
+        let sink =
+            FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default());
+        let outcome = sink
+            .write_payload(PreparedPayload::TarShard { headers, data })
+            .await
+            .expect("a shard past the report cap is still not a session failure");
+
+        assert_eq!(outcome.files_written, healthy.len());
+        assert_eq!(outcome.files_failed_total, blocked.len() as u64);
+        assert_eq!(
+            outcome.failures.len(),
+            MAX_REPORTED_FILE_FAILURES,
+            "carried details stay bounded"
+        );
+        for rel in &blocked {
+            assert!(outcome.file_failed(rel), "{rel} failed and must say so");
+        }
+        for rel in healthy {
+            assert!(
+                !outcome.file_failed(rel),
+                "{rel} landed; a shard past the cap must not suppress its \
+                 healthy members' completions"
+            );
+            assert_eq!(std::fs::read(dst.join(rel)).unwrap(), b"landed");
+        }
+    }
+
+    /// The probed writer is a second, separately-coded rayon path (the
+    /// otp-12 timing instrumentation). It contains a member failure the
+    /// same way the probe-less one does.
+    #[tokio::test]
+    async fn probed_tar_shard_writer_contains_one_members_failure() {
+        use crate::remote::transfer::session_phase::SessionPhaseRole;
+        use crate::remote::transfer::small_file_probe::{SmallFileCarrier, SmallFileProbe};
+
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        // A directory where the blocked member's file belongs.
+        std::fs::create_dir_all(dst.join("blocked.txt")).unwrap();
+
+        let probe = SmallFileProbe::capture("pfc-3", |_report| {})
+            .bind(
+                None,
+                SessionPhaseRole::Destination,
+                SessionPhaseRole::Source,
+                SmallFileCarrier::Tcp,
+            )
+            .expect("a capturing probe binds");
+        let sink =
+            FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default())
+                .with_small_file_probe(Some(probe));
+
+        let (headers, data) = shard_payload(&[("blocked.txt", b"blocked"), ("fine.txt", b"fine")]);
+        let outcome = sink
+            .write_payload(PreparedPayload::TarShard { headers, data })
+            .await
+            .expect("the probed writer contains a member failure too");
+
+        assert_eq!(outcome.files_written, 1);
+        assert_eq!(outcome.files_failed_total, 1);
+        assert_eq!(outcome.failures[0].relative_path, "blocked.txt");
+        assert!(!outcome.file_failed("fine.txt"));
+        assert_eq!(std::fs::read(dst.join("fine.txt")).unwrap(), b"fine");
+    }
+
+    /// Classification boundary: a shard whose tar will not parse failed
+    /// structurally, as a whole record — no member owns that error, so it
+    /// stays session-fatal.
+    #[tokio::test]
+    async fn tar_shard_structural_parse_failure_stays_fatal() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink =
+            FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default());
+
+        let err = sink
+            .write_payload(PreparedPayload::TarShard {
+                headers: vec![make_file_header("a.txt", 5)],
+                data: vec![0x41u8; 2048], // not a tar
+            })
+            .await
+            .expect_err("a shard that will not parse is session-fatal");
+        assert!(
+            format!("{err:#}").contains("tar shard"),
+            "expected the shard-structural chain; got: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dst).unwrap().count(),
+            0,
+            "a shard that never parsed writes nothing"
+        );
+    }
+
+    /// Classification boundary: a shard entry that escapes the
+    /// destination root is a containment violation (R47-F1 class), never
+    /// one member's failure. Hand-crafted bytes because the tar builder
+    /// refuses to write a traversal path — the same technique
+    /// `tar_safety`'s own traversal test uses.
+    #[tokio::test]
+    async fn tar_shard_traversal_entry_stays_fatal() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let (_, mut data) = shard_payload(&[("aaaaaaaaa.txt", b"pwn")]);
+        let bad_name = b"../escape.txt\0";
+        data[..bad_name.len()].copy_from_slice(bad_name);
+        let mut sum: u32 = 0;
+        for (index, byte) in data[..512].iter().enumerate() {
+            sum += if (148..156).contains(&index) {
+                0x20
+            } else {
+                *byte as u32
+            };
+        }
+        data[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+
+        let sink = FsTransferSink::new(tmp.path().join("src"), dst, FsSinkConfig::default());
+        let err = sink
+            .write_payload(PreparedPayload::TarShard {
+                headers: vec![make_file_header("../escape.txt", 3)],
+                data,
+            })
+            .await
+            .expect_err("a traversal entry is a containment violation, not a member failure");
+        assert!(
+            format!("{err:#}")
+                .to_lowercase()
+                .contains("validating tar shard entry"),
+            "expected the path-validation chain; got: {err:#}"
+        );
+        assert!(!tmp.path().join("escape.txt").exists());
+    }
+
+    /// cr-pfc2-1 inside the shard fold: a member whose write failed
+    /// because the volume refuses writes is not that member's failure —
+    /// every other member fails identically — so the shard returns `Err`
+    /// even though its other members landed. Synthesized `io::Error`
+    /// values keep this deterministic, as in the pfc-2 tests above.
+    #[test]
+    fn tar_shard_member_on_a_read_only_volume_stays_fatal() {
+        let tmp = tempdir().unwrap();
+        let results: Vec<(String, Result<(u64, ())>)> = vec![
+            ("landed.txt".to_string(), Ok((7, ()))),
+            (
+                "refused.txt".to_string(),
+                Err(write_error(std::io::Error::from(
+                    std::io::ErrorKind::ReadOnlyFilesystem,
+                ))),
+            ),
+        ];
+
+        let err = fold_shard_member_results(tmp.path(), results, |()| {})
+            .expect_err("a volume-level refusal inside a shard stays session-fatal");
+        assert!(
+            format!("{err:#}").contains("creating /dst/one.bin"),
+            "the original chain is handed back unchanged; got: {err:#}"
+        );
+    }
+
+    /// Boundary the other way: an ordinary refusal of one member's own
+    /// path carries no volume signature and is contained, with the
+    /// shard's healthy members counted.
+    #[test]
+    fn tar_shard_member_denied_by_its_own_path_is_contained() {
+        let tmp = tempdir().unwrap();
+        let results: Vec<(String, Result<(u64, ())>)> = vec![
+            ("landed.txt".to_string(), Ok((7, ()))),
+            (
+                "denied.txt".to_string(),
+                Err(write_error(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                ))),
+            ),
+        ];
+
+        let outcome = fold_shard_member_results(tmp.path(), results, |()| {})
+            .expect("one denied member is still one member's failure");
+        assert_eq!(outcome.files_written, 1);
+        assert_eq!(outcome.bytes_written, 7);
+        assert_eq!(outcome.files_failed_total, 1);
+        assert_eq!(outcome.failures[0].relative_path, "denied.txt");
+        assert!(!outcome.file_failed("landed.txt"));
     }
 
     /// Records every warn the `log` facade emits. The facade takes one

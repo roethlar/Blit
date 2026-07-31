@@ -1,15 +1,18 @@
 //! Shared safe tar-shard extraction primitive.
 //!
-//! Three sites in the codebase consume tar shards from a remote peer:
+//! One production site consumes tar shards since the otp-10/11 driver
+//! deletions unified every route on the session sink:
 //!
-//!   - `crates/blit-core/src/remote/pull.rs::apply_pull_tar_shard`
-//!     (gRPC fallback receive on the pull-client side)
 //!   - `crates/blit-core/src/remote/transfer/sink.rs::write_tar_shard_payload`
-//!     (TCP data plane on the pull-client side and local-local sink)
-//!   - `crates/blit-daemon/src/service/push/data_plane.rs::apply_tar_shard_sync`
-//!     (daemon receiving an authenticated push)
+//!     (both carriers, every topology, local included)
 //!
-//! All three need the same safety policy:
+//! (The pre-unification consumers this doc once named —
+//! `remote/pull.rs`, `service/push/data_plane.rs` — were deleted with
+//! their drivers; `write_extracted_file`/`write_extracted_shard` below
+//! remain as the sequential convenience wrappers, currently with no
+//! production caller.)
+//!
+//! Every consumer needs the same safety policy:
 //!
 //!   1. Reject non-regular entries (no symlinks, hardlinks, or device
 //!      nodes — a hostile tar can otherwise materialize a symlink at
@@ -31,7 +34,8 @@
 //! errors, parallel vs sequential writes, buffer-pool reuse) so the
 //! helper returns a `Vec<ExtractedFile>` and lets the caller adapt.
 //! `write_extracted_file` is provided as a convenience for the
-//! sequential-write case.
+//! sequential-write case, and `write_extracted_shard` wraps it in the
+//! per-member containment fold the parallel sink writers use.
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -41,6 +45,7 @@ use eyre::{bail, eyre, Context, Result};
 use filetime::{set_file_mtime, FileTime};
 use tar::{Archive, EntryType};
 
+use super::sink::SinkOutcome;
 use crate::generated::{FileHeader, WindowsFileMetadata};
 use crate::path_safety;
 
@@ -239,12 +244,10 @@ pub fn write_extracted_file(file: &ExtractedFile) -> Result<()> {
         .with_context(|| format!("writing {}", file.dest_path.display()))?;
     crate::windows_metadata::replace_streams(&file.dest_path, file.windows_metadata.as_ref())?;
     // POST_REVIEW_FIXES §1.1: best-effort metadata, but failures
-    // must be visible. R42-F1 caught this site as still silent
-    // after the first sweep; this helper is shared by pull
-    // tar-shard receive (`pull.rs`) and the daemon's gRPC push
-    // fallback (`service/push/data_plane.rs`), so silencing the
-    // errors here masked the same data-loss surface the sink-side
-    // sweep just unmasked.
+    // must be visible. R42-F1 caught this site as still silent after
+    // the first sweep (the then-live pull/push receivers shared it;
+    // both died with their drivers at otp-10c, leaving this a
+    // convenience wrapper with no production caller).
     if let Some(ft) = file.mtime {
         if let Err(e) = set_file_mtime(&file.dest_path, ft) {
             log::warn!("set mtime on {}: {}", file.dest_path.display(), e);
@@ -261,6 +264,31 @@ pub fn write_extracted_file(file: &ExtractedFile) -> Result<()> {
     }
     crate::windows_metadata::apply_attributes(&file.dest_path, file.windows_metadata.as_ref())?;
     Ok(())
+}
+
+/// Write every member of an extracted shard sequentially, containing
+/// per-member failures instead of abandoning the rest of the shard
+/// (pfc-3). One member the destination refuses is recorded in the
+/// returned [`SinkOutcome`] and the members after it still land; a
+/// failure the shared classifier reads as root-wide or volume-level
+/// (cr-pfc2-1) ends the shard and stays session-fatal.
+///
+/// This is the sequential counterpart of the sink's parallel writers and
+/// folds through the very same classifier, so the two can never drift on
+/// what counts as one member's failure. `bytes_written` counts payload
+/// bytes only — [`write_extracted_file`] applies named streams without
+/// reporting their size, and no consumer of this path counts them.
+pub fn write_extracted_shard(dst_root: &Path, files: &[ExtractedFile]) -> Result<SinkOutcome> {
+    let results: Vec<(String, Result<(u64, ())>)> = files
+        .iter()
+        .map(|file| {
+            (
+                file.rel.clone(),
+                write_extracted_file(file).map(|()| (file.size, ())),
+            )
+        })
+        .collect();
+    super::sink::fold_shard_member_results(dst_root, results, |()| {})
 }
 
 #[cfg(test)]
@@ -425,6 +453,62 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    fn extracted(dst_root: &Path, rel: &str, contents: &[u8]) -> ExtractedFile {
+        ExtractedFile {
+            rel: rel.to_string(),
+            dest_path: dst_root.join(rel),
+            contents: contents.to_vec(),
+            mtime: None,
+            permissions: None,
+            size: contents.len() as u64,
+            windows_metadata: None,
+        }
+    }
+
+    /// pfc-3: the sequential shard writer contains one member's failure
+    /// and still lands the rest — a regular file where the blocked
+    /// member's parent directory belongs is the audit-17 shape.
+    #[test]
+    fn write_extracted_shard_contains_one_members_failure() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("cache"), b"not a directory").unwrap();
+
+        let files = vec![
+            extracted(&dst, "cache/blocked.txt", b"blocked"),
+            extracted(&dst, "landed.txt", b"landed"),
+        ];
+        let outcome =
+            write_extracted_shard(&dst, &files).expect("one member's failure is contained");
+
+        assert_eq!(outcome.files_written, 1);
+        assert_eq!(outcome.bytes_written, 6);
+        assert_eq!(outcome.files_failed_total, 1);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].relative_path, "cache/blocked.txt");
+        assert!(outcome.file_failed("cache/blocked.txt"));
+        assert!(!outcome.file_failed("landed.txt"));
+        assert_eq!(std::fs::read(dst.join("landed.txt")).unwrap(), b"landed");
+    }
+
+    /// The sequential writer routes through the shared classifier rather
+    /// than containing everything: with the destination root itself
+    /// unusable, every member fails identically, so the shard stays
+    /// session-fatal.
+    #[test]
+    fn write_extracted_shard_keeps_a_dead_destination_root_fatal() {
+        let tmp = tempdir().unwrap();
+        let dst_root = tmp.path().join("root-is-a-file");
+        std::fs::write(&dst_root, b"not a directory").unwrap();
+
+        let files = vec![extracted(&dst_root, "a.txt", b"a")];
+        assert!(
+            write_extracted_shard(&dst_root, &files).is_err(),
+            "an unusable destination root is session-fatal, not per-member"
+        );
     }
 
     #[test]
