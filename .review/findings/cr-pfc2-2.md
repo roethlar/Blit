@@ -2,9 +2,9 @@
 
 **Severity**: MEDIUM — initiator-SOURCE progress (verbose/JSON) counts a
 file as completed that is absent or incomplete at the destination.
-**Status**: In progress — fixed inside the pfc-4 slice, per-finding verification pending
+**Status**: Verified
 **Branch**: — (default-branch mode)
-**Commit**: (lands with pfc-4)
+**Commit**: `bdc3e4a4` (the pfc-4 slice)
 
 Reviewer provenance (generation pass): codex / gpt-5.6-sol / xhigh /
 standard; codex-cli 0.146.0; range `4d2b888f..575e47e7`
@@ -55,6 +55,6 @@ signal). Mirror-only exposure in the interim (non-mirror sessions abort on
 contained failures per the pfc-2 interlock).
 
 ## Reviewer comments
-(pending pfc-4 fix + per-finding verification dispatch)
+Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.146.0 (detached, disposable worktree). Reviewed `bdc3e4a46242debaf33d8222a9d0fb3dc10bf5ad` base `72079331edc3c82b201fdb34aa9a1dda42f6e286`. guard_confirmed **true** (reviewer ran the fold-adoption revert red/green itself). Verdict: **accepted** against the recorded TOTALS-level scope, no comments. 2026-07-31T07:08Z. Record: `.review/results/cr-pfc2-2.codex.json`.
 
 As built (pfc-4): `ProgressEvent::SummaryReconciled { files_failed, bytes_landed }` — the SOURCE adopts the destination's authoritative byte total and retracts failed completions once at the summary boundary (exact `files_failed` total, correct past the 64 cap); the daemon jobs row applies the same on its source lane. Closure scope: TOTALS-level. The per-file SOURCE event stream remains optimistic by design (no per-file identity crosses the wire past the cap); pfc-5 renders failed files from the summary list. Guards (from the pfc-4 fix round, red/green-proven): `initiator_source_totals_reconcile_against_the_destination_summary` red under the fold-adoption revert (21 planned vs 10 landed); daemon `summary_reconciliation` red under the row-adoption revert; `write_file_stream` withdraw test red under the live-counter revert.
