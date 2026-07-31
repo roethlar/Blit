@@ -3,9 +3,9 @@
 **Severity**: HIGH — a delegated remote→remote mirror with contained
 destination failures returns clean success; the requested file is
 silently absent.
-**Status**: In progress — fixed, awaiting per-finding reviewer verdict
+**Status**: Verified
 **Branch**: — (default-branch mode)
-**Commit**: (filled at landing)
+**Commit**: `2b5c091b`
 
 Reviewer provenance (generation pass): codex / gpt-5.6-sol / xhigh /
 standard; codex-cli 0.146.0; range `72079331..bdc3e4a4`
@@ -52,6 +52,6 @@ Partial-failure *rendering* for delegated results is pfc-5's, with the
 rest of the CLI surfacing.
 
 ## Reviewer comments
-(pending per-finding verification after the fix)
+Reviewer: codex / gpt-5.6-sol / xhigh (T2 posture; owner-pinned pair is the harness ceiling, D-2026-07-31-3); codex-cli 0.146.0 (detached, disposable worktree). Reviewed `2b5c091b3dc9d22b106f89305701a38095eb4371` base `7124f7b61e47aab655770ef1a6daa260f3826f99`. guard_confirmed **true** (reviewer dropped the copy-through itself: round-trip AND daemon e2e red, clean-run control green, byte-identical restore). Verdict: **accepted**, no comments. 2026-07-31T08:07Z. Record: `.review/results/cr-pfc4-1.codex.json`.
 
 As built: `DelegatedPullSummary` gains `files_failed = 7` + `failures = 8` (reusing `FileFailure`, same cap semantics); the ONE re-encode extracted to `delegated_summary_from_session` (copies verbatim, no second capping path) with the v6 doc line naming it as the second site any future summary field must reach; `DelegatedPullOutcome::files_failed()/contained_failures()` consumer accessors (rendering stays pfc-5); detach-path literal explicitly zeroed with reason. Guards red three ways under the copy-through drop (unit round-trip 0≠70; consumer surface 0≠70; real two-daemon delegated e2e 0≠1 with the report's path+reason pinned and siblings landing byte-identical). blit-core 466/0, daemon 176/0, app 59/0, workspace 1663/0.
