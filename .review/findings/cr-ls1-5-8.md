@@ -1,8 +1,11 @@
 # cr-ls1-5..8 — The parallel destination diff, and why it was reverted rather than repaired
 
 **Severity**: 4 × MEDIUM
-**Status**: RESOLVED BY REVERT (cr-ls1-5, -6, -7); cr-ls1-8 fixed by
-replacing the false claim.
+**Status**: VERIFIED-CLOSED. Round-4 dispatch over `81c53255..0c708f72`
+returned **`verdict: clean`, `guard_confirmed: true`, zero findings** — the
+revert plus the round-trip-elimination replacement was independently
+re-verified, including the reviewer running the red/green itself. Record:
+`.review/results/ls-1-range.codex.r4.json`.
 **Source**: `ls-1-range` round-3 codex dispatch over `35948e70..81c53255`
 Reviewer: codex / gpt-5.6-sol / xhigh / workspace-write (detached, disposable
 worktree); codex-cli 0.146.0; **`guard_confirmed: false`**.

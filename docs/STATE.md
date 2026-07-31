@@ -35,9 +35,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Handoff — 2026-07-31
 - Done: pfc-1..6 + clp-1..2 landed and reviewed; D-2026-07-31-4 makes local
   speed priority-1; ls-1 step (0) instrument landed but its review FAILED.
-- Next: 1.23× shipped via round-trip elimination; parallel diff reverted on
-  r3 findings. Next levers are named-stream enumeration (correctness-bound)
-  and directory-level stat. r4 review owed. pfc Shipped is the owner's.
+- Next: 1.23× shipped, review loop CLOSED (r4 clean). Remaining levers are
+  named-stream enumeration (correctness-bound, rel-4) and directory-level
+  stat — both need owner scoping. pfc Shipped is the owner's.
 
 ## Now (active work)
 
@@ -89,9 +89,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    with apply and daemon sessions (cr-ls1-5..8). Remaining: named-stream
    enumeration 2.556 ms/file (correctness-bound, rel-4), stat 1.081 ms/file
    (eliminable via directory-level enumeration).
-   The instrument's review history (r1 FAILED → fixed → r2
-   `guard_confirmed: true` + 2 new MEDIUMs also fixed; **round 3 owed**) is
-   in `REVIEW.md` and `.review/findings/cr-ls1-*.md`. **`ls-0` LANDED**: the
+   **Review loop CLOSED: 4 rounds, 8 findings, all resolved, r4 CLEAN with
+   `guard_confirmed: true`** — see `REVIEW.md`. **`ls-0` LANDED**: the
    summary separates copied from repaired files and labels the rate as a
    whole-run average. NOT the closed P1 defect (D-2026-07-22-2).
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
