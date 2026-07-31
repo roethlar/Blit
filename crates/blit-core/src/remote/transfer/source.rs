@@ -192,11 +192,30 @@ pub trait TransferSource: Send + Sync {
 
 pub struct FsTransferSource {
     root: PathBuf,
+    /// clp-1: when set, enumeration liveness rides the progress lane and
+    /// this source prints nothing. Only a caller that owns the terminal
+    /// row attaches one (`run_local_session` under `-p`); every other
+    /// construction keeps the legacy stderr lines, which are the
+    /// daemon's enumeration log.
+    progress: Option<crate::remote::transfer::RemoteTransferProgress>,
 }
 
 impl FsTransferSource {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            progress: None,
+        }
+    }
+
+    /// Attach (or clear) the enumeration progress lane — see the
+    /// `progress` field. `None` leaves behavior byte-identical.
+    pub fn with_progress(
+        mut self,
+        progress: Option<crate::remote::transfer::RemoteTransferProgress>,
+    ) -> Self {
+        self.progress = progress;
+        self
     }
 }
 
@@ -212,6 +231,7 @@ impl TransferSource for FsTransferSource {
             filter.unwrap_or_default(),
             unreadable_paths,
             true,
+            EnumerationHeartbeat::new(self.progress.clone()),
         );
         (headers, SourceScan::new(task))
     }
@@ -226,6 +246,7 @@ impl TransferSource for FsTransferSource {
             filter.unwrap_or_default(),
             unreadable_paths,
             false,
+            EnumerationHeartbeat::new(self.progress.clone()),
         );
         (headers, SourceScan::new(task))
     }
@@ -266,6 +287,119 @@ impl TransferSource for FsTransferSource {
     }
 }
 
+/// Enumeration liveness for one manifest scan: the once-per-second
+/// running count and the completion line.
+///
+/// With a progress sink attached (clp-1) both ride the progress lane
+/// and NOTHING reaches raw stderr — the caller owns a live terminal row
+/// there, and a library `eprintln!` scrolls it off-row once a second
+/// (the motivating failure in `docs/plan/CLI_LIVE_PROGRESS.md`). With no
+/// sink the legacy lines print unchanged: they are the daemon's
+/// enumeration log, not TTY output (R46-F4 keeps them off stdout).
+struct EnumerationHeartbeat {
+    progress: Option<crate::remote::transfer::RemoteTransferProgress>,
+    /// Minimum spacing between reports. Only tests vary it.
+    interval: std::time::Duration,
+    /// Set by [`Self::begin`] inside the scan task, so the completion
+    /// line's elapsed time measures the scan and not construction.
+    started: Option<std::time::Instant>,
+    last: Option<std::time::Instant>,
+    /// Count already reported on the lane; the lane carries deltas.
+    reported: u64,
+    /// Test seam: legacy lines land here instead of stderr, so
+    /// "zero raw lines while a sink is attached" is observable without
+    /// touching fd 2.
+    lines: Option<Arc<Mutex<Vec<String>>>>,
+}
+
+impl EnumerationHeartbeat {
+    fn new(progress: Option<crate::remote::transfer::RemoteTransferProgress>) -> Self {
+        Self {
+            progress,
+            interval: std::time::Duration::from_secs(1),
+            started: None,
+            last: None,
+            reported: 0,
+            lines: None,
+        }
+    }
+
+    /// Capturing variant: every legacy line is collected instead of
+    /// printed, and `interval` is zero so each entry reports (the
+    /// wall-clock cadence is untestable without sleeping).
+    #[cfg(test)]
+    fn capturing(
+        progress: Option<crate::remote::transfer::RemoteTransferProgress>,
+    ) -> (Self, Arc<Mutex<Vec<String>>>) {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+        let mut heartbeat = Self::new(progress);
+        heartbeat.interval = std::time::Duration::ZERO;
+        heartbeat.lines = Some(Arc::clone(&lines));
+        (heartbeat, lines)
+    }
+
+    /// Start the clock. Called once, at the top of the scan task.
+    fn begin(&mut self) {
+        let now = std::time::Instant::now();
+        self.started = Some(now);
+        self.last = Some(now);
+    }
+
+    /// One enumerated entry has been queued; `enumerated` is the running
+    /// absolute count.
+    fn tick(&mut self, enumerated: u64) {
+        let due = match self.last {
+            Some(last) => last.elapsed() >= self.interval,
+            None => true,
+        };
+        if !due {
+            return;
+        }
+        match &self.progress {
+            Some(progress) => {
+                let delta = enumerated.saturating_sub(self.reported);
+                if delta > 0 {
+                    progress.report_enumerated(delta);
+                    self.reported = enumerated;
+                }
+            }
+            None => self.emit_line(format!(
+                "Enumerated {} entries… (streaming manifest)",
+                enumerated
+            )),
+        }
+        self.last = Some(std::time::Instant::now());
+    }
+
+    /// The scan finished with `enumerated` entries.
+    fn finish(&mut self, enumerated: u64) {
+        match &self.progress {
+            Some(progress) => {
+                let delta = enumerated.saturating_sub(self.reported);
+                if delta > 0 {
+                    progress.report_enumerated(delta);
+                    self.reported = enumerated;
+                }
+            }
+            None => self.emit_line(format!(
+                "Manifest enumeration complete in {:.2?} ({} entries)",
+                self.started.map(|s| s.elapsed()).unwrap_or_default(),
+                enumerated
+            )),
+        }
+    }
+
+    fn emit_line(&self, line: String) {
+        match &self.lines {
+            Some(lines) => lines
+                .lock()
+                .expect("enumeration line capture poisoned")
+                .push(line),
+            None => eprintln!("{line}"),
+        }
+    }
+}
+
 /// Stream a manifest scan of `root` as `FileHeader`s (otp-10c-2:
 /// relocated verbatim from the deleted push driver's
 /// `client::helpers` — `FsTransferSource` is its only consumer now).
@@ -278,6 +412,7 @@ fn spawn_manifest_task(
     filter: FileFilter,
     unreadable: Arc<Mutex<Vec<String>>>,
     preserve_windows_metadata: bool,
+    mut heartbeat: EnumerationHeartbeat,
 ) -> (
     mpsc::Receiver<FileHeader>,
     tokio::task::JoinHandle<Result<u64>>,
@@ -285,13 +420,11 @@ fn spawn_manifest_task(
     use crate::enumeration::{EntryKind, FileEnumerator};
     use eyre::eyre;
     use std::io::ErrorKind;
-    use std::time::{Duration, Instant};
 
     let (manifest_tx, manifest_rx) = mpsc::channel::<FileHeader>(64);
     let handle = tokio::task::spawn_blocking(move || -> Result<u64> {
         let enumerator = FileEnumerator::new(filter);
-        let start = Instant::now();
-        let mut last_log = start;
+        heartbeat.begin();
         let mut enumerated: u64 = 0;
         let unreadable = unreadable;
         let scan_outcome = enumerator.enumerate_local_streaming_capturing(&root, |entry| {
@@ -337,12 +470,10 @@ fn spawn_manifest_task(
                     .blocking_send(header)
                     .map_err(|_| eyre!("failed to queue manifest entry"))?;
                 enumerated += 1;
-                if last_log.elapsed() >= Duration::from_secs(1) {
-                    // R46-F4: progress to stderr, never stdout — the
-                    // CLI's `--json` modes own stdout.
-                    eprintln!("Enumerated {} entries… (streaming manifest)", enumerated);
-                    last_log = Instant::now();
-                }
+                // R46-F4: liveness to stderr, never stdout — the CLI's
+                // `--json` modes own stdout. clp-1: with a progress sink
+                // attached it rides the lane instead of stderr.
+                heartbeat.tick(enumerated);
             }
             Ok(())
         })?;
@@ -353,11 +484,7 @@ fn spawn_manifest_task(
                 &format!("scan suppressed: {}", suppressed.message),
             );
         }
-        eprintln!(
-            "Manifest enumeration complete in {:.2?} ({} entries)",
-            start.elapsed(),
-            enumerated
-        );
+        heartbeat.finish(enumerated);
         Ok(enumerated)
     });
 
@@ -821,6 +948,93 @@ async fn filter_headers(
         if tx.send(header).await.is_err() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod enumeration_heartbeat_tests {
+    use super::*;
+    use crate::remote::transfer::{ProgressEvent, RemoteTransferProgress};
+
+    /// Three files, so the running count is (1, 2, 3) whatever order the
+    /// walk visits them in.
+    fn fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.path().join(name), b"x").expect("fixture write");
+        }
+        dir
+    }
+
+    /// Drive the real production scan and return the enumerated count.
+    async fn run_scan(root: PathBuf, heartbeat: EnumerationHeartbeat) -> u64 {
+        let unreadable: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (mut headers, task) =
+            spawn_manifest_task(root, FileFilter::default(), unreadable, true, heartbeat);
+        let mut streamed = 0u64;
+        while headers.recv().await.is_some() {
+            streamed += 1;
+        }
+        let enumerated = task
+            .await
+            .expect("scan task joined")
+            .expect("scan succeeded");
+        assert_eq!(streamed, enumerated, "every enumerated entry is streamed");
+        enumerated
+    }
+
+    /// clp-1 gate: with a progress sink attached, enumeration liveness
+    /// rides the lane and the scan writes NO line — the caller owns a
+    /// live row on stderr for the whole transfer, and a library print
+    /// scrolls it off-row.
+    #[tokio::test]
+    async fn sink_attached_scan_reports_on_the_lane_and_writes_no_line() {
+        let dir = fixture();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
+        let (heartbeat, lines) =
+            EnumerationHeartbeat::capturing(Some(RemoteTransferProgress::new(tx)));
+
+        assert_eq!(run_scan(dir.path().to_path_buf(), heartbeat).await, 3);
+
+        assert!(
+            lines.lock().expect("line capture").is_empty(),
+            "a sink-attached scan must emit zero raw lines, got {:?}",
+            lines.lock().expect("line capture")
+        );
+        let mut reported = 0u64;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                ProgressEvent::Enumerated { files } => reported += files,
+                other => panic!("enumeration owns only the walk lane, got {other:?}"),
+            }
+        }
+        assert_eq!(reported, 3, "the whole count reaches the sink");
+    }
+
+    /// Sink-less callers keep the legacy lines verbatim: a serving daemon
+    /// has no row to protect and these lines are its enumeration log.
+    #[tokio::test]
+    async fn sinkless_scan_keeps_the_legacy_lines_verbatim() {
+        let dir = fixture();
+        let (heartbeat, lines) = EnumerationHeartbeat::capturing(None);
+
+        assert_eq!(run_scan(dir.path().to_path_buf(), heartbeat).await, 3);
+
+        let lines = lines.lock().expect("line capture").clone();
+        assert_eq!(
+            lines.len(),
+            4,
+            "one line per heartbeat plus the completion line: {lines:?}"
+        );
+        assert_eq!(lines[0], "Enumerated 1 entries… (streaming manifest)");
+        assert_eq!(lines[1], "Enumerated 2 entries… (streaming manifest)");
+        assert_eq!(lines[2], "Enumerated 3 entries… (streaming manifest)");
+        assert!(
+            lines[3].starts_with("Manifest enumeration complete in ")
+                && lines[3].ends_with(" (3 entries)"),
+            "completion line drifted: {}",
+            lines[3]
+        );
     }
 }
 

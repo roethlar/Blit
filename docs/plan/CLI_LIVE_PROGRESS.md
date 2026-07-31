@@ -64,8 +64,12 @@ from copying.
       to width.
 - [ ] `-v` with `-p`: per-file completion lines print via the indicatif
       handle and scroll cleanly above the intact status row.
-- [ ] Without `-p`: behavior unchanged (quiet run, end summary, the
-      existing once-per-second enumeration line).
+- [ ] Without `-p` **and without a TTY**: behavior unchanged (quiet run,
+      end summary, the existing once-per-second enumeration line).
+      Clarified at clp-1 landing: `effective_progress()` already engages
+      on an interactive TTY without `-p` (existing semantics, unchanged
+      in *when* — see Non-goals), so a TTY run gets the row and no raw
+      lines; the unchanged-behavior guarantee is for sink-less runs.
 - [ ] Source-side enumeration reports through the progress lane when a
       sink is attached; the raw `eprintln!` fires only when no sink
       exists. Guard: with a sink attached, zero "streaming manifest"
@@ -101,16 +105,20 @@ from copying.
 
 ### Approach
 
-1. **Wire the sink (clp-1).** `run_local_session` constructs an
-   unbounded `ProgressEvent` channel when `LocalMirrorOptions.progress`
-   is set, passes `RemoteTransferProgress` into `LocalApply::start`, and
-   exposes the receiver to the caller (surface it on the options/return
-   path the way the remote route does). Source-side enumeration gains an
-   optional progress handle: when attached, the once-per-second count
-   reports via `report_manifest_batch` instead of `eprintln!`; the
-   eprintln remains for sink-less callers (daemon logs). The destination
-   diff already knows manifest batches; enumeration counts come from the
-   SOURCE side of the local session (both ends in-process for local).
+1. **Wire the sink (clp-1) — landed; as-built notes.** The CLI owns both
+   channel ends and passes the sender handle in via
+   `LocalMirrorOptions.progress_events: Option<RemoteTransferProgress>`
+   (a return-side receiver cannot work: `run_local_session` returns only
+   after the transfer ends). Source-side enumeration reports through a
+   **new** `ProgressEvent::Enumerated { files }` lane (folded into
+   `ProgressTotals.enumerated_files`), NOT `report_manifest_batch` as
+   this plan originally said: on a local session the destination diff
+   already emits `ManifestBatch` for the need list, so reusing that lane
+   would double-count the copy denominator. The once-per-second line AND
+   the completion line both gate on sink attachment
+   (`EnumerationHeartbeat` in source.rs); sink-less callers print
+   byte-identically. Remote routes deliberately do not attach the lane
+   yet (their monitor does not render it — see clp-2 candidates).
 2. **Render (clp-1 minimal, clp-2 polish).** `blit-cli` replaces the
    static spinner with a consumer task draining the receiver into one
    `ProgressBar`: phase transitions (enumerating → comparing/copying →
@@ -146,7 +154,23 @@ One coherent, testable change per slice — sized for the review loop.
    guard tests for the gate and the wiring.
 2. **clp-2** — render polish: current-file segment with width-safe
    truncation, `-v` per-file lines via the indicatif handle, phase
-   labels incl. mirror-delete, pure-function format tests.
+   labels incl. mirror-delete (today an up-to-date tree can show
+   "enumerating" for the whole run and mirror-delete shows as
+   "copying"), pure-function format tests. Plus the clp-1 review
+   residue: **(a)** route the `stderr_log` backend through the live
+   row's handle while a row is live — `record_unreadable_entry`'s
+   `log::warn!` (source.rs) and pfc-2's `record_failure` warn
+   (sink.rs) still scroll the row (reproduced with a deny-ACL file);
+   **(b)** LiveProgressRow drain-loop test coverage (extract the
+   event→repaint decision so a test can feed a channel);
+   **(c)** decide the stderr-redirected `-p` posture (sink attaches
+   even when indicatif hides the bar, so redirected stderr gets no
+   enumeration liveness at all — either attach only when the bar can
+   draw, or accept and record);
+   **(d)** consider attaching the enumeration lane on the remote push
+   route (`blit-app/src/transfers/remote.rs` builds
+   `FsTransferSource::new` with a sink in hand) together with remote
+   render support.
 
 ## Open questions
 

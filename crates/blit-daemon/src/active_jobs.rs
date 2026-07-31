@@ -334,6 +334,10 @@ impl ActiveJobProgress {
             ProgressEvent::FileComplete { .. } => {
                 atomic_saturating_add(&self.counters.files_completed, 1);
             }
+            // Source-walk liveness (clp-1) is not a denominator and not
+            // completed work: a jobs row tracks the manifest/need totals
+            // it already folds above, so this lane contributes nothing.
+            ProgressEvent::Enumerated { .. } => {}
         }
     }
 

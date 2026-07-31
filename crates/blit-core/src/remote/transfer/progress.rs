@@ -31,6 +31,12 @@ use tokio::sync::mpsc::UnboundedSender;
 ///   direction-flavored (pull: full source manifest; push: need-list
 ///   batches; delegated: post-hoc summary) — consumers must treat it
 ///   as "expected files", nothing stronger.
+/// - `Enumerated { files }` is SOURCE-walk liveness, a lane of its own
+///   (clp-1). It is neither a denominator nor transferred work: the
+///   scan has merely *seen* that many entries, most of which the
+///   destination diff may never need. Folding it into `ManifestBatch`
+///   would double-count "M" on a local session, where both the source
+///   walk and the destination diff report on the one channel.
 ///
 /// [`ProgressTotals`] is the single shared fold for this contract;
 /// consumers must not re-derive per-direction folding rules.
@@ -39,6 +45,10 @@ pub enum ProgressEvent {
     /// Enumeration denominator: `files` more files and their declared
     /// payload `bytes` are expected.
     ManifestBatch { files: usize, bytes: u64 },
+    /// Source-walk liveness: the manifest scan has discovered `files`
+    /// more entries. Deliberately carries no bytes and no denominator
+    /// meaning — see the contract above.
+    Enumerated { files: u64 },
     /// Transfer delta: `bytes` more bytes moved; `files` more files
     /// finished on the aggregate lane (0 on per-file-lane producers).
     Payload { files: usize, bytes: u64 },
@@ -62,6 +72,9 @@ pub struct ProgressTotals {
     /// byte denominator paired with `manifest_files`; it never adds to the
     /// transferred-byte count.
     pub manifest_bytes: u64,
+    /// Entries the SOURCE walk has discovered (`Enumerated`). Liveness
+    /// only: never a denominator, never transferred work.
+    pub enumerated_files: u64,
     /// Files finished, counted once each via either lane.
     pub files: u64,
     /// Bytes transferred (`Payload` only).
@@ -75,6 +88,9 @@ impl ProgressTotals {
             ProgressEvent::ManifestBatch { files, bytes } => {
                 self.manifest_files = self.manifest_files.saturating_add(*files as u64);
                 self.manifest_bytes = self.manifest_bytes.saturating_add(*bytes);
+            }
+            ProgressEvent::Enumerated { files } => {
+                self.enumerated_files = self.enumerated_files.saturating_add(*files);
             }
             ProgressEvent::Payload { files, bytes } => {
                 self.files = self.files.saturating_add(*files as u64);
@@ -248,6 +264,43 @@ mod progress_totals_tests {
         assert!(!totals.started());
         totals.apply(&ProgressEvent::Payload { files: 0, bytes: 1 });
         assert!(totals.started());
+    }
+
+    /// clp-1: source-walk liveness rides its own counter. It must not
+    /// touch the denominator (`manifest_*`) or the transferred totals —
+    /// on a local session both lanes report on ONE channel, so a shared
+    /// counter would double-count "M" in "N of M".
+    #[test]
+    fn enumerated_is_liveness_only() {
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::Enumerated { files: 900 });
+        totals.apply(&ProgressEvent::Enumerated { files: 100 });
+        assert_eq!(totals.enumerated_files, 1000);
+        assert_eq!(totals.manifest_files, 0);
+        assert_eq!(totals.manifest_bytes, 0);
+        assert_eq!(totals.files, 0);
+        assert_eq!(totals.bytes, 0);
+        assert!(!totals.started());
+        // The denominator lane stays independent of the walk lane.
+        totals.apply(&ProgressEvent::ManifestBatch {
+            files: 3,
+            bytes: 30,
+        });
+        assert_eq!(totals.manifest_files, 3);
+        assert_eq!(totals.enumerated_files, 1000);
+    }
+
+    /// The reporter's walk lane lands on the walk counter and nowhere
+    /// else (the send path, not just the fold).
+    #[test]
+    fn reported_enumerated_folds_onto_the_walk_counter() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = RemoteTransferProgress::new(tx);
+        progress.report_enumerated(7);
+        let mut totals = ProgressTotals::default();
+        totals.apply(&rx.try_recv().expect("one enumeration event"));
+        assert_eq!(totals.enumerated_files, 7);
+        assert_eq!(totals.manifest_files, 0);
     }
 
     /// Totals saturate instead of wrapping on pathological inputs.
@@ -600,6 +653,15 @@ pub struct RemoteTransferProgress {
     sender: UnboundedSender<ProgressEvent>,
 }
 
+/// Hand-written so option structs that carry a sink (e.g.
+/// `LocalMirrorOptions`) keep their `Debug` derive without exposing
+/// channel internals.
+impl std::fmt::Debug for RemoteTransferProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RemoteTransferProgress")
+    }
+}
+
 impl RemoteTransferProgress {
     pub fn new(sender: UnboundedSender<ProgressEvent>) -> Self {
         Self { sender }
@@ -611,6 +673,12 @@ impl RemoteTransferProgress {
         let _ = self
             .sender
             .send(ProgressEvent::ManifestBatch { files, bytes });
+    }
+
+    /// Report `files` more entries seen by the SOURCE walk (clp-1).
+    /// Liveness only — not a denominator, not transferred work.
+    pub fn report_enumerated(&self, files: u64) {
+        let _ = self.sender.send(ProgressEvent::Enumerated { files });
     }
 
     /// Report a transfer delta. `bytes` is the only byte channel in

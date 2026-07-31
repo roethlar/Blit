@@ -1,12 +1,17 @@
 use crate::cli::TransferArgs;
 use crate::context::AppContext;
 use blit_app::display::{format_bps, format_bytes};
-use blit_core::remote::transfer::TransferLifecycleTrace;
+use blit_core::remote::transfer::{
+    ProgressEvent, ProgressTotals, RemoteTransferProgress, TransferLifecycleTrace,
+};
 use blit_core::transfer_session::{LocalMirrorOptions, LocalMirrorSummary, TransferOutcome};
 use eyre::{bail, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio::time::{interval, MissedTickBehavior};
 
 /// Convenience wrapper for callers that always want the summary
 /// printed inline. Most CLI paths (copy / mirror) want this; move
@@ -102,7 +107,7 @@ async fn run_local_transfer_inner(
         bail!("source path does not exist: {}", src_path.display());
     }
 
-    let options = build_local_options(ctx, args, mirror, move_verb)?;
+    let mut options = build_local_options(ctx, args, mirror, move_verb)?;
     let dry_run = options.dry_run;
     let null_sink = options.null_sink;
     let json_output = args.json;
@@ -115,31 +120,25 @@ async fn run_local_transfer_inner(
         );
     }
 
-    let progress_bar = if !args.effective_progress() {
-        None
+    // `effective_progress` decides WHEN a row engages (unchanged); what
+    // it shows is now the live lane instead of a fixed spinner message.
+    let progress_row = if args.effective_progress() {
+        let (sink, row) = LiveProgressRow::start(mirror, src_path, dest_path);
+        options.progress_events = Some(sink);
+        Some(row)
     } else {
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::with_template("{spinner} {msg}")
-                .unwrap()
-                .tick_strings(&["-", "\\", "|", "/"]),
-        );
-        pb.enable_steady_tick(Duration::from_millis(120));
-        pb.set_message(format!(
-            "{} {} → {}",
-            if mirror { "Mirroring" } else { "Copying" },
-            src_path.display(),
-            dest_path.display()
-        ));
-        Some(pb)
+        None
     };
 
     let start = Instant::now();
-    let summary = blit_app::transfers::local::run(src_path, dest_path, options).await?;
+    let result = blit_app::transfers::local::run(src_path, dest_path, options).await;
 
-    if let Some(pb) = progress_bar {
-        pb.finish_and_clear();
+    // Clear the row BEFORE the result is propagated: a live steady-tick
+    // row would otherwise redraw over the error the caller prints.
+    if let Some(row) = progress_row {
+        row.finish().await;
     }
+    let summary = result?;
 
     let elapsed = start.elapsed();
     if !defer_output {
@@ -159,6 +158,159 @@ async fn run_local_transfer_inner(
     }
 
     Ok(summary)
+}
+
+/// How often the row re-renders. Events are drained continuously (the
+/// pipeline must never block on the sink) but folded into one repaint
+/// per interval, so a hot small-file run costs one format per tick
+/// instead of one per file.
+const ROW_REFRESH: Duration = Duration::from_millis(125);
+
+/// Upper bound on waiting for the consumer after the session returned.
+/// A blocking enumeration task cannot be aborted (`spawn_blocking`), so
+/// a failed session can still hold a sink clone; the exit path must not
+/// hang on the row.
+const ROW_DRAIN_GRACE: Duration = Duration::from_millis(500);
+
+/// Phase the event stream has reached. Ordered, and the row only ever
+/// moves forward: a late enumeration event during the copy must not
+/// relabel the row. Mirror-delete has no event yet — it gets its label
+/// at clp-2, with the event that carries it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum LivePhase {
+    #[default]
+    Enumerating,
+    Comparing,
+    Copying,
+}
+
+/// Everything the live row renders. Counters ride blit-core's shared
+/// fold ([`ProgressTotals`], w6-1 — consumers must not re-derive the
+/// folding rules); only the phase is local.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LiveRowState {
+    phase: LivePhase,
+    totals: ProgressTotals,
+}
+
+impl LiveRowState {
+    fn apply(&mut self, event: &ProgressEvent) {
+        self.totals.apply(event);
+        let phase = match event {
+            // Source walk liveness.
+            ProgressEvent::Enumerated { .. } => LivePhase::Enumerating,
+            // The destination diff decided these files need transfer.
+            ProgressEvent::ManifestBatch { .. } => LivePhase::Comparing,
+            // Bytes are landing.
+            ProgressEvent::Payload { .. } | ProgressEvent::FileComplete { .. } => {
+                LivePhase::Copying
+            }
+        };
+        self.phase = self.phase.max(phase);
+    }
+}
+
+/// Render the row's message. Pure state → string (the row's only other
+/// content is the spinner), so the format is unit-testable.
+fn render_live_row(state: &LiveRowState) -> String {
+    let totals = &state.totals;
+    match state.phase {
+        LivePhase::Enumerating => {
+            format!("enumerating • {} files found", totals.enumerated_files)
+        }
+        LivePhase::Comparing => format!(
+            "comparing • {} files found • {} to copy",
+            totals.enumerated_files, totals.manifest_files
+        ),
+        LivePhase::Copying => format!(
+            "copying • {}/{} files • {}",
+            totals.files,
+            totals.manifest_files,
+            format_bytes(totals.bytes)
+        ),
+    }
+}
+
+/// The live status row: one `ProgressBar` on stderr plus the task that
+/// drains the transfer's progress lane into it. While this is alive it
+/// is the only writer of transfer-time stderr — anything that must
+/// print goes through [`ProgressBar::println`] / `suspend`, never raw
+/// `eprintln!` (that is what scrolled the pre-clp spinner off-row).
+struct LiveProgressRow {
+    bar: ProgressBar,
+    consumer: JoinHandle<()>,
+}
+
+impl LiveProgressRow {
+    /// Build the row and the sink the session reports into. A local
+    /// session runs both roles in this process, so this ONE sink covers
+    /// enumeration, diff, and apply events, and this ONE task consumes
+    /// them.
+    fn start(mirror: bool, src_path: &Path, dest_path: &Path) -> (RemoteTransferProgress, Self) {
+        let bar = ProgressBar::new_spinner();
+        bar.set_style(
+            ProgressStyle::with_template("{spinner} {msg}")
+                .unwrap()
+                .tick_strings(&["-", "\\", "|", "/"]),
+        );
+        bar.enable_steady_tick(Duration::from_millis(120));
+        // Until the first event lands the row still says what is running.
+        bar.set_message(format!(
+            "{} {} → {}",
+            if mirror { "Mirroring" } else { "Copying" },
+            src_path.display(),
+            dest_path.display()
+        ));
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ProgressEvent>();
+        let render_bar = bar.clone();
+        let consumer = tokio::spawn(async move {
+            let mut state = LiveRowState::default();
+            let mut pending_repaint = false;
+            let mut ticker = interval(ROW_REFRESH);
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    // Biased: drain the lane ahead of repainting, so a
+                    // producer never waits on the renderer.
+                    biased;
+                    event = rx.recv() => match event {
+                        Some(event) => {
+                            state.apply(&event);
+                            pending_repaint = true;
+                        }
+                        None => break,
+                    },
+                    _ = ticker.tick() => {
+                        if pending_repaint {
+                            render_bar.set_message(render_live_row(&state));
+                            pending_repaint = false;
+                        }
+                    }
+                }
+            }
+            if pending_repaint {
+                render_bar.set_message(render_live_row(&state));
+            }
+        });
+
+        (RemoteTransferProgress::new(tx), Self { bar, consumer })
+    }
+
+    /// Let the consumer drain, then clear the row so the summary owns
+    /// the terminal (the pre-clp `finish_and_clear`, unchanged).
+    async fn finish(self) {
+        let abort = self.consumer.abort_handle();
+        if tokio::time::timeout(ROW_DRAIN_GRACE, self.consumer)
+            .await
+            .is_err()
+        {
+            // A sink clone outlived the session; stop rendering rather
+            // than hold the exit open.
+            abort.abort();
+        }
+        self.bar.finish_and_clear();
+    }
 }
 
 fn build_local_options(
@@ -389,4 +541,130 @@ fn print_summary_json(
         "outcome": outcome,
     });
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
+}
+
+#[cfg(test)]
+mod live_row_tests {
+    use super::*;
+
+    fn fold(events: &[ProgressEvent]) -> LiveRowState {
+        let mut state = LiveRowState::default();
+        for event in events {
+            state.apply(event);
+        }
+        state
+    }
+
+    /// Before the diff has decided anything, the row reports the source
+    /// walk — the count that used to arrive as a raw stderr line.
+    #[test]
+    fn enumerating_row_reports_the_walk_count() {
+        let state = fold(&[
+            ProgressEvent::Enumerated { files: 900 },
+            ProgressEvent::Enumerated { files: 100 },
+        ]);
+        assert_eq!(state.phase, LivePhase::Enumerating);
+        assert_eq!(render_live_row(&state), "enumerating • 1000 files found");
+    }
+
+    /// Once the destination diff reports needed files, the row shows the
+    /// walk count and the transfer denominator side by side — the walk
+    /// lane must not inflate the denominator.
+    #[test]
+    fn comparing_row_reports_walk_and_needed_counts() {
+        let state = fold(&[
+            ProgressEvent::Enumerated { files: 1000 },
+            ProgressEvent::ManifestBatch {
+                files: 12,
+                bytes: 4096,
+            },
+        ]);
+        assert_eq!(state.phase, LivePhase::Comparing);
+        assert_eq!(
+            render_live_row(&state),
+            "comparing • 1000 files found • 12 to copy"
+        );
+    }
+
+    /// The copy row: files completed over files needed, plus bytes
+    /// written. Bytes ride `Payload` only (the w6-1 contract), so the
+    /// pair below counts one file and its bytes exactly once.
+    #[test]
+    fn copying_row_reports_completed_of_needed_and_bytes() {
+        let state = fold(&[
+            ProgressEvent::Enumerated { files: 3 },
+            ProgressEvent::ManifestBatch {
+                files: 2,
+                bytes: 2048,
+            },
+            ProgressEvent::Payload {
+                files: 0,
+                bytes: 1024,
+            },
+            ProgressEvent::FileComplete {
+                path: "a.txt".into(),
+            },
+            ProgressEvent::Payload {
+                files: 0,
+                bytes: 1024,
+            },
+            ProgressEvent::FileComplete {
+                path: "b.txt".into(),
+            },
+        ]);
+        assert_eq!(state.phase, LivePhase::Copying);
+        assert_eq!(render_live_row(&state), "copying • 2/2 files • 2.00 KiB");
+    }
+
+    /// pfc-2 (D-2026-07-30-1): a file whose write failed is contained
+    /// and never reports a completion, while its bytes were already
+    /// reported. The row shows the honest completed count.
+    #[test]
+    fn contained_file_failure_is_not_counted_complete() {
+        let state = fold(&[
+            ProgressEvent::ManifestBatch {
+                files: 2,
+                bytes: 200,
+            },
+            ProgressEvent::Payload {
+                files: 0,
+                bytes: 100,
+            },
+            ProgressEvent::FileComplete {
+                path: "ok.txt".into(),
+            },
+            ProgressEvent::Payload {
+                files: 0,
+                bytes: 100,
+            },
+        ]);
+        assert_eq!(render_live_row(&state), "copying • 1/2 files • 200 B");
+    }
+
+    /// The phase never regresses: a local session interleaves the source
+    /// walk with the destination's diff and applies, so enumeration
+    /// events keep arriving after the first byte lands.
+    #[test]
+    fn phase_never_moves_backwards() {
+        let state = fold(&[
+            ProgressEvent::ManifestBatch {
+                files: 1,
+                bytes: 10,
+            },
+            ProgressEvent::Payload {
+                files: 0,
+                bytes: 10,
+            },
+            ProgressEvent::FileComplete {
+                path: "a.txt".into(),
+            },
+            ProgressEvent::Enumerated { files: 5 },
+            ProgressEvent::ManifestBatch {
+                files: 1,
+                bytes: 10,
+            },
+        ]);
+        assert_eq!(state.phase, LivePhase::Copying);
+        assert_eq!(render_live_row(&state), "copying • 1/2 files • 10 B");
+    }
 }

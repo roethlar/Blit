@@ -126,7 +126,18 @@ explicitly-deferred logging epic (F15).
       auto-enabling on TTY regardless of the flag is
       `docs/audit/findings/drift-principles.md`
       (`drift-spinner-vs-quiet-default-decision-conflict`).
-- [ ] **audit-17** Local `copy` aborts the entire transfer on one
+      **Partially addressed by clp-1 (2026-07-31,
+      `docs/plan/CLI_LIVE_PROGRESS.md`):** local sessions with a progress
+      sink attached (any `effective_progress()` run) emit the counts as
+      `ProgressEvent::Enumerated` and print no raw lines; sink-less
+      callers (daemon logs, remote routes, non-TTY without `-p`) keep the
+      unconditional print byte-identically. The remaining open half is
+      the sink-less verbose gate and the remote routes' attachment.
+- [ ] **audit-17** — **owned by `docs/plan/PER_FILE_ERROR_CONTAINMENT.md`
+      (Active): pfc-2 landed single-file containment (mirror sessions);
+      pfc-3 (tar-shard writers) closes exactly this site;
+      pfc-5 extends to non-mirror.** Local `copy` aborts the entire
+      transfer on one
       filename the destination filesystem rejects, instead of
       skipping/warning and continuing. Reported: `blit copy
       /home/michael/ /run/media/michael/8247-7E92/michael -ypv`

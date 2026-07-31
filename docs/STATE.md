@@ -126,12 +126,17 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    source-deletion gate — see plan "pfc-2 landing notes"). **pfc-6
    metadata-only repair added (D-2026-07-31-1)**. Next: clp-1/clp-2
    (D-2026-07-31-2 ordering), then pfc-3..6.
-3. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2):** `-p` is a
-   static spinner that blit-core's unconditional enumeration `eprintln!`
-   scrolls off-row; `-v` changes only the end summary. Two slices (clp-1
-   wiring, clp-2 render) make the flags truthful on one stable row.
-   Runs after pfc-2 lands, before pfc-3..6; the TUI-scale redesign stays
-   a separate queued TODO.
+3. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2):** **clp-1
+   `[x]` landed** — local sessions thread one progress sink through both
+   roles (`ProgressEvent::Enumerated` lane for the walk; as-built note in
+   the plan), the enumeration heartbeat prints nothing when a sink is
+   attached (byte-identical otherwise), and the CLI renders one live
+   status row (phase/files/bytes) instead of the dead spinner.
+   **Owner: one real-TTY `blit mirror -p` eyeball is the only unverified
+   surface** (harness runs captured stderr). clp-2 (render polish +
+   review residue: log-backend routing through the row, drain-loop
+   coverage, redirected-stderr posture) next after cr-pfc2-1's fix;
+   then pfc-3..6. TUI-scale redesign stays a separate queued TODO.
 4. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft, D-2026-07-13-2):** local
    apply ships one worker and does not scale; resume only under an active plan.
 5. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4

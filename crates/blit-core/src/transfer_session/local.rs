@@ -143,7 +143,17 @@ pub struct LocalMirrorOptions {
     pub filter: FileFilter,
     pub mirror: bool,
     pub dry_run: bool,
+    /// Presentation intent only (the caller decided to show progress).
+    /// The event lane is `progress_events`; a caller that wants live
+    /// events must attach one.
     pub progress: bool,
+    /// clp-1: the caller's live-progress lane. A local session runs BOTH
+    /// roles in this process, so ONE sink covers both: source-side
+    /// enumeration liveness and the destination's diff/apply events land
+    /// on the caller's single channel, with the caller as the only
+    /// consumer. `None` (TUI, tests, every non-`-p` run) keeps the
+    /// session event-free and the enumeration lines on stderr.
+    pub progress_events: Option<RemoteTransferProgress>,
     pub verbose: bool,
     pub perf_history: bool,
     /// Skip any file the destination already has, regardless of
@@ -181,6 +191,7 @@ impl Default for LocalMirrorOptions {
             mirror: false,
             dry_run: false,
             progress: false,
+            progress_events: None,
             verbose: false,
             perf_history: true,
             ignore_existing: false,
@@ -582,8 +593,16 @@ pub async fn run_local_session(
     // Source chain: fs source → user filter (the universal
     // FilteredSource chokepoint, same as push/pull) → dest-subtree
     // exclusion when dst nests inside src.
-    let fs_source: Arc<dyn TransferSource> =
-        Arc::new(FsTransferSource::new(src_root.to_path_buf()));
+    //
+    // clp-1: the fs source carries the caller's progress lane, so its
+    // enumeration liveness reports as events instead of raw stderr
+    // lines that would fight the caller's live row. `prepare_source`
+    // shares this instance and never scans, so the handle is inert
+    // there.
+    let fs_source: Arc<dyn TransferSource> = Arc::new(
+        FsTransferSource::new(src_root.to_path_buf())
+            .with_progress(options.progress_events.clone()),
+    );
     let filtered: Arc<dyn TransferSource> = Arc::new(FilteredSource::new(
         Arc::clone(&fs_source),
         options.filter.clone_without_cache(),
@@ -663,6 +682,12 @@ pub async fn run_local_session(
         receiver_capacity: None,
         instruments: DestinationInstruments {
             small_file_probe: SmallFileProbe::disabled(),
+            // clp-1: the destination end of the caller's one lane — its
+            // diff reports the files-to-transfer denominator and the
+            // local apply pipeline reports bytes and per-file
+            // completions (a file the sink contained as failed never
+            // completes here, D-2026-07-30-1).
+            progress: options.progress_events.clone(),
             ..Default::default()
         },
         local_apply: Some(local_apply),
@@ -1054,6 +1079,64 @@ mod tests {
                 .len(),
             1_048_577
         );
+    }
+
+    /// clp-1 wiring: a local session with a progress sink attached
+    /// delivers BOTH roles' events onto the caller's one channel — the
+    /// destination diff's transfer denominator and the apply pipeline's
+    /// per-file completions and bytes. Without the wiring the session
+    /// runs with `progress: None` and the caller's row has nothing to
+    /// render.
+    #[tokio::test]
+    async fn progress_sink_receives_both_roles_events() {
+        use crate::remote::transfer::{ProgressEvent, ProgressTotals};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("mkdir src");
+        std::fs::write(src_root.join("a.txt"), b"first").expect("write");
+        std::fs::write(src_root.join("b.txt"), b"second").expect("write");
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ProgressEvent>();
+        let summary = run_local_session(
+            &src_root,
+            &dst_root,
+            LocalMirrorOptions {
+                progress: true,
+                progress_events: Some(RemoteTransferProgress::new(tx)),
+                perf_history: false,
+                ..LocalMirrorOptions::default()
+            },
+        )
+        .await
+        .expect("local session with progress attached");
+        assert_eq!(summary.copied_files, 2);
+
+        let mut totals = ProgressTotals::default();
+        let mut completed: Vec<String> = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let ProgressEvent::FileComplete { path } = &event {
+                completed.push(path.clone());
+            }
+            totals.apply(&event);
+        }
+        assert_eq!(
+            totals.manifest_files, 2,
+            "the destination diff reports the files it needs"
+        );
+        assert_eq!(
+            totals.enumerated_files, 2,
+            "the source-side enumeration heartbeat reports through the same sink"
+        );
+        completed.sort();
+        assert_eq!(
+            completed,
+            vec!["a.txt".to_string(), "b.txt".to_string()],
+            "the apply pipeline reports each finished file"
+        );
+        assert_eq!(totals.files, 2);
+        assert_eq!(totals.bytes, 11, "bytes ride the Payload lane only");
     }
 
     #[test]
