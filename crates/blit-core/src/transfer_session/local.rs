@@ -37,6 +37,7 @@ use crate::remote::transfer::source::{
 use crate::remote::transfer::{RemoteTransferProgress, SmallFileProbe};
 use crate::transfer_plan::PlanOptions;
 
+use super::phase_probe::{LocalPhase, LocalPhaseProbe};
 use super::transport::in_process_pair;
 use super::{
     run_destination, run_source, DestinationInstruments, DestinationSessionConfig,
@@ -182,6 +183,11 @@ pub struct LocalMirrorOptions {
     /// Discard writes (NullSink). Measures source read + pipeline
     /// throughput.
     pub null_sink: bool,
+    /// ls-1 wall-clock breakdown. Default permits environment activation
+    /// (`BLIT_TRACE_LOCAL_PHASES=1` + `BLIT_TRACE_RUN_ID`) and is otherwise
+    /// inert; a caller that needs deterministic behaviour installs its own
+    /// with [`LocalPhaseProbe::capture`] or [`LocalPhaseProbe::disabled`].
+    pub phase_probe: LocalPhaseProbe,
 }
 
 impl Default for LocalMirrorOptions {
@@ -204,6 +210,7 @@ impl Default for LocalMirrorOptions {
             debug_mode: false,
             resume: false,
             null_sink: false,
+            phase_probe: LocalPhaseProbe::default(),
         }
     }
 }
@@ -313,6 +320,10 @@ pub struct LocalApply {
     pub(super) unreadable: Arc<StdMutex<Vec<String>>>,
     /// Counters the entry folds into [`LocalMirrorSummary`] afterward.
     pub(super) stats: Arc<LocalApplyStats>,
+    /// ls-1 wall-clock breakdown, resolved once by the session entry. Rides
+    /// here because `LocalApply` is the one value threaded through every
+    /// destination-side local phase (diff, plan, apply, delete).
+    pub(super) phase_probe: LocalPhaseProbe,
 }
 
 /// Destination-side counters for the local summary. Atomics because
@@ -342,6 +353,8 @@ pub struct LocalApplyStats {
 pub(super) struct LocalApplyRun {
     payload_tx: Option<mpsc::Sender<TransferPayload>>,
     pipeline: Option<tokio::task::JoinHandle<Result<SinkOutcome>>>,
+    /// ls-1: times the drain in [`LocalApplyRun::finish`].
+    phase_probe: LocalPhaseProbe,
 }
 
 impl Drop for LocalApplyRun {
@@ -390,6 +403,7 @@ impl LocalApply {
         LocalApplyRun {
             payload_tx: Some(payload_tx),
             pipeline: Some(pipeline),
+            phase_probe: self.phase_probe.clone(),
         }
     }
 
@@ -454,14 +468,23 @@ impl LocalApplyRun {
     /// Close the queue and join the pipeline. Returns the write
     /// totals; surfaces the pipeline's own error as the root cause.
     pub(super) async fn finish(mut self) -> Result<SinkOutcome> {
+        // ls-1: dropping the sender closes the queue, so everything after
+        // this point is the pipeline draining work the diff already handed
+        // it — see `LocalPhase::Apply` for what that does and does not mean.
         self.payload_tx.take();
+        let drain_started = self.phase_probe.is_enabled().then(Instant::now);
         let pipeline = self
             .pipeline
             .take()
             .expect("local apply pipeline joined twice");
-        pipeline
+        let outcome = pipeline
             .await
-            .map_err(|err| eyre!("local apply pipeline panicked: {err}"))?
+            .map_err(|err| eyre!("local apply pipeline panicked: {err}"));
+        if let Some(started) = drain_started {
+            self.phase_probe
+                .record(LocalPhase::Apply, started.elapsed());
+        }
+        outcome?
     }
 }
 
@@ -578,6 +601,9 @@ pub async fn run_local_session(
     options: LocalMirrorOptions,
 ) -> Result<LocalMirrorSummary> {
     let started = Instant::now();
+    // ls-1: resolve the probe once, here, so every phase folds into one
+    // accumulator and the environment is read exactly once per session.
+    let phase_probe = options.phase_probe.clone().or_from_env();
 
     if !src_root.exists() {
         return Err(eyre!("source path does not exist: {}", src_root.display()));
@@ -629,7 +655,8 @@ pub async fn run_local_session(
     // there.
     let fs_source: Arc<dyn TransferSource> = Arc::new(
         FsTransferSource::new(src_root.to_path_buf())
-            .with_progress(options.progress_events.clone()),
+            .with_progress(options.progress_events.clone())
+            .with_phase_probe(phase_probe.clone()),
     );
     let filtered: Arc<dyn TransferSource> = Arc::new(FilteredSource::new(
         Arc::clone(&fs_source),
@@ -680,6 +707,7 @@ pub async fn run_local_session(
         },
         unreadable: Arc::clone(&unreadable),
         stats: Arc::clone(&stats),
+        phase_probe: phase_probe.clone(),
     };
 
     let source_cfg = SourceSessionConfig {
@@ -737,6 +765,9 @@ pub async fn run_local_session(
             DestinationTarget::Fixed(dst_root.to_path_buf())
         ),
     );
+    // ls-1: emit before the fault match, so a failed session still yields its
+    // breakdown — a run that died slowly is exactly the one worth timing.
+    phase_probe.emit(started.elapsed());
     // The destination is the scorer and holds the primary fault
     // (refusals, apply failures, delete failures); a source-only
     // failure (scan abort) surfaces when the destination succeeded.
@@ -994,6 +1025,7 @@ mod tests {
             sink_workers: 1,
             unreadable: Arc::clone(&unreadable),
             stats: Arc::new(LocalApplyStats::default()),
+            phase_probe: LocalPhaseProbe::disabled(),
         };
         let source_cfg = SourceSessionConfig {
             hello: HelloConfig::default(),
@@ -1592,6 +1624,7 @@ mod tests {
             sink_workers: 1,
             unreadable: Arc::default(),
             stats: Arc::new(LocalApplyStats::default()),
+            phase_probe: LocalPhaseProbe::disabled(),
         };
         let open = SessionOpen {
             initiator_role: TransferRole::Source as i32,

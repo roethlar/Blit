@@ -15,12 +15,14 @@
 
 mod data_plane;
 pub mod local;
+pub mod phase_probe;
 pub mod transport;
 
 pub use local::{
     run_local_session, LocalCompareMode, LocalMirrorDeleteScope, LocalMirrorOptions,
     LocalMirrorSummary, TransferOutcome,
 };
+pub use phase_probe::{LocalPhase, LocalPhaseProbe, LocalPhaseReport, PhaseAggregate};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -29,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
 
 use eyre::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -4011,6 +4014,13 @@ async fn destination_session_inner(
             .as_ref()
             .is_none_or(local::LocalApply::applies_changes),
         repaired: AtomicU64::new(0),
+        // A remote destination has no local-phase probe; ls-1 measures the
+        // local route only, so the probe comes from `LocalApply` when one is
+        // present and is inert otherwise.
+        phase_probe: local_apply
+            .as_ref()
+            .map(|apply| apply.phase_probe.clone())
+            .unwrap_or_else(LocalPhaseProbe::disabled),
     });
 
     // otp-11: the LOCAL carrier's apply pipeline — spawned before the
@@ -4742,16 +4752,24 @@ async fn destination_session_inner(
                             p.report_delete_begin();
                         }
                     }
+                    // ls-1: the delete pass owns one blocking call, so its
+                    // span is the whole spawn_blocking body.
+                    let delete_probe = local_apply
+                        .as_ref()
+                        .map(|la| la.phase_probe.clone())
+                        .unwrap_or_else(LocalPhaseProbe::disabled);
                     let mut pass = tokio::task::spawn_blocking(move || {
-                        mirror_delete_pass(
-                            &dst,
-                            &files,
-                            &filter,
-                            tolerate_nonempty,
-                            canonical.as_deref(),
-                            &abort,
-                            execute,
-                        )
+                        delete_probe.measure(LocalPhase::Delete, || {
+                            mirror_delete_pass(
+                                &dst,
+                                &files,
+                                &filter,
+                                tolerate_nonempty,
+                                canonical.as_deref(),
+                                &abort,
+                                execute,
+                            )
+                        })
                     });
                     // codex otp-10b-2 F1: a PEER fault mid-purge (a
                     // CancelJob on the serving source, a source-side
@@ -4937,8 +4955,24 @@ async fn diff_chunk_and_apply_local(
     // this one plans and applies them in-process. The resume flag is
     // meaningless here (the local carrier's block phase is
     // sink-level).
+    // ls-1: the compare span. Attribute repair happens INSIDE this call
+    // (pfc-6 repairs in place at diff time), so its own measured total is
+    // subtracted below rather than double-counted here — otherwise a
+    // repair-heavy run would report the same nanoseconds twice.
+    let compare_started = local.phase_probe.is_enabled().then(Instant::now);
+    let repair_before = local.phase_probe.total(LocalPhase::AttributeRepair);
     let needed =
         diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts, repair).await?;
+    if let Some(started) = compare_started {
+        let repaired_here = local
+            .phase_probe
+            .total(LocalPhase::AttributeRepair)
+            .saturating_sub(repair_before);
+        local.phase_probe.record(
+            LocalPhase::Compare,
+            started.elapsed().saturating_sub(repaired_here),
+        );
+    }
 
     let fresh: Vec<FileHeader> = needed
         .into_iter()
@@ -4963,7 +4997,13 @@ async fn diff_chunk_and_apply_local(
             }),
         );
     }
+    let plan_started = local.phase_probe.is_enabled().then(Instant::now);
     let payloads = local.plan_chunk(fresh).await?;
+    if let Some(started) = plan_started {
+        local
+            .phase_probe
+            .record(LocalPhase::Plan, started.elapsed());
+    }
     for payload in payloads {
         let queued = match run.as_ref() {
             Some(r) => r.queue(payload).await.is_ok(),
@@ -5225,6 +5265,11 @@ enum DiffVerdict {
 struct AttributeRepair {
     enabled: bool,
     repaired: AtomicU64,
+    /// ls-1: repairs run inside the diff, so their cost is timed here and
+    /// subtracted from the enclosing compare span rather than being folded
+    /// into it. The field check's 5445 repairs are the reason this is a
+    /// phase of its own.
+    phase_probe: LocalPhaseProbe,
 }
 
 /// Does the destination need this manifest entry? Stats its own file
@@ -5317,7 +5362,14 @@ fn destination_needs(
             &dst,
             resume_eligible,
             &repair.repaired,
-            || crate::windows_metadata::repair_attributes(&dst, header.windows_metadata.as_ref()),
+            || {
+                repair.phase_probe.measure(LocalPhase::AttributeRepair, || {
+                    crate::windows_metadata::repair_attributes(
+                        &dst,
+                        header.windows_metadata.as_ref(),
+                    )
+                })
+            },
         )),
     }
 }
@@ -6113,6 +6165,7 @@ mod tests {
             &AttributeRepair {
                 enabled: true,
                 repaired: AtomicU64::new(0),
+                phase_probe: LocalPhaseProbe::disabled(),
             },
         )
         .expect_err("a non-Windows destination must reject strict metadata preservation");

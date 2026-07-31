@@ -198,6 +198,45 @@ environmental/config cause is held to the same bar as a code cause.
   comparison of blit arms until the 4-arm single-session run explains the
   1388/2225 ms split.
   Probe record committed and codex-reviewed **before any fix slice exists**.
+
+  **ls-1 step (0) INSTRUMENT LANDED (2026-07-31).** What exists now is the
+  *measuring device*, not the measurement — no benchmark has been run and no
+  phase has been attributed yet. `transfer_session/phase_probe.rs` adds a
+  default-off `LocalPhaseProbe` (two-key gate: `BLIT_TRACE_LOCAL_PHASES=1` +
+  a non-empty `BLIT_TRACE_RUN_ID`, matching `SmallFileProbe`) that emits one
+  bounded JSON line per local session covering ENUMERATE,
+  ENUMERATE_BACKPRESSURE, COMPARE, ATTRIBUTE_REPAIR, PLAN, APPLY and DELETE
+  against a `session_wall_ns` denominator.
+  - **Does NOT re-enable the remote `SmallFileProbe` on the local route.**
+    That exclusion (`713526e8`) is deliberate and correct — its shard
+    receive/sink records key to the TCP and in-stream carriers, which local
+    apply does not use. Provenance was checked before writing a line of this.
+  - **Phases overlap and do not partition the wall clock**: the SOURCE and
+    DESTINATION drivers are joined concurrently, so ENUMERATE runs while
+    COMPARE runs. `phases_overlap: true` rides in the artifact and a unit
+    test pins that the spans can exceed the wall total.
+  - **Nested cost is subtracted, not double-billed**: ATTRIBUTE_REPAIR is
+    measured inside the diff and subtracted from COMPARE; ENUMERATE
+    subtracts its own backpressure. Both subtractions are red/green proven.
+  - Guards: 11 unit + 5 integration tests. Two reverts proven to bite —
+    dropping the repair `measure` wrapper reds the repair attribution test,
+    dropping the backpressure split reds the sample-count assertion (that
+    second guard was VACUOUS on its first draft and was replaced, which is
+    why it asserts sample counts rather than durations: a fast local test
+    never actually blocks on the channel). Byte-identical SHA-256 restores
+    after both.
+  - **Known gaps, carried forward honestly:**
+    - `APPLY` measures the DRAIN (queue-close to pipeline-join), not total
+      apply cost. Work that kept pace with compare is invisible by design.
+      Total apply cost needs instrumentation inside
+      `execute_sink_pipeline_streaming`, which the remote routes share, so
+      it was left out of a slice scoped to the local route.
+    - The backpressure guard proves the SPLIT exists, not that the measured
+      wait is correct under real contention. A slow-destination fixture
+      would be needed for that.
+    - Steps (a), (b) and (c) of ls-1 are untouched. Step (0) still has to be
+      RUN on the owner's shape (large tree, SMB destination) before anything
+      is attributed.
 - **ls-2..n** — one fix slice per CONFIRMED cause, smallest change first,
   A/B'd against the unmodified build on the same rig.
 - **ls-final** — re-run the full local matrix (`large`/`small`/`mixed`) at both

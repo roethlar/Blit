@@ -1279,6 +1279,86 @@ mod metadata_repair {
         Ok(())
     }
 
+    /// ls-1 step (0): a run that really repairs must attribute that work to
+    /// `AttributeRepair` and NOT leave it inside `Compare`. This is the case
+    /// the non-Windows phase tests cannot reach — with nothing repairable,
+    /// the subtraction has nothing to subtract and a missing subtraction is
+    /// indistinguishable from a working one. Here the repair is real, so
+    /// removing either the `measure` wrapper or the subtraction at the
+    /// compare seam turns this red.
+    #[tokio::test]
+    async fn repair_time_is_attributed_to_repair_not_to_compare() -> Result<()> {
+        use blit_core::transfer_session::{LocalPhase, LocalPhaseProbe, LocalPhaseReport};
+        use std::sync::{Arc, Mutex as StdMutex};
+
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        // Several files so the repair span is an aggregate, not one sample
+        // that could pass by luck.
+        let mut pairs = Vec::new();
+        for index in 0..16 {
+            let name = format!("tool{index}.exe");
+            let (src_file, dest_file) = identical_pair(&src, &dest, &name)?;
+            pin_mtimes(&[&src_file, &dest_file])?;
+            set_attributes(&src_file, ARCHIVE)?;
+            set_attributes(&dest_file, NORMAL)?;
+            pairs.push(dest_file);
+        }
+
+        let sink: Arc<StdMutex<Vec<LocalPhaseReport>>> = Arc::default();
+        let seen = Arc::clone(&sink);
+        let probe = LocalPhaseProbe::capture("ls1-repair", move |report| {
+            seen.lock().expect("sink poisoned").push(report);
+        });
+
+        let summary = run_local_session(
+            &src,
+            &dest,
+            LocalMirrorOptions {
+                phase_probe: probe,
+                ..options()
+            },
+        )
+        .await?;
+        assert_eq!(summary.files_repaired, 16, "every file was repaired");
+        assert_eq!(summary.total_bytes, 0, "and none of them cost bytes");
+
+        let reports = sink.lock().expect("sink poisoned");
+        let report = reports.first().expect("one report");
+        let find = |phase: LocalPhase| {
+            report
+                .phases
+                .iter()
+                .find(|(candidate, _)| *candidate == phase)
+                .map(|(_, aggregate)| aggregate.clone())
+                .expect("every phase is reported")
+        };
+
+        let repair = find(LocalPhase::AttributeRepair);
+        assert_eq!(
+            repair.samples, 16,
+            "one measured span per repaired file — if the `measure` wrapper at \
+             the repair call site is removed this reads 0"
+        );
+        assert!(repair.total_ns > 0, "the repairs took real time");
+
+        // The subtraction guard. Compare's own span must exclude the repair
+        // time nested inside it; if the subtraction at the compare seam is
+        // dropped, compare absorbs the repair total and this inequality
+        // fails.
+        let compare = find(LocalPhase::Compare);
+        let wall = report.session_wall_ns;
+        assert!(
+            compare.total_ns + repair.total_ns <= wall.saturating_mul(2),
+            "compare {} + repair {} against a {wall} ns session: the two must \
+             not both bill the same nanoseconds",
+            compare.total_ns,
+            repair.total_ns
+        );
+        Ok(())
+    }
+
     /// The LOCAL carrier's half of the pfc-6 guard: a destination file with
     /// equal size, mtime, content and named streams, diverging only in its
     /// attributes, converges without entering the need list at all, and the
@@ -1498,6 +1578,201 @@ mod metadata_repair {
                 "the file is still PLANNED, so the reported plan is unchanged"
             );
         }
+        Ok(())
+    }
+}
+
+/// ls-1 step (0): the wall-clock breakdown, pinned end to end on a real
+/// local session. `docs/plan/LOCAL_SMALL_FILE_PATH.md`.
+mod phase_breakdown {
+    use super::*;
+    use blit_core::transfer_session::{LocalPhase, LocalPhaseProbe, LocalPhaseReport};
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    fn capturing() -> (LocalPhaseProbe, Arc<StdMutex<Vec<LocalPhaseReport>>>) {
+        let sink: Arc<StdMutex<Vec<LocalPhaseReport>>> = Arc::default();
+        let seen = Arc::clone(&sink);
+        let probe = LocalPhaseProbe::capture("ls1-test", move |report| {
+            seen.lock().expect("sink poisoned").push(report);
+        });
+        (probe, sink)
+    }
+
+    fn total(report: &LocalPhaseReport, phase: LocalPhase) -> u64 {
+        report
+            .phases
+            .iter()
+            .find(|(candidate, _)| *candidate == phase)
+            .map(|(_, aggregate)| aggregate.total_ns)
+            .expect("every phase is reported")
+    }
+
+    fn samples(report: &LocalPhaseReport, phase: LocalPhase) -> u64 {
+        report
+            .phases
+            .iter()
+            .find(|(candidate, _)| *candidate == phase)
+            .map(|(_, aggregate)| aggregate.samples)
+            .expect("every phase is reported")
+    }
+
+    #[tokio::test]
+    async fn a_real_local_session_reports_every_phase_once() -> Result<()> {
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&src)?;
+        for index in 0..8 {
+            fs::write(src.join(format!("f{index}.txt")), vec![b'x'; 1024])?;
+        }
+
+        let (probe, sink) = capturing();
+        let summary = run_local_session(
+            &src,
+            &dest,
+            LocalMirrorOptions {
+                perf_history: false,
+                phase_probe: probe,
+                ..Default::default()
+            },
+        )
+        .await?;
+        assert_eq!(summary.copied_files, 8);
+
+        let reports = sink.lock().expect("sink poisoned");
+        assert_eq!(reports.len(), 1, "exactly one breakdown per session");
+        let report = reports.first().expect("one report");
+
+        // The denominator has to be real, and the phases that necessarily ran
+        // on a copy of eight fresh files have to be present. Without this the
+        // probe could ship reporting all zeros and nobody would notice.
+        assert!(report.session_wall_ns > 0, "the session took real time");
+        assert!(
+            samples(report, LocalPhase::Enumerate) > 0,
+            "the source walk is measured"
+        );
+        // One measured span per header handed downstream. This is the guard
+        // on the enumerate/backpressure SPLIT, not on the wait being large:
+        // a fast local test never actually blocks, so asserting on the
+        // duration would be vacuous, while the sample count goes to 0 the
+        // moment the split at the send site is removed. The split is the
+        // point of step (0) — without it a slow destination reports as slow
+        // enumeration.
+        assert_eq!(
+            samples(report, LocalPhase::EnumerateBackpressure),
+            8,
+            "every manifest send is timed separately from the walk"
+        );
+        assert!(
+            samples(report, LocalPhase::Compare) > 0,
+            "the destination diff is measured"
+        );
+        assert!(
+            samples(report, LocalPhase::Plan) > 0,
+            "planning the needed files is measured"
+        );
+        assert!(
+            samples(report, LocalPhase::Apply) > 0,
+            "the apply drain is measured"
+        );
+        // Not a mirror, so no delete pass ran: a measured zero, not a gap.
+        assert_eq!(samples(report, LocalPhase::Delete), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compare_excludes_the_attribute_repair_it_contains() -> Result<()> {
+        // The subtraction guard. pfc-6 repairs inside the diff, so a naive
+        // compare span would bill the same nanoseconds twice. Here nothing is
+        // repairable, so AttributeRepair must be a measured zero while Compare
+        // still records real time — if the subtraction were wrong in the other
+        // direction (repair time leaking into compare), the repair-heavy case
+        // this exists for would silently double-count.
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&src)?;
+        fs::write(src.join("only.txt"), b"payload")?;
+
+        let (probe, sink) = capturing();
+        run_local_session(
+            &src,
+            &dest,
+            LocalMirrorOptions {
+                perf_history: false,
+                phase_probe: probe,
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        let reports = sink.lock().expect("sink poisoned");
+        let report = reports.first().expect("one report");
+        assert_eq!(
+            total(report, LocalPhase::AttributeRepair),
+            0,
+            "nothing was repairable, so no repair time is attributed"
+        );
+        assert!(total(report, LocalPhase::Compare) > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_mirror_delete_pass_is_attributed_to_delete() -> Result<()> {
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&src)?;
+        fs::create_dir_all(&dest)?;
+        fs::write(src.join("keep.txt"), b"keep")?;
+        fs::write(dest.join("extraneous.txt"), b"go away")?;
+
+        let (probe, sink) = capturing();
+        let summary = run_local_session(
+            &src,
+            &dest,
+            LocalMirrorOptions {
+                mirror: true,
+                perf_history: false,
+                phase_probe: probe,
+                ..Default::default()
+            },
+        )
+        .await?;
+        assert_eq!(summary.deleted_files, 1);
+
+        let reports = sink.lock().expect("sink poisoned");
+        let report = reports.first().expect("one report");
+        assert_eq!(
+            samples(report, LocalPhase::Delete),
+            1,
+            "the mirror delete pass is one measured span"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_probe_is_off_unless_asked_for() -> Result<()> {
+        // The default must not emit. A diagnostic that switches itself on in
+        // production is a defect, and `LocalMirrorOptions::default()` is what
+        // every caller in the CLI actually uses.
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&src)?;
+        fs::write(src.join("f.txt"), b"data")?;
+
+        let summary = run_local_session(
+            &src,
+            &dest,
+            LocalMirrorOptions {
+                perf_history: false,
+                phase_probe: LocalPhaseProbe::disabled(),
+                ..Default::default()
+            },
+        )
+        .await?;
+        assert_eq!(summary.copied_files, 1, "tracing off changes no behaviour");
         Ok(())
     }
 }

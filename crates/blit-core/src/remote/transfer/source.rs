@@ -10,6 +10,7 @@ use crate::fs_enum::FileFilter;
 use crate::generated::FileHeader;
 use crate::remote::transfer::abort_on_drop::AbortOnDrop;
 use crate::remote::transfer::payload::{PreparedPayload, TransferPayload};
+use crate::transfer_session::phase_probe::{LocalPhase, LocalPhaseProbe};
 
 /// All tasks that produce one streamed manifest. Decorators append their
 /// forwarding or hashing tasks instead of detaching them, so a failed session
@@ -198,6 +199,10 @@ pub struct FsTransferSource {
     /// construction keeps the legacy stderr lines, which are the
     /// daemon's enumeration log.
     progress: Option<crate::remote::transfer::RemoteTransferProgress>,
+    /// ls-1: default-off enumerate timing. Only `run_local_session` attaches
+    /// a live probe; every other construction leaves it disabled, so the
+    /// remote routes that share this source are byte-identical.
+    phase_probe: LocalPhaseProbe,
 }
 
 impl FsTransferSource {
@@ -205,7 +210,15 @@ impl FsTransferSource {
         Self {
             root,
             progress: None,
+            phase_probe: LocalPhaseProbe::disabled(),
         }
+    }
+
+    /// Attach the ls-1 phase probe. `LocalPhaseProbe::disabled()` (the
+    /// default) leaves enumeration behavior and cost unchanged.
+    pub fn with_phase_probe(mut self, phase_probe: LocalPhaseProbe) -> Self {
+        self.phase_probe = phase_probe;
+        self
     }
 
     /// Attach (or clear) the enumeration progress lane — see the
@@ -232,6 +245,7 @@ impl TransferSource for FsTransferSource {
             unreadable_paths,
             true,
             EnumerationHeartbeat::new(self.progress.clone()),
+            self.phase_probe.clone(),
         );
         (headers, SourceScan::new(task))
     }
@@ -247,6 +261,7 @@ impl TransferSource for FsTransferSource {
             unreadable_paths,
             false,
             EnumerationHeartbeat::new(self.progress.clone()),
+            self.phase_probe.clone(),
         );
         (headers, SourceScan::new(task))
     }
@@ -413,6 +428,7 @@ fn spawn_manifest_task(
     unreadable: Arc<Mutex<Vec<String>>>,
     preserve_windows_metadata: bool,
     mut heartbeat: EnumerationHeartbeat,
+    phase_probe: LocalPhaseProbe,
 ) -> (
     mpsc::Receiver<FileHeader>,
     tokio::task::JoinHandle<Result<u64>>,
@@ -427,6 +443,10 @@ fn spawn_manifest_task(
         heartbeat.begin();
         let mut enumerated: u64 = 0;
         let unreadable = unreadable;
+        // ls-1: the walk's own wall clock. The bounded send below is measured
+        // separately and subtracted, so this reads as enumeration work rather
+        // than as whatever the destination is doing downstream.
+        let walk_started = phase_probe.is_enabled().then(std::time::Instant::now);
         let scan_outcome = enumerator.enumerate_local_streaming_capturing(&root, |entry| {
             if let EntryKind::File { size } = entry.kind {
                 let rel = crate::path_posix::relative_path_to_posix(&entry.relative_path);
@@ -466,9 +486,11 @@ fn spawn_manifest_task(
                 ) else {
                     return Ok(());
                 };
-                manifest_tx
-                    .blocking_send(header)
-                    .map_err(|_| eyre!("failed to queue manifest entry"))?;
+                phase_probe.measure(LocalPhase::EnumerateBackpressure, || {
+                    manifest_tx
+                        .blocking_send(header)
+                        .map_err(|_| eyre!("failed to queue manifest entry"))
+                })?;
                 enumerated += 1;
                 // R46-F4: liveness to stderr, never stdout — the CLI's
                 // `--json` modes own stdout. clp-1: with a progress sink
@@ -482,6 +504,18 @@ fn spawn_manifest_task(
                 &unreadable,
                 &suppressed.path,
                 &format!("scan suppressed: {}", suppressed.message),
+            );
+        }
+        if let Some(started) = walk_started {
+            // Walk total minus the send wait already folded into
+            // EnumerateBackpressure. `saturating_sub` because the two clocks
+            // are read independently; a negative remainder would mean the
+            // sends outlasted the walk, which is a measurement fault, not a
+            // negative duration to propagate.
+            let backpressure = phase_probe.total(LocalPhase::EnumerateBackpressure);
+            phase_probe.record(
+                LocalPhase::Enumerate,
+                started.elapsed().saturating_sub(backpressure),
             );
         }
         heartbeat.finish(enumerated);
@@ -969,8 +1003,14 @@ mod enumeration_heartbeat_tests {
     /// Drive the real production scan and return the enumerated count.
     async fn run_scan(root: PathBuf, heartbeat: EnumerationHeartbeat) -> u64 {
         let unreadable: Arc<Mutex<Vec<String>>> = Arc::default();
-        let (mut headers, task) =
-            spawn_manifest_task(root, FileFilter::default(), unreadable, true, heartbeat);
+        let (mut headers, task) = spawn_manifest_task(
+            root,
+            FileFilter::default(),
+            unreadable,
+            true,
+            heartbeat,
+            LocalPhaseProbe::disabled(),
+        );
         let mut streamed = 0u64;
         while headers.recv().await.is_some() {
             streamed += 1;

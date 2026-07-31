@@ -32,20 +32,14 @@ Last updated: 2026-07-31 (pfc-1..6 + clp-1..2 landed; owner field check returned
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
-## Handoff — 2026-07-31 at `a0b5d83d`
-- Done: pfc-1..6 and clp-1..2 landed (8 slices, 2 plans), review program
-  closed (7 range reviews, 11 findings resolved). Owner ran the field check
-  and ruled on it: D-2026-07-31-4 makes local transfer speed priority-1 and
-  flips `LOCAL_SMALL_FILE_PATH.md` Active (Queue 1).
-- Next: scope `ls-1` (the measurement gate) and bring it back for approval
-  before any code; `ls-0` (summary-display fix) is unblocked but unscoped.
-  The pfc Shipped flip remains the owner's alone.
-
-## Handoff — 2026-07-23 at `544adf81`
-- Done: Blit 0.1.1 is publicly released from exact validated candidate
-  `d1f1152d`; current post-release diagnostics and firewall-test work are closed.
-- Next: re-ground `ONE_TRANSFER_PATH`, identify its first unblocked post-release
-  slice, and stop for an approved plan/go before code or hardware work.
+## Handoff — 2026-07-31
+- Done: pfc-1..6 + clp-1..2 landed and reviewed; owner's field check ruled
+  on (D-2026-07-31-4, local speed priority-1); `LOCAL_SMALL_FILE_PATH.md`
+  Active as Queue 1; ls-1 step (0) phase-probe instrument landed and
+  guard-proven.
+- Next: RUN step (0) on the owner's shape (large tree, SMB destination) and
+  attribute the dominant phase; `ls-0` (summary-display fix) is unblocked
+  but unscoped. The pfc Shipped flip remains the owner's alone.
 
 ## Now (active work)
 
@@ -89,6 +83,13 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    convert concurrency into throughput; those numbers are flagged untrusted
    (bi-stable across sessions), which is what `ls-1` exists to settle.
    **`ls-1` is a hard measurement gate — no fix code before it lands.**
+   **ls-1 step (0) instrument landed 2026-07-31**: default-off
+   `LocalPhaseProbe` emits a per-session phase breakdown (enumerate /
+   backpressure / compare / attribute-repair / plan / apply-drain / delete)
+   against a wall denominator; nested costs subtracted, not double-billed;
+   two reverts guard-proven. It is the measuring device only — **no
+   benchmark has been run and no phase is attributed yet.** Known gaps
+   (apply is drain-only; steps a/b/c untouched) in the plan's landing note.
    **`ls-0` (summary-display fix) is carved out** of that gate: display text
    only, cannot move any number ls-1 records. NOT the closed P1 asymmetry
    defect (D-2026-07-22-2); labels deliberately kept apart.
