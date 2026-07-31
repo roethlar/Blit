@@ -44,22 +44,11 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   lifecycle helper, 16 fake-backed cases, real read-only parser check, and
   mutation guards are complete. No external review is pending under
   D-2026-07-23-7. Plan: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md`.
-- **THUNDERBOLT LIFECYCLE ATTRIBUTED (D-2026-07-23-3):** exact instrumented
-  candidate `a3be4a64` completed one 8 GiB Q-to-Nagatha RAM transfer with all
-  hashes matching. Only 13.645 ms was observed outside its 3.587845-second data
-  span: connect + RPC open + establishment totaled 4.687 ms, while rendering
-  through terminal took 0.041 ms. The historical 0.448-second gap did not recur
-  and is outside these fixed product stages. This sample's body rate was 19.153
-  Gb/s versus the prior 35.578 Gb/s, but one observation cannot classify that
-  difference or select a policy change. Cleanup is complete and no repeat is
-  authorized. Evidence: `docs/bench/end-to-end-transfer-latency-2026-07-23/`.
-- **THUNDERBOLT SSD FOLLOW-UP IS COMPLETE:** exact candidate `d1f1152d`
-  moved 12 GiB SSD-to-SSD in 7.73 s (13.335 Gb/s); Apple openrsync took
-  33.81 s (3.049 Gb/s), so Blit was 4.37x faster. All 36 files hash-match;
-  allocated writes were 38.884 GB. A later no-write cold read put Q's source
-  SSD at 1.931 GB/s; Blit's 1.667 GB/s is 86.3% of that source-only rate.
-  Cleanup is complete; no repeat is authorized. Evidence:
-  `docs/bench/thunderbolt-ssd-2026-07-22/`.
+- **THUNDERBOLT LIFECYCLE ATTRIBUTED (D-2026-07-23-3), SSD FOLLOW-UP
+  COMPLETE:** both closed, no repeats authorized; full records in DEVLOG
+  2026-07-23 and `docs/bench/end-to-end-transfer-latency-2026-07-23/` +
+  `docs/bench/thunderbolt-ssd-2026-07-22/` (pruned here 2026-07-31 for
+  the 200-line cap).
 - **RELEASE COMPLETION SHIPPED:** exact candidate `d1f1152d` passed every gate
   and is published as `v0.1.1`. Optional ceiling and Thunderbolt tuning remain
   post-release work.
