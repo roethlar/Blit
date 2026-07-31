@@ -425,6 +425,21 @@ fn row_writer_loop<O: RowOutput>(rx: std::sync::mpsc::Receiver<RowWrite>, output
     }
 }
 
+/// The writer thread's whole life (cr-clp2-2 r1): drain, clear, THEN
+/// signal — strictly in that order, because `finish()` waits on the
+/// signal instead of joining the thread or touching the bar. Extracted
+/// so the ordering contract is testable on a recorder.
+fn run_row_writer<O: RowOutput>(
+    rx: std::sync::mpsc::Receiver<RowWrite>,
+    output: O,
+    clear: impl FnOnce(),
+    done: tokio::sync::oneshot::Sender<()>,
+) {
+    row_writer_loop(rx, output);
+    clear();
+    let _ = done.send(());
+}
+
 impl RowOutput for ProgressBar {
     fn set_message(&self, message: String) {
         ProgressBar::set_message(self, message);
@@ -505,9 +520,8 @@ async fn join_drained(consumer: JoinHandle<()>, grace: Duration) -> bool {
 /// That includes the `log` facade: `_log_redirect` routes every backend
 /// line through the same handle for the row's lifetime.
 struct LiveProgressRow {
-    bar: ProgressBar,
     consumer: JoinHandle<()>,
-    writer: std::thread::JoinHandle<()>,
+    writer_done: tokio::sync::oneshot::Receiver<()>,
     _log_redirect: blit_core::stderr_log::LineRedirect,
 }
 
@@ -557,9 +571,19 @@ impl LiveProgressRow {
         // unbounded channel sends. One channel keeps `-v` lines and
         // repaints in production order.
         let (write_tx, write_rx) = std::sync::mpsc::channel::<RowWrite>();
-        let writer = std::thread::spawn({
+        let (done_tx, writer_done) = tokio::sync::oneshot::channel::<()>();
+        // A plain DETACHED std thread on purpose (cr-clp2-2 r1): the
+        // blocking pool is waited on at runtime shutdown, so a wedged
+        // terminal write there would hang CLI exit, while a std thread
+        // dies with the process. From here on this thread owns ALL bar
+        // access — including the final clear — so the async side never
+        // takes indicatif's lock again.
+        std::thread::spawn({
             let bar = bar.clone();
-            move || row_writer_loop(write_rx, bar)
+            move || {
+                let clear_bar = bar.clone();
+                run_row_writer(write_rx, bar, move || clear_bar.finish_and_clear(), done_tx)
+            }
         });
         let threaded = ThreadedRowOutput(write_tx);
         // Until the first event lands the row still says what is running.
@@ -577,9 +601,8 @@ impl LiveProgressRow {
         Some((
             RemoteTransferProgress::new(tx),
             Self {
-                bar,
                 consumer,
-                writer,
+                writer_done,
                 _log_redirect: log_redirect,
             },
         ))
@@ -597,25 +620,20 @@ impl LiveProgressRow {
     /// sink clone that keeps the lane open.
     async fn finish(self, session_succeeded: bool) {
         let Self {
-            bar,
             consumer,
-            writer,
+            writer_done,
             _log_redirect: log_redirect,
         } = self;
         drain_for_outcome(consumer, session_succeeded, ROW_DRAIN_GRACE).await;
         // Restore the backend now: its sender must drop for the writer
         // thread to see the channel close.
         drop(log_redirect);
-        // The writer applies what is queued and ends. Join off the
-        // async thread; a wedged terminal degrades to detaching it.
-        let _ = tokio::time::timeout(
-            ROW_DRAIN_GRACE,
-            tokio::task::spawn_blocking(move || {
-                let _ = writer.join();
-            }),
-        )
-        .await;
-        bar.finish_and_clear();
+        // The writer applies what is queued, clears the bar, then
+        // signals (cr-clp2-2 r1). Bounded wait on the SIGNAL only: no
+        // blocking-pool join the runtime would wait for at shutdown,
+        // and no bar access from this side — a wedged terminal leaves
+        // a detached thread that process exit reaps.
+        let _ = tokio::time::timeout(ROW_DRAIN_GRACE, writer_done).await;
     }
 }
 
@@ -1228,6 +1246,51 @@ mod live_row_loop_tests {
             "messages arrive in order"
         );
         assert_eq!(recorder.lines(), vec!["l1".to_string()], "lines arrive");
+    }
+
+    /// cr-clp2-2 r1: the writer drains, clears, and only THEN signals —
+    /// `finish()` waits on the signal, so a signal that outruns the
+    /// clear would let the summary race a live bar. The clear blocks
+    /// long enough that a premature signal is deterministically caught.
+    #[tokio::test]
+    async fn the_writer_clears_and_only_then_signals_done() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let recorder = Recorder::default();
+        let cleared = Arc::new(AtomicBool::new(false));
+        let out = ThreadedRowOutput(tx);
+        out.println("l1");
+        std::thread::spawn({
+            let recorder = recorder.clone();
+            let cleared = Arc::clone(&cleared);
+            move || {
+                run_row_writer(
+                    rx,
+                    recorder,
+                    move || {
+                        std::thread::sleep(Duration::from_millis(100));
+                        cleared.store(true, Ordering::SeqCst);
+                    },
+                    done_tx,
+                )
+            }
+        });
+        drop(out);
+        tokio::time::timeout(Duration::from_secs(5), done_rx)
+            .await
+            .expect("the writer must signal once the senders are gone")
+            .expect("the done sender must not drop unsent");
+        assert!(
+            cleared.load(Ordering::SeqCst),
+            "the clear must complete before the done signal"
+        );
+        assert_eq!(
+            recorder.lines(),
+            vec!["l1".to_string()],
+            "queued writes are applied before the signal"
+        );
     }
 
     /// cr-clp2-1: a routed warn interpolating a control-byte filename
