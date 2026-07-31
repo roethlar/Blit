@@ -177,8 +177,11 @@ impl ProgressTotals {
 
     /// True once any transfer work (not mere enumeration) has been
     /// observed — the "show live totals" gate consumers share.
+    /// Reconciled-away work still counts: an all-failed session sent
+    /// and retracted real transfer work, and hiding its final transfer
+    /// event would misreport the run as enumeration-only (cr-pfc4-3).
     pub fn started(&self) -> bool {
-        self.files > 0 || self.bytes > 0
+        self.files > 0 || self.bytes > 0 || self.files_failed > 0
     }
 }
 
@@ -270,6 +273,32 @@ mod progress_totals_tests {
     /// file — totals must count the bytes exactly once (design-1's
     /// class, now unrepresentable because FileComplete has no byte
     /// field).
+    /// cr-pfc4-3: an all-failed session sent real work and then
+    /// retracted every completion — the observed-work gate must still
+    /// read as started, or the consumer takes the manifest-only
+    /// terminal branch and drops the final transfer event.
+    #[test]
+    fn a_fully_retracted_session_still_reads_as_started() {
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::Payload {
+            files: 0,
+            bytes: 10,
+        });
+        totals.apply(&ProgressEvent::FileComplete {
+            path: "doomed.txt".into(),
+        });
+        totals.apply(&ProgressEvent::SummaryReconciled {
+            files_failed: 1,
+            bytes_landed: 0,
+        });
+        assert_eq!(totals.files, 0, "every completion retracted");
+        assert_eq!(totals.bytes, 0, "the destination landed nothing");
+        assert!(
+            totals.started(),
+            "reconciled-away work is still observed work"
+        );
+    }
+
     #[test]
     fn tcp_pull_pair_counts_bytes_once_and_one_file() {
         let mut totals = ProgressTotals::default();

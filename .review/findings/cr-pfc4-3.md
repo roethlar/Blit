@@ -3,7 +3,7 @@
 **Severity**: LOW — when every sent file fails at the destination,
 initiator verbose/JSON progress takes the manifest-only terminal branch
 and omits the final transfer event despite reconciled transfer work.
-**Status**: Open — fix queued behind cr-pfc3-1/-2 (ordering only)
+**Status**: In progress — fixed, awaiting per-finding reviewer verdict
 **Branch**: — (default-branch mode)
 **Commit**: (filled at landing)
 
@@ -44,3 +44,5 @@ None.
 
 ## Reviewer comments
 (pending per-finding verification after the fix)
+
+As built: `started()` treats nonzero `files_failed` as observed work (with the rationale in its doc). Guard `a_fully_retracted_session_still_reads_as_started` — full retraction to files=0/bytes=0 with files_failed=1 must still read started — FAILED red with the clause removed (verified this session), green restored.
