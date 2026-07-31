@@ -1343,18 +1343,19 @@ mod metadata_repair {
         );
         assert!(repair.total_ns > 0, "the repairs took real time");
 
-        // The subtraction guard. Compare's own span must exclude the repair
-        // time nested inside it; if the subtraction at the compare seam is
-        // dropped, compare absorbs the repair total and this inequality
-        // fails.
-        let compare = find(LocalPhase::Compare);
-        let wall = report.session_wall_ns;
+        // cr-ls1-2: this test does NOT try to guard the subtraction. The
+        // assertion that used to sit here (`compare + repair <= 2 * wall`)
+        // was satisfied by construction and stayed green when the
+        // subtraction was deleted — a reviewer proved that. The subtraction
+        // is guarded directly and decisively by
+        // `phase_probe::tests::nested_time_is_subtracted_from_the_enclosing_span`,
+        // which makes the nested phase claim an hour so a missing
+        // subtraction is categorical rather than a timing comparison. What
+        // this test is for is the WIRING: that real repairs on a real
+        // session reach the repair phase at all.
         assert!(
-            compare.total_ns + repair.total_ns <= wall.saturating_mul(2),
-            "compare {} + repair {} against a {wall} ns session: the two must \
-             not both bill the same nanoseconds",
-            compare.total_ns,
-            repair.total_ns
+            find(LocalPhase::Compare).samples > 0,
+            "the compare span still closes on a repair-heavy run"
         );
         Ok(())
     }

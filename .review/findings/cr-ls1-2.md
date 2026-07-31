@@ -1,7 +1,7 @@
 # cr-ls1-2 — The compare-subtraction guard is vacuous, and the landing records claimed otherwise
 
 **Severity**: MEDIUM (the code defect); the FALSE RECORD is the more serious half
-**Status**: admitted
+**Status**: FIXED — awaiting reviewer verification
 **Source**: `ls-1-range` codex dispatch over `a0b5d83d..d67b44fd`
 Reviewer provenance (generation pass): codex / gpt-5.6-sol / xhigh /
 workspace-write (detached, disposable worktree); codex-cli 0.146.0.
@@ -59,6 +59,45 @@ rather than on a bound that holds either way.
 Whatever replaces it must be verified by running the revert the reviewer
 ran — remove the `saturating_sub` at the compare seam and confirm the test
 goes red.
+
+## Fix
+
+Two changes, because the vacuous assertion was a symptom of the arithmetic
+being open-coded where nothing could reach it.
+
+1. The subtraction is now a named operation on the probe:
+   `LocalPhaseProbe::span_excluding(outer, inner)` returning a `NestedSpan`
+   whose `finish()` records `elapsed - nested`, plus a `measure_excluding`
+   closure form. The compare seam calls it instead of computing the
+   difference inline. Deliberately not `Drop`-based: an early return or `?`
+   would otherwise record a span the caller never meant to close, and a
+   diagnostic that silently records partial spans is worse than one that
+   records nothing.
+2. The guard is now categorical instead of comparative.
+   `phase_probe::tests::nested_time_is_subtracted_from_the_enclosing_span`
+   records **one hour** into the inner phase inside a span that really takes
+   microseconds. With the subtraction the outer saturates to exactly `0`;
+   without it the outer records real elapsed time, which is non-zero. There
+   is no machine speed at which that assertion passes by accident — which is
+   precisely what the old `compare + repair <= 2 * wall` bound could not
+   say for itself.
+
+Two supporting tests: prior nested time (recorded before the span opens)
+must NOT be deducted, so one chunk's repairs cannot erase the next chunk's
+compare cost; and a span on a disabled probe records nothing without
+panicking.
+
+The integration test's assertion was replaced rather than patched. It now
+guards the WIRING (repairs on a real session reach the repair phase) and
+says in-line that it deliberately does not guard the subtraction, naming the
+unit test that does — so a later reader cannot mistake it for the guard
+again.
+
+**Guard proof**: the exact revert the reviewer performed — dropping the
+`saturating_sub` so the outer records full elapsed time — now REDS
+`nested_time_is_subtracted_from_the_enclosing_span`. Restore verified
+byte-identical by SHA-256 (`7F9F5C5E…72DF4`), green after. Workspace
+1714 passed / 0 failed.
 
 ## Record correction owed
 

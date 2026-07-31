@@ -310,6 +310,47 @@ impl LocalPhaseProbe {
         out
     }
 
+    /// Time `body` into `outer`, MINUS whatever `body` folded into `inner`
+    /// while it ran.
+    ///
+    /// cr-ls1-2: this exists as a named operation rather than as arithmetic
+    /// open-coded at each call site, because the open-coded version shipped
+    /// with a guard that could not fail. Nested-cost subtraction is the one
+    /// property the whole breakdown rests on — COMPARE contains
+    /// ATTRIBUTE_REPAIR, and billing those nanoseconds twice would inflate
+    /// exactly the phase most likely to be picked as the culprit — so it is
+    /// worth having in one place with one direct test.
+    ///
+    /// `saturating_sub` because the two clocks are read independently; a
+    /// negative remainder means a measurement fault, not a negative duration
+    /// to propagate.
+    /// Open the span. The caller must call [`NestedSpan::finish`] — an
+    /// awaited body cannot be wrapped in a closure, so this is the form the
+    /// compare seam uses.
+    pub fn span_excluding(&self, outer: LocalPhase, inner: LocalPhase) -> NestedSpan<'_> {
+        NestedSpan {
+            probe: self,
+            outer,
+            inner,
+            started: self.context.is_some().then(Instant::now),
+            nested_before: self.total(inner),
+        }
+    }
+
+    /// Closure form of [`LocalPhaseProbe::span_excluding`] for synchronous
+    /// bodies.
+    pub fn measure_excluding<T>(
+        &self,
+        outer: LocalPhase,
+        inner: LocalPhase,
+        body: impl FnOnce() -> T,
+    ) -> T {
+        let span = self.span_excluding(outer, inner);
+        let out = body();
+        span.finish();
+        out
+    }
+
     /// Emit the breakdown exactly once per session. A second call is ignored
     /// so a retry or an error path cannot double-report.
     pub fn emit(&self, session_wall: Duration) {
@@ -334,6 +375,35 @@ impl LocalPhaseProbe {
                 .collect(),
         };
         (context.emit)(report);
+    }
+}
+
+/// An open outer span that will subtract whatever lands in its inner phase
+/// before it finishes. Created by [`LocalPhaseProbe::span_excluding`].
+///
+/// Deliberately NOT `Drop`-based: an early return or a `?` would then record
+/// a span the caller never meant to close, and a diagnostic that silently
+/// records partial spans is worse than one that records nothing.
+pub struct NestedSpan<'a> {
+    probe: &'a LocalPhaseProbe,
+    outer: LocalPhase,
+    inner: LocalPhase,
+    started: Option<Instant>,
+    nested_before: Duration,
+}
+
+impl NestedSpan<'_> {
+    /// Close the span, recording `elapsed - nested` into the outer phase.
+    pub fn finish(self) {
+        let Some(started) = self.started else {
+            return;
+        };
+        let nested = self
+            .probe
+            .total(self.inner)
+            .saturating_sub(self.nested_before);
+        self.probe
+            .record(self.outer, started.elapsed().saturating_sub(nested));
     }
 }
 
@@ -456,6 +526,76 @@ mod tests {
             .map(|(_, aggregate)| aggregate)
             .expect("apply present");
         assert_eq!(apply.samples, 2);
+    }
+
+    /// cr-ls1-2: the subtraction guard that actually bites.
+    ///
+    /// The trick is to make the nested phase claim FAR more time than the
+    /// outer span could possibly have taken. With subtraction, the outer
+    /// saturates to exactly zero. Without it, the outer records its real
+    /// elapsed time, which is non-zero. That is a categorical difference, not
+    /// a timing comparison, so the assertion cannot pass by luck on a fast
+    /// machine — which is exactly how the previous guard
+    /// (`compare + repair <= 2 * wall`) managed to hold whether or not the
+    /// subtraction existed.
+    #[test]
+    fn nested_time_is_subtracted_from_the_enclosing_span() {
+        let (probe, sink) = capturing();
+        probe.measure_excluding(LocalPhase::Compare, LocalPhase::AttributeRepair, || {
+            // An hour of "nested" work inside a span that really takes
+            // microseconds.
+            probe.record(LocalPhase::AttributeRepair, Duration::from_secs(3600));
+        });
+        probe.emit(Duration::from_millis(1));
+
+        let reports = sink.lock().expect("sink poisoned");
+        let report = reports.first().expect("one report");
+        let compare = report
+            .phases
+            .iter()
+            .find(|(phase, _)| *phase == LocalPhase::Compare)
+            .map(|(_, aggregate)| aggregate)
+            .expect("compare present");
+        assert_eq!(
+            compare.total_ns, 0,
+            "the nested hour must be subtracted; without the subtraction this \
+             records the span's real elapsed time instead"
+        );
+    }
+
+    #[test]
+    fn only_nested_time_from_inside_the_span_is_subtracted() {
+        // Work recorded to the inner phase BEFORE the span opens belongs to
+        // an earlier span and must not be deducted from this one — otherwise
+        // one chunk's repairs would erase the next chunk's compare cost.
+        let (probe, sink) = capturing();
+        probe.record(LocalPhase::AttributeRepair, Duration::from_secs(3600));
+        probe.measure_excluding(LocalPhase::Compare, LocalPhase::AttributeRepair, || {
+            std::thread::sleep(Duration::from_millis(5));
+        });
+        probe.emit(Duration::from_millis(10));
+
+        let reports = sink.lock().expect("sink poisoned");
+        let compare = reports
+            .first()
+            .expect("one report")
+            .phases
+            .iter()
+            .find(|(phase, _)| *phase == LocalPhase::Compare)
+            .map(|(_, aggregate)| aggregate.clone())
+            .expect("compare present");
+        assert!(
+            compare.total_ns > 0,
+            "prior nested time must not be deducted from a later span"
+        );
+    }
+
+    #[test]
+    fn a_span_on_a_disabled_probe_records_nothing_and_does_not_panic() {
+        let probe = LocalPhaseProbe::disabled();
+        probe.measure_excluding(LocalPhase::Compare, LocalPhase::AttributeRepair, || {});
+        probe.span_excluding(LocalPhase::Compare, LocalPhase::AttributeRepair);
+        assert_eq!(probe.total(LocalPhase::Compare), Duration::ZERO);
     }
 
     #[test]

@@ -4959,20 +4959,12 @@ async fn diff_chunk_and_apply_local(
     // (pfc-6 repairs in place at diff time), so its own measured total is
     // subtracted below rather than double-counted here — otherwise a
     // repair-heavy run would report the same nanoseconds twice.
-    let compare_started = local.phase_probe.is_enabled().then(Instant::now);
-    let repair_before = local.phase_probe.total(LocalPhase::AttributeRepair);
+    let compare_span = local
+        .phase_probe
+        .span_excluding(LocalPhase::Compare, LocalPhase::AttributeRepair);
     let needed =
         diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts, repair).await?;
-    if let Some(started) = compare_started {
-        let repaired_here = local
-            .phase_probe
-            .total(LocalPhase::AttributeRepair)
-            .saturating_sub(repair_before);
-        local.phase_probe.record(
-            LocalPhase::Compare,
-            started.elapsed().saturating_sub(repaired_here),
-        );
-    }
+    compare_span.finish();
 
     let fresh: Vec<FileHeader> = needed
         .into_iter()

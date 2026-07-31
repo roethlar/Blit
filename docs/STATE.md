@@ -35,9 +35,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Handoff — 2026-07-31
 - Done: pfc-1..6 + clp-1..2 landed and reviewed; D-2026-07-31-4 makes local
   speed priority-1; ls-1 step (0) instrument landed but its review FAILED.
-- Next: fix cr-ls1-1 (HIGH) and cr-ls1-2 (MEDIUM), one commit each, then
-  re-review before the instrument is trusted for any attribution. `ls-0` is
-  unblocked but unscoped; the pfc Shipped flip is the owner's alone.
+- Next: both ls-1 findings fixed; re-dispatch the range review, then RUN
+  step (0) on the owner's shape. `ls-0` unscoped; pfc Shipped is the owner's.
 
 ## Now (active work)
 
@@ -88,10 +87,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    apply backpressure has its own phase now (the queue await was inside no
    span, so a slow sink could dominate while APPLY read ~zero); guarded by a
    deliberately slow sink past the queue depth, red/green proven.
-   **cr-ls1-2 (MEDIUM) OPEN** — the compare-subtraction guard is vacuous,
-   and the landing records falsely claimed both subtractions were red/green
-   proven (only enumerate's was — correction recorded). **Not usable for
-   attribution until cr-ls1-2 closes and the re-review passes.**
+   **cr-ls1-2 (MEDIUM) FIXED** — the subtraction is now a named `NestedSpan`
+   operation with a categorical guard (an hour of nested time inside a
+   microsecond span: subtraction ⇒ exactly 0, none ⇒ non-zero), and the
+   reviewer's own revert now reds it. The landing records had falsely
+   claimed both subtractions were proven; correction recorded.
+   **Not usable for attribution until the range re-review passes.**
    **`ls-0` (summary-display fix) is carved out** of that gate: display text
    only, cannot move any number ls-1 records. NOT the closed P1 asymmetry
    defect (D-2026-07-22-2); labels deliberately kept apart.
