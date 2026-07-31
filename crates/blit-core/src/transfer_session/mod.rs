@@ -3945,6 +3945,11 @@ async fn destination_session_inner(
     let mut manifest_complete = false;
     let mut files_written: u64 = 0;
     let mut bytes_written: u64 = 0;
+    // Per-file failures the sink contained instead of faulting
+    // (D-2026-07-30-1), merged from every lane. Only the failure report
+    // is kept here — `files_written` / `bytes_written` above stay the
+    // counters each lane folds into.
+    let mut contained_failures = crate::remote::transfer::SinkOutcome::default();
     let mut need_batch_seq = 0u64;
 
     // otp-11: the LOCAL carrier's apply pipeline — spawned before the
@@ -4187,12 +4192,17 @@ async fn destination_session_inner(
                 let outcome = receive_file_record(transport, sink.as_ref(), &header).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
+                contained_failures.merge_failures(&outcome);
                 // otp-10b-2: in-stream per-file progress, same convention
                 // as the data-plane receive (`execute_receive_pipeline`):
-                // bytes ride Payload, FileComplete is byteless.
+                // bytes ride Payload, FileComplete is byteless. A file the
+                // sink contained as a per-file failure never completes on
+                // this lane (D-2026-07-30-1).
                 if let Some(p) = &progress {
                     p.report_payload(0, outcome.bytes_written);
-                    p.report_file_complete(header.relative_path.clone());
+                    if !outcome.file_failed(&header.relative_path) {
+                        p.report_file_complete(header.relative_path.clone());
+                    }
                 }
             }
             Some(Frame::Block(block)) => {
@@ -4211,12 +4221,20 @@ async fn destination_session_inner(
                     receive_block_record(transport, sink.as_ref(), &header, block).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
-                files_resumed.fetch_add(1, Ordering::Relaxed);
+                contained_failures.merge_failures(&outcome);
                 // The whole block record (patch bytes + completion) ran
-                // to its completion frame — one resumed file done.
+                // to its completion frame — one resumed file done, unless
+                // the sink contained it as a per-file failure: that is
+                // neither a resumed file nor a completion.
+                let resumed = !outcome.file_failed(&header.relative_path);
+                if resumed {
+                    files_resumed.fetch_add(1, Ordering::Relaxed);
+                }
                 if let Some(p) = &progress {
                     p.report_payload(0, outcome.bytes_written);
-                    p.report_file_complete(header.relative_path.clone());
+                    if resumed {
+                        p.report_file_complete(header.relative_path.clone());
+                    }
                 }
             }
             Some(Frame::BlockComplete(complete)) => {
@@ -4235,14 +4253,21 @@ async fn destination_session_inner(
                 let outcome = finish_block_record(sink.as_ref(), &header, &complete).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
-                files_resumed.fetch_add(1, Ordering::Relaxed);
+                contained_failures.merge_failures(&outcome);
+                let resumed = !outcome.file_failed(&header.relative_path);
+                if resumed {
+                    files_resumed.fetch_add(1, Ordering::Relaxed);
+                }
                 // Zero-block record: nothing transferred, the file is
-                // complete (identical content, metadata stamped).
+                // complete (identical content, metadata stamped) unless
+                // the sink contained its finalization as a failure.
                 if let Some(p) = &progress {
                     if outcome.bytes_written > 0 {
                         p.report_payload(0, outcome.bytes_written);
                     }
-                    p.report_file_complete(header.relative_path.clone());
+                    if resumed {
+                        p.report_file_complete(header.relative_path.clone());
+                    }
                 }
             }
             Some(Frame::TarShardHeader(shard)) => {
@@ -4370,6 +4395,7 @@ async fn destination_session_inner(
                         .await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
+                contained_failures.merge_failures(&outcome);
                 if let Some(p) = &progress {
                     p.report_payload(0, outcome.bytes_written);
                     for path in member_paths.unwrap_or_default() {
@@ -4515,6 +4541,7 @@ async fn destination_session_inner(
                     let totals = run.finish().await?;
                     files_written = totals.files_written as u64;
                     bytes_written = totals.bytes_written;
+                    contained_failures.merge_failures(&totals);
                 }
                 // R46-F2 on the local carrier (codex otp-11a F4): the
                 // scan-complete guard fired at ManifestComplete, but the
@@ -4556,6 +4583,7 @@ async fn destination_session_inner(
                         }
                         files_written = totals.outcome.files_written as u64;
                         bytes_written = totals.outcome.bytes_written;
+                        contained_failures.merge_failures(&totals.outcome);
                         debug_assert!(
                             final_logical_streams.is_some(),
                             "receive data plane must have logical resize state"
@@ -4589,6 +4617,36 @@ async fn destination_session_inner(
                     return Err(violation(format!(
                         "SourceDone with {unresumed} resume grant(s) never completed by a block record"
                     )));
+                }
+                // D-2026-07-30-1 Q1(b): a contained per-file failure must
+                // never authorize deleting the source. Mirroring is the one
+                // declaration that proves no source delete follows (R46-F1:
+                // `blit move` passes mirror=false on every route, so a
+                // mirror is never a move). A move itself declares nothing
+                // the destination can read — the push and local carriers
+                // gate scan completeness caller-side, so they arrive
+                // indistinguishable from a copy. Until the report reaches
+                // the caller's source-delete gate, every non-mirror session
+                // therefore keeps a per-file failure session-fatal:
+                // reporting a short success is what would let the only copy
+                // of a failed file be deleted.
+                let source_delete_may_follow = !mirror_enabled;
+                if source_delete_may_follow && contained_failures.files_failed_total != 0 {
+                    let named = contained_failures
+                        .failures
+                        .iter()
+                        .take(3)
+                        .map(|failure| format!("{}: {}", failure.relative_path, failure.reason))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(eyre::Report::new(SessionFault::internal(format!(
+                        "transfer refused: {} file(s) could not be written and this \
+                         operation deletes the source afterwards — reporting success \
+                         would destroy their only copy; first {}: {named}. Resolve and \
+                         re-run.",
+                        contained_failures.files_failed_total,
+                        contained_failures.failures.len().min(3),
+                    ))));
                 }
                 // otp-6b: run the mirror delete pass now — after every payload
                 // is written, so the dest tree is final and no about-to-arrive
@@ -5319,7 +5377,10 @@ async fn receive_block_record(
     header: &FileHeader,
     first: BlockTransfer,
 ) -> Result<crate::remote::transfer::SinkOutcome> {
-    let mut bytes_written: u64 = 0;
+    // One record's totals, per-file failures included: every block write
+    // and the closing finalization merge into it, so a contained failure
+    // reaches the session instead of dying at the record boundary.
+    let mut record = crate::remote::transfer::SinkOutcome::default();
     let mut block = first;
     loop {
         let len = block.content.len() as u64;
@@ -5340,7 +5401,7 @@ async fn receive_block_record(
             })
             .await
             .map_err(|e| tag_path(e, &header.relative_path))?;
-        bytes_written += outcome.bytes_written;
+        record.merge(&outcome);
         // codex 7b-2 G3: a transport break inside the record names the
         // file the record already identified.
         let received = match transport
@@ -5367,10 +5428,8 @@ async fn receive_block_record(
                 if complete.relative_path == header.relative_path =>
             {
                 let outcome = finish_block_record(sink, header, &complete).await?;
-                return Ok(crate::remote::transfer::SinkOutcome {
-                    files_written: outcome.files_written,
-                    bytes_written: bytes_written + outcome.bytes_written,
-                });
+                record.merge(&outcome);
+                return Ok(record);
             }
             Some(Frame::Error(err)) => {
                 // A mid-record abort (plan D4): the peer says why before

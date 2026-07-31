@@ -116,12 +116,16 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    proceed; move source-deletion refuses while failures exist).
    Implementation in progress via Opus 5 agents, slices pfc-1..5, one
    commit per slice on `master`. No external review dispatch approved
-   (D-2026-07-23-7). **pfc-1 `[x]` landed** (shared `attributes_converge`
-   predicate, apply + compare, red/green-proven; the motivating mirror is
-   unblocked pending the owner's re-run). **pfc-6 metadata-only repair
-   added (D-2026-07-31-1)** — old-backup regions read back `Normal` vs
-   source `Archive` and currently full-re-copy to fix one bit. pfc-2 in
-   flight; then pfc-3..6.
+   (D-2026-07-23-7; superseded for landed slices by D-2026-07-31-3's
+   standing codex dispatch — pfc-1 range reviewed **clean**). **pfc-1 `[x]`
+   landed** (shared `attributes_converge` predicate, apply + compare,
+   red/green-proven). **pfc-2 `[x]` landed** (bounded per-file failure
+   report in `SinkOutcome`, single-file write-path containment, pipeline
+   continues past contained failures; interim posture: containment live
+   for MIRROR sessions only, non-mirror stays fatal until pfc-5's
+   source-deletion gate — see plan "pfc-2 landing notes"). **pfc-6
+   metadata-only repair added (D-2026-07-31-1)**. Next: clp-1/clp-2
+   (D-2026-07-31-2 ordering), then pfc-3..6.
 3. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2):** `-p` is a
    static spinner that blit-core's unconditional enumeration `eprintln!`
    scrolls off-row; `-v` changes only the end summary. Two slices (clp-1

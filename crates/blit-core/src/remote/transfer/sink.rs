@@ -22,17 +22,147 @@ use crate::remote::transfer::source::TransferSource;
 // Re-export for consumers.
 pub use super::data_plane::DataPlaneSession;
 
+/// Upper bound on the per-file failures one outcome reports.
+/// [`SinkOutcome::files_failed_total`] keeps counting past it, so a
+/// catastrophic run still carries an exact count behind a bounded list —
+/// the same list the summary and the wire carry.
+pub const MAX_REPORTED_FILE_FAILURES: usize = 64;
+
+/// One file the destination could not materialize, named for the
+/// end-of-operation summary. `relative_path` is the manifest-relative
+/// wire path, empty for the single-file destination convention (the
+/// destination root IS the file — same rule as `FileHeader`).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FileFailure {
+    pub relative_path: String,
+    pub reason: String,
+}
+
 /// Outcome of writing payload(s) to a sink.
 #[derive(Debug, Default, Clone)]
 pub struct SinkOutcome {
     pub files_written: usize,
     pub bytes_written: u64,
+    /// Files that failed on their own while the session continued
+    /// (D-2026-07-30-1), capped at [`MAX_REPORTED_FILE_FAILURES`].
+    pub failures: Vec<FileFailure>,
+    /// Every per-file failure counted, including those past the cap.
+    pub files_failed_total: u64,
 }
 
 impl SinkOutcome {
+    /// A clean write of `files_written` file(s) carrying `bytes_written`
+    /// bytes. Write sites construct through this rather than a struct
+    /// literal so later fields do not ripple through every one of them.
+    pub fn written(files_written: usize, bytes_written: u64) -> Self {
+        Self {
+            files_written,
+            bytes_written,
+            failures: Vec::new(),
+            files_failed_total: 0,
+        }
+    }
+
+    /// One file that could not be written. Nothing is counted as landed
+    /// for it — a failed file is never a written file, whatever partial
+    /// bytes reached the destination.
+    pub fn failed(relative_path: impl Into<String>, reason: impl Into<String>) -> Self {
+        let mut outcome = Self::default();
+        outcome.record_failure(relative_path, reason);
+        outcome
+    }
+
+    /// Record one per-file failure. The reported list stops growing at
+    /// [`MAX_REPORTED_FILE_FAILURES`]; the total keeps counting.
+    pub fn record_failure(&mut self, relative_path: impl Into<String>, reason: impl Into<String>) {
+        let relative_path = relative_path.into();
+        let reason = reason.into();
+        // Every contained failure is logged here, exactly once — the one
+        // point every recorded failure passes through. A contained file
+        // that logs nothing is indistinguishable from a transferred one,
+        // and the log is the only surface a failure has until the summary
+        // carries the report. `merge`/`merge_failures` copy records rather
+        // than re-recording them, so no file is logged twice.
+        let named = if relative_path.is_empty() {
+            "<destination root>"
+        } else {
+            relative_path.as_str()
+        };
+        log::warn!("file failed, session continues: {named} ({reason})");
+        self.files_failed_total = self.files_failed_total.saturating_add(1);
+        if self.failures.len() < MAX_REPORTED_FILE_FAILURES {
+            self.failures.push(FileFailure {
+                relative_path,
+                reason,
+            });
+        }
+    }
+
+    /// Whether this outcome failed `relative_path`. Only the reported
+    /// list keeps identity, so an outcome that overflowed the cap answers
+    /// `true` for every path rather than let the progress lane report a
+    /// failed file as complete.
+    pub fn file_failed(&self, relative_path: &str) -> bool {
+        if self.files_failed_total > self.failures.len() as u64 {
+            return true;
+        }
+        self.failures
+            .iter()
+            .any(|failure| failure.relative_path == relative_path)
+    }
+
     pub fn merge(&mut self, other: &SinkOutcome) {
         self.files_written += other.files_written;
         self.bytes_written += other.bytes_written;
+        self.merge_failures(other);
+    }
+
+    /// Fold in `other`'s failure report without its written totals, for a
+    /// caller that keeps those per lane (the session counts writes lane by
+    /// lane but reports failures as one bounded list).
+    pub fn merge_failures(&mut self, other: &SinkOutcome) {
+        self.files_failed_total = self
+            .files_failed_total
+            .saturating_add(other.files_failed_total);
+        let room = MAX_REPORTED_FILE_FAILURES.saturating_sub(self.failures.len());
+        self.failures
+            .extend(other.failures.iter().take(room).cloned());
+    }
+}
+
+/// True while a per-file failure under `dst_root` is still attributable
+/// to one file. Destination-root unavailability is not (every payload in
+/// the session fails identically), so it stays session-fatal: a joined
+/// wire path needs the root to be a directory, and the single-file
+/// destination convention (empty wire path — the root IS the file) needs
+/// the root's parent. A parent mkdir for one file's own subpath under a
+/// live root is that file's failure.
+fn destination_root_live(dst_root: &Path, relative_path: &str) -> bool {
+    if relative_path.is_empty() {
+        return dst_root
+            .parent()
+            .is_none_or(|parent| parent.as_os_str().is_empty() || parent.is_dir());
+    }
+    dst_root.is_dir()
+}
+
+/// Classify one file's write error: a recorded [`FileFailure`] the
+/// caller reports while continuing with the next file, or the same error
+/// back when the destination root itself is the problem. Only call this
+/// where the error is attributable to exactly one file — path-safety
+/// violations, transport errors and destination-root failures must keep
+/// returning `Err` (session-fatal). Callers resolve and
+/// containment-check the destination first, so a hostile path can never
+/// arrive here.
+fn per_file_failure(
+    dst_root: &Path,
+    relative_path: &str,
+    error: eyre::Report,
+) -> Result<SinkOutcome> {
+    if destination_root_live(dst_root, relative_path) {
+        Ok(SinkOutcome::failed(relative_path, format!("{error:#}")))
+    } else {
+        Err(error)
     }
 }
 
@@ -135,6 +265,17 @@ pub struct FsTransferSink {
     /// Separate otp-12 high-volume observer. `None` is the exact normal
     /// sink path: no clocks, per-member timing, or output.
     small_file_probe: Option<BoundSmallFileProbe>,
+    /// First failure reason per relative path whose resume-block patch
+    /// failed. Such a file must never be finalized: the completion record
+    /// truncates and stamps the source mtime, so a partially patched
+    /// destination would read as converged on every later compare.
+    /// Leaving it unstamped is what makes the re-run resume it
+    /// (D-2026-07-09-1). The file is reported failed exactly once, at its
+    /// completion record, which also drains the entry. One sink instance
+    /// serves every socket of a session's receive plane, so this holds
+    /// for a file whose blocks and completion arrive on different
+    /// sockets.
+    failed_resume_reasons: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
 
 impl FsTransferSink {
@@ -155,6 +296,7 @@ impl FsTransferSink {
             config,
             byte_progress: None,
             small_file_probe: None,
+            failed_resume_reasons: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -196,6 +338,26 @@ impl FsTransferSink {
             }
         }
     }
+
+    /// Hold the first resume-block failure for `relative_path`. Nothing
+    /// is reported yet: a resumed file fails once, at its completion
+    /// record, so several failed blocks of one file cannot inflate the
+    /// failure count.
+    fn hold_resume_block_failure(&self, relative_path: &str, error: &eyre::Report) {
+        self.failed_resume_reasons
+            .lock()
+            .expect("failed-resume-reasons lock poisoned")
+            .entry(relative_path.to_string())
+            .or_insert_with(|| format!("{error:#}"));
+    }
+
+    /// Take the held resume-block failure for `relative_path`, if any.
+    fn take_resume_block_failure(&self, relative_path: &str) -> Option<String> {
+        self.failed_resume_reasons
+            .lock()
+            .expect("failed-resume-reasons lock poisoned")
+            .remove(relative_path)
+    }
 }
 
 #[async_trait]
@@ -211,14 +373,27 @@ impl TransferSink for FsTransferSink {
                 offset,
                 bytes,
             } => {
-                write_file_block_payload(
+                // Path safety first and separately: a hostile relative
+                // path is a protocol violation, never one file's failure.
+                // The block's bytes arrive as a payload rather than an
+                // unread wire record, so a contained failure leaves
+                // nothing to drain.
+                let dst = resolve_resume_destination(
                     &self.dst_root,
                     self.canonical_dst_root.as_deref(),
                     &relative_path,
-                    offset,
-                    bytes,
-                )
-                .await?
+                    "block-write",
+                )?;
+                match patch_file_block(&dst, offset, bytes).await {
+                    Ok(outcome) => outcome,
+                    Err(error) if !destination_root_live(&self.dst_root, &relative_path) => {
+                        return Err(error)
+                    }
+                    Err(error) => {
+                        self.hold_resume_block_failure(&relative_path, &error);
+                        SinkOutcome::default()
+                    }
+                }
             }
             PreparedPayload::FileBlockComplete {
                 relative_path,
@@ -227,17 +402,31 @@ impl TransferSink for FsTransferSink {
                 permissions,
                 windows_metadata,
             } => {
-                let outcome = write_file_block_complete(
+                let dst = resolve_resume_destination(
                     &self.dst_root,
                     self.canonical_dst_root.as_deref(),
                     &relative_path,
-                    total_size,
-                    mtime_seconds,
-                    permissions,
-                    windows_metadata,
-                )
-                .await?;
-                outcome
+                    "block-complete",
+                )?;
+                if let Some(reason) = self.take_resume_block_failure(&relative_path) {
+                    // Finalizing here would stamp a stale file as
+                    // converged (see `failed_resume_reasons`); the file
+                    // fails once, and this is the record that names it.
+                    SinkOutcome::failed(&relative_path, reason)
+                } else {
+                    match finalize_resumed_file(
+                        &dst,
+                        total_size,
+                        mtime_seconds,
+                        permissions,
+                        windows_metadata,
+                    )
+                    .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => per_file_failure(&self.dst_root, &relative_path, error)?,
+                    }
+                }
             }
             // otp-7b: the composite resume payload is send-side only
             // (DataPlaneSink); the receive pipeline decodes per-block
@@ -355,27 +544,63 @@ impl TransferSink for FsTransferSink {
             )
             .await
             .with_context(|| format!("draining {} (dry-run)", header.relative_path))?;
-            return Ok(SinkOutcome {
-                files_written: 1,
-                bytes_written: 0,
-            });
+            return Ok(SinkOutcome::written(1, 0));
         }
 
-        if let Some(parent) = dst.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("creating directory {}", parent.display()))?;
-        }
-
+        // Peer-supplied metadata shape is a protocol violation, not one
+        // file's failure — checked before any filesystem effect so the
+        // fatal class stays above the per-file block below.
         crate::windows_metadata::validate_payload(header.windows_metadata.as_ref())
             .with_context(|| format!("validating Windows metadata for {}", header.relative_path))?;
-        crate::windows_metadata::prepare_destination(&dst, header.windows_metadata.as_ref())?;
 
-        {
-            use tokio::io::AsyncWriteExt as _;
-            let mut file = tokio::fs::File::create(&dst)
+        // Materializing the destination for this one file: mkdir of its
+        // own subpath, readonly/stream preparation, create. Each failure
+        // is this file's, but the record's bytes are still on the wire —
+        // an undrained record would desync the protocol stream, so the
+        // record is drained before the failure is contained. A drain
+        // failure is transport, and stays fatal.
+        let prepared = async {
+            if let Some(parent) = dst.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("creating directory {}", parent.display()))?;
+            }
+            crate::windows_metadata::prepare_destination(&dst, header.windows_metadata.as_ref())?;
+            tokio::fs::File::create(&dst)
                 .await
-                .with_context(|| format!("creating {}", dst.display()))?;
+                .with_context(|| format!("creating {}", dst.display()))
+        }
+        .await;
+        let mut file = match prepared {
+            Ok(file) => file,
+            Err(error) if !destination_root_live(&self.dst_root, &header.relative_path) => {
+                return Err(error)
+            }
+            Err(error) => {
+                let mut drain = tokio::io::sink();
+                receive_stream_double_buffered(
+                    reader,
+                    &mut drain,
+                    header.size,
+                    RECEIVE_CHUNK_SIZE,
+                    None,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "draining {} after its destination could not be opened",
+                        header.relative_path
+                    )
+                })?;
+                return per_file_failure(&self.dst_root, &header.relative_path, error);
+            }
+        };
+
+        let written = {
+            use tokio::io::AsyncWriteExt as _;
+            // Wire read and disk write are one operation here: a failure
+            // leaves an unknown number of record bytes unread, so the
+            // stream cannot be resynchronized and this stays fatal.
             receive_stream_double_buffered(
                 reader,
                 &mut file,
@@ -394,13 +619,15 @@ impl TransferSink for FsTransferSink {
             //
             // POST_REVIEW_FIXES §1.1: flush failure is a data-loss
             // signal — the user believes the file is durable when it
-            // isn't. Propagate, don't swallow.
+            // isn't. Never swallowed; the record is fully consumed by
+            // now, so it is this file's failure.
             file.flush()
                 .await
-                .with_context(|| format!("flushing {}", dst.display()))?;
-        }
+                .with_context(|| format!("flushing {}", dst.display()))
+        };
         // Handle dropped → kernel close() complete → no further
         // metadata churn from this file. Now safe to set mtime by path.
+        drop(file);
 
         // Intentionally no sync_all: ZFS commits per fsync are
         // multi-second on spinning rust and crater throughput
@@ -408,39 +635,19 @@ impl TransferSink for FsTransferSink {
         // is its END marker plus the OS's own flush; matches rsync's
         // default behavior. Add a config flag if a caller needs sync.
 
-        let windows_bytes =
-            crate::windows_metadata::replace_streams(&dst, header.windows_metadata.as_ref())?;
+        // Metadata tail, past the last wire byte of the record: every
+        // failure below concerns exactly this file.
+        let windows_bytes = match written
+            .and_then(|()| stamp_streamed_metadata(&dst, header, &self.config))
+        {
+            Ok(windows_bytes) => windows_bytes,
+            Err(error) => return per_file_failure(&self.dst_root, &header.relative_path, error),
+        };
 
-        if self.config.preserve_times && header.mtime_seconds > 0 {
-            let ft = FileTime::from_unix_time(header.mtime_seconds, 0);
-            // Best-effort: cross-fs, root-owned, or ACL-protected
-            // destinations can refuse mtime updates. Surface via
-            // `log::warn!` so the failure is visible without making
-            // it a hard transfer error. POST_REVIEW_FIXES §1.1.
-            if let Err(e) = filetime::set_file_mtime(&dst, ft) {
-                log::warn!("set mtime on {}: {}", dst.display(), e);
-            }
-        }
-
-        // Permissions arrive on the wire (Unix mode bits). Apply best-
-        // effort; ignore failures (cross-fs, root-owned dst, etc.).
-        #[cfg(unix)]
-        if header.permissions != 0 {
-            use std::os::unix::fs::PermissionsExt;
-            if let Err(e) =
-                std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(header.permissions))
-            {
-                log::warn!("set permissions on {}: {}", dst.display(), e);
-            }
-        }
-        #[cfg(not(unix))]
-        let _ = header.permissions;
-        crate::windows_metadata::apply_attributes(&dst, header.windows_metadata.as_ref())?;
-
-        Ok(SinkOutcome {
-            files_written: 1,
-            bytes_written: header.size.saturating_add(windows_bytes),
-        })
+        Ok(SinkOutcome::written(
+            1,
+            header.size.saturating_add(windows_bytes),
+        ))
     }
 
     fn root(&self) -> &Path {
@@ -463,7 +670,10 @@ fn write_file_payload(
     // local session route (otp-11) is the first caller to send a
     // file-root File payload through here.
     if header.relative_path.is_empty() {
-        return copy_root_file_payload(src_root, dst_root, header, config);
+        return match copy_root_file_payload(src_root, dst_root, header, config) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => per_file_failure(dst_root, "", error),
+        };
     }
     let src = src_root.join(&header.relative_path);
     // R47-F1: the FsTransferSink::write_payload arm for
@@ -493,7 +703,13 @@ fn write_file_payload(
         }
     };
 
-    copy_resolved_file_payload(&src, &dst, header, config)
+    // Past the containment check every remaining failure — this file's
+    // own parent mkdir, the source read, the copy, its named streams and
+    // its attributes — belongs to exactly this file.
+    match copy_resolved_file_payload(&src, &dst, header, config) {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => per_file_failure(dst_root, &header.relative_path, error),
+    }
 }
 
 /// The file-root identity case of [`write_file_payload`]: `src_root`
@@ -521,10 +737,7 @@ fn copy_resolved_file_payload(
     // parent-mkdir so a dry-run doesn't create destination
     // directories on disk.
     if config.dry_run {
-        return Ok(SinkOutcome {
-            files_written: 1,
-            bytes_written: 0,
-        });
+        return Ok(SinkOutcome::written(1, 0));
     }
 
     if let Some(parent) = dst.parent() {
@@ -570,10 +783,47 @@ fn copy_resolved_file_payload(
     }
     crate::windows_metadata::apply_attributes(dst, header.windows_metadata.as_ref())?;
 
-    Ok(SinkOutcome {
-        files_written: 1,
-        bytes_written: (if did_copy { header.size } else { 0 }).saturating_add(windows_bytes),
-    })
+    Ok(SinkOutcome::written(
+        1,
+        (if did_copy { header.size } else { 0 }).saturating_add(windows_bytes),
+    ))
+}
+
+/// Stamp the metadata tail of a streamed receive: named streams, mtime,
+/// permissions, attributes. Returns the named-stream bytes applied.
+/// Split out of [`FsTransferSink::write_file_stream`] so the tail — past
+/// the record's last wire byte, therefore attributable to one file — is
+/// classified in one place.
+fn stamp_streamed_metadata(dst: &Path, header: &FileHeader, config: &FsSinkConfig) -> Result<u64> {
+    let windows_bytes =
+        crate::windows_metadata::replace_streams(dst, header.windows_metadata.as_ref())?;
+
+    if config.preserve_times && header.mtime_seconds > 0 {
+        let ft = FileTime::from_unix_time(header.mtime_seconds, 0);
+        // Best-effort: cross-fs, root-owned, or ACL-protected
+        // destinations can refuse mtime updates. Surface via
+        // `log::warn!` so the failure is visible without making
+        // it a hard transfer error. POST_REVIEW_FIXES §1.1.
+        if let Err(e) = filetime::set_file_mtime(dst, ft) {
+            log::warn!("set mtime on {}: {}", dst.display(), e);
+        }
+    }
+
+    // Permissions arrive on the wire (Unix mode bits). Apply best-
+    // effort; ignore failures (cross-fs, root-owned dst, etc.).
+    #[cfg(unix)]
+    if header.permissions != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            std::fs::set_permissions(dst, std::fs::Permissions::from_mode(header.permissions))
+        {
+            log::warn!("set permissions on {}: {}", dst.display(), e);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = header.permissions;
+    crate::windows_metadata::apply_attributes(dst, header.windows_metadata.as_ref())?;
+    Ok(windows_bytes)
 }
 
 /// Read the local source timestamp at apply time so local copies retain the
@@ -620,10 +870,7 @@ fn write_tar_shard_payload(
     )>,
 ) -> Result<SinkOutcome> {
     if config.dry_run {
-        return Ok(SinkOutcome {
-            files_written: headers.len(),
-            bytes_written: 0,
-        });
+        return Ok(SinkOutcome::written(headers.len(), 0));
     }
 
     // Two-phase extraction:
@@ -731,10 +978,7 @@ fn write_tar_shard_payload(
             bytes_written += result?;
             files_written += 1;
         }
-        return Ok(SinkOutcome {
-            files_written,
-            bytes_written,
-        });
+        return Ok(SinkOutcome::written(files_written, bytes_written));
     }
 
     type MemberSample = (
@@ -832,31 +1076,34 @@ fn write_tar_shard_payload(
         );
     }
 
-    Ok(SinkOutcome {
-        files_written,
-        bytes_written,
-    })
+    Ok(SinkOutcome::written(files_written, bytes_written))
 }
 
-/// Resume protocol: overwrite a block of an existing file at the given offset.
-async fn write_file_block_payload(
+/// Resume protocol: resolve one resume record's destination. Kept apart
+/// from the patch and finalize helpers because a path-safety failure is a
+/// protocol violation that must stay session-fatal, while the write it
+/// guards is one file's business.
+fn resolve_resume_destination(
     dst_root: &Path,
     canonical_dst_root: Option<&Path>,
     relative_path: &str,
-    offset: u64,
-    bytes: Vec<u8>,
-) -> Result<SinkOutcome> {
-    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-
+    record: &str,
+) -> Result<PathBuf> {
     // R46-F3: contained resolve when canonical root is available.
-    let dst = match canonical_dst_root {
+    match canonical_dst_root {
         Some(canonical) => {
             crate::path_safety::safe_join_contained(canonical, dst_root, relative_path)
-                .with_context(|| format!("validating block-write path {:?}", relative_path))?
+                .with_context(|| format!("validating {record} path {relative_path:?}"))
         }
         None => crate::path_safety::safe_join(dst_root, relative_path)
-            .with_context(|| format!("validating block-write path {:?}", relative_path))?,
-    };
+            .with_context(|| format!("validating {record} path {relative_path:?}")),
+    }
+}
+
+/// Resume protocol: overwrite a block of an existing file at the given offset.
+async fn patch_file_block(dst: &Path, offset: u64, bytes: Vec<u8>) -> Result<SinkOutcome> {
+    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
     let bytes_len = bytes.len() as u64;
     // Resume blocks patch existing files at offset; we want to create
     // if missing but never truncate (subsequent block records share
@@ -865,7 +1112,7 @@ async fn write_file_block_payload(
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&dst)
+        .open(dst)
         .await
         .with_context(|| format!("opening {} for block write", dst.display()))?;
     file.seek(std::io::SeekFrom::Start(offset))
@@ -885,10 +1132,8 @@ async fn write_file_block_payload(
     file.flush()
         .await
         .with_context(|| format!("flushing block write to {}", dst.display()))?;
-    Ok(SinkOutcome {
-        files_written: 0, // Resume blocks patch in-place; finalization counts the file.
-        bytes_written: bytes_len,
-    })
+    // Resume blocks patch in-place; finalization counts the file.
+    Ok(SinkOutcome::written(0, bytes_len))
 }
 
 /// Resume protocol: finalize a resumed file by truncating to total_size,
@@ -896,29 +1141,18 @@ async fn write_file_block_payload(
 /// the "mtime touched, content identical" mirror case correct — block-hash
 /// compare sends zero blocks, but BLOCK_COMPLETE still updates the dest
 /// mtime to match the source.
-async fn write_file_block_complete(
-    dst_root: &Path,
-    canonical_dst_root: Option<&Path>,
-    relative_path: &str,
+async fn finalize_resumed_file(
+    dst: &Path,
     total_size: u64,
     mtime_seconds: i64,
     permissions: u32,
     windows_metadata: Option<crate::generated::WindowsFileMetadata>,
 ) -> Result<SinkOutcome> {
-    // R46-F3: contained resolve when canonical root is available.
-    let dst = match canonical_dst_root {
-        Some(canonical) => {
-            crate::path_safety::safe_join_contained(canonical, dst_root, relative_path)
-                .with_context(|| format!("validating block-complete path {:?}", relative_path))?
-        }
-        None => crate::path_safety::safe_join(dst_root, relative_path)
-            .with_context(|| format!("validating block-complete path {:?}", relative_path))?,
-    };
-    crate::windows_metadata::prepare_destination(&dst, windows_metadata.as_ref())?;
+    crate::windows_metadata::prepare_destination(dst, windows_metadata.as_ref())?;
     {
         let file = tokio::fs::OpenOptions::new()
             .write(true)
-            .open(&dst)
+            .open(dst)
             .await
             .with_context(|| format!("opening {} for truncation", dst.display()))?;
         file.set_len(total_size)
@@ -930,28 +1164,25 @@ async fn write_file_block_complete(
     }
     // Stamp mtime + perms after the file handle is closed (same race
     // dance as write_file_stream — see commit 946bd77).
-    let windows_bytes = crate::windows_metadata::replace_streams(&dst, windows_metadata.as_ref())?;
+    let windows_bytes = crate::windows_metadata::replace_streams(dst, windows_metadata.as_ref())?;
     if mtime_seconds > 0 {
         let ft = FileTime::from_unix_time(mtime_seconds, 0);
-        if let Err(e) = filetime::set_file_mtime(&dst, ft) {
+        if let Err(e) = filetime::set_file_mtime(dst, ft) {
             log::warn!("set mtime on {}: {}", dst.display(), e);
         }
     }
     #[cfg(unix)]
     if permissions != 0 {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(permissions))
+        if let Err(e) = std::fs::set_permissions(dst, std::fs::Permissions::from_mode(permissions))
         {
             log::warn!("set permissions on {}: {}", dst.display(), e);
         }
     }
     #[cfg(not(unix))]
     let _ = permissions;
-    crate::windows_metadata::apply_attributes(&dst, windows_metadata.as_ref())?;
-    Ok(SinkOutcome {
-        files_written: 1,
-        bytes_written: windows_bytes,
-    })
+    crate::windows_metadata::apply_attributes(dst, windows_metadata.as_ref())?;
+    Ok(SinkOutcome::written(1, windows_bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,10 +1233,7 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                             header.relative_path.clone(),
                         ))
                     })?;
-                Ok(SinkOutcome {
-                    files_written: 1,
-                    bytes_written: size,
-                })
+                Ok(SinkOutcome::written(1, size))
             }
             PreparedPayload::TarShard { headers, data } => {
                 let bytes: u64 = headers
@@ -1021,10 +1249,7 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                     .send_prepared_tar_shard(headers, &data)
                     .await
                     .context("sending tar shard")?;
-                Ok(SinkOutcome {
-                    files_written: count,
-                    bytes_written: bytes,
-                })
+                Ok(SinkOutcome::written(count, bytes))
             }
             // Resume payloads can't be relayed without a reverse-resume
             // protocol on the next hop. Reject explicitly.
@@ -1089,11 +1314,11 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                         )
                         .await
                         .context("sending resume block complete")?;
-                    Ok(SinkOutcome {
-                        files_written: 1,
-                        bytes_written: bytes_written
+                    Ok(SinkOutcome::written(
+                        1,
+                        bytes_written
                             .saturating_add(crate::windows_metadata::payload_bytes(&header)),
-                    })
+                    ))
                 }
                 .await;
                 // otp-7b-2: any failure inside the record names its file
@@ -1118,10 +1343,10 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
             .send_file_from_reader(header, reader)
             .await
             .with_context(|| format!("relaying {}", header.relative_path))?;
-        Ok(SinkOutcome {
-            files_written: 1,
-            bytes_written: size.saturating_add(crate::windows_metadata::payload_bytes(header)),
-        })
+        Ok(SinkOutcome::written(
+            1,
+            size.saturating_add(crate::windows_metadata::payload_bytes(header)),
+        ))
     }
 
     async fn finish(&self) -> Result<()> {
@@ -1165,25 +1390,24 @@ impl NullSink {
 impl TransferSink for NullSink {
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
         match payload {
-            PreparedPayload::File(header) => Ok(SinkOutcome {
-                files_written: 1,
-                bytes_written: header
+            PreparedPayload::File(header) => Ok(SinkOutcome::written(
+                1,
+                header
                     .size
                     .saturating_add(crate::windows_metadata::payload_bytes(&header)),
-            }),
-            PreparedPayload::TarShard { headers, data } => Ok(SinkOutcome {
-                files_written: headers.len(),
-                bytes_written: (data.len() as u64).saturating_add(
+            )),
+            PreparedPayload::TarShard { headers, data } => Ok(SinkOutcome::written(
+                headers.len(),
+                (data.len() as u64).saturating_add(
                     headers
                         .iter()
                         .map(crate::windows_metadata::payload_bytes)
                         .sum(),
                 ),
-            }),
-            PreparedPayload::FileBlock { bytes, .. } => Ok(SinkOutcome {
-                files_written: 0,
-                bytes_written: bytes.len() as u64,
-            }),
+            )),
+            PreparedPayload::FileBlock { bytes, .. } => {
+                Ok(SinkOutcome::written(0, bytes.len() as u64))
+            }
             PreparedPayload::FileBlockComplete { .. } => Ok(SinkOutcome::default()),
             // Send-side composite (otp-7b); the receive path this sink
             // benchmarks never produces it.
@@ -1218,10 +1442,7 @@ impl TransferSink for NullSink {
         )
         .await
         .with_context(|| format!("draining {} (null sink)", header.relative_path))?;
-        Ok(SinkOutcome {
-            files_written: 1,
-            bytes_written: n,
-        })
+        Ok(SinkOutcome::written(1, n))
     }
 
     fn root(&self) -> &Path {
@@ -2091,6 +2312,264 @@ mod tests {
             probe_counter.load(std::sync::atomic::Ordering::Relaxed),
             block_bytes.len() as u64,
             "FileBlock byte progress must equal outcome.bytes_written"
+        );
+    }
+
+    // ─── Per-file containment (pfc-2, D-2026-07-30-1) ─────────────────
+
+    /// A destination position blocked by a directory fails exactly that
+    /// file: the outcome is `Ok` so the session continues, names the
+    /// file, and the next payload of the same run still lands.
+    #[tokio::test]
+    async fn write_payload_contains_one_files_failure_and_keeps_writing() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("blocked.txt"), b"blocked payload").unwrap();
+        std::fs::write(src.join("fine.txt"), b"fine payload").unwrap();
+        // A directory where the file belongs: the portable way to make
+        // one file's write — and only that one — fail.
+        std::fs::create_dir_all(dst.join("blocked.txt")).unwrap();
+
+        let sink = FsTransferSink::new(src, dst.clone(), FsSinkConfig::default());
+
+        let blocked = sink
+            .write_payload(PreparedPayload::File(make_file_header("blocked.txt", 15)))
+            .await
+            .expect("one file's write failure must not fail the session");
+        assert_eq!(blocked.files_written, 0);
+        assert_eq!(blocked.bytes_written, 0);
+        assert_eq!(blocked.files_failed_total, 1);
+        assert_eq!(blocked.failures.len(), 1);
+        assert_eq!(blocked.failures[0].relative_path, "blocked.txt");
+        assert!(
+            !blocked.failures[0].reason.is_empty(),
+            "a recorded failure carries its reason chain"
+        );
+
+        let healthy = sink
+            .write_payload(PreparedPayload::File(make_file_header("fine.txt", 12)))
+            .await
+            .expect("the next file writes normally");
+        assert_eq!(healthy.files_written, 1);
+        assert_eq!(healthy.files_failed_total, 0);
+        assert_eq!(
+            std::fs::read(dst.join("fine.txt")).unwrap(),
+            b"fine payload"
+        );
+    }
+
+    /// A streamed receive whose destination cannot be opened fails that
+    /// one file — and must still consume its record's bytes, or the next
+    /// record would be parsed out of this file's payload.
+    #[tokio::test]
+    async fn write_file_stream_contains_failure_after_draining_the_record() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(dst.join("blocked.bin")).unwrap();
+
+        let sink = FsTransferSink::new(tmp.path().join("src"), dst, FsSinkConfig::default());
+        let header = make_file_header("blocked.bin", 7);
+        let mut reader: &[u8] = b"payloadNEXT-RECORD";
+        let outcome = sink
+            .write_file_stream(&header, &mut reader)
+            .await
+            .expect("an unopenable destination is one file's failure");
+
+        assert_eq!(outcome.files_written, 0);
+        assert_eq!(outcome.files_failed_total, 1);
+        assert_eq!(outcome.failures[0].relative_path, "blocked.bin");
+        assert_eq!(
+            reader,
+            &b"NEXT-RECORD"[..],
+            "exactly the failed record's bytes are drained"
+        );
+    }
+
+    /// Classification boundary: a hostile wire path is a protocol
+    /// violation, never one file's failure — it still aborts.
+    #[tokio::test]
+    async fn write_payload_file_containment_violation_stays_fatal() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let sink = FsTransferSink::new(src, dst, FsSinkConfig::default());
+        let err = sink
+            .write_payload(PreparedPayload::File(make_file_header("../evil.txt", 4)))
+            .await
+            .expect_err("path-safety violations stay session-fatal");
+        assert!(
+            format!("{err:#}").contains("validating file payload path"),
+            "expected the path-validation chain; got: {err:#}"
+        );
+        assert!(!tmp.path().join("evil.txt").exists());
+    }
+
+    /// Classification boundary: with the destination root itself
+    /// unusable every payload would fail identically, so root
+    /// unavailability is session-fatal rather than a per-file failure.
+    #[tokio::test]
+    async fn write_payload_unusable_destination_root_stays_fatal() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.txt"), b"payload").unwrap();
+        // The configured destination root is a regular file: nothing can
+        // be written beneath it, for any payload.
+        let dst_root = tmp.path().join("root-is-a-file");
+        std::fs::write(&dst_root, b"not a directory").unwrap();
+
+        let sink = FsTransferSink::new(src, dst_root, FsSinkConfig::default());
+        let err = sink
+            .write_payload(PreparedPayload::File(make_file_header("a.txt", 7)))
+            .await
+            .expect_err("an unusable destination root is session-fatal");
+        assert!(
+            format!("{err:#}").contains("creating directory"),
+            "expected the parent-mkdir failure; got: {err:#}"
+        );
+    }
+
+    /// The reported list is bounded; the total keeps counting past it, so
+    /// a catastrophic run stays reportable without unbounded growth.
+    #[test]
+    fn file_failures_stop_at_the_cap_while_the_total_keeps_counting() {
+        let mut outcome = SinkOutcome::default();
+        for index in 0..70 {
+            outcome.record_failure(format!("f{index}.bin"), "synthetic");
+        }
+        assert_eq!(outcome.failures.len(), MAX_REPORTED_FILE_FAILURES);
+        assert_eq!(outcome.files_failed_total, 70);
+        assert_eq!(outcome.failures[0].relative_path, "f0.bin");
+        assert_eq!(
+            outcome.failures[MAX_REPORTED_FILE_FAILURES - 1].relative_path,
+            format!("f{}.bin", MAX_REPORTED_FILE_FAILURES - 1)
+        );
+        // Identity is lost past the cap, so no path may be reported as
+        // completed from an overflowed outcome.
+        assert!(outcome.file_failed("f0.bin"));
+        assert!(outcome.file_failed("never-seen.bin"));
+    }
+
+    /// Merging holds the same bound and sums both totals, so the
+    /// pipeline-wide total cannot grow without limit either.
+    #[test]
+    fn merging_failures_respects_the_cap_and_sums_totals() {
+        let mut total = SinkOutcome::written(1, 10);
+        for index in 0..40 {
+            total.record_failure(format!("a{index}.bin"), "first member");
+        }
+        let mut other = SinkOutcome::written(2, 20);
+        for index in 0..40 {
+            other.record_failure(format!("b{index}.bin"), "second member");
+        }
+        total.merge(&other);
+
+        assert_eq!(total.files_written, 3);
+        assert_eq!(total.bytes_written, 30);
+        assert_eq!(total.failures.len(), MAX_REPORTED_FILE_FAILURES);
+        assert_eq!(total.files_failed_total, 80);
+        assert_eq!(total.failures[40].relative_path, "b0.bin");
+    }
+
+    /// A resume block that cannot be patched fails its file once, and the
+    /// completion record must not stamp it: a stamped partial would read
+    /// as converged on every later compare instead of resuming.
+    #[tokio::test]
+    async fn failed_resume_block_fails_once_and_blocks_finalization() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        // A directory at the resumed file's path blocks the patch.
+        std::fs::create_dir_all(dst.join("resume.bin")).unwrap();
+
+        let sink =
+            FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default());
+
+        for offset in [0u64, 32] {
+            let outcome = sink
+                .write_payload(PreparedPayload::FileBlock {
+                    relative_path: "resume.bin".to_string(),
+                    offset,
+                    bytes: vec![0xABu8; 32],
+                })
+                .await
+                .expect("a block that cannot be patched is one file's failure");
+            assert_eq!(
+                outcome.files_failed_total, 0,
+                "a resumed file is reported once, at its completion record"
+            );
+        }
+
+        let complete = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "resume.bin".to_string(),
+                total_size: 64,
+                mtime_seconds: 1_700_000_000,
+                permissions: 0o644,
+                windows_metadata: None,
+            })
+            .await
+            .expect("the completion record reports, it does not fault");
+        assert_eq!(complete.files_written, 0);
+        assert_eq!(complete.files_failed_total, 1);
+        assert_eq!(complete.failures.len(), 1);
+        assert_eq!(complete.failures[0].relative_path, "resume.bin");
+        assert!(
+            dst.join("resume.bin").is_dir(),
+            "the finalization must not have run against the blocked path"
+        );
+    }
+
+    /// Records every warn the `log` facade emits. The facade takes one
+    /// backend per process, so this one is installed once and read by the
+    /// test that needs it; other tests assert nothing about logging.
+    static CAPTURED_WARNINGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    struct CaptureWarnings;
+
+    impl log::Log for CaptureWarnings {
+        fn enabled(&self, metadata: &log::Metadata) -> bool {
+            metadata.level() <= log::Level::Warn
+        }
+
+        fn log(&self, record: &log::Record) {
+            if self.enabled(record.metadata()) {
+                CAPTURED_WARNINGS
+                    .lock()
+                    .expect("captured-warnings lock poisoned")
+                    .push(record.args().to_string());
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    /// A contained failure's only surface until the summary carries the
+    /// report is its log line: a file that is skipped without a word is
+    /// indistinguishable from a transferred one.
+    #[test]
+    fn a_contained_failure_is_logged_with_its_path_and_reason() {
+        log::set_logger(&CaptureWarnings).expect("no other log backend in the lib tests");
+        log::set_max_level(log::LevelFilter::Warn);
+
+        let outcome = SinkOutcome::failed("logged/one.bin", "access is denied");
+        assert_eq!(outcome.files_failed_total, 1);
+
+        let logged = CAPTURED_WARNINGS
+            .lock()
+            .expect("captured-warnings lock poisoned");
+        assert!(
+            logged
+                .iter()
+                .any(|line| line.contains("logged/one.bin") && line.contains("access is denied")),
+            "expected a warn naming the failed file and its reason; got: {logged:?}"
         );
     }
 }

@@ -467,8 +467,7 @@ impl ResponderDataPlane {
                             return Err(error);
                         }
                     };
-                    total.files_written += outcome.files_written;
-                    total.bytes_written += outcome.bytes_written;
+                    total.merge(&outcome);
                 }
             }
         }
@@ -883,8 +882,7 @@ impl InitiatorReceivePlaneRun {
                     return Err(error);
                 }
             };
-            total.files_written += outcome.files_written;
-            total.bytes_written += outcome.bytes_written;
+            total.merge(&outcome);
         }
         Ok(ReceiveTotals { outcome: total })
     }
@@ -2353,12 +2351,16 @@ impl TransferSink for NeedListSink {
                     .await
                     .map_err(|e| super::tag_path(e, &path))?;
                 // Count only after the finalization write landed —
-                // the same ordering the in-stream arms follow.
-                self.resume
-                    .as_ref()
-                    .expect("claim_block_complete verified resume is negotiated")
-                    .resumed
-                    .fetch_add(1, Ordering::Relaxed);
+                // the same ordering the in-stream arms follow. A file the
+                // sink contained as a per-file failure never landed, so it
+                // is not a resumed file (D-2026-07-30-1).
+                if !outcome.file_failed(&path) {
+                    self.resume
+                        .as_ref()
+                        .expect("claim_block_complete verified resume is negotiated")
+                        .resumed
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 return Ok(outcome);
             }
             // Send-side composite (otp-7b) — the wire never carries it,

@@ -503,17 +503,23 @@ pub async fn execute_sink_pipeline_elastic(
                         // Contract (progress.rs): bytes ride Payload, one
                         // FileComplete per file. `size` is the planned
                         // manifest size — the value this lane has always
-                        // reported, now on the right variant.
+                        // reported, now on the right variant. A file this
+                        // payload recorded as failed never completes on
+                        // this lane (D-2026-07-30-1).
                         for (name, size) in &files {
                             p.report_payload(0, *size);
-                            p.report_file_complete(name.clone());
+                            if !outcome.file_failed(name) {
+                                p.report_file_complete(name.clone());
+                            }
                         }
                         // A resumed file finishes like any other (w6-1:
                         // counted once, per-file lane); its bytes are the
                         // stale blocks actually sent.
                         if let Some(name) = resumed_file {
                             p.report_payload(0, outcome.bytes_written);
-                            p.report_file_complete(name);
+                            if !outcome.file_failed(&name) {
+                                p.report_file_complete(name);
+                            }
                         }
                     }
                     let mut t = total.lock().unwrap();
@@ -1243,7 +1249,10 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                     .with_context(|| format!("receiving {}", header.relative_path))?;
                 if let Some(p) = progress {
                     p.report_payload(0, outcome.bytes_written);
-                    p.report_file_complete(header.relative_path.clone());
+                    // A per-file failure is not a completion.
+                    if !outcome.file_failed(&header.relative_path) {
+                        p.report_file_complete(header.relative_path.clone());
+                    }
                 }
                 total.merge(&outcome);
             }
@@ -1298,7 +1307,9 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                 if let Some(p) = progress {
                     p.report_payload(0, bytes);
                     for path in member_paths.unwrap_or_default() {
-                        p.report_file_complete(path);
+                        if !outcome.file_failed(&path) {
+                            p.report_file_complete(path);
+                        }
                     }
                 }
                 total.merge(&outcome);
@@ -1387,7 +1398,12 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                     if outcome.bytes_written > 0 {
                         p.report_payload(0, outcome.bytes_written);
                     }
-                    p.report_file_complete(path_for_progress.unwrap_or_default());
+                    let path = path_for_progress.unwrap_or_default();
+                    // A finalization the sink refused (its patch failed, or
+                    // the truncate/stamp did) is not a completion.
+                    if !outcome.file_failed(&path) {
+                        p.report_file_complete(path);
+                    }
                 }
                 total.merge(&outcome);
             }
@@ -2047,10 +2063,7 @@ mod tests {
                 PreparedPayload::FileBlockComplete { .. } => (1, 0),
                 PreparedPayload::ResumeFile { header, .. } => (1, header.size),
             };
-            Ok(SinkOutcome {
-                files_written,
-                bytes_written,
-            })
+            Ok(SinkOutcome::written(files_written, bytes_written))
         }
 
         async fn write_file_stream(
@@ -2060,10 +2073,7 @@ mod tests {
         ) -> Result<SinkOutcome> {
             let mut buf = Vec::new();
             tokio::io::AsyncReadExt::read_to_end(reader, &mut buf).await?;
-            Ok(SinkOutcome {
-                files_written: 1,
-                bytes_written: buf.len() as u64,
-            })
+            Ok(SinkOutcome::written(1, buf.len() as u64))
         }
 
         fn root(&self) -> &Path {
@@ -2323,6 +2333,127 @@ mod tests {
         );
     }
 
+    /// Sink that lands nothing and reports every payload as one file's
+    /// failure — the pfc-2 shape the pipeline must NOT read as a session
+    /// failure.
+    struct PerFileFailingSink {
+        dst_root: PathBuf,
+        writes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl TransferSink for PerFileFailingSink {
+        async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            let relative_path = match &payload {
+                PreparedPayload::File(header) => header.relative_path.clone(),
+                _ => String::new(),
+            };
+            Ok(SinkOutcome::failed(
+                relative_path,
+                "synthetic per-file failure",
+            ))
+        }
+        fn root(&self) -> &Path {
+            &self.dst_root
+        }
+    }
+
+    /// pfc-2: per-file failures ride the outcome, so first-error-wins
+    /// cancellation must not trip — every remaining payload is still
+    /// offered and the merged total carries the whole failure report.
+    #[tokio::test]
+    async fn per_file_failures_do_not_cancel_the_pipeline() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let names = ["a.txt", "b.txt", "c.txt"];
+        for name in names {
+            std::fs::write(src.join(name), b"payload").unwrap();
+        }
+
+        let source = Arc::new(FsTransferSource::new(src));
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sink: Arc<dyn TransferSink> = Arc::new(PerFileFailingSink {
+            dst_root: tmp.path().join("dst"),
+            writes: Arc::clone(&writes),
+        });
+
+        // One File payload per file (not the planner's tar grouping) so
+        // each write is its own outcome to merge.
+        let planned: Vec<TransferPayload> = names
+            .iter()
+            .map(|name| {
+                TransferPayload::File(FileHeader {
+                    relative_path: (*name).to_string(),
+                    size: 7,
+                    mtime_seconds: 0,
+                    permissions: 0o644,
+                    checksum: Vec::new(),
+                    windows_metadata: None,
+                })
+            })
+            .collect();
+
+        let total = execute_sink_pipeline(source, vec![sink], planned, 4, None)
+            .await
+            .expect("per-file failures are not session failures");
+
+        assert_eq!(
+            writes.load(Ordering::Relaxed),
+            names.len(),
+            "cancellation must not have stopped the queue"
+        );
+        assert_eq!(total.files_written, 0);
+        assert_eq!(total.files_failed_total, names.len() as u64);
+        let mut reported: Vec<String> = total
+            .failures
+            .iter()
+            .map(|failure| failure.relative_path.clone())
+            .collect();
+        reported.sort();
+        assert_eq!(reported, names);
+    }
+
+    /// pfc-2: one file whose destination cannot be opened fails alone —
+    /// the receive keeps parsing and the following record lands. The
+    /// failed record must be drained, or the next tag would be read out
+    /// of this file's payload bytes.
+    #[tokio::test]
+    async fn receive_pipeline_contains_per_file_failure_and_stays_aligned() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(dst.join("blocked.bin")).unwrap();
+
+        let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
+            PathBuf::new(),
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
+            },
+        ));
+
+        let mut wire = encode_file(b"blocked.bin", b"blocked!", 0, 0o644);
+        wire.extend_from_slice(&encode_file(b"landed.bin", b"landed!", 0, 0o644));
+        wire.push(DATA_PLANE_RECORD_END);
+
+        let mut socket: &[u8] = &wire;
+        let total = execute_receive_pipeline(&mut socket, sink, None)
+            .await
+            .expect("a per-file failure must not fault the receive");
+
+        assert_eq!(total.files_written, 1);
+        assert_eq!(total.files_failed_total, 1);
+        assert_eq!(total.failures.len(), 1);
+        assert_eq!(total.failures[0].relative_path, "blocked.bin");
+        assert_eq!(std::fs::read(dst.join("landed.bin")).unwrap(), b"landed!");
+    }
+
     /// audit-1c2: a receive that stalls (no bytes) must abort with the
     /// StallGuard's TimedOut rather than blocking forever. A duplex whose
     /// writer half is held open but never written keeps the first record-
@@ -2394,10 +2525,7 @@ mod workqueue_tests {
                 tokio::time::sleep(self.delay).await;
             }
             self.count.fetch_add(1, Ordering::Relaxed);
-            Ok(SinkOutcome {
-                files_written: 1,
-                bytes_written: 0,
-            })
+            Ok(SinkOutcome::written(1, 0))
         }
         fn root(&self) -> &Path {
             &self.root
@@ -2509,10 +2637,7 @@ mod workqueue_tests {
                 permit.forget();
             }
             self.count.fetch_add(1, Ordering::Relaxed);
-            Ok(SinkOutcome {
-                files_written: 1,
-                bytes_written: 0,
-            })
+            Ok(SinkOutcome::written(1, 0))
         }
         async fn finish(&self) -> Result<()> {
             self.finished.fetch_add(1, Ordering::Relaxed);
@@ -2570,10 +2695,7 @@ mod workqueue_tests {
                 permit.forget();
             }
             self.count.fetch_add(1, Ordering::Relaxed);
-            Ok(SinkOutcome {
-                files_written: 1,
-                bytes_written: 0,
-            })
+            Ok(SinkOutcome::written(1, 0))
         }
 
         async fn finish(&self) -> Result<()> {
@@ -3425,10 +3547,7 @@ mod workqueue_tests {
             };
             self.bytes.fetch_add(bytes, Ordering::Relaxed);
             self.paths.lock().unwrap().extend(names);
-            Ok(SinkOutcome {
-                files_written: files,
-                bytes_written: bytes,
-            })
+            Ok(SinkOutcome::written(files, bytes))
         }
         fn root(&self) -> &Path {
             &self.root

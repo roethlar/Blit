@@ -46,7 +46,10 @@ pub use progress::{
     StreamState, StreamTelemetry, StreamTelemetrySnapshot,
 };
 pub use session_phase::{SessionPhaseEvent, SessionPhaseRole, SessionPhaseTrace};
-pub use sink::{DataPlaneSink, FsSinkConfig, FsTransferSink, NullSink, SinkOutcome, TransferSink};
+pub use sink::{
+    DataPlaneSink, FileFailure, FsSinkConfig, FsTransferSink, NullSink, SinkOutcome, TransferSink,
+    MAX_REPORTED_FILE_FAILURES,
+};
 pub use small_file_probe::{
     ClaimReport, MemberTimingReport, ShardReceiveReport, ShardSinkReport, SmallFileCarrier,
     SmallFileProbe, SmallFileProbeReport, SourceBookkeepingReport, TimingAggregate,

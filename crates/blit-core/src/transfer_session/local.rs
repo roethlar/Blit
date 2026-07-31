@@ -974,6 +974,88 @@ mod tests {
         );
     }
 
+    /// A source tree with one file whose destination position is blocked
+    /// by a directory — the portable way to fail exactly one file's write.
+    /// Both files are sized past the planner's 1 MiB small-file cut so each
+    /// is planned as its own single-file payload: tar-shard members are a
+    /// separate containment slice, and a shard here would prove nothing
+    /// about the single-file write paths.
+    fn one_blocked_file_fixture(tmp: &Path) -> (PathBuf, PathBuf) {
+        let src_root = tmp.join("src");
+        let dst_root = tmp.join("dst");
+        std::fs::create_dir_all(&src_root).expect("mkdir src");
+        std::fs::create_dir_all(&dst_root).expect("mkdir dst");
+        let body = vec![b'x'; 1_048_576 + 1];
+        std::fs::write(src_root.join("ok.bin"), &body).expect("write");
+        std::fs::write(src_root.join("blocked.bin"), &body).expect("write");
+        std::fs::create_dir_all(dst_root.join("blocked.bin")).expect("mkdir blocker");
+        (src_root, dst_root)
+    }
+
+    /// D-2026-07-30-1 Q1(b), enforced in-session: a contained per-file
+    /// failure must never authorize deleting the source. A non-mirror
+    /// session may be `blit move`, whose caller deletes the source on
+    /// success, and no declaration distinguishes the two here — so the
+    /// failure stays fatal instead of reporting a short success.
+    #[tokio::test]
+    async fn per_file_failure_refuses_a_session_whose_caller_may_delete_the_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (src_root, dst_root) = one_blocked_file_fixture(tmp.path());
+
+        let err = run_local_session(
+            &src_root,
+            &dst_root,
+            LocalMirrorOptions {
+                mirror: false,
+                perf_history: false,
+                ..LocalMirrorOptions::default()
+            },
+        )
+        .await
+        .expect_err("a contained failure must not report success to a source-deleting caller");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("deletes the source afterwards"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("blocked.bin"),
+            "the refusal names the failed file: {message}"
+        );
+    }
+
+    /// The same failure in a mirror — the one shape that proves no source
+    /// delete follows (R46-F1: a move never mirrors) — is contained: the
+    /// session completes and the rest of the manifest lands.
+    #[tokio::test]
+    async fn mirror_contains_a_per_file_failure_and_transfers_the_rest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (src_root, dst_root) = one_blocked_file_fixture(tmp.path());
+
+        let summary = run_local_session(
+            &src_root,
+            &dst_root,
+            LocalMirrorOptions {
+                mirror: true,
+                perf_history: false,
+                ..LocalMirrorOptions::default()
+            },
+        )
+        .await
+        .expect("one file's write failure must not fault a mirror");
+
+        assert_eq!(
+            summary.copied_files, 1,
+            "the failed file is never a copied file"
+        );
+        assert_eq!(
+            std::fs::metadata(dst_root.join("ok.bin"))
+                .expect("the rest of the manifest landed")
+                .len(),
+            1_048_577
+        );
+    }
+
     #[test]
     fn dest_subtree_rel_detects_nesting() {
         assert_eq!(

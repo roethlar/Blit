@@ -108,9 +108,11 @@ aborted with `session INTERNAL: writing payload`.
   (`windows_metadata.rs:257-290`) — `actual == *expected` on the full
   `WindowsFileMetadata` (attributes + named streams).
 - Destination file-materialization sites (the complete `apply_attributes`
-  call-site set): `remote/transfer/sink.rs:412/438` (DataPlaneSink),
-  `:560/571` (`copy_resolved_file_payload`), `:702/721` and `:780/798`
-  (tar-shard parallel writers), `:933/950`; plus
+  call-site set): `remote/transfer/sink.rs:412/438`
+  (`FsTransferSink::write_file_stream` — the destination-side streaming
+  write; the pfc-1 draft mislabeled these lines "DataPlaneSink", corrected
+  at pfc-2 landing), `:560/571` (`copy_resolved_file_payload`), `:702/721`
+  and `:780/798` (tar-shard parallel writers), `:933/950`; plus
   `remote/transfer/tar_safety.rs:240/262` (`write_extracted_file`).
 - Pipeline is first-error-wins: worker loop at
   `remote/transfer/pipeline.rs:440-531` propagates any
@@ -197,6 +199,41 @@ tolerance tests fail.
    is never classified extraneous — copy failures do not corrupt the delete
    set.
 
+### pfc-2 landing notes (recorded boundaries and deferred items)
+
+- **Interim interlock (pfc-5 removes it):** containment is live for MIRROR
+  sessions only. A non-mirror session (`!mirror_enabled`) keeps a contained
+  per-file failure session-fatal at SourceDone — mirroring is the only
+  session declaration proving no source deletion follows, so this exactly
+  preserves pre-pfc-2 behavior for every move route and closes the
+  move-deletes-unlanded-source window the pfc-2 review caught. pfc-5
+  replaces this with the real `files_failed_total == 0` source-deletion
+  gate and extends containment to non-mirror sessions.
+- Every contained failure logs `log::warn!` at the single
+  `record_failure` chokepoint (interim visibility until pfc-5's summary
+  block).
+- **Send-side source read stays fatal** (`prepare_payload`,
+  pipeline.rs): skipping a granted file at the SOURCE trips the
+  DESTINATION's "needed file(s) never delivered" protocol check, so
+  source-side containment needs a wire skip signal — pfc-4 at the
+  earliest, or a recorded non-goal.
+- **`validate_payload` asymmetry (deliberate):** the wire receive path
+  (`write_file_stream`) faults on peer-supplied metadata shape before any
+  filesystem effect; the local File-payload path reads metadata from the
+  local source, so the same validation failure there is contained as that
+  file's failure.
+- **`file_failed` cap identity (pfc-3 must decide):** past the 64-entry
+  cap the predicate answers true for every path — conservative
+  (suppresses completions, never reports a failed file complete), but a
+  tar shard with >64 member failures would suppress completions for its
+  healthy members; pfc-3 needs per-member identity or an explicit accept.
+- **Byte accounting:** a contained flush-failure has already reported its
+  payload bytes to the live byte counter while the summary counts 0 for
+  the file — pfc-4 reconciles or records the divergence.
+- A held resume-block failure is reported only when its completion record
+  arrives; a sender that never sends the completion is a protocol
+  violation today, so the drop is unreachable — noted, not coded around.
+
 ### Half C — metadata-only attribute repair (pfc-6, D-2026-07-31-1)
 
 Field evidence (2026-07-31, `H:\apps` pre-existing backup regions, e.g.
@@ -258,6 +295,9 @@ One coherent, testable change per slice — sized for the review loop.
    both-roles/both-carriers propagation + round-trip tests.
 5. **pfc-5** — CLI failure block + exit code + JSON fields + move
    source-deletion gate + mirror-delete posture per Q1 + integration tests.
+   Also removes pfc-2's interim non-mirror interlock: containment extends
+   to non-mirror sessions once the `files_failed_total == 0` gate guards
+   every source-deleting route.
 6. **pfc-6** (added D-2026-07-31-1) — metadata-only attribute repair at the
    destination diff: attributes-only divergence repairs in place with zero
    payload bytes; stream divergence still transfers; repair failure
