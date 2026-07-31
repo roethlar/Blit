@@ -21,8 +21,7 @@ use std::time::Duration;
 use blit_core::generated::{
     delegated_pull_progress::Payload as ProgressPayload, session_error, BytesProgress,
     ComparisonMode, DelegatedPullError, DelegatedPullProgress, DelegatedPullRequest,
-    DelegatedPullStarted, DelegatedPullSummary, ManifestBatch as ProtoManifestBatch, MirrorMode,
-    TransferOperationSpec,
+    DelegatedPullStarted, ManifestBatch as ProtoManifestBatch, MirrorMode, TransferOperationSpec,
 };
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
 use blit_core::remote::transfer::operation_spec::NormalizedTransferOperation;
@@ -31,7 +30,8 @@ use blit_core::remote::transfer::session_client::{
     TransferOpenRefusal,
 };
 use blit_core::remote::transfer::{
-    SessionPhaseRole, TransferLifecycleOutcome, TransferLifecycleTrace,
+    delegated_summary_from_session, SessionPhaseRole, TransferLifecycleOutcome,
+    TransferLifecycleTrace,
 };
 use blit_core::transfer_session::SessionFault;
 use tokio::sync::mpsc;
@@ -491,23 +491,20 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     // Summary: the session's DESTINATION-computed record IS this end's
     // authoritative account (R34-F1 by construction — the session
     // scored what this filesystem did, deletions included; the old
-    // source-attested count problem cannot recur).
-    let s = &outcome.summary;
+    // source-attested count problem cannot recur). The re-encode into
+    // the RPC's own summary message is `delegated_summary_from_session`
+    // (cr-pfc4-1): it lives beside the session-summary contract so a
+    // future field cannot land on the session summary and silently go
+    // missing on this route — which is exactly how the destination's
+    // per-file failure report was lost here. `source_peer_observed` is
+    // this end's diagnostic (R23-F4), not load-bearing for byte-path
+    // isolation.
     let _ = tx
         .send(Ok(DelegatedPullProgress {
-            payload: Some(ProgressPayload::Summary(DelegatedPullSummary {
-                files_transferred: s.files_transferred,
-                bytes_transferred: s.bytes_transferred,
-                bytes_zero_copy: 0,
-                // Wire-compat: the old field means "the gRPC byte
-                // fallback carried the payload" — on the session that
-                // is the in-stream carrier.
-                tcp_fallback_used: s.in_stream_carrier_used,
-                entries_deleted: s.entries_deleted,
-                // Diagnostic only (R23-F4). The destination's view; not
-                // load-bearing for byte-path isolation.
-                source_peer_observed: format!("{}:{}", resolved.ip(), resolved.port()),
-            })),
+            payload: Some(ProgressPayload::Summary(delegated_summary_from_session(
+                &outcome.summary,
+                format!("{}:{}", resolved.ip(), resolved.port()),
+            ))),
         }))
         .await;
     Ok(())

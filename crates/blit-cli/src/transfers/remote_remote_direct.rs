@@ -190,6 +190,13 @@ async fn run_remote_to_remote_direct_inner(
             tcp_fallback_used: false,
             entries_deleted: 0,
             source_peer_observed: started.source_data_plane_endpoint.clone(),
+            // A detached caller exits before the destination computes
+            // any summary, so it observes no counts at all — including
+            // the per-file failure report (cr-pfc4-1). The daemon owns
+            // the transfer to completion; `blit jobs` is where its
+            // outcome is read.
+            files_failed: 0,
+            failures: Vec::new(),
         };
         let state = DeferredDelegatedState {
             summary,

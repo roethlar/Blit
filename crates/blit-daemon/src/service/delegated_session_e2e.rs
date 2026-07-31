@@ -256,6 +256,64 @@ async fn delegated_mirror_purges_extraneous_locally() {
     dst.stop().await;
 }
 
+/// cr-pfc4-1: a delegated MIRROR is the topology where the destination
+/// contains a per-file failure and still reports (a non-mirror session
+/// keeps it fatal — a source delete may follow). The destination's
+/// report must survive the re-encode into `DelegatedPullSummary` and
+/// reach the initiating CLI: exact count plus the failing path. Pre-fix
+/// the re-encode dropped both fields, so this delegated mirror reported
+/// "3 files transferred" with a file silently absent.
+///
+/// A directory where the file belongs is the portable way to fail
+/// exactly one file's write (the same fixture the sink's containment
+/// unit tests use).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delegated_summary_carries_the_destination_failure_report() {
+    let src = Daemon::start("srcmod", false).await;
+    let dst = Daemon::start("dstmod", true).await;
+    write_tree(&src.root, SRC_TREE);
+    std::fs::create_dir_all(dst.root.join("a.txt")).expect("block one destination path");
+
+    let events = run_delegated(
+        dst.port,
+        src.port,
+        "dstmod",
+        TransferOperationSpec {
+            mirror_mode: MirrorMode::All as i32,
+            ..spec("srcmod")
+        },
+    )
+    .await;
+    assert_no_error(&events);
+
+    let summary = summary_of(&events);
+    assert_eq!(
+        summary.files_failed, 1,
+        "the initiator must see the destination's contained failure"
+    );
+    assert_eq!(summary.failures.len(), 1);
+    assert_eq!(
+        summary.failures[0].relative_path, "a.txt",
+        "the report names the file that did not land"
+    );
+    assert!(
+        !summary.failures[0].reason.is_empty(),
+        "a carried failure keeps its reason chain"
+    );
+    // A failed file is never a transferred file: the other two landed.
+    assert_eq!(summary.files_transferred, SRC_TREE.len() as u64 - 1);
+    for (rel, content, _) in SRC_TREE.iter().filter(|(rel, _, _)| *rel != "a.txt") {
+        assert_eq!(
+            std::fs::read(dst.root.join(rel)).expect("healthy file landed"),
+            *content,
+            "containment keeps the rest of the manifest landing"
+        );
+    }
+
+    src.stop().await;
+    dst.stop().await;
+}
+
 /// otp-9b: `force_grpc` on the spec maps onto the session's in-stream
 /// carrier, surfacing on the wire-compat `tcp_fallback_used` summary
 /// bit (its historical meaning: "the gRPC byte fallback carried the

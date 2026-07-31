@@ -1,5 +1,6 @@
 pub mod abort_on_drop;
 pub mod data_plane;
+pub mod delegated_summary;
 pub mod diff_planner;
 pub mod faulted_path;
 pub mod lifecycle_trace;
@@ -24,6 +25,7 @@ pub use data_plane::{
     DATA_PLANE_RECORD_BLOCK, DATA_PLANE_RECORD_BLOCK_COMPLETE, DATA_PLANE_RECORD_END,
     DATA_PLANE_RECORD_FILE, DATA_PLANE_RECORD_TAR_SHARD, RECEIVE_CHUNK_SIZE, SUB_TOKEN_LEN,
 };
+pub use delegated_summary::{delegated_summary_failures, delegated_summary_from_session};
 pub use faulted_path::FaultedPath;
 pub use lifecycle_trace::{
     outcome_for_report, TransferLifecycleEvent, TransferLifecycleFailure, TransferLifecycleOutcome,

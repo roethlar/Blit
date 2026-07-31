@@ -58,8 +58,8 @@ use blit_core::remote::transfer::session_client::{
 };
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::transfer::{
-    RemoteTransferProgress, SessionPhaseRole, TransferLifecycleFailure, TransferLifecycleOutcome,
-    TransferLifecycleTrace,
+    delegated_summary_failures, FileFailure, RemoteTransferProgress, SessionPhaseRole,
+    TransferLifecycleFailure, TransferLifecycleOutcome, TransferLifecycleTrace,
 };
 use blit_core::remote::{RemoteEndpoint, RemotePath};
 use eyre::{bail, eyre, Context, Result};
@@ -337,10 +337,41 @@ pub struct DelegatedPullExecution {
 /// Output of [`run_delegated_pull`]. The `src` / `dst` endpoints
 /// are echoed back so the caller's printer can reference them
 /// without keeping its own copies.
+///
+/// `summary` is the destination daemon's re-encode of the session
+/// [`TransferSummary`] it computed, so it carries the same
+/// destination-attested account the direct routes surface —
+/// including the contained per-file failure report (cr-pfc4-1). A
+/// returned outcome is therefore NOT proof that every file landed:
+/// consult [`DelegatedPullOutcome::files_failed`] /
+/// [`DelegatedPullOutcome::contained_failures`] before treating a
+/// delegated run as an unqualified success.
 pub struct DelegatedPullOutcome {
     pub summary: DelegatedPullSummary,
     pub src: RemoteEndpoint,
     pub dst: RemoteEndpoint,
+}
+
+impl DelegatedPullOutcome {
+    /// Exact number of files the destination could not materialize
+    /// while the rest of the transfer landed (pfc-4,
+    /// D-2026-07-30-1). Always the full count, even when the named
+    /// detail below is capped — a delegated mirror is the topology
+    /// where contained failures are reported rather than made
+    /// session-fatal, so this is the only signal that a "complete"
+    /// delegated run is missing files.
+    pub fn files_failed(&self) -> u64 {
+        self.summary.files_failed
+    }
+    /// The named subset of [`DelegatedPullOutcome::files_failed`], in
+    /// the same in-memory shape `LocalMirrorSummary::failures`
+    /// carries, so one renderer serves every topology (pfc-5 owns the
+    /// rendering and the exit-code semantics). Sender-capped at 64
+    /// entries: a list shorter than the count means "capped", never
+    /// "some failures were forgotten".
+    pub fn contained_failures(&self) -> Vec<FileFailure> {
+        delegated_summary_failures(&self.summary)
+    }
 }
 
 /// Per-stream state tracked while consuming `BytesProgress`
@@ -635,6 +666,12 @@ where
         );
         return Err(eyre!("delegation ended before summary"));
     };
+    // Session-level classification only: `Success` here means the
+    // delegation ran to its summary, exactly as the direct routes
+    // classify a session that contained per-file failures. It is NOT a
+    // claim that every file landed — that verdict is
+    // `summary.files_failed` / `summary.failures`, carried on the
+    // outcome for the caller (pfc-5 owns rendering and exit codes).
     lifecycle_trace.record(
         "delegated_body_return",
         Some(TransferLifecycleOutcome::Success),
@@ -885,6 +922,50 @@ mod tests {
             port: 9031,
             path,
         }
+    }
+
+    /// cr-pfc4-1: the destination's contained failure report has to be
+    /// readable off the delegated outcome the initiator gets back — the
+    /// exact count plus every entry the sender carried. A delegated
+    /// mirror reports contained failures instead of faulting, so an
+    /// outcome that hides them is the silent-data-loss surface.
+    #[test]
+    fn delegated_outcome_surfaces_the_destination_failure_report() {
+        use blit_core::remote::transfer::delegated_summary_from_session;
+        use blit_core::remote::transfer::sink::{SinkOutcome, MAX_REPORTED_FILE_FAILURES};
+
+        let mut contained = SinkOutcome::written(2, 20);
+        for index in 0..(MAX_REPORTED_FILE_FAILURES + 6) {
+            contained.record_failure(format!("dir/f{index}.bin"), format!("synthetic {index}"));
+        }
+        let session_summary = TransferSummary {
+            files_transferred: 2,
+            bytes_transferred: 20,
+            entries_deleted: 0,
+            in_stream_carrier_used: false,
+            files_resumed: 0,
+            files_failed: contained.files_failed_total,
+            failures: contained.wire_failures(),
+        };
+        let endpoint = delegated_endpoint(RemotePath::Module {
+            module: "mod".to_string(),
+            rel_path: PathBuf::new(),
+        });
+        let outcome = DelegatedPullOutcome {
+            summary: delegated_summary_from_session(&session_summary, "peer".to_string()),
+            src: endpoint.clone(),
+            dst: endpoint,
+        };
+
+        assert_eq!(outcome.files_failed(), 70, "the count stays exact");
+        let failures = outcome.contained_failures();
+        assert_eq!(failures.len(), MAX_REPORTED_FILE_FAILURES);
+        assert_eq!(failures[0].relative_path, "dir/f0.bin");
+        assert_eq!(failures[0].reason, "synthetic 0");
+        assert_eq!(
+            failures[MAX_REPORTED_FILE_FAILURES - 1].relative_path,
+            format!("dir/f{}.bin", MAX_REPORTED_FILE_FAILURES - 1)
+        );
     }
 
     #[test]

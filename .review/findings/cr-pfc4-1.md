@@ -3,7 +3,7 @@
 **Severity**: HIGH — a delegated remote→remote mirror with contained
 destination failures returns clean success; the requested file is
 silently absent.
-**Status**: Open — fix queued behind cr-pfc3-1/-2 (ordering only)
+**Status**: In progress — fixed, awaiting per-finding reviewer verdict
 **Branch**: — (default-branch mode)
 **Commit**: (filled at landing)
 
@@ -53,3 +53,5 @@ rest of the CLI surfacing.
 
 ## Reviewer comments
 (pending per-finding verification after the fix)
+
+As built: `DelegatedPullSummary` gains `files_failed = 7` + `failures = 8` (reusing `FileFailure`, same cap semantics); the ONE re-encode extracted to `delegated_summary_from_session` (copies verbatim, no second capping path) with the v6 doc line naming it as the second site any future summary field must reach; `DelegatedPullOutcome::files_failed()/contained_failures()` consumer accessors (rendering stays pfc-5); detach-path literal explicitly zeroed with reason. Guards red three ways under the copy-through drop (unit round-trip 0≠70; consumer surface 0≠70; real two-daemon delegated e2e 0≠1 with the report's path+reason pinned and siblings landing byte-identical). blit-core 466/0, daemon 176/0, app 59/0, workspace 1663/0.

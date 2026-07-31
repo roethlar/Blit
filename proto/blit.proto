@@ -655,6 +655,23 @@ message DelegatedPullSummary {
   // connecting to src. Useful for operator audit logs. Not a proof of
   // byte-path isolation.
   string source_peer_observed = 6;
+
+  // The destination's contained per-file failure report, copied
+  // verbatim from the session `TransferSummary` this delegated run's
+  // DESTINATION computed (cr-pfc4-1, within contract v6). Identical
+  // semantics to `TransferSummary.files_failed` / `failures`:
+  // `files_failed` is the exact count, `failures` is the sender-capped
+  // named subset (64 entries, capped once at the summary's single
+  // construction site), so a shorter list means "capped", never "some
+  // failures were forgotten".
+  //
+  // The delegated topology re-encodes the authoritative session
+  // summary into THIS message before it reaches the initiating CLI, so
+  // the report has to ride it too: without these fields a delegated
+  // remote→remote mirror with contained destination failures reports
+  // clean success while the requested files are absent.
+  uint64 files_failed = 7;
+  repeated FileFailure failures = 8;
 }
 
 message DelegatedPullError {

@@ -76,7 +76,12 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// descriptors/content on manifest and payload records (rel-4).
 /// v5: explicit source-side Windows metadata downgrade policy.
 /// v6: `TransferSummary.files_failed` + capped `failures` list — the
-/// destination's per-file failure report (pfc-4, D-2026-07-30-1).
+/// destination's per-file failure report (pfc-4, D-2026-07-30-1). The
+/// delegated RPC re-states this summary in its own
+/// `DelegatedPullSummary`, which carries the same field pair
+/// (`remote::transfer::delegated_summary`, cr-pfc4-1) — a future
+/// summary field has to land there too or the delegated topology loses
+/// it.
 pub const CONTRACT_VERSION: u32 = 6;
 
 /// Payload chunk size on the in-stream carrier. Same unit the gRPC
