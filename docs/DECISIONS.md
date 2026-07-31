@@ -620,3 +620,35 @@ Format:
 - Supersedes: nothing. D-2026-07-23-2 (Opus 4.8 formal openreview) and
   D-2026-07-23-7 (per-dispatch approval) stand for everything outside this
   standing scope.
+
+## D-2026-07-31-4 — Local transfer speed is priority-1; LOCAL_SMALL_FILE_PATH Active
+- Decision: Owner (2026-07-31), ruling on the pfc field check: local mirror
+  performance is **too slow**, and single-worker local apply **"should have
+  been resolved before this was declared release-worthy."**
+  `docs/plan/LOCAL_SMALL_FILE_PATH.md` flips **Draft → Active** at
+  **priority-1**, ahead of the remaining post-release performance queue.
+  Its `ls-1` measurement gate stands as written (no fix code before it
+  lands); the summary-display defect is carved out as `ls-0`, which is
+  display-text only and not gated behind ls-1.
+- Also ruled, same message: the end-of-run summary is an incoherent status
+  display and **must be fixed** (two disjoint populations printed as one; a
+  throughput figure the owner ruled not useful in its current form).
+- Scope note the plan carries: "set the default worker count higher" is not
+  the fix. The plan's own equal-concurrency data has blit winning at one
+  thread and losing ~2× at eight, scaling 1.67× where robocopy scales
+  3.63× — the defect is that blit does not convert concurrency into
+  throughput. Those numbers are flagged untrusted in the plan (bi-stable
+  across sessions), which is exactly what ls-1 exists to settle.
+- Naming: this is **not** the defect this repo's records already call P1
+  (transfer asymmetry, closed by D-2026-07-22-2). The owner's priority-1
+  ruling is recorded under this plan's own name so the two labels cannot
+  collide in the record. The old P1 name is not retired.
+- Why: the finding was recorded 2026-07-13 and 0.1.1 shipped 2026-07-23
+  with it, under D-2026-07-13-2's "BEHIND" sequencing. That sequencing's
+  stated blockers are both gone — the asymmetry defect closed
+  (D-2026-07-22-2) and the pre-fix baselines it protected are no longer a
+  shipping prerequisite (D-2026-07-22-1).
+- Supersedes: **D-2026-07-13-2's priority ruling** ("BEHIND
+  `OTP12_PERF_FINDINGS.md`") only. That decision's technical rationale for
+  excluding local cost as a P1/P2 *mechanism* is unaffected and is retained
+  in the plan's §Decisions.

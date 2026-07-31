@@ -1,10 +1,13 @@
 # LOCAL_SMALL_FILE_PATH — the local carrier frames small files for a wire that isn't there
 
-**Status**: Draft
+**Status**: Active (D-2026-07-31-4, owner 2026-07-31 — priority-1)
 **Created**: 2026-07-13
-**Owner decisions required**: see §Decisions (none assumed; no code until Active)
-**Parent**: none. This is **not** P1 and **not** P2
-(`docs/plan/OTP12_PERF_FINDINGS.md`) — see §Not-that-finding.
+**Activated**: 2026-07-31
+**Owner decisions required**: see §Decisions (none assumed; no code until ls-1 lands)
+**Parent**: none. This is **not** the transfer-asymmetry defect this repo's
+records call P1 (closed by D-2026-07-22-2) and **not** P2
+(`docs/plan/OTP12_PERF_FINDINGS.md`) — see §Not-that-finding. It carries the
+owner's priority-1 ruling under its own name to keep the two labels apart.
 **Contract**: `docs/TRANSFER_SESSION.md`. **No wire change is in scope.** The
 tar shard is the *wire* payload format and must remain exactly as it is for
 remote sessions; this plan touches only the **local apply carrier**, which
@@ -142,8 +145,34 @@ environmental/config cause is held to the same bar as a code cause.
 - **No suite regressions**; floor = the current count. New pins carry guard
   proofs (temporary revert) per the loop.
 
-## Slices (each through the codex loop; NO code before ls-1 lands)
+## Slices (each through the codex loop; NO code before ls-1 lands,
+## except ls-0, which is explicitly carved out below)
 
+- **ls-0 — the end-of-run summary is an incoherent status display.** Owner
+  finding, 2026-07-31 field check. Not a measurement question and not gated
+  behind ls-1: it changes display text only, touches no transfer path, and
+  cannot move any number ls-1 will record. Against the observed output
+  (`Mirror complete: 9578 files, 393.01 MiB in 355.23s` / `• Throughput:
+  1.11 MiB/s | Workers used: 1` / `• Repaired metadata on 5445 file(s) — no
+  bytes re-sent`):
+  - **Two disjoint populations print as if they were one.** `copied_files`/
+    `total_bytes` and `files_repaired` share no members — pinned by
+    `crates/blit-core/tests/local_session.rs:1313-1318`, where a repaired
+    file asserts `copied_files: 0`, `total_bytes: 0`. A reader cannot tell
+    that from the output, and the owner read it as self-contradictory. The
+    summary must make the split legible without arithmetic.
+  - **The throughput figure is not a useful metric and does not survive as
+    it stands.** It divides `total_bytes` by TOTAL wall time
+    (`blit-cli/src/transfers/local.rs:865`), so enumeration, comparison and
+    metadata repair are all in the divisor while contributing no bytes.
+    Either report a rate over the interval it actually describes, or drop
+    the line. Owner ruling: it is not useful in its current form.
+  - **`Workers used: 1` stays and stays honest.** It is a hard-coded `1`
+    outside the debug limiter (`local.rs:876`) because local apply really
+    does run one sink worker. It is the true reading of the defect this
+    plan exists to fix; do not suppress or cosmetically inflate it.
+  - Bar: red/green guard on the summary text; no transfer logic touched; no
+    change to any JSON field's meaning (fields may be added).
 - **ls-1 (HARD GATE) — attribution, no behavior change.**
   (a) the equal-concurrency A/B (`ROBO_MT=1`/`BLIT_WORKERS=0` and
   `ROBO_MT=8`/`BLIT_WORKERS=8`) — establishes `Δ_local` and grades **L3**;
@@ -160,17 +189,19 @@ environmental/config cause is held to the same bar as a code cause.
 
 ## Decisions
 
-1. **Priority — SETTLED (D-2026-07-13-2): BEHIND.** This plan is sequenced
-   behind the ACTIVE `OTP12_PERF_FINDINGS.md` (MTU experiment → pf-1 → its fix
-   slices). The finding is recorded now; only the *fix* waits. Rationale in the
-   decision entry: the local cost is very unlikely to explain P1 (no initiator
-   axis; a per-file/worker cost cancels between two arms of the same code) or
-   P2 (P2 is *new*, this cost is *old*), while fixing it first would touch code
-   shared with the wire sink and void otp-12's pre-fix baselines.
-   **Carried into pf-1 as a cheap check** — the one way the two could touch: if
-   the unified session changed the **remote receive** worker count the way the
-   local side sits at one (`local.rs:602`), that WOULD be new, per-file, and a
-   live P2 candidate. Read the executed old path; do not assume.
+1. **Priority — RESETTLED (D-2026-07-31-4, owner 2026-07-31): PRIORITY-1,
+   ACTIVE NOW.** Supersedes D-2026-07-13-2's "BEHIND" sequencing. That
+   sequencing put this plan behind `OTP12_PERF_FINDINGS.md`, and its stated
+   blocker is gone: the asymmetry defect closed (D-2026-07-22-2) and the
+   pre-fix baselines this plan was told not to void are no longer a shipping
+   prerequisite (D-2026-07-22-1). The owner's ruling on the 2026-07-31 field
+   check is that a file copier which cannot use the machine is a defect, not a
+   backlog item, and that it should not have shipped in 0.1.1 — it was recorded
+   here on 2026-07-13, ten days before release, and shipped anyway.
+   *(Historical rationale for the superseded BEHIND ruling, kept because it
+   still documents why local cost was excluded as a P1/P2 mechanism: no
+   initiator axis, and a per-file/worker cost cancels between two arms of the
+   same code; P2 is new while this cost is old.)*
 2. **OPEN — the core design question.** Should the local carrier skip tar
    framing for small files and copy each one directly (the same primitive
    `large` already uses), accepting that local and remote payload shapes then

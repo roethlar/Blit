@@ -34,9 +34,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Handoff — 2026-07-31 at `a0b5d83d`
 - Done: pfc-1..6 and clp-1..2 landed (8 slices, 2 plans), review program
-  closed (7 range reviews, 11 findings resolved). Owner ran the field check.
-- Next: answer the owner's four summary-coherence objections (Open questions)
-  — no code change without their ruling; the Shipped flip is theirs alone.
+  closed (7 range reviews, 11 findings resolved). Owner ran the field check
+  and ruled on it: D-2026-07-31-4 makes local transfer speed priority-1 and
+  flips `LOCAL_SMALL_FILE_PATH.md` Active (Queue 1).
+- Next: scope `ls-1` (the measurement gate) and bring it back for approval
+  before any code; `ls-0` (summary-display fix) is unblocked but unscoped.
+  The pfc Shipped flip remains the owner's alone.
 
 ## Handoff — 2026-07-23 at `544adf81`
 - Done: Blit 0.1.1 is publicly released from exact validated candidate
@@ -64,22 +67,32 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   at cutover. Slices otp-1..13; converge-up per cell (±10%);
   symmetric-fs disk-to-disk verdict cells. **D-2026-07-05-2:
   same-build peers only, refusal at session open.**
-  - **Slices otp-1 … otp-11 are all `[x]` CLOSED** — the session
-    machine, the baselines, the cutover deletion (−13.8k lines) and
-    otp-11b's deletion of the old orchestration (−6.2k). The
-    deletion-proof acceptance line COMPLETES. The closed-slice record
-    was rotated verbatim to `docs/history/state-archive.md`
-    (2026-07-14 drift); per-slice detail lives in DEVLOG + `.review/`.
-  - **Open: otp-12d and otp-13** — both DEFERRED behind pf-final, see
-    Queue 1.
-  - **otp-12 worker-parity repair `[x]` (historical static-policy proof)** — both initiator layouts reached the same then-current target; zero receiver capacity meant unknown/default in both; payload proceeded while resize ACKs were pending; resize refusal was terminal. ldt-2 replaces that target with one live controller. This remains code/integration history, not adaptive hardware acceptance.
+  Slice status, the closed-slice record, and the otp-12 worker-parity
+  repair (historical static-policy proof, superseded as an adaptive target
+  by ldt-2) live in Queue 2, `docs/history/state-archive.md`, and DEVLOG —
+  not restated here.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]`; **sf-3a+ blocked** until ONE_TRANSFER_PATH ships, then
   resume/re-derive on the unified baseline. Principle: ceiling-driven,
   never competitor-relative (D-2026-07-04-4 — do not re-litigate).
 ## Queue (ordered)
 
-1. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
+1. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (ACTIVE, D-2026-07-31-4) —
+   PRIORITY-1, the owner's ruling on the 2026-07-31 field check.** Local
+   transfer is too slow and local apply ships one sink worker; the owner
+   ruled it "should have been resolved before this was declared
+   release-worthy." Recorded 2026-07-13, shipped in 0.1.1 anyway under
+   D-2026-07-13-2's BEHIND sequencing, whose blockers are both now gone.
+   **The fix is not a bigger default worker count** — the plan's own
+   equal-concurrency data has blit winning at 1 thread and losing ~2× at 8
+   (scaling 1.67× vs robocopy 3.63×), so the defect is that blit does not
+   convert concurrency into throughput; those numbers are flagged untrusted
+   (bi-stable across sessions), which is what `ls-1` exists to settle.
+   **`ls-1` is a hard measurement gate — no fix code before it lands.**
+   **`ls-0` (summary-display fix) is carved out** of that gate: display text
+   only, cannot move any number ls-1 records. NOT the closed P1 asymmetry
+   defect (D-2026-07-22-2); labels deliberately kept apart.
+2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13; any external review requires exact owner approval under
    D-2026-07-23-7. **otp-1 … otp-12c are all `[x]`** — closed-slice record
    and the otp-12a/b/c matrices live in `docs/history/state-archive.md`,
@@ -88,7 +101,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    POST-RELEASE (D-2026-07-22-1)**; retained pre-fix evidence remains usable
    for what it records, and no performance acceptance matrix is a shipping
    prerequisite.
-2. **`docs/plan/PER_FILE_ERROR_CONTAINMENT.md` (ACTIVE, D-2026-07-30-1) —
+3. **`docs/plan/PER_FILE_ERROR_CONTAINMENT.md` (ACTIVE, D-2026-07-30-1) —
    CODE-COMPLETE, ONE ACCEPTANCE CRITERION LEFT (the owner's).** Root
    posture defect: first-error-wins pipeline + no failure vocabulary in
    `TransferSummary`, so one survivable per-file error killed a session;
@@ -117,7 +130,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    2: 0 files, 0 B in 283.92s (a true no-op). **No declaration was given;
    the owner instead raised four coherence objections — see Open
    questions.** Plan does NOT flip to Shipped until the owner says so.
-3. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2): clp-1 and
+4. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2): clp-1 and
    clp-2 both `[x]` landed** — one live row with truthful phases
    (enumerating → comparing/up-to-date → copying → deleting; dry runs
    never claim deletion), width-safe current-file segment, `-v` per-file
@@ -127,8 +140,6 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    pre-clp-2) and used it through both field-check runs. Residue (d)
    (remote-route attachment) deferred to remote render work — see plan
    landing notes. TUI-scale redesign stays a separate queued TODO.
-4. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft, D-2026-07-13-2):** local
-   apply ships one worker and does not scale; resume only under an active plan.
 5. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
    performance status flip are not release gates (D-2026-07-22-1).
 6. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
@@ -181,20 +192,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Open questions
 
-- **The owner's four objections to the pfc field-check summary (2026-07-31),
-  unanswered and blocking the Shipped flip.** Against run 1's output
-  (`Mirror complete: 9578 files, 393.01 MiB in 355.23s` / `• Throughput:
-  1.11 MiB/s | Workers used: 1` / `• Repaired metadata on 5445 file(s) — no
-  bytes re-sent`): (a) why `Workers used: 1`; (b) 1.11 MiB/s is too slow;
-  (c) is throughput an accurate/useful metric when the run re-sent no bytes;
-  (d) the byte total next to "no bytes re-sent" reads as incoherent.
-  Established from code, not yet ruled on: `copied_files`/`total_bytes` and
-  `files_repaired` are DISJOINT sets (`local_session.rs` re-run test pins
-  a repaired file at `copied_files: 0`, `total_bytes: 0`), so the two lines
-  are consistent but the adjacency invites the misread; `Workers used` is a
-  hard-coded `1` outside the debug limiter (`blit-cli/src/transfers/
-  local.rs:876`) because local apply genuinely runs one sink worker — the
-  known gap already queued as item 4; and the throughput divisor is TOTAL
-  wall time, so run 2's 283.92s all-scan no-op implies ~71s of actual copy
-  window in run 1 (≈5.5 MiB/s, not 1.11). Whether any of this becomes a
-  code change is the owner's call.
+- **Does the pfc plan flip to Shipped?** Its last acceptance criterion
+  (re-run convergence) is satisfied by the owner's field data — run 2
+  copied 0 files, 0 B — but the owner has not declared it, and checkpoints
+  are owner-only. The plan stays ACTIVE until they do. Everything else the
+  field check raised is now ruled and queued as D-2026-07-31-4 / Queue 1;
+  no open question remains there.
