@@ -27,7 +27,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use eyre::Result;
@@ -62,6 +62,7 @@ use crate::remote::transfer::{
     AbortOnDrop, FaultedPath, MembershipOutcome, RemoteTransferProgress, CONTROL_PLANE_CHUNK_SIZE,
 };
 use crate::transfer_plan::PlanOptions;
+use crate::windows_metadata::DestinationMetadataVerdict;
 use transport::{FrameRx, FrameTransport, FrameTx};
 
 /// Belt-and-braces wire-shape version, bumped on any change to the
@@ -3220,6 +3221,11 @@ pub struct DestinationOutcome {
     /// ADD/REMOVE epochs), or `None` for the in-stream carrier. This is not
     /// the cumulative number of sockets ever opened.
     pub data_plane_streams: Option<usize>,
+    /// Files whose attributes this end repaired in place at diff time
+    /// instead of re-requesting their bytes (pfc-6). Destination-local by
+    /// design: the wire `TransferSummary` is not extended for it, so a
+    /// remote destination repairs without the initiator seeing the count.
+    pub files_repaired: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3996,6 +4002,16 @@ async fn destination_session_inner(
     // counters each lane folds into.
     let mut contained_failures = crate::remote::transfer::SinkOutcome::default();
     let mut need_batch_seq = 0u64;
+    // pfc-6: metadata-only attribute repair at the diff. Shared by both
+    // carriers because the DESTINATION owns its filesystem in every
+    // topology; disabled for a destination that writes nothing, which on
+    // this end is exactly a dry-run or `--null` local apply.
+    let attribute_repair = Arc::new(AttributeRepair {
+        enabled: local_apply
+            .as_ref()
+            .is_none_or(local::LocalApply::applies_changes),
+        repaired: AtomicU64::new(0),
+    });
 
     // otp-11: the LOCAL carrier's apply pipeline — spawned before the
     // loop so applies run concurrent with the diff, exactly as the
@@ -4049,6 +4065,7 @@ async fn destination_session_inner(
                             &mut granted,
                             &mut needed_paths,
                             progress.as_ref(),
+                            &attribute_repair,
                         )
                         .await?;
                     } else {
@@ -4068,6 +4085,7 @@ async fn destination_session_inner(
                             progress.as_ref(),
                             phase_trace.as_ref(),
                             &mut need_batch_seq,
+                            &attribute_repair,
                         )
                         .await?;
                     }
@@ -4119,6 +4137,7 @@ async fn destination_session_inner(
                         &mut granted,
                         &mut needed_paths,
                         progress.as_ref(),
+                        &attribute_repair,
                     )
                     .await?;
                 } else {
@@ -4138,6 +4157,7 @@ async fn destination_session_inner(
                         progress.as_ref(),
                         phase_trace.as_ref(),
                         &mut need_batch_seq,
+                        &attribute_repair,
                     )
                     .await?;
                 }
@@ -4832,6 +4852,7 @@ async fn destination_session_inner(
                     summary,
                     needed_paths,
                     data_plane_streams,
+                    files_repaired: attribute_repair.repaired.load(Ordering::Relaxed),
                 });
             }
             Some(Frame::Error(err)) => {
@@ -4894,6 +4915,7 @@ async fn diff_chunk_and_apply_local(
     granted: &mut HashSet<String>,
     needed_paths: &mut Vec<String>,
     progress: Option<&RemoteTransferProgress>,
+    repair: &Arc<AttributeRepair>,
 ) -> Result<()> {
     if chunk.is_empty() {
         return Ok(());
@@ -4915,7 +4937,8 @@ async fn diff_chunk_and_apply_local(
     // this one plans and applies them in-process. The resume flag is
     // meaningless here (the local carrier's block phase is
     // sink-level).
-    let needed = diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts).await?;
+    let needed =
+        diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts, repair).await?;
 
     let fresh: Vec<FileHeader> = needed
         .into_iter()
@@ -4995,6 +5018,7 @@ async fn diff_chunk_and_send_needs(
     progress: Option<&RemoteTransferProgress>,
     phase_trace: Option<&BoundSessionPhaseTrace>,
     need_batch_seq: &mut u64,
+    repair: &Arc<AttributeRepair>,
 ) -> Result<()> {
     if chunk.is_empty() {
         return Ok(());
@@ -5003,7 +5027,7 @@ async fn diff_chunk_and_send_needs(
     // is resume-flagged only when the session negotiated resume AND a
     // non-empty dest partial exists to diff against.
     let needed: Vec<(FileHeader, bool)> =
-        diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts)
+        diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts, repair)
             .await?
             .into_iter()
             .map(|(header, resume_eligible)| (header, resume_enabled && resume_eligible))
@@ -5129,12 +5153,17 @@ async fn diff_chunk_verdicts(
     dst_root: &Path,
     canonical_dst_root: Option<&Path>,
     compare_opts: &CompareOptions,
+    repair: &Arc<AttributeRepair>,
 ) -> Result<Vec<(FileHeader, bool)>> {
     let dst_root_owned = dst_root.to_path_buf();
     let canonical = canonical_dst_root.map(Path::to_path_buf);
     let opts = compare_opts.clone();
     let abort = Arc::new(AtomicBool::new(false));
     let _abort_guard = AbortFlagOnDrop(Arc::clone(&abort));
+    // pfc-6: the in-place attribute repair is a filesystem write, so it
+    // rides this blocking chunk with the stats and hashes — never the
+    // async control loop.
+    let repair = Arc::clone(repair);
     tokio::task::spawn_blocking(move || -> Result<Vec<(FileHeader, bool)>> {
         let mut needed = Vec::new();
         for header in chunk {
@@ -5147,6 +5176,7 @@ async fn diff_chunk_verdicts(
                 canonical.as_deref(),
                 &opts,
                 &abort,
+                &repair,
             )? {
                 NeedVerdict::Skip => {}
                 NeedVerdict::Transfer { resume_eligible } => {
@@ -5173,6 +5203,30 @@ enum NeedVerdict {
     Transfer { resume_eligible: bool },
 }
 
+/// The compare's verdict BEFORE the destination's in-place attribute
+/// repair is attempted (pfc-6). `RepairAttributes` is not an action the
+/// need list can carry: [`destination_needs`] resolves it against the
+/// filesystem into `Skip` (the repair converged — no payload, no need
+/// entry) or `Transfer` (the repair failed — the file re-copies exactly
+/// as it did before pfc-6), so nothing downstream sees this variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffVerdict {
+    Settled(NeedVerdict),
+    RepairAttributes { resume_eligible: bool },
+}
+
+/// Destination-side attribute-repair state for one session's diff
+/// (pfc-6). `enabled` is false exactly when this destination writes
+/// nothing (`--dry-run`, `--null`): a diff-time repair would otherwise be
+/// the ONE mutation those runs perform. The counter is destination-local
+/// — the wire `TransferSummary` is deliberately not extended for it, so a
+/// remote session repairs without an initiator-visible count.
+#[derive(Debug)]
+struct AttributeRepair {
+    enabled: bool,
+    repaired: AtomicU64,
+}
+
 /// Does the destination need this manifest entry? Stats its own file
 /// and delegates the verdict to `manifest::header_transfer_status` —
 /// the one mode-aware compare owner - fed from a live stat instead
@@ -5183,6 +5237,7 @@ fn destination_needs(
     canonical_dst_root: Option<&Path>,
     opts: &CompareOptions,
     abort: &AtomicBool,
+    repair: &AttributeRepair,
 ) -> Result<NeedVerdict> {
     let dst = match canonical_dst_root {
         Some(canonical) => {
@@ -5244,35 +5299,86 @@ fn destination_needs(
         target.map(|(size, mtime)| (size, mtime, target_hash.as_slice())),
         opts,
     );
-    let metadata_matches = match status {
+    let metadata = match status {
         FileStatus::Unchanged => {
-            crate::windows_metadata::destination_matches(&dst, header.windows_metadata.as_ref())?
+            crate::windows_metadata::destination_verdict(&dst, header.windows_metadata.as_ref())?
         }
-        _ => true,
+        _ => DestinationMetadataVerdict::Converged,
     };
-    Ok(finalize_need_verdict(status, target, metadata_matches))
+    match finalize_need_verdict(status, target, metadata) {
+        DiffVerdict::Settled(verdict) => Ok(verdict),
+        // A destination that writes nothing must not repair either; it
+        // still PLANS the file, so a dry run's would-copy count is exactly
+        // what it reported before pfc-6.
+        DiffVerdict::RepairAttributes { resume_eligible } if !repair.enabled => {
+            Ok(NeedVerdict::Transfer { resume_eligible })
+        }
+        DiffVerdict::RepairAttributes { resume_eligible } => Ok(resolve_attribute_repair(
+            &dst,
+            resume_eligible,
+            &repair.repaired,
+            || crate::windows_metadata::repair_attributes(&dst, header.windows_metadata.as_ref()),
+        )),
+    }
 }
 
 fn finalize_need_verdict(
     status: FileStatus,
     target: Option<(u64, i64)>,
-    metadata_matches: bool,
-) -> NeedVerdict {
+    metadata: DestinationMetadataVerdict,
+) -> DiffVerdict {
+    // Modified ⇒ a regular file exists at the dest (`target` was Some); it
+    // is resume-eligible when non-empty (plan D2 — an empty partial has
+    // nothing to hash, full transfer is strictly simpler and
+    // byte-equivalent).
+    let resume_eligible = target.is_some_and(|(size, _)| size > 0);
     match status {
-        // Modified ⇒ a regular file exists at the dest (`target` was
-        // Some); it is resume-eligible when non-empty (plan D2 — an
-        // empty partial has nothing to hash, full transfer is strictly
-        // simpler and byte-equivalent).
-        FileStatus::Modified => NeedVerdict::Transfer {
-            resume_eligible: target.is_some_and(|(size, _)| size > 0),
-        },
-        FileStatus::New => NeedVerdict::Transfer {
+        FileStatus::Modified => DiffVerdict::Settled(NeedVerdict::Transfer { resume_eligible }),
+        FileStatus::New => DiffVerdict::Settled(NeedVerdict::Transfer {
             resume_eligible: false,
+        }),
+        // pfc-6: an unchanged file whose data and named streams already
+        // match needs no payload to fix its attributes — the destination
+        // owns its own filesystem in every topology, so it repairs in
+        // place. A stream divergence still needs the bytes.
+        FileStatus::Unchanged => match metadata {
+            DestinationMetadataVerdict::Converged => DiffVerdict::Settled(NeedVerdict::Skip),
+            DestinationMetadataVerdict::AttributesOnly => {
+                DiffVerdict::RepairAttributes { resume_eligible }
+            }
+            DestinationMetadataVerdict::Streams => {
+                DiffVerdict::Settled(NeedVerdict::Transfer { resume_eligible })
+            }
         },
-        FileStatus::Unchanged if !metadata_matches => NeedVerdict::Transfer {
-            resume_eligible: target.is_some_and(|(size, _)| size > 0),
-        },
-        _ => NeedVerdict::Skip,
+        _ => DiffVerdict::Settled(NeedVerdict::Skip),
+    }
+}
+
+/// Repair an attributes-only divergence in place, or degrade to a full
+/// transfer (pfc-6). A failed repair is NEVER a new fatal path: the file
+/// goes back on the need list exactly as it would have before this slice,
+/// and if the transfer's own apply then fails, pfc-2's per-file
+/// containment owns it. `repair` is injected so the degradation is
+/// testable without a filesystem that refuses attribute writes — the same
+/// idiom `set_and_verify_attributes` uses.
+fn resolve_attribute_repair(
+    dst: &Path,
+    resume_eligible: bool,
+    repaired: &AtomicU64,
+    repair: impl FnOnce() -> Result<()>,
+) -> NeedVerdict {
+    match repair() {
+        Ok(()) => {
+            repaired.fetch_add(1, Ordering::Relaxed);
+            NeedVerdict::Skip
+        }
+        Err(error) => {
+            log::warn!(
+                "repairing Windows attributes on {} failed; re-transferring the file: {error:#}",
+                dst.display()
+            );
+            NeedVerdict::Transfer { resume_eligible }
+        }
     }
 }
 
@@ -5860,25 +5966,122 @@ mod tests {
 
     #[test]
     fn windows_metadata_difference_overrides_an_ordinary_skip() {
+        // pfc-6 adapted the divergence argument from a bool to the
+        // three-way `DestinationMetadataVerdict`: a STREAM divergence is
+        // the case that still overrides the skip with a full transfer,
+        // which is what this pin has always been about.
         assert_eq!(
-            finalize_need_verdict(FileStatus::Unchanged, Some((1, 1)), false),
-            NeedVerdict::Transfer {
+            finalize_need_verdict(
+                FileStatus::Unchanged,
+                Some((1, 1)),
+                DestinationMetadataVerdict::Streams
+            ),
+            DiffVerdict::Settled(NeedVerdict::Transfer {
                 resume_eligible: true,
-            }
+            })
         );
         assert_eq!(
-            finalize_need_verdict(FileStatus::Unchanged, Some((0, 1)), false),
-            NeedVerdict::Transfer {
+            finalize_need_verdict(
+                FileStatus::Unchanged,
+                Some((0, 1)),
+                DestinationMetadataVerdict::Streams
+            ),
+            DiffVerdict::Settled(NeedVerdict::Transfer {
                 resume_eligible: false,
+            })
+        );
+        assert_eq!(
+            finalize_need_verdict(
+                FileStatus::Unchanged,
+                Some((1, 1)),
+                DestinationMetadataVerdict::Converged
+            ),
+            DiffVerdict::Settled(NeedVerdict::Skip)
+        );
+        assert_eq!(
+            finalize_need_verdict(
+                FileStatus::SkippedExisting,
+                Some((1, 1)),
+                DestinationMetadataVerdict::Streams
+            ),
+            DiffVerdict::Settled(NeedVerdict::Skip)
+        );
+    }
+
+    /// pfc-6: the diff SPLITS the divergence. Attributes-only asks for the
+    /// in-place repair; streams still take the payload; a converged compare
+    /// — the pfc-1 synthesized-HIDDEN tolerance included, which reports
+    /// `Converged` — asks for nothing, so no repair can loop every session.
+    #[test]
+    fn attributes_only_divergence_asks_for_repair_not_a_transfer() {
+        assert_eq!(
+            finalize_need_verdict(
+                FileStatus::Unchanged,
+                Some((4096, 1)),
+                DestinationMetadataVerdict::AttributesOnly
+            ),
+            DiffVerdict::RepairAttributes {
+                resume_eligible: true
+            }
+        );
+        // The degradation must be byte-identical to the pre-pfc-6 verdict,
+        // resume eligibility included.
+        assert_eq!(
+            finalize_need_verdict(
+                FileStatus::Unchanged,
+                Some((0, 1)),
+                DestinationMetadataVerdict::AttributesOnly
+            ),
+            DiffVerdict::RepairAttributes {
+                resume_eligible: false
+            }
+        );
+        // A file that must transfer anyway is never a repair candidate: its
+        // attributes land with its bytes.
+        for status in [FileStatus::Modified, FileStatus::New] {
+            assert!(matches!(
+                finalize_need_verdict(
+                    status,
+                    Some((4096, 1)),
+                    DestinationMetadataVerdict::AttributesOnly
+                ),
+                DiffVerdict::Settled(NeedVerdict::Transfer { .. })
+            ));
+        }
+    }
+
+    /// pfc-6: a converged repair skips the file and counts it; a FAILED
+    /// repair degrades to the full transfer it would have been before this
+    /// slice and counts nothing — never a new error path out of the diff.
+    #[test]
+    fn failed_attribute_repair_degrades_to_a_full_transfer() {
+        let repaired = AtomicU64::new(0);
+        assert_eq!(
+            resolve_attribute_repair(Path::new("dest/tool.exe"), true, &repaired, || Ok(())),
+            NeedVerdict::Skip
+        );
+        assert_eq!(repaired.load(Ordering::Relaxed), 1);
+
+        assert_eq!(
+            resolve_attribute_repair(Path::new("dest/tool.exe"), true, &repaired, || Err(
+                eyre::eyre!("access denied setting Windows attributes")
+            )),
+            NeedVerdict::Transfer {
+                resume_eligible: true
             }
         );
         assert_eq!(
-            finalize_need_verdict(FileStatus::Unchanged, Some((1, 1)), true),
-            NeedVerdict::Skip
+            resolve_attribute_repair(Path::new("dest/empty.bin"), false, &repaired, || Err(
+                eyre::eyre!("access denied setting Windows attributes")
+            )),
+            NeedVerdict::Transfer {
+                resume_eligible: false
+            }
         );
         assert_eq!(
-            finalize_need_verdict(FileStatus::SkippedExisting, Some((1, 1)), false),
-            NeedVerdict::Skip
+            repaired.load(Ordering::Relaxed),
+            1,
+            "a failed repair is not a repaired file"
         );
     }
 
@@ -5907,6 +6110,10 @@ mod tests {
             None,
             &CompareOptions::default(),
             &AtomicBool::new(false),
+            &AttributeRepair {
+                enabled: true,
+                repaired: AtomicU64::new(0),
+            },
         )
         .expect_err("a non-Windows destination must reject strict metadata preservation");
         assert!(format!("{error:#}").contains("--drop-windows-metadata"));

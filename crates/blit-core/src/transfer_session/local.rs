@@ -265,6 +265,11 @@ pub struct LocalMirrorSummary {
     /// same bounded report the wire carries, so local and remote runs
     /// render one shape.
     pub failures: Vec<FileFailure>,
+    /// Files whose destination attributes were repaired in place at diff
+    /// time, with no payload bytes re-sent (pfc-6). Counted by the
+    /// destination end, so a remote session repairs the same way without
+    /// an initiator-visible count — the wire summary is not extended.
+    pub files_repaired: u64,
 }
 
 /// Process-local destination extension: apply needed files in-process
@@ -294,6 +299,10 @@ pub struct LocalApply {
     /// `--dry-run`: the sink already refuses writes; the mirror delete
     /// pass runs in plan-only mode (counts, deletes nothing).
     pub(super) dry_run: bool,
+    /// `--null`: the sink discards every payload. Read only by
+    /// [`LocalApply::applies_changes`] — a diagnostics run must not become
+    /// the one thing that mutates the destination (pfc-6).
+    pub(super) null_sink: bool,
     /// Pipeline worker count: 1 (the old streaming pipeline's default
     /// shape) unless the hidden `--workers` debug limiter set
     /// `debug_mode` (codex otp-11a F7).
@@ -344,6 +353,16 @@ impl Drop for LocalApplyRun {
 }
 
 impl LocalApply {
+    /// Does this destination write files in this session? False for
+    /// `--dry-run` (which must not mutate at all — its mirror pass is
+    /// plan-only too) and `--null` (a throughput diagnostic whose sink
+    /// discards payloads; its mirror delete pass has always executed,
+    /// but its copy path must stay write-free). The destination diff's
+    /// in-place attribute repair (pfc-6) is off for both.
+    pub(super) fn applies_changes(&self) -> bool {
+        !self.dry_run && !self.null_sink
+    }
+
     /// Spawn the apply pipeline — the shared streaming sink pipeline
     /// (prefetched prepares, blocking-pool writes) over this config's
     /// sink.
@@ -653,6 +672,7 @@ pub async fn run_local_session(
         plan_options: PlanOptions::default(),
         mirror_scope_filter: options.filter.clone_without_cache(),
         dry_run: options.dry_run,
+        null_sink: options.null_sink,
         sink_workers: if options.debug_mode {
             options.workers.max(1)
         } else {
@@ -780,6 +800,9 @@ pub async fn run_local_session(
             .iter()
             .map(FileFailure::from_wire)
             .collect(),
+        // pfc-6: destination-local, so it comes off the outcome rather
+        // than the wire summary the carriers exchange.
+        files_repaired: outcome.files_repaired,
     };
 
     record_local_history(&summary, &options);
@@ -967,6 +990,7 @@ mod tests {
             plan_options: PlanOptions::default(),
             mirror_scope_filter: FileFilter::default(),
             dry_run: false,
+            null_sink: false,
             sink_workers: 1,
             unreadable: Arc::clone(&unreadable),
             stats: Arc::new(LocalApplyStats::default()),
@@ -1564,6 +1588,7 @@ mod tests {
             plan_options: PlanOptions::default(),
             mirror_scope_filter: FileFilter::default(),
             dry_run: false,
+            null_sink: false,
             sink_workers: 1,
             unreadable: Arc::default(),
             stats: Arc::new(LocalApplyStats::default()),

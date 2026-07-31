@@ -281,20 +281,40 @@ fn read_payload(path: &Path) -> Result<Option<WindowsFileMetadata>> {
     )
 }
 
-pub fn destination_matches(path: &Path, expected: Option<&WindowsFileMetadata>) -> Result<bool> {
+/// WHICH half of a destination file's Windows metadata diverged from the
+/// manifest (pfc-6). Named streams can only be repaired by the payload
+/// that carries their bytes; attributes are repairable in place, so the
+/// destination diff splits the two instead of re-sending a whole file to
+/// fix one attribute bit. Convergence itself is still judged by the one
+/// [`attributes_converge`] predicate — this only reports the half.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationMetadataVerdict {
+    /// Destination metadata converges with the manifest.
+    Converged,
+    /// Named streams match by name/size/checksum; only attributes diverge.
+    AttributesOnly,
+    /// At least one named stream diverges, or the destination's metadata
+    /// could not be read: the whole file needs replacing.
+    Streams,
+}
+
+pub fn destination_verdict(
+    path: &Path,
+    expected: Option<&WindowsFileMetadata>,
+) -> Result<DestinationMetadataVerdict> {
     validate_destination_support(expected)?;
     let Some(expected) = expected else {
-        return Ok(true);
+        return Ok(DestinationMetadataVerdict::Converged);
     };
-    destination_matches_impl(path, expected)
+    destination_verdict_impl(path, expected)
 }
 
 #[cfg(any(windows, test))]
-fn destination_metadata_matches_with(
+fn destination_metadata_verdict_with(
     path: &Path,
     expected: &WindowsFileMetadata,
     read: impl FnOnce() -> Result<WindowsFileMetadata>,
-) -> Result<bool> {
+) -> Result<DestinationMetadataVerdict> {
     let actual = match read().and_then(|actual| {
         validate_manifest(Some(&actual))?;
         Ok(actual)
@@ -305,7 +325,7 @@ fn destination_metadata_matches_with(
                 "destination Windows metadata on {} is not representable and will be replaced: {error:#}",
                 path.display()
             );
-            return Ok(false);
+            return Ok(DestinationMetadataVerdict::Streams);
         }
     };
     // Destructure so a future WindowsFileMetadata field breaks this compare
@@ -314,21 +334,33 @@ fn destination_metadata_matches_with(
         file_attributes: actual_attributes,
         named_streams: actual_streams,
     } = &actual;
-    Ok(*actual_streams == expected.named_streams
-        && attributes_converge(
-            path.file_name(),
-            expected.file_attributes,
-            *actual_attributes,
-        ))
+    if *actual_streams != expected.named_streams {
+        return Ok(DestinationMetadataVerdict::Streams);
+    }
+    if attributes_converge(
+        path.file_name(),
+        expected.file_attributes,
+        *actual_attributes,
+    ) {
+        Ok(DestinationMetadataVerdict::Converged)
+    } else {
+        Ok(DestinationMetadataVerdict::AttributesOnly)
+    }
 }
 
 #[cfg(windows)]
-fn destination_matches_impl(path: &Path, expected: &WindowsFileMetadata) -> Result<bool> {
-    destination_metadata_matches_with(path, expected, || read_windows_metadata(path, false))
+fn destination_verdict_impl(
+    path: &Path,
+    expected: &WindowsFileMetadata,
+) -> Result<DestinationMetadataVerdict> {
+    destination_metadata_verdict_with(path, expected, || read_windows_metadata(path, false))
 }
 
 #[cfg(not(windows))]
-fn destination_matches_impl(path: &Path, _expected: &WindowsFileMetadata) -> Result<bool> {
+fn destination_verdict_impl(
+    path: &Path,
+    _expected: &WindowsFileMetadata,
+) -> Result<DestinationMetadataVerdict> {
     bail!(
         "destination {} cannot preserve Windows file metadata on this platform",
         path.display()
@@ -348,6 +380,20 @@ pub fn apply_attributes(path: &Path, metadata: Option<&WindowsFileMetadata>) -> 
         return Ok(());
     };
     validate_payload(Some(metadata))?;
+    apply_attributes_impl(path, metadata)
+}
+
+/// Repair the durable attribute mask on a destination file whose data and
+/// named streams already converge (pfc-6, [`DestinationMetadataVerdict::AttributesOnly`]).
+/// The diff holds the MANIFEST descriptor — stream sizes without their
+/// bytes — so this validates as a manifest where [`apply_attributes`]
+/// validates as a payload; both then share the one apply/verify path, so
+/// convergence is judged by [`attributes_converge`] either way.
+pub fn repair_attributes(path: &Path, metadata: Option<&WindowsFileMetadata>) -> Result<()> {
+    let Some(metadata) = metadata else {
+        return Ok(());
+    };
+    validate_manifest(Some(metadata))?;
     apply_attributes_impl(path, metadata)
 }
 
@@ -955,18 +1001,28 @@ mod tests {
             })
         };
 
-        assert!(destination_metadata_matches_with(
-            Path::new("apps/.tcp_shot.png.XkR0Av"),
-            &expected,
-            synthesized
-        )
-        .unwrap());
-        assert!(!destination_metadata_matches_with(
-            Path::new("apps/tcp_shot.png.XkR0Av"),
-            &expected,
-            synthesized
-        )
-        .unwrap());
+        // pfc-6: the tolerated case reports CONVERGED, not a repairable
+        // divergence — a repair that could never converge (no setter call
+        // clears a server-synthesized bit) must not be attempted on every
+        // session.
+        assert_eq!(
+            destination_metadata_verdict_with(
+                Path::new("apps/.tcp_shot.png.XkR0Av"),
+                &expected,
+                synthesized
+            )
+            .unwrap(),
+            DestinationMetadataVerdict::Converged
+        );
+        assert_eq!(
+            destination_metadata_verdict_with(
+                Path::new("apps/tcp_shot.png.XkR0Av"),
+                &expected,
+                synthesized
+            )
+            .unwrap(),
+            DestinationMetadataVerdict::AttributesOnly
+        );
 
         let mut with_stream = expected.clone();
         with_stream.named_streams.push({
@@ -974,12 +1030,65 @@ mod tests {
             manifest.content.clear();
             manifest
         });
-        assert!(!destination_metadata_matches_with(
-            Path::new("apps/.tcp_shot.png.XkR0Av"),
-            &with_stream,
-            synthesized
-        )
-        .unwrap());
+        assert_eq!(
+            destination_metadata_verdict_with(
+                Path::new("apps/.tcp_shot.png.XkR0Av"),
+                &with_stream,
+                synthesized
+            )
+            .unwrap(),
+            DestinationMetadataVerdict::Streams
+        );
+    }
+
+    /// pfc-6: the compare seam reports WHICH half diverged. Attributes are
+    /// repairable in place; a stream divergence — by content, by name, or
+    /// by an extra/missing stream — needs the payload, so it outranks the
+    /// attribute half even when both differ.
+    #[test]
+    fn destination_verdict_splits_attribute_and_stream_divergence() {
+        let manifest_stream = |name: &str, content: &[u8]| {
+            let mut entry = stream(name, content);
+            entry.content.clear();
+            entry
+        };
+        let expected = WindowsFileMetadata {
+            file_attributes: 0x20,
+            named_streams: vec![manifest_stream("meta", b"payload")],
+        };
+        let path = Path::new("apps/tool.exe");
+        let verdict = |actual: WindowsFileMetadata| {
+            destination_metadata_verdict_with(path, &expected, || Ok(actual)).unwrap()
+        };
+
+        assert_eq!(
+            verdict(expected.clone()),
+            DestinationMetadataVerdict::Converged
+        );
+
+        // The field-evidence shape: an old backup region reads Normal
+        // (0x00) against the source's Archive (0x20), streams identical.
+        let mut attributes_only = expected.clone();
+        attributes_only.file_attributes = 0x00;
+        assert_eq!(
+            verdict(attributes_only),
+            DestinationMetadataVerdict::AttributesOnly
+        );
+
+        for divergent in [
+            manifest_stream("meta", b"different"),
+            manifest_stream("other", b"payload"),
+        ] {
+            let mut streams = expected.clone();
+            streams.named_streams = vec![divergent];
+            assert_eq!(verdict(streams), DestinationMetadataVerdict::Streams);
+            // A stream divergence is never downgraded by a matching
+            // attribute set OR masked by a divergent one.
+            let mut both = expected.clone();
+            both.file_attributes = 0x00;
+            both.named_streams = Vec::new();
+            assert_eq!(verdict(both), DestinationMetadataVerdict::Streams);
+        }
     }
 
     #[test]
@@ -988,12 +1097,53 @@ mod tests {
             file_attributes: 0x20,
             named_streams: Vec::new(),
         };
-        let matches =
-            destination_metadata_matches_with(Path::new("destination.bin"), &expected, || {
+        let verdict =
+            destination_metadata_verdict_with(Path::new("destination.bin"), &expected, || {
                 Err(eyre::eyre!("named-stream bytes exceed cap"))
             })
             .expect("an unreadable destination metadata set is a replacement need");
-        assert!(!matches);
+        // Unreadable metadata is a WHOLE-FILE need, never an attributes-only
+        // repair: nothing proved the destination's stream set converges.
+        assert_eq!(verdict, DestinationMetadataVerdict::Streams);
+    }
+
+    /// pfc-6: the repair entry point takes the descriptor the DIFF holds —
+    /// a manifest, whose streams carry sizes without bytes. Feeding that
+    /// same descriptor to the payload-side [`apply_attributes`] is rejected,
+    /// which is exactly why the repair has its own entry point: otherwise
+    /// every file with a non-empty named stream would silently degrade to a
+    /// full re-transfer.
+    #[cfg(windows)]
+    #[test]
+    fn repair_accepts_the_manifest_descriptor_the_diff_holds() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("tool.exe");
+        std::fs::write(&destination, b"body").unwrap();
+        std::fs::write(named_stream_test_path(&destination, "meta"), b"payload").unwrap();
+
+        let mut manifest = WindowsFileMetadata {
+            file_attributes: 0x20,
+            named_streams: vec![stream("meta", b"payload")],
+        };
+        manifest.named_streams[0].content.clear();
+        assert!(
+            apply_attributes(&destination, Some(&manifest)).is_err(),
+            "the payload-side apply must keep rejecting a content-less manifest"
+        );
+        repair_attributes(&destination, Some(&manifest))
+            .expect("the diff's manifest descriptor is a valid repair request");
+        assert_eq!(
+            destination_verdict(&destination, Some(&manifest)).unwrap(),
+            DestinationMetadataVerdict::Converged
+        );
+    }
+
+    #[cfg(windows)]
+    fn named_stream_test_path(path: &Path, name: &str) -> std::path::PathBuf {
+        let mut value = path.as_os_str().to_owned();
+        value.push(":");
+        value.push(name);
+        value.into()
     }
 
     #[test]

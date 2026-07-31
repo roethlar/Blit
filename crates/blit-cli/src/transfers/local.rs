@@ -122,6 +122,15 @@ fn emit_summary(
         print_summary(
             mirror, dry_run, null_sink, verbose, debug_mode, workers, summary, elapsed,
         );
+        // pfc-6, outside `print_summary` for the same reason the failure
+        // block is: a run whose only work was an in-place attribute repair
+        // copies nothing, classifies up-to-date, and that fn early-returns.
+        if summary.files_repaired > 0 {
+            println!(
+                "• Repaired metadata on {} file(s) — no bytes re-sent",
+                summary.files_repaired
+            );
+        }
         crate::transfers::failures::print_failure_block(summary.files_failed, &summary.failures);
     }
 }
@@ -929,6 +938,7 @@ fn print_summary_json(
         "outcome": outcome,
         "files_failed": summary.files_failed,
         "failures": crate::transfers::failures::failures_json(&summary.failures),
+        "files_repaired": summary.files_repaired,
     });
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
 }

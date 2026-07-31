@@ -1203,3 +1203,301 @@ async fn unreadable_source_file_lands_in_summary_and_copy_continues() -> Result<
     );
     Ok(())
 }
+
+/// pfc-6: metadata-only attribute repair at the destination diff. These
+/// run against the real Win32 attribute surface — the field evidence
+/// (`H:\apps` backup regions reading Normal 0x00 against a source's
+/// Archive 0x20) is reproduced literally, not simulated.
+#[cfg(windows)]
+mod metadata_repair {
+    use super::*;
+    use std::path::Path;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileAttributesW, SetFileAttributesW, FILE_FLAGS_AND_ATTRIBUTES, INVALID_FILE_ATTRIBUTES,
+    };
+
+    const READONLY: u32 = 0x01;
+    const ARCHIVE: u32 = 0x20;
+    const HIDDEN: u32 = 0x02;
+    const NORMAL: u32 = 0x80;
+    /// `WINDOWS_PRESERVED_ATTRIBUTE_MASK` — the durable bits Blit compares.
+    const PRESERVED: u32 = 0x27;
+    /// Large enough that any re-transfer of the file is unmistakable in
+    /// `total_bytes`.
+    const BODY_LEN: usize = 64 * 1024;
+
+    fn wide(path: &Path) -> Vec<u16> {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    fn set_attributes(path: &Path, attributes: u32) -> Result<()> {
+        let path = wide(path);
+        unsafe {
+            SetFileAttributesW(PCWSTR(path.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(attributes))
+        }?;
+        Ok(())
+    }
+
+    fn durable_attributes(path: &Path) -> u32 {
+        let path = wide(path);
+        let attributes = unsafe { GetFileAttributesW(PCWSTR(path.as_ptr())) };
+        assert_ne!(attributes, INVALID_FILE_ATTRIBUTES, "reading attributes");
+        attributes & PRESERVED
+    }
+
+    fn stream_path(path: &Path, name: &str) -> PathBuf {
+        let mut value = path.as_os_str().to_owned();
+        value.push(":");
+        value.push(name);
+        value.into()
+    }
+
+    /// Both copies byte-identical with the same mtime — the only thing left
+    /// for the diff to disagree about is metadata. mtimes are set LAST: a
+    /// named-stream write bumps the file's last-write time.
+    fn identical_pair(src: &Path, dest: &Path, name: &str) -> Result<(PathBuf, PathBuf)> {
+        fs::create_dir_all(src)?;
+        fs::create_dir_all(dest)?;
+        let body: Vec<u8> = (0u8..=255).cycle().take(BODY_LEN).collect();
+        let src_file = src.join(name);
+        let dest_file = dest.join(name);
+        fs::write(&src_file, &body)?;
+        fs::write(&dest_file, &body)?;
+        Ok((src_file, dest_file))
+    }
+
+    fn pin_mtimes(files: &[&Path]) -> Result<()> {
+        let mtime = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+        for file in files {
+            filetime::set_file_mtime(file, mtime)?;
+        }
+        Ok(())
+    }
+
+    /// The LOCAL carrier's half of the pfc-6 guard: a destination file with
+    /// equal size, mtime, content and named streams, diverging only in its
+    /// attributes, converges without entering the need list at all, and the
+    /// repaired counter reaches the local summary.
+    ///
+    /// Read the byte assertion below with its caveat: this carrier's sink
+    /// re-checks the body itself and skips an identical one, so
+    /// `total_bytes` was already 0 before pfc-6. The BINDING byte guard —
+    /// where re-sending really costs bytes — is
+    /// `transfer_session_roles::attributes_only_divergence_repairs_without_sending_bytes_under_both_initiators`.
+    #[tokio::test]
+    async fn attributes_only_divergence_repairs_without_re_sending_bytes() -> Result<()> {
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        let (src_file, dest_file) = identical_pair(&src, &dest, "tool.exe")?;
+        pin_mtimes(&[&src_file, &dest_file])?;
+        set_attributes(&src_file, ARCHIVE)?;
+        // The field-evidence shape: the old backup region reads Normal.
+        set_attributes(&dest_file, NORMAL)?;
+        assert_eq!(durable_attributes(&dest_file), 0x00);
+
+        let summary = run_local_session(&src, &dest, options()).await?;
+
+        assert_eq!(
+            summary.total_bytes, 0,
+            "an attributes-only divergence must re-send no payload bytes"
+        );
+        // These three are what move under a reverted repair on this carrier:
+        // the file would be planned, prepared and applied — a whole payload
+        // round trip to set one bit.
+        assert_eq!(summary.copied_files, 0);
+        assert_eq!(
+            summary.planned_files, 0,
+            "a repaired file never enters the need list"
+        );
+        assert_eq!(summary.files_repaired, 1);
+        assert_eq!(summary.files_failed, 0);
+        assert_eq!(
+            durable_attributes(&dest_file),
+            ARCHIVE,
+            "the destination attributes converged on the source's"
+        );
+
+        // Re-run convergence: the repair holds, so the second run has
+        // nothing left to repair either.
+        let second = run_local_session(&src, &dest, options()).await?;
+        assert_eq!(second.files_repaired, 0);
+        assert_eq!(second.total_bytes, 0);
+        Ok(())
+    }
+
+    /// A named-stream divergence needs the payload that carries the stream
+    /// bytes, so it still transfers in full — the split's other half.
+    #[tokio::test]
+    async fn stream_divergence_still_transfers_the_whole_file() -> Result<()> {
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        let (src_file, dest_file) = identical_pair(&src, &dest, "tool.exe")?;
+        fs::write(stream_path(&src_file, "meta"), b"source stream")?;
+        fs::write(stream_path(&dest_file, "meta"), b"stale stream")?;
+        pin_mtimes(&[&src_file, &dest_file])?;
+        set_attributes(&src_file, ARCHIVE)?;
+        set_attributes(&dest_file, ARCHIVE)?;
+
+        let summary = run_local_session(&src, &dest, options()).await?;
+
+        assert_eq!(summary.files_repaired, 0, "stream bytes are not repairable");
+        assert_eq!(summary.copied_files, 1);
+        assert_eq!(summary.planned_files, 1, "the file takes the payload road");
+        // The LOCAL carrier's sink re-checks the body with its own compare
+        // and skips an identical one (`copy_resolved_file_payload`), so the
+        // bytes it reports here are the stream's. The byte-level proof that
+        // a needed file really re-sends its payload lives on the wire
+        // carrier — `transfer_session_roles`.
+        assert!(summary.total_bytes > 0);
+        assert_eq!(
+            fs::read(stream_path(&dest_file, "meta"))?,
+            b"source stream",
+            "the stream landed with the payload"
+        );
+        Ok(())
+    }
+
+    /// pfc-1's tolerance governs the repair verdict too: a dot-named
+    /// destination carrying an extra HIDDEN bit compares CONVERGED, so no
+    /// repair is attempted. A repair here could never converge (no setter
+    /// call clears a server-synthesized bit), and running it every session
+    /// would be a permanent repair loop.
+    #[tokio::test]
+    async fn tolerated_synthesized_hidden_triggers_no_repair() -> Result<()> {
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        let (src_file, dest_file) = identical_pair(&src, &dest, ".tcp_shot.png.XkR0Av")?;
+        pin_mtimes(&[&src_file, &dest_file])?;
+        set_attributes(&src_file, ARCHIVE)?;
+        set_attributes(&dest_file, ARCHIVE | HIDDEN)?;
+
+        let summary = run_local_session(&src, &dest, options()).await?;
+
+        assert_eq!(
+            summary.files_repaired, 0,
+            "a tolerated divergence is converged, not repairable"
+        );
+        assert_eq!(summary.total_bytes, 0);
+        assert_eq!(summary.planned_files, 0);
+        assert_eq!(
+            durable_attributes(&dest_file),
+            ARCHIVE | HIDDEN,
+            "nothing touched the destination's attributes"
+        );
+        Ok(())
+    }
+
+    /// A repair that FAILS degrades to the full transfer the file would
+    /// have had before pfc-6 — never a new fatal path. The failure is real:
+    /// a deny-WriteAttributes ACE on the destination file makes
+    /// `SetFileAttributesW` return access-denied, and the test proves the
+    /// fixture bites before running the session.
+    #[tokio::test]
+    async fn failed_repair_degrades_to_transfer_and_the_session_completes() -> Result<()> {
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        let (src_file, dest_file) = identical_pair(&src, &dest, "tool.exe")?;
+        pin_mtimes(&[&src_file, &dest_file])?;
+        // READONLY is the bit the destination will be missing: writing an
+        // ACL sets ARCHIVE on the file, so a plain Archive-vs-Normal
+        // divergence would not survive installing the deny ACE below.
+        set_attributes(&src_file, ARCHIVE | READONLY)?;
+
+        // Everyone by SID: not localized, and a deny ACE outranks every
+        // allow the current token holds.
+        let denied = std::process::Command::new("icacls")
+            .arg(&dest_file)
+            .arg("/deny")
+            .arg("*S-1-1-0:(WA)")
+            .output()?;
+        assert!(
+            denied.status.success(),
+            "icacls could not install the deny ACE: {}",
+            String::from_utf8_lossy(&denied.stdout)
+        );
+        assert_ne!(
+            durable_attributes(&dest_file),
+            ARCHIVE | READONLY,
+            "the fixture must leave an attribute divergence to repair"
+        );
+        assert!(
+            set_attributes(&dest_file, ARCHIVE | READONLY).is_err(),
+            "the fixture must actually make an attribute write fail"
+        );
+
+        let summary = run_local_session(&src, &dest, options()).await;
+        let _ = std::process::Command::new("icacls")
+            .arg(&dest_file)
+            .arg("/remove:d")
+            .arg("*S-1-1-0")
+            .output();
+        // Leave nothing read-only behind: the temp tree has to delete.
+        set_attributes(&src_file, ARCHIVE)?;
+        let summary = summary?;
+
+        assert_eq!(
+            summary.files_repaired, 0,
+            "a failed repair is not a repaired file"
+        );
+        assert_eq!(
+            summary.planned_files, 1,
+            "the file degrades onto the need list, exactly as before pfc-6"
+        );
+        // What the transfer then hits on the same denied file is pfc-2's
+        // business: contained per-file, session completes.
+        assert_eq!(summary.files_failed, 1);
+        assert_eq!(summary.copied_files, 0);
+        Ok(())
+    }
+
+    /// A destination that writes nothing must not repair either: `--null`
+    /// and `--dry-run` would otherwise make a diff-time attribute write the
+    /// one mutation those runs perform.
+    #[tokio::test]
+    async fn destinations_that_write_nothing_repair_nothing() -> Result<()> {
+        for (dry_run, null_sink) in [(true, false), (false, true)] {
+            let tmp = tempdir()?;
+            let src = tmp.path().join("src");
+            let dest = tmp.path().join("dest");
+            let (src_file, dest_file) = identical_pair(&src, &dest, "tool.exe")?;
+            pin_mtimes(&[&src_file, &dest_file])?;
+            set_attributes(&src_file, ARCHIVE)?;
+            set_attributes(&dest_file, NORMAL)?;
+
+            let summary = run_local_session(
+                &src,
+                &dest,
+                LocalMirrorOptions {
+                    dry_run,
+                    null_sink,
+                    ..options()
+                },
+            )
+            .await?;
+
+            assert_eq!(
+                summary.files_repaired, 0,
+                "dry_run={dry_run} null_sink={null_sink} must repair nothing"
+            );
+            assert_eq!(
+                durable_attributes(&dest_file),
+                0x00,
+                "dry_run={dry_run} null_sink={null_sink} must not touch the destination"
+            );
+            assert_eq!(
+                summary.planned_files, 1,
+                "the file is still PLANNED, so the reported plan is unchanged"
+            );
+        }
+        Ok(())
+    }
+}

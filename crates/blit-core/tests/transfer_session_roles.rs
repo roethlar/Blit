@@ -4030,3 +4030,128 @@ async fn checksum_compare_transfers_content_change_size_mtime_misses() {
         }
     }
 }
+
+/// pfc-6 THE BINDING GUARD, on the carrier that really moves bytes: a
+/// destination file whose size, mtime, content and named streams all match
+/// and whose ATTRIBUTES diverge is repaired in place by the destination, so
+/// the source is never granted its need and not one payload byte crosses
+/// the wire. A file whose STREAM diverges in the same tree still transfers
+/// in full, and `bytes_transferred` is asserted EXACTLY — revert the repair
+/// verdict and the repairable file's body reappears in that total.
+///
+/// Both initiator layouts, because the DESTINATION owns its filesystem in
+/// every topology: which end opened the session cannot matter.
+#[cfg(windows)]
+#[tokio::test]
+async fn attributes_only_divergence_repairs_without_sending_bytes_under_both_initiators() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileAttributesW, SetFileAttributesW, FILE_FLAGS_AND_ATTRIBUTES, INVALID_FILE_ATTRIBUTES,
+    };
+
+    const ARCHIVE: u32 = 0x20;
+    const NORMAL: u32 = 0x80;
+    const PRESERVED: u32 = 0x27;
+    const BODY_LEN: usize = 64 * 1024;
+    const STREAM: &[u8] = b"source stream";
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+    fn set_attributes(path: &Path, attributes: u32) {
+        let wide = wide(path);
+        unsafe { SetFileAttributesW(PCWSTR(wide.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(attributes)) }
+            .unwrap_or_else(|e| panic!("setting attributes on {}: {e}", path.display()));
+    }
+    fn durable_attributes(path: &Path) -> u32 {
+        let wide = wide(path);
+        let attributes = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
+        assert_ne!(attributes, INVALID_FILE_ATTRIBUTES, "reading attributes");
+        attributes & PRESERVED
+    }
+    fn stream_path(path: &Path, name: &str) -> std::path::PathBuf {
+        let mut value = path.as_os_str().to_owned();
+        value.push(":");
+        value.push(name);
+        value.into()
+    }
+
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        let body = make_patterned(BODY_LEN);
+        // Identical bodies and mtimes on both sides: metadata is the only
+        // thing left for the diff to disagree about. Streams are written
+        // before `write_tree` pins the mtimes — a stream write bumps the
+        // file's last-write time.
+        for root in [&src_root, &dst_root] {
+            std::fs::create_dir_all(root).unwrap();
+            std::fs::write(root.join("streamy.exe"), &body).unwrap();
+        }
+        std::fs::write(stream_path(&src_root.join("streamy.exe"), "meta"), STREAM).unwrap();
+        std::fs::write(
+            stream_path(&dst_root.join("streamy.exe"), "meta"),
+            b"stale stream",
+        )
+        .unwrap();
+        let tree: Vec<FileSpec> = vec![
+            ("repairable.exe", body.clone(), 1_600_000_100),
+            ("streamy.exe", body.clone(), 1_600_000_101),
+        ];
+        write_tree(&src_root, &tree);
+        write_tree(&dst_root, &tree);
+
+        // The field-evidence shape: the destination's backup region reads
+        // Normal (0x00) against the source's Archive (0x20).
+        for name in ["repairable.exe", "streamy.exe"] {
+            set_attributes(&src_root.join(name), ARCHIVE);
+            set_attributes(&dst_root.join(name), NORMAL);
+        }
+
+        let (source_result, dest_result) =
+            run_session(initiator_role, &src_root, &dst_root, PlanOptions::default()).await;
+        let (summary, outcome) = expect_session_success(
+            source_result,
+            dest_result,
+            &format!("pfc-6 repair session (initiator {initiator_role:?})"),
+        );
+
+        // BYTES FIRST: this is the assertion the guard turns on. Convergence
+        // alone proves nothing — the pre-pfc-6 path also converged, by
+        // re-sending every byte of the repairable file.
+        assert_eq!(
+            summary.bytes_transferred,
+            (BODY_LEN + STREAM.len()) as u64,
+            "exactly one file's bytes crossed: the repaired file must send none \
+             (initiator {initiator_role:?})"
+        );
+        assert_eq!(
+            outcome.needed_paths,
+            vec!["streamy.exe".to_string()],
+            "only the stream divergence needs the payload (initiator {initiator_role:?})"
+        );
+        assert_eq!(summary.files_transferred, 1);
+        assert_eq!(
+            outcome.files_repaired, 1,
+            "the destination repaired the attributes-only divergence in place"
+        );
+        assert_eq!(summary.files_failed, 0);
+        for name in ["repairable.exe", "streamy.exe"] {
+            assert_eq!(
+                durable_attributes(&dst_root.join(name)),
+                ARCHIVE,
+                "'{name}' converged on the source attributes (initiator {initiator_role:?})"
+            );
+        }
+        assert_eq!(
+            std::fs::read(stream_path(&dst_root.join("streamy.exe"), "meta")).unwrap(),
+            STREAM
+        );
+        assert_trees_identical(&src_root, &dst_root);
+    }
+}

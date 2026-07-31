@@ -68,7 +68,7 @@ aborted with `session INTERNAL: writing payload`.
 
 ## Acceptance criteria
 
-- [ ] Attribute tolerance: a dot-named file whose destination read-back is
+- [x] Attribute tolerance: a dot-named file whose destination read-back is
       exactly `requested | FILE_ATTRIBUTE_HIDDEN (0x2)` converges in
       `set_and_verify_attributes` AND compares equal in
       `destination_matches`; a non-dot-named file with the same divergence,
@@ -77,23 +77,23 @@ aborted with `session INTERNAL: writing payload`.
 - [ ] Re-run convergence: after a mirror that exercised the tolerance, a
       second mirror run re-copies nothing (compare-side tolerance keeps the
       dot-named files converged).
-- [ ] Per-file containment: an injected write failure on one file (e.g.
+- [x] Per-file containment: an injected write failure on one file (e.g.
       access-denied on the destination path) no longer aborts the session —
       remaining manifest files transfer; the summary carries the failed
       file's relative path and reason; the CLI prints the failure block and
       exits non-zero (distinct partial-failure code, recommended `2`).
-- [ ] Attribute non-convergence outside the tolerated case is a per-file
+- [x] Attribute non-convergence outside the tolerated case is a per-file
       failure (recorded, reported), not a session abort.
-- [ ] Wire parity: the failure report survives the round trip in both
+- [x] Wire parity: the failure report survives the round trip in both
       carriers (in-stream and TCP data plane) and in both roles (initiator
       SOURCE and initiator DESTINATION), from the daemon DESTINATION back to
       the initiating CLI.
-- [ ] Q1 posture (as ruled by owner) implemented and guard-tested.
-- [ ] Metadata-only repair (pfc-6): a destination file with equal
+- [x] Q1 posture (as ruled by owner) implemented and guard-tested.
+- [x] Metadata-only repair (pfc-6): a destination file with equal
       size/mtime and matching streams but divergent attributes converges
       with zero payload bytes re-sent; stream divergence still transfers
       fully; repair failure degrades to full transfer, never a new fatal.
-- [ ] `cargo fmt --check`, `clippy -D warnings`, `cargo test --workspace`
+- [x] `cargo fmt --check`, `clippy -D warnings`, `cargo test --workspace`
       green; Windows parity suite run; docs gate passes.
 
 ## Design
@@ -333,6 +333,41 @@ tolerance tests fail.
   - The three remote TUI move-route gates are compile-verified (same
     shared function; no TUI two-daemon fixture) — recorded honestly;
     the local TUI route is red/green-proven.
+
+### pfc-6 landing notes
+
+- The destination diff splits Unchanged-with-metadata-mismatch through a
+  three-way `DestinationMetadataVerdict` (Converged / AttributesOnly /
+  Streams) — streams compared first, then the ONE pfc-1
+  `attributes_converge` call, so the synthesized-HIDDEN tolerance
+  reports Converged and can never start a repair loop (guard-tested).
+  Attributes-only ⇒ in-place `repair_attributes` at diff time inside the
+  existing blocking chunk (manifest-validated — `apply_attributes` would
+  reject the content-less descriptor and silently degrade every file
+  with a named stream; pinned by test); repair failure ⇒ degrade to the
+  exact pre-pfc-6 Transfer verdict, resume eligibility preserved, never
+  a new fatal. Shared diff path: identical for local and remote.
+- The binding guard is byte-level under both initiator roles: the revert
+  re-sent exactly the repairable file's 65,536-byte body (the local
+  carrier's `total_bytes` proved VACUOUS for this guard — the sink's
+  own compare skips identical bodies — so the wire-carrier byte
+  assertion is the guard, recorded honestly).
+- Safety addition: `--dry-run`/`--null` runs perform NO diff-time repair
+  (`LocalApply::applies_changes`); they still plan the file, so their
+  reported would-copy counts are byte-identical to pre-pfc-6.
+- Counting: `files_repaired` on `DestinationOutcome` →
+  `LocalMirrorSummary` → one CLI line + the JSON field. The wire
+  `TransferSummary` is deliberately not extended (recorded boundary) —
+  a remote-pull initiator does not see the destination's repaired count.
+- Recorded follow-ups: `--dry-run` reports a repairable file as
+  would-copy (conservative prediction mismatch with the real run's
+  repair); diff-time repair does not consult the session abort flag
+  (repairs are idempotent convergent corrections — polish);
+  checksum-only stream divergence (same size, different content) lacks
+  a dedicated test (the verdict logic compares checksums; boundary
+  covered by content/name/absent cases); the CLI repaired-line has no
+  automated test; non-Checksum modes no longer get the incidental
+  body/mtime re-alignment a full re-copy used to perform (per design).
 
 ### Half C — metadata-only attribute repair (pfc-6, D-2026-07-31-1)
 
