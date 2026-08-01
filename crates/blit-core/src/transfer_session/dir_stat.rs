@@ -18,14 +18,18 @@
 //! only round-trip counts can.
 //!
 //! The one trust boundary worth naming: a name MISSING from a clean sweep
-//! with no case-folded near-match is a TRUSTED absent. Treating it as a
-//! fallback instead would re-run the full per-file stat storm on exactly
-//! the workload this cache exists to serve twice over — a fresh copy has
-//! every file absent. The folded-name check is what keeps that trust
-//! honest on case-insensitive filesystems: a destination holding
+//! is a TRUSTED absent only where nothing but the listed names can
+//! resolve. Two channels break that and both force the authoritative
+//! stat instead: case-folded near-matches (a destination holding
 //! `FOO.txt` never lets a manifest `foo.txt` be judged absent from the
-//! sweep alone, because the folded candidate forces the authoritative
-//! stat, which resolves case the way the filesystem itself does.
+//! sweep alone), and — cr-ls5-1 — Windows 8.3 short-name aliases, where
+//! path lookup resolves `PROFES~1.XML` to a listed `Professional.xml`
+//! the sweep knows by its long name only. A custom alias need not even
+//! contain `~`, so on Windows EVERY miss in a listed directory is the
+//! stat's to judge. The trusted absent survives where no alias can
+//! exist — absent directories (everywhere) and listed directories on
+//! non-Windows destinations — which still covers the fresh-copy
+//! workload: its destination directories do not exist yet.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
@@ -168,6 +172,18 @@ impl DirStatCache {
                 Some(SweptEntry::NeedsStat) => DirStatLookup::Fallback,
                 Some(entry) => DirStatLookup::Entry(*entry),
                 None if folded.contains(&fold_name(name)) => DirStatLookup::Fallback,
+                // An alias can only resolve to a LISTED entry, so an
+                // empty directory keeps the trusted absent on every
+                // platform — the copy-into-fresh-empty-directory case.
+                None if exact.is_empty() => DirStatLookup::Absent,
+                // cr-ls5-1: on Windows a name can miss the sweep yet still
+                // resolve through an 8.3 short-name alias of a listed
+                // entry; judging it absent would overwrite the aliased
+                // file, including under --ignore-existing. Only the stat
+                // resolves aliases.
+                #[cfg(windows)]
+                None => DirStatLookup::Fallback,
+                #[cfg(not(windows))]
                 None => DirStatLookup::Absent,
             },
             DirSnapshot::AbsentDir => DirStatLookup::Absent,
@@ -325,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn a_subdirectory_is_nonfile_and_a_missing_name_is_trusted_absent() {
+    fn a_subdirectory_is_nonfile_and_a_miss_beside_it_follows_the_platform_rule() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(dir.path().join("nested")).expect("mkdir");
 
@@ -334,12 +350,53 @@ mod tests {
             cache.lookup(dir.path(), OsStr::new("nested"), &probe()),
             DirStatLookup::Entry(SweptEntry::NonFile)
         );
+        // cr-ls5-1: beside LISTED entries, a Windows miss could be an 8.3
+        // alias of one of them — the stat judges it. Elsewhere no alias
+        // channel exists and the sweep's absent is trusted.
+        #[cfg(windows)]
+        let expected_miss = DirStatLookup::Fallback;
+        #[cfg(not(windows))]
+        let expected_miss = DirStatLookup::Absent;
         assert_eq!(
             cache.lookup(dir.path(), OsStr::new("never-created"), &probe()),
-            DirStatLookup::Absent
+            expected_miss
         );
         // Both answered from ONE sweep.
         assert_eq!(cache.sweeps(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_miss_beside_listed_entries_is_the_stats_to_judge() {
+        // The reviewer's live repro behind cr-ls5-1: `PROFES~1.XML`
+        // resolves to a listed `Professional.xml` through its 8.3 alias,
+        // so judging the sweep-miss absent re-copies over the aliased
+        // file — including under --ignore-existing. Auto 8.3 generation
+        // is per-volume configuration this test cannot assume, so it pins
+        // the DECISION (every miss beside listed entries falls back), not
+        // the OS's alias table.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Professional.xml"), b"keep me").expect("write");
+
+        let cache = DirStatCache::default();
+        assert_eq!(
+            cache.lookup(dir.path(), OsStr::new("PROFES~1.XML"), &probe()),
+            DirStatLookup::Fallback
+        );
+        assert_eq!(cache.fallbacks(), 1);
+    }
+
+    #[test]
+    fn an_empty_directory_keeps_the_trusted_absent_on_every_platform() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let cache = DirStatCache::default();
+        // Nothing is listed, so nothing can be aliased: the
+        // copy-into-fresh-empty-directory case stays fallback-free.
+        assert_eq!(
+            cache.lookup(dir.path(), OsStr::new("anything.txt"), &probe()),
+            DirStatLookup::Absent
+        );
         assert_eq!(cache.fallbacks(), 0);
     }
 

@@ -705,3 +705,8 @@ Format:
 - Decision: the per-file destination stream enumeration on size/mtime-matched files stays; eliding it for stream-less source files (proposed for perf, ~115 s -> ~30 s on the field mirror) is rejected.
 - Why: owner ruled "no" (2026-08-01) after full framing — blit's compare keeps detecting destination-only stream divergence every run, deliberately stricter than rsync/robocopy size+mtime defaults.
 - Supersedes: nothing (closes the ls-5 owner gate in docs/bench/ls1-phase-2026-07-31/dir-sweep.md).
+
+## D-2026-08-01-4 — destination stream interrogation deleted from the default compare
+- Decision: the per-file destination stream enumeration is removed from the default (size+mtime) compare — no runtime probe, no flag; streams are still carried whenever a file transfers, and `--checksum` retains exhaustive stream verification.
+- Why: owner walked the full chain (2026-08-01): the remedy for detected divergence is whole-file replacement, so interrogation never protected destination streams — it only found them sooner to destroy them sooner, at ~90 s/run; no peer tool attempts it; F+S+R all land on deletion.
+- Supersedes: D-2026-08-01-3, which is VOID — it misrecorded the owner's "no" (which rejected my half-measure framing, not the removal) as a keep ruling.

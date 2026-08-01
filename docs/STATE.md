@@ -33,17 +33,17 @@ Last updated: 2026-07-31 (pfc-1..6 + clp-1..2 landed; owner field check returned
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff — 2026-08-01
-- Done: **pfc SHIPPED** (owner declared, D-2026-08-01-2); clp-1..3 landed
-  (clp-3 = Dracula colour, unreviewed); local mirror 1.71× faster (owner's
-  283.92 s → ~166 s) via runtime-adaptive comparison concurrency, no new CLI
-  (D-2026-08-01-1). **ls-1 review CLOSED: 9 rounds, 16 findings, r9 CLEAN.**
-- **clp3-ls4 review CLOSED: 3 rounds, 2 findings, both verified-closed, r3
-  CLEAN.** Everything landed since ls-1's r9 is now independently reviewed.
-- **ls-5 SHIPPED: directory-sweep destination stat — converged SMB mirror
-  166.38 → 114.73 s** (2.38× vs step (0)); local A/B neutral; review pending.
-- Next: OWNER GATE on named-stream elision (numbers in
-  `docs/bench/ls1-phase-2026-07-31/dir-sweep.md`); wire carrier still needs
-  a concurrent-session measurement first.
+- Done: **pfc SHIPPED** (D-2026-08-01-2); clp-1..3 landed; adaptive checkers
+  1.71× (D-2026-08-01-1). Reviews CLOSED clean: ls-1 (9 rounds, 16 findings),
+  clp3-ls4 (3 rounds, 2 findings). Detail: DEVLOG 2026-08-01.
+- **ls-5 SHIPPED: directory-sweep stat — converged SMB mirror 166.38 →
+  114.73 s** (2.38× vs step 0); local A/B neutral. Review r1: 1 HIGH
+  (cr-ls5-1, 8.3-alias overwrite) FIXED; re-review awaits owner go.
+- **Owner ruled (2026-08-01): DELETE the destination stream interrogation
+  from the default compare** — no probe, no flag; streams still carried on
+  every copy; `--checksum` keeps deep verify; D-2026-08-01-3 VOID per
+  D-2026-08-01-4. This is ls-6, next; expect ~115 s → ~25–35 s floor.
+- Then: wire carrier still needs a concurrent-session measurement first.
 
 ## Now (active work)
 
