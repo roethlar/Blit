@@ -35,9 +35,10 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Handoff — 2026-07-31
 - Done: pfc-1..6 + clp-1..2 landed; local mirror 1.64× faster via
   runtime-adaptive comparison concurrency (no new CLI, D-2026-08-01-1).
-- Next: **r7 owed** (r6 closed cr-ls1-9/-10, raised 2 LOWs, both fixed;
-  nothing above LOW outstanding). Levers left: named-stream enumeration,
-  directory-level stat, wire-carrier concurrency. pfc Shipped is the owner's.
+- Next: **r8 owed** (r7 found a unit test that made a real network
+  connection — fixed — plus the 9th vacuous guard; both closed). Levers
+  left: named-stream enumeration, directory-level stat, wire-carrier
+  concurrency. pfc Shipped is the owner's.
 
 ## Now (active work)
 

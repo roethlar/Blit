@@ -858,22 +858,30 @@ mod tests {
             "move refused for the wrong reason: {error:#}"
         );
 
-        // And 0 — "discover at runtime" — is valid on every route, so the
-        // gate rejects the pin rather than rejecting remote transfers.
+        // And 0 — "discover at runtime" — must NOT be refused, so the gate
+        // rejects the pin rather than rejecting remote transfers.
+        //
+        // cr-ls1-14: asserted against the helper, NOT by continuing through
+        // the dispatch. Letting a remote route past the gate inside a unit
+        // test means real DNS and a real connection attempt to whatever
+        // `host` resolves to — and had it resolved to a live blit daemon,
+        // this test would have started an actual transfer into `/dst`. A
+        // unit test must not be able to reach the network, let alone write
+        // somewhere. The end-to-end positive case lives in
+        // `tests/checker_pin_gate.rs`, against local paths.
         let adaptive = gate_args("host:/src/", "/dst/", false, true);
         assert_eq!(adaptive.checkers, 0);
-        let error = runtime
-            .block_on(run_transfer_inner(
-                &ctx,
-                &adaptive,
-                TransferKind::Copy,
-                &trace,
-            ))
-            .expect_err("this endpoint does not resolve in a unit test");
-        assert!(
-            !format!("{error:#}").contains("--checkers"),
-            "the adaptive default must not be refused: {error:#}"
+        let remote_route = select_transfer_route(
+            parse_transfer_endpoint("host:/src/").expect("remote source parses"),
+            parse_transfer_endpoint("/dst/").expect("local destination parses"),
+            TransferKind::Copy,
         );
+        assert!(
+            !matches!(remote_route, TransferRoute::LocalToLocal { .. }),
+            "the fixture must be a remote route or this proves nothing"
+        );
+        reject_unsupported_checker_pin(&adaptive, &remote_route)
+            .expect("the adaptive default is valid on every route");
     }
 
     fn runtime() -> tokio::runtime::Runtime {
