@@ -171,6 +171,92 @@ One coherent, testable change per slice — sized for the review loop.
    route (`blit-app/src/transfers/remote.rs` builds
    `FsTransferSource::new` with a sink in hand) together with remote
    render support.
+3. **clp-3 — colour on the live row and the failure block** (owner asked
+   2026-08-01: scope "both", palette "dracula"). DRAFT, awaiting flip.
+
+   Not a new option and not decoration — see §clp-3 scope below. The row
+   currently gives equal visual weight to the phase, the counts and a
+   truncated path, and a partial failure (pfc-5) reads at the same weight
+   as a success. Colour is used to separate those, and nowhere else.
+
+## clp-3 scope (DRAFT — no code until flipped)
+
+### Palette
+
+Dracula, exact hex. `console` 0.16.4 exposes `Color::TrueColor(u8,u8,u8)`,
+so the real palette is available rather than an approximation, and it still
+routes through console's capability detection.
+
+| element | colour | hex |
+|---|---|---|
+| phase `enumerating` | Purple | `#BD93F9` |
+| phase `comparing` | Cyan | `#8BE9FD` |
+| phase `copying` | Green | `#50FA7B` |
+| phase `deleting` | Orange | `#FFB86C` |
+| current file path | Comment | `#6272A4` |
+| separators (`•`) | Comment | `#6272A4` |
+| counts / bytes | default fg | — |
+| failure block header | Red | `#FF5555` |
+| failed path | default fg | — |
+| failure reason | Red | `#FF5555` |
+| re-run hint | Comment | `#6272A4` |
+
+`deleting` is Orange rather than Red deliberately: red is reserved for
+"something went wrong", and a mirror delete pass is expected work. Orange
+still marks it as the destructive phase.
+
+Counts stay default-foreground because they are the numbers the operator
+reads; colouring them competes with the two things colour is here to
+surface.
+
+### Truecolor fallback
+
+Emit exact Dracula when the terminal advertises 24-bit
+(`COLORTERM=truecolor|24bit`), otherwise the standard Dracula 256-colour
+approximations (purple 141, cyan 117, green 84, orange 215, comment 61,
+red 203). Both paths go through `console::Style`, never hand-written escape
+sequences — hand-rolled escapes would bypass the capability detection that
+makes the no-colour cases below work.
+
+### Where colour must NOT appear
+
+Each of these is an existing seam, not new logic:
+
+- `NO_COLOR` set (any value) — the de-facto standard.
+- `TERM=dumb`.
+- stderr is not a TTY. The row already gates on "can the bar draw"
+  (clp-2 residue (c)), so piped and redirected output must stay
+  **byte-identical to today**.
+- `--json`, whose stdout is a machine contract.
+
+### Guards
+
+Given this slice's review history, the guards are specified up front and
+each names the property it proves, not a consequence of it:
+
+- **Styling is a pure function of (element, capability)** — extract it so
+  the mapping is unit-testable without a terminal, and assert the exact
+  escape bytes for truecolor, 256 and none. A test asserting "output is
+  non-empty" would prove nothing.
+- **No-colour paths are byte-identical to the current output.** Capture the
+  rendered row and failure block with colour disabled and compare against
+  the existing expected strings — this is the regression that actually
+  matters, because it is what every piped consumer and every existing test
+  depends on.
+- **The failure block is red where it claims to be.** Drive the real binary
+  with a forced-colour env and a deny-ACL file, assert the failure header
+  carries the red SGR sequence — at the seam, not on the helper.
+- Red/green proof required for each, per the standing note in
+  `.review/findings/cr-ls1-15-16.md`.
+
+### Non-goals for clp-3
+
+- No colour on the `ls-0` summary block (copied/repaired/average/workers).
+  Scope is the row and the failure block, as asked.
+- No theming, no `--color` flag, no config. `NO_COLOR` and TTY detection are
+  the entire control surface — anything more is user-facing surface for a
+  decision nobody needs to make (D-2026-08-01-1).
+- No change to what the row SAYS, only how it is rendered.
 
 ## clp-2 landing notes
 
