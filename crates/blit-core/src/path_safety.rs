@@ -657,6 +657,11 @@ mod containment_cross_platform_tests {
     /// ENOTDIR — so it can only go red on Unix. That is stated here rather
     /// than left to be discovered, because a Windows-only run of this test
     /// proves nothing about the bug it guards.
+    ///
+    /// PROVEN on real Linux (2026-08-01, `michael@gabrielle`, x86_64, rustc
+    /// 1.97.1): removing the `NotADirectory` arm reds both this test and
+    /// `tar_shard_member_with_an_unmakeable_parent_fails_alone`; restoring it
+    /// returns 516/516 green in `blit-core --lib`.
     #[test]
     fn a_path_blocked_by_a_file_component_is_contained_not_an_escape() {
         let tmp = tempdir().unwrap();

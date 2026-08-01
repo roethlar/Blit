@@ -18,6 +18,35 @@
   D-2026-07-23-6 requires exact test-owned cleanup; neither path is a product
   install or may be adopted as a reusable rule.
 
+## Linux hosts for CROSS-PLATFORM VERIFICATION (owner, 2026-08-01)
+
+Owner: "test with ssh michael@gabrielle, michael@magneto, or michael@altiera.
+those are all x64 linux." This authorizes running the **test suite and
+clippy** on them. It does NOT touch the build-only/never-a-bench-end rule
+below — these are correctness checks, not measurements, and nothing here
+makes any of them a benchmark end.
+
+Why this matters: a Windows-only gate cannot see Unix behaviour. On
+2026-08-01 CI was red for a full day with a cross-platform dead-code error
+and two Unix-only test failures while every local Windows run passed. One of
+those was a real containment bug (`ENOTDIR` treated as an escape) whose
+red/green proof is IMPOSSIBLE on Windows — Windows reports not-found where
+Unix reports `ENOTDIR`, so the guard cannot go red there. It was proven on
+`gabrielle` instead.
+
+- **Prefer `michael@magneto`** for this: modern, Arch (kernel 7.1.4), 4
+  cores, 31 GiB RAM, NVMe with ~897 G free, `cargo`/`rustc` 1.97.1.
+- `michael@gabrielle` — works, x86_64, 8 cores, `cargo` 1.97.1, 1.7 T free,
+  but it is a **2010-era iMac running Linux** (owner, 2026-08-01): slow, and
+  a full `target/` is ~10 G. Fine for a one-off; clean up after
+  (`rm -rf ~/blit-citest`) rather than leaving a build tree on old hardware.
+- `michael@altiera` — reachable, x86_64, but **no cargo installed** as of
+  2026-08-01. Not usable for this without a toolchain first.
+
+Method that worked: clone from the LAN gitea (`http://q:3000/michael/Blit_v2.git`),
+which the hosts can reach, so the exact pushed commit is under test rather
+than an rsync of a dirty tree.
+
 ## Additional Linux hosts — BUILD ONLY (owner rule, 2026-07-12)
 
 Owner: "Use it only for building binaries. Same with the VM. Build

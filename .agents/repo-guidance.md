@@ -143,6 +143,14 @@ between them.
   (`rustup target add` first; no linker needed for clippy/check). Several
   DEVLOG entries cite the mirror-image "strict Windows all-target
   cross-clippy" for the same reason.
+- **Cross-compiling is not cross-RUNNING.** Clippy on another target catches
+  compile-time divergence only. Behaviour that differs at runtime — error
+  kinds, path semantics, permissions — needs the suite executed on that OS.
+  The owner's Linux hosts are listed in `.agents/machines.md` (prefer
+  `michael@magneto`); clone from the LAN gitea there so the exact pushed
+  commit is under test. Some guards can only go red on one platform, and a
+  guard that cannot go red where you are is not evidence — say so instead of
+  reporting it as proven.
 - **A test in a `cfg`-gated module does not run where you are.** Check which
   module a new test lands in before claiming it covers a platform. A guard
   for a platform DISAGREEMENT must live in an ungated module, or it cannot
