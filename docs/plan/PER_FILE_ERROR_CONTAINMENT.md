@@ -1,12 +1,13 @@
 # Per-File Error Containment
 
-**Status**: Active (D-2026-07-30-1; Q1 settled — mirror deletes proceed,
-move source-deletion refuses while any per-file failure exists; pfc-6
-metadata-only repair added by owner go, D-2026-07-31-1)
+**Status**: Shipped (owner declared 2026-08-01, D-2026-08-01-2 — every
+acceptance criterion met, including the re-run convergence checkpoint the
+owner alone could call)
 **Created**: 2026-07-30
+**Shipped**: 2026-08-01
 **Supersedes**: nothing
-**Decision ref**: D-2026-07-30-1, amended D-2026-07-31-1 (D-2026-07-09-1
-supplies the governing principle)
+**Decision ref**: D-2026-07-30-1, amended D-2026-07-31-1, shipped
+D-2026-08-01-2 (D-2026-07-09-1 supplies the governing principle)
 
 ## Goal
 
@@ -74,9 +75,16 @@ aborted with `session INTERNAL: writing payload`.
       `destination_matches`; a non-dot-named file with the same divergence,
       or any other extra/missing bit, does not. Proven by pure-function
       tests plus injected-read tests on both paths; red/green guard.
-- [ ] Re-run convergence: after a mirror that exercised the tolerance, a
+- [x] Re-run convergence: after a mirror that exercised the tolerance, a
       second mirror run re-copies nothing (compare-side tolerance keeps the
       dot-named files converged).
+      **Met and declared by the owner, 2026-08-01.** Field evidence from
+      their 2026-07-31 run on the originating workload (`D:\Apps` →
+      `H:\apps`, Samba): run 1 copied 9578 files / 393.01 MiB and repaired
+      5445 files' metadata with zero bytes re-sent; **run 2 copied 0 files,
+      0 B** — a true no-op, which is the criterion. Declared per
+      D-2026-08-01-2; checkpoints are owner-only and this one was held open
+      until they called it.
 - [x] Per-file containment: an injected write failure on one file (e.g.
       access-denied on the destination path) no longer aborts the session —
       remaining manifest files transfer; the summary carries the failed

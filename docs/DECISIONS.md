@@ -621,6 +621,30 @@ Format:
   D-2026-07-23-7 (per-dispatch approval) stand for everything outside this
   standing scope.
 
+## D-2026-08-01-2 — PER_FILE_ERROR_CONTAINMENT is Shipped
+- Decision: Owner declared the plan **Shipped** (2026-08-01), closing the
+  last acceptance criterion — re-run convergence — which only they could
+  call. `docs/plan/PER_FILE_ERROR_CONTAINMENT.md` flips Active → Shipped.
+- Evidence: their 2026-07-31 field run on the originating workload
+  (`D:\Apps` → `H:\apps` over Samba). Run 1: 9578 files / 393.01 MiB copied,
+  5445 files metadata-repaired with zero bytes re-sent. **Run 2: 0 files,
+  0 B** — the no-op the criterion asks for.
+- What shipped: pfc-1..6. A single survivable per-file error no longer
+  aborts a transfer — the failing file is named and skipped, the rest of the
+  manifest lands, the report crosses the wire (CONTRACT_VERSION 5→6), the
+  CLI prints an end-of-operation failure block and exits 2, move routes
+  refuse to delete sources while any failure exists, and attributes-only
+  divergence is repaired in place with no payload re-sent.
+- Origin: the owner's mirror abort that opened this effort — one dot-named
+  file whose Samba-synthesized HIDDEN bit could never converge killed an
+  entire 88k-file transfer, violating D-2026-07-09-1's principle directly.
+  audit-17 (one bad filename killing a large copy) is closed by the same
+  work.
+- Review: 7 range dispatches under D-2026-07-31-3; 11 findings, 10
+  verified-closed with guard-confirmed reviewer verdicts, 1 declined with a
+  contested record.
+- Supersedes: nothing. Closes D-2026-07-30-1 and D-2026-07-31-1.
+
 ## D-2026-08-01-1 — Runtime tuning is discovered, never a user-facing CLI option
 - Decision: Owner (2026-08-01), rejecting a visible `--checkers` flag:
   **"I didn't ask for a new cli. FAST, SIMPLE, RELIABLE. adding a new cli

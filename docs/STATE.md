@@ -33,12 +33,13 @@ Last updated: 2026-07-31 (pfc-1..6 + clp-1..2 landed; owner field check returned
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff — 2026-08-01
-- Done: pfc-1..6 + clp-1..2 landed; local mirror 1.71× faster (owner's
+- Done: **pfc SHIPPED** (owner declared, D-2026-08-01-2); clp-1..3 landed
+  (clp-3 = Dracula colour, unreviewed); local mirror 1.71× faster (owner's
   283.92 s → ~166 s) via runtime-adaptive comparison concurrency, no new CLI
   (D-2026-08-01-1). **ls-1 review CLOSED: 9 rounds, 16 findings, r9 CLEAN.**
-- Next: named-stream enumeration (rel-4-bound), directory-level stat, and
-  wire-carrier concurrency — each needs owner scoping. pfc Shipped is the
-  owner's.
+- Next: review clp-3; then named-stream enumeration (rel-4-bound),
+  directory-level stat, wire-carrier concurrency — each needs owner scoping.
+  **28 commits unpushed.**
 
 ## Now (active work)
 
@@ -103,29 +104,13 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    closed by D-2026-07-22-2. **otp-12d and otp-13 are POST-RELEASE
    (D-2026-07-22-1)**; no performance acceptance matrix is a shipping
    prerequisite.
-3. **`docs/plan/PER_FILE_ERROR_CONTAINMENT.md` (ACTIVE, D-2026-07-30-1) —
-   CODE-COMPLETE, ONE ACCEPTANCE CRITERION LEFT (the owner's).** Root
-   posture defect: first-error-wins pipeline + no failure vocabulary in
-   `TransferSummary`, so one survivable per-file error killed a session;
-   SMB-synthesized HIDDEN on dot-named files could never converge. Found
-   via the owner's `D:\Apps → H:\apps` (Samba) mirror abort. Q1 settled
-   (mirror deletes proceed; move source-deletion refuses while failures
-   exist). **pfc-1..6 all `[x]` landed on `master`**, each red/green
-   guard-proven with a full gate: shared `attributes_converge` predicate;
-   bounded per-file failure report in `SinkOutcome`; tar-shard per-member
-   containment with exact failed identity;
-   `TransferSummary.files_failed`/`failures` on the wire (CONTRACT_VERSION
-   5→6); CLI failure block + exit 2 + the real
-   `refuse_source_delete_on_failures` gate on all eight move routes;
-   attributes-only in-place repair. The pfc-2 interim mirror-only interlock
-   is GONE — containment applies to every session kind; audit-17 closed end
-   to end. **Review program complete**: 7 range reviews, 11 findings, 10
-   verified-closed + 1 declined. Detail: DEVLOG 2026-07-31 and the plan.
-   **The one open acceptance criterion is re-run convergence, and it is
-   the OWNER'S to declare** (checkpoints are owner-only). Their 2026-07-31
-   run satisfies it on the data — run 2 copied 0 files, 0 B — but no
-   declaration was given; they raised coherence objections instead, since
-   ruled and closed. Plan does NOT flip to Shipped until they say so.
+3. **`docs/plan/PER_FILE_ERROR_CONTAINMENT.md` — SHIPPED** (owner declared
+   2026-08-01, D-2026-08-01-2; every acceptance criterion met, including the
+   owner-only re-run convergence checkpoint — their run 2 copied 0 files,
+   0 B on the originating `D:\Apps → H:\apps` workload). pfc-1..6 closed the
+   root posture defect: a single survivable per-file error no longer aborts
+   a transfer. audit-17 closed with it. 7 range reviews, 11 findings, 10
+   verified-closed + 1 declined. Detail: the plan and DEVLOG 2026-07-31.
 4. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2): clp-1, clp-2
    and clp-3 all `[x]` landed.** **clp-3** adds Dracula colour to the live
    row and the failure block (owner-chosen palette, scope "both"): phase word
@@ -193,8 +178,4 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Open questions
 
-- **Does the pfc plan flip to Shipped?** Its last acceptance criterion
-  (re-run convergence) is satisfied by the owner's field data — run 2 copied
-  0 files, 0 B — but the owner has not declared it, and checkpoints are
-  owner-only. Stays ACTIVE until they do. Everything else the field check
-  raised is ruled and queued as D-2026-07-31-4 / Queue 1.
+- None outstanding. (pfc Shipped by owner declaration, D-2026-08-01-2.)
