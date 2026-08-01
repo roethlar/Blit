@@ -224,6 +224,9 @@ pub struct LocalMirrorOptions {
     /// program can work out for itself must not become user-facing surface
     /// (FAST, SIMPLE, RELIABLE — see `.agents/repo-guidance.md`).
     pub checkers: usize,
+    /// Test-injection seam for the write backend — see [`SinkOverride`].
+    /// `None` (production, always) builds the real sink.
+    pub sink_override: Option<SinkOverride>,
     /// Pre-built comparison pool. `None` (production) builds one from
     /// [`LocalMirrorOptions::checkers`].
     ///
@@ -256,6 +259,28 @@ impl LocalMirrorOptions {
     }
 }
 
+/// A caller-supplied write backend, replacing the sink the session would
+/// build (`FsTransferSink`, or `NullSink` under `--null`).
+///
+/// ls-4 (r10 `ls4-guard`): this exists so a test can prove the session's
+/// apply pipeline RUNS CONCURRENTLY, not merely that it is configured to.
+/// The reviewer forced the worker wiring back to one and every ls-4 test
+/// stayed green — the same implementation-not-the-seam gap as cr-ls1-9,
+/// which `checker_pool` injection closed for the diff. A wrapping sink that
+/// measures peak in-flight `write_payload` calls is the only observer that
+/// can see the difference, and it needs this seam to get installed. No
+/// production caller sets it.
+#[derive(Clone)]
+pub struct SinkOverride(pub Arc<dyn TransferSink>);
+
+/// Hand-written because `dyn TransferSink` is not `Debug`. Reports presence,
+/// not contents — the same shape as `LocalPhaseProbe`'s.
+impl std::fmt::Debug for SinkOverride {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SinkOverride").finish_non_exhaustive()
+    }
+}
+
 impl Default for LocalMirrorOptions {
     fn default() -> Self {
         Self {
@@ -277,6 +302,7 @@ impl Default for LocalMirrorOptions {
             resume: false,
             null_sink: false,
             checkers: 0,
+            sink_override: None,
             checker_pool: None,
             phase_probe: LocalPhaseProbe::default(),
         }
@@ -749,7 +775,11 @@ pub async fn run_local_session(
     };
 
     // Local write backend — the old orchestrator's exact construction.
-    let sink: Arc<dyn TransferSink> = if options.null_sink {
+    // ls-4: an injected override wins so a test can observe the pipeline's
+    // real concurrency through this exact entry point (see `SinkOverride`).
+    let sink: Arc<dyn TransferSink> = if let Some(SinkOverride(sink)) = &options.sink_override {
+        Arc::clone(sink)
+    } else if options.null_sink {
         Arc::new(NullSink::new())
     } else {
         Arc::new(FsTransferSink::new(
@@ -1161,6 +1191,105 @@ mod tests {
         assert!(
             dst_root.join("extraneous.txt").exists(),
             "a refused mirror must not have deleted anything"
+        );
+    }
+
+    /// Wraps a real sink, holds each `write_payload` open for a fixed delay,
+    /// and records the PEAK number of simultaneously in-flight calls.
+    ///
+    /// ls-4 (r10 `ls4-guard`): the only observer that can distinguish "the
+    /// pipeline is configured for 8 workers" from "the pipeline ran 8
+    /// workers". The first ls-4 guard asserted configuration plus tree
+    /// equality, and the reviewer forced the production wiring back to one
+    /// worker with every test staying green — a single worker produces the
+    /// same correct tree, just slower.
+    struct ConcurrencyProbeSink {
+        inner: Arc<dyn TransferSink>,
+        delay: std::time::Duration,
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl TransferSink for ConcurrencyProbeSink {
+        async fn write_payload(
+            &self,
+            payload: crate::remote::transfer::payload::PreparedPayload,
+        ) -> eyre::Result<SinkOutcome> {
+            use std::sync::atomic::Ordering;
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            // Long enough that overlap is unavoidable when workers exist,
+            // and impossible when they do not.
+            tokio::time::sleep(self.delay).await;
+            let out = self.inner.write_payload(payload).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            out
+        }
+
+        async fn write_file_stream(
+            &self,
+            header: &FileHeader,
+            reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+        ) -> eyre::Result<SinkOutcome> {
+            self.inner.write_file_stream(header, reader).await
+        }
+
+        fn root(&self) -> &Path {
+            self.inner.root()
+        }
+    }
+
+    /// ls-4, the guard that observes EXECUTION: driven through
+    /// `run_local_session` — the public entry every CLI copy takes — with an
+    /// injected probe sink, this asserts more than one payload was in flight
+    /// at once. Forcing the `sink_workers` wiring back to `1` reds it, which
+    /// is precisely the mutation the r10 reviewer showed the configuration
+    /// assertions could not see.
+    #[tokio::test]
+    async fn a_normal_session_holds_multiple_payloads_in_flight() {
+        use std::sync::atomic::Ordering;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("mkdir src");
+        // Each file exceeds the tar-shard threshold so it plans as its own
+        // `File` payload; enough of them that overlap is not a coin flip.
+        let body = vec![b'p'; 1024 * 1024 + 1];
+        for index in 0..12 {
+            std::fs::write(src_root.join(format!("big{index}.bin")), &body).expect("write");
+        }
+
+        let probe = Arc::new(ConcurrencyProbeSink {
+            inner: Arc::new(FsTransferSink::new(
+                src_root.clone(),
+                dst_root.clone(),
+                FsSinkConfig::default(),
+            )),
+            delay: std::time::Duration::from_millis(40),
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            peak: std::sync::atomic::AtomicUsize::new(0),
+        });
+
+        let summary = run_local_session(
+            &src_root,
+            &dst_root,
+            LocalMirrorOptions {
+                perf_history: false,
+                sink_override: Some(SinkOverride(Arc::clone(&probe) as Arc<dyn TransferSink>)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("session");
+        assert_eq!(summary.copied_files, 12, "the probe must not drop work");
+
+        let peak = probe.peak.load(Ordering::SeqCst);
+        assert!(
+            peak > 1,
+            "peak in-flight payloads was {peak}; the apply pipeline executed \
+             sequentially, whatever its configuration says"
         );
     }
 
