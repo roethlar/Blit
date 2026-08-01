@@ -33,21 +33,17 @@ Last updated: 2026-07-31 (pfc-1..6 + clp-1..2 landed; owner field check returned
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff — 2026-08-01
-- Done: **pfc SHIPPED** (D-2026-08-01-2); clp-1..3 landed; adaptive checkers
-  1.71× (D-2026-08-01-1). Reviews CLOSED clean: ls-1 (9 rounds, 16 findings),
-  clp3-ls4 (3 rounds, 2 findings). Detail: DEVLOG 2026-08-01.
-- **ls-5 SHIPPED: directory-sweep stat — converged SMB mirror 166.38 →
-  114.73 s** (2.38× vs step 0); local A/B neutral. Review r1: 1 HIGH
-  (cr-ls5-1, 8.3-alias overwrite) FIXED; re-review awaits owner go.
+- Done: pfc SHIPPED (D-2026-08-01-2); clp-1..3; adaptive checkers 1.71×
+  (D-2026-08-01-1). Reviews closed clean: ls-1, clp3-ls4. See DEVLOG.
+- **ls-5 SHIPPED: directory-sweep stat, 166.38 → 114.73 s**; A/B neutral.
+  Review r1: 1 HIGH (cr-ls5-1, 8.3-alias overwrite) FIXED, re-review queued.
 - **ls-6 SHIPPED (D-2026-08-01-4): stream interrogation deleted from the
-  default compare — converged mirror 114.73 → 55.57 s, 5.1× vs the field
-  complaint.** `--checksum` keeps deep verify; pfc-6 repair unchanged;
-  contract pinned on local, wire, and CLI surfaces; Linux 528/0.
-  Evidence: `docs/bench/ls1-phase-2026-07-31/stream-interrogation-deletion.md`.
-- Blocked on owner: codex dispatch authority (per-invocation approval per
-  D-2026-07-23-7 vs session standing order) — cr-ls5-1 re-review and the
-  ls-6 range review both wait on it. Then: wire-carrier concurrent-session
-  measurement, or sweep prefetch (compare is now sweep-bound).
+  default compare — 114.73 → 55.57 s, 5.1× vs the field complaint.**
+  `--checksum` keeps deep verify; contract pinned local/wire/CLI; Linux
+  528/0. Evidence: `stream-interrogation-deletion.md` in the bench dir.
+- Blocked on owner: codex dispatch authority (D-2026-07-23-7) — cr-ls5-1
+  re-review and ls-6 range review wait on it. Then: wire-carrier
+  concurrent-session measurement, or sweep prefetch (compare is sweep-bound).
 
 ## Now (active work)
 
