@@ -1,7 +1,10 @@
 # cr-ls4-2 — the test-only sink seam shipped in the production API
 
 **Severity**: LOW
-**Status**: FIXED — awaiting reviewer verification
+**Status**: VERIFIED-CLOSED. Round-3 dispatch over `439a201d..fcc29f98`
+returned **`verdict: clean`, `guard_confirmed: true`, zero findings** —
+closing the clp3-ls4 review program.
+Record: `.review/results/clp3-ls4-range.codex.r3.json`.
 **Source**: `clp3-ls4-range` round-2 codex dispatch over `ac74e059..439a201d`
 Reviewer: codex / gpt-5.6-sol / xhigh / workspace-write (detached, disposable
 worktree); codex-cli 0.146.0. **`guard_confirmed: true`** — cr-ls4-1

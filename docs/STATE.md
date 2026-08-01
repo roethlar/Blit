@@ -37,8 +37,10 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   (clp-3 = Dracula colour, unreviewed); local mirror 1.71× faster (owner's
   283.92 s → ~166 s) via runtime-adaptive comparison concurrency, no new CLI
   (D-2026-08-01-1). **ls-1 review CLOSED: 9 rounds, 16 findings, r9 CLEAN.**
-- Next: review clp-3; then named-stream enumeration (rel-4-bound),
-  directory-level stat, wire-carrier concurrency — each needs owner scoping.
+- **clp3-ls4 review CLOSED: 3 rounds, 2 findings, both verified-closed, r3
+  CLEAN.** Everything landed since ls-1's r9 is now independently reviewed.
+- Next: named-stream enumeration (rel-4-bound), directory-level stat,
+  wire-carrier concurrency — each needs owner scoping.
 
 ## Now (active work)
 
