@@ -125,6 +125,32 @@ Antigravity exposes `catchup`/`handoff` as workspace skills in
 steps; `.agents/playbooks/openreview.md` is the review dispatch workflow and
 `.agents/playbooks/codereview.md` supplies downstream finding triage.
 
+## Verification — the local gate is NOT sufficient evidence
+
+The commands below are necessary and not sufficient. They run on ONE
+platform; this project ships on three, and real defects live in the gaps
+between them.
+
+- **CI is the evidence, not the local run.** Check it before trusting a
+  "green" claim and before pushing onto a branch — `gh run list`. On
+  2026-08-01 CI had been red for a full day (a cross-platform dead-code
+  error plus two Unix-only test failures from pfc-2/3/6) while every local
+  gate passed, and a whole session of work was pushed on top without anyone
+  noticing. Nothing in the local commands could have caught it.
+- **Cross-target clippy before claiming a gate is green**, in whichever
+  direction you are not on:
+  `cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu -- -D warnings`
+  (`rustup target add` first; no linker needed for clippy/check). Several
+  DEVLOG entries cite the mirror-image "strict Windows all-target
+  cross-clippy" for the same reason.
+- **A test in a `cfg`-gated module does not run where you are.** Check which
+  module a new test lands in before claiming it covers a platform. A guard
+  for a platform DISAGREEMENT must live in an ungated module, or it cannot
+  see the disagreement.
+- **Say which platform a result came from.** "Workspace green" means
+  "green on the platform I ran it on"; report it that way when the change
+  touches anything `cfg`-conditional.
+
 ## Verification
 
 ```bash
