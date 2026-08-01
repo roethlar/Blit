@@ -287,6 +287,27 @@ fn read_payload(path: &Path) -> Result<Option<WindowsFileMetadata>> {
 /// destination diff splits the two instead of re-sending a whole file to
 /// fix one attribute bit. Convergence itself is still judged by the one
 /// [`attributes_converge`] predicate — this only reports the half.
+/// `AttributesOnly` and `Streams` are CONSTRUCTED only under `cfg(windows)`.
+/// They are still matched cross-platform in the destination diff, but a
+/// non-Windows destination refuses Windows metadata outright
+/// (`validate_destination_support`, and `destination_verdict_impl` bails), so
+/// `Converged` is the only verdict reachable there. Matching does not count
+/// as construction for the dead-code lint, hence the platform-scoped expect —
+/// which will itself fire if a future change makes them constructible on
+/// Unix, rather than silently going stale like an `allow` would.
+/// The condition mirrors the construction gate exactly
+/// (`destination_metadata_verdict_with` is `cfg(any(windows, test))`), so the
+/// expectation is scoped to precisely the builds where the variants really
+/// are unconstructed — a broader `not(windows)` was unfulfilled under
+/// `cfg(test)` on Unix, which `expect` correctly rejected.
+#[cfg_attr(
+    not(any(windows, test)),
+    expect(
+        dead_code,
+        reason = "Windows-only verdicts; non-Windows destinations refuse \
+                  Windows metadata before any verdict is produced"
+    )
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestinationMetadataVerdict {
     /// Destination metadata converges with the manifest.
