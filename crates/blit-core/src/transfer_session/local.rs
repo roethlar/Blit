@@ -39,6 +39,38 @@ use crate::transfer_plan::PlanOptions;
 
 use super::checkers::CheckerPool;
 use super::phase_probe::{LocalPhase, LocalPhaseProbe};
+
+/// Apply-pipeline workers for a normal run.
+///
+/// **This was 1**, which cost 2.7× on a local destination. Measured on the
+/// owner's real tree (46,041 files / 7.36 GiB, `D:\Apps`) — the phase probe
+/// put **81.7% of a local-to-local copy's wall clock in APPLY_BACKPRESSURE**,
+/// i.e. the diff loop blocked handing payloads to the one sink worker:
+///
+/// | workers | local NVMe→NVMe | SMB destination |
+/// |---|---|---|
+/// | 1 | 17.68 s | 35.03 s |
+/// | 2 | 9.50 s | — |
+/// | 4 | 7.73 s | 35.22 s |
+/// | 8 | 7.19 s | — |
+/// | 16 | 6.58 s | 35.17 s |
+///
+/// 8 captures 2.46× of the available 2.69× and sits just past the knee.
+///
+/// Deliberately a FIXED value rather than the runtime-discovered treatment
+/// `--checkers` got (D-2026-08-01-1). That decision applies to tuning the
+/// program can work out at runtime, and here there is nothing to work out:
+/// the network measurement is FLAT — concurrency neither helps nor hurts —
+/// so no destination seen so far has an optimum below this. Adding an
+/// adaptive throttle to the WRITE path, where per-file containment and
+/// failure classification live, would be real risk bought for no measured
+/// gain.
+///
+/// Known gap, stated rather than implied: only NVMe and SMB were measured.
+/// A spinning disk or a heavily contended share could plausibly prefer
+/// fewer, and no evidence either way exists yet. The hidden `--workers` pin
+/// remains the diagnostic escape hatch if that turns up.
+pub const DEFAULT_SINK_WORKERS: usize = 8;
 use super::transport::in_process_pair;
 use super::{
     run_destination, run_source, DestinationInstruments, DestinationSessionConfig,
@@ -205,6 +237,23 @@ pub struct LocalMirrorOptions {
     /// inert; a caller that needs deterministic behaviour installs its own
     /// with [`LocalPhaseProbe::capture`] or [`LocalPhaseProbe::disabled`].
     pub phase_probe: LocalPhaseProbe,
+}
+
+impl LocalMirrorOptions {
+    /// Apply-pipeline workers this configuration will actually use.
+    ///
+    /// The session reads it from here rather than inlining the expression, so
+    /// a test can assert the effective count through the SAME path production
+    /// takes. Asserting on [`DEFAULT_SINK_WORKERS`] directly is a
+    /// compile-time constant comparison — clippy rejects it, correctly, as
+    /// proving nothing about what a session does.
+    pub fn effective_sink_workers(&self) -> usize {
+        if self.debug_mode {
+            self.workers.max(1)
+        } else {
+            DEFAULT_SINK_WORKERS
+        }
+    }
 }
 
 impl Default for LocalMirrorOptions {
@@ -729,11 +778,7 @@ pub async fn run_local_session(
         mirror_scope_filter: options.filter.clone_without_cache(),
         dry_run: options.dry_run,
         null_sink: options.null_sink,
-        sink_workers: if options.debug_mode {
-            options.workers.max(1)
-        } else {
-            1
-        },
+        sink_workers: options.effective_sink_workers(),
         unreadable: Arc::clone(&unreadable),
         stats: Arc::clone(&stats),
         phase_probe: phase_probe.clone(),

@@ -22,7 +22,7 @@ pub mod transport;
 pub use checkers::{CheckerPool, DEFAULT_CHECKERS, MAX_CHECKERS};
 pub use local::{
     run_local_session, LocalCompareMode, LocalMirrorDeleteScope, LocalMirrorOptions,
-    LocalMirrorSummary, TransferOutcome,
+    LocalMirrorSummary, TransferOutcome, DEFAULT_SINK_WORKERS,
 };
 pub use phase_probe::{LocalPhase, LocalPhaseProbe, LocalPhaseReport, PhaseAggregate};
 

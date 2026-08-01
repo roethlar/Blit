@@ -89,6 +89,15 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    hand-tuned value on its own. **Correction: the earlier "destination
    saturates" conclusion was WRONG** — one datapoint on rayon's shared pool;
    8 dedicated threads beat 32 shared by 33 s. See `.../checkers.md`.
+   **ls-4 SHIPPED: apply ran ONE worker; now 8 (`DEFAULT_SINK_WORKERS`).**
+   The owner's local-to-local mirror re-opened what step (0) had closed —
+   the bottleneck follows the DESTINATION, and on local NVMe
+   **APPLY_BACKPRESSURE was 81.7% of wall** (L3, measured). Sweep: local
+   17.68→6.58 s (2.69×, knee 4–8); **SMB completely flat with no penalty at
+   16**, which is why this is a fixed default rather than the `--checkers`
+   runtime treatment — nothing to discover, and an adaptive throttle on the
+   WRITE path would be risk for no measured gain. Real tree: **17.68 → 8.70 s
+   (2.03×)** on the shipped default. Evidence `.../apply-workers.md`.
    Remaining: named-stream enumeration (rel-4-bound), directory-level stat,
    and the wire carrier (needs a concurrent-session measurement first).
    **Review loop CLOSED: 4 rounds, 8 findings, all resolved, r4 CLEAN with

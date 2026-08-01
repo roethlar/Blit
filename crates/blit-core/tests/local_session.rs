@@ -1583,6 +1583,86 @@ mod metadata_repair {
     }
 }
 
+/// ls-4: a normal run must apply with MORE THAN ONE worker, and every
+/// worker count must produce identical results.
+///
+/// The single-worker default cost 2.7× on a local destination — the phase
+/// probe put 81.7% of a local-to-local copy in APPLY_BACKPRESSURE, the diff
+/// loop blocked handing payloads to one sink. Concurrency on the write path
+/// is where per-file containment and failure classification live, so the
+/// correctness half is asserted alongside the count.
+#[tokio::test]
+async fn apply_runs_concurrently_and_every_worker_count_agrees() -> Result<()> {
+    // Asserted through the SAME accessor the session uses, not on the
+    // constant: a bare `DEFAULT_SINK_WORKERS > 1` is a compile-time constant
+    // comparison that clippy rejects and that proves nothing about what a
+    // run actually does.
+    let unconfigured = options();
+    assert!(
+        unconfigured.effective_sink_workers() > 1,
+        "an unconfigured session would apply with {} worker(s); a \
+         single-worker default is the defect this slice measured, not a safe \
+         choice",
+        unconfigured.effective_sink_workers()
+    );
+    // And the debug pin must still win, or the diagnostic override is a lie.
+    let pinned = LocalMirrorOptions {
+        workers: 3,
+        debug_mode: true,
+        ..options()
+    };
+    assert_eq!(pinned.effective_sink_workers(), 3);
+
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    fs::create_dir_all(&src)?;
+    // Enough files, across enough directories, to span several payloads and
+    // exercise the tar-shard path as well as large-file tasks.
+    const FILES: usize = 300;
+    for idx in 0..FILES {
+        let dir = src.join(format!("d{}", idx % 7));
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join(format!("f{idx}.bin")), vec![b'q'; 512 + idx])?;
+    }
+
+    // Default (concurrent) and an explicitly pinned single worker must land
+    // byte-identical trees. A concurrency bug that dropped, duplicated or
+    // truncated a payload shows up as a differing file set or content.
+    let mut landed = Vec::new();
+    for (label, opts) in [
+        ("default", options()),
+        (
+            "pinned-1",
+            LocalMirrorOptions {
+                workers: 1,
+                debug_mode: true,
+                ..options()
+            },
+        ),
+    ] {
+        let dest = tmp.path().join(format!("dest-{label}"));
+        let summary = run_local_session(&src, &dest, opts).await?;
+        assert_eq!(
+            summary.copied_files, FILES,
+            "{label} copied {} of {FILES}",
+            summary.copied_files
+        );
+        let mut seen: Vec<(String, Vec<u8>)> = Vec::new();
+        for idx in 0..FILES {
+            let rel = format!("d{}/f{idx}.bin", idx % 7);
+            let bytes = fs::read(dest.join(&rel))
+                .unwrap_or_else(|err| panic!("{label} missing {rel}: {err}"));
+            seen.push((rel, bytes));
+        }
+        landed.push((label, seen));
+    }
+    assert_eq!(
+        landed[0].1, landed[1].1,
+        "concurrent apply produced a different tree than a single worker"
+    );
+    Ok(())
+}
+
 /// The production diff dispatches onto the checker pool, and every setting
 /// agrees on the same work.
 ///

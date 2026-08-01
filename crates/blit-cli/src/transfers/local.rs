@@ -1044,17 +1044,24 @@ fn print_summary(
                 )
             )
         );
-        // codex otp-11b B4: the session's apply pipeline runs one sink
-        // worker unless the hidden debug limiter widened it — print
-        // the EFFECTIVE count, not the options default (num_cpus).
-        // ls-0 keeps this visible rather than tidying it away: one worker
-        // is the defect `docs/plan/LOCAL_SMALL_FILE_PATH.md` exists to fix,
-        // and hiding the symptom would only make it harder to see.
+        // codex otp-11b B4: print the EFFECTIVE apply-worker count, not the
+        // options default (num_cpus). ls-4 raised the normal-run value from
+        // 1 to `DEFAULT_SINK_WORKERS`; this line must track the constant
+        // rather than restate a literal, or it goes back to reporting a
+        // number the session did not use — which is the exact defect B4
+        // caught in the first place.
         println!(
             "{}",
             palette.paint(
                 Role::Muted,
-                &format!("• Workers used: {}", if debug_mode { workers } else { 1 })
+                &format!(
+                    "• Workers used: {}",
+                    if debug_mode {
+                        workers
+                    } else {
+                        blit_core::transfer_session::DEFAULT_SINK_WORKERS
+                    }
+                )
             )
         );
     }

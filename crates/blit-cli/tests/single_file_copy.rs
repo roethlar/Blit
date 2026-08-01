@@ -194,10 +194,23 @@ fn the_summary_separates_copied_files_from_the_byte_rate() {
         !stdout.contains("• Throughput:"),
         "the unqualified 'Throughput' label is what misled, got:\n{stdout}"
     );
-    // The worker count stays visible: it is the defect, not noise to hide.
+    // The worker count stays visible. ls-0 pinned the literal `1` because
+    // that WAS the effective count and the defect worth seeing; ls-4 raised
+    // the default after measuring 2.7× on a local destination, so the
+    // assertion moves to the property — the line is present and reports a
+    // concurrent count — rather than to a number that encoded the bug.
+    let workers_line = stdout
+        .lines()
+        .find(|line| line.starts_with("• Workers used: "))
+        .unwrap_or_else(|| panic!("the effective worker count must stay on screen:\n{stdout}"));
+    let reported: usize = workers_line
+        .trim_start_matches("• Workers used: ")
+        .trim()
+        .parse()
+        .unwrap_or_else(|err| panic!("unparseable worker count {workers_line:?}: {err}"));
     assert!(
-        stdout.contains("• Workers used: 1"),
-        "the effective worker count must stay on screen, got:\n{stdout}"
+        reported > 1,
+        "a normal run must apply concurrently; got {workers_line:?}"
     );
 }
 
