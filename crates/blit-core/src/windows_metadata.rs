@@ -410,6 +410,78 @@ fn destination_verdict_impl(
     )
 }
 
+/// ls-6 (D-2026-08-01-4): judge destination Windows metadata from the
+/// attribute DWORD alone — no stream enumeration, and no destination round
+/// trip at all when the caller already holds the DWORD from its stat. The
+/// default (size+mtime) compare uses this; only `--checksum` still takes
+/// [`destination_verdict_using`], the exhaustive path.
+///
+/// The per-file stream interrogation was deleted from the default compare
+/// because its only remedy was whole-file replacement — it never protected
+/// destination streams, it re-sent identical bytes to strip them — and no
+/// peer tool interrogates skipped files (robocopy's skip decision is
+/// size+timestamp; streams ride `D=Data` when it copies). Streams now
+/// converge the way robocopy's do: carried whenever a file transfers,
+/// reset by replacement whenever a file differs, never asked about on
+/// files the run does not touch. The [`DestinationMetadataVerdict::Streams`]
+/// verdict is unreachable from here by construction — this judge cannot
+/// see streams, so it can only answer `Converged` or `AttributesOnly`
+/// (pfc-6 in-place repair rides the latter, unchanged).
+pub fn destination_attribute_verdict(
+    path: &Path,
+    expected: Option<&WindowsFileMetadata>,
+    known_attributes: Option<u32>,
+) -> Result<DestinationMetadataVerdict> {
+    validate_destination_support(expected)?;
+    let Some(expected) = expected else {
+        return Ok(DestinationMetadataVerdict::Converged);
+    };
+    destination_attribute_verdict_impl(path, expected, known_attributes)
+}
+
+#[cfg(windows)]
+fn destination_attribute_verdict_impl(
+    path: &Path,
+    expected: &WindowsFileMetadata,
+    known_attributes: Option<u32>,
+) -> Result<DestinationMetadataVerdict> {
+    // Same normalization as `read_windows_metadata_using`: a supplied DWORD
+    // is equivalent to a freshly read one, it just costs nothing.
+    let actual = match known_attributes {
+        Some(raw) => raw & WINDOWS_PRESERVED_ATTRIBUTE_MASK,
+        None => match windows_io::file_attributes(path) {
+            Ok(raw) => raw & WINDOWS_PRESERVED_ATTRIBUTE_MASK,
+            Err(error) => {
+                // Mirror of the exhaustive path's unreadable-metadata arm:
+                // a destination whose attributes cannot be read gets
+                // replaced, not trusted.
+                log::warn!(
+                    "destination Windows attributes on {} are unreadable and the file will be replaced: {error:#}",
+                    path.display()
+                );
+                return Ok(DestinationMetadataVerdict::Streams);
+            }
+        },
+    };
+    if attributes_converge(path.file_name(), expected.file_attributes, actual) {
+        Ok(DestinationMetadataVerdict::Converged)
+    } else {
+        Ok(DestinationMetadataVerdict::AttributesOnly)
+    }
+}
+
+#[cfg(not(windows))]
+fn destination_attribute_verdict_impl(
+    path: &Path,
+    _expected: &WindowsFileMetadata,
+    _known_attributes: Option<u32>,
+) -> Result<DestinationMetadataVerdict> {
+    bail!(
+        "destination {} cannot preserve Windows file metadata on this platform",
+        path.display()
+    )
+}
+
 pub fn replace_streams(path: &Path, metadata: Option<&WindowsFileMetadata>) -> Result<u64> {
     let Some(metadata) = metadata else {
         return Ok(0);
@@ -574,7 +646,7 @@ mod windows_io {
         Ok(metadata)
     }
 
-    fn file_attributes(path: &Path) -> Result<u32> {
+    pub(super) fn file_attributes(path: &Path) -> Result<u32> {
         let wide = wide_path(path);
         let attributes = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
         if attributes == INVALID_FILE_ATTRIBUTES {
@@ -1164,6 +1236,58 @@ mod tests {
         // Unreadable metadata is a WHOLE-FILE need, never an attributes-only
         // repair: nothing proved the destination's stream set converges.
         assert_eq!(verdict, DestinationMetadataVerdict::Streams);
+    }
+
+    /// ls-6 (D-2026-08-01-4): the attribute-only judge — the default
+    /// compare's — judges from the supplied DWORD and touches NOTHING.
+    /// The path below does not exist, so any destination I/O would error:
+    /// producing verdicts anyway IS the proof of zero round trips. It also
+    /// cannot see streams by construction — the manifest declares one, the
+    /// "destination" has none (it has nothing), and no verdict says so.
+    #[cfg(windows)]
+    #[test]
+    fn attribute_verdict_judges_from_the_supplied_dword_without_touching_anything() {
+        let mut declared = stream("meta", b"payload");
+        declared.content.clear();
+        let expected = WindowsFileMetadata {
+            file_attributes: 0x20,
+            named_streams: vec![declared],
+        };
+        let path = Path::new("does/not/exist/anywhere.bin");
+        assert_eq!(
+            destination_attribute_verdict(path, Some(&expected), Some(0x20)).unwrap(),
+            DestinationMetadataVerdict::Converged
+        );
+        // The same normalization as a fresh read: non-preserved bits
+        // (NOT_CONTENT_INDEXED here) are masked before judging.
+        assert_eq!(
+            destination_attribute_verdict(path, Some(&expected), Some(0x20 | 0x2000)).unwrap(),
+            DestinationMetadataVerdict::Converged
+        );
+        assert_eq!(
+            destination_attribute_verdict(path, Some(&expected), Some(0x00)).unwrap(),
+            DestinationMetadataVerdict::AttributesOnly
+        );
+        // No DWORD supplied and none readable: replaced, not trusted —
+        // the mirror of the exhaustive path's unreadable-metadata arm.
+        assert_eq!(
+            destination_attribute_verdict(path, Some(&expected), None).unwrap(),
+            DestinationMetadataVerdict::Streams
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_destination_refuses_the_attribute_verdict_too() {
+        let expected = WindowsFileMetadata {
+            file_attributes: 0x20,
+            named_streams: Vec::new(),
+        };
+        assert!(
+            destination_attribute_verdict(Path::new("dest.bin"), Some(&expected), None).is_err(),
+            "the attribute-only judge keeps the platform gate the exhaustive \
+             path has"
+        );
     }
 
     /// pfc-6: the repair entry point takes the descriptor the DIFF holds —

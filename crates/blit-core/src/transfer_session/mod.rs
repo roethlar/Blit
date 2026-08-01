@@ -5541,15 +5541,26 @@ fn destination_needs(
         FileStatus::Unchanged => {
             // Reached for EVERY file on a converged tree, which is the
             // owner's case: size and mtime match, so the only remaining
-            // question is metadata. ls-1: the attribute half is answered
-            // from the stat we already did, leaving only named-stream
-            // enumeration to cost a round trip.
+            // question is metadata. ls-1 answered the attribute half from
+            // the stat we already did; ls-6 (D-2026-08-01-4) deletes the
+            // named-stream interrogation from the default compare — the
+            // attribute-only judge touches nothing, so a converged file
+            // now costs the diff ZERO destination round trips beyond its
+            // share of the directory sweep. Only `--checksum` still takes
+            // the exhaustive per-file verdict.
             let span = repair.phase_probe.is_enabled().then(Instant::now);
-            let verdict = crate::windows_metadata::destination_verdict_using(
-                &dst,
-                header.windows_metadata.as_ref(),
-                stat_attributes,
-            );
+            let verdict = match opts.mode {
+                CompareMode::Checksum => crate::windows_metadata::destination_verdict_using(
+                    &dst,
+                    header.windows_metadata.as_ref(),
+                    stat_attributes,
+                ),
+                _ => crate::windows_metadata::destination_attribute_verdict(
+                    &dst,
+                    header.windows_metadata.as_ref(),
+                    stat_attributes,
+                ),
+            };
             if let Some(started) = span {
                 repair
                     .phase_probe

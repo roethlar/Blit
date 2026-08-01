@@ -289,6 +289,18 @@ environmental/config cause is held to the same bar as a code cause.
   absent, so a fresh copy pays no fallback storm. The per-file NAMED-STREAM
   check is explicitly NOT this slice: eliding it changes what "converged"
   means and is an owner gate, recorded in the bench doc.
+- **ls-6 — destination stream interrogation DELETED from the default
+  compare (owner ruling 2026-08-01, D-2026-08-01-4).** The owner walked
+  the chain: the interrogation's only remedy is whole-file replacement, so
+  it never protected destination streams — it found them sooner to destroy
+  them sooner, at ~90 s per converged run — and no peer tool interrogates
+  skipped files (robocopy's skip decision is size+timestamp; streams ride
+  `D=Data` when it copies). Default compare now judges metadata from the
+  attribute DWORD alone (zero extra round trips; pfc-6 attribute repair
+  unchanged); `--checksum` keeps the exhaustive per-file stream verdict.
+  Rejected on the way, owner-refused in order: elide-when-source-has-no-
+  streams (half-measure), and a per-volume mtime-coupling probe (machinery
+  guarding a backup-tool property blit does not have).
 - **ls-final** — re-run the full local matrix (`large`/`small`/`mixed`) at both
   concurrencies, plus the remote no-regression check.
 

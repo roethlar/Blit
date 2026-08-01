@@ -73,6 +73,11 @@ measured at ~49 s serial is gone as a round-trip cost. The remaining wall
 is approximately `sweep floor (~21 s single-threaded) + stream checks
 under checker concurrency` — which is the ~115 s observed.
 
+**RESOLVED 2026-08-01**: the gate below closed as D-2026-08-01-4 — the
+interrogation is deleted from the default compare outright, not elided
+conditionally. Evidence: `stream-interrogation-deletion.md`. The paragraph
+stands as the state of knowledge when ls-5 landed.
+
 **Next lever, owner-gated:** eliding the per-file destination stream
 enumeration when the manifest declares no source streams would drop the
 converged compare toward its sweep floor (~25–35 s plausible from these

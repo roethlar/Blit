@@ -39,11 +39,15 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 - **ls-5 SHIPPED: directory-sweep stat — converged SMB mirror 166.38 →
   114.73 s** (2.38× vs step 0); local A/B neutral. Review r1: 1 HIGH
   (cr-ls5-1, 8.3-alias overwrite) FIXED; re-review awaits owner go.
-- **Owner ruled (2026-08-01): DELETE the destination stream interrogation
-  from the default compare** — no probe, no flag; streams still carried on
-  every copy; `--checksum` keeps deep verify; D-2026-08-01-3 VOID per
-  D-2026-08-01-4. This is ls-6, next; expect ~115 s → ~25–35 s floor.
-- Then: wire carrier still needs a concurrent-session measurement first.
+- **ls-6 SHIPPED (D-2026-08-01-4): stream interrogation deleted from the
+  default compare — converged mirror 114.73 → 55.57 s, 5.1× vs the field
+  complaint.** `--checksum` keeps deep verify; pfc-6 repair unchanged;
+  contract pinned on local, wire, and CLI surfaces; Linux 528/0.
+  Evidence: `docs/bench/ls1-phase-2026-07-31/stream-interrogation-deletion.md`.
+- Blocked on owner: codex dispatch authority (per-invocation approval per
+  D-2026-07-23-7 vs session standing order) — cr-ls5-1 re-review and the
+  ls-6 range review both wait on it. Then: wire-carrier concurrent-session
+  measurement, or sweep prefetch (compare is now sweep-bound).
 
 ## Now (active work)
 

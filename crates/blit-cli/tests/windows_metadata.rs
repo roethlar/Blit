@@ -75,6 +75,13 @@ fn assert_metadata(path: &Path) {
         fs::read(named_stream_path(path, "meta")).expect("read ADS"),
         ADS_CONTENT
     );
+    assert_attributes(path);
+}
+
+/// The attribute half of [`assert_metadata`] alone — what the DEFAULT
+/// compare still repairs in place after ls-6 (D-2026-08-01-4) deleted its
+/// stream interrogation.
+fn assert_attributes(path: &Path) {
     let attributes = fs::metadata(path).expect("metadata").file_attributes();
     assert_eq!(
         attributes & REQUIRED_ATTRIBUTES,
@@ -128,6 +135,23 @@ fn run_local_copy(src: &Path, dst: &Path) {
     );
 }
 
+fn run_local_checksum_copy(src: &Path, dst: &Path) {
+    let mut command = Command::new(cli_bin());
+    command
+        .arg("copy")
+        .arg("--yes")
+        .arg("--checksum")
+        .arg(src)
+        .arg(dst);
+    let output = run_with_timeout(command, Duration::from_secs(30));
+    assert!(
+        output.status.success(),
+        "local checksum copy failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn local_single_and_tar_batch_preserve_attributes_and_ads() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -138,17 +162,37 @@ fn local_single_and_tar_batch_preserve_attributes_and_ads() {
     run_local_copy(&single, &single_dest);
     assert_metadata(&single_dest);
     assert_mtime_matches(&single, &single_dest);
+    // ls-6 (D-2026-08-01-4): the default compare repairs the attribute half
+    // in place but never interrogates a size/mtime-matched file about its
+    // streams — the erased ADS stays erased, and that is the contract.
     erase_metadata_but_match_mtime(&single, &single_dest);
     run_local_copy(&single, &single_dest);
+    assert_attributes(&single_dest);
+    assert!(
+        fs::metadata(named_stream_path(&single_dest, "meta")).is_err(),
+        "the default compare must not see (or restore) stream divergence \
+         on a size/mtime-matched file"
+    );
+    // `--checksum` keeps the exhaustive verdict: the same divergence
+    // transfers and the full metadata lands.
+    run_local_checksum_copy(&single, &single_dest);
     assert_metadata(&single_dest);
     assert_mtime_matches(&single, &single_dest);
     add_oversized_stale_stream_but_match_mtime(&single, &single_dest);
     run_local_copy(&single, &single_dest);
+    assert_attributes(&single_dest);
+    assert!(
+        fs::metadata(named_stream_path(&single_dest, "stale")).is_ok(),
+        "a skipped file is untouched under the default compare — stale \
+         stream included"
+    );
+    run_local_checksum_copy(&single, &single_dest);
     assert_metadata(&single_dest);
     assert_mtime_matches(&single, &single_dest);
     assert!(
         fs::metadata(named_stream_path(&single_dest, "stale")).is_err(),
-        "oversized stale destination stream must be removed by replacement"
+        "oversized stale destination stream must be removed by checksum-mode \
+         replacement"
     );
 
     let batch = temp.path().join("batch");
@@ -183,6 +227,9 @@ fn remote_single_and_tar_batch_preserve_attributes_and_ads() {
     assert!(single_output.status.success(), "remote single copy failed");
     assert_metadata(&ctx.module_dir.join("single.bin"));
     erase_metadata_but_match_mtime(&single, &ctx.module_dir.join("single.bin"));
+    // ls-6 (D-2026-08-01-4): the wire destination's default compare repairs
+    // attributes in place but never interrogates streams, so the erased ADS
+    // stays gone until the checksum pass below.
     let mut repair_command = Command::new(&ctx.cli_bin);
     repair_command
         .arg("--config-dir")
@@ -193,7 +240,30 @@ fn remote_single_and_tar_batch_preserve_attributes_and_ads() {
     let repair_output = run_with_timeout(repair_command, Duration::from_secs(30));
     assert!(
         repair_output.status.success(),
-        "remote metadata repair failed"
+        "remote attribute repair failed"
+    );
+    assert_attributes(&ctx.module_dir.join("single.bin"));
+    assert!(
+        fs::metadata(named_stream_path(
+            &ctx.module_dir.join("single.bin"),
+            "meta"
+        ))
+        .is_err(),
+        "the default compare must not see (or restore) stream divergence \
+         on a size/mtime-matched file"
+    );
+    let mut checksum_command = Command::new(&ctx.cli_bin);
+    checksum_command
+        .arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("copy")
+        .arg("--checksum")
+        .arg(&single)
+        .arg(&single_remote);
+    let checksum_output = run_with_timeout(checksum_command, Duration::from_secs(30));
+    assert!(
+        checksum_output.status.success(),
+        "remote checksum repair failed"
     );
     assert_metadata(&ctx.module_dir.join("single.bin"));
 

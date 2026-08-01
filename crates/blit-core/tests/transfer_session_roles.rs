@@ -4032,12 +4032,18 @@ async fn checksum_compare_transfers_content_change_size_mtime_misses() {
 }
 
 /// pfc-6 THE BINDING GUARD, on the carrier that really moves bytes: a
-/// destination file whose size, mtime, content and named streams all match
-/// and whose ATTRIBUTES diverge is repaired in place by the destination, so
-/// the source is never granted its need and not one payload byte crosses
-/// the wire. A file whose STREAM diverges in the same tree still transfers
-/// in full, and `bytes_transferred` is asserted EXACTLY — revert the repair
-/// verdict and the repairable file's body reappears in that total.
+/// destination file whose size, mtime and content match and whose
+/// ATTRIBUTES diverge is repaired in place by the destination, so the
+/// source is never granted its need and not one payload byte crosses the
+/// wire. A genuinely MODIFIED file in the same tree still transfers in
+/// full, and `bytes_transferred` is asserted EXACTLY — revert the repair
+/// verdict and the repairable files' bodies reappear in that total.
+///
+/// ls-6 (D-2026-08-01-4) rides the same fixture on this carrier:
+/// `streamy.exe`'s stream divergence is INVISIBLE to the default compare,
+/// so it repairs its attributes in place, sends nothing, and its stale
+/// destination stream survives — the wire twin of the local pin in
+/// `local_session.rs`.
 ///
 /// Both initiator layouts, because the DESTINATION owns its filesystem in
 /// every topology: which end opened the session cannot matter.
@@ -4099,16 +4105,26 @@ async fn attributes_only_divergence_repairs_without_sending_bytes_under_both_ini
             b"stale stream",
         )
         .unwrap();
-        let tree: Vec<FileSpec> = vec![
+        // `modified.exe` is the one genuine need: same length, different
+        // bytes, different mtime — the only divergence the default compare
+        // is CONTRACTED to see beyond attributes (D-2026-08-01-4).
+        let stale_body = vec![0xABu8; BODY_LEN];
+        let src_tree: Vec<FileSpec> = vec![
             ("repairable.exe", body.clone(), 1_600_000_100),
             ("streamy.exe", body.clone(), 1_600_000_101),
+            ("modified.exe", body.clone(), 1_600_000_102),
         ];
-        write_tree(&src_root, &tree);
-        write_tree(&dst_root, &tree);
+        let dst_tree: Vec<FileSpec> = vec![
+            ("repairable.exe", body.clone(), 1_600_000_100),
+            ("streamy.exe", body.clone(), 1_600_000_101),
+            ("modified.exe", stale_body, 1_600_000_042),
+        ];
+        write_tree(&src_root, &src_tree);
+        write_tree(&dst_root, &dst_tree);
 
         // The field-evidence shape: the destination's backup region reads
         // Normal (0x00) against the source's Archive (0x20).
-        for name in ["repairable.exe", "streamy.exe"] {
+        for name in ["repairable.exe", "streamy.exe", "modified.exe"] {
             set_attributes(&src_root.join(name), ARCHIVE);
             set_attributes(&dst_root.join(name), NORMAL);
         }
@@ -4125,32 +4141,37 @@ async fn attributes_only_divergence_repairs_without_sending_bytes_under_both_ini
         // alone proves nothing — the pre-pfc-6 path also converged, by
         // re-sending every byte of the repairable file.
         assert_eq!(
-            summary.bytes_transferred,
-            (BODY_LEN + STREAM.len()) as u64,
-            "exactly one file's bytes crossed: the repaired file must send none \
+            summary.bytes_transferred, BODY_LEN as u64,
+            "exactly one file's bytes crossed: the repaired files must send none \
              (initiator {initiator_role:?})"
         );
         assert_eq!(
             outcome.needed_paths,
-            vec!["streamy.exe".to_string()],
-            "only the stream divergence needs the payload (initiator {initiator_role:?})"
+            vec!["modified.exe".to_string()],
+            "only the content divergence needs the payload (initiator {initiator_role:?})"
         );
         assert_eq!(summary.files_transferred, 1);
         assert_eq!(
-            outcome.files_repaired, 1,
-            "the destination repaired the attributes-only divergence in place"
+            outcome.files_repaired, 2,
+            "the destination repaired both attributes-only divergences in place \
+             — streamy.exe's stream divergence is invisible to the default \
+             compare by contract"
         );
         assert_eq!(summary.files_failed, 0);
-        for name in ["repairable.exe", "streamy.exe"] {
+        for name in ["repairable.exe", "streamy.exe", "modified.exe"] {
             assert_eq!(
                 durable_attributes(&dst_root.join(name)),
                 ARCHIVE,
                 "'{name}' converged on the source attributes (initiator {initiator_role:?})"
             );
         }
+        // The wire-side ls-6 pin: the skipped file was never touched, its
+        // stale destination stream included.
         assert_eq!(
             std::fs::read(stream_path(&dst_root.join("streamy.exe"), "meta")).unwrap(),
-            STREAM
+            b"stale stream",
+            "the default compare must not interrogate (or replace) streams on \
+             a size/mtime-matched file (initiator {initiator_role:?})"
         );
         assert_trees_identical(&src_root, &dst_root);
     }

@@ -1412,10 +1412,14 @@ mod metadata_repair {
         Ok(())
     }
 
-    /// A named-stream divergence needs the payload that carries the stream
-    /// bytes, so it still transfers in full — the split's other half.
+    /// ls-6 (D-2026-08-01-4): the default compare does not interrogate a
+    /// size/mtime-matched destination about its streams — the divergence
+    /// below is INVISIBLE to it by design, the file skips, and the stale
+    /// destination stream stays. This is also the revert guard for the
+    /// deletion: reintroducing the per-file interrogation turns this skip
+    /// into a transfer and reds the assertions.
     #[tokio::test]
-    async fn stream_divergence_still_transfers_the_whole_file() -> Result<()> {
+    async fn stream_divergence_is_invisible_to_the_default_compare() -> Result<()> {
         let tmp = tempdir()?;
         let src = tmp.path().join("src");
         let dest = tmp.path().join("dest");
@@ -1427,6 +1431,42 @@ mod metadata_repair {
         set_attributes(&dest_file, ARCHIVE)?;
 
         let summary = run_local_session(&src, &dest, options()).await?;
+
+        assert_eq!(summary.copied_files, 0, "size+mtime match: the file skips");
+        assert_eq!(summary.files_repaired, 0);
+        assert_eq!(summary.total_bytes, 0);
+        assert_eq!(
+            fs::read(stream_path(&dest_file, "meta"))?,
+            b"stale stream",
+            "a skipped file is never touched — streams included"
+        );
+        Ok(())
+    }
+
+    /// The other half of D-2026-08-01-4: `--checksum` keeps the exhaustive
+    /// verdict, so the same divergence transfers there and the payload
+    /// carries the stream bytes.
+    #[tokio::test]
+    async fn checksum_compare_still_replaces_stream_divergence() -> Result<()> {
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        let (src_file, dest_file) = identical_pair(&src, &dest, "tool.exe")?;
+        fs::write(stream_path(&src_file, "meta"), b"source stream")?;
+        fs::write(stream_path(&dest_file, "meta"), b"stale stream")?;
+        pin_mtimes(&[&src_file, &dest_file])?;
+        set_attributes(&src_file, ARCHIVE)?;
+        set_attributes(&dest_file, ARCHIVE)?;
+
+        let summary = run_local_session(
+            &src,
+            &dest,
+            LocalMirrorOptions {
+                compare_mode: LocalCompareMode::Checksum,
+                ..options()
+            },
+        )
+        .await?;
 
         assert_eq!(summary.files_repaired, 0, "stream bytes are not repairable");
         assert_eq!(summary.copied_files, 1);
