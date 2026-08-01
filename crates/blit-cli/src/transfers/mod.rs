@@ -271,6 +271,13 @@ async fn run_transfer_inner(
         }
     }
 
+    // cr-ls1-12: route-dependent validation belongs HERE, beside the other
+    // gates and before any banner, warning or destructive prompt. Rejecting
+    // later meant `blit mirror host:/a/ /b/ --checkers 4` printed "starting",
+    // asked the operator to confirm deleting extraneous files, and only then
+    // failed on the flag.
+    reject_unsupported_checker_pin(args, &route)?;
+
     warn_if_dropping_windows_metadata(args);
 
     // For mirror operations, prompt unless --yes or --dry-run
@@ -296,13 +303,6 @@ async fn run_transfer_inner(
                 pre_resolve_display, dst_display
             );
         }
-    }
-
-    // cr-ls1-10: one gate for every non-local route, placed here rather than
-    // per-arm so a future route cannot be added that silently swallows the
-    // pin.
-    if !matches!(route, TransferRoute::LocalToLocal { .. }) {
-        reject_unsupported_checker_pin(args)?;
     }
 
     match route {
@@ -517,6 +517,10 @@ async fn run_move_inner(
         );
     }
 
+    // cr-ls1-12: before the warning and, critically, before the prompt that
+    // asks the operator to authorise deleting the source.
+    reject_unsupported_checker_pin(args, &route)?;
+
     warn_if_dropping_windows_metadata(args);
 
     // Prompt for confirmation before move (which deletes source)
@@ -537,11 +541,6 @@ async fn run_move_inner(
                 pre_resolve_display, dst_display
             );
         }
-    }
-
-    // cr-ls1-10: same gate on the move dispatch.
-    if !matches!(route, TransferRoute::LocalToLocal { .. }) {
-        reject_unsupported_checker_pin(args)?;
     }
 
     match route {
@@ -788,8 +787,11 @@ fn warn_if_dropping_windows_metadata(args: &TransferArgs) {
 /// would silently invalidate whatever measurement the pin was set up to take
 /// — and the flag exists ONLY to take measurements, so a pin that quietly
 /// does nothing defeats its single purpose. Refusing is the honest failure.
-pub(crate) fn reject_unsupported_checker_pin(args: &TransferArgs) -> Result<()> {
-    if args.checkers != 0 {
+pub(crate) fn reject_unsupported_checker_pin(
+    args: &TransferArgs,
+    route: &TransferRoute,
+) -> Result<()> {
+    if args.checkers != 0 && !matches!(route, TransferRoute::LocalToLocal { .. }) {
         bail!(
             "--checkers is a local-route diagnostic and is not implemented for remote transfers; \
              remove it, or run the measurement against a local destination"
@@ -804,27 +806,74 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
-    /// cr-ls1-10: a diagnostic pin that silently does nothing is worse than
-    /// no pin, because its whole purpose is to make a measurement
-    /// trustworthy. Remote routes have no comparison pool, so they refuse.
+    /// cr-ls1-10/-11/-12: a diagnostic pin that silently does nothing is
+    /// worse than no pin, because its whole purpose is to make a measurement
+    /// trustworthy. Remote routes have no comparison pool, so they refuse —
+    /// and they refuse through the DISPATCH, before any banner or
+    /// destructive prompt.
+    ///
+    /// Driven through `run_transfer_inner`/`run_move_inner` rather than the
+    /// helper: cr-ls1-11 showed that testing the helper directly leaves the
+    /// production call sites unguarded — the reviewer disabled both and the
+    /// helper test stayed green. Reaching the gate requires no network,
+    /// because it fires before any RPC.
     #[test]
-    fn a_checker_pin_is_refused_where_it_cannot_take_effect() {
-        let mut args = TransferArgs {
+    fn the_dispatch_refuses_a_checker_pin_it_cannot_honour() {
+        let runtime = runtime();
+        let ctx = AppContext {
+            perf_history_enabled: false,
+        };
+        let trace = TransferLifecycleTrace::disabled();
+
+        for mode in [TransferKind::Copy, TransferKind::Mirror] {
+            // `yes: true` so a missing gate would sail past the mirror
+            // confirmation instead of blocking the test on stdin — the
+            // failure mode we want is a wrong RESULT, not a hang.
+            let args = TransferArgs {
+                checkers: 4,
+                ..gate_args("host:/src/", "/dst/", false, true)
+            };
+            let error = runtime
+                .block_on(run_transfer_inner(&ctx, &args, mode, &trace))
+                .expect_err("a remote route must refuse a pin it cannot honour");
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("--checkers") && message.contains("not implemented for remote"),
+                "{mode:?} must refuse with a message naming the flag and the \
+                 remedy, got: {message}"
+            );
+        }
+
+        // The move dispatch has its own gate, ahead of the source-delete
+        // confirmation.
+        let move_args = TransferArgs {
             checkers: 4,
             ..gate_args("host:/src/", "/dst/", false, true)
         };
-        let error = reject_unsupported_checker_pin(&args)
-            .expect_err("a remote route must refuse a pin it cannot honour");
-        let message = format!("{error:#}");
+        let error = runtime
+            .block_on(run_move_inner(&ctx, &move_args, &trace))
+            .expect_err("move must refuse the pin too");
         assert!(
-            message.contains("--checkers") && message.contains("not implemented for remote"),
-            "the refusal must say what is wrong and what to do: {message}"
+            format!("{error:#}").contains("--checkers"),
+            "move refused for the wrong reason: {error:#}"
         );
 
-        // 0 is "discover at runtime", which every route supports.
-        args.checkers = 0;
-        reject_unsupported_checker_pin(&args)
-            .expect("the adaptive default is valid on every route");
+        // And 0 — "discover at runtime" — is valid on every route, so the
+        // gate rejects the pin rather than rejecting remote transfers.
+        let adaptive = gate_args("host:/src/", "/dst/", false, true);
+        assert_eq!(adaptive.checkers, 0);
+        let error = runtime
+            .block_on(run_transfer_inner(
+                &ctx,
+                &adaptive,
+                TransferKind::Copy,
+                &trace,
+            ))
+            .expect_err("this endpoint does not resolve in a unit test");
+        assert!(
+            !format!("{error:#}").contains("--checkers"),
+            "the adaptive default must not be refused: {error:#}"
+        );
     }
 
     fn runtime() -> tokio::runtime::Runtime {

@@ -33,12 +33,11 @@ Last updated: 2026-07-31 (pfc-1..6 + clp-1..2 landed; owner field check returned
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff — 2026-07-31
-- Done: pfc-1..6 + clp-1..2 landed and reviewed; D-2026-07-31-4 makes local
-  speed priority-1; ls-1 step (0) instrument landed but its review FAILED.
-- Next: 1.64× shipped (runtime-adaptive comparison concurrency, no new CLI);
-  r5's 2 findings fixed, **r6 owed**. Remaining levers: named-stream
-  enumeration, directory-level stat, wire-carrier concurrency. pfc Shipped
-  is the owner's.
+- Done: pfc-1..6 + clp-1..2 landed; local mirror 1.64× faster via
+  runtime-adaptive comparison concurrency (no new CLI, D-2026-08-01-1).
+- Next: **r7 owed** (r6 closed cr-ls1-9/-10, raised 2 LOWs, both fixed;
+  nothing above LOW outstanding). Levers left: named-stream enumeration,
+  directory-level stat, wire-carrier concurrency. pfc Shipped is the owner's.
 
 ## Now (active work)
 
