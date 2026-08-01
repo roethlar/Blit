@@ -118,11 +118,13 @@ fn a_piped_summary_carries_no_escape_bytes() {
         std::fs::write(src.join(format!("f{index}.bin")), vec![b'x'; 4096]).unwrap();
     }
 
-    let run = |source: &std::path::Path, destination: &std::path::Path| -> String {
+    let run = |source: &std::path::Path, destination: &std::path::Path, extra: &[&str]| -> String {
         let mut cmd = Command::new(cli_bin());
-        cmd.arg("copy")
-            .arg("--yes")
-            .arg(format!("{}/", source.display()))
+        cmd.arg("copy").arg("--yes");
+        for arg in extra {
+            cmd.arg(arg);
+        }
+        cmd.arg(format!("{}/", source.display()))
             .arg(format!("{}/", destination.display()))
             .stdin(std::process::Stdio::null());
         let out = run_with_timeout(cmd, Duration::from_secs(30));
@@ -130,13 +132,20 @@ fn a_piped_summary_carries_no_escape_bytes() {
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
 
-    // First run: the "transferred" summary. Second: the up-to-date summary,
-    // which is the single most-seen line in the product and takes its own
-    // early-return path through the printer.
-    let transferred = run(&src, &dst);
-    let converged = run(&src, &dst);
+    // Three shapes, because each takes a DIFFERENT path through the printer
+    // and a sample that misses one proves nothing about it. The `-v` case is
+    // here specifically because the planner lines sit behind `verbose` and a
+    // non-verbose sample left them unchecked on the first pass.
+    let transferred = run(&src, &dst, &[]);
+    let converged = run(&src, &dst, &[]);
+    let verbose_dst = tmp.path().join("dst-v");
+    let verbose = run(&src, &verbose_dst, &["-v"]);
 
-    for (label, text) in [("transferred", &transferred), ("up-to-date", &converged)] {
+    for (label, text) in [
+        ("transferred", &transferred),
+        ("up-to-date", &converged),
+        ("verbose", &verbose),
+    ] {
         assert!(
             !text.contains('\u{1b}'),
             "{label} summary leaked escape bytes into a pipe:\n{text:?}"
@@ -144,6 +153,9 @@ fn a_piped_summary_carries_no_escape_bytes() {
     }
     assert!(transferred.contains("• Copied: 3 file(s)"), "{transferred}");
     assert!(converged.contains("Up to date:"), "{converged}");
+    // Pins that the verbose sample really did reach the planner lines, so it
+    // cannot silently stop covering them.
+    assert!(verbose.contains("• Planned 3 file(s)"), "{verbose}");
 }
 
 /// The adaptive default must reach the REMOTE dispatch, not be swept up by

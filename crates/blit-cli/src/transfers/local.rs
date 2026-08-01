@@ -1068,23 +1068,41 @@ fn print_summary(
         );
     }
 
+    // clp-3b: the `-v` planner lines are context in exactly the sense
+    // `• Average:` and `• Workers used:` are — they describe HOW the work was
+    // shaped, not what the run achieved — so they mute with them. Missed on
+    // the first pass because they sit behind `verbose` and the sample run
+    // used to check the summary did not pass `-v`; the owner's screenshot
+    // showed them still white among muted neighbours.
     if verbose {
         println!(
-            "• Planned {} file(s), total bytes {}",
-            summary.planned_files,
-            format_bytes(summary.total_bytes)
+            "{}",
+            palette.paint(
+                Role::Muted,
+                &format!(
+                    "• Planned {} file(s), total bytes {}",
+                    summary.planned_files,
+                    format_bytes(summary.total_bytes)
+                )
+            )
         );
         if summary.tar_shard_tasks > 0 || summary.raw_bundle_tasks > 0 || summary.large_tasks > 0 {
             println!(
-                "• Planner mix: {} tar shard(s) [{} file(s), {}], {} bundle(s) [{} file(s), {}], {} large task(s) [{}]",
-                summary.tar_shard_tasks,
-                summary.tar_shard_files,
-                format_bytes(summary.tar_shard_bytes),
-                summary.raw_bundle_tasks,
-                summary.raw_bundle_files,
-                format_bytes(summary.raw_bundle_bytes),
-                summary.large_tasks,
-                format_bytes(summary.large_bytes),
+                "{}",
+                palette.paint(
+                    Role::Muted,
+                    &format!(
+                        "• Planner mix: {} tar shard(s) [{} file(s), {}], {} bundle(s) [{} file(s), {}], {} large task(s) [{}]",
+                        summary.tar_shard_tasks,
+                        summary.tar_shard_files,
+                        format_bytes(summary.tar_shard_bytes),
+                        summary.raw_bundle_tasks,
+                        summary.raw_bundle_files,
+                        format_bytes(summary.raw_bundle_bytes),
+                        summary.large_tasks,
+                        format_bytes(summary.large_bytes),
+                    )
+                )
             );
         }
     }
