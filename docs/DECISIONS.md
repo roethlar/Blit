@@ -700,3 +700,8 @@ Format:
   `OTP12_PERF_FINDINGS.md`") only. That decision's technical rationale for
   excluding local cost as a P1/P2 *mechanism* is unaffected and is retained
   in the plan's §Decisions.
+
+## D-2026-08-01-3 — destination named-stream check stays in the default compare
+- Decision: the per-file destination stream enumeration on size/mtime-matched files stays; eliding it for stream-less source files (proposed for perf, ~115 s -> ~30 s on the field mirror) is rejected.
+- Why: owner ruled "no" (2026-08-01) after full framing — blit's compare keeps detecting destination-only stream divergence every run, deliberately stricter than rsync/robocopy size+mtime defaults.
+- Supersedes: nothing (closes the ls-5 owner gate in docs/bench/ls1-phase-2026-07-31/dir-sweep.md).
