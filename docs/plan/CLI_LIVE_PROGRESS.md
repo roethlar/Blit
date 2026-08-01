@@ -298,6 +298,59 @@ Guards, each proven by revert:
 
 Verified by hand: piped output contains no escape bytes at all.
 
+## clp-3b landing notes — colour moved to the output that survives
+
+Owner review of clp-3, 2026-08-01: *"file colorations are mostly useless
+because they scroll by too fast, and the status at the end is just plain
+text."* Correct, and it exposed a scoping error in clp-3: colour was spent on
+transient output and withheld from permanent output.
+
+What the audit found:
+
+| output | persists? | clp-3 |
+|---|---|---|
+| row phase word | no — repainted, then cleared | coloured |
+| row current file | no — changes several times a second | muted |
+| `-v` per-file lines | no — scroll away | never coloured at all |
+| **end-of-run summary** | **yes** | **plain** |
+| failure block | yes | red |
+
+The most-seen line in the product — `Up to date: N files examined, 0 changed`,
+the entire output of a converged mirror — was plain. clp-3's non-goals had
+explicitly said "No colour on the ls-0 summary block", which reasoned about
+which code path was interesting rather than which pixels survive.
+
+Now coloured, by role rather than by hue:
+
+- **Outcome** (`Copy complete in` / `Up to date:` / `Source is empty:`) —
+  green, so a glance says it finished clean.
+- **`• Copied:`** — role `Count`, which deliberately paints NOTHING. The
+  numbers render as default foreground and stand out because their
+  neighbours are muted, not because they are loud. A guard asserts this role
+  never emits an escape.
+- **`• Repaired:`** — cyan. A different KIND of result from a copy (work
+  done, no bytes moved), and the owner's original ls-0 complaint was exactly
+  that these two populations read as one thing.
+- **`• Deleted:`** — orange, matching the row's deleting phase: same work,
+  same colour, whether happening or finished.
+- **`• Average:` / `• Workers used:` / debug limiter** — muted. Context, not
+  result.
+
+Kept as-is: the row's phase colour (the one live signal worth having) and
+the muted current-file path (de-emphasis, not decoration — it stops a long
+path competing with the counts). The `-v` lines stay uncoloured; they scroll.
+
+Guards:
+- `the_count_role_never_emits_an_escape` — pins the deliberate no-colour role.
+- `summary_result_roles_are_mutually_distinct` — outcome, repaired, deleted,
+  failure and muted must never collapse into one colour.
+- `a_piped_summary_carries_no_escape_bytes` — drives the REAL BINARY and
+  checks both the transferred and up-to-date summaries (separate early-return
+  paths) for escape bytes when stdout is a pipe. **Proven** by defeating the
+  no-colour gate: the summary then leaked escapes and the test went red.
+  That same failure is what confirms the production call sites consult the
+  palette, since piped output cannot demonstrate colour directly.
+
 ## clp-2 landing notes
 
 - Landed with post-review hardenings: DeleteBegin gated on `execute` (a

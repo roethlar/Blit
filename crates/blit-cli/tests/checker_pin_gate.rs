@@ -101,6 +101,51 @@ fn a_remote_checker_pin_is_refused_before_any_banner_or_prompt() {
     }
 }
 
+/// clp-3b: the SUMMARY — the output that survives after the run — must
+/// contain no escape bytes when stdout is not a terminal.
+///
+/// This is the property every piped consumer, every script and every
+/// existing test depends on, and it is asserted against the real binary's
+/// real stdout rather than against the palette helper, because the palette
+/// helper cannot see whether the production call site consulted it.
+#[test]
+fn a_piped_summary_carries_no_escape_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    for index in 0..3 {
+        std::fs::write(src.join(format!("f{index}.bin")), vec![b'x'; 4096]).unwrap();
+    }
+
+    let run = |source: &std::path::Path, destination: &std::path::Path| -> String {
+        let mut cmd = Command::new(cli_bin());
+        cmd.arg("copy")
+            .arg("--yes")
+            .arg(format!("{}/", source.display()))
+            .arg(format!("{}/", destination.display()))
+            .stdin(std::process::Stdio::null());
+        let out = run_with_timeout(cmd, Duration::from_secs(30));
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // First run: the "transferred" summary. Second: the up-to-date summary,
+    // which is the single most-seen line in the product and takes its own
+    // early-return path through the printer.
+    let transferred = run(&src, &dst);
+    let converged = run(&src, &dst);
+
+    for (label, text) in [("transferred", &transferred), ("up-to-date", &converged)] {
+        assert!(
+            !text.contains('\u{1b}'),
+            "{label} summary leaked escape bytes into a pipe:\n{text:?}"
+        );
+    }
+    assert!(transferred.contains("• Copied: 3 file(s)"), "{transferred}");
+    assert!(converged.contains("Up to date:"), "{converged}");
+}
+
 /// The adaptive default must reach the REMOTE dispatch, not be swept up by
 /// the same gate — otherwise the check would be "reject remote transfers"
 /// rather than "reject a pin that cannot take effect".

@@ -132,9 +132,20 @@ fn emit_summary(
         // other. They never did — the two sets are disjoint — but nothing
         // on screen said so.
         if summary.files_repaired > 0 {
+            // clp-3b: cyan, not the copied-count colour. Repair is a
+            // different KIND of result from a copy — work done that moved no
+            // bytes — and the owner's original complaint was precisely that
+            // these two populations read as one thing.
+            let palette = Palette::detect(console::Term::stdout().features().colors_supported());
             println!(
-                "• Repaired: {} separate file(s) — metadata only, no bytes re-sent",
-                summary.files_repaired
+                "{}",
+                palette.paint(
+                    Role::Repaired,
+                    &format!(
+                        "• Repaired: {} separate file(s) — metadata only, no bytes re-sent",
+                        summary.files_repaired
+                    )
+                )
             );
         }
         crate::transfers::failures::print_failure_block(summary.files_failed, &summary.failures);
@@ -905,6 +916,13 @@ fn print_summary(
     summary: &LocalMirrorSummary,
     elapsed: Duration,
 ) {
+    // clp-3b: the summary is the output that SURVIVES. The live row is
+    // repainted several times a second and then cleared; the `-v` lines
+    // scroll away. This block is what an operator is still looking at when
+    // the command is done, and it was the one thing clp-3 left plain —
+    // colour spent on the transient and withheld from the permanent.
+    // Resolved against stdout, which is where it prints.
+    let palette = Palette::detect(console::Term::stdout().features().colors_supported());
     let operation = if mirror { "Mirror" } else { "Copy" };
     let suffix = if dry_run {
         " (dry run)"
@@ -924,16 +942,30 @@ fn print_summary(
     // which masked two classes of bugs (rsync-semantics, single-file noop).
     match summary.outcome {
         TransferOutcome::UpToDate => {
+            // The single most-seen line in the product: a converged mirror
+            // prints this and nothing else.
             println!(
-                "Up to date: {} files examined, 0 changed{} (in {:.2?})",
-                summary.scanned_files, suffix, duration
+                "{}",
+                palette.paint(
+                    Role::Outcome,
+                    &format!(
+                        "Up to date: {} files examined, 0 changed{} (in {:.2?})",
+                        summary.scanned_files, suffix, duration
+                    )
+                )
             );
             return;
         }
         TransferOutcome::SourceEmpty => {
             println!(
-                "Source is empty: 0 files copied{} (in {:.2?})",
-                suffix, duration
+                "{}",
+                palette.paint(
+                    Role::Outcome,
+                    &format!(
+                        "Source is empty: 0 files copied{} (in {:.2?})",
+                        suffix, duration
+                    )
+                )
             );
             return;
         }
@@ -947,17 +979,37 @@ fn print_summary(
     // one. Copied and repaired files share no members (a repaired file is
     // never planned and never copied — `local_session.rs` pins that), so
     // each gets its own line and the header commits to neither count.
-    println!("{}{} complete in {:.2?}", operation, suffix, duration);
     println!(
-        "• Copied: {} file(s), {}",
-        summary.copied_files,
-        format_bytes(summary.total_bytes)
+        "{}",
+        palette.paint(
+            Role::Outcome,
+            &format!("{}{} complete in {:.2?}", operation, suffix, duration)
+        )
+    );
+    println!(
+        "{}",
+        palette.paint(
+            Role::Count,
+            &format!(
+                "• Copied: {} file(s), {}",
+                summary.copied_files,
+                format_bytes(summary.total_bytes)
+            )
+        )
     );
 
     if summary.deleted_files > 0 || summary.deleted_dirs > 0 {
+        // Orange, matching the row's deleting phase — the same work, named
+        // the same colour whether it is happening or finished.
         println!(
-            "• Deleted: {} file(s), {} dir(s)",
-            summary.deleted_files, summary.deleted_dirs
+            "{}",
+            palette.paint(
+                Role::PhaseDeleting,
+                &format!(
+                    "• Deleted: {} file(s), {} dir(s)",
+                    summary.deleted_files, summary.deleted_dirs
+                )
+            )
         );
     }
 
@@ -979,9 +1031,18 @@ fn print_summary(
         // fraction of the 355 s — the number was not wrong, it was
         // unlabelled. It now states what it averages over instead of
         // implying a copy rate.
+        // Muted: this and the worker count are CONTEXT, not result. Dimming
+        // them is what makes the counts above legible at a glance — the
+        // summary earns emphasis by having quiet neighbours, not by shouting.
         println!(
-            "• Average: {} over the whole run (includes scan and compare)",
-            format_bps(throughput as u64)
+            "{}",
+            palette.paint(
+                Role::Muted,
+                &format!(
+                    "• Average: {} over the whole run (includes scan and compare)",
+                    format_bps(throughput as u64)
+                )
+            )
         );
         // codex otp-11b B4: the session's apply pipeline runs one sink
         // worker unless the hidden debug limiter widened it — print
@@ -989,10 +1050,22 @@ fn print_summary(
         // ls-0 keeps this visible rather than tidying it away: one worker
         // is the defect `docs/plan/LOCAL_SMALL_FILE_PATH.md` exists to fix,
         // and hiding the symptom would only make it harder to see.
-        println!("• Workers used: {}", if debug_mode { workers } else { 1 });
+        println!(
+            "{}",
+            palette.paint(
+                Role::Muted,
+                &format!("• Workers used: {}", if debug_mode { workers } else { 1 })
+            )
+        );
     }
     if debug_mode {
-        println!("• Debug limiter active – worker cap {} worker(s)", workers);
+        println!(
+            "{}",
+            palette.paint(
+                Role::Muted,
+                &format!("• Debug limiter active – worker cap {} worker(s)", workers)
+            )
+        );
     }
 
     if verbose {

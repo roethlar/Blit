@@ -60,32 +60,52 @@ pub(crate) enum Role {
     /// work, and red is reserved for something having gone wrong. Spending
     /// red here would cost red its meaning in the failure block below.
     PhaseDeleting,
-    /// Secondary text: separators, truncated paths, the re-run hint.
+    /// Secondary text: separators, truncated paths, the re-run hint, and the
+    /// advisory summary lines (average rate, worker count) that are context
+    /// rather than result.
     Muted,
+    /// A run that finished with everything landed. Green, matching
+    /// `PhaseCopying` — the same colour for "this is going fine" and "this
+    /// went fine".
+    Outcome,
+    /// The counts an operator actually reads off the finished summary.
+    /// Deliberately the DEFAULT foreground, not a colour: the summary earns
+    /// legibility from its neighbours being muted, not from being loud.
+    Count,
+    /// Work done without moving bytes (metadata repair). A different kind of
+    /// result from a copy, so a different colour from one.
+    Repaired,
     /// Something went wrong. The only red in the CLI.
     Failure,
 }
 
 impl Role {
-    fn rgb(self) -> (u8, u8, u8) {
+    /// `Count` is the one role with no colour: it renders as default
+    /// foreground so the summary's numbers stand out by contrast with the
+    /// muted lines around them, rather than by adding a fifth hue.
+    fn rgb(self) -> Option<(u8, u8, u8)> {
         match self {
-            Role::PhaseEnumerating => dracula::PURPLE,
-            Role::PhaseComparing => dracula::CYAN,
-            Role::PhaseCopying => dracula::GREEN,
-            Role::PhaseDeleting => dracula::ORANGE,
-            Role::Muted => dracula::COMMENT,
-            Role::Failure => dracula::RED,
+            Role::PhaseEnumerating => Some(dracula::PURPLE),
+            Role::PhaseComparing => Some(dracula::CYAN),
+            Role::PhaseCopying | Role::Outcome => Some(dracula::GREEN),
+            Role::PhaseDeleting => Some(dracula::ORANGE),
+            Role::Repaired => Some(dracula::CYAN),
+            Role::Muted => Some(dracula::COMMENT),
+            Role::Failure => Some(dracula::RED),
+            Role::Count => None,
         }
     }
 
-    fn ansi256(self) -> u8 {
+    fn ansi256(self) -> Option<u8> {
         match self {
-            Role::PhaseEnumerating => dracula::PURPLE_256,
-            Role::PhaseComparing => dracula::CYAN_256,
-            Role::PhaseCopying => dracula::GREEN_256,
-            Role::PhaseDeleting => dracula::ORANGE_256,
-            Role::Muted => dracula::COMMENT_256,
-            Role::Failure => dracula::RED_256,
+            Role::PhaseEnumerating => Some(dracula::PURPLE_256),
+            Role::PhaseComparing => Some(dracula::CYAN_256),
+            Role::PhaseCopying | Role::Outcome => Some(dracula::GREEN_256),
+            Role::PhaseDeleting => Some(dracula::ORANGE_256),
+            Role::Repaired => Some(dracula::CYAN_256),
+            Role::Muted => Some(dracula::COMMENT_256),
+            Role::Failure => Some(dracula::RED_256),
+            Role::Count => None,
         }
     }
 }
@@ -154,19 +174,22 @@ impl Palette {
     pub(crate) fn paint(self, role: Role, text: &str) -> String {
         match self.depth {
             ColorDepth::None => text.to_string(),
-            ColorDepth::Ansi256 => Style::new()
-                .fg(Color::Color256(role.ansi256()))
-                .force_styling(true)
-                .apply_to(text)
-                .to_string(),
-            ColorDepth::TrueColor => {
-                let (r, g, b) = role.rgb();
-                Style::new()
+            ColorDepth::Ansi256 => match role.ansi256() {
+                Some(index) => Style::new()
+                    .fg(Color::Color256(index))
+                    .force_styling(true)
+                    .apply_to(text)
+                    .to_string(),
+                None => text.to_string(),
+            },
+            ColorDepth::TrueColor => match role.rgb() {
+                Some((r, g, b)) => Style::new()
                     .fg(Color::TrueColor(r, g, b))
                     .force_styling(true)
                     .apply_to(text)
-                    .to_string()
-            }
+                    .to_string(),
+                None => text.to_string(),
+            },
         }
     }
 }
@@ -242,6 +265,49 @@ mod tests {
             palette.paint(Role::Failure, "boom"),
             "\u{1b}[38;5;203mboom\u{1b}[0m"
         );
+    }
+
+    /// clp-3b: `Count` is a role that deliberately paints NOTHING, so the
+    /// summary's numbers render as default foreground and stand out by
+    /// contrast with their muted neighbours. If it ever acquires a colour
+    /// this fails, because "emphasis by quiet neighbours" stops working the
+    /// moment the emphasised thing is also loud.
+    #[test]
+    fn the_count_role_never_emits_an_escape() {
+        for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+            let palette = Palette::with_depth(depth);
+            let painted = palette.paint(Role::Count, "• Copied: 9578 file(s), 393.01 MiB");
+            assert_eq!(
+                painted, "• Copied: 9578 file(s), 393.01 MiB",
+                "{depth:?}: Count must render as default foreground"
+            );
+        }
+    }
+
+    /// The summary's result roles must be distinguishable from each other:
+    /// a finished run, a metadata-only repair, a delete pass and a failure
+    /// are four different outcomes and must not collapse into one colour.
+    #[test]
+    fn summary_result_roles_are_mutually_distinct() {
+        for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+            let palette = Palette::with_depth(depth);
+            let rendered: Vec<String> = [
+                Role::Outcome,
+                Role::Repaired,
+                Role::PhaseDeleting,
+                Role::Failure,
+                Role::Muted,
+            ]
+            .iter()
+            .map(|role| palette.paint(*role, "x"))
+            .collect();
+            let unique: std::collections::HashSet<&String> = rendered.iter().collect();
+            assert_eq!(
+                unique.len(),
+                rendered.len(),
+                "{depth:?}: two summary roles render identically: {rendered:?}"
+            );
+        }
     }
 
     #[test]
