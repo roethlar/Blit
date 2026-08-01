@@ -230,7 +230,26 @@ pub fn verify_contained(canonical_module_root: &Path, target: &Path) -> Result<(
     let canonical_ancestor = loop {
         match std::fs::canonicalize(&probe) {
             Ok(c) => break c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // `NotADirectory` means a component partway down the path is a
+            // regular file, so the target does not exist — exactly what
+            // `NotFound` means for this walk, and NOT evidence of an escape.
+            // Unix reports ENOTDIR here where Windows reports not-found, and
+            // treating that difference as a containment violation made a
+            // per-file mkdir failure session-FATAL on Unix only: a tar-shard
+            // member whose parent is an existing file aborted the whole
+            // shard instead of being contained (pfc-3's promise, and the
+            // exact shape of the audit-17 field failure).
+            //
+            // Escape detection is unaffected. The loop still stops at the
+            // deepest EXISTING ancestor and still requires it to canonicalize
+            // under the root, so a symlinked component pointing outside is
+            // caught when that component itself is canonicalized.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
                 if !probe.pop() {
                     bail!(
                         "path '{}' has no canonicalizable ancestor (root '{}' missing?)",
@@ -605,6 +624,68 @@ mod unicode_edge_cases {
         let wire = "caf\u{0301}/\u{65E5}\u{672C}\u{8A9E}/\u{202E}x.txt";
         let joined = safe_join(root, wire).unwrap();
         assert!(joined.starts_with("/dest"));
+    }
+}
+
+/// Containment behaviour that must be IDENTICAL on every platform.
+///
+/// Separate from `containment_tests` below, which is Unix-only because it
+/// needs real symlinks. The bug this module was created for was precisely a
+/// platform DISAGREEMENT — Unix reported `ENOTDIR` where Windows reported
+/// not-found, and only Unix escalated a per-file failure to session-fatal —
+/// so a guard living in a Unix-gated module could not have caught it.
+#[cfg(test)]
+mod containment_cross_platform_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn module_root(tmp: &std::path::Path) -> PathBuf {
+        let root = tmp.join("module");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::canonicalize(&root).unwrap()
+    }
+
+    /// A path whose MIDDLE COMPONENT is a regular file is not an escape — it
+    /// is a path that does not exist. Treating the Unix spelling of that
+    /// (`ENOTDIR`) as a containment violation made a tar-shard member whose
+    /// parent is an existing file abort the ENTIRE shard on Unix, instead of
+    /// being contained as that member's own failure — breaking pfc-3's
+    /// promise on exactly the shape of the audit-17 field failure.
+    ///
+    /// NOTE ON ITS OWN GUARD VALUE: on Windows this test passes with or
+    /// without the fix, because Windows reports not-found where Unix reports
+    /// ENOTDIR — so it can only go red on Unix. That is stated here rather
+    /// than left to be discovered, because a Windows-only run of this test
+    /// proves nothing about the bug it guards.
+    #[test]
+    fn a_path_blocked_by_a_file_component_is_contained_not_an_escape() {
+        let tmp = tempdir().unwrap();
+        let root = module_root(tmp.path());
+        // A regular file sits where a directory would need to be.
+        std::fs::write(root.join("cache"), b"not a directory").unwrap();
+
+        verify_contained(&root, &root.join("cache/blocked.txt")).expect(
+            "a member blocked by a file component is a per-file failure, not a \
+             containment violation",
+        );
+        // Deeper than one level, so the walk-up loop runs more than once.
+        verify_contained(&root, &root.join("cache/a/b/c.txt"))
+            .expect("the walk-up must keep climbing past non-existent components");
+    }
+
+    /// The relaxation above must not weaken escape detection: a path that
+    /// genuinely resolves outside the root is still rejected.
+    #[test]
+    fn an_absolute_path_outside_the_root_is_still_rejected() {
+        let tmp = tempdir().unwrap();
+        let root = module_root(tmp.path());
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside = std::fs::canonicalize(&outside).unwrap();
+
+        let err = verify_contained(&root, &outside.join("target.txt"))
+            .expect_err("a path resolving outside the root must still be refused");
+        assert!(err.to_string().contains("escapes module root"), "{err}");
     }
 }
 
