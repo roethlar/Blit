@@ -2973,14 +2973,26 @@ mod tests {
         let dst_root = tmp.path().join("root-is-a-file");
         std::fs::write(&dst_root, b"not a directory").unwrap();
 
-        let sink = FsTransferSink::new(src, dst_root, FsSinkConfig::default());
+        let sink = FsTransferSink::new(src, dst_root.clone(), FsSinkConfig::default());
         let err = sink
             .write_payload(PreparedPayload::File(make_file_header("a.txt", 7)))
             .await
+            // The PROPERTY under test: fatal, i.e. `Err`, rather than an `Ok`
+            // carrying a contained per-file failure. That distinction is the
+            // whole point of the classification boundary.
             .expect_err("an unusable destination root is session-fatal");
+
+        // Deliberately NOT asserting which stage produced the error. The two
+        // platforms fail at different points for the same reason — Windows
+        // when the parent mkdir is refused, Unix when the containment
+        // canonicalize hits ENOTDIR — and pinning one spelling made this a
+        // Windows-only guard that failed on Linux for a difference that does
+        // not matter. What must hold everywhere is that it is fatal AND that
+        // it is about this destination, not some incidental error.
+        let rendered = format!("{err:#}");
         assert!(
-            format!("{err:#}").contains("creating directory"),
-            "expected the parent-mkdir failure; got: {err:#}"
+            rendered.contains(&dst_root.display().to_string()) || rendered.contains("a.txt"),
+            "the fatal error must name the destination it could not use; got: {rendered}"
         );
     }
 
