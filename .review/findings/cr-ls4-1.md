@@ -1,7 +1,10 @@
 # cr-ls4-1 — the apply-concurrency guard never observed concurrent execution
 
 **Severity**: LOW
-**Status**: FIXED — awaiting reviewer verification
+**Status**: VERIFIED-CLOSED. Round-2 dispatch over `ac74e059..439a201d`
+returned **`guard_confirmed: true`** and did not re-raise this finding; it
+raised one LOW against the seam's API exposure instead (`cr-ls4-2.md`).
+Record: `.review/results/clp3-ls4-range.codex.r2.json`.
 **Source**: `clp3-ls4-range` codex dispatch over `23760d8d..ac74e059`
 Reviewer: codex / gpt-5.6-sol / xhigh / workspace-write (detached, disposable
 worktree); codex-cli 0.146.0; **`guard_confirmed: false`**.

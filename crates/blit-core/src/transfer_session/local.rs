@@ -225,7 +225,8 @@ pub struct LocalMirrorOptions {
     /// (FAST, SIMPLE, RELIABLE — see `.agents/repo-guidance.md`).
     pub checkers: usize,
     /// Test-injection seam for the write backend — see [`SinkOverride`].
-    /// `None` (production, always) builds the real sink.
+    /// Absent from production builds entirely.
+    #[cfg(test)]
     pub sink_override: Option<SinkOverride>,
     /// Pre-built comparison pool. `None` (production) builds one from
     /// [`LocalMirrorOptions::checkers`].
@@ -268,13 +269,21 @@ impl LocalMirrorOptions {
 /// stayed green — the same implementation-not-the-seam gap as cr-ls1-9,
 /// which `checker_pool` injection closed for the diff. A wrapping sink that
 /// measures peak in-flight `write_payload` calls is the only observer that
-/// can see the difference, and it needs this seam to get installed. No
-/// production caller sets it.
+/// can see the difference, and it needs this seam to get installed.
+///
+/// `cfg(test)` (r11 `test-seam-api`): the seam is COMPILED OUT of production
+/// rather than merely unused there. A public override would let any caller
+/// bypass the `FsTransferSink`/`NullSink` construction that enforces
+/// dry-run, checksum and resume behaviour, and would change the public
+/// struct for a test's benefit. Only this crate's unit tests can name it,
+/// and the release binary carries neither the field nor the branch.
+#[cfg(test)]
 #[derive(Clone)]
 pub struct SinkOverride(pub Arc<dyn TransferSink>);
 
 /// Hand-written because `dyn TransferSink` is not `Debug`. Reports presence,
 /// not contents — the same shape as `LocalPhaseProbe`'s.
+#[cfg(test)]
 impl std::fmt::Debug for SinkOverride {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SinkOverride").finish_non_exhaustive()
@@ -302,6 +311,7 @@ impl Default for LocalMirrorOptions {
             resume: false,
             null_sink: false,
             checkers: 0,
+            #[cfg(test)]
             sink_override: None,
             checker_pool: None,
             phase_probe: LocalPhaseProbe::default(),
@@ -775,10 +785,19 @@ pub async fn run_local_session(
     };
 
     // Local write backend — the old orchestrator's exact construction.
-    // ls-4: an injected override wins so a test can observe the pipeline's
-    // real concurrency through this exact entry point (see `SinkOverride`).
-    let sink: Arc<dyn TransferSink> = if let Some(SinkOverride(sink)) = &options.sink_override {
-        Arc::clone(sink)
+    // ls-4/r11: in TEST builds only, an injected override wins so a test can
+    // observe the pipeline's real concurrency through this exact entry point
+    // (see `SinkOverride`). Production builds compile neither the field nor
+    // this branch.
+    #[cfg(test)]
+    let test_override: Option<Arc<dyn TransferSink>> = options
+        .sink_override
+        .as_ref()
+        .map(|SinkOverride(sink)| Arc::clone(sink));
+    #[cfg(not(test))]
+    let test_override: Option<Arc<dyn TransferSink>> = None;
+    let sink: Arc<dyn TransferSink> = if let Some(sink) = test_override {
+        sink
     } else if options.null_sink {
         Arc::new(NullSink::new())
     } else {
