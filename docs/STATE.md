@@ -39,7 +39,6 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   (D-2026-08-01-1). **ls-1 review CLOSED: 9 rounds, 16 findings, r9 CLEAN.**
 - Next: review clp-3; then named-stream enumeration (rel-4-bound),
   directory-level stat, wire-carrier concurrency — each needs owner scoping.
-  **28 commits unpushed.**
 
 ## Now (active work)
 
