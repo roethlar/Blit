@@ -1,5 +1,6 @@
 use crate::cli::TransferArgs;
 use crate::context::AppContext;
+use crate::style::{Palette, Role};
 use blit_app::display::{format_bps, format_bytes};
 use blit_core::remote::transfer::{
     ProgressEvent, ProgressTotals, RemoteTransferProgress, TransferLifecycleTrace,
@@ -257,6 +258,20 @@ enum LivePhase {
     Deleting,
 }
 
+impl LivePhase {
+    /// clp-3: the palette role for this phase. Mapping lives here so the
+    /// phase and its colour cannot drift apart, and so adding a phase
+    /// without choosing a colour fails the match at build time.
+    fn role(self) -> Role {
+        match self {
+            LivePhase::Enumerating => Role::PhaseEnumerating,
+            LivePhase::Comparing => Role::PhaseComparing,
+            LivePhase::Copying => Role::PhaseCopying,
+            LivePhase::Deleting => Role::PhaseDeleting,
+        }
+    }
+}
+
 /// Everything the live row renders. Counters ride blit-core's shared
 /// fold ([`ProgressTotals`], w6-1 — consumers must not re-derive the
 /// folding rules); the phase, the diff-finished fact, and the current
@@ -315,7 +330,17 @@ impl LiveRowState {
 /// Columns are counted as `char`s: a double-width name can still render
 /// narrower than the budget, and indicatif's `{wide_msg}` makes the
 /// final cut against the real terminal anyway.
+/// Production always goes through the styled path — with a disabled palette
+/// when colour is unwanted — so this plain form exists only as the reference
+/// the clp-3 guards compare against.
+#[cfg(test)]
 fn render_live_row(state: &LiveRowState, width: usize) -> String {
+    render_live_row_styled(state, width, Palette::disabled())
+}
+
+/// clp-3: the row, coloured. `render_live_row` above is this with a disabled
+/// palette, so the plain form cannot drift from the coloured one.
+fn render_live_row_styled(state: &LiveRowState, width: usize, palette: Palette) -> String {
     let totals = &state.totals;
     let copy_row = || {
         format!(
@@ -364,24 +389,84 @@ fn render_live_row(state: &LiveRowState, width: usize) -> String {
             }
         }
     };
-    fit_row(head, file, width)
+    // The phase the ROW is showing, which is not always `state.phase`: an
+    // up-to-date tree renders the walk, and a diff-complete tree renders the
+    // copy row before the first byte lands.
+    let shown = if head.starts_with("copying") {
+        LivePhase::Copying
+    } else if head.starts_with("deleting") {
+        LivePhase::Deleting
+    } else if head.starts_with("comparing") {
+        LivePhase::Comparing
+    } else {
+        LivePhase::Enumerating
+    };
+    lay_out_row(head, file, width).render(palette, shown)
 }
 
-/// Lay the counters and the current-file segment out inside `width`.
-/// The counters come first and are never sacrificed for the file name.
-fn fit_row(head: String, file: Option<&str>, width: usize) -> String {
-    let mut row = truncate_columns(&head, width);
-    let Some(file) = file else { return row };
-    const SEPARATOR: &str = " • ";
-    let remaining = width
-        .saturating_sub(row.chars().count())
-        .saturating_sub(SEPARATOR.chars().count());
-    if remaining < MIN_FILE_SEGMENT {
-        return row;
+/// The row after truncation, still in pieces.
+///
+/// clp-3: layout happens on PLAIN text and colour is applied to the finished
+/// pieces. Escape sequences are zero-width on screen but not zero-length in
+/// a `String`, so styling before this point would corrupt every width
+/// calculation above.
+struct RowLayout {
+    head: String,
+    file: Option<String>,
+}
+
+impl RowLayout {
+    /// Assemble. A disabled palette reproduces the pre-clp-3 bytes exactly,
+    /// which is what `fit_row` and every existing row test rely on.
+    fn render(&self, palette: Palette, phase: LivePhase) -> String {
+        if !palette.is_enabled() {
+            let mut row = self.head.clone();
+            if let Some(file) = &self.file {
+                row.push_str(ROW_SEPARATOR);
+                row.push_str(file);
+            }
+            return row;
+        }
+        // The head is `<phase word> • <detail>`, joined a few lines above by
+        // this same module, so splitting it back apart is reading our own
+        // format rather than parsing someone else's. The
+        // `styling_never_changes_the_visible_row` guard pins that: strip the
+        // colour back off and the bytes must equal the plain row.
+        let mut row = match self.head.split_once(ROW_SEPARATOR) {
+            Some((phase_word, detail)) => {
+                let mut head = palette.paint(phase.role(), phase_word);
+                head.push_str(&palette.paint(Role::Muted, ROW_SEPARATOR));
+                head.push_str(detail);
+                head
+            }
+            None => palette.paint(phase.role(), &self.head),
+        };
+        if let Some(file) = &self.file {
+            row.push_str(&palette.paint(Role::Muted, ROW_SEPARATOR));
+            row.push_str(&palette.paint(Role::Muted, file));
+        }
+        row
     }
-    row.push_str(SEPARATOR);
-    row.push_str(&truncate_path_head(file, remaining));
-    row
+}
+
+const ROW_SEPARATOR: &str = " • ";
+
+fn lay_out_row(head: String, file: Option<&str>, width: usize) -> RowLayout {
+    let head = truncate_columns(&head, width);
+    let Some(file) = file else {
+        return RowLayout { head, file: None };
+    };
+    let remaining = width
+        .saturating_sub(head.chars().count())
+        .saturating_sub(ROW_SEPARATOR.chars().count());
+    if remaining < MIN_FILE_SEGMENT {
+        return RowLayout { head, file: None };
+    }
+    let file = truncate_path_head(file, remaining);
+    RowLayout {
+        head,
+        file: Some(file),
+    }
 }
 
 /// Shorten a path from the LEFT: the tail names the file, the leading
@@ -519,6 +604,7 @@ async fn drain_progress_lane(
     mut rx: mpsc::UnboundedReceiver<ProgressEvent>,
     output: impl RowOutput,
     verbose: bool,
+    palette: Palette,
 ) {
     let mut state = LiveRowState::default();
     let mut pending_repaint = false;
@@ -546,14 +632,14 @@ async fn drain_progress_lane(
             },
             _ = ticker.tick() => {
                 if pending_repaint {
-                    output.set_message(render_live_row(&state, ROW_COLUMNS));
+                    output.set_message(render_live_row_styled(&state, ROW_COLUMNS, palette));
                     pending_repaint = false;
                 }
             }
         }
     }
     if pending_repaint {
-        output.set_message(render_live_row(&state, ROW_COLUMNS));
+        output.set_message(render_live_row_styled(&state, ROW_COLUMNS, palette));
     }
 }
 
@@ -655,7 +741,12 @@ impl LiveProgressRow {
         let log_redirect = blit_core::stderr_log::redirect_lines(row_line_sink(threaded.clone()));
 
         let (tx, rx) = mpsc::unbounded_channel::<ProgressEvent>();
-        let consumer = tokio::spawn(drain_progress_lane(rx, threaded, verbose));
+        // clp-3: the row owns stderr, so its palette is resolved against
+        // stderr. Reaching here already means the bar can draw — a hidden
+        // bar returns None above — so the terminal question is settled and
+        // `detect` only adds the colour-specific conventions.
+        let palette = Palette::detect(console::Term::stderr().features().colors_supported());
+        let consumer = tokio::spawn(drain_progress_lane(rx, threaded, verbose, palette));
 
         Some((
             RemoteTransferProgress::new(tx),
@@ -970,6 +1061,7 @@ fn print_summary_json(
 #[cfg(test)]
 mod live_row_tests {
     use super::*;
+    use crate::style::ColorDepth;
 
     fn fold(events: &[ProgressEvent]) -> LiveRowState {
         let mut state = LiveRowState::default();
@@ -977,6 +1069,153 @@ mod live_row_tests {
             state.apply(event);
         }
         state
+    }
+
+    /// Remove SGR sequences. Only used by the clp-3 guards below.
+    fn strip_sgr(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\u{1b}' {
+                out.push(ch);
+                continue;
+            }
+            // ESC [ ... m
+            for next in chars.by_ref() {
+                if next == 'm' {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// clp-3, the load-bearing guard: colour must be PURELY additive.
+    ///
+    /// Strip the SGR sequences back off a coloured row and the bytes must
+    /// equal the plain row exactly, across every phase and a range of
+    /// widths including ones that force head truncation and drop the file
+    /// segment. This is what proves styling cannot disturb the width
+    /// arithmetic — the specific hazard of colouring before layout — and it
+    /// fails for any mis-split of the head, not just for a wrong colour.
+    #[test]
+    fn styling_never_changes_the_visible_row() {
+        let states = [
+            fold(&[ProgressEvent::Enumerated { files: 900 }]),
+            fold(&[
+                ProgressEvent::Enumerated { files: 900 },
+                ProgressEvent::ManifestBatch {
+                    files: 12,
+                    bytes: 4096,
+                },
+            ]),
+            fold(&[
+                ProgressEvent::ManifestBatch {
+                    files: 12,
+                    bytes: 4096,
+                },
+                ProgressEvent::Payload {
+                    files: 3,
+                    bytes: 900,
+                },
+                ProgressEvent::FileComplete {
+                    path: "deep/nested/directory/name/payload.bin".to_string(),
+                },
+            ]),
+            fold(&[
+                ProgressEvent::DiffComplete,
+                ProgressEvent::Enumerated { files: 40 },
+            ]),
+            fold(&[ProgressEvent::DeleteBegin]),
+        ];
+        for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+            let palette = Palette::with_depth(depth);
+            for state in &states {
+                for width in [0usize, 1, 8, 20, 40, 80, 200] {
+                    let plain = render_live_row(state, width);
+                    let styled = render_live_row_styled(state, width, palette);
+                    assert_eq!(
+                        strip_sgr(&styled),
+                        plain,
+                        "{depth:?} at width {width}: colour changed the visible row"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A disabled palette must emit no escapes at all, so piped output and
+    /// every pre-clp-3 expectation are byte-identical.
+    #[test]
+    fn a_disabled_palette_emits_no_escapes() {
+        let state = fold(&[
+            ProgressEvent::ManifestBatch {
+                files: 4,
+                bytes: 10,
+            },
+            ProgressEvent::FileComplete {
+                path: "a/b.txt".to_string(),
+            },
+        ]);
+        let row = render_live_row_styled(&state, 80, Palette::disabled());
+        assert!(!row.contains('\u{1b}'), "{row}");
+        assert_eq!(row, render_live_row(&state, 80));
+    }
+
+    /// The phase word carries the colour, and each phase carries its own.
+    /// Asserted on the actual rendered row, not on the palette helper.
+    #[test]
+    fn each_phase_colours_its_own_word() {
+        let palette = Palette::with_depth(ColorDepth::TrueColor);
+        let copying = render_live_row_styled(
+            &fold(&[
+                ProgressEvent::ManifestBatch {
+                    files: 4,
+                    bytes: 10,
+                },
+                // A Payload is what moves the phase to Copying; a manifest
+                // batch alone still renders the comparing row.
+                ProgressEvent::Payload {
+                    files: 1,
+                    bytes: 10,
+                },
+            ]),
+            80,
+            palette,
+        );
+        assert!(
+            copying.starts_with("\u{1b}[38;2;80;250;123mcopying\u{1b}[0m"),
+            "copying must lead with Dracula green: {copying:?}"
+        );
+
+        let comparing = render_live_row_styled(
+            &fold(&[ProgressEvent::ManifestBatch {
+                files: 4,
+                bytes: 10,
+            }]),
+            80,
+            palette,
+        );
+        assert!(
+            comparing.starts_with("\u{1b}[38;2;139;233;253mcomparing\u{1b}[0m"),
+            "comparing must lead with Dracula cyan: {comparing:?}"
+        );
+
+        let deleting = render_live_row_styled(&fold(&[ProgressEvent::DeleteBegin]), 80, palette);
+        assert!(
+            deleting.starts_with("\u{1b}[38;2;255;184;108mdeleting\u{1b}[0m"),
+            "deleting must lead with Dracula orange, not red: {deleting:?}"
+        );
+
+        let enumerating = render_live_row_styled(
+            &fold(&[ProgressEvent::Enumerated { files: 5 }]),
+            80,
+            palette,
+        );
+        assert!(
+            enumerating.starts_with("\u{1b}[38;2;189;147;249menumerating\u{1b}[0m"),
+            "enumerating must lead with Dracula purple: {enumerating:?}"
+        );
     }
 
     /// Before the diff has decided anything, the row reports the source
@@ -1398,7 +1637,12 @@ mod live_row_loop_tests {
     async fn the_ticker_repaints_while_the_lane_stays_open() {
         let (tx, rx) = mpsc::unbounded_channel();
         let recorder = Recorder::default();
-        let consumer = tokio::spawn(drain_progress_lane(rx, recorder.clone(), false));
+        let consumer = tokio::spawn(drain_progress_lane(
+            rx,
+            recorder.clone(),
+            false,
+            Palette::disabled(),
+        ));
         tx.send(ProgressEvent::Enumerated { files: 7 })
             .expect("send");
         // Paused clock: sleeping past the refresh interval fires the
@@ -1419,7 +1663,12 @@ mod live_row_loop_tests {
     async fn control_bytes_in_a_path_cannot_break_the_row() {
         let (tx, rx) = mpsc::unbounded_channel();
         let recorder = Recorder::default();
-        let consumer = tokio::spawn(drain_progress_lane(rx, recorder.clone(), true));
+        let consumer = tokio::spawn(drain_progress_lane(
+            rx,
+            recorder.clone(),
+            true,
+            Palette::disabled(),
+        ));
         tx.send(ProgressEvent::ManifestBatch { files: 1, bytes: 4 })
             .expect("send");
         tx.send(ProgressEvent::FileComplete {
@@ -1473,7 +1722,7 @@ mod live_row_loop_tests {
         }
         drop(tx);
 
-        drain_progress_lane(rx, recorder.clone(), false).await;
+        drain_progress_lane(rx, recorder.clone(), false, Palette::disabled()).await;
 
         assert_eq!(
             recorder.last_message(),
@@ -1508,7 +1757,7 @@ mod live_row_loop_tests {
         }
         drop(tx);
 
-        drain_progress_lane(rx, recorder.clone(), true).await;
+        drain_progress_lane(rx, recorder.clone(), true, Palette::disabled()).await;
 
         assert_eq!(recorder.lines(), vec!["one.txt", "dir/two.txt"]);
         assert_eq!(
@@ -1533,7 +1782,7 @@ mod live_row_loop_tests {
         }
         drop(tx);
 
-        drain_progress_lane(rx, recorder.clone(), false).await;
+        drain_progress_lane(rx, recorder.clone(), false, Palette::disabled()).await;
 
         assert_eq!(
             recorder.last_message(),
@@ -1549,7 +1798,12 @@ mod live_row_loop_tests {
         tx.send(ProgressEvent::Enumerated { files: 1 })
             .expect("the consumer is alive");
         drop(tx);
-        let consumer = tokio::spawn(drain_progress_lane(rx, recorder.clone(), false));
+        let consumer = tokio::spawn(drain_progress_lane(
+            rx,
+            recorder.clone(),
+            false,
+            Palette::disabled(),
+        ));
 
         assert!(join_drained(consumer, ROW_DRAIN_GRACE).await);
         assert_eq!(recorder.last_message(), "enumerating • 1 files found");
@@ -1586,7 +1840,12 @@ mod live_row_loop_tests {
             .expect("send");
         }
         drop(tx);
-        let consumer = tokio::spawn(drain_progress_lane(rx, slow.clone(), true));
+        let consumer = tokio::spawn(drain_progress_lane(
+            rx,
+            slow.clone(),
+            true,
+            Palette::disabled(),
+        ));
         // 100 × 2 ms of output far exceeds this grace; only the
         // success branch (unbounded await) can deliver every line.
         assert!(drain_for_outcome(consumer, true, Duration::from_millis(50)).await);
@@ -1607,7 +1866,12 @@ mod live_row_loop_tests {
         let recorder = Recorder::default();
         tx.send(ProgressEvent::Enumerated { files: 1 })
             .expect("the consumer is alive");
-        let consumer = tokio::spawn(drain_progress_lane(rx, recorder.clone(), false));
+        let consumer = tokio::spawn(drain_progress_lane(
+            rx,
+            recorder.clone(),
+            false,
+            Palette::disabled(),
+        ));
 
         let started = Instant::now();
         let grace = Duration::from_millis(50);

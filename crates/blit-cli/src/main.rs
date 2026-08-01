@@ -12,6 +12,7 @@ mod ls;
 mod profile;
 mod rm;
 mod scan;
+mod style;
 mod transfers;
 
 use crate::check::run_check;

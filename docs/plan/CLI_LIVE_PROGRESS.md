@@ -172,7 +172,8 @@ One coherent, testable change per slice — sized for the review loop.
    `FsTransferSource::new` with a sink in hand) together with remote
    render support.
 3. **clp-3 — colour on the live row and the failure block** (owner asked
-   2026-08-01: scope "both", palette "dracula"). DRAFT, awaiting flip.
+   2026-08-01: scope "both", palette "dracula"). **`[x]` LANDED** — see
+   §clp-3 landing notes.
 
    Not a new option and not decoration — see §clp-3 scope below. The row
    currently gives equal visual weight to the phase, the counts and a
@@ -257,6 +258,45 @@ each names the property it proves, not a consequence of it:
   the entire control surface — anything more is user-facing surface for a
   decision nobody needs to make (D-2026-08-01-1).
 - No change to what the row SAYS, only how it is rendered.
+
+## clp-3 landing notes
+
+Landed as drafted, with one design constraint the draft had not caught and
+which turned out to be the whole shape of the change.
+
+- **Colour is applied AFTER layout, never before.** Escape sequences are
+  zero-width on screen but not zero-length in a `String`, so styling before
+  the row's width arithmetic corrupts every truncation. `lay_out_row` now
+  returns the truncated pieces and `RowLayout::render` styles them. The draft
+  said "template change"; it was not.
+- `render_live_row` and `failure_block` became `#[cfg(test)]` reference
+  forms: production always calls the styled path with a possibly-disabled
+  palette, so the plain output cannot drift from the coloured one by
+  construction rather than by a parallel implementation.
+- `console` is now a direct dependency of `blit-cli` (it was already in the
+  tree via indicatif). `Color::TrueColor` exists in 0.16, so the palette is
+  exact Dracula rather than an approximation.
+- The failure block resolves its palette against **stdout** and the row
+  against **stderr**, because that is where each actually writes.
+
+Guards, each proven by revert:
+- `styling_never_changes_the_visible_row` — strip the SGR back off and the
+  bytes must equal the plain row, across every phase and widths 0..200.
+  This is the load-bearing one: it catches any mis-split of the head, any
+  lost text, and the layout hazard above. **Proven** by making `render`
+  truncate the styled string (i.e. counting escapes as width): red at
+  width 40, byte-identical restore.
+- `the_header_and_reason_are_red_and_the_path_is_not` — **proven** by
+  repointing the header at `Muted`: red.
+- `colour_never_changes_the_block_text` — same strip-and-compare for the
+  block, including the elided-count case, and asserts the styled form
+  DIFFERS from the plain one so it cannot pass by colouring nothing.
+- `deleting_and_failure_never_share_a_colour` — the one semantic invariant,
+  asserted at both depths.
+- Exact-byte assertions per capability tier; `NO_COLOR` (including empty),
+  `TERM=dumb`, and a caller-denied gate all verified to disable.
+
+Verified by hand: piped output contains no escape bytes at all.
 
 ## clp-2 landing notes
 

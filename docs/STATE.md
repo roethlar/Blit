@@ -110,38 +110,38 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    SMB-synthesized HIDDEN on dot-named files could never converge. Found
    via the owner's `D:\Apps → H:\apps` (Samba) mirror abort. Q1 settled
    (mirror deletes proceed; move source-deletion refuses while failures
-   exist). **pfc-1..6 all `[x]` landed on `master`**, one commit per
-   slice, each red/green guard-proven with a full gate at landing:
-   shared `attributes_converge` predicate; bounded per-file failure
-   report in `SinkOutcome`; tar-shard per-member containment with exact
-   failed identity; `TransferSummary.files_failed`/`failures` on the
-   wire (CONTRACT_VERSION 5→6); CLI failure block + exit 2 + the real
+   exist). **pfc-1..6 all `[x]` landed on `master`**, each red/green
+   guard-proven with a full gate: shared `attributes_converge` predicate;
+   bounded per-file failure report in `SinkOutcome`; tar-shard per-member
+   containment with exact failed identity;
+   `TransferSummary.files_failed`/`failures` on the wire (CONTRACT_VERSION
+   5→6); CLI failure block + exit 2 + the real
    `refuse_source_delete_on_failures` gate on all eight move routes;
-   attributes-only in-place repair (`files_repaired`, zero bytes
-   re-sent). The pfc-2 interim mirror-only interlock is GONE — containment
-   applies to every session kind. audit-17 closed end to end.
-   **Review program complete** under D-2026-07-31-3's standing codex
-   dispatch: 7 range reviews (pfc-1, clp-1, pfc-5, pfc-6 clean; pfc-2/3/4
-   raised 11 findings — 10 verified-closed with guard-confirmed codex
-   verdicts, cr-clp2-4 declined with record). Per-slice detail: DEVLOG
-   2026-07-31 and the plan's landing notes.
+   attributes-only in-place repair. The pfc-2 interim mirror-only interlock
+   is GONE — containment applies to every session kind; audit-17 closed end
+   to end. **Review program complete**: 7 range reviews, 11 findings, 10
+   verified-closed + 1 declined. Detail: DEVLOG 2026-07-31 and the plan.
    **The one open acceptance criterion is re-run convergence, and it is
-   the OWNER'S to declare** (checkpoints are owner-only). Owner ran it
-   2026-07-31 and the data satisfies it — run 1: 9578 files / 393.01 MiB
-   in 355.23s, 5445 files metadata-repaired with zero bytes re-sent; run
-   2: 0 files, 0 B in 283.92s (a true no-op). **No declaration was given;
-   the owner instead raised four coherence objections — see Open
-   questions.** Plan does NOT flip to Shipped until the owner says so.
-4. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2): clp-1 and
-   clp-2 both `[x]` landed** — one live row with truthful phases
+   the OWNER'S to declare** (checkpoints are owner-only). Their 2026-07-31
+   run satisfies it on the data — run 2 copied 0 files, 0 B — but no
+   declaration was given; they raised coherence objections instead, since
+   ruled and closed. Plan does NOT flip to Shipped until they say so.
+4. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2): clp-1, clp-2
+   and clp-3 all `[x]` landed.** **clp-3** adds Dracula colour to the live
+   row and the failure block (owner-chosen palette, scope "both"): phase word
+   carries the colour, deleting is orange not red so red keeps its meaning
+   for failures, counts and failed paths stay unstyled. Colour is applied
+   AFTER layout — escapes are zero-width on screen but not in a `String` —
+   and the plain forms are `#[cfg(test)]` references so production output
+   cannot drift from them. `NO_COLOR` + TTY detection are the whole control
+   surface; no flag (D-2026-08-01-1). **Not yet reviewed.** clp-1/clp-2 gave one live row with truthful phases
    (enumerating → comparing/up-to-date → copying → deleting; dry runs
    never claim deletion), width-safe current-file segment, `-v` per-file
    lines through the row handle, and the `log` backend routed through
    the row while it lives (warns scroll above, never scroll it away).
-   Owner confirmed on a real TTY that the row holds one line (2026-07-31,
-   pre-clp-2) and used it through both field-check runs. Residue (d)
-   (remote-route attachment) deferred to remote render work — see plan
-   landing notes. TUI-scale redesign stays a separate queued TODO.
+   Owner confirmed on a real TTY (2026-08-01) that the row holds one line
+   while `-v` lines scroll above it. Residue (d) (remote-route attachment)
+   deferred to remote render work. TUI-scale redesign stays a queued TODO.
 5. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
    performance status flip are not release gates (D-2026-07-22-1).
 6. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
