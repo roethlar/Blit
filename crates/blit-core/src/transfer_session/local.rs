@@ -228,6 +228,13 @@ pub struct LocalMirrorOptions {
     /// Absent from production builds entirely.
     #[cfg(test)]
     pub sink_override: Option<SinkOverride>,
+    /// Test-injection seam for the destination directory-sweep cache
+    /// (ls-5): the test holds the very cache the session answers from and
+    /// asserts it DID answer — the cr-ls1-9/cr-ls4-1 lesson, applied at
+    /// build time rather than after a reviewer runs the revert. Absent
+    /// from production builds entirely.
+    #[cfg(test)]
+    pub dir_stat_probe: Option<Arc<super::dir_stat::DirStatCache>>,
     /// Pre-built comparison pool. `None` (production) builds one from
     /// [`LocalMirrorOptions::checkers`].
     ///
@@ -313,6 +320,8 @@ impl Default for LocalMirrorOptions {
             checkers: 0,
             #[cfg(test)]
             sink_override: None,
+            #[cfg(test)]
+            dir_stat_probe: None,
             checker_pool: None,
             phase_probe: LocalPhaseProbe::default(),
         }
@@ -432,6 +441,11 @@ pub struct LocalApply {
     /// built once and shared by every chunk so threads are not respawned per
     /// chunk.
     pub(super) checker_pool: CheckerPool,
+    /// ls-5: the session's destination directory-sweep cache — one
+    /// `read_dir` per directory answers most per-file target resolutions
+    /// (see [`super::dir_stat::DirStatCache`]). Carried here so the
+    /// session drive loop shares the instance a test may have injected.
+    pub(super) dir_stats: Arc<super::dir_stat::DirStatCache>,
 }
 
 /// Destination-side counters for the local summary. Atomics because
@@ -818,6 +832,15 @@ pub async fn run_local_session(
         ))
     };
 
+    // ls-5: the session's destination directory-sweep cache. In TEST
+    // builds an injected instance wins for the same reason `SinkOverride`
+    // exists — so a test can hold the very cache the session answers from
+    // and assert it DID answer, which no tree comparison can see.
+    #[cfg(test)]
+    let dir_stats = options.dir_stat_probe.clone().unwrap_or_default();
+    #[cfg(not(test))]
+    let dir_stats = Arc::new(super::dir_stat::DirStatCache::default());
+
     let stats = Arc::new(LocalApplyStats::default());
     let local_apply = LocalApply {
         src_root: src_root.to_path_buf(),
@@ -832,6 +855,7 @@ pub async fn run_local_session(
         stats: Arc::clone(&stats),
         phase_probe: phase_probe.clone(),
         checker_pool: checker_pool.clone(),
+        dir_stats,
     };
 
     let source_cfg = SourceSessionConfig {
@@ -1157,6 +1181,7 @@ mod tests {
             stats: Arc::new(LocalApplyStats::default()),
             phase_probe: LocalPhaseProbe::disabled(),
             checker_pool: CheckerPool::new(1).expect("checker pool"),
+            dir_stats: Arc::default(),
         };
         let source_cfg = SourceSessionConfig {
             hello: HelloConfig::default(),
@@ -1312,6 +1337,138 @@ mod tests {
         );
     }
 
+    /// ls-5 guard: a converged mirror ANSWERS from directory sweeps. The
+    /// tree comparison cannot see this — a per-file-stat session produces
+    /// the identical tree, just slower — so the test holds the very cache
+    /// the session uses (`dir_stat_probe`, the cr-ls1-9 injection lesson)
+    /// and asserts every resolution came from it. Reverting the
+    /// `resolve_destination_target` wiring back to `std::fs::metadata`
+    /// zeroes the hit counter and reds this.
+    #[tokio::test]
+    async fn a_converged_mirror_answers_from_directory_sweeps() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        for dir in ["alpha", "beta", "gamma"] {
+            std::fs::create_dir_all(src_root.join(dir)).expect("mkdir");
+            for file in 0..3 {
+                std::fs::write(src_root.join(dir).join(format!("f{file}.txt")), b"stable")
+                    .expect("write");
+            }
+        }
+        run_local_session(&src_root, &dst_root, LocalMirrorOptions::default())
+            .await
+            .expect("seed session");
+
+        let cache = Arc::new(super::super::dir_stat::DirStatCache::default());
+        let summary = run_local_session(
+            &src_root,
+            &dst_root,
+            LocalMirrorOptions {
+                perf_history: false,
+                dir_stat_probe: Some(Arc::clone(&cache)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("converged session");
+        assert_eq!(summary.copied_files, 0, "the tree was already converged");
+        assert_eq!(
+            cache.fallbacks(),
+            0,
+            "a converged tree of plain files needs no authoritative per-file stat"
+        );
+        assert!(cache.sweeps() >= 3, "one sweep per destination directory");
+        assert_eq!(
+            cache.hits(),
+            9,
+            "every manifest entry must resolve from the sweep cache; zero hits \
+             means the session went back to per-file stats"
+        );
+    }
+
+    /// ls-5 guard for the trusted-absent arm: a fresh copy into a
+    /// destination that does not exist yet must not pay a per-file
+    /// fallback storm — the sweep's NotFound answers every child.
+    /// Reverting AbsentDir to Unsweepable reds the fallback count.
+    #[tokio::test]
+    async fn a_fresh_copy_trusts_the_sweeps_absent_answer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(src_root.join("nested")).expect("mkdir");
+        for file in 0..4 {
+            std::fs::write(src_root.join("nested").join(format!("f{file}.txt")), b"new")
+                .expect("write");
+        }
+
+        let cache = Arc::new(super::super::dir_stat::DirStatCache::default());
+        let summary = run_local_session(
+            &src_root,
+            &dst_root,
+            LocalMirrorOptions {
+                perf_history: false,
+                dir_stat_probe: Some(Arc::clone(&cache)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fresh session");
+        assert_eq!(summary.copied_files, 4);
+        assert_eq!(
+            cache.fallbacks(),
+            0,
+            "an absent destination directory is a trusted absent for every \
+             child, never a per-file stat storm"
+        );
+    }
+
+    /// ls-5 trust boundary: a destination name that differs from the
+    /// manifest's only by case must NEVER be judged absent from the sweep
+    /// alone. On this case-sensitive filesystem the authoritative fallback
+    /// stat misses and the file copies; trusting the sweep's absent would
+    /// also copy — so the FALLBACK COUNTER is the assertion that matters,
+    /// and the case-insensitive half of the argument (where trusting
+    /// absent means a permanent re-copy loop, or worse a false skip on a
+    /// case-sensitive SMB backend) rides the same counter.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_case_folded_near_miss_is_never_trusted_as_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("mkdir src");
+        std::fs::create_dir_all(&dst_root).expect("mkdir dst");
+        std::fs::write(src_root.join("readme.txt"), b"source body").expect("write src");
+        std::fs::write(dst_root.join("README.txt"), b"other file").expect("write dst");
+
+        let cache = Arc::new(super::super::dir_stat::DirStatCache::default());
+        let summary = run_local_session(
+            &src_root,
+            &dst_root,
+            LocalMirrorOptions {
+                perf_history: false,
+                dir_stat_probe: Some(Arc::clone(&cache)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("session");
+        assert_eq!(
+            summary.copied_files, 1,
+            "the lowercase file is genuinely absent"
+        );
+        assert!(
+            cache.fallbacks() >= 1,
+            "a folded-name near-miss must consult the authoritative stat, \
+             not the sweep's absence"
+        );
+        assert_eq!(
+            std::fs::read(dst_root.join("readme.txt")).expect("copied file"),
+            b"source body"
+        );
+    }
+
     /// A sink that takes a known, large amount of time per payload. Wraps a
     /// real sink so the transfer still succeeds and the rest of the session
     /// behaves normally — only the writer is slow.
@@ -1422,6 +1579,7 @@ mod tests {
             stats: Arc::new(LocalApplyStats::default()),
             phase_probe: slow_probe.clone(),
             checker_pool: CheckerPool::new(1).expect("checker pool"),
+            dir_stats: Arc::default(),
         };
         let open = SessionOpen {
             initiator_role: TransferRole::Source as i32,
@@ -2054,6 +2212,7 @@ mod tests {
             stats: Arc::new(LocalApplyStats::default()),
             phase_probe: LocalPhaseProbe::disabled(),
             checker_pool: CheckerPool::new(1).expect("checker pool"),
+            dir_stats: Arc::default(),
         };
         let open = SessionOpen {
             initiator_role: TransferRole::Source as i32,

@@ -15,6 +15,7 @@
 
 pub mod checkers;
 mod data_plane;
+pub mod dir_stat;
 pub mod local;
 pub mod phase_probe;
 pub mod transport;
@@ -4024,6 +4025,16 @@ async fn destination_session_inner(
             .map(|apply| apply.phase_probe.clone())
             .unwrap_or_else(LocalPhaseProbe::disabled),
     });
+    // ls-5: ONE destination directory-sweep cache for the whole session,
+    // shared by both carriers for the same reason the repair state is —
+    // the destination owns its filesystem in every topology. The local
+    // carrier's rides `LocalApply` so a test can inject and observe the
+    // very cache the session answers from; the wire destination builds
+    // its own.
+    let dir_stats: Arc<dir_stat::DirStatCache> = local_apply
+        .as_ref()
+        .map(|apply| Arc::clone(&apply.dir_stats))
+        .unwrap_or_default();
 
     // otp-11: the LOCAL carrier's apply pipeline — spawned before the
     // loop so applies run concurrent with the diff, exactly as the
@@ -4078,6 +4089,7 @@ async fn destination_session_inner(
                             &mut needed_paths,
                             progress.as_ref(),
                             &attribute_repair,
+                            &dir_stats,
                         )
                         .await?;
                     } else {
@@ -4098,6 +4110,7 @@ async fn destination_session_inner(
                             phase_trace.as_ref(),
                             &mut need_batch_seq,
                             &attribute_repair,
+                            &dir_stats,
                         )
                         .await?;
                     }
@@ -4150,6 +4163,7 @@ async fn destination_session_inner(
                         &mut needed_paths,
                         progress.as_ref(),
                         &attribute_repair,
+                        &dir_stats,
                     )
                     .await?;
                 } else {
@@ -4170,6 +4184,7 @@ async fn destination_session_inner(
                         phase_trace.as_ref(),
                         &mut need_batch_seq,
                         &attribute_repair,
+                        &dir_stats,
                     )
                     .await?;
                 }
@@ -4936,6 +4951,7 @@ async fn diff_chunk_and_apply_local(
     needed_paths: &mut Vec<String>,
     progress: Option<&RemoteTransferProgress>,
     repair: &Arc<AttributeRepair>,
+    dir_stats: &Arc<dir_stat::DirStatCache>,
 ) -> Result<()> {
     if chunk.is_empty() {
         return Ok(());
@@ -4980,6 +4996,7 @@ async fn diff_chunk_and_apply_local(
         canonical_dst_root,
         compare_opts,
         repair,
+        dir_stats,
         Some(&local.checker_pool),
     )
     .await;
@@ -5089,6 +5106,7 @@ async fn diff_chunk_and_send_needs(
     phase_trace: Option<&BoundSessionPhaseTrace>,
     need_batch_seq: &mut u64,
     repair: &Arc<AttributeRepair>,
+    dir_stats: &Arc<dir_stat::DirStatCache>,
 ) -> Result<()> {
     if chunk.is_empty() {
         return Ok(());
@@ -5103,8 +5121,16 @@ async fn diff_chunk_and_send_needs(
         // resource-sharing hazard cr-ls1-6 raised — so remote checkers need
         // their own measurement (concurrent sessions, not one) before they
         // get a pool. Recorded in the plan rather than silently defaulted.
-        diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts, repair, None)
-            .await?
+        diff_chunk_verdicts(
+            chunk,
+            dst_root,
+            canonical_dst_root,
+            compare_opts,
+            repair,
+            dir_stats,
+            None,
+        )
+        .await?
             .into_iter()
             .map(|(header, resume_eligible)| (header, resume_enabled && resume_eligible))
             .collect();
@@ -5230,6 +5256,10 @@ async fn diff_chunk_verdicts(
     canonical_dst_root: Option<&Path>,
     compare_opts: &CompareOptions,
     repair: &Arc<AttributeRepair>,
+    // ls-5: the session's directory-sweep cache. Explicit for the same
+    // reason `checker_pool` is — a call site that forgot it would silently
+    // re-buy the per-file round trips this slice removed.
+    dir_stats: &Arc<dir_stat::DirStatCache>,
     // `checker_pool: None` runs the diff sequentially. Explicit rather than
     // defaulted so a caller cannot acquire or lose concurrency by accident —
     // the defect this slice exists to fix was a silently single-threaded diff.
@@ -5244,6 +5274,7 @@ async fn diff_chunk_verdicts(
     // rides this blocking chunk with the stats and hashes — never the
     // async control loop.
     let repair = Arc::clone(repair);
+    let dir_stats = Arc::clone(dir_stats);
     // The per-file diff runs on the session's DEDICATED checker pool
     // (`--checkers`). This work is latency-bound — round trips to the
     // destination — so concurrency is the lever, the same one
@@ -5279,6 +5310,7 @@ async fn diff_chunk_verdicts(
                 &opts,
                 &abort,
                 &repair,
+                &dir_stats,
             )? {
                 NeedVerdict::Skip => Ok(None),
                 NeedVerdict::Transfer { resume_eligible } => {
@@ -5376,10 +5408,66 @@ struct AttributeRepair {
     phase_probe: LocalPhaseProbe,
 }
 
-/// Does the destination need this manifest entry? Stats its own file
-/// and delegates the verdict to `manifest::header_transfer_status` —
-/// the one mode-aware compare owner - fed from a live stat instead
-/// of a materialized target manifest.
+/// ls-5: resolve one destination target — `(size, mtime)` when a regular
+/// file is present, plus the Windows attribute DWORD — through the
+/// session's directory-sweep cache, with the per-file stat as the
+/// AUTHORITATIVE fallback for everything the sweep cannot judge exactly
+/// (symlinks and reparse points, case-folded near-miss names, unsweepable
+/// directories). The two paths share `dir_stat::mtime_seconds`, so the
+/// only difference between them is round trips, never the verdict.
+fn resolve_destination_target(
+    dst: &Path,
+    dir_stats: &dir_stat::DirStatCache,
+    repair: &AttributeRepair,
+) -> (Option<(u64, i64)>, Option<u32>) {
+    use dir_stat::{DirStatLookup, SweptEntry};
+    let looked = match (dst.parent(), dst.file_name()) {
+        (Some(dir), Some(name)) => dir_stats.lookup(dir, name, &repair.phase_probe),
+        // A destination path with no parent/name split (a bare root) has
+        // no directory to sweep; only the stat can speak to it.
+        _ => DirStatLookup::Fallback,
+    };
+    match looked {
+        DirStatLookup::Entry(SweptEntry::File {
+            size,
+            mtime,
+            attributes,
+        }) => (Some((size, mtime)), attributes),
+        // Absent — or present as a directory/other, which a file write
+        // must replace: both diff as "target does not have it" (matches
+        // the push daemon's file_requires_upload).
+        DirStatLookup::Entry(SweptEntry::NonFile) | DirStatLookup::Absent => (None, None),
+        DirStatLookup::Entry(SweptEntry::NeedsStat) | DirStatLookup::Fallback => {
+            let stat_result = std::fs::metadata(dst);
+            // ls-1: on Windows the stat ALREADY carries the attribute
+            // DWORD, so capture it here and let the metadata verdict reuse
+            // it instead of spending a second destination round trip on
+            // `GetFileAttributesW`.
+            #[cfg(windows)]
+            let stat_attributes = {
+                use std::os::windows::fs::MetadataExt;
+                stat_result
+                    .as_ref()
+                    .ok()
+                    .filter(|meta| meta.is_file())
+                    .map(|meta| meta.file_attributes())
+            };
+            #[cfg(not(windows))]
+            let stat_attributes: Option<u32> = None;
+            let target = match stat_result {
+                Ok(meta) if meta.is_file() => Some((meta.len(), dir_stat::mtime_seconds(&meta))),
+                _ => None,
+            };
+            (target, stat_attributes)
+        }
+    }
+}
+
+/// Does the destination need this manifest entry? Resolves its own file
+/// (directory-sweep cache first, per-file stat as the authoritative
+/// fallback — ls-5) and delegates the verdict to
+/// `manifest::header_transfer_status` — the one mode-aware compare owner —
+/// fed from a live resolution instead of a materialized target manifest.
 fn destination_needs(
     header: &FileHeader,
     dst_root: &Path,
@@ -5387,6 +5475,7 @@ fn destination_needs(
     opts: &CompareOptions,
     abort: &AtomicBool,
     repair: &AttributeRepair,
+    dir_stats: &dir_stat::DirStatCache,
 ) -> Result<NeedVerdict> {
     let dst = match canonical_dst_root {
         Some(canonical) => {
@@ -5406,48 +5495,22 @@ fn destination_needs(
     // touched and then rejected later by the sink.
     crate::windows_metadata::validate_destination_support(header.windows_metadata.as_ref())?;
 
-    // ls-1 sub-attribution: on a converged tree this stat and the metadata
-    // read below are the ONLY destination I/O the diff performs, and step
-    // (0) put ~100% of the wall clock in COMPARE. Timing them separately is
-    // what says whether the cost is one SMB round trip per file or three.
+    // ls-1 sub-attribution: on a converged tree resolving the target and
+    // the metadata read below are the ONLY destination I/O the diff
+    // performs, and step (0) put ~100% of the wall clock in COMPARE.
+    // ls-5: the resolution now answers from the directory-sweep cache
+    // where the sweep's answer is exact, and drops to the per-file stat
+    // — which REMAINS authoritative — everywhere it is not. The
+    // COMPARE_STAT span covers the whole resolution either way, so the
+    // ls-1 numbers stay comparable; COMPARE_SWEEP appears inside it as a
+    // component on the sweeping thread.
     let stat_span = repair.phase_probe.is_enabled().then(Instant::now);
-    let stat_result = std::fs::metadata(&dst);
+    let (target, stat_attributes) = resolve_destination_target(&dst, dir_stats, repair);
     if let Some(started) = stat_span {
         repair
             .phase_probe
             .record(LocalPhase::CompareStat, started.elapsed());
     }
-    // ls-1: on Windows the stat above ALREADY carries the attribute DWORD, so
-    // capture it here and let the metadata verdict reuse it instead of
-    // spending a second destination round trip on `GetFileAttributesW`.
-    #[cfg(windows)]
-    let stat_attributes = {
-        use std::os::windows::fs::MetadataExt;
-        stat_result
-            .as_ref()
-            .ok()
-            .filter(|meta| meta.is_file())
-            .map(|meta| meta.file_attributes())
-    };
-    #[cfg(not(windows))]
-    let stat_attributes: Option<u32> = None;
-
-    let target = match stat_result {
-        Ok(meta) if meta.is_file() => {
-            let mtime = match meta.modified() {
-                Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
-                    Ok(d) => d.as_secs() as i64,
-                    Err(e) => -(e.duration().as_secs() as i64),
-                },
-                Err(_) => 0,
-            };
-            Some((meta.len(), mtime))
-        }
-        // Absent — or present as a directory/other, which a file
-        // write must replace: both diff as "target does not have it"
-        // (matches the push daemon's file_requires_upload).
-        _ => None,
-    };
     // otp-10b-1: a Checksum session hashes the local candidate so a
     // content-equal file SKIPS regardless of mtime (the old pull's
     // `--checksum` behavior, now role-agnostic). Only the same-size
@@ -6313,6 +6376,7 @@ mod tests {
                 repaired: AtomicU64::new(0),
                 phase_probe: LocalPhaseProbe::disabled(),
             },
+            &dir_stat::DirStatCache::default(),
         )
         .expect_err("a non-Windows destination must reject strict metadata preservation");
         assert!(format!("{error:#}").contains("--drop-windows-metadata"));

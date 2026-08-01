@@ -39,8 +39,11 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   (D-2026-08-01-1). **ls-1 review CLOSED: 9 rounds, 16 findings, r9 CLEAN.**
 - **clp3-ls4 review CLOSED: 3 rounds, 2 findings, both verified-closed, r3
   CLEAN.** Everything landed since ls-1's r9 is now independently reviewed.
-- Next: named-stream enumeration (rel-4-bound), directory-level stat,
-  wire-carrier concurrency — each needs owner scoping.
+- **ls-5 SHIPPED: directory-sweep destination stat — converged SMB mirror
+  166.38 → 114.73 s** (2.38× vs step (0)); local A/B neutral; review pending.
+- Next: OWNER GATE on named-stream elision (numbers in
+  `docs/bench/ls1-phase-2026-07-31/dir-sweep.md`); wire carrier still needs
+  a concurrent-session measurement first.
 
 ## Now (active work)
 
@@ -100,8 +103,14 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    runtime treatment — nothing to discover, and an adaptive throttle on the
    WRITE path would be risk for no measured gain. Real tree: **17.68 → 8.70 s
    (2.03×)** on the shipped default. Evidence `.../apply-workers.md`.
-   Remaining: named-stream enumeration (rel-4-bound), directory-level stat,
-   and the wire carrier (needs a concurrent-session measurement first).
+   **ls-5 SHIPPED: directory-sweep destination stat, 166.38 → 114.73 s.**
+   One `read_dir` per destination directory answers the diff's target
+   resolutions (6,191 sweeps / 6,709 dirs, zero re-sweep waste); the
+   per-file stat REMAINS authoritative for anything the sweep cannot judge
+   exactly. Local NVMe A/B neutral. Evidence `.../dir-sweep.md`.
+   Remaining: named-stream elision (OWNER GATE — the check is now ~the
+   whole compare; eliding it is a fidelity change, see dir-sweep.md), and
+   the wire carrier (needs a concurrent-session measurement first).
    **Review loop CLOSED: 4 rounds, 8 findings, all resolved, r4 CLEAN with
    `guard_confirmed: true`** — see `REVIEW.md`. **`ls-0` LANDED**: the
    summary separates copied from repaired files and labels the rate as a

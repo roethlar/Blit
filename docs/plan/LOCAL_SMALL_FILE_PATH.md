@@ -276,6 +276,19 @@ environmental/config cause is held to the same bar as a code cause.
   copying case is unmeasured.
 - **ls-2..n** — one fix slice per CONFIRMED cause, smallest change first,
   A/B'd against the unmodified build on the same rig.
+- **ls-5 — directory-sweep destination stat (owner "go" 2026-08-01).**
+  Replace the diff's per-file `std::fs::metadata` with a lazy per-directory
+  enumeration cache: one `read_dir` sweep returns every entry's size, mtime
+  and (on Windows) the attribute DWORD, because `FindFirstFile` carries them
+  in the enumeration itself. Measured premise on the field tree: one full
+  sweep of `H:\apps` (46,041 files) = **21.19 s** against ~49 s of serial
+  per-file stats it replaces. Semantics-free by construction: the per-file
+  stat REMAINS the authoritative path for anything the sweep cannot judge
+  exactly (symlinks/reparse points, case-folded near-miss names, unreadable
+  directories); a sweep miss with no case-folded candidate is a trusted
+  absent, so a fresh copy pays no fallback storm. The per-file NAMED-STREAM
+  check is explicitly NOT this slice: eliding it changes what "converged"
+  means and is an owner gate, recorded in the bench doc.
 - **ls-final** — re-run the full local matrix (`large`/`small`/`mixed`) at both
   concurrencies, plus the remote no-regression check.
 

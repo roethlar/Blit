@@ -68,6 +68,13 @@ pub enum LocalPhase {
     /// converged run's wall clock, so the next question is which of its own
     /// per-file operations that is.
     CompareStat,
+    /// ls-5: one `read_dir` sweep of a destination directory inside the
+    /// diff, feeding the [`super::dir_stat::DirStatCache`] that answers
+    /// most `CompareStat` resolutions without a per-file round trip. A
+    /// COMPONENT of `CompareStat` (the sweeping thread's stat span
+    /// contains its sweep), not a sibling — see the module docs on phases
+    /// overlapping.
+    CompareSweep,
     /// Reading the destination's Windows metadata (durable attributes plus
     /// named-stream enumeration) to judge metadata convergence. Only runs
     /// when size/mtime already matched — which on a CONVERGED tree is every
@@ -104,11 +111,12 @@ pub enum LocalPhase {
 impl LocalPhase {
     /// Every phase, in the order a session encounters them. Fixed so the
     /// report's field order is stable across runs and diffable.
-    pub const ALL: [LocalPhase; 10] = [
+    pub const ALL: [LocalPhase; 11] = [
         LocalPhase::Enumerate,
         LocalPhase::EnumerateBackpressure,
         LocalPhase::Compare,
         LocalPhase::CompareStat,
+        LocalPhase::CompareSweep,
         LocalPhase::CompareMetadata,
         LocalPhase::AttributeRepair,
         LocalPhase::Plan,
@@ -123,12 +131,13 @@ impl LocalPhase {
             LocalPhase::EnumerateBackpressure => 1,
             LocalPhase::Compare => 2,
             LocalPhase::CompareStat => 3,
-            LocalPhase::CompareMetadata => 4,
-            LocalPhase::AttributeRepair => 5,
-            LocalPhase::Plan => 6,
-            LocalPhase::ApplyBackpressure => 7,
-            LocalPhase::Apply => 8,
-            LocalPhase::Delete => 9,
+            LocalPhase::CompareSweep => 4,
+            LocalPhase::CompareMetadata => 5,
+            LocalPhase::AttributeRepair => 6,
+            LocalPhase::Plan => 7,
+            LocalPhase::ApplyBackpressure => 8,
+            LocalPhase::Apply => 9,
+            LocalPhase::Delete => 10,
         }
     }
 }
@@ -196,7 +205,7 @@ type ReportEmitter = dyn Fn(LocalPhaseReport) + Send + Sync + 'static;
 
 struct ProbeContext {
     run_id: Arc<str>,
-    phases: [AtomicPhase; 10],
+    phases: [AtomicPhase; 11],
     emit: Arc<ReportEmitter>,
     emitted: OnceLock<()>,
 }
