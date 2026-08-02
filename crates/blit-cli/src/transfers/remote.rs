@@ -336,6 +336,7 @@ async fn run_remote_push_transfer_inner(
         ignore_existing: args.ignore_existing,
         remote_label: format_remote_endpoint(&remote),
         lifecycle_trace: lifecycle_trace.clone(),
+        verbose: args.verbose,
     };
 
     // Push has no caller-side destructive step (mirror-delete is

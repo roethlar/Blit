@@ -784,7 +784,14 @@ pub async fn run_local_session(
     let fs_source: Arc<dyn TransferSource> = Arc::new(
         FsTransferSource::new(src_root.to_path_buf())
             .with_progress(options.progress_events.clone())
-            .with_phase_probe(phase_probe.clone()),
+            .with_phase_probe(phase_probe.clone())
+            // audit-16: a sink-less run (no progress lane attached) only
+            // prints the raw enumeration heartbeat under `--verbose`, or
+            // when `-p` was requested at all (clp-2 residue c: `-p` on a
+            // redirected/non-TTY stderr can't draw a row, so the sink
+            // never attaches either — that fallback keeps the heartbeat
+            // as the only liveness signal and predates this gate).
+            .with_verbose(options.verbose || options.progress),
     );
     let filtered: Arc<dyn TransferSource> = Arc::new(FilteredSource::new(
         Arc::clone(&fs_source),

@@ -33,8 +33,8 @@ Last updated: 2026-07-31 (pfc-1..6 + clp-1..2 landed; owner field check returned
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff — 2026-08-01
-- Done: pfc SHIPPED (D-2026-08-01-2); clp-1..3; adaptive checkers 1.71×
-  (D-2026-08-01-1). Reviews closed clean: ls-1, clp3-ls4. See DEVLOG.
+- Done: pfc SHIPPED (D-2026-08-01-2); clp-1..3; adaptive checkers 1.71× (D-2026-08-01-1). Reviews closed clean: ls-1, clp3-ls4. See DEVLOG.
+- **audit-16 CLOSED:** sink-less enumeration heartbeat now gated behind `--verbose` (or `-p`, preserving clp-2's redirected-stream fallback); TODO.md updated.
 - **ls-5 SHIPPED: directory-sweep stat, 166.38 → 114.73 s**; A/B neutral.
   Review r1: 1 HIGH (cr-ls5-1, 8.3-alias overwrite) FIXED, re-review queued.
 - **ls-6 SHIPPED (D-2026-08-01-4): stream interrogation deleted from the

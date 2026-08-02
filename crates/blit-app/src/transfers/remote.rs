@@ -119,6 +119,12 @@ pub struct PushExecution {
     pub ignore_existing: bool,
     pub remote_label: String,
     pub lifecycle_trace: TransferLifecycleTrace,
+    /// audit-16: gates the SOURCE-side enumeration heartbeat's raw
+    /// stderr lines when no progress sink is attached (non-TTY runs
+    /// without `-p`). `false` keeps the scan quiet, matching
+    /// `docs/plan/LOCAL_TRANSFER_HEURISTICS.md`'s original intent;
+    /// callers thread the CLI's `--verbose`/`-v` flag through here.
+    pub verbose: bool,
 }
 
 /// Output of [`run_remote_push`]. `summary` is the
@@ -166,7 +172,8 @@ pub async fn run_remote_push(
     execution: PushExecution,
     progress: Option<&RemoteTransferProgress>,
 ) -> Result<PushExecutionOutcome> {
-    let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(execution.source));
+    let source: Arc<dyn TransferSource> =
+        Arc::new(FsTransferSource::new(execution.source).with_verbose(execution.verbose));
 
     let options = PushSessionOptions {
         compare_mode: execution.compare_mode,

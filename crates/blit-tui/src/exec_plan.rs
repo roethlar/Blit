@@ -151,6 +151,9 @@ pub(crate) fn build_f1_push_execution(
         ignore_existing: false,
         remote_label,
         lifecycle_trace: Default::default(),
+        // No verbose toggle on the F1 trigger — stays quiet like every
+        // other TUI-driven transfer (audit-16).
+        verbose: false,
     }
 }
 

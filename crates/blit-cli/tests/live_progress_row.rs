@@ -60,14 +60,28 @@ fn progress_with_redirected_stderr_keeps_the_enumeration_liveness() {
     );
 }
 
-/// The sink-less baseline the above must match: `-p` changes nothing
-/// about a redirected stream.
+/// audit-16 guard: the true default (no `-p`, no `--verbose`) must stay
+/// quiet. Before the fix, a sink-less scan printed the legacy heartbeat
+/// lines unconditionally regardless of verbosity.
 #[test]
-fn plain_redirected_run_keeps_the_enumeration_liveness() {
+fn plain_redirected_run_stays_quiet_without_verbose() {
     let output = copy_with_progress(&[]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
+        !stderr.contains(ENUMERATION_LIVENESS),
+        "a plain run with neither -p nor --verbose must stay quiet:\n{stderr}"
+    );
+}
+
+/// `--verbose` (no `-p`) restores the sink-less heartbeat end-to-end
+/// through the real CLI flag — the audit-16 opt-in this binary's other
+/// two cases (progress-requested, and the true default above) bracket.
+#[test]
+fn verbose_redirected_run_keeps_the_enumeration_liveness() {
+    let output = copy_with_progress(&["--verbose"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
         stderr.contains(ENUMERATION_LIVENESS),
-        "the sink-less run's stderr is unchanged:\n{stderr}"
+        "--verbose must restore the sink-less enumeration liveness:\n{stderr}"
     );
 }

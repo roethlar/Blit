@@ -108,7 +108,7 @@ explicitly-deferred logging epic (F15).
 
 ### New audit findings (2026-07-06)
 
-- [ ] **audit-16** `spawn_manifest_task`'s "Enumerated N entries… (streaming
+- [x] **audit-16** `spawn_manifest_task`'s "Enumerated N entries… (streaming
       manifest)" heartbeat (`crates/blit-core/src/remote/push/client/helpers.rs:114-183`)
       prints unconditionally on a 1s wall-clock timer — no `--verbose` gate.
       `docs/plan/LOCAL_TRANSFER_HEURISTICS.md:42` (Status: Historical)
@@ -131,8 +131,21 @@ explicitly-deferred logging epic (F15).
       sink attached (any `effective_progress()` run) emit the counts as
       `ProgressEvent::Enumerated` and print no raw lines; sink-less
       callers (daemon logs, remote routes, non-TTY without `-p`) keep the
-      unconditional print byte-identically. The remaining open half is
+      unconditional print byte-identically. The remaining open half was
       the sink-less verbose gate and the remote routes' attachment.
+      **Closed 2026-08-02:** `FsTransferSource` (the unified home for
+      this heartbeat since the `spawn_manifest_task` era) now carries a
+      `verbose` flag (`with_verbose`), defaulting `false` on every
+      construction. `run_local_session` threads `options.verbose ||
+      options.progress` (the `||` preserves clp-2's redirected-`-p`
+      fallback, `docs/plan/CLI_LIVE_PROGRESS.md` residue (c)); remote
+      push threads `PushExecution.verbose` from the CLI's `--verbose`/
+      `-v`. Default `copy`/`mirror`/push runs are quiet again, matching
+      `docs/plan/LOCAL_TRANSFER_HEURISTICS.md`'s original intent. The
+      remote routes' attachment gap (push's SOURCE-side enumeration
+      never rides a progress sink at all) is unchanged and stays tracked
+      as `docs/plan/CLI_LIVE_PROGRESS.md`'s residue (d), not re-filed
+      here.
 - [ ] **audit-17** — **owned by `docs/plan/PER_FILE_ERROR_CONTAINMENT.md`
       (Active): pfc-2 landed single-file containment (mirror sessions);
       pfc-3 (tar-shard writers) closes exactly this site;

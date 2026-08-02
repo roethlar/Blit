@@ -203,6 +203,14 @@ pub struct FsTransferSource {
     /// a live probe; every other construction leaves it disabled, so the
     /// remote routes that share this source are byte-identical.
     phase_probe: LocalPhaseProbe,
+    /// audit-16: gates the sink-less heartbeat's raw stderr lines
+    /// (`EnumerationHeartbeat`'s legacy path, used when `progress` is
+    /// `None`). Default `false` keeps every construction quiet, matching
+    /// `docs/plan/LOCAL_TRANSFER_HEURISTICS.md`'s original intent
+    /// ("Default mode remains quiet unless a stall occurs"); only a
+    /// caller that threads the CLI's `--verbose`/`-v` flag through
+    /// [`Self::with_verbose`] gets the lines back.
+    verbose: bool,
 }
 
 impl FsTransferSource {
@@ -211,6 +219,7 @@ impl FsTransferSource {
             root,
             progress: None,
             phase_probe: LocalPhaseProbe::disabled(),
+            verbose: false,
         }
     }
 
@@ -230,6 +239,14 @@ impl FsTransferSource {
         self.progress = progress;
         self
     }
+
+    /// audit-16: gate the sink-less heartbeat's raw lines behind the
+    /// caller's verbose flag. `false` (the default) leaves a sink-less
+    /// scan silent; `true` restores the legacy unconditional lines.
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
 }
 
 #[async_trait]
@@ -244,7 +261,7 @@ impl TransferSource for FsTransferSource {
             filter.unwrap_or_default(),
             unreadable_paths,
             true,
-            EnumerationHeartbeat::new(self.progress.clone()),
+            EnumerationHeartbeat::new(self.progress.clone(), self.verbose),
             self.phase_probe.clone(),
         );
         (headers, SourceScan::new(task))
@@ -260,7 +277,7 @@ impl TransferSource for FsTransferSource {
             filter.unwrap_or_default(),
             unreadable_paths,
             false,
-            EnumerationHeartbeat::new(self.progress.clone()),
+            EnumerationHeartbeat::new(self.progress.clone(), self.verbose),
             self.phase_probe.clone(),
         );
         (headers, SourceScan::new(task))
@@ -309,10 +326,16 @@ impl TransferSource for FsTransferSource {
 /// and NOTHING reaches raw stderr — the caller owns a live terminal row
 /// there, and a library `eprintln!` scrolls it off-row once a second
 /// (the motivating failure in `docs/plan/CLI_LIVE_PROGRESS.md`). With no
-/// sink the legacy lines print unchanged: they are the daemon's
-/// enumeration log, not TTY output (R46-F4 keeps them off stdout).
+/// sink attached, the legacy lines are gated behind `verbose` (audit-16):
+/// `docs/plan/LOCAL_TRANSFER_HEURISTICS.md`'s original intent was a
+/// quiet default with `--verbose` restoring the heartbeat, but the
+/// shipped code never wired that check in until now.
 struct EnumerationHeartbeat {
     progress: Option<crate::remote::transfer::RemoteTransferProgress>,
+    /// audit-16: when `progress` is `None`, only emit the legacy lines
+    /// if this is `true`. Sink-attached scans ignore this entirely — the
+    /// progress lane above is unconditional whenever a sink exists.
+    verbose: bool,
     /// Minimum spacing between reports. Only tests vary it.
     interval: std::time::Duration,
     /// Set by [`Self::begin`] inside the scan task, so the completion
@@ -328,9 +351,13 @@ struct EnumerationHeartbeat {
 }
 
 impl EnumerationHeartbeat {
-    fn new(progress: Option<crate::remote::transfer::RemoteTransferProgress>) -> Self {
+    fn new(
+        progress: Option<crate::remote::transfer::RemoteTransferProgress>,
+        verbose: bool,
+    ) -> Self {
         Self {
             progress,
+            verbose,
             interval: std::time::Duration::from_secs(1),
             started: None,
             last: None,
@@ -345,9 +372,10 @@ impl EnumerationHeartbeat {
     #[cfg(test)]
     fn capturing(
         progress: Option<crate::remote::transfer::RemoteTransferProgress>,
+        verbose: bool,
     ) -> (Self, Arc<Mutex<Vec<String>>>) {
         let lines: Arc<Mutex<Vec<String>>> = Arc::default();
-        let mut heartbeat = Self::new(progress);
+        let mut heartbeat = Self::new(progress, verbose);
         heartbeat.interval = std::time::Duration::ZERO;
         heartbeat.lines = Some(Arc::clone(&lines));
         (heartbeat, lines)
@@ -378,10 +406,11 @@ impl EnumerationHeartbeat {
                     self.reported = enumerated;
                 }
             }
-            None => self.emit_line(format!(
+            None if self.verbose => self.emit_line(format!(
                 "Enumerated {} entries… (streaming manifest)",
                 enumerated
             )),
+            None => {}
         }
         self.last = Some(std::time::Instant::now());
     }
@@ -396,11 +425,12 @@ impl EnumerationHeartbeat {
                     self.reported = enumerated;
                 }
             }
-            None => self.emit_line(format!(
+            None if self.verbose => self.emit_line(format!(
                 "Manifest enumeration complete in {:.2?} ({} entries)",
                 self.started.map(|s| s.elapsed()).unwrap_or_default(),
                 enumerated
             )),
+            None => {}
         }
     }
 
@@ -1039,7 +1069,7 @@ mod enumeration_heartbeat_tests {
         let dir = fixture();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
         let (heartbeat, lines) =
-            EnumerationHeartbeat::capturing(Some(RemoteTransferProgress::new(tx)));
+            EnumerationHeartbeat::capturing(Some(RemoteTransferProgress::new(tx)), false);
 
         assert_eq!(run_scan(dir.path().to_path_buf(), heartbeat).await, 3);
 
@@ -1058,12 +1088,32 @@ mod enumeration_heartbeat_tests {
         assert_eq!(reported, 3, "the whole count reaches the sink");
     }
 
-    /// Sink-less callers keep the legacy lines verbatim: a serving daemon
-    /// has no row to protect and these lines are its enumeration log.
+    /// audit-16 guard: sink-less callers must stay silent by default —
+    /// `docs/plan/LOCAL_TRANSFER_HEURISTICS.md`'s original intent was a
+    /// quiet default with `--verbose` restoring the heartbeat. Before the
+    /// fix, `EnumerationHeartbeat` printed unconditionally whenever no
+    /// progress sink was attached, regardless of verbosity.
     #[tokio::test]
-    async fn sinkless_scan_keeps_the_legacy_lines_verbatim() {
+    async fn sinkless_default_scan_emits_no_raw_lines() {
         let dir = fixture();
-        let (heartbeat, lines) = EnumerationHeartbeat::capturing(None);
+        let (heartbeat, lines) = EnumerationHeartbeat::capturing(None, false);
+
+        assert_eq!(run_scan(dir.path().to_path_buf(), heartbeat).await, 3);
+
+        assert!(
+            lines.lock().expect("line capture").is_empty(),
+            "a sink-less, non-verbose scan must emit zero raw lines, got {:?}",
+            lines.lock().expect("line capture")
+        );
+    }
+
+    /// Sink-less + verbose callers keep the legacy lines verbatim: a
+    /// caller that explicitly asked for `--verbose` still gets the
+    /// heartbeat, byte-identical to the pre-audit-16 unconditional print.
+    #[tokio::test]
+    async fn sinkless_verbose_scan_keeps_the_legacy_lines_verbatim() {
+        let dir = fixture();
+        let (heartbeat, lines) = EnumerationHeartbeat::capturing(None, true);
 
         assert_eq!(run_scan(dir.path().to_path_buf(), heartbeat).await, 3);
 
