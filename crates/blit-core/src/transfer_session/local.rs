@@ -1395,9 +1395,17 @@ mod tests {
     }
 
     /// ls-5 guard for the trusted-absent arm: a fresh copy into a
-    /// destination that does not exist yet must not pay a per-file
-    /// fallback storm — the sweep's NotFound answers every child.
-    /// Reverting AbsentDir to Unsweepable reds the fallback count.
+    /// destination that does not exist yet answers from the sweep's
+    /// NotFound rather than stat-ing every child. Reverting AbsentDir to
+    /// Unsweepable zeroes the hit counter and reds this.
+    ///
+    /// cr-ls5-2 narrowed what this can assert: the first transfer verdict
+    /// taints the destination directory, so absences judged AFTER it fall
+    /// back by design and the old `fallbacks() == 0` contract is no longer
+    /// the right one for a directory the session writes into more than
+    /// once. The spirit survives deterministically in the hit: a verdict
+    /// requires a lookup, so the session's FIRST lookup cannot be preceded
+    /// by any taint, and it is the absent directory's sweep that answers it.
     #[tokio::test]
     async fn a_fresh_copy_trusts_the_sweeps_absent_answer() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1422,11 +1430,56 @@ mod tests {
         .await
         .expect("fresh session");
         assert_eq!(summary.copied_files, 4);
-        assert_eq!(
-            cache.fallbacks(),
-            0,
-            "an absent destination directory is a trusted absent for every \
-             child, never a per-file stat storm"
+        assert!(
+            cache.hits() >= 1,
+            "an absent destination directory is a trusted absent until this \
+             session writes into it, never a per-file stat storm from the \
+             first entry on"
+        );
+    }
+
+    /// cr-ls5-2 guard: a snapshot may not outlive this session's own
+    /// writes. The manifest is diffed in `DEST_DIFF_CHUNK` (128) chunks and
+    /// chunk N's payloads land while chunk N+1 is being diffed, so the 129th
+    /// and 130th entries are judged against a directory the session has
+    /// already written 128 files into. Their absence answers must come from
+    /// the authoritative stat — the pre-write listing cannot see a freshly
+    /// written file, nor the 8.3 alias or case variant it is reachable under.
+    ///
+    /// Deterministic in both directions: chunk 2 has exactly two entries and
+    /// both live in the tainted destination root, and with the taint removed
+    /// a fresh absent-directory copy takes ZERO fallbacks, so this reds.
+    #[tokio::test]
+    async fn a_later_chunk_stops_trusting_absence_once_the_session_has_written() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("mkdir");
+        // 130 > 128: forces a second diff chunk, whose verdicts are reached
+        // strictly after the first chunk's were recorded.
+        for file in 0..130 {
+            std::fs::write(src_root.join(format!("f{file:03}.txt")), b"new").expect("write");
+        }
+
+        let cache = Arc::new(super::super::dir_stat::DirStatCache::default());
+        let summary = run_local_session(
+            &src_root,
+            &dst_root,
+            LocalMirrorOptions {
+                perf_history: false,
+                dir_stat_probe: Some(Arc::clone(&cache)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fresh session");
+        assert_eq!(summary.copied_files, 130, "every source file must land");
+        assert!(
+            cache.fallbacks() >= 2,
+            "entries judged after the session wrote into their destination \
+             directory must be resolved by the authoritative stat; got {} \
+             fallbacks",
+            cache.fallbacks()
         );
     }
 

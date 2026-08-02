@@ -43,7 +43,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   528/0. Evidence: `stream-interrogation-deletion.md` in the bench dir.
 - **1.0 RELEASE EFFORT ACTIVE** (owner goal + commit/push/review
   discretion, 2026-08-01): gates in `docs/plan/RELEASE_1_0.md`. Open:
-  cr-ls5-2 (HIGH, opus subagent), owner calls on audit-18/19 disposition.
+  cr-ls5-2 FIXED (taint-on-verdict), re-review queued; audit-18/19 owner call.
 
 ## Now (active work)
 

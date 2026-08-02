@@ -5570,28 +5570,36 @@ fn destination_needs(
         }
         _ => DestinationMetadataVerdict::Converged,
     };
-    match finalize_need_verdict(status, target, metadata) {
-        DiffVerdict::Settled(verdict) => Ok(verdict),
+    let verdict = match finalize_need_verdict(status, target, metadata) {
+        DiffVerdict::Settled(verdict) => verdict,
         // A destination that writes nothing must not repair either; it
         // still PLANS the file, so a dry run's would-copy count is exactly
         // what it reported before pfc-6.
         DiffVerdict::RepairAttributes { resume_eligible } if !repair.enabled => {
-            Ok(NeedVerdict::Transfer { resume_eligible })
+            NeedVerdict::Transfer { resume_eligible }
         }
-        DiffVerdict::RepairAttributes { resume_eligible } => Ok(resolve_attribute_repair(
-            &dst,
-            resume_eligible,
-            &repair.repaired,
-            || {
+        DiffVerdict::RepairAttributes { resume_eligible } => {
+            resolve_attribute_repair(&dst, resume_eligible, &repair.repaired, || {
                 repair.phase_probe.measure(LocalPhase::AttributeRepair, || {
                     crate::windows_metadata::repair_attributes(
                         &dst,
                         header.windows_metadata.as_ref(),
                     )
                 })
-            },
-        )),
+            })
+        }
+    };
+    // cr-ls5-2: the ONE place both carriers settle a need, so the ONE place
+    // the sweep cache learns this session is about to write into `dst`'s
+    // directories — every later absence answer for them now costs an
+    // authoritative stat instead of trusting a pre-write listing. Announced
+    // unconditionally: a Transfer verdict is the write's only warning, and a
+    // destination that plans without writing (`--dry-run`) pays nothing but
+    // the round trips it made before ls-5 anyway.
+    if matches!(verdict, NeedVerdict::Transfer { .. }) {
+        dir_stats.taint(&dst);
     }
+    Ok(verdict)
 }
 
 fn finalize_need_verdict(
