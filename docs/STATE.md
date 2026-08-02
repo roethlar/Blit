@@ -1,6 +1,9 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-08-02 (TUI rework M1 landed: F3 picker mode + path-return plumbing, no caller wired yet; full gate green)
+Last updated: 2026-08-02 handoff. NOW: BLIT_CONSOLE.md Draft (TUI_REWORK
+scrapped, D-2026-08-02-2). NEXT: owner rules D1 (egui vs tauri) → D2/D3
+→ dispatch C1. Open: G5b cross-OS smoke matrix; interim 1.0 archives in
+dist/ off `ef9a13b2`; audit-18/19 ship documented unless owner overrides.
 
 - **BLIT 0.1.1 IS RELEASED (D-2026-07-23-8):** annotated tag `v0.1.1`
   resolves to exact validated candidate `d1f1152d` on LAN Gitea and GitHub.
@@ -38,12 +41,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 - **ls-5+6 SHIPPED: converged mirror 166.38 → 55.57 s (5.1× vs field)** —
   sweep stat + interrogation deletion (D-2026-08-01-4); cr-ls5-* closed.
 - **1.0 RELEASE EFFORT ACTIVE** (owner goal + discretion, 2026-08-01):
-  gates in `RELEASE_1_0.md` — G1 closed; bump landed; 3 interim archives
-  verified off `ef9a13b2`.
-  **TUI_REWORK SCRAPPED by owner (D-2026-08-02-2) → `BLIT_CONSOLE.md`**
-  (console core + GUI + file-manager TUI, Draft): awaiting owner D1
-  (egui vs Tauri), then D2/D3 → C1. M1 `f3picker.rs` dead code pending
-  cutover. Also open: G5b cross-OS smoke matrix.
+  `RELEASE_1_0.md` — G1 closed; bump landed; interim archives `ef9a13b2`.
+  **TUI_REWORK SCRAPPED (D-2026-08-02-2) → `BLIT_CONSOLE.md` Draft**;
+  M1 `f3picker.rs` dead code pending cutover.
 
 ## Now (active work)
 
