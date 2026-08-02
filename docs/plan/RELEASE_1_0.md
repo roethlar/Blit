@@ -51,11 +51,14 @@ are the owner's act.
   small mixed tree with nested dirs and a content change, initial copy,
   content verify, converged re-run must report 0 changed. Recorded here
   with results per pair.
-- [ ] **G5c — TUI Pick-not-Type rework complete (D-2026-08-02-1, owner
-  option 3).** `docs/plan/TUI_REWORK.md` M1–M6 all land through the
-  review loop, plus owner interactive UX acceptance (agents cannot UX-test
-  a TTY). The `ef9a13b2` candidate and tonight's archives become interim
-  pipeline proof; the final candidate is re-cut after this gate.
+- [ ] **G5c — usable UI surface (D-2026-08-02-1 intent, re-pointed by
+  D-2026-08-02-2).** TUI_REWORK was scrapped whole by the owner;
+  `docs/plan/BLIT_CONSOLE.md` replaces it — one console core, GUI +
+  file-manager TUI faces, owner-run acceptance per milestone. Which
+  milestones gate 1.0 is that plan's D3 (owner, pending). The legacy TUI
+  retires from the release surface at cutover regardless — nothing broken
+  ships. The `ef9a13b2` candidate and its archives are interim pipeline
+  proof; the final candidate is re-cut after this gate.
 - [ ] **G6 — OWNER GATE: tag v1.0.0 and publish.** Outward act; needs the
   owner's explicit go on the exact candidate SHA.
 

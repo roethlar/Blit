@@ -1,6 +1,11 @@
 # TUI Rework — From Typing to Navigation
 
-**Status**: Active (was: Design doc, awaiting owner sign-off before code changes)
+**Status**: Superseded — scrapped whole by owner, 2026-08-02 ("nothing
+about current TUI works for me. scrap the entire UI… no arcane 'picker'
+keys"); replaced by `BLIT_CONSOLE.md` (one console core, GUI +
+file-manager TUI faces, D-2026-08-02-2). M1 landed (`cc7a3269`,
+`f3picker.rs`) before the ruling and is dead code pending the cutover
+decision recorded there; M2–M6 never started.
 **Created**: 2026-05-31
 **Supersedes**: portions of `TUI_DESIGN.md` §6 (trigger modal text inputs)
 and the F3 free-text destination prompt.

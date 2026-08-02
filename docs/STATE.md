@@ -35,15 +35,15 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Handoff — 2026-08-01
 - Done: pfc SHIPPED (D-2026-08-01-2); clp-1..3; checkers 1.71×; audit-16
   closed (heartbeat verbose-gated). Reviews clean: ls-1, clp3-ls4. DEVLOG.
-- **ls-5 + ls-6 SHIPPED: converged mirror 166.38 → 55.57 s (5.1× vs field
-  complaint)** — directory-sweep stat + stream interrogation deleted
-  (D-2026-08-01-4); cr-ls5-1/-2/-3 verified-closed; ls1-phase bench dir.
+- **ls-5+6 SHIPPED: converged mirror 166.38 → 55.57 s (5.1× vs field)** —
+  sweep stat + interrogation deletion (D-2026-08-01-4); cr-ls5-* closed.
 - **1.0 RELEASE EFFORT ACTIVE** (owner goal + discretion, 2026-08-01):
-  gates in `docs/plan/RELEASE_1_0.md`. G1 closed (3 rounds, 5 findings);
-  1.0.0 bump landed; 3 interim archives built+verified off `ef9a13b2`.
-  **1.0 NOW GATED ON TUI REWORK (D-2026-08-02-1, owner option 3):**
-  M1–M6 via subagents; M1 LANDED (F3 picker mode, no caller wired yet);
-  M3a/b need §6 sign-off (1/3/5/6 + 6). Also open: G5b cross-OS smoke matrix.
+  gates in `RELEASE_1_0.md` — G1 closed; bump landed; 3 interim archives
+  verified off `ef9a13b2`.
+  **TUI_REWORK SCRAPPED by owner (D-2026-08-02-2) → `BLIT_CONSOLE.md`**
+  (console core + GUI + file-manager TUI, Draft): awaiting owner D1
+  (egui vs Tauri), then D2/D3 → C1. M1 `f3picker.rs` dead code pending
+  cutover. Also open: G5b cross-OS smoke matrix.
 
 ## Now (active work)
 

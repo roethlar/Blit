@@ -715,3 +715,8 @@ Format:
 - Decision: v1.0.0 is not tagged until `docs/plan/TUI_REWORK.md` M1–M6 are complete; the TUI ships in 1.0 as a first-class surface, not as-is or preview-flagged.
 - Why: owner ruled option 3 (2026-08-02) when asked; the TUI has had no interactive UX testing and its rework plan was already Active with all milestones open.
 - Supersedes: RELEASE_1_0.md's "TUI rework M1–M6" non-goal (my unratified scope call); the ef9a13b2 candidate and tonight's archives become interim proof of the release pipeline, to be re-cut at the eventual candidate.
+
+## D-2026-08-02-2 — TUI_REWORK scrapped; Blit Console (one core, two faces) replaces it
+- Decision: the Pick-not-Type rework and the current TUI surfaces are scrapped whole (owner: "nothing about the current TUI works for me… no arcane picker keys"); the replacement is `docs/plan/BLIT_CONSOLE.md` — a shared `blit-console-core` with a GUI face (rust/tauri-or-egui, D1 pending) AND a file-manager TUI face, because "for headless boxes, a GUI is useless."
+- Why: the product's purpose is "manage transfers between daemons and handle the CLI options I don't want to remember"; two prior UI attempts failed by stdout-parsing integration and owner-sees-it-last process, both corrected structurally in the new plan (direct API core, owner-run acceptance gate per milestone).
+- Supersedes: D-2026-08-02-1's concrete gate (TUI_REWORK M1–M6) — its intent (no 1.0 with an unusable UI) persists as RELEASE_1_0 G5c re-pointed to BLIT_CONSOLE milestones (scope = D3, pending).
