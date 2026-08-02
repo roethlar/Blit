@@ -36,21 +36,40 @@
 //! diffed, so a directory that was absent or empty at sweep time can hold
 //! this session's own freshly written files — and their 8.3 aliases and
 //! case variants — by the time a later entry is judged against the same
-//! snapshot. A [`DirStatCache::taint`] therefore rides every transfer
-//! VERDICT: from then on, every ABSENCE answer for that directory (a
-//! swept miss, an [`DirSnapshot::AbsentDir`] child, the empty-directory
-//! carve-out) degrades to [`DirStatLookup::Fallback`], where the stat
-//! resolves aliases and case exactly as the filesystem does. Listed-entry
-//! HITS survive: a hit describes that file's own pre-write state, which is
-//! the state the diff is entitled to compare against. Taint precedes the
+//! snapshot. A [`DirStatCache::mark_write_pending`] therefore rides every
+//! transfer VERDICT: from then on, every ABSENCE answer (a swept miss, an
+//! [`DirSnapshot::AbsentDir`] child, the empty-directory carve-out)
+//! degrades to [`DirStatLookup::Fallback`], where the stat resolves
+//! aliases and case exactly as the filesystem does. Listed-entry HITS
+//! survive: a hit describes that file's own pre-write state, which is the
+//! state the diff is entitled to compare against. The mark precedes the
 //! writes it guards by construction — a chunk's verdicts are all recorded
 //! before any of its payloads is queued, and the next chunk's diff starts
 //! only after the previous chunk returned.
+//!
+//! cr-ls5-3 fixes what that degradation was keyed BY. It first shipped as
+//! a `HashSet<PathBuf>` of tainted directories, which matched SPELLINGS,
+//! not directories: Windows resolves case variants and 8.3 directory
+//! aliases to one directory, so a write announced under `NewDirectory`
+//! left a lookup under `newdirectory` still trusting the stale absence —
+//! the very overwrite cr-ls5-2 set out to close, reached by another name.
+//! Reasoning about destination identity through NAMES is the root error
+//! this file has now made three times (cr-ls5-1 leaf aliases, cr-ls5-2
+//! snapshot staleness, cr-ls5-3 parent aliases), and canonicalizing is no
+//! answer: at verdict time the directory may not exist yet, and the round
+//! trips are exactly what the cache exists to avoid. So the per-directory
+//! precision is DELETED in favour of one session-global flag: once any
+//! verdict in the session says Transfer, EVERY absence-class answer falls
+//! back, in every directory, on every platform. A converged mirror issues
+//! no Transfer verdicts, so it sets nothing and its fast path is
+//! untouched; a fresh copy pays one authoritative stat per absence answer
+//! after the first write, which is dwarfed by the copies those answers
+//! belong to.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -122,13 +141,6 @@ struct CacheInner {
     dirs: HashMap<PathBuf, Arc<OnceLock<DirSnapshot>>>,
     /// Insertion order, for FIFO eviction.
     order: VecDeque<PathBuf>,
-    /// cr-ls5-2: directories this session has decided to write into, and
-    /// their ancestors. Deliberately NOT evicted with `dirs`: a re-swept
-    /// snapshot is newer but still a snapshot, so the degradation has to
-    /// outlive the listing it degrades. One `PathBuf` per destination
-    /// directory the session touches is the same order as the tree it is
-    /// writing.
-    tainted: HashSet<PathBuf>,
 }
 
 /// Session-lifetime cache of destination directory sweeps. Shared by every
@@ -140,13 +152,20 @@ struct CacheInner {
 /// Against EXTERNAL mutation that is the same check-then-act model the
 /// per-file stat already had. Against the session's OWN apply it is not
 /// (cr-ls5-2): applies run concurrently with the diff of later chunks, so
-/// a snapshot outlives writes made into the directory it describes. Every
-/// transfer verdict therefore [`DirStatCache::taint`]s its destination's
-/// ancestors, and a tainted directory answers no absence from the
-/// snapshot again.
+/// a snapshot outlives writes made into the directory it describes. The
+/// first transfer verdict therefore calls
+/// [`DirStatCache::mark_write_pending`], and from then on NO snapshot in
+/// this cache answers an absence again (cr-ls5-3: the degradation is
+/// session-global precisely because a directory has more than one
+/// spelling, and a per-directory key can only match one of them).
 #[derive(Default)]
 pub struct DirStatCache {
     inner: Mutex<CacheInner>,
+    /// cr-ls5-3: set once, by the session's first transfer verdict, and
+    /// never cleared. It is a `write_pending` rather than a `wrote`: the
+    /// verdict is recorded strictly before the payload it announces is
+    /// queued, which is what makes the degradation conservative.
+    write_pending: AtomicBool,
     sweeps: AtomicU64,
     hits: AtomicU64,
     fallbacks: AtomicU64,
@@ -193,27 +212,25 @@ impl DirStatCache {
             }
             swept
         });
-        // cr-ls5-2: read the taint AFTER the snapshot, never before. A taint
+        // cr-ls5-2: read the flag AFTER the snapshot, never before. A mark
         // recorded while this very sweep was running still precedes the write
         // it announces, so a pre-read would miss exactly the write whose
         // absence answer is about to go stale.
-        let tainted = {
-            let inner = self.inner.lock().expect("dir-stat cache poisoned");
-            inner.tainted.contains(dir)
-        };
+        let write_pending = self.write_pending.load(Ordering::Acquire);
         let looked = match snapshot {
             DirSnapshot::Swept { exact, folded } => match exact.get(name) {
                 Some(SweptEntry::NeedsStat) => DirStatLookup::Fallback,
                 Some(entry) => DirStatLookup::Entry(*entry),
                 None if folded.contains(&fold_name(name)) => DirStatLookup::Fallback,
-                // cr-ls5-2: this session has written into the directory
-                // since the sweep, so a miss no longer proves absence —
-                // the new file may be reachable under this very name as an
-                // alias or a case variant. Only the stat can say.
-                None if tainted => DirStatLookup::Fallback,
-                // An alias can only resolve to a LISTED entry, so an
-                // untainted empty directory keeps the trusted absent on
-                // every platform — the copy-into-fresh-empty-directory case.
+                // cr-ls5-2: this session is writing, so a miss no longer
+                // proves absence — the new file may be reachable under
+                // this very name as an alias or a case variant. Only the
+                // stat can say.
+                None if write_pending => DirStatLookup::Fallback,
+                // An alias can only resolve to a LISTED entry, so before
+                // the session writes anything an empty directory keeps the
+                // trusted absent on every platform — the
+                // copy-into-fresh-empty-directory case.
                 None if exact.is_empty() => DirStatLookup::Absent,
                 // cr-ls5-1: on Windows a name can miss the sweep yet still
                 // resolve through an 8.3 short-name alias of a listed
@@ -225,10 +242,10 @@ impl DirStatCache {
                 #[cfg(not(windows))]
                 None => DirStatLookup::Absent,
             },
-            // cr-ls5-2: the write that made the directory exist is this
+            // cr-ls5-2: the write that made the directory exist may be this
             // session's own, so "the directory was absent" no longer
             // settles anything about its children.
-            DirSnapshot::AbsentDir if tainted => DirStatLookup::Fallback,
+            DirSnapshot::AbsentDir if write_pending => DirStatLookup::Fallback,
             DirSnapshot::AbsentDir => DirStatLookup::Absent,
             DirSnapshot::Unsweepable => DirStatLookup::Fallback,
         };
@@ -239,29 +256,33 @@ impl DirStatCache {
         looked
     }
 
-    /// cr-ls5-2: record that this session has decided to WRITE `path`, so
-    /// no snapshot of the directories holding it may answer absence again.
+    /// cr-ls5-2: record that this session has decided to WRITE, so no
+    /// snapshot in this cache may answer an absence again.
     ///
     /// Called at VERDICT time, not write time, and that ordering is the
     /// whole guarantee: a chunk's verdicts are all in before any of its
     /// payloads is queued, and the next chunk's diff begins only after the
     /// previous chunk returned, so every write is announced here before it
-    /// happens. Ancestors are tainted too — landing a file creates the
-    /// directories above it, which changes THEIR listings (and can mint
-    /// short-name aliases for the directory names).
+    /// happens.
+    ///
+    /// cr-ls5-3: deliberately takes no path. A per-directory taint keyed
+    /// by `PathBuf` matched SPELLINGS — `NewDirectory` and `newdirectory`
+    /// and an 8.3 alias are one directory to the filesystem and three keys
+    /// to a `HashSet` — so the degradation could be walked around by
+    /// spelling the parent differently. This session-global flag has no
+    /// name to get wrong, and the precision it gives up bought nothing
+    /// measurable: a converged mirror never calls this at all, and a fresh
+    /// copy's absence answers belong to files it is about to copy anyway.
+    ///
+    /// `Release`/`Acquire` rather than `Relaxed` so the flag stands on its
+    /// own rather than on the surrounding chunk join being the only edge;
+    /// it is one flag, set once per session.
     ///
     /// Nothing here re-sweeps or invalidates: a listed entry keeps
     /// answering, because a hit describes that file's own pre-write state,
     /// which is exactly the state its diff compares against.
-    pub fn taint(&self, path: &Path) {
-        let mut inner = self.inner.lock().expect("dir-stat cache poisoned");
-        // Ancestors are only ever inserted as a whole chain, so the first
-        // one already present means every remaining one is too.
-        for ancestor in path.ancestors().skip(1) {
-            if !inner.tainted.insert(ancestor.to_path_buf()) {
-                break;
-            }
-        }
+    pub fn mark_write_pending(&self) {
+        self.write_pending.store(true, Ordering::Release);
     }
 
     /// Sweeps performed. Test observability for the injection seam — the
@@ -500,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tainted_directory_stops_trusting_every_absence_but_keeps_its_hits() {
+    fn a_pending_write_stops_trusting_every_absence_but_keeps_its_hits() {
         // cr-ls5-2: the session's own apply is what invalidates the
         // snapshot, so from the transfer verdict onward the listing may
         // only answer for what it LISTED — a hit is that file's own
@@ -518,29 +539,29 @@ mod tests {
             "expected the swept file, got {before:?}"
         );
 
-        cache.taint(&dir.path().join("just-written.bin"));
+        cache.mark_write_pending();
 
         let after = cache.lookup(dir.path(), OsStr::new("listed.txt"), &probe());
         assert_eq!(after, before, "a listed entry still answers from the sweep");
         // A miss, however, may now be this session's own freshly written
         // file reached under an alias or a case variant. Platform note: in
         // a LISTED directory cr-ls5-1 already forces this same Fallback on
-        // Windows, so this line's taint-specific red is a non-Windows one.
-        // The taint's platform-neutral reds are the two tests below, whose
+        // Windows, so this line's flag-specific red is a non-Windows one.
+        // The flag's platform-neutral reds are the three tests below, whose
         // directories list nothing for cr-ls5-1's rule to bite on.
         assert_eq!(
             cache.lookup(dir.path(), OsStr::new("never-listed.bin"), &probe()),
             DirStatLookup::Fallback
         );
-        // Tainting judges nothing itself: still ONE sweep.
+        // Marking judges nothing itself: still ONE sweep.
         assert_eq!(cache.sweeps(), 1);
     }
 
     #[test]
-    fn a_tainted_empty_directory_loses_the_carve_out() {
-        // The empty-directory carve-out survives only while the directory
-        // is still empty. Once this session has planted a file in it,
-        // "nothing is listed, so nothing can be aliased" is false.
+    fn a_pending_write_costs_an_empty_directory_its_carve_out() {
+        // The empty-directory carve-out survives only while the session has
+        // written nothing. Once it is planting files, "nothing is listed,
+        // so nothing can be aliased" is no longer true of this snapshot.
         let dir = tempfile::tempdir().expect("tempdir");
 
         let cache = DirStatCache::default();
@@ -548,7 +569,7 @@ mod tests {
             cache.lookup(dir.path(), OsStr::new("first.txt"), &probe()),
             DirStatLookup::Absent
         );
-        cache.taint(&dir.path().join("first.txt"));
+        cache.mark_write_pending();
         assert_eq!(
             cache.lookup(dir.path(), OsStr::new("second.txt"), &probe()),
             DirStatLookup::Fallback
@@ -556,10 +577,10 @@ mod tests {
     }
 
     #[test]
-    fn a_tainted_absent_directory_falls_back_for_every_child_and_ancestor() {
-        // Landing a file also creates the directories above it, so the
-        // taint climbs: neither the absent directory nor the parent that
-        // gains it may answer absence from its pre-write snapshot.
+    fn a_pending_write_falls_back_for_absent_directories_and_their_parents() {
+        // Landing a file also creates the directories above it, so neither
+        // the absent directory nor the parent that gains it may answer
+        // absence from its pre-write snapshot.
         let dir = tempfile::tempdir().expect("tempdir");
         let missing = dir.path().join("not-yet-created");
 
@@ -573,7 +594,7 @@ mod tests {
             DirStatLookup::Absent
         );
 
-        cache.taint(&missing.join("a.txt"));
+        cache.mark_write_pending();
 
         assert_eq!(
             cache.lookup(&missing, OsStr::new("b.txt"), &probe()),
@@ -582,6 +603,44 @@ mod tests {
         assert_eq!(
             cache.lookup(dir.path(), OsStr::new("not-yet-created"), &probe()),
             DirStatLookup::Fallback
+        );
+    }
+
+    #[test]
+    fn a_pending_write_degrades_a_directory_the_session_never_named() {
+        // cr-ls5-3, the reason the per-directory taint is gone. It was a
+        // `HashSet<PathBuf>` of the written path's ancestors, so it matched
+        // SPELLINGS: a directory outside that chain kept its trusted
+        // absent, and on Windows "outside that chain" includes the SAME
+        // directory reached through a case variant or an 8.3 alias
+        // (`NewDirectory` vs `newdirectory`), which is how the reviewer
+        // walked around cr-ls5-2's fix and re-opened the overwrite.
+        //
+        // Both directories here are EMPTY, so the pre-write answer is the
+        // platform-neutral carve-out rather than cr-ls5-1's Windows-only
+        // fallback: the flip below is the flag's doing on every platform,
+        // and the old ancestor-keyed taint cannot produce it at all.
+        let root = tempfile::tempdir().expect("tempdir");
+        let written = root.path().join("written");
+        let unnamed = root.path().join("unnamed");
+        std::fs::create_dir_all(&written).expect("mkdir written");
+        std::fs::create_dir_all(&unnamed).expect("mkdir unnamed");
+
+        let cache = DirStatCache::default();
+        assert_eq!(
+            cache.lookup(&unnamed, OsStr::new("victim.txt"), &probe()),
+            DirStatLookup::Absent,
+            "before any write the empty-directory carve-out still holds"
+        );
+
+        // The session decides to write somewhere else entirely.
+        cache.mark_write_pending();
+
+        assert_eq!(
+            cache.lookup(&unnamed, OsStr::new("victim.txt"), &probe()),
+            DirStatLookup::Fallback,
+            "once the session is writing, NO directory answers absence — \
+             a spelling is not a directory, so there is nothing to key on"
         );
     }
 

@@ -1400,12 +1400,12 @@ mod tests {
     /// Unsweepable zeroes the hit counter and reds this.
     ///
     /// cr-ls5-2 narrowed what this can assert: the first transfer verdict
-    /// taints the destination directory, so absences judged AFTER it fall
-    /// back by design and the old `fallbacks() == 0` contract is no longer
-    /// the right one for a directory the session writes into more than
-    /// once. The spirit survives deterministically in the hit: a verdict
-    /// requires a lookup, so the session's FIRST lookup cannot be preceded
-    /// by any taint, and it is the absent directory's sweep that answers it.
+    /// marks the session as writing, so absences judged AFTER it fall back
+    /// by design and the old `fallbacks() == 0` contract is no longer the
+    /// right one for any session that copies anything. The spirit survives
+    /// deterministically in the hit: a verdict requires a lookup, so the
+    /// session's FIRST lookup cannot be preceded by any mark, and it is the
+    /// absent directory's sweep that answers it.
     #[tokio::test]
     async fn a_fresh_copy_trusts_the_sweeps_absent_answer() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1447,8 +1447,9 @@ mod tests {
     /// written file, nor the 8.3 alias or case variant it is reachable under.
     ///
     /// Deterministic in both directions: chunk 2 has exactly two entries and
-    /// both live in the tainted destination root, and with the taint removed
-    /// a fresh absent-directory copy takes ZERO fallbacks, so this reds.
+    /// both are judged after the session has announced writes, and with the
+    /// mark removed a fresh absent-directory copy takes ZERO fallbacks, so
+    /// this reds.
     #[tokio::test]
     async fn a_later_chunk_stops_trusting_absence_once_the_session_has_written() {
         let tmp = tempfile::tempdir().expect("tempdir");

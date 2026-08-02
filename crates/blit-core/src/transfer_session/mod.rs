@@ -5590,14 +5590,16 @@ fn destination_needs(
         }
     };
     // cr-ls5-2: the ONE place both carriers settle a need, so the ONE place
-    // the sweep cache learns this session is about to write into `dst`'s
-    // directories — every later absence answer for them now costs an
-    // authoritative stat instead of trusting a pre-write listing. Announced
-    // unconditionally: a Transfer verdict is the write's only warning, and a
-    // destination that plans without writing (`--dry-run`) pays nothing but
-    // the round trips it made before ls-5 anyway.
+    // the sweep cache learns this session is about to write — every later
+    // absence answer now costs an authoritative stat instead of trusting a
+    // pre-write listing. Announced unconditionally: a Transfer verdict is the
+    // write's only warning, and a destination that plans without writing
+    // (`--dry-run`) pays nothing but the round trips it made before ls-5
+    // anyway. cr-ls5-3: `dst` is deliberately not passed — the degradation is
+    // session-global because a per-directory key matches a SPELLING, and
+    // Windows reaches one directory through several of them.
     if matches!(verdict, NeedVerdict::Transfer { .. }) {
-        dir_stats.taint(&dst);
+        dir_stats.mark_write_pending();
     }
     Ok(verdict)
 }
