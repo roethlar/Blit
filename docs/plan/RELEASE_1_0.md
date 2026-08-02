@@ -27,8 +27,9 @@ are the owner's act.
 - [ ] **G3 — known broken behaviors dispositioned.** Fix now:
   audit-16's open half (sink-less heartbeat ignores `--verbose`).
   Owner design gates (fix pre-1.0 or ship documented): audit-18
-  (non-UTF-8 filenames fail to transfer — per-file contained since pfc,
-  but unfixable-by-user), audit-19 (`--exclude` silently matches nothing
+  (non-UTF-8 filenames fail to transfer — per-file contained on LOCAL
+  transfers only; a REMOTE push can still abort wholesale at source
+  payload preparation, per ls6-range r2's nonutf8-release-claim), audit-19 (`--exclude` silently matches nothing
   for absolute paths and bare directory names). Whichever ships open goes
   in release notes as a known limitation, verbatim enough to be found.
 - [ ] **G4 — docs truth pass.** README and `docs/TRANSFER_SESSION.md`

@@ -119,11 +119,12 @@ documented rather than fixed:
 
 - **Non-UTF-8 filenames fail to transfer.** A source filename that is
   valid on Linux/ext4 but not valid UTF-8 gets corrupted during blit's
-  internal path handling and fails to transfer. Since 1.0, that failure
-  is contained to the one file (the rest of the transfer proceeds and
-  exits with code `2`, per Reliability above) rather than aborting the
-  whole run — but the affected file still cannot be transferred, and
-  there is currently no workaround.
+  internal path handling and fails to transfer. On LOCAL transfers that
+  failure is contained to the one file (the rest of the transfer
+  proceeds and exits with code `2`, per Reliability above). On REMOTE
+  transfers it is NOT contained: the corrupted path can make payload
+  preparation fail at the source and abort the whole session. There is
+  currently no workaround beyond renaming the affected files.
 - **`--exclude` only matches paths relative to the transfer source, and
   directory patterns don't match their contents.** An absolute path, or
   a bare directory name intended to exclude everything under it, will
