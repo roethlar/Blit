@@ -1,6 +1,7 @@
 # zero_copy.rs FAST evaluation — splice in the receive pipeline
 
-**Status**: Active (verdict ratified — outcome is deletion, executed in w8-1)
+**Status**: Historical (verdict ratified — outcome was deletion, executed in
+w8-1; status reconciled 2026-08-01 during the 1.0 docs truth pass)
 **Created**: 2026-06-12
 **Supersedes**: nothing
 **Decision ref**: D-2026-06-12-1 (owner agreed 2026-06-12: delete)

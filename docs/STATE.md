@@ -41,9 +41,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   default compare — 114.73 → 55.57 s, 5.1× vs the field complaint.**
   `--checksum` keeps deep verify; contract pinned local/wire/CLI; Linux
   528/0. Evidence: `stream-interrogation-deletion.md` in the bench dir.
-- Blocked on owner: codex dispatch authority (D-2026-07-23-7) — cr-ls5-1
-  re-review and ls-6 range review wait on it. Then: wire-carrier
-  concurrent-session measurement, or sweep prefetch (compare is sweep-bound).
+- **1.0 RELEASE EFFORT ACTIVE** (owner goal + commit/push/review
+  discretion, 2026-08-01): gates in `docs/plan/RELEASE_1_0.md`. Open:
+  cr-ls5-2 (HIGH, opus subagent), owner calls on audit-18/19 disposition.
 
 ## Now (active work)
 
@@ -108,9 +108,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    resolutions (6,191 sweeps / 6,709 dirs, zero re-sweep waste); the
    per-file stat REMAINS authoritative for anything the sweep cannot judge
    exactly. Local NVMe A/B neutral. Evidence `.../dir-sweep.md`.
-   Remaining: named-stream elision (OWNER GATE — the check is now ~the
-   whole compare; eliding it is a fidelity change, see dir-sweep.md), and
-   the wire carrier (needs a concurrent-session measurement first).
+   **ls-6 SHIPPED (D-2026-08-01-4): stream interrogation deleted from the
+   default compare, 114.73 → 55.57 s** (5.1× vs field complaint); remaining
+   lever: sweep prefetch or wire-carrier concurrent-session measurement.
    **Review loop CLOSED: 4 rounds, 8 findings, all resolved, r4 CLEAN with
    `guard_confirmed: true`** — see `REVIEW.md`. **`ls-0` LANDED**: the
    summary separates copied from repaired files and labels the rate as a

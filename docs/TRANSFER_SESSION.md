@@ -294,14 +294,22 @@ message WindowsNamedStream {
   duplicate, extra, incomplete, or changed stream data is a protocol failure.
   The DESTINATION retains the granted manifest header and compares the payload
   attributes plus ordered-by-name descriptors before claiming the need.
-- On Windows, destination comparison treats a metadata mismatch as a need
-  even when the ordinary size/time or checksum comparison would skip; explicit
-  `ignore_existing` still means no change to an existing destination. Applying
-  metadata replaces the named-stream set: stale destination streams are
-  deleted, declared streams are written completely, then the declared
-  attributes are applied. Any failure fails the file/session; metadata errors
-  are not best-effort warnings. On a non-Windows DESTINATION, a present
-  `windows_metadata` is refused rather than silently discarded.
+- On Windows, destination comparison judges metadata by compare mode
+  (D-2026-08-01-4, 2026-08-01). The DEFAULT (size+mtime) compare judges
+  ATTRIBUTES only — from the attribute word its own stat/sweep already
+  holds, with no additional destination I/O — and repairs attribute-only
+  divergence in place; it does not interrogate a size/mtime-matched
+  destination file's named streams, so a destination-only stream
+  divergence on an otherwise-unchanged file is invisible to it by design.
+  CHECKSUM compare retains the exhaustive verdict: a stream mismatch is a
+  need even when content matches. Explicit `ignore_existing` still means
+  no change to an existing destination. Applying metadata (on any
+  transfer, whatever detected the need) replaces the named-stream set:
+  stale destination streams are deleted, declared streams are written
+  completely, then the declared attributes are applied. Any failure fails
+  the file/session; metadata errors are not best-effort warnings. On a
+  non-Windows DESTINATION, a present `windows_metadata` is refused rather
+  than silently discarded.
 - `FileHeader.size` remains the unnamed stream's size. File and byte completion
   is published only after named streams and attributes have been applied.
   Cancellation or a metadata failure therefore cannot produce a successful
