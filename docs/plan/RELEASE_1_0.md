@@ -17,11 +17,11 @@ are the owner's act.
 
 ## Gates
 
-- [ ] **G1 — reviews clean.** `7fa18f5b..ba3fc73a` r1 returned
-  `guard_confirmed: true`, VERIFIED-CLOSED cr-ls5-1, and found one HIGH
-  successor: cr-ls5-2 (session-stale absent snapshots re-open the alias
-  overwrite; taint-on-verdict fix prescribed). G1 = cr-ls5-2 fixed and
-  the range re-reviewed to clean.
+- [x] **G1 — reviews clean.** Closed 2026-08-02: ls6-range program ran 3
+  rounds / 5 findings (cr-ls5-1/-2/-3, nonutf8-release-claim, cr-a16-1),
+  all VERIFIED-CLOSED; r3 over `6c7f67f0..016c8578` returned **clean,
+  `guard_confirmed: true`, zero findings**
+  (`.review/results/ls6-range.codex.r3.json`).
 - [ ] **G2 — CI green on the exact candidate**, both workflows (CI: fmt,
   strict clippy, Linux/macOS/Windows tests; Docs Gate).
 - [ ] **G3 — known broken behaviors dispositioned.** Fix now:

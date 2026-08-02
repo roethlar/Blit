@@ -1,8 +1,10 @@
 # cr-ls5-3 — taint matched directory SPELLINGS, not directories
 
 **Severity**: HIGH
-**Status**: FIXED, awaiting re-review. Fixed by an opus subagent (owner
-instruction: coding via opus/sonnet subagents).
+**Status**: VERIFIED-CLOSED. Fix commit `1ae3e742`; ls6-range r3 over
+`6c7f67f0..016c8578` returned **clean, `guard_confirmed: true`, zero
+findings** (`.review/results/ls6-range.codex.r3.json`). Fixed by an opus
+subagent (owner instruction: coding via opus/sonnet subagents).
 **Source**: `ls6-range` r2 codex dispatch over `ba3fc73a..6c7f67f0`
 (reviewer id `parent-alias-taint`). **`guard_confirmed: true`** for
 cr-ls5-2's own guards — this is the next hole out, not a vacuous guard.

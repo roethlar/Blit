@@ -1,7 +1,9 @@
 # cr-ls5-2 — session-stale absent snapshots re-open the alias overwrite
 
 **Severity**: HIGH
-**Status**: FIXED, awaiting re-review. Fixed by an opus subagent (owner
+**Status**: VERIFIED-CLOSED. Fix commit `6c7f67f0`; r2 held its guards
+(`guard_confirmed: true`) and found the spelling channel (cr-ls5-3),
+whose fix r3 verified clean. Fixed by an opus subagent (owner
 instruction: coding via opus/sonnet subagents).
 **Source**: `ls6-range` codex dispatch over `7fa18f5b..ba3fc73a`
 Reviewer: codex / gpt-5.6-sol / xhigh / workspace-write (detached,

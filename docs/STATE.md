@@ -34,16 +34,16 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Handoff — 2026-08-01
 - Done: pfc SHIPPED (D-2026-08-01-2); clp-1..3; adaptive checkers 1.71× (D-2026-08-01-1). Reviews closed clean: ls-1, clp3-ls4. See DEVLOG.
-- **audit-16 CLOSED:** sink-less enumeration heartbeat now gated behind `--verbose` (or `-p`, preserving clp-2's redirected-stream fallback); TODO.md updated.
-- **ls-5 SHIPPED: directory-sweep stat, 166.38 → 114.73 s**; A/B neutral.
-  Review r1: 1 HIGH (cr-ls5-1, 8.3-alias overwrite) FIXED, re-review queued.
+- **audit-16 CLOSED:** sink-less heartbeat gated behind `--verbose`/`-p`.
+- **ls-5 SHIPPED: directory-sweep stat, 166.38 → 114.73 s**; A/B neutral;
+  its alias-trust findings cr-ls5-1/-2/-3 all verified-closed (REVIEW.md).
 - **ls-6 SHIPPED (D-2026-08-01-4): stream interrogation deleted from the
-  default compare — 114.73 → 55.57 s, 5.1× vs the field complaint.**
-  `--checksum` keeps deep verify; contract pinned local/wire/CLI; Linux
-  528/0. Evidence: `stream-interrogation-deletion.md` in the bench dir.
-- **1.0 RELEASE EFFORT ACTIVE** (owner goal + commit/push/review
-  discretion, 2026-08-01): gates in `docs/plan/RELEASE_1_0.md`. Open:
-  ls6-range r2's cr-ls5-3 (session-global write flag) and cr-a16-1 (`-p` heartbeat on the remote route) both FIXED, re-review queued; audit-18/19 owner call.
+  default compare — 114.73 → 55.57 s, 5.1× vs the field complaint**;
+  `--checksum` keeps deep verify; evidence in the ls1-phase bench dir.
+- **1.0 RELEASE EFFORT ACTIVE** (owner goal + discretion, 2026-08-01):
+  gates in `docs/plan/RELEASE_1_0.md`. **G1 CLOSED — ls6-range r3 CLEAN
+  (3 rounds, 5 findings, all verified).** Next: 1.0.0 bump → candidate
+  CI → archives; tag = owner (G6); audit-18/19 ship documented.
 
 ## Now (active work)
 
