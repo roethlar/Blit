@@ -710,3 +710,8 @@ Format:
 - Decision: the per-file destination stream enumeration is removed from the default (size+mtime) compare — no runtime probe, no flag; streams are still carried whenever a file transfers, and `--checksum` retains exhaustive stream verification.
 - Why: owner walked the full chain (2026-08-01): the remedy for detected divergence is whole-file replacement, so interrogation never protected destination streams — it only found them sooner to destroy them sooner, at ~90 s/run; no peer tool attempts it; F+S+R all land on deletion.
 - Supersedes: D-2026-08-01-3, which is VOID — it misrecorded the owner's "no" (which rejected my half-measure framing, not the removal) as a keep ruling.
+
+## D-2026-08-02-1 — 1.0 is gated on the Pick-not-Type TUI rework
+- Decision: v1.0.0 is not tagged until `docs/plan/TUI_REWORK.md` M1–M6 are complete; the TUI ships in 1.0 as a first-class surface, not as-is or preview-flagged.
+- Why: owner ruled option 3 (2026-08-02) when asked; the TUI has had no interactive UX testing and its rework plan was already Active with all milestones open.
+- Supersedes: RELEASE_1_0.md's "TUI rework M1–M6" non-goal (my unratified scope call); the ef9a13b2 candidate and tonight's archives become interim proof of the release pipeline, to be re-cut at the eventual candidate.

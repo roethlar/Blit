@@ -43,14 +43,28 @@ are the owner's act.
   notes cover 0.1.1 → 1.0.0 (pfc containment, ls-0..6 performance ~5.1×
   on the field mirror, colour output, compare-contract change, fixes,
   known limitations).
+- [ ] **G5b — cross-OS smoke matrix (owner-raised, 2026-08-02).** CI only
+  proves same-OS loopback daemon transfers; the six directed cross-OS
+  pairs (win↔linux, win↔mac, mac↔linux) run with the CANDIDATE binaries
+  on the real fleet (netwatch-01, magneto, q — identical build identity
+  `1.0.0+ef9a13b21afc` satisfies the same-build handshake). Each pair:
+  small mixed tree with nested dirs and a content change, initial copy,
+  content verify, converged re-run must report 0 changed. Recorded here
+  with results per pair.
+- [ ] **G5c — TUI Pick-not-Type rework complete (D-2026-08-02-1, owner
+  option 3).** `docs/plan/TUI_REWORK.md` M1–M6 all land through the
+  review loop, plus owner interactive UX acceptance (agents cannot UX-test
+  a TTY). The `ef9a13b2` candidate and tonight's archives become interim
+  pipeline proof; the final candidate is re-cut after this gate.
 - [ ] **G6 — OWNER GATE: tag v1.0.0 and publish.** Outward act; needs the
   owner's explicit go on the exact candidate SHA.
 
 ## Non-goals (post-1.0)
 
-TUI rework M1–M6 (`TUI_REWORK.md` continues), F15 logging epic, RDMA,
-wire-carrier comparison concurrency, sweep prefetch, 25GbE work,
-competitor benchmarks.
+F15 logging epic, RDMA, wire-carrier comparison concurrency, sweep
+prefetch, 25GbE work, competitor benchmarks. (TUI rework was listed here
+until D-2026-08-02-1 made it gate G5c — my original scope call, owner
+overruled.)
 
 ## Working rules for this effort
 

@@ -33,17 +33,17 @@ Last updated: 2026-08-02 (workspace version bumped to 1.0.0 release candidate; C
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff — 2026-08-01
-- Done: pfc SHIPPED (D-2026-08-01-2); clp-1..3; adaptive checkers 1.71× (D-2026-08-01-1). Reviews closed clean: ls-1, clp3-ls4. See DEVLOG.
-- **audit-16 CLOSED:** sink-less heartbeat gated behind `--verbose`/`-p`.
-- **ls-5 SHIPPED: directory-sweep stat, 166.38 → 114.73 s**; A/B neutral;
-  its alias-trust findings cr-ls5-1/-2/-3 all verified-closed (REVIEW.md).
-- **ls-6 SHIPPED (D-2026-08-01-4): stream interrogation deleted from the
-  default compare — 114.73 → 55.57 s, 5.1× vs the field complaint**;
-  `--checksum` keeps deep verify; evidence in the ls1-phase bench dir.
+- Done: pfc SHIPPED (D-2026-08-01-2); clp-1..3; checkers 1.71×; audit-16
+  closed (heartbeat verbose-gated). Reviews clean: ls-1, clp3-ls4. DEVLOG.
+- **ls-5 + ls-6 SHIPPED: converged mirror 166.38 → 55.57 s (5.1× vs field
+  complaint)** — directory-sweep stat + stream interrogation deleted
+  (D-2026-08-01-4); cr-ls5-1/-2/-3 verified-closed; ls1-phase bench dir.
 - **1.0 RELEASE EFFORT ACTIVE** (owner goal + discretion, 2026-08-01):
-  gates in `docs/plan/RELEASE_1_0.md`. **G1 CLOSED — ls6-range r3 CLEAN
-  (3 rounds, 5 findings, all verified).** **1.0.0 bump landed** (gate
-  green); next: candidate CI → archives; tag = owner (G6); audit-18/19 ship documented.
+  gates in `docs/plan/RELEASE_1_0.md`. G1 closed (3 rounds, 5 findings);
+  1.0.0 bump landed; 3 interim archives built+verified off `ef9a13b2`.
+  **1.0 NOW GATED ON TUI REWORK (D-2026-08-02-1, owner option 3):**
+  M1–M6 via subagents, M1 dispatched; M3a/b need owner sign-off on
+  TUI_REWORK §6 decisions 1/3/5/6. Also open: G5b cross-OS smoke matrix.
 
 ## Now (active work)
 
