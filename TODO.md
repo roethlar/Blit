@@ -546,7 +546,7 @@ locked-in choices). Agents queuing TUI work should **start from the
 rework spec, not from `TUI_DESIGN.md`** — the latter has a top-of-file
 note redirecting to the rework.
 
-- [ ] **Phase 6 — M1.** F3 picker mode (foundation; modal pick-mode + continuation channel).
+- [x] **Phase 6 — M1.** F3 picker mode (foundation; modal pick-mode + continuation channel). ✅ Shipped 2026-08-02 — `crates/blit-tui/src/f3picker.rs` + `handle_f3_picker_keystroke`; no caller wired yet (M3a/M3b invoke it).
 - [ ] **Phase 6 — M2.** `LocalDaemon` pseudo-target + local-fs browsable in F3.
 - [ ] **Phase 6 — M3a.** F1 trigger modal: pickers replace text fields.
 - [ ] **Phase 6 — M3b.** F3 pull destination: picker replaces free-text input.

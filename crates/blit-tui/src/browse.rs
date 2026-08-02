@@ -722,6 +722,35 @@ pub fn pull_source_endpoint(
     })
 }
 
+/// TUI_REWORK §4.2 (M1): the endpoint of the directory currently being
+/// VIEWED — what `.` picks in picker mode.
+///
+/// This is deliberately not [`pull_source_endpoint`]: that one resolves
+/// the cursor ROW (what `p` pulls), while `.` answers "the directory I
+/// am standing in". §4.2 splits them on purpose — `Enter` always
+/// descends, so an operator picks a directory by walking into it, and
+/// the row under the cursor is irrelevant to that choice.
+///
+/// `None` at the module list, which is a menu of modules rather than a
+/// directory any transfer could name.
+pub fn current_dir_endpoint(view: &BrowseView, base: &RemoteEndpoint) -> Option<RemoteEndpoint> {
+    let BrowseView::Module { name, path } = view else {
+        return None;
+    };
+    let mut rel_path = PathBuf::new();
+    for seg in path {
+        rel_path.push(seg);
+    }
+    Some(RemoteEndpoint {
+        host: base.host.clone(),
+        port: base.port,
+        path: RemotePath::Module {
+            module: name.clone(),
+            rel_path,
+        },
+    })
+}
+
 /// d-27: stable sort key for browse rows. Directories
 /// sort before files; within each kind, alphabetical
 /// by `name` (case-insensitive). Module rows (top-level
@@ -1914,5 +1943,42 @@ mod tests {
             pull_source_endpoint(&view, Some(&row), &base("host:9999")).expect("port endpoint");
         assert_eq!(ep.port, 9999);
         assert_eq!(ep.display(), "host:9999:/share/logs");
+    }
+
+    // TUI_REWORK §4.2 (M1): `.` picks the directory being VIEWED, so
+    // `current_dir_endpoint` answers from the view alone — the cursor
+    // row must not change the answer.
+
+    #[test]
+    fn current_dir_endpoint_is_the_module_root_at_depth_zero() {
+        let view = BrowseView::Module {
+            name: "photos".to_string(),
+            path: vec![],
+        };
+        let ep = current_dir_endpoint(&view, &base("nas")).expect("module root");
+        let (module, rel) = module_rel(&ep);
+        assert_eq!(module, "photos");
+        assert_eq!(rel, std::path::Path::new(""));
+        assert_eq!(ep.display(), "nas:/photos/");
+    }
+
+    #[test]
+    fn current_dir_endpoint_walks_the_whole_path_stack() {
+        let view = BrowseView::Module {
+            name: "photos".to_string(),
+            path: vec!["2024".to_string(), "summer".to_string()],
+        };
+        let ep = current_dir_endpoint(&view, &base("nas:9999")).expect("nested dir");
+        let (_module, rel) = module_rel(&ep);
+        assert_eq!(rel, std::path::Path::new("2024/summer"));
+        assert_eq!(ep.port, 9999);
+        assert_eq!(ep.display(), "nas:9999:/photos/2024/summer");
+    }
+
+    /// The module list is a menu, not a directory — there is nothing
+    /// there a transfer could name, so `.` has nothing to pick.
+    #[test]
+    fn current_dir_endpoint_is_none_at_the_module_list() {
+        assert!(current_dir_endpoint(&BrowseView::Modules, &base("nas")).is_none());
     }
 }

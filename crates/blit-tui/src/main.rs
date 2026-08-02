@@ -37,6 +37,7 @@ mod f1push;
 mod f1trigger;
 mod f3del;
 mod f3du;
+mod f3picker;
 mod f3pull;
 mod help;
 mod profile;
@@ -249,6 +250,12 @@ struct AppState {
     /// Sender into the F3 browse fetcher mpsc. Cloned by
     /// `kick_browse_fetch` into each spawned task.
     browse_fetch_tx: mpsc::Sender<BrowseFetchReply>,
+    /// TUI_REWORK §4.2 (M1): F3's picker mode. While a pick is in
+    /// flight this pane is modal — `handle_f3_picker_keystroke` owns
+    /// its keys and pane switching is disabled — and the picked path
+    /// leaves through the continuation this state holds. Nothing opens
+    /// a picker yet; M3a/M3b are the callers.
+    f3_picker: f3picker::F3PickerState,
 
     // F4
     profile: profile::ProfileState,
@@ -786,6 +793,7 @@ async fn run_router(
         browse: BrowseState::new(),
         browse_last_fetched_view: None,
         browse_fetch_tx: browse_fetch_tx.clone(),
+        f3_picker: f3picker::F3PickerState::new(),
         profile: profile::ProfileState::new(),
         profile_reply_tx: profile_reply_tx.clone(),
         verify: verify::VerifyState::with_defaults_and_paths(
@@ -1045,6 +1053,9 @@ async fn run_router(
                         &f3_del_to_display(app.f3_del.status(), f3_pull_spec.as_deref()),
                         // d-53: batch-pull progress (current/total).
                         app.f3_batch_pull.as_ref().map(|b| (b.done + 1, b.total)),
+                        // TUI_REWORK §4.2 (M1): empty unless a pick is
+                        // in flight, so the Browse header is unchanged.
+                        app.f3_picker.title_suffix(),
                         now,
                         accent_color,
                     ),
@@ -1244,6 +1255,18 @@ async fn run_router(
                 if app.current_screen == Screen::F1
                     && app.f1_trigger.is_editing()
                     && handle_f1_trigger_keystroke(&key, &mut app)
+                {
+                    continue;
+                }
+                // TUI_REWORK §4.2 (M1): F3's picker mode is modal —
+                // while a pick is in flight it owns the pane's keys,
+                // including the pane-switch keys the other F3 input
+                // modes let through (a switch mid-pick would orphan the
+                // continuation). It therefore routes BEFORE the filter
+                // guard and delegates `/` filter editing itself.
+                if app.current_screen == Screen::F3
+                    && app.f3_picker.is_picking()
+                    && handle_f3_picker_keystroke(&key, &mut app, &KeyMap::from_config(&tui_config))
                 {
                     continue;
                 }
@@ -4679,6 +4702,120 @@ fn handle_f3_filter_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// TUI_REWORK §4.2 (M1): F3 picker-mode keystroke router. Runs only
+/// while `f3_picker.is_picking()`, and returns `true` when the key was
+/// absorbed — which, unlike the other F3 input modes, includes the
+/// pane-switch keys: picker mode is modal precisely so a mid-pick
+/// switch cannot orphan the invoker's continuation.
+///
+/// The §4.2 keymap, in one place:
+/// - `Enter` ALWAYS descends. On a file row it is terminal instead, but
+///   only in a picker that accepts files; a directory picker leaves the
+///   file alone (the operator descends and presses `.`).
+/// - `.` picks the directory being VIEWED — not the cursor row.
+/// - `Esc` cancels, dropping the continuation (§7).
+/// - `/` still opens the browse filter, and while that filter is being
+///   edited its own handler owns the keys.
+/// - Movement stays on the configured keymap, so picker mode navigates
+///   exactly like Browse mode does.
+///
+/// Quit (`q` / Ctrl-c) still bubbles: tearing the TUI down drops
+/// `AppState`, and with it the continuation, which is the cancel signal
+/// the invoker already handles.
+fn handle_f3_picker_keystroke(key: &KeyEvent, app: &mut AppState, keymap: &KeyMap) -> bool {
+    use blit_app::endpoints::Endpoint;
+
+    // The filter is an input mode inside picker mode; let its handler
+    // read the keystroke first while it is open.
+    if app.browse.is_editing_filter() {
+        if handle_f3_filter_keystroke(key, app) {
+            return true;
+        }
+        // That handler bubbles F-keys so the dispatcher can switch
+        // panes. Picker mode disables that (§4.2), so swallow them
+        // here; Ctrl-c and `?` still bubble.
+        return matches!(key.code, KeyCode::F(_));
+    }
+    // Esc is the picker's cancel, so it must be read before the keymap
+    // turns it into Quit.
+    if key.code == KeyCode::Esc {
+        app.f3_picker.cancel();
+        return true;
+    }
+    if key.code == KeyCode::Char('.')
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        // §4.2: `.` picks the directory currently being viewed. The
+        // file-vs-directory rule is the picker state's to enforce (it
+        // refuses a directory pick in a file picker), so this only has
+        // to answer "which directory" — `None` at the module list,
+        // which is a menu rather than a directory.
+        if let Some(endpoint) = app
+            .browse_target
+            .as_ref()
+            .and_then(|base| browse::current_dir_endpoint(app.browse.view(), base))
+        {
+            app.f3_picker.pick_directory(Endpoint::Remote(endpoint));
+        }
+        return true;
+    }
+    match key_action(key, keymap) {
+        // Quit tears the whole TUI down; the continuation dies with it.
+        Some(UserAction::Quit) => false,
+        // `?` stays the global help toggle, as in every other F3 mode.
+        Some(UserAction::ToggleHelp) => false,
+        Some(UserAction::SelectNext) => {
+            app.browse.select_next();
+            true
+        }
+        Some(UserAction::SelectPrev) => {
+            app.browse.select_prev();
+            true
+        }
+        Some(UserAction::SelectFirst) => {
+            app.browse.select_first();
+            true
+        }
+        Some(UserAction::SelectLast) => {
+            app.browse.select_last();
+            true
+        }
+        Some(UserAction::Ascend) => {
+            app.browse.ascend();
+            true
+        }
+        Some(UserAction::Descend) => {
+            let on_file = matches!(
+                app.browse.selected_row().map(|row| &row.kind),
+                Some(browse::BrowseRowKind::File)
+            );
+            if !on_file {
+                // §4.2: Enter ALWAYS descends on anything that can be
+                // descended into. The fetch for the new view is kicked
+                // by the event loop, exactly as in Browse mode.
+                app.browse.descend();
+            } else if let Some(endpoint) = app.browse_target.as_ref().and_then(|base| {
+                browse::pull_source_endpoint(app.browse.view(), app.browse.selected_row(), base)
+            }) {
+                // A directory picker refuses this — the picker state
+                // owns that rule, so it is stated once, not twice.
+                app.f3_picker.pick_file(Endpoint::Remote(endpoint));
+            }
+            true
+        }
+        Some(UserAction::F3FilterBegin) => {
+            app.browse.begin_edit_filter();
+            true
+        }
+        Some(UserAction::ReloadConfig) => false,
+        // Everything else — pane switching above all — is swallowed
+        // while the picker owns the pane.
+        _ => true,
     }
 }
 
@@ -8292,6 +8429,7 @@ mod tests {
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
+            f3_picker: f3picker::F3PickerState::new(),
             profile: profile::ProfileState::new(),
             profile_reply_tx: mpsc::channel::<ProfileReply>(1).0,
             verify: verify::VerifyState::new(),
@@ -8417,6 +8555,241 @@ mod tests {
         let consumed = handle_f3_filter_keystroke(&key, &mut app);
         assert!(!consumed);
         assert_eq!(app.browse.filter(), "");
+    }
+
+    // TUI_REWORK §4.2 (M1): F3 picker-mode keystroke routing.
+
+    /// Helper: an F3 app parked inside module `photos` with one
+    /// directory row and one file row, and a picker open for `kind`.
+    /// Returns the app and the continuation the invoker awaits.
+    fn app_in_picker(
+        kind: f3picker::PickerKind,
+    ) -> (
+        AppState,
+        tokio::sync::oneshot::Receiver<f3picker::PathPicked>,
+    ) {
+        let mut app = make_test_app_state(Screen::F3);
+        app.browse_target = Some(RemoteEndpoint::parse("nas").expect("browse target"));
+        app.browse.apply_modules(
+            vec![Module {
+                name: "photos".to_string(),
+                path: "/srv/photos".to_string(),
+                read_only: false,
+            }],
+            Instant::now(),
+        );
+        app.browse.descend();
+        app.browse.apply_listing(
+            "photos",
+            &[],
+            vec![
+                DirEntry {
+                    name: "2024".to_string(),
+                    is_dir: true,
+                    size: 0,
+                    mtime_seconds: 0,
+                },
+                DirEntry {
+                    name: "img001.jpg".to_string(),
+                    is_dir: false,
+                    size: 100,
+                    mtime_seconds: 0,
+                },
+            ],
+            Instant::now(),
+        );
+        let rx = app.f3_picker.begin(kind);
+        (app, rx)
+    }
+
+    fn picker_key(key: KeyEvent, app: &mut AppState) -> bool {
+        handle_f3_picker_keystroke(&key, app, &km())
+    }
+
+    /// §4.2: Enter ALWAYS descends. The cursor starts on the `2024`
+    /// directory row, so Enter walks into it rather than picking it.
+    #[test]
+    fn f3_picker_enter_descends_into_a_directory() {
+        let (mut app, mut rx) = app_in_picker(f3picker::PickerKind::Directory);
+        assert!(picker_key(k(KeyCode::Enter), &mut app));
+        match app.browse.view() {
+            browse::BrowseView::Module { name, path } => {
+                assert_eq!(name, "photos");
+                assert_eq!(path, &["2024".to_string()]);
+            }
+            other => panic!("expected Module view, got {other:?}"),
+        }
+        assert!(app.f3_picker.is_picking(), "descending is not picking");
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    /// §4.2: `.` picks the directory being VIEWED — note the cursor is
+    /// sitting on a row that is NOT what gets returned.
+    #[tokio::test]
+    async fn f3_picker_dot_picks_the_viewed_directory() {
+        let (mut app, rx) = app_in_picker(f3picker::PickerKind::Directory);
+        // Walk into 2024 first, so the viewed directory is nested.
+        picker_key(k(KeyCode::Enter), &mut app);
+        assert!(picker_key(k(KeyCode::Char('.')), &mut app));
+        assert!(!app.f3_picker.is_picking(), "the pick closes picker mode");
+        let picked = rx.await.expect("the continuation carries the pick");
+        assert_eq!(picked.target, f3picker::PickTarget::Directory);
+        match picked.endpoint {
+            blit_app::endpoints::Endpoint::Remote(ep) => {
+                assert_eq!(ep.display(), "nas:/photos/2024");
+            }
+            other => panic!("expected a remote endpoint, got {other:?}"),
+        }
+    }
+
+    /// §4.2: Enter on a file row is the file picker's terminal key.
+    #[tokio::test]
+    async fn f3_picker_enter_on_a_file_returns_it() {
+        let (mut app, rx) = app_in_picker(f3picker::PickerKind::File);
+        // Move the cursor off `2024` and onto `img001.jpg`.
+        assert!(picker_key(k(KeyCode::Down), &mut app));
+        assert!(picker_key(k(KeyCode::Enter), &mut app));
+        assert!(!app.f3_picker.is_picking());
+        let picked = rx.await.expect("the continuation carries the pick");
+        assert_eq!(picked.target, f3picker::PickTarget::File);
+        match picked.endpoint {
+            blit_app::endpoints::Endpoint::Remote(ep) => {
+                assert_eq!(ep.display(), "nas:/photos/img001.jpg");
+            }
+            other => panic!("expected a remote endpoint, got {other:?}"),
+        }
+    }
+
+    /// §4.2: in a DIRECTORY picker, Enter on a file is a no-op — the
+    /// key is still absorbed (the pane is modal), but nothing is
+    /// returned and the picker stays open.
+    #[test]
+    fn f3_picker_enter_on_a_file_is_inert_for_a_directory_picker() {
+        let (mut app, mut rx) = app_in_picker(f3picker::PickerKind::Directory);
+        picker_key(k(KeyCode::Down), &mut app);
+        assert!(picker_key(k(KeyCode::Enter), &mut app));
+        assert!(app.f3_picker.is_picking());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    /// The mirror rule: `.` is inert in a file picker.
+    #[test]
+    fn f3_picker_dot_is_inert_for_a_file_picker() {
+        let (mut app, mut rx) = app_in_picker(f3picker::PickerKind::File);
+        assert!(picker_key(k(KeyCode::Char('.')), &mut app));
+        assert!(app.f3_picker.is_picking());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    /// §7: Esc leaves picker mode and drops the continuation, so the
+    /// invoker's await fails and it takes its cancel path.
+    #[tokio::test]
+    async fn f3_picker_esc_cancels_and_drops_the_continuation() {
+        let (mut app, rx) = app_in_picker(f3picker::PickerKind::Directory);
+        assert!(picker_key(k(KeyCode::Esc), &mut app));
+        assert!(!app.f3_picker.is_picking());
+        assert!(rx.await.is_err(), "cancel reaches the invoker");
+    }
+
+    /// §4.2: pane switching is DISABLED while picking — the keys are
+    /// swallowed here rather than bubbled to the dispatcher, because a
+    /// switch mid-pick would orphan the continuation.
+    #[test]
+    fn f3_picker_swallows_pane_switch_keys() {
+        let (mut app, _rx) = app_in_picker(f3picker::PickerKind::Directory);
+        for n in 1..=4 {
+            assert!(
+                picker_key(k(KeyCode::F(n)), &mut app),
+                "F{n} must not reach the pane dispatcher"
+            );
+        }
+        for c in ['1', '2', '3', '4'] {
+            assert!(
+                picker_key(k(KeyCode::Char(c)), &mut app),
+                "`{c}` must not reach the pane dispatcher"
+            );
+        }
+        assert_eq!(app.current_screen, Screen::F3);
+        assert!(app.f3_picker.is_picking());
+    }
+
+    /// Quit and help stay global: both bubble so the router can quit /
+    /// toggle the overlay. Quitting drops `AppState`, and the
+    /// continuation with it — that is the §7 cancel path.
+    #[test]
+    fn f3_picker_bubbles_quit_and_help() {
+        let (mut app, _rx) = app_in_picker(f3picker::PickerKind::Directory);
+        assert!(!picker_key(k(KeyCode::Char('q')), &mut app));
+        assert!(!picker_key(
+            KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+            },
+            &mut app
+        ));
+        assert!(!picker_key(k(KeyCode::Char('?')), &mut app));
+        assert!(app.f3_picker.is_picking(), "none of those ended the pick");
+    }
+
+    /// `/` still opens the browse filter inside picker mode, and while
+    /// that filter is being edited its own handler owns the keys — so
+    /// typing goes to the filter, not to the picker.
+    #[test]
+    fn f3_picker_delegates_to_the_filter_while_it_is_open() {
+        let (mut app, _rx) = app_in_picker(f3picker::PickerKind::Directory);
+        assert!(picker_key(k(KeyCode::Char('/')), &mut app));
+        assert!(app.browse.is_editing_filter());
+        assert!(picker_key(k(KeyCode::Char('2')), &mut app));
+        assert_eq!(app.browse.filter(), "2", "the char reached the filter");
+        // Esc closes the filter, not the picker.
+        assert!(picker_key(k(KeyCode::Esc), &mut app));
+        assert!(!app.browse.is_editing_filter());
+        assert!(app.f3_picker.is_picking());
+        // Pane switching stays disabled even mid-filter.
+        app.browse.begin_edit_filter();
+        assert!(picker_key(k(KeyCode::F(1)), &mut app));
+    }
+
+    /// Movement still works — picker mode navigates exactly like
+    /// Browse mode, which is the whole point of reusing this pane.
+    #[test]
+    fn f3_picker_navigates_with_the_configured_movement_keys() {
+        let (mut app, mut rx) = app_in_picker(f3picker::PickerKind::Directory);
+        assert_eq!(
+            app.browse.selected_row().map(|r| r.name.clone()),
+            Some("2024".to_string()),
+            "the cursor starts on the first row"
+        );
+        assert!(picker_key(k(KeyCode::Char('j')), &mut app));
+        assert_eq!(
+            app.browse.selected_row().map(|r| r.name.clone()),
+            Some("img001.jpg".to_string())
+        );
+        assert!(picker_key(k(KeyCode::Char('k')), &mut app));
+        assert_eq!(
+            app.browse.selected_row().map(|r| r.name.clone()),
+            Some("2024".to_string())
+        );
+        // Left ascends back to the module list.
+        assert!(picker_key(k(KeyCode::Left), &mut app));
+        assert!(matches!(app.browse.view(), browse::BrowseView::Modules));
+        // §4.2: the module list is a menu, not a directory, so `.` has
+        // nothing to pick there even in a directory picker.
+        assert!(picker_key(k(KeyCode::Char('.')), &mut app));
+        assert!(app.f3_picker.is_picking());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
     }
 
     // d-35: F3 pull keystroke routing.
@@ -9899,6 +10272,7 @@ mod tests {
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
+            f3_picker: f3picker::F3PickerState::new(),
             profile: profile::ProfileState::new(),
             profile_reply_tx: mpsc::channel::<ProfileReply>(1).0,
             verify: verify::VerifyState::new(),
@@ -9970,6 +10344,7 @@ mod tests {
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
+            f3_picker: f3picker::F3PickerState::new(),
             profile: profile::ProfileState::new(),
             profile_reply_tx: mpsc::channel::<ProfileReply>(1).0,
             verify: verify::VerifyState::new(),
@@ -10094,6 +10469,7 @@ mod tests {
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
+            f3_picker: f3picker::F3PickerState::new(),
             profile: profile::ProfileState::new(),
             profile_reply_tx: mpsc::channel::<ProfileReply>(1).0,
             verify: verify::VerifyState::new(),
@@ -10177,6 +10553,7 @@ mod tests {
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
+            f3_picker: f3picker::F3PickerState::new(),
             profile: profile::ProfileState::new(),
             profile_reply_tx: mpsc::channel::<ProfileReply>(1).0,
             verify: verify::VerifyState::new(),

@@ -165,6 +165,11 @@ pub enum F3DuDisplay {
 /// the screens layer stays free of `blit_core` types).
 /// `None` when no remote is configured or nothing is
 /// selectable.
+///
+/// TUI_REWORK §4.2 (M1): `picker_suffix` is the header's picker-mode
+/// signal, pre-rendered by the caller (`f3picker::title_suffix`) so this
+/// layer needs no picker types. Empty in Browse mode, which is every
+/// keystroke until M3a/M3b invoke a picker.
 pub fn render_into(
     frame: &mut Frame,
     area: Rect,
@@ -175,6 +180,7 @@ pub fn render_into(
     du: &F3DuDisplay,
     del: &F3DelDisplay,
     batch_pull: Option<(usize, usize)>,
+    picker_suffix: &str,
     now: Instant,
     // e-10: `[theme] accent_color` for the browse-tree selection
     // highlight (matches the tab strip / F2).
@@ -193,23 +199,37 @@ pub fn render_into(
         ])
         .split(area);
 
-    render_header(frame, chunks[0], state, remote_label);
+    render_header(frame, chunks[0], state, remote_label, picker_suffix);
     render_table(frame, chunks[1], state, accent);
     render_stats(frame, chunks[2], state, pull_spec, du);
     render_footer(frame, chunks[3], state, pull, del, batch_pull, now);
 }
 
-fn render_header(frame: &mut Frame, area: Rect, state: &BrowseState, remote_label: &str) {
-    let title = format!(
-        " blit-tui · F3 Browse · {} · {} ",
-        remote_label,
-        state.breadcrumb(),
-    );
+fn render_header(
+    frame: &mut Frame,
+    area: Rect,
+    state: &BrowseState,
+    remote_label: &str,
+    picker_suffix: &str,
+) {
+    let title = header_title(state, remote_label, picker_suffix);
     let para = Paragraph::new(Line::from(Span::styled(
         title,
         Style::default().add_modifier(Modifier::BOLD),
     )));
     frame.render_widget(para, area);
+}
+
+/// The F3 header line, split out so the picker-mode suffix is testable
+/// without a backend. `picker_suffix` is empty in Browse mode, and the
+/// title is then byte-for-byte what it was before TUI_REWORK M1.
+fn header_title(state: &BrowseState, remote_label: &str, picker_suffix: &str) -> String {
+    format!(
+        " blit-tui · F3 Browse · {} · {}{} ",
+        remote_label,
+        state.breadcrumb(),
+        picker_suffix,
+    )
 }
 
 fn render_table(frame: &mut Frame, area: Rect, state: &BrowseState, accent: Color) {
@@ -676,6 +696,25 @@ mod tests {
         assert!(
             found,
             "the selected browse row paints the accent background"
+        );
+    }
+
+    /// TUI_REWORK §4.2 (M1): picker mode says so in the header, and
+    /// Browse mode's header is untouched by the addition.
+    #[test]
+    fn header_title_carries_the_picker_suffix_only_while_picking() {
+        let state = BrowseState::new();
+        assert_eq!(
+            header_title(&state, "nas:9031", ""),
+            format!(" blit-tui · F3 Browse · nas:9031 · {} ", state.breadcrumb()),
+            "Browse mode renders exactly the pre-M1 header"
+        );
+        assert_eq!(
+            header_title(&state, "nas:9031", " · picker (directory)"),
+            format!(
+                " blit-tui · F3 Browse · nas:9031 · {} · picker (directory) ",
+                state.breadcrumb()
+            )
         );
     }
 

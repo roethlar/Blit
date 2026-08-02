@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-08-02 (workspace version bumped to 1.0.0 release candidate; Cargo.lock refreshed, full gate green)
+Last updated: 2026-08-02 (TUI rework M1 landed: F3 picker mode + path-return plumbing, no caller wired yet; full gate green)
 
 - **BLIT 0.1.1 IS RELEASED (D-2026-07-23-8):** annotated tag `v0.1.1`
   resolves to exact validated candidate `d1f1152d` on LAN Gitea and GitHub.
@@ -42,8 +42,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   gates in `docs/plan/RELEASE_1_0.md`. G1 closed (3 rounds, 5 findings);
   1.0.0 bump landed; 3 interim archives built+verified off `ef9a13b2`.
   **1.0 NOW GATED ON TUI REWORK (D-2026-08-02-1, owner option 3):**
-  M1–M6 via subagents, M1 dispatched; M3a/b need owner sign-off on
-  TUI_REWORK §6 decisions 1/3/5/6. Also open: G5b cross-OS smoke matrix.
+  M1–M6 via subagents; M1 LANDED (F3 picker mode, no caller wired yet);
+  M3a/b need §6 sign-off (1/3/5/6 + 6). Also open: G5b cross-OS smoke matrix.
 
 ## Now (active work)
 
