@@ -125,6 +125,18 @@ pub struct PushExecution {
     /// `docs/plan/LOCAL_TRANSFER_HEURISTICS.md`'s original intent;
     /// callers thread the CLI's `--verbose`/`-v` flag through here.
     pub verbose: bool,
+    /// cr-a16-1: the OTHER half of that gate, and the reason it is a
+    /// separate field rather than `progress.is_some()`. audit-16 kept
+    /// clp-2's fallback on the local route as `verbose || progress` but
+    /// threaded only `verbose` here, so a remote push with `-p` and no
+    /// `-v` went silent through a slow source enumeration — the documented
+    /// "(or `-p`)" contract holding on one route and not the other.
+    /// Callers thread the CLI's effective `--progress`/`-p` decision
+    /// through here. Note this is NOT "a progress sink is attached": the
+    /// SOURCE still has no sink (attaching one is CLI_LIVE_PROGRESS
+    /// residue (d), post-1.0), and a caller that draws its own surface —
+    /// the TUI — must leave this `false` so raw lines never land on it.
+    pub progress: bool,
 }
 
 /// Output of [`run_remote_push`]. `summary` is the
@@ -172,8 +184,14 @@ pub async fn run_remote_push(
     execution: PushExecution,
     progress: Option<&RemoteTransferProgress>,
 ) -> Result<PushExecutionOutcome> {
-    let source: Arc<dyn TransferSource> =
-        Arc::new(FsTransferSource::new(execution.source).with_verbose(execution.verbose));
+    // cr-a16-1: `verbose || progress`, the same shape `run_local_session`
+    // uses. The SOURCE gets no progress sink here, so under plain `-p` the
+    // heartbeat's raw-stderr fallback is the only liveness signal a slow
+    // enumeration has, exactly as clp-2 left it.
+    let source: Arc<dyn TransferSource> = Arc::new(
+        FsTransferSource::new(execution.source)
+            .with_verbose(execution.verbose || execution.progress),
+    );
 
     let options = PushSessionOptions {
         compare_mode: execution.compare_mode,

@@ -154,6 +154,12 @@ pub(crate) fn build_f1_push_execution(
         // No verbose toggle on the F1 trigger — stays quiet like every
         // other TUI-driven transfer (audit-16).
         verbose: false,
+        // cr-a16-1: `progress` here is the SOURCE-side heartbeat's
+        // raw-stderr fallback, not the TUI's own progress. The TUI draws
+        // its own surface and reads events off the session's progress
+        // lane, so raw lines would land ON that surface — it stays off,
+        // which is also exactly the shape it had before cr-a16-1.
+        progress: false,
     }
 }
 

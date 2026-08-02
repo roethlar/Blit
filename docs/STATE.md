@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-08-02 (cr-ls5-3 fixed: the sweep cache's write taint is now session-global)
+Last updated: 2026-08-02 (ls6-range r2 fixes: cr-ls5-3 session-global write taint, cr-a16-1 `-p` heartbeat)
 
 - **BLIT 0.1.1 IS RELEASED (D-2026-07-23-8):** annotated tag `v0.1.1`
   resolves to exact validated candidate `d1f1152d` on LAN Gitea and GitHub.
@@ -43,7 +43,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   528/0. Evidence: `stream-interrogation-deletion.md` in the bench dir.
 - **1.0 RELEASE EFFORT ACTIVE** (owner goal + commit/push/review
   discretion, 2026-08-01): gates in `docs/plan/RELEASE_1_0.md`. Open:
-  cr-ls5-3 FIXED (session-global write flag — the per-directory taint matched SPELLINGS), re-review queued; cr-a16-1 next; audit-18/19 owner call.
+  ls6-range r2's cr-ls5-3 (session-global write flag) and cr-a16-1 (`-p` heartbeat on the remote route) both FIXED, re-review queued; audit-18/19 owner call.
 
 ## Now (active work)
 

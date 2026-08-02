@@ -337,6 +337,11 @@ async fn run_remote_push_transfer_inner(
         remote_label: format_remote_endpoint(&remote),
         lifecycle_trace: lifecycle_trace.clone(),
         verbose: args.verbose,
+        // cr-a16-1: `-p` is the other half of audit-16's gate, so the
+        // remote route reads the same effective decision the local one
+        // does (`LocalMirrorOptions.progress`) rather than losing the
+        // documented "(or `-p`)" liveness fallback.
+        progress: args.effective_progress(),
     };
 
     // Push has no caller-side destructive step (mirror-delete is

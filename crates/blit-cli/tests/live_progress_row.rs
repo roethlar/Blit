@@ -6,13 +6,17 @@
 //! what gates blit-core's enumeration heartbeat, so attaching it would
 //! leave the redirected stream with no row (nothing can be drawn) and no
 //! liveness line either. This binary asserts the liveness survives.
+//!
+//! It also owns audit-16's gate end-to-end — the whole truth about when
+//! that heartbeat speaks lives here, on BOTH routes (cr-a16-1): quiet by
+//! default, audible under `--verbose`, audible under `-p`.
 
 use std::fs;
 use std::process::Command;
 use std::time::Duration;
 
 mod common;
-use common::{cli_bin, run_with_timeout};
+use common::{cli_bin, run_with_timeout, TestContext};
 
 /// The line blit-core prints when a manifest scan ends with no progress
 /// sink attached. Its presence is the observable proof the sink stayed
@@ -83,5 +87,60 @@ fn verbose_redirected_run_keeps_the_enumeration_liveness() {
     assert!(
         stderr.contains(ENUMERATION_LIVENESS),
         "--verbose must restore the sink-less enumeration liveness:\n{stderr}"
+    );
+}
+
+/// cr-a16-1: the same `-p` posture on the REMOTE PUSH route.
+///
+/// audit-16 preserved clp-2's `verbose || progress` fallback in
+/// `run_local_session` but threaded only `execution.verbose` into
+/// `run_remote_push`'s `FsTransferSource`, so a push with `-p` and no
+/// `-v` was silent through source enumeration — the documented "(or
+/// `-p`)" contract holding on one route and not the other. The CLI does
+/// build a progress handle for `-p`, but that handle rides the SESSION's
+/// progress lane; the SOURCE end has no sink of its own (attaching one is
+/// CLI_LIVE_PROGRESS residue (d), post-1.0), so the raw heartbeat is the
+/// only liveness a slow remote enumeration has.
+///
+/// Driven through the real binary against a real daemon because that is
+/// where the CLI's `-p` decision, `PushExecution.progress`, and the source
+/// construction all meet; a unit test on the expression would pin the fix
+/// rather than the behaviour. Reverting `|| execution.progress` in
+/// `blit_app::transfers::remote::run_remote_push` reds this and nothing
+/// else — the two local-route tests above cannot see that route at all.
+#[test]
+fn remote_push_with_progress_keeps_the_enumeration_liveness() {
+    let ctx = TestContext::new();
+    let src = ctx.workspace.join("src");
+    fs::create_dir_all(&src).expect("mkdir src");
+    fs::write(src.join("a.txt"), b"first").expect("write a");
+    fs::write(src.join("b.txt"), b"second").expect("write b");
+
+    let mut cmd = Command::new(&ctx.cli_bin);
+    cmd.arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("copy")
+        .arg("--yes")
+        .arg("-p")
+        .arg(format!("{}/", src.display()))
+        .arg(format!("127.0.0.1:{}:/test/", ctx.daemon_port));
+
+    let output = run_with_timeout(cmd, Duration::from_secs(60));
+    assert!(
+        output.status.success(),
+        "blit copy to the daemon failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(ctx.module_dir.join("b.txt")).expect("the push must land"),
+        b"second",
+        "the fixture must actually transfer, or the liveness assertion is vacuous"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(ENUMERATION_LIVENESS),
+        "a remote push with -p (and no -v) must keep the enumeration liveness:\n{stderr}"
     );
 }

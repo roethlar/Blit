@@ -57,6 +57,7 @@ fn push_execution(src: &Path, port: u16) -> PushExecution {
         remote_label: format!("127.0.0.1:{port}:/test/"),
         lifecycle_trace: Default::default(),
         verbose: false,
+        progress: false,
     }
 }
 
