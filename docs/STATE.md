@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-08-02 (ls6-range r2 fixes: cr-ls5-3 session-global write taint, cr-a16-1 `-p` heartbeat)
+Last updated: 2026-08-02 (workspace version bumped to 1.0.0 release candidate; Cargo.lock refreshed, full gate green)
 
 - **BLIT 0.1.1 IS RELEASED (D-2026-07-23-8):** annotated tag `v0.1.1`
   resolves to exact validated candidate `d1f1152d` on LAN Gitea and GitHub.
@@ -42,8 +42,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   `--checksum` keeps deep verify; evidence in the ls1-phase bench dir.
 - **1.0 RELEASE EFFORT ACTIVE** (owner goal + discretion, 2026-08-01):
   gates in `docs/plan/RELEASE_1_0.md`. **G1 CLOSED — ls6-range r3 CLEAN
-  (3 rounds, 5 findings, all verified).** Next: 1.0.0 bump → candidate
-  CI → archives; tag = owner (G6); audit-18/19 ship documented.
+  (3 rounds, 5 findings, all verified).** **1.0.0 bump landed** (gate
+  green); next: candidate CI → archives; tag = owner (G6); audit-18/19 ship documented.
 
 ## Now (active work)
 
