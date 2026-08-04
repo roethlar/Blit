@@ -1,1 +1,0 @@
-Implemented USN-based change journal fast-path for local copy/mirror. `change_journal.rs` stores per-root checkpoints in `~/.config/blit/journal_cache.json` and orchestrator consults them to skip planning when `skip_unchanged` and checksum/tar overrides are off. Added unit tests + TODO to rerun Windows 0-change benchmark; macOS (FSEvents) and Linux fanotify remain pending.
