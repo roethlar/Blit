@@ -2,7 +2,7 @@
 
 Last updated: 2026-08-04. NOW: BLIT_CONSOLE.md ACTIVE — D1 egui (D-2026-08-04-1),
 D2 legacy TUI dies at cutover (D-2026-08-04-2), D3 1.0 gates on C1–C4 + T1–T3
-(D-2026-08-04-3). NEXT: C1 egui GUI shell slice (core slices 1+2 landed). Open: G5b cross-OS smoke matrix; interim
+(D-2026-08-04-3). NEXT: C1 egui GUI shell slice (core slices 1+2 landed, as of `7e6c68f5`). Open: G5b cross-OS smoke matrix; interim
 1.0 archives in dist/ off `ef9a13b2`; audit-18/19 ship documented unless owner overrides.
 
 - **BLIT 0.1.1 IS RELEASED (D-2026-07-23-8):** annotated tag `v0.1.1`
