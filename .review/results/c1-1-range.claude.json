@@ -1,0 +1,22 @@
+{
+  "verdict": "findings",
+  "capability_ok": true,
+  "reviewed_sha": "243f4d4d",
+  "base_sha": "3a602a94",
+  "findings": [
+    {
+      "title": "Browse completion messages carry no correlation to the in-flight request, so stale or mismatched results silently overwrite newer state",
+      "evidence": "crates/blit-console-core/src/model.rs:138-150 \u2014 Msg::ListingLoaded unconditionally sets current_path/listing and clears last_error, and Msg::ListingFailed unconditionally clears the listing and sets the error; neither handler compares the message's path (ListingFailed even discards it via `..`) against current_path, and neither Msg carries the EndpointId that Effect::Browse (model.rs:131, src/model.rs:34) issued, so the host cannot correlate a completion to its request even if it wanted to. Triggered by the module's own stated contract (model.rs:1-7): a host that executes Effect::Browse asynchronously and feeds results back. Sequence: NavigateTo(A), NavigateTo(B), A's result arrives after B's \u2192 model reports current_path=A with A's listing though the user requested B; a slow failure for A likewise wipes B's freshly loaded listing and shows A's error. Same shape across endpoints: SelectEndpoint(daemon) after a pending local browse \u2192 the local listing lands and is displayed as the daemon pane's content.",
+      "predicted_failure": "In the first async face (the egui GUI this crate exists to serve), rapid navigation or endpoint switching displays the wrong directory's contents / wrong error with no crash and no test failure \u2014 model.rs tests (model.rs:206-245) only cover the single matched-request case, so nothing pins out-of-order behavior.",
+      "severity": "MEDIUM \u2014 wrong-state bug in the crate's core contract (the shared brain both faces must trust), but not yet user-reachable because no face ships in this slice and local browse is synchronous.",
+      "better_approach": "Tag each Effect::Browse with a request generation (and endpoint id), echo it in ListingLoaded/ListingFailed, and have update() drop completions whose generation != the latest issued; add an out-of-order test."
+    },
+    {
+      "title": "SelectEndpoint leaves the previous endpoint's browse state (listing, current_path, loading) in place",
+      "evidence": "crates/blit-console-core/src/model.rs:118-126 \u2014 the SelectEndpoint arm sets `selected` and clears last_error but does not touch listing, current_path, or loading, while the Msg doc (model.rs:16-17, 'Bring the endpoint's browse pane into focus') and the single shared listing/current_path fields (model.rs:40-46) mean there is only one pane state. Trigger: add_endpoint(Daemon...), NavigateTo(some local path), ListingLoaded, then SelectEndpoint(daemon) \u2014 model now reports the daemon as selected while listing()/current_path() still describe the local filesystem; if selection changes while loading==true and the host abandons the old effect, is_loading() stays true forever.",
+      "predicted_failure": "A face rendering straight from the model shows endpoint A's directory contents attributed to endpoint B after an endpoint switch, or a permanent loading spinner; no existing test exercises selection change after a completed or in-flight browse.",
+      "severity": "LOW \u2014 real incorrect-display behavior in the model API, but in this slice only Local is registered by default and daemon browse is a typed stub, so practical reachability is minimal.",
+      "better_approach": "On selection change, reset listing/current_path/loading (or emit a fresh Browse effect for the new endpoint), and pin it with a test."
+    }
+  ]
+}

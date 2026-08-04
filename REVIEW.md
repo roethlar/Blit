@@ -17,6 +17,16 @@ See `.review/findings/<id>.md` for per-finding details.
   reviewer verdict when external review was not authorized; its finding record
   must carry the local guard proof and the non-review closure.
 
+## Blit Console (BLIT_CONSOLE) — landed-slice defect reviews
+
+Plan: `docs/plan/BLIT_CONSOLE.md` (Active, D-2026-08-04-1..3).
+
+| ID | Title | Status | Commit(s) |
+|----|-------|--------|-----------|
+| c1-1-range | Defect hunt over `3a602a94..243f4d4d` (console-core scaffold) | `[x]` | **findings: 2, both admitted below**. Reviewer: claude / claude-fable-5 / high / standard; claude-cli 2.1.221; capability_ok=true; SHAs pin-verified; dispatch note: local `rtk` wrapper rewrote 8 early git calls outside the launch grant (recovered; noted per owner ruling 2026-07-23); record `.review/results/c1-1-range.claude.json` |
+| cr-c1-1 | Browse completions carry no request correlation — stale results overwrite newer state | `[ ]` | MEDIUM; open (`.review/findings/cr-c1-1.md`) |
+| cr-c1-2 | SelectEndpoint leaves the previous endpoint's browse state in place | `[ ]` | LOW; open (`.review/findings/cr-c1-2.md`) |
+
 ## Per-file error containment + CLI live progress — landed-slice defect reviews
 
 Plans: `docs/plan/PER_FILE_ERROR_CONTAINMENT.md` (Active, D-2026-07-30-1 /
