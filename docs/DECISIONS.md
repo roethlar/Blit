@@ -735,3 +735,8 @@ Format:
 - Decision: v1.0.0 is not tagged until BLIT_CONSOLE C1–C4 (GUI) AND T1–T3 (TUI v2) are complete and owner-approved; the new TUI is not post-1.0.
 - Why: owner ruled "both surfaces" (2026-08-04) — headless boxes are first-class, so 1.0 ships only when both the egui GUI and the file-manager TUI have passed their owner-run acceptance gates.
 - Effect: RELEASE_1_0.md G5c re-points to BLIT_CONSOLE C1–C4 + T1–T3. D-2026-08-02-1's intent ("no 1.0 with an unusable UI") is now fully concrete.
+
+## D-2026-08-04-4 — external/paid review dispatches are OFF by owner default (cost)
+- Decision: no further external review dispatches (codereview/openreview, any paid harness) unless the owner explicitly orders that exact dispatch. Findings close on the local guard proof instead (REVIEW.md's local-closure rule). First application: cr-c1-2 closed by local closure after its verification dispatch returned invalid on a transport failure.
+- Why: owner, 2026-08-04: "no more reviews. those are very expensive."
+- Supersedes/qualifies: the standing landed-slice codex dispatch grant (D-2026-07-31-3) is suspended until the owner reinstates it; D-2026-07-23-7's per-invocation approval rule is unaffected (it already required explicit approval — this ruling removes the expectation that approval will be sought as a matter of course).

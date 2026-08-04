@@ -25,14 +25,15 @@ Plan: `docs/plan/BLIT_CONSOLE.md` (Active, D-2026-08-04-1..3).
 |----|-------|--------|-----------|
 | c1-1-range | Defect hunt over `3a602a94..243f4d4d` (console-core scaffold) | `[x]` | **findings: 2, both admitted below**. Reviewer: claude / claude-fable-5 / high / standard; claude-cli 2.1.221; capability_ok=true; SHAs pin-verified; dispatch note: local `rtk` wrapper rewrote 8 early git calls outside the launch grant (recovered; noted per owner ruling 2026-07-23); record `.review/results/c1-1-range.claude.json` |
 | cr-c1-1 | Browse completions carry no request correlation — stale results overwrite newer state | `[x]` | MEDIUM; fixed `1244f19b`; claude/claude-fable-5/high verification **accepted**, guard_confirmed=true, SHAs pin-verified (`.review/results/cr-c1-1.claude.json`) |
-| cr-c1-2 | SelectEndpoint leaves the previous endpoint's browse state in place | `[!]` | LOW; fixed `22261bf5`; verification dispatch **invalid** (reviewer transport: blanket execution denial, no guard proof) — contested, awaiting owner ruling (`.review/cr-c1-2.contested.md`) |
+| cr-c1-2 | SelectEndpoint leaves the previous endpoint's browse state in place | `[x]` | LOW; fixed `22261bf5`; verification dispatch invalid (reviewer transport denial); **closed by local closure per owner ruling D-2026-08-04-4** — mutation guard in `.review/findings/cr-c1-2.md` is the record (`.review/cr-c1-2.contested.md`) |
 
 ## Per-file error containment + CLI live progress — landed-slice defect reviews
 
 Plans: `docs/plan/PER_FILE_ERROR_CONTAINMENT.md` (Active, D-2026-07-30-1 /
 D-2026-07-31-1), `docs/plan/CLI_LIVE_PROGRESS.md` (Active, D-2026-07-31-2).
 Standing dispatch (owner, D-2026-07-31-3): `codereview codex gpt-5.6-sol
-xhigh` over each landed slice's pinned range as it lands.
+xhigh` over each landed slice's pinned range as it lands. **SUSPENDED by
+D-2026-08-04-4** (owner, cost: "no more reviews") until reinstated.
 
 | ID | Title | Status | Commit(s) |
 |----|-------|--------|-----------|

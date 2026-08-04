@@ -37,3 +37,11 @@ pre-fix body turns `select_resets_pane_and_replaces_in_flight_browse` and
    legend permits `[x]` local closure when external review is not
    authorized); the finding doc carries the proof and this note.
 3. **Leave open** — cr-c1-2 stays `[~]` until a future review pass covers it.
+
+## Ruling (owner, 2026-08-04)
+
+**Option 2 — local closure.** Owner: "no more reviews. those are very
+expensive." Recorded as D-2026-08-04-4 (`docs/DECISIONS.md`): external/paid
+review dispatches are off unless the owner explicitly orders one; local
+guard proofs close findings. cr-c1-2 is Verified by local closure on the
+mutation guard recorded in `.review/findings/cr-c1-2.md`.

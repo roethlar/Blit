@@ -1,9 +1,9 @@
 # cr-c1-2: SelectEndpoint leaves the previous endpoint's browse state in place
 
 **Severity**: LOW — real incorrect-display behavior in the model API, but slice 1 registers only Local by default and daemon browse is a typed stub, so practical reachability is minimal.
-**Status**: In progress — fix committed, external verification pending
+**Status**: Verified — local closure (owner ruling 2026-08-04: no further external review dispatches, cost; the local guard proof below is the record)
 **Branch**: —
-**Commit**: (this fix commit; SHA filled in at the verification record)
+**Commit**: `22261bf5`
 
 ## Evidence
 `crates/blit-console-core/src/model.rs:118-126` — the `SelectEndpoint` arm sets `selected` and clears `last_error` but does not touch `listing`, `current_path`, or `loading`, while the model holds a single shared pane state (`model.rs:40-46`) and the Msg doc (`model.rs:16-17`) describes selection as bringing that endpoint's pane into focus. Trigger: `add_endpoint(Daemon…)`, `NavigateTo(local path)`, `ListingLoaded`, then `SelectEndpoint(daemon)` → the daemon is selected while `listing()`/`current_path()` still describe the local filesystem. If selection changes while `loading == true` and the host abandons the old effect, `is_loading()` stays true forever.
