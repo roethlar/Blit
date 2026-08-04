@@ -136,12 +136,27 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     match msg {
         Msg::SelectEndpoint(id) => {
             if model.endpoint(id).is_some() {
+                // A switch owns the pane: drop the previous endpoint's
+                // listing/path and immediately browse the new endpoint's
+                // root. Issuing the browse bumps the generation, so any
+                // completion still in flight from the old endpoint is
+                // dropped as stale.
                 model.selected = Some(id);
                 model.last_error = None;
+                model.listing.clear();
+                model.current_path = PathBuf::from("/");
+                model.browse_generation += 1;
+                let generation = model.browse_generation;
+                model.loading = true;
+                vec![Effect::Browse {
+                    endpoint: id,
+                    path: model.current_path.clone(),
+                    generation,
+                }]
             } else {
                 model.last_error = Some(format!("unknown endpoint {}", id.0));
+                Vec::new()
             }
-            Vec::new()
         }
         Msg::NavigateTo(path) => match model.selected {
             Some(endpoint) => {
@@ -222,9 +237,85 @@ mod tests {
         }));
         update(&mut model, Msg::SelectEndpoint(EndpointId(99)));
         let effects = update(&mut model, Msg::SelectEndpoint(daemon));
-        assert!(effects.is_empty());
+        assert_eq!(
+            effects,
+            vec![Effect::Browse {
+                endpoint: daemon,
+                path: PathBuf::from("/"),
+                generation: 1,
+            }]
+        );
         assert_eq!(model.selected(), Some(daemon));
         assert_eq!(model.last_error(), None);
+    }
+
+    #[test]
+    fn select_resets_pane_and_replaces_in_flight_browse() {
+        let mut model = Model::new();
+        let daemon = model.add_endpoint(Endpoint::Daemon(DaemonEndpoint {
+            address: "magneto:9833".to_string(),
+            name: "magneto".to_string(),
+        }));
+        // Load the local pane, then start another browse so one is in
+        // flight when the switch lands.
+        update(&mut model, Msg::NavigateTo(PathBuf::from("/tmp")));
+        update(
+            &mut model,
+            Msg::ListingLoaded {
+                generation: 1,
+                path: PathBuf::from("/tmp"),
+                entries: vec![DirEntry {
+                    name: "local-file".to_string(),
+                    is_dir: false,
+                    size: 1,
+                    mtime_seconds: 1,
+                }],
+            },
+        );
+        update(&mut model, Msg::NavigateTo(PathBuf::from("/var")));
+        assert!(model.is_loading());
+        let effects = update(&mut model, Msg::SelectEndpoint(daemon));
+        // The pane is reset and re-loading the new endpoint's root; the
+        // old endpoint's in-flight browse (generation 2) is superseded.
+        assert_eq!(
+            effects,
+            vec![Effect::Browse {
+                endpoint: daemon,
+                path: PathBuf::from("/"),
+                generation: 3,
+            }]
+        );
+        assert!(model.listing().is_empty());
+        assert_eq!(model.current_path(), &PathBuf::from("/"));
+        assert!(model.is_loading());
+        // The superseded local completion is dropped, not displayed.
+        update(
+            &mut model,
+            Msg::ListingLoaded {
+                generation: 2,
+                path: PathBuf::from("/var"),
+                entries: vec![DirEntry {
+                    name: "stale".to_string(),
+                    is_dir: true,
+                    size: 0,
+                    mtime_seconds: 1,
+                }],
+            },
+        );
+        assert!(model.is_loading());
+        assert!(model.listing().is_empty());
+        assert_eq!(model.current_path(), &PathBuf::from("/"));
+        // The switch's own completion resolves the pane.
+        update(
+            &mut model,
+            Msg::ListingFailed {
+                generation: 3,
+                path: PathBuf::from("/"),
+                error: "daemon browse unsupported".to_string(),
+            },
+        );
+        assert!(!model.is_loading());
+        assert_eq!(model.last_error(), Some("daemon browse unsupported"));
     }
 
     #[test]

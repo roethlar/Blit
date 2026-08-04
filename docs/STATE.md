@@ -46,7 +46,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   M1 `f3picker.rs` dead code pending cutover.
 
 ## Now (active work)
-- **BLIT_CONSOLE C1 slice 1 landed:** `crates/blit-console-core` scaffolded — endpoint model (local + daemon), local browse via blit-app `admin::ls` (daemon browse typed-stubbed `Unsupported`), Elm-ish `Model`/`Msg`/`update`, unit-tested; discovery + egui shell next. **Active review loop:** cr-c1-1 verified-closed `1244f19b`, cr-c1-2 (LOW) open — REVIEW.md §Blit Console.
+- **BLIT_CONSOLE C1 slice 1 landed:** `crates/blit-console-core` scaffolded — endpoint model (local + daemon), local browse via blit-app `admin::ls` (daemon browse typed-stubbed `Unsupported`), Elm-ish `Model`/`Msg`/`update`, unit-tested; discovery + egui shell next. **Active review loop:** cr-c1-1 verified-closed `1244f19b`; cr-c1-2 fixed (verification dispatch pending) — REVIEW.md §Blit Console.
 - **MACOS TEST FIREWALL CLEANUP SHIPPED LOCALLY (D-2026-07-23-6):** helper,
   16 fake-backed cases, parser check and mutation guards complete; no review
   pending. Plan: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md`.

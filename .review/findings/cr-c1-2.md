@@ -1,9 +1,9 @@
 # cr-c1-2: SelectEndpoint leaves the previous endpoint's browse state in place
 
 **Severity**: LOW — real incorrect-display behavior in the model API, but slice 1 registers only Local by default and daemon browse is a typed stub, so practical reachability is minimal.
-**Status**: Open
+**Status**: In progress — fix committed, external verification pending
 **Branch**: —
-**Commit**: (pending)
+**Commit**: (this fix commit; SHA filled in at the verification record)
 
 ## Evidence
 `crates/blit-console-core/src/model.rs:118-126` — the `SelectEndpoint` arm sets `selected` and clears `last_error` but does not touch `listing`, `current_path`, or `loading`, while the model holds a single shared pane state (`model.rs:40-46`) and the Msg doc (`model.rs:16-17`) describes selection as bringing that endpoint's pane into focus. Trigger: `add_endpoint(Daemon…)`, `NavigateTo(local path)`, `ListingLoaded`, then `SelectEndpoint(daemon)` → the daemon is selected while `listing()`/`current_path()` still describe the local filesystem. If selection changes while `loading == true` and the host abandons the old effect, `is_loading()` stays true forever.
@@ -15,13 +15,14 @@ A face rendering straight from the model shows endpoint A's directory contents a
 Endpoint selection does not reset (or re-load) the single shared browse pane, so stale cross-endpoint state is displayed as current.
 
 ## Approach
-(pending — coder completes when work starts)
+The reviewer's first option, chosen because it also closes the residual shape the cr-c1-1 verifier noted (a bare `SelectEndpoint` not followed by `NavigateTo` left `loading` and the generation untouched): a successful `SelectEndpoint` now owns the pane — it clears the listing, resets `current_path` to `/`, and immediately issues a fresh `Effect::Browse` for the new endpoint's root. Issuing the browse bumps `browse_generation`, so any completion still in flight from the old endpoint is dropped as stale by cr-c1-1's guards rather than landing in the new pane; `loading` always tracks the switch's own browse, so it cannot stick. Unknown-endpoint selection is unchanged (error, no effect).
 
 ## Files changed
-(pending)
+- `crates/blit-console-core/src/model.rs:137-161` — `SelectEndpoint` arm resets pane state and emits `Effect::Browse` for the new endpoint's root
+- `crates/blit-console-core/src/model.rs` tests — `select_registered_daemon_clears_error` updated for the emitted effect; new `select_resets_pane_and_replaces_in_flight_browse` pins reset, stale-drop, and load resolution across a switch
 
 ## Guard proof
-(pending — a selection-after-load test that FAILS pre-fix, PASSES post-fix)
+- `model::tests::select_resets_pane_and_replaces_in_flight_browse` and the updated `select_registered_daemon_clears_error` — mutation guard: reverting the arm to the pre-fix body (select + clear error, no reset, no effect) turns both tests red; restored, green (16/16 crate suite).
 
 ## Coder dispute
 None.
