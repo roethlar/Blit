@@ -1,6 +1,6 @@
 # Blit Console — one core, two faces (GUI + TUI)
 
-**Status**: Draft — awaiting owner rulings on D1–D3 below, then Active
+**Status**: Active — D1 ruled egui (D-2026-08-04-1); D2/D3 pending, one at a time
 **Created**: 2026-08-02
 **Supersedes**: `TUI_REWORK.md` (scrapped whole by owner, 2026-08-02:
 "nothing about current TUI works for me. scrap the entire UI"); re-points
@@ -98,19 +98,19 @@ the codex review loop.
 
 ## 5. Owner decisions (queued one at a time)
 
-- **D1 — GUI framework.** (a) **egui**: pure Rust, single static binary,
+- **D1 — GUI framework. RULED 2026-08-04: egui (D-2026-08-04-1).** ~~(a) **egui**: pure Rust, single static binary,
   no extra toolchain, utilitarian look; recommendation for integration
   simplicity and repo fit. (b) **Tauri**: webview shell, native-feeling
   polish, adds a web toolchain (npm/TS) to the repo and CI. Owner has
-  said either is acceptable in principle.
-- **D2 — fate of legacy `blit-tui` code.** (a) Delete the F1/F3 panes,
+  said either is acceptable in principle.~~
+- **D2 — fate of legacy `blit-tui` code. RULED 2026-08-04: at T1 cutover (D-2026-08-04-2).** ~~(a) Delete the F1/F3 panes,
   `dual_pane.rs`, and M1's `f3picker.rs` at T1 cutover (recommendation);
-  (b) delete immediately and leave the crate a stub until T1.
-- **D3 — what 1.0 gates on.** (a) GUI MVP (C1–C4) only, TUI v2 follows
-  post-1.0; (b) both surfaces (C1–C4 + T1–T3). Re-points RELEASE_1_0
-  G5c; owner's D-2026-08-02-1 intent ("no 1.0 with an unusable UI")
-  persists either way because nothing broken ships: the legacy TUI is
-  retired from the release surface at cutover regardless.
+  (b) delete immediately and leave the crate a stub until T1.~~
+- **D3 — what 1.0 gates on. RULED 2026-08-04: both surfaces (D-2026-08-04-3).** ~~(a) GUI MVP (C1–C4) only, TUI v2 follows
+  post-1.0; (b) both surfaces (C1–C4 + T1–T3).~~ Re-points RELEASE_1_0
+  G5c to C1–C4 + T1–T3; owner's D-2026-08-02-1 intent ("no 1.0 with an
+  unusable UI") is now fully concrete: nothing broken ships, and the
+  legacy TUI is retired from the release surface at cutover regardless.
 
 ## 6. Out of scope
 
@@ -130,8 +130,10 @@ mobile/web remotes.
 
 ## 8. Next step
 
-Owner rules D1 (framework). D2/D3 follow one at a time. Plan flips
-Active on D1; C1 dispatches immediately after.
+Owner ruled D1 (egui, D-2026-08-04-1), D2 (delete legacy TUI at T1 cutover,
+D-2026-08-04-2), D3 (1.0 gates on C1–C4 + T1–T3, D-2026-08-04-3); plan is
+Active. Next: dispatch C1 (`blit-console-core` endpoints/discovery/browse +
+egui GUI shell).
 
 ## Owner acceptance log
 

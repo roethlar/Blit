@@ -720,3 +720,18 @@ Format:
 - Decision: the Pick-not-Type rework and the current TUI surfaces are scrapped whole (owner: "nothing about the current TUI works for me… no arcane picker keys"); the replacement is `docs/plan/BLIT_CONSOLE.md` — a shared `blit-console-core` with a GUI face (rust/tauri-or-egui, D1 pending) AND a file-manager TUI face, because "for headless boxes, a GUI is useless."
 - Why: the product's purpose is "manage transfers between daemons and handle the CLI options I don't want to remember"; two prior UI attempts failed by stdout-parsing integration and owner-sees-it-last process, both corrected structurally in the new plan (direct API core, owner-run acceptance gate per milestone).
 - Supersedes: D-2026-08-02-1's concrete gate (TUI_REWORK M1–M6) — its intent (no 1.0 with an unusable UI) persists as RELEASE_1_0 G5c re-pointed to BLIT_CONSOLE milestones (scope = D3, pending).
+
+## D-2026-08-04-1 — Blit Console GUI framework is egui (D1 ruled)
+- Decision: the GUI face of `docs/plan/BLIT_CONSOLE.md` is built with **egui** — pure Rust, single static binary, no new toolchain. Tauri (webview shell, Node.js/TypeScript toolchain) is rejected.
+- Why: owner ruled egui (2026-08-04) when asked, accepting the plan's recommendation: integration simplicity and repo fit; the utilitarian look is an accepted trade because the GUI is a thin view over `blit-console-core` and can be rewritten without touching the brain.
+- Effect: BLIT_CONSOLE flips Draft → Active; C1 (`blit-console-core` endpoints/discovery/browse + egui GUI shell) may dispatch. D2 (legacy blit-tui fate) and D3 (1.0 gate scope) remain queued, one at a time.
+
+## D-2026-08-04-2 — legacy blit-tui code deleted at T1 cutover, not before (D2 ruled)
+- Decision: the F1/F3 panes, `dual_pane.rs`, and M1's `f3picker.rs` stay in the repo until the TUI v2 lands and the owner judges it usable (BLIT_CONSOLE milestone T1/T3 cutover); they are deleted then, not immediately.
+- Why: owner ruled "at cutover" (2026-08-04), accepting the plan's recommendation — the old TUI remains a runnable fallback during the GUI-first milestones, which are months of work before T1.
+- Effect: no immediate code deletion; the T3 cutover milestone carries the deletion. M1 `f3picker.rs` stays dead-code-pending-cutover as STATE records.
+
+## D-2026-08-04-3 — 1.0 gates on BOTH Blit Console surfaces (D3 ruled)
+- Decision: v1.0.0 is not tagged until BLIT_CONSOLE C1–C4 (GUI) AND T1–T3 (TUI v2) are complete and owner-approved; the new TUI is not post-1.0.
+- Why: owner ruled "both surfaces" (2026-08-04) — headless boxes are first-class, so 1.0 ships only when both the egui GUI and the file-manager TUI have passed their owner-run acceptance gates.
+- Effect: RELEASE_1_0.md G5c re-points to BLIT_CONSOLE C1–C4 + T1–T3. D-2026-08-02-1's intent ("no 1.0 with an unusable UI") is now fully concrete.

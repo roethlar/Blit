@@ -1,9 +1,9 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-08-02 handoff. NOW: BLIT_CONSOLE.md Draft (TUI_REWORK
-scrapped, D-2026-08-02-2). NEXT: owner rules D1 (egui vs tauri) → D2/D3
-→ dispatch C1. Open: G5b cross-OS smoke matrix; interim 1.0 archives in
-dist/ off `ef9a13b2`; audit-18/19 ship documented unless owner overrides.
+Last updated: 2026-08-04. NOW: BLIT_CONSOLE.md ACTIVE — D1 egui (D-2026-08-04-1),
+D2 legacy TUI dies at cutover (D-2026-08-04-2), D3 1.0 gates on C1–C4 + T1–T3
+(D-2026-08-04-3). NEXT: dispatch C1. Open: G5b cross-OS smoke matrix; interim
+1.0 archives in dist/ off `ef9a13b2`; audit-18/19 ship documented unless owner overrides.
 
 - **BLIT 0.1.1 IS RELEASED (D-2026-07-23-8):** annotated tag `v0.1.1`
   resolves to exact validated candidate `d1f1152d` on LAN Gitea and GitHub.
