@@ -2,7 +2,7 @@
 
 Last updated: 2026-08-04. NOW: BLIT_CONSOLE.md ACTIVE — D1 egui (D-2026-08-04-1),
 D2 legacy TUI dies at cutover (D-2026-08-04-2), D3 1.0 gates on C1–C4 + T1–T3
-(D-2026-08-04-3). NEXT: dispatch C1. Open: G5b cross-OS smoke matrix; interim
+(D-2026-08-04-3). NEXT: C1 egui GUI shell slice (core slices 1+2 landed). Open: G5b cross-OS smoke matrix; interim
 1.0 archives in dist/ off `ef9a13b2`; audit-18/19 ship documented unless owner overrides.
 
 - **BLIT 0.1.1 IS RELEASED (D-2026-07-23-8):** annotated tag `v0.1.1`
@@ -46,7 +46,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   M1 `f3picker.rs` dead code pending cutover.
 
 ## Now (active work)
-- **BLIT_CONSOLE C1 slice 1 landed:** `crates/blit-console-core` scaffolded — endpoint model (local + daemon), local browse via blit-app `admin::ls` (daemon browse typed-stubbed `Unsupported`), Elm-ish `Model`/`Msg`/`update`, unit-tested; discovery + egui shell next. **Review loop CLOSED:** cr-c1-1 verified (claude/claude-fable-5/high, accepted, guard_confirmed=true); cr-c1-2 verified (codex/gpt-5.6-sol/xhigh r2, accepted, guard_confirmed=true, owner-ordered under D-2026-08-04-4).
+- **BLIT_CONSOLE C1 slices 1+2 landed:** `crates/blit-console-core` — endpoint model, local browse, mDNS discovery (upsert-by-address merge, generation-tagged, departed-selected falls back to Local), daemon browse (`browse` now async: daemon root → module list, below root → `admin::ls::list_remote`; local path behavior unchanged), Elm-ish `Model`/`Msg`/`update`, 32 unit tests with no live-network requirement; egui shell next. Slice-1 review loop CLOSED (cr-c1-1 claude accepted, guard_confirmed=true; cr-c1-2 codex accepted, owner-ordered under D-2026-08-04-4); slice 2 ships without external review per D-2026-08-04-4.
 - **MACOS TEST FIREWALL CLEANUP SHIPPED LOCALLY (D-2026-07-23-6):** helper,
   16 fake-backed cases, parser check and mutation guards complete; no review
   pending. Plan: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md`.

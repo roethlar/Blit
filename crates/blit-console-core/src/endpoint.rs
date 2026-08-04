@@ -1,6 +1,7 @@
 //! Endpoint model: the things the console browses — the local
-//! filesystem and remote daemons. In-memory only in this slice; mDNS
-//! discovery and manual-add plumbing land in a later slice
+//! filesystem and remote daemons. In-memory only in this slice;
+//! mDNS discovery populates daemon endpoints ([`crate::discover`]),
+//! manual-add plumbing lands in a later slice
 //! (`docs/plan/BLIT_CONSOLE.md` §4, C1).
 
 use serde::{Deserialize, Serialize};
@@ -23,7 +24,8 @@ pub struct DaemonEndpoint {
 pub enum Endpoint {
     /// The local filesystem.
     Local,
-    /// A remote daemon (browse stubbed as unsupported in this slice).
+    /// A remote daemon (browsed over gRPC — the root lists its
+    /// modules, anything below lists within one module).
     Daemon(DaemonEndpoint),
 }
 

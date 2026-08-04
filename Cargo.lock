@@ -304,8 +304,10 @@ name = "blit-console-core"
 version = "1.0.0"
 dependencies = [
  "blit-app",
+ "blit-core",
  "serde",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
