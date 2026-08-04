@@ -5,6 +5,9 @@
 //! [`Effect::Browse`] means calling [`crate::browse::browse`] and
 //! feeding the result back as [`Msg::ListingLoaded`] /
 //! [`Msg::ListingFailed`], so both faces drive identical logic.
+//! Every browse carries a generation the host echoes back; the model
+//! drops completions for superseded requests, so asynchronous hosts
+//! can never show a stale directory or error.
 
 use crate::endpoint::{Endpoint, EndpointId};
 use blit_app::admin::ls::DirEntry;
@@ -17,21 +20,33 @@ pub enum Msg {
     SelectEndpoint(EndpointId),
     /// Ask to list `path` on the selected endpoint.
     NavigateTo(PathBuf),
-    /// A browse effect completed successfully.
+    /// A browse effect completed successfully. `generation` must echo
+    /// the [`Effect::Browse`] it answers; stale completions are dropped.
     ListingLoaded {
+        generation: u64,
         path: PathBuf,
         entries: Vec<DirEntry>,
     },
-    /// A browse effect failed.
-    ListingFailed { path: PathBuf, error: String },
+    /// A browse effect failed. Same generation rule as
+    /// [`Msg::ListingLoaded`].
+    ListingFailed {
+        generation: u64,
+        path: PathBuf,
+        error: String,
+    },
 }
 
 /// Work the host must perform on the core's behalf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     /// List `path` on `endpoint` and report back with
-    /// [`Msg::ListingLoaded`] / [`Msg::ListingFailed`].
-    Browse { endpoint: EndpointId, path: PathBuf },
+    /// [`Msg::ListingLoaded`] / [`Msg::ListingFailed`], echoing
+    /// `generation` so the core can drop out-of-order completions.
+    Browse {
+        endpoint: EndpointId,
+        path: PathBuf,
+        generation: u64,
+    },
 }
 
 /// Console state: registered endpoints plus the current browse.
@@ -44,6 +59,9 @@ pub struct Model {
     loading: bool,
     last_error: Option<String>,
     next_id: u64,
+    /// Generation of the most recently issued [`Effect::Browse`].
+    /// Completions echoing an older generation are dropped.
+    browse_generation: u64,
 }
 
 impl Default for Model {
@@ -65,6 +83,7 @@ impl Model {
             loading: false,
             last_error: None,
             next_id: 0,
+            browse_generation: 0,
         };
         let local = model.add_endpoint(Endpoint::Local);
         model.selected = Some(local);
@@ -126,23 +145,43 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::NavigateTo(path) => match model.selected {
             Some(endpoint) => {
+                model.browse_generation += 1;
+                let generation = model.browse_generation;
                 model.loading = true;
                 model.current_path = path.clone();
-                vec![Effect::Browse { endpoint, path }]
+                vec![Effect::Browse {
+                    endpoint,
+                    path,
+                    generation,
+                }]
             }
             None => {
                 model.last_error = Some("no endpoint selected".to_string());
                 Vec::new()
             }
         },
-        Msg::ListingLoaded { path, entries } => {
+        Msg::ListingLoaded {
+            generation,
+            path,
+            entries,
+        } => {
+            if !model.loading || generation != model.browse_generation {
+                // Stale or unsolicited completion: a newer request (or
+                // none) owns the pane — drop it.
+                return Vec::new();
+            }
             model.loading = false;
             model.current_path = path;
             model.listing = entries;
             model.last_error = None;
             Vec::new()
         }
-        Msg::ListingFailed { error, .. } => {
+        Msg::ListingFailed {
+            generation, error, ..
+        } => {
+            if !model.loading || generation != model.browse_generation {
+                return Vec::new();
+            }
             model.loading = false;
             model.listing.clear();
             model.last_error = Some(error);
@@ -197,6 +236,7 @@ mod tests {
             vec![Effect::Browse {
                 endpoint: EndpointId(0),
                 path: PathBuf::from("/tmp"),
+                generation: 1,
             }]
         );
         assert!(model.is_loading());
@@ -216,6 +256,7 @@ mod tests {
         let effects = update(
             &mut model,
             Msg::ListingLoaded {
+                generation: 1,
                 path: PathBuf::from("/tmp"),
                 entries,
             },
@@ -234,6 +275,7 @@ mod tests {
         let effects = update(
             &mut model,
             Msg::ListingFailed {
+                generation: 1,
                 path: PathBuf::from("/tmp"),
                 error: "permission denied".to_string(),
             },
@@ -242,6 +284,84 @@ mod tests {
         assert!(!model.is_loading());
         assert!(model.listing().is_empty());
         assert_eq!(model.last_error(), Some("permission denied"));
+    }
+
+    #[test]
+    fn stale_loaded_is_dropped_in_favour_of_newer_request() {
+        let mut model = Model::new();
+        update(&mut model, Msg::NavigateTo(PathBuf::from("/a")));
+        update(&mut model, Msg::NavigateTo(PathBuf::from("/b")));
+        // The /a browse (generation 1) completes after /b (generation 2)
+        // was issued — it must not overwrite the pane.
+        let effects = update(
+            &mut model,
+            Msg::ListingLoaded {
+                generation: 1,
+                path: PathBuf::from("/a"),
+                entries: vec![DirEntry {
+                    name: "stale".to_string(),
+                    is_dir: true,
+                    size: 0,
+                    mtime_seconds: 1,
+                }],
+            },
+        );
+        assert!(effects.is_empty());
+        assert!(model.is_loading());
+        assert_eq!(model.current_path(), &PathBuf::from("/b"));
+        assert!(model.listing().is_empty());
+        // The matching completion for generation 2 still lands.
+        update(
+            &mut model,
+            Msg::ListingLoaded {
+                generation: 2,
+                path: PathBuf::from("/b"),
+                entries: vec![DirEntry {
+                    name: "fresh".to_string(),
+                    is_dir: true,
+                    size: 0,
+                    mtime_seconds: 1,
+                }],
+            },
+        );
+        assert!(!model.is_loading());
+        assert_eq!(model.listing().len(), 1);
+        assert_eq!(model.listing()[0].name, "fresh");
+    }
+
+    #[test]
+    fn stale_failure_is_dropped_in_favour_of_newer_request() {
+        let mut model = Model::new();
+        update(&mut model, Msg::NavigateTo(PathBuf::from("/a")));
+        update(&mut model, Msg::NavigateTo(PathBuf::from("/b")));
+        let effects = update(
+            &mut model,
+            Msg::ListingFailed {
+                generation: 1,
+                path: PathBuf::from("/a"),
+                error: "stale error".to_string(),
+            },
+        );
+        assert!(effects.is_empty());
+        assert!(model.is_loading());
+        assert_eq!(model.current_path(), &PathBuf::from("/b"));
+        assert_eq!(model.last_error(), None);
+    }
+
+    #[test]
+    fn unsolicited_completion_without_browse_is_dropped() {
+        let mut model = Model::new();
+        let effects = update(
+            &mut model,
+            Msg::ListingLoaded {
+                generation: 0,
+                path: PathBuf::from("/tmp"),
+                entries: vec![],
+            },
+        );
+        assert!(effects.is_empty());
+        assert!(!model.is_loading());
+        assert!(model.listing().is_empty());
     }
 
     #[test]
@@ -254,6 +374,7 @@ mod tests {
             loading: false,
             last_error: None,
             next_id: 0,
+            browse_generation: 0,
         };
         let effects = update(&mut model, Msg::NavigateTo(PathBuf::from("/tmp")));
         assert!(effects.is_empty());
