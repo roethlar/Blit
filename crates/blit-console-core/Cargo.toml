@@ -1,0 +1,20 @@
+[package]
+name = "blit-console-core"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+# The ONE brain of the Blit Console (docs/plan/BLIT_CONSOLE.md §2):
+# endpoint model, browse state, and an Elm-ish message/update loop
+# shared by the GUI and TUI faces. Zero UI dependencies — frontends
+# render the model and dispatch messages.
+
+[dependencies]
+blit-app = { path = "../blit-app" }
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

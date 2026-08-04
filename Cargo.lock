@@ -300,6 +300,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "blit-console-core"
+version = "1.0.0"
+dependencies = [
+ "blit-app",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "blit-core"
 version = "1.0.0"
 dependencies = [
