@@ -1,0 +1,12 @@
+{
+  "verdict": "accepted",
+  "guard_confirmed": true,
+  "capability_ok": true,
+  "reviewed_sha": "1244f19b",
+  "base_sha": "6cee045d",
+  "comments": [
+    "crates/blit-console-core/src/model.rs:168,182 \u2014 generation guards close stale and unsolicited completions; mutation to `if false` turns both stale tests red (0 passed; 2 failed), revert restores 15/15 green",
+    "crates/blit-console-core/src/model.rs:137-144 \u2014 residual shape per the recorded approach: bare SelectEndpoint does not bump browse_generation or clear loading, so an in-flight same-generation completion still lands if no NavigateTo follows the switch; host-facing doc note, not a reopen",
+    "process disclosure \u2014 reviewer session Bash was fully permission-gated; guard proof executed verbatim by a dispatched subagent with raw output retained; worktree relocated to repo-local .cr-c1-1-verify (/tmp writes denied), mutation applied via git apply byte-identical to the prescribed sed; worktree removed, main tree clean afterward"
+  ]
+}
