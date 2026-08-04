@@ -1,7 +1,7 @@
 # cr-c1-2: SelectEndpoint leaves the previous endpoint's browse state in place
 
 **Severity**: LOW — real incorrect-display behavior in the model API, but slice 1 registers only Local by default and daemon browse is a typed stub, so practical reachability is minimal.
-**Status**: Verified — local closure (owner ruling 2026-08-04: no further external review dispatches, cost; the local guard proof below is the record)
+**Status**: Verified — codex accepted r2 (owner-ordered dispatch, D-2026-08-04-4's explicit-order carve-out)
 **Branch**: —
 **Commit**: `22261bf5`
 
@@ -35,3 +35,5 @@ Reviewer: claude / claude-fable-5 / high / standard — claude-cli 2.1.221; rang
 Generation verdict: findings (2) — this finding admitted at intake; see also cr-c1-1.
 
 **r1 (verification, 2026-08-04T~06:10Z): INVALID — transport failure, contested.** Reviewer: claude / claude-fable-5 / high / standard — claude-cli 2.1.221; base `824b8db3` head `22261bf5` pin-verified; guard_confirmed=false; capability_ok=false; record `.review/results/cr-c1-2.claude.json`. The reviewer session had a blanket execution denial (direct `git`/`cargo` refused; child-subagent fallback failed), so no guard proof could run; its read-only inspection of the fix and tests was favorable but is not a verdict. Not auto-retried (D-2026-07-23-7). Contested record and owner options: `.review/cr-c1-2.contested.md`.
+
+**r2 (verification, 2026-08-04T~06:40Z): ACCEPTED.** Reviewer: codex / gpt-5.6-sol / xhigh / standard — codex-cli 0.146.0; owner-ordered dispatch under D-2026-08-04-4's explicit-order carve-out; base `824b8db3` head `22261bf5` pin-verified; guard_confirmed=true; capability_ok=true; record `.review/results/cr-c1-2.codex.json` (raw events `logs/cr-c1-2-verify-codex.jsonl`). Reviewer independently re-ran the mutation guard in its own worktree at the head SHA: pre-fix arm made both required guards fail; restoration passed all 16 crate tests, no adjacent regression. Supersedes the r1 local-closure status — the finding is now externally verified.

@@ -45,3 +45,9 @@ expensive." Recorded as D-2026-08-04-4 (`docs/DECISIONS.md`): external/paid
 review dispatches are off unless the owner explicitly orders one; local
 guard proofs close findings. cr-c1-2 is Verified by local closure on the
 mutation guard recorded in `.review/findings/cr-c1-2.md`.
+
+**Superseded same day:** the owner then explicitly ordered one verification
+dispatch (`codereview codex gpt-5.6-sol xhigh`), which returned **accepted**
+with guard_confirmed=true (`.review/results/cr-c1-2.codex.json`). cr-c1-2 is
+externally verified; this contested record is historical. D-2026-08-04-4
+itself stands — no further dispatches without an explicit owner order.

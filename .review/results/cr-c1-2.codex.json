@@ -1,0 +1,11 @@
+{
+  "verdict": "accepted",
+  "guard_confirmed": true,
+  "capability_ok": true,
+  "reviewed_sha": "22261bf5",
+  "base_sha": "824b8db3",
+  "comments": [
+    "crates/blit-console-core/src/model.rs:137 \u2014 Selection now clears stale pane state, resets the path, advances generation, and emits a replacement browse whose completion resolves loading.",
+    "crates/blit-console-core/src/model.rs:253 \u2014 Pre-fix mutation made both required guards fail; restoration passed all 16 crate tests with no adjacent regression found."
+  ]
+}
