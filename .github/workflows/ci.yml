@@ -94,6 +94,94 @@ jobs:
           printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
+      - name: Sign and notarize macOS binaries
+        # Signing activates only when the repo carries the whole Apple secret
+        # set; a contributor or fork build packages UNSIGNED binaries and stays
+        # green. A missing GitHub secret renders as an EMPTY-BUT-DEFINED env
+        # var, so every gate here tests non-empty, never merely defined.
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                      APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8 KEYCHAIN_PASSWORD; do
+            if [ -z "$(printenv "${name}" || true)" ]; then
+              echo "::notice title=Unsigned macOS release::${name} is empty; packaging unsigned binaries"
+              exit 0
+            fi
+          done
+
+          bin_dir="target/${TARGET}/release"
+          certificate="${RUNNER_TEMP}/developer-id.p12"
+          keychain="${RUNNER_TEMP}/blit-signing.keychain-db"
+
+          test -x "${bin_dir}/blit"
+          test -x "${bin_dir}/blit-daemon"
+
+          printf '%s' "${APPLE_CERTIFICATE}" | base64 --decode > "${certificate}"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${keychain}"
+          security set-keychain-settings -lut 21600 "${keychain}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${keychain}"
+          security import "${certificate}" -k "${keychain}" -P "${APPLE_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/security
+          security list-keychains -d user -s "${keychain}"
+          security default-keychain -s "${keychain}"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASSWORD}" "${keychain}"
+          security find-identity -v -p codesigning "${keychain}"
+
+          # Hardened runtime and a secure timestamp are both prerequisites for
+          # notarizing a Developer ID signature.
+          for binary in blit blit-daemon; do
+            codesign --force --sign "${APPLE_SIGNING_IDENTITY}" --options runtime --timestamp \
+              "${bin_dir}/${binary}"
+          done
+
+          # A signing step can silently no-op and still exit 0, so the
+          # signature is asserted rather than assumed.
+          for binary in blit blit-daemon; do
+            codesign --verify --deep --strict --verbose=2 "${bin_dir}/${binary}"
+            codesign -dv --verbose=4 "${bin_dir}/${binary}" 2>&1 | tee "${RUNNER_TEMP}/codesign-${binary}.txt"
+            grep -q 'Authority=Developer ID Application' "${RUNNER_TEMP}/codesign-${binary}.txt"
+          done
+
+          key_dir="${RUNNER_TEMP}/private_keys"
+          key_path="${key_dir}/AuthKey_${APPLE_API_KEY}.p8"
+          mkdir -p "${key_dir}"
+          printf '%s' "${APPLE_API_KEY_P8}" > "${key_path}"
+          chmod 600 "${key_path}"
+
+          # notarytool needs a container, so the signed binaries ride a
+          # throwaway zip. Flat executables CANNOT be stapled — there is no
+          # bundle to hold the ticket — so nothing is stapled and Gatekeeper
+          # resolves the notarization ticket online instead. The zip is
+          # submission-only; the release tarball still carries the binaries.
+          notarize_stage="${RUNNER_TEMP}/notarize"
+          notarize_zip="${RUNNER_TEMP}/blit-${TARGET}-notarize.zip"
+          notarize_log="${RUNNER_TEMP}/notarytool-submit.txt"
+
+          test ! -e "${notarize_stage}"
+          mkdir -p "${notarize_stage}"
+          cp "${bin_dir}/blit" "${bin_dir}/blit-daemon" "${notarize_stage}/"
+          ditto -c -k --keepParent "${notarize_stage}" "${notarize_zip}"
+
+          xcrun notarytool submit "${notarize_zip}" \
+            --key "${key_path}" \
+            --key-id "${APPLE_API_KEY}" \
+            --issuer "${APPLE_API_ISSUER}" \
+            --wait 2>&1 | tee "${notarize_log}"
+          # Some notarytool versions exit 0 on a rejected submission, so the
+          # accepted status is read back out of its own output.
+          grep -qE '^[[:space:]]*status: Accepted$' "${notarize_log}"
+
+          rm -rf "${notarize_stage}" "${notarize_zip}" "${certificate}" "${key_path}"
       - name: Package Unix release
         if: matrix.archive == 'tar.gz'
         shell: bash
@@ -119,6 +207,70 @@ jobs:
           python3 -c 'import hashlib, pathlib, sys; p = pathlib.Path(sys.argv[1]); print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")' "${archive}" > "${checksum}"
           test -s "${archive}"
           test -s "${checksum}"
+      - name: Sign Windows binaries
+        # Azure Trusted Signing; the three AZURE_* credentials are read
+        # automatically by the TrustedSigning module's EnvironmentCredential.
+        # Same gating rule as the macOS leg: a missing GitHub secret renders as
+        # an EMPTY-BUT-DEFINED env var, so an incomplete set means an unsigned
+        # (still green) package rather than a failed job.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($name in @(
+            "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET",
+            "AZURE_SIGNING_ENDPOINT", "AZURE_SIGNING_ACCOUNT", "AZURE_CERT_PROFILE")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              Write-Host "::notice title=Unsigned Windows release::$name is empty; packaging unsigned binaries"
+              exit 0
+            }
+          }
+
+          $binDir = Join-Path "target" "$env:TARGET/release"
+          $binaries = @("blit.exe", "blit-daemon.exe") | ForEach-Object { Join-Path $binDir $_ }
+          foreach ($path in $binaries) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "required release binary is missing: $path"
+            }
+          }
+
+          # NuGet is usually already present on the hosted image; Install-Module
+          # is what actually needs it, and reports clearly if it is absent.
+          try {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+          } catch {
+            Write-Host "NuGet provider not installed here: $($_.Exception.Message)"
+          }
+          Install-Module -Name TrustedSigning -MinimumVersion 0.5.0 -Force -Repository PSGallery -Scope CurrentUser
+
+          foreach ($path in $binaries) {
+            Invoke-TrustedSigning `
+              -Endpoint $env:AZURE_SIGNING_ENDPOINT `
+              -CodeSigningAccountName $env:AZURE_SIGNING_ACCOUNT `
+              -CertificateProfileName $env:AZURE_CERT_PROFILE `
+              -TimestampRfc3161 "http://timestamp.acs.microsoft.com" `
+              -TimestampDigest "SHA256" `
+              -FileDigest "SHA256" `
+              -Files $path
+          }
+
+          # A signing step can silently no-op and still exit 0, so the
+          # signature is asserted rather than assumed.
+          foreach ($path in $binaries) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $path
+            if ($signature.Status -ne "Valid") {
+              throw "authenticode signature is not valid for ${path}: $($signature.Status) — $($signature.StatusMessage)"
+            }
+            Write-Host "signed $path <- $($signature.SignerCertificate.Subject)"
+          }
       - name: Package Windows release
         if: matrix.archive == 'zip'
         shell: pwsh
