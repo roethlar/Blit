@@ -234,7 +234,10 @@ jobs:
             }
           }
 
-          $binDir = Join-Path "target" "$env:TARGET/release"
+          # Invoke-TrustedSigning refuses relative paths ("file path ... is
+          # not rooted" — the first signed run failed exactly there), so the
+          # binary paths are rooted at the workspace.
+          $binDir = Join-Path $env:GITHUB_WORKSPACE "target" "$env:TARGET/release"
           $binaries = @("blit.exe", "blit-daemon.exe") | ForEach-Object { Join-Path $binDir $_ }
           foreach ($path in $binaries) {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
