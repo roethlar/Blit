@@ -337,11 +337,22 @@ jobs:
           if-no-files-found: error
       - name: Attach release archive to the tag's release
         # Tag pushes only — a master push has no release to attach to, and the
-        # workflow artifact above is what makes those builds retrievable. The
-        # release is NOT a draft: v0.1.0 and v0.1.1 were both published
-        # directly. Notes are left alone; the action only writes a body when
-        # one is given, so hand-written notes (docs/RELEASE_NOTES_1_0.md) added
-        # to the release survive every later leg.
+        # workflow artifact above is what makes those builds retrievable.
+        #
+        # Title and draft state are both stated EXPLICITLY so neither drifts
+        # with an action default. Verified against the GitHub API on 2026-08-08:
+        # the only release this repo has ever published is `v0.1.1`, titled
+        # `Blit v0.1.1`, non-draft and non-prerelease (`v0.1.0` is a bare tag
+        # with no release object, so it is not evidence either way). Left
+        # unset, the action titles a release it creates with the bare tag
+        # ("v0.1.2"), which is NOT this repo's convention — hence `name`.
+        # Every leg sends the same `name`, which keeps the concurrent updates
+        # idempotent but also means a hand-edited title is normalised back to
+        # this form on the next leg; change it here, not on the release.
+        #
+        # Notes are left alone; the action only writes a body when one is
+        # given, so hand-written notes (docs/RELEASE_NOTES_1_0.md) added to the
+        # release survive every later leg.
         #
         # All three matrix legs attach to the same tag concurrently. Each
         # uploads its own two filenames, so no two legs touch the same asset,
@@ -354,6 +365,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: Blit ${{ github.ref_name }}
           draft: false
           fail_on_unmatched_files: true
           files: |
