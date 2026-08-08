@@ -335,10 +335,32 @@ jobs:
             dist/blit-${{ matrix.target }}.${{ matrix.archive }}
             dist/blit-${{ matrix.target }}.${{ matrix.archive }}.sha256
           if-no-files-found: error
-      - name: Attach release archive to the tag's release
-        # Tag pushes only — a master push has no release to attach to, and the
-        # workflow artifact above is what makes those builds retrievable.
-        #
+  publish-release:
+    name: Publish release
+    # A job that `needs` a matrix job only runs if EVERY leg of that matrix
+    # succeeded — this is the fix for a real high-severity defect the
+    # adversarial review round caught: three legs attaching independently
+    # meant one leg's failure (a live risk; signing calls out to Apple
+    # notarization and Azure Trusted Signing, and Azure 403'd on the first
+    # signed run today) left the other, already-finished legs' assets
+    # published on a public, non-draft release with no rollback and no
+    # completeness check. Gating the single attach step behind `needs` on
+    # the whole matrix makes the release atomic: all three platforms
+    # succeed and it publishes with all six files, or any one fails and no
+    # release is created or modified at all.
+    needs: [build-release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v6
+        with:
+          pattern: blit-*
+          path: dist
+          merge-multiple: true
+      - name: Publish the tag's release
         # Title and draft state are both stated EXPLICITLY so neither drifts
         # with an action default. Verified against the GitHub API on 2026-08-08:
         # the only release this repo has ever published is `v0.1.1`, titled
@@ -346,28 +368,18 @@ jobs:
         # with no release object, so it is not evidence either way). Left
         # unset, the action titles a release it creates with the bare tag
         # ("v0.1.2"), which is NOT this repo's convention — hence `name`.
-        # Every leg sends the same `name`, which keeps the concurrent updates
-        # idempotent but also means a hand-edited title is normalised back to
-        # this form on the next leg; change it here, not on the release.
         #
         # Notes are left alone; the action only writes a body when one is
         # given, so hand-written notes (docs/RELEASE_NOTES_1_0.md) added to the
-        # release survive every later leg.
-        #
-        # All three matrix legs attach to the same tag concurrently. Each
-        # uploads its own two filenames, so no two legs touch the same asset,
-        # and the action retries its create call when a sibling leg wins the
-        # race to create the release.
+        # release survive a later re-run of this job.
         #
         # fail_on_unmatched_files is what stops a missing archive from
         # publishing a silently incomplete release: without it the action
-        # reports the miss and still exits 0.
-        if: startsWith(github.ref, 'refs/tags/v')
+        # reports the miss and still exits 0. With the atomic gate above this
+        # is now belt-and-braces rather than the only safety net.
         uses: softprops/action-gh-release@v2
         with:
           name: Blit ${{ github.ref_name }}
           draft: false
           fail_on_unmatched_files: true
-          files: |
-            dist/blit-${{ matrix.target }}.${{ matrix.archive }}
-            dist/blit-${{ matrix.target }}.${{ matrix.archive }}.sha256
+          files: dist/*
