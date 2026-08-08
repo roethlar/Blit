@@ -3,6 +3,9 @@ name: CI
 on:
   push:
     branches: [master]
+    # A v* tag runs the same gate as a master push and then publishes the
+    # packaged archives to that tag's GitHub release (see build-release).
+    tags: ['v*']
   pull_request:
     branches: [master]
 
@@ -62,7 +65,13 @@ jobs:
   build-release:
     name: Build Release (${{ matrix.target }})
     needs: [check, test-linux, test-macos, test-windows]
-    if: github.ref == 'refs/heads/master'
+    # A master push proves the packaging lane; a v* tag does the same work and
+    # additionally attaches the archives to the release for that tag.
+    if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      # Creating the release and uploading its assets is the only write this
+      # job needs; everything else here reads.
+      contents: write
     strategy:
       matrix:
         include:
@@ -326,3 +335,27 @@ jobs:
             dist/blit-${{ matrix.target }}.${{ matrix.archive }}
             dist/blit-${{ matrix.target }}.${{ matrix.archive }}.sha256
           if-no-files-found: error
+      - name: Attach release archive to the tag's release
+        # Tag pushes only — a master push has no release to attach to, and the
+        # workflow artifact above is what makes those builds retrievable. The
+        # release is NOT a draft: v0.1.0 and v0.1.1 were both published
+        # directly. Notes are left alone; the action only writes a body when
+        # one is given, so hand-written notes (docs/RELEASE_NOTES_1_0.md) added
+        # to the release survive every later leg.
+        #
+        # All three matrix legs attach to the same tag concurrently. Each
+        # uploads its own two filenames, so no two legs touch the same asset,
+        # and the action retries its create call when a sibling leg wins the
+        # race to create the release.
+        #
+        # fail_on_unmatched_files is what stops a missing archive from
+        # publishing a silently incomplete release: without it the action
+        # reports the miss and still exits 0.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          fail_on_unmatched_files: true
+          files: |
+            dist/blit-${{ matrix.target }}.${{ matrix.archive }}
+            dist/blit-${{ matrix.target }}.${{ matrix.archive }}.sha256
