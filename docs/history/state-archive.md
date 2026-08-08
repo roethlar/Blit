@@ -10,6 +10,19 @@ commit at which it was rotated out.
 
 ---
 
+## Rotated 2026-08-08 (at `98084edf`) — RELEASE COMPLETION SHIPPED
+
+Landed: v0.1.1 published; the entry duplicated the standing "BLIT 0.1.1 IS
+RELEASED (D-2026-07-23-8)" bullet that remains in `docs/STATE.md`.
+
+Verbatim, as it stood in `docs/STATE.md`:
+
+> - **RELEASE COMPLETION SHIPPED:** exact candidate `d1f1152d` passed every
+>   gate and is published as `v0.1.1`; ceiling/Thunderbolt tuning is
+>   post-release.
+
+---
+
 ## Rotated 2026-07-14 (at `7fc48d3`) — ONE_TRANSFER_PATH: the closed-slice record
 
 Landed: every slice otp-1..otp-11 was `[x]` when this was rotated. The parent

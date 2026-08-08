@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-08-08. **NOW: v0.1.2 PATCH RELEASE PREPARED, AWAITING THE OWNER'S TAG (D-2026-08-08-1).** Owner ruled "blit 0.1.2" over 1.0.0, so the workspace version reverted `1.0.0` → `0.1.2` (`0c04db73`) and `CHANGELOG.md` `[0.1.2]` (`a63cb3fa`) states the real scope of all 177 commits since `v0.1.1` — version LABEL only, no code reverted. `docs/plan/RELEASE_1_0.md` stays **Active with G2–G6 open — deferred, not closed**; a future v1.0.0 closes them on its own candidate, `ef9a13b2`'s `1.0.0` label and its `dist/` archives are now historical pipeline proof only, and audit-18/19 ship documented in 0.1.2 unless the owner overrides. Local gate green on macOS (fmt, clippy native + linux-cross, 1854 tests, smoke, docs); **the four prep commits are UNPUSHED, so CI has not seen this head** and G2 is unproven here. NEXT: owner decides tag-and-push, or resumes BLIT_CONSOLE — `BLIT_CONSOLE.md` is still ACTIVE (D1 egui D-2026-08-04-1, D2 legacy TUI dies at cutover D-2026-08-04-2, D3 1.0 gates on C1–C4 + T1–T3 D-2026-08-04-3) with the C1 egui GUI shell next (core slices 1+2 landed at `7e6c68f5`); G5b's cross-OS smoke matrix is still unrun.
+Last updated: 2026-08-08. **NOW: v0.1.2 PATCH RELEASE PREPARED, AWAITING THE OWNER'S TAG (D-2026-08-08-1).** Owner ruled "blit 0.1.2" over 1.0.0, so the workspace version reverted `1.0.0` → `0.1.2` (`0c04db73`) and `CHANGELOG.md` `[0.1.2]` (`a63cb3fa`) states the real scope of all 177 commits since `v0.1.1` — version LABEL only, no code reverted. `docs/plan/RELEASE_1_0.md` stays **Active with G2–G6 open — deferred, not closed**; a future v1.0.0 closes them on its own candidate, `ef9a13b2`'s `1.0.0` label and its `dist/` archives are now historical pipeline proof only, and audit-18/19 ship documented in 0.1.2 unless the owner overrides. Local gate green on macOS (fmt, clippy native + linux-cross, 1854 tests, smoke, docs); CI is green at this head (CI run 31235325444 + Docs Gate 31235325447, as of `98084edf`). NEXT: owner decides tag-and-push, or resumes BLIT_CONSOLE — `BLIT_CONSOLE.md` is still ACTIVE (D1 egui D-2026-08-04-1, D2 legacy TUI dies at cutover D-2026-08-04-2, D3 1.0 gates on C1–C4 + T1–T3 D-2026-08-04-3) with the C1 egui GUI shell next (core slices 1+2 landed at `7e6c68f5`); G5b's cross-OS smoke matrix is still unrun.
 CI `build-release` signs the shipped binaries when the signing secrets are present (macOS codesign + notarize, unstapled by design; Windows Azure Trusted Signing) and packages unsigned when they are not; the signed path is proven green end to end (run 31229611237, DEVLOG 2026-08-08). A `v*` tag push runs that same gate, and **as of `9c193968` a single downstream `publish-release` job — not the matrix legs — attaches all six files at once**, so the release is atomic: every platform leg succeeds and it publishes complete, or one fails and no release is touched (the earlier per-leg attach could publish a partial release; DEVLOG 2026-08-08 01:35Z). It is non-draft and titled `Blit <tag>`, matching `v0.1.1`, which API-verified 2026-08-08 is the ONLY release this repo has ever published (`v0.1.0` is a bare tag with no release object; the "both published directly" claim is corrected in DEVLOG 2026-08-08 01:20Z). No longer a by-hand upload, but unexercised until the first real tag.
 
 - **BLIT 0.1.1 IS RELEASED (D-2026-07-23-8):** annotated tag `v0.1.1`
@@ -51,8 +51,6 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 - **THUNDERBOLT LIFECYCLE + SSD FOLLOW-UP COMPLETE (D-2026-07-23-3):** both
   closed, no repeats authorized; records in DEVLOG 2026-07-23 and
   `docs/bench/{end-to-end-transfer-latency,thunderbolt-ssd}-*/`.
-- **RELEASE COMPLETION SHIPPED:** exact candidate `d1f1152d` passed every gate
-  and is published as `v0.1.1`; ceiling/Thunderbolt tuning is post-release.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -63,8 +61,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   same-build peers only, refusal at session open.**
   Slice status, the closed-slice record, and the otp-12 worker-parity
   repair (historical static-policy proof, superseded as an adaptive target
-  by ldt-2) live in Queue 2, `docs/history/state-archive.md`, and DEVLOG —
-  not restated here.
+  by ldt-2) live in Queue 2, `docs/history/state-archive.md` (the
+  otp-1..11 record), DEVLOG, and `docs/bench/otp12*/` — not restated here.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]`; **sf-3a+ blocked** until ONE_TRANSFER_PATH ships, then
   resume/re-derive on the unified baseline. Principle: ceiling-driven,
@@ -116,8 +114,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13; any external review requires exact owner approval under
    D-2026-07-23-7. **otp-1 … otp-12c are all `[x]`** — closed-slice record and
-   the otp-12a/b/c matrices live in `docs/history/state-archive.md`, DEVLOG,
-   and `docs/bench/otp12*/`; the one historical FAIL cell (wm_tcp_mixed) is
+   the otp-12a/b/c matrices live in `docs/history/state-archive.md`
+   (otp-1..11), DEVLOG, the otp-12c row in `REVIEW.md`, and
+   `docs/bench/otp12*/`; the one historical FAIL cell (wm_tcp_mixed) is
    closed by D-2026-07-22-2. **otp-12d and otp-13 are POST-RELEASE
    (D-2026-07-22-1)**; no performance acceptance matrix is a shipping
    prerequisite.
