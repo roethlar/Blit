@@ -7,6 +7,21 @@ release, targeting 1.0. commit & push & review as you deem appropriate.")
 exact reviewed candidate, green hosted CI on three platforms, truthful
 docs, packaging/startup sanity — with the release act itself owner-gated.
 
+> **DEFERRED, NOT CLOSED (D-2026-08-08-1, 2026-08-08).** A **v0.1.2 patch
+> release shipped independently** of this plan by explicit owner ruling
+> ("blit 0.1.2"), carrying all 177 commits since `v0.1.1` — including the
+> D-2026-08-01-4 compare-contract change. **No gate below was closed,
+> satisfied, or waived by it**: G2–G6 remain open exactly as written and
+> still bind v1.0.0, which must close them on its own candidate. Two
+> consequences for anyone resuming this plan: the workspace version is now
+> `0.1.2`, so G5's "0.1.1 → 1.0.0" bump is now `0.1.2 → 1.0.0` and G5b's
+> `1.0.0+ef9a13b21afc` build identity no longer exists on any binary
+> (`ef9a13b2`'s candidate label is retired, its `dist/` archives are
+> historical pipeline proof only); and `docs/RELEASE_NOTES_1_0.md` still
+> reads as 1.0's notes while describing behavior that shipped in 0.1.2 —
+> re-cutting it is part of closing G5. 0.1.2's own scope is stated in
+> `CHANGELOG.md` `[0.1.2]`.
+
 ## Goal
 
 Cut v1.0.0 from an exact reviewed, CI-green commit, with documentation
