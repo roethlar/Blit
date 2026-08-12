@@ -780,3 +780,8 @@ Format:
 - Why: owner chose B (2026-08-12) over manual-first.
 - Consequence: one-time owner setup still required (empty tap/bucket/AUR remotes, tokens, AUR SSH). Missing secrets skip that channel with a notice; they do not fail the blit release. Signing secrets never go to this job. Third-party repos (`homebrew/core`, `microsoft/winget-pkgs`) get PRs, not direct pushes.
 - Supersedes: the manual-until-first-success recommendation in `docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (edited in place).
+
+## D-2026-08-12-7 — PACKAGE_MANAGER_DISTRIBUTION flipped Draft → Active
+- Decision: `docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` is **Active**. Implementation starts at pm-1 (injected build-identity SHA), then the generator, then the package-managers CI job. Live channel proofs (pm-4+) still wait on the one-time remotes/secrets.
+- Why: owner said "go" (2026-08-12) after D1–D5 were recorded.
+- Supersedes: nothing.

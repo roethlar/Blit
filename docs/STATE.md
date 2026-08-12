@@ -156,8 +156,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    inside its `…/blit-temp/` folder — nothing written outside it, ever;
    no daemon runs on zoey without a fresh go.
 8. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
-9. **`docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (Draft)** — brew, AUR,
-   winget, scoop; v0.1.2; bot on tag. Awaiting Draft→Active.
+9. **`docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (ACTIVE, D-2026-08-12-7)**
+   — brew, AUR, winget, scoop; v0.1.2; bot on tag. Now: pm-1.
 
 ## Authoritative docs right now
 
@@ -182,6 +182,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   `.review/README.md` is retired as the grading mechanism (its
   `findings/`/`results/` records and the REVIEW.md index remain live).
 - Review loop: `REVIEW.md` (no open rows) + `.review/findings|results/`.
+- **`docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (ACTIVE, D-2026-08-12-7).**
 - Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (module delete ratified
   D-2026-06-12-1, executes w8-1; **capability unparked D-2026-07-05-3** —
   post-cutover write strategy), `TUI_REWORK.md` (gated on Round 1),
@@ -196,4 +197,4 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Open questions
 
-- Package-manager interview complete; Draft→Active is the remaining flip.
+- Package-manager plan Active (D-2026-08-12-7); next slice pm-1.

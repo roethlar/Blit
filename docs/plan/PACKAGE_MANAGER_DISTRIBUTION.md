@@ -1,9 +1,9 @@
 # Package-manager distribution
 
-**Status**: Draft
+**Status**: Active
 **Created**: 2026-08-12
 **Supersedes**: nothing
-**Decision ref**: D-2026-08-12-1 (D1), D-2026-08-12-2 (identifiers), D-2026-08-12-3 (two-crate cargo rejected), D-2026-08-12-4 (cargo is not a user channel), D-2026-08-12-5 (first payload v0.1.2), D-2026-08-12-6 (bot on tag publish). Draft→Active pending owner flip.
+**Decision ref**: D-2026-08-12-1 (D1), D-2026-08-12-2 (identifiers), D-2026-08-12-3 (two-crate cargo rejected), D-2026-08-12-4 (cargo is not a user channel), D-2026-08-12-5 (first payload v0.1.2), D-2026-08-12-6 (bot on tag publish), D-2026-08-12-7 (Draft→Active).
 
 ## Goal
 
@@ -98,8 +98,8 @@ build tool, not a user install channel (D-2026-08-12-4).
 - [x] Identifier set recorded (D-2026-08-12-2).
 - [x] Cargo is not a user channel (D-2026-08-12-4).
 - [x] First payload is v0.1.2 (D-2026-08-12-5).
-- [x] Updates are a bot on tag publish (D-2026-08-12-6). Draft→Active
-      waits on the owner flip.
+- [x] Updates are a bot on tag publish (D-2026-08-12-6).
+- [x] Plan flipped Draft → Active (D-2026-08-12-7).
 - [ ] `build.rs` honors a pre-set `BLIT_GIT_SHA` (or `BLIT_RELEASE_SHA`)
       so a git-less tree can emit the tag SHA. Guard: without git and
       without the env, identity is still a non-colliding `unknown.<nonce>`;
@@ -281,8 +281,7 @@ deploy key; tokens that can open winget-pkgs / homebrew/core PRs.
 
 One coherent, testable change each. No slice starts without Draft→Active.
 
-1. **pm-0 — Flip Active** once the owner says so. Docs only. All D1–D5
-   are D-2026-08-12-1..6. First payload is `v0.1.2`.
+1. **pm-0 — Flip Active.** `[x]` D-2026-08-12-7. First payload `v0.1.2`.
 2. **pm-1 — Honor pre-set `BLIT_GIT_SHA` / `BLIT_RELEASE_SHA` in
    `crates/blit-core/build.rs`.** Validation + nonce fallback unchanged.
    Tests: env set → exact suffix; env absent + no git → nonce, two
@@ -344,6 +343,7 @@ entry before the slice that needs it. Recommendations are not decisions.
   `v0.1.2`. Do not wait for 1.0 or the console.
 - **D5 — Automation.** **Recorded D-2026-08-12-6:** bot on tag
   publish; `workflow_dispatch` for v0.1.2. Interview complete.
+  **Active flip:** D-2026-08-12-7.
 
 ## Risks
 
