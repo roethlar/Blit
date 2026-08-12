@@ -3,7 +3,7 @@
 **Status**: Draft
 **Created**: 2026-08-12
 **Supersedes**: nothing
-**Decision ref**: D-2026-08-12-1 (D1), D-2026-08-12-2 (identifiers), D-2026-08-12-3 (two-crate cargo rejected), D-2026-08-12-4 (cargo is not a user channel). Remaining D4–D5 + Draft→Active pending.
+**Decision ref**: D-2026-08-12-1 (D1), D-2026-08-12-2 (identifiers), D-2026-08-12-3 (two-crate cargo rejected), D-2026-08-12-4 (cargo is not a user channel), D-2026-08-12-5 (first payload v0.1.2). Remaining D5 + Draft→Active pending.
 
 ## Goal
 
@@ -93,8 +93,9 @@ build tool, not a user install channel (D-2026-08-12-4).
 
 - [x] D1 recorded (D-2026-08-12-1): both archive and source lanes.
 - [x] Identifier set recorded (D-2026-08-12-2).
-- [x] Cargo is not a user channel (D-2026-08-12-4). Draft→Active still
-      waits on D4–D5.
+- [x] Cargo is not a user channel (D-2026-08-12-4).
+- [x] First payload is v0.1.2 (D-2026-08-12-5). Draft→Active still
+      waits on D5.
 - [ ] `build.rs` honors a pre-set `BLIT_GIT_SHA` (or `BLIT_RELEASE_SHA`)
       so a git-less tree can emit the tag SHA. Guard: without git and
       without the env, identity is still a non-colliding `unknown.<nonce>`;
@@ -265,8 +266,9 @@ One coherent, testable change each. No slice starts without Draft→Active
 and the decisions it names. Owner-gated publish is a go per channel, not
 covered by Active.
 
-1. **pm-0 — Record remaining D4/D5 if ruled; flip Active.** Docs only.
-   D1–D3/D4-cargo are D-2026-08-12-1..4. No product code.
+1. **pm-0 — Record remaining D5 if ruled; flip Active.** Docs only.
+   D1–D4 are D-2026-08-12-1..5. First live stubs target tag `v0.1.2`.
+   No product code.
 2. **pm-1 — Honor pre-set `BLIT_GIT_SHA` / `BLIT_RELEASE_SHA` in
    `crates/blit-core/build.rs`.** Validation + nonce fallback unchanged.
    Tests: env set → exact suffix; env absent + no git → nonce, two
@@ -278,7 +280,7 @@ covered by Active.
    tag SHA (the `BLIT_GIT_SHA=` export). Refuse a missing digest. No
    network on generate, no push. Red-prove one digest assertion.
 4. **pm-3 — Homebrew tap live (archive).** Owner tap, generated
-   `blit-bin` formula from a published tag. Prove `brew install` on arm64
+   `blit-bin` formula from tag `v0.1.2`. Prove `brew install` on arm64
    macOS: both binaries on PATH, version identity, `codesign` still
    Developer ID. Docs after proof.
 5. **pm-4 — Homebrew core PR (source).** Generated source formula.
@@ -318,9 +320,8 @@ entry before the slice that needs it. Recommendations are not decisions.
   D-2026-08-12-4.
 - **D3 — Cargo.** **Recorded D-2026-08-12-3** (two-crate rejected) and
   **D-2026-08-12-4** (not a user channel).
-- **D4 — First version to publish.** Recommended: start from existing
-  `v0.1.2` assets (source lane needs the tag tarball of that same tag).
-  Do not wait for 1.0 or the console.
+- **D4 — First version.** **Recorded D-2026-08-12-5:** wrap existing
+  `v0.1.2`. Do not wait for 1.0 or the console.
 - **D5 — Automation.** Recommended: manual generator + owner push/PR
   until each channel has one successful live update.
 

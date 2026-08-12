@@ -769,3 +769,8 @@ Format:
 - Decision: do not publish blit to crates.io and do not advertise `cargo install` (one crate or two). User install paths are Homebrew, AUR, winget, and Scoop. Developers clone and `cargo build --release`.
 - Why: owner chose B (2026-08-12) after rejecting a two-crate cargo UX; crate name `blit` is taken, so a one-command crates.io install could not be `cargo install blit`.
 - Supersedes: the crates.io user-package names in D-2026-08-12-2; option A in `docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (edited in place). D-2026-08-12-3 stands (two-crate cargo install remains rejected).
+
+## D-2026-08-12-5 — First package-manager payload is v0.1.2
+- Decision: the first Homebrew / AUR / winget / Scoop packages wrap the existing **v0.1.2** GitHub Release archives and that tag's source tarball. Do not wait for 1.0 or a new blit tag.
+- Why: owner chose A (2026-08-12). v0.1.2 is already published with signed archives.
+- Supersedes: nothing.
