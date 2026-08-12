@@ -3,16 +3,22 @@
 **Status**: Draft
 **Created**: 2026-08-12
 **Supersedes**: nothing
-**Decision ref**: pending owner Draft→Active flip (and D1+ below)
+**Decision ref**: D-2026-08-12-1 (D1 = both lanes). Remaining D2–D5 + Draft→Active pending.
 
 ## Goal
 
-A user can install the shipped `blit` and `blit-daemon` binaries through
-Homebrew, AUR, winget, Scoop, and Cargo, at the same version identity as the
-GitHub Release for that tag. macOS and Windows package payloads are the
-already-signed release binaries (Developer ID + notarization; Azure Trusted
-Signing). Linux package payloads are the unsigned Linux release archive, which
-is the existing policy. GitHub Releases remain the canonical binary host.
+A user can install `blit` and `blit-daemon` through Homebrew, AUR, winget,
+Scoop, and Cargo. Per D-2026-08-12-1 there are two payload lanes:
+
+- **Archive lane:** the GitHub Release binaries for that tag (macOS/Windows
+  already signed in CI; Linux unsigned by standing policy).
+- **Source lane:** rebuild from the tagged source (Homebrew core, AUR
+  source). Unsigned by nature. Must still emit the same
+  `<version>+<12-char tag SHA>` identity as the CI archives so mixed
+  archive/source peers pass D-2026-07-05-2.
+
+GitHub Releases remain the canonical prebuilt host. Cargo is source and
+is still D3.
 
 ## Non-goals
 
@@ -21,10 +27,12 @@ is the existing policy. GitHub Releases remain the canonical binary host.
 - systemd, launchd, Windows service, or login-item install of `blit-daemon`.
 - Packaging `blit-tui`, `blit-console-core`, the unfinished console GUI, or
   `blit-prometheus-bridge`.
-- Extra CPU targets (Intel macOS, Linux ARM, Windows ARM). First pass uses
-  the three archives CI already publishes.
+- Extra **archive** CPU targets (Intel macOS, Linux ARM, Windows ARM).
+  The archive lane uses the three CI artifacts. The source lane may
+  compile on whatever arch the manager builds (Intel Mac, Homebrew-on-Linux)
+  without us adding new CI archives.
 - Mac App Store, Microsoft Store, Flatpak, Snap, nixpkgs, Chocolatey, apt,
-  dnf, or official `homebrew/core` submission unless later authorized.
+  dnf. Homebrew core **is** in scope (D-2026-08-12-1).
 - Changing transfer behavior, CLI surface, same-build handshake
   (D-2026-07-05-2), or the `build-release` / `publish-release` job shape.
 - Copying `../certs` into this repo, committing signing material, or adding
@@ -37,10 +45,12 @@ is the existing policy. GitHub Releases remain the canonical binary host.
 - **FAST, SIMPLE, RELIABLE** applies to the user-facing install contract. No
   new user-visible CLI flags. Package managers install the two shipped
   binaries onto `PATH` and stop.
-- **One binary source.** brew / AUR / winget / Scoop install the exact GitHub
-  Release archive for that tag (same URL, same SHA-256 as the `.sha256`
-  sidecar). They do not rebuild or re-sign the payload. Cargo is source and
-  is specified separately below because it cannot consume those archives.
+- **Two lanes, one version identity (D-2026-08-12-1).** Archive packages
+  install the exact GitHub Release archive for that tag (same URL, same
+  SHA-256 as the `.sha256` sidecar) and do not rebuild or re-sign.
+  Source packages rebuild from the tagged source and do not re-sign.
+  Cargo is specified under D3. Both lanes of the same tag must produce
+  peers that pass the same-build hello.
 - **One version.** Workspace `[workspace.package] version` is canonical.
   Tag is `v<version>`. Manifests report that version, not a floating `latest`.
 - **Signing already exists and is the signing path.**
@@ -54,12 +64,12 @@ is the existing policy. GitHub Releases remain the canonical binary host.
   It does not import `../certs` locally and does not change the sign/notarize
   steps. Forks without secrets still package unsigned, as today.
 - **D-2026-07-05-2 same-build only.** Session hello is
-  `CARGO_PKG_VERSION + BLIT_GIT_SHA`. Clean git builds at a tag share
-  identity with the CI archives for that tag. `crates.io` source tarballs
-  have no git: `crates/blit-core/build_identity.rs` then emits
-  `unknown.<nonce>`, so two independent `cargo install`s of the same crate
-  version refuse each other and refuse the GitHub binaries. Cargo publish
-  is not a metadata-only change.
+  `CARGO_PKG_VERSION + BLIT_GIT_SHA`. CI tag builds have `.git` and emit
+  the 12-char tag SHA. GitHub tag tarballs, AUR/homebrew source trees, and
+  `crates.io` tarballs do **not** have `.git`; today's
+  `crates/blit-core/build_identity.rs` then emits `unknown.<nonce>`.
+  Source-lane packages must therefore export the tag's 12-char SHA into
+  the build (see Design: source identity). Do not relax the hello.
 - **`blit-core` build.rs reads `../../proto`.** A crates.io package of
   `blit-core` does not include that tree unless the crate `include`s it (or
   generated prost sources are vendored). Path deps across the workspace must
@@ -73,10 +83,11 @@ is the existing policy. GitHub Releases remain the canonical binary host.
   `blit-x86_64-pc-windows-msvc.zip`, each with a `.sha256` sidecar. Each
   archive contains `blit`/`blit.exe`, `blit-daemon`/`blit-daemon.exe`,
   `README.md`, `LICENSE`, `CHANGELOG.md`, `BUILD.txt`.
-- **Outward acts stay owner-gated.** Creating/updating AUR, a Homebrew tap
-  or cask PR, winget-pkgs, a Scoop bucket, and `cargo publish` all publish.
-  Generators and tests may land in-repo; the first live push/PR/publish of
-  each channel waits for an explicit go naming that channel.
+- **Outward acts stay owner-gated.** Creating/updating AUR packages, a
+  Homebrew tap, a `homebrew/core` PR, winget-pkgs, a Scoop bucket, and
+  `cargo publish` all publish. Generators and tests may land in-repo; the
+  first live push/PR/publish of each channel waits for an explicit go
+  naming that channel.
 - **Do not block `publish-release` on package-manager merge.** External
   review latency must not delay the canonical GitHub Release.
 - **No secret leakage.** External package repos receive only public asset
@@ -84,17 +95,25 @@ is the existing policy. GitHub Releases remain the canonical binary host.
 
 ## Acceptance criteria
 
-- [ ] D1 (payload/channel shape) and the identifier set (D2) recorded in
-      `docs/DECISIONS.md`; this plan flipped Draft → Active.
-- [ ] Deterministic in-repo generator produces Homebrew, AUR, winget, and
-      Scoop stubs from a release's version + three SHA-256 sidecars.
-      Snapshot-tested against golden files. Digests are never hand-edited.
-- [ ] Each authorized channel is actually installable by a stranger on that
-      OS, putting `blit` and `blit-daemon` on `PATH` at the release version.
-      `--version` on both binaries equals `<version>+<12-char tag SHA>` for
-      binary channels.
-- [ ] macOS and Windows installed binaries still carry the CI signatures
+- [x] D1 recorded (D-2026-08-12-1): both archive and source lanes.
+- [ ] Identifier set (D2) recorded; this plan flipped Draft → Active.
+- [ ] `build.rs` honors a pre-set `BLIT_GIT_SHA` (or `BLIT_RELEASE_SHA`)
+      so a git-less tree can emit the tag SHA. Guard: without git and
+      without the env, identity is still a non-colliding `unknown.<nonce>`;
+      with the env set to a 12-char SHA, `--version` is `<ver>+<sha>` and
+      two such builds hello. Red-prove the nonce path still refuses.
+- [ ] Deterministic generator produces **archive** stubs (Homebrew tap
+      formula, AUR `-bin`, Scoop, winget) from version + three sidecar
+      SHA-256s, **and source** stubs (Homebrew core formula, AUR source)
+      from version + GitHub tag-tarball SHA-256 + the tag's 12-char SHA.
+      Snapshot-tested. Digests never hand-edited.
+- [ ] Each authorized channel is installable by a stranger on that OS,
+      putting `blit` and `blit-daemon` on `PATH` at the release version.
+      `--version` on both binaries is `<version>+<12-char tag SHA>` for
+      **both** lanes.
+- [ ] Archive-lane macOS/Windows binaries still carry the CI signatures
       (Developer ID Application / valid Authenticode). Not re-signed.
+      Source-lane binaries are unsigned; docs do not claim otherwise.
 - [ ] Cargo path, if D3 authorizes crates.io: `cargo install <chosen-cli-crate>
       --locked` and `cargo install <chosen-daemon-crate> --locked` of the
       same version produce peers that pass the same-build hello with each
@@ -115,14 +134,19 @@ is the existing policy. GitHub Releases remain the canonical binary host.
 tag vX.Y.Z
   → existing CI build-release (sign macOS/Windows when secrets present)
   → existing publish-release attaches the six files atomically
-  → in-repo generator reads version + the three .sha256 sidecars
+  → in-repo generator reads:
+       version + three archive .sha256 sidecars
+       + GitHub tag-tarball sha256 + 12-char tag SHA
   → writes stubs under dist/package-managers/ (or packaging/)
   → maintainer (owner-gated) updates:
-       Homebrew tap formula | AUR blit-bin | Scoop manifest | winget PR
-  → cargo (if authorized) is a separate source publish, not an archive wrap
+       tap (archive) | homebrew/core (source)
+       AUR -bin (archive) | AUR source
+       Scoop | winget
+  → cargo (if authorized) is a separate source publish
 ```
 
-GitHub Releases stay the download path. Package managers are pointers.
+GitHub Releases stay the prebuilt download path. Archive packages are
+pointers. Source packages rebuild and must inject the tag SHA.
 
 ### Signing
 
@@ -136,9 +160,29 @@ No new signing implementation. Confirm, do not replace:
 
 Package-manager CI and external PRs never receive those secrets.
 
-### Binary channels (brew, AUR, winget, Scoop)
+### Source identity (required by D1 = both lanes)
 
-Each package:
+`crates/blit-core/build.rs` today always derives `BLIT_GIT_SHA` from git.
+Change (pm-1, before any source package is advertised):
+
+1. If the process environment already has a non-empty `BLIT_GIT_SHA` or
+   `BLIT_RELEASE_SHA`, use that value (12-char lowercase hex; reject
+   anything else rather than passing it through).
+2. Else use today's git derivation.
+3. Else `unknown.<nonce>` — never a shared fallback.
+
+Source-lane formulas/PKGBUILDs export the **tag commit's** 12-char SHA
+(the same suffix CI archives print). Generator bakes that SHA into the
+stub. Two source builds of the same stub, and a source build vs a CI
+archive of that tag, must hello.
+
+Do not amend a commit to insert a SHA. Do not put certs or tokens in
+manifests. crates.io still cannot set env for `cargo install`; that
+remains a D3 file-bake if crates.io is chosen.
+
+### Archive channels
+
+Each archive package:
 
 1. Downloads the platform archive from
    `https://github.com/roethlar/Blit/releases/download/v<ver>/blit-<target>.<ext>`.
@@ -146,14 +190,34 @@ Each package:
 3. Installs `blit` and `blit-daemon` onto the manager's bindir.
 4. Does not start the daemon, write `/etc/blit`, or register a service.
 
-Channel-specific shape (recommendations; identifiers are D2):
+### Source channels
 
-| Channel | Payload | Landing place (recommended) | Notes |
-|---|---|---|---|
-| Homebrew | `blit-aarch64-apple-darwin.tar.gz` | owner tap `roethlar/blit`, formula `blit` | Formula, not cask: two CLI binaries, no `.app`. arm64-only until an Intel archive exists. Official `homebrew/core` is a later, separate go (source rebuild, unsigned). |
-| AUR | `blit-x86_64-unknown-linux-gnu.tar.gz` | `blit-bin` | Thin `-bin` wrap. Source AUR package is out of scope for the first pass. |
-| Scoop | `blit-x86_64-pc-windows-msvc.zip` | owner bucket, app `blit` | Native zip + `bin` shims. |
-| winget | same zip, `InstallerType: zip` + portable nested installer | `microsoft/winget-pkgs` id `Roethlar.Blit` | No Setup.exe exists. If winget-pkgs rejects portable zip, stop and ask; do not invent an installer in that slice. |
+Each source package:
+
+1. Fetches the GitHub tag source tarball
+   `https://github.com/roethlar/Blit/archive/refs/tags/v<ver>.tar.gz`
+   (or the equivalent `.../archive/<tagsha>.tar.gz` if a formula needs a
+   content-addressed URL). Verifies SHA-256.
+2. Exports `BLIT_GIT_SHA=<12-char tag SHA>`.
+3. `cargo build --release --locked` (or Homebrew `cargo install --locked`
+   from the workspace) of `blit` and `blit-daemon` only.
+4. Installs those two binaries onto the manager's bindir. Same no-service
+   rule as the archive lane.
+
+Winget and Scoop have no useful source-package convention; they stay
+archive-only.
+
+Channel-specific shape (identifiers are D2; names below are
+recommendations):
+
+| Channel | Lane | Payload | Landing place (recommended) | Notes |
+|---|---|---|---|---|
+| Homebrew tap | archive | `blit-aarch64-apple-darwin.tar.gz` | tap `roethlar/blit`, formula `blit-bin` | Signed CLI binaries. Name is `blit-bin` so it can coexist with core `blit`. arm64-only until an Intel archive exists. |
+| Homebrew core | source | GitHub tag tarball | `homebrew/core` formula `blit` | Unsigned local build. May compile on Intel Mac and Linuxbrew. PR is owner-gated; long review is expected — park, do not spin. |
+| AUR `-bin` | archive | `blit-x86_64-unknown-linux-gnu.tar.gz` | `blit-bin` | Thin wrap. |
+| AUR source | source | GitHub tag tarball | `blit` | `makedepends=(cargo)` (and the usual base-devel). Exports `BLIT_GIT_SHA`. |
+| Scoop | archive | `blit-x86_64-pc-windows-msvc.zip` | owner bucket, app `blit` | Zip + shims. No source package. |
+| winget | archive | same zip, portable nested installer | `microsoft/winget-pkgs` id `Roethlar.Blit` | No Setup.exe. If winget-pkgs rejects zip/portable, stop and ask; do not invent an installer in that slice. |
 
 ### Cargo
 
@@ -202,15 +266,20 @@ without copying that Python package. Prefer `scripts/package_managers/`
 (Python 3, no new runtime; this repo already uses Python for
 `scripts/release_smoke.py`).
 
-Input: `--version`, directory of the three `.sha256` sidecars (or a
-downloaded GitHub release), `--out`.
-Output: written stub trees only. No network on the generate path except an
-optional later `fetch` helper. No AUR/brew/winget/Scoop push.
+Input: `--version`, `--tag-sha` (12-char), directory of the three archive
+`.sha256` sidecars, and the GitHub source-tarball SHA-256 (passed in or
+hashed from a provided file). `--out`.
+Output: written stub trees only. Snapshot tests never hit the network.
+A live generate may fetch the GitHub tag tarball to hash it; that is a
+separate `fetch` helper, not the generate path. No AUR/brew/winget/Scoop
+push.
 
-Snapshot tests under `scripts/package_managers/testdata/` (or
-`tests/` next to the script) with a fixed fake version and fake digests.
-A focused test fails if a digest is rewritten by hand in a fixture that
-claims to be generated.
+Source stubs must contain the exported `BLIT_GIT_SHA=<tag-sha>` line.
+Archive stubs must not rebuild.
+
+Snapshot tests under `scripts/package_managers/testdata/` with a fixed
+fake version, fake tag SHA, and fake digests. A focused test fails if a
+digest is rewritten by hand in a fixture that claims to be generated.
 
 ### Docs
 
@@ -225,9 +294,11 @@ or SmartScreen.
 Maintainer steps, manual until a later automation slice:
 
 1. Wait for tag CI `publish-release` green and the six assets live.
-2. Run the generator against those sidecars.
-3. Update the external package repos / open the winget PR.
-4. After the package is queryable, add or bump the README option.
+2. Hash the GitHub tag source tarball; run the generator with archive
+   sidecars + source sha256 + tag SHA.
+3. Update tap, AUR `-bin`, AUR source, Scoop, winget PR, and (when
+   live) the homebrew/core bump.
+4. After each package is queryable, add or bump that README option.
 
 Do not fold those updates into `publish-release`.
 
@@ -237,59 +308,68 @@ One coherent, testable change each. No slice starts without Draft→Active
 and the decisions it names. Owner-gated publish is a go per channel, not
 covered by Active.
 
-1. **pm-0 — Record D1/D2/D3; flip Active.** Docs only. Bind payload model,
-   identifiers, and cargo shape. Rewrite any recommendation below that
-   lost. No product code.
-2. **pm-1 — Generator + snapshot tests.** Homebrew formula, AUR
-   `PKGBUILD`+`.SRCINFO`, Scoop manifest, winget multi-file manifest,
-   all from version + sidecars. Refuse a missing platform digest. No
-   network, no push. Red-prove one digest assertion.
-3. **pm-2 — Homebrew tap live.** Create/update owner tap with the generated
-   formula from a published tag (v0.1.2 is a valid first payload). Prove
-   `brew install` on arm64 macOS: both binaries on PATH, version identity,
-   `codesign` still Developer ID. Docs option only after that proof.
-   Official `homebrew/core` is not this slice.
-4. **pm-3 — AUR `blit-bin` live.** Generate from the Linux archive; owner
-   pushes `ssh://aur@aur.archlinux.org/blit-bin.git`. Prove install on
-   Arch (or an Arch container) puts both binaries on PATH. Docs after
-   `https://aur.archlinux.org/packages/blit-bin` exists. If AUR create is
-   locked (as it was for AMKB-GUI on 2026-08-08), park this slice and
-   continue; do not spin.
-5. **pm-4 — Scoop bucket live.** Owner bucket; prove `scoop install` on
+1. **pm-0 — Record remaining D2/D3 (and D4/D5 if ruled); flip Active.**
+   Docs only. D1 is already D-2026-08-12-1. No product code.
+2. **pm-1 — Honor pre-set `BLIT_GIT_SHA` / `BLIT_RELEASE_SHA` in
+   `crates/blit-core/build.rs`.** Validation + nonce fallback unchanged.
+   Tests: env set → exact suffix; env absent + no git → nonce, two
+   independent builds disagree; env garbage → fail the build. This lands
+   before any source package is advertised.
+3. **pm-2 — Generator + snapshot tests.** Archive stubs (tap `blit-bin`,
+   AUR `-bin`, Scoop, winget) from version + three sidecars. Source stubs
+   (Homebrew core, AUR source) from version + source-tarball sha256 +
+   tag SHA (the `BLIT_GIT_SHA=` export). Refuse a missing digest. No
+   network on generate, no push. Red-prove one digest assertion.
+4. **pm-3 — Homebrew tap live (archive).** Owner tap, generated
+   `blit-bin` formula from a published tag. Prove `brew install` on arm64
+   macOS: both binaries on PATH, version identity, `codesign` still
+   Developer ID. Docs after proof.
+5. **pm-4 — Homebrew core PR (source).** Generated source formula.
+   Prove a local `brew install --build-from-source` emits
+   `<ver>+<tagsha>` and hellos a CI archive of that tag. Owner opens the
+   `homebrew/core` PR. If review stalls, park; do not spin. Docs after
+   `brew install blit` from core actually works.
+6. **pm-5 — AUR `blit-bin` live (archive).** Owner pushes
+   `ssh://aur@aur.archlinux.org/blit-bin.git`. Prove install. Docs after
+   the AUR page exists. If AUR create is locked, park; continue.
+7. **pm-6 — AUR source live.** Same AUR caveats. Prove `makepkg` exports
+   `BLIT_GIT_SHA`, both binaries match the tag identity, and a source
+   install hellos an archive-lane binary of that tag.
+8. **pm-7 — Scoop bucket live (archive).** Prove `scoop install` on
    Windows; Authenticode still Valid; both binaries shimmed. Docs after.
-6. **pm-5 — winget portable zip.** Generate manifests; owner PR to
-   `microsoft/winget-pkgs`. Prove `winget install --manifest` locally
-   before the PR. If the official repo rejects zip/portable, stop and
-   ask — do not add a Windows installer inside this slice.
-7. **pm-6 — Cargo, only if D3 = crates.io.** Identity bake + proto include
-   + publish metadata + `publish = false` on unpublished members + a
-   dry-run `cargo publish --dry-run` from a clean tag worktree for each
-   of the four crates, in order. First real `cargo publish` is owner-gated
-   and uses the owner's crates.io token. Prove two independent
-   `cargo install`s of that version hello each other and a GitHub binary
-   of the same tag. If D3 = git-only, this slice is docs-only: add the
-   `--git --tag` commands, do not publish.
-8. **pm-7 — Release-process note.** Short maintainer section (README or
-   `docs/installing.md`) listing the generator command and the owner-gated
-   external updates. No CI automation in this slice.
+9. **pm-8 — winget portable zip (archive).** Prove
+   `winget install --manifest` locally, then owner PR to
+   `microsoft/winget-pkgs`. Zip rejection → stop and ask; no installer.
+10. **pm-9 — Cargo, only if D3 = crates.io.** File-bake of the tag SHA
+    (env cannot be set by `cargo install` from crates.io) + proto include
+    + publish metadata + `publish = false` on unpublished members +
+    `cargo publish --dry-run` in order. First real publish is
+    owner-gated. Prove two independent `cargo install`s hello each other
+    and a GitHub binary of that tag. If D3 = git-only, docs-only:
+    `--git --tag`, no publish.
+11. **pm-10 — Release-process note.** Maintainer section listing the
+    generator command and the owner-gated external updates for **both**
+    lanes. No CI automation in this slice.
 
 ## Open questions
 
 Answered in chat one at a time; each recorded as a `docs/DECISIONS.md`
 entry before the slice that needs it. Recommendations are not decisions.
 
-- **D1 — Payload for brew / AUR / winget / Scoop.** Recommended: GitHub
-  Release archives only (the table above). Alternative: source rebuilds
-  (homebrew-core / AUR source), which are unsigned and a different
-  maintenance path.
-- **D2 — Identifiers.** Recommended: tap `roethlar/blit` formula `blit`;
-  AUR `blit-bin`; Scoop `blit`; winget `Roethlar.Blit`; crates `blit-cli`
-  + `blit-daemon` + `blit-core` + `blit-app` (binary names unchanged).
+- **D1 — Payload.** **Recorded D-2026-08-12-1:** both archive and source
+  lanes. Homebrew core and AUR source are in scope. Winget/Scoop stay
+  archive-only.
+- **D2 — Identifiers.** Recommended: Homebrew core `blit` (source); tap
+  `roethlar/blit` formula `blit-bin` (signed archive, name chosen so it
+  can sit next to core); AUR `blit` + `blit-bin`; Scoop `blit`; winget
+  `Roethlar.Blit`; crates `blit-cli` + `blit-daemon` + `blit-core` +
+  `blit-app` (binary names unchanged).
 - **D3 — Cargo shape.** Recommended: git-tag install first (identity
   already correct); crates.io as a follow-up only if the owner wants
   `cargo install blit-cli` without `--git`.
-- **D4 — First version to publish.** Recommended: wrap existing `v0.1.2`
-  assets; do not wait for 1.0 or the console.
+- **D4 — First version to publish.** Recommended: start from existing
+  `v0.1.2` assets (source lane needs the tag tarball of that same tag).
+  Do not wait for 1.0 or the console.
 - **D5 — Automation.** Recommended: manual generator + owner push/PR
   until each channel has one successful live update.
 
@@ -297,12 +377,15 @@ entry before the slice that needs it. Recommendations are not decisions.
 
 | Risk | Handling |
 |---|---|
-| winget-pkgs rejects portable zip | pm-5 stops and asks; no installer surprise |
-| AUR package creation locked | park pm-3; other channels continue |
+| winget-pkgs rejects portable zip | pm-8 stops and asks; no installer surprise |
+| AUR package creation locked | park pm-5/pm-6; other channels continue |
+| homebrew/core review is slow or rejects the name | park pm-4; tap `blit-bin` still ships signed macOS |
 | `blit` name collisions (brew/scoop/AUR) | D2 can pick `blit-bin` / `blit-transfer`; do not squat |
-| crates.io identity/`proto` miss | cargo install peers refuse each other; pm-6 guards this |
+| Source build without injected SHA | `unknown.<nonce>` refuse; pm-1 + stub export prevent this |
+| crates.io identity/`proto` miss | cargo install peers refuse each other; pm-9 guards this |
 | Docs advertise a dead command | docs only after live proof |
 | Second signing path / certs in repo | forbidden by Constraints |
-| Package rebuilds unsigned macOS/Windows binaries | forbidden by one-binary-source |
+| Archive lane rebuilds or re-signs | forbidden |
+| Source lane claimed as signed | forbidden; docs must not say that |
 | `publish-release` waits on brew/AUR/winget | forbidden |
 | SmartScreen / first-run Gatekeeper | existing changelog caveats; do not tell users to disable OS security |
