@@ -157,7 +157,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    no daemon runs on zoey without a fresh go.
 8. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
 9. **`docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (Draft)** — brew, AUR,
-   winget, scoop, cargo. D1 = both lanes (D-2026-08-12-1). Awaiting D2.
+   winget, scoop, cargo. D1 both lanes, D2 identifiers. Awaiting D3.
 
 ## Authoritative docs right now
 

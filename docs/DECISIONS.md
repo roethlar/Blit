@@ -753,3 +753,8 @@ Format:
 - Why: owner chose option C (2026-08-12) when asked whether those four channels wrap archives only, rebuild from source only, or both.
 - Consequence: source trees from GitHub tag tarballs have no `.git`, so a source formula/PKGBUILD must supply the tag's 12-char SHA into the build (env honored by `build.rs`) or those binaries mint `unknown.<nonce>` and refuse the CI archives. D-2026-07-05-2 is not relaxed.
 - Supersedes: the archive-only recommendation in `docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (edited in place).
+
+## D-2026-08-12-2 — Package-manager identifiers
+- Decision: Homebrew core formula `blit` (source); owner tap `roethlar/blit` formula `blit-bin` (signed macOS archive); AUR `blit` (source) and `blit-bin` (archive); Scoop `blit`; winget `Roethlar.Blit`; crates.io names, if published, are `blit-cli`, `blit-daemon`, `blit-core`, `blit-app` (binary names stay `blit` / `blit-daemon`). Crate name `blit` is not used — it is taken.
+- Why: owner approved the recommended set (2026-08-12). Tap/AUR `-bin` names exist so a signed archive package can sit next to a source package.
+- Supersedes: nothing.
