@@ -764,3 +764,8 @@ Format:
 - Decision: a user-facing `cargo install` that must be run twice, or that names two crates, to get `blit` and `blit-daemon` is rejected. Cargo is either one command that installs both binaries, or it is not advertised as an install path.
 - Why: owner, 2026-08-12: "that's a terrible user experience" of the two-crate install.
 - Supersedes: the two-crate `cargo install blit-cli` + `cargo install blit-daemon` user path in D-2026-08-12-2 (identifiers for brew/AUR/Scoop/winget and the binary names stand).
+
+## D-2026-08-12-4 — Cargo is not a user install channel
+- Decision: do not publish blit to crates.io and do not advertise `cargo install` (one crate or two). User install paths are Homebrew, AUR, winget, and Scoop. Developers clone and `cargo build --release`.
+- Why: owner chose B (2026-08-12) after rejecting a two-crate cargo UX; crate name `blit` is taken, so a one-command crates.io install could not be `cargo install blit`.
+- Supersedes: the crates.io user-package names in D-2026-08-12-2; option A in `docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (edited in place). D-2026-08-12-3 stands (two-crate cargo install remains rejected).

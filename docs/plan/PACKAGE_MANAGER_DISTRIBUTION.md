@@ -3,12 +3,12 @@
 **Status**: Draft
 **Created**: 2026-08-12
 **Supersedes**: nothing
-**Decision ref**: D-2026-08-12-1 (D1), D-2026-08-12-2 (identifiers), D-2026-08-12-3 (one cargo command or no cargo user channel). Remaining D3 A/B + D4–D5 + Draft→Active pending.
+**Decision ref**: D-2026-08-12-1 (D1), D-2026-08-12-2 (identifiers), D-2026-08-12-3 (two-crate cargo rejected), D-2026-08-12-4 (cargo is not a user channel). Remaining D4–D5 + Draft→Active pending.
 
 ## Goal
 
 A user can install `blit` and `blit-daemon` through Homebrew, AUR, winget,
-Scoop, and Cargo. Per D-2026-08-12-1 there are two payload lanes:
+and Scoop. Per D-2026-08-12-1 there are two payload lanes:
 
 - **Archive lane:** the GitHub Release binaries for that tag (macOS/Windows
   already signed in CI; Linux unsigned by standing policy).
@@ -17,8 +17,8 @@ Scoop, and Cargo. Per D-2026-08-12-1 there are two payload lanes:
   `<version>+<12-char tag SHA>` identity as the CI archives so mixed
   archive/source peers pass D-2026-07-05-2.
 
-GitHub Releases remain the canonical prebuilt host. Cargo is source and
-is still D3.
+GitHub Releases remain the canonical prebuilt host. Cargo is a developer
+build tool, not a user install channel (D-2026-08-12-4).
 
 ## Non-goals
 
@@ -39,9 +39,9 @@ is still D3.
   a second signing path beside the existing CI secrets.
 - Advertising a channel in README/docs before that channel is live and
   installable by a stranger.
-- A user-facing `cargo install` that names two crates or is run twice
-  to get `blit` and `blit-daemon`. Owner, 2026-08-12: two-crate cargo
-  install is a terrible user experience. Rejected.
+- `cargo install` as a user install path, crates.io publication, and any
+  README claim that cargo is how you install blit (D-2026-08-12-3,
+  D-2026-08-12-4). Clone + `cargo build --release` stays for developers.
 
 ## Constraints
 
@@ -52,8 +52,8 @@ is still D3.
   install the exact GitHub Release archive for that tag (same URL, same
   SHA-256 as the `.sha256` sidecar) and do not rebuild or re-sign.
   Source packages rebuild from the tagged source and do not re-sign.
-  Cargo is specified under D3. Both lanes of the same tag must produce
-  peers that pass the same-build hello.
+  Both lanes of the same tag must produce peers that pass the
+  same-build hello. Cargo is not a lane (D-2026-08-12-4).
 - **One version.** Workspace `[workspace.package] version` is canonical.
   Tag is `v<version>`. Manifests report that version, not a floating `latest`.
 - **Signing already exists and is the signing path.**
@@ -68,18 +68,11 @@ is still D3.
   steps. Forks without secrets still package unsigned, as today.
 - **D-2026-07-05-2 same-build only.** Session hello is
   `CARGO_PKG_VERSION + BLIT_GIT_SHA`. CI tag builds have `.git` and emit
-  the 12-char tag SHA. GitHub tag tarballs, AUR/homebrew source trees, and
-  `crates.io` tarballs do **not** have `.git`; today's
-  `crates/blit-core/build_identity.rs` then emits `unknown.<nonce>`.
-  Source-lane packages must therefore export the tag's 12-char SHA into
-  the build (see Design: source identity). Do not relax the hello.
-- **`blit-core` build.rs reads `../../proto`.** A crates.io package of
-  `blit-core` does not include that tree unless the crate `include`s it (or
-  generated prost sources are vendored). Path deps across the workspace must
-  become versioned deps in publish order.
-- **Crate name `blit` is taken on crates.io** (unrelated 2D sprite library,
-  `blit` 0.8.3). The workspace crate that produces the `blit` binary is
-  already named `blit-cli`.
+  the 12-char tag SHA. GitHub tag tarballs and AUR/homebrew source trees
+  do **not** have `.git`; today's `crates/blit-core/build_identity.rs`
+  then emits `unknown.<nonce>`. Source-lane packages must therefore
+  export the tag's 12-char SHA into the build (see Design: source
+  identity). Do not relax the hello.
 - **Current release assets** (v0.1.2 and the `publish-release` contract):
   `blit-x86_64-unknown-linux-gnu.tar.gz`,
   `blit-aarch64-apple-darwin.tar.gz`,
@@ -87,10 +80,10 @@ is still D3.
   archive contains `blit`/`blit.exe`, `blit-daemon`/`blit-daemon.exe`,
   `README.md`, `LICENSE`, `CHANGELOG.md`, `BUILD.txt`.
 - **Outward acts stay owner-gated.** Creating/updating AUR packages, a
-  Homebrew tap, a `homebrew/core` PR, winget-pkgs, a Scoop bucket, and
-  `cargo publish` all publish. Generators and tests may land in-repo; the
-  first live push/PR/publish of each channel waits for an explicit go
-  naming that channel.
+  Homebrew tap, a `homebrew/core` PR, winget-pkgs, and a Scoop bucket
+  all publish. Generators and tests may land in-repo; the first live
+  push/PR/publish of each channel waits for an explicit go naming that
+  channel. `cargo publish` is out of scope (D-2026-08-12-4).
 - **Do not block `publish-release` on package-manager merge.** External
   review latency must not delay the canonical GitHub Release.
 - **No secret leakage.** External package repos receive only public asset
@@ -99,7 +92,9 @@ is still D3.
 ## Acceptance criteria
 
 - [x] D1 recorded (D-2026-08-12-1): both archive and source lanes.
-- [x] Identifier set recorded (D-2026-08-12-2). Draft→Active still waits on remaining interview decisions.
+- [x] Identifier set recorded (D-2026-08-12-2).
+- [x] Cargo is not a user channel (D-2026-08-12-4). Draft→Active still
+      waits on D4–D5.
 - [ ] `build.rs` honors a pre-set `BLIT_GIT_SHA` (or `BLIT_RELEASE_SHA`)
       so a git-less tree can emit the tag SHA. Guard: without git and
       without the env, identity is still a non-colliding `unknown.<nonce>`;
@@ -117,12 +112,8 @@ is still D3.
 - [ ] Archive-lane macOS/Windows binaries still carry the CI signatures
       (Developer ID Application / valid Authenticode). Not re-signed.
       Source-lane binaries are unsigned; docs do not claim otherwise.
-- [ ] Cargo path, if D3 = one crates.io package: a single
-      `cargo install <name> --locked` installs both `blit` and
-      `blit-daemon`, both reporting `<ver>+<tagsha>`, and those binaries
-      hello the GitHub archives of that tag. Docs never show two cargo
-      install commands. If D3 drops cargo as a user channel, README does
-      not advertise `cargo install` at all.
+- [ ] README does not advertise `cargo install`. Developer clone +
+      `cargo build --release` may remain. No crates.io publish.
 - [ ] README lists only live channels, as install options next to the
       existing source-build / GitHub Release path. No channel advertised
       before it is queryable.
@@ -145,7 +136,6 @@ tag vX.Y.Z
        tap (archive) | homebrew/core (source)
        AUR -bin (archive) | AUR source
        Scoop | winget
-  → cargo (if authorized) is a separate source publish
 ```
 
 GitHub Releases stay the prebuilt download path. Archive packages are
@@ -180,8 +170,7 @@ stub. Two source builds of the same stub, and a source build vs a CI
 archive of that tag, must hello.
 
 Do not amend a commit to insert a SHA. Do not put certs or tokens in
-manifests. crates.io still cannot set env for `cargo install`; that
-remains a D3 file-bake if crates.io is chosen.
+manifests. No crates.io identity file-bake (D-2026-08-12-4).
 
 ### Archive channels
 
@@ -221,40 +210,11 @@ Channel-specific shape (identifiers bound by D-2026-08-12-2):
 | Scoop | archive | `blit-x86_64-pc-windows-msvc.zip` | owner bucket, app `blit` | Zip + shims. No source package. |
 | winget | archive | same zip, portable nested installer | `microsoft/winget-pkgs` id `Roethlar.Blit` | No Setup.exe. If winget-pkgs rejects zip/portable, stop and ask; do not invent an installer in that slice. |
 
-### Cargo
+### Cargo (not a user channel)
 
-Owner rejected a two-crate / two-command `cargo install` (2026-08-12).
-D3 is no longer “git vs crates.io as two user crates.” It is:
-
-**A — one crates.io package, one command, both binaries (recommended).**
-User runs `cargo install blit-bin --locked` (name matches the tap/AUR
-archive package; crate name `blit` is taken). That one package declares
-both `[[bin]]` targets (`blit` and `blit-daemon`). Workspace crate names
-`blit-cli` / `blit-daemon` may remain as members; they are not what the
-user types. Libraries `blit-core` and `blit-app` publish only as
-dependencies. Still required:
-
-1. **Identity bake.** Tag SHA written into a crate-local file that
-   `build_identity.rs` reads when git cannot see the original repo.
-   `cargo install` of that version emits `<ver>+<tagsha>`, not
-   `unknown.<nonce>`.
-2. **proto in `blit-core`.** Package `include`s the workspace `proto/`
-   tree so `build.rs` compiles from a crates.io unpack.
-3. **Path → version deps**; publish order libraries then the one
-   install package. `publish = false` on `blit-tui`,
-   `blit-console-core`, `blit-prometheus-bridge`, and any leftover
-   binary crate the user must not `cargo install`.
-4. **`--locked`** is the documented install.
-
-This qualifies D-2026-08-12-2: users do not install `blit-cli` and
-`blit-daemon` as two crates. Binary names stay `blit` / `blit-daemon`.
-
-**B — cargo is not a user channel.** No crates.io user package. README
-does not advertise `cargo install`. Developers clone and
-`cargo build --release`. brew / AUR / winget / Scoop are the install UX.
-
-Do not relax D-2026-07-05-2 to make crates.io easier. Do not document
-two `cargo install` lines, including `--git --bin` twice.
+D-2026-08-12-4: no crates.io publish, no `cargo install` in user docs.
+README Quick Start may keep clone + `cargo build` as the developer
+path. Workspace crate layout is unchanged.
 
 ### Generator
 
@@ -305,8 +265,8 @@ One coherent, testable change each. No slice starts without Draft→Active
 and the decisions it names. Owner-gated publish is a go per channel, not
 covered by Active.
 
-1. **pm-0 — Record remaining D3 (and D4/D5 if ruled); flip Active.**
-   Docs only. D1/D2 are D-2026-08-12-1/-2. No product code.
+1. **pm-0 — Record remaining D4/D5 if ruled; flip Active.** Docs only.
+   D1–D3/D4-cargo are D-2026-08-12-1..4. No product code.
 2. **pm-1 — Honor pre-set `BLIT_GIT_SHA` / `BLIT_RELEASE_SHA` in
    `crates/blit-core/build.rs`.** Validation + nonce fallback unchanged.
    Tests: env set → exact suffix; env absent + no git → nonce, two
@@ -337,14 +297,9 @@ covered by Active.
 9. **pm-8 — winget portable zip (archive).** Prove
    `winget install --manifest` locally, then owner PR to
    `microsoft/winget-pkgs`. Zip rejection → stop and ask; no installer.
-10. **pm-9 — Cargo, only if D3 = A.** One install package with both
-    `[[bin]]`s; file-bake of the tag SHA; proto include; publish
-    metadata; `publish = false` on everything the user must not type;
-    `cargo publish --dry-run` in order. First real publish is
-    owner-gated. Prove `cargo install <name> --locked` drops both
-    binaries, they hello each other and a GitHub binary of that tag.
-    If D3 = B, this slice is: delete any cargo-install claim from docs;
-    do not publish.
+10. **pm-9 — Docs: cargo is not an install option.** Confirm README and
+    any install doc list only live brew/AUR/winget/Scoop (and GitHub
+    Releases / clone-build). No `cargo install`. No crates.io.
 11. **pm-10 — Release-process note.** Maintainer section listing the
     generator command and the owner-gated external updates for **both**
     lanes. No CI automation in this slice.
@@ -358,13 +313,11 @@ entry before the slice that needs it. Recommendations are not decisions.
   lanes. Homebrew core and AUR source are in scope. Winget/Scoop stay
   archive-only.
 - **D2 — Identifiers.** **Recorded D-2026-08-12-2** for brew / AUR /
-  Scoop / winget and for binary names `blit` / `blit-daemon`. The
-  crates.io *user* package name is reopened by the two-crate UX
-  rejection; D3 binds it.
-- **D3 — Cargo user install.** Two-crate / two-command install is
-  rejected. Remaining pick: **A** one crates.io package
-  (`cargo install blit-bin --locked` → both binaries) or **B** cargo
-  is not a user channel.
+  Scoop / winget and for binary names `blit` / `blit-daemon`.
+  crates.io user-package names in that entry are superseded by
+  D-2026-08-12-4.
+- **D3 — Cargo.** **Recorded D-2026-08-12-3** (two-crate rejected) and
+  **D-2026-08-12-4** (not a user channel).
 - **D4 — First version to publish.** Recommended: start from existing
   `v0.1.2` assets (source lane needs the tag tarball of that same tag).
   Do not wait for 1.0 or the console.
@@ -380,7 +333,7 @@ entry before the slice that needs it. Recommendations are not decisions.
 | homebrew/core review is slow or rejects the name | park pm-4; tap `blit-bin` still ships signed macOS |
 | `blit` name collisions (brew/scoop/AUR) | identifiers are bound (D-2026-08-12-2); if a registry rejects one, stop and ask |
 | Source build without injected SHA | `unknown.<nonce>` refuse; pm-1 + stub export prevent this |
-| crates.io identity/`proto` miss | cargo install peers refuse each other; pm-9 guards this |
+| Docs claim `cargo install` | forbidden by D-2026-08-12-4; pm-9 removes any such claim |
 | Docs advertise a dead command | docs only after live proof |
 | Second signing path / certs in repo | forbidden by Constraints |
 | Archive lane rebuilds or re-signs | forbidden |
