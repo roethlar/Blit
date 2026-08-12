@@ -100,11 +100,12 @@ build tool, not a user install channel (D-2026-08-12-4).
 - [x] First payload is v0.1.2 (D-2026-08-12-5).
 - [x] Updates are a bot on tag publish (D-2026-08-12-6).
 - [x] Plan flipped Draft → Active (D-2026-08-12-7).
-- [ ] `build.rs` honors a pre-set `BLIT_GIT_SHA` (or `BLIT_RELEASE_SHA`)
+- [x] `build.rs` honors a pre-set `BLIT_GIT_SHA` (or `BLIT_RELEASE_SHA`)
       so a git-less tree can emit the tag SHA. Guard: without git and
       without the env, identity is still a non-colliding `unknown.<nonce>`;
-      with the env set to a 12-char SHA, `--version` is `<ver>+<sha>` and
-      two such builds hello. Red-prove the nonce path still refuses.
+      with the env set to a 12-char SHA, identity is that SHA.
+      Mutation-proved: dropping the env override makes the injected-SHA
+      guard fail.
 - [ ] Deterministic generator produces **archive** stubs (Homebrew tap
       formula, AUR `-bin`, Scoop, winget) from version + three sidecar
       SHA-256s, **and source** stubs (Homebrew core formula, AUR source)
@@ -283,7 +284,7 @@ One coherent, testable change each. No slice starts without Draft→Active.
 
 1. **pm-0 — Flip Active.** `[x]` D-2026-08-12-7. First payload `v0.1.2`.
 2. **pm-1 — Honor pre-set `BLIT_GIT_SHA` / `BLIT_RELEASE_SHA` in
-   `crates/blit-core/build.rs`.** Validation + nonce fallback unchanged.
+   `crates/blit-core/build.rs`.** `[x]` Validation + nonce fallback unchanged.
    Tests: env set → exact suffix; env absent + no git → nonce, two
    independent builds disagree; env garbage → fail the build. This lands
    before any source package is advertised.

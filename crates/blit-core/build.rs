@@ -12,10 +12,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_file = proto_dir.join("blit.proto");
 
     println!("cargo:rerun-if-changed={}", proto_file.display());
-    println!(
-        "cargo:rustc-env=BLIT_GIT_SHA={}",
-        build_identity::git_build_suffix(&manifest_dir)
-    );
+    let build_sha = build_identity::git_build_suffix(&manifest_dir)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    println!("cargo:rustc-env=BLIT_GIT_SHA={build_sha}");
 
     tonic_prost_build::configure()
         .build_server(true)

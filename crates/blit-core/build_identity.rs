@@ -81,6 +81,55 @@ fn unknown_build_suffix() -> String {
     format!("unknown.{nonce:016x}")
 }
 
+fn nonempty_env(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn parse_injected_sha(raw: &str) -> Result<String, String> {
+    if raw.len() == 12
+        && raw
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        Ok(raw.to_string())
+    } else {
+        Err(format!(
+            "injected build SHA must be 12 lowercase hex digits, got {raw:?}"
+        ))
+    }
+}
+
+/// Prefer `BLIT_GIT_SHA`, then `BLIT_RELEASE_SHA`. Empty is unset.
+/// Disagreeing non-empty values are an error, not a silent pick.
+fn injected_sha(git: Option<String>, release: Option<String>) -> Result<Option<String>, String> {
+    match (nonempty_env(git), nonempty_env(release)) {
+        (Some(git_sha), Some(release_sha)) if git_sha != release_sha => Err(format!(
+            "BLIT_GIT_SHA ({git_sha:?}) and BLIT_RELEASE_SHA ({release_sha:?}) disagree"
+        )),
+        (Some(sha), _) | (None, Some(sha)) => parse_injected_sha(&sha).map(Some),
+        (None, None) => Ok(None),
+    }
+}
+
+fn resolve_build_suffix(
+    manifest_dir: &Path,
+    emit_rerun: bool,
+    git_env: Option<String>,
+    release_env: Option<String>,
+) -> Result<String, String> {
+    if emit_rerun {
+        println!("cargo:rerun-if-env-changed=BLIT_GIT_SHA");
+        println!("cargo:rerun-if-env-changed=BLIT_RELEASE_SHA");
+    }
+    if let Some(sha) = injected_sha(git_env, release_env)? {
+        return Ok(sha);
+    }
+    Ok(git_build_suffix_inner(manifest_dir, emit_rerun))
+}
+
 /// Git identity for the same-build session handshake.
 ///
 /// Clean build inputs use the commit SHA. Dirty build inputs add a stable hash
@@ -117,8 +166,13 @@ fn git_build_suffix_inner(manifest_dir: &Path, emit_rerun: bool) -> String {
 }
 
 #[cfg(not(test))]
-pub(crate) fn git_build_suffix(manifest_dir: &Path) -> String {
-    git_build_suffix_inner(manifest_dir, true)
+pub(crate) fn git_build_suffix(manifest_dir: &Path) -> Result<String, String> {
+    resolve_build_suffix(
+        manifest_dir,
+        true,
+        std::env::var("BLIT_GIT_SHA").ok(),
+        std::env::var("BLIT_RELEASE_SHA").ok(),
+    )
 }
 
 #[cfg(test)]
@@ -195,6 +249,99 @@ mod tests {
 
         let first = git_build_suffix_inner(&manifest_dir, false);
         let second = git_build_suffix_inner(&manifest_dir, false);
+        assert!(first.starts_with("unknown."));
+        assert!(second.starts_with("unknown."));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn injected_sha_wins_over_git_and_must_be_twelve_lowercase_hex() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        let root = repo.path();
+        let manifest_dir = root.join("crates/blit-core");
+        fs::create_dir_all(manifest_dir.join("src")).expect("core src");
+        fs::write(root.join("Cargo.toml"), b"[workspace]\n").expect("workspace manifest");
+        fs::write(manifest_dir.join("src/lib.rs"), b"pub fn value() {}\n").expect("source");
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=Blit Test",
+                "-c",
+                "user.email=blit@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        );
+
+        let from_git = git_build_suffix_inner(&manifest_dir, false);
+        assert_ne!(from_git, "aaaaaaaaaaaa");
+
+        let injected =
+            resolve_build_suffix(&manifest_dir, false, Some("aaaaaaaaaaaa".into()), None)
+                .expect("valid BLIT_GIT_SHA");
+        assert_eq!(injected, "aaaaaaaaaaaa");
+
+        let alias = resolve_build_suffix(&manifest_dir, false, None, Some("bbbbbbbbbbbb".into()))
+            .expect("valid BLIT_RELEASE_SHA");
+        assert_eq!(alias, "bbbbbbbbbbbb");
+
+        let agreed = resolve_build_suffix(
+            &manifest_dir,
+            false,
+            Some("cccccccccccc".into()),
+            Some("cccccccccccc".into()),
+        )
+        .expect("matching injected SHAs");
+        assert_eq!(agreed, "cccccccccccc");
+    }
+
+    #[test]
+    fn injected_sha_rejects_garbage_and_disagreement() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let manifest_dir = root.path();
+
+        let garbage = resolve_build_suffix(manifest_dir, false, Some("NOT-A-SHA".into()), None)
+            .expect_err("garbage SHA");
+        assert!(
+            garbage.contains("12 lowercase hex"),
+            "unexpected error: {garbage}"
+        );
+
+        let uppercase =
+            resolve_build_suffix(manifest_dir, false, Some("AAAAAAAAAAAA".into()), None)
+                .expect_err("uppercase SHA");
+        assert!(
+            uppercase.contains("12 lowercase hex"),
+            "unexpected error: {uppercase}"
+        );
+
+        let disagree = resolve_build_suffix(
+            manifest_dir,
+            false,
+            Some("aaaaaaaaaaaa".into()),
+            Some("bbbbbbbbbbbb".into()),
+        )
+        .expect_err("disagreeing SHAs");
+        assert!(
+            disagree.contains("disagree"),
+            "unexpected error: {disagree}"
+        );
+    }
+
+    #[test]
+    fn missing_git_and_missing_env_still_never_false_matches() {
+        let repo = tempfile::tempdir().expect("temp source tree");
+        let root = repo.path();
+        let manifest_dir = root.join("crates/blit-core");
+        fs::create_dir_all(manifest_dir.join("src")).expect("core src");
+        fs::write(root.join("Cargo.toml"), b"[workspace]\n").expect("workspace manifest");
+
+        let first = resolve_build_suffix(&manifest_dir, false, None, None).expect("nonce");
+        let second = resolve_build_suffix(&manifest_dir, false, None, None).expect("nonce");
         assert!(first.starts_with("unknown."));
         assert!(second.starts_with("unknown."));
         assert_ne!(first, second);
