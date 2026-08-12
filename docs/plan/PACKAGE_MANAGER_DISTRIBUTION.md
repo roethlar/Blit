@@ -3,7 +3,7 @@
 **Status**: Draft
 **Created**: 2026-08-12
 **Supersedes**: nothing
-**Decision ref**: D-2026-08-12-1 (D1), D-2026-08-12-2 (identifiers), D-2026-08-12-3 (two-crate cargo rejected), D-2026-08-12-4 (cargo is not a user channel), D-2026-08-12-5 (first payload v0.1.2). Remaining D5 + Draft→Active pending.
+**Decision ref**: D-2026-08-12-1 (D1), D-2026-08-12-2 (identifiers), D-2026-08-12-3 (two-crate cargo rejected), D-2026-08-12-4 (cargo is not a user channel), D-2026-08-12-5 (first payload v0.1.2), D-2026-08-12-6 (bot on tag publish). Draft→Active pending owner flip.
 
 ## Goal
 
@@ -79,11 +79,14 @@ build tool, not a user install channel (D-2026-08-12-4).
   `blit-x86_64-pc-windows-msvc.zip`, each with a `.sha256` sidecar. Each
   archive contains `blit`/`blit.exe`, `blit-daemon`/`blit-daemon.exe`,
   `README.md`, `LICENSE`, `CHANGELOG.md`, `BUILD.txt`.
-- **Outward acts stay owner-gated.** Creating/updating AUR packages, a
-  Homebrew tap, a `homebrew/core` PR, winget-pkgs, and a Scoop bucket
-  all publish. Generators and tests may land in-repo; the first live
-  push/PR/publish of each channel waits for an explicit go naming that
-  channel. `cargo publish` is out of scope (D-2026-08-12-4).
+- **Bot publishes; one-time remotes/secrets stay owner-gated
+  (D-2026-08-12-6).** After `publish-release`, a separate job generates
+  stubs and updates configured channels. Owner creates the empty tap,
+  Scoop bucket, and AUR remotes once and stores tokens/AUR SSH as repo
+  secrets. Missing secrets skip that channel (notice, not a failed blit
+  release). `homebrew/core` and `microsoft/winget-pkgs` are PRs. Signing
+  secrets never enter this job. `cargo publish` is out of scope
+  (D-2026-08-12-4).
 - **Do not block `publish-release` on package-manager merge.** External
   review latency must not delay the canonical GitHub Release.
 - **No secret leakage.** External package repos receive only public asset
@@ -94,8 +97,9 @@ build tool, not a user install channel (D-2026-08-12-4).
 - [x] D1 recorded (D-2026-08-12-1): both archive and source lanes.
 - [x] Identifier set recorded (D-2026-08-12-2).
 - [x] Cargo is not a user channel (D-2026-08-12-4).
-- [x] First payload is v0.1.2 (D-2026-08-12-5). Draft→Active still
-      waits on D5.
+- [x] First payload is v0.1.2 (D-2026-08-12-5).
+- [x] Updates are a bot on tag publish (D-2026-08-12-6). Draft→Active
+      waits on the owner flip.
 - [ ] `build.rs` honors a pre-set `BLIT_GIT_SHA` (or `BLIT_RELEASE_SHA`)
       so a git-less tree can emit the tag SHA. Guard: without git and
       without the env, identity is still a non-colliding `unknown.<nonce>`;
@@ -115,6 +119,10 @@ build tool, not a user install channel (D-2026-08-12-4).
       Source-lane binaries are unsigned; docs do not claim otherwise.
 - [ ] README does not advertise `cargo install`. Developer clone +
       `cargo build --release` may remain. No crates.io publish.
+- [ ] A CI job runs after `publish-release` (and via
+      `workflow_dispatch` + tag) that generates stubs and updates every
+      channel whose secrets are present. It cannot fail or delay the
+      GitHub Release. v0.1.2 is bootstrapped by dispatch, not a new tag.
 - [ ] README lists only live channels, as install options next to the
       existing source-build / GitHub Release path. No channel advertised
       before it is queryable.
@@ -247,28 +255,34 @@ Keep the GitHub Release and source-build paths. Options only — no trust
 essay, no "unsigned Linux" framing, no instruction to disable Gatekeeper
 or SmartScreen.
 
-### Release process (after first live success)
+### Release process (D-2026-08-12-6)
 
-Maintainer steps, manual until a later automation slice:
+```
+publish-release succeeds (six assets live)
+  → separate package-managers job (needs: publish-release)
+      generate stubs from sidecars + tag-tarball sha256 + tag SHA
+      push tap blit-bin / Scoop blit / AUR blit + blit-bin
+        when those secrets exist
+      open PRs to homebrew/core and microsoft/winget-pkgs
+        when those tokens exist
+  → missing secret: notice + skip that channel
+```
 
-1. Wait for tag CI `publish-release` green and the six assets live.
-2. Hash the GitHub tag source tarball; run the generator with archive
-   sidecars + source sha256 + tag SHA.
-3. Update tap, AUR `-bin`, AUR source, Scoop, winget PR, and (when
-   live) the homebrew/core bump.
-4. After each package is queryable, add or bump that README option.
+`workflow_dispatch` with `tag=v0.1.2` is the first run. Do not fold this
+into the `publish-release` attach step. A package-manager failure must
+not delete or draft the GitHub Release.
 
-Do not fold those updates into `publish-release`.
+One-time owner setup (not a slice the agent invents): GitHub repos for
+`roethlar/homebrew-blit` (or the tap name D2 implies: tap `roethlar/blit`
+is `github.com/roethlar/homebrew-blit`) and the Scoop bucket; AUR SSH
+deploy key; tokens that can open winget-pkgs / homebrew/core PRs.
 
 ## Slices
 
-One coherent, testable change each. No slice starts without Draft→Active
-and the decisions it names. Owner-gated publish is a go per channel, not
-covered by Active.
+One coherent, testable change each. No slice starts without Draft→Active.
 
-1. **pm-0 — Record remaining D5 if ruled; flip Active.** Docs only.
-   D1–D4 are D-2026-08-12-1..5. First live stubs target tag `v0.1.2`.
-   No product code.
+1. **pm-0 — Flip Active** once the owner says so. Docs only. All D1–D5
+   are D-2026-08-12-1..6. First payload is `v0.1.2`.
 2. **pm-1 — Honor pre-set `BLIT_GIT_SHA` / `BLIT_RELEASE_SHA` in
    `crates/blit-core/build.rs`.** Validation + nonce fallback unchanged.
    Tests: env set → exact suffix; env absent + no git → nonce, two
@@ -279,32 +293,38 @@ covered by Active.
    (Homebrew core, AUR source) from version + source-tarball sha256 +
    tag SHA (the `BLIT_GIT_SHA=` export). Refuse a missing digest. No
    network on generate, no push. Red-prove one digest assertion.
-4. **pm-3 — Homebrew tap live (archive).** Owner tap, generated
-   `blit-bin` formula from tag `v0.1.2`. Prove `brew install` on arm64
-   macOS: both binaries on PATH, version identity, `codesign` still
-   Developer ID. Docs after proof.
-5. **pm-4 — Homebrew core PR (source).** Generated source formula.
-   Prove a local `brew install --build-from-source` emits
-   `<ver>+<tagsha>` and hellos a CI archive of that tag. Owner opens the
-   `homebrew/core` PR. If review stalls, park; do not spin. Docs after
-   `brew install blit` from core actually works.
-6. **pm-5 — AUR `blit-bin` live (archive).** Owner pushes
-   `ssh://aur@aur.archlinux.org/blit-bin.git`. Prove install. Docs after
-   the AUR page exists. If AUR create is locked, park; continue.
-7. **pm-6 — AUR source live.** Same AUR caveats. Prove `makepkg` exports
-   `BLIT_GIT_SHA`, both binaries match the tag identity, and a source
-   install hellos an archive-lane binary of that tag.
-8. **pm-7 — Scoop bucket live (archive).** Prove `scoop install` on
-   Windows; Authenticode still Valid; both binaries shimmed. Docs after.
-9. **pm-8 — winget portable zip (archive).** Prove
-   `winget install --manifest` locally, then owner PR to
-   `microsoft/winget-pkgs`. Zip rejection → stop and ask; no installer.
-10. **pm-9 — Docs: cargo is not an install option.** Confirm README and
-    any install doc list only live brew/AUR/winget/Scoop (and GitHub
-    Releases / clone-build). No `cargo install`. No crates.io.
-11. **pm-10 — Release-process note.** Maintainer section listing the
-    generator command and the owner-gated external updates for **both**
-    lanes. No CI automation in this slice.
+4. **pm-3 — package-managers CI job.** Separate from `publish-release`.
+   Triggers: `workflow_dispatch` (tag input) and after a successful
+   tag `publish-release`. Downloads/hashes public release assets +
+   GitHub tag tarball, runs the generator, then for each configured
+   secret: push tap / Scoop / AUR, or open winget-pkgs and
+   homebrew/core PRs. No signing secrets. A failed channel is a job
+   notice or a failed *this* job, never a mutation of the GitHub
+   Release. Unit-test the skip-when-secret-missing rule.
+5. **pm-4 — Homebrew tap live (archive).** Dispatch the job for
+   `v0.1.2` once the tap remote and token exist. Prove `brew install`
+   on arm64 macOS: both binaries on PATH, version identity, `codesign`
+   still Developer ID. Docs after proof.
+6. **pm-5 — Homebrew core (source).** Local
+   `brew install --build-from-source` proof (`<ver>+<tagsha>` hellos a
+   CI archive), then the job's homebrew/core PR. If review stalls,
+   park; do not spin. Docs after `brew install blit` from core works.
+7. **pm-6 — AUR `blit-bin` live (archive).** Job pushes when AUR SSH
+   is present. Prove install. Docs after the AUR page exists. If AUR
+   create is locked, park; continue.
+8. **pm-7 — AUR source live.** Same AUR caveats. Prove `makepkg`
+   exports `BLIT_GIT_SHA` and hellos an archive-lane binary of that tag.
+9. **pm-8 — Scoop bucket live (archive).** Job push. Prove
+   `scoop install` on Windows; Authenticode still Valid. Docs after.
+10. **pm-9 — winget portable zip (archive).** Job opens the
+    winget-pkgs PR after a local `winget install --manifest` proof.
+    Zip rejection → stop and ask; no installer.
+11. **pm-10 — Docs: cargo is not an install option.** README lists
+    only live brew/AUR/winget/Scoop (and GitHub Releases / clone-build).
+    No `cargo install`. No crates.io.
+12. **pm-11 — Maintainer note.** Documents the job, required secrets,
+    `workflow_dispatch` for a past tag, and that a channel skip is
+    not a release failure.
 
 ## Open questions
 
@@ -322,8 +342,8 @@ entry before the slice that needs it. Recommendations are not decisions.
   **D-2026-08-12-4** (not a user channel).
 - **D4 — First version.** **Recorded D-2026-08-12-5:** wrap existing
   `v0.1.2`. Do not wait for 1.0 or the console.
-- **D5 — Automation.** Recommended: manual generator + owner push/PR
-  until each channel has one successful live update.
+- **D5 — Automation.** **Recorded D-2026-08-12-6:** bot on tag
+  publish; `workflow_dispatch` for v0.1.2. Interview complete.
 
 ## Risks
 
@@ -339,5 +359,8 @@ entry before the slice that needs it. Recommendations are not decisions.
 | Second signing path / certs in repo | forbidden by Constraints |
 | Archive lane rebuilds or re-signs | forbidden |
 | Source lane claimed as signed | forbidden; docs must not say that |
-| `publish-release` waits on brew/AUR/winget | forbidden |
+| `publish-release` waits on brew/AUR/winget | forbidden; package job is downstream and non-blocking |
+| Bot pushes a bad stub | generator snapshot tests; channel skip on missing secret; third-party is PR not push |
+| Bot job has signing certs | forbidden |
+| v0.1.2 already tagged | `workflow_dispatch`, not a retag |
 | SmartScreen / first-run Gatekeeper | existing changelog caveats; do not tell users to disable OS security |

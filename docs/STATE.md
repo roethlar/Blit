@@ -157,7 +157,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    no daemon runs on zoey without a fresh go.
 8. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
 9. **`docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (Draft)** — brew, AUR,
-   winget, scoop; first payload v0.1.2. Awaiting D5 (automation).
+   winget, scoop; v0.1.2; bot on tag. Awaiting Draft→Active.
 
 ## Authoritative docs right now
 
@@ -196,4 +196,4 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Open questions
 
-- Package-manager D1–D5 live in `docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md`.
+- Package-manager interview complete; Draft→Active is the remaining flip.

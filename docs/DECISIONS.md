@@ -774,3 +774,9 @@ Format:
 - Decision: the first Homebrew / AUR / winget / Scoop packages wrap the existing **v0.1.2** GitHub Release archives and that tag's source tarball. Do not wait for 1.0 or a new blit tag.
 - Why: owner chose A (2026-08-12). v0.1.2 is already published with signed archives.
 - Supersedes: nothing.
+
+## D-2026-08-12-6 — Package-manager updates are a bot on tag publish
+- Decision: a CI job, not a human, updates Homebrew / AUR / winget / Scoop when a `v*` tag's GitHub Release is published. `workflow_dispatch` with a tag input bootstraps **v0.1.2** (already shipped). The job must not block or roll back `publish-release`.
+- Why: owner chose B (2026-08-12) over manual-first.
+- Consequence: one-time owner setup still required (empty tap/bucket/AUR remotes, tokens, AUR SSH). Missing secrets skip that channel with a notice; they do not fail the blit release. Signing secrets never go to this job. Third-party repos (`homebrew/core`, `microsoft/winget-pkgs`) get PRs, not direct pushes.
+- Supersedes: the manual-until-first-success recommendation in `docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (edited in place).
