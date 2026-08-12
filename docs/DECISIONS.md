@@ -758,3 +758,9 @@ Format:
 - Decision: Homebrew core formula `blit` (source); owner tap `roethlar/blit` formula `blit-bin` (signed macOS archive); AUR `blit` (source) and `blit-bin` (archive); Scoop `blit`; winget `Roethlar.Blit`; crates.io names, if published, are `blit-cli`, `blit-daemon`, `blit-core`, `blit-app` (binary names stay `blit` / `blit-daemon`). Crate name `blit` is not used — it is taken.
 - Why: owner approved the recommended set (2026-08-12). Tap/AUR `-bin` names exist so a signed archive package can sit next to a source package.
 - Supersedes: nothing.
+- Qualified 2026-08-12: the crates.io *user-install* pair (`cargo install blit-cli` plus `cargo install blit-daemon`) is rejected as UX. Binary names and the brew/AUR/Scoop/winget identifiers stand. D3 binds the cargo user command.
+
+## D-2026-08-12-3 — Cargo user install is one command or it is not a user channel
+- Decision: a user-facing `cargo install` that must be run twice, or that names two crates, to get `blit` and `blit-daemon` is rejected. Cargo is either one command that installs both binaries, or it is not advertised as an install path.
+- Why: owner, 2026-08-12: "that's a terrible user experience" of the two-crate install.
+- Supersedes: the two-crate `cargo install blit-cli` + `cargo install blit-daemon` user path in D-2026-08-12-2 (identifiers for brew/AUR/Scoop/winget and the binary names stand).
