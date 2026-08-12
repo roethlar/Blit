@@ -1,0 +1,25 @@
+{
+  "version": "0.0.0",
+  "description": "High-performance file transfer CLI and daemon",
+  "homepage": "https://github.com/roethlar/Blit",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/roethlar/Blit/releases/download/v0.0.0/blit-x86_64-pc-windows-msvc.zip",
+      "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "extract_dir": "blit-x86_64-pc-windows-msvc"
+    }
+  },
+  "bin": [
+    "blit.exe",
+    "blit-daemon.exe"
+  ],
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/roethlar/Blit/releases/download/v$version/blit-x86_64-pc-windows-msvc.zip"
+      }
+    }
+  }
+}

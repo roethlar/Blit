@@ -29,6 +29,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: release smoke guards
         run: python3 scripts/release_smoke_test.py
+      - name: package-manager stub guards
+        run: python3 scripts/package_managers/test_generate.py
 
   test-linux:
     name: Test (Linux)

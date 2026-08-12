@@ -106,11 +106,12 @@ build tool, not a user install channel (D-2026-08-12-4).
       with the env set to a 12-char SHA, identity is that SHA.
       Mutation-proved: dropping the env override makes the injected-SHA
       guard fail.
-- [ ] Deterministic generator produces **archive** stubs (Homebrew tap
+- [x] Deterministic generator produces **archive** stubs (Homebrew tap
       formula, AUR `-bin`, Scoop, winget) from version + three sidecar
       SHA-256s, **and source** stubs (Homebrew core formula, AUR source)
       from version + GitHub tag-tarball SHA-256 + the tag's 12-char SHA.
-      Snapshot-tested. Digests never hand-edited.
+      Snapshot-tested. Mutation-proved: a hand-rewritten golden digest
+      fails `test_snapshots_match_golden_tree`.
 - [ ] Each authorized channel is installable by a stranger on that OS,
       putting `blit` and `blit-daemon` on `PATH` at the release version.
       `--version` on both binaries is `<version>+<12-char tag SHA>` for
@@ -288,7 +289,7 @@ One coherent, testable change each. No slice starts without Draft→Active.
    Tests: env set → exact suffix; env absent + no git → nonce, two
    independent builds disagree; env garbage → fail the build. This lands
    before any source package is advertised.
-3. **pm-2 — Generator + snapshot tests.** Archive stubs (tap `blit-bin`,
+3. **pm-2 — Generator + snapshot tests.** `[x]` Archive stubs (tap `blit-bin`,
    AUR `-bin`, Scoop, winget) from version + three sidecars. Source stubs
    (Homebrew core, AUR source) from version + source-tarball sha256 +
    tag SHA (the `BLIT_GIT_SHA=` export). Refuse a missing digest. No

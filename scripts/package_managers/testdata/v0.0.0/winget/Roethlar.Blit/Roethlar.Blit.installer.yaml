@@ -1,0 +1,16 @@
+PackageIdentifier: Roethlar.Blit
+PackageVersion: 0.0.0
+InstallerLocale: en-US
+InstallerType: zip
+NestedInstallerType: portable
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/roethlar/Blit/releases/download/v0.0.0/blit-x86_64-pc-windows-msvc.zip
+  InstallerSha256: CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+  NestedInstallerFiles:
+  - RelativeFilePath: blit-x86_64-pc-windows-msvc/blit.exe
+    PortableCommandAlias: blit
+  - RelativeFilePath: blit-x86_64-pc-windows-msvc/blit-daemon.exe
+    PortableCommandAlias: blit-daemon
+ManifestType: installer
+ManifestVersion: 1.6.0
