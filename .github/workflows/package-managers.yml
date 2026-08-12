@@ -1,0 +1,42 @@
+# Updates Homebrew / AUR / Scoop / winget after a GitHub Release.
+# Never receives signing secrets. A failure here does not mutate the release.
+name: Package managers
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to package (for example v0.1.2)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    name: Update package managers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - name: Update configured channels
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_REPO: ${{ secrets.HOMEBREW_TAP_REPO }}
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          SCOOP_BUCKET_REPO: ${{ secrets.SCOOP_BUCKET_REPO }}
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+          WINGET_PKGS_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
+          WINGET_PKGS_FORK: ${{ secrets.WINGET_PKGS_FORK }}
+          HOMEBREW_CORE_TOKEN: ${{ secrets.HOMEBREW_CORE_TOKEN }}
+          HOMEBREW_CORE_FORK: ${{ secrets.HOMEBREW_CORE_FORK }}
+        run: |
+          set -euo pipefail
+          tag_sha="$(git rev-parse --short=12 "${{ inputs.tag }}")"
+          python3 scripts/package_managers/publish.py \
+            --tag "${{ inputs.tag }}" \
+            --tag-sha "${tag_sha}" \
+            --repo-root .

@@ -31,6 +31,8 @@ jobs:
         run: python3 scripts/release_smoke_test.py
       - name: package-manager stub guards
         run: python3 scripts/package_managers/test_generate.py
+      - name: package-manager publish guards
+        run: python3 scripts/package_managers/test_publish.py
 
   test-linux:
     name: Test (Linux)
@@ -385,3 +387,50 @@ jobs:
           draft: false
           fail_on_unmatched_files: true
           files: dist/*
+
+  package-managers:
+    name: Update package managers
+    # Downstream of the atomic attach. Failure here must not draft, delete,
+    # or rewrite the GitHub Release — this job never calls the release API.
+    needs: [publish-release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download release sidecars
+        uses: actions/download-artifact@v6
+        with:
+          pattern: blit-*
+          path: dist
+          merge-multiple: true
+      - name: Fetch the GitHub tag source tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          curl -fsSL "https://github.com/roethlar/Blit/archive/refs/tags/${TAG}.tar.gz" \
+            -o "dist/Blit-${version}.tar.gz"
+          test -s "dist/Blit-${version}.tar.gz"
+      - name: Update configured channels
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_REPO: ${{ secrets.HOMEBREW_TAP_REPO }}
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          SCOOP_BUCKET_REPO: ${{ secrets.SCOOP_BUCKET_REPO }}
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+          WINGET_PKGS_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
+          WINGET_PKGS_FORK: ${{ secrets.WINGET_PKGS_FORK }}
+          HOMEBREW_CORE_TOKEN: ${{ secrets.HOMEBREW_CORE_TOKEN }}
+          HOMEBREW_CORE_FORK: ${{ secrets.HOMEBREW_CORE_FORK }}
+        run: |
+          set -euo pipefail
+          tag_sha="$(git rev-parse --short=12 "${GITHUB_SHA}")"
+          python3 scripts/package_managers/publish.py \
+            --tag "${GITHUB_REF_NAME}" \
+            --tag-sha "${tag_sha}" \
+            --sidecars dist \
+            --source-tarball "dist/Blit-${GITHUB_REF_NAME#v}.tar.gz" \
+            --repo-root .

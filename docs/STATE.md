@@ -157,7 +157,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    no daemon runs on zoey without a fresh go.
 8. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
 9. **`docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (ACTIVE, D-2026-08-12-7)**
-   — brew, AUR, winget, scoop; v0.1.2; bot on tag. Now: pm-3.
+   — brew, AUR, winget, scoop; v0.1.2; bot on tag. Now: pm-4 (tap live).
 
 ## Authoritative docs right now
 
@@ -197,4 +197,4 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Open questions
 
-- Package-manager plan Active (D-2026-08-12-7); pm-1/pm-2 landed; next pm-3.
+- Package-manager plan Active (D-2026-08-12-7); pm-1..3 landed. Next: remotes/secrets, then pm-4.

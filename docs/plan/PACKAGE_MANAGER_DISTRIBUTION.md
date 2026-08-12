@@ -121,10 +121,11 @@ build tool, not a user install channel (D-2026-08-12-4).
       Source-lane binaries are unsigned; docs do not claim otherwise.
 - [ ] README does not advertise `cargo install`. Developer clone +
       `cargo build --release` may remain. No crates.io publish.
-- [ ] A CI job runs after `publish-release` (and via
+- [x] A CI job runs after `publish-release` (and via
       `workflow_dispatch` + tag) that generates stubs and updates every
       channel whose secrets are present. It cannot fail or delay the
       GitHub Release. v0.1.2 is bootstrapped by dispatch, not a new tag.
+      Skip-when-secret-missing is unit-tested.
 - [ ] README lists only live channels, as install options next to the
       existing source-build / GitHub Release path. No channel advertised
       before it is queryable.
@@ -294,7 +295,7 @@ One coherent, testable change each. No slice starts without Draft→Active.
    (Homebrew core, AUR source) from version + source-tarball sha256 +
    tag SHA (the `BLIT_GIT_SHA=` export). Refuse a missing digest. No
    network on generate, no push. Red-prove one digest assertion.
-4. **pm-3 — package-managers CI job.** Separate from `publish-release`.
+4. **pm-3 — package-managers CI job.** `[x]` Separate from `publish-release`.
    Triggers: `workflow_dispatch` (tag input) and after a successful
    tag `publish-release`. Downloads/hashes public release assets +
    GitHub tag tarball, runs the generator, then for each configured
