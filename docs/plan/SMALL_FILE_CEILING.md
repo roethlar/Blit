@@ -120,6 +120,12 @@ to find the ceiling with the least machinery, not to stop early:
    small transfer), then cut — candidates: temp-file+rename
    pattern, separate set-times/set-perms syscalls, per-file
    need-list echo. The profile, not intuition, names the cuts.
+   **sf-3a result (2026-08-13):** the unified streamed path does not use a
+   temp/rename pattern. The measured candidates, in risk-adjusted order, are
+   parent-directory readiness reuse, retaining the completed descriptor
+   through metadata stamping, and a security-preserving replacement for
+   repeated full-path containment walks. Canonical evidence and expected
+   syscall savings: `docs/bench/sf3a-per-file-cost-2026-08-13/`.
 3. **Historical proposal, retired by ldt-2 — resize-on-file-backlog**: feed the existing ue-2 resize
    machinery a backlog signal so a stream drowning in tiny files
    triggers mid-transfer ADD — this is also the organic resize
@@ -155,12 +161,13 @@ analysis to prove it earns its keep before design review.
    (10k tiny → multi-stream; 1×1 GiB unchanged; mixed →
    intermediate) + loopback e2e pin that a 10k-file push opens >1
    data-plane connection.
-3. **sf-3a per-file cost limiter analysis** (analysis-only, w8-1b
+3. **sf-3a per-file cost limiter analysis — COMPLETE 2026-08-13**
+   (analysis-only, w8-1b
    precedent): `strace -c`/`perf` profile of daemon receive and
    client pull-write during a small transfer; deliverable is a
    committed analysis naming each per-file syscall cost and the
    ordered list of candidate cuts, each with its expected saving.
-   No code.
+   No code. Evidence: `docs/bench/sf3a-per-file-cost-2026-08-13/`.
 4. **sf-3b… one cut per slice**: each accepted cut from sf-3a lands
    as its own review-loop slice with its own loopback
    per-file-cost proxy pin (so CI catches gross regressions

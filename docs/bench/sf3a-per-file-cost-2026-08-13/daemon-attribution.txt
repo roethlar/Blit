@@ -1,0 +1,19 @@
+# One-file daemon receive attribution
+
+Raw `strace -f -yy -s 256` excerpt for `f10001.dat`, restricted to the
+file/path syscalls used in the aggregate profile. PIDs are retained to show
+the create and metadata tail crossing blocking workers.
+
+```text
+126397 mkdir(".../daemon-root/attribution", 0777) = 0
+126397 openat(AT_FDCWD, ".../daemon-root/attribution/f10001.dat", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0666) = 13
+126313 close(13<.../f10001.dat>) = 0
+126313 openat(AT_FDCWD, ".../daemon-root/attribution/f10001.dat", O_RDONLY|O_CLOEXEC) = 13
+126313 utimensat(13<.../f10001.dat>, NULL, [UTIME_OMIT, {tv_sec=1786657555, tv_nsec=0}], 0) = 0
+126313 close(13<.../f10001.dat>) = 0
+126313 chmod(".../daemon-root/attribution/f10001.dat", 0100644) = 0
+```
+
+Immediately before this excerpt, each containment resolution walks every
+component from `/mnt` through `daemon-root/attribution` with `readlink(2)`;
+the aggregate profile records how that repeated full-path walk scales.
