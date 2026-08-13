@@ -33,6 +33,11 @@ CI `build-release` signs the shipped binaries when the signing secrets are prese
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
+## Handoff — 2026-08-13 (`d2d4d72b`)
+- Done: read-only audit found large sequential 10 GbE transfers near line rate, but small-file and mixed workloads remain measurably off their hardware ceilings; no repo or remote-host changes were made.
+- In flight: owner authorized `SMALL_FILE_CEILING` sf-3a analysis only. Stop before remote staging, package installation, daemon launch, benchmark data creation/deletion, or choosing a substitute rig without the owner's exact authorization.
+- First action: from the new machine, test `admin@skippy` SSH read-only; then report its profiling-tool state and ask for the exact staging/install/run/cleanup authorization. Do not substitute Zoey. Preserve the pre-existing `Cargo.lock` modification.
+
 ## Handoff — 2026-08-01
 - Done: pfc SHIPPED (D-2026-08-01-2); clp-1..3; checkers 1.71×; audit-16
   closed (heartbeat verbose-gated). Reviews clean: ls-1, clp3-ls4. DEVLOG.
@@ -44,6 +49,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   M1 `f3picker.rs` dead code pending cutover.
 
 ## Now (active work)
+
+- **Current focus is `SMALL_FILE_CEILING` sf-3a, resumed by owner on 2026-08-13:** analysis-only profiling of daemon receive and client pull-write on the unified path. `admin@skippy` timed out from this Mac, and magneto had neither `perf` nor `strace`; nothing was staged, installed, launched, benchmarked, cleaned up, or changed.
+- **UI work is not active.** Owner rejected the landed GUI as acceptance evidence, said external GUIs belong outside this repo in `../BlitAdmin_UIs`, and then explicitly ordered no deletion or other code change until the architecture is understood and designed. Do not infer a language/framework or removal authorization. Existing GUI/TUI/bridge code remains untouched.
 - **BLIT_CONSOLE C1 GUI shell landed:** `crates/blit-gui` is a thin eframe face over `blit-console-core` — window, fleet sidebar (Local + mDNS daemons, labeled Refresh fleet), one browse pane (path, Up, directory buttons). Host (`Session`) executes Browse/Discover and drops stale completions via the core generation tags. In-flight listings are not clickable (cr-c1-3). Run: `cargo run -p blit-gui`. Not in the GitHub Release archives. Owner 60s test still closes C1. Core slices 1+2 unchanged at `7e6c68f5`; slice-1 review loop CLOSED (cr-c1-1 claude accepted, guard_confirmed=true; cr-c1-2 codex accepted, owner-ordered under D-2026-08-04-4).
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
@@ -63,7 +71,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   never competitor-relative (D-2026-07-04-4 — do not re-litigate).
 ## Queue (ordered)
 
-1. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (ACTIVE, D-2026-07-31-4) —
+1. **`docs/plan/SMALL_FILE_CEILING.md` sf-3a IN FLIGHT** — secure exact remote-host authorization, then profile current push/pull paths and commit the measured limiter analysis before proposing code.
+2. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (ACTIVE, D-2026-07-31-4) —
    PRIORITY-1, the owner's ruling on the 2026-07-31 field check.** Local
    transfer is too slow; the owner ruled it "should have been resolved before
    this was declared release-worthy." Recorded 2026-07-13, shipped in 0.1.1
@@ -105,7 +114,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    `guard_confirmed: true`** — see `REVIEW.md`. **`ls-0` LANDED**: the
    summary separates copied from repaired files and labels the rate as a
    whole-run average. NOT the closed P1 defect (D-2026-07-22-2).
-2. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
+3. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
    slices otp-1..13; any external review requires exact owner approval under
    D-2026-07-23-7. **otp-1 … otp-12c are all `[x]`** — closed-slice record and
    the otp-12a/b/c matrices live in `docs/history/state-archive.md`
@@ -114,14 +123,14 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    closed by D-2026-07-22-2. **otp-12d and otp-13 are POST-RELEASE
    (D-2026-07-22-1)**; no performance acceptance matrix is a shipping
    prerequisite.
-3. **`docs/plan/PER_FILE_ERROR_CONTAINMENT.md` — SHIPPED** (owner declared
+4. **`docs/plan/PER_FILE_ERROR_CONTAINMENT.md` — SHIPPED** (owner declared
    2026-08-01, D-2026-08-01-2; every acceptance criterion met, including the
    owner-only re-run convergence checkpoint — their run 2 copied 0 files,
    0 B on the originating `D:\Apps → H:\apps` workload). pfc-1..6 closed the
    root posture defect: a single survivable per-file error no longer aborts
    a transfer. audit-17 closed with it. 7 range reviews, 11 findings, 10
    verified-closed + 1 declined. Detail: the plan and DEVLOG 2026-07-31.
-4. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2): clp-1, clp-2
+5. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2): clp-1, clp-2
    and clp-3 all `[x]` landed.** **clp-3** adds Dracula colour to the live
    row and the failure block (owner-chosen palette, scope "both"): phase word
    carries the colour, deleting is orange not red so red keeps its meaning
@@ -137,10 +146,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    Owner confirmed on a real TTY (2026-08-01) that the row holds one line
    while `-v` lines scroll above it. Residue (d) (remote-route attachment)
    deferred to remote render work. TUI-scale redesign stays a queued TODO.
-5. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
+6. **POST-RELEASE performance declarations:** ue-1, ue-2, and the REV4
    performance status flip are not release gates (D-2026-07-22-1).
-6. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
-   resumes/re-derives after ONE_TRANSFER_PATH ships.
 7. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
    Pro daemon CPU-bound below 10 GbE from SSD cache). Executes AFTER
    cutover as a runtime-selected write strategy in the unified receive
