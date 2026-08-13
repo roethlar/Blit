@@ -130,10 +130,10 @@ mobile/web remotes.
 
 ## 8. Next step
 
-Owner ruled D1 (egui, D-2026-08-04-1), D2 (delete legacy TUI at T1 cutover,
-D-2026-08-04-2), D3 (1.0 gates on C1–C4 + T1–T3, D-2026-08-04-3); plan is
-Active. Next: dispatch C1 (`blit-console-core` endpoints/discovery/browse +
-egui GUI shell).
+C1 core (slices 1+2) and the egui GUI shell (`crates/blit-gui`) have
+landed. Next: owner 60-second test — `cargo run -p blit-gui`, "I can
+see my fleet and walk directories." A pass is recorded in the
+acceptance log and unlocks C2 (transfer composer).
 
 ## Owner acceptance log
 

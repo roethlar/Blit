@@ -8,6 +8,7 @@ members = [
     "crates/blit-tui",
     "crates/blit-prometheus-bridge",
     "crates/blit-console-core",
+    "crates/blit-gui",
 ]
 
 [workspace.package]
