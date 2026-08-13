@@ -33,10 +33,10 @@ CI `build-release` signs the shipped binaries when the signing secrets are prese
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
-## Handoff — 2026-08-13 (`38209026` profile base)
-- Done: `SMALL_FILE_CEILING` sf-3a analysis-only profiling completed on magneto↔skippy at exact HEAD; both 100,000×4 KiB destinations verified, and evidence is committed under `docs/bench/sf3a-per-file-cost-2026-08-13/`. No product code changed.
-- In flight: no sf-3x code is authorized. The evidence orders three candidates: parent-directory readiness reuse, descriptor-retained metadata stamping, then security-preserving containment-walk reduction.
-- First action: ask the owner whether to plan sf-3b as the recommended parent-directory readiness cut; do not infer approval from sf-3a's profiling authorization.
+## Handoff — 2026-08-13 (`d5f5781d` sf-3b base)
+- Done: sf-3b implementation/evidence landed: concurrency-safe per-session parent readiness, stale-parent recovery, 16→1 proxy proof, full local/cross gates, and exact 12-run rig A/B under `docs/bench/sf3b-parent-readiness-2026-08-13/`.
+- In flight: the plan-required neutral review was not part of the implementation authorization; sf-3b is not declared closed until that owner-gated review runs.
+- First action: obtain exact approval for the neutral sf-3b review; do not begin descriptor-retained metadata stamping (sf-3c) from this authorization.
 
 ## Handoff — 2026-08-01
 - Done: pfc SHIPPED (D-2026-08-01-2); clp-1..3; checkers 1.71×; audit-16
@@ -50,7 +50,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **`SMALL_FILE_CEILING` sf-3a analysis is COMPLETE:** exact `38209026` on magneto↔skippy, 100,000×4 KiB each direction. Both destination trees verified 100,000 files / 409,600,000 bytes. The unified sink pays repeated full-path containment walks (27.1–35.5 failed `readlink`/file), two opens/two closes, ~two stats, one mostly-failed mkdir, one timestamp update, and one chmod per file. Evidence and risk-ordered cuts: `docs/bench/sf3a-per-file-cost-2026-08-13/`. No product code changed; no sf-3x implementation is authorized.
+- **`SMALL_FILE_CEILING` sf-3b implementation/evidence complete, neutral review pending:** session parent readiness removes 9,989 of 10,000 create attempts on the rig fixture without bypassing per-file containment; stale cached parents recover. Proxy 16→1; daemon A/B neutral, client median −22.3%. Evidence: `docs/bench/sf3b-parent-readiness-2026-08-13/`.
 - **UI work is not active.** Owner rejected the landed GUI as acceptance evidence, said external GUIs belong outside this repo in `../BlitAdmin_UIs`, and then explicitly ordered no deletion or other code change until the architecture is understood and designed. Do not infer a language/framework or removal authorization. Existing GUI/TUI/bridge code remains untouched.
 - **BLIT_CONSOLE C1 GUI shell landed:** `crates/blit-gui` is a thin eframe face over `blit-console-core` — window, fleet sidebar (Local + mDNS daemons, labeled Refresh fleet), one browse pane (path, Up, directory buttons). Host (`Session`) executes Browse/Discover and drops stale completions via the core generation tags. In-flight listings are not clickable (cr-c1-3). Run: `cargo run -p blit-gui`. Not in the GitHub Release archives. Owner 60s test still closes C1. Core slices 1+2 unchanged at `7e6c68f5`; slice-1 review loop CLOSED (cr-c1-1 claude accepted, guard_confirmed=true; cr-c1-2 codex accepted, owner-ordered under D-2026-08-04-4).
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
@@ -65,13 +65,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   repair (historical static-policy proof, superseded as an adaptive target
   by ldt-2) live in Queue 2, `docs/history/state-archive.md` (the
   otp-1..11 record), DEVLOG, and `docs/bench/otp12*/` — not restated here.
-- **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
-  `[x]`; **sf-3a+ blocked** until ONE_TRANSFER_PATH ships, then
-  resume/re-derive on the unified baseline. Principle: ceiling-driven,
-  never competitor-relative (D-2026-07-04-4 — do not re-litigate).
+- **SMALL_FILE_CEILING ACTIVE at sf-3b** on the unified path. sf-3a named
+  the cuts; sf-3b awaits its required neutral review. Principle:
+  ceiling-driven, never competitor-relative (D-2026-07-04-4).
 ## Queue (ordered)
 
-1. **`docs/plan/SMALL_FILE_CEILING.md` sf-3a COMPLETE; sf-3b awaits owner selection** — recommendation: parent-directory readiness reuse first (eliminate ~99,900 failed mkdir attempts per 100,000 files), then descriptor-retained metadata stamping, then security-preserving containment-walk reduction. Evidence: `docs/bench/sf3a-per-file-cost-2026-08-13/`. No code is authorized yet.
+1. **`docs/plan/SMALL_FILE_CEILING.md` sf-3b implementation/evidence ready; neutral review pending** — parent readiness is guarded and measured; exact approval is still required to invoke the neutral review. Only after that closes may the owner select descriptor-retained metadata stamping as sf-3c.
 2. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (ACTIVE, D-2026-07-31-4) —
    PRIORITY-1, the owner's ruling on the 2026-07-31 field check.** Local
    transfer is too slow; the owner ruled it "should have been resolved before

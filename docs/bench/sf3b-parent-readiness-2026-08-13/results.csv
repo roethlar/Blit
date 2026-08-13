@@ -1,0 +1,13 @@
+lane,slot,variant,milliseconds,files,bytes,exit
+push,1,base,1452,10000,40960000,0
+push,1,candidate,1447,10000,40960000,0
+push,2,candidate,1442,10000,40960000,0
+push,2,base,1433,10000,40960000,0
+push,3,base,1445,10000,40960000,0
+push,3,candidate,1448,10000,40960000,0
+pull,1,base,1192,10000,40960000,0
+pull,1,candidate,582,10000,40960000,0
+pull,2,candidate,720,10000,40960000,0
+pull,2,base,768,10000,40960000,0
+pull,3,base,735,10000,40960000,0
+pull,3,candidate,597,10000,40960000,0

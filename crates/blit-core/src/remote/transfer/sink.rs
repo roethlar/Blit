@@ -670,6 +670,19 @@ pub struct FsTransferSink {
     /// for a file whose blocks and completion arrive on different
     /// sockets.
     failed_resume_reasons: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    /// Successful parent-directory readiness, shared by every receive
+    /// worker that owns this session sink. The map lock only protects
+    /// lookup/insertion; each parent has its own async once-cell so first
+    /// use of distinct directories remains concurrent while simultaneous
+    /// files in one directory share a single `create_dir_all` attempt.
+    ready_parents:
+        std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::OnceCell<()>>>>,
+    /// Test-only proxy for the parent-directory syscall cost. Incremented
+    /// immediately before each `create_dir_all` attempt so the sf-3b guard
+    /// can pin one readiness check per shared parent without depending on
+    /// an OS-specific syscall tracer in CI.
+    #[cfg(test)]
+    parent_create_attempts: std::sync::atomic::AtomicUsize,
 }
 
 impl FsTransferSink {
@@ -691,6 +704,9 @@ impl FsTransferSink {
             byte_progress: None,
             small_file_probe: None,
             failed_resume_reasons: std::sync::Mutex::new(std::collections::HashMap::new()),
+            ready_parents: std::sync::Mutex::new(std::collections::HashMap::new()),
+            #[cfg(test)]
+            parent_create_attempts: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -751,6 +767,98 @@ impl FsTransferSink {
             .lock()
             .expect("failed-resume-reasons lock poisoned")
             .remove(relative_path)
+    }
+
+    async fn create_parent_directory(&self, parent: &Path) -> Result<()> {
+        #[cfg(test)]
+        self.parent_create_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("creating directory {}", parent.display()))
+    }
+
+    fn parent_readiness(&self, parent: &Path) -> Arc<tokio::sync::OnceCell<()>> {
+        Arc::clone(
+            self.ready_parents
+                .lock()
+                .expect("ready-parents lock poisoned")
+                .entry(parent.to_path_buf())
+                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+        )
+    }
+
+    /// Remove only the readiness generation this caller observed. Another
+    /// worker may already have invalidated a stale generation and installed
+    /// a successful replacement; a late failure must not evict that one.
+    fn invalidate_parent_readiness(
+        &self,
+        parent: &Path,
+        observed: &Arc<tokio::sync::OnceCell<()>>,
+    ) {
+        let mut ready_parents = self
+            .ready_parents
+            .lock()
+            .expect("ready-parents lock poisoned");
+        if ready_parents
+            .get(parent)
+            .is_some_and(|current| Arc::ptr_eq(current, observed))
+        {
+            ready_parents.remove(parent);
+        }
+    }
+
+    async fn ensure_parent_ready(&self, parent: &Path) -> Result<Arc<tokio::sync::OnceCell<()>>> {
+        let readiness = self.parent_readiness(parent);
+        if let Err(error) = readiness
+            .get_or_try_init(|| self.create_parent_directory(parent))
+            .await
+        {
+            self.invalidate_parent_readiness(parent, &readiness);
+            return Err(error);
+        }
+        Ok(readiness)
+    }
+
+    async fn create_stream_destination(
+        &self,
+        dst: &Path,
+        windows_metadata: Option<&crate::generated::WindowsFileMetadata>,
+    ) -> Result<tokio::fs::File> {
+        let parent_readiness = match dst.parent() {
+            Some(parent) => Some((parent, self.ensure_parent_ready(parent).await?)),
+            None => None,
+        };
+
+        if let Err(error) = crate::windows_metadata::prepare_destination(dst, windows_metadata) {
+            if let Some((parent, readiness)) = &parent_readiness {
+                self.invalidate_parent_readiness(parent, readiness);
+            }
+            return Err(error);
+        }
+
+        match tokio::fs::File::create(dst).await {
+            Ok(file) => Ok(file),
+            Err(error) => {
+                if let Some((parent, readiness)) = &parent_readiness {
+                    self.invalidate_parent_readiness(parent, readiness);
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        self.ensure_parent_ready(parent).await?;
+                        crate::windows_metadata::prepare_destination(dst, windows_metadata)?;
+                        return tokio::fs::File::create(dst)
+                            .await
+                            .with_context(|| format!("creating {}", dst.display()));
+                    }
+                }
+                Err(error).with_context(|| format!("creating {}", dst.display()))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn parent_create_attempts(&self) -> usize {
+        self.parent_create_attempts
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -959,18 +1067,9 @@ impl TransferSink for FsTransferSink {
         // an undrained record would desync the protocol stream, so the
         // record is drained before the failure is contained. A drain
         // failure is transport, and stays fatal.
-        let prepared = async {
-            if let Some(parent) = dst.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .with_context(|| format!("creating directory {}", parent.display()))?;
-            }
-            crate::windows_metadata::prepare_destination(&dst, header.windows_metadata.as_ref())?;
-            tokio::fs::File::create(&dst)
-                .await
-                .with_context(|| format!("creating {}", dst.display()))
-        }
-        .await;
+        let prepared = self
+            .create_stream_destination(&dst, header.windows_metadata.as_ref())
+            .await;
         let mut file = match prepared {
             Ok(file) => file,
             Err(error)
@@ -2102,6 +2201,86 @@ mod tests {
             !dst.join("nested").exists(),
             "dry-run streaming receive must not create destination dirs"
         );
+    }
+
+    /// sf-3b: all receive workers share one sink, so concurrent files in
+    /// one directory should pay for parent readiness once per session.
+    /// The counter is a portable proxy for the `mkdir` syscall measured by
+    /// sf-3a; it keeps this regression guard independent of `strace`.
+    #[tokio::test]
+    async fn fs_sink_prepares_a_shared_parent_once() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = Arc::new(FsTransferSink::new(
+            tmp.path().join("src"),
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
+            },
+        ));
+
+        let writes = (0..16).map(|index| {
+            let sink = Arc::clone(&sink);
+            async move {
+                let header = make_file_header(&format!("shared/file-{index}.txt"), 1);
+                let mut reader: &[u8] = b"x";
+                sink.write_file_stream(&header, &mut reader).await.unwrap();
+            }
+        });
+        futures::future::join_all(writes).await;
+
+        assert_eq!(sink.parent_create_attempts(), 1);
+        for index in 0..16 {
+            assert_eq!(
+                std::fs::read(dst.join(format!("shared/file-{index}.txt"))).unwrap(),
+                b"x"
+            );
+        }
+    }
+
+    /// A successful readiness observation is only a cache, not authority
+    /// over later filesystem state. If the directory disappears during a
+    /// session, the missing-parent create failure evicts that generation
+    /// and retries after recreating the parent.
+    #[tokio::test]
+    async fn fs_sink_recreates_a_cached_parent_after_removal() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().join("src"),
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
+            },
+        );
+
+        let first = make_file_header("shared/first.txt", 1);
+        let mut first_reader: &[u8] = b"a";
+        sink.write_file_stream(&first, &mut first_reader)
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(dst.join("shared")).unwrap();
+
+        let second = make_file_header("shared/second.txt", 1);
+        let mut second_reader: &[u8] = b"b";
+        let outcome = sink
+            .write_file_stream(&second, &mut second_reader)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.files_written, 1);
+        assert_eq!(sink.parent_create_attempts(), 2);
+        assert_eq!(std::fs::read(dst.join("shared/second.txt")).unwrap(), b"b");
     }
 
     #[tokio::test]

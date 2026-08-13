@@ -173,6 +173,15 @@ analysis to prove it earns its keep before design review.
    per-file-cost proxy pin (so CI catches gross regressions
    without the rig). The count of sf-3x slices is set by sf-3a's
    list, not guessed here.
+   **sf-3b parent readiness (implementation/evidence complete 2026-08-13;
+   neutral review pending):** the streamed sink now shares a concurrency-safe
+   once-cell per destination parent for one session, invalidates failed/stale
+   generations by identity, and recreates a cached parent that disappears.
+   The portable proxy proved 16→1 create attempts for concurrent siblings;
+   untraced rig A/B was neutral on daemon receive and −22.3% median on client
+   receive, with the operation-count reduction—not that noisy wall delta—as
+   the durable claim. Evidence:
+   `docs/bench/sf3b-parent-readiness-2026-08-13/`.
 5. **sf-4 rig re-measure + limiter analysis**: rerun sf-1 harness on
    the 10 GbE rig; record the limiter analysis per cell. Hardware-
    bound everywhere + tripwires clean → acceptance review with the
