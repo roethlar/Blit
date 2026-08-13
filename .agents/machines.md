@@ -263,7 +263,7 @@ retraction: a cost billed to one arm and not the other.)
 
 - **The Mac's 10GbE IP and NIC CHANGED 2026-07-13** — this is a live
   confound in the otp-12 numbers, not a bookkeeping detail:
-  * **now: `en9` = 10.1.10.54**, a Thunderbolt **Aquantia** adapter,
+  * **otp-12 window (2026-07-13): `en9` = 10.1.10.54**, a Thunderbolt **Aquantia** adapter,
     MTU 9000, 10Gbase-T. (SSH into the Mac = `michael@10.1.10.54`;
     Remote Login is ON and netwatch-01's key is in the Mac's
     `authorized_keys`, so Windows→Mac ssh/sftp works.)
@@ -275,11 +275,14 @@ retraction: a cost billed to one arm and not the other.)
     of a code regression. Both runs still showed the same qualitative
     asymmetry; only the delta is suspect.
   * Harnesses take the Mac IP via `MAC_HOST=` — pass **10.1.10.54**
-    (older invocations in the DEVLOG say 10.1.10.91).
-- Windows box = **`michael@netwatch-01`, IP 10.1.10.177 as of
-  2026-07-12** (the earlier-recorded 10.1.10.173 is STALE — DHCP; ssh
+    (older invocations in the DEVLOG say 10.1.10.91). **Not current NIC
+    identity:** the Aquantia later moved to `q` — see the `q` section.
+- Windows box = **`michael@netwatch-01`**. IP **10.1.10.177 as of
+  2026-07-12** (then treated as replacing 10.1.10.173). **Superseded
+  2026-07-21 (D-2026-07-21-1 / `q` section):** DHCP moved back to
+  **10.1.10.173**; this residue is not current addressing. ssh
   by hostname; if the bare name stops resolving, `netwatch-01.local` or
-  the IP both work — the host key is filed under both). **MTU raised
+  the live IP both work — the host key is filed under both. **MTU raised
   1500 → 9000 on 2026-07-13** (see Network/MTU above). SMB File Sharing
   is now ON on the Mac and Windows is authenticated to it
   (`net use \\10.1.10.91\blit-bench-work`), so robocopy can reach it.
@@ -293,11 +296,10 @@ retraction: a cost billed to one arm and not the other.)
   to be a match for skippy** — a zoey↔skippy pair is NOT a valid
   symmetric/performance-matched rig; a zoey endpoint becomes the
   bottleneck and MASKS data-plane effects rather than measuring them.
-  Consequence, recorded so it is not re-proposed: the fleet has **no
-  same-OS, real-network, performance-matched pair** (one Mac; zoey too
-  slow for skippy; magneto is a busy BitTorrent box — build-only, never
-  a bench end). Platform-vs-role confounds on a two-host rig therefore
-  cannot be broken by rig juggling and need a code-level counterfactual
+  Consequence: zoey↔skippy is invalid. **Superseded 2026-07-13:**
+  magneto **is** a valid bench end; magneto↔skippy is the same-OS
+  pair (see Additional Linux hosts). Platform-vs-role confounds on a
+  mixed-OS two-host rig still need a code-level counterfactual
   (see `docs/plan/OTP12_PERF_FINDINGS.md`).
 - zoey: binaries staged 2026-07-10 in `blit-temp/` — **corrected <!-- lint: allow (owner ruled leave-it, 2026-07-25: staging dir on zoey, not a repo path) -->
   2026-07-12**: the staged daemon embeds `731023bfc8a1.dirty.…`, NOT

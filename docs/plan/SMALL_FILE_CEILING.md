@@ -3,7 +3,7 @@
 **Status**: Active
 **Created**: 2026-07-05
 **Supersedes**: nothing
-**Decision ref**: D-2026-07-04-4 (Draft → Active, owner "go")
+**Decision ref**: D-2026-07-04-4 (Draft → Active); paused at sf-2 by D-2026-07-05-1
 
 **Worker-policy correction (ldt-2, 2026-07-16):** sf-2's file-count-derived
 stream target is historical evidence, not current authority. The active

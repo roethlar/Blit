@@ -10,6 +10,22 @@ commit at which it was rotated out.
 
 ---
 
+## Rotated 2026-08-13 (at `384d251f`) — MACOS FIREWALL + THUNDERBOLT FOLLOW-UP
+
+Landed: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md` is **Shipped**
+(D-2026-07-23-6); Thunderbolt lifecycle + SSD probe plans are
+**Historical** (D-2026-07-23-3). Helper shipped; two leftover firewall
+entries stay in `docs/STATE.md` Blockers and `.agents/machines.md`.
+
+Verbatim, as they stood in `docs/STATE.md`:
+
+> - **MACOS TEST FIREWALL CLEANUP SHIPPED LOCALLY (D-2026-07-23-6):** helper,
+>   16 fake-backed cases, parser check and mutation guards complete; no review
+>   pending. Plan: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md`.
+> - **THUNDERBOLT LIFECYCLE + SSD FOLLOW-UP COMPLETE (D-2026-07-23-3):** both
+>   closed, no repeats authorized; records in DEVLOG 2026-07-23 and
+>   `docs/bench/{end-to-end-transfer-latency,thunderbolt-ssd}-*/`.
+
 ## Rotated 2026-08-08 (at `98084edf`) — RELEASE COMPLETION SHIPPED
 
 Landed: v0.1.1 published; the entry duplicated the standing "BLIT 0.1.1 IS

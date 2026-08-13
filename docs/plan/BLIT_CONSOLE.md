@@ -1,6 +1,6 @@
 # Blit Console — one core, two faces (GUI + TUI)
 
-**Status**: Active — D1 ruled egui (D-2026-08-04-1); D2/D3 pending, one at a time
+**Status**: Active — D1 egui (D-2026-08-04-1); D2 legacy TUI dies at T1 cutover (D-2026-08-04-2); D3 1.0 gates on C1–C4 + T1–T3 (D-2026-08-04-3)
 **Created**: 2026-08-02
 **Supersedes**: `TUI_REWORK.md` (scrapped whole by owner, 2026-08-02:
 "nothing about current TUI works for me. scrap the entire UI"); re-points
