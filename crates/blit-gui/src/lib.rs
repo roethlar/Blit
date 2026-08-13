@@ -69,6 +69,22 @@ pub fn enter_path(current: &Path, name: &str) -> PathBuf {
     current.join(name)
 }
 
+/// Listing rows the face may turn into click targets.
+///
+/// Core keeps the previous listing visible while a newer browse is
+/// in flight (`loading` is true, `current_path` already moved).
+/// Clicking those stale names would join them onto the new path
+/// (`/photos` + leftover `photos/` → `/photos/photos`). The face
+/// therefore treats an in-flight browse as having no interactive
+/// rows.
+pub fn interactive_listing(model: &Model) -> &[blit_console_core::DirEntry] {
+    if model.is_loading() {
+        &[]
+    } else {
+        model.listing()
+    }
+}
+
 /// Console session: model plus the effect runtime the face drives.
 pub struct Session {
     model: Model,
@@ -361,6 +377,33 @@ mod tests {
             .map(|entry| entry.name.as_str())
             .collect();
         assert_eq!(names, vec!["second.txt"]);
+    }
+
+    #[tokio::test]
+    async fn in_flight_browse_has_no_interactive_rows() {
+        let first = tempfile::tempdir().unwrap();
+        std::fs::write(first.path().join("photos"), b"x").unwrap();
+        std::fs::create_dir(first.path().join("keep")).unwrap();
+        let second = tempfile::tempdir().unwrap();
+
+        let mut session = Session::new();
+        session.dispatch(Msg::NavigateTo(first.path().to_path_buf()));
+        wait_idle(&mut session).await;
+        assert!(
+            !interactive_listing(session.model()).is_empty(),
+            "settled listing should be clickable"
+        );
+
+        session.dispatch(Msg::NavigateTo(second.path().to_path_buf()));
+        assert!(session.model().is_loading());
+        assert!(
+            !session.model().listing().is_empty(),
+            "core keeps the stale listing while loading"
+        );
+        assert!(
+            interactive_listing(session.model()).is_empty(),
+            "stale rows must not stay clickable after current_path moves"
+        );
     }
 
     #[tokio::test]

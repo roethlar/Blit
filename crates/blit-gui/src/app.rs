@@ -3,7 +3,7 @@
 //! will use. No listing, discovery, or merge logic lives here.
 
 use blit_console_core::{Endpoint, Msg};
-use blit_gui::{enter_path, parent_path, Session};
+use blit_gui::{enter_path, interactive_listing, parent_path, Session};
 use eframe::egui::{self, Color32};
 use std::sync::Arc;
 use std::time::Duration;
@@ -86,10 +86,7 @@ impl eframe::App for ConsoleApp {
             }
             ui.separator();
 
-            let entries: Vec<_> = self
-                .session
-                .model()
-                .listing()
+            let entries: Vec<_> = interactive_listing(self.session.model())
                 .iter()
                 .map(|entry| (entry.name.clone(), entry.is_dir, entry.size))
                 .collect();

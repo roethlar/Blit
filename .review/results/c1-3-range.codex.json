@@ -1,0 +1,15 @@
+{
+  "verdict": "findings",
+  "capability_ok": true,
+  "reviewed_sha": "3487874f97c84754e653302239de9f89b249d4a5",
+  "base_sha": "767dc1e0d97c7e8241b3dae80e255a44aefec02d",
+  "findings": [
+    {
+      "title": "Stale directory buttons remain active during navigation",
+      "evidence": "crates/blit-gui/src/app.rs:81 detects that a browse is loading, but crates/blit-gui/src/app.rs:89 still collects and renders the previous listing as active buttons. The triggering condition is navigating to a directory whose asynchronous listing has not completed, especially a remote directory.",
+      "predicted_failure": "A conventional double-click on a remote directory can process the old row twice: after the first click changes the current path to `/photos`, the second click joins the stale `photos` row onto that new path and requests `/photos/photos`. The first request is superseded, leaving the user in an unintended directory or showing a missing-path error. This is MEDIUM impact because ordinary navigation can produce an incorrect destination.",
+      "severity": "MEDIUM",
+      "better_approach": "Clear the listing when navigation begins, or render existing rows disabled/hidden while `is_loading()` is true. Add a regression test that starts navigation while a prior listing is present and verifies stale rows cannot dispatch another `NavigateTo`."
+    }
+  ]
+}
