@@ -27,7 +27,7 @@ Plan: `docs/plan/BLIT_CONSOLE.md` (Active, D-2026-08-04-1..3).
 | cr-c1-1 | Browse completions carry no request correlation — stale results overwrite newer state | `[x]` | MEDIUM; fixed `1244f19b`; claude/claude-fable-5/high verification **accepted**, guard_confirmed=true, SHAs pin-verified (`.review/results/cr-c1-1.claude.json`) |
 | cr-c1-2 | SelectEndpoint leaves the previous endpoint's browse state in place | `[x]` | LOW; fixed `22261bf5`; claude/claude-fable-5/high verification invalid (transport denial); codex/gpt-5.6-sol/xhigh verification (owner-ordered r2) **accepted**, guard_confirmed=true (`.review/results/cr-c1-2.codex.json`) |
 | c1-3-range | Defect hunt over `767dc1e0..3487874f` (C1 egui GUI shell) | `[x]` | `3487874f` — **findings: 1, admitted below**. Reviewer: codex / gpt-5.6-sol / xhigh / standard; codex-cli 0.147.0; capability_ok=true; SHAs pin-verified; record `.review/results/c1-3-range.codex.json` |
-| cr-c1-3 | Stale directory buttons remain active during navigation | `[~]` | MEDIUM; fix landing this commit; generation: c1-3-range |
+| cr-c1-3 | Stale directory buttons remain active during navigation | `[x]` | MEDIUM; fixed `95357667`; codex/gpt-5.6-sol/xhigh verification **accepted**, guard_confirmed=true, SHAs pin-verified (`.review/results/cr-c1-3.codex.json`) |
 
 ## Per-file error containment + CLI live progress — landed-slice defect reviews
 

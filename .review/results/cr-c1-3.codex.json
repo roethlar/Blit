@@ -1,0 +1,10 @@
+{
+  "verdict": "accepted",
+  "guard_confirmed": true,
+  "capability_ok": true,
+  "reviewed_sha": "95357667cc18cdb072a0968d0ede8433bf9d2b01",
+  "base_sha": "3487874f97c84754e653302239de9f89b249d4a5",
+  "comments": [
+    "The fix prevents stale listing rows from remaining clickable during an in-flight browse. In a disposable worktree at the reviewed SHA, reverting the helper behavior made the named test fail at its stale-row assertion; restoring it made the test pass. All blit-gui tests also passed."
+  ]
+}
