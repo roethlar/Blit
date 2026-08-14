@@ -34,9 +34,9 @@ CI `build-release` signs the shipped binaries when the signing secrets are prese
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff — 2026-08-14 (`dab7bb82` sf-3b implementation)
-- Done: sf-3b implementation/evidence landed: concurrency-safe per-session parent readiness, stale-parent recovery, 16→1 proxy proof, full local/cross gates, and exact 12-run rig A/B under `docs/bench/sf3b-parent-readiness-2026-08-13/`.
-- In flight: owner-ordered Claude neutral r1 completed but returned only an inaccessible content-reference token; re-emission could not resume the non-persisted session. No verdict was accepted; `.review/sf-3b-r1.contested.md`.
-- First action: owner chooses a fresh schema-captured paid review, explicit local closure, or leaving sf-3b pending. Do not begin descriptor-retained metadata stamping (sf-3c).
+- Done: sf-3b implementation/evidence landed at `dab7bb82`; review-failure record landed at `6dec3b66`. Claude Fable r1 completed, but the invocation omitted `--json-schema` and disabled session persistence, making its content-referenced verdict unrecoverable after one re-emission attempt.
+- In flight: sf-3b remains open with complete local/rig evidence but no neutral verdict. The failed restricted run cost $2.184326; the owner explicitly objected to the avoidable invocation error. No further paid review is authorized.
+- First action: do not dispatch Fable or any paid reviewer. Await the owner's ruling to leave sf-3b pending or close it on local evidence; do not begin descriptor-retained metadata stamping (sf-3c).
 
 ## Handoff — 2026-08-01
 - Done: pfc SHIPPED (D-2026-08-01-2); clp-1..3; checkers 1.71×; audit-16
