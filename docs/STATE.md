@@ -33,8 +33,8 @@ CI `build-release` signs the shipped binaries when the signing secrets are prese
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
-## Handoff — 2026-08-14 (sf-3b CLOSED by in-session review, D-2026-08-14-1)
-- Done: sf-3b implementation/evidence at `dab7bb82`; r1 transport-failure record at `6dec3b66`. Owner then ordered the review done in-session, no playbooks: the working agent (claude-fable-5) reviewed `d5f5781d..dab7bb82` — no defects; mutation proof (readiness-map bypass reds the sharing guard at 16≠1, byte-identical restore); 20 sink tests green (Linux), CI green. Owner accepted; closure recorded in REVIEW.md, `.review/sf-3b-r1.contested.md` (resolution + 3 non-blocking observations), and D-2026-08-14-1.
+## Handoff — 2026-08-14 (HEAD `e1488f93`; sf-3b CLOSED by in-session review, D-2026-08-14-1)
+- Done: sf-3b implementation/evidence at `dab7bb82`; r1 transport-failure record at `6dec3b66`. Owner then ordered the review done in-session, no playbooks: the working agent (claude-fable-5) reviewed `d5f5781d..dab7bb82` — no defects; mutation proof (readiness-map bypass reds the sharing guard at 16≠1, byte-identical restore); 20 sink tests green (Linux), CI green. Owner accepted; closure recorded at `e1488f93` in REVIEW.md, `.review/sf-3b-r1.contested.md` (resolution + 3 non-blocking observations), and D-2026-08-14-1. Local commits are UNPUSHED (`origin/master` = `36d78ae4`).
 - In flight: nothing on SMALL_FILE_CEILING. sf-3c (descriptor-retained metadata stamping) is selectable but NOT selected.
 - First action: ask the owner whether to select sf-3c or another queue item; no implementation without that selection.
 
