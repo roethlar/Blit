@@ -1,0 +1,15 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "terminal_reason": "completed",
+  "stop_reason": "end_turn",
+  "duration_ms": 467170,
+  "duration_api_ms": 173919,
+  "num_turns": 10,
+  "total_cost_usd": 2.184326,
+  "fast_mode_state": "off",
+  "api_error_status": null,
+  "result": "<<ccr:cabb9af7635b,string,3.7KB>>",
+  "uuid": "e9737624-35c0-4292-ab27-fde444812c73"
+}
