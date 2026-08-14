@@ -33,10 +33,10 @@ CI `build-release` signs the shipped binaries when the signing secrets are prese
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
-## Handoff — 2026-08-14 (`dab7bb82` sf-3b implementation)
-- Done: sf-3b implementation/evidence landed at `dab7bb82`; review-failure record landed at `6dec3b66`. Claude Fable r1 completed, but the invocation omitted `--json-schema` and disabled session persistence, making its content-referenced verdict unrecoverable after one re-emission attempt.
-- In flight: sf-3b remains open with complete local/rig evidence but no neutral verdict. The failed restricted run cost $2.184326; the owner explicitly objected to the avoidable invocation error. No further paid review is authorized.
-- First action: do not dispatch Fable or any paid reviewer. Await the owner's ruling to leave sf-3b pending or close it on local evidence; do not begin descriptor-retained metadata stamping (sf-3c).
+## Handoff — 2026-08-14 (sf-3b CLOSED by in-session review, D-2026-08-14-1)
+- Done: sf-3b implementation/evidence at `dab7bb82`; r1 transport-failure record at `6dec3b66`. Owner then ordered the review done in-session, no playbooks: the working agent (claude-fable-5) reviewed `d5f5781d..dab7bb82` — no defects; mutation proof (readiness-map bypass reds the sharing guard at 16≠1, byte-identical restore); 20 sink tests green (Linux), CI green. Owner accepted; closure recorded in REVIEW.md, `.review/sf-3b-r1.contested.md` (resolution + 3 non-blocking observations), and D-2026-08-14-1.
+- In flight: nothing on SMALL_FILE_CEILING. sf-3c (descriptor-retained metadata stamping) is selectable but NOT selected.
+- First action: ask the owner whether to select sf-3c or another queue item; no implementation without that selection.
 
 ## Handoff — 2026-08-01
 - Done: pfc SHIPPED (D-2026-08-01-2); clp-1..3; checkers 1.71×; audit-16
@@ -50,7 +50,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **`SMALL_FILE_CEILING` sf-3b implementation/evidence complete, review r1 invalid/unavailable:** session parent readiness removes 9,989 of 10,000 create attempts on the rig fixture without bypassing per-file containment; stale cached parents recover. Proxy 16→1; daemon A/B neutral, client median −22.3%. Claude r1 produced no accessible verdict; `.review/sf-3b-r1.contested.md`.
+- **`SMALL_FILE_CEILING` sf-3b CLOSED (D-2026-08-14-1):** session parent readiness removes 9,989 of 10,000 create attempts on the rig fixture without bypassing per-file containment; stale cached parents recover. Proxy 16→1; daemon A/B neutral, client median −22.3%. After r1's transport failure the owner ordered an in-session review (working agent, no playbooks) and accepted its no-defect verdict; resolution in `.review/sf-3b-r1.contested.md`.
 - **UI work is not active.** Owner rejected the landed GUI as acceptance evidence, said external GUIs belong outside this repo in `../BlitAdmin_UIs`, and then explicitly ordered no deletion or other code change until the architecture is understood and designed. Do not infer a language/framework or removal authorization. Existing GUI/TUI/bridge code remains untouched.
 - **BLIT_CONSOLE C1 GUI shell landed:** `crates/blit-gui` is a thin eframe face over `blit-console-core` — window, fleet sidebar (Local + mDNS daemons, labeled Refresh fleet), one browse pane (path, Up, directory buttons). Host (`Session`) executes Browse/Discover and drops stale completions via the core generation tags. In-flight listings are not clickable (cr-c1-3). Run: `cargo run -p blit-gui`. Not in the GitHub Release archives. Owner 60s test still closes C1. Core slices 1+2 unchanged at `7e6c68f5`; slice-1 review loop CLOSED (cr-c1-1 claude accepted, guard_confirmed=true; cr-c1-2 codex accepted, owner-ordered under D-2026-08-04-4).
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
@@ -65,12 +65,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   repair (historical static-policy proof, superseded as an adaptive target
   by ldt-2) live in Queue 2, `docs/history/state-archive.md` (the
   otp-1..11 record), DEVLOG, and `docs/bench/otp12*/` — not restated here.
-- **SMALL_FILE_CEILING ACTIVE at sf-3b** on the unified path. sf-3a named
-  the cuts; sf-3b r1 was invalid/unavailable and the review gate remains open. Principle:
-  ceiling-driven, never competitor-relative (D-2026-07-04-4).
+- **SMALL_FILE_CEILING ACTIVE; sf-3b closed (D-2026-08-14-1)** on the
+  unified path. sf-3a named the cuts; sf-3c awaits owner selection.
+  Principle: ceiling-driven, never competitor-relative (D-2026-07-04-4).
 ## Queue (ordered)
 
-1. **`docs/plan/SMALL_FILE_CEILING.md` sf-3b implementation/evidence ready; review gate open** — parent readiness is guarded and measured; Claude r1 returned no accessible verdict. Owner must authorize a fresh paid review or explicit local closure. Only after that closes may the owner select descriptor-retained metadata stamping as sf-3c.
+1. **`docs/plan/SMALL_FILE_CEILING.md` — sf-3b closed (D-2026-08-14-1); sf-3c awaits owner selection** — descriptor-retained metadata stamping is sf-3a's next named cut; no implementation until the owner selects it.
 2. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (ACTIVE, D-2026-07-31-4) —
    PRIORITY-1, the owner's ruling on the 2026-07-31 field check.** Local
    transfer is too slow; the owner ruled it "should have been resolved before

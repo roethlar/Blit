@@ -173,8 +173,8 @@ analysis to prove it earns its keep before design review.
    per-file-cost proxy pin (so CI catches gross regressions
    without the rig). The count of sf-3x slices is set by sf-3a's
    list, not guessed here.
-   **sf-3b parent readiness (implementation/evidence complete 2026-08-13;
-   neutral review r1 invalid/unavailable 2026-08-14):** the streamed sink now
+   **sf-3b parent readiness (CLOSED 2026-08-14, D-2026-08-14-1):** the
+   streamed sink now
    shares a concurrency-safe once-cell per destination parent for one session,
    invalidates failed/stale
    generations by identity, and recreates a cached parent that disappears.
@@ -184,8 +184,9 @@ analysis to prove it earns its keep before design review.
    the durable claim. Evidence:
    `docs/bench/sf3b-parent-readiness-2026-08-13/`.
    The owner-ordered Claude r1 completed transport but exposed no verdict
-   schema; fail-closed record: `.review/sf-3b-r1.contested.md`. A fresh
-   review or explicit owner waiver is required before sf-3c.
+   schema; after that failure the owner ordered and accepted an in-session
+   review by the working agent (no defects; mutation-proven guard). Record
+   and resolution: `.review/sf-3b-r1.contested.md`.
 5. **sf-4 rig re-measure + limiter analysis**: rerun sf-1 harness on
    the 10 GbE rig; record the limiter analysis per cell. Hardware-
    bound everywhere + tripwires clean → acceptance review with the

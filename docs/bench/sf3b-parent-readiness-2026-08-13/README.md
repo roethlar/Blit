@@ -1,8 +1,8 @@
 # sf-3b parent-directory readiness — 2026-08-13
 
-**Status:** Implementation and local/rig evidence complete. The plan-required
-neutral review was invoked on 2026-08-14, but its verdict payload was
-inaccessible; the slice is not declared closed.
+**Status:** Closed 2026-08-14 (D-2026-08-14-1). After r1's inaccessible
+verdict the owner ordered and accepted an in-session review by the working
+agent — no defects; resolution in `.review/sf-3b-r1.contested.md`.
 
 ## Bottom line
 
@@ -85,11 +85,14 @@ operation-count reduction with no observed wall regression, not a universal
 - A/B staging, destinations, daemon, and listener were verified absent after
   cleanup.
 
-## Remaining gate
+## Review gate — resolved 2026-08-14
 
 `SMALL_FILE_CEILING` requires every sf-3x slice to pass a neutral review. The
 owner-ordered Claude r1 transport completed, but returned only an inaccessible
 content-reference token; the one re-emission attempt could not resume its
 non-persisted session. The fail-closed record is
-`.review/sf-3b-r1.contested.md`. A fresh paid review or an explicit owner
-waiver remains before sf-3b is declared closed or sf-3c begins.
+`.review/sf-3b-r1.contested.md`. The owner then ordered the review performed
+in-session by the working agent (D-2026-08-14-1): no defects; the sharing
+guard was mutation-proven (map bypass → `16 != 1` red, byte-identical
+restore); owner accepted. sf-3b is closed; the resolution detail lives in the
+contested record.

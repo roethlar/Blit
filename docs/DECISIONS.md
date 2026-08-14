@@ -785,3 +785,8 @@ Format:
 - Decision: `docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` is **Active**. Implementation starts at pm-1 (injected build-identity SHA), then the generator, then the package-managers CI job. Live channel proofs (pm-4+) still wait on the one-time remotes/secrets.
 - Why: owner said "go" (2026-08-12) after D1–D5 were recorded.
 - Supersedes: nothing.
+
+## D-2026-08-14-1 — sf-3b review gate closed by owner-accepted in-session review
+- Decision: sf-3b is closed. After r1's transport failure the owner ordered the review performed in the working session itself, explicitly without playbooks and without another paid dispatch; the working agent (claude-fable-5) reviewed exact `d5f5781d..dab7bb82`, found no defects, and independently proved the sharing guard bites by mutation (readiness-map bypass reds `fs_sink_prepares_a_shared_parent_once` at 16≠1; byte-identical restore; 20 focused sink tests green on Linux; CI green). Owner accepted 2026-08-14. sf-3c is selectable but not selected.
+- Why: r1 completed at $2.18 with an unrecoverable verdict and the owner refused further paid dispatches, choosing an in-session review over waiving review entirely. The reviewer is the session's own working agent — primed by session context, not a neutral second harness — and every record of this closure says so.
+- Supersedes: for sf-3b only, the reviewer-selection requirement of D-2026-07-23-2 (no general policy change; future formal reviews remain as ruled there). Resolution detail: `.review/sf-3b-r1.contested.md`.

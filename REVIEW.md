@@ -136,7 +136,7 @@ sf-3b… count is set by sf-3a's analysis, rows added as filed).
 |----|-------|--------|-----------|
 | sf-1 | Tripwire + stream-scaling harness (`scripts/bench_tripwires.sh`) — baseline re-runnable in one command. Codex NEEDS FIXES (6/6 accepted: teardown ownership, coverage-enforced verdict, external-daemon mode, ±10% flag, record accuracy) | `[x]` | `7202c1a` + review fix `80633df` |
 | sf-2 | Historical static shape-correction resize — client re-ran the shape table over the accumulated need list. Retired as worker authority by ldt-2; its loopback evidence remains valid for the named commits. Codex NEEDS FIXES (1/1 accepted: count from append-only `files_requested`, not the pruned set) | `[x]` | `c70c2ac` + review fix `7627e7b` |
-| sf-3b | Parent-directory readiness cache. Claude r1 completed but returned no accessible verdict schema; fail-closed record `.review/sf-3b-r1.contested.md`. | `[~]` | `dab7bb82` |
+| sf-3b | Parent-directory readiness cache | `[x]` | `dab7bb82`; r1 paid dispatch returned no accessible verdict (`.review/sf-3b-r1.contested.md`); **closed by owner-accepted in-session review (D-2026-08-14-1)** — working agent claude-fable-5 over `d5f5781d..dab7bb82` (primed, not neutral; recorded as such), no defects; mutation proof: readiness-map bypass reds `fs_sink_prepares_a_shared_parent_once` at 16≠1, byte-identical restore, 20 sink tests green (Linux), CI green; 3 non-blocking observations in the contested record's resolution |
 
 ## One transfer path (ONE_TRANSFER_PATH) — code→GPT-review→fix loop
 
