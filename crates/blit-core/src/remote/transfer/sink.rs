@@ -683,6 +683,14 @@ pub struct FsTransferSink {
     /// an OS-specific syscall tracer in CI.
     #[cfg(test)]
     parent_create_attempts: std::sync::atomic::AtomicUsize,
+    /// Test-only proxy for the streamed-receive metadata-stamp reopen sf-3c
+    /// removed. Incremented immediately before each retained-handle stamp
+    /// attempt in `write_file_stream`, so the sf-3c guard can pin that
+    /// every streamed file's metadata went through the descriptor it was
+    /// written with rather than a fresh by-path open, without depending on
+    /// an OS-specific syscall tracer in CI.
+    #[cfg(test)]
+    handle_metadata_stamps: std::sync::atomic::AtomicUsize,
 }
 
 impl FsTransferSink {
@@ -707,6 +715,8 @@ impl FsTransferSink {
             ready_parents: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(test)]
             parent_create_attempts: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            handle_metadata_stamps: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -858,6 +868,12 @@ impl FsTransferSink {
     #[cfg(test)]
     fn parent_create_attempts(&self) -> usize {
         self.parent_create_attempts
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn handle_metadata_stamps(&self) -> usize {
+        self.handle_metadata_stamps
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
@@ -1115,8 +1131,8 @@ impl TransferSink for FsTransferSink {
             .with_context(|| format!("writing {}", dst.display()))?;
             // Flush the tokio File's internal buffer state (does NOT
             // fsync — just ensures user-space buffering is drained
-            // before we drop the handle and apply mtime). Without
-            // this, set_file_mtime races with deferred writes from
+            // before we apply mtime through the retained handle).
+            // Without this, set_file_mtime raced deferred writes from
             // tokio's blocking-thread pool: 5/8 of mtimes were
             // observed silently bumped to "now" on the receive side.
             //
@@ -1128,9 +1144,6 @@ impl TransferSink for FsTransferSink {
                 .await
                 .with_context(|| format!("flushing {}", dst.display()))
         };
-        // Handle dropped → kernel close() complete → no further
-        // metadata churn from this file. Now safe to set mtime by path.
-        drop(file);
 
         // Intentionally no sync_all: ZFS commits per fsync are
         // multi-second on spinning rust and crater throughput
@@ -1139,28 +1152,50 @@ impl TransferSink for FsTransferSink {
         // default behavior. Add a config flag if a caller needs sync.
 
         // Metadata tail, past the last wire byte of the record: every
-        // failure below concerns exactly this file.
-        let windows_bytes =
-            match written.and_then(|()| stamp_streamed_metadata(&dst, header, &self.config)) {
-                Ok(windows_bytes) => windows_bytes,
-                Err(error) => {
-                    // pfc-4 byte-lane reconciliation (the pfc-2 landing
-                    // note's owed item). The chunk hook above already
-                    // reported this file's payload to the LIVE counter —
-                    // exactly `header.size` bytes, since the stream returned
-                    // Ok — while the outcome below counts zero for a
-                    // contained failure and the summary reports zero with it.
-                    // Give those bytes back so the live lane never claims
-                    // work the authoritative summary denies. The sibling
-                    // containment route above (destination could not be
-                    // opened) drains with `None`, so it has nothing to
-                    // withdraw.
-                    if let Some(bp) = &self.byte_progress {
-                        bp.withdraw(header.size);
-                    }
-                    return per_file_failure(&self.dst_root, &header.relative_path, error);
+        // failure below concerns exactly this file. sf-3c: on a
+        // successful write the descriptor is retained through this tail
+        // instead of being dropped and reopened by path —
+        // `stamp_streamed_metadata_via_handle` removes the openat+close
+        // pair sf-3a measured at one/file
+        // (`docs/bench/sf3a-per-file-cost-2026-08-13/README.md`).
+        // `into_std` waits on the same in-flight-completion check
+        // `flush` above already satisfied, so it cannot reintroduce the
+        // deferred-write race, and no writes happen after this point.
+        // A failed write/flush has nothing to stamp, so its handle is
+        // dropped immediately — same release point as before.
+        let stamped = match written {
+            Ok(()) => {
+                let std_file = file.into_std().await;
+                #[cfg(test)]
+                self.handle_metadata_stamps
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                stamp_streamed_metadata_via_handle(&std_file, &dst, header, &self.config)
+            }
+            Err(error) => {
+                drop(file);
+                Err(error)
+            }
+        };
+        let windows_bytes = match stamped {
+            Ok(windows_bytes) => windows_bytes,
+            Err(error) => {
+                // pfc-4 byte-lane reconciliation (the pfc-2 landing
+                // note's owed item). The chunk hook above already
+                // reported this file's payload to the LIVE counter —
+                // exactly `header.size` bytes, since the stream returned
+                // Ok — while the outcome below counts zero for a
+                // contained failure and the summary reports zero with it.
+                // Give those bytes back so the live lane never claims
+                // work the authoritative summary denies. The sibling
+                // containment route above (destination could not be
+                // opened) drains with `None`, so it has nothing to
+                // withdraw.
+                if let Some(bp) = &self.byte_progress {
+                    bp.withdraw(header.size);
                 }
-            };
+                return per_file_failure(&self.dst_root, &header.relative_path, error);
+            }
+        };
 
         Ok(SinkOutcome::written(
             1,
@@ -1307,12 +1342,25 @@ fn copy_resolved_file_payload(
     ))
 }
 
-/// Stamp the metadata tail of a streamed receive: named streams, mtime,
-/// permissions, attributes. Returns the named-stream bytes applied.
-/// Split out of [`FsTransferSink::write_file_stream`] so the tail — past
-/// the record's last wire byte, therefore attributable to one file — is
-/// classified in one place.
-fn stamp_streamed_metadata(dst: &Path, header: &FileHeader, config: &FsSinkConfig) -> Result<u64> {
+/// Stamp the metadata tail of a streamed receive through the already-open
+/// destination descriptor: named streams and attributes stay path-based
+/// (Windows ADS/attribute APIs here are not descriptor-based), while mtime
+/// and — on Unix — permissions route through `file` instead of a by-path
+/// reopen. Returns the named-stream bytes applied.
+///
+/// sf-3c (`docs/bench/sf3a-per-file-cost-2026-08-13/README.md` candidate
+/// 2): the prior by-path `stamp_streamed_metadata` reopened `dst` purely
+/// to set mtime, paying one extra `openat`+`close` per file. The caller
+/// ([`FsTransferSink::write_file_stream`]) already proved every deferred
+/// write landed (the `flush`/`into_std` ordering documented there) before
+/// handing `file` to this function, so stamping through it cannot
+/// reintroduce that race — it can only remove a redundant open.
+fn stamp_streamed_metadata_via_handle(
+    file: &std::fs::File,
+    dst: &Path,
+    header: &FileHeader,
+    config: &FsSinkConfig,
+) -> Result<u64> {
     let windows_bytes =
         crate::windows_metadata::replace_streams(dst, header.windows_metadata.as_ref())?;
 
@@ -1322,19 +1370,19 @@ fn stamp_streamed_metadata(dst: &Path, header: &FileHeader, config: &FsSinkConfi
         // destinations can refuse mtime updates. Surface via
         // `log::warn!` so the failure is visible without making
         // it a hard transfer error. POST_REVIEW_FIXES §1.1.
-        if let Err(e) = filetime::set_file_mtime(dst, ft) {
+        if let Err(e) = filetime::set_file_handle_times(file, None, Some(ft)) {
             log::warn!("set mtime on {}: {}", dst.display(), e);
         }
     }
 
-    // Permissions arrive on the wire (Unix mode bits). Apply best-
-    // effort; ignore failures (cross-fs, root-owned dst, etc.).
+    // Permissions arrive on the wire (Unix mode bits). Apply best-effort
+    // through the retained handle (fchmod, `File::set_permissions`)
+    // rather than a by-path reopen; ignore failures (cross-fs, root-owned
+    // dst, etc.).
     #[cfg(unix)]
     if header.permissions != 0 {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) =
-            std::fs::set_permissions(dst, std::fs::Permissions::from_mode(header.permissions))
-        {
+        if let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(header.permissions)) {
             log::warn!("set permissions on {}: {}", dst.display(), e);
         }
     }
@@ -2281,6 +2329,66 @@ mod tests {
         assert_eq!(outcome.files_written, 1);
         assert_eq!(sink.parent_create_attempts(), 2);
         assert_eq!(std::fs::read(dst.join("shared/second.txt")).unwrap(), b"b");
+    }
+
+    /// sf-3c: the streamed finalize path stamps mtime/permissions through
+    /// the descriptor the file was just written with, instead of dropping
+    /// it and reopening the destination by path
+    /// (`docs/bench/sf3a-per-file-cost-2026-08-13/README.md` candidate 2 —
+    /// one `openat`+`close` pair per file). `handle_metadata_stamps` is a
+    /// portable proxy for that reopen, in the same style as sf-3b's
+    /// `parent_create_attempts`: incremented immediately before each
+    /// retained-handle stamp attempt, so this guard pins the call-site
+    /// behavior without an OS-specific syscall tracer in CI. It also pins
+    /// that the handle-based stamp still lands the wire mtime and
+    /// permissions correctly.
+    #[tokio::test]
+    async fn fs_sink_stamps_streamed_metadata_without_reopening() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().join("src"),
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: true,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
+            },
+        );
+
+        let mtime_seconds = 1_700_000_000;
+        for index in 0..8 {
+            let mut header = make_file_header(&format!("file-{index}.txt"), 1);
+            header.mtime_seconds = mtime_seconds;
+            header.permissions = 0o640;
+            let mut reader: &[u8] = b"x";
+            sink.write_file_stream(&header, &mut reader).await.unwrap();
+        }
+
+        assert_eq!(
+            sink.handle_metadata_stamps(),
+            8,
+            "every streamed file must stamp metadata through the retained \
+             descriptor, not a by-path reopen"
+        );
+        for index in 0..8 {
+            let path = dst.join(format!("file-{index}.txt"));
+            let metadata = std::fs::metadata(&path).unwrap();
+            let mtime = filetime::FileTime::from_last_modification_time(&metadata);
+            assert_eq!(
+                mtime.seconds(),
+                mtime_seconds,
+                "handle-based stamp must still set the wire mtime"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(metadata.permissions().mode() & 0o777, 0o640);
+            }
+        }
     }
 
     #[tokio::test]

@@ -187,6 +187,35 @@ analysis to prove it earns its keep before design review.
    schema; after that failure the owner ordered and accepted an in-session
    review by the working agent (no defects; mutation-proven guard). Record
    and resolution: `.review/sf-3b-r1.contested.md`.
+   **sf-3c descriptor-retained metadata stamping (LANDED 2026-08-15):** the
+   streamed receive finalize path (`write_file_stream`) no longer drops its
+   completed write handle and reopens the destination by path to stamp
+   mtime/permissions; it converts the already-flushed `tokio::fs::File` via
+   `into_std().await` (a no-op wait behind the flush that already satisfied
+   the same in-flight-completion check, so it cannot reintroduce the
+   documented deferred-write mtime race) and stamps through that
+   `std::fs::File` handle instead —
+   `filetime::set_file_handle_times` for mtime, `File::set_permissions`
+   (fchmod) on Unix. Named streams and attributes stay path-based (no
+   handle-based Windows ADS/attribute API exists); the by-path
+   `stamp_streamed_metadata` helper is removed (no other callers) in favor
+   of `stamp_streamed_metadata_via_handle`. The portable proxy
+   (`handle_metadata_stamps`, sf-3b's counter pattern, incremented
+   immediately before each retained-handle stamp attempt) is
+   mutation-proved: reverting the production change to a path-based reopen
+   reds the new pin `fs_sink_stamps_streamed_metadata_without_reopening` at
+   0≠8; restoring the fix returns it to green. Full workspace gate green
+   (fmt, native + `x86_64-unknown-linux-gnu`-cross clippy at `-D warnings`,
+   1873 tests passed/0 failed/2 ignored on macOS, including
+   `remote_regression`'s `pull_preserves_mtime_end_to_end`); Windows
+   verified only to the extent Linux cross-clippy compile-checks the
+   `#[cfg(unix)]`/`#[cfg(not(unix))]` branches, not run at runtime this
+   session. `copy_resolved_file_payload` (local-copy path) and
+   `stamp_shard_member_metadata` (tar-shard members) are untouched, out of
+   this slice's scope. Surfaced, not acted on: `finalize_resumed_file` (the
+   resume-completion path) has a near-identical by-path reopen for
+   mtime/permissions after truncation — a candidate for its own future
+   slice, not sf-3c's scope.
 5. **sf-4 rig re-measure + limiter analysis**: rerun sf-1 harness on
    the 10 GbE rig; record the limiter analysis per cell. Hardware-
    bound everywhere + tripwires clean → acceptance review with the

@@ -33,20 +33,15 @@ CI `build-release` signs the shipped binaries when the signing secrets are prese
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
+## Handoff — 2026-08-15 (sf-3c LANDED: descriptor-retained metadata stamping)
+- Done: `write_file_stream`'s finalize tail now stamps mtime (Unix: permissions too) through the retained `std::fs::File` handle (`stamp_streamed_metadata_via_handle`) instead of dropping the file and reopening `dst` by path; named-stream/attribute calls stay path-based (no handle API exists). New pin `fs_sink_stamps_streamed_metadata_without_reopening` (portable `handle_metadata_stamps` counter, sf-3b's proxy pattern) mutation-proven red (0≠8) / green (8). Gates green: fmt, native + linux-cross clippy at `-D warnings`, full workspace test 1873 passed/0 failed/2 ignored (macOS), including `remote_regression`'s `pull_preserves_mtime_end_to_end`. Record: `docs/plan/SMALL_FILE_CEILING.md` Slices §4, DEVLOG 2026-08-15 18:30Z. Local commit only, UNPUSHED.
+- In flight: nothing further on SMALL_FILE_CEILING; sf-3a's third named candidate (contained-path canonicalization amortizing the readlink walk) is next in the ordered list, not yet selected. `finalize_resumed_file`'s near-identical by-path reopen (resume-completion path) was surfaced as an out-of-scope observation, also not yet selected.
+- First action: ask the owner whether to select the next sf-3x cut, or move to another queue item.
+
 ## Handoff — 2026-08-14 (HEAD `e1488f93`; sf-3b CLOSED by in-session review, D-2026-08-14-1)
 - Done: sf-3b implementation/evidence at `dab7bb82`; r1 transport-failure record at `6dec3b66`. Owner then ordered the review done in-session, no playbooks: the working agent (claude-fable-5) reviewed `d5f5781d..dab7bb82` — no defects; mutation proof (readiness-map bypass reds the sharing guard at 16≠1, byte-identical restore); 20 sink tests green (Linux), CI green. Owner accepted; closure recorded at `e1488f93` in REVIEW.md, `.review/sf-3b-r1.contested.md` (resolution + 3 non-blocking observations), and D-2026-08-14-1. Local commits are UNPUSHED (`origin/master` = `36d78ae4`).
 - In flight: nothing on SMALL_FILE_CEILING. sf-3c (descriptor-retained metadata stamping) is selectable but NOT selected.
 - First action: ask the owner whether to select sf-3c or another queue item; no implementation without that selection.
-
-## Handoff — 2026-08-01
-- Done: pfc SHIPPED (D-2026-08-01-2); clp-1..3; checkers 1.71×; audit-16
-  closed (heartbeat verbose-gated). Reviews clean: ls-1, clp3-ls4. DEVLOG.
-- **ls-5+6 SHIPPED: converged mirror 166.38 → 55.57 s (5.1× vs field)** —
-  sweep stat + interrogation deletion (D-2026-08-01-4); cr-ls5-* closed.
-- **1.0 RELEASE EFFORT ACTIVE** (owner goal + discretion, 2026-08-01):
-  `RELEASE_1_0.md` — G1 closed; bump landed; interim archives `ef9a13b2`.
-  **TUI_REWORK SCRAPPED (D-2026-08-02-2) → `BLIT_CONSOLE.md` Draft**;
-  M1 `f3picker.rs` dead code pending cutover.
 
 ## Now (active work)
 
@@ -65,13 +60,16 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   repair (historical static-policy proof, superseded as an adaptive target
   by ldt-2) live in Queue 2, `docs/history/state-archive.md` (the
   otp-1..11 record), DEVLOG, and `docs/bench/otp12*/` — not restated here.
-- **SMALL_FILE_CEILING ACTIVE; sf-3b closed (D-2026-08-14-1)** on the
-  unified path. sf-3a named the cuts; sf-3c awaits owner selection.
+- **SMALL_FILE_CEILING ACTIVE; sf-3b closed (D-2026-08-14-1), sf-3c
+  landed 2026-08-15** on the unified path. sf-3a named the cuts; sf-3c
+  (descriptor-retained metadata stamping) removed the streamed finalize
+  path's by-path reopen. sf-3a's third candidate (contained-path
+  canonicalization) awaits owner selection.
   Principle: ceiling-driven, never competitor-relative (D-2026-07-04-4).
 ## Queue (ordered)
 
 1. **`docs/plan/UI_REMOVAL.md` (Draft, D-2026-08-15-1/-2)** — delete `blit-gui`/`blit-console-core`/`blit-tui`; one open interview question (`blit-app` disposition — headless, `blit-cli` depends on it). No code until Status: Active + go.
-2. **`docs/plan/SMALL_FILE_CEILING.md` — sf-3b closed (D-2026-08-14-1); sf-3c awaits owner selection** — descriptor-retained metadata stamping is sf-3a's next named cut; no implementation until the owner selects it.
+2. **`docs/plan/SMALL_FILE_CEILING.md` — sf-3b closed (D-2026-08-14-1); sf-3c landed 2026-08-15** — descriptor-retained metadata stamping now stamps streamed-receive mtime/permissions through the retained write handle instead of reopening by path; proxy pin + mutation proof in the plan's Slices section. sf-3a's third candidate (contained-path canonicalization) awaits owner selection.
 2. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (ACTIVE, D-2026-07-31-4) —
    PRIORITY-1, the owner's ruling on the 2026-07-31 field check.** Local
    transfer is too slow; the owner ruled it "should have been resolved before
