@@ -66,15 +66,13 @@ are the owner's act.
   small mixed tree with nested dirs and a content change, initial copy,
   content verify, converged re-run must report 0 changed. Recorded here
   with results per pair.
-- [ ] **G5c — usable UI surface (D-2026-08-02-1 intent, re-pointed by
-  D-2026-08-02-2; scope ruled by D-2026-08-04-3).** TUI_REWORK was
-  scrapped whole by the owner; `docs/plan/BLIT_CONSOLE.md` replaces it —
-  one console core, GUI (egui, D-2026-08-04-1) + file-manager TUI faces,
-  owner-run acceptance per milestone. **1.0 gates on BOTH surfaces:
-  C1–C4 + T1–T3** (D3 ruled "both surfaces", 2026-08-04). The legacy TUI
-  retires from the release surface at cutover (D-2026-08-04-2) — nothing
-  broken ships. The `ef9a13b2` candidate and its archives are interim
-  pipeline proof; the final candidate is re-cut after this gate.
+- **G5c — DISSOLVED (D-2026-08-15-2): 1.0 is CLI + daemon only; no UI
+  surface gates this or any release.** UIs are a separate app
+  (`BlitAdmin_UIs` repo) with their own lifecycle. History: this gate was
+  raised by D-2026-08-02-1, re-pointed by D-2026-08-02-2, scoped to both
+  Console surfaces by D-2026-08-04-3; all superseded by D-2026-08-15-1
+  (Blit is CLI + daemon only). Crate deletion runs under
+  `docs/plan/UI_REMOVAL.md`, independent of this release plan.
 - [ ] **G6 — OWNER GATE: tag v1.0.0 and publish.** Outward act; needs the
   owner's explicit go on the exact candidate SHA.
 

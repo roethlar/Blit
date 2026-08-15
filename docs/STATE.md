@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-08-15. **NOW: v0.1.2 IS RELEASED (D-2026-08-08-1).** Tag `v0.1.2` → `98084edf` (lightweight — v0.1.1 was annotated; left as-is on the owner's call); the public GitHub release `Blit v0.1.2` is non-draft with all six assets (3 archives + 3 `.sha256` sidecars) attached atomically by the `publish-release` job on tag-push CI run 31235325733 (green) — the atomic lane's first real-tag exercise. Owner ruled "blit 0.1.2" over 1.0.0, so the workspace version reverted `1.0.0` → `0.1.2` (`0c04db73`) and `CHANGELOG.md` `[0.1.2]` (`a63cb3fa`) states the real scope of all 177 commits since `v0.1.1` — version LABEL only, no code reverted. `docs/plan/RELEASE_1_0.md` stays **Active with G2–G6 open — deferred, not closed**; a future v1.0.0 closes them on its own candidate, `ef9a13b2`'s `1.0.0` label and its `dist/` archives are now historical pipeline proof only, and audit-18/19 shipped documented in 0.1.2. Local gate green on macOS (fmt, clippy native + linux-cross, 1854 tests, smoke, docs); CI is green at the tagged head (CI run 31235325444 + Docs Gate 31235325447 on `master`, tag run 31235325733, as of `98084edf`). NEXT: sf-3c (or another queue item) awaits owner selection. **BLIT_CONSOLE IS DEAD (D-2026-08-15-1): Blit is CLI + daemon only — no TUI, no GUI in this repo; UIs live in `http://q:3000/michael/BlitAdmin_UIs.git`.** G5b's cross-OS smoke matrix is still unrun.
+Last updated: 2026-08-15. **NOW: v0.1.2 IS RELEASED (D-2026-08-08-1).** Tag `v0.1.2` → `98084edf` (lightweight — v0.1.1 was annotated; left as-is on the owner's call); the public GitHub release `Blit v0.1.2` is non-draft with all six assets (3 archives + 3 `.sha256` sidecars) attached atomically by the `publish-release` job on tag-push CI run 31235325733 (green) — the atomic lane's first real-tag exercise. Owner ruled "blit 0.1.2" over 1.0.0, so the workspace version reverted `1.0.0` → `0.1.2` (`0c04db73`) and `CHANGELOG.md` `[0.1.2]` (`a63cb3fa`) states the real scope of all 177 commits since `v0.1.1` — version LABEL only, no code reverted. `docs/plan/RELEASE_1_0.md` stays **Active with G2–G6 open — deferred, not closed**; a future v1.0.0 closes them on its own candidate, `ef9a13b2`'s `1.0.0` label and its `dist/` archives are now historical pipeline proof only, and audit-18/19 shipped documented in 0.1.2. Local gate green on macOS (fmt, clippy native + linux-cross, 1854 tests, smoke, docs); CI is green at the tagged head (CI run 31235325444 + Docs Gate 31235325447 on `master`, tag run 31235325733, as of `98084edf`). NEXT: `UI_REMOVAL.md` interview (one question: `blit-app` disposition), then owner flips it Active. **BLIT_CONSOLE IS DEAD (D-2026-08-15-1): Blit is CLI + daemon only — no TUI, no GUI in this repo; UIs live in `http://q:3000/michael/BlitAdmin_UIs.git`. 1.0 gates on CLI + daemon only (D-2026-08-15-2; G5c dissolved).** G5b's cross-OS smoke matrix is still unrun.
 CI `build-release` signs the shipped binaries when the signing secrets are present (macOS codesign + notarize, unstapled by design; Windows Azure Trusted Signing) and packages unsigned when they are not; the signed path is proven green end to end (run 31229611237, DEVLOG 2026-08-08). A `v*` tag push runs that same gate, and **as of `9c193968` a single downstream `publish-release` job — not the matrix legs — attaches all six files at once**, so the release is atomic: every platform leg succeeds and it publishes complete, or one fails and no release is touched (the earlier per-leg attach could publish a partial release; DEVLOG 2026-08-08 01:35Z). It is non-draft and titled `Blit <tag>`, matching `v0.1.1`, which API-verified 2026-08-08 is the ONLY release this repo has ever published (`v0.1.0` is a bare tag with no release object; the "both published directly" claim is corrected in DEVLOG 2026-08-08 01:20Z). No longer a by-hand upload — exercised for real on v0.1.2 (run 31235325733: non-draft `Blit v0.1.2`, all six assets in one attach; DEVLOG 2026-08-08 03:16Z).
 
 - **BLIT 0.1.1 IS RELEASED (D-2026-07-23-8):** annotated tag `v0.1.1`
@@ -70,7 +70,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   Principle: ceiling-driven, never competitor-relative (D-2026-07-04-4).
 ## Queue (ordered)
 
-1. **`docs/plan/SMALL_FILE_CEILING.md` — sf-3b closed (D-2026-08-14-1); sf-3c awaits owner selection** — descriptor-retained metadata stamping is sf-3a's next named cut; no implementation until the owner selects it.
+1. **`docs/plan/UI_REMOVAL.md` (Draft, D-2026-08-15-1/-2)** — delete `blit-gui`/`blit-console-core`/`blit-tui`; one open interview question (`blit-app` disposition — headless, `blit-cli` depends on it). No code until Status: Active + go.
+2. **`docs/plan/SMALL_FILE_CEILING.md` — sf-3b closed (D-2026-08-14-1); sf-3c awaits owner selection** — descriptor-retained metadata stamping is sf-3a's next named cut; no implementation until the owner selects it.
 2. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (ACTIVE, D-2026-07-31-4) —
    PRIORITY-1, the owner's ruling on the 2026-07-31 field check.** Local
    transfer is too slow; the owner ruled it "should have been resolved before
@@ -163,7 +164,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — D-2026-07-05-4);**
   `docs/plan/OTP7_RESUME.md` (**Active**, D-2026-07-09-1 — otp-7 slice design).
-  **`docs/plan/BLIT_CONSOLE.md` (Superseded — D-2026-08-15-1: no in-repo UI).**
+  **`docs/plan/BLIT_CONSOLE.md` (Superseded, D-2026-08-15-1)** → `docs/plan/UI_REMOVAL.md` (**Draft** — UI-crate deletion, awaiting interview).
   **`docs/plan/PER_FILE_ERROR_CONTAINMENT.md` (SHIPPED, D-2026-08-01-2).**
 - Shipped release record: **`docs/RELEASE_READINESS.md`** and
   **`docs/plan/RELEASE_COMPLETION.md`**.
@@ -190,11 +191,10 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Blocked / waiting (owner declarations and explicitly dated external blockers; checkpoints are owner-only)
 
 - **Rig facts:** `.agents/machines.md` is canonical; no host pairings here.
-- **Two stale test firewall entries await separately approved cleanup;** the
-  helper is shipped, but these historical entries remain untouched. Exact
-  paths and the no-reuse/no-removal gate: `.agents/machines.md`.
+- **Two stale test firewall entries await separately approved cleanup;** helper
+  shipped, entries untouched. Paths + no-reuse/no-removal gate: `.agents/machines.md`.
 
 ## Open questions
 
 - Package-manager next: `docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (pm-4 tap live; remotes/secrets owner-gated, D-2026-08-12-6).
-- 1.0 UX gate: D-2026-08-15-1 dissolved D-2026-08-04-3's Console gates, so `RELEASE_1_0.md` G5c points at nothing — what (if anything) gates 1.0 on UX needs an owner ruling. Dead UI crates (`blit-gui`/`blit-console-core`/`blit-tui`/`blit-app`) stay in the workspace until an approved removal plan and go.
+- `blit-app` disposition (UI_REMOVAL open question): fold into `blit-cli`/`blit-core`, or keep as the CLI's headless internal layer (recommended). 1.0 UX gate is CLOSED: D-2026-08-15-2 — 1.0 is CLI + daemon only, G5c dissolved.
