@@ -803,3 +803,8 @@ Format:
 - Decision: v1.0.0 gates on the CLI and daemon alone. `RELEASE_1_0.md` G5c (usable UI surface) is dissolved, not re-pointed — no UI surface ever gates a release of this repo. UIs are a separate app in `BlitAdmin_UIs` with their own lifecycle. This closes the open question D-2026-08-15-1 left for G5c.
 - Why: owner, 2026-08-15: "1.0 is cli only. UIs will be a separate app." (Given while approving the UI-removal plan interview.)
 - Supersedes: the gate half of D-2026-08-02-1 (TUI-rework intent as a 1.0 gate — already narrowed by D-2026-08-02-2 and D-2026-08-04-3, both superseded by D-2026-08-15-1); `RELEASE_1_0.md` G5c edited in place. Removal execution: `docs/plan/UI_REMOVAL.md` (Draft).
+
+## D-2026-08-15-3 — all coding by sonnet/opus subagents
+- Decision: all code writing is dispatched to sonnet-model subagents; opus only where sonnet demonstrably fails or the task is clearly beyond it, and the escalation is named when it happens. The orchestrating session writes no code itself — it briefs agents, verifies output against the gates, and keeps the records.
+- Why: owner, 2026-08-15: "use sonnet (or opus if necessary) agents for all coding. fable tokens are being overspent."
+- Supersedes: nothing; generalizes the 2026-08-01 working rule (coding fixes to opus/sonnet subagents, recorded in `RELEASE_1_0.md` Working rules) from that release effort to all coding in this repo.
