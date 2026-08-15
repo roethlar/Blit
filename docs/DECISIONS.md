@@ -725,16 +725,19 @@ Format:
 - Decision: the GUI face of `docs/plan/BLIT_CONSOLE.md` is built with **egui** — pure Rust, single static binary, no new toolchain. Tauri (webview shell, Node.js/TypeScript toolchain) is rejected.
 - Why: owner ruled egui (2026-08-04) when asked, accepting the plan's recommendation: integration simplicity and repo fit; the utilitarian look is an accepted trade because the GUI is a thin view over `blit-console-core` and can be rewritten without touching the brain.
 - Effect: BLIT_CONSOLE flips Draft → Active; C1 (`blit-console-core` endpoints/discovery/browse + egui GUI shell) may dispatch. D2 (legacy blit-tui fate) and D3 (1.0 gate scope) remain queued, one at a time.
+- Superseded by D-2026-08-15-1: no GUI in this repo; the framework choice is moot.
 
 ## D-2026-08-04-2 — legacy blit-tui code deleted at T1 cutover, not before (D2 ruled)
 - Decision: the F1/F3 panes, `dual_pane.rs`, and M1's `f3picker.rs` stay in the repo until the TUI v2 lands and the owner judges it usable (BLIT_CONSOLE milestone T1/T3 cutover); they are deleted then, not immediately.
 - Why: owner ruled "at cutover" (2026-08-04), accepting the plan's recommendation — the old TUI remains a runnable fallback during the GUI-first milestones, which are months of work before T1.
 - Effect: no immediate code deletion; the T3 cutover milestone carries the deletion. M1 `f3picker.rs` stays dead-code-pending-cutover as STATE records.
+- Superseded by D-2026-08-15-1: the T1/T3 cutover will never happen; legacy TUI/pane deletion now belongs to the owner-gated UI-crate removal plan.
 
 ## D-2026-08-04-3 — 1.0 gates on BOTH Blit Console surfaces (D3 ruled)
 - Decision: v1.0.0 is not tagged until BLIT_CONSOLE C1–C4 (GUI) AND T1–T3 (TUI v2) are complete and owner-approved; the new TUI is not post-1.0.
 - Why: owner ruled "both surfaces" (2026-08-04) — headless boxes are first-class, so 1.0 ships only when both the egui GUI and the file-manager TUI have passed their owner-run acceptance gates.
 - Effect: RELEASE_1_0.md G5c re-points to BLIT_CONSOLE C1–C4 + T1–T3. D-2026-08-02-1's intent ("no 1.0 with an unusable UI") is now fully concrete.
+- Superseded by D-2026-08-15-1: 1.0 no longer gates on Console surfaces; the 1.0 UX gate (RELEASE_1_0 G5c) is an open question.
 
 ## D-2026-08-04-4 — external/paid review dispatches are OFF by owner default (cost)
 - Decision: no further external review dispatches (codereview/openreview, any paid harness) unless the owner explicitly orders that exact dispatch. Findings close on the local guard proof instead (REVIEW.md's local-closure rule). First application: cr-c1-2 closed by local closure after its verification dispatch returned invalid on a transport failure.
@@ -790,3 +793,8 @@ Format:
 - Decision: sf-3b is closed. After r1's transport failure the owner ordered the review performed in the working session itself, explicitly without playbooks and without another paid dispatch; the working agent (claude-fable-5) reviewed exact `d5f5781d..dab7bb82`, found no defects, and independently proved the sharing guard bites by mutation (readiness-map bypass reds `fs_sink_prepares_a_shared_parent_once` at 16≠1; byte-identical restore; 20 focused sink tests green on Linux; CI green). Owner accepted 2026-08-14. sf-3c is selectable but not selected.
 - Why: r1 completed at $2.18 with an unrecoverable verdict and the owner refused further paid dispatches, choosing an in-session review over waiving review entirely. The reviewer is the session's own working agent — primed by session context, not a neutral second harness — and every record of this closure says so.
 - Supersedes: for sf-3b only, the reviewer-selection requirement of D-2026-07-23-2 (no general policy change; future formal reviews remain as ruled there). Resolution detail: `.review/sf-3b-r1.contested.md`.
+
+## D-2026-08-15-1 — Blit is CLI + daemon only; no TUI, no GUI in this repo
+- Decision: Blit ships as the CLI and the daemon, nothing else — permanently, not pending rework. The TUI and GUI are out of the product; UIs live in their own repo, `http://q:3000/michael/BlitAdmin_UIs.git`. `docs/plan/BLIT_CONSOLE.md` (both faces) is Superseded. Removing the UI crates (`blit-gui`, `blit-console-core`, `blit-tui`, `blit-app`) is a code change that needs its own approved plan and go; the crates sit untouched until then. Whether any of that code migrates to BlitAdmin_UIs is owner-gated and undecided.
+- Why: owner, 2026-08-15, after running the landed C1 shell: "the rust gui is not worth building here. it should not be part of the base app. blit should be the cli and daemon. no tui, no gui. the tui has never been even marginally useful, and the gui is just bloating what should be a small cli utility."
+- Supersedes: D-2026-08-04-1 (egui framework — moot, no GUI here), D-2026-08-04-2 (legacy-TUI deletion at T1 cutover — the cutover will never come; deletion folds into the future owner-approved removal plan), D-2026-08-04-3 (1.0 gating on both Console surfaces — that gate dissolves; what, if anything, gates 1.0 on UX is now an open question for RELEASE_1_0 G5c), and the replacement half of D-2026-08-02-2 (Blit Console as the two-faced successor; its scrapping of the old TUI direction stands).
