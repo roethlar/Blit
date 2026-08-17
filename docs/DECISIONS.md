@@ -823,3 +823,8 @@ Format:
 - Decision: `blit-prometheus-bridge` is deleted from the workspace (INTERFACE_PLATFORM ruling R5, slice ip-5; the crate and its 20 inline tests, delta recorded at removal). If metrics are ever wanted, the daemon exposes them itself; git history keeps the code recoverable.
 - Why: owner, 2026-08-17: "prometheus bridge has never been executed, tested, requested, or desired… extraordinary lengths to convince me it's worth keeping" → "remove". No defense existed: 877 lines, standalone binary, no integration tests, no consumers, in no release archive, referenced by no plan or decision.
 - Supersedes: nothing (the crate was never the subject of a decision — part of why it goes).
+
+## D-2026-08-17-4 — blit-tui is deleted; the future TUI starts fresh
+- Decision: `crates/blit-tui` (29,172 lines) is deleted from the workspace (INTERFACE_PLATFORM ruling R3 option (a), slice ip-4); nothing moves to BlitAdmin_UIs. The future TUI is written fresh there as a standalone `blit-core` consumer. Git history keeps the deleted code recoverable.
+- Why: owner ruled "(a)", 2026-08-17. The crate predates the one-transfer-path architecture and D-2026-08-15-1; seeding the new repo with it would carry the rejected shape into day one.
+- Supersedes: nothing new (the crate's fate was already sealed by D-2026-08-15-1; this settles delete-vs-move).

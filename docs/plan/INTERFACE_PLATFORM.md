@@ -4,7 +4,8 @@
 (interface-crate name) DISSOLVED = D-2026-08-17-2 (no new crate:
 everything folds into `blit-core`, which publishes to crates.io).
 R5 RULED = D-2026-08-17-3 (`blit-prometheus-bridge` deleted, ip-5).
-Awaiting R3 (`blit-tui` disposition) and R4 (`blit-gui` disposition).
+R3 RULED = D-2026-08-17-4 (`blit-tui` deleted, fresh TUI later, ip-4).
+Awaiting R4 (`blit-gui` disposition) only.
 No code until **Status**: Active and a per-slice go.
 **Created**: 2026-08-17 (reworked same day under D-2026-08-17-2; the
 original draft's merged-SDK-crate shape, slices if-1..if-3, is
@@ -71,11 +72,9 @@ on the LAN gitea before the first publish) and upgrade deliberately.
 - **R1 — direction**: RULED, approved 2026-08-17 (D-2026-08-17-1).
 - **R2 — interface-crate name**: DISSOLVED (D-2026-08-17-2); no new
   crate exists to name.
-- **R3 — `blit-tui`** (29,172 lines, pre-dates the one-session
-  architecture decisions and D-2026-08-15-1): (a) delete here, future
-  TUI starts fresh in BlitAdmin_UIs against `blit-core` (git history
-  keeps the code recoverable), or (b) move as-is to BlitAdmin_UIs.
-  Recommendation: **(a)**.
+- **R3 — `blit-tui`**: RULED, (a) delete; future TUI starts fresh in
+  BlitAdmin_UIs (owner "(a)", 2026-08-17; D-2026-08-17-4). Executed
+  by ip-4.
 - **R4 — `blit-gui`** (552 lines, the landed C1 eframe shell): (a)
   move as-is to BlitAdmin_UIs as the GUI starting point, then delete
   here, or (b) delete here, GUI starts fresh. Recommendation: **(a)**.
@@ -181,10 +180,10 @@ on the LAN gitea before the first publish) and upgrade deliberately.
    named-remote, approved in-session). Then, either ruling: delete
    `crates/blit-gui`, drop the member, remove the three CI GUI-header
    blocks, regenerate `Cargo.lock`. Record deleted-test delta.
-4. **ip-4 — `blit-tui` per R3.** Delete (or move, per ruling) the
-   crate; drop the member; regenerate `Cargo.lock`; fix `README.md`
-   tree and comment-only references in surviving crates. Record
-   deleted-test delta.
+4. **ip-4 — delete `blit-tui` (D-2026-08-17-4).** Delete the crate;
+   drop the member; regenerate `Cargo.lock`; fix `README.md` tree and
+   comment-only references in surviving crates. Record deleted-test
+   delta.
 5. **ip-5 — delete `blit-prometheus-bridge` (D-2026-08-17-3).**
    Remove the crate and member, regenerate `Cargo.lock`, record the
    20-test delta.
