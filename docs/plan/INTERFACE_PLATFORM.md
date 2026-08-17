@@ -1,13 +1,13 @@
 # Interface Platform — blit-core is the platform; standalone front-ends
 
-**Status**: Draft — R1 (direction) APPROVED = D-2026-08-17-1; R2
-(interface-crate name) DISSOLVED = D-2026-08-17-2 (no new crate:
-everything folds into `blit-core`, which publishes to crates.io).
-R5 RULED = D-2026-08-17-3 (`blit-prometheus-bridge` deleted, ip-5).
-R3 RULED = D-2026-08-17-4 (`blit-tui` deleted, fresh TUI later, ip-4).
-R4 RULED = D-2026-08-17-5 (`blit-gui` deleted, fresh GUI later, ip-3).
-**All rulings closed. Awaiting the owner's flip to Active; then each
-slice needs its own go.**
+**Status**: Active — owner "go", 2026-08-17. All rulings closed:
+R1 (direction) = D-2026-08-17-1; R2 (interface-crate name) DISSOLVED
+= D-2026-08-17-2 (no new crate: everything folds into `blit-core`,
+which publishes to crates.io); R5 = D-2026-08-17-3
+(`blit-prometheus-bridge` deleted, ip-5); R3 = D-2026-08-17-4
+(`blit-tui` deleted, fresh TUI later, ip-4); R4 = D-2026-08-17-5
+(`blit-gui` deleted, fresh GUI later, ip-3). **Each slice still needs
+its own go.**
 **Created**: 2026-08-17 (reworked same day under D-2026-08-17-2; the
 original draft's merged-SDK-crate shape, slices if-1..if-3, is
 superseded)
