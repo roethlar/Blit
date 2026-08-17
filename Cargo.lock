@@ -322,16 +322,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blit-prometheus-bridge"
-version = "0.1.2"
-dependencies = [
- "blit-core",
- "clap",
- "eyre",
- "tokio",
-]
-
-[[package]]
 name = "bstr"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

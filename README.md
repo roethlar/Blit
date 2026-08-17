@@ -36,8 +36,7 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 ├── crates/        # Rust workspace
 │   ├── blit-core/
 │   ├── blit-cli/  # Produces `blit` (admin verbs included)
-│   ├── blit-daemon/
-│   └── blit-prometheus-bridge/
+│   └── blit-daemon/
 ├── proto/         # gRPC (protobuf) definitions
 ├── scripts/       # Helper scripts (Windows, etc.)
 ├── test/          # Test data/resources
