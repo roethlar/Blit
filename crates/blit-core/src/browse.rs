@@ -1,5 +1,5 @@
 //! Browse model: list one directory on one endpoint through the
-//! typed blit-app admin APIs — the same call paths `blit ls` and
+//! typed `crate::admin` APIs — the same call paths `blit ls` and
 //! `blit list-modules` use (`crates/blit-cli/src/ls.rs`). No stdout
 //! parsing, no spawning.
 //!
@@ -10,15 +10,15 @@
 //! one module (`admin::ls::list_remote`) — see
 //! [`resolve_daemon_target`].
 
+use crate::admin::list_modules::{self, Module};
+use crate::admin::ls::{self, DirEntry};
 use crate::endpoint::{DaemonEndpoint, Endpoint};
-use blit_core::admin::list_modules::{self, Module};
-use blit_core::admin::ls::{self, DirEntry};
-use blit_core::remote::endpoint::RemoteEndpoint;
+use crate::remote::endpoint::RemoteEndpoint;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
 /// A directory listing for one path on one endpoint. `entries`
-/// reuses blit-app's `DirEntry` (name, is_dir, size, mtime_seconds)
+/// reuses `crate::admin::ls::DirEntry` (name, is_dir, size, mtime_seconds)
 /// so every face sees exactly what `blit ls --json` sees.
 #[derive(Debug, Clone)]
 pub struct Listing {
@@ -117,7 +117,7 @@ pub(crate) fn modules_to_entries(modules: Vec<Module>) -> Vec<DirEntry> {
 }
 
 /// List `path` on `endpoint`. Local listings reuse
-/// `blit_core::admin::ls::list_local` on a blocking thread (matching
+/// `crate::admin::ls::list_local` on a blocking thread (matching
 /// the CLI's local branch without blocking the caller's runtime);
 /// daemon listings go over gRPC per [`resolve_daemon_target`].
 pub async fn browse(endpoint: &Endpoint, path: &Path) -> Result<Listing, BrowseError> {
@@ -195,7 +195,7 @@ mod tests {
         let listing = browse(&Endpoint::Local, tmp.path()).await.unwrap();
         assert_eq!(listing.path, tmp.path());
         assert_eq!(listing.entries.len(), 2);
-        // blit-app sorts by path: file.txt before subdir.
+        // admin::ls sorts by path: file.txt before subdir.
         let file = &listing.entries[0];
         assert_eq!(file.name, "file.txt");
         assert!(!file.is_dir);

@@ -1,14 +1,14 @@
 //! Discovery: turn mDNS results into registered daemon endpoints.
 //!
-//! The scan itself is blit-app's [`blit_core::scan::discover`] — the
-//! same typed wrapper `blit scan` and the TUI's F1 pane use, which
-//! runs `blit_core::mdns::discover` on a blocking thread. This module
+//! The scan itself is [`crate::scan::discover`] — the same typed
+//! wrapper `blit scan` uses, which
+//! runs `crate::mdns::discover` on a blocking thread. This module
 //! owns the mapping from [`MdnsDiscoveredService`] to the console's
 //! [`DaemonEndpoint`]; the merge of a fresh snapshot into the model
 //! lives in [`crate::model`] (upsert-by-address, see there).
 
 use crate::endpoint::DaemonEndpoint;
-use blit_core::mdns::MdnsDiscoveredService;
+use crate::mdns::MdnsDiscoveredService;
 use std::fmt;
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ impl std::error::Error for DiscoveryError {}
 
 /// Map one discovered service to a dialable daemon endpoint:
 /// `address` is the first advertised IPv4 address plus the daemon
-/// port (the form [`blit_core::remote::endpoint::RemoteEndpoint::parse`]
+/// port (the form [`crate::remote::endpoint::RemoteEndpoint::parse`]
 /// accepts), `name` is the mDNS instance name shown in the sidebar.
 ///
 /// Returns `None` when the service advertised no IPv4 address —
@@ -47,19 +47,19 @@ pub fn endpoint_from_service(service: &MdnsDiscoveredService) -> Option<DaemonEn
 }
 
 /// Map a whole discovery snapshot, skipping services without an
-/// address. Input order is preserved — `blit_core::mdns::discover`
+/// address. Input order is preserved — `crate::mdns::discover`
 /// already sorts by instance name.
 pub fn endpoints_from_services(services: &[MdnsDiscoveredService]) -> Vec<DaemonEndpoint> {
     services.iter().filter_map(endpoint_from_service).collect()
 }
 
 /// Scan the LAN for blit daemons and return them as daemon endpoints.
-/// Async through blit-app's spawn-blocking wrapper — no blocking call
+/// Async through the scan module's spawn-blocking wrapper — no blocking call
 /// runs on the caller's runtime. This is what a host executes for
-/// [`crate::Effect::Discover`], feeding the result back as
-/// [`crate::Msg::DiscoveryLoaded`] / [`crate::Msg::DiscoveryFailed`].
+/// [`crate::model::Effect::Discover`], feeding the result back as
+/// [`crate::model::Msg::DiscoveryLoaded`] / [`crate::model::Msg::DiscoveryFailed`].
 pub async fn discover_daemons(timeout: Duration) -> Result<Vec<DaemonEndpoint>, DiscoveryError> {
-    let services = blit_core::scan::discover(timeout)
+    let services = crate::scan::discover(timeout)
         .await
         .map_err(|err| DiscoveryError {
             reason: err.to_string(),

@@ -1,5 +1,10 @@
 //! Endpoint parsing + remote-transfer support gates.
 //!
+//! Not to be confused with [`crate::endpoint`] (singular), which
+//! models browse targets (local filesystem + discovered daemons)
+//! for front-end listing. This module parses transfer endpoint
+//! strings; that one models browseable places.
+//!
 //! Moved from `crates/blit-cli/src/transfers/endpoints.rs` and
 //! `crates/blit-cli/src/util.rs` as part of the Phase 5 A.0
 //! extraction. The two pre-A.0 `Endpoint` enums (strict in

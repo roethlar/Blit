@@ -1,12 +1,15 @@
-//! Endpoint model: the things the console browses — the local
-//! filesystem and remote daemons. In-memory only in this slice;
-//! mDNS discovery populates daemon endpoints ([`crate::discover`]),
-//! manual-add plumbing lands in a later slice
-//! (`docs/plan/BLIT_CONSOLE.md` §4, C1).
+//! Endpoint model: the things a browsing front-end lists — the
+//! local filesystem and remote daemons. In-memory registry types;
+//! mDNS discovery populates daemon endpoints ([`crate::discover`]).
+//!
+//! Not to be confused with [`crate::endpoints`] (plural), which
+//! parses transfer endpoint STRINGS (`host:/module/path`) for the
+//! CLI's transfer verbs. This module models browse targets; that
+//! one parses transfer addresses.
 
 use serde::{Deserialize, Serialize};
 
-/// In-memory identity for an endpoint, assigned by [`crate::Model`]
+/// In-memory identity for an endpoint, assigned by [`crate::model::Model`]
 /// as endpoints are registered. Not persisted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EndpointId(pub u64);

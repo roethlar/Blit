@@ -23,9 +23,9 @@
 //! in-flight browse of the dead daemon is superseded by generation), so
 //! the pane never shows an endpoint that left the network.
 
+use crate::admin::ls::DirEntry;
 use crate::discover::DEFAULT_DISCOVERY_TIMEOUT;
 use crate::endpoint::{DaemonEndpoint, Endpoint, EndpointId};
-use blit_core::admin::ls::DirEntry;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
