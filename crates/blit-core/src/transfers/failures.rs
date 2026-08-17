@@ -3,9 +3,9 @@
 //! source-deletion gate every move route shares (pfc-5,
 //! D-2026-07-30-1).
 //!
-//! This lives in `blit-app`, not in a single front end, because BOTH
-//! shipped surfaces delete a move's source: `blit-cli`'s four
-//! `run_move` routes and `blit-tui`'s four move routes. One gate, one
+//! This lives in the shared library, not in a single front end, so
+//! every surface that deletes a move's source (today `blit-cli`'s
+//! four `run_move` routes) shares one gate, one
 //! refusal wording, no second copy to keep in step. Rendering (the
 //! operator block, the JSON shape, the process exit status) stays in
 //! the consuming crate, per this crate's no-presentation charter.

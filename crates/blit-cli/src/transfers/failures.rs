@@ -9,9 +9,9 @@
 //!
 //! The surface-neutral half — the failed-file naming rule, the wire
 //! read-back, and the source-deletion gate — lives in
-//! `blit_core::transfers::failures` because `blit-tui` deletes move
-//! sources too; only rendering and the process exit status are this
-//! crate's.
+//! `blit_core::transfers::failures` so any front end that deletes
+//! move sources shares it; only rendering and the process exit
+//! status are this crate's.
 
 use std::process::ExitCode;
 

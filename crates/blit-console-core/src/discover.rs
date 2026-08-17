@@ -35,9 +35,9 @@ impl std::error::Error for DiscoveryError {}
 /// port (the form [`blit_core::remote::endpoint::RemoteEndpoint::parse`]
 /// accepts), `name` is the mDNS instance name shown in the sidebar.
 ///
-/// Returns `None` when the service advertised no IPv4 address — the
-/// same skip the TUI's `DaemonsState::endpoint_for_row` makes for
-/// address-less rows (`crates/blit-tui/src/daemons.rs`).
+/// Returns `None` when the service advertised no IPv4 address —
+/// an address-less row is undialable and is skipped rather than
+/// shown.
 pub fn endpoint_from_service(service: &MdnsDiscoveredService) -> Option<DaemonEndpoint> {
     let address = service.addresses.first()?;
     Some(DaemonEndpoint {
