@@ -3,9 +3,9 @@
 **Status**: Draft — R1 (direction) APPROVED = D-2026-08-17-1; R2
 (interface-crate name) DISSOLVED = D-2026-08-17-2 (no new crate:
 everything folds into `blit-core`, which publishes to crates.io).
-Awaiting R3 (`blit-tui` disposition), R4 (`blit-gui` disposition),
-R5 (`blit-prometheus-bridge` deletion). No code until **Status**:
-Active and a per-slice go.
+R5 RULED = D-2026-08-17-3 (`blit-prometheus-bridge` deleted, ip-5).
+Awaiting R3 (`blit-tui` disposition) and R4 (`blit-gui` disposition).
+No code until **Status**: Active and a per-slice go.
 **Created**: 2026-08-17 (reworked same day under D-2026-08-17-2; the
 original draft's merged-SDK-crate shape, slices if-1..if-3, is
 superseded)
@@ -79,12 +79,8 @@ on the LAN gitea before the first publish) and upgrade deliberately.
 - **R4 — `blit-gui`** (552 lines, the landed C1 eframe shell): (a)
   move as-is to BlitAdmin_UIs as the GUI starting point, then delete
   here, or (b) delete here, GUI starts fresh. Recommendation: **(a)**.
-- **R5 — `blit-prometheus-bridge`** (877 lines, standalone binary, 20
-  inline test fns, no integration tests, no consumers, not in any
-  release archive; owner 2026-08-17: "never been executed, tested,
-  requested, or desired"): delete, or keep. Recommendation: **delete**
-  (if metrics are ever wanted, the daemon exposes them itself; git
-  history keeps this code).
+- **R5 — `blit-prometheus-bridge`**: RULED, delete (owner "remove",
+  2026-08-17; D-2026-08-17-3). Executed by ip-5.
 
 ## Facts (verified 2026-08-17 against the tree)
 
@@ -189,9 +185,9 @@ on the LAN gitea before the first publish) and upgrade deliberately.
    crate; drop the member; regenerate `Cargo.lock`; fix `README.md`
    tree and comment-only references in surviving crates. Record
    deleted-test delta.
-5. **ip-5 — `blit-prometheus-bridge` per R5.** If delete: remove the
-   crate and member, regenerate `Cargo.lock`, record the 20-test
-   delta.
+5. **ip-5 — delete `blit-prometheus-bridge` (D-2026-08-17-3).**
+   Remove the crate and member, regenerate `Cargo.lock`, record the
+   20-test delta.
 6. **ip-6 — crates.io publishability.** Add publish metadata to
    `blit-core`'s Cargo.toml (`description`, `repository`, `readme`,
    `keywords`, `categories`; license already inherited MIT); verify
