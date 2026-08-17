@@ -902,7 +902,7 @@ impl Blit for BlitService {
     ) -> Result<Response<DaemonState>, Status> {
         use std::sync::atomic::Ordering;
         let req = request.into_inner();
-        // `recent_limit` semantics (`proto/blit.proto`): 0 means
+        // `recent_limit` semantics (`crates/blit-core/proto/blit.proto`): 0 means
         // "use the daemon's default" — return the full ring as
         // sized by `with_recent_limit`. A non-zero value caps
         // the response to the most-recent N entries; the daemon

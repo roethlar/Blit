@@ -110,7 +110,7 @@ fn compare_file(
         }
         CompareMode::Force => {
             // R58-F9: Force means "transfer regardless of target
-            // state" per the proto contract (proto/blit.proto:443)
+            // state" per the proto contract (crates/blit-core/proto/blit.proto:443)
             // and the diff_planner's always-copy behavior. The
             // size/mtime comparison previously here disagreed with
             // both — if the user said --force, the manifest layer

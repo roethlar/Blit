@@ -3,6 +3,11 @@ name = "blit-core"
 version.workspace = true
 edition = "2021"
 license.workspace = true
+description = "High-performance file enumeration, planning, and transfer engine — the platform library behind the blit CLI and daemon, embeddable by any Rust front-end"
+repository = "https://github.com/roethlar/Blit"
+readme = "../../README.md"
+keywords = ["file-transfer", "sync", "backup", "mirror", "rsync"]
+categories = ["filesystem", "network-programming"]
 
 [dependencies]
 eyre = "0.6"

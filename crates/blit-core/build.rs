@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::env::set_var("PROTOC", protoc_path);
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let proto_dir = manifest_dir.join("..").join("..").join("proto");
+    let proto_dir = manifest_dir.join("proto");
     let proto_file = proto_dir.join("blit.proto");
 
     println!("cargo:rerun-if-changed={}", proto_file.display());

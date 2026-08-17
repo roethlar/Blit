@@ -17,7 +17,7 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 - **Platform Optimization**
   Windows, Linux, and macOS optimized; per-filesystem capability detection (reflink, sparse, xattr) with platform-native fast-copy paths (`clonefile`, `copy_file_range`, `CopyFileEx`).
 - **gRPC API**
-  Robust proto definitions in `proto/blit.proto` enable remote orchestration and integrations.
+  Robust proto definitions in `crates/blit-core/proto/blit.proto` enable remote orchestration and integrations.
 - **Security Boundaries**
   Path containment, bounded wire records, and per-session data-plane tokens. The daemon has no built-in TLS or user authentication; operate it only on a trusted network or through an SSH tunnel or VPN.
 - **Admin Utilities**
@@ -37,7 +37,6 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 │   ├── blit-core/
 │   ├── blit-cli/  # Produces `blit` (admin verbs included)
 │   └── blit-daemon/
-├── proto/         # gRPC (protobuf) definitions
 ├── scripts/       # Helper scripts (Windows, etc.)
 ├── test/          # Test data/resources
 ├── docs/          # Workflow/process docs

@@ -4,7 +4,7 @@ use std::process::Command;
 
 /// Inputs that can change either peer's executable behavior. Documentation and
 /// other repository bookkeeping deliberately do not churn the wire build ID.
-const BUILD_INPUTS: &[&str] = &["Cargo.toml", "Cargo.lock", "crates", "proto"];
+const BUILD_INPUTS: &[&str] = &["Cargo.toml", "Cargo.lock", "crates"];
 
 fn run_git(manifest_dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
     let output = Command::new("git")
