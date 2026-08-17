@@ -9,7 +9,7 @@
 //!
 //! The surface-neutral half — the failed-file naming rule, the wire
 //! read-back, and the source-deletion gate — lives in
-//! `blit_app::transfers::failures` because `blit-tui` deletes move
+//! `blit_core::transfers::failures` because `blit-tui` deletes move
 //! sources too; only rendering and the process exit status are this
 //! crate's.
 
@@ -18,8 +18,8 @@ use std::process::ExitCode;
 use blit_core::remote::transfer::FileFailure;
 use serde_json::{json, Value};
 
-use blit_app::transfers::failures::shown_path;
-pub(crate) use blit_app::transfers::failures::{
+use blit_core::transfers::failures::shown_path;
+pub(crate) use blit_core::transfers::failures::{
     failures_from_wire, refuse_source_delete_on_failures,
 };
 

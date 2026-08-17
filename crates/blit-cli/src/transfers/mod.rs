@@ -4,12 +4,12 @@ mod local;
 mod remote;
 mod remote_remote_direct;
 
-// Endpoint types come from `blit_app::endpoints` directly. The
+// Endpoint types come from `blit_core::endpoints` directly. The
 // `transfers/endpoints.rs` shim now contains only the two
 // clap-arg adapter wrappers (`ensure_remote_pull_supported` /
 // `ensure_remote_push_supported`) — every other consumer
-// imports from `blit_app::endpoints` directly.
-use blit_app::endpoints::{format_remote_endpoint, parse_transfer_endpoint, Endpoint};
+// imports from `blit_core::endpoints` directly.
+use blit_core::endpoints::{format_remote_endpoint, parse_transfer_endpoint, Endpoint};
 
 use crate::cli::TransferArgs;
 use crate::context::AppContext;
@@ -21,14 +21,14 @@ use std::process::ExitCode;
 use failures::{exit_for_failures, refuse_source_delete_on_failures};
 
 use crate::rm::delete_remote_path;
-use blit_app::transfers::dispatch::{select_transfer_route, TransferKind, TransferRoute};
-use blit_app::transfers::filter::{self, FilterInputs};
-use blit_app::transfers::resolution::resolve_destination;
 use blit_core::fs_enum::FileFilter;
 use blit_core::remote::transfer::{
     SessionPhaseRole, TransferLifecycleOutcome, TransferLifecycleTrace,
 };
 use blit_core::remote::RemotePath;
+use blit_core::transfers::dispatch::{select_transfer_route, TransferKind, TransferRoute};
+use blit_core::transfers::filter::{self, FilterInputs};
+use blit_core::transfers::resolution::resolve_destination;
 
 /// Build a `FilterInputs` view over a `TransferArgs`. Lives here
 /// because the orphan rule prevents `impl From<&TransferArgs>` on
@@ -46,7 +46,7 @@ fn filter_inputs(args: &TransferArgs) -> FilterInputs<'_> {
         max_age: args.max_age.as_deref(),
     }
 }
-use blit_app::endpoints::{ensure_remote_destination_supported, ensure_remote_source_supported};
+use blit_core::endpoints::{ensure_remote_destination_supported, ensure_remote_source_supported};
 use endpoints::{ensure_remote_pull_supported, ensure_remote_push_supported};
 use local::run_local_transfer;
 use remote::{run_remote_pull_transfer, run_remote_push_transfer};
@@ -79,13 +79,13 @@ fn collapse_slashes(s: &str) -> String {
 }
 
 /// Build a `FileFilter` from a transfer command's args. Thin
-/// clap-side wrapper around `blit_app::transfers::filter::build`.
+/// clap-side wrapper around `blit_core::transfers::filter::build`.
 pub(crate) fn build_filter(args: &TransferArgs) -> Result<FileFilter> {
     filter::build(&filter_inputs(args))
 }
 
 /// Build the wire-side `FilterSpec` proto from CLI args. Thin
-/// wrapper around `blit_app::transfers::filter::build_spec`.
+/// wrapper around `blit_core::transfers::filter::build_spec`.
 pub(crate) fn build_filter_spec(args: &TransferArgs) -> Result<blit_core::generated::FilterSpec> {
     filter::build_spec(&filter_inputs(args))
 }
@@ -1005,7 +1005,7 @@ mod tests {
     }
 
     // rsync-resolution unit tests moved alongside the
-    // implementation to `blit_app::transfers::resolution`. The CLI
+    // implementation to `blit_core::transfers::resolution`. The CLI
     // module's tests retain only the end-to-end dispatcher tests
     // above (`copy_local_transfers_file`,
     // `copy_local_dry_run_creates_no_files`).

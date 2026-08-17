@@ -17,7 +17,7 @@ use eyre::Result;
 // w5-2: the classifier moved to blit-core (single owner of retry
 // policy, next to the transfer code that produces the errors). The
 // re-export keeps this module's public API stable.
-pub use blit_core::remote::retry::is_retryable;
+pub use crate::remote::retry::is_retryable;
 
 /// Run `attempt` (a fresh transfer attempt; `attempt_no` is 0 on the
 /// first try) with up to `retries` retries spaced by `wait`. Retries fire

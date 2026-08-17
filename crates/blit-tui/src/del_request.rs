@@ -11,7 +11,7 @@ use blit_core::remote::endpoint::RemoteEndpoint;
 /// Thin wrapper over `rel_path_to_string` so the conversion
 /// boundary is named + unit-testable.
 pub(crate) fn del_wire_path(rel_path: &std::path::Path) -> String {
-    blit_app::endpoints::rel_path_to_string(rel_path)
+    blit_core::endpoints::rel_path_to_string(rel_path)
 }
 
 /// d-50: assemble a delete request from resolved cursor/marked
@@ -32,7 +32,7 @@ pub(crate) fn build_delete_request(
     endpoints: Vec<RemoteEndpoint>,
     batch: bool,
 ) -> Option<(RemoteEndpoint, Vec<String>, String, Option<String>)> {
-    use blit_app::admin::rm;
+    use blit_core::admin::rm;
     let deletable: Vec<RemoteEndpoint> = endpoints
         .into_iter()
         .filter(is_deletable_remote_path)
@@ -63,7 +63,7 @@ pub(crate) fn build_delete_request(
 /// `Discovery` (bare-host) endpoints, which carry no path.
 /// Pure — the dispatcher gates the confirm prompt on this.
 pub(crate) fn is_deletable_remote_path(endpoint: &RemoteEndpoint) -> bool {
-    use blit_app::admin::rm;
+    use blit_core::admin::rm;
     match rm::extract_module_and_path(endpoint) {
         Ok((_module, rel_path)) => {
             let rel = rel_path.to_string_lossy();

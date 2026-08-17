@@ -1,6 +1,6 @@
 use crate::cli::{JobsCancelArgs, JobsCommand, JobsListArgs, JobsWatchArgs};
-use blit_app::admin::jobs;
-use blit_app::admin::jobs::{CancelJobOutcome, WatchSnapshot};
+use blit_core::admin::jobs;
+use blit_core::admin::jobs::{CancelJobOutcome, WatchSnapshot};
 use blit_core::generated::{daemon_event, DaemonState};
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
@@ -480,7 +480,7 @@ fn human_progress_line(transfer_id: &str, p: &blit_core::generated::TransferProg
         transfer_id,
         format_progress_pair(p.bytes_completed, p.bytes_total),
         format_progress_pair(p.files_completed, p.files_total),
-        blit_app::display::format_bps(bps),
+        blit_core::display::format_bps(bps),
     )
 }
 

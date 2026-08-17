@@ -30,7 +30,7 @@
 //! `host:` with no module / root, which the wire protocol
 //! can't route.
 
-use blit_core::remote::{RemoteEndpoint, RemotePath};
+use crate::remote::{RemoteEndpoint, RemotePath};
 use eyre::{bail, Result};
 use std::path::{Path, PathBuf};
 
@@ -198,9 +198,9 @@ pub fn module_and_rel_path(remote: &RemoteEndpoint) -> Result<(String, PathBuf)>
 /// for the wire `path` / `start_path` fields. Empty or `.` paths
 /// produce an empty string (the daemon-side convention for "the
 /// module root"). Delegates to the single canonical helper in
-/// `blit_core::path_posix` so the conversion is consistent everywhere.
+/// `crate::path_posix` so the conversion is consistent everywhere.
 pub fn rel_path_to_string(path: &Path) -> String {
-    blit_core::path_posix::relative_path_to_posix(path)
+    crate::path_posix::relative_path_to_posix(path)
 }
 
 #[cfg(test)]

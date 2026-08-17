@@ -4,8 +4,8 @@
 //! keeps the human / JSON formatting; this module just speaks gRPC
 //! and returns the structured response.
 
-use blit_core::generated::FilesystemStatsRequest;
-use blit_core::remote::RemoteEndpoint;
+use crate::generated::FilesystemStatsRequest;
+use crate::remote::RemoteEndpoint;
 use eyre::Result;
 use serde::Serialize;
 

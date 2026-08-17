@@ -10,7 +10,7 @@
 //! `Endpoint::connect_timeout` alone does NOT bound slow DNS — see the
 //! function docs.)
 
-use blit_core::generated::blit_client::BlitClient;
+use crate::generated::blit_client::BlitClient;
 use eyre::{Context, Result};
 use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};

@@ -5,8 +5,8 @@
 //! channel forwarder while the CLI prints inline. Caller handles
 //! all formatting.
 
-use blit_core::generated::DiskUsageRequest;
-use blit_core::remote::RemoteEndpoint;
+use crate::generated::DiskUsageRequest;
+use crate::remote::RemoteEndpoint;
 use eyre::Result;
 use serde::Serialize;
 

@@ -1,7 +1,7 @@
 //! F4 Profile screen — header / records-summary block /
 //! predictor coefficients block / footer.
 //!
-//! Renders the profile data from `blit_app::profile`, the
+//! Renders the profile data from `blit_core::profile`, the
 //! Verify form, the Diagnostics-dump block, and the local
 //! Transfer block. The lifecycle hotkeys are wired: [d]/[e]
 //! toggle history recording and [c] clears the log behind a
@@ -31,8 +31,8 @@ use crate::diagnostics::{DiagnosticsState, DiagnosticsStatus};
 use crate::profile::{ProfileFetchStatus, ProfileState};
 use crate::transfer::{TransferState, TransferStatus};
 use crate::verify::{VerifyFocus, VerifyState, VerifyStatus};
-use blit_app::display::{format_bps, format_bytes};
-use blit_app::profile::{PredictorReport, ProfileReport, ProfileSummary};
+use blit_core::display::{format_bps, format_bytes};
+use blit_core::profile::{PredictorReport, ProfileReport, ProfileSummary};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -466,7 +466,7 @@ fn render_verify(frame: &mut Frame, area: Rect, verify: &VerifyState, now: Insta
 /// category (an existing file that differs) comes first.
 /// Empty categories are skipped — a clean compare with
 /// only matches returns an empty Vec.
-fn verify_preview_lines(result: &blit_app::check::CheckResult, max: usize) -> Vec<Line<'static>> {
+fn verify_preview_lines(result: &blit_core::check::CheckResult, max: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let warn = Style::default().fg(Color::Yellow);
     let err = Style::default().fg(Color::Red);
@@ -699,11 +699,13 @@ fn format_since(now: Instant, then: Instant) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blit_app::profile::{DurationCoefficients, PredictorReport, ProfileReport, ProfileSummary};
     use blit_core::perf_history::{
         CompareModeSnapshot, OptionSnapshot, PerformanceRecord, RunKind, TransferMode,
     };
     use blit_core::perf_predictor::PredictorCoefficients;
+    use blit_core::profile::{
+        DurationCoefficients, PredictorReport, ProfileReport, ProfileSummary,
+    };
 
     fn record(epoch_ms: u128, bytes: u64) -> PerformanceRecord {
         PerformanceRecord {
@@ -862,8 +864,8 @@ mod tests {
 
     // d-17: verify-result preview lines.
 
-    fn empty_check_result() -> blit_app::check::CheckResult {
-        blit_app::check::CheckResult::default()
+    fn empty_check_result() -> blit_core::check::CheckResult {
+        blit_core::check::CheckResult::default()
     }
 
     #[test]
@@ -878,7 +880,7 @@ mod tests {
     #[test]
     fn verify_preview_shows_first_differ_first() {
         let mut result = empty_check_result();
-        result.differing.push(blit_app::check::DiffEntry {
+        result.differing.push(blit_core::check::DiffEntry {
             path: "src/a.txt".to_string(),
             reason: "size 1024 vs 2048".to_string(),
             src_size: 1024,
@@ -899,7 +901,7 @@ mod tests {
     #[test]
     fn verify_preview_caps_at_max_even_with_all_categories() {
         let mut result = empty_check_result();
-        result.differing.push(blit_app::check::DiffEntry {
+        result.differing.push(blit_core::check::DiffEntry {
             path: "a".to_string(),
             reason: "r".to_string(),
             src_size: 0,

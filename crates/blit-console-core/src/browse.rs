@@ -11,8 +11,8 @@
 //! [`resolve_daemon_target`].
 
 use crate::endpoint::{DaemonEndpoint, Endpoint};
-use blit_app::admin::list_modules::{self, Module};
-use blit_app::admin::ls::{self, DirEntry};
+use blit_core::admin::list_modules::{self, Module};
+use blit_core::admin::ls::{self, DirEntry};
 use blit_core::remote::endpoint::RemoteEndpoint;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -117,7 +117,7 @@ pub(crate) fn modules_to_entries(modules: Vec<Module>) -> Vec<DirEntry> {
 }
 
 /// List `path` on `endpoint`. Local listings reuse
-/// `blit_app::admin::ls::list_local` on a blocking thread (matching
+/// `blit_core::admin::ls::list_local` on a blocking thread (matching
 /// the CLI's local branch without blocking the caller's runtime);
 /// daemon listings go over gRPC per [`resolve_daemon_target`].
 pub async fn browse(endpoint: &Endpoint, path: &Path) -> Result<Listing, BrowseError> {

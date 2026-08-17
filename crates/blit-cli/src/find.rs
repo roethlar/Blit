@@ -1,6 +1,6 @@
 use crate::cli::FindArgs;
-use blit_app::admin::find::{self, FindEntry, FindParams};
-use blit_app::endpoints::{
+use blit_core::admin::find::{self, FindEntry, FindParams};
+use blit_core::endpoints::{
     module_and_rel_path, parse_endpoint_or_local, rel_path_to_string, Endpoint,
 };
 use eyre::{bail, Result};

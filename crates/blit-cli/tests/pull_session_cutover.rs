@@ -1,6 +1,6 @@
 //! otp-10b-2: the pull-shaped verb rides the unified transfer session.
 //!
-//! `blit_app::transfers::remote::run_remote_pull` — the one entry both
+//! `blit_core::transfers::remote::run_remote_pull` — the one entry both
 //! the CLI verbs and the TUI F3 trigger call — initiates a
 //! DESTINATION-role `Transfer` session instead of driving the old
 //! pull driver. These pins guard the verb-level option wiring that
@@ -22,10 +22,10 @@ use std::path::{Path, PathBuf};
 mod common;
 use common::TestContext;
 
-use blit_app::transfers::remote::{run_remote_pull, PullExecution};
 use blit_core::generated::{ComparisonMode, FilterSpec, MirrorMode};
 use blit_core::remote::transfer::{ProgressEvent, ProgressTotals, RemoteTransferProgress};
 use blit_core::remote::{RemoteEndpoint, RemotePath};
+use blit_core::transfers::remote::{run_remote_pull, PullExecution};
 
 fn module_endpoint(port: u16) -> RemoteEndpoint {
     RemoteEndpoint {

@@ -1,6 +1,6 @@
 use crate::cli::RmArgs;
-use blit_app::admin::rm;
-use blit_app::endpoints::{parse_endpoint_or_local, Endpoint};
+use blit_core::admin::rm;
+use blit_core::endpoints::{parse_endpoint_or_local, Endpoint};
 use eyre::{bail, Result};
 use serde::Serialize;
 use std::io::{self, Write};
@@ -8,7 +8,7 @@ use std::path::Path;
 
 // Re-export the helper used by `crate::transfers::mod::run_move`
 // so existing call sites stay working without an import update.
-pub use blit_app::admin::rm::delete_remote_path;
+pub use blit_core::admin::rm::delete_remote_path;
 
 pub async fn run_rm(args: RmArgs) -> Result<()> {
     let remote = match parse_endpoint_or_local(&args.target) {

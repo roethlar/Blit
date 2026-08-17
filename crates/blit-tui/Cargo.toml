@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 blit-core = { path = "../blit-core" }
-blit-app = { path = "../blit-app" }
 tokio = { version = "1", features = ["full"] }
 tonic = "0.14"
 ratatui = "0.30"

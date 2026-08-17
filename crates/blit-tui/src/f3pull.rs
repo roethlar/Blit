@@ -27,9 +27,9 @@
 //!    state (guarded by `request_id` so a stale reply from
 //!    a superseded run is dropped).
 
-use blit_app::endpoints::Endpoint;
-use blit_app::transfers::resolution::resolve_destination;
+use blit_core::endpoints::Endpoint;
 use blit_core::remote::endpoint::RemoteEndpoint;
+use blit_core::transfers::resolution::resolve_destination;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

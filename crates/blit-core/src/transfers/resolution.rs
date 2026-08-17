@@ -21,7 +21,7 @@
 //! resolve path.
 
 use crate::endpoints::Endpoint;
-use blit_core::remote::RemotePath;
+use crate::remote::RemotePath;
 use std::ffi::OsString;
 
 /// Returns true if the raw CLI source string specifies "copy
@@ -180,7 +180,7 @@ mod tests {
     //! longer duplicates the resolution-helper unit coverage.
 
     use super::*;
-    use blit_core::remote::{RemoteEndpoint, RemotePath};
+    use crate::remote::{RemoteEndpoint, RemotePath};
     use std::path::PathBuf;
     use tempfile::tempdir;
 

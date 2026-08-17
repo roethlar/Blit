@@ -5,8 +5,8 @@
 //! browse-provider request/response mapping. Transfer execution lands
 //! in later Phase 6 slices.
 
-use blit_app::admin::list_modules::Module;
-use blit_app::admin::ls::DirEntry;
+use blit_core::admin::list_modules::Module;
+use blit_core::admin::ls::DirEntry;
 use blit_core::remote::{RemoteEndpoint, RemotePath};
 use eyre::{Context, Result};
 use std::collections::BTreeSet;

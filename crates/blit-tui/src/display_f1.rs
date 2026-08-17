@@ -72,7 +72,7 @@ pub(crate) fn f1_trigger_prompt(
 /// builds degrade to a non-lying "(parse error)" phrase rather than
 /// misclassifying the deletion target.
 fn move_delete_target_phrase(source: &str) -> &'static str {
-    use blit_app::endpoints::{parse_transfer_endpoint, Endpoint};
+    use blit_core::endpoints::{parse_transfer_endpoint, Endpoint};
     match parse_transfer_endpoint(source) {
         Ok(Endpoint::Remote(_)) => "deletes the remote source",
         Ok(Endpoint::Local(_)) => "deletes the local source",

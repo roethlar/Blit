@@ -1,7 +1,7 @@
 //! Local→local transfer: the one app-layer chokepoint (CLI + TUI).
 //!
 //! Since otp-11 this rides the unified `TransferSession` over the
-//! in-process transport (`blit_core::transfer_session::run_local_session`,
+//! in-process transport (`crate::transfer_session::run_local_session`,
 //! `docs/plan/OTP11_LOCAL_SESSION.md`): both roles in this process, the
 //! same choreography as every remote session, bytes applied through the
 //! local write strategy (clonefile / block-clone / copy_file_range where
@@ -14,11 +14,11 @@
 //! `LocalMirrorOptions` from its Verify form — same shape, no clap
 //! coupling.
 
-use blit_core::transfer_session::{LocalMirrorOptions, LocalMirrorSummary};
+use crate::transfer_session::{LocalMirrorOptions, LocalMirrorSummary};
 use eyre::{Context, Result};
 use std::path::Path;
 
-pub use blit_core::transfer_session::TransferOutcome;
+pub use crate::transfer_session::TransferOutcome;
 
 /// Run a local→local copy / mirror to completion as one transfer
 /// session. Returns the summary verbatim; caller handles presentation
@@ -34,7 +34,7 @@ pub async fn run(
     options: LocalMirrorOptions,
 ) -> Result<LocalMirrorSummary> {
     let mirror = options.mirror;
-    blit_core::transfer_session::run_local_session(src, dst, options)
+    crate::transfer_session::run_local_session(src, dst, options)
         .await
         .with_context(|| {
             format!(

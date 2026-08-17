@@ -1,16 +1,16 @@
 use crate::cli::TransferArgs;
 use eyre::Result;
 
-use blit_app::transfers::remote::{
-    run_delegated_pull, run_delegated_pull_until_started, DelegatedPullExecution,
-    DelegatedPullOutcome,
-};
 use blit_core::generated::DelegatedPullSummary;
 use blit_core::remote::transfer::{operation_spec::DelegatedSpecOptions, TransferLifecycleTrace};
 use blit_core::remote::RemoteEndpoint;
+use blit_core::transfers::remote::{
+    run_delegated_pull, run_delegated_pull_until_started, DelegatedPullExecution,
+    DelegatedPullOutcome,
+};
 
 use super::remote::spawn_progress_monitor_with_options;
-use blit_app::endpoints::format_remote_endpoint;
+use blit_core::endpoints::format_remote_endpoint;
 
 /// CLI-facing alias for the library's delegated-pull outcome.
 /// Field shape unchanged across the A.0 move; preserves the
@@ -97,7 +97,7 @@ fn delegated_pull_options(
 }
 
 // `DeferredDelegatedState` is now a type alias for
-// `blit_app::transfers::remote::DelegatedPullOutcome` (see the
+// `blit_core::transfers::remote::DelegatedPullOutcome` (see the
 // top of this file). Same field shape, same callers — the
 // orchestration body that builds it lives in `blit-app` after
 // this A.0 sub-slice.
@@ -316,7 +316,7 @@ fn describe_delegated_result(
 
 // Unit tests for `destination_spec_fields`,
 // `report_bytes_progress`, and `DelegatedBytesProgressState`
-// moved to `blit_app::transfers::remote::tests` alongside the
+// moved to `blit_core::transfers::remote::tests` alongside the
 // implementations — see the a0-remote-helpers round-1 reopen
 // for the test-locality precedent.
 

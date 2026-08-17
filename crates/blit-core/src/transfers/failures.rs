@@ -10,7 +10,7 @@
 //! operator block, the JSON shape, the process exit status) stays in
 //! the consuming crate, per this crate's no-presentation charter.
 
-use blit_core::remote::transfer::FileFailure;
+use crate::remote::transfer::FileFailure;
 use eyre::{bail, Result};
 
 /// How one failed file is named. `""` is the single-file destination
@@ -29,7 +29,7 @@ pub fn shown_path(relative_path: &str) -> &str {
 /// A peer's carried report read back into the in-memory shape the
 /// gate and the renderers take, so push / pull / delegated share the
 /// local carrier's code path instead of each handling the wire type.
-pub fn failures_from_wire(wire: &[blit_core::generated::FileFailure]) -> Vec<FileFailure> {
+pub fn failures_from_wire(wire: &[crate::generated::FileFailure]) -> Vec<FileFailure> {
     wire.iter().map(FileFailure::from_wire).collect()
 }
 
@@ -143,7 +143,7 @@ mod tests {
     /// local carrier produces.
     #[test]
     fn wire_entries_read_back_as_in_memory_records() {
-        let wire = vec![blit_core::generated::FileFailure {
+        let wire = vec![crate::generated::FileFailure {
             relative_path: "sub/blocked.bin".to_string(),
             reason: "Access is denied. (os error 5)".to_string(),
         }];

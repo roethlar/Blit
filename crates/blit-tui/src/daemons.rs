@@ -2,7 +2,7 @@
 //! mDNS discovery result plus the operator's row selection.
 //!
 //! The discovery loop in `main.rs` calls
-//! [`blit_app::scan::discover`] on a timer and pushes
+//! [`blit_core::scan::discover`] on a timer and pushes
 //! `DiscoveryUpdate`s through an mpsc. This module owns the
 //! reducer that maps those updates onto a stable [`DaemonsState`]
 //! the renderer consumes.

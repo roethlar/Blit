@@ -1,13 +1,13 @@
 //! Performance-history toggles + granular reads.
 //!
 //! Moved from `crates/blit-cli/src/diagnostics.rs` (perf path)
-//! in A.0. Thin wrappers around `blit_core::perf_history`.
+//! in A.0. Thin wrappers around `crate::perf_history`.
 
-use blit_core::perf_history;
+use crate::perf_history;
 use eyre::Result;
 use std::path::PathBuf;
 
-pub use blit_core::perf_history::PerformanceRecord;
+pub use crate::perf_history::PerformanceRecord;
 
 /// Read the persisted "perf history enabled" flag. Separate
 /// so the CLI's `diagnostics perf` verb can treat the post-toggle
@@ -27,7 +27,7 @@ pub fn history_path() -> Result<PathBuf> {
 }
 
 /// Read up to `limit` most recent records. `0` means "all" per
-/// `blit_core::perf_history::read_recent_records`'s contract.
+/// `crate::perf_history::read_recent_records`'s contract.
 pub fn read_records(limit: usize) -> Result<Vec<PerformanceRecord>> {
     perf_history::read_recent_records(limit)
 }

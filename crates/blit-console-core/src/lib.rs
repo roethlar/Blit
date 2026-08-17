@@ -23,4 +23,4 @@ pub use discover::{
 pub use endpoint::{DaemonEndpoint, Endpoint, EndpointId};
 pub use model::{update, Effect, Model, Msg};
 
-pub use blit_app::admin::ls::DirEntry;
+pub use blit_core::admin::ls::DirEntry;

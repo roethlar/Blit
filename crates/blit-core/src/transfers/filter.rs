@@ -9,7 +9,7 @@
 //! struct, which is also the shape the TUI's transfer-options
 //! modal will use.
 
-use blit_core::fs_enum::{parse_duration, parse_size, FileFilter};
+use crate::fs_enum::{parse_duration, parse_size, FileFilter};
 use eyre::{eyre, Context, Result};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -79,8 +79,8 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
 /// enforces the same filter the CLI would have applied locally.
 /// `--files-from` is read here and shipped expanded so the daemon
 /// doesn't have to reach back into the client's filesystem.
-pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<blit_core::generated::FilterSpec> {
-    use blit_core::generated::FilterSpec;
+pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterSpec> {
+    use crate::generated::FilterSpec;
     let mut spec = FilterSpec {
         include: inputs.include.to_vec(),
         exclude: inputs.exclude.to_vec(),

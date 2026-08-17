@@ -15,7 +15,7 @@
 mod metrics;
 mod server;
 
-use blit_app::admin::jobs;
+use blit_core::admin::jobs;
 use blit_core::generated::DaemonState;
 use blit_core::remote::endpoint::RemoteEndpoint;
 use clap::Parser;

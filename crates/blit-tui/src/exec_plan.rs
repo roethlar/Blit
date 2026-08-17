@@ -58,10 +58,10 @@ pub(crate) fn build_f3_pull_execution(
     remote: RemoteEndpoint,
     dest_root: std::path::PathBuf,
     kind: f3pull::PullKind,
-) -> blit_app::transfers::remote::PullExecution {
-    use blit_app::transfers::compare::{comparison_mode, move_comparison_mode, CompareFlags};
-    use blit_app::transfers::remote::PullExecution;
+) -> blit_core::transfers::remote::PullExecution {
     use blit_core::generated::MirrorMode;
+    use blit_core::transfers::compare::{comparison_mode, move_comparison_mode, CompareFlags};
+    use blit_core::transfers::remote::PullExecution;
     let mirror = kind == f3pull::PullKind::Mirror;
     let remote_label = remote.display();
     // No compare toggles on the F3 trigger — the default flags map to
@@ -113,10 +113,10 @@ pub(crate) fn build_f1_push_execution(
     local_source: std::path::PathBuf,
     remote: RemoteEndpoint,
     kind: f3pull::PullKind,
-) -> blit_app::transfers::remote::PushExecution {
-    use blit_app::transfers::compare::{comparison_mode, move_comparison_mode, CompareFlags};
-    use blit_app::transfers::remote::PushExecution;
+) -> blit_core::transfers::remote::PushExecution {
     use blit_core::generated::MirrorMode;
+    use blit_core::transfers::compare::{comparison_mode, move_comparison_mode, CompareFlags};
+    use blit_core::transfers::remote::PushExecution;
     let mirror = kind == f3pull::PullKind::Mirror;
     let remote_label = remote.display();
     PushExecution {
@@ -180,9 +180,9 @@ pub(crate) fn build_delegated_execution(
     src: RemoteEndpoint,
     dst: RemoteEndpoint,
     kind: f3pull::PullKind,
-) -> blit_app::transfers::remote::DelegatedPullExecution {
+) -> blit_core::transfers::remote::DelegatedPullExecution {
     let dst_label = dst.display();
-    blit_app::transfers::remote::DelegatedPullExecution {
+    blit_core::transfers::remote::DelegatedPullExecution {
         src,
         dst,
         options: f3_pull_options(kind),

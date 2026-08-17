@@ -1,5 +1,5 @@
 //! F4 Verify form state. The Verify pane lets the operator
-//! pick two local paths and run `blit_app::check::compare_trees`
+//! pick two local paths and run `blit_core::check::compare_trees`
 //! to see how they differ — same code path as `blit check`.
 //!
 //! d-2-f4-verify scope: text-input form, run-on-Enter, result
@@ -12,7 +12,7 @@
 //! the CLI's `blit check` semantics — local paths only, per
 //! TUI_DESIGN §5.4).
 
-use blit_app::check::CheckResult;
+use blit_core::check::CheckResult;
 use std::time::Instant;
 
 /// Which form field has the cursor. `None` means the

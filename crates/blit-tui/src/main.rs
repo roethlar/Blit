@@ -58,14 +58,14 @@ use crate::exec_plan::{build_delegated_execution, build_f1_push_execution};
 use crate::progress_accum::{du_total_from_entries, pull_throughput};
 use crate::theme_color::{base_theme_style, raw_color_to_ratatui};
 use crate::tick_budget::{compute_tick_budget, min_opt};
-use blit_app::admin::list_modules::Module;
-use blit_app::admin::ls::DirEntry;
-use blit_app::admin::{jobs, list_modules, ls};
-use blit_app::profile as app_profile;
-use blit_app::scan;
+use blit_core::admin::list_modules::Module;
+use blit_core::admin::ls::DirEntry;
+use blit_core::admin::{jobs, list_modules, ls};
 use blit_core::generated::{DaemonEvent, DaemonState};
 use blit_core::mdns::MdnsDiscoveredService;
+use blit_core::profile as app_profile;
 use blit_core::remote::endpoint::RemoteEndpoint;
+use blit_core::scan;
 use browse::BrowseState;
 use clap::Parser;
 use crossterm::cursor::Show;
@@ -411,7 +411,7 @@ enum F2CancelStatus {
         // CancelJobOutcome variant has its own
         // `transfer_id` field), so we don't double up
         // here.
-        outcome: blit_app::admin::jobs::CancelJobOutcome,
+        outcome: blit_core::admin::jobs::CancelJobOutcome,
         /// d-23: terminal-state timestamp. The footer
         /// converter hides the fragment after the
         /// configured cancel-status TTL (d-24:
@@ -450,7 +450,7 @@ impl F2CancelStatus {
 struct CancelReply {
     request_id: u64,
     transfer_id: String,
-    result: Result<blit_app::admin::jobs::CancelJobOutcome, String>,
+    result: Result<blit_core::admin::jobs::CancelJobOutcome, String>,
 }
 
 /// Polling cadence for the event loop. 50ms keeps keystroke
@@ -2734,7 +2734,7 @@ fn spawn_detail_fetch(
                 let mut capacities = Vec::new();
                 for module in &state.modules {
                     if let Ok(stats) =
-                        blit_app::admin::df::query(&endpoint, module.name.clone()).await
+                        blit_core::admin::df::query(&endpoint, module.name.clone()).await
                     {
                         capacities.push((module.name.clone(), stats.used_bytes, stats.total_bytes));
                     }
@@ -3082,7 +3082,7 @@ fn spawn_profile_fetch(request_id: u64, tx: mpsc::Sender<ProfileReply>) {
 
 struct ProfileReply {
     request_id: u64,
-    result: Result<blit_app::profile::ProfileReport, String>,
+    result: Result<blit_core::profile::ProfileReport, String>,
 }
 
 /// Reply envelope from the F4 Verify run task. Generation
@@ -3090,7 +3090,7 @@ struct ProfileReply {
 /// between kicks) gets dropped on arrival.
 struct VerifyReply {
     request_id: u64,
-    result: Result<blit_app::check::CheckResult, String>,
+    result: Result<blit_core::check::CheckResult, String>,
 }
 
 /// Reply envelope from a local-transfer task.
@@ -3170,7 +3170,7 @@ fn spawn_f3_del(
 /// forward-slash wire paths (built by `del_wire_path` at the
 /// dispatch boundary). Returns the daemon's total files-deleted.
 async fn run_f3_del(module_endpoint: &RemoteEndpoint, rel_paths: Vec<String>) -> eyre::Result<u64> {
-    use blit_app::admin::rm;
+    use blit_core::admin::rm;
     let (module, _) = rm::extract_module_and_path(module_endpoint)?;
     rm::purge(module_endpoint, module, rel_paths).await
 }
@@ -3219,8 +3219,8 @@ const _: () = assert!(
 /// the accumulation (keep the max-byte entry) is unit-testable
 /// without a live daemon — see `du_total_from_entries`.
 async fn run_f3_du_total(remote: &RemoteEndpoint) -> eyre::Result<(u64, u64)> {
-    use blit_app::admin::du;
-    use blit_app::endpoints::{module_and_rel_path, rel_path_to_string};
+    use blit_core::admin::du;
+    use blit_core::endpoints::{module_and_rel_path, rel_path_to_string};
 
     let (module, rel_path) = module_and_rel_path(remote)?;
     let start_path = rel_path_to_string(&rel_path);
@@ -3284,10 +3284,10 @@ fn spawn_f3_pull(
     // `F3PullReply`.
     progress_tx: mpsc::Sender<F3PullProgress>,
 ) {
-    use blit_app::admin::rm::delete_remote_path;
-    use blit_app::transfers::failures::{failures_from_wire, refuse_source_delete_on_failures};
-    use blit_app::transfers::remote::run_remote_pull;
+    use blit_core::admin::rm::delete_remote_path;
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
+    use blit_core::transfers::failures::{failures_from_wire, refuse_source_delete_on_failures};
+    use blit_core::transfers::remote::run_remote_pull;
     use f3pull::PullKind;
     tokio::spawn(async move {
         // d-37: progress monitor. run_remote_pull reports
@@ -3363,25 +3363,29 @@ fn spawn_f3_pull(
                         // destination-attested count. The failed file's
                         // only copy is the one we are about to delete.
                         match refuse_source_delete_on_failures(
-                            &blit_app::endpoints::format_remote_endpoint(&source),
+                            &blit_core::endpoints::format_remote_endpoint(&source),
                             outcome.summary.files_failed,
                             &failures_from_wire(&outcome.summary.failures),
                         ) {
                             Err(err) => Err(format!("{err:#}")),
-                            Ok(()) => match blit_app::admin::rm::extract_module_and_path(&source) {
-                                Ok((_, rel_path)) => {
-                                    let wire = del_wire_path(&rel_path);
-                                    match delete_remote_path(&source, &wire).await {
-                                        Ok(removed) => Ok((transferred.0, transferred.1, removed)),
-                                        Err(err) => Err(format!(
+                            Ok(()) => {
+                                match blit_core::admin::rm::extract_module_and_path(&source) {
+                                    Ok((_, rel_path)) => {
+                                        let wire = del_wire_path(&rel_path);
+                                        match delete_remote_path(&source, &wire).await {
+                                            Ok(removed) => {
+                                                Ok((transferred.0, transferred.1, removed))
+                                            }
+                                            Err(err) => Err(format!(
                                             "received but failed to delete remote source: {err:#}"
                                         )),
+                                        }
                                     }
-                                }
-                                Err(err) => Err(format!(
+                                    Err(err) => Err(format!(
                                     "received but cannot resolve remote source to delete: {err:#}"
                                 )),
-                            },
+                                }
+                            }
                         }
                     }
                 }
@@ -3408,9 +3412,9 @@ fn spawn_f1_push(
     tx: mpsc::Sender<F1PushReply>,
     progress_tx: mpsc::Sender<F1PushProgress>,
 ) {
-    use blit_app::transfers::failures::{failures_from_wire, refuse_source_delete_on_failures};
-    use blit_app::transfers::remote::run_remote_push;
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
+    use blit_core::transfers::failures::{failures_from_wire, refuse_source_delete_on_failures};
+    use blit_core::transfers::remote::run_remote_push;
     use f3pull::PullKind;
     tokio::spawn(async move {
         // d-63: progress monitor — run_remote_push reports
@@ -3519,10 +3523,10 @@ fn spawn_f1_delegated_pull(
     tx: mpsc::Sender<F1PushReply>,
     progress_tx: mpsc::Sender<F1PushProgress>,
 ) {
-    use blit_app::admin::rm::{delete_remote_path, extract_module_and_path};
-    use blit_app::transfers::failures::refuse_source_delete_on_failures;
-    use blit_app::transfers::remote::run_delegated_pull;
+    use blit_core::admin::rm::{delete_remote_path, extract_module_and_path};
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
+    use blit_core::transfers::failures::refuse_source_delete_on_failures;
+    use blit_core::transfers::remote::run_delegated_pull;
     tokio::spawn(async move {
         // d-69: progress monitor — run_delegated_pull reports Payload
         // deltas into `pe_rx` (the contract's aggregate lane); the
@@ -3576,7 +3580,7 @@ fn spawn_f1_delegated_pull(
                     // so the count is read through cr-pfc4-1's
                     // accessors rather than off a `TransferSummary`.
                     Some(source) => match refuse_source_delete_on_failures(
-                        &blit_app::endpoints::format_remote_endpoint(&source),
+                        &blit_core::endpoints::format_remote_endpoint(&source),
                         outcome.files_failed(),
                         &outcome.contained_failures(),
                     ) {
@@ -3639,10 +3643,10 @@ fn plan_f1_trigger(
     kind: f3pull::PullKind,
     confirmed: bool,
 ) -> TriggerOutcome {
-    use blit_app::endpoints::{
+    use blit_core::endpoints::{
         ensure_remote_destination_supported, parse_transfer_endpoint, Endpoint,
     };
-    use blit_app::transfers::resolution::resolve_destination;
+    use blit_core::transfers::resolution::resolve_destination;
     let source = match parse_transfer_endpoint(src) {
         Ok(s) => s,
         Err(_) => return TriggerOutcome::Rejected(format!("invalid source: {src}")),
@@ -3807,7 +3811,7 @@ fn plan_f1_delegated(
     kind: f3pull::PullKind,
     confirmed: bool,
 ) -> TriggerOutcome {
-    use blit_app::endpoints::ensure_remote_destination_supported;
+    use blit_core::endpoints::ensure_remote_destination_supported;
     if ensure_remote_destination_supported(&dst).is_err() {
         return TriggerOutcome::Rejected("destination needs a module (host:/module/)".into());
     }
@@ -3961,7 +3965,7 @@ fn spawn_cancels_for_targets(
 
 /// d-22: spawn a CancelJob RPC against `endpoint` for
 /// `transfer_id`. Reply lands on `tx` as a [`CancelReply`].
-/// The async machinery exists in `blit_app::admin::jobs::cancel`;
+/// The async machinery exists in `blit_core::admin::jobs::cancel`;
 /// this is a thin wrapper that flattens the Result into the
 /// reply envelope.
 fn spawn_cancel_transfer(
@@ -3971,7 +3975,7 @@ fn spawn_cancel_transfer(
     tx: mpsc::Sender<CancelReply>,
 ) {
     tokio::spawn(async move {
-        let result = blit_app::admin::jobs::cancel(&endpoint, &transfer_id)
+        let result = blit_core::admin::jobs::cancel(&endpoint, &transfer_id)
             .await
             .map_err(|err| format!("{err:#}"));
         let _ = tx
@@ -3993,7 +3997,7 @@ fn spawn_cancel_transfer(
 /// `ClearRecent` never touches the daemon's planner telemetry.
 fn spawn_clear_recent(endpoint: blit_core::remote::RemoteEndpoint) {
     tokio::spawn(async move {
-        let _ = blit_app::admin::jobs::clear_recent(&endpoint).await;
+        let _ = blit_core::admin::jobs::clear_recent(&endpoint).await;
     });
 }
 
@@ -4110,8 +4114,8 @@ fn prepare_local_transfer(
     raw_source: &str,
     raw_destination: &str,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
-    use blit_app::endpoints::{parse_transfer_endpoint, Endpoint};
-    use blit_app::transfers::resolution::resolve_destination;
+    use blit_core::endpoints::{parse_transfer_endpoint, Endpoint};
+    use blit_core::transfers::resolution::resolve_destination;
 
     let src_endpoint =
         parse_transfer_endpoint(raw_source).map_err(|e| format!("parse source: {e:#}"))?;
@@ -4130,7 +4134,7 @@ fn prepare_local_transfer(
 }
 
 /// Spawn a local copy / mirror via
-/// `blit_app::transfers::local::run`. The caller has
+/// `blit_core::transfers::local::run`. The caller has
 /// already validated + resolved both paths through
 /// [`prepare_local_transfer`], so this just forwards them
 /// to the local session and ferries the reply back.
@@ -4155,7 +4159,7 @@ fn spawn_local_transfer(
             perf_history: perf_history_enabled,
             ..Default::default()
         };
-        let result = blit_app::transfers::local::run(&source, &destination, options)
+        let result = blit_core::transfers::local::run(&source, &destination, options)
             .await
             .map_err(|err| format!("{err:#}"));
         let _ = tx
@@ -4230,7 +4234,7 @@ async fn perform_local_move(
         compare_mode: blit_core::transfer_session::LocalCompareMode::IgnoreTimes,
         ..Default::default()
     };
-    let summary = blit_app::transfers::local::run(source, destination, options)
+    let summary = blit_core::transfers::local::run(source, destination, options)
         .await
         .map_err(|err| format!("{err:#}"))?;
 
@@ -4267,7 +4271,7 @@ async fn perform_local_move(
     // `!mirror_enabled` interlock used to fail the call before
     // this point; the session now contains such a failure and
     // returns `Ok`, so the refusal lives here, beside the delete.
-    blit_app::transfers::failures::refuse_source_delete_on_failures(
+    blit_core::transfers::failures::refuse_source_delete_on_failures(
         &source.display().to_string(),
         summary.files_failed,
         &summary.failures,
@@ -4299,7 +4303,7 @@ struct DiagnosticsReply {
 
 /// Spawn a diagnostics-dump task on a blocking worker.
 /// Builds the JSON snapshot via
-/// `blit_app::diagnostics::dump::endpoint_snapshot` for
+/// `blit_core::diagnostics::dump::endpoint_snapshot` for
 /// both source and destination, writes it to
 /// `~/.config/blit/diagnostics-<unix-ms>.json`, and posts
 /// the resulting path through `tx`.
@@ -4363,9 +4367,9 @@ fn build_diagnostics_snapshot(
     source: &str,
     destination: &str,
 ) -> Result<serde_json::Value, String> {
-    use blit_app::diagnostics::dump::{endpoint_display, endpoint_snapshot, same_device};
-    use blit_app::endpoints::parse_transfer_endpoint;
-    use blit_app::transfers::resolution::{
+    use blit_core::diagnostics::dump::{endpoint_display, endpoint_snapshot, same_device};
+    use blit_core::endpoints::parse_transfer_endpoint;
+    use blit_core::transfers::resolution::{
         dest_is_container, resolve_destination, source_is_contents,
     };
 
@@ -4726,7 +4730,7 @@ fn handle_f3_filter_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
 /// `AppState`, and with it the continuation, which is the cancel signal
 /// the invoker already handles.
 fn handle_f3_picker_keystroke(key: &KeyEvent, app: &mut AppState, keymap: &KeyMap) -> bool {
-    use blit_app::endpoints::Endpoint;
+    use blit_core::endpoints::Endpoint;
 
     // The filter is an input mode inside picker mode; let its handler
     // read the keystroke first while it is open.
@@ -5022,7 +5026,7 @@ fn spawn_verify_run(
         let result = tokio::task::spawn_blocking(move || {
             let src = std::path::PathBuf::from(&source);
             let dst = std::path::PathBuf::from(&destination);
-            blit_app::check::compare_trees(
+            blit_core::check::compare_trees(
                 &src,
                 &dst,
                 use_checksum,
@@ -6762,7 +6766,7 @@ mod tests {
         assert!(!idle.is_sending());
 
         let done = F2CancelStatus::Done {
-            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+            outcome: blit_core::admin::jobs::CancelJobOutcome::Cancelled {
                 transfer_id: "t-1".to_string(),
             },
             finished_at: Instant::now(),
@@ -7163,7 +7167,7 @@ mod tests {
     fn cancel_status_done_within_ttl_renders_terminal_variant() {
         let now = Instant::now();
         let status = F2CancelStatus::Done {
-            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+            outcome: blit_core::admin::jobs::CancelJobOutcome::Cancelled {
                 transfer_id: "t-1".to_string(),
             },
             finished_at: now,
@@ -7183,7 +7187,7 @@ mod tests {
         let finished_at = Instant::now();
         let later = finished_at + TEST_CANCEL_TTL + std::time::Duration::from_millis(1);
         let status = F2CancelStatus::Done {
-            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+            outcome: blit_core::admin::jobs::CancelJobOutcome::Cancelled {
                 transfer_id: "t-1".to_string(),
             },
             finished_at,
@@ -7217,7 +7221,7 @@ mod tests {
         let finished_at = Instant::now();
         let at_boundary = finished_at + TEST_CANCEL_TTL;
         let status = F2CancelStatus::Done {
-            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+            outcome: blit_core::admin::jobs::CancelJobOutcome::Cancelled {
                 transfer_id: "t-1".to_string(),
             },
             finished_at,
@@ -7237,7 +7241,7 @@ mod tests {
         let custom_ttl = std::time::Duration::from_millis(1_000);
         let just_past = finished_at + custom_ttl + std::time::Duration::from_millis(1);
         let status = F2CancelStatus::Done {
-            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+            outcome: blit_core::admin::jobs::CancelJobOutcome::Cancelled {
                 transfer_id: "t-1".to_string(),
             },
             finished_at,
@@ -7292,7 +7296,7 @@ mod tests {
         let ttl = std::time::Duration::from_millis(1_000);
         let now = finished_at + std::time::Duration::from_millis(250);
         let status = F2CancelStatus::Done {
-            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+            outcome: blit_core::admin::jobs::CancelJobOutcome::Cancelled {
                 transfer_id: "t-1".to_string(),
             },
             finished_at,
@@ -7324,7 +7328,7 @@ mod tests {
         let ttl = std::time::Duration::from_millis(500);
         let now = finished_at + std::time::Duration::from_millis(501);
         let status = F2CancelStatus::Done {
-            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+            outcome: blit_core::admin::jobs::CancelJobOutcome::Cancelled {
                 transfer_id: "t-1".to_string(),
             },
             finished_at,
@@ -7341,7 +7345,7 @@ mod tests {
         let ttl = std::time::Duration::from_millis(500);
         let now = finished_at + ttl;
         let status = F2CancelStatus::Done {
-            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+            outcome: blit_core::admin::jobs::CancelJobOutcome::Cancelled {
                 transfer_id: "t-1".to_string(),
             },
             finished_at,
@@ -7849,7 +7853,7 @@ mod tests {
     /// the conversion boundary at `(module, rel_path)` → wire.
     #[test]
     fn del_wire_path_is_forward_slash_joined() {
-        use blit_app::admin::rm;
+        use blit_core::admin::rm;
         // Resolve a multi-component cursor endpoint the same way
         // the dispatcher does, then run the conversion boundary.
         let ep = RemoteEndpoint::parse("nas:/home/photos/old.jpg").expect("ep");
@@ -8638,7 +8642,7 @@ mod tests {
         let picked = rx.await.expect("the continuation carries the pick");
         assert_eq!(picked.target, f3picker::PickTarget::Directory);
         match picked.endpoint {
-            blit_app::endpoints::Endpoint::Remote(ep) => {
+            blit_core::endpoints::Endpoint::Remote(ep) => {
                 assert_eq!(ep.display(), "nas:/photos/2024");
             }
             other => panic!("expected a remote endpoint, got {other:?}"),
@@ -8656,7 +8660,7 @@ mod tests {
         let picked = rx.await.expect("the continuation carries the pick");
         assert_eq!(picked.target, f3picker::PickTarget::File);
         match picked.endpoint {
-            blit_app::endpoints::Endpoint::Remote(ep) => {
+            blit_core::endpoints::Endpoint::Remote(ep) => {
                 assert_eq!(ep.display(), "nas:/photos/img001.jpg");
             }
             other => panic!("expected a remote endpoint, got {other:?}"),
@@ -10623,7 +10627,7 @@ mod tests {
         // F4 after a successful profile fetch → tick.
         let id = app.profile.begin_fetch();
         app.profile.apply_report(
-            blit_app::profile::ProfileReport {
+            blit_core::profile::ProfileReport {
                 enabled: true,
                 records: vec![],
                 predictor_path: None,
@@ -10756,7 +10760,7 @@ mod tests {
     /// `blit copy` behavior. The CLI does this through
     /// `resolve_destination` (`crates/blit-cli/src/transfers/mod.rs:105`);
     /// the TUI must do the same before calling
-    /// `blit_app::transfers::local::run`.
+    /// `blit_core::transfers::local::run`.
     #[test]
     fn prepare_local_transfer_appends_basename_for_container_dest() {
         let tmp = tempfile::tempdir().expect("tmp");

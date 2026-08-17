@@ -106,7 +106,7 @@ fn verbose_redirected_run_keeps_the_enumeration_liveness() {
 /// where the CLI's `-p` decision, `PushExecution.progress`, and the source
 /// construction all meet; a unit test on the expression would pin the fix
 /// rather than the behaviour. Reverting `|| execution.progress` in
-/// `blit_app::transfers::remote::run_remote_push` reds this and nothing
+/// `blit_core::transfers::remote::run_remote_push` reds this and nothing
 /// else — the two local-route tests above cannot see that route at all.
 #[test]
 fn remote_push_with_progress_keeps_the_enumeration_liveness() {

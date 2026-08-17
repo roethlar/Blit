@@ -1,5 +1,5 @@
 use crate::cli::ListModulesArgs;
-use blit_app::admin::list_modules;
+use blit_core::admin::list_modules;
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
 

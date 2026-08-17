@@ -25,7 +25,7 @@
 
 use crate::discover::DEFAULT_DISCOVERY_TIMEOUT;
 use crate::endpoint::{DaemonEndpoint, Endpoint, EndpointId};
-use blit_app::admin::ls::DirEntry;
+use blit_core::admin::ls::DirEntry;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;

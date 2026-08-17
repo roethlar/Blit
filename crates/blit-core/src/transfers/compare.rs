@@ -14,7 +14,7 @@
 //! rides `SessionOpen.ignore_existing`, not this enum (same split the
 //! old wire spec made).
 
-use blit_core::generated::ComparisonMode;
+use crate::generated::ComparisonMode;
 
 /// The compare-relevant CLI flags, direction-agnostic. Both verb
 /// wrappers build this from `&TransferArgs`; the TUI builds it

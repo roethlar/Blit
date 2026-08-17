@@ -6,8 +6,8 @@
 //! it's a verb-routing decision; the same decision is made
 //! UI-side by the TUI's F1/F3 split.
 
-use blit_core::generated::ListRequest;
-use blit_core::remote::endpoint::RemoteEndpoint;
+use crate::generated::ListRequest;
+use crate::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
 use serde::Serialize;
 use std::fs;
@@ -111,7 +111,7 @@ pub fn list_local(path: &Path) -> Result<LocalListing> {
                 name: entry.file_name().to_string_lossy().into_owned(),
                 is_dir,
                 size,
-                mtime_seconds: blit_core::wire_metadata::mtime_seconds(&meta).unwrap_or(0),
+                mtime_seconds: crate::wire_metadata::mtime_seconds(&meta).unwrap_or(0),
             });
         }
         Ok(LocalListing::Directory { entries })
@@ -125,7 +125,7 @@ pub fn list_local(path: &Path) -> Result<LocalListing> {
                 name,
                 is_dir: false,
                 size: metadata.len(),
-                mtime_seconds: blit_core::wire_metadata::mtime_seconds(&metadata).unwrap_or(0),
+                mtime_seconds: crate::wire_metadata::mtime_seconds(&metadata).unwrap_or(0),
             },
         })
     }

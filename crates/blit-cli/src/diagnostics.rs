@@ -1,9 +1,11 @@
 use crate::cli::{DiagnosticsDumpArgs, PerfArgs};
 use crate::context::AppContext;
-use blit_app::diagnostics::dump::{endpoint_display, endpoint_snapshot, same_device};
-use blit_app::diagnostics::perf;
-use blit_app::endpoints::parse_transfer_endpoint;
-use blit_app::transfers::resolution::{dest_is_container, resolve_destination, source_is_contents};
+use blit_core::diagnostics::dump::{endpoint_display, endpoint_snapshot, same_device};
+use blit_core::diagnostics::perf;
+use blit_core::endpoints::parse_transfer_endpoint;
+use blit_core::transfers::resolution::{
+    dest_is_container, resolve_destination, source_is_contents,
+};
 use chrono::{DateTime, Utc};
 use eyre::Result;
 use serde_json::{json, Value};
@@ -152,9 +154,9 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
 ///
 /// The per-endpoint snapshot helpers (`endpoint_snapshot`,
 /// `endpoint_display`, `same_device`) live in
-/// `blit_app::diagnostics::dump`; the rsync-resolution helpers
+/// `blit_core::diagnostics::dump`; the rsync-resolution helpers
 /// (`source_is_contents`, `dest_is_container`,
-/// `resolve_destination`) live in `blit_app::transfers::resolution`.
+/// `resolve_destination`) live in `blit_core::transfers::resolution`.
 /// Both sets are imported directly at the top of this file; this
 /// function orchestrates them.
 pub fn run_diagnostics_dump(args: &DiagnosticsDumpArgs) -> Result<()> {

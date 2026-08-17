@@ -1,7 +1,7 @@
 use crate::cli::TransferArgs;
 use crate::context::AppContext;
 use crate::style::{Palette, Role};
-use blit_app::display::{format_bps, format_bytes};
+use blit_core::display::{format_bps, format_bytes};
 use blit_core::remote::transfer::{
     ProgressEvent, ProgressTotals, RemoteTransferProgress, TransferLifecycleTrace,
 };
@@ -196,7 +196,7 @@ async fn run_local_transfer_inner(
     });
 
     let start = Instant::now();
-    let result = blit_app::transfers::local::run(src_path, dest_path, options).await;
+    let result = blit_core::transfers::local::run(src_path, dest_path, options).await;
 
     // Clear the row BEFORE the result is propagated: a live steady-tick
     // row would otherwise redraw over the error the caller prints.
@@ -834,7 +834,7 @@ fn build_local_options(
     //
     // codex otp-10b-2 F3: a MOVE maps through the move rule instead
     // (IgnoreTimes, or Checksum when asked) — the local twin of
-    // `blit_app::transfers::compare::move_comparison_mode`. Today the
+    // `blit_core::transfers::compare::move_comparison_mode`. Today the
     // non-mirror local path copies unconditionally regardless of the
     // compare mode (probed live at the F3 adjudication), so this is
     // defense-in-depth; it becomes load-bearing at otp-11, when local

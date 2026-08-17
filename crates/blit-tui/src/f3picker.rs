@@ -46,7 +46,7 @@
 //! half of §7's transient-state reset (M1 has no prior pane to return
 //! to).
 
-use blit_app::endpoints::Endpoint;
+use blit_core::endpoints::Endpoint;
 use tokio::sync::oneshot;
 
 /// What the invoking flow asked the picker to return (§4.2's "what kind

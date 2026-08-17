@@ -1,5 +1,5 @@
 //! F4 Profile state — a thin wrapper around
-//! `blit_app::profile::ProfileReport` plus a fetch-status
+//! `blit_core::profile::ProfileReport` plus a fetch-status
 //! indicator. Backed by a local file (`perf_local.jsonl`)
 //! and a predictor state file; no RPC.
 //!
@@ -8,7 +8,7 @@
 //! and [c] clear wipes the on-disk log behind a y/N confirm
 //! (d-66 — `confirming_clear`, since the wipe is permanent).
 
-use blit_app::profile::ProfileReport;
+use blit_core::profile::ProfileReport;
 use std::time::Instant;
 
 /// Fetch status for the local profile read. Mirrors the
@@ -115,7 +115,7 @@ impl ProfileState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blit_app::profile::ProfileReport;
+    use blit_core::profile::ProfileReport;
 
     fn empty_report() -> ProfileReport {
         ProfileReport {

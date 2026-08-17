@@ -10,7 +10,6 @@ license.workspace = true
 # render the model and dispatch messages.
 
 [dependencies]
-blit-app = { path = "../blit-app" }
 blit-core = { path = "../blit-core" }
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "macros"] }

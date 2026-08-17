@@ -45,8 +45,8 @@
 //! files in arbitrary `PathBuf` order. Sorting here
 //! gives a stable, scannable display.
 
-use blit_app::admin::list_modules::Module;
-use blit_app::admin::ls::DirEntry;
+use blit_core::admin::list_modules::Module;
+use blit_core::admin::ls::DirEntry;
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -802,8 +802,8 @@ fn sort_priority(kind: &BrowseRowKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blit_app::admin::list_modules::Module;
-    use blit_app::admin::ls::DirEntry;
+    use blit_core::admin::list_modules::Module;
+    use blit_core::admin::ls::DirEntry;
 
     fn module(name: &str, read_only: bool) -> Module {
         Module {

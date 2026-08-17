@@ -21,12 +21,12 @@ use crate::context::AppContext;
 use crate::diagnostics::{run_diagnostics_dump, run_diagnostics_perf};
 use crate::jobs::run_jobs;
 use crate::transfers::{run_move, run_transfer};
-use blit_app::transfers::dispatch::TransferKind;
-use blit_app::transfers::retry::run_with_retries;
 use blit_core::config;
 use blit_core::remote::transfer::{
     outcome_for_report, TransferLifecycleOutcome, TransferLifecycleTrace,
 };
+use blit_core::transfers::dispatch::TransferKind;
+use blit_core::transfers::retry::run_with_retries;
 use clap::Parser;
 use eyre::Result;
 use std::process::ExitCode;

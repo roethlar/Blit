@@ -1,7 +1,7 @@
 use crate::cli::DfArgs;
-use blit_app::admin::df;
-use blit_app::display::format_bytes;
-use blit_app::endpoints::{module_and_rel_path, parse_endpoint_or_local, Endpoint};
+use blit_core::admin::df;
+use blit_core::display::format_bytes;
+use blit_core::endpoints::{module_and_rel_path, parse_endpoint_or_local, Endpoint};
 use eyre::{bail, Result};
 
 pub async fn run_df(args: DfArgs) -> Result<()> {

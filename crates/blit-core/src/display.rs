@@ -3,7 +3,7 @@
 //!
 //! Moved from `crates/blit-cli/src/util.rs` as part of the
 //! Phase 5 A.0 split. `format_bytes` is also used inside
-//! `blit_app::check::compare_trees` to populate
+//! `blit_core::check::compare_trees` to populate
 //! `DiffEntry.reason` strings; pre-A.0 a private duplicate
 //! lived in the check module to avoid the cross-crate
 //! dependency before util.rs was split — now consolidated.

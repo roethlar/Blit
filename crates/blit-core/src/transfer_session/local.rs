@@ -716,7 +716,7 @@ fn dest_subtree_rel(src_root: &Path, dst_root: &Path) -> Option<String> {
 /// Run one LOCAL transfer as a full session: both role drivers joined
 /// over the in-process pair, bytes applied through [`LocalApply`].
 /// This is the ONLY local transfer entry (D-2026-07-05-1) — the
-/// `blit_app::transfers::local::run` chokepoint (CLI + TUI) rides it.
+/// `blit_core::transfers::local::run` chokepoint (CLI + TUI) rides it.
 pub async fn run_local_session(
     src_root: &Path,
     dst_root: &Path,

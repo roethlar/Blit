@@ -12,14 +12,14 @@
 use eyre::{Context, Result};
 use std::time::Duration;
 
-pub use blit_core::mdns::MdnsDiscoveredService;
+pub use crate::mdns::MdnsDiscoveredService;
 
-/// Block-on-tokio wrapper around `blit_core::mdns::discover`.
+/// Block-on-tokio wrapper around `crate::mdns::discover`.
 /// Discovery is synchronous (the mdns-sd crate exposes a sync
 /// API); the wrapper spawns the blocking call onto a worker
 /// thread so async callers don't stall the runtime.
 pub async fn discover(wait: Duration) -> Result<Vec<MdnsDiscoveredService>> {
-    tokio::task::spawn_blocking(move || blit_core::mdns::discover(wait))
+    tokio::task::spawn_blocking(move || crate::mdns::discover(wait))
         .await
         .context("mDNS discovery task panicked")?
 }

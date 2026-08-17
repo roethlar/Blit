@@ -17,7 +17,7 @@
 //! keystroke shouldn't be enough.
 //!
 //! The actual transfer runs via
-//! `blit_app::transfers::local::run`, identical to the
+//! `blit_core::transfers::local::run`, identical to the
 //! CLI's `blit copy` / `blit mirror` code path.
 
 use blit_core::transfer_session::LocalMirrorSummary;

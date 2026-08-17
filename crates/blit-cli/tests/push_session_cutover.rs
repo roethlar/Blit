@@ -1,6 +1,6 @@
 //! otp-10a: the push-shaped verb rides the unified transfer session.
 //!
-//! `blit_app::transfers::remote::run_remote_push` — the one entry both
+//! `blit_core::transfers::remote::run_remote_push` — the one entry both
 //! the CLI verbs and the TUI F1 trigger call — now initiates a
 //! SOURCE-role `Transfer` session instead of driving the old
 //! per-direction push client. These pins guard the verb-level option
@@ -22,10 +22,10 @@ use std::path::{Path, PathBuf};
 mod common;
 use common::TestContext;
 
-use blit_app::transfers::remote::{run_remote_push, PushExecution};
 use blit_core::generated::{ComparisonMode, FilterSpec, MirrorMode};
 use blit_core::remote::transfer::{ProgressEvent, ProgressTotals, RemoteTransferProgress};
 use blit_core::remote::{RemoteEndpoint, RemotePath};
+use blit_core::transfers::remote::{run_remote_push, PushExecution};
 
 fn module_endpoint(port: u16) -> RemoteEndpoint {
     RemoteEndpoint {

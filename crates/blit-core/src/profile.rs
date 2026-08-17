@@ -10,14 +10,14 @@
 //! "predictor failed to load" distinction — see `ProfileReport`
 //! field doc for why that matters for JSON shape parity.
 
-use blit_core::perf_history;
-use blit_core::perf_history::TransferMode;
-use blit_core::perf_predictor::PerformancePredictor;
+use crate::perf_history;
+use crate::perf_history::TransferMode;
+use crate::perf_predictor::PerformancePredictor;
 use eyre::Result;
 use std::path::PathBuf;
 
-pub use blit_core::perf_history::PerformanceRecord;
-pub use blit_core::perf_predictor::DurationCoefficients;
+pub use crate::perf_history::PerformanceRecord;
+pub use crate::perf_predictor::DurationCoefficients;
 
 /// One side of the predictor's mode-keyed profile (Copy / Mirror).
 /// `coefficients` is `None` when no training data exists for the

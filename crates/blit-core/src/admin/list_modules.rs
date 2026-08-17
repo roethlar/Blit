@@ -6,8 +6,8 @@
 //! the smart-dispatch `blit list <bare-host>` path that also lands
 //! here.
 
-use blit_core::generated::ListModulesRequest;
-use blit_core::remote::endpoint::RemoteEndpoint;
+use crate::generated::ListModulesRequest;
+use crate::remote::endpoint::RemoteEndpoint;
 use eyre::Result;
 use serde::Serialize;
 

@@ -71,7 +71,7 @@
 //! Subscribe stream rather than the per-reply path.
 
 use crate::state::{ActiveRow, RecentRow, TransfersState};
-use blit_app::display::{format_bps, format_bytes};
+use blit_core::display::{format_bps, format_bytes};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -546,7 +546,7 @@ fn format_files_progress(completed: u64, total: u64) -> String {
 }
 
 fn kind_label(kind: i32) -> &'static str {
-    blit_app::admin::jobs::kind_label(kind)
+    blit_core::admin::jobs::kind_label(kind)
 }
 
 fn module_path(module: &str, path: &str) -> String {

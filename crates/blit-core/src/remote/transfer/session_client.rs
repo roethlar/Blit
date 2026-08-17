@@ -11,10 +11,10 @@
 //!
 //! Verb wiring: the push-shaped verb (CLI `copy`/`mirror`/`move` to a
 //! remote destination, TUI F1 push) rides [`run_push_session`] since
-//! otp-10a via `blit_app::transfers::remote::run_remote_push`; the
+//! otp-10a via `blit_core::transfers::remote::run_remote_push`; the
 //! pull-shaped verb (remote source → local destination, TUI F3 pull)
 //! rides [`run_pull_session`] since otp-10b-2 via
-//! `blit_app::transfers::remote::run_remote_pull`. Both push (otp-4b)
+//! `blit_core::transfers::remote::run_remote_pull`. Both push (otp-4b)
 //! and pull (otp-5b) default to the TCP data plane; the in-stream
 //! carrier is the requested fallback either direction.
 

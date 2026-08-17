@@ -1,6 +1,6 @@
 //! Discovery: turn mDNS results into registered daemon endpoints.
 //!
-//! The scan itself is blit-app's [`blit_app::scan::discover`] — the
+//! The scan itself is blit-app's [`blit_core::scan::discover`] — the
 //! same typed wrapper `blit scan` and the TUI's F1 pane use, which
 //! runs `blit_core::mdns::discover` on a blocking thread. This module
 //! owns the mapping from [`MdnsDiscoveredService`] to the console's
@@ -59,7 +59,7 @@ pub fn endpoints_from_services(services: &[MdnsDiscoveredService]) -> Vec<Daemon
 /// [`crate::Effect::Discover`], feeding the result back as
 /// [`crate::Msg::DiscoveryLoaded`] / [`crate::Msg::DiscoveryFailed`].
 pub async fn discover_daemons(timeout: Duration) -> Result<Vec<DaemonEndpoint>, DiscoveryError> {
-    let services = blit_app::scan::discover(timeout)
+    let services = blit_core::scan::discover(timeout)
         .await
         .map_err(|err| DiscoveryError {
             reason: err.to_string(),

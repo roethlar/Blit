@@ -6,11 +6,11 @@
 //! wire `DaemonState` plus typed helpers; the CLI/TUI layer
 //! does its own formatting.
 
-use blit_core::generated::{
+use crate::generated::{
     CancelJobRequest, ClearRecentRequest, DaemonEvent, DaemonState, GetStateRequest,
     SubscribeRequest,
 };
-use blit_core::remote::endpoint::RemoteEndpoint;
+use crate::remote::endpoint::RemoteEndpoint;
 use eyre::Result;
 use tonic::Code;
 
@@ -167,10 +167,10 @@ pub async fn subscribe(
 #[derive(Debug, Clone)]
 pub enum WatchSnapshot {
     /// Transfer is in flight. Embeds the active row.
-    Active(blit_core::generated::ActiveTransfer),
+    Active(crate::generated::ActiveTransfer),
     /// Transfer has completed (success or failure). Embeds
     /// the record from the ring.
-    Finished(blit_core::generated::TransferRecord),
+    Finished(crate::generated::TransferRecord),
     /// No row found in either table. The transfer either
     /// never existed or rotated out of the recent ring.
     NotFound,
@@ -206,7 +206,7 @@ pub fn watch_snapshot(state: &DaemonState, transfer_id: &str) -> WatchSnapshot {
 /// daemon emitting a kind we don't know yet) render as
 /// `"unknown"` so the row stays visible.
 pub fn kind_label(kind: i32) -> &'static str {
-    use blit_core::generated::TransferKind;
+    use crate::generated::TransferKind;
     match TransferKind::try_from(kind) {
         Ok(TransferKind::Push) => "push",
         Ok(TransferKind::Pull) => "pull",
@@ -219,7 +219,7 @@ pub fn kind_label(kind: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blit_core::generated::TransferKind;
+    use crate::generated::TransferKind;
 
     #[test]
     fn kind_label_maps_known_variants() {
@@ -245,8 +245,8 @@ mod tests {
         DaemonState::default()
     }
 
-    fn active_row(id: &str) -> blit_core::generated::ActiveTransfer {
-        blit_core::generated::ActiveTransfer {
+    fn active_row(id: &str) -> crate::generated::ActiveTransfer {
+        crate::generated::ActiveTransfer {
             transfer_id: id.to_string(),
             kind: TransferKind::DelegatedPull as i32,
             peer: "p".to_string(),
@@ -260,8 +260,8 @@ mod tests {
         }
     }
 
-    fn recent_row(id: &str, ok: bool, err: &str) -> blit_core::generated::TransferRecord {
-        blit_core::generated::TransferRecord {
+    fn recent_row(id: &str, ok: bool, err: &str) -> crate::generated::TransferRecord {
+        crate::generated::TransferRecord {
             transfer_id: id.to_string(),
             kind: TransferKind::DelegatedPull as i32,
             peer: "p".to_string(),

@@ -6,16 +6,16 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-use blit_app::transfers::compare::{comparison_mode, move_comparison_mode, CompareFlags};
-use blit_app::transfers::remote::{
-    run_remote_pull, run_remote_push, PullExecution, PullVerbOutcome, PushExecution,
-};
 use blit_core::remote::transfer::{
     ProgressEvent, ProgressTotals, RemoteTransferProgress, TransferLifecycleTrace,
 };
 use blit_core::remote::RemoteEndpoint;
+use blit_core::transfers::compare::{comparison_mode, move_comparison_mode, CompareFlags};
+use blit_core::transfers::remote::{
+    run_remote_pull, run_remote_push, PullExecution, PullVerbOutcome, PushExecution,
+};
 
-use blit_app::endpoints::format_remote_endpoint;
+use blit_core::endpoints::format_remote_endpoint;
 
 /// CLI-facing alias for the library's pull-outcome struct — since
 /// otp-10b-2 the session verb outcome (`summary` + `dest_root`); the

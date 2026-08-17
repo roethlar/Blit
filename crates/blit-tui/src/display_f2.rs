@@ -18,7 +18,7 @@ pub(crate) fn cancel_status_to_display(
     now: Instant,
     ttl: std::time::Duration,
 ) -> screens::f2::F2CancelDisplay {
-    use blit_app::admin::jobs::CancelJobOutcome;
+    use blit_core::admin::jobs::CancelJobOutcome;
     use screens::f2::F2CancelDisplay;
     match status {
         F2CancelStatus::Idle => F2CancelDisplay::Hidden,

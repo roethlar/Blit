@@ -1,7 +1,7 @@
 //! F4 Diagnostics dump state. Operator presses `s`
 //! (snapshot) on F4 to write a JSON dump of the current
 //! Source/Destination pair to disk. The dump reuses
-//! `blit_app::diagnostics::dump::endpoint_snapshot` so the
+//! `blit_core::diagnostics::dump::endpoint_snapshot` so the
 //! file shape matches the CLI's `blit diagnostics dump
 //! --json` output verbatim.
 //!

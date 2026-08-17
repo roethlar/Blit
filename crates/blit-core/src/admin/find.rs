@@ -5,8 +5,8 @@
 //! pattern as `du::stream` so a TUI can forward entries to its
 //! event loop while the CLI prints inline.
 
-use blit_core::generated::FindRequest;
-use blit_core::remote::RemoteEndpoint;
+use crate::generated::FindRequest;
+use crate::remote::RemoteEndpoint;
 use eyre::Result;
 use serde::Serialize;
 

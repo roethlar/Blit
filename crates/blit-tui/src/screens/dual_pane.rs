@@ -5,7 +5,7 @@
 //! transfer execution land in later slices.
 
 use crate::dual_pane::{BrowserEntry, DualPaneState, PaneFetchStatus, PaneId, PaneState};
-use blit_app::display::format_bytes;
+use blit_core::display::format_bytes;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

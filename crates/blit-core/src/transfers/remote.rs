@@ -44,24 +44,22 @@
 //! retains only the clap-arg wrappers and presentation
 //! (progress monitor + JSON / human printers).
 
-use blit_core::generated::delegated_pull_error::Phase as DelegatedPullPhase;
-use blit_core::generated::delegated_pull_progress::Payload as DelegatedPayload;
-use blit_core::generated::{
+use crate::generated::delegated_pull_error::Phase as DelegatedPullPhase;
+use crate::generated::delegated_pull_progress::Payload as DelegatedPayload;
+use crate::generated::{
     BytesProgress, ComparisonMode, DelegatedPullRequest, DelegatedPullStarted,
     DelegatedPullSummary, FilterSpec, MirrorMode, RemoteSourceLocator, TransferSummary,
 };
-use blit_core::remote::transfer::operation_spec::{
-    delegated_spec_from_options, DelegatedSpecOptions,
-};
-use blit_core::remote::transfer::session_client::{
+use crate::remote::transfer::operation_spec::{delegated_spec_from_options, DelegatedSpecOptions};
+use crate::remote::transfer::session_client::{
     run_pull_session, run_push_session, PullSessionOptions, PushSessionOptions,
 };
-use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
-use blit_core::remote::transfer::{
+use crate::remote::transfer::source::{FsTransferSource, TransferSource};
+use crate::remote::transfer::{
     delegated_summary_failures, FileFailure, RemoteTransferProgress, SessionPhaseRole,
     TransferLifecycleFailure, TransferLifecycleOutcome, TransferLifecycleTrace,
 };
-use blit_core::remote::{RemoteEndpoint, RemotePath};
+use crate::remote::{RemoteEndpoint, RemotePath};
 use eyre::{bail, eyre, Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -78,7 +76,7 @@ use tonic::Code;
 /// D-2026-07-11-1), so a remote source is unrepresentable here.
 ///
 /// `filter` is the wire `FilterSpec` (the CLI builds it via
-/// `blit_app::transfers::filter::build_spec`); it rides
+/// `blit_core::transfers::filter::build_spec`); it rides
 /// `SessionOpen.filter`, where the session's SOURCE end applies
 /// it through the universal `FilteredSource` chokepoint (R49 /
 /// otp-6a) and the DESTINATION scopes mirror deletions with it.
@@ -404,7 +402,7 @@ impl DelegatedPullOutcome {
 /// monotonic counters from the daemon; we use them to compute
 /// deltas against the CLI's [`RemoteTransferProgress`] channel.
 /// This is the aggregate lane of the `ProgressEvent` contract
-/// (see `blit_core::remote::transfer::progress`): only counters
+/// (see `crate::remote::transfer::progress`): only counters
 /// are visible here, so file deltas ride `Payload.files` and no
 /// `FileComplete` is ever emitted.
 #[derive(Default)]
@@ -517,12 +515,12 @@ pub fn destination_spec_fields(dst: &RemoteEndpoint) -> Result<(String, String)>
         RemotePath::Module { module, rel_path } => {
             Ok((
                 module.clone(),
-                blit_core::path_posix::request_path_to_posix(rel_path),
+                crate::path_posix::request_path_to_posix(rel_path),
             ))
         }
         RemotePath::Root { rel_path } => Ok((
             String::new(),
-            blit_core::path_posix::request_path_to_posix(rel_path),
+            crate::path_posix::request_path_to_posix(rel_path),
         )),
         RemotePath::Discovery => bail!(
             "remote destination must include a module or root (e.g., server:/module/ or server://path){}",
@@ -905,8 +903,8 @@ mod tests {
         // the RPC. Otherwise dropping the stream after Started
         // would let the daemon's tx.closed() race drop the
         // transfer.
-        use blit_core::remote::endpoint::RemoteEndpoint;
-        use blit_core::remote::RemotePath;
+        use crate::remote::endpoint::RemoteEndpoint;
+        use crate::remote::RemotePath;
         let endpoint = RemoteEndpoint {
             host: "127.0.0.1".to_string(),
             port: 1,
@@ -938,7 +936,7 @@ mod tests {
     // in the a0-delegated-execution slice so the helpers and their
     // coverage live together.
 
-    use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
+    use crate::remote::transfer::{ProgressEvent, RemoteTransferProgress};
     use tokio::sync::mpsc;
 
     fn delegated_endpoint(path: RemotePath) -> RemoteEndpoint {
@@ -956,8 +954,8 @@ mod tests {
     /// outcome that hides them is the silent-data-loss surface.
     #[test]
     fn delegated_outcome_surfaces_the_destination_failure_report() {
-        use blit_core::remote::transfer::delegated_summary_from_session;
-        use blit_core::remote::transfer::sink::{SinkOutcome, MAX_REPORTED_FILE_FAILURES};
+        use crate::remote::transfer::delegated_summary_from_session;
+        use crate::remote::transfer::sink::{SinkOutcome, MAX_REPORTED_FILE_FAILURES};
 
         let mut contained = SinkOutcome::written(2, 20);
         for index in 0..(MAX_REPORTED_FILE_FAILURES + 6) {

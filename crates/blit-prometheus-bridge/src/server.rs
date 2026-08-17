@@ -13,7 +13,7 @@
 //! as up-but-down rather than a scrape error.
 
 use crate::metrics;
-use blit_app::admin::jobs;
+use blit_core::admin::jobs;
 use blit_core::generated::DaemonState;
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};

@@ -1,7 +1,7 @@
 //! `blit check` — read-only tree comparison.
 //!
 //! The comparison algorithm + result types live in
-//! `blit_app::check`. This module owns clap-arg handling,
+//! `blit_core::check`. This module owns clap-arg handling,
 //! filter construction (via `crate::transfers`), the
 //! `spawn_blocking` lift, the JSON / text presenters, and the
 //! exit-code policy:
@@ -12,8 +12,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use blit_app::check::{compare_trees, CheckResult};
-use blit_app::transfers::filter::{self, FilterInputs};
+use blit_core::check::{compare_trees, CheckResult};
+use blit_core::transfers::filter::{self, FilterInputs};
 use eyre::{bail, Context, Result};
 
 use crate::cli::CheckArgs;

@@ -1,5 +1,5 @@
 use crate::cli::ProfileArgs;
-use blit_app::profile::{self, PredictorReport, ProfileSummary};
+use blit_core::profile::{self, PredictorReport, ProfileSummary};
 use eyre::Result;
 
 pub fn run_profile(args: ProfileArgs) -> Result<()> {

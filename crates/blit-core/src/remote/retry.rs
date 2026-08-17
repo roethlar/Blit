@@ -1,6 +1,6 @@
 //! The retryable-error classifier — single owner of retry policy.
 //!
-//! w5-2: moved here from `blit_app::transfers::retry` (which still
+//! w5-2: moved here from `blit_core::transfers::retry` (which still
 //! re-exports it) so the policy lives next to the transfer code that
 //! produces the errors it classifies, and so in-crate tests can pin
 //! chain-preservation behavior (the queued W1.1 work). The dead,

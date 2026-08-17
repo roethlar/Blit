@@ -16,7 +16,7 @@
 //! [`crate::transfers::remote`].
 
 use crate::endpoints::Endpoint;
-use blit_core::remote::RemoteEndpoint;
+use crate::remote::RemoteEndpoint;
 use std::path::PathBuf;
 
 /// Copy vs mirror — the user-facing verb-tag the dispatcher
@@ -115,7 +115,7 @@ pub fn select_transfer_route(src: Endpoint, dst: Endpoint, kind: TransferKind) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blit_core::remote::RemotePath;
+    use crate::remote::RemotePath;
     use std::path::PathBuf;
 
     fn local(p: &str) -> Endpoint {

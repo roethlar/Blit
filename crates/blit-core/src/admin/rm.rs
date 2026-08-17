@@ -5,8 +5,8 @@
 //! (presentation). The CLI's `move` verb also consumes the
 //! `delete_remote_path` helper for its source-side removal step.
 
-use blit_core::generated::PurgeRequest;
-use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
+use crate::generated::PurgeRequest;
+use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use eyre::{bail, Result};
 use std::path::PathBuf;
 

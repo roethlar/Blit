@@ -10,8 +10,8 @@
 //! future F1 daemon-detail and F3 path-inspect affordances.
 
 use crate::endpoints::{format_remote_endpoint, Endpoint};
-use blit_core::fs_capability::cached_probe;
-use blit_core::remote::RemotePath;
+use crate::fs_capability::cached_probe;
+use crate::remote::RemotePath;
 use serde_json::{json, Value};
 use std::path::Path;
 

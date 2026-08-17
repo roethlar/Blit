@@ -62,7 +62,7 @@
 //!   empty module/directory).
 
 use crate::browse::{BrowseFetchStatus, BrowseRow, BrowseRowKind, BrowseState, BrowseView};
-use blit_app::display::{format_bps, format_bytes};
+use blit_core::display::{format_bps, format_bytes};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -659,7 +659,7 @@ mod tests {
     /// accent), matching F2 (e-9) — not a black-on-dark hardcode.
     #[test]
     fn browse_row_highlight_uses_accent_with_contrast() {
-        use blit_app::admin::list_modules::Module;
+        use blit_core::admin::list_modules::Module;
         use ratatui::{backend::TestBackend, Terminal};
         let mut state = BrowseState::new();
         state.apply_modules(

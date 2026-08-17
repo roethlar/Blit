@@ -23,9 +23,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use blit_core::checksum::{hash_file, ChecksumType};
-use blit_core::enumeration::{EntryKind, EnumeratedEntry, FileEnumerator};
-use blit_core::fs_enum::FileFilter;
+use crate::checksum::{hash_file, ChecksumType};
+use crate::enumeration::{EntryKind, EnumeratedEntry, FileEnumerator};
+use crate::fs_enum::FileFilter;
 use eyre::{Context, Result};
 use serde::Serialize;
 

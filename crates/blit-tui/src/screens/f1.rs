@@ -26,7 +26,7 @@
 //! └──────────────────────────────────────────────────┘
 
 use crate::daemons::{DaemonDetail, DaemonRow, DaemonsState, DiscoveryStatus};
-use blit_app::display::{format_bps, format_bytes};
+use blit_core::display::{format_bps, format_bytes};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

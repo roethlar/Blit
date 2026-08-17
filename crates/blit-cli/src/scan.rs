@@ -1,5 +1,5 @@
 use crate::cli::ScanArgs;
-use blit_app::scan;
+use blit_core::scan;
 use eyre::Result;
 use serde::Serialize;
 use std::time::Duration;
