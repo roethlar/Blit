@@ -1,15 +1,19 @@
-# Interface Platform — one SDK layer, standalone front-ends
+# Interface Platform — blit-core is the platform; standalone front-ends
 
-**Status**: Draft — R1 (direction/supersession) APPROVED, recorded as
-D-2026-08-17-1. Awaiting R2 (SDK crate name), R3 (`blit-tui`
-disposition), R4 (`blit-gui` disposition). No code until **Status**:
+**Status**: Draft — R1 (direction) APPROVED = D-2026-08-17-1; R2
+(interface-crate name) DISSOLVED = D-2026-08-17-2 (no new crate:
+everything folds into `blit-core`, which publishes to crates.io).
+Awaiting R3 (`blit-tui` disposition), R4 (`blit-gui` disposition),
+R5 (`blit-prometheus-bridge` deletion). No code until **Status**:
 Active and a per-slice go.
-**Created**: 2026-08-17
-**Supersedes**: `docs/plan/UI_REMOVAL.md` (Draft, never
-activated; D-2026-08-17-1); amends D-2026-08-15-1 (UIs stay out-of-repo, but the
-headless interface layer is a first-class product of this repo, not UI
-residue to delete). D-2026-08-15-2 (1.0 gates on CLI + daemon only) is
-unchanged.
+**Created**: 2026-08-17 (reworked same day under D-2026-08-17-2; the
+original draft's merged-SDK-crate shape, slices if-1..if-3, is
+superseded)
+**Supersedes**: `docs/plan/UI_REMOVAL.md` (Draft, never activated;
+D-2026-08-17-1); amends D-2026-08-15-1 (UIs stay out-of-repo, but the
+headless interface capability is a first-class product of this repo,
+not UI residue to delete). D-2026-08-15-2 (1.0 gates on CLI + daemon
+only) is unchanged.
 
 ## Direction (owner intent, 2026-08-17)
 
@@ -26,64 +30,61 @@ binary (`winget install blit-gui` gives a GUI that works alone) that:
 - works independently of every other front-end.
 
 UI-specific work (TUI, GUI) lives in `http://q:3000/michael/BlitAdmin_UIs.git`.
-The layer they build on lives here.
+The layer they build on lives here — and it is `blit-core` itself.
+
+Additionally (D-2026-08-17-2): Blit is embeddable. Third-party Rust
+apps integrate by adding the `blit-core` crate; everything else
+integrates through the daemon's gRPC surface. `blit-core` publishes to
+crates.io.
 
 ## Architecture invariant
 
-**There is exactly one programmatic interface to the engine: the SDK
-crate.** Every front-end consumes it. The CLI is the reference
-consumer: if the CLI can only do something by reaching around the SDK,
-the SDK API is incomplete and gets extended — that is the enforcement
-mechanism for "first-class."
+**There is exactly one programmatic interface to the engine:
+`blit-core`.** No intermediate crate. Every front-end — the in-repo
+CLI, the out-of-repo TUI/GUI, any third-party embedder — depends on
+`blit-core` alone. The CLI is the reference consumer: if the CLI can
+only do something by reaching around the library, the library API is
+incomplete and gets extended. That rule is what makes third-party
+embedding work without a special case.
 
 ```
-blit-core          engine: enumerate, plan, transfer_session
-blit-daemon        engine wrapped in the gRPC service (proto/blit.proto)
-<sdk crate>        THE headless interface layer (library, no I/O to a screen)
-  ├── blit (CLI)               this repo — ships first, 1.0 gate
-  ├── blit-tui                 BlitAdmin_UIs — later
-  └── blit-gui                 BlitAdmin_UIs — later
+blit-core          THE platform crate (publishes to crates.io):
+                   engine (enumerate, plan, transfer_session),
+                   verbs (check/scan/df/diagnostics/…), daemon client,
+                   mDNS discovery, remote browse, event/observer surface
+blit-daemon        blit-core wrapped in the gRPC service (proto/blit.proto)
+  consumers of blit-core:
+  ├── blit (CLI)              this repo — ships first, 1.0 gate
+  ├── blit-tui                BlitAdmin_UIs — later
+  ├── blit-gui                BlitAdmin_UIs — later
+  └── third-party Rust apps   crates.io
 ```
 
-SDK responsibilities (all exist today, split across `blit-app` and
-`blit-console-core`; this plan consolidates, it does not invent):
+Target workspace after this plan: **`blit-core`, `blit-cli`,
+`blit-daemon`** (three crates; `blit-prometheus-bridge` pending R5).
 
-- in-process engine operations (local transfers, scan, check, profile);
-- daemon discovery (`blit_core::mdns` via `discover`);
-- remote daemon connection (`BlitClient` gRPC with bounded connect,
-  contract-version handling) and remote browse (`browse`, `endpoint`,
-  `model` with stale-completion generation tags);
-- admin verbs (df, diagnostics, endpoints, transfer filtering, display
-  helpers);
-- full engine access for front-ends through one dependency
-  (`pub use blit_core as core;` re-export — see if-3).
+Out-of-repo consumers pin `blit-core` by crates.io version (or git rev
+on the LAN gitea before the first publish) and upgrade deliberately.
 
-Dependency rule: front-ends (`blit-cli`, and out-of-repo TUI/GUI)
-depend on the SDK crate only. Services (`blit-daemon`,
-`blit-prometheus-bridge`) may keep direct `blit-core` deps.
-Out-of-repo consumers pin the SDK by git rev/tag on the LAN gitea and
-upgrade deliberately; no crates.io publication (non-goal).
+## Rulings (chat, one at a time; record in `docs/DECISIONS.md`)
 
-## Rulings required (chat, one at a time; record in `docs/DECISIONS.md`)
-
-- **R1 — direction**: adopt this architecture; supersede
-  `UI_REMOVAL.md`; amend D-2026-08-15-1 as described above.
-  **RULED: approved, 2026-08-17 (D-2026-08-17-1).**
-- **R2 — SDK crate name**: `blit-app` + `blit-console-core` merge into
-  one crate. Recommendation: **`blit-sdk`** — says exactly what it is
-  (the supported surface you build a Blit front-end on), no false
-  UI connotation ("console"), no vague one ("app"). Alternate
-  considered: `blit-control`. The rest of this plan writes `blit-sdk`;
-  a different ruling substitutes mechanically.
+- **R1 — direction**: RULED, approved 2026-08-17 (D-2026-08-17-1).
+- **R2 — interface-crate name**: DISSOLVED (D-2026-08-17-2); no new
+  crate exists to name.
 - **R3 — `blit-tui`** (29,172 lines, pre-dates the one-session
   architecture decisions and D-2026-08-15-1): (a) delete here, future
-  TUI starts fresh in BlitAdmin_UIs against the SDK (git history keeps
-  the code recoverable), or (b) move as-is to BlitAdmin_UIs.
+  TUI starts fresh in BlitAdmin_UIs against `blit-core` (git history
+  keeps the code recoverable), or (b) move as-is to BlitAdmin_UIs.
   Recommendation: **(a)**.
-- **R4 — `blit-gui`** (552 lines, the landed C1 eframe shell, already
-  console-core-only): (a) move as-is to BlitAdmin_UIs as the GUI
-  starting point, then delete here, or (b) delete here, GUI starts
-  fresh. Recommendation: **(a)**; the shell is current and thin.
+- **R4 — `blit-gui`** (552 lines, the landed C1 eframe shell): (a)
+  move as-is to BlitAdmin_UIs as the GUI starting point, then delete
+  here, or (b) delete here, GUI starts fresh. Recommendation: **(a)**.
+- **R5 — `blit-prometheus-bridge`** (877 lines, standalone binary, 20
+  inline test fns, no integration tests, no consumers, not in any
+  release archive; owner 2026-08-17: "never been executed, tested,
+  requested, or desired"): delete, or keep. Recommendation: **delete**
+  (if metrics are ever wanted, the daemon exposes them itself; git
+  history keeps this code).
 
 ## Facts (verified 2026-08-17 against the tree)
 
@@ -98,10 +99,26 @@ upgrade deliberately; no crates.io publication (non-goal).
 - `blit-console-core` modules (1,416 lines): browse, discover,
   endpoint, model. `discover` wraps `blit_core::mdns`; `browse`/`model`
   carry the generation-tag stale-completion design.
-- `blit-cli` references `blit_core::` at 112 sites and `blit_app::` at
-  96 sites (grep counts; re-verify at implementation time).
+- **No module-name collisions**: none of the 13 incoming module names
+  exists at `blit-core`'s top level (verified against
+  `crates/blit-core/src/lib.rs`). Note `endpoint` (browse-pane
+  endpoint model, from console-core) vs `endpoints` (CLI endpoint
+  parsing, from blit-app) — different things; keep both names,
+  document each in its module header.
+- Dependency delta of the fold: `chrono` (new to core) and the
+  `"disk"` feature on core's existing `sysinfo`. Everything else
+  blit-app/console-core use, core already has.
+- `blit-cli` references `blit_app::` at 96 sites and `blit_core::` at
+  112 sites (grep counts; re-verify at implementation time). After the
+  fold its only path dep is `blit-core`.
 - gRPC client type: `blit_core::generated::blit_client::BlitClient`;
   bounded connect lives in `blit_app::client::connect_with_timeout`.
+- crates.io names (checked 2026-08-17 via API): `blit-core` and
+  `blit-daemon` AVAILABLE; `blit` and `blit-cli` TAKEN by unrelated
+  projects (a sprite library; a terminal client). Irrelevant to
+  binaries — they ship via package managers
+  (`PACKAGE_MANAGER_DISTRIBUTION.md`), not crates.io. Only
+  `blit-core` publishes.
 - CI `.github/workflows/ci.yml` installs GUI headers in three jobs
   (lines 28–31, 52–55, 116–119) solely because `blit-gui` (egui)
   compiles in the workspace.
@@ -109,6 +126,9 @@ upgrade deliberately; no crates.io publication (non-goal).
   references remain in surviving crates (`crates/blit-app/Cargo.toml:8`,
   `crates/blit-app/src/lib.rs:2`,
   `crates/blit-cli/src/transfers/failures.rs:12`, …).
+- `blit-core`'s build script vendors protoc, so crate consumers need
+  no system protoc; `cargo package` must be verified to include
+  `proto/` (see ip-6).
 
 ## Non-goals
 
@@ -117,20 +137,22 @@ upgrade deliberately; no crates.io publication (non-goal).
 - New package IDs / channels — `PACKAGE_MANAGER_DISTRIBUTION.md` owns
   packaging; `blit-tui`/`blit-gui` IDs are added there when those
   front-ends ship.
-- crates.io publication of any crate.
+- Curating/regrouping `blit-core`'s module tree — the fold moves
+  modules in flat at top level; naming/grouping polish is future work
+  (see Deferred).
 - History rewrite; plain commits on `master`, one slice each.
 
 ## Acceptance criteria
 
-- [ ] One SDK crate exists containing today's `blit-app` +
-      `blit-console-core` capability; both old crates gone from
-      `cargo metadata`.
-- [ ] `blit-cli`'s `Cargo.toml` depends on the SDK crate only (no
-      direct `blit-core`); grep shows zero `blit_core::` /
-      `blit_app::` paths in `crates/blit-cli/src`.
-- [ ] `blit-gui`/`blit-tui` resolved per R3/R4; workspace builds
-      core / sdk / cli / daemon / prometheus-bridge only; the three CI
-      GUI-header blocks removed; CI green.
+- [ ] `cargo metadata` lists no `blit-app`, `blit-console-core`
+      (and no `blit-gui`/`blit-tui`/`blit-prometheus-bridge` per
+      R3/R4/R5); workspace is core + cli + daemon.
+- [ ] `blit-cli`'s `Cargo.toml` depends on `blit-core` only; grep
+      shows zero `blit_app::` / `blit_console_core::` paths anywhere
+      in the tree.
+- [ ] The three CI GUI-header blocks removed; CI green.
+- [ ] `cargo package -p blit-core` succeeds (dry-run publishability);
+      the actual `cargo publish` is a separately owner-gated act.
 - [ ] `README.md` tree and surviving-crate comments match the new
       shape.
 - [ ] Full gate green per slice (fmt; clippy native + strict
@@ -141,56 +163,68 @@ upgrade deliberately; no crates.io publication (non-goal).
 
 ## Slices (each: own go, own commit, full gate, DEVLOG entry)
 
-1. **if-1 — rename `blit-app` → `blit-sdk`.** `git mv
-   crates/blit-app crates/blit-sdk`; update package name, workspace
-   member, and the dependents' Cargo.tomls (blit-cli,
-   blit-console-core, blit-tui if present, blit-prometheus-bridge);
-   rewrite `blit_app::` imports to `blit_sdk::`; regenerate
-   `Cargo.lock`. Mechanical; zero behavior change; test delta 0.
-2. **if-2 — fold `blit-console-core` into `blit-sdk`.** Move
-   `browse.rs`, `discover.rs`, `endpoint.rs`, `model.rs` in as public
-   modules (note: existing `endpoints.rs` vs incoming `endpoint.rs` —
-   keep both names, they are different things: CLI endpoint parsing vs
-   browse-pane endpoint model; document each in its module header).
-   Rewire `blit-gui` to `blit-sdk`; drop the member; regenerate
-   `Cargo.lock`. Move console-core's tests with their modules; test
-   delta 0.
-3. **if-3 — single-dependency surface.** Add `pub use blit_core as
-   core;` to `blit-sdk`'s lib.rs. Migrate `blit-cli` off its direct
-   `blit-core` dep: rewrite `use blit_core::…` → `use
-   blit_sdk::core::…` (112 sites, mechanical), remove `blit-core` from
-   `crates/blit-cli/Cargo.toml`. Gate addition: a grep check proving
-   `crates/blit-cli/src` contains no `blit_core::`/`blit_app::` paths.
-4. **if-4 — `blit-gui` per R4.** If (a): copy the crate into
-   BlitAdmin_UIs with its dependency rewritten to a git-pinned
-   `blit-sdk` (every push to BlitAdmin_UIs is owner-gated,
+1. **ip-1 — fold `blit-app` into `blit-core`.** Move the nine modules
+   into `crates/blit-core/src/` as top-level `pub mod`s (no
+   collisions, verified above); move their unit tests with them; add
+   `chrono` and the sysinfo `"disk"` feature to core's Cargo.toml;
+   rewrite `blit_app::` → `blit_core::` in blit-cli,
+   blit-console-core, blit-tui and blit-prometheus-bridge (while
+   present); drop `blit-app` from blit-cli's (and the others')
+   Cargo.toml and from workspace members; delete `crates/blit-app`;
+   regenerate `Cargo.lock`. Internal references from the moved
+   `client` module to `blit_core::generated` become crate-local
+   (`crate::generated`). Zero behavior change; test delta 0.
+2. **ip-2 — fold `blit-console-core` into `blit-core`.** Move
+   `browse.rs`, `discover.rs`, `endpoint.rs`, `model.rs` in as
+   top-level `pub mod`s; document `endpoint` vs `endpoints` in both
+   module headers; rewire `blit-gui` to `blit-core`; drop the member;
+   delete the crate dir; regenerate `Cargo.lock`. Test delta 0.
+3. **ip-3 — `blit-gui` per R4.** If (a): copy the crate into
+   BlitAdmin_UIs with its dependency rewritten to `blit-core` pinned
+   by git rev (every push to BlitAdmin_UIs is owner-gated,
    named-remote, approved in-session). Then, either ruling: delete
    `crates/blit-gui`, drop the member, remove the three CI GUI-header
    blocks, regenerate `Cargo.lock`. Record deleted-test delta.
-5. **if-5 — `blit-tui` per R3.** Delete (or move, per ruling) the
+4. **ip-4 — `blit-tui` per R3.** Delete (or move, per ruling) the
    crate; drop the member; regenerate `Cargo.lock`; fix `README.md`
    tree and comment-only references in surviving crates. Record
    deleted-test delta.
-6. **if-6 — record the shape.** Update `README.md` architecture prose
+5. **ip-5 — `blit-prometheus-bridge` per R5.** If delete: remove the
+   crate and member, regenerate `Cargo.lock`, record the 20-test
+   delta.
+6. **ip-6 — crates.io publishability.** Add publish metadata to
+   `blit-core`'s Cargo.toml (`description`, `repository`, `readme`,
+   `keywords`, `categories`; license already inherited MIT); verify
+   `cargo package -p blit-core` succeeds and the packaged crate
+   builds (protoc vendoring + `proto/` inclusion — fix
+   `include`/`exclude` if the package misses files). **The actual
+   `cargo publish` is outward-facing: owner's crates.io account/token,
+   owner-approved in-session, never run by an agent on its own.**
+   First published version = the workspace version current at publish
+   time.
+7. **ip-7 — record the shape.** Update `README.md` architecture prose
    and crate list to the final workspace; `docs/STATE.md` queue and
-   authoritative-docs entries; supersession edits to `UI_REMOVAL.md`
-   (Status → Superseded, pointer here) if not done at activation.
+   authoritative-docs entries; any remaining supersession pointers.
 
-Order: if-1 → if-2 strictly first (everything else touches the merged
-crate). if-3, if-4, if-5 are independent of each other; default order
-as numbered. if-6 last.
+Order: ip-1 → ip-2 strictly first (everything else touches the folded
+crate). ip-3, ip-4, ip-5 are independent of each other; default order
+as numbered. ip-6 after ip-1/ip-2; ip-7 last.
 
 ## Deferred (recorded so it is not rediscovered)
 
 - **Peer version skew.** Independently installed front-ends and
-  daemons WILL meet across versions. D-2026-07-05-2 (same-build peers
-  only, refusal at session open) stands until an explicit owner
-  decision replaces it with contract-version compatibility
-  (`CONTRACT_VERSION` in `proto/blit.proto` is the hook). Must be
-  ruled before any front-end ships as a separately-versioned install.
-- **Curated event surface.** Front-ends initially reach engine
-  progress/observer APIs through the `core` re-export. If the raw
-  surface proves too sharp for the TUI/GUI, a curated event-stream
-  API in `blit-sdk` is its own future plan.
-- **SDK tagging discipline** for BlitAdmin_UIs pinning (which tags,
-  when) — decide when the first out-of-repo consumer lands.
+  daemons WILL meet across versions — and crates.io embedders make
+  this certain. D-2026-07-05-2 (same-build peers only, refusal at
+  session open) stands until an explicit owner decision replaces it
+  with contract-version compatibility (`CONTRACT_VERSION` in
+  `proto/blit.proto` is the hook). Must be ruled before any
+  front-end ships as a separately-versioned install.
+- **Module-tree curation.** The fold leaves ~13 new top-level modules
+  in `blit-core`. Whether/how to group them (and what the curated
+  public API of a published crate should hide) is its own future
+  plan; semver discipline starts mattering at first publish.
+- **Curated event surface.** Front-ends initially use engine
+  progress/observer APIs directly. If the raw surface proves too
+  sharp for the TUI/GUI, a curated event-stream API is future work.
+- **Publish cadence** (which versions/tags go to crates.io, and
+  whether `blit-daemon` ever publishes) — decide at first publish.
