@@ -5,8 +5,9 @@
 everything folds into `blit-core`, which publishes to crates.io).
 R5 RULED = D-2026-08-17-3 (`blit-prometheus-bridge` deleted, ip-5).
 R3 RULED = D-2026-08-17-4 (`blit-tui` deleted, fresh TUI later, ip-4).
-Awaiting R4 (`blit-gui` disposition) only.
-No code until **Status**: Active and a per-slice go.
+R4 RULED = D-2026-08-17-5 (`blit-gui` deleted, fresh GUI later, ip-3).
+**All rulings closed. Awaiting the owner's flip to Active; then each
+slice needs its own go.**
 **Created**: 2026-08-17 (reworked same day under D-2026-08-17-2; the
 original draft's merged-SDK-crate shape, slices if-1..if-3, is
 superseded)
@@ -75,9 +76,9 @@ on the LAN gitea before the first publish) and upgrade deliberately.
 - **R3 — `blit-tui`**: RULED, (a) delete; future TUI starts fresh in
   BlitAdmin_UIs (owner "(a)", 2026-08-17; D-2026-08-17-4). Executed
   by ip-4.
-- **R4 — `blit-gui`** (552 lines, the landed C1 eframe shell): (a)
-  move as-is to BlitAdmin_UIs as the GUI starting point, then delete
-  here, or (b) delete here, GUI starts fresh. Recommendation: **(a)**.
+- **R4 — `blit-gui`**: RULED, (b) delete; future GUI starts fresh in
+  BlitAdmin_UIs (owner "B", 2026-08-17; D-2026-08-17-5). Executed by
+  ip-3. Consequence: this plan pushes nothing to BlitAdmin_UIs.
 - **R5 — `blit-prometheus-bridge`**: RULED, delete (owner "remove",
   2026-08-17; D-2026-08-17-3). Executed by ip-5.
 
@@ -174,12 +175,10 @@ on the LAN gitea before the first publish) and upgrade deliberately.
    top-level `pub mod`s; document `endpoint` vs `endpoints` in both
    module headers; rewire `blit-gui` to `blit-core`; drop the member;
    delete the crate dir; regenerate `Cargo.lock`. Test delta 0.
-3. **ip-3 — `blit-gui` per R4.** If (a): copy the crate into
-   BlitAdmin_UIs with its dependency rewritten to `blit-core` pinned
-   by git rev (every push to BlitAdmin_UIs is owner-gated,
-   named-remote, approved in-session). Then, either ruling: delete
+3. **ip-3 — delete `blit-gui` (D-2026-08-17-5).** Delete
    `crates/blit-gui`, drop the member, remove the three CI GUI-header
    blocks, regenerate `Cargo.lock`. Record deleted-test delta.
+   Nothing is copied or pushed to BlitAdmin_UIs.
 4. **ip-4 — delete `blit-tui` (D-2026-08-17-4).** Delete the crate;
    drop the member; regenerate `Cargo.lock`; fix `README.md` tree and
    comment-only references in surviving crates. Record deleted-test

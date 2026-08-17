@@ -828,3 +828,8 @@ Format:
 - Decision: `crates/blit-tui` (29,172 lines) is deleted from the workspace (INTERFACE_PLATFORM ruling R3 option (a), slice ip-4); nothing moves to BlitAdmin_UIs. The future TUI is written fresh there as a standalone `blit-core` consumer. Git history keeps the deleted code recoverable.
 - Why: owner ruled "(a)", 2026-08-17. The crate predates the one-transfer-path architecture and D-2026-08-15-1; seeding the new repo with it would carry the rejected shape into day one.
 - Supersedes: nothing new (the crate's fate was already sealed by D-2026-08-15-1; this settles delete-vs-move).
+
+## D-2026-08-17-5 — blit-gui is deleted; the future GUI starts fresh
+- Decision: `crates/blit-gui` (552 lines, the C1 eframe shell) is deleted from the workspace (INTERFACE_PLATFORM ruling R4 option (b), slice ip-3); nothing moves to BlitAdmin_UIs, so this plan pushes nothing to that repo. The future GUI is written fresh there as a standalone `blit-core` consumer. Git history keeps the deleted code recoverable.
+- Why: owner ruled "B", 2026-08-17, rejecting the shell as a product ("a two-paned completely non-functional piece of garbage"). Its only value was demonstrating the thin-view-over-headless-layer wiring, and that machinery (session/browse/generation tags) survives inside the folded `blit-core`; the eframe scaffolding on top is trivially rebuilt.
+- Supersedes: nothing new (fate sealed by D-2026-08-15-1; this settles move-vs-delete).
