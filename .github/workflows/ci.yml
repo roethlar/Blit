@@ -23,12 +23,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: native GUI build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libx11-dev libxrandr-dev libxi-dev \
-            libxcursor-dev libxinerama-dev libgl1-mesa-dev \
-            libwayland-dev libxkbcommon-dev
       - name: cargo fmt
         run: cargo fmt --all -- --check
       - name: cargo clippy
@@ -47,12 +41,6 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: native GUI build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libx11-dev libxrandr-dev libxi-dev \
-            libxcursor-dev libxinerama-dev libgl1-mesa-dev \
-            libwayland-dev libxkbcommon-dev
       - name: cargo test
         run: cargo test --workspace
 
@@ -110,13 +98,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - name: native GUI build deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libx11-dev libxrandr-dev libxi-dev \
-            libxcursor-dev libxinerama-dev libgl1-mesa-dev \
-            libwayland-dev libxkbcommon-dev
       - name: Resolve workspace release version
         id: release-version
         shell: bash
