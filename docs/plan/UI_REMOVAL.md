@@ -1,6 +1,13 @@
 # UI Crate Removal
 
-**Status**: Draft
+**Status**: Superseded — by `docs/plan/INTERFACE_PLATFORM.md`
+(D-2026-08-17-1) before ever activating. This plan deleted
+`blit-console-core` as UI residue; the owner instead ruled that the
+headless interface layer is a first-class product (the SDK crate) and
+future UIs are standalone SDK consumers in BlitAdmin_UIs. The deletion
+slices below are absorbed/reshaped there (ui-rm-1/2 → if-4/if-5; the
+`blit-app` question → `blit-app` becomes the SDK). Historical record
+only; do not execute.
 **Created**: 2026-08-15
 **Supersedes**: nothing (executes the removal that D-2026-08-15-1 gated on
 "its own approved plan and go")

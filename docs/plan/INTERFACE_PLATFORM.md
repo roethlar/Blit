@@ -1,11 +1,12 @@
 # Interface Platform — one SDK layer, standalone front-ends
 
-**Status**: Draft — awaiting owner rulings R1 (direction/supersession),
-R2 (SDK crate name), R3 (`blit-tui` disposition), R4 (`blit-gui`
-disposition). No code until **Status**: Active and a per-slice go.
+**Status**: Draft — R1 (direction/supersession) APPROVED, recorded as
+D-2026-08-17-1. Awaiting R2 (SDK crate name), R3 (`blit-tui`
+disposition), R4 (`blit-gui` disposition). No code until **Status**:
+Active and a per-slice go.
 **Created**: 2026-08-17
-**Supersedes on activation**: `docs/plan/UI_REMOVAL.md` (Draft, never
-activated); amends D-2026-08-15-1 (UIs stay out-of-repo, but the
+**Supersedes**: `docs/plan/UI_REMOVAL.md` (Draft, never
+activated; D-2026-08-17-1); amends D-2026-08-15-1 (UIs stay out-of-repo, but the
 headless interface layer is a first-class product of this repo, not UI
 residue to delete). D-2026-08-15-2 (1.0 gates on CLI + daemon only) is
 unchanged.
@@ -67,6 +68,7 @@ upgrade deliberately; no crates.io publication (non-goal).
 
 - **R1 — direction**: adopt this architecture; supersede
   `UI_REMOVAL.md`; amend D-2026-08-15-1 as described above.
+  **RULED: approved, 2026-08-17 (D-2026-08-17-1).**
 - **R2 — SDK crate name**: `blit-app` + `blit-console-core` merge into
   one crate. Recommendation: **`blit-sdk`** — says exactly what it is
   (the supported surface you build a Blit front-end on), no false
