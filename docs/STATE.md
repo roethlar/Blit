@@ -156,7 +156,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    no daemon runs on zoey without a fresh go.
 8. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
 9. **`docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (ACTIVE, D-2026-08-12-7)**
-   — **pm-4 PROVEN; ALL BOT CHANNELS LIVE 2026-08-18**: brew tap (install-proven on arm64 macOS, exact identity, signature intact), scoop bucket, and AUR (`blit` + `blit-bin` 0.1.2-1, RPC-verified) are live; winget branch on the owner's fork awaits their microsoft PR click; homebrew-core (pm-5) not started. Detail: DEVLOG 2026-08-18 20:10Z/20:30Z.
+   — **pm-4 PROVEN; ALL BOT CHANNELS LIVE 2026-08-18**: brew tap (install-proven on arm64 macOS, exact identity, signature intact), scoop bucket, and AUR (`blit` + `blit-bin` 0.1.2-1, RPC-verified) are live; winget PR open (microsoft/winget-pkgs#420041, in external review); homebrew-core (pm-5) not started. Detail: DEVLOG 2026-08-18 20:10Z/20:30Z.
 
 ## Authoritative docs right now
 
