@@ -1,6 +1,8 @@
 # Interface Platform — blit-core is the platform; standalone front-ends
 
-**Status**: Active — owner "go", 2026-08-17. All rulings closed:
+**Status**: Shipped — owner declared 2026-08-18; all slices landed,
+all acceptance criteria met, CI green on `086823f7` (run
+32089671635). Was Active by owner "go" 2026-08-17. All rulings closed:
 R1 (direction) = D-2026-08-17-1; R2 (interface-crate name) DISSOLVED
 = D-2026-08-17-2 (no new crate: everything folds into `blit-core`,
 which publishes to crates.io); R5 = D-2026-08-17-3
