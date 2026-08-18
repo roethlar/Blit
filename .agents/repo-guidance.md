@@ -171,7 +171,8 @@ cargo test --workspace
   removal is called out in the finding doc's Known gaps.
 - Windows parity: after touching platform-specific code (`win_fs`, planners),
   run `scripts/windows/run-blit-tests.ps1`.
-- Docs gate (CI): a push touching `crates/**` or `proto/**` must also touch
+- Docs gate (CI): a push touching `crates/**` (which now contains the
+  proto) must also touch
   `docs/STATE.md`, unless the commit message contains `[state: skip]`
   (reserved for mechanical changes). `scripts/agent/check-docs.sh` must pass;
   run it locally before pushing docs changes.
@@ -260,17 +261,25 @@ consent (`docs/DECISIONS.md` D-2026-06-07-1).
 
 ## Project Map
 
-- `crates/blit-core/` — core library (enumeration, planner, the unified
-  `transfer_session` — every transfer, local included, since otp-11);
-  most logic and unit tests live here. New modules get re-exported in
-  `crates/blit-core/src/lib.rs`.
+- `crates/blit-core/` — THE platform crate (D-2026-08-17-2): engine
+  (enumeration, planner, the unified `transfer_session` — every
+  transfer, local included, since otp-11), the former blit-app verb
+  layer (admin, check, client, diagnostics, display, endpoints,
+  profile, scan, transfers), and the former blit-console-core browse
+  layer (browse, discover, endpoint, model). Publishable to crates.io
+  (publish act owner-gated). Every front-end and third-party Rust
+  embedder consumes this crate alone; most logic and unit tests live
+  here. New modules get declared in `crates/blit-core/src/lib.rs`.
 - `crates/blit-cli/`, `crates/blit-daemon/` — CLI and daemon binaries; admin
   verbs (scan, ls, find, du, df, rm, completions, profile, list-modules) live
-  in `blit-cli` alongside transfer commands.
-- `crates/blit-app/`, `crates/blit-tui/` — TUI application layers.
-- `crates/blit-prometheus-bridge/` — metrics bridge.
-- `proto/blit.proto` — gRPC definitions; `blit-core`'s build script vendors
-  protoc.
+  in `blit-cli` alongside transfer commands. These three are the whole
+  workspace; UIs live in `BlitAdmin_UIs` (D-2026-08-15-1).
+- `crates/blit-core/proto/blit.proto` — gRPC definitions (moved into
+  the crate in ip-6 so the packaged crate builds); `blit-core`'s build
+  script vendors protoc.
+- Deleted 2026-08-17 (INTERFACE_PLATFORM, D-2026-08-17-2..-5): `blit-app`
+  and `blit-console-core` (folded into core), `blit-tui`, `blit-gui`,
+  `blit-prometheus-bridge` (removed). Do not re-add them as crates.
 - Integration tests live per-crate (`crates/blit-cli/tests/`,
   `crates/blit-core/tests/`); the root `Cargo.toml` is a virtual workspace,
   so a root-level `tests/` dir would never be compiled. `scripts/` — helper

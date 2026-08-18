@@ -159,6 +159,21 @@ on the LAN gitea before the first publish) and upgrade deliberately.
 
 ## Slices (each: own go, own commit, full gate, DEVLOG entry)
 
+**Execution record (2026-08-17, all under the owner's blanket "go do
+the coding"; details per slice in DEVLOG):** ip-1 `2bb7c734` (found
+pre-implemented in the working tree, verified as pure code motion,
+authorship outside this session); ip-3 `d5723fb5` (−13 tests); ip-4
+`b42747ae` (−678); ip-5 `570b8cc7` (−20); ip-2 `d8021482` (delta 0);
+ip-6 `f83cb14d` (proto moved into the crate, `cargo package` proven);
+ip-7 = the shape-recording commit carrying this note. Executed order
+ip-1→3→4→5→2→6→7: deletions before folds so the folds had no doomed
+dependents to rewire (the plan's ip-3/4/5 independence makes this
+legal). Every gate ran on macOS (aarch64) + linux cross-clippy; final
+suite 1162 passed / 0 failed / 2 ignored, every delta reconciled
+exactly. **CI has not seen these commits (all local, push
+owner-gated), so the CI-green acceptance criterion and any Shipped
+flip remain open.**
+
 1. **ip-1 — fold `blit-app` into `blit-core`.** Move the nine modules
    into `crates/blit-core/src/` as top-level `pub mod`s (no
    collisions, verified above); move their unit tests with them; add
