@@ -13,8 +13,9 @@
 //!   session, mirror deletions in-session (no post-RPC purge
 //!   half — the old split's reason to exist is gone on this
 //!   path). Presentation (progress monitor spawn, summary
-//!   printing) stays in `blit-cli` until the M-C
-//!   `AppProgressEvent` reshape lands.
+//!   printing) stays in `blit-cli`: that monitor is
+//!   display-only and spans the whole session, in-session
+//!   mirror purge included, so nothing here may depend on it.
 //!
 //! - [`run_delegated_pull`] + [`DelegatedPullExecution`] +
 //!   [`DelegatedPullOutcome`] — delegated remote→remote
@@ -36,8 +37,8 @@
 //!   source is local by construction: `--relay-via-cli` (the
 //!   one remote-source push shape) was removed at otp-10c-1
 //!   (D-2026-07-11-1). The CLI-side progress monitor stays in
-//!   `blit-cli` (M-C `AppProgressEvent` reshape is its own
-//!   pause point).
+//!   `blit-cli`: display-only, and live for the whole session
+//!   including the in-session mirror purge.
 //!
 //! No further `transfers/remote.rs` orchestration lives in
 //! `blit-cli` after this slice — the CLI's `transfers/remote.rs`
@@ -539,12 +540,11 @@ pub fn destination_spec_fields(dst: &RemoteEndpoint) -> Result<(String, String)>
 /// continues to consume `ProgressEvent` as before.
 ///
 /// `on_started` fires exactly once if the destination emits a
-/// `Started` event (it precedes the first byte). The callback
-/// is the stopgap presentation hook: CLI prints
+/// `Started` event (it precedes the first byte). It is a
+/// display-only hook — the CLI prints
 /// `[delegation] destination pulling from <ep> (<n> stream(s))`
-/// in verbose mode; TUI passes a no-op. The M-C
-/// `AppProgressEvent` reshape will replace the callback with
-/// a stream variant that both consumers handle uniformly.
+/// in verbose mode, and a caller that shows nothing passes a
+/// no-op — so the transfer must not depend on what it does.
 ///
 /// Errors from the destination's stream are mapped through
 /// [`map_delegated_error`]; transport-level failures

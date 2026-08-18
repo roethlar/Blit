@@ -218,9 +218,8 @@ async fn run_remote_to_remote_direct_inner(
     }
 
     // CLI-side presentation hook for the destination's `Started`
-    // event. M-C's `AppProgressEvent` reshape will replace the
-    // callback with a stream variant that both CLI and TUI
-    // handle uniformly; the closure is the stopgap.
+    // event: display-only, so the closure must stay free of any
+    // effect the transfer depends on.
     let verbose_human = args.verbose && !args.json;
     let outcome = run_delegated_pull(execution, progress_handle.as_ref(), |started| {
         if verbose_human {

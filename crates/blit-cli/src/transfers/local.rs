@@ -79,12 +79,7 @@ pub fn print_local_transfer_summary(
     let options = build_local_options(ctx, args, mirror, false)?;
     emit_summary(
         args.json,
-        mirror,
-        options.dry_run,
-        options.null_sink,
-        options.verbose,
-        options.debug_mode,
-        options.workers,
+        SummaryOptions::from_local(mirror, &options),
         summary,
         elapsed,
         src_path,
@@ -98,56 +93,23 @@ pub fn print_local_transfer_summary(
 ///
 /// One function so the inline (copy/mirror) and deferred (move) paths stay
 /// byte-identical, and so the block cannot be attached to only one of
-/// them. The block is emitted OUTSIDE `print_summary` deliberately:
-/// that function returns early for the up-to-date and empty-source
-/// outcomes, and a run whose only planned file failed classifies as
-/// up-to-date (zero copied files) — exactly the run that must not report
-/// a clean summary and nothing else.
-#[allow(clippy::too_many_arguments)]
+/// them. The failure block is emitted OUTSIDE [`summary_lines`]
+/// deliberately: that renderer stops after one line for the up-to-date and
+/// empty-source outcomes, and a run whose only planned file failed
+/// classifies as up-to-date (zero copied files) — exactly the run that must
+/// not report a clean summary and nothing else.
 fn emit_summary(
     json_output: bool,
-    mirror: bool,
-    dry_run: bool,
-    null_sink: bool,
-    verbose: bool,
-    debug_mode: bool,
-    workers: usize,
+    options: SummaryOptions,
     summary: &LocalMirrorSummary,
     elapsed: Duration,
     src_path: &Path,
     dest_path: &Path,
 ) {
     if json_output {
-        print_summary_json(mirror, summary, elapsed, src_path, dest_path);
+        print_summary_json(options.mirror, summary, elapsed, src_path, dest_path);
     } else {
-        print_summary(
-            mirror, dry_run, null_sink, verbose, debug_mode, workers, summary, elapsed,
-        );
-        // pfc-6, outside `print_summary` for the same reason the failure
-        // block is: a run whose only work was an in-place attribute repair
-        // copies nothing, classifies up-to-date, and that fn early-returns.
-        // ls-0: phrased as a sibling of the "• Copied:" line and explicitly
-        // "separate files", because the owner's reading of the old output
-        // was that a byte total and "no bytes re-sent" contradicted each
-        // other. They never did — the two sets are disjoint — but nothing
-        // on screen said so.
-        if summary.files_repaired > 0 {
-            // clp-3b: cyan, not the copied-count colour. Repair is a
-            // different KIND of result from a copy — work done that moved no
-            // bytes — and the owner's original complaint was precisely that
-            // these two populations read as one thing.
-            let palette = Palette::detect(console::Term::stdout().features().colors_supported());
-            println!(
-                "{}",
-                palette.paint(
-                    Role::Repaired,
-                    &format!(
-                        "• Repaired: {} separate file(s) — metadata only, no bytes re-sent",
-                        summary.files_repaired
-                    )
-                )
-            );
-        }
+        print_summary(options, summary, elapsed);
         crate::transfers::failures::print_failure_block(summary.files_failed, &summary.failures);
     }
 }
@@ -167,8 +129,9 @@ async fn run_local_transfer_inner(
     }
 
     let mut options = build_local_options(ctx, args, mirror, move_verb)?;
-    let dry_run = options.dry_run;
-    let null_sink = options.null_sink;
+    // Snapshot the presentation fields before the options value is moved
+    // into the session.
+    let summary_options = SummaryOptions::from_local(mirror, &options);
     let json_output = args.json;
     let verbose = options.verbose;
     let debug_mode = options.debug_mode;
@@ -212,12 +175,7 @@ async fn run_local_transfer_inner(
             || {
                 emit_summary(
                     json_output,
-                    mirror,
-                    dry_run,
-                    null_sink,
-                    verbose,
-                    debug_mode,
-                    workers,
+                    summary_options,
                     &summary,
                     elapsed,
                     src_path,
@@ -906,27 +864,97 @@ fn build_local_options(
 /// transfers where it's meaningful.
 const THROUGHPUT_LINE_MIN_BYTES: u64 = 1024 * 1024; // 1 MiB
 
-fn print_summary(
+/// The presentation-only inputs of the end-of-run summary block, grouped
+/// so [`summary_lines`] is a pure function of one value a test can hold
+/// rather than of a flag list only the print site can assemble.
+#[derive(Clone, Copy, Debug)]
+struct SummaryOptions {
     mirror: bool,
     dry_run: bool,
     null_sink: bool,
     verbose: bool,
     debug_mode: bool,
     workers: usize,
+}
+
+impl SummaryOptions {
+    /// Every other field of `LocalMirrorOptions` decides what the session
+    /// DOES, not what the summary says, so it is not carried here.
+    fn from_local(mirror: bool, options: &LocalMirrorOptions) -> Self {
+        Self {
+            mirror,
+            dry_run: options.dry_run,
+            null_sink: options.null_sink,
+            verbose: options.verbose,
+            debug_mode: options.debug_mode,
+            workers: options.workers,
+        }
+    }
+}
+
+/// clp-3b: the summary is the output that SURVIVES. The live row is
+/// repainted several times a second and then cleared; the `-v` lines
+/// scroll away. This block is what an operator is still looking at when
+/// the command is done, and it was the one thing clp-3 left plain —
+/// colour spent on the transient and withheld from the permanent.
+/// The palette is resolved against stdout, which is where it prints.
+fn print_summary(options: SummaryOptions, summary: &LocalMirrorSummary, elapsed: Duration) {
+    let palette = Palette::detect(console::Term::stdout().features().colors_supported());
+    for line in summary_lines(options, summary, elapsed, palette) {
+        println!("{line}");
+    }
+}
+
+/// Every line of the summary block, in print order, already painted.
+///
+/// Pure inputs → strings so each line's palette ROLE is observable without
+/// a terminal (review clp-3 F1): while the roles were bound inline at the
+/// `println!` sites, any of them could be swapped — or the palette dropped
+/// entirely — with the whole suite still green. The print site prints;
+/// every decision about content and colour is here.
+fn summary_lines(
+    options: SummaryOptions,
     summary: &LocalMirrorSummary,
     elapsed: Duration,
-) {
-    // clp-3b: the summary is the output that SURVIVES. The live row is
-    // repainted several times a second and then cleared; the `-v` lines
-    // scroll away. This block is what an operator is still looking at when
-    // the command is done, and it was the one thing clp-3 left plain —
-    // colour spent on the transient and withheld from the permanent.
-    // Resolved against stdout, which is where it prints.
-    let palette = Palette::detect(console::Term::stdout().features().colors_supported());
-    let operation = if mirror { "Mirror" } else { "Copy" };
-    let suffix = if dry_run {
+    palette: Palette,
+) -> Vec<String> {
+    let mut lines = outcome_lines(options, summary, elapsed, palette);
+    // pfc-6, appended after the outcome block rather than inside it: a run
+    // whose only work was an in-place attribute repair copies nothing and
+    // classifies up-to-date, and that outcome renders one line and stops.
+    // ls-0: phrased as a sibling of the "• Copied:" line and explicitly
+    // "separate files", because the owner's reading of the old output
+    // was that a byte total and "no bytes re-sent" contradicted each
+    // other. They never did — the two sets are disjoint — but nothing
+    // on screen said so.
+    if summary.files_repaired > 0 {
+        // clp-3b: cyan, not the copied-count colour. Repair is a
+        // different KIND of result from a copy — work done that moved no
+        // bytes — and the owner's original complaint was precisely that
+        // these two populations read as one thing.
+        lines.push(palette.paint(
+            Role::Repaired,
+            &format!(
+                "• Repaired: {} separate file(s) — metadata only, no bytes re-sent",
+                summary.files_repaired
+            ),
+        ));
+    }
+    lines
+}
+
+/// The outcome half of the block: one line for a run that moved nothing,
+/// the header plus counters for one that did.
+fn outcome_lines(
+    options: SummaryOptions,
+    summary: &LocalMirrorSummary,
+    elapsed: Duration,
+    palette: Palette,
+) -> Vec<String> {
+    let operation = if options.mirror { "Mirror" } else { "Copy" };
+    let suffix = if options.dry_run {
         " (dry run)"
-    } else if null_sink {
+    } else if options.null_sink {
         " (null sink — writes discarded)"
     } else {
         ""
@@ -944,30 +972,22 @@ fn print_summary(
         TransferOutcome::UpToDate => {
             // The single most-seen line in the product: a converged mirror
             // prints this and nothing else.
-            println!(
-                "{}",
-                palette.paint(
-                    Role::Outcome,
-                    &format!(
-                        "Up to date: {} files examined, 0 changed{} (in {:.2?})",
-                        summary.scanned_files, suffix, duration
-                    )
-                )
-            );
-            return;
+            return vec![palette.paint(
+                Role::Outcome,
+                &format!(
+                    "Up to date: {} files examined, 0 changed{} (in {:.2?})",
+                    summary.scanned_files, suffix, duration
+                ),
+            )];
         }
         TransferOutcome::SourceEmpty => {
-            println!(
-                "{}",
-                palette.paint(
-                    Role::Outcome,
-                    &format!(
-                        "Source is empty: 0 files copied{} (in {:.2?})",
-                        suffix, duration
-                    )
-                )
-            );
-            return;
+            return vec![palette.paint(
+                Role::Outcome,
+                &format!(
+                    "Source is empty: 0 files copied{} (in {:.2?})",
+                    suffix, duration
+                ),
+            )];
         }
         TransferOutcome::Transferred => {}
     }
@@ -979,45 +999,39 @@ fn print_summary(
     // one. Copied and repaired files share no members (a repaired file is
     // never planned and never copied — `local_session.rs` pins that), so
     // each gets its own line and the header commits to neither count.
-    println!(
-        "{}",
+    let mut lines = vec![
         palette.paint(
             Role::Outcome,
-            &format!("{}{} complete in {:.2?}", operation, suffix, duration)
-        )
-    );
-    println!(
-        "{}",
+            &format!("{}{} complete in {:.2?}", operation, suffix, duration),
+        ),
         palette.paint(
             Role::Count,
             &format!(
                 "• Copied: {} file(s), {}",
                 summary.copied_files,
                 format_bytes(summary.total_bytes)
-            )
-        )
-    );
+            ),
+        ),
+    ];
 
     if summary.deleted_files > 0 || summary.deleted_dirs > 0 {
         // Orange, matching the row's deleting phase — the same work, named
         // the same colour whether it is happening or finished.
-        println!(
-            "{}",
-            palette.paint(
-                Role::PhaseDeleting,
-                &format!(
-                    "• Deleted: {} file(s), {} dir(s)",
-                    summary.deleted_files, summary.deleted_dirs
-                )
-            )
-        );
+        lines.push(palette.paint(
+            Role::PhaseDeleting,
+            &format!(
+                "• Deleted: {} file(s), {} dir(s)",
+                summary.deleted_files, summary.deleted_dirs
+            ),
+        ));
     }
 
     // Suppress throughput/workers noise on small transfers where startup
     // dominates wall time and the numbers are meaningless. Keep it for
     // bulk transfers where it's actually informative.
-    let show_throughput =
-        verbose || summary.total_bytes >= THROUGHPUT_LINE_MIN_BYTES || summary.copied_files > 1;
+    let show_throughput = options.verbose
+        || summary.total_bytes >= THROUGHPUT_LINE_MIN_BYTES
+        || summary.copied_files > 1;
     if show_throughput {
         let throughput = if duration.as_secs_f64() > 0.0 {
             summary.total_bytes as f64 / duration.as_secs_f64()
@@ -1034,45 +1048,39 @@ fn print_summary(
         // Muted: this and the worker count are CONTEXT, not result. Dimming
         // them is what makes the counts above legible at a glance — the
         // summary earns emphasis by having quiet neighbours, not by shouting.
-        println!(
-            "{}",
-            palette.paint(
-                Role::Muted,
-                &format!(
-                    "• Average: {} over the whole run (includes scan and compare)",
-                    format_bps(throughput as u64)
-                )
-            )
-        );
+        lines.push(palette.paint(
+            Role::Muted,
+            &format!(
+                "• Average: {} over the whole run (includes scan and compare)",
+                format_bps(throughput as u64)
+            ),
+        ));
         // review otp-11b B4: print the EFFECTIVE apply-worker count, not the
         // options default (num_cpus). ls-4 raised the normal-run value from
         // 1 to `DEFAULT_SINK_WORKERS`; this line must track the constant
         // rather than restate a literal, or it goes back to reporting a
         // number the session did not use — which is the exact defect B4
         // caught in the first place.
-        println!(
-            "{}",
-            palette.paint(
-                Role::Muted,
-                &format!(
-                    "• Workers used: {}",
-                    if debug_mode {
-                        workers
-                    } else {
-                        blit_core::transfer_session::DEFAULT_SINK_WORKERS
-                    }
-                )
-            )
-        );
+        lines.push(palette.paint(
+            Role::Muted,
+            &format!(
+                "• Workers used: {}",
+                if options.debug_mode {
+                    options.workers
+                } else {
+                    blit_core::transfer_session::DEFAULT_SINK_WORKERS
+                }
+            ),
+        ));
     }
-    if debug_mode {
-        println!(
-            "{}",
-            palette.paint(
-                Role::Muted,
-                &format!("• Debug limiter active – worker cap {} worker(s)", workers)
-            )
-        );
+    if options.debug_mode {
+        lines.push(palette.paint(
+            Role::Muted,
+            &format!(
+                "• Debug limiter active – worker cap {} worker(s)",
+                options.workers
+            ),
+        ));
     }
 
     // clp-3b: the `-v` planner lines are context in exactly the sense
@@ -1081,38 +1089,33 @@ fn print_summary(
     // the first pass because they sit behind `verbose` and the sample run
     // used to check the summary did not pass `-v`; the owner's screenshot
     // showed them still white among muted neighbours.
-    if verbose {
-        println!(
-            "{}",
-            palette.paint(
+    if options.verbose {
+        lines.push(palette.paint(
+            Role::Muted,
+            &format!(
+                "• Planned {} file(s), total bytes {}",
+                summary.planned_files,
+                format_bytes(summary.total_bytes)
+            ),
+        ));
+        if summary.tar_shard_tasks > 0 || summary.raw_bundle_tasks > 0 || summary.large_tasks > 0 {
+            lines.push(palette.paint(
                 Role::Muted,
                 &format!(
-                    "• Planned {} file(s), total bytes {}",
-                    summary.planned_files,
-                    format_bytes(summary.total_bytes)
-                )
-            )
-        );
-        if summary.tar_shard_tasks > 0 || summary.raw_bundle_tasks > 0 || summary.large_tasks > 0 {
-            println!(
-                "{}",
-                palette.paint(
-                    Role::Muted,
-                    &format!(
-                        "• Planner mix: {} tar shard(s) [{} file(s), {}], {} bundle(s) [{} file(s), {}], {} large task(s) [{}]",
-                        summary.tar_shard_tasks,
-                        summary.tar_shard_files,
-                        format_bytes(summary.tar_shard_bytes),
-                        summary.raw_bundle_tasks,
-                        summary.raw_bundle_files,
-                        format_bytes(summary.raw_bundle_bytes),
-                        summary.large_tasks,
-                        format_bytes(summary.large_bytes),
-                    )
-                )
-            );
+                    "• Planner mix: {} tar shard(s) [{} file(s), {}], {} bundle(s) [{} file(s), {}], {} large task(s) [{}]",
+                    summary.tar_shard_tasks,
+                    summary.tar_shard_files,
+                    format_bytes(summary.tar_shard_bytes),
+                    summary.raw_bundle_tasks,
+                    summary.raw_bundle_files,
+                    format_bytes(summary.raw_bundle_bytes),
+                    summary.large_tasks,
+                    format_bytes(summary.large_bytes),
+                ),
+            ));
         }
     }
+    lines
 }
 
 fn print_summary_json(
@@ -1154,6 +1157,317 @@ fn print_summary_json(
         "files_repaired": summary.files_repaired,
     });
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
+}
+
+/// Review clp-3 F1: the summary block's colour roles, pinned on the exact
+/// bytes [`summary_lines`] returns. Before the extraction the roles were
+/// bound inline at ten `println!` sites, where nothing could observe them —
+/// any role could be swapped for any other, and the whole palette could be
+/// dropped, with the suite still green.
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+    use crate::style::ColorDepth;
+    use blit_core::transfer_session::DEFAULT_SINK_WORKERS;
+
+    /// Dracula as the terminal receives it. Spelled out literally rather
+    /// than obtained from `Palette`, so a palette edit cannot rewrite the
+    /// expectation it is supposed to be checked against.
+    const GREEN: &str = "\u{1b}[38;2;80;250;123m";
+    const CYAN: &str = "\u{1b}[38;2;139;233;253m";
+    const ORANGE: &str = "\u{1b}[38;2;255;184;108m";
+    const COMMENT: &str = "\u{1b}[38;2;98;114;164m";
+    const RED: &str = "\u{1b}[38;2;255;85;85m";
+    const RESET: &str = "\u{1b}[0m";
+
+    /// The `elapsed` every case below passes. Distinct from the durations
+    /// the summaries carry, so a case that reads the wrong one shows it.
+    const ELAPSED: Duration = Duration::from_secs(3);
+
+    fn strip_sgr(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\u{1b}' {
+                out.push(ch);
+                continue;
+            }
+            for next in chars.by_ref() {
+                if next == 'm' {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// A plain copy: no mirror, no deletes, no `-v`, no diagnostic pin.
+    fn quiet_options() -> SummaryOptions {
+        SummaryOptions {
+            mirror: false,
+            dry_run: false,
+            null_sink: false,
+            verbose: false,
+            debug_mode: false,
+            workers: 8,
+        }
+    }
+
+    /// A mirror that reaches every optional line in one run.
+    fn loud_options() -> SummaryOptions {
+        SummaryOptions {
+            mirror: true,
+            dry_run: false,
+            null_sink: false,
+            verbose: true,
+            debug_mode: true,
+            workers: 3,
+        }
+    }
+
+    fn loud_summary() -> LocalMirrorSummary {
+        LocalMirrorSummary {
+            planned_files: 12,
+            copied_files: 9,
+            total_bytes: 4 * 1024 * 1024,
+            scanned_files: 40,
+            deleted_files: 3,
+            deleted_dirs: 2,
+            duration: Duration::from_secs(2),
+            tar_shard_tasks: 2,
+            tar_shard_files: 7,
+            tar_shard_bytes: 2048,
+            raw_bundle_tasks: 1,
+            raw_bundle_files: 2,
+            raw_bundle_bytes: 1024,
+            large_tasks: 1,
+            large_bytes: 3 * 1024 * 1024,
+            outcome: TransferOutcome::Transferred,
+            files_repaired: 5,
+            ..Default::default()
+        }
+    }
+
+    fn quiet_summary() -> LocalMirrorSummary {
+        LocalMirrorSummary {
+            planned_files: 2,
+            copied_files: 2,
+            total_bytes: 1024,
+            scanned_files: 5,
+            duration: Duration::from_millis(1500),
+            outcome: TransferOutcome::Transferred,
+            ..Default::default()
+        }
+    }
+
+    fn plain(options: SummaryOptions, summary: &LocalMirrorSummary) -> Vec<String> {
+        summary_lines(options, summary, ELAPSED, Palette::disabled())
+    }
+
+    fn painted(options: SummaryOptions, summary: &LocalMirrorSummary) -> Vec<String> {
+        summary_lines(
+            options,
+            summary,
+            ELAPSED,
+            Palette::with_depth(ColorDepth::TrueColor),
+        )
+    }
+
+    /// The refactor's own guard: the production bytes are the pre-extraction
+    /// strings, spelled out here rather than recomputed from the code under
+    /// test. Every optional line is present in the loud case.
+    #[test]
+    fn the_plain_summary_text_is_unchanged() {
+        assert_eq!(
+            plain(loud_options(), &loud_summary()),
+            vec![
+                "Mirror complete in 2.00s",
+                "• Copied: 9 file(s), 4.00 MiB",
+                "• Deleted: 3 file(s), 2 dir(s)",
+                "• Average: 2.00 MiB/s over the whole run (includes scan and compare)",
+                "• Workers used: 3",
+                "• Debug limiter active – worker cap 3 worker(s)",
+                "• Planned 12 file(s), total bytes 4.00 MiB",
+                "• Planner mix: 2 tar shard(s) [7 file(s), 2.00 KiB], 1 bundle(s) [2 file(s), 1.00 KiB], 1 large task(s) [3.00 MiB]",
+                "• Repaired: 5 separate file(s) — metadata only, no bytes re-sent",
+            ]
+        );
+        assert_eq!(
+            plain(quiet_options(), &quiet_summary()),
+            vec![
+                "Copy complete in 1.50s".to_string(),
+                "• Copied: 2 file(s), 1.00 KiB".to_string(),
+                "• Average: 682 B/s over the whole run (includes scan and compare)".to_string(),
+                format!("• Workers used: {DEFAULT_SINK_WORKERS}"),
+            ]
+        );
+    }
+
+    /// The three outcomes and the two run-mode suffixes, plus the
+    /// `elapsed` fallback a session that reported no duration of its own
+    /// takes.
+    #[test]
+    fn the_zero_file_outcomes_and_the_suffixes_are_unchanged() {
+        let mut options = quiet_options();
+        options.dry_run = true;
+        let summary = LocalMirrorSummary {
+            scanned_files: 40,
+            duration: Duration::from_secs(2),
+            outcome: TransferOutcome::UpToDate,
+            ..Default::default()
+        };
+        assert_eq!(
+            plain(options, &summary),
+            vec!["Up to date: 40 files examined, 0 changed (dry run) (in 2.00s)"]
+        );
+
+        let mut options = quiet_options();
+        options.null_sink = true;
+        let summary = LocalMirrorSummary {
+            outcome: TransferOutcome::SourceEmpty,
+            ..Default::default()
+        };
+        // Zero carried duration: the block falls back to the caller's
+        // measured `elapsed`.
+        assert_eq!(
+            plain(options, &summary),
+            vec!["Source is empty: 0 files copied (null sink — writes discarded) (in 3.00s)"]
+        );
+    }
+
+    /// The load-bearing guard: every role binding in the block, as bytes.
+    /// A role swapped for another role, or a line that stopped going
+    /// through the palette at all, changes this vector.
+    #[test]
+    fn every_summary_line_binds_its_own_role() {
+        assert_eq!(
+            painted(loud_options(), &loud_summary()),
+            vec![
+                // Outcome — green, the same colour the copy phase uses.
+                format!("{GREEN}Mirror complete in 2.00s{RESET}"),
+                // Count — the one role that deliberately paints nothing.
+                "• Copied: 9 file(s), 4.00 MiB".to_string(),
+                // PhaseDeleting — orange, matching the live row's delete pass.
+                format!("{ORANGE}• Deleted: 3 file(s), 2 dir(s){RESET}"),
+                // Muted — advisory context, four lines of it.
+                format!(
+                    "{COMMENT}• Average: 2.00 MiB/s over the whole run (includes scan and compare){RESET}"
+                ),
+                format!("{COMMENT}• Workers used: 3{RESET}"),
+                format!("{COMMENT}• Debug limiter active – worker cap 3 worker(s){RESET}"),
+                format!("{COMMENT}• Planned 12 file(s), total bytes 4.00 MiB{RESET}"),
+                format!(
+                    "{COMMENT}• Planner mix: 2 tar shard(s) [7 file(s), 2.00 KiB], 1 bundle(s) [2 file(s), 1.00 KiB], 1 large task(s) [3.00 MiB]{RESET}"
+                ),
+                // Repaired — cyan, a different KIND of result from a copy.
+                format!("{CYAN}• Repaired: 5 separate file(s) — metadata only, no bytes re-sent{RESET}"),
+            ]
+        );
+    }
+
+    /// Both zero-file outcomes are the same green as a finished transfer:
+    /// "nothing to do" is a clean result, not a warning.
+    #[test]
+    fn both_zero_file_outcomes_are_outcome_green() {
+        let up_to_date = LocalMirrorSummary {
+            scanned_files: 40,
+            duration: Duration::from_secs(2),
+            outcome: TransferOutcome::UpToDate,
+            ..Default::default()
+        };
+        assert_eq!(
+            painted(quiet_options(), &up_to_date),
+            vec![format!(
+                "{GREEN}Up to date: 40 files examined, 0 changed (in 2.00s){RESET}"
+            )]
+        );
+        let source_empty = LocalMirrorSummary {
+            duration: Duration::from_secs(2),
+            outcome: TransferOutcome::SourceEmpty,
+            ..Default::default()
+        };
+        assert_eq!(
+            painted(quiet_options(), &source_empty),
+            vec![format!(
+                "{GREEN}Source is empty: 0 files copied (in 2.00s){RESET}"
+            )]
+        );
+    }
+
+    /// The repaired line reaches the block from the zero-file outcomes too
+    /// — a run whose only work was an in-place attribute repair copies
+    /// nothing and classifies up-to-date (pfc-6).
+    #[test]
+    fn a_repair_only_run_still_reports_the_repair() {
+        let summary = LocalMirrorSummary {
+            scanned_files: 40,
+            duration: Duration::from_secs(2),
+            outcome: TransferOutcome::UpToDate,
+            files_repaired: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            painted(quiet_options(), &summary),
+            vec![
+                format!("{GREEN}Up to date: 40 files examined, 0 changed (in 2.00s){RESET}"),
+                format!(
+                    "{CYAN}• Repaired: 4 separate file(s) — metadata only, no bytes re-sent{RESET}"
+                ),
+            ]
+        );
+    }
+
+    /// The palette's one semantic invariant, asserted where it is spent:
+    /// an expected destructive pass must not look like an error.
+    #[test]
+    fn the_deleted_line_is_never_failure_red() {
+        for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+            let deleted = summary_lines(
+                loud_options(),
+                &loud_summary(),
+                ELAPSED,
+                Palette::with_depth(depth),
+            )
+            .into_iter()
+            .find(|line| strip_sgr(line).starts_with("• Deleted:"))
+            .expect("a mirror that deleted reports it");
+            assert!(
+                !deleted.contains(RED)
+                    && !deleted.contains("\u{1b}[38;5;203m")
+                    && deleted.contains('\u{1b}'),
+                "{depth:?}: the delete line must be coloured, and not red: {deleted:?}"
+            );
+        }
+    }
+
+    /// Colour is purely additive: strip the SGR sequences and every line is
+    /// byte-identical to the plain form, at both depths.
+    #[test]
+    fn colour_never_changes_the_summary_text() {
+        let cases = [
+            (loud_options(), loud_summary()),
+            (quiet_options(), quiet_summary()),
+        ];
+        for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+            let palette = Palette::with_depth(depth);
+            for (options, summary) in &cases {
+                let expected = plain(*options, summary);
+                let styled = summary_lines(*options, summary, ELAPSED, palette);
+                assert_ne!(styled, expected, "{depth:?}: nothing was coloured at all");
+                let stripped: Vec<String> = styled.iter().map(|line| strip_sgr(line)).collect();
+                assert_eq!(stripped, expected, "{depth:?}: colour changed the text");
+            }
+        }
+    }
+
+    /// A disabled palette emits no escapes anywhere, so piped output and
+    /// every pre-clp-3 expectation are byte-identical.
+    #[test]
+    fn a_disabled_palette_emits_no_escapes() {
+        for line in plain(loud_options(), &loud_summary()) {
+            assert!(!line.contains('\u{1b}'), "{line:?}");
+        }
+    }
 }
 
 #[cfg(test)]
