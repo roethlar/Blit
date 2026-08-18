@@ -139,7 +139,18 @@ def commit_if_changed(repo: Path, message: str) -> bool:
     status = git("status", "--porcelain", cwd=repo)
     if not status.strip():
         return False
-    git("commit", "-m", message, cwd=repo)
+    # CI runners have no global git identity; commit as the Actions bot
+    # via one-shot config so nothing persists in the clone.
+    git(
+        "-c",
+        "user.name=github-actions[bot]",
+        "-c",
+        "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+        "commit",
+        "-m",
+        message,
+        cwd=repo,
+    )
     return True
 
 
