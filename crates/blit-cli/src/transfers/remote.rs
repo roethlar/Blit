@@ -39,6 +39,11 @@ fn carries_payload(event: &ProgressEvent) -> bool {
 struct RateSample {
     avg_bps: f64,
     current_bps: f64,
+    /// The window moved nothing while payload was still in flight.
+    /// `current_bps` is a true 0 — the human line says so in words
+    /// ("stalled") rather than printing a rate that reads like a
+    /// measurement, and the JSON keeps its frozen numeric shape.
+    stalled: bool,
 }
 
 /// The window the CLI progress monitor measures rates against.
@@ -48,18 +53,38 @@ struct RateSample {
 /// payload byte, and a push then waits for the destination's summary —
 /// but no bytes move there. Measuring against that tail printed
 /// trailing "0.00 MiB/s current" lines and divided the final average by
-/// non-transfer time. So: the averaging window ends at the last
-/// byte-carrying event, and a tick whose window moved nothing at all
-/// prints nothing rather than repeating the previous numbers with a
-/// fabricated rate.
+/// non-transfer time. So the averaging window ends at the last
+/// byte-carrying event, and an idle tick is read against the phase it
+/// lands in (owner ruling "revised b", 2026-08-19):
+///
+/// 1. **Before the first payload byte** — nothing to say about a rate;
+///    the caller's manifest-liveness branch owns this phase and the
+///    window stays silent.
+/// 2. **Mid-payload** (a byte has moved, no `DeleteBegin` yet, and the
+///    file counter is still short of its manifest denominator) — an
+///    idle second is a stall the user needs to see, so the line still
+///    prints with the current-rate segment replaced by the word
+///    "stalled". Silence here looked like a hung monitor.
+/// 3. **Post-payload** — a purge, or the wait for the destination's
+///    summary, is *supposed* to move no bytes, so "stalled" would be a
+///    lie and idle ticks print nothing. Two independent signals put us
+///    here: `DeleteBegin` (a mirror purge is starting), and the file
+///    counter reaching the manifest total (every file is placed).
+///    Neither alone is sufficient — a non-mirror push never emits
+///    `DeleteBegin`, and a run that skips files never reaches its
+///    denominator — so both are checked.
 ///
 /// State only, no clock of its own — every method takes `now`, so the
 /// decisions are unit-testable with constructed instants.
 struct RateWindow {
     start: Instant,
     /// Instant of the last byte-carrying event; `None` until the
-    /// payload stream produces its first byte.
+    /// payload stream produces its first byte. Doubles as the phase-1
+    /// discriminator: `None` means payload has not started.
     last_payload: Option<Instant>,
+    /// Set once `DeleteBegin` passes through the event stream: the
+    /// payload is over and idleness is expected from here on (phase 3).
+    post_payload: bool,
     /// Start of the current per-second window.
     prev_instant: Instant,
     prev_bytes: u64,
@@ -71,6 +96,7 @@ impl RateWindow {
         Self {
             start,
             last_payload: None,
+            post_payload: false,
             prev_instant: start,
             prev_bytes: 0,
             prev_files: 0,
@@ -81,6 +107,12 @@ impl RateWindow {
     /// [`carries_payload`] says so).
     fn mark_payload(&mut self, now: Instant) {
         self.last_payload = Some(now);
+    }
+
+    /// Enter phase 3: the payload stream is done and the session is in
+    /// its purge/bookkeeping tail. Call on `ProgressEvent::DeleteBegin`.
+    fn begin_post_payload(&mut self) {
+        self.post_payload = true;
     }
 
     /// Average over the payload window: start → the last byte-carrying
@@ -95,9 +127,9 @@ impl RateWindow {
         (bytes as f64) / elapsed
     }
 
-    /// The per-second decision. `None` means "nothing moved in this
-    /// window" — the payload stream is idle or over, and the caller
-    /// emits no line for this tick.
+    /// The per-second decision. `None` means "print nothing for this
+    /// tick"; a sample with `stalled` set means "print the line, but
+    /// say stalled instead of a rate".
     ///
     /// The window always rolls forward, emitted or not: an idle second
     /// must not dilute the *next* window's current rate.
@@ -114,32 +146,59 @@ impl RateWindow {
         self.prev_bytes = totals.bytes;
         self.prev_files = totals.files;
         if !moved {
-            return None;
+            // A stall is only a stall while work is still outstanding.
+            // Phase 1 (no byte has moved yet) and phase 3 (`DeleteBegin`
+            // seen) both expect idleness; so does a run whose file
+            // counter has reached its manifest denominator — every file
+            // is placed and the session is just waiting on the
+            // destination's summary. That last check is what covers a
+            // non-mirror push, which never emits `DeleteBegin` at all.
+            let outstanding = totals.files < totals.manifest_files;
+            if self.last_payload.is_none() || self.post_payload || !outstanding {
+                return None;
+            }
+            return Some(RateSample {
+                avg_bps: self.avg_bps(totals.bytes, now),
+                current_bps: 0.0,
+                stalled: true,
+            });
         }
         Some(RateSample {
             avg_bps: self.avg_bps(totals.bytes, now),
             current_bps: (window_bytes as f64) / window_elapsed,
+            stalled: false,
         })
     }
 }
 
 const MIB: f64 = 1024.0 * 1024.0;
 
+/// Only the trailing segment moves: a measured second reports its rate,
+/// a mid-payload idle second reports the word "stalled". Printing
+/// "0.00 MiB/s current" there would read as a measurement of a moving
+/// stream rather than as an absence of one.
 fn progress_line(totals: &ProgressTotals, sample: &RateSample) -> String {
+    let current = if sample.stalled {
+        "stalled".to_string()
+    } else {
+        format!("{:.2} MiB/s current", sample.current_bps / MIB)
+    };
     format!(
-        "[progress] {}/{} files \u{2022} {:.2} MiB copied \u{2022} {:.2} MiB/s avg \u{2022} {:.2} MiB/s current",
+        "[progress] {}/{} files \u{2022} {:.2} MiB copied \u{2022} {:.2} MiB/s avg \u{2022} {}",
         totals.files,
         totals.manifest_files,
         totals.bytes as f64 / MIB,
         sample.avg_bps / MIB,
-        sample.current_bps / MIB,
+        current,
     )
 }
 
 /// JSON shape is frozen: same event name, same five fields, always
-/// present. `avg_bytes_sec` divides by the payload window (start → last
-/// byte-carrying event) rather than by total wall time, so a run with a
-/// post-payload tail reports the rate the payload actually moved at.
+/// present — a stall is expressed as `current_bytes_sec: 0`, never as a
+/// new field or a missing one. `avg_bytes_sec` divides by the payload
+/// window (start → last byte-carrying event) rather than by total wall
+/// time, so a run with a post-payload tail reports the rate the payload
+/// actually moved at.
 fn progress_json_line(totals: &ProgressTotals, sample: &RateSample) -> String {
     format!(
         "{{\"event\":\"progress\",\"files\":{},\"total_files\":{},\"bytes_copied\":{},\"avg_bytes_sec\":{:.0},\"current_bytes_sec\":{:.0}}}",
@@ -204,6 +263,11 @@ pub(crate) fn spawn_progress_monitor_with_options(
                             if carries_payload(&event) {
                                 window.mark_payload(Instant::now());
                             }
+                            if matches!(event, ProgressEvent::DeleteBegin) {
+                                // Last payload byte is behind us: idle
+                                // ticks are normal from here (phase 3).
+                                window.begin_post_payload();
+                            }
                             if let ProgressEvent::FileComplete { path } = &event {
                                 if json {
                                     // `bytes` stays in the JSON shape for
@@ -225,10 +289,12 @@ pub(crate) fn spawn_progress_monitor_with_options(
                 }
                 _ = ticker.tick() => {
                     if totals.started() {
-                        // `None` = the window moved nothing: the payload
-                        // stream is idle or already over (a mirror purge
-                        // or the wait for the destination's summary), so
-                        // there is no honest rate to print.
+                        // `None` = say nothing this second: either no
+                        // payload byte has moved yet, or the payload is
+                        // over (a mirror purge or the wait for the
+                        // destination's summary) and idleness is normal.
+                        // A mid-payload idle tick returns a `stalled`
+                        // sample instead, so the user sees the hang.
                         if let Some(sample) = window.tick(&totals, Instant::now()) {
                             if json {
                                 eprintln!("{}", progress_json_line(&totals, &sample));
@@ -795,7 +861,7 @@ pub fn describe_push_result(summary: &blit_core::generated::TransferSummary, des
 
 #[cfg(test)]
 mod rate_window_tests {
-    use super::{carries_payload, final_line, progress_line, RateWindow, MIB};
+    use super::{carries_payload, final_line, progress_json_line, progress_line, RateWindow, MIB};
     use blit_core::remote::transfer::{ProgressEvent, ProgressTotals};
     use std::time::{Duration, Instant};
 
@@ -807,17 +873,27 @@ mod rate_window_tests {
         Tick,
     }
 
+    /// What a replayed timeline would have printed.
+    struct Replayed {
+        /// The human per-second lines, in order.
+        lines: Vec<String>,
+        /// The `--json` rendering of the very same ticks, so the two
+        /// surfaces cannot silently disagree about a tick.
+        json: Vec<String>,
+        /// The final line rendered at the script's end instant.
+        final_text: String,
+    }
+
     /// Replay a timeline through the monitor's decision path with
     /// injected instants — the same calls the ticker loop makes, so the
-    /// test pins behaviour rather than a private formula. Returns the
-    /// per-second lines that would have been printed, plus the final
-    /// line rendered at `end_ms`.
-    fn replay(script: &[(u64, Step)], end_ms: u64) -> (Vec<String>, String) {
+    /// test pins behaviour rather than a private formula.
+    fn replay(script: &[(u64, Step)], end_ms: u64) -> Replayed {
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
         let mut totals = ProgressTotals::default();
         let mut window = RateWindow::new(t0);
         let mut lines = Vec::new();
+        let mut json = Vec::new();
         for (ms, step) in script {
             match step {
                 Step::Event(event) => {
@@ -825,18 +901,26 @@ mod rate_window_tests {
                     if carries_payload(event) {
                         window.mark_payload(at(*ms));
                     }
+                    if matches!(event, ProgressEvent::DeleteBegin) {
+                        window.begin_post_payload();
+                    }
                 }
                 Step::Tick => {
                     if totals.started() {
                         if let Some(sample) = window.tick(&totals, at(*ms)) {
                             lines.push(progress_line(&totals, &sample));
+                            json.push(progress_json_line(&totals, &sample));
                         }
                     }
                 }
             }
         }
         let avg = window.avg_bps(totals.bytes, at(end_ms));
-        (lines, final_line(&totals, avg))
+        Replayed {
+            lines,
+            json,
+            final_text: final_line(&totals, avg),
+        }
     }
 
     fn payload(mib: u64) -> ProgressEvent {
@@ -846,20 +930,29 @@ mod rate_window_tests {
         }
     }
 
-    /// The residue this fix closes: 9 MiB moved over the first three
-    /// seconds, then an in-session mirror purge holds the session open
-    /// for five more. The ticker must go quiet once the payload stream
-    /// ends — no trailing "0.00 MiB/s current" — and the final average
-    /// must divide by the 3 s payload window (3.00 MiB/s), not by the
-    /// 8 s wall clock (which would report 1.12 MiB/s).
+    /// Phase 3, reached by `DeleteBegin`. The residue this fix closes:
+    /// 9 MiB moved over the first three seconds, then an in-session
+    /// mirror purge holds the session open for five more. Past
+    /// `DeleteBegin` the ticker must go fully quiet — no trailing
+    /// "0.00 MiB/s current", and no "stalled" either, because a purge
+    /// moving no payload is not a stall — and the final average must
+    /// divide by the 3 s payload window (3.00 MiB/s), not by the 8 s
+    /// wall clock (1.12 MiB/s).
+    ///
+    /// The manifest promises 4 files and only 3 transfer (the fourth is
+    /// skipped as already-current, the ordinary mirror case). So the
+    /// file counter never reaches its denominator and the
+    /// files-complete signal cannot fire: `DeleteBegin` is the only
+    /// thing holding the purge quiet, which is exactly what this test
+    /// is for.
     #[test]
     fn post_payload_phase_emits_no_zero_rate_and_does_not_dilute_the_average() {
         let script = vec![
             (
                 0,
                 Step::Event(ProgressEvent::ManifestBatch {
-                    files: 3,
-                    bytes: 9 * MIB as u64,
+                    files: 4,
+                    bytes: 12 * MIB as u64,
                 }),
             ),
             (1000, Step::Event(payload(3))),
@@ -875,7 +968,9 @@ mod rate_window_tests {
             (6500, Step::Tick),
             (7500, Step::Tick),
         ];
-        let (lines, final_text) = replay(&script, 8000);
+        let Replayed {
+            lines, final_text, ..
+        } = replay(&script, 8000);
 
         assert_eq!(
             lines.len(),
@@ -885,6 +980,10 @@ mod rate_window_tests {
         assert!(
             lines.iter().all(|l| !l.contains("0.00 MiB/s current")),
             "no tick may report a fabricated zero current rate: {lines:#?}"
+        );
+        assert!(
+            lines.iter().all(|l| !l.contains("stalled")),
+            "a post-payload purge is not a stall: {lines:#?}"
         );
         assert!(
             final_text.contains("3.00 MiB/s avg"),
@@ -900,10 +999,10 @@ mod rate_window_tests {
         );
     }
 
-    /// Suppression keys on movement, not on bytes alone: a run of empty
-    /// files moves the file count with zero bytes and must still report
-    /// liveness. Guards the fix against over-reaching into a legitimate
-    /// zero-byte second.
+    /// Movement, not bytes alone: a run of empty files moves the file
+    /// count with zero bytes and must still report liveness. The
+    /// trailing idle tick lands in phase 1 — no payload byte has ever
+    /// moved, so there is no stall to report and nothing prints.
     #[test]
     fn file_only_progress_still_emits_a_line() {
         let script = vec![
@@ -920,22 +1019,135 @@ mod rate_window_tests {
             // Nothing at all moves in this window.
             (3000, Step::Tick),
         ];
-        let (lines, _) = replay(&script, 3000);
+        let Replayed { lines, .. } = replay(&script, 3000);
         assert_eq!(
             lines.len(),
             2,
-            "empty-file progress is still progress: {lines:#?}"
+            "empty-file progress is still progress, and pre-payload idle stays silent: {lines:#?}"
         );
         assert!(lines[1].contains("2/0 files"), "got: {}", lines[1]);
     }
 
-    /// An idle stretch must not bleed into the next window's current
-    /// rate: the window rolls forward even on a suppressed tick, so the
-    /// second that resumes payload reports the rate it actually moved
-    /// at (4 MiB in 1 s), not 4 MiB spread over the idle time.
+    /// Phase 2, the behaviour "revised b" adds. Payload starts, then the
+    /// stream hangs for two seconds. Those seconds must still print —
+    /// silence there reads as a dead monitor — but say "stalled" rather
+    /// than a fabricated rate. The average is frozen at the last
+    /// payload byte, so it does not decay while nothing moves, and the
+    /// JSON keeps its five frozen fields with `current_bytes_sec: 0`.
     #[test]
-    fn a_suppressed_tick_still_rolls_the_window_forward() {
+    fn mid_payload_idle_ticks_report_a_stall() {
         let script = vec![
+            (
+                0,
+                Step::Event(ProgressEvent::ManifestBatch {
+                    files: 2,
+                    bytes: 6 * MIB as u64,
+                }),
+            ),
+            (1000, Step::Event(payload(3))),
+            (1500, Step::Tick),
+            // The stream hangs — no bytes, no files, no DeleteBegin.
+            (2500, Step::Tick),
+            (3500, Step::Tick),
+        ];
+        let Replayed { lines, json, .. } = replay(&script, 3500);
+
+        assert_eq!(
+            lines.len(),
+            3,
+            "a mid-payload stall is reported, not swallowed: {lines:#?}"
+        );
+        assert!(
+            lines[0].contains("MiB/s current") && !lines[0].contains("stalled"),
+            "the moving second is unchanged: {}",
+            lines[0]
+        );
+        for line in &lines[1..] {
+            assert_eq!(
+                line, "[progress] 1/2 files \u{2022} 3.00 MiB copied \u{2022} 3.00 MiB/s avg \u{2022} stalled",
+                "exact stalled shape: only the rate segment changes"
+            );
+        }
+        assert!(
+            json[1].contains("\"current_bytes_sec\":0"),
+            "JSON expresses a stall as a zero rate, not a new field: {}",
+            json[1]
+        );
+        assert!(
+            json[1].starts_with("{\"event\":\"progress\",\"files\":1,\"total_files\":2,\"bytes_copied\":3145728,\"avg_bytes_sec\":3145728,"),
+            "the machine shape is frozen: {}",
+            json[1]
+        );
+        assert!(
+            !json[1].contains("stalled"),
+            "the word never leaks into the machine surface: {}",
+            json[1]
+        );
+    }
+
+    /// Phase 3 reached WITHOUT `DeleteBegin` — the case the first cut
+    /// of this change got wrong. A non-mirror push runs no purge and so
+    /// never emits `DeleteBegin`, but it still holds the session open
+    /// after the last file while it waits for the destination's
+    /// summary. Every manifest file is placed by then, so there is no
+    /// outstanding work to stall on and the tail must stay silent
+    /// rather than accusing a healthy transfer of hanging.
+    #[test]
+    fn the_summary_wait_tail_is_silent_without_a_delete_begin() {
+        let script = vec![
+            (
+                0,
+                Step::Event(ProgressEvent::ManifestBatch {
+                    files: 2,
+                    bytes: 6 * MIB as u64,
+                }),
+            ),
+            (1000, Step::Event(payload(3))),
+            (1500, Step::Tick),
+            (2000, Step::Event(payload(3))),
+            (2500, Step::Tick),
+            // Both files are placed. No DeleteBegin will ever arrive;
+            // the session is just waiting on the peer's summary.
+            (3500, Step::Tick),
+            (4500, Step::Tick),
+            (5500, Step::Tick),
+        ];
+        let Replayed {
+            lines, final_text, ..
+        } = replay(&script, 6000);
+
+        assert_eq!(
+            lines.len(),
+            2,
+            "the summary wait is not a stall: {lines:#?}"
+        );
+        assert!(
+            lines.iter().all(|l| !l.contains("stalled")),
+            "no stall may be reported once every manifest file is placed: {lines:#?}"
+        );
+        assert!(
+            final_text.contains("3.00 MiB/s avg"),
+            "the average still divides by the 2 s payload window: {final_text}"
+        );
+    }
+
+    /// An idle stretch must not bleed into the next window's current
+    /// rate: the window rolls forward on a stalled tick too, so the
+    /// second that resumes payload reports the rate it actually moved
+    /// at (4 MiB in the 1 s since the last tick), not 4 MiB spread over the idle
+    /// time. The two idle seconds are mid-payload with a file still
+    /// outstanding (1 of 3 placed), so they print as stalls rather than
+    /// vanishing.
+    #[test]
+    fn a_stalled_tick_still_rolls_the_window_forward() {
+        let script = vec![
+            (
+                0,
+                Step::Event(ProgressEvent::ManifestBatch {
+                    files: 3,
+                    bytes: 5 * MIB as u64,
+                }),
+            ),
             (500, Step::Event(payload(1))),
             (1000, Step::Tick),
             (2000, Step::Tick),
@@ -943,16 +1155,20 @@ mod rate_window_tests {
             (3500, Step::Event(payload(4))),
             (4000, Step::Tick),
         ];
-        let (lines, _) = replay(&script, 4000);
+        let Replayed { lines, .. } = replay(&script, 4000);
         assert_eq!(
             lines.len(),
-            2,
-            "one idle stretch, two live seconds: {lines:#?}"
+            4,
+            "two live seconds bracketing two stalled ones: {lines:#?}"
         );
         assert!(
-            lines[1].contains("4.00 MiB/s current"),
-            "the resumed window is measured from the last tick: {}",
-            lines[1]
+            lines[1].ends_with("stalled") && lines[2].ends_with("stalled"),
+            "the idle stretch is reported as stalled: {lines:#?}"
+        );
+        assert!(
+            lines[3].contains("4.00 MiB/s current"),
+            "the resumed window is measured from the last tick, not from the last live one: {}",
+            lines[3]
         );
     }
 
