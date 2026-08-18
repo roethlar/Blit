@@ -316,9 +316,20 @@ One coherent, testable change each. No slice starts without Draft→Active.
    `v0.1.2` once the tap remote and token exist. Prove `brew install`
    on arm64 macOS: both binaries on PATH, version identity, `codesign`
    still Developer ID. Docs after proof.
-6. **pm-5 — Homebrew core (source).** Local
-   `brew install --build-from-source` proof (`<ver>+<tagsha>` hellos a
-   CI archive), then the job's homebrew/core PR. If review stalls,
+6. **pm-5 — Homebrew core (source).** **BLOCKED FOR v0.1.2, mechanism
+   PROVEN (2026-08-18, DEVLOG 23:00Z):** the v0.1.2 tag tree predates
+   pm-1 itself (042d79ad landed after tag commit 98084edf), so a
+   pristine tag build silently ignores the formula's `BLIT_GIT_SHA`
+   export — proven: `0.1.2+unknown.<nonce>`, red on the formula's own
+   version test; with pm-1's two files backported onto the same
+   tarball, the identical formula produced exactly `0.1.2+98084edf8c92`
+   and passed. (The tag also needs `-p blit-cli`, pre-rename.) The
+   source lane's first payload must therefore be the first tag carrying
+   pm-1 + the blit-transfer rename — the next release tag; this amends
+   D-2026-08-12-5's "first payload v0.1.2" to the archive lane only.
+   Then: local `brew install --build-from-source` proof
+   (`<ver>+<tagsha>` hellos a CI archive), then the job's
+   homebrew/core PR. If review stalls,
    park; do not spin. Docs after `brew install blit` from core works.
 7. **pm-6 — AUR `blit-bin` live (archive).** Job pushes when AUR SSH
    is present. Prove install. Docs after the AUR page exists. If AUR

@@ -46,6 +46,12 @@ mismatched builds would mis-cooperate instead of refusing.
 
 ## Slices (each: own go, own commit, full gate, DEVLOG entry)
 
+**Execution record:** cv-1 + cv-2 LANDED 2026-08-18 at `05529c19`
+(opus worktree agent under the owner's ultracode go; mutation-proved
+red/green on the new-behavior pin; DEVLOG 2026-08-18 23:00Z). cv-3
+remains open until the first release carrying cv-1. CI cross-platform
+evidence pending the next push.
+
 1. **cv-1 — the gate.** Drop the `build_id` half of the refusal;
    keep exact `contract_version` match. Keep the wire fault code
    `BuildMismatch` (tag compatibility; enum names are not on the
