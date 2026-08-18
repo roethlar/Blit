@@ -33,15 +33,15 @@ CI `build-release` signs the shipped binaries when the signing secrets are prese
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
+## Handoff — 2026-08-19 (HEAD `0a8c928f`, pushed both remotes; the two-day sprint is closed)
+- Done (detail in DEVLOG 2026-08-17..19 and the plans): INTERFACE_PLATFORM SHIPPED (3 crates; blit-core = the platform crate); AI references excised; v0.1.2 live on brew/scoop/AUR/cargo/Releases, winget PR #420041 in Microsoft review; CONTRACT_VERSION_GATE cv-1+cv-2 landed (cv-3 waits for next release); sf-3d landed; clp-3 F1 + progress rate-window + revised-b stall line landed. CI 7/7 green at `af9b48b3` (run 32195891519); `0a8c928f`'s run was in flight at handoff — verify before building on it (`gh run list`). Tests 1162→1195, nothing removed.
+- In flight: nothing. All worktrees/temp branches cleaned; tree clean.
+- First action: check CI on `0a8c928f`; then the owner items: sf-3d + sweep-prefetch rig runs (magneto/skippy, netwatch-01 SMB), perf-history scope ruling (remote runs in `blit profile`?), next release tag (unlocks homebrew-core pm-5, cv-3 README softening, clean crates.io versions).
+
 ## Handoff — 2026-08-15 (sf-3c LANDED: descriptor-retained metadata stamping)
 - Done: `write_file_stream`'s finalize tail now stamps mtime (Unix: permissions too) through the retained `std::fs::File` handle (`stamp_streamed_metadata_via_handle`) instead of dropping the file and reopening `dst` by path; named-stream/attribute calls stay path-based (no handle API exists). New pin `fs_sink_stamps_streamed_metadata_without_reopening` (portable `handle_metadata_stamps` counter, sf-3b's proxy pattern) mutation-proven red (0≠8) / green (8). Gates green: fmt, native + linux-cross clippy at `-D warnings`, full workspace test 1873 passed/0 failed/2 ignored (macOS), including `remote_regression`'s `pull_preserves_mtime_end_to_end`. Record: `docs/plan/SMALL_FILE_CEILING.md` Slices §4, DEVLOG 2026-08-15 18:30Z. Local commit only, UNPUSHED.
 - In flight: nothing further on SMALL_FILE_CEILING; sf-3a's third named candidate (contained-path canonicalization amortizing the readlink walk) is next in the ordered list, not yet selected. `finalize_resumed_file`'s near-identical by-path reopen (resume-completion path) was surfaced as an out-of-scope observation, also not yet selected.
 - First action: ask the owner whether to select the next sf-3x cut, or move to another queue item.
-
-## Handoff — 2026-08-14 (HEAD `e1488f93`; sf-3b CLOSED by in-session review, D-2026-08-14-1)
-- Done: sf-3b implementation/evidence at `dab7bb82`; r1 transport-failure record at `6dec3b66`. Owner then ordered the review done in-session, no playbooks: the working agent (claude-fable-5) reviewed `d5f5781d..dab7bb82` — no defects; mutation proof (readiness-map bypass reds the sharing guard at 16≠1, byte-identical restore); 20 sink tests green (Linux), CI green. Owner accepted; closure recorded at `e1488f93` in REVIEW.md, `.review/sf-3b-r1.contested.md` (resolution + 3 non-blocking observations), and D-2026-08-14-1. Local commits are UNPUSHED (`origin/master` = `36d78ae4`).
-- In flight: nothing on SMALL_FILE_CEILING. sf-3c (descriptor-retained metadata stamping) is selectable but NOT selected.
-- First action: ask the owner whether to select sf-3c or another queue item; no implementation without that selection.
 
 ## Now (active work)
 
