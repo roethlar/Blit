@@ -23,6 +23,148 @@ use blit_core::endpoints::format_remote_endpoint;
 /// preserved across the retype.
 pub type DeferredPullState = PullVerbOutcome;
 
+/// True for the events that actually move payload bytes. Per the
+/// `ProgressEvent` contract, bytes ride `Payload` only — `FileComplete`
+/// carries none, `ManifestBatch`/`Enumerated` are denominators, the
+/// phase signals carry nothing, and `SummaryReconciled` is a
+/// close-boundary correction rather than payload in flight. A
+/// zero-byte `Payload` (an empty file on the aggregate lane) moves the
+/// file count, not the byte stream, so it does not extend the rate
+/// window.
+fn carries_payload(event: &ProgressEvent) -> bool {
+    matches!(event, ProgressEvent::Payload { bytes, .. } if *bytes > 0)
+}
+
+/// One tick's rates, in bytes per second.
+struct RateSample {
+    avg_bps: f64,
+    current_bps: f64,
+}
+
+/// The window the CLI progress monitor measures rates against.
+///
+/// A transfer's wall clock keeps running through the post-payload
+/// phase — an in-session mirror purge starts only after the last
+/// payload byte, and a push then waits for the destination's summary —
+/// but no bytes move there. Measuring against that tail printed
+/// trailing "0.00 MiB/s current" lines and divided the final average by
+/// non-transfer time. So: the averaging window ends at the last
+/// byte-carrying event, and a tick whose window moved nothing at all
+/// prints nothing rather than repeating the previous numbers with a
+/// fabricated rate.
+///
+/// State only, no clock of its own — every method takes `now`, so the
+/// decisions are unit-testable with constructed instants.
+struct RateWindow {
+    start: Instant,
+    /// Instant of the last byte-carrying event; `None` until the
+    /// payload stream produces its first byte.
+    last_payload: Option<Instant>,
+    /// Start of the current per-second window.
+    prev_instant: Instant,
+    prev_bytes: u64,
+    prev_files: u64,
+}
+
+impl RateWindow {
+    fn new(start: Instant) -> Self {
+        Self {
+            start,
+            last_payload: None,
+            prev_instant: start,
+            prev_bytes: 0,
+            prev_files: 0,
+        }
+    }
+
+    /// Record that payload bytes arrived at `now` (call only when
+    /// [`carries_payload`] says so).
+    fn mark_payload(&mut self, now: Instant) {
+        self.last_payload = Some(now);
+    }
+
+    /// Average over the payload window: start → the last byte-carrying
+    /// event, falling back to `now` while no bytes have moved yet (the
+    /// numerator is then 0 anyway).
+    fn avg_bps(&self, bytes: u64, now: Instant) -> f64 {
+        let end = self.last_payload.unwrap_or(now);
+        let elapsed = end
+            .saturating_duration_since(self.start)
+            .as_secs_f64()
+            .max(1e-6);
+        (bytes as f64) / elapsed
+    }
+
+    /// The per-second decision. `None` means "nothing moved in this
+    /// window" — the payload stream is idle or over, and the caller
+    /// emits no line for this tick.
+    ///
+    /// The window always rolls forward, emitted or not: an idle second
+    /// must not dilute the *next* window's current rate.
+    fn tick(&mut self, totals: &ProgressTotals, now: Instant) -> Option<RateSample> {
+        // Files as well as bytes: a run of empty files makes real
+        // progress the user should still see.
+        let moved = totals.bytes != self.prev_bytes || totals.files != self.prev_files;
+        let window_elapsed = now
+            .saturating_duration_since(self.prev_instant)
+            .as_secs_f64()
+            .max(1e-6);
+        let window_bytes = totals.bytes.saturating_sub(self.prev_bytes);
+        self.prev_instant = now;
+        self.prev_bytes = totals.bytes;
+        self.prev_files = totals.files;
+        if !moved {
+            return None;
+        }
+        Some(RateSample {
+            avg_bps: self.avg_bps(totals.bytes, now),
+            current_bps: (window_bytes as f64) / window_elapsed,
+        })
+    }
+}
+
+const MIB: f64 = 1024.0 * 1024.0;
+
+fn progress_line(totals: &ProgressTotals, sample: &RateSample) -> String {
+    format!(
+        "[progress] {}/{} files \u{2022} {:.2} MiB copied \u{2022} {:.2} MiB/s avg \u{2022} {:.2} MiB/s current",
+        totals.files,
+        totals.manifest_files,
+        totals.bytes as f64 / MIB,
+        sample.avg_bps / MIB,
+        sample.current_bps / MIB,
+    )
+}
+
+/// JSON shape is frozen: same event name, same five fields, always
+/// present. `avg_bytes_sec` divides by the payload window (start → last
+/// byte-carrying event) rather than by total wall time, so a run with a
+/// post-payload tail reports the rate the payload actually moved at.
+fn progress_json_line(totals: &ProgressTotals, sample: &RateSample) -> String {
+    format!(
+        "{{\"event\":\"progress\",\"files\":{},\"total_files\":{},\"bytes_copied\":{},\"avg_bytes_sec\":{:.0},\"current_bytes_sec\":{:.0}}}",
+        totals.files, totals.manifest_files, totals.bytes, sample.avg_bps, sample.current_bps
+    )
+}
+
+fn final_line(totals: &ProgressTotals, avg_bps: f64) -> String {
+    format!(
+        "[progress] final: {} file(s) transferred \u{2022} {:.2} MiB total \u{2022} {:.2} MiB/s avg",
+        totals.files,
+        totals.bytes as f64 / MIB,
+        avg_bps / MIB,
+    )
+}
+
+/// Same three fields as before. `avg_bytes_sec` is the payload-window
+/// average (see [`progress_json_line`]).
+fn final_json_line(totals: &ProgressTotals, avg_bps: f64) -> String {
+    format!(
+        "{{\"event\":\"final\",\"files_transferred\":{},\"total_bytes\":{},\"avg_bytes_sec\":{:.0}}}",
+        totals.files, totals.bytes, avg_bps
+    )
+}
+
 /// Spawn the per-transfer progress monitor. `suppress_final_line=true`
 /// lets move callers gate the post-transfer "[progress] final: …"
 /// line so a transfer-looking success summary doesn't appear on
@@ -48,8 +190,7 @@ pub(crate) fn spawn_progress_monitor_with_options(
         // per-direction folding rules (and the CLI's byte double-count
         // on TCP pulls, design-1) are gone with the contract.
         let mut totals = ProgressTotals::default();
-        let mut prev_bytes = 0u64;
-        let mut prev_instant = start;
+        let mut window = RateWindow::new(start);
         let mut ticker = interval(Duration::from_secs(1));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -60,6 +201,9 @@ pub(crate) fn spawn_progress_monitor_with_options(
                     match event {
                         Some(event) => {
                             totals.apply(&event);
+                            if carries_payload(&event) {
+                                window.mark_payload(Instant::now());
+                            }
                             if let ProgressEvent::FileComplete { path } = &event {
                                 if json {
                                     // `bytes` stays in the JSON shape for
@@ -81,31 +225,17 @@ pub(crate) fn spawn_progress_monitor_with_options(
                 }
                 _ = ticker.tick() => {
                     if totals.started() {
-                        let now = Instant::now();
-                        let elapsed = now.duration_since(start).as_secs_f64().max(1e-6);
-                        let window_elapsed = now.duration_since(prev_instant).as_secs_f64().max(1e-6);
-                        let window_bytes = totals.bytes.saturating_sub(prev_bytes);
-                        let avg_bps = (totals.bytes as f64) / elapsed;
-                        let current_bps = (window_bytes as f64) / window_elapsed;
-                        if json {
-                            eprintln!(
-                                "{{\"event\":\"progress\",\"files\":{},\"total_files\":{},\"bytes_copied\":{},\"avg_bytes_sec\":{:.0},\"current_bytes_sec\":{:.0}}}",
-                                totals.files, totals.manifest_files, totals.bytes, avg_bps, current_bps
-                            );
-                        } else {
-                            let avg_mib = avg_bps / (1024.0 * 1024.0);
-                            let current_mib = current_bps / (1024.0 * 1024.0);
-                            println!(
-                                "[progress] {}/{} files \u{2022} {:.2} MiB copied \u{2022} {:.2} MiB/s avg \u{2022} {:.2} MiB/s current",
-                                totals.files,
-                                totals.manifest_files,
-                                totals.bytes as f64 / (1024.0 * 1024.0),
-                                avg_mib,
-                                current_mib,
-                            );
+                        // `None` = the window moved nothing: the payload
+                        // stream is idle or already over (a mirror purge
+                        // or the wait for the destination's summary), so
+                        // there is no honest rate to print.
+                        if let Some(sample) = window.tick(&totals, Instant::now()) {
+                            if json {
+                                eprintln!("{}", progress_json_line(&totals, &sample));
+                            } else {
+                                println!("{}", progress_line(&totals, &sample));
+                            }
                         }
-                        prev_instant = now;
-                        prev_bytes = totals.bytes;
                     } else if totals.manifest_files > 0 {
                         if json {
                             eprintln!(
@@ -124,21 +254,13 @@ pub(crate) fn spawn_progress_monitor_with_options(
         }
 
         if totals.started() && !suppress_final_line {
-            let elapsed = start.elapsed().as_secs_f64().max(1e-6);
-            let avg_bps = (totals.bytes as f64) / elapsed;
+            // Payload window, not total wall: a post-payload purge is
+            // not transfer time and must not dilute the average.
+            let avg_bps = window.avg_bps(totals.bytes, Instant::now());
             if json {
-                eprintln!(
-                    "{{\"event\":\"final\",\"files_transferred\":{},\"total_bytes\":{},\"avg_bytes_sec\":{:.0}}}",
-                    totals.files, totals.bytes, avg_bps
-                );
+                eprintln!("{}", final_json_line(&totals, avg_bps));
             } else {
-                let avg_mib = avg_bps / (1024.0 * 1024.0);
-                println!(
-                    "[progress] final: {} file(s) transferred \u{2022} {:.2} MiB total \u{2022} {:.2} MiB/s avg",
-                    totals.files,
-                    totals.bytes as f64 / (1024.0 * 1024.0),
-                    avg_mib,
-                );
+                println!("{}", final_line(&totals, avg_bps));
             }
         } else if !totals.started() && totals.manifest_files > 0 {
             if json {
@@ -670,6 +792,198 @@ pub fn describe_push_result(summary: &blit_core::generated::TransferSummary, des
 
 // This module's test surface is reserved for CLI-entry-point
 // behavior; library behavior is pinned in blit_core.
+
+#[cfg(test)]
+mod rate_window_tests {
+    use super::{carries_payload, final_line, progress_line, RateWindow, MIB};
+    use blit_core::remote::transfer::{ProgressEvent, ProgressTotals};
+    use std::time::{Duration, Instant};
+
+    /// One scripted moment on the monitor's timeline.
+    enum Step {
+        /// An event arrived on the progress channel.
+        Event(ProgressEvent),
+        /// The one-second ticker fired.
+        Tick,
+    }
+
+    /// Replay a timeline through the monitor's decision path with
+    /// injected instants — the same calls the ticker loop makes, so the
+    /// test pins behaviour rather than a private formula. Returns the
+    /// per-second lines that would have been printed, plus the final
+    /// line rendered at `end_ms`.
+    fn replay(script: &[(u64, Step)], end_ms: u64) -> (Vec<String>, String) {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut totals = ProgressTotals::default();
+        let mut window = RateWindow::new(t0);
+        let mut lines = Vec::new();
+        for (ms, step) in script {
+            match step {
+                Step::Event(event) => {
+                    totals.apply(event);
+                    if carries_payload(event) {
+                        window.mark_payload(at(*ms));
+                    }
+                }
+                Step::Tick => {
+                    if totals.started() {
+                        if let Some(sample) = window.tick(&totals, at(*ms)) {
+                            lines.push(progress_line(&totals, &sample));
+                        }
+                    }
+                }
+            }
+        }
+        let avg = window.avg_bps(totals.bytes, at(end_ms));
+        (lines, final_line(&totals, avg))
+    }
+
+    fn payload(mib: u64) -> ProgressEvent {
+        ProgressEvent::Payload {
+            files: 1,
+            bytes: mib * MIB as u64,
+        }
+    }
+
+    /// The residue this fix closes: 9 MiB moved over the first three
+    /// seconds, then an in-session mirror purge holds the session open
+    /// for five more. The ticker must go quiet once the payload stream
+    /// ends — no trailing "0.00 MiB/s current" — and the final average
+    /// must divide by the 3 s payload window (3.00 MiB/s), not by the
+    /// 8 s wall clock (which would report 1.12 MiB/s).
+    #[test]
+    fn post_payload_phase_emits_no_zero_rate_and_does_not_dilute_the_average() {
+        let script = vec![
+            (
+                0,
+                Step::Event(ProgressEvent::ManifestBatch {
+                    files: 3,
+                    bytes: 9 * MIB as u64,
+                }),
+            ),
+            (1000, Step::Event(payload(3))),
+            (1500, Step::Tick),
+            (2000, Step::Event(payload(3))),
+            (2500, Step::Tick),
+            (3000, Step::Event(payload(3))),
+            (3500, Step::Tick),
+            // Last payload byte is behind us; the purge runs on.
+            (3600, Step::Event(ProgressEvent::DeleteBegin)),
+            (4500, Step::Tick),
+            (5500, Step::Tick),
+            (6500, Step::Tick),
+            (7500, Step::Tick),
+        ];
+        let (lines, final_text) = replay(&script, 8000);
+
+        assert_eq!(
+            lines.len(),
+            3,
+            "one line per payload-carrying second, none for the purge: {lines:#?}"
+        );
+        assert!(
+            lines.iter().all(|l| !l.contains("0.00 MiB/s current")),
+            "no tick may report a fabricated zero current rate: {lines:#?}"
+        );
+        assert!(
+            final_text.contains("3.00 MiB/s avg"),
+            "the average divides by the payload window: {final_text}"
+        );
+        assert!(
+            !final_text.contains("1.12 MiB/s avg"),
+            "wall-clock dilution regressed: {final_text}"
+        );
+        assert!(
+            final_text.contains("9.00 MiB total"),
+            "byte total is untouched by the window change: {final_text}"
+        );
+    }
+
+    /// Suppression keys on movement, not on bytes alone: a run of empty
+    /// files moves the file count with zero bytes and must still report
+    /// liveness. Guards the fix against over-reaching into a legitimate
+    /// zero-byte second.
+    #[test]
+    fn file_only_progress_still_emits_a_line() {
+        let script = vec![
+            (
+                500,
+                Step::Event(ProgressEvent::FileComplete { path: "a".into() }),
+            ),
+            (1000, Step::Tick),
+            (
+                1500,
+                Step::Event(ProgressEvent::FileComplete { path: "b".into() }),
+            ),
+            (2000, Step::Tick),
+            // Nothing at all moves in this window.
+            (3000, Step::Tick),
+        ];
+        let (lines, _) = replay(&script, 3000);
+        assert_eq!(
+            lines.len(),
+            2,
+            "empty-file progress is still progress: {lines:#?}"
+        );
+        assert!(lines[1].contains("2/0 files"), "got: {}", lines[1]);
+    }
+
+    /// An idle stretch must not bleed into the next window's current
+    /// rate: the window rolls forward even on a suppressed tick, so the
+    /// second that resumes payload reports the rate it actually moved
+    /// at (4 MiB in 1 s), not 4 MiB spread over the idle time.
+    #[test]
+    fn a_suppressed_tick_still_rolls_the_window_forward() {
+        let script = vec![
+            (500, Step::Event(payload(1))),
+            (1000, Step::Tick),
+            (2000, Step::Tick),
+            (3000, Step::Tick),
+            (3500, Step::Event(payload(4))),
+            (4000, Step::Tick),
+        ];
+        let (lines, _) = replay(&script, 4000);
+        assert_eq!(
+            lines.len(),
+            2,
+            "one idle stretch, two live seconds: {lines:#?}"
+        );
+        assert!(
+            lines[1].contains("4.00 MiB/s current"),
+            "the resumed window is measured from the last tick: {}",
+            lines[1]
+        );
+    }
+
+    /// Only a byte-bearing `Payload` extends the rate window — the
+    /// classification the whole fix rests on.
+    #[test]
+    fn only_byte_bearing_payload_events_extend_the_window() {
+        assert!(carries_payload(&ProgressEvent::Payload {
+            files: 0,
+            bytes: 1
+        }));
+        assert!(!carries_payload(&ProgressEvent::Payload {
+            files: 1,
+            bytes: 0
+        }));
+        assert!(!carries_payload(&ProgressEvent::FileComplete {
+            path: "a".into()
+        }));
+        assert!(!carries_payload(&ProgressEvent::ManifestBatch {
+            files: 1,
+            bytes: 99
+        }));
+        assert!(!carries_payload(&ProgressEvent::Enumerated { files: 5 }));
+        assert!(!carries_payload(&ProgressEvent::DiffComplete));
+        assert!(!carries_payload(&ProgressEvent::DeleteBegin));
+        assert!(!carries_payload(&ProgressEvent::SummaryReconciled {
+            files_failed: 1,
+            bytes_landed: 7,
+        }));
+    }
+}
 
 #[cfg(test)]
 mod session_fault_summary_tests {
