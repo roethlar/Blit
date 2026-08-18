@@ -18,9 +18,11 @@ jobs:
     name: Update package managers
     runs-on: ubuntu-latest
     steps:
+      # Check out the dispatching branch, not the tag: the packaging
+      # scripts must come from the current tree (a bootstrap tag like
+      # v0.1.2 predates them). The tag is only resolved to its SHA below.
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.tag }}
           fetch-depth: 0
       - name: Update configured channels
         env:
@@ -33,10 +35,11 @@ jobs:
           WINGET_PKGS_FORK: ${{ secrets.WINGET_PKGS_FORK }}
           HOMEBREW_CORE_TOKEN: ${{ secrets.HOMEBREW_CORE_TOKEN }}
           HOMEBREW_CORE_FORK: ${{ secrets.HOMEBREW_CORE_FORK }}
+          TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          tag_sha="$(git rev-parse --short=12 "${{ inputs.tag }}")"
+          tag_sha="$(git rev-parse --short=12 "$TAG")"
           python3 scripts/package_managers/publish.py \
-            --tag "${{ inputs.tag }}" \
+            --tag "$TAG" \
             --tag-sha "${tag_sha}" \
             --repo-root .
