@@ -37,7 +37,7 @@ for candidate in "${candidates[@]}"; do
 done
 
 if [[ -z "${BLIT_BIN}" ]]; then
-  echo "blit binary not found. Build it first: cargo build --release -p blit-cli --bin blit" >&2
+  echo "blit binary not found. Build it first: cargo build --release -p blit-transfer --bin blit" >&2
   exit 1
 fi
 

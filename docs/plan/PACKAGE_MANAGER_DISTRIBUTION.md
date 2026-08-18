@@ -85,8 +85,9 @@ build tool, not a user install channel (D-2026-08-12-4).
   Scoop bucket, and AUR remotes once and stores tokens/AUR SSH as repo
   secrets. Missing secrets skip that channel (notice, not a failed blit
   release). `homebrew/core` and `microsoft/winget-pkgs` are PRs. Signing
-  secrets never enter this job. `cargo publish` is out of scope
-  (D-2026-08-12-4).
+  secrets never enter this job. `cargo publish` is a separate
+  owner-gated act, not part of this job (channel status: D-2026-08-18-1,
+  superseding D-2026-08-12-4's exclusion).
 - **Do not block `publish-release` on package-manager merge.** External
   review latency must not delay the canonical GitHub Release.
 - **No secret leakage.** External package repos receive only public asset
@@ -96,7 +97,10 @@ build tool, not a user install channel (D-2026-08-12-4).
 
 - [x] D1 recorded (D-2026-08-12-1): both archive and source lanes.
 - [x] Identifier set recorded (D-2026-08-12-2).
-- [x] Cargo is not a user channel (D-2026-08-12-4).
+- [x] ~~Cargo is not a user channel (D-2026-08-12-4).~~ **Superseded
+      by D-2026-08-18-1**: cargo IS a channel — `cargo install
+      blit-transfer` / `blit-daemon` (crate renamed; binary stays
+      `blit`). Publish acts owner-gated.
 - [x] First payload is v0.1.2 (D-2026-08-12-5).
 - [x] Updates are a bot on tag publish (D-2026-08-12-6).
 - [x] Plan flipped Draft → Active (D-2026-08-12-7).
@@ -119,8 +123,10 @@ build tool, not a user install channel (D-2026-08-12-4).
 - [ ] Archive-lane macOS/Windows binaries still carry the CI signatures
       (Developer ID Application / valid Authenticode). Not re-signed.
       Source-lane binaries are unsigned; docs do not claim otherwise.
-- [ ] README does not advertise `cargo install`. Developer clone +
-      `cargo build --release` may remain. No crates.io publish.
+- [ ] ~~README does not advertise `cargo install`.~~ **Superseded by
+      D-2026-08-18-1**: README advertises `cargo install
+      blit-transfer` once the crates are live and queryable — the
+      same only-live-channels rule as every other channel.
 - [x] A CI job runs after `publish-release` (and via
       `workflow_dispatch` + tag) that generates stubs and updates every
       channel whose secrets are present. It cannot fail or delay the
@@ -360,7 +366,7 @@ entry before the slice that needs it. Recommendations are not decisions.
 | homebrew/core review is slow or rejects the name | park pm-4; tap `blit-bin` still ships signed macOS |
 | `blit` name collisions (brew/scoop/AUR) | identifiers are bound (D-2026-08-12-2); if a registry rejects one, stop and ask |
 | Source build without injected SHA | `unknown.<nonce>` refuse; pm-1 + stub export prevent this |
-| Docs claim `cargo install` | forbidden by D-2026-08-12-4; pm-9 removes any such claim |
+| Docs claim `cargo install` before the crates are live | only-live-channels rule (D-2026-08-18-1 made cargo a channel, superseding D-2026-08-12-4) |
 | Docs advertise a dead command | docs only after live proof |
 | Second signing path / certs in repo | forbidden by Constraints |
 | Archive lane rebuilds or re-signs | forbidden |

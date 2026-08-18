@@ -51,7 +51,7 @@ $candidateBinaries = @(
 )
 $blitCli = $candidateBinaries | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if (-not $blitCli) {
-    throw "Unable to find blit.exe. Build it first: cargo build --release -p blit-cli --bin blit"
+    throw "Unable to find blit.exe. Build it first: cargo build --release -p blit-transfer --bin blit"
 }
 
 Write-Host ""

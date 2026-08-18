@@ -136,7 +136,7 @@ def homebrew_core_formula(
 
   def install
     ENV["BLIT_GIT_SHA"] = "{tag_sha}"
-    system "cargo", "build", "--release", "--locked", "-p", "blit-cli", "-p", "blit-daemon"
+    system "cargo", "build", "--release", "--locked", "-p", "blit-transfer", "-p", "blit-daemon"
     bin.install "target/release/blit", "target/release/blit-daemon"
   end
 
@@ -215,7 +215,7 @@ build() {{
   export BLIT_GIT_SHA={tag_sha}
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
-  cargo build --release --locked -p blit-cli -p blit-daemon
+  cargo build --release --locked -p blit-transfer -p blit-daemon
 }}
 
 package() {{

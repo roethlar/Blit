@@ -37,5 +37,5 @@ run_step "temporary firewall helper" \
   "${SCRIPT_DIR}/test-with-temporary-firewall-rule.sh"
 run_step "cargo check" cargo check
 run_step "cargo test -p blit-core" cargo test -p blit-core
-run_step "cargo test -p blit-cli" cargo test -p blit-cli
+run_step "cargo test -p blit-transfer" cargo test -p blit-transfer
 run_step "cargo test workspace" cargo test

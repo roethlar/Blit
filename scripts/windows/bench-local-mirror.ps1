@@ -195,7 +195,7 @@ try {
         $previousActionPreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = "Continue"
-            & cargo build --release --package blit-cli --bin blit 2>&1 |
+            & cargo build --release --package blit-transfer --bin blit 2>&1 |
                 ForEach-Object { Write-Log $_ }
         } finally {
             $ErrorActionPreference = $previousActionPreference

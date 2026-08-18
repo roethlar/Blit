@@ -47,5 +47,5 @@ function Run-Step {
 Run-Step "cargo fmt -- --check"      { cargo fmt -- --check }
 Run-Step "cargo check"               { cargo check }
 Run-Step "cargo test -p blit-core"   { cargo test -p blit-core }
-Run-Step "cargo test -p blit-cli"    { cargo test -p blit-cli }
+Run-Step "cargo test -p blit-transfer"    { cargo test -p blit-transfer }
 Run-Step "cargo test workspace"      { cargo test }

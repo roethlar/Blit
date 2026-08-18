@@ -3,11 +3,16 @@ name = "blit-daemon"
 version.workspace = true
 edition = "2021"
 license.workspace = true
+description = "blit-daemon: the network service for blit, the fast file transfer tool"
+repository = "https://github.com/roethlar/Blit"
+readme = "../../README.md"
+keywords = ["file-transfer", "sync", "backup", "daemon", "grpc"]
+categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tonic = "0.14"
-blit-core = { path = "../blit-core" }
+blit-core = { path = "../blit-core", version = "0.1.2" }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tokio-util = "0.7"
 eyre = "0.6"

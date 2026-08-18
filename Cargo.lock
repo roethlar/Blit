@@ -211,31 +211,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blit-cli"
-version = "0.1.2"
-dependencies = [
- "blit-core",
- "chrono",
- "clap",
- "clap_complete",
- "color-eyre",
- "console",
- "eyre",
- "filetime",
- "indicatif",
- "log",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-stream",
- "toml",
- "tonic",
- "wait-timeout",
- "walkdir",
-]
-
-[[package]]
 name = "blit-core"
 version = "0.1.2"
 dependencies = [
@@ -308,6 +283,31 @@ dependencies = [
  "tokio-util",
  "toml",
  "tonic",
+ "walkdir",
+]
+
+[[package]]
+name = "blit-transfer"
+version = "0.1.2"
+dependencies = [
+ "blit-core",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "color-eyre",
+ "console",
+ "eyre",
+ "filetime",
+ "indicatif",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tonic",
+ "wait-timeout",
  "walkdir",
 ]
 

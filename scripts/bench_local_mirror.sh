@@ -219,7 +219,7 @@ else
   log "Building blit (release) into $TARGET_DIR..."
   (
     cd "$REPO_ROOT"
-    cargo build --release --package blit-cli --bin blit
+    cargo build --release --package blit-transfer --bin blit
   ) >>"$LOG_FILE" 2>&1
 
   BLIT_BIN="$TARGET_DIR/release/blit"

@@ -1,14 +1,21 @@
 [package]
-name = "blit-cli"
+# Published as `blit-transfer` (D-2026-08-18-1): the crates.io names
+# `blit` and `blit-cli` belong to unrelated projects, and cargo
+# installs by BINARY name, so `cargo install blit-transfer` still
+# yields the `blit` command. The directory stays crates/blit-cli.
+name = "blit-transfer"
 version.workspace = true
 edition = "2021"
 license.workspace = true
+description = "blit: a fast file transfer tool — local and remote sync, migration, and backup (CLI)"
+repository = "https://github.com/roethlar/Blit"
+readme = "../../README.md"
+keywords = ["file-transfer", "sync", "backup", "mirror", "rsync"]
+categories = ["command-line-utilities", "filesystem"]
 
 # The shipped command is named `blit`, matching every doc, manpage,
-# and README example. Crate stays `blit-cli` to avoid rippling the
-# workspace member name; only the produced binary is renamed via
-# `[[bin]]`. Tests, scripts, and CI walk the build dir and look for
-# `blit` / `blit.exe` (was `blit-cli` / `blit-cli.exe`).
+# and README example; the binary is named via `[[bin]]`. Tests,
+# scripts, and CI walk the build dir and look for `blit` / `blit.exe`.
 [[bin]]
 name = "blit"
 path = "src/main.rs"
@@ -17,7 +24,7 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
-blit-core = { path = "../blit-core" }
+blit-core = { path = "../blit-core", version = "0.1.2" }
 eyre = "0.6"
 color-eyre = "0.6"
 log = "0.4"
