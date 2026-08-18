@@ -156,7 +156,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    no daemon runs on zoey without a fresh go.
 8. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
 9. **`docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (ACTIVE, D-2026-08-12-7)**
-   — brew, AUR, winget, scoop; v0.1.2; bot on tag. Now: pm-4 (tap live).
+   — **pm-4 PROVEN 2026-08-18**: brew tap + scoop bucket live and installed on arm64 macOS with exact tag identity + intact signature; winget branch pushed (owner's microsoft PR click pending); AUR blocked on the owner saving the new pubkey to their account; homebrew-core (pm-5) not started. Detail: DEVLOG 2026-08-18 20:10Z.
 
 ## Authoritative docs right now
 
