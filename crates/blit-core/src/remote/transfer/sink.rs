@@ -2378,8 +2378,12 @@ mod tests {
             let path = dst.join(format!("file-{index}.txt"));
             let metadata = std::fs::metadata(&path).unwrap();
             let mtime = filetime::FileTime::from_last_modification_time(&metadata);
+            // `.unix_seconds()`, never `.seconds()`: the latter is
+            // 1601-epoch-based on Windows, so comparing it to a unix wire
+            // value fails by exactly 11644473600 there while the stamped
+            // mtime is in fact correct (CI runs 31961332122/32084669325).
             assert_eq!(
-                mtime.seconds(),
+                mtime.unix_seconds(),
                 mtime_seconds,
                 "handle-based stamp must still set the wire mtime"
             );
