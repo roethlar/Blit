@@ -25,7 +25,7 @@ use std::io;
 /// that REPLACE the original chain (the fault is what crosses the wire
 /// and the driver boundary), so the fault carries the underlying
 /// `io::ErrorKind` in `SessionFault::io_kind` and classifies here by
-/// the same kind set (codex otp-10a F5) — a mid-transfer socket reset
+/// the same kind set (review otp-10a F5) — a mid-transfer socket reset
 /// stays retryable under `--retry` on the session paths.
 pub fn is_retryable(err: &eyre::Report) -> bool {
     err.chain().any(|cause| {
@@ -116,7 +116,7 @@ mod tests {
         assert!(is_retryable(&deep));
     }
 
-    /// codex otp-10a F5: a `SessionFault` replaces the original error
+    /// review otp-10a F5: a `SessionFault` replaces the original error
     /// chain at the session-driver boundary, so its captured `io_kind`
     /// must classify exactly as the raw io::Error would — retryable
     /// kinds retry, fatal kinds and kind-less faults do not.

@@ -838,7 +838,7 @@ impl FilteredSource {
 ///
 /// A file that cannot be opened or read for hashing is still EMITTED,
 /// with an empty checksum — `compare_file`'s missing-checksum arm then
-/// transfers it unconditionally (codex otp-10b-1 F1: dropping it would
+/// transfers it unconditionally (review otp-10b-1 F1: dropping it would
 /// let a pull "succeed" with the file silently absent, since only the
 /// SOURCE end sees its own unreadable list; a genuinely unreadable file
 /// then fails loudly at payload time like any other read failure).
@@ -911,7 +911,7 @@ impl ChecksummingSource {
         };
         let (tx, rx_hashed) = mpsc::channel::<FileHeader>(64);
         let inner = Arc::clone(&self.inner);
-        // codex otp-10b-1 F2: the hashing task must not outlive its
+        // review otp-10b-1 F2: the hashing task must not outlive its
         // consumer by a whole (arbitrarily large) file — the stop probe
         // is checked between 64 KiB hash chunks, bounding residual work
         // after a session ends to one chunk.
@@ -963,7 +963,7 @@ fn strip_windows_metadata_from_scan(
 /// Incremental 64 KiB reads keep memory flat; blake3 itself is fast
 /// enough that hashing inline with the (I/O-bound) read is the simple
 /// and adequate shape here. Returns `Ok(None)` when `stop` reports the
-/// consumer is gone (checked between chunks — codex otp-10b-1 F2).
+/// consumer is gone (checked between chunks — review otp-10b-1 F2).
 async fn hash_header_content(
     source: &dyn TransferSource,
     header: &FileHeader,
@@ -1535,7 +1535,7 @@ mod checksumming_source_tests {
     use tokio::sync::mpsc::channel;
 
     /// Stub whose `open_file` serves bytes for every header except
-    /// ones named `unhashable*`, which error — the codex otp-10b-1 F1
+    /// ones named `unhashable*`, which error — the review otp-10b-1 F1
     /// shape (a file the scan listed but the hash pass cannot read).
     struct HashStub {
         headers: StdMutex<Option<Vec<FileHeader>>>,
@@ -1601,7 +1601,7 @@ mod checksumming_source_tests {
         }
     }
 
-    /// codex otp-10b-1 F1: an unhashable file must still be EMITTED —
+    /// review otp-10b-1 F1: an unhashable file must still be EMITTED —
     /// with an empty checksum, so the destination's missing-checksum
     /// arm transfers it unconditionally. Dropping it would let a pull
     /// report success with the file silently absent (only the SOURCE

@@ -45,7 +45,7 @@ pub fn comparison_mode(flags: CompareFlags) -> ComparisonMode {
     }
 }
 
-/// The move-verb mapping (codex otp-10a F1, mirrored on pull at
+/// The move-verb mapping (review otp-10a F1, mirrored on pull at
 /// otp-10b-2): a move deletes the source after the transfer, so every
 /// skip must be provably safe. `--checksum` qualifies — a Checksum
 /// skip means the destination already holds byte-identical content —

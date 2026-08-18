@@ -425,7 +425,7 @@ pub struct LocalApply {
     pub(super) null_sink: bool,
     /// Pipeline worker count: 1 (the old streaming pipeline's default
     /// shape) unless the hidden `--workers` debug limiter set
-    /// `debug_mode` (codex otp-11a F7).
+    /// `debug_mode` (review otp-11a F7).
     pub(super) sink_workers: usize,
     /// Shared unreadable-path accumulator (same Arc the source scan
     /// feeds): apply-side availability failures land here too, so
@@ -469,7 +469,7 @@ pub struct LocalApplyStats {
 /// the write totals (the same join discipline as the data-plane
 /// receive). A run dropped WITHOUT `finish()` — a session error or a
 /// cancelled future — aborts the pipeline task at its next payload
-/// boundary (codex otp-11a F3): the in-flight `spawn_blocking` write
+/// boundary (review otp-11a F3): the in-flight `spawn_blocking` write
 /// completes, queued payloads are dropped, and no write continues
 /// behind an operation that already returned.
 pub(super) struct LocalApplyRun {
@@ -508,7 +508,7 @@ impl LocalApply {
         // One pipeline worker per sink handle — the old streaming
         // pipeline's default shape is one; the hidden `--workers`
         // debug limiter (which always sets debug_mode) widens it
-        // (codex otp-11a F7).
+        // (review otp-11a F7).
         let sinks: Vec<Arc<dyn TransferSink>> = (0..self.sink_workers.max(1))
             .map(|_| Arc::clone(&self.sink))
             .collect();
@@ -1052,7 +1052,7 @@ fn build_local_record(
     // `--null` runs keep the old `null_sink` tag: RunKind derivation
     // keys on it (perf_history.rs), and a `"session"` tag would
     // classify diagnostics runs as Real and contaminate profiling
-    // (codex otp-11a F9).
+    // (review otp-11a F9).
     let fast_path = if options.null_sink {
         "null_sink"
     } else {
@@ -1141,7 +1141,7 @@ mod tests {
         }
     }
 
-    /// R46-F2 carried onto the local carrier (codex otp-11a F4): a
+    /// R46-F2 carried onto the local carrier (review otp-11a F4): a
     /// source entry that vanishes AFTER a clean scan (recorded
     /// unreadable by the apply's availability check) must refuse the
     /// mirror at SourceDone, before any deletion — the old engine
@@ -2039,7 +2039,7 @@ mod tests {
         assert_eq!(record.large_bytes, 5_000);
     }
 
-    /// codex otp-11a F9: `--null` runs keep the `null_sink` tag so
+    /// review otp-11a F9: `--null` runs keep the `null_sink` tag so
     /// RunKind derivation classifies them as diagnostics, and dry-run
     /// records carry `dry_run` for the same lane split.
     #[test]

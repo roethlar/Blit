@@ -458,7 +458,7 @@ impl TransferDial {
             }
             if profile.max_inflight_bytes > 0 {
                 // The in-flight budget bounds the CHUNK ceiling first
-                // (codex ue-r2-1e F1: with max_chunk unknown, a budget
+                // (review ue-r2-1e F1: with max_chunk unknown, a budget
                 // smaller than one chunk must still be honored — floor
                 // 64 KiB, matching the session's minimum buffer), then
                 // prefetch so prefetch × chunk stays within budget
@@ -1108,7 +1108,7 @@ pub fn spawn_dial_tuner_with_resize(
                 }
                 continue;
             };
-            // codex ue-r2-1e F2: an idle tick (no bytes moved) is NO
+            // review ue-r2-1e F2: an idle tick (no bytes moved) is NO
             // SIGNAL, not a clean pipe — stepping up during manifest /
             // preparation stalls would ramp without evidence and break
             // the conservative-start contract. ue-r2-2 review (panel
@@ -1203,7 +1203,7 @@ mod tests {
         assert_eq!(dial.prefetch_count(), 2, "prefetch bounded by max_inflight");
         assert_eq!(dial.ceiling_max_streams(), 4);
 
-        // codex F1: an in-flight budget smaller than one chunk bounds
+        // review F1: an in-flight budget smaller than one chunk bounds
         // the chunk ceiling itself, even with max_chunk unknown (0).
         let tight = TransferDial::conservative_within(Some(&profile(0, 0, 8 * MIB as u64)));
         while tight.step_up_cheap_dials() {}
@@ -1316,7 +1316,7 @@ mod tests {
         // registered before the clock moves.
         tokio::task::yield_now().await;
 
-        // codex F2: an idle tick (no bytes moved) must NOT step.
+        // review F2: an idle tick (no bytes moved) must NOT step.
         tokio::time::advance(DIAL_TUNER_TICK + std::time::Duration::from_millis(10)).await;
         for _ in 0..16 {
             tokio::task::yield_now().await;

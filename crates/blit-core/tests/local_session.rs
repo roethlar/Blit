@@ -1145,7 +1145,7 @@ async fn deep_modification_after_warm_runs_syncs() -> Result<()> {
 }
 
 /// Local `--resume` rides the carrier's block phase — the shared
-/// `resume_copy_file` primitive (design doc D2, codex design F5
+/// `resume_copy_file` primitive (design doc D2, review design F5
 /// adjudication): a stale partial at the destination is completed
 /// byte-identical.
 #[tokio::test]

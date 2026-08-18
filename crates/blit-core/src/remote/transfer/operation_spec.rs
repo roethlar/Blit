@@ -325,7 +325,7 @@ pub fn delegated_spec_from_options(
 
 #[cfg(test)]
 mod delegated_spec_tests {
-    //! otp-10c-2 codex F3: the delegated trigger's spec builder is
+    //! otp-10c-2 review F3: the delegated trigger's spec builder is
     //! live code and lost its direct pins when the old pull driver's
     //! `spec_extraction_tests` died with it — re-pinned here against
     //! the relocated `delegated_spec_from_options`.

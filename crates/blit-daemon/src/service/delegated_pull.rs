@@ -82,7 +82,7 @@ pub(crate) fn delete_list_authorized(mirror_mode_proto: i32) -> bool {
         || mirror_mode_proto == MirrorMode::All as i32
 }
 
-/// Classify a session error onto the wire error phase (codex otp-9b
+/// Classify a session error onto the wire error phase (review otp-9b
 /// F3): every `Transfer`-open failure is a NEGOTIATE-phase failure —
 /// structurally, via [`TransferOpenRefusal`], exactly as the old typed
 /// `PullSyncError` boundary treated every pre-response RPC failure
@@ -757,7 +757,7 @@ mod tests {
         assert!(validate_spec(spec).is_err());
     }
 
-    /// codex otp-9b F3: phase classification is structural. EVERY
+    /// review otp-9b F3: phase classification is structural. EVERY
     /// Transfer-open failure — whatever its inner code — is NEGOTIATE
     /// (the old typed boundary's contract for pre-response failures);
     /// mid-session faults phase by code; a plain transport error is

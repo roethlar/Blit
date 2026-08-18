@@ -153,7 +153,7 @@ flush_win_ms() {   # Windows volume flush, self-timed; prints ms or NA
     | nocr | sed -n 's/.*F:\([0-9][0-9]*\):F.*/\1/p;s/.*F:NA:F.*/NA/p' | head -1
 }
 sync_skippy_ms() {   # skippy sync bracketed by /proc/uptime in one shell
-  # codex otp-12c F5: a FAILED sync must not read as a plausible flush. The
+  # review otp-12c F5: a FAILED sync must not read as a plausible flush. The
   # sentinel is emitted only on rc=0, so a broken sync yields NA -> the run
   # voids (fail closed), instead of a numeric flush on unflushed bytes.
   local out
@@ -171,7 +171,7 @@ sha256_win()   { local h; h=$(wssh "(Get-FileHash -Algorithm SHA256 '$1' -ErrorA
 # `blit --version` — the CLI rejects the flag — so grep the exe, never run it.
 # LC_ALL=C + -a are load-bearing on BSD grep (macOS) for matches inside binaries.
 #
-# codex otp-12c F3: a bare substring test for "+<sha>" ALSO matches a dirty
+# review otp-12c F3: a bare substring test for "+<sha>" ALSO matches a dirty
 # build id ("+<sha>.dirty.<hash>" — the exact shape that fooled otp-12a's
 # provenance check on zoey). A clean build must embed "+<sha>" NOT followed by
 # ".dirty", so each gate below asserts the id is present AND that no dirty
@@ -195,7 +195,7 @@ preflight() {
   command -v python3 >/dev/null || die "python3 required on the Mac"
   command -v shasum  >/dev/null || die "shasum required on the Mac"
 
-  # Clean SOURCE tree. codex otp-12c F3: `proto/` was omitted — blit-core's build
+  # Clean SOURCE tree. review otp-12c F3: `proto/` was omitted — blit-core's build
   # script compiles proto/blit.proto into the binaries, so proto dirt changes the
   # build exactly like crates dirt does. Docs churn stays allowed.
   local dirty; dirty="$(git -C "$REPO_ROOT" status --porcelain -- crates proto Cargo.toml Cargo.lock)"
@@ -212,7 +212,7 @@ $dirty"
   sssh "test -x '$SKIPPY_DAEMON'" || die "skippy blit-daemon missing/not exec: $SKIPPY_DAEMON"
   embeds_clean_skippy "$SKIPPY_BLIT"   || die "skippy blit does not embed a CLEAN +$EXPECT_SHA"
   embeds_clean_skippy "$SKIPPY_DAEMON" || die "skippy blit-daemon does not embed a CLEAN +$EXPECT_SHA"
-  # codex otp-12c F1: cold caches are METHODOLOGY, not a nicety — a session that
+  # review otp-12c F1: cold caches are METHODOLOGY, not a nicety — a session that
   # cannot drop them measures warm reads and its numbers are worthless. This was
   # a warning; it is now a hard gate (COLD_REQUIRED=0 to measure warm on purpose).
   if [[ "${COLD_REQUIRED:-1}" == 1 ]]; then
@@ -248,7 +248,7 @@ write_manifest() {
   h_sd="$(sha256_skippy "$SKIPPY_DAEMON")"
   h_wc="$(sha256_win "$WIN_BLIT")"
   h_wd="$(sha256_win "$NEW_WIN_DAEMON")"
-  # codex otp-12c F4: the `sha` column must be the BINARY's identity (the id the
+  # review otp-12c F4: the `sha` column must be the BINARY's identity (the id the
   # binaries actually embed, gated above), NOT the harness checkout's HEAD. When
   # EXPECT_SHA is overridden these differ, and recording HEAD made the
   # machine-readable field FALSE. Harness HEAD is recorded separately, as itself.
@@ -326,7 +326,7 @@ skippy_daemon_stop() {
   [[ "$SKIPPY_DAEMON_STARTED" == 1 && -n "$SKIPPY_PID" ]] || return 0
   # PID-scoped, comm-verified: only kill if THAT pid is still a blit process.
   sssh "if [ -r /proc/$SKIPPY_PID/comm ] && grep -qi blit /proc/$SKIPPY_PID/comm; then kill $SKIPPY_PID 2>/dev/null; for i in 1 2 3 4 5 6; do [ -d /proc/$SKIPPY_PID ] || break; sleep 0.5; done; [ -d /proc/$SKIPPY_PID ] && kill -9 $SKIPPY_PID 2>/dev/null; fi; true" 2>/dev/null || true
-  # codex otp-12c F6: the teardown used to clear the flag and log "stopped"
+  # review otp-12c F6: the teardown used to clear the flag and log "stopped"
   # unconditionally — the harness could exit 0 with a daemon still holding the
   # port, and the EXIT trap would never retry. VERIFY the pid is gone; a
   # survivor is loud and leaves the flag set so the trap tries again.
@@ -379,7 +379,7 @@ win_daemon_stop() {
 if(\$p){ \$proc=Get-Process -Id \$p -ErrorAction SilentlyContinue; if(\$proc -and \$proc.ProcessName -eq 'blit-daemon'){ Stop-Process -Id \$p -Force } }
 else { \$c=Get-Content '$WIN_TEST\\daemon-wmi.pid' -ErrorAction SilentlyContinue; if(\$c){ \$d=Get-CimInstance Win32_Process -Filter \"Name='blit-daemon.exe'\" | Where-Object { \$_.ParentProcessId -eq \$c } | Select-Object -First 1; if(\$d){ Stop-Process -Id \$d.ProcessId -Force } } }
 Remove-Item '$WIN_TEST\\daemon-wmi.pid' -ErrorAction SilentlyContinue" 2>/dev/null || true
-  # codex otp-12c F6: verify the kill landed — never log "stopped" on faith.
+  # review otp-12c F6: verify the kill landed — never log "stopped" on faith.
   if wssh "if(Get-Process -Id '$WIN_PID' -ErrorAction SilentlyContinue){exit 0}else{exit 1}" 2>/dev/null; then
     TEARDOWN_LEAK=1
     log "ERROR: windows daemon pid $WIN_PID SURVIVED teardown — port $PORT may still be held"
@@ -405,7 +405,7 @@ for(\$i=0; \$i -lt $DRAIN_ITERS; \$i++){
 'DRAIN-TIMEOUT'" 2>/dev/null | nocr || echo DRAIN-ERROR
 }
 drain_skippy() {   # sync then poll /proc/diskstats sectors-written until quiet
-  # codex otp-12c F5: if SKIPPY_DISK_REGEX matches NO device, awk sums nothing,
+  # review otp-12c F5: if SKIPPY_DISK_REGEX matches NO device, awk sums nothing,
   # every delta is 0, and the loop reports "drained" on the first windows — a
   # never-drained disk reading as drained. Assert the regex matches >=1 device
   # BEFORE polling; no match is DRAIN-NODEV (not drained -> the pair voids).
@@ -432,7 +432,7 @@ prep_run() {   # $1 = dest kind (win|skippy). Drain the dest, then cold BOTH end
   RUN_DRAIN="${RUN_DRAIN// /_}"
   [[ "$RUN_DRAIN" == drained* ]] || log "  WARNING: dest($dest_kind) window UNDRAINED ($RUN_DRAIN) — pair will void, rerun"
 
-  # Cold BOTH data-plane ends every run (plan D4). codex otp-12c F1: these were
+  # Cold BOTH data-plane ends every run (plan D4). review otp-12c F1: these were
   # `|| true` — a purge that silently failed produced a WARM run that still
   # counted as valid, the same failure class as the a2dea3f sudo no-op. The
   # outcome is now recorded per run and a failure VOIDS the pair (fail closed).
@@ -534,7 +534,7 @@ deleg_run() {
   [[ -z "$RUN_FLUSH" || "$RUN_FLUSH" == NA ]] && { RUN_VALID=no; RUN_FLUSH=0; }
   RUN_MS=$(( end - start + RUN_FLUSH )); RUN_EXIT=$rc
   [[ $rc -eq 0 && "$RUN_DRAIN" == drained* ]] || RUN_VALID=no
-  cold_ok || RUN_VALID=no   # codex otp-12c F1: a warm run never counts
+  cold_ok || RUN_VALID=no   # review otp-12c F1: a warm run never counts
 }
 
 # direct_run CELL RID DEST_KIND SRC_REMOTE  — dest-host self-timed local pull
@@ -566,7 +566,7 @@ direct_run() {
   [[ -z "$RUN_FLUSH" || "$RUN_FLUSH" == NA ]] && { RUN_VALID=no; RUN_FLUSH=0; }
   RUN_MS=$(( T_MS + RUN_FLUSH )); RUN_EXIT=$T_RC
   [[ "$T_RC" == 0 && "$RUN_DRAIN" == drained* ]] || RUN_VALID=no
-  cold_ok || RUN_VALID=no   # codex otp-12c F1: a warm run never counts
+  cold_ok || RUN_VALID=no   # review otp-12c F1: a warm run never counts
 }
 
 # arm wrappers (CUR_W bound by the matrix driver)
@@ -591,7 +591,7 @@ run_pair_loop() {
       rid="${aname}_s${slot}a${attempts}"   # arm in every path -> no cross-arm collision
       "$fn" "$cell" "$rid"
       [[ "$RUN_VALID" == yes ]] || pair_valid=no
-      # codex otp-12c F4: `build` is the binary identity that was gated and
+      # review otp-12c F4: `build` is the binary identity that was gated and
       # hashed into the manifest, not the harness checkout's HEAD.
       local row="$cell,$aname,$EXPECT_SHA,$init,$slot,$RUN_MS,$RUN_FLUSH,$RUN_EXIT,$RUN_DRAIN"
       if [[ "$arm" == A ]]; then rowA="$row"; else rowB="$row"; fi
@@ -704,7 +704,7 @@ TEARDOWN_LEAK=0
 on_exit() {
   local rc=$?
   daemons_stop || true
-  # codex otp-12c F6: a daemon that survived teardown is still holding $PORT and
+  # review otp-12c F6: a daemon that survived teardown is still holding $PORT and
   # will trip the NEXT session's stale-listener refusal. Never exit 0 on a leak.
   if [[ "$TEARDOWN_LEAK" == 1 ]]; then
     log "FATAL: a benchmark daemon survived teardown — stop it before the next session"

@@ -89,7 +89,7 @@ zssh() { ssh "${SSH_MUX[@]}" "$ZOEY_SSH" "$@"; }
 # median absorbs the (rare) NTP-step outlier. python3 is a documented
 # prerequisite (preflight-checked).
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
-# --- Self-timed durability steps (codex otp-2w F3, applied here too) --
+# --- Self-timed durability steps (review otp-2w F3, applied here too) --
 # The timed window = transfer + destination flush, and NOTHING else.
 # An `ssh host sync` wrapped in the window adds ~1.2s of connection
 # setup (measured) that lands only on push cells; each durability step
@@ -100,7 +100,7 @@ now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
 sync_dest_ms() {   # Linux sync on the daemon host; prints its elapsed ms
     zssh 'a=$(awk "{print int(\$1*1000)}" /proc/uptime); sync; b=$(awk "{print int(\$1*1000)}" /proc/uptime); echo $((b-a))'
 }
-# Durable pull window (codex otp-2 F2): macOS sync(2) SCHEDULES writes
+# Durable pull window (review otp-2 F2): macOS sync(2) SCHEDULES writes
 # and may return early, unlike Linux sync(2) which waits — so a bare
 # `sync` under-times the pull cells relative to the push cells' remote
 # sync. fsync every file in the dest tree instead: on macOS fsync
@@ -165,7 +165,7 @@ sweep_push_dirs() {
 trap 'stop_daemon; sweep_push_dirs' EXIT
 
 # --- Pool drain + cold caches, both ends ------------------------------
-# Order matters (codex otp-2 F4): FIRST flush the daemon host's dirty
+# Order matters (review otp-2 F4): FIRST flush the daemon host's dirty
 # pages into the pool (`sync` — Linux sync waits), THEN wait for the
 # tier to destage until quiet (three consecutive 2s windows with
 # < 2 MiB written across all physical disks; timeout 240s), then cold
@@ -241,7 +241,7 @@ finish_cell() {  # label total best  (per-run times read back from CSV)
 }
 
 # push: client fixture -> fresh, never-seen module subdir per run.
-# SESSION_TAG makes destinations unique per INVOCATION too (codex otp-2
+# SESSION_TAG makes destinations unique per INVOCATION too (review otp-2
 # F5): an interrupted run's leftovers can never turn a rerun's copy
 # into a partial no-op; the EXIT trap also sweeps them.
 push_cell() {    # label src flag(optional)

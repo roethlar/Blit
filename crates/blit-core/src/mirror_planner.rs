@@ -38,7 +38,7 @@ pub struct MirrorDeletionPlan {
 // unified session, the first mirror path that diffs a WIRE source set (the
 // source's on-disk case) against the DEST filesystem: on a case-insensitive
 // dest the two cases can diverge, and an exact key would delete the
-// just-written file (codex otp-6b F1). Case-insensitive Linux mounts and
+// just-written file (review otp-6b F1). Case-insensitive Linux mounts and
 // case-sensitive macOS volumes are rare misconfigurations a compile-time cfg
 // cannot detect; ASCII-only folding leaves Unicode case variants approximate
 // (a known gap, same as the pre-existing Windows behavior).
@@ -363,7 +363,7 @@ mod casefold_tests {
 
     // On NTFS/APFS the mirror keep-set must treat `Foo.txt` and `foo.txt` as
     // the same file, or the session mirror deletes a just-written file whose
-    // wire case differs from the dest-FS case (codex otp-6b F1). Runs on
+    // wire case differs from the dest-FS case (review otp-6b F1). Runs on
     // Windows/macOS CI (the case-insensitive-default platforms); a Linux dev
     // box cannot exercise it — see the exact-match test below.
     #[cfg(any(windows, target_os = "macos"))]

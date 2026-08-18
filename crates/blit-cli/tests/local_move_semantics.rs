@@ -78,7 +78,7 @@ fn local_move_preserves_unrelated_destination_entries() {
     );
 }
 
-/// codex otp-10b-2 F3 (regression pin for otp-11): a same-size
+/// review otp-10b-2 F3 (regression pin for otp-11): a same-size
 /// SAME-mtime destination file whose content differs must land the
 /// source bytes before move deletes the source. Today the non-mirror
 /// local path copies unconditionally, so this holds already; local

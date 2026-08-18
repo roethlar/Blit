@@ -26,7 +26,7 @@ pub enum ResumeDiffEvent<'a> {
     /// A stale block that must be sent: `(offset, bytes)`. The slice
     /// borrows the iterator's buffer and is valid until the next call.
     Stale { offset: u64, bytes: &'a [u8] },
-    /// codex otp-7b-1 F1: emitted when the configured keepalive
+    /// review otp-7b-1 F1: emitted when the configured keepalive
     /// interval elapsed while skipping MATCHING blocks. A long
     /// mostly-matching scan produces no stale blocks — and therefore no
     /// socket traffic — for as long as the file takes to read+hash; a
@@ -69,7 +69,7 @@ impl ResumeBlockDiff {
         block_size: usize,
         dest_hashes: Vec<Vec<u8>>,
     ) -> Result<Self> {
-        // otp-7b-2 codex G2: the open failure names its file too, on
+        // otp-7b-2 review G2: the open failure names its file too, on
         // both carriers.
         let reader = source
             .open_file(header)
@@ -152,7 +152,7 @@ mod tests {
     use super::*;
     use crate::remote::transfer::source::FsTransferSource;
 
-    /// codex otp-7b-1 F1: an all-matching scan armed with keepalive
+    /// review otp-7b-1 F1: an all-matching scan armed with keepalive
     /// yields one KeepAlive per skipped block at a zero interval (the
     /// liveness signal exists), and yields nothing when unarmed (the
     /// in-stream carrier's behavior is unchanged).

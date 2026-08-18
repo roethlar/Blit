@@ -13,9 +13,9 @@
 # placed ABOVE the override check, so the harness refused EVERY run. Found by
 # running it. `bash -n` sees nothing.)
 #
-#   .review/results/macmac-harness-r11.codex-engine.md   (the decision rule)
-#   .review/results/macmac-harness-r11.codex-harness.md  (this file: 1 BLOCKER, 4 HIGH)
-#   .review/results/macmac-harness-r11.grok.md           (second opinion, D-2026-07-14-2)
+#   .review/results/macmac-harness-r11.*.md — the decision rule, this
+#   file's findings (1 BLOCKER, 4 HIGH), and the second opinion
+#   (D-2026-07-14-2).
 #
 # Clearing it: land the round-12 review, adjudicate, and delete this block plus the
 # CLEARED_BY_REVIEW guard below. Until then `SELFTEST=1` and `PREFLIGHT_ONLY=1`
@@ -69,7 +69,7 @@
 #   * Gates FAILED OPEN: pgrep errors read as "quiet"; a failed `top` read as 0%
 #     CPU and a late idle sample could overwrite a busy one; non-numeric `iostat`
 #     read as zero and CERTIFIED drainage; the drain watched a hardcoded `disk0`
-#     that the data need never touch (grok); `die` inside $(...) exited only the
+#     that the data need never touch (review); `die` inside $(...) exited only the
 #     subshell, so an empty hash still landed. Every probe is now sentinel-framed,
 #     rc-aware, and fails CLOSED.
 #
@@ -110,7 +110,7 @@ REGISTERED_BUILD="f35702a"
 # =============================================================================
 # THE REGISTERED TOPOLOGY. **NOT OVERRIDABLE** — literals, not `${VAR:-default}`.
 #
-# Round-11 (codex, BLOCKER): the NIC, IP and MAC were env-overridable and the MTU and the
+# Round-11 (review, BLOCKER): the NIC, IP and MAC were env-overridable and the MTU and the
 # link speed were NEVER CHECKED AT ALL. So the whole run could go over the 1GbE NIC, or at
 # MTU 1500, and every gate would still pass — while pf-0 spent 256 runs establishing that
 # MTU moves wall time on this fabric. THE RIG MUST PROVE IT IS ON THE FABRIC IT CLAIMS.
@@ -138,7 +138,7 @@ Q_MODULE="${Q_MODULE:-/Users/michael/blit-bench-work}"
 # =============================================================================
 # THE REGISTERED CONSTANTS. **NOT OVERRIDABLE.**
 #
-# Round-5 (codex, BLOCKER): these were `${VAR:-default}`, so the pre-registered
+# Round-5 (review, BLOCKER): these were `${VAR:-default}`, so the pre-registered
 # decision rule could be edited FROM THE COMMAND LINE — `DELTA_REF_MS=240` turned a
 # RIG-VOID into a VANISHES. A pre-registration that the operator can retune, after
 # the data exists, in the direction of the answer they want, IS NOT A
@@ -180,7 +180,7 @@ SETTLE_MS=250              # equal pre-fsync window on BOTH arms
 # one-directional P1 out of nothing. The pre-registration has claimed an equal settle
 # on both arms through revisions 3, 4 and 5. It was never applied.
 #
-# Found only by EXECUTING it (round-5 codex flagged the ignored exit status; running
+# Found only by EXECUTING it (round-5 review flagged the ignored exit status; running
 # it showed the status was ALWAYS failure). `bash -n` sees nothing here.
 SETTLE_SEC="$(awk -v m="$SETTLE_MS" 'BEGIN{printf "%.3f", m/1000}')"
 [[ "$SETTLE_SEC" =~ ^[0-9]+\.[0-9]+$ ]] || { echo "FATAL: settle seconds did not compute ('$SETTLE_SEC')" >&2; exit 1; }
@@ -204,7 +204,7 @@ Q_IP=10.1.10.54                       # q, 10GbE en8
 Q_NIC=en8
 Q_MAC=00:01:d2:19:04:a3               # q's OWN en8 MAC (measured)
 
-# RUNS and PORT are registered too (round-11 grok, LOW): RUNS was `${RUNS:-8}` and absent from
+# RUNS and PORT are registered too (round-11 review, LOW): RUNS was `${RUNS:-8}` and absent from
 # the refusal list above, so it was pinned only by a preflight check -- a weaker guarantee than
 # every other registered constant, for the one number the whole rule depends on (n is EXACTLY
 # 8; at any larger n the >=95% interval starts TRIMMING and a bimodal arm yields a false null).
@@ -212,7 +212,7 @@ Q_MAC=00:01:d2:19:04:a3               # q's OWN en8 MAC (measured)
 RUNS=8
 PORT=9031
 
-# THE FABRIC (round-11 codex, BLOCKER). Measured on both hosts, 2026-07-14, before any data:
+# THE FABRIC (round-11 review, BLOCKER). Measured on both hosts, 2026-07-14, before any data:
 #   nagatha en11: mtu 9000, media 10Gbase-T <full-duplex,flow-control>, status active
 #   q       en8 : mtu 9000, media 10Gbase-T <full-duplex>,              status active
 #   path    MSS : 8948 in BOTH directions (9000 - 20 IP - 20 TCP - 12 timestamps)
@@ -225,7 +225,7 @@ REGISTERED_MSS=8948
 
 # The REGISTERED cell set. The verdict engine requires ALL of them present and
 # complete: a partial set that is merely filtered lets a ONE-CELL run emit
-# "VANISHES" while claiming both cells vanished (codex r2 BLOCKER 1).
+# "VANISHES" while claiming both cells vanished (review r2 BLOCKER 1).
 REGISTERED_CELLS="nq_tcp_mixed,qn_tcp_mixed,nq_grpc_mixed,qn_grpc_mixed,nq_tcp_large,qn_tcp_large"
 CONTROL_CELLS="nq_grpc_mixed,qn_grpc_mixed,nq_tcp_large,qn_tcp_large"
 VERDICT_CELLS="nq_tcp_mixed,qn_tcp_mixed"
@@ -384,7 +384,7 @@ else echo 'G:BROKEN:G'; fi" | nocr | sed -n 's/.*G:\([A-Z]*\):G.*/\1/p' | head -
 
 quiescence_gate() {
   local h="$1" p busy=""
-  for p in codex cargo rustc; do
+  for p in review cargo rustc; do
     case "$(pgrep_state "$h" "$p")" in
       RUNNING) busy="$busy $p" ;;
       NONE)    : ;;
@@ -396,7 +396,7 @@ quiescence_gate() {
 
 timemachine_gate() {   # FAIL-CLOSED on running OR merely ENABLED (the hole pf-0 found)
   local h="$1" running auto
-  # `tr -cd '0-9'` IS THE BUG (round-11 codex, HIGH): it does not VALIDATE a number, it
+  # `tr -cd '0-9'` IS THE BUG (round-11 review, HIGH): it does not VALIDATE a number, it
   # MANUFACTURES one. Any malformed output CONTAINING a zero -- "0%", "0.0", "status: 0 of 5"
   # -- was stripped down to a bare `0` and read as "not running" / "AUTOBACKUP DISABLED". The
   # gate that is supposed to keep a Time Machine backup out of a timed window would have
@@ -421,7 +421,7 @@ spotlight_gate() {
   # The MAX across samples, not the last: a late idle sample could overwrite an
   # earlier busy one. NR==0 (top produced nothing) is an ERROR, not 0% CPU.
   # `$2+0` coerced ANY non-numeric field to zero -- the same defect the drain had with "."
-  # (round-10 codex). A field that is not a number is an ERROR, not 0% CPU.
+  # (round-10 review). A field that is not a number is an ERROR, not 0% CPU.
   cpu="$(hrun "$h" "top -l 2 -n 30 -o cpu -stats command,cpu 2>/dev/null \
     | awk '/^mds_stores/{ if (\$2 !~ /^[0-9]+(\\.[0-9]+)?\$/) { bad = 1 } else if (\$2+0 > m) { m = \$2+0 } }
            END{ if (NR == 0 || bad) print \"ERR\"; else printf \"%d\", m+0 }'" | nocr)" || cpu="ERR"
@@ -449,7 +449,7 @@ link_gate() {   # both directions; the peer's ARP must be the PEER's MAC, never 
   # en8 — so an unfiltered $4 yields a MULTI-LINE string that can never equal a
   # single MAC. (Measured: this refused a perfectly good link. It is also the more
   # correct check: a stale entry on the 1GbE NIC is irrelevant to the 10GbE path.)
-  # A PROBE THAT COULD NOT RUN IS NOT AN ABSENT ARP ENTRY (round-11 codex, MEDIUM). Both of
+  # A PROBE THAT COULD NOT RUN IS NOT AN ABSENT ARP ENTRY (round-11 review, MEDIUM). Both of
   # these read a command substitution whose status was discarded, so a broken ssh, a missing
   # `arp`, or a failed `route` produced an EMPTY value and died with the message for a
   # genuinely bad link — which the self-test then scores [FIRED] ("the gate works!") instead
@@ -479,7 +479,7 @@ echo \"R:\${v:-NONE}:R\"" | nocr | sed -n 's/.*R:\([^:]*\):R.*/\1/p' | head -1)"
     || die "$(hname "$h"): route to $peer_ip egresses '$route_nic', not the 10GbE NIC '$(hnic "$h")' — the multi-NIC trap (macOS routes by network SERVICE order, so a 1GbE NIC can win and every run would go over gigabit)."
 }
 
-# THE REGISTERED FABRIC, PROVED ON THE WIRE (round-11 codex, BLOCKER: it never was).
+# THE REGISTERED FABRIC, PROVED ON THE WIRE (round-11 review, BLOCKER: it never was).
 #
 # link_gate above proves the peer resolves on the right NIC and the route egresses it. That
 # says NOTHING about the NIC's SPEED or the path's MTU: a 1GbE interface, or a 9000-MTU NIC
@@ -570,7 +570,7 @@ end_mss_gate() {   # SESSION-END policy: the data exists, so VOID it rather than
   done
 }
 
-# --- the drain device: RESOLVED, never hardcoded (grok) ------------------------
+# --- the drain device: RESOLVED, never hardcoded (review) ------------------------
 # `iostat disk0` can certify a disk the data never touched. Worse, on APFS the
 # volume lives on a SYNTHESIZED disk whose stats may be empty while the physical
 # store is saturated — a false "quiet". Resolve the module path to its PHYSICAL
@@ -581,12 +581,12 @@ resolve_disk() {
   local h="$1" p dev
   p="$(hmod "$h")"
   # A FAILED `diskutil` MUST NOT silently fall back to the synthesized disk (round-5
-  # codex, HIGH). On APFS the volume lives on a synthesized container whose iostat
+  # review, HIGH). On APFS the volume lives on a synthesized container whose iostat
   # counters can read IDLE while the physical store is saturated — so falling back to
   # it is not a harmless default, it is a FALSE QUIET that certifies drainage on a
   # device the data never touched. If the volume is APFS, the physical-store lookup
   # must SUCCEED or the gate refuses.
-  # EVERY producer's STATUS, not just its value (round-11 codex, HIGH -- the same class as the
+  # EVERY producer's STATUS, not just its value (round-11 review, HIGH -- the same class as the
   # drain, in the gate right next to it). The df PIPELINE's status was discarded, so a failed
   # df that still printed something could name a synthesized device; and `grep -q 'APFS'` maps
   # rc>=2 -- a BROKEN grep -- onto the same branch as "no match", i.e. "not APFS", which is
@@ -643,7 +643,7 @@ echo \"D:\$base:D\"" | nocr | sed -n 's/.*D:\([^:]*\):D.*/\1/p' | head -1)"
 # been wrong by 7x, in the direction that flatters nothing and confuses everything.
 SSH_RTT_MS=0
 measure_ssh_rtt() {
-  # A FAILED ssh must not contribute a plausible number (round-5 codex, MEDIUM): a
+  # A FAILED ssh must not contribute a plausible number (round-5 review, MEDIUM): a
   # fast-failing connection would report a small "bound" and flatter the settle claim.
   SSH_RTT_MS="$(python3 -c '
 import statistics, subprocess, sys, time
@@ -673,7 +673,7 @@ preflight() {
   # it. Its p-hacking guard surface goes with it.
   [[ "$RUNS" == 8 ]] || die "RUNS must be 8 (the registered value) — got '$RUNS'"
   # The build pin. This check was deleted by accident when the escalation block was cut out
-  # (adjacent lines), so ANY sha — including `f35702a.dirty` — was accepted (round-10 codex,
+  # (adjacent lines), so ANY sha — including `f35702a.dirty` — was accepted (round-10 review,
   # BLOCKER). A run against an unregistered build is not the registered experiment.
   [[ "$EXPECT_SHA" == "$REGISTERED_BUILD" ]] \
     || die "EXPECT_SHA='$EXPECT_SHA' but the PRE-REGISTERED build is $REGISTERED_BUILD — a run against any other build (or a .dirty one) is not the registered experiment"
@@ -684,7 +684,7 @@ preflight() {
     || die "the instrument has UNCOMMITTED changes (harness/verdict/test) — it cannot claim the reviewed commit. Commit or stash first."
   # The decision rule proves itself before it grades anything — AND proves the proof
   # is not vacuous. Running only the cases would let a silently-reverted fix pass
-  # preflight if the cases still happen to pass for another reason (round-3 grok).
+  # preflight if the cases still happen to pass for another reason (round-3 review).
   python3 "$VERDICT_TEST" >"$OUT_DIR/verdict-guard-test.txt" 2>&1 \
     || die "the verdict engine's OWN guard test FAILS (see $OUT_DIR/verdict-guard-test.txt) — the decision rule is broken; refusing to take data"
   python3 "$VERDICT_TEST" --mutations >"$OUT_DIR/verdict-mutations.txt" 2>&1 \
@@ -702,7 +702,7 @@ preflight() {
     done
     hrun "$h" "sudo -n /usr/sbin/purge" || die "$(hname "$h") cannot purge without a password — every run would read WARM"
     # THE SAME pgrep FAIL-OPEN AS THE QUIESCENCE GATE, IN A DUPLICATE SITE I DID NOT
-    # TOUCH (round-5 codex, HIGH). `if hrun ... pgrep; then die; fi` reads rc>=2 (a
+    # TOUCH (round-5 review, HIGH). `if hrun ... pgrep; then die; fi` reads rc>=2 (a
     # BROKEN probe, or a failed ssh) as "no daemon is running" and sails on. Every
     # process probe now goes through this one rc-aware helper -- there is no second
     # site left to forget.
@@ -784,7 +784,7 @@ printf '[daemon]\nbind = \"0.0.0.0\"\nport = $PORT\nno_mdns = true\n\n[[module]]
 nohup '$bin' --config '$cfg' > '$mod/mm-daemon.log' 2>&1 < /dev/null &
 echo \"P:\$!:P\"" | nocr | sed -n 's/.*P:\([0-9][0-9]*\):P.*/\1/p' | head -1)"
   [[ "$pid" =~ ^[0-9]+$ ]] || die "$(hname "$h"): daemon did not report a pid (see $mod/mm-daemon.log)"
-  # OWN THE PID BEFORE VALIDATING IT (round-5 codex, MEDIUM): the old code stored it
+  # OWN THE PID BEFORE VALIDATING IT (round-5 review, MEDIUM): the old code stored it
   # only AFTER the alive/listening checks, so a daemon that started but failed
   # validation was `die`d on while the EXIT trap did not yet know its pid — leaking a
   # live daemon holding the port for the next session to trip over.
@@ -819,10 +819,10 @@ for i in 1 2 3 4 5 6; do ps -p $pid >/dev/null 2>&1 || break; sleep 0.5; done
 if ps -p $pid >/dev/null 2>&1; then kill -9 $pid 2>/dev/null || true; sleep 1; fi" >/dev/null 2>&1 || true
   # A teardown that cannot be VERIFIED is a failure, not a success. The old probe
   # called a FAILED ssh "GONE".
-  # A BROKEN `ps` probe is not "GONE" (round-10 codex). The sentinel must come back, or the
+  # A BROKEN `ps` probe is not "GONE" (round-10 review). The sentinel must come back, or the
   # teardown is unverified and the session says so.
   # `ps -p`: 0 = the pid EXISTS, 1 = it does NOT, anything else = THE PROBE IS BROKEN. The
-  # old form mapped every non-zero status onto "GONE" (round-11 codex, MEDIUM: r10 fixed the
+  # old form mapped every non-zero status onto "GONE" (round-11 review, MEDIUM: r10 fixed the
   # ssh-failure half and left the rc half), so a `ps` that could not run at all -- no PATH, a
   # full process table -- certified the daemon dead and left it holding the port.
   state="$(hrun "$h" "ps -p $pid >/dev/null 2>&1; rc=\$?
@@ -856,13 +856,13 @@ drain_host() {   # $1 = host. Echoes drained_<n>x2s | DRAIN-TIMEOUT | DRAIN-ERRO
   [[ -n "$dev" ]] || { echo DRAIN-ERROR; return 0; }
   out="$(
   # A FAILED iostat must not certify quiet even when it printed a parseable line
-  # (round-5 codex, HIGH: a numeric line followed by a NONZERO EXIT still accumulated
+  # (round-5 review, HIGH: a numeric line followed by a NONZERO EXIT still accumulated
   # "quiet" samples). The exit code is now checked BEFORE the value is used.
   hrun "$h" "quiet=0
 for i in \$(seq 1 $DRAIN_ITERS); do
   out=\$(iostat -d -w 2 -c 2 '$dev' 2>/dev/null); rc=\$?
   if [ \$rc -ne 0 ]; then echo DRAIN-ERROR; exit 0; fi
-  # EVERY PRODUCER'S STATUS IS CHECKED, NOT JUST ITS VALUE (round-11 codex, HIGH). This is
+  # EVERY PRODUCER'S STATUS IS CHECKED, NOT JUST ITS VALUE (round-11 review, HIGH). This is
   # the THIRD time this one class has been found in this one function: r5 found the iostat
   # status discarded; r8 found the drained_* VALUE validated while its STATUS was discarded;
   # these three substitutions were STILL discarding theirs. The remote shell has no errexit,
@@ -871,7 +871,7 @@ for i in \$(seq 1 $DRAIN_ITERS); do
   w=\$(echo \"\$out\" | tail -1 | awk '{print \$3}'); rc=\$?
   if [ \$rc -ne 0 ]; then echo DRAIN-ERROR; exit 0; fi
   # A REAL number, not merely digits-and-dots: "." and ".." pass a shape test, read as 0,
-  # and 0 < the threshold CERTIFIES QUIET (codex r9). awk decides, and it must see exactly
+  # and 0 < the threshold CERTIFIES QUIET (review r9). awk decides, and it must see exactly
   # one numeric field.
   ok_num=\$(echo \"\$w\" | awk '{ print (NF == 1 && \$1 ~ /^[0-9]+(\\.[0-9]+)?\$/) ? 1 : 0 }'); rc=\$?
   if [ \$rc -ne 0 ] || [ \"\$ok_num\" != 1 ]; then echo DRAIN-ERROR; exit 0; fi
@@ -882,7 +882,7 @@ for i in \$(seq 1 $DRAIN_ITERS); do
 done
 echo DRAIN-TIMEOUT" 2>/dev/null | nocr | tail -1)" || out="DRAIN-ERROR"
   # ONE token, or it is an error -- AND the probe must have EXITED cleanly. A drain that
-  # printed `drained_*` and THEN failed is not a drain (codex r8: I fixed the value and
+  # printed `drained_*` and THEN failed is not a drain (review r8: I fixed the value and
   # left the status, which is the same defect one layer down).
   case "$out" in
     drained_[0-9]*x2s) echo "$out" ;;
@@ -895,7 +895,7 @@ prep_run() {   # $1 = dest host
   # Purge BOTH ends first — the purge itself dirties the disk, so a drain certified
   # BEFORE it proves nothing.
   # `sync; purge` reported only PURGE's status — a failed sync then read as a clean cold
-  # cache (round-10 codex). Both must succeed.
+  # cache (round-10 review). Both must succeed.
   hrun n "sync && sudo -n /usr/sbin/purge" >/dev/null 2>&1 || cn=FAIL
   hrun q "sync && sudo -n /usr/sbin/purge" >/dev/null 2>&1 || cq=FAIL
   if [[ "$cn" == ok && "$cq" == ok ]]; then RUN_COLD=cold
@@ -916,7 +916,7 @@ fsync_tree() {   # $1 = DEST host, $2 = landed path -> "ms files bytes settled_m
   # RAN. Round 6 then found the repair was still not provable: `sleep` is
   # PATH/function-resolved, the walk's timer starts AFTER it, and the self-test only
   # counted files — so a no-op `sleep` would pass while the log narrated "settle
-  # included" (codex + grok, BLOCKER, and grok measured a 44 ms "250 ms settle").
+  # included" (review, BLOCKER, and review measured a 44 ms "250 ms settle").
   #
   # A protection that cannot be OBSERVED is not a protection. The settle now happens
   # in python, is timed by the same monotonic clock as the walk, and is REPORTED. The
@@ -953,7 +953,7 @@ settle_ok() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= SETTLE_MS && $1 < SETTLE_MS * 4
 # --- one timed run ------------------------------------------------------------
 # The ssh dispatch, measured RIGHT NOW rather than assumed from preflight. The residual
 # free-writeback asymmetry between the arms is bounded BY this number, and a bound measured
-# once at the start is not a bound on a run taken twenty minutes later (round-10 codex).
+# once at the start is not a bound on a run taken twenty minutes later (round-10 review).
 RUN_RTT=0
 rtt_now() {
   local v
@@ -1034,7 +1034,7 @@ arm_destinit() {
 }
 
 # A landed tree that SURVIVES its deletion makes the next run of that cell fast, or lets the
-# transfer skip work entirely (round-10 codex, HIGH: the failure was discarded with `|| true`).
+# transfer skip work entirely (round-10 review, HIGH: the failure was discarded with `|| true`).
 # Every timed run already writes to a FRESH, never-seen directory, so a survivor cannot
 # contaminate a later run -- but it CAN fill the disk and it means the rig is not behaving,
 # so it is recorded loudly rather than swallowed.
@@ -1051,7 +1051,7 @@ META="$OUT_DIR/meta.csv"
 
 # THE CELLS ARE INTERLEAVED, NOT RUN BACK TO BACK.
 #
-# Round-8 (codex, HIGH): both measurand cells used to run first, then the controls. So the
+# Round-8 (review, HIGH): both measurand cells used to run first, then the controls. So the
 # controls certified a window THEY NEVER SHARED -- a transient (a background process, a
 # thermal excursion, a disk that woke up) could hit the measurand and be entirely gone by
 # the time the gRPC/large controls ran, and they would certify the rig as clean. The
@@ -1117,7 +1117,7 @@ run_all_cells() {
       read -r cell sh dh w flag <<<"${CELL_TABLE[$i]}"
       # a voided pair is retried IN PLACE, so the cell stays in step with its siblings.
       # NOT `if run_one_pair ...`: a function called as a CONDITION runs with errexit
-      # DISABLED throughout its call tree (round-10 codex, HIGH), so a failing command deep
+      # DISABLED throughout its call tree (round-10 review, HIGH), so a failing command deep
       # inside it would no longer abort the run. It reports through PAIR_OK instead.
       while (( ${CELL_ATTEMPTS[$i]:-0} < max )); do
         PAIR_OK=0
@@ -1141,7 +1141,7 @@ SESSION_VOID_REASON=""
 # The end-load is a CONDITION OF THE SESSION, not a log line. A mid-session load
 # spike is exactly the contamination the start gate exists to prevent, and until now
 # it could not void anything: the code logged `load1 (end)` and computed a verdict
-# anyway, while the comment claimed a session "can void on it" (round-3 grok, HIGH —
+# anyway, while the comment claimed a session "can void on it" (round-3 review, HIGH —
 # a doc claim the code did not honour, which is the defect class this whole review
 # exists to kill).
 end_load_gate() {
@@ -1178,12 +1178,12 @@ compute_verdicts() {
 # =============================================================================
 SELFTEST_FIRED=0; SELFTEST_BROKEN=0
 # A gate can end in three states, and the old self-test collapsed two of them
-# (round-5 codex, HIGH: "every nonzero result — including a BROKEN probe — is labeled
+# (round-5 review, HIGH: "every nonzero result — including a BROKEN probe — is labeled
 # [FIRED], and the self-test exits zero"). That is the same fail-open it exists to
 # hunt, committed by the hunter:
 #
 #   [OK]     the probe answered and the condition holds.
-#   [FIRED]  the probe answered and the condition is genuinely UNMET (codex is
+#   [FIRED]  the probe answered and the condition is genuinely UNMET (review is
 #            running, Time Machine is on). The gate WORKS. Not a self-test failure.
 #   [BROKEN] the probe could not answer at all. THE GATE IS BLIND, and the self-test
 #            FAILS (exit 1) — a blind gate is exactly what fails open on the night.
@@ -1197,7 +1197,7 @@ gate_probe() {
   local label="$1"; shift
   local err rc=0
   # `err="$(...)" || rc=1` put the gate's WHOLE CALL TREE inside an `||` context, which
-  # DISABLES errexit throughout it (round-11 codex, MEDIUM — the same defect r10 fixed in
+  # DISABLES errexit throughout it (round-11 review, MEDIUM — the same defect r10 fixed in
   # run_all_cells, surviving in its duplicate here). A failing command deep inside a gate
   # would then not abort the gate, and the gate could report a value it never actually
   # verified. errexit is suspended in THIS shell only, and re-armed INSIDE the subshell.
@@ -1264,7 +1264,7 @@ selftest() {
     if resolve_python "$h"; then log "  [OK]     python3       (absolute, not PATH-resolved)"
     else log "  [BROKEN] python3       — could not resolve an absolute interpreter"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)); fi
     gate_probe "timer         (the measurand's clock)" timer_gate "$h"
-    gate_probe "quiescence    (codex/cargo/rustc)"     quiescence_gate "$h"
+    gate_probe "quiescence    (review/cargo/rustc)"     quiescence_gate "$h"
     gate_probe "time machine  (running OR enabled)"    timemachine_gate "$h"
     gate_probe "spotlight     (mds_stores CPU)"        spotlight_gate "$h"
     gate_probe "load  start   (load1 <= $LOAD_MAX)"      load_gate "$h"
@@ -1278,7 +1278,7 @@ selftest() {
     # the harness.
     if resolve_disk "$h"; then log "  [OK]     drain device  (resolved via the APFS physical store)"
     else log "  [BROKEN] drain device  — could not resolve the physical disk"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)); fi
-    # The paths the old self-test claimed and did not run (round-5 codex, HIGH):
+    # The paths the old self-test claimed and did not run (round-5 review, HIGH):
     gate_probe "purge         (sudo -n, or every run reads WARM)" hrun "$h" "sudo -n /usr/sbin/purge"
     case "$(pgrep_state "$h" blit-daemon)" in
       NONE)    log "  [OK]     stale daemon  (rc-aware probe: none running)" ;;
@@ -1286,7 +1286,7 @@ selftest() {
       *)       log "  [BROKEN] stale daemon  — the probe could not answer"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1)) ;;
     esac
     # DRAIN-TIMEOUT is a genuinely busy disk (the gate WORKING); DRAIN-ERROR is a blind
-    # probe. Scoring them the same made the classification untrustworthy (grok r6, F7).
+    # probe. Scoring them the same made the classification untrustworthy (review r6, F7).
     local dr; dr="$(drain_host "$h")"
     case "$dr" in
       drained*)      log "  [OK]     drain loop    ($dr)" ;;
@@ -1300,7 +1300,7 @@ selftest() {
   if [[ -z "$SESSION_VOID_REASON" ]]; then
     log "  [OK]     end-load gate (both Macs under $LOAD_MAX; it CAN void a session)"
   elif [[ "$SESSION_VOID_REASON" == *"could not be read"* ]]; then
-    # An UNREADABLE end-load is a blind probe, not a busy machine (grok r6, F7).
+    # An UNREADABLE end-load is a blind probe, not a busy machine (review r6, F7).
     log "  [BROKEN] end-load gate — $SESSION_VOID_REASON"; SELFTEST_BROKEN=$((SELFTEST_BROKEN+1))
   else
     log "  [FIRED]  end-load gate — $SESSION_VOID_REASON"; SELFTEST_FIRED=$((SELFTEST_FIRED+1))

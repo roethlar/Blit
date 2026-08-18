@@ -48,7 +48,7 @@ fn test_remote_move_local_to_remote() {
     );
 }
 
-/// codex otp-10a F1: `blit move` to a remote destination must land the
+/// review otp-10a F1: `blit move` to a remote destination must land the
 /// source bytes even when the destination already holds a SAME-SIZE,
 /// NEWER file — the copy-shaped SizeMtime compare would skip that cell,
 /// and move's source-delete would then destroy the only copy of the
@@ -106,7 +106,7 @@ fn move_lands_source_bytes_over_same_size_newer_destination() {
     );
 }
 
-/// otp-10b-2 (codex otp-10a F1 mirrored on pull): a remote→local move
+/// otp-10b-2 (review otp-10a F1 mirrored on pull): a remote→local move
 /// through the actual binary must land the REMOTE source's bytes over
 /// a same-size-newer LOCAL destination before deleting the remote
 /// source — the pull twin of the push-move pin above. Pre-cutover the

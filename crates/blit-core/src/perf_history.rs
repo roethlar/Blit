@@ -632,7 +632,7 @@ mod tests {
         );
     }
 
-    /// GPT explicit ask: "old mirror record migrates without
+    /// review explicit ask: "old mirror record migrates without
     /// becoming copy."
     #[test]
     fn migration_v1_mirror_record_preserves_mirror_mode_and_real_lane() {

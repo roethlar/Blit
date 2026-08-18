@@ -1082,7 +1082,7 @@ q_quiet_gate() {
     while :; do
         bad=$(ps -axo comm= | awk '
             {name=$1; sub(/^.*\//,"",name)}
-            name == "cargo" || name == "rustc" || name == "blit" || name == "blit-daemon" || name ~ /^codex($|-)/ {print name}' | head -1)
+            name == "cargo" || name == "rustc" || name == "blit" || name == "blit-daemon" || name ~ /^review($|-)/ {print name}' | head -1)
         [[ -z "$bad" ]] || session_void "q conflicting process: $bad"
         auto=$(defaults read /Library/Preferences/com.apple.TimeMachine AutoBackup 2>/dev/null || printf unknown)
         [[ "$auto" == 0 ]] || session_void "q Time Machine AutoBackup changed to $auto"

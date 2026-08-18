@@ -408,7 +408,7 @@ pub async fn run_pull_session_with_client(
 /// Derive the wire `(module, path)` from a resolved endpoint. Empty
 /// module targets the daemon's default root export; a discovery-form
 /// endpoint is not resolvable to a transfer target. The path is
-/// POSIX-normalized (codex otp-10a F2): a `rel_path` that went through
+/// POSIX-normalized (review otp-10a F2): a `rel_path` that went through
 /// `PathBuf::join` (the CLI's rsync destination-resolution rule does)
 /// carries native `\` separators on Windows, and `to_string_lossy`
 /// would put them on the wire verbatim — a Unix daemon then creates a
@@ -443,7 +443,7 @@ mod endpoint_module_path_tests {
         }
     }
 
-    /// codex otp-10a F2: a rel_path assembled via `PathBuf::join` (the
+    /// review otp-10a F2: a rel_path assembled via `PathBuf::join` (the
     /// rsync destination-resolution rule appends the source file name
     /// this way) must reach the wire in POSIX form on every platform —
     /// on Windows the joined form carries a native `\` that would
@@ -467,7 +467,7 @@ mod endpoint_module_path_tests {
 /// The `Transfer` RPC failed at OPEN — before any session frame flowed.
 /// A distinct error type (not a bare `SessionFault`) so callers can
 /// classify EVERY open-time failure structurally as a negotiation
-/// failure (codex otp-9b F3 — the old typed `PullSyncError` boundary
+/// failure (review otp-9b F3 — the old typed `PullSyncError` boundary
 /// treated every pre-response RPC failure as NEGOTIATE); the inner
 /// fault still carries the closest session code for the message.
 #[derive(Debug)]

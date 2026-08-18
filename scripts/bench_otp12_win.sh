@@ -87,7 +87,7 @@ CELLS=${CELLS:-}
 MAC_WORK=${MAC_WORK:-$HOME/blit-bench-work}
 # The Mac module root IS the fixture workdir (design F6): both
 # initiators of a Mac->Win cell read the same physical inodes. NOT
-# overridable (codex otp-12b F6) — an override could point the two
+# overridable (review otp-12b F6) — an override could point the two
 # initiators at different trees or devices.
 MAC_MODULE_ROOT="$MAC_WORK"
 
@@ -119,7 +119,7 @@ now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
 
 # --- Self-timed durability (destination-OS-keyed, never verb-keyed) ----
 flush_win_ms() {   # Windows volume flush, self-timed; prints ms or NA
-    # Sentinel-framed and error-terminating (codex otp-12b F7): a
+    # Sentinel-framed and error-terminating (review otp-12b F7): a
     # failed flush or garbage output must never read as a plausible
     # number — NA makes the caller VOID the run per the D2 rule.
     local v
@@ -209,7 +209,7 @@ OLD_WIN_DAEMON_HASH=""
 NEW_WIN_DAEMON_HASH=""
 write_manifest() {
     # Hashes are captured into variables FIRST so a failure dies for
-    # real — `echo "$(die …)"` only exits the subshell (codex otp-12b
+    # real — `echo "$(die …)"` only exits the subshell (review otp-12b
     # F1, the otp-12a F3 lesson re-applied).
     local f="$OUT_DIR/staging-manifest.txt"
     local h_oc h_nc h_md h_wc h_ref
@@ -241,7 +241,7 @@ setup_host() {
         scp -q -o BatchMode=yes "$SCRIPT_DIR/windows/purge-standby.ps1" \
             "$WIN_SSH:$WIN_TEST/purge-standby.ps1"
     }
-    # An existing rule is verified, never trusted by name alone (codex
+    # An existing rule is verified, never trusted by name alone (review
     # otp-12b F11) — and never silently mutated (owner's firewall).
     wssh "New-Item -ItemType Directory -Force -Path '$WIN_MODULE','$WIN_BINS\\active' | Out-Null
 \$rule = Get-NetFirewallRule -DisplayName blit-otp12-daemon -ErrorAction SilentlyContinue
@@ -266,7 +266,7 @@ win_daemon_start() {   # $1 = old|new
     wssh "if (Get-Process blit-daemon -ErrorAction SilentlyContinue) { 'STALE blit-daemon running'; exit 1 }" \
         || die "refusing to start over a stale Windows daemon"
     # The active copy must provably BE the requested arm before launch
-    # (codex otp-12b F2): terminate on copy errors and verify the
+    # (review otp-12b F2): terminate on copy errors and verify the
     # landed hash against the manifest hash for this arm — the old arm
     # has no handshake to catch a stale active exe.
     local want_hash
@@ -290,7 +290,7 @@ path = '$WIN_MODULE'
 if (\$r.ReturnValue -ne 0) { \"wmi create failed: \$(\$r.ReturnValue)\"; exit 1 }
 Set-Content -Path '$WIN_TEST\\daemon-wmi.pid' -Value \$r.ProcessId"
     # The WMI pid is cmd's, recorded IMMEDIATELY so an interruption
-    # before the verify step leaves nothing untracked (codex otp-12b
+    # before the verify step leaves nothing untracked (review otp-12b
     # F9); the verify step resolves the daemon pid as the blit-daemon
     # whose PARENT is our cmd — a name lookup tied to THIS launch.
     sleep 2
@@ -510,7 +510,7 @@ mac_pull_run() {   # blit_bin cell rid remote_src [flags...]
 # Windows-initiated runs (block 2 win_init arms): the transfer window is
 # a Stopwatch ON Windows printing "<ms>,<exit>"; CRLF-stripped.
 win_client_run() {   # cell rid src dst flags_string; sets T_MS/T_RC
-    # Sentinel-framed (codex otp-12b F7): anything but a clean
+    # Sentinel-framed (review otp-12b F7): anything but a clean
     # "R:<ms>,<rc>:R" — pwsh noise, a crash, a negative exit — parses
     # to T_RC=99 and voids the run; nothing can masquerade as a time.
     local cell="$1" rid="$2" src="$3" dst="$4" flags="${5:-}"
@@ -564,7 +564,7 @@ run_pair_loop() {   # cell armA armB runA_fn runB_fn (fns take: cell rid)
             if [[ "$arm" == A ]]; then fn="$fnA"; aname="$armA"; else fn="$fnB"; aname="$armB"; fi
             # The arm is part of every rid — and therefore every
             # destination path — so the two arms of a slot can never
-            # collide on leftover data if a sweep fails (codex otp-12b
+            # collide on leftover data if a sweep fails (review otp-12b
             # F3; the zoey harness always had this).
             rid="${aname}_s${slot}a${attempts}"
             "$fn" "$cell" "$rid"
@@ -601,7 +601,7 @@ b1_push_new() { win_ensure new; mac_push_run "$NEW_BLIT" "$1" "$2" "$WIN_REMOTE"
 b1_pull_old() { win_ensure old; mac_pull_run "$OLD_BLIT" "$1" "$2" "${WIN_REMOTE}pull_src_$CUR_W/src_$CUR_W/" $CUR_FLAG; }
 b1_pull_new() { win_ensure new; mac_pull_run "$NEW_BLIT" "$1" "$2" "${WIN_REMOTE}pull_src_$CUR_W/src_$CUR_W/" $CUR_FLAG; }
 # Block-2 arm wrappers (new pair; both daemons stay up). Both arms of a
-# pair do IDENTICAL work (codex otp-12b F5): no-trailing-slash sources
+# pair do IDENTICAL work (review otp-12b F5): no-trailing-slash sources
 # everywhere AND a destination CONTAINER precreated OUTSIDE the timed
 # window on every arm — each transfer lands the same one-level-nested
 # `container/src_<w>` tree, and no arm pays an in-window container
@@ -713,9 +713,9 @@ for cell in b2_cells:
     inv = bar(hi, lo)   # max/min <= 1.10
     out.write(f"{cell},invariance,mac_init,win_init,{a},{b},{hi/lo:.3f},1.10,{'PASS' if inv else 'FAIL'}\n")
     # F3: each arm independently meets the direction's converge bars.
-    # Committed references are MANDATORY (fail closed, codex otp-12b
+    # Committed references are MANDATORY (fail closed, review otp-12b
     # F8); the same-session reference requires the block-1 counterpart
-    # COMPLETE (codex otp-12b F4 — a partial median never referees),
+    # COMPLETE (review otp-12b F4 — a partial median never referees),
     # else the row says so in registered vocabulary.
     d, carrier, fixture = cell.split("_")
     verb = "push" if d == "mw" else "pull"
@@ -741,8 +741,8 @@ for cell in b2_cells:
     out.write(f"{cell},cross,worst_arm,min_old_committed,{worst},{cross_ref},{worst/cross_ref:.3f},1.10,{'PASS' if bar(worst, cross_ref) else 'FAIL'}\n")
 
 # Discriminator gap rows (D-2026-07-12-1; recorded, never adjudicated):
-# emitted only when ALL FOUR contributing cells are complete (codex
-# otp-12b F4). Row operands are labeled exactly (codex otp-12b F12).
+# emitted only when ALL FOUR contributing cells are complete (review
+# otp-12b F4). Row operands are labeled exactly (review otp-12b F12).
 for carrier in ("tcp", "grpc"):
     for fixture in ("large", "small", "mixed"):
         four = [f"push_{carrier}_{fixture}", f"pull_{carrier}_{fixture}",
@@ -810,7 +810,7 @@ main() {
         local c
         for c in ${CELLS//,/ }; do
             # Header excluded — CELLS=cell must not match "cell,…"
-            # (codex otp-12b F10).
+            # (review otp-12b F10).
             tail -n +2 "$META" | grep -q "^$c," \
                 || die "CELLS entry '$c' matched no comparison — nothing was measured for it"
         done

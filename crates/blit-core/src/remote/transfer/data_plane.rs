@@ -729,7 +729,7 @@ impl<P: Probe> DataPlaneSession<P> {
             .await
             .context("writing tar shard length")?;
         for chunk in data.chunks(self.chunk_bytes.max(1)) {
-            // codex ue-r2-1e F3: shard writes carry the small-file
+            // review ue-r2-1e F3: shard writes carry the small-file
             // workloads — without a blocked signal here the tuner sees
             // a saturated link as a clean one. Same P::ACTIVE gating as
             // the file loop: NoProbe reads no clock.

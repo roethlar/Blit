@@ -385,7 +385,7 @@ pub async fn execute_sink_pipeline_elastic(
     // as any other worker is alive `send_async` keeps succeeding, so the
     // forwarder would keep draining `payload_rx` and queueing payloads
     // that can never complete — delaying first-error-wins propagation
-    // (Codex review, PR2). With it, the forwarder stops at the next
+    // (review review, PR2). With it, the forwarder stops at the next
     // payload boundary and closes the queue so the survivors drain and
     // finish promptly.
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -483,7 +483,7 @@ pub async fn execute_sink_pipeline_elastic(
                         // time. The composite ResumeFile IS one whole
                         // file's phase — reported below from the outcome,
                         // because its byte count (stale blocks only) is
-                        // known only after the write (codex otp-10a F6).
+                        // known only after the write (review otp-10a F6).
                         PreparedPayload::FileBlock { .. }
                         | PreparedPayload::FileBlockComplete { .. }
                         | PreparedPayload::ResumeFile { .. } => Vec::new(),
@@ -1337,7 +1337,7 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
             }
             DATA_PLANE_RECORD_BLOCK => {
                 let path = read_string(socket).await?;
-                // otp-7b-2 (codex G3): once the record names its file,
+                // otp-7b-2 (review G3): once the record names its file,
                 // every failure inside it does too.
                 let offset = read_u64(socket)
                     .await
@@ -1380,7 +1380,7 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
             }
             DATA_PLANE_RECORD_BLOCK_COMPLETE => {
                 let path = read_string(socket).await?;
-                // otp-7b-2 (codex G3): completion-metadata read failures
+                // otp-7b-2 (review G3): completion-metadata read failures
                 // name the file the record already identified.
                 let tag =
                     |e: eyre::Report| e.wrap_err(super::faulted_path::FaultedPath(path.clone()));
@@ -2770,7 +2770,7 @@ mod workqueue_tests {
         );
     }
 
-    /// Codex-review (PR2) regression: when the only sink errors, the
+    /// review-review (PR2) regression: when the only sink errors, the
     /// forwarder must stop draining the producer promptly rather than
     /// continuing to pull every remaining payload. We feed a large
     /// payload set through a single always-failing sink and assert that

@@ -106,7 +106,7 @@ pub struct PushExecution {
     /// `transfers::compare` mapping (otp-10b-2 — identical for push
     /// and pull; the SizeMtime default's same-size dest-newer skip is
     /// the standing owner question in STATE). Move verbs MUST pass
-    /// `move_comparison_mode`'s result (codex otp-10a F1): move
+    /// `move_comparison_mode`'s result (review otp-10a F1): move
     /// deletes the source on success, so every skip must be provably
     /// safe — `IgnoreTimes`, or `Checksum` (content-proven equal).
     pub compare_mode: ComparisonMode,

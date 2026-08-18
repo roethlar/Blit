@@ -164,7 +164,7 @@ pub fn ensure_daemon_built() {
 /// the child-death check in `spawn_daemon`.
 /// Every port handed out in this process — by `pick_unused_port` AND
 /// by the fake-server scaffold — goes through this one set, so a fake
-/// server can never be assigned a port a daemon was promised (codex
+/// server can never be assigned a port a daemon was promised (review
 /// review of f6e592e caught the fake-server path bypassing the set).
 fn claim_port(port: u16) -> bool {
     static CLAIMED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();

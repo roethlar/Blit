@@ -195,7 +195,7 @@ pub async fn run_remote_push_transfer(
 /// the push summary instead of printing inline so the caller can
 /// defer output until after source-delete.
 ///
-/// codex otp-10a F1: move maps through `move_comparison_mode` —
+/// review otp-10a F1: move maps through `move_comparison_mode` —
 /// `IgnoreTimes` (transfer every file unconditionally), or `Checksum`
 /// when the user asked for it (a content-proven skip is safe). Move
 /// deletes the source on success, so a metadata-shaped skip of a
@@ -249,7 +249,7 @@ pub fn print_deferred_push_result(args: &TransferArgs, state: &DeferredPushState
 /// session that never opened (whose inner fault never names a file —
 /// `end_of_operation_summary` then returns `None`). Extraction is
 /// split from the printing so the chain-walking is unit-pinned
-/// (codex otp-10a F7).
+/// (review otp-10a F7).
 fn session_fault_summary(err: &eyre::Report) -> Option<String> {
     use blit_core::remote::transfer::session_client::TransferOpenRefusal;
     use blit_core::transfer_session::SessionFault;
@@ -669,7 +669,7 @@ pub fn describe_push_result(summary: &blit_core::generated::TransferSummary, des
 }
 
 // This module's test surface is reserved for CLI-entry-point
-// behavior; library behavior is pinned in blit_app/blit_core.
+// behavior; library behavior is pinned in blit_core.
 
 #[cfg(test)]
 mod session_fault_summary_tests {

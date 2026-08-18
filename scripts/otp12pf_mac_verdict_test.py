@@ -14,7 +14,7 @@ CASE HAS ONE: 16 of the 37 do. The rest are behavioural (the rig must be able to
 thing it can say) and have no single line to revert. Two more guards are asserted DIRECTLY
 rather than by mutation, because at n=8 no synthetic session can tell the CI from the RANGE
 -- they are the same two numbers -- and a mutation that cannot be killed is not a proof.
-(Round-10, codex: the previous docstring claimed every case was mutation-proven. It was not.)
+(Round-10, review: the previous docstring claimed every case was mutation-proven. It was not.)
 """
 import csv, os, random, subprocess, sys, tempfile
 
@@ -45,7 +45,7 @@ def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=
     unguardable by construction.
 
     `extra_rows` = [(cell, arm, ms), ...]: valid rows in ONE arm with no partner in the
-    other. Same reason (round-11, codex + grok, independently): every row this helper could
+    other. Same reason (round-11, review, independently): every row this helper could
     write was PAIRED, so a CSV with a duplicate or unpaired valid row -- which skews that
     arm's MEDIAN, and therefore T, B and the bar, while the PAIR count still looks right --
     was unrepresentable, and the engine's arm-count check was consequently unguarded. A fix
@@ -104,34 +104,34 @@ def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=
 # (name, kwargs, must_be, must_not_be)
 CASES = [
     # --- a real effect must never read as nothing --------------------------------
-    ("codex r1: a 190ms effect on 7/8 pairs is not a null",
+    ("review r1: a 190ms effect on 7/8 pairs is not a null",
      dict(measurand_d=[0, 180, 180, 190, 190, 200, 200, 200], src=2000),
      "UNCLEAR", "DOES-NOT-REPRODUCE"),
 
-    ("codex r2: a rig-W-sized effect (230ms) in EVERY pair, on a slow 2500ms arm",
+    ("review r2: a rig-W-sized effect (230ms) in EVERY pair, on a slow 2500ms arm",
      dict(measurand_d=[230] * 8, src=2500, control_d=[0] * 8),
      "REPRODUCES", "DOES-NOT-REPRODUCE"),
 
-    ("codex r2: an effect the 10% bar alone would forgive (240ms @ 2500)",
+    ("review r2: an effect the 10% bar alone would forgive (240ms @ 2500)",
      dict(measurand_d=[-100, -50, 0, 50, 100, 200, 220, 240], src=2500, control_d=[0] * 8),
      "UNCLEAR", "DOES-NOT-REPRODUCE"),
 
-    ("codex r2: the inverting threshold is -src/11, not -src/10 (CI [-190,0] @ 2000)",
+    ("review r2: the inverting threshold is -src/11, not -src/10 (CI [-190,0] @ 2000)",
      dict(measurand_d=[-190, -190, 0, 0, 0, 0, 0, 0], src=2000, control_d=[0] * 8),
      "UNCLEAR", "DOES-NOT-REPRODUCE"),
 
     # --- an artifact must never read as an effect --------------------------------
-    ("codex r2: 7 positive + 1 negative is not a reproduction",
+    ("review r2: 7 positive + 1 negative is not a reproduction",
      dict(measurand_d=[-20, 300, 310, 320, 330, 340, 350, 360], src=1000),
      "UNCLEAR", "REPRODUCES"),
 
-    ("codex r5: a 1ms paired effect is not a reproduction, whatever the medians do",
+    ("review r5: a 1ms paired effect is not a reproduction, whatever the medians do",
      dict(measurand_d=[1] * 13 + [-4500] * 3,
           src=[1000] * 7 + [1200] * 6 + [5000] * 3,
           control_d=[5] * 16, control_src=1000, pairs=16),
      None, "REPRODUCES"),
 
-    ("codex r6: nor when the marginal bar fails in the MATCHING direction",
+    ("review r6: nor when the marginal bar fails in the MATCHING direction",
      dict(measurand_d=[400] * 3 + [1] * 13, src=[1000] * 8 + [1200] * 8,
           control_d=[5] * 16, control_src=1000, pairs=16),
      None, "REPRODUCES"),
@@ -140,7 +140,7 @@ CASES = [
      dict(measurand_d=[10, 10, 10, 10, 10, 10, 10, 800], src=1000),
      "UNCLEAR", "REPRODUCES"),
 
-    ("grok r9: a LONG cell (16 pairs) is INCOMPLETE — a CI at n>8 TRIMS the pairs that contradict it",
+    ("review r9: a LONG cell (16 pairs) is INCOMPLETE — a CI at n>8 TRIMS the pairs that contradict it",
      dict(measurand_d=[-500] * 3 + [200] * 13, src=1000, control_d=[0] * 16),
      "INCOMPLETE", "REPRODUCES"),
 
@@ -148,40 +148,40 @@ CASES = [
      dict(measurand_d=[-4, -2, -1, 0, 1, 2], src=2000),
      "INCOMPLETE", "DOES-NOT-REPRODUCE"),
 
-    # codex r11 (MEDIUM) + grok r11 (HIGH), found INDEPENDENTLY: the arm-count check was the
+    # review r11 (MEDIUM) + review r11 (HIGH), found INDEPENDENTLY: the arm-count check was the
     # engine's only defence against a valid-but-UNPAIRED row, and NOTHING guarded it -- delete
     # the two conjuncts and all 34 cases still passed. The 8 pairs are intact here, so the pair
     # count looks right; 12 extra valid srcinit rows at 100ms drag that ARM's median from
     # 1000ms to 100ms, T = src/10 collapses from 100 to 10, and a +50ms difference -- a NULL at
     # the true arm speed -- becomes an EFFECT. The CSV is the harness's, but the engine must not
     # be the thing that trusts it: this is the row-integrity check, and it now has a proof.
-    ("codex+grok r11: unpaired valid rows skew the ARM median -- exactly 8 rows per arm, or INCOMPLETE",
+    ("review+review r11: unpaired valid rows skew the ARM median -- exactly 8 rows per arm, or INCOMPLETE",
      dict(measurand_d=[50] * 8, src=1000, control_d=[0] * 8,
           extra_rows=[("nq_tcp_mixed", "srcinit", 100)] * 12),
      "INCOMPLETE", "REPRODUCES"),
 
     # --- the controls are a precondition -----------------------------------------
-    ("grok r2: a bar-FAIL control whose CI crosses zero blocks every verdict",
+    ("review r2: a bar-FAIL control whose CI crosses zero blocks every verdict",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           control_d=[-100, -50, 300, 320, 340, 350, 360, 380], control_src=1000),
      "CONTROLS-NOT-CLEAN", "DOES-NOT-REPRODUCE"),
 
-    ("grok r4: a Delta_ref-sized control effect blocks every verdict",
+    ("review r4: a Delta_ref-sized control effect blocks every verdict",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           control_d=[230] * 8, control_src=2500),
      "CONTROLS-NOT-CLEAN", "DOES-NOT-REPRODUCE"),
 
-    ("codex r5: ...and so does one with a single zero pair (CI [0,230])",
+    ("review r5: ...and so does one with a single zero pair (CI [0,230])",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           control_d=[0] + [230] * 7, control_src=2500),
      "CONTROLS-NOT-CLEAN", "DOES-NOT-REPRODUCE"),
 
-    ("grok r5: ...and a non-directional one (CI [-10,230])",
+    ("review r5: ...and a non-directional one (CI [-10,230])",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           control_d=[230] * 7 + [-10], control_src=2500),
      "CONTROLS-NOT-CLEAN", "DOES-NOT-REPRODUCE"),
 
-    ("grok r6: ...and one at D=+229, ONE MS under the reference effect",
+    ("review r6: ...and one at D=+229, ONE MS under the reference effect",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           control_d=[229] * 8, control_src=2500),
      "CONTROLS-NOT-CLEAN", "DOES-NOT-REPRODUCE"),
@@ -192,18 +192,18 @@ CASES = [
     # NOT fire. So this is the ONLY case where certifying controls at T instead of T/2 changes
     # the verdict -- every faster control that fails at T/2 is now ALSO caught by the bias
     # gate, which silently made the old mutation for this fix VACUOUS (it survived).
-    ("grok r6: a control clean at T but DIRTY at T/2 blocks every verdict (T/2 is load-bearing)",
+    ("review r6: a control clean at T but DIRTY at T/2 blocks every verdict (T/2 is load-bearing)",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=1000,
           control_d=[120] * 8, control_src=5000),
      "CONTROLS-NOT-CLEAN", "DOES-NOT-REPRODUCE"),
 
-    ("codex r6: a dirty control blocks a REPRODUCTION too, not just a null",
+    ("review r6: a dirty control blocks a REPRODUCTION too, not just a null",
      dict(measurand_d=[300, 310, 320, 330, 340, 350, 360, 370], src=1000,
           control_d=[0] + [230] * 7, control_src=2500),
      "CONTROLS-NOT-CLEAN", "REPRODUCES"),
 
     # ...but a GOOD rig must still be able to ANSWER. An instrument that can never
-    # conclude is also broken (grok r6: the "dead zone").
+    # conclude is also broken (review r6: the "dead zone").
     ("a clean rig with a tiny host x role control asymmetry still answers",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           control_d=[5] * 8, control_src=1000),
@@ -218,38 +218,38 @@ CASES = [
      dict(measurand_d=[100] * 8, src=1000, control_d=[0] * 8),
      "REPRODUCES", None),
 
-    # codex r8, BLOCKER: a control at +5 is "clean", but that 5ms of arm bias may be
+    # review r8, BLOCKER: a control at +5 is "clean", but that 5ms of arm bias may be
     # riding in the measurand too -- so an effect of EXACTLY T could be (T-5) real plus
     # 5 rig. It must not be banked as a reproduction. B carries the bias the controls
     # could not exclude into the measurand's threshold.
-    ("codex r8: an effect of exactly T is NOT a reproduction when the controls carry bias",
+    ("review r8: an effect of exactly T is NOT a reproduction when the controls carry bias",
      dict(measurand_d=[100] * 8, src=1000, control_d=[5] * 8),
      "UNCLEAR", "REPRODUCES"),
 
-    ("codex r9: B is RELATIVE — a 4.9% bias on a FAST control must not under-penalise a slower measurand",
+    ("review r9: B is RELATIVE — a 4.9% bias on a FAST control must not under-penalise a slower measurand",
      dict(measurand_d=[130] * 8, src=1000,
           control_d=[24] * 8, control_src=500),
      "UNCLEAR", "REPRODUCES"),
 
-    ("grok r9: a null must also survive the TIGHTER bound (bias could be MASKING an effect)",
+    ("review r9: a null must also survive the TIGHTER bound (bias could be MASKING an effect)",
      dict(measurand_d=[60] * 8, src=1000, control_d=[49] * 8),
      "UNCLEAR", "DOES-NOT-REPRODUCE"),
 
-    # codex r11, HIGH (grok found the same dead-zone): the controls PASS at T/2 and the rig is
+    # review r11, HIGH (review found the same dead-zone): the controls PASS at T/2 and the rig is
     # still unreadable. T is capped at 230; the permitted bias is 4.9% OF THE ARM. On a 10000ms
     # measurand that is B=490 against T=230 -- a null is impossible (T-B < 0) and the "effect"
     # at 720ms is up to 68% permitted rig bias, at a ratio of only 1.072. Owner: refuse to grade.
-    ("codex r11: B >= T/2 is NOT a clean rig, even when every control passes at T/2",
+    ("review r11: B >= T/2 is NOT a clean rig, even when every control passes at T/2",
      dict(measurand_d=[720] * 8, src=10000, control_d=[49] * 8, control_src=1000),
      "CONTROLS-NOT-CLEAN", "REPRODUCES"),
 
     # ...and the SAME control bias on a measurand whose arm it can actually bound still grades.
     # The gate must bite on the DIVERGENCE (capped T vs fractional B), not on any bias at all.
-    ("codex r11: ...but a rig whose bias is small against T still answers",
+    ("review r11: ...but a rig whose bias is small against T still answers",
      dict(measurand_d=[300] * 8, src=1000, control_d=[10] * 8, control_src=1000),
      "REPRODUCES", "CONTROLS-NOT-CLEAN"),
 
-    ("codex r8: ...and the same effect IS one once the rig is bias-free",
+    ("review r8: ...and the same effect IS one once the rig is bias-free",
      dict(measurand_d=[105] * 8, src=1000, control_d=[5] * 8),
      "REPRODUCES", "UNCLEAR"),
 
@@ -263,11 +263,11 @@ CASES = [
                     "qn_tcp_mixed": ([-300, -310, -320, -330, -340, -350, -360, -370], 1000)}),
      "MIXED", "REPRODUCES"),
 
-    # codex r11, HIGH: B hardens each CELL but could make the SESSION verdict EASIER. At
+    # review r11, HIGH: B hardens each CELL but could make the SESSION verdict EASIER. At
     # +110 / -94 on a 1000ms arm, controls AT ZERO give MIXED; clean controls at +5 push the
     # -94 cell out of INVERTED (it needs <= -95.9), the MIXED branch stops firing, and the
     # session upgrades itself to REPRODUCES. A NOISIER RIG PRODUCED A STRONGER CLAIM.
-    ("codex r11: a NOISIER rig must not upgrade MIXED to REPRODUCES",
+    ("review r11: a NOISIER rig must not upgrade MIXED to REPRODUCES",
      dict(measurand_d=[0] * 8, src=1000, control_d=[5] * 8, control_src=1000,
           per_cell={"nq_tcp_mixed": ([110] * 8, 1000),
                     "qn_tcp_mixed": ([-94] * 8, 1000)}),
@@ -279,16 +279,16 @@ CASES = [
                     "qn_tcp_mixed": ([-20, 300, 310, 320, 330, 340, 350, 360], 1000)}),
      "REPRODUCES", "UNCLEAR"),
 
-    # codex r11, MEDIUM: the ARM median controls T, B and the bar -- and the LOW median (which
+    # review r11, MEDIUM: the ARM median controls T, B and the bar -- and the LOW median (which
     # is registered only for the paired D) is anti-conservative on a BIMODAL arm. Here the arm
     # is 4x1000 + 4x5000: the low median calls it 1000ms, so +100 is "a 10% effect" -> EFFECT.
     # The conventional median calls it 3000ms, where the same +100 is 3.3% -- below both bars.
     # Rig W's fast arm is ALREADY bimodal (~730/~840), so this is not a synthetic worry.
-    ("codex r11: a BIMODAL arm must not shrink T (the arm median is conventional, not low)",
+    ("review r11: a BIMODAL arm must not shrink T (the arm median is conventional, not low)",
      dict(measurand_d=[100] * 8, src=[1000] * 4 + [5000] * 4, control_d=[0] * 8),
      "DOES-NOT-REPRODUCE", "REPRODUCES"),
 
-    ("codex r8: a bimodal arm cannot hide from the RANGE (a null is judged on every pair)",
+    ("review r8: a bimodal arm cannot hide from the RANGE (a null is judged on every pair)",
      dict(measurand_d=[-110, 0, -110, 110, 110, 0, -110, 0], src=730,
           control_d=[0] * 8),
      "UNCLEAR", "DOES-NOT-REPRODUCE"),
@@ -303,63 +303,63 @@ CASES = [
           drop_cells=("qn_tcp_mixed",)),
      "INCOMPLETE", "DOES-NOT-REPRODUCE"),
 
-    ("grok r3: n=1 with complete=yes must not grade at 0% CI coverage",
+    ("review r3: n=1 with complete=yes must not grade at 0% CI coverage",
      dict(measurand_d=[0], src=2000, control_d=[5], control_src=1000),
      "INCOMPLETE", "DOES-NOT-REPRODUCE"),
 
-    ("grok r3: a harness-detected session void (end-load) refuses a verdict",
+    ("review r3: a harness-detected session void (end-load) refuses a verdict",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           void_reason="end-load on q is 9.1 (> 3.0)"),
      "RIG-VOID", "DOES-NOT-REPRODUCE"),
 
-    ("codex r10: a session of ZERO timings must not report an EFFECT",
+    ("review r10: a session of ZERO timings must not report an EFFECT",
      dict(measurand_d=[0] * 8, src=0, control_d=[0] * 8, control_src=0),
      "ENGINE-REFUSED", "REPRODUCES"),
 
-    ("codex r10: the CELL ROLES are pinned -- a dirty control cannot be dropped from the set",
+    ("review r10: the CELL ROLES are pinned -- a dirty control cannot be dropped from the set",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           control_d=[230] * 8, control_src=2500,
           env_extra={"CONTROL_CELLS": "nq_grpc_mixed"}),
      "ENGINE-REFUSED", "DOES-NOT-REPRODUCE"),
 
-    ("codex r5: DELTA_REF_MS is PINNED -- the rule is not tunable from the environment",
+    ("review r5: DELTA_REF_MS is PINNED -- the rule is not tunable from the environment",
      dict(measurand_d=[-4, -2, -1, 0, 0, 1, 2, 3], src=2000,
           env_extra={"DELTA_REF_MS": "240"}),
      "ENGINE-REFUSED", "DOES-NOT-REPRODUCE"),
 ]
 
 MUTATIONS = [
-    ("the control threshold is the SAME as the measurand's, not half (grok r6)",
+    ("the control threshold is the SAME as the measurand's, not half (review r6)",
      ['    c_pos, c_neg = thresholds(x["src"], 0.5)',
       '    c_pos, c_neg = thresholds(x["src"], 1.0)'],
      "clean at T but DIRTY at T/2"),
 
-    ("dirty controls block only the null, not a reproduction (codex r6)",
+    ("dirty controls block only the null, not a reproduction (review r6)",
      ["elif dirty or bias_over:",
       "elif (dirty or bias_over) and not any(s == 'EFFECT' for s in m.values()):"],
      "blocks a REPRODUCTION too"),
 
-    ("a permitted bias of HALF the threshold still grades -- B > T licenses a rig effect (codex r11)",
+    ("a permitted bias of HALF the threshold still grades -- B > T licenses a rig effect (review r11)",
      ["    if t_pos > 0 and B >= t_pos / 2.0:", "    if False:"],
      "B >= T/2 is NOT a clean rig"),
 
-    ("the ARM median is the LOW median again, so a bimodal arm shrinks T (codex r11)",
+    ("the ARM median is the LOW median again, so a bimodal arm shrinks T (review r11)",
      ["    v = sorted(v)\n    n = len(v)\n    if n % 2:\n        return float(v[n // 2])\n"
       "    return (v[n // 2 - 1] + v[n // 2]) / 2.0",
       "    v = sorted(v)\n    return float(v[(len(v) - 1) // 2])"],
      "BIMODAL arm must not shrink T"),
 
-    ("MIXED is decided on the HARDENED states, so control noise upgrades it to REPRODUCES (codex r11)",
+    ("MIXED is decided on the HARDENED states, so control noise upgrades it to REPRODUCES (review r11)",
      ['elif "EFFECT" in m0.values() and "INVERTED" in m0.values():',
       'elif "EFFECT" in m.values() and "INVERTED" in m.values():'],
      "NOISIER rig must not upgrade MIXED"),
 
-    ("the inverting threshold is -src/10, not -src/11 (codex r2)",
+    ("the inverting threshold is -src/10, not -src/11 (review r2)",
      ["            -min(s_med / 11.0, float(DELTA_REF)) * scale)",
       "            -min(s_med / 10.0, float(DELTA_REF)) * scale)"],
      "inverting threshold is -src/11"),
 
-    ("the threshold ignores DELTA_REF, so the bar alone forgives 240ms (codex r2)",
+    ("the threshold ignores DELTA_REF, so the bar alone forgives 240ms (review r2)",
      ["    return (min(s_med / 10.0, float(DELTA_REF)) * scale,",
       "    return ((s_med / 10.0) * scale,"],
      "bar alone would forgive"),
@@ -368,28 +368,28 @@ MUTATIONS = [
      ["    if ci_lo >= t_pos + B:", "    if (ci_lo + ci_hi) / 2.0 >= t_pos + B:"],
      "one huge outlier"),
 
-    ("the NULL is not tightened by the control bias -- a masked effect reads as a null (grok r9)",
+    ("the NULL is not tightened by the control bias -- a masked effect reads as a null (review r9)",
      ["    if t_neg + B < rng_lo and rng_hi < t_pos - B:",
       "    if t_neg < rng_lo and rng_hi < t_pos:"],
      "null must also survive the TIGHTER bound"),
 
-    ("the EFFECT is not hardened by the control bias -- an effect of exactly T reproduces (codex r8)",
+    ("the EFFECT is not hardened by the control bias -- an effect of exactly T reproduces (review r8)",
      ["    if ci_lo >= t_pos + B:", "    if ci_lo >= t_pos:"],
      "exactly T is NOT a reproduction"),
 
-    ("B is carried as RAW MILLISECONDS across controls of different arm speeds (codex r9)",
+    ("B is carried as RAW MILLISECONDS across controls of different arm speeds (review r9)",
      ['        B_frac = max(B_frac, abs(x["rng"][0]) / x["src"], abs(x["rng"][1]) / x["src"])',
       '        B_frac = max(B_frac, abs(x["rng"][0]), abs(x["rng"][1]))',
       '    B = B_frac * x["src"]                    # the control bias, on THIS cell\'s arm',
       "    B = B_frac"],
      "B is RELATIVE"),
 
-    ("the control's residual bias is not carried into the measurand (codex r8)",
+    ("the control's residual bias is not carried into the measurand (review r8)",
      ['        B_frac = max(B_frac, abs(x["rng"][0]) / x["src"], abs(x["rng"][1]) / x["src"])',
       "        B_frac = max(B_frac, 0.0)"],
      "exactly T is NOT a reproduction"),
 
-    ("the engine trusts meta.complete and never counts the pairs (grok r3)",
+    ("the engine trusts meta.complete and never counts the pairs (review r3)",
      ['    if (meta.get(c, {}).get("complete") != "yes" or len(d) != PAIRS or ci is None\n'
       '            or len(by.get((c, "srcinit"), [])) != PAIRS\n'
       '            or len(by.get((c, "destinit"), [])) != PAIRS):',
@@ -398,31 +398,31 @@ MUTATIONS = [
 
     # SELECTIVELY: only the two ARM-count conjuncts, leaving meta.complete and the PAIR count
     # in place. The combined mutation above dies on the short-pair case and so proved nothing
-    # about these two lines (round-11, codex + grok).
-    ("the engine counts PAIRS but not the rows in each ARM (codex+grok r11)",
+    # about these two lines (round-11, review).
+    ("the engine counts PAIRS but not the rows in each ARM (review+review r11)",
      ['    if (meta.get(c, {}).get("complete") != "yes" or len(d) != PAIRS or ci is None\n'
       '            or len(by.get((c, "srcinit"), [])) != PAIRS\n'
       '            or len(by.get((c, "destinit"), [])) != PAIRS):',
       '    if (meta.get(c, {}).get("complete") != "yes" or len(d) != PAIRS or ci is None):'],
      "unpaired valid rows skew the ARM median"),
 
-    ("a missing registered cell is filtered away (codex r2)",
+    ("a missing registered cell is filtered away (review r2)",
      ["for c in sorted(set(REGISTERED) | set(meta)):", "for c in sorted(meta):"],
      "missing registered cell"),
 
-    ("a harness-detected session void is ignored (grok r3)",
+    ("a harness-detected session void is ignored (review r3)",
      ["elif SESSION_VOID:", "elif False:"],
      "session void (end-load)"),
 
-    ("a non-positive timing is accepted, and zeros then report an EFFECT (codex r10)",
+    ("a non-positive timing is accepted, and zeros then report an EFFECT (review r10)",
      ["        if v <= 0:", "        if False:"],
      "ZERO timings"),
 
-    ("the cell ROLES are taken from the environment again (codex r10)",
+    ("the cell ROLES are taken from the environment again (review r10)",
      ["    if _got and _got != _want:", "    if False:"],
      "CELL ROLES are pinned"),
 
-    ("the registered DELTA_REF is taken from the environment again (codex r5)",
+    ("the registered DELTA_REF is taken from the environment again (review r5)",
      ['_env = os.environ.get("DELTA_REF_MS")', "_env = None"],
      "DELTA_REF_MS is PINNED"),
 ]
@@ -431,7 +431,7 @@ MUTATIONS = [
 def rule_unit_tests():
     """The RULE itself, called directly -- because a session at n=8 cannot distinguish the
     CI from the RANGE (with 8 pairs the >=95% interval IS [min,max]). Removing n=16 is what
-    closed codex's round-8 blocker; judging a NULL on the RANGE is the SEMANTICS that keeps
+    closed review's round-8 blocker; judging a NULL on the RANGE is the SEMANTICS that keeps
     it closed if a larger n is ever registered again, and it can only be tested here."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("eng", DEFAULT_VERDICT)

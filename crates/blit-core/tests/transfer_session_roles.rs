@@ -581,7 +581,7 @@ async fn resume_over_the_data_plane_moves_only_the_changed_blocks() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resume_data_plane_honors_block_sizes_above_the_in_stream_ceiling() {
-    // codex otp-7b-1 F6 / D-2026-07-10-2 pin: the data-plane carrier's
+    // review otp-7b-1 F6 / D-2026-07-10-2 pin: the data-plane carrier's
     // block-size ceiling (64 MiB) exceeds the in-stream carrier's
     // (2 MiB). Request 4 MiB blocks over a 4 MiB file whose LAST byte
     // is stale at the dest: honored, the single 4 MiB block covers the
@@ -785,7 +785,7 @@ async fn resume_ineligible_targets_are_plain_full_transfers() {
 
 #[tokio::test]
 async fn resume_block_size_floor_clamps_tiny_requests() {
-    // codex otp-7a F1: a block_size=1 open must not hash at 1-byte
+    // review otp-7a F1: a block_size=1 open must not hash at 1-byte
     // granularity (a 32× hash-list amplification) — the destination
     // clamps to the 64 KiB floor. Behavioral pin: a 2-block file whose
     // second block is stale moves exactly one floor-sized block; an
@@ -811,7 +811,7 @@ async fn resume_block_size_floor_clamps_tiny_requests() {
 
 #[tokio::test]
 async fn resume_block_size_ceiling_clamps_oversized_requests() {
-    // codex otp-7a F1: a 64 MiB block_size would put a single
+    // review otp-7a F1: a 64 MiB block_size would put a single
     // BlockTransfer frame far past tonic's 4 MiB decode limit on the
     // gRPC-served in-stream carrier — the destination clamps to the
     // 2 MiB in-stream ceiling. Behavioral pin: a 4 MiB file whose
@@ -836,7 +836,7 @@ async fn resume_block_size_ceiling_clamps_oversized_requests() {
 
 #[tokio::test]
 async fn file_record_for_resume_flagged_path_is_protocol_violation() {
-    // codex otp-7a F3: a resume-flagged grant may be satisfied ONLY by
+    // review otp-7a F3: a resume-flagged grant may be satisfied ONLY by
     // its block record. A scripted source that answers the grant with a
     // whole-file record must fail the session fast — accepting it would
     // bypass the hash choreography and report a clean summary. Also
@@ -1108,7 +1108,7 @@ async fn mid_resume_source_fault_surfaces_cleanly_to_both_ends() {
             "destination fault carries the structured path over the wire \
              (initiator {initiator_role:?})"
         );
-        // The fault was genuinely MID-record (codex F6): block 0 landed
+        // The fault was genuinely MID-record (review F6): block 0 landed
         // in place before the reader died in block 1, so the partial is
         // partially patched — the in-place model D4 documents — and the
         // never-sent tail is untouched.
@@ -3185,7 +3185,7 @@ async fn mirror_refused_when_source_scan_incomplete() {
 
 #[tokio::test]
 async fn cancel_frame_during_mirror_purge_aborts_the_deletions() {
-    // codex otp-10b-2 F1: a peer fault (CancelJob on the serving
+    // review otp-10b-2 F1: a peer fault (CancelJob on the serving
     // source) arriving while the DESTINATION runs its mirror delete
     // pass must abort the pass and surface the fault — not sit unread
     // on the control lane while deletions run to completion behind a
@@ -3377,7 +3377,7 @@ async fn cancel_mid_file_record_surfaces_the_peers_fault() {
 
 #[tokio::test]
 async fn incomplete_scan_refused_when_completeness_required() {
-    // codex otp-9b F1 (R49-F2 on the session): an initiator that
+    // review otp-9b F1 (R49-F2 on the session): an initiator that
     // declared require_complete_scan (`blit move` — the source is
     // deleted after success) must NOT get a success out of an
     // incomplete source scan; files the scan could not read would be
@@ -3510,7 +3510,7 @@ async fn source_filter_limits_manifest_under_both_initiators() {
 /// — the `TransferSource` contract permits that, and the since-deleted relay
 /// source (`RemoteTransferSource`, removed at otp-10c-1) really did it. Used
 /// to prove the session applies filters via the universal `FilteredSource`
-/// chokepoint, not via the per-impl `scan(filter)` arg (codex otp-6a F1). If
+/// chokepoint, not via the per-impl `scan(filter)` arg (review otp-6a F1). If
 /// the session ever reverts to threading the filter through `scan`, this
 /// source drops it and every file transfers.
 struct FilterIgnoringSource {
@@ -3555,7 +3555,7 @@ impl TransferSource for FilterIgnoringSource {
 
 #[tokio::test]
 async fn session_filters_via_chokepoint_not_scan_arg() {
-    // otp-6a F1 (codex): filtering must not depend on the inner source
+    // otp-6a F1 (review): filtering must not depend on the inner source
     // honoring the scan(filter) argument — the contract lets an impl
     // ignore it (the deleted relay source did). Drive a push session
     // whose source ignores the scan arg; the filter must still apply
@@ -3812,7 +3812,7 @@ async fn resume_flagged_need_is_refused_in_non_resume_session() {
 
 #[tokio::test]
 async fn need_complete_before_manifest_complete_faults_the_source() {
-    // codex otp-3 F2: NeedComplete is only legal after the source's
+    // review otp-3 F2: NeedComplete is only legal after the source's
     // ManifestComplete has been received (contract §Phase state
     // machine). A peer promising "nothing further needed" before it
     // could have seen the full manifest must fail the session fast,

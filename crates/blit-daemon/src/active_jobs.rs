@@ -1099,7 +1099,7 @@ impl ActiveJobGuard {
     }
 
     /// Lightweight `'static` handle for updating this row from inside
-    /// a running handler (codex otp-10b-2 F4): the unified `Transfer`
+    /// a running handler (review otp-10b-2 F4): the unified `Transfer`
     /// learns its kind AND endpoint mid-handshake — from the
     /// `SessionOpen`, inside the session future — after the guard has
     /// moved into the dispatcher's spawned task, so the open hook

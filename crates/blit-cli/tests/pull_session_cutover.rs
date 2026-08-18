@@ -289,7 +289,7 @@ fn pull_verb_reports_w6_1_progress_events() {
     );
 }
 
-/// codex otp-10a F1, mirrored on pull (otp-10b-2): a move-shaped pull
+/// review otp-10a F1, mirrored on pull (otp-10b-2): a move-shaped pull
 /// (`ComparisonMode::IgnoreTimes`) must transfer a same-size file even
 /// when the local destination copy is NEWER — move deletes the REMOTE
 /// source afterwards, so a compare-mode skip of content that silently

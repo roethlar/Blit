@@ -32,7 +32,7 @@ use blit_core::transfers::resolution::resolve_destination;
 
 /// Build a `FilterInputs` view over a `TransferArgs`. Lives here
 /// because the orphan rule prevents `impl From<&TransferArgs>` on
-/// `FilterInputs` (the struct moved to `blit-app::transfers::filter`,
+/// `FilterInputs` (the struct lives in `blit_core::transfers::filter`,
 /// `TransferArgs` stays in `blit-cli`). Inlined wrapper keeps the
 /// `build_filter` / `build_filter_spec` call sites readable.
 fn filter_inputs(args: &TransferArgs) -> FilterInputs<'_> {
@@ -468,13 +468,13 @@ async fn run_move_inner(
         );
     }
 
-    // R54-F2 (data-loss), refreshed at otp-10b-2 (and its codex F3):
+    // R54-F2 (data-loss), refreshed at otp-10b-2 (and its review F3):
     // reject `--force`, `--ignore-times`, and `--size-only` for move.
     //
     // Every move route — local, push, pull, delegated — now maps
     // through the move compare rule (transfer unconditionally, or
     // `--checksum` for the one skip that is content-proven safe;
-    // codex otp-10a F1 and its otp-10b-2 mirrors). That makes
+    // review otp-10a F1 and its otp-10b-2 mirrors). That makes
     // `--force` / `--ignore-times` pure no-ops on move: reject them
     // rather than silently absorb them.
     //
@@ -643,7 +643,7 @@ async fn run_move_inner(
             // move_verb=true: the session refuses partial source
             // scans (R49-F2 / otp-9b F1) before we delete the remote
             // source via delete_remote_path below, and the move
-            // compare mapping transfers unconditionally (codex
+            // compare mapping transfers unconditionally (review
             // otp-10a F1, mirrored on pull at otp-10b-2).
             // R51-F4: defer output so a failure during the
             // remote-source delete doesn't leave a success-looking

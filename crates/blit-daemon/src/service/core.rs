@@ -355,7 +355,7 @@ impl Blit for BlitService {
         let default_root = self.default_root.clone();
         // Operator policy applies to served sessions exactly as it did
         // to the old handlers: --force-grpc-data grants no TCP data
-        // plane (codex otp-10a F3); --no-server-checksums refuses
+        // plane (review otp-10a F3); --no-server-checksums refuses
         // Checksum opens (otp-10b-1).
         let policy = blit_core::transfer_session::ResponderPolicy {
             force_in_stream: self.force_grpc_data,
@@ -368,7 +368,7 @@ impl Blit for BlitService {
         // Jobs row: registered with a Push placeholder and an empty
         // endpoint — the KIND and module/path all arrive in the
         // SessionOpen, mid-handshake inside the session. The on_open
-        // hook below (codex otp-10b-2 F4) fixes the row, counts the
+        // hook below (review otp-10b-2 F4) fixes the row, counts the
         // right metric, and emits the started event the moment the
         // open resolves; the row supports CancelJob throughout.
         let job = self.active_jobs.register(
@@ -421,7 +421,7 @@ impl Blit for BlitService {
             let byte_progress = job.bytes_counter();
             let job_progress = job.progress();
             // Session variant: cancel surfaces as a framed
-            // SessionError{CANCELLED}, not a bare Status (codex F1).
+            // SessionError{CANCELLED}, not a bare Status (review F1).
             let (ok, err_msg) = resolve_transfer_session_outcome(
                 super::transfer::run_transfer_session(
                     modules,
@@ -1229,7 +1229,7 @@ where
 /// [`resolve_transfer_outcome`] (the w4-3 shape the deleted
 /// push/pull_sync dispatchers used). On `CancelJob` it emits a framed
 /// `SessionError{CANCELLED}` on the response stream instead of a bare
-/// `Status::cancelled` (otp-4a codex F1). The session speaks `TransferFrame`s, so the client reads the
+/// `Status::cancelled` (otp-4a review F1). The session speaks `TransferFrame`s, so the client reads the
 /// framed error — and the aborted session future can't send it itself
 /// once the select drops it, so the dispatcher does. A session that
 /// faults on its own already framed the reason; the trailing `Status`
@@ -1325,7 +1325,7 @@ mod tests {
         assert_eq!(outcome, None, "a running handler must yield to cancel");
     }
 
-    /// otp-4a codex F1: a `CancelJob` on a served `Transfer` session
+    /// otp-4a review F1: a `CancelJob` on a served `Transfer` session
     /// must reach the client as a framed `SessionError{CANCELLED}` on
     /// the response stream — not a bare `Status::cancelled` (the
     /// session speaks frames, and the aborted session future can't

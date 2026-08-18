@@ -2398,7 +2398,7 @@ q_quiet_gate() {
         offenders=$(ps -axo pid=,comm= | awk -v owned="${q_daemon_pid:-}" '
             {
               n=$2; sub(/^.*\//, "", n)
-              if ($1 != owned && (n == "cargo" || n == "rustc" || n == "blit-daemon" || n ~ /^codex($|-)/))
+              if ($1 != owned && (n == "cargo" || n == "rustc" || n == "blit-daemon" || n ~ /^review($|-)/))
                 print $1 ":" n
             }')
         [[ -z "$offenders" ]] \

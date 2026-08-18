@@ -104,7 +104,7 @@ fn dp_fault(msg: impl Into<String>) -> eyre::Report {
 
 /// [`dp_fault`] for failures that stringify an underlying I/O-bearing
 /// report (socket dials): carry the `io::ErrorKind` so the retry
-/// classifier still sees a transient transport condition (codex
+/// classifier still sees a transient transport condition (review
 /// otp-10a F5).
 fn dp_fault_io(err: &eyre::Report, msg: impl Into<String>) -> eyre::Report {
     let fault = SessionFault::refusal(Code::DataPlaneFailed, msg).with_io_kind_from(err);
@@ -1920,7 +1920,7 @@ impl SourceDataPlane {
 /// `execute_receive_pipeline` writes socket-provided paths directly, so
 /// without this a peer could substitute an off-need-list path for a
 /// needed one (count-preserving), duplicate one, or send resume block
-/// records the session never negotiated (codex otp-4b-1 F1). Every
+/// records the session never negotiated (review otp-4b-1 F1). Every
 /// written path must be a granted, not-yet-received need. Resume
 /// sessions (otp-7b) additionally validate + claim block records
 /// against the shared [`ResumeHeaders`] grant map — with the identical
@@ -2154,7 +2154,7 @@ impl NeedListSink {
         }
     }
 
-    /// codex otp-7a F3, data-plane parity: a resume-flagged grant may
+    /// review otp-7a F3, data-plane parity: a resume-flagged grant may
     /// be satisfied ONLY by its block record — a whole-file or tar-shard
     /// delivery for it bypasses the hash choreography this end committed
     /// to.
@@ -2609,7 +2609,7 @@ mod tests {
         assert!(!fault.message.contains("before it was sealed"));
     }
 
-    /// codex otp-4b-1 F1: the data-plane receive must enforce the same
+    /// review otp-4b-1 F1: the data-plane receive must enforce the same
     /// need-list contract the in-stream carrier does inline. A path not
     /// on the outstanding set, a duplicate delivery, and a resume block
     /// record (non-resume session) all fault; a granted path claims once.
@@ -2728,7 +2728,7 @@ mod tests {
         );
 
         // A whole-file record for the resume-flagged grant bypasses the
-        // hash choreography — rejected (codex otp-7a F3 parity).
+        // hash choreography — rejected (review otp-7a F3 parity).
         let _ = sink
             .write_payload(PreparedPayload::File(FileHeader {
                 relative_path: "part.bin".to_string(),

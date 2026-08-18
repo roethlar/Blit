@@ -106,7 +106,7 @@ const DEST_DIFF_CHUNK: usize = 128;
 /// buffering per file record.
 const FILE_RECORD_PIPE_BYTES: usize = 256 * 1024;
 
-/// otp-7a resume bounds (codex F1, D-2026-07-10-1; data-plane ceiling
+/// otp-7a resume bounds (review F1, D-2026-07-10-1; data-plane ceiling
 /// otp-7b, D-2026-07-10-2). The in-stream carrier rides the gRPC
 /// `Transfer` RPC when the daemon serves, and tonic's default 4 MiB
 /// decode limit applies to every frame — so the DESTINATION's
@@ -124,7 +124,7 @@ const MIN_RESUME_BLOCK_SIZE: usize = 64 * 1024;
 /// 4 MiB frame limit.
 const MAX_IN_STREAM_RESUME_BLOCK_SIZE: usize = 2 * 1024 * 1024;
 /// Ceiling, in-stream carrier, for one `TarShardHeader` frame's encoded
-/// member list (codex otp-8 F2). The planner bounds a shard's CONTENT
+/// member list (review otp-8 F2). The planner bounds a shard's CONTENT
 /// bytes and file count (≤ 4096), but not the encoded size of its
 /// header list — 4096 legally long relative paths can push the single
 /// protobuf frame past tonic's 4 MiB decode limit. The in-stream send
@@ -434,7 +434,7 @@ pub struct SessionFault {
     /// ends can name it, wherever the fault originated. Structured
     /// identity, never scraped from the message.
     pub relative_path: Option<String>,
-    /// codex otp-10a F5: the `io::ErrorKind` of the underlying I/O
+    /// review otp-10a F5: the `io::ErrorKind` of the underlying I/O
     /// failure, when this fault stringified a report that carried one.
     /// `SessionFault` replaces the original error chain as the
     /// drivers' error payload, which would otherwise strip the signal
@@ -459,7 +459,7 @@ impl SessionFault {
     }
 
     /// Capture the underlying `io::ErrorKind` from the report this
-    /// fault is about to replace (codex otp-10a F5). Call at every
+    /// fault is about to replace (review otp-10a F5). Call at every
     /// site that stringifies an eyre chain into a fault.
     fn with_io_kind_from(mut self, report: &eyre::Report) -> Self {
         self.io_kind = report
@@ -486,7 +486,7 @@ impl SessionFault {
         let path = self.relative_path.as_deref()?;
         // "" is the single-file-root transfer's identity (the root IS
         // the file) — render it as such rather than a blank name
-        // (codex 7b-2 G1).
+        // (review 7b-2 G1).
         let shown = if path.is_empty() {
             "<the transfer root file>"
         } else {
@@ -529,10 +529,10 @@ impl SessionFault {
             local_build_id: err.peer_build_id,
             peer_build_id: err.local_build_id,
             peer_notified: true,
-            // Explicit wire presence (codex 7b-2 G1): "" is the valid
+            // Explicit wire presence (review 7b-2 G1): "" is the valid
             // identity of a single-file-root transfer, not absence.
             relative_path: err.relative_path,
-            // Peer-reported fault: no local I/O evidence (codex
+            // Peer-reported fault: no local I/O evidence (review
             // otp-10a F5 — io_kind is local-transport testimony only).
             io_kind: None,
         }
@@ -567,7 +567,7 @@ fn fault_from_report(report: eyre::Report) -> SessionFault {
     match report.downcast::<SessionFault>() {
         Ok(fault) => fault,
         Err(other) => {
-            // codex otp-10a F5: stringifying the chain would strip the
+            // review otp-10a F5: stringifying the chain would strip the
             // io::ErrorKind the retry classifier keys on — carry it.
             let fault = SessionFault::internal(format!("{other:#}")).with_io_kind_from(&other);
             match other.downcast_ref::<FaultedPath>() {
@@ -625,7 +625,7 @@ fn complement(role: TransferRole) -> TransferRole {
 /// wire form an end sends to tell its peer why it is aborting. Public
 /// so the daemon dispatcher can emit `CANCELLED` when a `CancelJob`
 /// fires mid-session (the session future is aborted by the select and
-/// cannot send it itself — otp-4a codex F1); blit-core stays the one
+/// cannot send it itself — otp-4a review F1); blit-core stays the one
 /// owner of the frame grammar. The build-id fields are left empty:
 /// they are only meaningful for `BUILD_MISMATCH`.
 pub fn session_error_frame(code: session_error::Code, message: impl Into<String>) -> TransferFrame {
@@ -756,8 +756,8 @@ fn destination_open_validator(open: &SessionOpen) -> std::result::Result<(), Ses
 /// Flips an abort flag when dropped, so a blocking-pool pass whose
 /// awaiting future is dropped (client disconnect, CancelJob) stops at
 /// its next flag check instead of running to completion behind a dead
-/// session. Introduced for the mirror delete pass (codex otp-9b F2);
-/// the destination diff's hash chunks share it (codex otp-10b-1 F3).
+/// session. Introduced for the mirror delete pass (review otp-9b F2);
+/// the destination diff's hash chunks share it (review otp-10b-1 F3).
 struct AbortFlagOnDrop(Arc<AtomicBool>);
 impl Drop for AbortFlagOnDrop {
     fn drop(&mut self) {
@@ -1195,7 +1195,7 @@ enum SourceEvent {
 
 /// The receive half's event sender, mirroring every `Fault` onto a
 /// `watch` signal as it is queued. The in-stream send path races this
-/// signal against its (potentially blocked) record sends — codex otp-8
+/// signal against its (potentially blocked) record sends — review otp-8
 /// F1: a peer fault (CANCELLED above all) must interrupt a send half
 /// stuck inside `reader.read()`/`tx.send()`, exactly as the data-plane
 /// drain's `recv_peer_fault` arm does for socket sends. The mpsc queue
@@ -1328,7 +1328,7 @@ async fn drive_source(
     // because the source has not yet reached its manifest queue boundary.
     let manifest_sent = Arc::new(AtomicBool::new(false));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
-    // Fault side-channel (codex otp-8 F1): the in-stream send path
+    // Fault side-channel (review otp-8 F1): the in-stream send path
     // races this signal against blocked record sends; see
     // `SourceEventSender`.
     let (fault_tx, fault_rx) = watch::channel(None::<SessionFault>);
@@ -1518,7 +1518,7 @@ async fn source_recv_half(
             }
             Some(Frame::NeedComplete(_)) => {
                 if !manifest_sent.load(Ordering::Acquire) {
-                    // Fail fast at arrival time (otp-3 codex F2): the
+                    // Fail fast at arrival time (otp-3 review F2): the
                     // event queue would otherwise let an early
                     // NeedComplete be processed late and pass as
                     // legitimate.
@@ -1728,7 +1728,7 @@ async fn source_send_half(
         // scan. Apply it through the universal `FilteredSource` decorator, the
         // single filter chokepoint every source impl routes through, rather
         // than the per-impl `scan(filter)` arg — a source impl is free to
-        // ignore that arg (the since-deleted relay source did; codex otp-6a
+        // ignore that arg (the since-deleted relay source did; review otp-6a
         // F1), and the chokepoint makes filtering independent of it. A
         // default/absent filter scans everything (unchanged from otp-3). Globs
         // were validated at OPEN (`source_open_validator`), so the conversion
@@ -1987,12 +1987,12 @@ async fn source_send_half(
                         // closes the send pipeline under backpressure, so this
                         // queue fails with a data-plane error — prefer the
                         // peer's framed reason (CANCELLED) the same way the
-                        // finish() drain does (otp-4b-3 codex F1). Not raced
+                        // finish() drain does (otp-4b-3 review F1). Not raced
                         // against events like finish(): live `Need`s still
                         // arrive here, and `recv_peer_fault` would consume them.
                     }
                     None => {
-                        // codex otp-8 F1: race the record sends against the
+                        // review otp-8 F1: race the record sends against the
                         // receive half's fault signal — the in-stream twin of
                         // the data-plane drain's `recv_peer_fault` arm. A peer
                         // cancel (framed CANCELLED, then RPC teardown) must
@@ -2053,7 +2053,7 @@ async fn source_send_half(
                         .await?;
                         // Same cancel posture as the plain-batch queue above:
                         // prefer the peer's framed reason over the transport
-                        // break a cancel also causes (otp-4b-3 codex F1).
+                        // break a cancel also causes (otp-4b-3 review F1).
                     }
                     None => {
                         for (header, hashes) in ready {
@@ -2065,10 +2065,10 @@ async fn source_send_half(
                                 prepared = prepare_in_stream_resume(&source, header, hashes) => prepared?,
                             };
                             let (header, block_size, dest_hashes) = prepared;
-                            // codex 7b-2 G2: the whole in-stream record names
+                            // review 7b-2 G2: the whole in-stream record names
                             // its file on failure, matching the data-plane
                             // carrier's outer wrap. Same fault race as the
-                            // plain-batch send above (codex otp-8 F1).
+                            // plain-batch send above (review otp-8 F1).
                             tokio::select! {
                                 biased;
                                 fault = peer_fault_signalled(&mut fault_signal) => {
@@ -2400,7 +2400,7 @@ async fn process_source_event(
             Ok(())
         }
         SourceEvent::BlockHashes(list) => {
-            // Validate the wire block size at ARRIVAL (codex F5), not
+            // Validate the wire block size at ARRIVAL (review F5), not
             // when the record is eventually sent — pending plain files
             // go out first, and an already-invalid frame must fail fast.
             // A conforming destination clamps into this range (D5 /
@@ -2835,7 +2835,7 @@ async fn settle_inflight_resize(
 /// but (possibly) an abort frame — no `Need`, `NeedComplete`, `ResizeAck`,
 /// or `Summary` is legitimate here. So a `Fault` is returned as-is and any
 /// OTHER event is surfaced as a protocol violation rather than silently
-/// dropped (codex otp-4b-3 F3): dropping it would defer or lose a
+/// dropped (review otp-4b-3 F3): dropping it would defer or lose a
 /// fail-fast error and, if the drain is itself stuck, hang. Parks forever
 /// once the channel closes with no event so the data-plane future it
 /// races decides the outcome instead.
@@ -2876,7 +2876,7 @@ async fn recv_peer_fault(events: &mut mpsc::UnboundedReceiver<SourceEvent>) -> S
 /// fast on any stray event), this is called from BOTH error sites,
 /// including the `queue()` error inside the payload loop — where a
 /// legitimate `Need`/`NeedComplete`/`ResizeAck` may already be queued
-/// ahead of the peer's `SessionError` (codex otp-4b-3 pass-2 F1). So it
+/// ahead of the peer's `SessionError` (review otp-4b-3 pass-2 F1). So it
 /// SKIPS non-fault events rather than treating them as violations: we are
 /// already unwinding on a data-plane error, and the framed fault (or the
 /// dp error) is the correct outcome, never a spurious protocol violation.
@@ -2930,7 +2930,7 @@ fn in_stream_tar_header_cost(header: &FileHeader) -> usize {
 
 /// Split any planned tar shard whose hydrated `TarShardHeader` member
 /// list would exceed `max_encoded` into consecutive smaller shards
-/// (codex otp-8 F2 — the in-stream carrier's frame-limit bound; cap
+/// (review otp-8 F2 — the in-stream carrier's frame-limit bound; cap
 /// rationale at [`MAX_IN_STREAM_TAR_HEADER_BYTES`]). Order and file
 /// set are preserved; non-shard payloads pass through untouched. Pure,
 /// so the bound is unit-testable without a 4 MiB fixture.
@@ -2997,7 +2997,7 @@ async fn send_payload_records(
         );
     }
     // In-stream only: every shard's header frame must clear the tonic
-    // frame limit (codex otp-8 F2). The data-plane branch keeps the
+    // frame limit (review otp-8 F2). The data-plane branch keeps the
     // planner's shards whole — its records are not protobuf frames.
     let payloads = bound_in_stream_tar_headers(payloads, MAX_IN_STREAM_TAR_HEADER_BYTES);
     // Progress convention (otp-10a): identical to the data-plane sink
@@ -3170,9 +3170,9 @@ async fn send_resume_block_records(
 ) -> Result<()> {
     use crate::remote::transfer::resume_diff::{ResumeBlockDiff, ResumeDiffEvent};
     // block_size was range-validated when the BlockHashList arrived
-    // (`process_source_event`, codex F5) — use it directly. Keepalive
+    // (`process_source_event`, review F5) — use it directly. Keepalive
     // stays unarmed: the control lane carries no receive stall guard,
-    // so a silent scan cannot trip one (codex 7b-1 F1 is a data-plane
+    // so a silent scan cannot trip one (review 7b-1 F1 is a data-plane
     // concern; `DataPlaneSink` arms it there).
     let mut diff = ResumeBlockDiff::open(source, header, block_size as usize, dest_hashes).await?;
     let mut stale_bytes: u64 = 0;
@@ -3196,7 +3196,7 @@ async fn send_resume_block_records(
         windows_metadata: header.windows_metadata.clone(),
     })))
     .await?;
-    // codex otp-10a F6: a resumed file finishes like any other (w6-1:
+    // review otp-10a F6: a resumed file finishes like any other (w6-1:
     // per-file lane, counted once); its bytes are the stale blocks
     // actually sent — the same convention as the data-plane carrier.
     if let Some(p) = progress {
@@ -3702,7 +3702,7 @@ fn mirror_delete_pass(
         source_files,
         filter,
     )?;
-    // codex otp-9b F2: a dropped session future (client disconnect,
+    // review otp-9b F2: a dropped session future (client disconnect,
     // CancelJob) cannot abort a running blocking task — the shared executor
     // checks this drop-guard before every filesystem operation.
     let stats = crate::deletion::execute_deletion_plan(
@@ -3860,7 +3860,7 @@ async fn destination_session_inner(
     let resume_headers: data_plane::ResumeHeaders = Arc::default();
     let files_resumed = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    // Two sets, deliberately separate (codex otp-4b-1 fix-review F1):
+    // Two sets, deliberately separate (review otp-4b-1 fix-review F1):
     // `granted` is the ever-granted DEDUP set — control-loop-local,
     // insert-only, never removed, so a concurrent data-plane claim can
     // never re-open a grant (a duplicate manifest path is granted at
@@ -3958,7 +3958,7 @@ async fn destination_session_inner(
                 // silently taking the in-stream branch cannot fall back — it
                 // would deadlock until the responder's accept times out. A
                 // grant means the initiator MUST dial (contract §Transport).
-                // (codex otp-5b-1 finding.)
+                // (review otp-5b-1 finding.)
                 (Some(_), None) => {
                     return Err(eyre::Report::new(SessionFault::internal(
                         "responder granted a TCP data plane but this DESTINATION \
@@ -4136,7 +4136,7 @@ async fn destination_session_inner(
                          the source still has",
                     )));
                 }
-                // codex otp-9b F1 (R49-F2 on the session): an initiator
+                // review otp-9b F1 (R49-F2 on the session): an initiator
                 // that declared "the source will be deleted after this
                 // transfer" (`blit move`) must NOT get a success out of
                 // an incomplete source scan — files the scan could not
@@ -4223,7 +4223,7 @@ async fn destination_session_inner(
                 }
                 // A resume-flagged grant may be satisfied ONLY by its
                 // block record — a whole-file record for it bypasses the
-                // hash choreography this end committed to (codex F3).
+                // hash choreography this end committed to (review F3).
                 if resume_headers
                     .lock()
                     .expect("resume-headers lock poisoned")
@@ -4379,7 +4379,7 @@ async fn destination_session_inner(
                 if !manifest_complete {
                     return Err(violation("tar shard record before ManifestComplete".into()));
                 }
-                // Same rule as file records (codex F3): a resume-flagged
+                // Same rule as file records (review F3): a resume-flagged
                 // grant may not be satisfied through a tar shard.
                 {
                     let held = resume_headers.lock().expect("resume-headers lock poisoned");
@@ -4631,7 +4631,7 @@ async fn destination_session_inner(
                 // NeedListSink claims as payloads land, so joining the
                 // receive task first drains the last of them (and
                 // surfaces any receive error / stall). Set membership —
-                // not a file count — is the contract (codex F1: a count
+                // not a file count — is the contract (review F1: a count
                 // proxy let a peer substitute or duplicate paths).
                 // `finish()` drops the arm sender (no more ADD sockets) and
                 // joins every receive worker. The shared resize state below,
@@ -4648,7 +4648,7 @@ async fn destination_session_inner(
                     bytes_written = totals.bytes_written;
                     contained_failures.merge_failures(&totals);
                 }
-                // R46-F2 on the local carrier (codex otp-11a F4): the
+                // R46-F2 on the local carrier (review otp-11a F4): the
                 // scan-complete guard fired at ManifestComplete, but the
                 // local apply's availability checks can record
                 // unreadables AFTER it (a file vanishing or losing
@@ -4707,7 +4707,7 @@ async fn destination_session_inner(
                         "SourceDone with {unfulfilled} needed file(s) never delivered"
                     )));
                 }
-                // Belt-and-braces (codex F3): with the per-record claims
+                // Belt-and-braces (review F3): with the per-record claims
                 // above (in-stream inline, data-plane in NeedListSink),
                 // an empty outstanding set implies every resume grant
                 // completed as a block record — but verify the stronger
@@ -4751,7 +4751,7 @@ async fn destination_session_inner(
                     // otp-11: `--dry-run` (local carrier only) plans the
                     // pass without deleting; every wire session executes.
                     let execute = local_apply.as_ref().is_none_or(|la| !la.dry_run);
-                    // codex otp-9b F2: if THIS future is dropped while the
+                    // review otp-9b F2: if THIS future is dropped while the
                     // blocking pass runs (client disconnect, CancelJob),
                     // the guard's Drop flips the abort flag and the pass
                     // stops deleting instead of running to completion
@@ -4788,7 +4788,7 @@ async fn destination_session_inner(
                             )
                         })
                     });
-                    // codex otp-10b-2 F1: a PEER fault mid-purge (a
+                    // review otp-10b-2 F1: a PEER fault mid-purge (a
                     // CancelJob on the serving source, a source-side
                     // abort) arrives as a control frame — a bare await
                     // here would leave it unread while deletions run to
@@ -4968,7 +4968,7 @@ async fn diff_chunk_and_apply_local(
         .scanned_bytes
         .fetch_add(chunk.iter().map(|h| h.size).sum::<u64>(), Ordering::Relaxed);
 
-    // ONE diff core, both carriers (codex otp-11a F1): only the
+    // ONE diff core, both carriers (review otp-11a F1): only the
     // dispatch differs — the wire twin grants these to the source,
     // this one plans and applies them in-process. The resume flag is
     // meaningless here (the local carrier's block phase is
@@ -5111,7 +5111,7 @@ async fn diff_chunk_and_send_needs(
     if chunk.is_empty() {
         return Ok(());
     }
-    // ONE diff core, both carriers (codex otp-11a F1); plan D2: a need
+    // ONE diff core, both carriers (review otp-11a F1); plan D2: a need
     // is resume-flagged only when the session negotiated resume AND a
     // non-empty dest partial exists to diff against.
     let needed: Vec<(FileHeader, bool)> =
@@ -5243,10 +5243,10 @@ async fn diff_chunk_and_send_needs(
 /// Stat-and-compare one manifest chunk on the blocking pool (2+
 /// syscalls per entry — the daemon's w4-4 chunked-check rationale),
 /// abortable when the session dies: under Checksum compare this chunk
-/// hashes up to DEST_DIFF_CHUNK files (codex otp-10b-1 F3), so the
+/// hashes up to DEST_DIFF_CHUNK files (review otp-10b-1 F3), so the
 /// guard's Drop flips the flag, the loop checks it per entry, and the
 /// hasher per 64 KiB chunk. The ONE diff core for both carriers
-/// (codex otp-11a F1): `diff_chunk_and_send_needs` grants the result
+/// (review otp-11a F1): `diff_chunk_and_send_needs` grants the result
 /// to the source over the wire; `diff_chunk_and_apply_local` plans and
 /// applies it in-process. Returns `(header, resume_eligible)` per
 /// entry that must transfer.
@@ -5519,7 +5519,7 @@ fn destination_needs(
     // `compare_file` arm conservatively transfers. This runs inside
     // the diff's blocking-pool chunk (same rationale as the resume
     // block hashing), so the hash never blocks the async loop; the
-    // abort flag bounds it when the session dies (codex F3).
+    // abort flag bounds it when the session dies (review F3).
     let target_hash: Vec<u8> = match target {
         Some((size, _)) if opts.mode == CompareMode::Checksum && size == header.size => {
             match hash_file_abortable(&dst, abort) {
@@ -5665,7 +5665,7 @@ fn resolve_attribute_repair(
 }
 
 /// Blake3 of one whole local file, abortable between 64 KiB chunks —
-/// the destination diff's Checksum-mode hasher (codex otp-10b-1 F3:
+/// the destination diff's Checksum-mode hasher (review otp-10b-1 F3:
 /// `checksum::hash_file` runs a whole file uninterruptibly; inside the
 /// diff's blocking chunk that must yield to a dead session's abort
 /// flag within one chunk).
@@ -5716,7 +5716,7 @@ async fn compute_resume_block_hashes(
         // Re-stat inside the claim: a partial that vanished, stopped
         // being a regular file, or grew past the hash-count cap since
         // the diff yields the empty list — the full-transfer fallback
-        // (D1) — never an error and never an oversized frame (codex F1).
+        // (D1) — never an error and never an oversized frame (review F1).
         match std::fs::metadata(&dst) {
             Ok(meta) if meta.is_file() && resume_hash_list_fits(meta.len(), block_size) => {}
             Ok(_) => return Ok(Vec::new()),
@@ -5870,7 +5870,7 @@ async fn receive_block_record(
             .await
             .map_err(|e| tag_path(e, &header.relative_path))?;
         record.merge(&outcome);
-        // codex 7b-2 G3: a transport break inside the record names the
+        // review 7b-2 G3: a transport break inside the record names the
         // file the record already identified.
         let received = match transport
             .recv()
@@ -5979,7 +5979,7 @@ async fn receive_file_record(
     let feed = async {
         let mut remaining = header.size;
         while remaining > 0 {
-            // codex 7b-2 G3: a transport break inside the record names
+            // review 7b-2 G3: a transport break inside the record names
             // the file the record already identified.
             let received = match transport
                 .recv()
@@ -8380,7 +8380,7 @@ mod tests {
         );
     }
 
-    /// otp-10c-2 codex F4: the mirror delete pass containment-checks
+    /// otp-10c-2 review F4: the mirror delete pass containment-checks
     /// every planned target against the canonical destination root
     /// before any filesystem op. The wiring was unpinned (a mutation
     /// deleting the `contained(...)` call survived the suite): with a
@@ -8498,7 +8498,7 @@ mod tests {
         assert!(!git.is_empty(), "git component must be non-empty");
     }
 
-    /// codex otp-10a F5: converting a driver error into a
+    /// review otp-10a F5: converting a driver error into a
     /// `SessionFault` stringifies the chain, which would strip the
     /// `io::ErrorKind` the retry classifier keys on — the fault must
     /// carry it. A chain with no I/O source stays kind-less (fatal to
@@ -8626,7 +8626,7 @@ mod tests {
         assert_eq!(restored.relative_path.as_deref(), Some("big.bin"));
         let no_path = SessionFault::from_wire(SessionFault::internal("x").to_wire());
         assert_eq!(no_path.relative_path, None, "absent wire path is None");
-        // codex 7b-2 G1: "" is the single-file-root identity — it must
+        // review 7b-2 G1: "" is the single-file-root identity — it must
         // survive the wire (explicit presence) and render non-blank.
         let root_file = SessionFault::from_wire(
             SessionFault::internal("root file fault")
@@ -8662,7 +8662,7 @@ mod tests {
         assert_eq!(kept.relative_path.as_deref(), Some("kept.bin"));
     }
 
-    /// otp-7a codex F1: the hash-count cap decision — a partial at
+    /// otp-7a review F1: the hash-count cap decision — a partial at
     /// exactly the cap hashes; one block past it degrades to the empty
     /// full-transfer fallback. Pure-function test because the boundary
     /// fixture would otherwise be MAX_RESUME_BLOCK_HASHES × 64 KiB = 4 GiB.
@@ -8699,7 +8699,7 @@ mod tests {
         assert!(back.peer_notified);
     }
 
-    /// codex otp-9b F2: the mirror pass runs on the blocking pool, where
+    /// review otp-9b F2: the mirror pass runs on the blocking pool, where
     /// a dropped session future cannot reach it — the drop-guard's abort
     /// flag must stop it before the next filesystem op. With the flag
     /// pre-set the pass deletes NOTHING, even with a genuinely
@@ -8754,7 +8754,7 @@ mod tests {
         }
     }
 
-    /// codex otp-8 F2: an oversized shard splits into consecutive
+    /// review otp-8 F2: an oversized shard splits into consecutive
     /// shards, each with its encoded member list under the bound; order
     /// and file set are preserved and non-shard payloads pass through.
     #[test]
@@ -8846,7 +8846,7 @@ mod tests {
         );
     }
 
-    /// codex otp-8 F2, the wiring guard: `send_payload_records` itself
+    /// review otp-8 F2, the wiring guard: `send_payload_records` itself
     /// must emit multiple `TarShardHeader` frames — each under the
     /// in-stream bound — when the planner hands it ONE shard whose
     /// header list would exceed it. 4096 one-byte files (the planner's

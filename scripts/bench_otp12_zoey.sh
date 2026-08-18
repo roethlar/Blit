@@ -19,11 +19,11 @@
 # (cold caches both ends, drain-then-purge order, durable self-timed
 # destination flush, fresh never-seen destinations, wall-clock windows,
 # median = floor of the mean of the middle two). New in otp-12a:
-#   * ABBA counterbalanced interleave (codex design F5): pair slots run
+#   * ABBA counterbalanced interleave (review design F5): pair slots run
 #     old,new / new,old / old,new / new,old — each arm leads half the
 #     pairs, so arm never confounds with within-pair order on the
 #     stateful pool.
-#   * Valid-run rule (codex design F7): a run with a nonzero blit exit
+#   * Valid-run rule (review design F7): a run with a nonzero blit exit
 #     OR an undrained pre-run window voids its whole PAIR; the pair is
 #     re-run at the same slot until RUNS valid pairs exist, capped at
 #     2*RUNS pair attempts per comparison; at the cap the comparison is
@@ -98,7 +98,7 @@ OLD_BLIT=${OLD_BLIT:-$MAC_WORK/bins/blit-$OLD_SHA}
 OLD_DAEMON=${OLD_DAEMON:-$ZOEY_TEMP/blit-daemon-$OLD_SHA}
 NEW_DAEMON=${NEW_DAEMON:-$ZOEY_TEMP/blit-daemon-$NEW_SHA}
 # The committed reference is FIXED (pre-registered, design D2) — no env
-# override (codex otp-12a F5); its sha256 is recorded in the manifest.
+# override (review otp-12a F5); its sha256 is recorded in the manifest.
 BASELINE_SUMMARY="$REPO_ROOT/docs/bench/otp2-baseline-2026-07-10/summary.csv"
 
 OUT_DIR=${OUT_DIR:-$REPO_ROOT/logs/otp12_zoey_$(date +%Y%m%dT%H%M%S)}
@@ -116,7 +116,7 @@ zssh() { ssh "${SSH_MUX[@]}" "$ZOEY_SSH" "$@"; }
 # Wall-clock ms across two separate python3 processes (deliberate; see
 # bench_otp2_baseline.sh for why monotonic is wrong here).
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
-# Self-timed durability steps (codex otp-2w F3): the timed window is
+# Self-timed durability steps (review otp-2w F3): the timed window is
 # transfer + destination flush and NOTHING else; each flush times
 # ITSELF on the destination and reports only its own duration.
 sync_dest_ms() {   # Linux sync on the daemon host; prints its elapsed ms
@@ -146,7 +146,7 @@ arm_sha()    { case "$1" in old) echo "$OLD_SHA";;    new) echo "$NEW_SHA";;    
 # --- Preflight ---------------------------------------------------------
 preflight() {
     [[ "$RUNS" == 4 || "$RUNS" == 8 ]] \
-        || die "RUNS must be 4 (standard) or 8 (the D2 escalation) — got '$RUNS' (codex otp-12a F8: odd values break ABBA balance)"
+        || die "RUNS must be 4 (standard) or 8 (the D2 escalation) — got '$RUNS' (review otp-12a F8: odd values break ABBA balance)"
     [[ -x "$NEW_BLIT" ]] || die "missing $NEW_BLIT (cargo build --release first)"
     [[ -x "$OLD_BLIT" ]] || die "old client not staged at $OLD_BLIT (rebuild at $OLD_SHA in a detached worktree: git worktree add --detach /tmp/blit-old $OLD_SHA && cargo build --release in it, then copy target/release/blit here)"
     command -v python3 >/dev/null || die "python3 required (timing + fsync_tree + verdicts)"
@@ -154,7 +154,7 @@ preflight() {
     sudo -n /usr/sbin/purge || die "cold-cache purge needs a NOPASSWD sudoers rule for /usr/sbin/purge"
     zssh "test -x '$OLD_DAEMON'" || die "old daemon not staged at $OLD_DAEMON"
     zssh "test -x '$NEW_DAEMON'" || die "new daemon not staged at $NEW_DAEMON (zigbuild aarch64-musl at $NEW_SHA, stage BESIDE the old one)"
-    # Provenance enforcement (codex otp-12a F3): a stale-but-matching
+    # Provenance enforcement (review otp-12a F3): a stale-but-matching
     # pair passes the handshake yet is not the labeled build. Every
     # binary must embed its arm's sha (session_build_id/BLIT_GIT_SHA is
     # a compile-time literal in the binary; the old commits embed it
@@ -163,7 +163,7 @@ preflight() {
     # misses matches inside binaries without them (UTF-8 line
     # handling). The pattern is the BUILD-ID form "+<sha>" — a bare
     # sha false-positives on build-directory paths cargo embeds
-    # (codex otp-12a-run F1: the e757dcc client's only bare match was
+    # (review otp-12a-run F1: the e757dcc client's only bare match was
     # the worktree path). This still cannot distinguish a clean id
     # from "<sha>.dirty.…" — the clean-tree die above covers the new
     # arm at run time; old-arm cleanliness rests on the build
@@ -175,7 +175,7 @@ preflight() {
         || die "$NEW_DAEMON does not embed +$NEW_SHA — restage the new daemon"
     zssh "grep -qa '+$OLD_SHA' '$OLD_DAEMON'" \
         || die "$OLD_DAEMON does not embed +$OLD_SHA — the staged old daemon is not the pinned pair"
-    # Pre-cutover CLIENT binaries embed NO greppable build id (codex
+    # Pre-cutover CLIENT binaries embed NO greppable build id (review
     # otp-12a-run F1, verified against the e757dcc client). Where the
     # id exists we require it; otherwise the operator must explicitly
     # acknowledge that old-client provenance = the documented
@@ -195,13 +195,13 @@ preflight() {
     fi
     # Clean tree is MANDATORY for the new arm (design D1: dirty builds
     # mint <sha>.dirty.* ids; the run must be the recorded commit) —
-    # die, don't warn (codex otp-12a F3).
+    # die, don't warn (review otp-12a F3).
     [[ -z $(git -C "$REPO_ROOT" status --porcelain) ]] \
         || die "working tree DIRTY — the recorded run must be a clean checkout of $NEW_SHA (D-2026-07-05-2)"
     log "preflight OK  old pair: $OLD_SHA  new pair: $NEW_SHA  runs/arm: $RUNS"
 }
 
-sha256_local() {   # $1 = path; dies on failure (codex otp-12a F3: no blanks)
+sha256_local() {   # $1 = path; dies on failure (review otp-12a F3: no blanks)
     local h
     h=$(shasum -a 256 "$1" | cut -d' ' -f1) || die "sha256 failed for $1"
     [[ ${#h} -eq 64 ]] || die "sha256 produced '$h' for $1"
@@ -234,7 +234,7 @@ write_manifest() {   # binary provenance for the evidence README (design D6)
 # --- Daemon lifecycle (everything inside ZOEY_TEMP; one arm at a time) --
 # The EXIT trap acts only after THIS session started a daemon, and the
 # kill is comm-verified — a stale pidfile's recycled PID is never killed
-# (codex otp-12a F4).
+# (review otp-12a F4).
 CURRENT_ARM=""
 DAEMON_EVER_STARTED=0
 start_daemon() {   # $1 = arm
@@ -317,7 +317,7 @@ drop_caches() {   # $1 = run label; sets RUN_DRAIN
 }
 
 # --- Fixtures (client disk; generated once; shapes = otp-2/sf-1) -------
-# Existence alone is NOT trusted (codex otp-12a F2): an interrupted
+# Existence alone is NOT trusted (review otp-12a F2): an interrupted
 # generation/staging leaves a partial workload that later runs would
 # silently benchmark. Every fixture is verified by file count + byte
 # sum; a present-but-wrong dir is a hard stop with an explicit removal
@@ -386,7 +386,7 @@ smoke_pair() {   # $1 = arm; 1-file untimed transfer proves the pair works.
 stage_pull_sources() {
     # Untimed; sources are SHARED across arms by design (bytes are
     # bytes — design D5); kept across sessions. A kept dir is verified
-    # by remote file count (codex otp-12a F2) — a partial staging is
+    # by remote file count (review otp-12a F2) — a partial staging is
     # re-staged (blit converges: identical files skip, missing land),
     # then re-verified.
     log "staging pull sources (untimed, new pair)"
@@ -427,7 +427,7 @@ timed_push_run() {   # arm cell rid src [flags...]; fresh dest per run
     start=$(now_ms)
     # stdout (arm-dependent progress volume) goes to /dev/null exactly
     # like the frozen harness; only stderr — silent unless failing — is
-    # kept for diagnostics (codex otp-12a F6).
+    # kept for diagnostics (review otp-12a F6).
     "$blit" copy "$src" "${REMOTE}push_${SESSION_TAG}_${cell}_${arm}_${rid}/" --yes "$@" \
         > /dev/null 2> "$OUT_DIR/blit-logs/${cell}_${arm}_${rid}.err" || rc=$?
     end=$(now_ms)
@@ -450,7 +450,7 @@ timed_pull_run() {   # arm cell rid remote_src [flags...]; fresh dest per run
     local blit start end rc=0
     blit=$(arm_blit "$arm")
     ensure_daemon "$arm"
-    # Never-seen destination path per run (design D5; codex otp-12a
+    # Never-seen destination path per run (design D5; review otp-12a
     # F7), removed after its flush is measured so pulls don't
     # accumulate GiBs on the client disk.
     local dst="$MAC_WORK/dst_pull_${SESSION_TAG}_${cell}_${arm}_${rid}"
@@ -532,7 +532,7 @@ def median(v):
     return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) // 2
 
 # A cell is usable only when its comparison completed (RUNS valid
-# pairs, codex otp-12a F1): summary medians are written for complete
+# pairs, review otp-12a F1): summary medians are written for complete
 # cells ONLY — never a median over fewer than RUNS valid runs. The
 # verdict loop iterates EVERY attempted comparison (meta), so a
 # zero-valid cell still surfaces as INCOMPLETE.
@@ -562,7 +562,7 @@ with open(verdicts_p, "w") as f:
         new_m = median(by_arm[(cell, "new")])
         old_m = median(by_arm[(cell, "old")])
         if cell not in base:
-            # Fail CLOSED (codex otp-12a F5): every matrix cell has a
+            # Fail CLOSED (review otp-12a F5): every matrix cell has a
             # committed reference row; a miss is a harness/reference
             # bug, not a benchmark outcome.
             sys.exit(f"FATAL: no committed reference row for {cell} in {base_p}")
@@ -605,7 +605,7 @@ main() {
         if want_cell "pull_grpc_${w}"; then run_comparison "pull_grpc_${w}" pull "${REMOTE}pull_src_$w/src_$w/" --force-grpc; fi
     done
     # A mistyped CELLS entry must not exit 0 with empty evidence
-    # (codex otp-12a-run F5).
+    # (review otp-12a-run F5).
     if [[ -n "$CELLS" ]]; then
         local c
         for c in ${CELLS//,/ }; do

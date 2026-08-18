@@ -4,9 +4,9 @@
 //! Pre-A.0 the struct had a `from_transfer(&TransferArgs)`
 //! constructor — that's now in the CLI as inline field-by-field
 //! construction (orphan rule prevents the impl living here:
-//! blit-app can't `impl FilterInputs` for `&TransferArgs` because
+//! the library can't `impl FilterInputs` for `&TransferArgs` because
 //! `TransferArgs` lives in blit-cli). Callers explicitly fill the
-//! struct, which is also the shape the TUI's transfer-options
+//! struct, which is also the shape any front-end's transfer-options
 //! modal will use.
 
 use crate::fs_enum::{parse_duration, parse_size, FileFilter};
@@ -117,7 +117,7 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
     }
-    // codex otp-10a F8: validate the globs at construction time, like
+    // review otp-10a F8: validate the globs at construction time, like
     // `build` does (R58-F12) — a malformed `--include`/`--exclude`
     // must fail before any connection is opened, not when the session
     // end validates the spec at OPEN.
@@ -132,7 +132,7 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
 
 #[cfg(test)]
 mod tests {
-    //! audit-6 item 1: blit-app orchestration glue. `build` / `build_spec`
+    //! audit-6 item 1: transfer orchestration glue. `build` / `build_spec`
     //! are pure filter-assembly helpers every transfer/check verb routes
     //! through, so their semantics (glob propagation, size/age parsing,
     //! reference-time capture, malformed-input rejection) are worth
@@ -228,7 +228,7 @@ mod tests {
         assert_eq!(spec.max_age_secs, None);
     }
 
-    /// codex otp-10a F8: the wire-spec builder rejects malformed globs
+    /// review otp-10a F8: the wire-spec builder rejects malformed globs
     /// up front, exactly like `build` — a bad `--exclude` on a push
     /// verb must fail before any connection is opened.
     #[test]

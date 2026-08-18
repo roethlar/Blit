@@ -61,7 +61,7 @@ pub async fn run_remote_to_remote_direct_deferred(
     .await
 }
 
-/// The delegated wire options, extracted for pinnability (codex
+/// The delegated wire options, extracted for pinnability (review
 /// otp-10b-2 F2). A MOVE deletes the remote source after the
 /// delegated transfer, so its compare must never produce a
 /// metadata-shaped skip: `ignore_times` is forced on unless the user
@@ -99,8 +99,8 @@ fn delegated_pull_options(
 // `DeferredDelegatedState` is now a type alias for
 // `blit_core::transfers::remote::DelegatedPullOutcome` (see the
 // top of this file). Same field shape, same callers — the
-// orchestration body that builds it lives in `blit-app` after
-// this A.0 sub-slice.
+// orchestration body that builds it lives in `blit-core`
+// (`transfers::remote`).
 
 pub fn print_deferred_delegated_result(args: &TransferArgs, state: &DeferredDelegatedState) {
     if args.json {
@@ -371,7 +371,7 @@ mod delegated_options_tests {
             .compare_mode
     }
 
-    /// codex otp-10b-2 F2: a delegated MOVE must never ride a
+    /// review otp-10b-2 F2: a delegated MOVE must never ride a
     /// metadata-shaped compare — the dst daemon would skip a
     /// same-size changed file and the CLI then deletes the remote
     /// source (the otp-10a F1 data loss on the delegated route).

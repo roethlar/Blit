@@ -172,7 +172,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for StallGuardWriter<W> {
                 // bytes per poll would never trip the guard. The
                 // caller (write_all loop) will keep polling; if real
                 // progress doesn't show up within the window the
-                // Pending arm below trips. (h3b round 2: GPT review
+                // Pending arm below trips. (h3b round 2: review
                 // flagged Ok(0) as a doc/code mismatch.)
                 Poll::Ready(Ok(0))
             }

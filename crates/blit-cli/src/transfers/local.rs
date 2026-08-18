@@ -44,7 +44,7 @@ pub async fn run_local_transfer(
 /// takes ownership of when (and whether) to print the final summary
 /// (a failure during source-delete can then surface without first
 /// emitting a successful-looking JSON document on stdout — R49-F3),
-/// and the compare maps through the move rule (codex otp-10b-2 F3):
+/// and the compare maps through the move rule (review otp-10b-2 F3):
 /// transfer unconditionally, or `--checksum` for the one skip that is
 /// content-proven safe — a SizeMtime skip of a same-size same-mtime
 /// changed file followed by the source-delete would destroy the only
@@ -832,7 +832,7 @@ fn build_local_options(
     // checksum > default. This keeps local and pull behaviorally
     // identical when given the same flag combination.
     //
-    // codex otp-10b-2 F3: a MOVE maps through the move rule instead
+    // review otp-10b-2 F3: a MOVE maps through the move rule instead
     // (IgnoreTimes, or Checksum when asked) — the local twin of
     // `blit_core::transfers::compare::move_comparison_mode`. Today the
     // non-mirror local path copies unconditionally regardless of the
@@ -1044,7 +1044,7 @@ fn print_summary(
                 )
             )
         );
-        // codex otp-11b B4: print the EFFECTIVE apply-worker count, not the
+        // review otp-11b B4: print the EFFECTIVE apply-worker count, not the
         // options default (num_cpus). ls-4 raised the normal-run value from
         // 1 to `DEFAULT_SINK_WORKERS`; this line must track the constant
         // rather than restate a literal, or it goes back to reporting a

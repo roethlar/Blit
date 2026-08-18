@@ -103,7 +103,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    // Paused virtual time (w4-1 codex review): the relocated test
+    // Paused virtual time (w4-1 review review): the relocated test
     // waited only 150ms real time against the task's 500ms natural
     // completion, so it passed whether or not Drop aborted — vacuous
     // since its pull.rs days. Under start_paused the auto-advancing

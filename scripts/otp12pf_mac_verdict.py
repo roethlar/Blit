@@ -24,7 +24,7 @@ THE STATISTIC (paired, because the design is paired)
     RANGE = [min(d), max(d)], and a NULL is judged on the RANGE, never on a trimmed CI.
 
     n IS EXACTLY 8. Not "at least": at any larger n the >=95% interval starts TRIMMING
-    outliers, and a bimodal arm then yields a narrow median CI and a FALSE verdict. grok
+    outliers, and a bimodal arm then yields a narrow median CI and a FALSE verdict. review
     drove exactly that with a 16-pair CSV (3 pairs at -500 trimmed away, 13 at +200 left)
     -> REPRODUCES. The cell must carry EXACTLY the registered pair count or it is INCOMPLETE.
 
@@ -51,7 +51,7 @@ new case to walk past, because they partition the interval's position relative t
     way -- and the engine REFUSES any other n.
 
     (This block described the rev-8 rule -- a NONE judged on the CI, no B -- for three
-    revisions after the code had moved on. Round-11, grok. A docstring is not decoration: it
+    revisions after the code had moved on. Round-11, review. A docstring is not decoration: it
     is what the next reader believes.)
 
 THE CONTROLS ARE A PRECONDITION
@@ -136,7 +136,7 @@ def ms_of(r):
         if v <= 0:
             # A transfer cannot take zero time. With src_median = 0 the thresholds collapse
             # to 0 and classify(0,0,0,0,0,0) returns EFFECT -- a session of zeros would
-            # report a REPRODUCTION (codex r10).
+            # report a REPRODUCTION (review r10).
             raise ValueError("non-positive")
         return v
     except (TypeError, ValueError):
@@ -168,7 +168,7 @@ def med(v):
 def med_arm(v):
     """The conventional even-n median (mean of the two middle values), for the ARM medians.
 
-    Round-11 codex (MEDIUM): the low median was registered for the paired D and then reused
+    Round-11 review (MEDIUM): the low median was registered for the paired D and then reused
     for srcinit_med -- which is not a reported number, it CONTROLS T, B and the bar. And it
     is anti-conservative in exactly the case that matters: a BIMODAL arm pulls the low median
     DOWN, T = src/10 shrinks with it, and an EFFECT gets EASIER. With an arm of 4x1000ms and
@@ -234,13 +234,13 @@ def classify(ci_lo, ci_hi, rng_lo, rng_hi, t_pos, t_neg, B=0.0):
     way -- the distinction is the SEMANTICS that keeps the rule sound if a larger n is ever
     registered, and the engine REFUSES any n but 8.
 
-    NONE uses the FULL RANGE -- EVERY pair must lie inside +-T. Round 8 (codex, BLOCKER):
+    NONE uses the FULL RANGE -- EVERY pair must lie inside +-T. Round 8 (review, BLOCKER):
     a >=95% CI at n>8 TRIMS outliers, so a BIMODAL arm produces a NARROW median CI and a
     FALSE NULL (driven: CI = [1,1] from modes at +-110). An equivalence claim must never be
     reachable by trimming away the very pairs that contradict it. This is also why
     bimodality needs no special branch: it cannot hide from the range.
 
-    B IS APPLIED HERE, ONCE, AND IT ONLY EVER HARDENS (round-11 grok, MEDIUM). It used to be
+    B IS APPLIED HERE, ONCE, AND IT ONLY EVER HARDENS (round-11 review, MEDIUM). It used to be
     folded into the thresholds by the CALLER -- which passed `t_pos + B` and so WIDENED the
     NONE window -- and a second check downstream then tightened the null back to `T - B`. The
     net effect was right and the intermediate call was wrong, which is a bug waiting for the
@@ -287,7 +287,7 @@ for c in sorted(set(REGISTERED) | set(meta)):
 # A control certifies clean at T/2 -- but "clean" is not "zero". A control sitting at +49
 # with T/2 = 50 is accepted, and THAT 49 ms OF ARM BIAS MAY BE RIDING IN THE MEASURAND
 # TOO, so a measurand "EFFECT" at exactly T could be half real and half rig (round-8
-# codex, BLOCKER). The bias the controls FAIL TO EXCLUDE is therefore carried into the
+# review, BLOCKER). The bias the controls FAIL TO EXCLUDE is therefore carried into the
 # measurand's thresholds:
 #
 #     B = the arm asymmetry the controls could not rule out, as a FRACTION OF THE ARM,
@@ -312,7 +312,7 @@ for c in CONTROLS:
     if x["ctrl_state"] != "NONE":
         dirty.append(c)
     elif x["src"]:
-        # B IS A FRACTION OF THE ARM, NOT A MILLISECOND COUNT (round-9 codex, BLOCKER).
+        # B IS A FRACTION OF THE ARM, NOT A MILLISECOND COUNT (round-9 review, BLOCKER).
         # The controls run on DIFFERENT fixtures and therefore different arm speeds: the
         # same 4.9% arm bias is 122 ms on a 2500 ms large-file control and 24 ms on a fast
         # one. Carrying raw ms across them OVER-penalises a measurand slower than the
@@ -323,7 +323,7 @@ for c in CONTROLS:
         B_frac = max(B_frac, abs(x["rng"][0]) / x["src"], abs(x["rng"][1]) / x["src"])
 
 # ---- pass 3: grade the measurands, against thresholds widened by the control bias -----
-# B >= T/2 IS NOT A CLEAN RIG (D-2026-07-14-4; round-11 codex HIGH, grok found the same
+# B >= T/2 IS NOT A CLEAN RIG (D-2026-07-14-4; round-11 review HIGH, review found the same
 # dead-zone independently). T is CAPPED at DELTA_REF, but the bias a clean control is
 # permitted to carry is a FRACTION of its arm -- so on a SLOW measurand the two diverge:
 # clean controls at 4.9% of a 1000 ms arm give B = 490 ms on a 10000 ms measurand, while
@@ -443,7 +443,7 @@ elif dirty or bias_over:
                              for c in bias_over), DELTA_REF))
     why += ("There is no escalation: a noisy rig is fixed by a QUIETER RIG, not more pairs.")
 elif "EFFECT" in m0.values() and "INVERTED" in m0.values():
-    # DECIDED ON THE UNHARDENED STATES (round-11 codex, HIGH). B hardens each CELL, but
+    # DECIDED ON THE UNHARDENED STATES (round-11 review, HIGH). B hardens each CELL, but
     # through this branch's PRECEDENCE it could make the SESSION verdict EASIER: with
     # measurands at +110 and -94 (src=1000), controls at zero give MIXED -- but clean
     # controls at +5 push the -94 cell out of INVERTED (it needs <= -95.9), the MIXED branch

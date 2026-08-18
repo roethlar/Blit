@@ -46,7 +46,7 @@ use crate::active_jobs::ActiveJobKind;
 use crate::active_jobs::ActiveJobProgress;
 use crate::runtime::{ModuleConfig, RootExport};
 
-/// The dispatcher's open hook (codex otp-10b-2 F4): called exactly once
+/// The dispatcher's open hook (review otp-10b-2 F4): called exactly once
 /// per session, at the moment the received `SessionOpen` resolves
 /// successfully — the first point the daemon knows what kind of
 /// transfer it is serving (the initiator's declared role) and which
@@ -145,13 +145,13 @@ pub(crate) async fn run_transfer_session(
     inbound: Streaming<TransferFrame>,
     tx: mpsc::Sender<Result<TransferFrame, Status>>,
     // Operator policy from the daemon runtime config: `--force-grpc-data`
-    // (codex otp-10a F3) and `--no-server-checksums` (otp-10b-1) apply
+    // (review otp-10a F3) and `--no-server-checksums` (otp-10b-1) apply
     // to served sessions exactly as they did to the old handlers.
     policy: ResponderPolicy,
     byte_progress: ByteProgressSink,
     job_progress: ActiveJobProgress,
     // Fires once at a successful open resolve with this session's job
-    // kind + endpoint (codex otp-10b-2 F4).
+    // kind + endpoint (review otp-10b-2 F4).
     on_open: Arc<OnSessionOpen>,
 ) -> Result<(), Status> {
     let transport = grpc_daemon_transport(tx, inbound);

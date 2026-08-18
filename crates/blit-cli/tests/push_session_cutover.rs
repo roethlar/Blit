@@ -322,7 +322,7 @@ fn push_verb_fails_when_source_has_unreadable_entries() {
     );
 }
 
-/// codex otp-10a F1: a move-shaped push (`ComparisonMode::IgnoreTimes`)
+/// review otp-10a F1: a move-shaped push (`ComparisonMode::IgnoreTimes`)
 /// must transfer a same-size file even when the destination copy is
 /// NEWER — move deletes the source afterwards, so a compare-mode skip
 /// of content that silently differs would destroy the only copy of the
@@ -364,7 +364,7 @@ fn move_shaped_push_transfers_same_size_newer_destination() {
     );
 }
 
-/// codex otp-10a F3: a daemon started with `--force-grpc-data` never
+/// review otp-10a F3: a daemon started with `--force-grpc-data` never
 /// grants a TCP data plane — a session push against it rides the
 /// in-stream carrier even though the client did not ask for it, the
 /// same server-side force the old push handler honored.
@@ -446,7 +446,7 @@ fn push_verb_resume_patches_changed_partials_blockwise() {
         "patched destination must match the new source"
     );
 
-    // codex otp-10a F6: a resumed file reports w6-1 progress like any
+    // review otp-10a F6: a resumed file reports w6-1 progress like any
     // other — counted once on the per-file lane, bytes = the stale
     // blocks actually sent (less than the whole file).
     let mut totals = ProgressTotals::default();

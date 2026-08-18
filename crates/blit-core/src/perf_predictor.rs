@@ -1272,7 +1272,7 @@ mod tests {
         assert_eq!(prediction.observations, 10);
     }
 
-    /// GPT explicit ask: predictor state version bump means any
+    /// review explicit ask: predictor state version bump means any
     /// state file from a previous schema that ran with the pre-R56
     /// observe-everything semantics is invalidated. The load path
     /// resets, so a poisoned state file from before the bump can't
@@ -1290,7 +1290,7 @@ mod tests {
     /// Concretely verify the load-time invalidation: write a state
     /// file with the previous version + a phony profile, load it
     /// THROUGH THE LOAD PATH (not the bare for_tests constructor —
-    /// that was R56-F2's gap, GPT caught it). The mismatched
+    /// that was R56-F2's gap, review caught it). The mismatched
     /// version must reset to a fresh state.
     #[test]
     fn load_resets_state_on_version_mismatch() {

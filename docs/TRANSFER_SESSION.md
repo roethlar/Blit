@@ -32,7 +32,7 @@ doc explains the state machine the proto cannot.
    features. `build_id` = `<crate version>+<git commit hash>`
    composed at compile time; `contract_version` is a belt-and-braces
    integer bumped on any wire-shape change (exact match required).
-   Imprecise identities never false-match (otp-3 codex F1): a dirty
+   Imprecise identities never false-match (otp-3 review F1): a dirty
    tree composes `<sha>.dirty.<content hash>` (deterministic — only
    byte-identical dirty trees match), and a build without git
    identity composes `unknown.<per-compilation entropy>` (only the

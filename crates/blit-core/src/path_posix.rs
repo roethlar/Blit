@@ -70,7 +70,7 @@ pub fn request_path_to_posix(path: &Path) -> String {
 /// backslash is **not** a separator (it's a literal filename byte) and
 /// stays as part of the last component; on Windows a trailing native
 /// `\` IS a separator and round-trips as `/`. Round-1 reopen
-/// (GPT review) — `sub/` was canonicalizing to `sub`, which broke
+/// (review) — `sub/` was canonicalizing to `sub`, which broke
 /// `split_completion_prefix`'s "list inside sub/" path.
 pub fn relative_str_to_posix(s: &str) -> String {
     let trailing_sep = s
@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(relative_str_to_posix("a/b/c"), "a/b/c");
     }
 
-    /// **Round-1 reopen regression (GPT)**: shell completions like
+    /// **Round-1 reopen regression (review)**: shell completions like
     /// `sub/` MUST preserve the trailing `/` — it's the UX signal
     /// "complete inside `sub/`". Earlier the str helper went through
     /// `Path::components()` which drops trailing separators, turning

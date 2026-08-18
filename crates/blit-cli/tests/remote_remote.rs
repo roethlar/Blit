@@ -90,7 +90,7 @@ fn remote_to_remote_copy_delegates_directly_without_cli_byte_path() {
     );
 }
 
-/// codex otp-10c-1 F1: the POSITIVE control for the diagnostics
+/// review otp-10c-1 F1: the POSITIVE control for the diagnostics
 /// counter. Every other assertion in this file is
 /// `cli_data_plane_outbound_bytes == 0`, and `read_counters` maps a
 /// missing or unreadable counter file to zero — so if the

@@ -1877,7 +1877,7 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                 use crate::remote::transfer::resume_diff::{ResumeBlockDiff, ResumeDiffEvent};
                 let path = header.relative_path.clone();
                 let record = async {
-                    // codex otp-7b-1 F1: a mostly-matching scan is a
+                    // review otp-7b-1 F1: a mostly-matching scan is a
                     // long SILENT read+hash — arm keepalive ticks well
                     // inside the receiver's stall window and answer each
                     // with a zero-length BLOCK (a no-op in-place write),

@@ -36,7 +36,7 @@ empty-dir presence, etc.), use `diff -r` or a similar tool.";
 #[derive(Parser)]
 #[command(name = "blit")]
 #[command(version = blit_core::transfer_session::session_build_id())]
-#[command(about = "A fast, AI-built file transfer tool (v2)")]
+#[command(about = "A fast file transfer tool")]
 #[command(after_help = "Run '<command> --help' for detailed options on each command.")]
 pub struct Cli {
     /// Override the configuration directory for this invocation

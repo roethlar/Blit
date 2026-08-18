@@ -4,7 +4,7 @@
 # timed run). Requires an administrator token; enables
 # SeProfileSingleProcessPrivilege, then asks the memory manager to
 # purge the standby list (SystemMemoryListInformation / command 4).
-# Every step is checked and reported (codex otp-2w F5):
+# Every step is checked and reported (review otp-2w F5):
 # AdjustTokenPrivileges can "succeed" while assigning nothing
 # (ERROR_NOT_ALL_ASSIGNED) — that is surfaced as the causal error
 # instead of an opaque NTSTATUS from the purge itself.

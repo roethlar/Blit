@@ -69,7 +69,7 @@ now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
 # flush — and nothing else. Wrapping `ssh host flush` in the window
 # adds connection setup + shell spawn (~0.5s to this host, ~1.2s to
 # zoey — measured), which lands only on push cells and inflated the
-# first recorded session's push/pull ratios (codex otp-2w F3, upheld
+# first recorded session's push/pull ratios (review otp-2w F3, upheld
 # and quantified). Each durability step therefore times ITSELF on the
 # destination machine and reports only its own duration; the harness
 # adds that to the locally-timed transfer segment.
@@ -130,7 +130,7 @@ if (-not (Get-NetFirewallRule -DisplayName blit-bench-daemon -ErrorAction Silent
 # moment the launching ssh command returns. A WMI-created process is
 # parented outside the session and survives; `cmd /c` supplies the log
 # redirection Win32_Process.Create lacks.
-# Stale-daemon refusal + PID tracking (codex otp-2w F2): a leftover
+# Stale-daemon refusal + PID tracking (review otp-2w F2): a leftover
 # daemon would mask a new bind failure and get benchmarked in place of
 # this build, so the launch REFUSES if any blit-daemon already runs;
 # the fresh daemon's PID is recorded and teardown kills exactly that
@@ -168,7 +168,7 @@ sweep_push_dirs() {
 trap 'stop_daemon; sweep_push_dirs' EXIT
 
 # --- Drain + cold caches ----------------------------------------------
-# A failed counter read must never count as quiet (codex otp-2w F1:
+# A failed counter read must never count as quiet (review otp-2w F1:
 # non-terminating errors leave $w = $null, and $null -lt N is true in
 # PowerShell) — errors terminate, and only a real numeric sample below
 # the threshold increments the quiet count.

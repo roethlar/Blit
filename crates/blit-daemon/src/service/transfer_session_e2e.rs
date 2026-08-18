@@ -337,7 +337,7 @@ impl blit_core::remote::transfer::source::TransferSource for StuckAfterFirstChun
         // only completes once the data-plane send pipeline has DRAINED it
         // out to the TCP socket — i.e. `started` fires after payload bytes
         // have actually flowed over the data plane, not merely into a
-        // local buffer (codex otp-4b-3 F2).
+        // local buffer (review otp-4b-3 F2).
         let (mut w, r) = tokio::io::duplex(4 * 1024);
         let started = Arc::clone(&self.started);
         tokio::spawn(async move {
@@ -838,7 +838,7 @@ async fn checksum_open_refused_when_daemon_disables_checksums() {
 // otp-7b-2: cancel + fault identity during a data-plane resume
 // ---------------------------------------------------------------------------
 
-/// otp-7b-2 (codex otp-7a F4, deferred to 7b): a `CancelJob` fired while
+/// otp-7b-2 (review otp-7a F4, deferred to 7b): a `CancelJob` fired while
 /// the resume block phase is provably in progress over the TCP data
 /// plane tears down cleanly — the client surfaces the peer's framed
 /// CANCELLED (not the transport break), nothing hangs, and the daemon
@@ -1286,7 +1286,7 @@ async fn pull_session_resume_clamps_oversized_blocks_to_in_stream_ceiling() {
     daemon.stop().await;
 }
 
-/// codex otp-8 F1: the mid-transfer cancel guard on the IN-STREAM
+/// review otp-8 F1: the mid-transfer cancel guard on the IN-STREAM
 /// carrier. The data-plane twin above relies on the drain's
 /// `recv_peer_fault` select arm; in-stream, the send half runs the
 /// record sends inline, so without the fault race a cancel leaves the
@@ -1440,7 +1440,7 @@ async fn pull_session_lands_bytes_over_in_stream_carrier() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn served_sessions_record_their_kind_and_endpoint() {
-    // codex otp-10b-2 F4: post-cutover every verb rides `Transfer`, so
+    // review otp-10b-2 F4: post-cutover every verb rides `Transfer`, so
     // the jobs taxonomy must come from the open — a pull-shaped session
     // records PullSync (the old pull verbs' kind — CancelJob-capable,
     // wire TransferKind::PullSync) and a push-shaped one records Push,
