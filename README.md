@@ -48,6 +48,42 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 
 ---
 
+## Installation
+
+Prebuilt binaries of `blit` and `blit-daemon` (macOS binaries are
+Developer ID-signed and notarized; Windows binaries carry Authenticode
+signatures):
+
+**macOS — Homebrew**
+
+```sh
+brew install roethlar/blit/blit-bin
+```
+
+**Windows — Scoop**
+
+```powershell
+scoop bucket add blit https://github.com/roethlar/scoop-blit
+scoop install blit
+```
+
+**Arch Linux — AUR** (`blit-bin` installs the release binaries;
+`blit` builds from source):
+
+```sh
+paru -S blit-bin   # or: yay -S blit-bin
+```
+
+**Any platform — GitHub Releases**: download the archive for your
+platform plus its `.sha256` from
+[Releases](https://github.com/roethlar/Blit/releases), verify, and
+put the two binaries on `PATH`.
+
+`blit --version` reports `<version>+<git sha>` so you can confirm
+exactly what you installed.
+
+---
+
 ## Quick Start
 
 ### Prerequisites

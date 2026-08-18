@@ -126,9 +126,12 @@ build tool, not a user install channel (D-2026-08-12-4).
       channel whose secrets are present. It cannot fail or delay the
       GitHub Release. v0.1.2 is bootstrapped by dispatch, not a new tag.
       Skip-when-secret-missing is unit-tested.
-- [ ] README lists only live channels, as install options next to the
+- [x] README lists only live channels, as install options next to the
       existing source-build / GitHub Release path. No channel advertised
-      before it is queryable.
+      before it is queryable. (2026-08-18: Homebrew tap, Scoop, AUR,
+      GitHub Releases. winget deliberately absent until
+      microsoft/winget-pkgs#420041 merges; homebrew-core absent until
+      pm-5.)
 - [ ] `scripts/agent/check-docs.sh` green. Generator tests red-prove a
       digest mismatch. No user-facing CLI change.
 
