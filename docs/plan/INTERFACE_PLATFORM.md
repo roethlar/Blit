@@ -140,22 +140,29 @@ on the LAN gitea before the first publish) and upgrade deliberately.
 
 ## Acceptance criteria
 
-- [ ] `cargo metadata` lists no `blit-app`, `blit-console-core`
+- [x] `cargo metadata` lists no `blit-app`, `blit-console-core`
       (and no `blit-gui`/`blit-tui`/`blit-prometheus-bridge` per
-      R3/R4/R5); workspace is core + cli + daemon.
-- [ ] `blit-cli`'s `Cargo.toml` depends on `blit-core` only; grep
+      R3/R4/R5); workspace is core + cli + daemon. (ip-1..ip-5.)
+- [x] `blit-cli`'s `Cargo.toml` depends on `blit-core` only; grep
       shows zero `blit_app::` / `blit_console_core::` paths anywhere
       in the tree.
-- [ ] The three CI GUI-header blocks removed; CI green.
-- [ ] `cargo package -p blit-core` succeeds (dry-run publishability);
-      the actual `cargo publish` is a separately owner-gated act.
-- [ ] `README.md` tree and surviving-crate comments match the new
-      shape.
-- [ ] Full gate green per slice (fmt; clippy native + strict
-      `x86_64-unknown-linux-gnu` cross-target at `-D warnings`;
-      `cargo test --workspace`; `scripts/agent/check-docs.sh`).
-      Test-count deltas recorded per slice; drops only from deleted
-      crates' own tests, named in the slice record.
+- [x] The three CI GUI-header blocks removed; **CI green on the
+      exact head `086823f7`: run 32089671635, all seven jobs (test
+      ×3, fmt, build-release ×3), 2026-08-18.** One Windows
+      release-smoke WinError-32 teardown failure before the clean
+      rerun was a runner file-lock flake (script unchanged since
+      v0.1.1, long green history).
+- [x] `cargo package -p blit-core` succeeds and the packaged crate
+      builds from its own tarball (ip-6); `cargo publish` remains a
+      separately owner-gated act.
+- [x] `README.md` tree and surviving-crate comments match the new
+      shape. (ip-4/ip-5/ip-7.)
+- [x] Full gate green per slice on macOS + linux cross-clippy;
+      test deltas −13 (gui) / −678 (tui) / −20 (bridge), each
+      reconciled exactly in its slice's DEVLOG entry.
+
+All criteria met 2026-08-18. The **Shipped** status flip is the
+owner's declaration, not this record's.
 
 ## Slices (each: own go, own commit, full gate, DEVLOG entry)
 
