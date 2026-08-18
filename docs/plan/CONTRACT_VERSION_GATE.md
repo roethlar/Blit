@@ -1,7 +1,7 @@
 # Contract-Version Gate — protocol number replaces same-build refusal
 
-**Status**: Draft — direction RULED (D-2026-08-18-2); awaiting the
-owner's Active flip, then per-slice gos.
+**Status**: Active — owner's blanket queue go, 2026-08-18 ("dispatch
+opus agents to handle all of these"). Direction ruled D-2026-08-18-2.
 **Created**: 2026-08-18
 **Decision refs**: D-2026-08-18-2 (this plan's ruling; supersedes
 D-2026-07-05-2's same-build gate), D-2026-08-17-2 (embeddability),
