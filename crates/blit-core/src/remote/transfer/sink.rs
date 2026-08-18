@@ -677,6 +677,15 @@ pub struct FsTransferSink {
     /// files in one directory share a single `create_dir_all` attempt.
     ready_parents:
         std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::OnceCell<()>>>>,
+    /// Session-scoped reuse of the destination containment walk, shared by
+    /// every receive worker that owns this sink. sf-3d: `safe_join_contained`
+    /// canonicalizes from the filesystem root, so siblings of one directory
+    /// each re-read every symlink of the absolute destination prefix —
+    /// sf-3a measured 27–35 failed `readlink` calls per received file.
+    /// The cache re-proves the no-follow shape of the path below the root
+    /// for every file and refuses reuse the moment it changes, so escapes
+    /// are refused exactly as before.
+    containment: crate::path_safety::ContainedPathCache,
     /// Test-only proxy for the parent-directory syscall cost. Incremented
     /// immediately before each `create_dir_all` attempt so the sf-3b guard
     /// can pin one readiness check per shared parent without depending on
@@ -691,6 +700,13 @@ pub struct FsTransferSink {
     /// an OS-specific syscall tracer in CI.
     #[cfg(test)]
     handle_metadata_stamps: std::sync::atomic::AtomicUsize,
+    /// Test-only proxy for the same reopen on the resume-completion path.
+    /// Incremented immediately before each retained-handle stamp attempt in
+    /// [`FsTransferSink::finalize_resumed_file`], so its guard can pin that
+    /// the truncation descriptor — not a fresh by-path open — carried the
+    /// metadata tail.
+    #[cfg(test)]
+    resumed_handle_metadata_stamps: std::sync::atomic::AtomicUsize,
 }
 
 impl FsTransferSink {
@@ -713,10 +729,13 @@ impl FsTransferSink {
             small_file_probe: None,
             failed_resume_reasons: std::sync::Mutex::new(std::collections::HashMap::new()),
             ready_parents: std::sync::Mutex::new(std::collections::HashMap::new()),
+            containment: crate::path_safety::ContainedPathCache::new(),
             #[cfg(test)]
             parent_create_attempts: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             handle_metadata_stamps: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            resumed_handle_metadata_stamps: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -742,10 +761,17 @@ impl FsTransferSink {
     /// (with a warn) if `canonical_dst_root` was None at
     /// construction time — that path remains exposed but is
     /// extremely unusual in practice.
-    fn resolve_destination(&self, wire_path: &str) -> Result<PathBuf> {
+    /// sf-3d: the containment check runs through the session cache, which
+    /// amortizes the canonicalization walk across files sharing a parent
+    /// without weakening any refusal (see [`ContainedPathCache`]).
+    ///
+    /// [`ContainedPathCache`]: crate::path_safety::ContainedPathCache
+    async fn resolve_destination(&self, wire_path: &str) -> Result<PathBuf> {
         match self.canonical_dst_root.as_ref() {
             Some(canonical) => {
-                crate::path_safety::safe_join_contained(canonical, &self.dst_root, wire_path)
+                self.containment
+                    .safe_join_contained(canonical, &self.dst_root, wire_path)
+                    .await
             }
             None => {
                 log::warn!(
@@ -865,9 +891,65 @@ impl FsTransferSink {
         }
     }
 
+    /// Resume protocol: finalize a resumed file by truncating to
+    /// `total_size`, then stamp mtime + perms from the wire. The mtime
+    /// stamp is what makes the "mtime touched, content identical" mirror
+    /// case correct — block-hash compare sends zero blocks, but
+    /// BLOCK_COMPLETE still updates the dest mtime to match the source.
+    ///
+    /// sf-3d second cut: the truncation descriptor is retained through the
+    /// metadata tail instead of being dropped and the destination reopened
+    /// by path — the sf-3c treatment
+    /// (`docs/bench/sf3a-per-file-cost-2026-08-13/README.md` candidate 2)
+    /// applied to the path sf-3c explicitly left out of its scope.
+    async fn finalize_resumed_file(
+        &self,
+        dst: &Path,
+        total_size: u64,
+        mtime_seconds: i64,
+        permissions: u32,
+        windows_metadata: Option<crate::generated::WindowsFileMetadata>,
+    ) -> Result<SinkOutcome> {
+        crate::windows_metadata::prepare_destination(dst, windows_metadata.as_ref())?;
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(dst)
+            .await
+            .with_context(|| format!("opening {} for truncation", dst.display()))?;
+        file.set_len(total_size)
+            .await
+            .with_context(|| format!("truncating {} to {}", dst.display(), total_size))?;
+        file.sync_all()
+            .await
+            .with_context(|| format!("syncing {}", dst.display()))?;
+        let std_file = file.into_std().await;
+        #[cfg(test)]
+        self.resumed_handle_metadata_stamps
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let windows_bytes = stamp_resumed_metadata_via_handle(
+            &std_file,
+            dst,
+            mtime_seconds,
+            permissions,
+            windows_metadata.as_ref(),
+        )?;
+        Ok(SinkOutcome::written(1, windows_bytes))
+    }
+
     #[cfg(test)]
     fn parent_create_attempts(&self) -> usize {
         self.parent_create_attempts
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn containment_walks(&self) -> usize {
+        self.containment.walks()
+    }
+
+    #[cfg(test)]
+    fn resumed_handle_metadata_stamps(&self) -> usize {
+        self.resumed_handle_metadata_stamps
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -897,11 +979,13 @@ impl TransferSink for FsTransferSink {
                 // unread wire record, so a contained failure leaves
                 // nothing to drain.
                 let dst = resolve_resume_destination(
+                    &self.containment,
                     &self.dst_root,
                     self.canonical_dst_root.as_deref(),
                     &relative_path,
                     "block-write",
-                )?;
+                )
+                .await?;
                 match patch_file_block(&dst, offset, bytes).await {
                     Ok(outcome) => outcome,
                     Err(error)
@@ -927,25 +1011,28 @@ impl TransferSink for FsTransferSink {
                 windows_metadata,
             } => {
                 let dst = resolve_resume_destination(
+                    &self.containment,
                     &self.dst_root,
                     self.canonical_dst_root.as_deref(),
                     &relative_path,
                     "block-complete",
-                )?;
+                )
+                .await?;
                 if let Some(reason) = self.take_resume_block_failure(&relative_path) {
                     // Finalizing here would stamp a stale file as
                     // converged (see `failed_resume_reasons`); the file
                     // fails once, and this is the record that names it.
                     SinkOutcome::failed(&relative_path, reason)
                 } else {
-                    match finalize_resumed_file(
-                        &dst,
-                        total_size,
-                        mtime_seconds,
-                        permissions,
-                        windows_metadata,
-                    )
-                    .await
+                    match self
+                        .finalize_resumed_file(
+                            &dst,
+                            total_size,
+                            mtime_seconds,
+                            permissions,
+                            windows_metadata,
+                        )
+                        .await
                     {
                         Ok(outcome) => outcome,
                         Err(error) => per_file_failure(&self.dst_root, &relative_path, error)?,
@@ -1045,6 +1132,7 @@ impl TransferSink for FsTransferSink {
         // `/outside/file`.
         let dst = self
             .resolve_destination(&header.relative_path)
+            .await
             .with_context(|| format!("validating receive path {:?}", header.relative_path))?;
 
         // R58-F4: dry-run must be side-effect-free. Drain the wire
@@ -1682,18 +1770,21 @@ pub(super) fn fold_shard_member_results<S>(
 /// from the patch and finalize helpers because a path-safety failure is a
 /// protocol violation that must stay session-fatal, while the write it
 /// guards is one file's business.
-fn resolve_resume_destination(
+async fn resolve_resume_destination(
+    containment: &crate::path_safety::ContainedPathCache,
     dst_root: &Path,
     canonical_dst_root: Option<&Path>,
     relative_path: &str,
     record: &str,
 ) -> Result<PathBuf> {
-    // R46-F3: contained resolve when canonical root is available.
+    // R46-F3: contained resolve when canonical root is available. sf-3d:
+    // through the session cache, so a resumed file's block and completion
+    // records share one parent proof instead of walking twice each.
     match canonical_dst_root {
-        Some(canonical) => {
-            crate::path_safety::safe_join_contained(canonical, dst_root, relative_path)
-                .with_context(|| format!("validating {record} path {relative_path:?}"))
-        }
+        Some(canonical) => containment
+            .safe_join_contained(canonical, dst_root, relative_path)
+            .await
+            .with_context(|| format!("validating {record} path {relative_path:?}")),
         None => crate::path_safety::safe_join(dst_root, relative_path)
             .with_context(|| format!("validating {record} path {relative_path:?}")),
     }
@@ -1735,53 +1826,45 @@ async fn patch_file_block(dst: &Path, offset: u64, bytes: Vec<u8>) -> Result<Sin
     Ok(SinkOutcome::written(0, bytes_len))
 }
 
-/// Resume protocol: finalize a resumed file by truncating to total_size,
-/// then stamp mtime + perms from the wire. The mtime stamp is what makes
-/// the "mtime touched, content identical" mirror case correct — block-hash
-/// compare sends zero blocks, but BLOCK_COMPLETE still updates the dest
-/// mtime to match the source.
-async fn finalize_resumed_file(
+/// Stamp the metadata tail of a resume completion through the descriptor
+/// the truncation already holds: named streams and attributes stay
+/// path-based (no handle-based Windows ADS/attribute API exists), while
+/// mtime and — on Unix — permissions route through `file`. Returns the
+/// named-stream bytes applied.
+///
+/// The sf-3c treatment applied to the resume-completion path: the prior
+/// code dropped the truncation handle and re-addressed `dst` by path for
+/// both stamps. `sync_all` on the caller's handle is strictly stronger
+/// than the flush sf-3c relies on, and `into_std` waits on the same
+/// in-flight-completion check, so stamping through the handle cannot
+/// reintroduce the deferred-write mtime race — no write happens after it.
+fn stamp_resumed_metadata_via_handle(
+    file: &std::fs::File,
     dst: &Path,
-    total_size: u64,
     mtime_seconds: i64,
     permissions: u32,
-    windows_metadata: Option<crate::generated::WindowsFileMetadata>,
-) -> Result<SinkOutcome> {
-    crate::windows_metadata::prepare_destination(dst, windows_metadata.as_ref())?;
-    {
-        let file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(dst)
-            .await
-            .with_context(|| format!("opening {} for truncation", dst.display()))?;
-        file.set_len(total_size)
-            .await
-            .with_context(|| format!("truncating {} to {}", dst.display(), total_size))?;
-        file.sync_all()
-            .await
-            .with_context(|| format!("syncing {}", dst.display()))?;
-    }
-    // Stamp mtime + perms after the file handle is closed (same race
-    // dance as write_file_stream — see commit 946bd77).
-    let windows_bytes = crate::windows_metadata::replace_streams(dst, windows_metadata.as_ref())?;
+    windows_metadata: Option<&crate::generated::WindowsFileMetadata>,
+) -> Result<u64> {
+    let windows_bytes = crate::windows_metadata::replace_streams(dst, windows_metadata)?;
     if mtime_seconds > 0 {
         let ft = FileTime::from_unix_time(mtime_seconds, 0);
-        if let Err(e) = filetime::set_file_mtime(dst, ft) {
+        // Best-effort, same as the streamed path: cross-fs, root-owned or
+        // ACL-protected destinations can refuse the update.
+        if let Err(e) = filetime::set_file_handle_times(file, None, Some(ft)) {
             log::warn!("set mtime on {}: {}", dst.display(), e);
         }
     }
     #[cfg(unix)]
     if permissions != 0 {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(dst, std::fs::Permissions::from_mode(permissions))
-        {
+        if let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(permissions)) {
             log::warn!("set permissions on {}: {}", dst.display(), e);
         }
     }
     #[cfg(not(unix))]
     let _ = permissions;
-    crate::windows_metadata::apply_attributes(dst, windows_metadata.as_ref())?;
-    Ok(SinkOutcome::written(1, windows_bytes))
+    crate::windows_metadata::apply_attributes(dst, windows_metadata)?;
+    Ok(windows_bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -2387,6 +2470,246 @@ mod tests {
                 mtime_seconds,
                 "handle-based stamp must still set the wire mtime"
             );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(metadata.permissions().mode() & 0o777, 0o640);
+            }
+        }
+    }
+
+    /// sf-3d: every receive worker shares one sink, so siblings of one
+    /// destination directory should pay for the containment
+    /// canonicalization walk once per session. `containment_walks` is a
+    /// portable proxy for the `readlink` storm sf-3a measured at 27–35
+    /// calls/file (`docs/bench/sf3a-per-file-cost-2026-08-13/README.md`
+    /// candidate 3), in the same style as sf-3b's `parent_create_attempts`.
+    #[tokio::test]
+    async fn fs_sink_canonicalizes_a_shared_parent_once() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(dst.join("shared")).unwrap();
+        let sink = Arc::new(FsTransferSink::new(
+            tmp.path().join("src"),
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
+            },
+        ));
+
+        let writes = (0..16).map(|index| {
+            let sink = Arc::clone(&sink);
+            async move {
+                let header = make_file_header(&format!("shared/file-{index}.txt"), 1);
+                let mut reader: &[u8] = b"x";
+                sink.write_file_stream(&header, &mut reader).await.unwrap();
+            }
+        });
+        futures::future::join_all(writes).await;
+
+        assert_eq!(
+            sink.containment_walks(),
+            1,
+            "16 siblings must share one containment walk"
+        );
+        for index in 0..16 {
+            assert_eq!(
+                std::fs::read(dst.join(format!("shared/file-{index}.txt"))).unwrap(),
+                b"x"
+            );
+        }
+    }
+
+    /// A cached parent verdict is a cache, not authority over later
+    /// filesystem state. A parent that disappears and comes back is a
+    /// different directory: the cached generation is evicted and the walk
+    /// re-runs before the next file is admitted.
+    #[tokio::test]
+    async fn fs_sink_recanonicalizes_a_parent_recreated_mid_session() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(dst.join("shared")).unwrap();
+        let sink = FsTransferSink::new(
+            tmp.path().join("src"),
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
+            },
+        );
+
+        let first = make_file_header("shared/first.txt", 1);
+        let mut first_reader: &[u8] = b"a";
+        sink.write_file_stream(&first, &mut first_reader)
+            .await
+            .unwrap();
+        assert_eq!(sink.containment_walks(), 1);
+        std::fs::remove_dir_all(dst.join("shared")).unwrap();
+
+        let second = make_file_header("shared/second.txt", 1);
+        let mut second_reader: &[u8] = b"b";
+        sink.write_file_stream(&second, &mut second_reader)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sink.containment_walks(),
+            2,
+            "a vanished parent must be re-proved, not answered from cache"
+        );
+        assert_eq!(std::fs::read(dst.join("shared/second.txt")).unwrap(), b"b");
+    }
+
+    /// sf-3d adversarial guard: the escape a cache could plausibly admit.
+    /// A parent proved contained early in the session is swapped for a
+    /// symlink pointing outside the destination root, then a sibling file
+    /// arrives for it. The cached verdict must not answer — the swap
+    /// changes the chain's no-follow shape, so the full walk runs and
+    /// refuses exactly as it did before the cache existed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_sink_refuses_a_parent_swapped_for_an_escape_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(dst.join("shared")).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let sink =
+            FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default());
+
+        let first = make_file_header("shared/first.txt", 1);
+        let mut first_reader: &[u8] = b"a";
+        sink.write_file_stream(&first, &mut first_reader)
+            .await
+            .unwrap();
+
+        std::fs::remove_dir_all(dst.join("shared")).unwrap();
+        symlink(&outside, dst.join("shared")).unwrap();
+
+        let escaped = make_file_header("shared/escaped.txt", 1);
+        let mut escaped_reader: &[u8] = b"b";
+        let error = sink
+            .write_file_stream(&escaped, &mut escaped_reader)
+            .await
+            .expect_err("a parent swapped for an escape symlink must still be refused");
+        assert!(
+            format!("{error:#}").contains("escapes module root"),
+            "expected a containment refusal, got: {error:#}"
+        );
+        assert!(
+            !outside.join("escaped.txt").exists(),
+            "the refusal must happen before any write leaves the destination root"
+        );
+    }
+
+    /// The other half of the same guard: the parent is untouched and its
+    /// verdict is legitimately cached, but the DESTINATION ITSELF already
+    /// exists as a symlink pointing outside. A parent verdict must never
+    /// answer for a symlink leaf.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_sink_refuses_an_escaping_symlink_leaf_under_a_cached_parent() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(dst.join("shared")).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.txt"), b"sensitive").unwrap();
+        let sink =
+            FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default());
+
+        let first = make_file_header("shared/first.txt", 1);
+        let mut first_reader: &[u8] = b"a";
+        sink.write_file_stream(&first, &mut first_reader)
+            .await
+            .unwrap();
+
+        symlink(outside.join("victim.txt"), dst.join("shared/victim.txt")).unwrap();
+
+        let escaped = make_file_header("shared/victim.txt", 9);
+        let mut escaped_reader: &[u8] = b"overwrite";
+        let error = sink
+            .write_file_stream(&escaped, &mut escaped_reader)
+            .await
+            .expect_err("an escaping symlink leaf must still be refused");
+        assert!(
+            format!("{error:#}").contains("escapes module root"),
+            "expected a containment refusal, got: {error:#}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("victim.txt")).unwrap(),
+            b"sensitive"
+        );
+    }
+
+    /// sf-3d second cut: the resume-completion path stamps mtime and
+    /// permissions through the descriptor its truncation already holds,
+    /// instead of dropping it and re-addressing the destination by path —
+    /// the sf-3c treatment applied to the path sf-3c left out of scope.
+    /// `resumed_handle_metadata_stamps` is the same style of portable
+    /// proxy as sf-3c's `handle_metadata_stamps`: incremented immediately
+    /// before each retained-handle stamp attempt.
+    #[tokio::test]
+    async fn fs_sink_stamps_resumed_metadata_without_reopening() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink =
+            FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default());
+
+        let mtime_seconds = 1_700_000_000;
+        for index in 0..4 {
+            let relative_path = format!("resumed-{index}.bin");
+            sink.write_payload(PreparedPayload::FileBlock {
+                relative_path: relative_path.clone(),
+                offset: 0,
+                bytes: vec![0xABu8; 32],
+            })
+            .await
+            .unwrap();
+            let outcome = sink
+                .write_payload(PreparedPayload::FileBlockComplete {
+                    relative_path,
+                    total_size: 32,
+                    mtime_seconds,
+                    permissions: 0o640,
+                    windows_metadata: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(outcome.files_written, 1);
+        }
+
+        assert_eq!(
+            sink.resumed_handle_metadata_stamps(),
+            4,
+            "every resume completion must stamp metadata through the \
+             truncation descriptor, not a by-path reopen"
+        );
+        for index in 0..4 {
+            let path = dst.join(format!("resumed-{index}.bin"));
+            let metadata = std::fs::metadata(&path).unwrap();
+            // `.unix_seconds()`, never `.seconds()`: the latter is
+            // 1601-epoch-based on Windows, so comparing it to a unix wire
+            // value fails there by exactly 11644473600 while the stamped
+            // mtime is in fact correct.
+            assert_eq!(
+                FileTime::from_last_modification_time(&metadata).unix_seconds(),
+                mtime_seconds,
+                "handle-based stamp must still set the wire mtime"
+            );
+            assert_eq!(metadata.len(), 32);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;

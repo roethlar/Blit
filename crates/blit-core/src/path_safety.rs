@@ -55,7 +55,9 @@
 //! module behavior. A fully race-proof alternative would use
 //! `openat` + `O_NOFOLLOW` per-component descent.
 
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use eyre::{bail, Result};
 
@@ -345,6 +347,241 @@ pub fn safe_join_contained(
     let target = safe_join(dest_root, wire_path)?;
     verify_contained(canonical_root, &target)?;
     Ok(target)
+}
+
+// ─── Session amortization of the containment walk (sf-3d) ─────────
+
+/// One destination-parent component as it looked, WITHOUT following it,
+/// when a containment walk proved that parent contained.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum ComponentShape {
+    /// A real directory. Resolution cannot leave the root through it.
+    Directory,
+    /// A symlink pointing at exactly this target. Repointing it changes
+    /// the shape, so a cached verdict stops answering for it.
+    Symlink(PathBuf),
+}
+
+/// A proven parent directory: the verdict of one full [`verify_contained`]
+/// walk plus the no-follow signature that verdict was proven against.
+#[derive(Debug)]
+struct ParentProof {
+    /// `None` when the chain could not be signed at proof time — a
+    /// component was missing, or was not a directory. The walk still
+    /// answered the file that triggered it; nothing reusable is left
+    /// behind for the next one.
+    shape: Option<Vec<ComponentShape>>,
+}
+
+/// Amortizes the [`verify_contained`] canonicalization walk across the
+/// files of one receive session.
+///
+/// `std::fs::canonicalize` resolves from the filesystem root, so a
+/// per-file containment check re-reads every symlink of the absolute
+/// destination prefix — sf-3a measured 27–35 failed `readlink` calls per
+/// received file, 2.71 M and 3.55 M over a 100,000-file fixture
+/// (`docs/bench/sf3a-per-file-cost-2026-08-13/README.md`, candidate 3).
+/// Siblings of one directory repeat that identical walk.
+///
+/// ─── What is cached, and what every file re-proves ───────────────
+///
+/// Cached per destination parent, for the life of one cache: that a full
+/// [`verify_contained`] walk found that parent contained, together with
+/// the chain's no-follow signature — one entry per wire component below
+/// the destination root, recording whether it was a real directory or a
+/// symlink and, if a symlink, its exact target.
+///
+/// Re-proved for every single file, never cached:
+///
+///   - the lexical wire validation ([`validate_wire_path`]);
+///   - the whole chain's no-follow signature, so a component replaced by
+///     a symlink — or a symlink repointed — mismatches, evicts that
+///     generation, and takes the full walk, which refuses exactly as it
+///     did before the cache existed;
+///   - the leaf: a destination that already exists as a symlink never
+///     answers from its parent's verdict, it takes the full walk, so an
+///     escaping symlink at the final component is refused unchanged.
+///
+/// The one thing not re-resolved per file is `canonical_root` itself,
+/// which the caller already canonicalizes once per operation
+/// ([`canonical_dest_root`]) and holds for the whole session.
+///
+/// Verdicts are therefore identical to per-file [`safe_join_contained`]
+/// on an unchanging destination tree, and never more permissive on a
+/// changing one. Reuse costs one `symlink_metadata` per wire component
+/// below the root instead of a canonicalize walk of the whole absolute
+/// path, so cost stops scaling with how deep the destination root is
+/// mounted.
+///
+/// Concurrency mirrors the sf-3b parent-readiness cache: the map lock
+/// only guards lookup and insertion, each parent carries its own async
+/// once-cell so distinct directories still prove concurrently, and no
+/// lock is ever held across an await.
+#[derive(Default)]
+pub struct ContainedPathCache {
+    parents: std::sync::Mutex<
+        std::collections::HashMap<PathBuf, Arc<tokio::sync::OnceCell<ParentProof>>>,
+    >,
+    /// Test-only proxy for the containment syscall cost. Incremented
+    /// immediately before each full canonicalization walk, so the sf-3d
+    /// guard can pin one walk per shared parent without depending on an
+    /// OS-specific syscall tracer in CI.
+    #[cfg(test)]
+    walks: std::sync::atomic::AtomicUsize,
+}
+
+impl ContainedPathCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The amortized form of [`safe_join_contained`]: same inputs, same
+    /// returned lexical target, same refusals.
+    pub async fn safe_join_contained(
+        &self,
+        canonical_root: &Path,
+        dest_root: &Path,
+        wire_path: &str,
+    ) -> Result<PathBuf> {
+        let validated = validate_wire_path(wire_path)?;
+        if validated.as_os_str().is_empty() {
+            // The single-file destination case: `dest_root` IS the target,
+            // so there is no parent below the root to amortize against.
+            let target = dest_root.to_path_buf();
+            self.walk(canonical_root, &target)?;
+            return Ok(target);
+        }
+
+        let target = dest_root.join(&validated);
+        let mut chain: Vec<&OsStr> = validated.components().map(Component::as_os_str).collect();
+        chain.pop();
+
+        match target.parent() {
+            Some(parent) if leaf_answers_from_parent(&target) => {
+                self.verify_parent(canonical_root, dest_root, &chain, parent)
+                    .await?
+            }
+            _ => self.walk(canonical_root, &target)?,
+        }
+        Ok(target)
+    }
+
+    async fn verify_parent(
+        &self,
+        canonical_root: &Path,
+        dest_root: &Path,
+        chain: &[&OsStr],
+        parent: &Path,
+    ) -> Result<()> {
+        let cell = self.parent_cell(parent);
+        let proven = cell.get().and_then(|proof| proof.shape.as_ref());
+        if let Some(shape) = proven {
+            if read_chain_shape(dest_root, chain).as_deref() == Some(shape.as_slice()) {
+                return Ok(());
+            }
+            // The destination tree moved under the cached verdict. Drop
+            // only the generation this caller observed — another worker
+            // may already have installed a re-proven replacement.
+            self.invalidate(parent, &cell);
+        }
+
+        let cell = self.parent_cell(parent);
+        let outcome = cell
+            .get_or_try_init(|| async {
+                self.walk(canonical_root, parent)?;
+                Ok::<ParentProof, eyre::Report>(ParentProof {
+                    shape: read_chain_shape(dest_root, chain),
+                })
+            })
+            .await;
+        let reusable = match outcome {
+            Ok(proof) => proof.shape.is_some(),
+            Err(error) => {
+                // A refusal leaves the cell empty; drop it so a refused
+                // parent cannot grow the map without bound.
+                self.invalidate(parent, &cell);
+                return Err(error);
+            }
+        };
+        if !reusable {
+            self.invalidate(parent, &cell);
+        }
+        Ok(())
+    }
+
+    fn parent_cell(&self, parent: &Path) -> Arc<tokio::sync::OnceCell<ParentProof>> {
+        Arc::clone(
+            self.parents
+                .lock()
+                .expect("contained-path cache lock poisoned")
+                .entry(parent.to_path_buf())
+                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+        )
+    }
+
+    fn invalidate(&self, parent: &Path, observed: &Arc<tokio::sync::OnceCell<ParentProof>>) {
+        let mut parents = self
+            .parents
+            .lock()
+            .expect("contained-path cache lock poisoned");
+        if parents
+            .get(parent)
+            .is_some_and(|current| Arc::ptr_eq(current, observed))
+        {
+            parents.remove(parent);
+        }
+    }
+
+    fn walk(&self, canonical_root: &Path, target: &Path) -> Result<()> {
+        #[cfg(test)]
+        self.walks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        verify_contained(canonical_root, target)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn walks(&self) -> usize {
+        self.walks.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// May the parent's containment verdict answer for this target?
+///
+/// Only when the final component is not itself a symlink. An existing
+/// symlink leaf can resolve anywhere, so it always takes the full walk —
+/// the same walk that refused it before this cache existed. A target that
+/// does not exist resolves to its parent, which is exactly what
+/// [`verify_contained`]'s walk-up does, including the `NotADirectory`
+/// spelling Unix uses for a path blocked by a file component.
+fn leaf_answers_from_parent(target: &Path) -> bool {
+    match std::fs::symlink_metadata(target) {
+        Ok(metadata) => !metadata.file_type().is_symlink(),
+        Err(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        ),
+    }
+}
+
+/// Read the no-follow signature of the wire components below
+/// `dest_root`, deepest last. `None` means the chain cannot be signed
+/// right now — a component is missing or is not a directory — which
+/// forbids caching a verdict against it.
+fn read_chain_shape(dest_root: &Path, chain: &[&OsStr]) -> Option<Vec<ComponentShape>> {
+    let mut probe = dest_root.to_path_buf();
+    let mut shape = Vec::with_capacity(chain.len());
+    for component in chain {
+        probe.push(component);
+        let file_type = std::fs::symlink_metadata(&probe).ok()?.file_type();
+        if file_type.is_symlink() {
+            shape.push(ComponentShape::Symlink(std::fs::read_link(&probe).ok()?));
+        } else if file_type.is_dir() {
+            shape.push(ComponentShape::Directory);
+        } else {
+            return None;
+        }
+    }
+    Some(shape)
 }
 
 /// Detect strings that represent Windows-absolute paths regardless of
@@ -691,6 +928,200 @@ mod containment_cross_platform_tests {
         let err = verify_contained(&root, &outside.join("target.txt"))
             .expect_err("a path resolving outside the root must still be refused");
         assert!(err.to_string().contains("escapes module root"), "{err}");
+    }
+}
+
+/// sf-3d: the cached resolver must return the SAME verdict as the
+/// per-file walk for every shape the containment contract names.
+///
+/// Cross-platform on purpose. The escape cases that need real symlinks
+/// live in `contained_path_cache_symlink_tests` below; these hold on
+/// every host, so a Windows-only run still exercises the cache's
+/// lexical, missing-path and blocked-component behaviour.
+#[cfg(test)]
+mod contained_path_cache_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn dest(tmp: &Path) -> (PathBuf, PathBuf) {
+        let root = tmp.join("dst");
+        std::fs::create_dir_all(&root).unwrap();
+        let canonical = canonical_dest_root(&root).unwrap();
+        (root, canonical)
+    }
+
+    #[tokio::test]
+    async fn cached_resolution_matches_the_uncached_one() {
+        let tmp = tempdir().unwrap();
+        let (root, canonical) = dest(tmp.path());
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/existing.txt"), b"x").unwrap();
+        // A regular file where a directory would have to be: contained
+        // per-file failure, not an escape (the `NotADirectory` arm).
+        std::fs::write(root.join("blocker"), b"not a directory").unwrap();
+
+        let cache = ContainedPathCache::new();
+        for wire in [
+            "",
+            "top.txt",
+            "sub/existing.txt",
+            "sub/new.txt",
+            "fresh/deep/new.txt",
+            "blocker/blocked.txt",
+        ] {
+            let uncached = safe_join_contained(&canonical, &root, wire);
+            let cached = cache.safe_join_contained(&canonical, &root, wire).await;
+            assert_eq!(
+                uncached.is_ok(),
+                cached.is_ok(),
+                "verdict differs for {wire:?}: {uncached:?} vs {cached:?}"
+            );
+            if let (Ok(uncached), Ok(cached)) = (uncached, cached) {
+                assert_eq!(uncached, cached, "target differs for {wire:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn lexical_refusals_are_never_cached_away() {
+        let tmp = tempdir().unwrap();
+        let (root, canonical) = dest(tmp.path());
+        let cache = ContainedPathCache::new();
+        // Warm the cache on a legitimate sibling first.
+        cache
+            .safe_join_contained(&canonical, &root, "sub/ok.txt")
+            .await
+            .unwrap();
+
+        for wire in ["../escape", "/etc/passwd", "C:\\evil", "sub/../../escape"] {
+            assert!(
+                cache
+                    .safe_join_contained(&canonical, &root, wire)
+                    .await
+                    .is_err(),
+                "wire path {wire:?} must still be refused"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn siblings_share_one_walk_and_a_new_directory_earns_its_own() {
+        let tmp = tempdir().unwrap();
+        let (root, canonical) = dest(tmp.path());
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        let cache = ContainedPathCache::new();
+
+        for index in 0..8 {
+            cache
+                .safe_join_contained(&canonical, &root, &format!("a/file-{index}.txt"))
+                .await
+                .unwrap();
+        }
+        assert_eq!(cache.walks(), 1);
+
+        cache
+            .safe_join_contained(&canonical, &root, "b/file.txt")
+            .await
+            .unwrap();
+        assert_eq!(cache.walks(), 2, "a distinct parent proves itself");
+    }
+}
+
+/// sf-3d escape cases that need real symlinks. Unix-only for the same
+/// reason `containment_tests` is: `std::os::unix::fs::symlink`.
+#[cfg(unix)]
+#[cfg(test)]
+mod contained_path_cache_symlink_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    use tempfile::tempdir;
+
+    fn dest(tmp: &Path) -> (PathBuf, PathBuf) {
+        let root = tmp.join("dst");
+        std::fs::create_dir_all(&root).unwrap();
+        let canonical = canonical_dest_root(&root).unwrap();
+        (root, canonical)
+    }
+
+    /// The whole point of the guard: a parent proved contained, then
+    /// replaced by a symlink out of the root, must not be admitted by the
+    /// cached verdict.
+    #[tokio::test]
+    async fn a_parent_swapped_for_an_escape_symlink_is_refused() {
+        let tmp = tempdir().unwrap();
+        let (root, canonical) = dest(tmp.path());
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let cache = ContainedPathCache::new();
+
+        cache
+            .safe_join_contained(&canonical, &root, "sub/first.txt")
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(root.join("sub")).unwrap();
+        symlink(&outside, root.join("sub")).unwrap();
+
+        let error = cache
+            .safe_join_contained(&canonical, &root, "sub/second.txt")
+            .await
+            .expect_err("the swapped parent must be refused");
+        assert!(error.to_string().contains("escapes module root"), "{error}");
+    }
+
+    /// A symlink that stays inside the root is legitimate and must keep
+    /// working; repointing it OUT of the root mid-session must be caught,
+    /// because the cached shape records the exact link target.
+    #[tokio::test]
+    async fn an_intra_root_symlink_parent_works_and_repointing_it_is_refused() {
+        let tmp = tempdir().unwrap();
+        let (root, canonical) = dest(tmp.path());
+        std::fs::create_dir_all(root.join("v1")).unwrap();
+        symlink(root.join("v1"), root.join("latest")).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let cache = ContainedPathCache::new();
+
+        let target = cache
+            .safe_join_contained(&canonical, &root, "latest/file.txt")
+            .await
+            .unwrap();
+        assert_eq!(target, root.join("latest/file.txt"));
+
+        std::fs::remove_file(root.join("latest")).unwrap();
+        symlink(&outside, root.join("latest")).unwrap();
+        let error = cache
+            .safe_join_contained(&canonical, &root, "latest/other.txt")
+            .await
+            .expect_err("a repointed symlink parent must be refused");
+        assert!(error.to_string().contains("escapes module root"), "{error}");
+    }
+
+    /// A destination that already exists as a symlink pointing outside is
+    /// refused even when its parent is legitimately cached: the leaf never
+    /// answers from the parent's verdict.
+    #[tokio::test]
+    async fn an_escaping_symlink_leaf_under_a_cached_parent_is_refused() {
+        let tmp = tempdir().unwrap();
+        let (root, canonical) = dest(tmp.path());
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.txt"), b"sensitive").unwrap();
+        let cache = ContainedPathCache::new();
+
+        cache
+            .safe_join_contained(&canonical, &root, "sub/first.txt")
+            .await
+            .unwrap();
+        symlink(outside.join("victim.txt"), root.join("sub/victim.txt")).unwrap();
+
+        let error = cache
+            .safe_join_contained(&canonical, &root, "sub/victim.txt")
+            .await
+            .expect_err("an escaping symlink leaf must be refused");
+        assert!(error.to_string().contains("escapes module root"), "{error}");
     }
 }
 

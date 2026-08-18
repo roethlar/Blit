@@ -216,6 +216,49 @@ analysis to prove it earns its keep before design review.
    resume-completion path) has a near-identical by-path reopen for
    mtime/permissions after truncation — a candidate for its own future
    slice, not sf-3c's scope.
+   **sf-3d contained-path canonicalization amortization (LANDED 2026-08-18):**
+   sf-3a candidate 3. `safe_join_contained` canonicalizes from the filesystem
+   root, so every received file re-read every symlink of the absolute
+   destination prefix — 27.145 failed `readlink` calls/file on magneto and
+   35.523/file on skippy. The streamed and resume receive paths now resolve
+   through `path_safety::ContainedPathCache`, a session-scoped cache on
+   `FsTransferSink` built on sf-3b's pattern: per-parent
+   `Arc<tokio::sync::OnceCell>`, the map lock never held across an await,
+   generation-identity eviction, and per-file containment failures still
+   contained. The security bar is met by re-proving, for **every** file,
+   (a) the lexical wire validation, (b) the whole parent chain's no-follow
+   shape below the destination root — each component's directory-vs-symlink
+   status and, for symlinks, the exact link target, so a swapped or repointed
+   component mismatches, evicts that generation and takes the full walk — and
+   (c) the leaf, which never answers from a parent verdict when it already
+   exists as a symlink. Reuse therefore costs one `symlink_metadata` per wire
+   component instead of a canonicalize walk of the whole absolute path, and
+   stops scaling with how deep the destination root is mounted. The only
+   thing not re-resolved per file is the destination root itself, which the
+   sink already canonicalizes once at construction. Same slice: the sf-3c
+   descriptor-retained stamping treatment applied to `finalize_resumed_file`
+   (the item sf-3c surfaced and left out of scope) — the truncation handle is
+   converted with `into_std().await` after `sync_all` (strictly stronger than
+   sf-3c's flush) and carries mtime and Unix permissions through
+   `stamp_resumed_metadata_via_handle`; named streams and attributes stay
+   path-based. Two portable proxies, sf-3b's counter pattern:
+   `containment_walks` (mutation-proved — forcing the full walk reds
+   `fs_sink_canonicalizes_a_shared_parent_once` at 16≠1 and the path_safety
+   sibling pin at 8≠1) and `resumed_handle_metadata_stamps` (reverting to the
+   by-path reopen reds `fs_sink_stamps_resumed_metadata_without_reopening` at
+   0≠4). The adversarial guards are mutation-proved too: making a cached
+   verdict answer without re-reading the chain shape reds the swapped-parent
+   and repointed-symlink guards, and the sink guard then observes the escaped
+   file actually written. Gate on macOS: fmt clean, native and
+   `x86_64-unknown-linux-gnu`-cross clippy clean at `-D warnings`, 1173
+   passed / 0 failed / 2 ignored workspace-wide (+10 versus the pre-slice
+   baseline), including `remote_regression`'s `pull_preserves_mtime_end_to_end`.
+   Windows was not run and could not be cross-clippy'd on this host (no MSVC
+   assembler); the `#[cfg(not(unix))]` stamping arm is unexercised there.
+   Untouched, out of scope: `write_file_payload` and the tar-shard member
+   containment check, which resolve inside `spawn_blocking` and cannot share
+   the async cache as written, and the compare-phase
+   `destination_needs` resolve in `transfer_session`.
 5. **sf-4 rig re-measure + limiter analysis**: rerun sf-1 harness on
    the 10 GbE rig; record the limiter analysis per cell. Hardware-
    bound everywhere + tripwires clean → acceptance review with the
