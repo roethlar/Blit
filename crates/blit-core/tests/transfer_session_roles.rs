@@ -2586,14 +2586,26 @@ async fn preserves_mtime_on_streamed_files() {
 // Handshake refusals
 // ---------------------------------------------------------------------------
 
+/// D-2026-08-18-2: the build fingerprint stopped being a veto. Two
+/// ends whose `build_id`s differ but whose `contract_version` agrees
+/// open the session and move bytes, under either initiator role. Red
+/// under the pre-cv-1 gate, which refused on either inequality.
 #[tokio::test]
-async fn build_mismatch_refused_under_both_initiators() {
+async fn differing_build_ids_open_when_contract_matches() {
     for initiator_role in [TransferRole::Source, TransferRole::Destination] {
         let tmp = tempfile::tempdir().unwrap();
         let src_root = tmp.path().join("src");
         let dst_root = tmp.path().join("dst");
         std::fs::create_dir_all(&src_root).unwrap();
         std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(
+            &src_root,
+            &[(
+                "cross-build.txt",
+                b"different builds, one contract".to_vec(),
+                1_500_000_000,
+            )],
+        );
 
         let open = basic_open(initiator_role);
         let (source_endpoint, dest_endpoint) = match initiator_role {
@@ -2632,6 +2644,65 @@ async fn build_mismatch_refused_under_both_initiators() {
         .await
         .unwrap();
 
+        source_result.unwrap_or_else(|e| {
+            panic!("differing build ids must not refuse (initiator {initiator_role:?}): {e:#}")
+        });
+        dest_result.unwrap_or_else(|e| {
+            panic!("differing build ids must not refuse (initiator {initiator_role:?}): {e:#}")
+        });
+        assert_trees_identical(&src_root, &dst_root);
+    }
+}
+
+/// A `contract_version` inequality still refuses, with both versions
+/// named first and both build ids second (D-2026-08-18-2), under
+/// either initiator role and at both ends.
+#[tokio::test]
+async fn contract_mismatch_refused_under_both_initiators() {
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+
+        let open = basic_open(initiator_role);
+        let (source_endpoint, dest_endpoint) = match initiator_role {
+            TransferRole::Source => (SessionEndpoint::initiator(open), SessionEndpoint::Responder),
+            _ => (SessionEndpoint::Responder, SessionEndpoint::initiator(open)),
+        };
+        let source_cfg = SourceSessionConfig {
+            instruments: Default::default(),
+            hello: HelloConfig {
+                build_id: "0.1.0+aaaaaaaaaaaa".into(),
+                contract_version: CONTRACT_VERSION,
+            },
+            endpoint: source_endpoint,
+            plan_options: PlanOptions::default(),
+            data_plane_host: None,
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig {
+                build_id: "0.1.0+bbbbbbbbbbbb".into(),
+                contract_version: CONTRACT_VERSION + 1,
+            },
+            endpoint: dest_endpoint,
+            data_plane_host: None,
+            receiver_capacity: None,
+            instruments: Default::default(),
+            local_apply: None,
+        };
+        let (a, b) = in_process_pair();
+        let source = Arc::new(FsTransferSource::new(src_root.clone()));
+        let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, async {
+            tokio::join!(
+                run_source(source_cfg, a, source),
+                run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
+            )
+        })
+        .await
+        .unwrap();
+
         for (end, err) in [
             ("source", source_result.unwrap_err()),
             ("destination", dest_result.err().unwrap()),
@@ -2642,9 +2713,18 @@ async fn build_mismatch_refused_under_both_initiators() {
                 session_error::Code::BuildMismatch,
                 "{end} must refuse with BUILD_MISMATCH (initiator {initiator_role:?})"
             );
+            let versions = fault
+                .message
+                .find(&format!("v{}", CONTRACT_VERSION + 1))
+                .expect("message names the peer contract version");
+            let builds = fault
+                .message
+                .find("aaaaaaaaaaaa")
+                .min(fault.message.find("bbbbbbbbbbbb"))
+                .expect("message names both build ids");
             assert!(
-                fault.message.contains("aaaaaaaaaaaa") && fault.message.contains("bbbbbbbbbbbb"),
-                "{end} must name both build ids, got: {}",
+                versions < builds,
+                "{end} must lead with the contract versions, fingerprints second, got: {}",
                 fault.message
             );
         }

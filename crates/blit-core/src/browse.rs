@@ -306,6 +306,7 @@ mod tests {
         let daemon = Endpoint::Daemon(DaemonEndpoint {
             address: ":9031".to_string(),
             name: "broken".to_string(),
+            contract_version: None,
         });
         let err = browse(&daemon, Path::new("/")).await.unwrap_err();
         match err {

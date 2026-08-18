@@ -71,9 +71,13 @@ use crate::transfer_plan::PlanOptions;
 use crate::windows_metadata::DestinationMetadataVerdict;
 use transport::{FrameRx, FrameTransport, FrameTx};
 
-/// Belt-and-braces wire-shape version, bumped on any change to the
-/// frame set or grammar. Exchanged (and exact-matched) in
-/// `SessionHello` alongside the build id (D-2026-07-05-2).
+/// Wire-shape version, bumped on any change to the frame set or
+/// grammar. THE session gate (D-2026-08-18-2): `SessionHello`
+/// exchanges it and session open exact-matches it — the build id
+/// rides along as information, never a veto. The discipline this
+/// makes load-bearing: any wire-shape or wire-behavior change bumps
+/// this constant in the same commit, or mismatched builds
+/// mis-cooperate instead of refusing.
 /// v2: `SessionError.relative_path` (otp-7b-2, the D-2026-07-09-1 Q2
 /// fault-summary rider).
 /// v3: `SessionError.Code::CHECKSUM_DISABLED` + populated
@@ -156,7 +160,10 @@ fn resume_hash_list_fits(dst_len: u64, block_size: usize) -> bool {
 
 /// This build's session identity: `<crate version>+<git sha>[.dirty]`
 /// (contract §Invariants 2). `BLIT_GIT_SHA` is emitted by build.rs;
-/// "unknown" when git was unavailable at compile time.
+/// "unknown" when git was unavailable at compile time. Informational
+/// since D-2026-08-18-2 — it labels peers in faults and diagnostics,
+/// and never decides whether a session opens (`CONTRACT_VERSION`
+/// does).
 pub fn session_build_id() -> &'static str {
     concat!(env!("CARGO_PKG_VERSION"), "+", env!("BLIT_GIT_SHA"))
 }
@@ -866,10 +873,13 @@ async fn flush_session_phase_trace(trace: Option<&BoundSessionPhaseTrace>) {
     let _ = tokio::task::spawn_blocking(move || trace.flush()).await;
 }
 
-/// HELLO both ways, exact match (D-2026-07-05-2). First frame each
-/// direction; no ordering between the two directions. Factored out so a
-/// serving end (`run_responder`) can exchange HELLO, then read the OPEN
-/// and dispatch on the declared role before running a role driver.
+/// HELLO both ways, exact match on `contract_version` and nothing else
+/// (D-2026-08-18-2, superseding D-2026-07-05-2's same-build refusal):
+/// peers speaking the same protocol version cooperate whatever builds
+/// they were compiled from. First frame each direction; no ordering
+/// between the two directions. Factored out so a serving end
+/// (`run_responder`) can exchange HELLO, then read the OPEN and
+/// dispatch on the declared role before running a role driver.
 async fn exchange_hello(transport: &mut FrameTransport, hello: &HelloConfig) -> Result<()> {
     transport
         .send(frame(Frame::Hello(SessionHello {
@@ -892,15 +902,21 @@ async fn exchange_hello(transport: &mut FrameTransport, hello: &HelloConfig) -> 
         }
     };
 
-    if peer_hello.build_id != hello.build_id
-        || peer_hello.contract_version != hello.contract_version
-    {
+    // Contract version is the whole gate; build ids are reported for
+    // diagnosis only (D-2026-08-18-2). The fault KEEPS the
+    // `BuildMismatch` wire tag: tag numbers are on the wire, enum
+    // names are not, so renaming it would break peers that already
+    // decode it.
+    if peer_hello.contract_version != hello.contract_version {
         let fault = SessionFault {
             code: session_error::Code::BuildMismatch,
             message: format!(
-                "same-build peers required (D-2026-07-05-2): local {} (contract v{}) vs peer {} (contract v{})",
-                hello.build_id, hello.contract_version,
-                peer_hello.build_id, peer_hello.contract_version,
+                "contract version mismatch (D-2026-08-18-2): local v{} vs peer v{} \
+                 (builds: local {}, peer {})",
+                hello.contract_version,
+                peer_hello.contract_version,
+                hello.build_id,
+                peer_hello.build_id,
             ),
             local_build_id: hello.build_id.clone(),
             peer_build_id: peer_hello.build_id.clone(),
@@ -2404,8 +2420,8 @@ async fn process_source_event(
             // when the record is eventually sent — pending plain files
             // go out first, and an already-invalid frame must fail fast.
             // A conforming destination clamps into this range (D5 /
-            // D-2026-07-10-1); same-build peers make a mismatch a
-            // violation, never a negotiation. The ceiling is the
+            // D-2026-07-10-1); a matched contract version makes a
+            // mismatch a violation, never a negotiation. The ceiling is the
             // CARRIER's (otp-7b, D-2026-07-10-2): binary data-plane
             // records take up to the wire block cap; in-stream frames
             // must stay under the gRPC frame limit.

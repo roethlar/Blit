@@ -347,8 +347,9 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     // construction on the session path — `run_destination` advertises
     // THIS end's own `local_receiver_capacity()` in its `SessionOpen`
     // (contract §Invariants 5: the byte receiver advertises, wherever
-    // it initiates), and same-build peers make capability bits moot
-    // (D-2026-07-05-2). Nothing capability-shaped from the CLI's spec
+    // it initiates), and a matched contract version makes capability
+    // bits moot (D-2026-08-18-2, formerly the same-build rule of
+    // D-2026-07-05-2). Nothing capability-shaped from the CLI's spec
     // is consulted.
 
     // Step 9: outbound connect. The endpoint host is the validated

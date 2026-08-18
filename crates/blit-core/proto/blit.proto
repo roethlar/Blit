@@ -11,7 +11,8 @@ service Blit {
   // and TransferOperationSpec.metadata_only — the relay scan flag,
   // whose caller was removed at otp-10c-1). Earlier deletion, same
   // rule: rpc Pull (2026-07-03, ue-r2-1h). No bridge, no
-  // version-tolerance — same-build peers only (D-2026-07-05-2).
+  // version-tolerance — peers must speak the same contract_version
+  // (D-2026-08-18-2, superseding D-2026-07-05-2's same-build rule).
   rpc Transfer(stream TransferFrame) returns (stream TransferFrame);
 
   // Lists contents of a remote directory.
@@ -175,7 +176,8 @@ enum DrainClass {
 // ── Mid-transfer stream resize ──────────────────────────────────────
 // Control-plane request to grow/shrink the live data-plane stream set.
 // Carried on the transfer control stream, never as a blind TCP record.
-// Same-build TransferSession peers always share this contract.
+// TransferSession peers on a matched contract_version always share
+// this contract.
 enum DataPlaneResizeOp {
   DATA_PLANE_RESIZE_OP_UNSPECIFIED = 0;
   DATA_PLANE_RESIZE_OP_ADD = 1;
@@ -379,8 +381,9 @@ message TransferOperationSpec {
   //   2 (unchanged, historical ue-r2-1b): briefly added
   //      `receiver_capacity` without a bump. otp-10c-2 later deleted that
   //      field and reserved tag 12 because capacity belongs to the session
-  //      handshake. The service now requires same-build peers, so the old
-  //      mixed-version rationale is no longer an active contract.
+  //      handshake. The service now requires peers to match on
+  //      contract_version, so the old mixed-version rationale is no
+  //      longer an active contract.
   //   3: added `drop_windows_metadata`. Bumped so delegated peers
   //      cannot silently ignore an explicitly requested lossy policy.
   uint32 spec_version = 1;
@@ -413,8 +416,10 @@ message TransferOperationSpec {
 
   // Field 8 was `PeerCapabilities client_capabilities` — deleted at
   // otp-10c-2 with the codex round: nothing read it once delegation
-  // stopped forwarding the spec (otp-9b) and D-2026-07-05-2 made
-  // capability bits meaningless (same build implies same features).
+  // stopped forwarding the spec (otp-9b) and the handshake made
+  // capability bits meaningless (a matched contract_version implies
+  // the same wire features — D-2026-08-18-2, formerly the same-build
+  // rule of D-2026-07-05-2).
   reserved 8;
   reserved "client_capabilities";
 
@@ -969,7 +974,7 @@ message TransferError {
 // Authoritative state machine + frame table: docs/TRANSFER_SESSION.md.
 // The ONLY transfer choreography: Push and PullSync were deleted
 // whole at cutover (otp-10c-2, D-2026-07-05-1); no bridge
-// (D-2026-07-05-2: same-build peers only).
+// (D-2026-08-18-2: peers must speak the same contract_version).
 // ═══════════════════════════════════════════════════════════════════
 
 // A transfer has a SOURCE role and a DESTINATION role. Which end
@@ -980,14 +985,21 @@ enum TransferRole {
   TRANSFER_ROLE_DESTINATION = 2;
 }
 
-// First frame BOTH directions. Exact-match same-build handshake
-// (D-2026-07-05-2): any inequality in either field is a
-// SessionError{BUILD_MISMATCH} naming both ids, then close. No
-// negotiate-down, no advisory fields, no capability bits.
+// First frame BOTH directions. Exact-match handshake on
+// contract_version ALONE (D-2026-08-18-2, superseding
+// D-2026-07-05-2's same-build rule): a contract_version inequality is
+// a SessionError{BUILD_MISMATCH} naming both versions and both build
+// ids, then close; a build_id inequality alone opens normally. No
+// negotiate-down, no advisory fields, no capability bits. The
+// BUILD_MISMATCH tag is unchanged — tags are on the wire, names are
+// not.
 message SessionHello {
   // "<crate version>+<git commit>[.dirty]", composed at compile time.
+  // Informational: identifies peers in faults and diagnostics, never
+  // gates the session.
   string build_id = 1;
-  // Bumped on any wire-shape change; exact match required.
+  // Bumped on any wire-shape change; exact match required. This is
+  // the gate.
   uint32 contract_version = 2;
 }
 

@@ -7,8 +7,9 @@ cross-platform Windows metadata policy, v4 = Windows file attributes +
 named `$DATA` streams)
 **Created**: 2026-07-05
 **Plan**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4)
-**Decision refs**: D-2026-07-05-1 (one path), D-2026-07-05-2
-(same-build only), D-2026-06-20-1/-2 (bounded-unilateral dial)
+**Decision refs**: D-2026-07-05-1 (one path), D-2026-08-18-2
+(contract version is the gate; supersedes D-2026-07-05-2's same-build
+rule), D-2026-06-20-1/-2 (bounded-unilateral dial)
 
 This document is the authoritative contract for the single `Transfer`
 RPC — the only byte-moving RPC since cutover (`Push` and `PullSync`
@@ -24,19 +25,24 @@ doc explains the state machine the proto cannot.
    it is the gRPC client or server. This is the structural form of
    the owner's invariant: there is no push-shaped or pull-shaped
    message set to diverge.
-2. **Same build only (D-2026-07-05-2).** The first frame each way is
-   `SessionHello{build_id, contract_version}`. Both ends compare for
-   EXACT equality; any mismatch → `SessionError{BUILD_MISMATCH}`
-   naming both ids, then stream close. No negotiate-down, no advisory
-   fields, no feature-capability bits — same build implies same
-   features. `build_id` = `<crate version>+<git commit hash>`
-   composed at compile time; `contract_version` is a belt-and-braces
-   integer bumped on any wire-shape change (exact match required).
-   Imprecise identities never false-match (otp-3 review F1): a dirty
-   tree composes `<sha>.dirty.<content hash>` (deterministic — only
-   byte-identical dirty trees match), and a build without git
-   identity composes `unknown.<per-compilation entropy>` (only the
-   selfsame binary matches itself).
+2. **Same contract version only (D-2026-08-18-2, superseding
+   D-2026-07-05-2's same-build rule).** The first frame each way is
+   `SessionHello{build_id, contract_version}`. Both ends compare
+   `contract_version` for EXACT equality; a mismatch →
+   `SessionError{BUILD_MISMATCH}` naming both versions and both build
+   ids, then stream close. The fault keeps the `BUILD_MISMATCH` wire
+   tag (tags are on the wire; enum names are not). `build_id` differences
+   alone do NOT refuse: two builds speaking the same protocol version
+   cooperate. No negotiate-down, no advisory fields, no
+   feature-capability bits — a matched contract version implies the
+   same wire features, which makes the corollary load-bearing: any
+   wire-shape or wire-behavior change bumps `contract_version` in the
+   same commit. `build_id` = `<crate version>+<git commit hash>`
+   composed at compile time, carried for diagnosis only: it labels the
+   two ends in faults and diagnostics. A dirty tree composes
+   `<sha>.dirty.<content hash>` and a build without git identity
+   composes `unknown.<per-compilation entropy>`, so the label stays
+   specific even though it no longer gates.
 3. **Roles.** The initiator (the end that opened the RPC — a CLI
    client, or a daemon acting as delegated initiator) declares in
    `SessionOpen` whether it is SOURCE or DESTINATION; the responder

@@ -482,9 +482,9 @@ impl std::fmt::Display for TransferOpenRefusal {
 impl std::error::Error for TransferOpenRefusal {}
 
 /// Map an open-time gRPC status onto the `SessionFault` code the same
-/// refusal would carry as a session frame. On a same-build fleet an
-/// `Unimplemented` Transfer only means a pre-session peer — the
-/// build-mismatch shape; `PermissionDenied` is the peer's own
+/// refusal would carry as a session frame. An `Unimplemented`
+/// Transfer only means a pre-session peer — the same refusal shape a
+/// contract mismatch carries; `PermissionDenied` is the peer's own
 /// delegation/ACL gate; anything else keeps INTERNAL, with the
 /// [`TransferOpenRefusal`] wrapper preserving the open-phase identity.
 fn transfer_open_refusal(status: tonic::Status) -> TransferOpenRefusal {

@@ -1459,8 +1459,8 @@ async fn read_i64<R: AsyncRead + Unpin>(socket: &mut R) -> Result<i64> {
 /// many-GB allocation by sending u32::MAX as a path length.
 const MAX_WIRE_PATH_LEN: usize = 64 * 1024;
 /// Maximum file count per tar shard. The shared planner cannot emit more than
-/// 4096 members. Exact same-build peers reject a larger count before reserving
-/// a peer-sized header vector.
+/// 4096 members. Peers on a matched contract version reject a larger count
+/// before reserving a peer-sized header vector.
 const MAX_WIRE_TAR_SHARD_FILES: usize = 4096;
 /// Maximum tar shard payload size (in bytes). Single source of truth
 /// is `tar_safety::MAX_TAR_SHARD_BYTES` so the wire-side reader

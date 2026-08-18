@@ -35,6 +35,10 @@ impl std::error::Error for DiscoveryError {}
 /// port (the form [`crate::remote::endpoint::RemoteEndpoint::parse`]
 /// accepts), `name` is the mDNS instance name shown in the sidebar.
 ///
+/// `contract_version` carries the daemon's advertised transfer-session
+/// protocol version (cv-2) so front-ends can show it; `None` when the
+/// daemon advertised none — unknown, never a mismatch.
+///
 /// Returns `None` when the service advertised no IPv4 address —
 /// an address-less row is undialable and is skipped rather than
 /// shown.
@@ -43,6 +47,7 @@ pub fn endpoint_from_service(service: &MdnsDiscoveredService) -> Option<DaemonEn
     Some(DaemonEndpoint {
         address: format!("{}:{}", address, service.port),
         name: service.instance_name.clone(),
+        contract_version: service.contract_version(),
     })
 }
 
@@ -82,6 +87,23 @@ mod tests {
             addresses: addresses.to_vec(),
             properties: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn advertised_contract_version_reaches_the_endpoint() {
+        let mut svc = service("magneto", &[Ipv4Addr::new(192, 168, 1, 10)], 9031);
+        svc.properties
+            .insert("contract".to_string(), "6".to_string());
+        assert_eq!(
+            endpoint_from_service(&svc).unwrap().contract_version,
+            Some(6)
+        );
+    }
+
+    #[test]
+    fn endpoint_contract_version_is_none_for_pre_cv2_daemon() {
+        let svc = service("legacy", &[Ipv4Addr::new(192, 168, 1, 11)], 9031);
+        assert_eq!(endpoint_from_service(&svc).unwrap().contract_version, None);
     }
 
     #[test]

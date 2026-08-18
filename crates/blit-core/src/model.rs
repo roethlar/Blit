@@ -275,8 +275,10 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.discovering = false;
 
             // Upsert by address: an already-known daemon keeps its id
-            // (and any selection pointing at it); only the display
-            // name refreshes. New daemons are appended in the
+            // (and any selection pointing at it); the display name and
+            // advertised contract version refresh from the new
+            // snapshot (a restarted daemon may speak a different
+            // protocol version). New daemons are appended in the
             // snapshot's (name-sorted) order.
             let fresh: HashSet<String> = endpoints
                 .iter()
@@ -289,6 +291,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 match existing {
                     Some((id, Endpoint::Daemon(known))) => {
                         known.name = daemon.name;
+                        known.contract_version = daemon.contract_version;
                         model.discovered.insert(*id);
                     }
                     // `find` above only matches Daemon variants.
@@ -399,6 +402,7 @@ mod tests {
         let daemon = model.add_endpoint(Endpoint::Daemon(DaemonEndpoint {
             address: "magneto:9833".to_string(),
             name: "magneto".to_string(),
+            contract_version: None,
         }));
         update(&mut model, Msg::SelectEndpoint(EndpointId(99)));
         let effects = update(&mut model, Msg::SelectEndpoint(daemon));
@@ -420,6 +424,7 @@ mod tests {
         let daemon = model.add_endpoint(Endpoint::Daemon(DaemonEndpoint {
             address: "magneto:9833".to_string(),
             name: "magneto".to_string(),
+            contract_version: None,
         }));
         // Load the local pane, then start another browse so one is in
         // flight when the switch lands.
@@ -644,6 +649,7 @@ mod tests {
         DaemonEndpoint {
             address: address.to_string(),
             name: name.to_string(),
+            contract_version: None,
         }
     }
 
@@ -713,6 +719,36 @@ mod tests {
             "id is stable across scans"
         );
         assert_eq!(model.endpoints()[1].1.display_name(), "alpha-renamed");
+    }
+
+    /// cv-2: a re-scan refreshes the advertised protocol version on a
+    /// known daemon — a restarted daemon may speak a different one,
+    /// and an unadvertised version reverts to unknown.
+    #[test]
+    fn upsert_refreshes_the_advertised_contract_version() {
+        let mut model = Model::new();
+        update(&mut model, Msg::RefreshDiscovery);
+        update(
+            &mut model,
+            Msg::DiscoveryLoaded {
+                generation: 1,
+                endpoints: vec![daemon_endpoint("alpha", "192.168.1.10:9031")],
+            },
+        );
+        let mut upgraded = daemon_endpoint("alpha", "192.168.1.10:9031");
+        upgraded.contract_version = Some(7);
+        update(&mut model, Msg::RefreshDiscovery);
+        update(
+            &mut model,
+            Msg::DiscoveryLoaded {
+                generation: 2,
+                endpoints: vec![upgraded],
+            },
+        );
+        let Endpoint::Daemon(known) = &model.endpoints()[1].1 else {
+            panic!("discovered endpoint is a daemon");
+        };
+        assert_eq!(known.contract_version, Some(7));
     }
 
     #[test]

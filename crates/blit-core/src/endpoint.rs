@@ -20,6 +20,12 @@ pub struct EndpointId(pub u64);
 pub struct DaemonEndpoint {
     pub address: String,
     pub name: String,
+    /// Transfer-session protocol version the daemon advertised (cv-2,
+    /// D-2026-08-18-2): the number that decides whether a transfer
+    /// with it can open. `None` = the daemon advertised none (it
+    /// predates cv-2) — render as unknown, never as a mismatch.
+    #[serde(default)]
+    pub contract_version: Option<u32>,
 }
 
 /// One browsable endpoint.
@@ -52,6 +58,7 @@ mod tests {
         let daemon = Endpoint::Daemon(DaemonEndpoint {
             address: "magneto:9833".to_string(),
             name: "magneto".to_string(),
+            contract_version: Some(6),
         });
         assert_eq!(daemon.display_name(), "magneto");
     }

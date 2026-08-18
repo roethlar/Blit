@@ -130,7 +130,8 @@ fn resolve_build_suffix(
     Ok(git_build_suffix_inner(manifest_dir, emit_rerun))
 }
 
-/// Git identity for the same-build session handshake.
+/// Git identity reported in the session handshake (informational
+/// since D-2026-08-18-2; the gate is `CONTRACT_VERSION`).
 ///
 /// Clean build inputs use the commit SHA. Dirty build inputs add a stable hash
 /// of their scoped status, tracked diff, and untracked file contents. Every

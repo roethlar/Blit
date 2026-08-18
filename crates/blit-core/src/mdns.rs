@@ -11,6 +11,8 @@ use hostname::get;
 use log::warn;
 use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent, ServiceInfo};
 
+use crate::transfer_session::CONTRACT_VERSION;
+
 /// Service type advertised by blit daemons.
 pub const BLIT_SERVICE_TYPE: &str = "_blit._tcp.local.";
 
@@ -61,6 +63,17 @@ impl MdnsDiscoveredService {
         self.properties
             .get("delegation_enabled")
             .map(|v| matches!(v.as_str(), "1" | "true"))
+    }
+
+    /// Transfer-session protocol version the daemon speaks, from the
+    /// `contract` TXT record (cv-2, D-2026-08-18-2 — the one number
+    /// that decides whether two peers can transfer). `None` when the
+    /// daemon didn't advertise it (pre-cv-2 daemon) or the value
+    /// wasn't a number: unknown, never a mismatch.
+    pub fn contract_version(&self) -> Option<u32> {
+        self.properties
+            .get("contract")
+            .and_then(|v| v.parse::<u32>().ok())
     }
 }
 
@@ -138,6 +151,10 @@ pub fn advertise(options: AdvertiseOptions<'_>) -> Result<MdnsAdvertiser> {
 
     let mut properties = HashMap::new();
     properties.insert("version".to_string(), env!("CARGO_PKG_VERSION").to_string());
+    // cv-2: the transfer-session protocol version, which is what
+    // actually decides interoperability (D-2026-08-18-2) — the crate
+    // `version` above does not.
+    properties.insert("contract".to_string(), CONTRACT_VERSION.to_string());
     // §3.2: module_count is the authoritative count. The `modules`
     // string is human-readable but truncated past ~180 bytes (mDNS
     // TXT size cap), so a daemon exporting hundreds of modules
@@ -344,6 +361,20 @@ mod accessor_tests {
     fn delegation_enabled_absent_returns_none() {
         let s = service(&[("version", "0.1.0")]);
         assert_eq!(s.delegation_enabled(), None);
+    }
+
+    #[test]
+    fn contract_version_parses_advertised_value() {
+        let s = service(&[("contract", "6")]);
+        assert_eq!(s.contract_version(), Some(6));
+    }
+
+    #[test]
+    fn contract_version_unknown_for_pre_cv2_daemon() {
+        // Absent or unparseable is UNKNOWN, never a mismatch (cv-2).
+        assert_eq!(service(&[("version", "0.1.0")]).contract_version(), None);
+        assert_eq!(service(&[("contract", "")]).contract_version(), None);
+        assert_eq!(service(&[("contract", "six")]).contract_version(), None);
     }
 
     #[test]
