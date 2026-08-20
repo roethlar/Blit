@@ -5,6 +5,17 @@ Per R5-F5 of `docs/reviews/followup_review_2026-05-02.md`: new entries
 go at the top of the file, immediately below this header, so reviewers
 scanning chronologically don't miss appended-at-the-bottom changes.
 
+- 2026-08-20T23:02Z — **CI green on `2fa0eccd`: master unblocked on both
+  remotes**. Owner pushed `20d6e51f..2fa0eccd` to origin + github; GitHub CI
+  run 32425865763 fully green — Check & Format on the rust 1.98.0 runner
+  (the toolchain that redded `20d6e51f`), Linux/macOS/Windows test jobs, all
+  three release builds; publish jobs skipped (non-tag push). Docs Gate
+  32425865667 green. Independently proven before push: `cargo +1.98.0
+  clippy --workspace --all-targets -- -D warnings` clean locally. No open
+  release blockers remain. (Timestamp note: the two entries below were
+  written earlier this same session with a fast clock; their `Z` stamps
+  overshoot real UTC — true order is preserved by file position.)
+
 - 2026-08-21T00:10Z — **CI red on `a7c6f20e` fixed: new stable-clippy lint**.
   CI's runner picked up rust 1.98.0, whose new
   `clippy::chunks_exact_to_as_chunks` lint failed `-D warnings` at
