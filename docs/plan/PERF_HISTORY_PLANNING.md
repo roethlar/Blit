@@ -217,9 +217,20 @@ tagging at the call sites).
    stubbed out → test fails → restored) and absent/corrupt store
    (cold start, store-level error never invents a seed). `--checkers`
    pins outrank seeds and never teach them.
-5. **ph-5 — warm-start session workers.** Wire frozen (R4b): seed drives
-   an accelerated post-open ramp toward the seeded count; ldt-2 parity
-   traces unchanged.
+5. **ph-5 — warm-start session workers.** LANDED 2026-08-20. Wire frozen
+   (R4b): the sender's session dial reads the route's settled workers
+   seed at open and, when one exists, ramps toward it on an accelerated
+   schedule instead of the cold-start ladder — acceleration only, never a
+   pin: the live controller keeps full authority to walk past or below
+   the seed on evidence, and the seed store's settle gate unchanged.
+   Seeded coverage is the PUSH direction (CLI is the byte sender and
+   both reads the seed and writes the settled count back). The PULL
+   direction stays cold-start: the daemon is the byte sender there, its
+   `ResponderInstruments` are built before `SessionOpen` reveals the
+   route, so it has no seed to arm and no mirror cell to record —
+   documented gap, candidate follow-up after ph-6, not a release
+   blocker (pull inherits the live tuner, which is the larger share of
+   the win). ldt-2 parity traces unchanged.
 6. **ph-6 — rig proof.** Cold-vs-warm repeat-run A/B on magneto↔skippy;
    evidence dir under `docs/bench/`.
 

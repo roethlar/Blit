@@ -1242,8 +1242,15 @@ async fn start_source_data_plane(
     let observer = phase_trace.as_ref().map(phase_dial_observer);
     let dial = TransferDial::conservative_within(receiver_capacity)
         .with_observer(observer)
+        .with_settled_mirror(instruments.settled_streams_out.clone())
         .shared();
     dial.set_negotiated_streams(initial);
+    // ph-5: arm the route-seeded accelerated ramp. The dial clamps the
+    // seed into the receiver-advertised ceiling; a poisoned seed dies on
+    // the first unhealthy tick or clamped settle (dial.rs guards).
+    if let Some(seed) = instruments.stream_seed {
+        dial.seed_streams(seed as usize);
+    }
 
     let mut epoch0_handshake = session_token.clone();
     epoch0_handshake.extend_from_slice(&epoch0_sub_token);

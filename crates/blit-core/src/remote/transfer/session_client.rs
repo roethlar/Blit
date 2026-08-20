@@ -204,6 +204,26 @@ pub async fn run_push_session(
     // move never deletes a source whose files were silently skipped.
     let unreadable: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
 
+    // ph-5: seed the sender-owned stream dial from what a previous run
+    // on this exact route settled at, and capture what THIS run settles
+    // at for the store. Both ride the perf sink: no sink (unit tests,
+    // history disabled) means cold start and no recording — the same
+    // opt-in the ph-1 record path uses. Any store problem is a cold
+    // start, never an error.
+    let stream_seed = perf.as_ref().and_then(|sink| {
+        let store = crate::seed_store::SeedStore::for_history(&sink.store);
+        match store.lookup_route_latest(&sink.route) {
+            Ok(entry) => entry.and_then(|entry| entry.workers),
+            Err(err) => {
+                log::debug!("stream seed lookup failed (cold start): {err:?}");
+                None
+            }
+        }
+    });
+    let settled_streams_cell = perf
+        .as_ref()
+        .map(|_| Arc::new(std::sync::atomic::AtomicU32::new(0)));
+
     let cfg = SourceSessionConfig {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(open),
@@ -221,6 +241,8 @@ pub async fn run_push_session(
             // ph-1c: initiators record via their own summary return
             // path; the terminal hook exists for raced responders.
             on_terminal_summary: None,
+            stream_seed,
+            settled_streams_out: settled_streams_cell.clone(),
             #[cfg(test)]
             dial_test_samples: None,
             #[cfg(test)]
@@ -260,6 +282,27 @@ pub async fn run_push_session(
             elapsed: started.elapsed(),
         },
     );
+    // ph-5 writer: persist what the dial settled at as this route's
+    // `workers` seed (store-internal min-files gate; merge keeps the
+    // route's checker seed). 0 = the mirror never armed — record
+    // nothing rather than teach the floor from a run that never moved.
+    if let (Some(sink), Some(cell)) = (perf.as_ref(), settled_streams_cell.as_ref()) {
+        let settled = cell.load(std::sync::atomic::Ordering::Relaxed);
+        if settled > 0 {
+            let store = crate::seed_store::SeedStore::for_history(&sink.store);
+            if let Err(err) = store.record_settled(
+                &sink.route,
+                crate::seed_store::SettledDials {
+                    checkers: None,
+                    workers: Some(settled),
+                },
+                summary.files_transferred.try_into().unwrap_or(usize::MAX),
+                summary.bytes_transferred,
+            ) {
+                log::warn!("failed to update dial seed store: {err:?}");
+            }
+        }
+    }
     Ok(summary)
 }
 

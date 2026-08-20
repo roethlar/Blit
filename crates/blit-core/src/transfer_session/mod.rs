@@ -327,6 +327,18 @@ pub struct SourceInstruments {
     /// High-volume aggregate observer for otp-12 small-file attribution.
     /// Separate from the low-frequency phase trace and disabled by default.
     pub small_file_probe: SmallFileProbe,
+    /// ph-5: stream count a previous run on this route settled at
+    /// (`SeedRecord.workers`). Arms the sender-owned dial's accelerated
+    /// ramp — ADD skips the sustain/cooldown gates while ticks stay
+    /// healthy, one epoch per step on the unchanged wire. `None` = cold
+    /// start (unchanged policy).
+    pub stream_seed: Option<u32>,
+    /// ph-5 writer: when set, every settled live stream count is
+    /// mirrored here (epoch-0 negotiation and each accepted resize), so
+    /// the caller can persist the final value as the route's `workers`
+    /// seed after the session — the dial itself dies with the data
+    /// plane.
+    pub settled_streams_out: Option<Arc<std::sync::atomic::AtomicU32>>,
     /// Deterministic sample source used only by in-crate role guards. The
     /// production build has no such field and always samples live probes.
     #[cfg(test)]

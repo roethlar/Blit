@@ -5,6 +5,23 @@ Per R5-F5 of `docs/reviews/followup_review_2026-05-02.md`: new entries
 go at the top of the file, immediately below this header, so reviewers
 scanning chronologically don't miss appended-at-the-bottom changes.
 
+- 2026-08-20T20:55Z — **ph-5 warm-start session workers landed**
+  (PERF_HISTORY_PLANNING): the sender's session dial arms the route's
+  settled `workers` seed at open and ramps toward it on an accelerated
+  schedule — acceleration only, never a pin; the live controller keeps
+  full authority to walk past or below the seed, and the settle gate is
+  unchanged. The seed's `workers` slot gets its writer at session
+  close. Coverage: PUSH is seeded end-to-end (CLI is the byte sender —
+  reads the seed AND writes the settled count back). PULL stays
+  cold-start: the daemon is the byte sender there and its
+  `ResponderInstruments` are built before `SessionOpen` reveals the
+  route, so there is no seed to arm and no mirror cell to record —
+  documented in the plan's ph-5 entry as a post-ph-6 candidate, not a
+  release blocker (pull inherits the live tuner). Wire frozen per R4b;
+  ldt-2 parity traces unchanged. Gates: fmt clean; clippy `-D
+  warnings` clean native (macOS) and cross x86_64-unknown-linux-gnu;
+  full workspace suite green on macOS. Next: ph-6 rig A/B
+  (magneto↔skippy) closes the plan.
 - 2026-08-20T19:35Z — **ph-4 warm-start checkers landed**
   (PERF_HISTORY_PLANNING): the checker dial accepts a route seed as a
   measured one-chunk jump — cold start and baseline unchanged, jump to

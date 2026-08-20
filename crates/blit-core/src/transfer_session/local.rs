@@ -902,6 +902,11 @@ pub async fn run_local_session(
             small_file_probe: SmallFileProbe::disabled(),
             // ph-1c: the local carrier records via its own return path.
             on_terminal_summary: None,
+            // ph-5: the LOCAL carrier moves bytes in-process — there is
+            // no network dial to seed or record; local worker scaling
+            // is the checker/apply pools (ph-4).
+            stream_seed: None,
+            settled_streams_out: None,
             #[cfg(test)]
             dial_test_samples: None,
             #[cfg(test)]
@@ -1270,6 +1275,8 @@ mod tests {
                 lifecycle_trace: Default::default(),
                 small_file_probe: SmallFileProbe::disabled(),
                 on_terminal_summary: None,
+                stream_seed: None,
+                settled_streams_out: None,
                 #[cfg(test)]
                 dial_test_samples: None,
                 #[cfg(test)]
@@ -1729,6 +1736,8 @@ mod tests {
                 lifecycle_trace: Default::default(),
                 small_file_probe: SmallFileProbe::disabled(),
                 on_terminal_summary: None,
+                stream_seed: None,
+                settled_streams_out: None,
                 #[cfg(test)]
                 dial_test_samples: None,
                 #[cfg(test)]

@@ -95,6 +95,10 @@ pub(crate) enum DialDecisionReason {
     Bound,
     Add,
     Remove,
+    /// ph-5: an ADD proposed by the route-seed accelerated ramp, which
+    /// bypasses the cheap-dial/sustain/cooldown gates while the pipe
+    /// stays healthy and live count is below the seeded target.
+    SeedRamp,
 }
 
 impl DialDecisionReason {
@@ -110,6 +114,7 @@ impl DialDecisionReason {
             Self::Bound => "bound",
             Self::Add => "add",
             Self::Remove => "remove",
+            Self::SeedRamp => "seed-ramp",
         }
     }
 }
@@ -411,6 +416,22 @@ pub struct TransferDial {
     /// AND cheap dials maxed" streak, negative = "blocked AND cheap
     /// dials floored" streak. Any other tick resets it.
     resize_sustain: AtomicI32,
+    /// ph-5 route seed: stream count a previous run on this route
+    /// settled at. 0 = no seed (cold start, unchanged policy). While
+    /// alive, the seed lets ADD proposals skip the sustain/cooldown/
+    /// cheap-dial gates — one stream per epoch on the frozen wire,
+    /// never above the receiver-clamped ceiling.
+    seed_target: AtomicUsize,
+    /// Sticky ramp kill switch. Set when the ramp reaches its target,
+    /// when a tick shows back-pressure (the seed is wrong for today's
+    /// conditions), or when a settle comes back refused/clamped. Once
+    /// set, only the normal evidence policy moves streams — a poisoned
+    /// seed can never pin the dial.
+    seed_ramp_dead: std::sync::atomic::AtomicBool,
+    /// ph-5 writer half: an out-cell the owner reads AFTER the session
+    /// (the dial dies with the data plane); every settled live count is
+    /// mirrored here as it lands.
+    settled_mirror: Option<Arc<std::sync::atomic::AtomicU32>>,
     /// Wakes deterministic drivers after a valid resize settlement.
     resize_settlement_notify: tokio::sync::Notify,
     // Profile-clamped bounds, fixed at construction.
@@ -486,6 +507,9 @@ impl TransferDial {
             resize_lock_sequence: AtomicUsize::new(0),
             ticks_since_settle: AtomicU32::new(0),
             resize_sustain: AtomicI32::new(0),
+            seed_target: AtomicUsize::new(0),
+            seed_ramp_dead: std::sync::atomic::AtomicBool::new(false),
+            settled_mirror: None,
             resize_settlement_notify: tokio::sync::Notify::new(),
             ceiling_chunk_bytes: ceiling_chunk,
             ceiling_prefetch,
@@ -505,6 +529,36 @@ impl TransferDial {
 
     pub fn shared(self) -> Arc<Self> {
         Arc::new(self)
+    }
+
+    /// Arm the ph-5 route-seed ramp: accelerate ADDs toward `target`
+    /// while the pipe stays healthy. Clamped into
+    /// `1..=ceiling_max_streams` (the receiver profile stays
+    /// authoritative; a seed can never outrank it). A `0` target is a
+    /// no-op — cold start, unchanged policy. The wire is untouched:
+    /// the ramp only relaxes WHEN the tuner may propose the next +1,
+    /// never what a proposal looks like.
+    pub fn seed_streams(&self, target: usize) {
+        if target == 0 {
+            return;
+        }
+        let clamped = target.clamp(1, self.ceiling_max_streams.max(1));
+        self.seed_target.store(clamped, Ordering::Relaxed);
+    }
+
+    /// The live seed-ramp target, if the ramp is still alive.
+    fn seed_ramp_target(&self) -> Option<usize> {
+        if self.seed_ramp_dead.load(Ordering::Relaxed) {
+            return None;
+        }
+        match self.seed_target.load(Ordering::Relaxed) {
+            0 => None,
+            target => Some(target),
+        }
+    }
+
+    fn kill_seed_ramp(&self) {
+        self.seed_ramp_dead.store(true, Ordering::Relaxed);
     }
 
     // ── live reads ───────────────────────────────────────────────────
@@ -538,7 +592,27 @@ impl TransferDial {
         self.initial_streams.store(clamped, Ordering::Relaxed);
         self.live_streams.store(clamped, Ordering::Relaxed);
         self.peak_streams.store(clamped, Ordering::Relaxed);
+        self.mirror_settled(clamped);
         clamped
+    }
+
+    /// ph-5 writer: mirror every settled live count into the caller's
+    /// out-cell, so the closing record can read the final value after
+    /// the data plane (and this dial) are gone. Observability only —
+    /// the dial never reads it back.
+    fn mirror_settled(&self, streams: usize) {
+        if let Some(cell) = self.settled_mirror.as_ref() {
+            cell.store(streams.min(u32::MAX as usize) as u32, Ordering::Relaxed);
+        }
+    }
+
+    /// Attach the ph-5 settled-count mirror before sharing the dial.
+    pub(crate) fn with_settled_mirror(
+        mut self,
+        cell: Option<Arc<std::sync::atomic::AtomicU32>>,
+    ) -> Self {
+        self.settled_mirror = cell;
+        self
     }
 
     // ── ue-r2-2 resize policy ────────────────────────────────────────
@@ -642,6 +716,37 @@ impl TransferDial {
         if delta_bytes == 0 {
             self.resize_sustain.store(0, Ordering::Relaxed);
             return Some((None, DialDecisionReason::Idle));
+        }
+        // ph-5 accelerated ramp: with a live route seed, ADD skips the
+        // cheap-dial/sustain/cooldown gates — one stream per epoch on
+        // the unchanged wire — while every tick keeps proving the pipe
+        // healthy. The first back-pressured tick kills the ramp for the
+        // rest of the session (poison recovery: a stale seed degrades
+        // to the normal evidence policy, it never pins the dial).
+        if let Some(seed_target) = self.seed_ramp_target() {
+            if blocked_ratio > DIAL_STEP_DOWN_BLOCKED_RATIO {
+                self.kill_seed_ramp();
+            } else {
+                let live = self.live_streams.load(Ordering::Relaxed).max(1);
+                let bound = self.ceiling_max_streams.max(1);
+                if live >= seed_target.min(bound) {
+                    // Reached (or the ceiling moved under us): done.
+                    self.kill_seed_ramp();
+                } else if blocked_ratio < DIAL_STEP_UP_BLOCKED_RATIO {
+                    if let Some(epoch) = state.settled_epoch.checked_add(1) {
+                        let proposal = ResizeProposal {
+                            epoch,
+                            target_streams: (live + 1).min(bound),
+                            add: true,
+                        };
+                        state.pending = Some(proposal);
+                        self.resize_sustain.store(0, Ordering::Relaxed);
+                        return Some((Some(proposal), DialDecisionReason::SeedRamp));
+                    }
+                }
+                // Mid-zone tick: no accelerated step, ramp stays armed,
+                // normal policy runs below.
+            }
         }
         let sustain = if blocked_ratio < DIAL_STEP_UP_BLOCKED_RATIO && self.cheap_dials_maxed() {
             let prev = self.resize_sustain.load(Ordering::Relaxed).max(0);
@@ -809,9 +914,18 @@ impl TransferDial {
         }
         self.ticks_since_settle.store(0, Ordering::Relaxed);
         self.resize_sustain.store(0, Ordering::Relaxed);
+        let proposed = state.pending.map(|pending| pending.target_streams);
         if accepted {
             let clamped = effective_streams.clamp(1, self.ceiling_max_streams.max(1));
             self.live_streams.store(clamped, Ordering::Relaxed);
+            self.mirror_settled(clamped);
+        }
+        // ph-5: a refused epoch, or one the peer granted below what was
+        // asked, means the destination disagrees with the seed — stop
+        // accelerating and leave further movement to the evidence
+        // policy (the seed must never argue with the receiver).
+        if !accepted || proposed.is_some_and(|target| effective_streams < target) {
+            self.kill_seed_ramp();
         }
         // A refused request was still an observed wire epoch. Consuming it
         // keeps future/duplicate traffic monotonic even though live count
@@ -1164,6 +1278,67 @@ mod tests {
             max_chunk_bytes: max_chunk,
             max_inflight_bytes: max_inflight,
         }
+    }
+
+    /// ph-5: a seeded dial proposes consecutive ADDs on healthy ticks
+    /// alone — no cheap-dial pinning, no sustain streak, no cooldown —
+    /// one epoch at a time, and stops dead at the seeded target.
+    #[test]
+    fn seeded_ramp_adds_on_healthy_ticks_and_stops_at_the_target() {
+        let dial = TransferDial::conservative();
+        dial.seed_streams(6);
+        // Healthy tick with cheap dials still at the floor: the normal
+        // policy could never ADD here; the seed ramp does.
+        let p1 = dial.resize_tick(1, 0.0).expect("seed ramp proposes");
+        assert_eq!((p1.target_streams, p1.add), (5, true));
+        dial.resize_settled(p1.epoch, 5, true);
+        let p2 = dial.resize_tick(1, 0.0).expect("ramp continues");
+        assert_eq!(p2.target_streams, 6);
+        dial.resize_settled(p2.epoch, 6, true);
+        // Target reached: the ramp is done, and the normal policy has
+        // no grounds to move (cheap dials are not pinned).
+        assert_eq!(dial.resize_tick(1, 0.0), None);
+        assert_eq!(dial.live_streams(), 6);
+    }
+
+    /// ph-5 poison recovery, tick direction: the first back-pressured
+    /// tick kills the ramp permanently — a stale seed can slow nothing
+    /// down and pin nothing up.
+    #[test]
+    fn back_pressure_kills_the_seeded_ramp_for_good() {
+        let dial = TransferDial::conservative();
+        dial.seed_streams(8);
+        assert_eq!(dial.resize_tick(1, 0.9), None, "blocked tick never ADDs");
+        // Later healthy ticks: the ramp is dead, normal policy owns the
+        // dial (and has no pinned cheap dials, so no movement).
+        assert_eq!(dial.resize_tick(1, 0.0), None);
+        assert_eq!(dial.live_streams(), 4);
+    }
+
+    /// ph-5 poison recovery, settle direction: a grant BELOW the asked
+    /// target ends the acceleration — the receiver outranks the seed.
+    /// (A full refusal is covered independently by the dial's terminal
+    /// `refused` bit, which blocks every future proposal.)
+    #[test]
+    fn clamped_settle_kills_the_seeded_ramp() {
+        let dial = TransferDial::conservative();
+        dial.seed_streams(8);
+        let p1 = dial.resize_tick(1, 0.0).expect("seed ramp proposes");
+        assert_eq!(p1.target_streams, 5);
+        // Peer accepted the epoch but granted less than asked.
+        dial.resize_settled(p1.epoch, 4, true);
+        assert_eq!(dial.resize_tick(1, 0.0), None, "ramp dead after clamp");
+        assert_eq!(dial.live_streams(), 4);
+    }
+
+    /// ph-5: the seed clamps into the receiver-advertised ceiling; a
+    /// seed at or below the live count arms nothing.
+    #[test]
+    fn seed_never_outranks_the_receiver_ceiling() {
+        let dial = TransferDial::conservative_within(Some(&profile(4, 0, 0)));
+        dial.seed_streams(12); // clamped to the ceiling of 4
+        assert_eq!(dial.resize_tick(1, 0.0), None, "already at the bound");
+        assert_eq!(dial.live_streams(), 4);
     }
 
     #[test]
