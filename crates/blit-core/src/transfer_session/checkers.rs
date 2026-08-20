@@ -77,6 +77,19 @@ pub struct AdaptiveCheckers {
     /// in an atomic.
     best_rate_milli: AtomicU64,
     settled: AtomicBool,
+    /// ph-4 (`PERF_HISTORY_PLANNING`): ladder index a prior settled run
+    /// suggested for this route ([`crate::seed_store`]), or `usize::MAX`
+    /// for none. A seed never RELOCATES the start — the dial still opens
+    /// at the cold floor and takes its baseline measurement, then jumps
+    /// here for exactly one chunk and keeps the rung only if the measured
+    /// rate beats the baseline. A poisoned seed therefore costs one chunk
+    /// and leaves the dial exactly where the cold walk would be —
+    /// `seed_return` — still unsettled and free to keep adapting.
+    seed_target: AtomicUsize,
+    /// Rung to fall back to when the seeded chunk does not measure better.
+    seed_return: AtomicUsize,
+    /// The jump has been taken; the next observation judges it.
+    seed_pending: AtomicBool,
 }
 
 impl AdaptiveCheckers {
@@ -89,6 +102,44 @@ impl AdaptiveCheckers {
             rung: AtomicUsize::new(rung),
             best_rate_milli: AtomicU64::new(0),
             settled: AtomicBool::new(false),
+            seed_target: AtomicUsize::new(usize::MAX),
+            seed_return: AtomicUsize::new(0),
+            seed_pending: AtomicBool::new(false),
+        }
+    }
+
+    /// Arm a seed: `limit` is the concurrency a prior settled run on this
+    /// route discovered. Takes effect at the next observation that has a
+    /// baseline to judge it against; ignored once settled. Values at or
+    /// below the current rung arm nothing — the walk is already there.
+    pub fn seed_hint(&self, limit: usize) {
+        if limit == 0 || self.settled.load(Ordering::Relaxed) {
+            return;
+        }
+        let target = LADDER
+            .iter()
+            .position(|value| *value >= limit)
+            .unwrap_or(LADDER.len() - 1);
+        self.seed_target.store(target, Ordering::Relaxed);
+    }
+
+    /// One-shot jump to an armed seed, only from a measured baseline and
+    /// only while still adapting. Called after the normal rule has folded
+    /// the current measurement, so the jump never swallows an observation.
+    fn maybe_jump_to_seed(&self) {
+        if self.settled.load(Ordering::Relaxed) || self.best_rate_milli.load(Ordering::Relaxed) == 0
+        {
+            return;
+        }
+        let target = self.seed_target.swap(usize::MAX, Ordering::Relaxed);
+        if target == usize::MAX {
+            return;
+        }
+        let rung = self.rung.load(Ordering::Relaxed);
+        if target > rung {
+            self.seed_return.store(rung, Ordering::Relaxed);
+            self.rung.store(target, Ordering::Relaxed);
+            self.seed_pending.store(true, Ordering::Relaxed);
         }
     }
 
@@ -108,6 +159,20 @@ impl AdaptiveCheckers {
         let best = self.best_rate_milli.load(Ordering::Relaxed);
         let rung = self.rung.load(Ordering::Relaxed);
 
+        if self.seed_pending.swap(false, Ordering::Relaxed) {
+            // This chunk ran at the seeded rung. Keep it only if it
+            // MEASURED better than the walk's own best; otherwise return
+            // to where the walk was, unsettled, and let the normal rule
+            // continue as if the seed had never existed.
+            if rate_milli > best.saturating_mul(105) / 100 {
+                self.best_rate_milli.store(rate_milli, Ordering::Relaxed);
+            } else {
+                self.rung
+                    .store(self.seed_return.load(Ordering::Relaxed), Ordering::Relaxed);
+            }
+            return self.limit();
+        }
+
         if best == 0 {
             // First measurement: nothing to compare against, so take a step
             // and see. This is the "begin immediately" half of the rule.
@@ -115,6 +180,7 @@ impl AdaptiveCheckers {
             if rung + 1 < LADDER.len() {
                 self.rung.store(rung + 1, Ordering::Relaxed);
             }
+            self.maybe_jump_to_seed();
             return self.limit();
         }
 
@@ -140,6 +206,7 @@ impl AdaptiveCheckers {
             // Flat: this rung is the plateau.
             self.settled.store(true, Ordering::Relaxed);
         }
+        self.maybe_jump_to_seed();
         self.limit()
     }
 
@@ -183,6 +250,15 @@ impl CheckerPolicy {
     pub fn observe(&self, files: usize, elapsed: std::time::Duration) {
         if let Self::Adaptive(adaptive) = self {
             adaptive.observe(files, elapsed);
+        }
+    }
+
+    /// Arm a route seed (ph-4). A [`CheckerPolicy::Fixed`] pin ignores it:
+    /// the operator asked for an exact count, and a seed must never
+    /// override an explicit instruction.
+    pub fn seed_hint(&self, limit: usize) {
+        if let Self::Adaptive(adaptive) = self {
+            adaptive.seed_hint(limit);
         }
     }
 
@@ -274,6 +350,12 @@ impl CheckerPool {
         self.policy.observe(files, elapsed);
     }
 
+    /// Arm a route seed on the dial; clamped to this pool's ceiling. See
+    /// [`CheckerPolicy::seed_hint`].
+    pub fn seed_hint(&self, limit: usize) {
+        self.policy.seed_hint(limit.clamp(1, self.threads));
+    }
+
     /// See [`CheckerPolicy::settled_limit`]; clamped like [`Self::limit`].
     pub fn settled_limit(&self) -> Option<usize> {
         self.policy
@@ -307,6 +389,87 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+
+    fn ms(n: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(n)
+    }
+
+    /// ph-4: an armed seed fires only after a measured baseline exists,
+    /// and is kept only when the seeded chunk MEASURES better.
+    #[test]
+    fn seed_jump_adopted_only_when_measured_better() {
+        let dial = AdaptiveCheckers::new();
+        let top = *LADDER.last().unwrap();
+        dial.seed_hint(top);
+        // Cold start is untouched by an armed seed.
+        assert_eq!(dial.limit(), ADAPTIVE_FLOOR);
+        // Baseline chunk: normal first-measurement step, then the jump.
+        dial.observe(100, ms(1000));
+        assert_eq!(dial.limit(), top, "jump taken after the baseline");
+        // The seeded chunk measures 3x better -> adopted, still adapting.
+        dial.observe(300, ms(1000));
+        assert_eq!(dial.limit(), top);
+        assert!(!dial.is_settled());
+    }
+
+    /// ph-4 poison recovery, direction 1: a bad seed costs exactly one
+    /// chunk, then the dial is indistinguishable from a cold walk fed
+    /// the same non-seeded observations — it cannot be pinned.
+    #[test]
+    fn poisoned_seed_costs_one_chunk_and_resumes_the_cold_walk() {
+        let dial = AdaptiveCheckers::new();
+        let cold = AdaptiveCheckers::new();
+        dial.seed_hint(*LADDER.last().unwrap());
+        dial.observe(100, ms(1000));
+        cold.observe(100, ms(1000));
+        // The seeded chunk is far worse -> rejected outright.
+        dial.observe(10, ms(1000));
+        assert_eq!(dial.limit(), cold.limit(), "back where the cold walk is");
+        assert!(
+            !dial.is_settled(),
+            "a rejected seed must not settle the dial"
+        );
+        // From here the two walks stay in lockstep.
+        dial.observe(200, ms(1000));
+        cold.observe(200, ms(1000));
+        assert_eq!(dial.limit(), cold.limit());
+        assert_eq!(dial.is_settled(), cold.is_settled());
+    }
+
+    /// ph-4 poison recovery, direction 2: no seed (absent store, corrupt
+    /// store, keyless route) arms nothing — the dial IS the cold dial.
+    #[test]
+    fn unseeded_dial_is_exactly_the_cold_walk() {
+        let dial = AdaptiveCheckers::new();
+        let cold = AdaptiveCheckers::new();
+        dial.seed_hint(0); // what a failed lookup must degrade to
+        for (files, dur) in [(100, 1000), (150, 1000), (150, 1000)] {
+            dial.observe(files, ms(dur));
+            cold.observe(files, ms(dur));
+            assert_eq!(dial.limit(), cold.limit());
+            assert_eq!(dial.is_settled(), cold.is_settled());
+        }
+    }
+
+    /// ph-4: a seed at or below the walk's current rung arms nothing.
+    #[test]
+    fn seed_at_or_below_the_walk_is_ignored() {
+        let dial = AdaptiveCheckers::new();
+        let cold = AdaptiveCheckers::new();
+        dial.seed_hint(1);
+        dial.observe(100, ms(1000));
+        cold.observe(100, ms(1000));
+        assert_eq!(dial.limit(), cold.limit());
+    }
+
+    /// ph-4: an explicit `--checkers` pin outranks any seed.
+    #[test]
+    fn fixed_pin_ignores_seed_hints() {
+        let policy = CheckerPolicy::from_request(4);
+        policy.seed_hint(64);
+        assert_eq!(policy.limit(), 4);
+        assert!(policy.settled_limit().is_none(), "pins never teach seeds");
+    }
 
     #[test]
     fn zero_means_adaptive_and_the_cap_binds() {

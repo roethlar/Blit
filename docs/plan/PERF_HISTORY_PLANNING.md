@@ -200,13 +200,23 @@ tagging at the call sites).
 2. **ph-2 — honest reports.** Topology/role/initiator labels and per-key
    aggregate separation in `blit profile` / `blit diagnostics perf`,
    text + JSON; daemon-record visibility per R5.
-3. **ph-3 — seed store.** Persist settled dial values per key at session
-   close, gated on min-samples + settled confidence; retire the predictor
-   per R1 (its file, state versioning, and `blit profile`'s
-   predicted-duration lines).
-4. **ph-4 — warm-start checkers.** Optional seed rung into
-   `AdaptiveCheckers` with bidirectional bracketing from the seed;
-   poisoned-seed recovery red-proven in both directions.
+3. **ph-3 — seed store.** LANDED 2026-08-20. Persist settled dial values
+   per key at session close, gated on min-samples + settled confidence;
+   retire the predictor per R1 (its file, state versioning, and
+   `blit profile`'s predicted-duration lines).
+4. **ph-4 — warm-start checkers.** LANDED 2026-08-20. Design refined
+   from the original "bidirectional bracketing" sketch (delegated
+   envelope, D-2026-08-20-2) to something simpler and provably
+   unpinnable: the seed never relocates the cold start — the dial takes
+   its normal baseline, then jumps to the seeded rung for exactly ONE
+   measured chunk and keeps it only if it beat the baseline; rejection
+   returns the walk to where it was, unsettled. Read side is
+   route-latest across classes (the run's own class is unknowable at
+   open; measurement makes cross-class seeds survivable). Poisoned-seed
+   recovery red-proven in both directions: bad-seed pinning (fallback
+   stubbed out → test fails → restored) and absent/corrupt store
+   (cold start, store-level error never invents a seed). `--checkers`
+   pins outrank seeds and never teach them.
 5. **ph-5 — warm-start session workers.** Wire frozen (R4b): seed drives
    an accelerated post-open ramp toward the seeded count; ldt-2 parity
    traces unchanged.

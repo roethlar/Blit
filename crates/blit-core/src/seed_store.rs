@@ -248,6 +248,34 @@ impl SeedStore {
         Ok(self.load()?.seeds.remove(&key))
     }
 
+    /// The most recently updated seed for a route, across workload
+    /// classes (ph-4). At session OPEN the run's own class is not yet
+    /// knowable — the scan has not streamed — so warm-start reads take
+    /// the route's newest entry. The asymmetry with the class-keyed
+    /// WRITE side is deliberate and safe: the dial MEASURES a seed
+    /// before adopting it, so a cross-class seed costs at most one
+    /// probing chunk before the walk resumes cold behavior.
+    pub fn lookup_route_latest(&self, route: &RouteTag) -> Result<Option<SeedEntry>> {
+        let peer = match route.peer_key.as_deref() {
+            Some(peer) => peer,
+            None => return Ok(None),
+        };
+        let prefix = format!(
+            "{}|{}|{}|{}|",
+            route.topology.label(),
+            route.local_role.label(),
+            route.initiator.label(),
+            peer,
+        );
+        Ok(self
+            .load()?
+            .seeds
+            .into_iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .map(|(_, entry)| entry)
+            .max_by_key(|entry| entry.updated_ms))
+    }
+
     fn load(&self) -> Result<SeedFile> {
         let path = self.path();
         match std::fs::read(&path) {
@@ -288,6 +316,21 @@ pub fn record_settled_user(route: &RouteTag, dials: SettledDials, files: usize, 
     }
 }
 
+/// Convenience used by the session open paths (ph-4): the route's
+/// newest seed from the operator store. Any failure — missing file,
+/// corrupt JSON, unreadable state dir — is a cold start, never an
+/// error: a seed is an optimization hint, and a session must open
+/// identically with or without one.
+pub fn route_seed_user(route: &RouteTag) -> Option<SeedEntry> {
+    match SeedStore::user().and_then(|store| store.lookup_route_latest(route)) {
+        Ok(entry) => entry,
+        Err(err) => {
+            log::debug!("dial seed lookup failed (cold start): {err:?}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +349,51 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = SeedStore::at_dir(dir.path().to_path_buf());
         (dir, store)
+    }
+
+    /// ph-4 read side: the route's NEWEST class entry wins, other
+    /// routes' entries never bleed in, and a keyless route reads
+    /// nothing.
+    #[test]
+    fn route_latest_takes_the_newest_class_for_that_route_only() {
+        let (_dir, store) = store();
+        // Absent file: cold start, not an error.
+        assert!(store
+            .lookup_route_latest(&route(Some("/dst")))
+            .expect("absent store reads clean")
+            .is_none());
+        let json = serde_json::json!({
+            "schema_version": SEED_SCHEMA_VERSION,
+            "seeds": {
+                "local|source|cli|/dst|small": {"checkers": 4, "runs": 3, "updated_ms": 100},
+                "local|source|cli|/dst|large": {"checkers": 16, "runs": 1, "updated_ms": 200},
+                "local|source|cli|/other|small": {"checkers": 64, "runs": 9, "updated_ms": 999},
+            },
+        });
+        std::fs::create_dir_all(_dir.path()).unwrap();
+        std::fs::write(store.path(), serde_json::to_vec(&json).unwrap()).unwrap();
+        let seed = store
+            .lookup_route_latest(&route(Some("/dst")))
+            .expect("read")
+            .expect("seed present");
+        assert_eq!(seed.checkers, Some(16), "newest entry for the route wins");
+        assert!(store
+            .lookup_route_latest(&route(None))
+            .expect("keyless route reads clean")
+            .is_none());
+    }
+
+    /// ph-4 poison recovery, store half: a corrupt file is an error at
+    /// the store level (`route_seed_user` degrades it to a cold start).
+    #[test]
+    fn corrupt_store_errors_instead_of_inventing_seeds() {
+        let (_dir, store) = store();
+        std::fs::create_dir_all(_dir.path()).unwrap();
+        std::fs::write(store.path(), b"not json").unwrap();
+        assert!(store.lookup_route_latest(&route(Some("/dst"))).is_err());
+        assert!(store
+            .lookup(&route(Some("/dst")), WorkloadClass::SmallFiles)
+            .is_err());
     }
 
     #[test]

@@ -5,6 +5,22 @@ Per R5-F5 of `docs/reviews/followup_review_2026-05-02.md`: new entries
 go at the top of the file, immediately below this header, so reviewers
 scanning chronologically don't miss appended-at-the-bottom changes.
 
+- 2026-08-20T19:35Z — **ph-4 warm-start checkers landed**
+  (PERF_HISTORY_PLANNING): the checker dial accepts a route seed as a
+  measured one-chunk jump — cold start and baseline unchanged, jump to
+  the seeded rung once a baseline exists, keep it only if the chunk
+  MEASURED better, otherwise return to the walk unsettled. Read side:
+  `SeedStore::lookup_route_latest` (newest across classes; the run's
+  own class is unknowable at open) + `route_seed_user` (any failure =
+  cold start); armed in `run_local_session` when perf history is on and
+  not a dry run; `--checkers` pins ignore seeds. Poison recovery
+  red-proven both directions: the pinning guard was proven to bite by
+  stubbing the rejection fallback (test failed) and restoring; corrupt
+  store errors at store level and degrades to cold start at the call
+  site. Design refinement from the plan's "bidirectional bracketing"
+  sketch recorded in the plan doc (delegated envelope, D-2026-08-20-2).
+  Tests 1206 → 1213 (+5 dial, +2 store). Workspace 1213/0 on macOS;
+  Linux cross-clippy clean.
 - 2026-08-20T18:55Z — **ph-3 seed store landed + predictor retired**
   (PERF_HISTORY_PLANNING): new `blit_core::seed_store` persists the
   dial values a run actually settled on (`perf_seeds.json`, schema v1,

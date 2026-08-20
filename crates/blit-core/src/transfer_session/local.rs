@@ -732,6 +732,23 @@ pub async fn run_local_session(
         Some(pool) => pool,
         None => CheckerPool::new(options.checkers)?,
     };
+    // ph-4 (`PERF_HISTORY_PLANNING`): warm-start the checker dial from
+    // this route's newest seed. The hint is measured before it is
+    // adopted (see `AdaptiveCheckers::seed_hint`), a `--checkers` pin
+    // ignores it, and any lookup failure is silently a cold start.
+    if options.perf_history && !options.dry_run {
+        let route = crate::perf_history::RouteTag {
+            topology: crate::perf_history::Topology::Local,
+            local_role: crate::perf_history::LocalRole::Source,
+            initiator: crate::perf_history::Initiator::Cli,
+            peer_key: Some(dst_root.display().to_string()),
+        };
+        if let Some(seed) = crate::seed_store::route_seed_user(&route) {
+            if let Some(checkers) = seed.checkers {
+                checker_pool.seed_hint(checkers as usize);
+            }
+        }
+    }
 
     if !src_root.exists() {
         return Err(eyre!("source path does not exist: {}", src_root.display()));
