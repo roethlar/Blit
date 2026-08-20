@@ -60,6 +60,12 @@ signatures):
 brew install roethlar/blit/blit-bin
 ```
 
+**Windows — winget**
+
+```powershell
+winget install Roethlar.Blit
+```
+
 **Windows — Scoop**
 
 ```powershell
