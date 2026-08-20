@@ -1,0 +1,9 @@
+A r1 rc=0 wall_ms=11200
+A r2 rc=0 wall_ms=22232
+A r3 rc=0 wall_ms=17809
+A r4 rc=0 wall_ms=18113
+B r1 rc=0 wall_ms=18277
+B r2 rc=0 wall_ms=18065
+B r3 rc=0 wall_ms=18222
+B r4 rc=0 wall_ms=18322
+BENCH-DONE

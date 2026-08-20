@@ -233,6 +233,15 @@ tagging at the call sites).
    the win). ldt-2 parity traces unchanged.
 6. **ph-6 — rig proof.** Cold-vs-warm repeat-run A/B on magneto↔skippy;
    evidence dir under `docs/bench/`.
+   **Executed 2026-08-20** — both directions, both workload classes, clean
+   reruns after discarding a build-contaminated first pass. Evidence:
+   `docs/bench/PERF_HISTORY_PLANNING/`. Result: warm == cold within noise
+   (no regression), seeds persist/reuse/settle correctly (forward settles
+   at 4, reverse down to 1), merged reporting verified live on the daemon
+   box. Win ≈ 0 on this rig because the dial settles within the first
+   epochs even cold — the demonstrated claims are correctness and no
+   regression, not a speedup. Awaiting owner pass/fail on the R3
+   acceptance bar; checkpoints are owner-only.
 
 ## Rulings (all resolved — D-2026-08-20-2, owner-delegated design under
 "FAST, SIMPLE, RELIABLE")

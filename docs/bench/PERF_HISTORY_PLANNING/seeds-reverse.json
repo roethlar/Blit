@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "seeds": {
+    "remote|source|cli|magneto:/ph6/data|small": {
+      "workers": 1,
+      "runs": 4,
+      "updated_ms": 1787259621307
+    }
+  }
+}

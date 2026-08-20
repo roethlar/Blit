@@ -1,0 +1,6 @@
+Performance history ENABLED (18 record(s) loaded)
+Daemon history merged from: /mnt/generic-pool/video/blit-bin/ph6-state/perf_local.jsonl
+Per-route aggregates (3 key(s)):
+  [daemon] remote/destination/cli key=10.1.10.10:/mnt/generic-pool/video/ph6-dst/data — 16 run(s) (16 real), 131072 file(s), 131072.0 MiB, avg transfer 19113.5 ms
+  [daemon] remote/destination/cli key=10.1.10.10:/mnt/generic-pool/video/ph6-dst/smoke — 1 run(s) (1 real), 512 file(s), 512.0 MiB, avg transfer 3814.0 ms
+  [operator] local/source/cli key=- — 1 run(s) (1 real), 1 file(s), 0.0 MiB, avg transfer 3.0 ms

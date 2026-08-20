@@ -5,6 +5,21 @@ Per R5-F5 of `docs/reviews/followup_review_2026-05-02.md`: new entries
 go at the top of the file, immediately below this header, so reviewers
 scanning chronologically don't miss appended-at-the-bottom changes.
 
+- 2026-08-20T23:30Z — **ph-6 rig proof executed (PERF_HISTORY_PLANNING)**.
+  Cold-vs-warm A/B, both directions magneto↔skippy, 4 runs/arm, seeds
+  wiped per-run in the cold arm. First pass of BOTH benches discarded —
+  it overlapped a native `cargo build` on magneto (contamination caught
+  because forward steady-state dropped 27–28s → 18.1s on the clean
+  rerun). Clean results: forward steady ≈18.1s, reverse ≈26.1s, warm ==
+  cold within noise in both; settled seeds `large→workers:4` /
+  `small→workers:1` (N200 daemon side is the reverse bottleneck),
+  persisted + reused (`runs:4`); merged reporting verified live on
+  skippy (`[daemon]` + `[operator]` origin labels, per-route
+  aggregates). r1-of-batch fast outlier is a fresh-dataset effect, not a
+  seed effect (cold r1 matches steady). Evidence + interpretation:
+  `docs/bench/PERF_HISTORY_PLANNING/`. Scratch daemons stopped; fixtures
+  left on both boxes for owner inspection. Plan stays Active — R3
+  acceptance is an owner-only checkpoint, reported and awaiting ruling.
 - 2026-08-20T21:45Z — **daemon-address-shaped LOCAL dest now warns**
   (D-2026-08-20-3, owner: warn, don't refuse). The ph-5 smoke's typo'd
   `127.0.0.1:9911//dst1/` silently created a literal local directory and
