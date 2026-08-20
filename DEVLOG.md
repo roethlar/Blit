@@ -5,6 +5,25 @@ Per R5-F5 of `docs/reviews/followup_review_2026-05-02.md`: new entries
 go at the top of the file, immediately below this header, so reviewers
 scanning chronologically don't miss appended-at-the-bottom changes.
 
+- 2026-08-20T21:20Z — **ph-5 loopback E2E smoke** (local daemon,
+  127.0.0.1, real CLI pushes; scratch under /tmp, removed): workers
+  seed writer proven live end-to-end (push run → `perf_seeds.json`
+  gains `workers` under `remote|source|cli|<route>|small`); settle
+  gates proven (incremental no-op run and a 64-file run both correctly
+  refuse to write — ≥100-file gate); per-route seed keying isolates
+  (dst1 vs dst2 keys independent); warm runs green with seed armed.
+  Ramp acceleration NOT locally observable and cannot be: the dial
+  steps on blocked-tick pressure and loopback never blocks (2 GiB run
+  sealed at 4 streams, zero resizes, cold and warm identical) — the
+  scale-up/down-under-load demonstration is structurally rig-only,
+  confirming ph-6's A/B as the acceptance bar. FINDING for owner
+  ruling: a remote-looking destination `host:port//path` (double
+  slash, no colon before it) parses as a LOCAL path — `blit copy src/
+  "127.0.0.1:9911//dst1/"` silently created a literal `./127.0.0.1:9911/dst1`
+  directory and reported success; correct root-export grammar is
+  `host:port://path`. Candidate guard: refuse (or warn on) local
+  destinations whose first segment looks like `host[:port]`. Not
+  changed — user-facing CLI semantics need an owner decision.
 - 2026-08-20T20:55Z — **ph-5 warm-start session workers landed**
   (PERF_HISTORY_PLANNING): the sender's session dial arms the route's
   settled `workers` seed at open and ramps toward it on an accelerated
