@@ -158,6 +158,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 8. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
 9. **`docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (ACTIVE, D-2026-08-12-7)**
    — **pm-4 PROVEN; ALL BOT CHANNELS LIVE 2026-08-18**: brew tap (install-proven on arm64 macOS, exact identity, signature intact), scoop bucket, and AUR (`blit` + `blit-bin` 0.1.2-1, RPC-verified) are live; **winget LIVE — microsoft/winget-pkgs#420041 MERGED 2026-08-19** (`winget install Roethlar.Blit`); README Installation section lists the live channels (winget added 2026-08-20); cargo LIVE (D-2026-08-18-1: all three crates published 0.1.2, install proven, README advertises with the same-build caveat + BLIT_GIT_SHA pin recipe); homebrew-core (pm-5) not started. Detail: DEVLOG 2026-08-18 20:10Z/20:30Z.
+10. **`docs/plan/PERF_HISTORY_PLANNING.md` (Draft, 2026-08-20) — RELEASE BLOCKER (D-2026-08-20-1):** perf data must feed planning (warm-started dials from route-tagged history, all routes recorded incl. daemon-served) AND report honestly before the next tag. Open rulings R1–R3 in the doc; no code until Active.
 
 ## Authoritative docs right now
 
@@ -190,10 +191,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 ## Blocked / waiting (owner declarations and explicitly dated external blockers; checkpoints are owner-only)
 
 - **Rig facts:** `.agents/machines.md` is canonical; no host pairings here.
-- **Two stale test firewall entries await separately approved cleanup;** helper
-  shipped, entries untouched. Paths + no-reuse/no-removal gate: `.agents/machines.md`.
+- **Two stale test firewall entries await separately approved cleanup** (helper shipped, entries untouched); paths + no-reuse/no-removal gate: `.agents/machines.md`.
 
 ## Open questions
 
-- Package-manager next: `docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (pm-4 tap live; remotes/secrets owner-gated, D-2026-08-12-6).
+- Perf plan rulings R1–R3 (`docs/plan/PERF_HISTORY_PLANNING.md`): retire predictor for settled-dial seeds? fleet exposure deferred? rig A/B as the closing bar? — owner.
 - `INTERFACE_PLATFORM.md`: Active, no open rulings (D-2026-08-17-1..-5); open is only the per-slice gos. The old UI_REMOVAL `blit-app` question is absorbed: `blit-app` becomes the SDK. 1.0 UX gate stays CLOSED (D-2026-08-15-2).
