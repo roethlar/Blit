@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import generate
 import publish
@@ -88,6 +90,76 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(publish.normalize_tag("0.1.2"), ("v0.1.2", "0.1.2"))
         with self.assertRaises(publish.PublishError):
             publish.normalize_tag("latest")
+
+    def test_republish_extends_the_existing_pr_branch(self) -> None:
+        # A second dispatch for the same tag must land on the fork's
+        # existing PR branch, not fail non-fast-forward with a fresh
+        # branch cut from the default branch.
+        env = {
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.invalid",
+            "HOME": "/nonexistent",
+            "PATH": "/usr/bin:/bin",
+        }
+
+        def run(*args: str, cwd: Path) -> str:
+            return subprocess.check_output(
+                ["git", *args], cwd=cwd, env=env, text=True
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fork = root / "fork.git"
+            fork.mkdir()
+            run("init", "--bare", "--initial-branch=main", ".", cwd=fork)
+            seed = root / "seed"
+            seed.mkdir()
+            run("init", "--initial-branch=main", ".", cwd=seed)
+            (seed / "README").write_text("fork\n", encoding="utf-8")
+            run("add", "-A", cwd=seed)
+            run("commit", "-m", "init", cwd=seed)
+            run("push", str(fork), "main", cwd=seed)
+            # First dispatch already pushed the PR branch.
+            run("checkout", "-b", "blit-9.9.9", cwd=seed)
+            manifest = seed / "manifests" / "stub.yaml"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("attempt: 1\n", encoding="utf-8")
+            run("add", "-A", cwd=seed)
+            run("commit", "-m", "first dispatch", cwd=seed)
+            run("push", str(fork), "blit-9.9.9", cwd=seed)
+
+            stub = root / "stub.yaml"
+            stub.write_text("attempt: 2\n", encoding="utf-8")
+
+            def local_clone(repo: str, dest: Path, token: str) -> None:
+                subprocess.check_output(
+                    [
+                        "git",
+                        "clone",
+                        "--depth",
+                        "1",
+                        f"file://{fork}",
+                        str(dest),
+                    ],
+                    env=env,
+                    text=True,
+                )
+
+            with mock.patch.object(publish, "clone_https", local_clone):
+                result = publish.publish_copied_tree(
+                    stub_files=[(stub, Path("manifests") / "stub.yaml")],
+                    token="unused",
+                    repo="unused/fork",
+                    branch="blit-9.9.9",
+                    message="second dispatch",
+                )
+            self.assertIn("pushed", result)
+            # init + first dispatch + second dispatch, on one line of history.
+            self.assertEqual(
+                run("rev-list", "--count", "blit-9.9.9", cwd=fork).strip(), "3"
+            )
 
     def test_prepare_stubs_from_local_sidecars_does_not_need_network(self) -> None:
         here = Path(__file__).resolve().parent

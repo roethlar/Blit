@@ -245,7 +245,15 @@ def publish_copied_tree(
     with tempfile.TemporaryDirectory() as temp:
         dest = Path(temp) / "fork"
         clone_https(repo, dest, token)
-        git("checkout", "-B", branch, cwd=dest)
+        # A re-dispatch must extend the fork's existing PR branch: the
+        # shallow clone only has the default branch, and a fresh branch
+        # from it is rejected as non-fast-forward once the remote branch
+        # exists. Fetch the branch tip if it exists and build on it.
+        try:
+            git("fetch", "--depth", "1", "origin", branch, cwd=dest)
+            git("checkout", "-B", branch, "FETCH_HEAD", cwd=dest)
+        except PublishError:
+            git("checkout", "-B", branch, cwd=dest)
         for source, relative in stub_files:
             target = dest / relative
             target.parent.mkdir(parents=True, exist_ok=True)
