@@ -63,6 +63,14 @@ pub fn parse_transfer_endpoint(input: &str) -> Result<Endpoint> {
             // remote-shaped-typo guard below. Honor that lower-level
             // classification: it's local, not a typo'd remote.
             if err_msg.contains("appears to be a local path") {
+                // D-2026-08-20-3: still name the daemon-address trap —
+                // `1.2.3.4:9911//x/` lands here (the `:` is followed by
+                // a digit, so `check_local_path` calls it local), and
+                // silently creating a `./1.2.3.4:9911/` directory is
+                // exactly the footgun. Warn, don't refuse.
+                if let Some(msg) = remote_shaped_local_warning(input) {
+                    log::warn!("{msg}");
+                }
                 return Ok(Endpoint::Local(PathBuf::from(input)));
             }
             if err_msg.contains("forward slashes") {
@@ -75,10 +83,37 @@ pub fn parse_transfer_endpoint(input: &str) -> Result<Endpoint> {
             if input.contains("://") || input.contains(":/") {
                 Err(err)
             } else {
+                if let Some(msg) = remote_shaped_local_warning(input) {
+                    log::warn!("{msg}");
+                }
                 Ok(Endpoint::Local(PathBuf::from(input)))
             }
         }
     }
+}
+
+/// D-2026-08-20-3 (owner: warn, don't refuse): an input that falls
+/// through to LOCAL but whose first path segment is shaped like a
+/// daemon address (`host:port`) is almost always a typo'd remote —
+/// `host:port//path` where the root-export form is `host:port://path`.
+/// The loopback smoke that earned this rule watched
+/// `127.0.0.1:9911//dst1/` silently materialize a literal
+/// `./127.0.0.1:9911/dst1` directory and report success. Classification
+/// is deliberately unchanged (no local-wins ambiguity, same stance as
+/// the 2026-07-12 bare-name ruling); this only names the trap out loud.
+/// Returns the warning text so tests can pin the shape detection.
+fn remote_shaped_local_warning(input: &str) -> Option<String> {
+    let first = input.split(['/', '\\']).next().unwrap_or("");
+    let (host, port) = first.rsplit_once(':')?;
+    if host.is_empty() || port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!(
+        "'{input}' is being treated as a LOCAL path, but '{first}' looks like a \
+         daemon address — for a remote transfer use '{host}:{port}://<path>' \
+         (root export) or '{host}:{port}:/<module>/<path>'; use './{input}' to \
+         silence this warning"
+    ))
 }
 
 pub fn format_remote_endpoint(remote: &RemoteEndpoint) -> String {
@@ -240,6 +275,45 @@ mod tests {
             parse_transfer_endpoint("skippy:/backup/"),
             Ok(Endpoint::Remote(_))
         ));
+    }
+
+    /// D-2026-08-20-3: `host:port//path` classifies LOCAL (unchanged)
+    /// but the daemon-address shape is named out loud.
+    #[test]
+    fn host_port_double_slash_is_local_with_warning() {
+        assert!(matches!(
+            parse_transfer_endpoint("127.0.0.1:9911//dst1/"),
+            Ok(Endpoint::Local(_))
+        ));
+        let msg = remote_shaped_local_warning("127.0.0.1:9911//dst1/")
+            .expect("daemon-address shape must warn");
+        assert!(msg.contains("127.0.0.1:9911://<path>"), "got: {msg}");
+        assert!(
+            remote_shaped_local_warning("nas:9031/backup").is_some(),
+            "hostname:port + path must warn"
+        );
+    }
+
+    /// D-2026-08-20-3: ordinary local shapes stay silent — the `./`
+    /// escape hatch, plain names, non-numeric after the colon, Windows
+    /// drive segments, and empty host/port sides.
+    #[test]
+    fn ordinary_local_shapes_do_not_warn() {
+        for input in [
+            "./127.0.0.1:9911//dst1/",
+            "notes.txt",
+            "dir/file:12",
+            "C:\\path",
+            "host:/x",
+            "host:",
+            ":9031",
+            "host:port//x",
+        ] {
+            assert!(
+                remote_shaped_local_warning(input).is_none(),
+                "unexpected warning for {input:?}"
+            );
+        }
     }
 
     /// Owner decision 2026-07-12: when the Discovery refusal fires and

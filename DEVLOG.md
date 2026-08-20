@@ -5,6 +5,19 @@ Per R5-F5 of `docs/reviews/followup_review_2026-05-02.md`: new entries
 go at the top of the file, immediately below this header, so reviewers
 scanning chronologically don't miss appended-at-the-bottom changes.
 
+- 2026-08-20T21:45Z — **daemon-address-shaped LOCAL dest now warns**
+  (D-2026-08-20-3, owner: warn, don't refuse). The ph-5 smoke's typo'd
+  `127.0.0.1:9911//dst1/` silently created a literal local directory and
+  reported success. `parse_transfer_endpoint` now emits a stderr warning
+  (via `stderr_log`) whenever an input classified LOCAL has a leading
+  `host:port` segment, naming the `://`+`:/` remote forms and the `./`
+  escape hatch; classification itself is unchanged on both LOCAL branches
+  (`check_local_path` IsLocal and the parse-error fallback). Guard proven
+  red (stubbed helper → FAILED → restored); warning verified live on a
+  rebuilt binary. Gates: fmt clean, native + Linux-cross clippy clean at
+  `-D warnings`, workspace suite green on macOS (39 suites). Note: the
+  `smoke` ptk session has no default rustup toolchain — builds there fail
+  with a rustup backtrace; build in `aux`.
 - 2026-08-20T21:20Z — **ph-5 loopback E2E smoke** (local daemon,
   127.0.0.1, real CLI pushes; scratch under /tmp, removed): workers
   seed writer proven live end-to-end (push run → `perf_seeds.json`

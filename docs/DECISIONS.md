@@ -854,3 +854,7 @@ Format:
 - Why: each pick is the no-new-surface, no-wire-change option; a seed is a hint, not a contract, so it needs no negotiation; SIMPLE constrains the user-facing surface.
 - Supersedes: open rulings R1–R5 in docs/plan/PERF_HISTORY_PLANNING.md (resolved in the doc this session).
 
+## D-2026-08-20-3 — remote-shaped local destination warns, not refuses
+- Decision: owner picked (b) of (a) refuse / (b) warn-only / (c) leave-it for the `host:port//path` trap (loopback smoke finding, DEVLOG 2026-08-20T21:20Z): a transfer input that falls through endpoint classification to LOCAL but whose first path segment is shaped like a daemon address (`host:port`) emits a stderr warning naming the `host:port://path` root-export form and the `./` escape hatch; the transfer still runs locally. Parsing is unchanged — no local-wins ambiguity change, consistent with the 2026-07-12 bare-name foot-gun ruling (hint, don't reclassify).
+- Why: silently materializing a literal `./host:port/` directory and reporting success violates RELIABLE, but a hard refusal would break legitimate local paths (colons are legal in Unix filenames); the warning preserves both.
+
