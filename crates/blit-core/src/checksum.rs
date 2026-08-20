@@ -50,12 +50,12 @@ impl RollingChecksum {
         self.s2 = 0;
 
         // Use rsync's algorithm: process 4 bytes at a time for speed
-        let mut iter = data.chunks_exact(4);
-        for chunk in &mut iter {
-            let b0 = chunk[0] as u32;
-            let b1 = chunk[1] as u32;
-            let b2 = chunk[2] as u32;
-            let b3 = chunk[3] as u32;
+        let (chunks, remainder) = data.as_chunks::<4>();
+        for &[b0, b1, b2, b3] in chunks {
+            let b0 = b0 as u32;
+            let b1 = b1 as u32;
+            let b2 = b2 as u32;
+            let b3 = b3 as u32;
 
             self.s2 = self.s2.wrapping_add(
                 4u32.wrapping_mul(self.s1.wrapping_add(b0))
@@ -74,7 +74,7 @@ impl RollingChecksum {
         }
 
         // Process remaining bytes
-        for &byte in iter.remainder() {
+        for &byte in remainder {
             let v = byte as u32;
             self.s1 = self.s1.wrapping_add(v.wrapping_add(CHAR_OFFSET));
             self.s2 = self.s2.wrapping_add(self.s1);

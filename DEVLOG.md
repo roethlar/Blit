@@ -5,6 +5,17 @@ Per R5-F5 of `docs/reviews/followup_review_2026-05-02.md`: new entries
 go at the top of the file, immediately below this header, so reviewers
 scanning chronologically don't miss appended-at-the-bottom changes.
 
+- 2026-08-21T00:10Z — **CI red on `a7c6f20e` fixed: new stable-clippy lint**.
+  CI's runner picked up rust 1.98.0, whose new
+  `clippy::chunks_exact_to_as_chunks` lint failed `-D warnings` at
+  `crates/blit-core/src/checksum.rs:53` (Check & Format job; Linux, macOS,
+  Windows test jobs were all green). Mechanical rewrite to
+  `data.as_chunks::<4>()` + destructured `&[b0,b1,b2,b3]`; remainder loop
+  unchanged in behavior. Local 1.97.1 can't see the lint — the fix removes
+  `chunks_exact` outright, CI is the proof. Gates: fmt, clippy native +
+  linux-cross at `-D warnings`, full workspace suite green on macOS
+  (39 result lines, 0 failed; checksum 14/14).
+
 - 2026-08-20T23:55Z — **PERF_HISTORY_PLANNING SHIPPED; release blocker
   cleared (D-2026-08-20-4)**. Owner ruled "pass" on the ph-6/R3
   acceptance bar over the clean A/B evidence: warm == cold within noise
