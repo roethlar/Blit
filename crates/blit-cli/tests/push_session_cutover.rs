@@ -58,6 +58,9 @@ fn push_execution(src: &Path, port: u16) -> PushExecution {
         lifecycle_trace: Default::default(),
         verbose: false,
         progress: false,
+        // ph-1: never write to the machine's real perf-history store
+        // from a test.
+        perf_history: false,
     }
 }
 

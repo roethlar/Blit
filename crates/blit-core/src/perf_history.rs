@@ -472,6 +472,14 @@ impl HistoryStore {
     }
 }
 
+/// Where and how one session end records itself (ph-1): the store it
+/// owns plus the route as this end experienced it.
+#[derive(Debug, Clone)]
+pub struct RecordSink {
+    pub store: HistoryStore,
+    pub route: RouteTag,
+}
+
 /// Append a record to the user (CLI) performance history store.
 ///
 /// Back-compat wrapper over [`HistoryStore::user`]; see

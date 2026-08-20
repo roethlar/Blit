@@ -997,7 +997,7 @@ pub async fn run_local_session(
         files_repaired: outcome.files_repaired,
     };
 
-    record_local_history(&summary, &options);
+    record_local_history(&summary, &options, dst_root);
 
     Ok(summary)
 }
@@ -1006,11 +1006,15 @@ pub async fn run_local_session(
 /// `blit profile` keeps its local data feed; the predictor and its
 /// planner/transfer split retired with the engine, so the whole wall
 /// time lands in `transfer_duration_ms`).
-fn record_local_history(summary: &LocalMirrorSummary, options: &LocalMirrorOptions) {
+fn record_local_history(
+    summary: &LocalMirrorSummary,
+    options: &LocalMirrorOptions,
+    dest_root: &Path,
+) {
     if !options.perf_history {
         return;
     }
-    let record = build_local_record(summary, options);
+    let record = build_local_record(summary, options, dest_root);
     if let Err(err) = crate::perf_history::append_local_record(&record) {
         if options.verbose {
             // Through the log facade so a live progress row can route it
@@ -1025,11 +1029,19 @@ fn record_local_history(summary: &LocalMirrorSummary, options: &LocalMirrorOptio
 /// (R44-F1's "train and query on the same feature vector" invariant,
 /// carried forward as "record scanned features") stays unit-testable,
 /// the same rationale the engine's `build_performance_record` had.
+///
+/// `dest_root` is threaded in from [`run_local_session`] (the only
+/// caller, and the one place that holds both roots) purely to key the
+/// v3 route: neither `LocalMirrorSummary` nor `LocalMirrorOptions`
+/// carries where the bytes landed.
 fn build_local_record(
     summary: &LocalMirrorSummary,
     options: &LocalMirrorOptions,
+    dest_root: &Path,
 ) -> crate::perf_history::PerformanceRecord {
-    use crate::perf_history::{OptionSnapshot, PerformanceRecord, TransferMode};
+    use crate::perf_history::{
+        Initiator, LocalRole, OptionSnapshot, PerformanceRecord, RouteTag, Topology, TransferMode,
+    };
     let snapshot = OptionSnapshot {
         dry_run: options.dry_run,
         // The engine-era option axes retired at otp-11b; the persisted
@@ -1070,7 +1082,16 @@ fn build_local_record(
         summary.duration.as_millis(),
         0,
         0,
-    );
+    )
+    // v3 (ph-1): both ends are this machine, so the process owns the
+    // SOURCE role by the `LocalRole` convention, and the destination
+    // root is the whole peer identity — there is no host to name.
+    .with_route(RouteTag {
+        topology: Topology::Local,
+        local_role: LocalRole::Source,
+        initiator: Initiator::Cli,
+        peer_key: Some(dest_root.display().to_string()),
+    });
     record.tar_shard_tasks = summary.tar_shard_tasks as u32;
     record.tar_shard_files = summary.tar_shard_files as u32;
     record.tar_shard_bytes = summary.tar_shard_bytes;
@@ -2011,11 +2032,39 @@ mod tests {
             duration: std::time::Duration::from_millis(200),
             ..LocalMirrorSummary::default()
         };
-        let record = build_local_record(&summary, &LocalMirrorOptions::default());
+        let record = build_local_record(
+            &summary,
+            &LocalMirrorOptions::default(),
+            Path::new("/dest/root"),
+        );
         assert_eq!(record.file_count, 1000);
         assert_eq!(record.total_bytes, summary.scanned_bytes);
         assert_eq!(record.transfer_duration_ms, 200);
         assert_eq!(record.fast_path.as_deref(), Some("session"));
+    }
+
+    /// ph-1: a local record carries its route, so `blit profile` can
+    /// keep local-disk numbers out of the remote aggregates and a seed
+    /// lookup can find the previous run to THIS destination. Pre-ph-1
+    /// every record was route-less, which is exactly why the v0–v2
+    /// migration defaults are local/source/cli.
+    #[test]
+    fn local_record_carries_the_local_cli_route() {
+        use crate::perf_history::{Initiator, LocalRole, Topology};
+        let dest = Path::new("/dest/root");
+        let record = build_local_record(
+            &LocalMirrorSummary::default(),
+            &LocalMirrorOptions::default(),
+            dest,
+        );
+        assert_eq!(record.topology, Topology::Local);
+        assert_eq!(record.local_role, LocalRole::Source);
+        assert_eq!(record.initiator, Initiator::Cli);
+        assert_eq!(
+            record.peer_key.as_deref(),
+            Some(dest.display().to_string().as_str()),
+            "the destination root is the local route's whole peer identity"
+        );
     }
 
     /// Bucket-shape fields still reflect actual apply activity.
@@ -2031,7 +2080,11 @@ mod tests {
             large_bytes: 5_000,
             ..LocalMirrorSummary::default()
         };
-        let record = build_local_record(&summary, &LocalMirrorOptions::default());
+        let record = build_local_record(
+            &summary,
+            &LocalMirrorOptions::default(),
+            Path::new("/dest/root"),
+        );
         assert_eq!(record.tar_shard_tasks, 2);
         assert_eq!(record.tar_shard_files, 7);
         assert_eq!(record.tar_shard_bytes, 30_000);
@@ -2046,12 +2099,14 @@ mod tests {
     fn local_record_null_and_dry_run_lanes() {
         use crate::perf_history::RunKind;
         let summary = LocalMirrorSummary::default();
+        let dest = Path::new("/dest/root");
         let null = build_local_record(
             &summary,
             &LocalMirrorOptions {
                 null_sink: true,
                 ..LocalMirrorOptions::default()
             },
+            dest,
         );
         assert_eq!(null.fast_path.as_deref(), Some("null_sink"));
         assert_eq!(null.run_kind, RunKind::NullSink);
@@ -2061,6 +2116,7 @@ mod tests {
                 dry_run: true,
                 ..LocalMirrorOptions::default()
             },
+            dest,
         );
         assert_eq!(dry.run_kind, RunKind::DryRun);
     }

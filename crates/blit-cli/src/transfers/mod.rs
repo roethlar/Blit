@@ -320,7 +320,15 @@ async fn run_transfer_inner(
             }
             ensure_remote_push_supported(args)?;
             ensure_remote_destination_supported(&dst)?;
-            let state = run_remote_push_transfer(args, src, dst, mirror, lifecycle_trace).await?;
+            let state = run_remote_push_transfer(
+                args,
+                src,
+                dst,
+                mirror,
+                ctx.perf_history_enabled,
+                lifecycle_trace,
+            )
+            .await?;
             Ok(exit_for_failures(state.summary.files_failed))
         }
         TransferRoute::RemoteToLocal { src, dst, mirror } => {
@@ -332,6 +340,7 @@ async fn run_transfer_inner(
                 &dst,
                 mirror,
                 false, // not a move — source survives
+                ctx.perf_history_enabled,
                 lifecycle_trace,
             )
             .await?;
@@ -347,6 +356,7 @@ async fn run_transfer_inner(
                 dst,
                 mirror,
                 false, /* not a move */
+                ctx.perf_history_enabled,
                 lifecycle_trace,
             )
             .await?;
@@ -654,6 +664,7 @@ async fn run_move_inner(
                 &dst_path,
                 false,
                 true,
+                ctx.perf_history_enabled,
                 lifecycle_trace,
             )
             .await?;
@@ -700,6 +711,7 @@ async fn run_move_inner(
                 src_path.clone(),
                 remote.clone(),
                 false,
+                ctx.perf_history_enabled,
                 lifecycle_trace,
             )
             .await?;
@@ -741,6 +753,7 @@ async fn run_move_inner(
                 dst,
                 false,
                 true,
+                ctx.perf_history_enabled,
                 lifecycle_trace,
             )
             .await?;

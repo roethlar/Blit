@@ -24,6 +24,7 @@ pub async fn run_remote_to_remote_direct(
     dst: RemoteEndpoint,
     mirror_mode: bool,
     move_verb: bool,
+    perf_history: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredDelegatedState> {
     run_remote_to_remote_direct_inner(
@@ -33,6 +34,7 @@ pub async fn run_remote_to_remote_direct(
         mirror_mode,
         move_verb,
         false, // defer_output
+        perf_history,
         lifecycle_trace,
     )
     .await
@@ -47,6 +49,7 @@ pub async fn run_remote_to_remote_direct_deferred(
     dst: RemoteEndpoint,
     mirror_mode: bool,
     move_verb: bool,
+    perf_history: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredDelegatedState> {
     run_remote_to_remote_direct_inner(
@@ -56,6 +59,7 @@ pub async fn run_remote_to_remote_direct_deferred(
         mirror_mode,
         move_verb,
         true, // defer_output
+        perf_history,
         lifecycle_trace,
     )
     .await
@@ -114,6 +118,7 @@ pub fn print_deferred_delegated_result(args: &TransferArgs, state: &DeferredDele
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_remote_to_remote_direct_inner(
     args: &TransferArgs,
     src: RemoteEndpoint,
@@ -121,6 +126,10 @@ async fn run_remote_to_remote_direct_inner(
     mirror_mode: bool,
     move_verb: bool,
     defer_output: bool,
+    // ph-1: the CLI settings gate, threaded from `AppContext` by the
+    // dispatcher. `run_delegated_pull` also refuses to record a
+    // `--detach` run, which exits before any summary exists.
+    perf_history: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredDelegatedState> {
     let filter_spec = super::build_filter_spec(args)?;
@@ -150,6 +159,7 @@ async fn run_remote_to_remote_direct_inner(
         // CLI in-byte-path guarantee.
         detach: args.detach,
         lifecycle_trace: lifecycle_trace.clone(),
+        perf_history,
     };
 
     // --detach exit-after-Started path. Opens the stream

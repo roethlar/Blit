@@ -437,6 +437,9 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
         progress: None,
         trace_data_plane: false,
         lifecycle_trace: lifecycle_trace.clone(),
+        // ph-1: the delegated dst daemon's own recording lands in a
+        // later slice (it needs the daemon store, not the user one).
+        perf: None,
     };
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let mut options = options;

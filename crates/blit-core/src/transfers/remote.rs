@@ -51,9 +51,11 @@ use crate::generated::{
     BytesProgress, ComparisonMode, DelegatedPullRequest, DelegatedPullStarted,
     DelegatedPullSummary, FilterSpec, MirrorMode, RemoteSourceLocator, TransferSummary,
 };
+use crate::perf_history::{HistoryStore, Initiator, LocalRole, RecordSink, RouteTag, Topology};
 use crate::remote::transfer::operation_spec::{delegated_spec_from_options, DelegatedSpecOptions};
 use crate::remote::transfer::session_client::{
-    run_pull_session, run_push_session, PullSessionOptions, PushSessionOptions,
+    endpoint_module_path, record_session_history, run_pull_session, run_push_session,
+    PullSessionOptions, PushSessionOptions, SessionRecordFacts,
 };
 use crate::remote::transfer::source::{FsTransferSource, TransferSource};
 use crate::remote::transfer::{
@@ -136,6 +138,11 @@ pub struct PushExecution {
     /// residue (d), post-1.0), and a caller that draws its own surface —
     /// the TUI — must leave this `false` so raw lines never land on it.
     pub progress: bool,
+    /// ph-1: record this run in the CLI's performance history. Threaded
+    /// from `AppContext::perf_history_enabled` exactly as the local
+    /// route threads `LocalMirrorOptions::perf_history`; in-repo tests
+    /// and benches set it `false` so they never touch the real store.
+    pub perf_history: bool,
 }
 
 /// Output of [`run_remote_push`]. `summary` is the
@@ -150,6 +157,44 @@ pub struct PushExecution {
 pub struct PushExecutionOutcome {
     pub summary: TransferSummary,
     pub destination: String,
+}
+
+/// Stable `peer_key` for a remote route's performance record (ph-1):
+/// the endpoint host plus the wire target the session addressed,
+/// derived through the very `(module, path)` pair `SessionOpen` carries
+/// (`endpoint_module_path`) so the key cannot drift from what was
+/// transferred. The rendering matches [`RemoteEndpoint::display`]'s
+/// canonical form — `host:/module/path` for a module export,
+/// `host://path` for the default root export — so module and root
+/// targets never collide.
+///
+/// `None` for a discovery-form endpoint (no resolvable target). A
+/// record with no key still lands and still counts in the route's
+/// aggregates; it simply keys no seed.
+fn remote_peer_key(endpoint: &RemoteEndpoint) -> Option<String> {
+    let (module, path) = endpoint_module_path(endpoint).ok()?;
+    let target = if module.is_empty() {
+        format!("//{path}")
+    } else {
+        format!("/{module}/{path}")
+    };
+    Some(format!("{}:{}", endpoint.host, target))
+}
+
+/// The CLI store's [`RecordSink`] for `route`, or `None` when the store
+/// cannot be located.
+///
+/// ph-1 posture: recording never fails a transfer, so an unresolvable
+/// config directory is a warning and a skipped record, never an error
+/// the verb returns.
+fn cli_record_sink(route: RouteTag) -> Option<RecordSink> {
+    match HistoryStore::user() {
+        Ok(store) => Some(RecordSink { store, route }),
+        Err(err) => {
+            log::warn!("performance history not recorded for this run: {err:?}");
+            None
+        }
+    }
 }
 
 /// Run a remote push end-to-end (otp-10a: the push-shaped verb on the
@@ -183,6 +228,17 @@ pub async fn run_remote_push(
     execution: PushExecution,
     progress: Option<&RemoteTransferProgress>,
 ) -> Result<PushExecutionOutcome> {
+    // ph-1: this end is the SOURCE of a two-machine session driven from
+    // this CLI process, keyed by the destination it pushed to.
+    let perf = execution.perf_history.then(|| {
+        cli_record_sink(RouteTag {
+            topology: Topology::Remote,
+            local_role: LocalRole::Source,
+            initiator: Initiator::Cli,
+            peer_key: remote_peer_key(&execution.remote),
+        })
+    });
+
     // cr-a16-1: `verbose || progress`, the same shape `run_local_session`
     // uses. The SOURCE gets no progress sink here, so under plain `-p` the
     // heartbeat's raw-stderr fallback is the only liveness signal a slow
@@ -212,6 +268,7 @@ pub async fn run_remote_push(
         progress: progress.cloned(),
         trace_data_plane: execution.trace_data_plane,
         lifecycle_trace: execution.lifecycle_trace,
+        perf: perf.flatten(),
         ..PushSessionOptions::default()
     };
 
@@ -261,6 +318,8 @@ pub struct PullExecution {
     pub ignore_existing: bool,
     pub remote_label: String,
     pub lifecycle_trace: TransferLifecycleTrace,
+    /// ph-1: see [`PushExecution::perf_history`].
+    pub perf_history: bool,
 }
 
 /// Output of [`run_remote_pull`]: the session [`TransferSummary`] this
@@ -320,6 +379,25 @@ pub async fn run_remote_pull(
         progress: progress.cloned(),
         trace_data_plane: execution.trace_data_plane,
         lifecycle_trace: execution.lifecycle_trace,
+        // ph-1: this end is the DESTINATION of a two-machine session
+        // driven from this CLI process. The key names the peer it pulled
+        // from and the local root the bytes landed in — the pair that
+        // makes two pulls comparable.
+        perf: execution
+            .perf_history
+            .then(|| {
+                cli_record_sink(RouteTag {
+                    topology: Topology::Remote,
+                    local_role: LocalRole::Destination,
+                    initiator: Initiator::Cli,
+                    peer_key: Some(format!(
+                        "{}:{}",
+                        execution.remote.host,
+                        execution.dest_root.display()
+                    )),
+                })
+            })
+            .flatten(),
     };
     let outcome = run_pull_session(&execution.remote, execution.dest_root.clone(), options)
         .await
@@ -356,6 +434,11 @@ pub struct DelegatedPullExecution {
     /// upstream).
     pub detach: bool,
     pub lifecycle_trace: TransferLifecycleTrace,
+    /// ph-1: see [`PushExecution::perf_history`]. The coordinator runs
+    /// no session of its own, so [`run_delegated_pull`] records the
+    /// delegated run directly — and only when it stays to observe the
+    /// summary (a `detach` run exits before one exists).
+    pub perf_history: bool,
 }
 
 /// Output of [`run_delegated_pull`]. The `src` / `dst` endpoints
@@ -563,6 +646,28 @@ where
     let spec = delegated_spec_from_options(&execution.src, &execution.options)?;
     let (dst_module, dst_destination_path) = destination_spec_fields(&execution.dst)?;
 
+    // ph-1: no session runs in this process — the coordinator only
+    // drives two daemons — so the record is built here from the
+    // destination's re-encoded summary. Read the spec's policy fields
+    // before the spec moves onto the request.
+    let started = std::time::Instant::now();
+    let spec_compare =
+        ComparisonMode::try_from(spec.compare_mode).unwrap_or(ComparisonMode::SizeMtime);
+    let spec_mirrors = spec.mirror_mode != MirrorMode::Off as i32;
+    // A detached CLI exits before the destination computes any summary
+    // (the synthesized zero-summary in the caller is not a measurement),
+    // so it has nothing honest to record.
+    let perf = (execution.perf_history && !execution.detach)
+        .then(|| {
+            cli_record_sink(RouteTag {
+                topology: Topology::RemoteToRemote,
+                local_role: LocalRole::Coordinator,
+                initiator: Initiator::Cli,
+                peer_key: remote_peer_key(&execution.dst),
+            })
+        })
+        .flatten();
+
     let request = DelegatedPullRequest {
         dst_module,
         dst_destination_path,
@@ -699,6 +804,19 @@ where
         "delegated_body_return",
         Some(TransferLifecycleOutcome::Success),
     );
+
+    record_session_history(
+        perf.as_ref(),
+        SessionRecordFacts {
+            mirror_enabled: spec_mirrors,
+            compare_mode: spec_compare,
+            files: summary.files_transferred,
+            bytes: summary.bytes_transferred,
+            files_failed: summary.files_failed,
+            elapsed: started.elapsed(),
+        },
+    );
+
     Ok(DelegatedPullOutcome {
         summary,
         src: execution.src,
@@ -921,6 +1039,8 @@ mod tests {
             dst_label: "x".to_string(),
             detach: false,
             lifecycle_trace: Default::default(),
+            // Never touch the operator's real store from a test.
+            perf_history: false,
         };
         let err = run_delegated_pull_until_started(execution)
             .await
@@ -988,6 +1108,42 @@ mod tests {
         assert_eq!(
             failures[MAX_REPORTED_FILE_FAILURES - 1].relative_path,
             format!("dir/f{}.bin", MAX_REPORTED_FILE_FAILURES - 1)
+        );
+    }
+
+    /// ph-1: the remote `peer_key` renders the endpoint's canonical
+    /// identity, so a module export and the default root export can
+    /// never share a key (and thus never share a seed or an aggregate).
+    #[test]
+    fn remote_peer_key_distinguishes_module_and_root_targets() {
+        let module = delegated_endpoint(RemotePath::Module {
+            module: "mod".to_string(),
+            rel_path: PathBuf::from("a").join("b"),
+        });
+        assert_eq!(
+            remote_peer_key(&module).as_deref(),
+            Some("localhost:/mod/a/b")
+        );
+
+        let module_root = delegated_endpoint(RemotePath::Module {
+            module: "mod".to_string(),
+            rel_path: PathBuf::new(),
+        });
+        assert_eq!(
+            remote_peer_key(&module_root).as_deref(),
+            Some("localhost:/mod/")
+        );
+
+        let root = delegated_endpoint(RemotePath::Root {
+            rel_path: PathBuf::from("mod"),
+        });
+        assert_eq!(remote_peer_key(&root).as_deref(), Some("localhost://mod"));
+
+        // A discovery form addresses no transfer target, so it keys
+        // nothing rather than inventing an identity.
+        assert_eq!(
+            remote_peer_key(&delegated_endpoint(RemotePath::Discovery)),
+            None
         );
     }
 

@@ -365,6 +365,7 @@ pub async fn run_remote_push_transfer(
     source: PathBuf,
     remote: RemoteEndpoint,
     mirror_mode: bool,
+    perf_history: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredPushState> {
     run_remote_push_transfer_inner(
@@ -374,6 +375,7 @@ pub async fn run_remote_push_transfer(
         mirror_mode,
         false,
         false,
+        perf_history,
         lifecycle_trace,
     )
     .await
@@ -396,6 +398,7 @@ pub async fn run_remote_push_transfer_deferred(
     source: PathBuf,
     remote: RemoteEndpoint,
     mirror_mode: bool,
+    perf_history: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredPushState> {
     run_remote_push_transfer_inner(
@@ -405,6 +408,7 @@ pub async fn run_remote_push_transfer_deferred(
         mirror_mode,
         true,
         true,
+        perf_history,
         lifecycle_trace,
     )
     .await
@@ -456,6 +460,7 @@ fn emit_session_fault_summary(err: &eyre::Report) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_remote_push_transfer_inner(
     args: &TransferArgs,
     source: PathBuf,
@@ -463,6 +468,10 @@ async fn run_remote_push_transfer_inner(
     mirror_mode: bool,
     move_verb: bool,
     defer_output: bool,
+    // ph-1: the CLI settings gate, threaded from `AppContext` by the
+    // dispatcher — the same value `LocalMirrorOptions::perf_history`
+    // gets on the local route.
+    perf_history: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredPushState> {
     let show_progress = args.effective_progress() || args.verbose;
@@ -530,6 +539,7 @@ async fn run_remote_push_transfer_inner(
         // does (`LocalMirrorOptions.progress`) rather than losing the
         // documented "(or `-p`)" liveness fallback.
         progress: args.effective_progress(),
+        perf_history,
     };
 
     // Push has no caller-side destructive step (mirror-delete is
@@ -573,6 +583,7 @@ pub async fn run_remote_pull_transfer(
     dest_root: &Path,
     mirror_mode: bool,
     move_verb: bool,
+    perf_history: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredPullState> {
     run_remote_pull_transfer_inner(
@@ -582,6 +593,7 @@ pub async fn run_remote_pull_transfer(
         mirror_mode,
         move_verb,
         false, // emit success summary inline (copy/mirror default)
+        perf_history,
         lifecycle_trace,
     )
     .await
@@ -597,6 +609,7 @@ pub async fn run_remote_pull_transfer_deferred(
     dest_root: &Path,
     mirror_mode: bool,
     move_verb: bool,
+    perf_history: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredPullState> {
     run_remote_pull_transfer_inner(
@@ -606,6 +619,7 @@ pub async fn run_remote_pull_transfer_deferred(
         mirror_mode,
         move_verb,
         true,
+        perf_history,
         lifecycle_trace,
     )
     .await
@@ -625,6 +639,7 @@ pub fn print_deferred_pull_result(args: &TransferArgs, state: &DeferredPullState
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_remote_pull_transfer_inner(
     args: &TransferArgs,
     remote: RemoteEndpoint,
@@ -632,6 +647,8 @@ async fn run_remote_pull_transfer_inner(
     mirror_mode: bool,
     move_verb: bool,
     defer_output: bool,
+    // ph-1: see `run_remote_push_transfer_inner`.
+    perf_history: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredPullState> {
     // Filter parity: the wire FilterSpec rides `SessionOpen.filter`
@@ -688,6 +705,7 @@ async fn run_remote_pull_transfer_inner(
         ignore_existing: args.ignore_existing,
         remote_label: format_remote_endpoint(&remote),
         lifecycle_trace: lifecycle_trace.clone(),
+        perf_history,
     };
 
     // Mirror deletions run in-session at SourceDone (the one delete

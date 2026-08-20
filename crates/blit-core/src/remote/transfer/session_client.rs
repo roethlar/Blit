@@ -32,6 +32,7 @@ use crate::generated::{
     ComparisonMode, FilterSpec, MirrorMode, ResumeSettings, SessionOpen, TransferRole,
     TransferSummary,
 };
+use crate::perf_history;
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::source::TransferSource;
 use crate::remote::transfer::{
@@ -94,6 +95,12 @@ pub struct PushSessionOptions {
     pub trace_data_plane: bool,
     /// Explicit process-local lifecycle context. Disabled by default.
     pub lifecycle_trace: TransferLifecycleTrace,
+    /// ph-1: where this end records the finished session, and as what
+    /// route. `None` (the default, and every test) records nothing —
+    /// recording is opt-in per call, exactly as the local session's
+    /// `LocalMirrorOptions::perf_history` flag is, so a unit test can
+    /// never write to the operator's real store.
+    pub perf: Option<perf_history::RecordSink>,
 }
 
 impl Default for PushSessionOptions {
@@ -113,6 +120,7 @@ impl Default for PushSessionOptions {
             progress: None,
             trace_data_plane: false,
             lifecycle_trace: TransferLifecycleTrace::disabled(),
+            perf: None,
         }
     }
 }
@@ -124,8 +132,15 @@ impl Default for PushSessionOptions {
 pub async fn run_push_session(
     endpoint: &RemoteEndpoint,
     source: Arc<dyn TransferSource>,
-    options: PushSessionOptions,
+    mut options: PushSessionOptions,
 ) -> Result<TransferSummary> {
+    // ph-1: the perf facts this end needs, lifted before the option
+    // fields are moved into `SessionOpen` / the instruments.
+    let started = std::time::Instant::now();
+    let perf = options.perf.take();
+    let perf_mirror = options.mirror_enabled;
+    let perf_compare = options.compare_mode;
+
     let lifecycle_trace = options.lifecycle_trace.clone();
     lifecycle_trace.attach_initiator_role(SessionPhaseRole::Source);
 
@@ -230,6 +245,18 @@ pub async fn run_push_session(
         }
         return Err(eyre!(message));
     }
+
+    record_session_history(
+        perf.as_ref(),
+        SessionRecordFacts {
+            mirror_enabled: perf_mirror,
+            compare_mode: perf_compare,
+            files: summary.files_transferred,
+            bytes: summary.bytes_transferred,
+            files_failed: summary.files_failed,
+            elapsed: started.elapsed(),
+        },
+    );
     Ok(summary)
 }
 
@@ -282,6 +309,9 @@ pub struct PullSessionOptions {
     pub trace_data_plane: bool,
     /// Explicit process-local lifecycle context. Disabled by default.
     pub lifecycle_trace: TransferLifecycleTrace,
+    /// ph-1: see [`PushSessionOptions::perf`] — same opt-in posture,
+    /// DESTINATION role.
+    pub perf: Option<perf_history::RecordSink>,
 }
 
 impl Default for PullSessionOptions {
@@ -301,6 +331,7 @@ impl Default for PullSessionOptions {
             progress: None,
             trace_data_plane: false,
             lifecycle_trace: TransferLifecycleTrace::disabled(),
+            perf: None,
         }
     }
 }
@@ -337,8 +368,15 @@ pub async fn run_pull_session_with_client(
     mut client: BlitClient<Channel>,
     endpoint: &RemoteEndpoint,
     dest_root: PathBuf,
-    options: PullSessionOptions,
+    mut options: PullSessionOptions,
 ) -> Result<DestinationOutcome> {
+    // ph-1: same lift as the push side — the perf facts are read before
+    // the option fields move into the open / the instruments.
+    let started = std::time::Instant::now();
+    let perf = options.perf.take();
+    let perf_mirror = options.mirror_enabled;
+    let perf_compare = options.compare_mode;
+
     let lifecycle_trace = options.lifecycle_trace.clone();
     lifecycle_trace.attach_initiator_role(SessionPhaseRole::Destination);
     let (module, path) = endpoint_module_path(endpoint)?;
@@ -402,7 +440,136 @@ pub async fn run_pull_session_with_client(
         },
         local_apply: None,
     };
-    run_destination(cfg, transport, DestinationTarget::Fixed(dest_root)).await
+    let outcome = run_destination(cfg, transport, DestinationTarget::Fixed(dest_root)).await?;
+
+    record_session_history(
+        perf.as_ref(),
+        SessionRecordFacts {
+            mirror_enabled: perf_mirror,
+            compare_mode: perf_compare,
+            files: outcome.summary.files_transferred,
+            bytes: outcome.summary.bytes_transferred,
+            files_failed: outcome.summary.files_failed,
+            elapsed: started.elapsed(),
+        },
+    );
+    Ok(outcome)
+}
+
+/// The facts one finished session end contributes to its
+/// [`perf_history::PerformanceRecord`] (ph-1).
+///
+/// Grouped into a struct rather than threaded as loose parameters
+/// because three call sites with three different summary messages
+/// build the same row: the push SOURCE and the pull DESTINATION here
+/// (`TransferSummary`), and the delegated coordinator in
+/// `crate::transfers::remote` (`DelegatedPullSummary`, no session of
+/// its own). One builder means the record shape cannot drift between
+/// routes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SessionRecordFacts {
+    pub mirror_enabled: bool,
+    pub compare_mode: ComparisonMode,
+    /// Destination-attested file and byte counts.
+    pub files: u64,
+    pub bytes: u64,
+    /// Destination-contained per-file failures (pfc-4).
+    pub files_failed: u64,
+    /// Wall time this end spent on the session.
+    pub elapsed: Duration,
+}
+
+/// Map the wire comparison policy onto the perf-history snapshot enum.
+///
+/// Deliberately NOT shared with
+/// `LocalCompareMode::resolve_compare_snapshot`: that one maps from the
+/// process-local `LocalCompareMode` **plus** the legacy `--checksum`
+/// bool, so it has a different input type and an extra precedence rule.
+/// A shared `CompareModeSnapshot::from_proto` would only serve one of
+/// the two sites, and folding the local site through it would mean
+/// resolving `LocalCompareMode` to `ComparisonMode` first — a second
+/// hop that buys nothing. The variant mapping below is the same
+/// one-to-one correspondence, written against the proto enum.
+/// `Unspecified` is the wire's documented "treat as SIZE_MTIME"
+/// default (blit.proto §ComparisonMode).
+fn compare_snapshot(mode: ComparisonMode) -> perf_history::CompareModeSnapshot {
+    use perf_history::CompareModeSnapshot;
+    match mode {
+        ComparisonMode::Unspecified | ComparisonMode::SizeMtime => CompareModeSnapshot::SizeMtime,
+        ComparisonMode::Checksum => CompareModeSnapshot::Checksum,
+        ComparisonMode::SizeOnly => CompareModeSnapshot::SizeOnly,
+        ComparisonMode::Force => CompareModeSnapshot::Force,
+        ComparisonMode::IgnoreTimes => CompareModeSnapshot::IgnoreTimes,
+    }
+}
+
+/// Build the [`perf_history::PerformanceRecord`] for one finished
+/// session end, without touching disk — split from the writer for the
+/// same reason `build_local_record` is: the record-shape contract stays
+/// unit-testable without a live daemon.
+pub(crate) fn build_session_record(
+    route: &perf_history::RouteTag,
+    facts: SessionRecordFacts,
+) -> perf_history::PerformanceRecord {
+    use perf_history::{OptionSnapshot, PerformanceRecord, TransferMode};
+    let snapshot = OptionSnapshot {
+        // A session never runs a dry plan: `--dry-run` never reaches
+        // the wire.
+        dry_run: false,
+        // The engine-era option axes retired at otp-11b; the persisted
+        // snapshot schema keeps the fields — record the historical
+        // defaults (the only values production ever produced), exactly
+        // as `build_local_record` does.
+        preserve_symlinks: true,
+        include_symlinks: true,
+        skip_unchanged: true,
+        checksum: matches!(facts.compare_mode, ComparisonMode::Checksum),
+        compare_mode: compare_snapshot(facts.compare_mode),
+        // Remote worker counts are dial-managed by the live session
+        // controllers on each end and are not a client-side option, so
+        // there is no client-observed count to record here.
+        workers: 0,
+    };
+    let mode = if facts.mirror_enabled {
+        TransferMode::Mirror
+    } else {
+        TransferMode::Copy
+    };
+    PerformanceRecord::new(
+        mode,
+        None,
+        None,
+        facts.files as usize,
+        facts.bytes,
+        snapshot,
+        Some("session".to_string()),
+        // The session has no separate planner phase to attribute; the
+        // whole wall time lands in `transfer_duration_ms` (D3, the same
+        // split `build_local_record` collapsed).
+        0,
+        facts.elapsed.as_millis(),
+        0,
+        facts.files_failed.try_into().unwrap_or(u32::MAX),
+    )
+    .with_route(route.clone())
+}
+
+/// Append one finished session end's record to its sink, if it has one.
+///
+/// ph-1 posture: recording must NEVER fail or delay the transfer result
+/// beyond the append itself, so a store error is logged and dropped —
+/// the caller has already computed its summary.
+pub(crate) fn record_session_history(
+    sink: Option<&perf_history::RecordSink>,
+    facts: SessionRecordFacts,
+) {
+    let Some(sink) = sink else {
+        return;
+    };
+    let record = build_session_record(&sink.route, facts);
+    if let Err(err) = sink.store.append(&record) {
+        log::warn!("failed to update performance history: {err:?}");
+    }
 }
 
 /// Derive the wire `(module, path)` from a resolved endpoint. Empty
@@ -414,7 +581,11 @@ pub async fn run_pull_session_with_client(
 /// would put them on the wire verbatim — a Unix daemon then creates a
 /// literal `sub\dir` entry. Every wire-bound relative path routes
 /// through `path_posix` (the win-1 rule).
-fn endpoint_module_path(endpoint: &RemoteEndpoint) -> Result<(String, String)> {
+///
+/// `pub(crate)` since ph-1: the perf-history `peer_key` for a remote
+/// route is derived from the very `(module, path)` pair the session
+/// addressed, so the key cannot drift from what was transferred.
+pub(crate) fn endpoint_module_path(endpoint: &RemoteEndpoint) -> Result<(String, String)> {
     use crate::path_posix::relative_path_to_posix;
     match &endpoint.path {
         RemotePath::Module { module, rel_path } => {
@@ -461,6 +632,160 @@ mod endpoint_module_path_tests {
     fn empty_rel_path_is_the_module_root() {
         let (_, path) = endpoint_module_path(&endpoint(PathBuf::new())).expect("resolves");
         assert_eq!(path, "");
+    }
+}
+
+/// ph-1 record-shape coverage. A push or pull session cannot be built
+/// without a live daemon, so the shape contract is pinned on the
+/// builder both session paths run through rather than faked around one.
+#[cfg(test)]
+mod session_record_tests {
+    use super::*;
+    use crate::perf_history::{
+        CompareModeSnapshot, Initiator, LocalRole, RouteTag, RunKind, Topology, TransferMode,
+    };
+
+    fn route() -> RouteTag {
+        RouteTag {
+            topology: Topology::Remote,
+            local_role: LocalRole::Source,
+            initiator: Initiator::Cli,
+            peer_key: Some("host:/mod/sub".to_string()),
+        }
+    }
+
+    fn facts() -> SessionRecordFacts {
+        SessionRecordFacts {
+            mirror_enabled: false,
+            compare_mode: ComparisonMode::SizeMtime,
+            files: 12,
+            bytes: 3400,
+            files_failed: 0,
+            elapsed: Duration::from_millis(250),
+        }
+    }
+
+    /// Every comparison policy the wire can carry maps onto a
+    /// snapshot variant. The enumeration is built by probing the
+    /// proto's whole discriminant space, so a new variant joins the
+    /// list automatically, and the expectation is an exhaustive
+    /// `match` with no wildcard arm, so that new variant is a compile
+    /// error here until it is mapped deliberately — never a silent
+    /// slide into the SizeMtime bucket (R59 #5's contamination shape).
+    #[test]
+    fn every_wire_compare_mode_maps_onto_a_snapshot() {
+        let variants: Vec<ComparisonMode> = (0..64)
+            .filter_map(|value| ComparisonMode::try_from(value).ok())
+            .collect();
+        assert_eq!(
+            variants.len(),
+            6,
+            "proto ComparisonMode variant set changed: {variants:?}"
+        );
+        for mode in variants {
+            let expected = match mode {
+                // The wire documents UNSPECIFIED as "treat as SIZE_MTIME".
+                ComparisonMode::Unspecified | ComparisonMode::SizeMtime => {
+                    CompareModeSnapshot::SizeMtime
+                }
+                ComparisonMode::Checksum => CompareModeSnapshot::Checksum,
+                ComparisonMode::SizeOnly => CompareModeSnapshot::SizeOnly,
+                ComparisonMode::Force => CompareModeSnapshot::Force,
+                ComparisonMode::IgnoreTimes => CompareModeSnapshot::IgnoreTimes,
+            };
+            assert_eq!(compare_snapshot(mode), expected, "mapping for {mode:?}");
+        }
+    }
+
+    /// The route the caller experienced lands on the record verbatim —
+    /// a record without it is invisible to every per-route aggregate
+    /// and seed lookup ph-2/ph-3 build on.
+    #[test]
+    fn session_record_carries_the_callers_route() {
+        let record = build_session_record(&route(), facts());
+        assert_eq!(record.topology, Topology::Remote);
+        assert_eq!(record.local_role, LocalRole::Source);
+        assert_eq!(record.initiator, Initiator::Cli);
+        assert_eq!(record.peer_key.as_deref(), Some("host:/mod/sub"));
+        assert_eq!(record.fast_path.as_deref(), Some("session"));
+        // A session never carries a dry plan, so the lane is Real —
+        // the filter every production consumer keys on (R56-F1).
+        assert_eq!(record.run_kind, RunKind::Real);
+        assert_eq!(record.file_count, 12);
+        assert_eq!(record.total_bytes, 3400);
+        assert_eq!(record.transfer_duration_ms, 250);
+        assert_eq!(record.options.workers, 0);
+    }
+
+    /// Mirror intent comes off the session's own mirror flag, not the
+    /// verb name — a push and a pull built from the same flag record
+    /// the same mode.
+    #[test]
+    fn session_record_mode_follows_the_mirror_flag() {
+        let copy = build_session_record(&route(), facts());
+        assert_eq!(copy.mode, TransferMode::Copy);
+        let mirror = build_session_record(
+            &route(),
+            SessionRecordFacts {
+                mirror_enabled: true,
+                ..facts()
+            },
+        );
+        assert_eq!(mirror.mode, TransferMode::Mirror);
+    }
+
+    /// The wire counts failures in `u64`; the record's `error_count` is
+    /// `u32`. A saturating conversion keeps a catastrophic run's record
+    /// writable (and honest about "very many") instead of wrapping to a
+    /// small number — `as` would report 0 for exactly 2^32 failures.
+    #[test]
+    fn session_record_clamps_the_failure_count() {
+        let record = build_session_record(
+            &route(),
+            SessionRecordFacts {
+                files_failed: u64::from(u32::MAX) + 1,
+                ..facts()
+            },
+        );
+        assert_eq!(record.error_count, u32::MAX);
+        let exact = build_session_record(
+            &route(),
+            SessionRecordFacts {
+                files_failed: 7,
+                ..facts()
+            },
+        );
+        assert_eq!(exact.error_count, 7);
+    }
+
+    /// The legacy `checksum` bool and the full `compare_mode` snapshot
+    /// stay consistent: the bool is true exactly for the checksum
+    /// policy, so a pre-R59 consumer reading only the bool is not
+    /// misled by a `--size-only` run.
+    #[test]
+    fn session_record_snapshot_tracks_the_compare_policy() {
+        let checksum = build_session_record(
+            &route(),
+            SessionRecordFacts {
+                compare_mode: ComparisonMode::Checksum,
+                ..facts()
+            },
+        );
+        assert!(checksum.options.checksum);
+        assert_eq!(checksum.options.compare_mode, CompareModeSnapshot::Checksum);
+
+        let size_only = build_session_record(
+            &route(),
+            SessionRecordFacts {
+                compare_mode: ComparisonMode::SizeOnly,
+                ..facts()
+            },
+        );
+        assert!(!size_only.options.checksum);
+        assert_eq!(
+            size_only.options.compare_mode,
+            CompareModeSnapshot::SizeOnly
+        );
     }
 }
 
