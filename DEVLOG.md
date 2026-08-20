@@ -5,6 +5,17 @@ Per R5-F5 of `docs/reviews/followup_review_2026-05-02.md`: new entries
 go at the top of the file, immediately below this header, so reviewers
 scanning chronologically don't miss appended-at-the-bottom changes.
 
+- 2026-08-20T23:55Z — **PERF_HISTORY_PLANNING SHIPPED; release blocker
+  cleared (D-2026-08-20-4)**. Owner ruled "pass" on the ph-6/R3
+  acceptance bar over the clean A/B evidence: warm == cold within noise
+  both directions, seeds persist/reuse/settle per class, merged
+  `[daemon]`/`[operator]` reporting live; win ≈ 0 on this rig is the
+  honest expected result (dial settles in the first epochs even cold).
+  Plan Status Active → Shipped; `docs/STATE.md` item 10 and headline
+  updated; the D-2026-08-20-1 next-tag block is lifted. Known follow-up
+  (recorded in plan ph-5, not a blocker): PULL worker seeding stays
+  cold-start.
+
 - 2026-08-20T23:30Z — **ph-6 rig proof executed (PERF_HISTORY_PLANNING)**.
   Cold-vs-warm A/B, both directions magneto↔skippy, 4 runs/arm, seeds
   wiped per-run in the cold arm. First pass of BOTH benches discarded —

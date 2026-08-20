@@ -1,6 +1,6 @@
 # Perf History That Plans — record everything, warm-start the dials
 
-**Status**: Active
+**Status**: Shipped
 **Created**: 2026-08-20
 **Supersedes**: the narrow reading of Post-REV4 residue item (2) (report-completeness only)
 **Decision ref**: D-2026-08-20-1 (blocker ruling; plan activation pending),
@@ -240,8 +240,9 @@ tagging at the call sites).
    at 4, reverse down to 1), merged reporting verified live on the daemon
    box. Win ≈ 0 on this rig because the dial settles within the first
    epochs even cold — the demonstrated claims are correctness and no
-   regression, not a speedup. Awaiting owner pass/fail on the R3
-   acceptance bar; checkpoints are owner-only.
+   regression, not a speedup. **Owner ruled PASS 2026-08-20**
+   (D-2026-08-20-4): the R3 acceptance bar is met, this plan is Shipped,
+   and the D-2026-08-20-1 release-tag block is cleared.
 
 ## Rulings (all resolved — D-2026-08-20-2, owner-delegated design under
 "FAST, SIMPLE, RELIABLE")
