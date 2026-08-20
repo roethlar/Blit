@@ -5,6 +5,21 @@ Per R5-F5 of `docs/reviews/followup_review_2026-05-02.md`: new entries
 go at the top of the file, immediately below this header, so reviewers
 scanning chronologically don't miss appended-at-the-bottom changes.
 
+- 2026-08-20T17:58Z — **ph-1 recording matrix closed**: added the
+  delegated-coordinator landing test
+  (`coordinator_records_delegated_run_in_operator_store`) driving the
+  real `run_delegated_pull` entry point with the operator store pointed
+  at a temp config dir — asserts one `remote_to_remote/coordinator/cli`
+  row keyed `127.0.0.1:/dstmod/`; proven to bite by gating off the
+  coordinator record (red) and restoring (green). Concurrency/migration
+  guard audit against the matrix criterion: already pinned by
+  `concurrent_appends_lose_no_records`,
+  `history_len_guard_detects_concurrent_append`, atomic size-cap
+  rotation, and the v0/v1/v2→v3 migration + lane-derivation tests — no
+  gaps, no new code. Gate green on macOS: fmt, clippy native +
+  linux-cross `-D warnings`, workspace 1215/0. ph-1 done; ph-2 (feed
+  history into planning dials) is next.
+
 - 2026-08-20T17:02Z — **ph-1c: daemon-side perf recording + served-session
   close honesty** (PERF_HISTORY_PLANNING ph-1, third sub-slice). The daemon
   now records every session it takes part in into its OWN store (ruling R5:

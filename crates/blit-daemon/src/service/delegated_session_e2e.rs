@@ -299,6 +299,84 @@ async fn delegated_participants_record_their_own_perf_history() {
     dst.stop().await;
 }
 
+/// ph-1c recording matrix, coordinator leg (plan §Acceptance): the CLI
+/// coordinator of a delegated run records into the OPERATOR's store
+/// from the destination's re-encoded summary — topology
+/// `remote_to_remote`, role `coordinator`, keyed by the destination
+/// endpoint it addressed. Drives the real library entry point
+/// ([`run_delegated_pull`]) rather than the raw RPC so the record path
+/// under test is the one the CLI ships.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn coordinator_records_delegated_run_in_operator_store() {
+    use blit_core::config;
+    use blit_core::perf_history::{HistoryStore, Initiator, LocalRole, Topology};
+    use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
+    use blit_core::remote::transfer::TransferLifecycleTrace;
+    use blit_core::transfers::remote::{run_delegated_pull, DelegatedPullExecution};
+
+    let src = Daemon::start("srcmod", false).await;
+    let dst = Daemon::start("dstmod", true).await;
+    write_tree(&src.root, SRC_TREE);
+
+    // The coordinator writes to `HistoryStore::user()` (the operator's
+    // config dir); point the process-global override at a temp dir for
+    // the duration. No other test in this binary touches it.
+    let operator_dir = tempfile::tempdir().expect("operator store dir");
+    let prev = config::config_dir_override();
+    config::set_config_dir(operator_dir.path());
+
+    let endpoint = |port: u16, module: &str| RemoteEndpoint {
+        host: "127.0.0.1".into(),
+        port,
+        path: RemotePath::Module {
+            module: module.into(),
+            rel_path: PathBuf::new(),
+        },
+    };
+    let execution = DelegatedPullExecution {
+        src: endpoint(src.port, "srcmod"),
+        dst: endpoint(dst.port, "dstmod"),
+        options: Default::default(),
+        trace_data_plane: false,
+        dst_label: "dst".into(),
+        detach: false,
+        lifecycle_trace: TransferLifecycleTrace::disabled(),
+        perf_history: true,
+    };
+    let outcome = run_delegated_pull(execution, None, |_| {}).await;
+
+    // Restore the global before asserting so a failure cannot leak the
+    // override into later tests.
+    match prev {
+        Some(prev) => config::set_config_dir(prev),
+        None => config::clear_config_dir_override(),
+    }
+    let outcome = outcome.expect("delegated run succeeds");
+    assert_eq!(outcome.summary.files_transferred, SRC_TREE.len() as u64);
+
+    let records = HistoryStore::at_dir(operator_dir.path().to_path_buf())
+        .read_recent_records(0)
+        .expect("read operator store");
+    assert_eq!(records.len(), 1, "coordinator appends exactly one row");
+    let rec = &records[0];
+    assert_eq!(rec.topology, Topology::RemoteToRemote);
+    assert_eq!(rec.local_role, LocalRole::Coordinator);
+    assert_eq!(rec.initiator, Initiator::Cli);
+    assert_eq!(
+        rec.peer_key.as_deref(),
+        Some("127.0.0.1:/dstmod/"),
+        "coordinator keys the destination endpoint it addressed"
+    );
+    assert_eq!(rec.file_count, SRC_TREE.len());
+    assert_eq!(
+        rec.total_bytes,
+        SRC_TREE.iter().map(|(_, c, _)| c.len() as u64).sum::<u64>()
+    );
+
+    src.stop().await;
+    dst.stop().await;
+}
+
 /// otp-9b: mirror deletions run LOCALLY on the dst daemon via the
 /// session's one delete rule — there is no source-attested delete list
 /// anymore, and a plain copy (mirror off) must not delete anything.
