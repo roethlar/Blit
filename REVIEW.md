@@ -328,6 +328,12 @@ Coder loop: pick the topmost `[ ]` row. W2.3 requires a `docs/plan/` doc with
 | tui-key-dispatch-press-only-filter | Bug fix | TUI input task dropped Repeat events: `spawn_input_task` matched only `KeyEventKind::Press`, silently dropping autorepeat (and any other non-Press kind). Now accepts Press + Repeat, only filters Release. Plus a `BLIT_TUI_INPUT_TRACE=1` env-gated diagnostic log to `/tmp/blit-tui-input.log` for follow-up if needed. Owner-authorized. | `[x]` | `phase5/a1` | `2e5bcb9` |
 | windows-move-tree-hang | Known issue | Resolved as a native-separator need-list mismatch in the deleted pre-session path, not a held source handle. `48c5a11` fixed that path; the exact nested directory move test is enabled and passed on hosted Windows in run `29944148295` at `28cf989`. | `[x]` | `phase5/a1` | `48c5a11` |
 
+## Plan reviews (openreview)
+
+| ID | Target | Verdict | Record |
+|----|--------|---------|--------|
+| plan-perf-history-2026-08-20 | `docs/plan/PERF_HISTORY_PLANNING.md` (Draft) over `47f27238..d9021896` (docs-only; guard N/A) | **acceptable_with_changes** — codex / gpt-5.6-sol / default / owner-directed dispatch; codex-cli headless one-shot; capability_ok=true; SHAs pin-verified. 3 HIGH (epoch-zero seed vs no-wire constraint; daemon store invisible under service sandbox/user split; checker cannot unwind a high seed), 2 MEDIUM (route taxonomy omits RemoteToRemoteDelegated + daemon role split; JSONL rotation unsafe under daemon concurrency). 4 material changes pending owner triage. | `.review/results/2026-08-20-perf-history-plan-verdict.json` + `-events.jsonl` |
+
 ## Reconciled legacy finding groups
 
 The former unversioned “Open findings” rollup was stale. Its B/M-Jobs/C/A.1/D/E
