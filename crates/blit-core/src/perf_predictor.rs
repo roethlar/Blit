@@ -639,6 +639,12 @@ mod tests {
             timestamp_epoch_ms: 0,
             mode,
             run_kind: crate::perf_history::RunKind::Real,
+            // v3 route identity: these fixtures model the historical
+            // local CLI records, i.e. the v3 defaults.
+            topology: crate::perf_history::Topology::Local,
+            local_role: crate::perf_history::LocalRole::Source,
+            initiator: crate::perf_history::Initiator::Cli,
+            peer_key: None,
             source_fs: source_fs.map(str::to_string),
             dest_fs: dest_fs.map(str::to_string),
             file_count,
