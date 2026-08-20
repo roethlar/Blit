@@ -1,52 +1,23 @@
-//! `profile` — local performance history summary + predictor
-//! coefficients.
+//! `profile` — local performance history summary.
 //!
 //! Moved from `crates/blit-cli/src/profile.rs` in A.0. No RPC;
-//! reads `~/.config/blit/perf_local.jsonl` and the predictor
-//! state file directly. The CLI keeps both formatters (JSON +
-//! text); this module owns the data assembly.
+//! reads the operator's `perf_local.jsonl` (plus the daemon store,
+//! R5b) directly. The CLI keeps both formatters (JSON + text); this
+//! module owns the data assembly.
 //!
-//! Preserves the pre-A.0 "predictor loaded but empty" vs
-//! "predictor failed to load" distinction — see `ProfileReport`
-//! field doc for why that matters for JSON shape parity.
+//! The gradient-descent predictor retired here in ph-3 of
+//! `docs/plan/PERF_HISTORY_PLANNING.md` (R1, D-2026-08-20-2): it
+//! predicted for no consumer, and the settled-dial seed store
+//! (`crate::seed_store`) is the planning consumer instead. The
+//! `predictor`/`predictor_path` JSON keys are gone with it — an
+//! owner-ruled output change, not a slip.
 
 use crate::perf_history;
-use crate::perf_history::TransferMode;
-use crate::perf_predictor::PerformancePredictor;
 use eyre::Result;
-use std::path::PathBuf;
 
 pub use crate::perf_history::{MergedRecord, PerformanceRecord, RecordOrigin, RouteAggregate};
-pub use crate::perf_predictor::DurationCoefficients;
 
-/// One side of the predictor's mode-keyed profile (Copy / Mirror).
-/// `coefficients` is `None` when no training data exists for the
-/// queried key; `observations` and `fallback_depth` describe how
-/// the predictor reached the answer (or what it didn't find).
-#[derive(Debug, Clone)]
-pub struct ProfileSummary {
-    pub coefficients: Option<DurationCoefficients>,
-    pub observations: u64,
-    pub fallback_depth: usize,
-}
-
-/// Per-mode predictor coefficients. Always carries both sides;
-/// the CLI's text path prints them as two blocks and the JSON
-/// path serializes as a two-field object.
-#[derive(Debug, Clone)]
-pub struct PredictorReport {
-    pub copy: ProfileSummary,
-    pub mirror: ProfileSummary,
-}
-
-/// What `query()` returns. The `predictor` field is wrapped in
-/// `Option` so that "predictor file failed to load" stays
-/// distinguishable from "predictor file loaded but has no
-/// training data" — the JSON output emits `"predictor": null`
-/// in the first case and `"predictor": { "copy": ..., "mirror":
-/// ... }` (with possibly-null inner coefficients) in the second.
-/// Pre-A.0 the CLI's `predictor_summary: Option<(_, _)>` local
-/// carried the same distinction.
+/// What `query()` returns.
 #[derive(Debug, Clone)]
 pub struct ProfileReport {
     pub enabled: bool,
@@ -58,30 +29,18 @@ pub struct ProfileReport {
     pub aggregates: Vec<RouteAggregate>,
     /// The daemon store's history file when a distinct one was found
     /// and merged (R5b).
-    pub daemon_history_path: Option<PathBuf>,
+    pub daemon_history_path: Option<std::path::PathBuf>,
     /// Set when a daemon history file exists but could not be read.
     pub daemon_note: Option<String>,
-    pub predictor_path: Option<PathBuf>,
-    pub predictor: Option<PredictorReport>,
 }
 
-/// Build a `ProfileReport` from the on-disk perf history and
-/// predictor state. `limit` matches the CLI's `--limit N` arg —
-/// `0` means "all records" per `read_recent_records`'s contract.
+/// Build a `ProfileReport` from the on-disk perf history. `limit`
+/// matches the CLI's `--limit N` arg — `0` means "all records" per
+/// `read_recent_records`'s contract.
 pub fn query(limit: usize) -> Result<ProfileReport> {
     let enabled = perf_history::perf_history_enabled()?;
     let history = perf_history::read_merged_recent_records(limit)?;
     let aggregates = perf_history::aggregate_by_route(&history.records);
-    let predictor = PerformancePredictor::load().ok();
-    let predictor_path = predictor
-        .as_ref()
-        .map(|pred| pred.path().to_path_buf())
-        .filter(|p| p.exists());
-
-    let predictor = predictor.as_ref().map(|pred| PredictorReport {
-        copy: summarize_mode(pred, TransferMode::Copy),
-        mirror: summarize_mode(pred, TransferMode::Mirror),
-    });
 
     Ok(ProfileReport {
         enabled,
@@ -89,26 +48,5 @@ pub fn query(limit: usize) -> Result<ProfileReport> {
         aggregates,
         daemon_history_path: history.daemon_path,
         daemon_note: history.daemon_note,
-        predictor_path,
-        predictor,
     })
-}
-
-/// Probe the predictor for a mode with all secondary key
-/// components defaulted. Exercises the same fallback chain
-/// `predict()` walks, looking for the broadest profile that has
-/// training data.
-fn summarize_mode(predictor: &PerformancePredictor, mode: TransferMode) -> ProfileSummary {
-    match predictor.coefficients_for(mode, None, None, None, true, false) {
-        Some((coeffs, obs, depth)) => ProfileSummary {
-            coefficients: Some(coeffs),
-            observations: obs,
-            fallback_depth: depth,
-        },
-        None => ProfileSummary {
-            coefficients: None,
-            observations: 0,
-            fallback_depth: 0,
-        },
-    }
 }

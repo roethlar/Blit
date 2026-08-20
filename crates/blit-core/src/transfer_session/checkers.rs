@@ -185,6 +185,19 @@ impl CheckerPolicy {
             adaptive.observe(files, elapsed);
         }
     }
+
+    /// The concurrency this run DISCOVERED, for the seed store (ph-3
+    /// of `PERF_HISTORY_PLANNING`): `Some` only for an adaptive dial
+    /// that actually settled. A run still probing when it ended
+    /// returns `None`, and so does [`CheckerPolicy::Fixed`] — the
+    /// hidden diagnostic pin discovered nothing and must never teach
+    /// a seed.
+    pub fn settled_limit(&self) -> Option<usize> {
+        match self {
+            Self::Fixed(_) => None,
+            Self::Adaptive(adaptive) => adaptive.is_settled().then(|| adaptive.limit()),
+        }
+    }
 }
 
 /// A session's destination-comparison pool.
@@ -259,6 +272,13 @@ impl CheckerPool {
     /// Fold one chunk's throughput back into the controller.
     pub fn observe(&self, files: usize, elapsed: std::time::Duration) {
         self.policy.observe(files, elapsed);
+    }
+
+    /// See [`CheckerPolicy::settled_limit`]; clamped like [`Self::limit`].
+    pub fn settled_limit(&self) -> Option<usize> {
+        self.policy
+            .settled_limit()
+            .map(|n| n.clamp(1, self.threads))
     }
 
     pub fn policy(&self) -> &CheckerPolicy {

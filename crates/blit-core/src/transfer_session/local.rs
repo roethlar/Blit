@@ -999,19 +999,26 @@ pub async fn run_local_session(
         files_repaired: outcome.files_repaired,
     };
 
-    record_local_history(&summary, &options, dst_root);
+    record_local_history(&summary, &options, dst_root, checker_pool.settled_limit());
 
     Ok(summary)
 }
 
 /// Perf-history row for a local session run (D3 in the slice doc:
-/// `blit profile` keeps its local data feed; the predictor and its
-/// planner/transfer split retired with the engine, so the whole wall
-/// time lands in `transfer_duration_ms`).
+/// `blit profile` keeps its local data feed; the predictor retired
+/// with ph-3 in favour of the settled-dial seed store, so the whole
+/// wall time lands in `transfer_duration_ms`).
+///
+/// `settled_checkers` is the comparison concurrency the checker dial
+/// actually settled on (`None` while probing or pinned); alongside the
+/// record it teaches the ph-3 seed store, gated inside
+/// [`crate::seed_store`] on min-samples and never from a dry-run or
+/// measurement lane.
 fn record_local_history(
     summary: &LocalMirrorSummary,
     options: &LocalMirrorOptions,
     dest_root: &Path,
+    settled_checkers: Option<usize>,
 ) {
     if !options.perf_history {
         return;
@@ -1023,6 +1030,26 @@ fn record_local_history(
             // above the row instead of being scrolled away by it.
             log::warn!("failed to update performance history: {err:?}");
         }
+    }
+    // ph-3: persist the settled dials beside the record, keyed exactly
+    // like the record's route, so seed rows and history rows can be
+    // cross-read during diagnosis.
+    if record.run_kind == crate::perf_history::RunKind::Real {
+        let route = crate::perf_history::RouteTag {
+            topology: record.topology,
+            local_role: record.local_role,
+            initiator: record.initiator,
+            peer_key: record.peer_key.clone(),
+        };
+        crate::seed_store::record_settled_user(
+            &route,
+            crate::seed_store::SettledDials {
+                checkers: settled_checkers.map(|n| n as u32),
+                workers: None,
+            },
+            summary.scanned_files,
+            summary.scanned_bytes,
+        );
     }
 }
 

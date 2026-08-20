@@ -882,7 +882,7 @@ impl ActiveJobs {
     ///
     /// **Never touches the planner's `perf_local.jsonl`.** This only
     /// affects the recents ring and its dedicated `recents.jsonl`
-    /// backing store — the predictor's historical telemetry is a
+    /// backing store — the planner's historical telemetry is a
     /// separate store and is deliberately left intact (see module
     /// [`crate::recents_store`] and [`blit_core::perf_history`]).
     pub fn clear_recent(&self) -> usize {
@@ -1756,7 +1756,7 @@ mod tests {
     /// rec-2: `clear_recent` empties the in-memory ring and the on-disk
     /// recents store, returning the count removed — and **never touches
     /// the planner's `perf_local.jsonl`**. The sibling perf-telemetry
-    /// file (the predictor's training data) must be byte-for-byte intact
+    /// file (the planner's history feed) must be byte-for-byte intact
     /// after a clear; this is the core safety property of the feature.
     #[tokio::test]
     async fn clear_recent_empties_store_but_not_perf_local() {

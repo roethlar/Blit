@@ -47,7 +47,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 /// this record?" — a real transfer, a dry-run, a null-sink benchmark,
 /// etc. A `(mode=Mirror, run_kind=DryRun)` record means the user asked
 /// for a mirror operation but routed it through the dry-run path; that
-/// record should NOT teach the predictor anything about real-mirror
+/// record should NOT teach the seed store anything about real-mirror
 /// transfer cost (no writes happened).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -65,7 +65,7 @@ pub enum TransferMode {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum RunKind {
-    /// Normal production transfer. Eligible for predictor training and
+    /// Normal production transfer. Eligible for seed learning and
     /// auto-tune aggregates.
     #[default]
     Real,
@@ -77,7 +77,7 @@ pub enum RunKind {
     /// cost.
     NullSink,
     /// `blit bench transfer` (planned 0.2.0 verb): real source reads,
-    /// null destination. Separate predictor lane.
+    /// null destination. Separate measurement lane.
     BenchTransfer,
     /// `blit bench wire` (planned 0.2.0 verb): synthetic source,
     /// null destination. Pure data-plane measurement.
@@ -86,8 +86,8 @@ pub enum RunKind {
 
 impl RunKind {
     /// True iff the record is a "real transfer" — eligible to feed
-    /// the predictor's real-transfer profile and the local auto-tune
-    /// bucket aggregates. R56-F1: every consumer of historical
+    /// the seed store and the local auto-tune bucket aggregates.
+    /// R56-F1: every consumer of historical
     /// records that drives production behavior MUST filter on this
     /// before consulting per-record fields.
     pub fn is_real_transfer(&self) -> bool {

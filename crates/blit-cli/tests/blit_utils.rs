@@ -628,54 +628,27 @@ fn test_utils_profile_json() {
         "expected 'records' field in profile JSON"
     );
 
-    // R44-F2: pin the predictor key shape. Two valid states:
-    //   - top-level null: predictor file failed to load entirely
-    //     (rare — only on permission errors or corrupted state)
-    //   - object with `copy` and `mirror` fields, each either null
-    //     ("no profile yet for this mode, needs ≥5 observations")
-    //     or a coefficient object — chosen because it's strictly
-    //     more informative: it distinguishes "predictor never
-    //     initialised" from "predictor exists, mode-specific
-    //     profile not yet trained."
-    //
-    // The pre-fix commit message claimed top-level null in the
-    // empty case, which was wrong; this assertion locks the actual
-    // contract so the next reviewer can rely on it.
-    let predictor = parsed
-        .get("predictor")
-        .expect("expected 'predictor' field in profile JSON");
-    if !predictor.is_null() {
-        let obj = predictor
-            .as_object()
-            .unwrap_or_else(|| panic!("predictor must be null or object, got: {}", predictor));
+    // ph-3 (R1, D-2026-08-20-2) retired the gradient-descent
+    // predictor; the settled-dial seed store replaced it as the
+    // planning consumer. This pin inverts the old R44-F2 shape
+    // check: the keys must be GONE, so a half-reverted merge cannot
+    // quietly resurrect the dead surface.
+    for retired in ["predictor", "predictor_path"] {
         assert!(
-            obj.contains_key("copy"),
-            "predictor object must include 'copy' (got: {})",
-            predictor
+            parsed.get(retired).is_none(),
+            "'{}' was retired with the predictor (ph-3, R1) and must \
+             not reappear in profile JSON, got: {}",
+            retired,
+            stdout
         );
+    }
+    // The ph-2 merged-reporting keys are the living contract.
+    for key in ["aggregates", "daemon_history_path", "daemon_note"] {
         assert!(
-            obj.contains_key("mirror"),
-            "predictor object must include 'mirror' (got: {})",
-            predictor
+            parsed.as_object().map(|o| o.contains_key(key)) == Some(true),
+            "expected '{}' field in profile JSON, got: {}",
+            key,
+            stdout
         );
-        // Each mode is either null (no trained profile) or an
-        // object with planner+transfer coefficient blocks.
-        for mode in ["copy", "mirror"] {
-            let val = &obj[mode];
-            if !val.is_null() {
-                let mode_obj = val.as_object().unwrap_or_else(|| {
-                    panic!("predictor.{} must be null or object, got: {}", mode, val)
-                });
-                for key in ["observations", "fallback_depth", "planner", "transfer"] {
-                    assert!(
-                        mode_obj.contains_key(key),
-                        "predictor.{} must include '{}' (got: {})",
-                        mode,
-                        key,
-                        val
-                    );
-                }
-            }
-        }
     }
 }

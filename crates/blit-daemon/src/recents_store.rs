@@ -7,7 +7,7 @@
 //!
 //! **Separation from planner telemetry.** The recents store lives in its
 //! own file, `recents.jsonl`, alongside but entirely separate from
-//! `perf_local.jsonl` (the predictor's training data in
+//! `perf_local.jsonl` (the planner's history feed in
 //! [`blit_core::perf_history`]). A future `ClearRecent` (rec-2) wipes
 //! `recents.jsonl` only — the planner's telemetry is never touched.
 //!
