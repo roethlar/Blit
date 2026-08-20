@@ -1,6 +1,6 @@
 # Perf History That Plans — record everything, warm-start the dials
 
-**Status**: Draft
+**Status**: Active
 **Created**: 2026-08-20
 **Supersedes**: the narrow reading of Post-REV4 residue item (2) (report-completeness only)
 **Decision ref**: D-2026-08-20-1 (blocker ruling; plan activation pending),
