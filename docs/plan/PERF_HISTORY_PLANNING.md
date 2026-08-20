@@ -3,7 +3,8 @@
 **Status**: Draft
 **Created**: 2026-08-20
 **Supersedes**: the narrow reading of Post-REV4 residue item (2) (report-completeness only)
-**Decision ref**: D-2026-08-20-1 (blocker ruling; plan activation pending)
+**Decision ref**: D-2026-08-20-1 (blocker ruling; plan activation pending),
+D-2026-08-20-2 (design rulings R1–R5 resolved, owner-delegated)
 **Review**: openreview 2026-08-20 (codex/gpt-5.6-sol, owner-dispatched,
 `47f27238..d9021896`): `acceptable_with_changes`. Its four material changes
 are folded into this revision; the two that need an owner choice are R4 and
@@ -40,15 +41,13 @@ the `blit profile` display. Nothing plans from the history (verified
 - **No new user-visible CLI options** (standing rule, owner 2026-08-01).
   Tuning the program can work out at runtime stays at runtime. The existing
   `blit diagnostics perf --enable/--disable/--clear` surface is unchanged.
-- **No wire/proto change — challenged by review, ruling R4.** Each end
-  seeds its own dials from its own store. The review showed this conflicts
-  with ph-5 as written: `data_plane.rs` validates every epoch-zero grant
-  against `receiver_initial_streams` and always grants the conservative
-  floor, so a learned start count cannot be honored at session open without
-  a wire change. R4 picks between a defaultable, receiver-clamped
-  `preferred_initial_streams` negotiation field (CONTRACT_VERSION bump)
-  and re-scoping ph-5 to post-open accelerated ramping. Until R4 is ruled,
-  this non-goal stands and ph-5 is blocked.
+- **No wire/proto change.** Ruled R4b (D-2026-08-20-2): the wire stays
+  frozen, CONTRACT_VERSION untouched. Epoch-zero grants keep the
+  conservative floor (`data_plane.rs` validates them against
+  `receiver_initial_streams`, so a seeded count cannot be honored at
+  session open without negotiation); a worker seed instead drives an
+  accelerated post-open ramp toward the seeded count. A seed is a hint,
+  not a contract.
 - No change to what the live controllers are allowed to do once running —
   ldt-2's adaptive role parity and the checkers' settle-on-regression
   behavior stay authoritative over any seed.
@@ -72,9 +71,11 @@ the `blit profile` display. Nothing plans from the history (verified
   `ProtectHome=read-only` (`docs/DAEMON_CONFIG.md`), so a config-dir store
   is unwritable there, and even where writable it is the service account's
   store — invisible to an operator's `blit profile`. The daemon gets an
-  explicitly writable service data directory for its store; the operator
-  surface question is R5. Enable/disable semantics must control whichever
-  store the recording process owns.
+  explicitly writable service data directory for its store; ruled R5b
+  (D-2026-08-20-2): `blit profile` / `blit diagnostics perf` merge
+  daemon-recorded history with origin labels — no new command.
+  Enable/disable semantics must control whichever store the recording
+  process owns.
 - **Writer safety (review):** the current rotate path checks length then
   truncates the live file without locking or atomic replacement; the daemon
   spawns served transfers independently. All appends in a process go
@@ -92,8 +93,8 @@ the `blit profile` display. Nothing plans from the history (verified
       tests per route; daemon side proven, not assumed).
 - [ ] `blit profile` / `blit diagnostics perf` (text + JSON) label
       topology/role/initiator and keep aggregates separate per key —
-      including daemon-recorded runs, surfaced per the R5 ruling with
-      origin labels; pre-v3 records still load (migration test).
+      including daemon-recorded runs, merged with origin labels (R5b);
+      pre-v3 records still load (migration test).
 - [ ] Recording-matrix test covers local, push, pull, both delegated
       daemon participants, and the delegated coordinator; concurrent
       session completions lose no records (writer-serialization guard);
@@ -101,9 +102,9 @@ the `blit profile` display. Nothing plans from the history (verified
 - [ ] Checkers: with a seeded rung, first chunk runs at the seed; a
       poisoned seed in EITHER direction (too high or too low) brackets
       back to the true optimum (both red-proven).
-- [ ] Session workers: seeded start honored per the R4 ruling (at session
-      open if R4a, via accelerated post-open ramp if R4b); live controller
-      still converges identically in the ldt-2 parity traces.
+- [ ] Session workers: seeded start honored via the accelerated post-open
+      ramp (R4b); live controller still converges identically in the ldt-2
+      parity traces.
 - [ ] Seeds persist only from settled runs (min-samples + confidence gate
       red-proven: an interrupted probing run writes no seed).
 - [ ] Rig proof (magneto↔skippy, small-file fixture): on a repeat run,
@@ -175,32 +176,26 @@ tagging at the call sites).
 4. **ph-4 — warm-start checkers.** Optional seed rung into
    `AdaptiveCheckers` with bidirectional bracketing from the seed;
    poisoned-seed recovery red-proven in both directions.
-5. **ph-5 — warm-start session workers (blocked on R4).** R4a: negotiate
-   a defaultable, receiver-clamped preferred initial stream count
-   (CONTRACT_VERSION bump); R4b: keep the wire frozen and seed via an
-   accelerated post-open ramp. ldt-2 parity traces unchanged either way.
+5. **ph-5 — warm-start session workers.** Wire frozen (R4b): seed drives
+   an accelerated post-open ramp toward the seeded count; ldt-2 parity
+   traces unchanged.
 6. **ph-6 — rig proof.** Cold-vs-warm repeat-run A/B on magneto↔skippy;
    evidence dir under `docs/bench/`.
 
-## Open questions
+## Rulings (all resolved — D-2026-08-20-2, owner-delegated design under
+"FAST, SIMPLE, RELIABLE")
 
-- R1: retire the gradient-descent predictor in favor of the settled-dial
-  seed store (recommend **yes** — it predicts for no consumer; settled
-  values are simpler and true)? — owner
-- R2: confirm fleet/wire exposure of history is deferred to a later plan
-  (recommend **yes**)? — owner
-- R3: is ph-6's rig demonstration the closing acceptance bar for the plan
-  (recommend **yes**)? — owner
-- R4 (from review): worker warm-start mechanism — (a) add a defaultable,
-  receiver-clamped `preferred_initial_streams` negotiation field with a
-  CONTRACT_VERSION bump, or (b) keep the wire frozen and re-scope ph-5 to
-  accelerated post-open ramping (recommend **b** — preserves the no-wire
-  non-goal; the ramp reaches the seed within the first epochs, which is
-  most of the win)? — owner
-- R5 (from review): how does an operator see daemon-recorded history —
-  (a) daemon store stays private to the service (reports cover CLI-side
-  records only, honestly labeled as such), or (b) `blit profile` /
-  `blit diagnostics perf` additionally read/query the daemon's store and
-  label record origin (recommend **b** — "reports tell the truth" is the
-  blocker ruling; a daemon-served transfer invisible to the operator
-  fails it)? — owner
+- R1 — **retire the gradient-descent predictor**; the settled-dial seed
+  store is the planning consumer. It predicted for no consumer; settled
+  values are simpler and true.
+- R2 — **fleet/wire exposure of history stays deferred** to a later plan.
+- R3 — **ph-6's rig demonstration is the closing acceptance bar**.
+- R4 — **(b) wire frozen; accelerated post-open ramp** toward the seeded
+  worker count. No negotiation field, no CONTRACT_VERSION bump; the ramp
+  reaches the seed within the first epochs, which is most of the win.
+- R5 — **(b) merged reporting**: `blit profile` / `blit diagnostics perf`
+  read the daemon's store too and label record origin. Chosen over a
+  separate `blit-daemon profile` command (owner floated it, no
+  preference): one existing surface telling the whole truth is SIMPLE;
+  a daemon-served transfer invisible to the operator fails the
+  D-2026-08-20-1 "reports tell the truth" bar.
