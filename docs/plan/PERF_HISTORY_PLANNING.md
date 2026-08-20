@@ -142,6 +142,37 @@ tagging at the call sites).
   transfer. Each end that runs a session appends one record to its own
   store at session close, tagged with its route as it experienced it.
   The daemon reads the same settings toggle; disabled means disabled.
+- **Served-end recording + close honesty (ph-1c, landed)**: a serving
+  daemon cannot record from inside its raced responder future — the
+  initiator legitimately hangs up the instant it holds what it needs,
+  and the dispatcher race (w4-3) then drops that future mid-teardown.
+  Worse, the pull initiator's terminal summary sat in the client's
+  request-stream channel when the call dropped, so the served source
+  scored "peer closed before TransferSummary" for every completed
+  direct pull — dishonest jobs/metrics/history. Three cooperating
+  mechanisms fix this without wire changes (no new frames, no
+  CONTRACT_VERSION bump): (1) `on_terminal_summary` instruments fire
+  at each end's contract-terminal point (destination: summary
+  finalized; source: summary received) into a dispatcher-owned
+  `ServedSessionRecorder`, which appends the daemon's row AFTER the
+  race settles and upgrades a hangup verdict to `ok` when the session
+  had completed; (2) a bounded hangup grace (`HANGUP_GRACE`, 500ms)
+  lets a handler absorb frames that already arrived before it is
+  dropped — mid-transfer hangups still tear down, just one grace
+  later, which no one is left to observe; (3) a DESTINATION initiator
+  performs a graceful close (`SUMMARY_DELIVERY_CLOSE_GRACE`, 2s cap):
+  after sending its summary it drains the response stream until the
+  responder closes, so the RPC ends cleanly and the summary actually
+  flushes instead of dying with a cancelled call. Daemon `peer_key`
+  conventions mirror ph-1b's client shapes from the other side of the
+  wire: serving a push keys `peer_host:local_root`, serving a pull
+  keys the peer host alone (the peer's destination root never crosses
+  the wire), the delegated dst daemon keys `src_host:dest_root`; no
+  resolvable host → no key (a shared `unknown` bucket must never
+  teach seeds). The daemon store is injected at service construction
+  (`BlitService::from_runtime`), `HistoryStore::daemon()` in
+  production, temp-dir stores in the e2e matrix — tests never touch a
+  real store.
 - **Seed store**: at session close, alongside the record, persist the
   *settled* dial values keyed by `(route, peer_key, workload class)` —
   the checker ladder rung actually settled on and the worker count the

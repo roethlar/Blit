@@ -883,6 +883,8 @@ pub async fn run_local_session(
             session_phase_trace: Default::default(),
             lifecycle_trace: Default::default(),
             small_file_probe: SmallFileProbe::disabled(),
+            // ph-1c: the local carrier records via its own return path.
+            on_terminal_summary: None,
             #[cfg(test)]
             dial_test_samples: None,
             #[cfg(test)]
@@ -1223,6 +1225,7 @@ mod tests {
                 session_phase_trace: Default::default(),
                 lifecycle_trace: Default::default(),
                 small_file_probe: SmallFileProbe::disabled(),
+                on_terminal_summary: None,
                 #[cfg(test)]
                 dial_test_samples: None,
                 #[cfg(test)]
@@ -1681,6 +1684,7 @@ mod tests {
                 session_phase_trace: Default::default(),
                 lifecycle_trace: Default::default(),
                 small_file_probe: SmallFileProbe::disabled(),
+                on_terminal_summary: None,
                 #[cfg(test)]
                 dial_test_samples: None,
                 #[cfg(test)]

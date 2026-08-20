@@ -67,6 +67,9 @@ struct Daemon {
     _dest: tempfile::TempDir,
     dest_root: PathBuf,
     active_jobs: crate::active_jobs::ActiveJobs,
+    /// ph-1c: this daemon's own isolated history store; the recording
+    /// matrix asserts what the served end wrote here.
+    perf_dir: tempfile::TempDir,
 }
 
 impl Daemon {
@@ -95,6 +98,7 @@ impl Daemon {
                 delegation_allowed: true,
             },
         );
+        let perf_dir = tempfile::tempdir().expect("perf dir");
         let service = BlitService::from_runtime(
             modules,
             None,
@@ -102,6 +106,9 @@ impl Daemon {
             server_checksums_enabled,
             crate::metrics::TransferMetrics::disabled(),
             crate::delegation_gate::DelegationConfig::default(),
+            Some(blit_core::perf_history::HistoryStore::at_dir(
+                perf_dir.path().to_path_buf(),
+            )),
         );
         let active_jobs = service.active_jobs.clone();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -136,7 +143,36 @@ impl Daemon {
             _dest: dest,
             dest_root: canonical,
             active_jobs,
+            perf_dir,
         }
+    }
+
+    /// The records this daemon's own store holds, oldest first.
+    fn perf_records(&self) -> Vec<blit_core::perf_history::PerformanceRecord> {
+        blit_core::perf_history::HistoryStore::at_dir(self.perf_dir.path().to_path_buf())
+            .read_recent_records(0)
+            .expect("read daemon perf store")
+    }
+
+    /// Wait for the daemon's own append to land: the responder sends
+    /// the client its summary BEFORE `run_transfer_session` returns and
+    /// records, so the client observing completion does not order the
+    /// daemon-side write.
+    async fn wait_for_perf_records(
+        &self,
+        n: usize,
+    ) -> Vec<blit_core::perf_history::PerformanceRecord> {
+        for _ in 0..200 {
+            let records = self.perf_records();
+            if records.len() >= n {
+                return records;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "daemon store never reached {n} record(s): {:?}",
+            self.perf_records()
+        );
     }
 
     /// Endpoint pointing at a module name that isn't configured.
@@ -491,6 +527,76 @@ async fn lifecycle_boundaries_are_role_symmetric_and_session_correlated() {
             "independent sessions must not share a derived session id"
         );
     }
+    daemon.stop().await;
+}
+
+/// ph-1c recording matrix, served legs (plan §Acceptance: "daemon side
+/// proven, not assumed"): a served push and a served pull each append a
+/// route-labeled record to the DAEMON's own store, tagged with the role
+/// the daemon actually played — DESTINATION when serving a push, SOURCE
+/// when serving a pull — and keyed per the ph-1b conventions
+/// (`peer_host:local_root` / host-level).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn served_sessions_record_daemon_side_perf_history() {
+    use blit_core::perf_history::{Initiator, LocalRole, Topology};
+
+    let daemon = Daemon::start(false).await;
+    let src = tempfile::tempdir().unwrap();
+    write_tree(src.path(), &[("a.txt", b"alpha", 1_600_000_001)]);
+
+    run_push_session(
+        &daemon.endpoint,
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions::default(),
+    )
+    .await
+    .expect("push succeeds");
+
+    let records = daemon.wait_for_perf_records(1).await;
+    assert_eq!(records.len(), 1, "served push appends exactly one record");
+    let rec = &records[0];
+    assert_eq!(rec.topology, Topology::Remote);
+    assert_eq!(rec.local_role, LocalRole::Destination);
+    assert_eq!(rec.initiator, Initiator::Cli);
+    let key = rec.peer_key.as_deref().expect("served push keys peer+root");
+    assert!(
+        key.starts_with("127.0.0.1:"),
+        "host-prefixed key, got {key}"
+    );
+    assert!(
+        key.ends_with(&daemon.dest_root.display().to_string()),
+        "key names the local destination root, got {key}"
+    );
+    assert!(
+        rec.run_kind.is_real_transfer(),
+        "served rows must be seed-eligible"
+    );
+    assert_eq!(rec.file_count, 1);
+    assert_eq!(rec.total_bytes, 5);
+    assert_eq!(rec.error_count, 0);
+
+    let dest = tempfile::tempdir().unwrap();
+    run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions::default(),
+    )
+    .await
+    .expect("pull succeeds");
+
+    let records = daemon.wait_for_perf_records(2).await;
+    assert_eq!(records.len(), 2, "served pull appends its own record");
+    let rec = &records[1];
+    assert_eq!(rec.topology, Topology::Remote);
+    assert_eq!(rec.local_role, LocalRole::Source);
+    assert_eq!(rec.initiator, Initiator::Cli);
+    assert_eq!(
+        rec.peer_key.as_deref(),
+        Some("127.0.0.1"),
+        "a pulled-from daemon knows only the peer host — no shared bucket"
+    );
+    assert_eq!(rec.total_bytes, 5);
+
     daemon.stop().await;
 }
 

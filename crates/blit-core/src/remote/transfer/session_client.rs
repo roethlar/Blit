@@ -218,6 +218,9 @@ pub async fn run_push_session(
             session_phase_trace: Default::default(),
             lifecycle_trace,
             small_file_probe: Default::default(),
+            // ph-1c: initiators record via their own summary return
+            // path; the terminal hook exists for raced responders.
+            on_terminal_summary: None,
             #[cfg(test)]
             dial_test_samples: None,
             #[cfg(test)]
@@ -437,6 +440,9 @@ pub async fn run_pull_session_with_client(
             session_phase_trace: Default::default(),
             lifecycle_trace,
             small_file_probe: Default::default(),
+            // ph-1c: initiators record via their own outcome return
+            // path; the terminal hook exists for raced responders.
+            on_terminal_summary: None,
         },
         local_apply: None,
     };
@@ -465,9 +471,11 @@ pub async fn run_pull_session_with_client(
 /// (`TransferSummary`), and the delegated coordinator in
 /// `crate::transfers::remote` (`DelegatedPullSummary`, no session of
 /// its own). One builder means the record shape cannot drift between
-/// routes.
+/// routes. Public because the daemon's served-session responder
+/// (ph-1c) is a fourth call site: it must build the identical row
+/// shape for its own store rather than growing a drift-prone copy.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SessionRecordFacts {
+pub struct SessionRecordFacts {
     pub mirror_enabled: bool,
     pub compare_mode: ComparisonMode,
     /// Destination-attested file and byte counts.
@@ -507,7 +515,7 @@ fn compare_snapshot(mode: ComparisonMode) -> perf_history::CompareModeSnapshot {
 /// session end, without touching disk — split from the writer for the
 /// same reason `build_local_record` is: the record-shape contract stays
 /// unit-testable without a live daemon.
-pub(crate) fn build_session_record(
+pub fn build_session_record(
     route: &perf_history::RouteTag,
     facts: SessionRecordFacts,
 ) -> perf_history::PerformanceRecord {
@@ -559,10 +567,7 @@ pub(crate) fn build_session_record(
 /// ph-1 posture: recording must NEVER fail or delay the transfer result
 /// beyond the append itself, so a store error is logged and dropped —
 /// the caller has already computed its summary.
-pub(crate) fn record_session_history(
-    sink: Option<&perf_history::RecordSink>,
-    facts: SessionRecordFacts,
-) {
+pub fn record_session_history(sink: Option<&perf_history::RecordSink>, facts: SessionRecordFacts) {
     let Some(sink) = sink else {
         return;
     };

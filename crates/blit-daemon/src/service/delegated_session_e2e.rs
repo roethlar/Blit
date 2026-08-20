@@ -38,6 +38,9 @@ struct Daemon {
     server: Option<tokio::task::JoinHandle<()>>,
     _root: tempfile::TempDir,
     root: PathBuf,
+    /// ph-1c: this daemon's own isolated history store; the recording
+    /// matrix asserts what each participant wrote here.
+    perf_dir: tempfile::TempDir,
 }
 
 impl Daemon {
@@ -63,6 +66,7 @@ impl Daemon {
             // delegation_gate.rs.
             allowed_source_hosts: Vec::new(),
         };
+        let perf_dir = tempfile::tempdir().expect("perf dir");
         let service = BlitService::from_runtime(
             modules,
             None,
@@ -70,6 +74,9 @@ impl Daemon {
             true,
             TransferMetrics::disabled(),
             delegation,
+            Some(blit_core::perf_history::HistoryStore::at_dir(
+                perf_dir.path().to_path_buf(),
+            )),
         );
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -94,7 +101,35 @@ impl Daemon {
             server: Some(server),
             _root: dir,
             root: canonical,
+            perf_dir,
         }
+    }
+
+    /// The records this daemon's own store holds, oldest first.
+    fn perf_records(&self) -> Vec<blit_core::perf_history::PerformanceRecord> {
+        blit_core::perf_history::HistoryStore::at_dir(self.perf_dir.path().to_path_buf())
+            .read_recent_records(0)
+            .expect("read daemon perf store")
+    }
+
+    /// Wait for this daemon's own append: a served end records after
+    /// it has already sent the peer its summary, so stream completion
+    /// does not order the store write.
+    async fn wait_for_perf_records(
+        &self,
+        n: usize,
+    ) -> Vec<blit_core::perf_history::PerformanceRecord> {
+        for _ in 0..200 {
+            let records = self.perf_records();
+            if records.len() >= n {
+                return records;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "daemon store never reached {n} record(s): {:?}",
+            self.perf_records()
+        );
     }
 
     async fn stop(mut self) {
@@ -209,6 +244,56 @@ async fn delegated_transfer_rides_the_session_and_lands_bytes() {
         "default delegated carrier is the session's TCP data plane"
     );
     assert_trees_identical(&src.root, &dst.root);
+
+    src.stop().await;
+    dst.stop().await;
+}
+
+/// ph-1c recording matrix, delegated legs (plan §Acceptance): BOTH
+/// delegated daemon participants append to their OWN stores — the dst
+/// daemon as a daemon-initiated remote→remote DESTINATION (the row a
+/// flat `daemon_served` bucket would have collapsed, plan §Design), the
+/// src daemon as a served SOURCE that is wire-indistinguishable from a
+/// CLI-driven pull (`Initiator` enum docs).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delegated_participants_record_their_own_perf_history() {
+    use blit_core::perf_history::{Initiator, LocalRole, Topology};
+
+    let src = Daemon::start("srcmod", false).await;
+    let dst = Daemon::start("dstmod", true).await;
+    write_tree(&src.root, SRC_TREE);
+
+    let events = run_delegated(dst.port, src.port, "dstmod", spec("srcmod")).await;
+    assert_no_error(&events);
+
+    let total_bytes: u64 = SRC_TREE.iter().map(|(_, c, _)| c.len() as u64).sum();
+
+    let dst_records = dst.wait_for_perf_records(1).await;
+    assert_eq!(dst_records.len(), 1, "dst daemon appends exactly one row");
+    let rec = &dst_records[0];
+    assert_eq!(rec.topology, Topology::RemoteToRemote);
+    assert_eq!(rec.local_role, LocalRole::Destination);
+    assert_eq!(rec.initiator, Initiator::Daemon);
+    assert_eq!(
+        rec.peer_key.as_deref(),
+        Some(format!("127.0.0.1:{}", dst.root.display()).as_str()),
+        "dst keys the src host + its own destination root"
+    );
+    assert_eq!(rec.file_count, SRC_TREE.len());
+    assert_eq!(rec.total_bytes, total_bytes);
+
+    let src_records = src.wait_for_perf_records(1).await;
+    assert_eq!(src_records.len(), 1, "src daemon appends exactly one row");
+    let rec = &src_records[0];
+    assert_eq!(
+        rec.topology,
+        Topology::Remote,
+        "a served delegated leg is wire-indistinguishable from a CLI pull"
+    );
+    assert_eq!(rec.local_role, LocalRole::Source);
+    assert_eq!(rec.initiator, Initiator::Cli);
+    assert_eq!(rec.peer_key.as_deref(), Some("127.0.0.1"));
+    assert_eq!(rec.total_bytes, total_bytes);
 
     src.stop().await;
     dst.stop().await;

@@ -208,6 +208,9 @@ pub(crate) async fn handle_delegated_pull(
     transfer_id: String,
     byte_progress: blit_core::remote::transfer::ByteProgressSink,
     job_progress: ActiveJobProgress,
+    // ph-1c: the daemon's own history store for this end's record
+    // (`None` = recording structurally off).
+    perf_store: Option<blit_core::perf_history::HistoryStore>,
 ) -> bool {
     let resolver = StdResolver;
     let lifecycle_trace = TransferLifecycleTrace::from_env();
@@ -224,6 +227,7 @@ pub(crate) async fn handle_delegated_pull(
         &byte_progress,
         &job_progress,
         &lifecycle_trace,
+        perf_store,
     )
     .await;
 
@@ -257,6 +261,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     byte_progress: &blit_core::remote::transfer::ByteProgressSink,
     job_progress: &ActiveJobProgress,
     lifecycle_trace: &TransferLifecycleTrace,
+    perf_store: Option<blit_core::perf_history::HistoryStore>,
 ) -> Result<(), DelegatedPullProgress> {
     use blit_core::generated::delegated_pull_error::Phase;
 
@@ -437,9 +442,27 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
         progress: None,
         trace_data_plane: false,
         lifecycle_trace: lifecycle_trace.clone(),
-        // ph-1: the delegated dst daemon's own recording lands in a
-        // later slice (it needs the daemon store, not the user one).
-        perf: None,
+        // ph-1c: this end is the DESTINATION of the delegated
+        // remote→remote session and a daemon-initiated participant —
+        // the row the flat `daemon_served` bucket would have collapsed
+        // (plan §Design, Schema v3). Key shape mirrors the pull
+        // client's `src_host:dest_root`.
+        perf: perf_store.map(|store| blit_core::perf_history::RecordSink {
+            store,
+            route: blit_core::perf_history::RouteTag {
+                topology: blit_core::perf_history::Topology::RemoteToRemote,
+                local_role: blit_core::perf_history::LocalRole::Destination,
+                initiator: blit_core::perf_history::Initiator::Daemon,
+                // `components()` renders `root/.` (the empty-wire-path
+                // form) and `root` as one key — same target, one seed
+                // bucket.
+                peer_key: Some(format!(
+                    "{}:{}",
+                    endpoint.host,
+                    dest_root.components().collect::<PathBuf>().display()
+                )),
+            },
+        }),
     };
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let mut options = options;
@@ -856,6 +879,7 @@ mod tests {
             "t-test".to_string(),
             guard.bytes_counter(),
             guard.progress(),
+            None,
         )
         .await;
         assert!(

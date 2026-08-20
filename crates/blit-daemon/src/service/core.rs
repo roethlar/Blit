@@ -85,6 +85,13 @@ pub struct BlitService {
     /// Captured once so a clock jump between construction and
     /// the GetState call doesn't show up as negative uptime.
     started_at: std::time::Instant,
+    /// The daemon's own performance-history store (ph-1c, ruling R5):
+    /// served sessions and delegated participation record here, never
+    /// the operator's config-dir store. `None` means recording is
+    /// structurally off (store unresolvable at startup, or a test
+    /// harness that opted out) — a missing record must never fail a
+    /// transfer.
+    pub(crate) perf_store: Option<blit_core::perf_history::HistoryStore>,
 }
 
 impl BlitService {
@@ -95,6 +102,7 @@ impl BlitService {
         server_checksums_enabled: bool,
         metrics: Arc<TransferMetrics>,
         delegation: crate::delegation_gate::DelegationConfig,
+        perf_store: Option<blit_core::perf_history::HistoryStore>,
     ) -> Self {
         let (events_tx, _) = broadcast::channel(SUBSCRIBE_BROADCAST_CAPACITY);
         Self {
@@ -107,6 +115,7 @@ impl BlitService {
             active_jobs: ActiveJobs::new(),
             events_tx,
             started_at: std::time::Instant::now(),
+            perf_store,
         }
     }
 
@@ -122,6 +131,9 @@ impl BlitService {
             true,
             TransferMetrics::disabled(),
             crate::delegation_gate::DelegationConfig::default(),
+            // Unit tests never write the real daemon store; the
+            // recording matrix injects a temp-dir store explicitly.
+            None,
         )
     }
 
@@ -412,6 +424,10 @@ impl Blit for BlitService {
             })
         };
         let active_jobs = self.active_jobs.clone();
+        // ph-1c: dispatcher-owned session observer — it must outlive
+        // the raced responder future (see ServedSessionRecorder).
+        let recorder =
+            super::transfer::ServedSessionRecorder::new(self.perf_store.clone(), peer.clone());
         let peer_for_task = peer;
 
         tokio::spawn(async move {
@@ -432,12 +448,29 @@ impl Blit for BlitService {
                     byte_progress,
                     job_progress,
                     on_open,
+                    Arc::clone(&recorder),
                 ),
                 &tx,
                 &cancel_token,
                 &metrics,
+                || recorder.completed(),
             )
             .await;
+            // ph-1c: a hangup after the terminal summary was scored ok
+            // above but may have dropped the responder before its own
+            // `finish` — pin the jobs row to the summary's final counts
+            // (idempotent when the responder got there itself). Then
+            // append the daemon's own performance row.
+            if ok {
+                if let Some(summary) = recorder.terminal_summary() {
+                    job.progress().finish(
+                        summary.files_transferred,
+                        summary.bytes_transferred,
+                        summary.in_stream_carrier_used,
+                    );
+                }
+            }
+            recorder.record(ok);
             // A session that died before its open resolved never fired
             // the hook: emit the started event now — with the
             // registration placeholders, the pre-cutover dispatch-time
@@ -649,6 +682,7 @@ impl Blit for BlitService {
         // cancelled-future on its own line.
         let cancel_token = job.cancellation_token().clone();
         let events_tx = self.events_tx();
+        let perf_store = self.perf_store.clone();
         tokio::spawn(async move {
             // `job` moves into the spawned task alongside the
             // metrics guard; its Drop runs on every exit path
@@ -687,6 +721,7 @@ impl Blit for BlitService {
                     transfer_id_for_started,
                     byte_progress,
                     job_progress,
+                    perf_store,
                 ),
                 tx.closed(),
                 cancel_token.cancelled(),
@@ -1216,13 +1251,33 @@ where
     C: std::future::Future<Output = ()>,
     K: std::future::Future<Output = ()>,
 {
+    tokio::pin!(handler);
     tokio::select! {
         biased;
-        output = handler => Some(output),
-        _ = tx_closed, if !detach => None,
+        output = &mut handler => Some(output),
+        // ph-1c: a client hangup gets a bounded grace window before the
+        // handler is dropped. The initiator legitimately disconnects
+        // the instant it holds what it needs — for a served pull, right
+        // after putting its scoring summary on the wire — so the frames
+        // that complete this end's session are typically already in the
+        // local receive buffer when the hangup signal fires. Dropping
+        // the handler at that instant threw the summary away and
+        // mis-scored every such transfer "client cancelled". A handler
+        // that is genuinely mid-transfer cannot finish in the window
+        // and still tears down as before, just `HANGUP_GRACE` later —
+        // nobody is left to observe the difference. `CancelJob` stays
+        // ungraced: it is an operator order to stop a running transfer.
+        _ = tx_closed, if !detach => {
+            tokio::time::timeout(HANGUP_GRACE, &mut handler).await.ok()
+        }
         _ = cancelled => None,
     }
 }
+
+/// How long a raced transfer handler may keep running after its client
+/// hangs up, so a session whose terminal frames already arrived can
+/// finish absorbing them (see [`resolve_transfer_outcome`]).
+const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Resolve a served `Transfer` session's terminal outcome, racing the
 /// handler against client hangup and the row's `CancelJob` token via
@@ -1239,6 +1294,15 @@ async fn resolve_transfer_session_outcome<H>(
     tx: &mpsc::Sender<Result<blit_core::generated::TransferFrame, Status>>,
     cancel_token: &CancellationToken,
     metrics: &TransferMetrics,
+    // ph-1c: whether the session reached its terminal summary
+    // (`ServedSessionRecorder::completed`). The initiator legitimately
+    // hangs up as soon as it holds what it needs — often before this
+    // end's teardown finishes — so a hangup (or a photo-finish
+    // CancelJob, audit-10's own rationale) AFTER the terminal summary
+    // is a completed transfer, not a cancel. Without this, every
+    // served pull scored "client cancelled" on the daemon while the
+    // client held a clean summary — dishonest jobs/metrics telemetry.
+    session_completed: impl Fn() -> bool,
 ) -> (bool, Option<String>)
 where
     H: std::future::Future<Output = Result<(), Status>>,
@@ -1254,6 +1318,7 @@ where
             }
             (ok, err_msg)
         }
+        None if session_completed() => (true, None),
         None if cancel_token.is_cancelled() => {
             let _ = tx
                 .send(Ok(blit_core::transfer_session::session_error_frame(
@@ -1342,7 +1407,8 @@ mod tests {
         let metrics = TransferMetrics::disabled();
         // A session that never completes on its own — cancel must win.
         let never = std::future::pending::<Result<(), Status>>();
-        let (ok, msg) = resolve_transfer_session_outcome(never, &tx, &cancel, &metrics).await;
+        let (ok, msg) =
+            resolve_transfer_session_outcome(never, &tx, &cancel, &metrics, &|| false).await;
         assert!(!ok, "cancel is not a success");
         assert_eq!(msg.as_deref(), Some("cancelled via CancelJob"));
 
@@ -1400,10 +1466,36 @@ mod tests {
             &tx,
             &token,
             &metrics,
+            &|| false,
         )
         .await;
         assert!(!ok, "a hangup-terminated transfer must record ok=false");
         assert_eq!(err.as_deref(), Some("client cancelled"));
+    }
+
+    /// ph-1c: a hangup AFTER the session's terminal summary is a
+    /// normal close, not a cancel — the initiator legitimately
+    /// disconnects the moment it holds the summary, which can drop the
+    /// responder future mid-teardown. Pre-fix, every served pull was
+    /// scored "client cancelled" on the daemon while the client held a
+    /// clean summary.
+    #[tokio::test]
+    async fn session_hangup_after_terminal_summary_scores_ok() {
+        use std::future::pending;
+        let (tx, rx) = mpsc::channel::<Result<blit_core::generated::TransferFrame, Status>>(1);
+        drop(rx); // client hung up right after receiving the summary
+        let token = CancellationToken::new();
+        let metrics = TransferMetrics::disabled();
+        let (ok, err) = resolve_transfer_session_outcome(
+            pending::<Result<(), Status>>(),
+            &tx,
+            &token,
+            &metrics,
+            &|| true,
+        )
+        .await;
+        assert!(ok, "a completed session must not score as a cancel");
+        assert_eq!(err, None);
     }
 
     /// w4-3 / audit-10, on the session dispatcher: a handler that has
@@ -1419,7 +1511,7 @@ mod tests {
         token.cancel();
         let metrics = TransferMetrics::disabled();
         let (ok, err) =
-            resolve_transfer_session_outcome(ready(Ok(())), &tx, &token, &metrics).await;
+            resolve_transfer_session_outcome(ready(Ok(())), &tx, &token, &metrics, &|| false).await;
         assert!(ok, "a completed handler must beat simultaneous cancels");
         assert_eq!(err, None);
     }
@@ -1438,6 +1530,7 @@ mod tests {
             &tx,
             &token,
             &metrics,
+            &|| false,
         )
         .await;
         assert!(!ok);
@@ -1461,7 +1554,7 @@ mod tests {
         let token = CancellationToken::new();
         let metrics = TransferMetrics::disabled();
         let (ok, err) =
-            resolve_transfer_session_outcome(ready(Ok(())), &tx, &token, &metrics).await;
+            resolve_transfer_session_outcome(ready(Ok(())), &tx, &token, &metrics, &|| false).await;
         assert!(ok);
         assert!(err.is_none());
         drop(tx);

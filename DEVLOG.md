@@ -5,6 +5,36 @@ Per R5-F5 of `docs/reviews/followup_review_2026-05-02.md`: new entries
 go at the top of the file, immediately below this header, so reviewers
 scanning chronologically don't miss appended-at-the-bottom changes.
 
+- 2026-08-20T17:02Z — **ph-1c: daemon-side perf recording + served-session
+  close honesty** (PERF_HISTORY_PLANNING ph-1, third sub-slice). The daemon
+  now records every session it takes part in into its OWN store (ruling R5:
+  `HistoryStore::daemon()`, injected via `BlitService::from_runtime`; e2e
+  harnesses inject temp dirs — tests never touch a real store): served push
+  → `remote/destination/cli` keyed `peer_host:local_root`, served pull →
+  `remote/source/cli` keyed host-only (the peer's dest root never crosses
+  the wire; no resolvable host → no key), delegated dst participant →
+  `remote_to_remote/destination/daemon` keyed `src_host:dest_root`
+  (route+key conventions recorded in plan §Design). Building the matrix
+  test exposed a REAL telemetry defect: on every completed direct served
+  pull, the client's terminal summary died unflushed in its cancelled RPC
+  ("peer closed before TransferSummary" on the daemon — watched red before
+  the fix) and the dispatcher race dropped the responder mid-teardown, so
+  the daemon scored the transfer "client cancelled". Fixed with no wire
+  change: (1) `on_terminal_summary` instruments (blit-core) fire at each
+  end's contract-terminal point into a dispatcher-owned
+  `ServedSessionRecorder`, which records after the race settles and
+  upgrades a hangup verdict to ok when the session had completed; (2)
+  bounded hangup grace (500ms) before the raced handler is dropped; (3)
+  DESTINATION initiators gracefully close (drain response stream, 2s cap)
+  so the summary actually flushes. e2e matrix: served push/pull
+  (`served_sessions_record_daemon_side_perf_history`), both delegated
+  participants (`delegated_participants_record_their_own_perf_history`),
+  plus `session_hangup_after_terminal_summary_scores_ok` unit guard.
+  Gate green on macOS: fmt, clippy native + linux-cross `-D warnings`,
+  workspace 1214 passed / 0 failed (blit-daemon 176→179), check-docs OK.
+  Remaining in ph-1: coordinator-record landing test; audit
+  concurrency/migration guards against the matrix criterion.
+
 - 2026-08-20T15:05Z — Openreview of `docs/plan/PERF_HISTORY_PLANNING.md`
   (owner-dispatched, codex / gpt-5.6-sol default, headless one-shot, pinned
   `47f27238..d9021896`, docs-only so red/green guard N/A): verdict

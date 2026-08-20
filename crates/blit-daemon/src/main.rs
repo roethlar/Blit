@@ -102,6 +102,16 @@ async fn main() -> Result<()> {
             delegation.allowed_source_hosts.len()
         );
     }
+    // ph-1c: the daemon's own performance-history store (ruling R5:
+    // never the operator's config-dir store). An unresolvable store
+    // is a warning and no recording — never a startup failure.
+    let perf_store = match blit_core::perf_history::HistoryStore::daemon() {
+        Ok(store) => Some(store),
+        Err(err) => {
+            eprintln!("blitd: performance history disabled: {err:#}");
+            None
+        }
+    };
     let service = BlitService::from_runtime(
         modules,
         default_root,
@@ -109,6 +119,7 @@ async fn main() -> Result<()> {
         server_checksums_enabled,
         metrics,
         delegation,
+        perf_store,
     );
     // c-4: kick off the periodic `TransferProgress` emitter.
     // The handle is owned by the runtime for the daemon's

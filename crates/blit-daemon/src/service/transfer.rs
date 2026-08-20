@@ -32,7 +32,9 @@ use tokio::sync::Mutex;
 use tonic::{Status, Streaming};
 
 use blit_core::generated::session_error::Code;
-use blit_core::generated::{SessionOpen, TransferFrame};
+use blit_core::generated::{ComparisonMode, SessionOpen, TransferFrame};
+use blit_core::perf_history::{HistoryStore, Initiator, LocalRole, RecordSink, RouteTag, Topology};
+use blit_core::remote::transfer::session_client::{record_session_history, SessionRecordFacts};
 use blit_core::remote::transfer::{ByteProgressSink, RemoteTransferProgress};
 use blit_core::transfer_session::transport::grpc_daemon_transport;
 use blit_core::transfer_session::{
@@ -75,6 +77,174 @@ fn with_open_hook(
             Ok(resolved)
         })
     })
+}
+
+/// The open-time facts the daemon's own performance record needs
+/// (ph-1c): the policy the initiator declared in `SessionOpen` and the
+/// local root the open resolved to. Captured by [`with_perf_capture`]
+/// at the same moment the dispatcher's open hook fires. A session
+/// whose open never resolves records nothing — there is no honest row
+/// to write.
+#[derive(Debug, Clone)]
+struct OpenPerfFacts {
+    compare_mode: ComparisonMode,
+    mirror_enabled: bool,
+    resolved_root: std::path::PathBuf,
+}
+
+/// One served session's observer, owned by the DISPATCHER task — not
+/// the raced responder future (ph-1c). The initiator legitimately
+/// hangs up the moment it has what it needs, which can drop the
+/// responder mid-teardown (w4-3 race); anything the daemon must still
+/// know afterward — "did the session reach its terminal summary?",
+/// the facts for its own performance row — lives here, filled from
+/// inside the session via the open resolver and the
+/// `on_terminal_summary` instruments, and read after the race settles.
+pub(crate) struct ServedSessionRecorder {
+    store: Option<HistoryStore>,
+    peer: String,
+    started: std::time::Instant,
+    open: std::sync::Mutex<Option<OpenPerfFacts>>,
+    terminal: std::sync::Mutex<Option<(LocalRole, blit_core::generated::TransferSummary)>>,
+}
+
+impl ServedSessionRecorder {
+    pub(crate) fn new(store: Option<HistoryStore>, peer: String) -> Arc<Self> {
+        Arc::new(Self {
+            store,
+            peer,
+            started: std::time::Instant::now(),
+            open: std::sync::Mutex::new(None),
+            terminal: std::sync::Mutex::new(None),
+        })
+    }
+
+    fn note_open(&self, facts: OpenPerfFacts) {
+        *self.open.lock().unwrap_or_else(|e| e.into_inner()) = Some(facts);
+    }
+
+    fn note_terminal(&self, role: LocalRole, summary: &blit_core::generated::TransferSummary) {
+        *self.terminal.lock().unwrap_or_else(|e| e.into_inner()) = Some((role, summary.clone()));
+    }
+
+    /// Whether the session reached its terminal summary — the contract
+    /// point past which a peer hangup is a normal close, not a cancel.
+    pub(crate) fn completed(&self) -> bool {
+        self.terminal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// The terminal summary, if the session reached one — the
+    /// dispatcher uses it to pin final jobs-row counts when the raced
+    /// responder future was dropped before its own `finish`.
+    pub(crate) fn terminal_summary(&self) -> Option<blit_core::generated::TransferSummary> {
+        self.terminal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(_, summary)| summary.clone())
+    }
+
+    /// Append this session's row to the daemon's own store (ruling
+    /// R5), once the dispatcher race has settled and only for a
+    /// session scored `ok`. The role is the one the responder actually
+    /// played; `peer_key` follows the ph-1b client conventions viewed
+    /// from this side of the wire: serving a push (DESTINATION) keys
+    /// `peer_host:local_root` — the mirror image of the pull client's
+    /// `src_host:dest_root` — while serving a pull (SOURCE) degrades
+    /// to the host-level key, because the peer's destination root
+    /// never crosses the wire. No resolvable peer host → no key: the
+    /// record still lands and counts in aggregates, but a shared
+    /// `unknown` bucket must never teach seeds (contamination rule,
+    /// R56-F1 spirit). Recording never fails or delays the transfer
+    /// (ph-1 posture).
+    pub(crate) fn record(&self, ok: bool) {
+        if !ok {
+            return;
+        }
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let Some(facts) = self.open.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+            return;
+        };
+        let Some((local_role, summary)) = self
+            .terminal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            return;
+        };
+        let peer_key = peer_host(&self.peer).map(|host| match local_role {
+            // `components()` renders `root/.` and `root` as one key —
+            // same target, one seed bucket.
+            LocalRole::Destination => format!(
+                "{host}:{}",
+                facts
+                    .resolved_root
+                    .components()
+                    .collect::<std::path::PathBuf>()
+                    .display()
+            ),
+            _ => host.to_string(),
+        });
+        let sink = RecordSink {
+            store: store.clone(),
+            route: RouteTag {
+                topology: Topology::Remote,
+                local_role,
+                // Best wire knowledge: the session protocol does not
+                // identify the peer's process kind (see the enum docs).
+                initiator: Initiator::Cli,
+                peer_key,
+            },
+        };
+        record_session_history(
+            Some(&sink),
+            SessionRecordFacts {
+                mirror_enabled: facts.mirror_enabled,
+                compare_mode: facts.compare_mode,
+                files: summary.files_transferred,
+                bytes: summary.bytes_transferred,
+                files_failed: summary.files_failed,
+                elapsed: self.started.elapsed(),
+            },
+        );
+    }
+}
+
+/// Wrap an [`OpenResolver`] so a successful resolve also deposits the
+/// perf facts into the recorder. Kept separate from [`with_open_hook`]
+/// so the dispatcher-event contract (otp-10b-2 F4) stays untouched.
+fn with_perf_capture(
+    inner: Box<OpenResolver>,
+    recorder: Arc<ServedSessionRecorder>,
+) -> Box<OpenResolver> {
+    Box::new(move |open: &SessionOpen| {
+        let compare_mode = open.compare_mode();
+        let mirror_enabled = open.mirror_enabled;
+        let fut = inner(open);
+        let recorder = Arc::clone(&recorder);
+        Box::pin(async move {
+            let resolved = fut.await?;
+            recorder.note_open(OpenPerfFacts {
+                compare_mode,
+                mirror_enabled,
+                resolved_root: resolved.root.clone(),
+            });
+            Ok(resolved)
+        })
+    })
+}
+
+/// The stable host portion of the dispatcher's peer string
+/// (`SocketAddr` rendering or `"unknown"`): the port churns per
+/// connection and must not fragment seed keys.
+fn peer_host(peer: &str) -> Option<&str> {
+    peer.rsplit_once(':').map(|(host, _)| host)
 }
 
 /// Map a resolver `tonic::Status` onto a `SessionError` code. blit-core
@@ -153,6 +323,9 @@ pub(crate) async fn run_transfer_session(
     // Fires once at a successful open resolve with this session's job
     // kind + endpoint (review otp-10b-2 F4).
     on_open: Arc<OnSessionOpen>,
+    // ph-1c: dispatcher-owned session observer; this function fills it
+    // from inside the session, the dispatcher reads it after the race.
+    recorder: Arc<ServedSessionRecorder>,
 ) -> Result<(), Status> {
     let transport = grpc_daemon_transport(tx, inbound);
     let (source_progress_tx, mut source_progress_rx) = mpsc::unbounded_channel();
@@ -176,24 +349,48 @@ pub(crate) async fn run_transfer_session(
     // consulted source-resolver means the daemon serves SOURCE (the
     // client pulls — the old PullSync verbs' kind), a consulted
     // dest-resolver means the daemon receives (push-equivalent).
-    let source_resolver = with_open_hook(
-        make_open_resolver(Arc::clone(&modules), default_root.clone()),
-        Arc::clone(&on_open),
-        ActiveJobKind::PullSync,
+    let source_resolver = with_perf_capture(
+        with_open_hook(
+            make_open_resolver(Arc::clone(&modules), default_root.clone()),
+            Arc::clone(&on_open),
+            ActiveJobKind::PullSync,
+        ),
+        Arc::clone(&recorder),
     );
-    let dest_resolver = with_open_hook(
-        make_open_resolver(modules, default_root),
-        on_open,
-        ActiveJobKind::Push,
+    let dest_resolver = with_perf_capture(
+        with_open_hook(
+            make_open_resolver(modules, default_root),
+            on_open,
+            ActiveJobKind::Push,
+        ),
+        Arc::clone(&recorder),
     );
+    // ph-1c: terminal-summary hooks fire inside the session at the
+    // contract's closing point, so the dispatcher still knows the
+    // session completed even if the initiator's immediate hangup drops
+    // this future mid-teardown. Which hook fires IS the role.
+    let source_terminal = {
+        let recorder = Arc::clone(&recorder);
+        Arc::new(move |summary: &blit_core::generated::TransferSummary| {
+            recorder.note_terminal(LocalRole::Source, summary);
+        })
+    };
+    let destination_terminal = {
+        let recorder = Arc::clone(&recorder);
+        Arc::new(move |summary: &blit_core::generated::TransferSummary| {
+            recorder.note_terminal(LocalRole::Destination, summary);
+        })
+    };
     let instruments = ResponderInstruments {
         source: SourceInstruments {
             progress: Some(RemoteTransferProgress::new(source_progress_tx)),
+            on_terminal_summary: Some(source_terminal),
             ..Default::default()
         },
         destination: DestinationInstruments {
             progress: Some(RemoteTransferProgress::new(destination_progress_tx)),
             byte_progress: Some(byte_progress),
+            on_terminal_summary: Some(destination_terminal),
             ..Default::default()
         },
     };
@@ -215,6 +412,10 @@ pub(crate) async fn run_transfer_session(
         // (the jobs kind stays Push until the taxonomy is revisited at
         // cutover — see the dispatcher).
         Ok(outcome) => {
+            // ph-1c: the daemon's own record is appended by the
+            // dispatcher AFTER the outcome race settles
+            // (`ServedSessionRecorder::record`), never here — this
+            // future is the raced one.
             let summary = match outcome {
                 blit_core::transfer_session::ResponderOutcome::Source(summary) => summary,
                 blit_core::transfer_session::ResponderOutcome::Destination(outcome) => {

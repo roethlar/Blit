@@ -299,6 +299,14 @@ pub struct SourceInstruments {
     /// push-direction denominator — files the DESTINATION requested),
     /// `Payload`/`FileComplete` per payload sent on either carrier.
     pub progress: Option<RemoteTransferProgress>,
+    /// ph-1c: fires the instant this SOURCE end receives the
+    /// destination's scoring summary — the session's terminal state by
+    /// contract (§Closing) — and before any teardown await. A serving
+    /// daemon uses it to observe a completed session even when its
+    /// dispatcher's hangup race drops the responder future
+    /// mid-teardown: the initiator legitimately disconnects as soon as
+    /// it has what it needs.
+    pub on_terminal_summary: Option<Arc<dyn Fn(&TransferSummary) + Send + Sync>>,
     /// Shared accumulator for source paths the manifest scan could not
     /// read. The session still streams what it can and reports
     /// `ManifestComplete{scan_complete=false}`; callers that must not
@@ -406,6 +414,13 @@ pub struct DestinationInstruments {
     /// High-volume aggregate observer for otp-12 small-file attribution.
     /// Separate from the low-frequency phase trace and disabled by default.
     pub small_file_probe: SmallFileProbe,
+    /// ph-1c: fires the instant this DESTINATION end finalizes its own
+    /// scoring summary (it IS the scorer — contract §Closing), before
+    /// the summary frame send. See
+    /// [`SourceInstruments::on_terminal_summary`] for why a serving
+    /// daemon needs a terminal signal that survives the dispatcher's
+    /// hangup race.
+    pub on_terminal_summary: Option<Arc<dyn Fn(&TransferSummary) + Send + Sync>>,
 }
 
 /// Observability hooks for either role a serving responder may assume.
@@ -2183,6 +2198,12 @@ async fn source_send_half(
         // its summary (the receive half ends after forwarding it).
         match events.recv().await {
             Some(SourceEvent::Summary(summary)) => {
+                // ph-1c: terminal by contract — signal BEFORE any
+                // further await, so a responder dropped by its
+                // dispatcher's hangup race still observed completion.
+                if let Some(hook) = instruments.on_terminal_summary.as_ref() {
+                    hook(&summary);
+                }
                 if let Some(trace) = &phase_trace {
                     trace.event("summary_received", SessionPhaseFields::default());
                 }
@@ -3484,6 +3505,25 @@ pub async fn run_destination(
         cfg.local_apply,
     )
     .await;
+    // ph-1c: graceful close for a DESTINATION initiator (the pull
+    // client, incl. the delegated dst daemon). Its terminal summary is
+    // queued into the request-stream channel, not yet on the wire;
+    // returning here would drop the whole call and CANCEL the RPC,
+    // discarding the queued summary — the served source then scores
+    // "peer closed before TransferSummary" for a transfer that
+    // completed. Draining the response stream until the responder
+    // closes it keeps the call alive while the summary flushes and
+    // ends the RPC cleanly instead of by cancel. Bounded so a wedged
+    // peer cannot hold the client; no wire change — no frame is
+    // expected and none is sent (contract §Closing unchanged). The
+    // responder closes right after its dispatcher settles, so this
+    // typically costs one round trip.
+    if result.is_ok() && matches!(endpoint, SessionEndpoint::Initiator { .. }) {
+        let _ = tokio::time::timeout(SUMMARY_DELIVERY_CLOSE_GRACE, async {
+            while let Ok(Some(_)) = transport.recv().await {}
+        })
+        .await;
+    }
     lifecycle_trace.record(
         "session_body_return",
         Some(if result.is_ok() {
@@ -3494,6 +3534,12 @@ pub async fn run_destination(
     );
     result
 }
+
+/// How long a DESTINATION initiator holds its call open after sending
+/// the terminal summary, waiting for the responder's clean close (see
+/// `run_destination`). LAN-typical cost is a single round trip; the cap
+/// only bites when the peer wedges mid-teardown.
+const SUMMARY_DELIVERY_CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The DESTINATION session body: run the diff/receive loop and map a
 /// fault to a peer-notified report. Shared by [`run_destination`] and
@@ -3787,6 +3833,9 @@ async fn destination_session_inner(
     // the denominator (reported where they're emitted, below); per-file
     // events ride each carrier's record handling.
     let progress = instruments.progress;
+    // ph-1c: cloned out before the struct's remaining fields scatter,
+    // fired at the summary's construction (§Closing).
+    let on_terminal_summary = instruments.on_terminal_summary.clone();
     let compare_mode = ComparisonMode::try_from(negotiated.open.compare_mode)
         .unwrap_or(ComparisonMode::Unspecified);
     // Session deletions run via the otp-6b mirror pass (a whole-tree
@@ -4887,6 +4936,12 @@ async fn destination_session_inner(
                     files_failed: contained_failures.files_failed_total,
                     failures: contained_failures.wire_failures(),
                 };
+                // ph-1c: this end is the scorer and its score is now
+                // final — signal terminal state before the send, whose
+                // completion only the peer needs.
+                if let Some(hook) = on_terminal_summary.as_ref() {
+                    hook(&summary);
+                }
                 if let Some(trace) = &phase_trace {
                     trace.event("summary_send_begin", SessionPhaseFields::default());
                 }
