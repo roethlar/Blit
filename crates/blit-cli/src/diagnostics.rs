@@ -41,14 +41,19 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
     }
 
     let history_path = perf::history_path()?;
-    let records = perf::read_records(args.limit)?;
+    let history = perf::read_merged(args.limit)?;
+    let aggregates = perf::aggregate(&history.records);
+    let records = history.records;
 
     if args.json {
         let output = json!({
             "enabled": ctx.perf_history_enabled,
             "history_path": history_path.to_string_lossy(),
+            "daemon_history_path": history.daemon_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            "daemon_note": history.daemon_note,
             "record_count": records.len(),
             "records": records,
+            "aggregates": aggregates,
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
@@ -60,6 +65,12 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
         records.len()
     );
     println!("History file: {}", history_path.display());
+    if let Some(path) = history.daemon_path.as_ref() {
+        println!("Daemon history merged from: {}", path.display());
+    }
+    if let Some(note) = history.daemon_note.as_ref() {
+        println!("Warning: {note}");
+    }
     println!(
         "Status: {}",
         if ctx.perf_history_enabled {
@@ -77,19 +88,24 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
         return Ok(());
     }
 
+    crate::profile::print_aggregates(&aggregates);
+
     let total_runs = records.len();
     let total_runs_f64 = total_runs as f64;
     let avg_planner = records
         .iter()
-        .map(|r| r.planner_duration_ms as f64)
+        .map(|r| r.record.planner_duration_ms as f64)
         .sum::<f64>()
         / total_runs_f64;
     let avg_transfer = records
         .iter()
-        .map(|r| r.transfer_duration_ms as f64)
+        .map(|r| r.record.transfer_duration_ms as f64)
         .sum::<f64>()
         / total_runs_f64;
-    let fast_path_runs = records.iter().filter(|r| r.fast_path.is_some()).count();
+    let fast_path_runs = records
+        .iter()
+        .filter(|r| r.record.fast_path.is_some())
+        .count();
     let fast_pct = if total_runs == 0 {
         0.0
     } else {
@@ -107,7 +123,8 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
         avg_planner, avg_transfer
     );
 
-    if let Some(last) = records.last() {
+    if let Some(row) = records.last() {
+        let last = &row.record;
         let millis = last.timestamp_epoch_ms.min(u64::MAX as u128) as u64;
         let timestamp = DateTime::<Utc>::from(UNIX_EPOCH + Duration::from_millis(millis));
         let mode = match last.mode {
@@ -120,6 +137,14 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
         println!(
             "  Timestamp : {}",
             timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+        );
+        println!(
+            "  Route     : [{}] {}/{}/{} key={}",
+            row.origin.label(),
+            last.topology.label(),
+            last.local_role.label(),
+            last.initiator.label(),
+            last.peer_key.as_deref().unwrap_or("-")
         );
         println!("  Mode      : {}", mode);
         println!("  Fast path : {}", fast_path_label);

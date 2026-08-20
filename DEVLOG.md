@@ -5,6 +5,15 @@ Per R5-F5 of `docs/reviews/followup_review_2026-05-02.md`: new entries
 go at the top of the file, immediately below this header, so reviewers
 scanning chronologically don't miss appended-at-the-bottom changes.
 
+- 2026-08-20T18:20Z — **R5b honest reporting landed** (PERF_HISTORY_PLANNING):
+  `blit diagnostics perf` now merges the operator store with the daemon
+  store, labels each record's origin, and reports per-route aggregates,
+  fast-path vs streaming split, and planner/transfer averages; `blit
+  profile` drops the retired predictor (R1, D-2026-08-20-2) and states
+  recording status plainly; `docs/DAEMON_CONFIG.md` documents the
+  daemon-side store. 4 new tests (3 merged-reporting + 1 aggregate);
+  workspace 1219/0 on macOS, Linux cross-clippy clean. Verified the CLI
+  output end-to-end against real recorded runs.
 - 2026-08-20T17:58Z — **ph-1 recording matrix closed**: added the
   delegated-coordinator landing test
   (`coordinator_records_delegated_run_in_operator_store`) driving the

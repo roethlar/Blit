@@ -16,7 +16,7 @@ use crate::perf_predictor::PerformancePredictor;
 use eyre::Result;
 use std::path::PathBuf;
 
-pub use crate::perf_history::PerformanceRecord;
+pub use crate::perf_history::{MergedRecord, PerformanceRecord, RecordOrigin, RouteAggregate};
 pub use crate::perf_predictor::DurationCoefficients;
 
 /// One side of the predictor's mode-keyed profile (Copy / Mirror).
@@ -50,7 +50,17 @@ pub struct PredictorReport {
 #[derive(Debug, Clone)]
 pub struct ProfileReport {
     pub enabled: bool,
-    pub records: Vec<PerformanceRecord>,
+    /// Operator + daemon rows merged with origin labels (ph-2, R5b),
+    /// oldest-first, capped to the newest `limit` of the union.
+    pub records: Vec<MergedRecord>,
+    /// Per-key aggregates over `records`: one row per
+    /// `(origin, topology, role, initiator, peer_key)` group.
+    pub aggregates: Vec<RouteAggregate>,
+    /// The daemon store's history file when a distinct one was found
+    /// and merged (R5b).
+    pub daemon_history_path: Option<PathBuf>,
+    /// Set when a daemon history file exists but could not be read.
+    pub daemon_note: Option<String>,
     pub predictor_path: Option<PathBuf>,
     pub predictor: Option<PredictorReport>,
 }
@@ -60,7 +70,8 @@ pub struct ProfileReport {
 /// `0` means "all records" per `read_recent_records`'s contract.
 pub fn query(limit: usize) -> Result<ProfileReport> {
     let enabled = perf_history::perf_history_enabled()?;
-    let records = perf_history::read_recent_records(limit)?;
+    let history = perf_history::read_merged_recent_records(limit)?;
+    let aggregates = perf_history::aggregate_by_route(&history.records);
     let predictor = PerformancePredictor::load().ok();
     let predictor_path = predictor
         .as_ref()
@@ -74,7 +85,10 @@ pub fn query(limit: usize) -> Result<ProfileReport> {
 
     Ok(ProfileReport {
         enabled,
-        records,
+        records: history.records,
+        aggregates,
+        daemon_history_path: history.daemon_path,
+        daemon_note: history.daemon_note,
         predictor_path,
         predictor,
     })

@@ -534,6 +534,252 @@ pub fn read_recent_records(limit: usize) -> Result<Vec<PerformanceRecord>> {
     HistoryStore::user()?.read_recent_records(limit)
 }
 
+// ---------------------------------------------------------------------
+// ph-2: merged reporting (ruling R5b) — `blit profile` /
+// `blit diagnostics perf` read the daemon's store too and label record
+// origin, so a daemon-served transfer is never invisible to the
+// operator. One existing surface telling the whole truth; no new
+// command.
+// ---------------------------------------------------------------------
+
+/// Which store a reported record came from (ph-2, R5b). Attached at
+/// read time by [`read_merged_recent_records`] — never persisted; the
+/// on-disk row is identical either way.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordOrigin {
+    /// The operator's store under the user config dir.
+    Operator,
+    /// The daemon's service-data store (ruling R5).
+    Daemon,
+}
+
+impl RecordOrigin {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Daemon => "daemon",
+        }
+    }
+}
+
+impl Topology {
+    /// Stable snake_case label, identical to the serde wire form.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
+            Self::RemoteToRemote => "remote_to_remote",
+        }
+    }
+}
+
+impl LocalRole {
+    /// Stable snake_case label, identical to the serde wire form.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Destination => "destination",
+            Self::Coordinator => "coordinator",
+        }
+    }
+}
+
+impl Initiator {
+    /// Stable snake_case label, identical to the serde wire form.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Daemon => "daemon",
+        }
+    }
+}
+
+/// A record plus the store it was read from. Serializes as the record's
+/// own fields with `origin` alongside them, so the JSON row shape is
+/// the ph-1 record shape plus one additive key.
+#[derive(Debug, Clone, Serialize)]
+pub struct MergedRecord {
+    pub origin: RecordOrigin,
+    #[serde(flatten)]
+    pub record: PerformanceRecord,
+}
+
+/// What [`read_merged_recent_records`] found: both stores' rows merged
+/// oldest-first by timestamp, capped to the newest `limit` of the
+/// union, plus where each side was read from.
+#[derive(Debug, Clone)]
+pub struct MergedHistory {
+    /// The operator store's history file (exists or not).
+    pub operator_path: PathBuf,
+    /// The daemon store's history file, when a distinct daemon store
+    /// was found on this machine. `None` on machines with no daemon
+    /// store and in dev runs where the daemon shares the config dir
+    /// (those rows already appear as `operator`).
+    pub daemon_path: Option<PathBuf>,
+    /// Set when a daemon history file exists but could not be read —
+    /// the report says so instead of silently narrowing to one store.
+    pub daemon_note: Option<String>,
+    pub records: Vec<MergedRecord>,
+}
+
+/// Locate a daemon store distinct from the operator's, best-effort:
+/// `$STATE_DIRECTORY` when set (the daemon process itself, or an
+/// operator pointing the CLI at it), else the documented systemd
+/// service-data path `/var/lib/blit` (`StateDirectory=blit`,
+/// `docs/DAEMON_CONFIG.md`). A candidate counts only when its history
+/// file actually exists; the operator's own dir never counts (dev
+/// runs share it — those rows are already operator rows).
+fn daemon_store_for_reporting(operator_dir: &Path) -> Option<HistoryStore> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(raw) = std::env::var_os("STATE_DIRECTORY") {
+        if let Some(first) = std::env::split_paths(&raw).next() {
+            if !first.as_os_str().is_empty() {
+                candidates.push(first);
+            }
+        }
+    }
+    candidates.push(PathBuf::from("/var/lib/blit"));
+    candidates
+        .into_iter()
+        .filter(|dir| dir != operator_dir)
+        .map(HistoryStore::at_dir)
+        .find(|store| store.history_path().exists())
+}
+
+/// Read the operator store and (when present) the daemon store,
+/// merged with origin labels (R5b). `limit` caps the merged union to
+/// its newest rows (`0` = all) so neither store can push the other out
+/// by being read second.
+pub fn read_merged_recent_records(limit: usize) -> Result<MergedHistory> {
+    let operator = HistoryStore::user()?;
+    let daemon = daemon_store_for_reporting(operator.dir());
+    read_merged_at(&operator, daemon.as_ref(), limit)
+}
+
+/// [`read_merged_recent_records`] with the store resolution factored
+/// out (tests inject temp stores; production resolves via
+/// [`HistoryStore::user`] + the daemon-store probe).
+pub fn read_merged_at(
+    operator: &HistoryStore,
+    daemon: Option<&HistoryStore>,
+    limit: usize,
+) -> Result<MergedHistory> {
+    let mut records: Vec<MergedRecord> = operator
+        .read_recent_records(0)?
+        .into_iter()
+        .map(|record| MergedRecord {
+            origin: RecordOrigin::Operator,
+            record,
+        })
+        .collect();
+
+    let mut daemon_path = None;
+    let mut daemon_note = None;
+    if let Some(store) = daemon {
+        daemon_path = Some(store.history_path());
+        match store.read_recent_records(0) {
+            Ok(rows) => records.extend(rows.into_iter().map(|record| MergedRecord {
+                origin: RecordOrigin::Daemon,
+                record,
+            })),
+            Err(err) => {
+                daemon_note = Some(format!(
+                    "daemon history at {} could not be read: {err:#}",
+                    store.history_path().display()
+                ));
+            }
+        }
+    }
+
+    // Stable sort: equal timestamps keep operator-before-daemon
+    // insertion order, and each store's own internal order.
+    records.sort_by_key(|row| row.record.timestamp_epoch_ms);
+    if limit > 0 && records.len() > limit {
+        records.drain(..records.len() - limit);
+    }
+
+    Ok(MergedHistory {
+        operator_path: operator.history_path(),
+        daemon_path,
+        daemon_note,
+        records,
+    })
+}
+
+/// One per-key aggregate row (ph-2): everything that distinguishes a
+/// lane a consumer may not mix — origin, route identity, and peer key —
+/// stays a separate group.
+#[derive(Debug, Clone, Serialize)]
+pub struct RouteAggregate {
+    pub origin: RecordOrigin,
+    pub topology: Topology,
+    pub local_role: LocalRole,
+    pub initiator: Initiator,
+    pub peer_key: Option<String>,
+    /// All rows in the group, any [`RunKind`].
+    pub runs: usize,
+    /// `RunKind::Real` rows only — the measurement lane eligible to
+    /// feed planning (R56-F1). Dry-run / null-sink rows count in
+    /// `runs` but never here.
+    pub real_runs: usize,
+    pub total_files: u64,
+    pub total_bytes: u64,
+    /// Mean transfer duration across all `runs`, in ms.
+    pub avg_transfer_ms: f64,
+}
+
+/// Group merged records by `(origin, topology, local_role, initiator,
+/// peer_key)` — deterministic label order, so text and JSON report the
+/// same rows in the same sequence on every run.
+pub fn aggregate_by_route(records: &[MergedRecord]) -> Vec<RouteAggregate> {
+    use std::collections::BTreeMap;
+
+    type Key = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        Option<String>,
+    );
+    let mut groups: BTreeMap<Key, Vec<&MergedRecord>> = BTreeMap::new();
+    for row in records {
+        groups
+            .entry((
+                row.origin.label(),
+                row.record.topology.label(),
+                row.record.local_role.label(),
+                row.record.initiator.label(),
+                row.record.peer_key.clone(),
+            ))
+            .or_default()
+            .push(row);
+    }
+
+    groups
+        .into_values()
+        .map(|rows| {
+            let runs = rows.len();
+            let sum_ms: u128 = rows.iter().map(|r| r.record.transfer_duration_ms).sum();
+            RouteAggregate {
+                origin: rows[0].origin,
+                topology: rows[0].record.topology,
+                local_role: rows[0].record.local_role,
+                initiator: rows[0].record.initiator,
+                peer_key: rows[0].record.peer_key.clone(),
+                runs,
+                real_runs: rows
+                    .iter()
+                    .filter(|r| r.record.run_kind.is_real_transfer())
+                    .count(),
+                total_files: rows.iter().map(|r| r.record.file_count as u64).sum(),
+                total_bytes: rows.iter().map(|r| r.record.total_bytes).sum(),
+                avg_transfer_ms: sum_ms as f64 / runs as f64,
+            }
+        })
+        .collect()
+}
+
 fn read_records_from_path(path: &Path, limit: usize) -> Result<Vec<PerformanceRecord>> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -544,7 +790,20 @@ fn read_records_from_path(path: &Path, limit: usize) -> Result<Vec<PerformanceRe
     let mut records = Vec::new();
 
     for line in reader.lines() {
-        let Ok(line) = line else { continue };
+        let line = match line {
+            Ok(line) => line,
+            // A non-UTF-8 line: `read_line` consumed through the
+            // newline before failing validation, so iteration has
+            // advanced — skipping is safe and keeps one corrupt line
+            // from hiding the rest of the history.
+            Err(err) if err.kind() == std::io::ErrorKind::InvalidData => continue,
+            // Any other I/O error may not have consumed anything
+            // (unreadable file, directory where the file should be):
+            // `continue` would retry the same failing read forever at
+            // 100% CPU (ph-2 red test, found via the merged-read
+            // unreadable-daemon-store guard). Surface it.
+            Err(err) => return Err(err.into()),
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -865,6 +1124,12 @@ mod tests {
         writeln!(file, "{}", sample_v0_json()).expect("write v0");
         writeln!(file, "{{not valid json}}").expect("write garbage");
         writeln!(file).expect("write empty");
+        // A non-UTF-8 line: consumed through its newline by
+        // `read_line` before UTF-8 validation fails, so it must be
+        // SKIPPED (not spin, not fail the read) — one corrupt line
+        // never hides the rest of the history.
+        file.write_all(&[0xFF, 0xFE, 0xFD, b'\n'])
+            .expect("write non-utf8");
         writeln!(file, "{}", sample_v1_json()).expect("write v1");
         drop(file);
 
@@ -1379,5 +1644,201 @@ mod tests {
             load_settings_at(&path).is_err(),
             "malformed settings must surface as an error"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // ph-2: merged reporting (R5b) + per-key aggregates
+    // -----------------------------------------------------------------
+
+    fn stamped(file_count: usize, ts: u128, route: RouteTag) -> PerformanceRecord {
+        let mut record = sample_record(file_count).with_route(route);
+        record.timestamp_epoch_ms = ts;
+        record
+    }
+
+    fn route(
+        topology: Topology,
+        local_role: LocalRole,
+        initiator: Initiator,
+        peer_key: Option<&str>,
+    ) -> RouteTag {
+        RouteTag {
+            topology,
+            local_role,
+            initiator,
+            peer_key: peer_key.map(str::to_string),
+        }
+    }
+
+    /// R5b: rows from both stores come back origin-labeled, merged
+    /// oldest-first by timestamp, and the limit caps the UNION's newest
+    /// rows — neither store can push the other out by being read second.
+    #[test]
+    fn merged_read_labels_origin_and_caps_the_union() {
+        let op_dir = tempfile::tempdir().expect("op dir");
+        let dm_dir = tempfile::tempdir().expect("dm dir");
+        let operator = HistoryStore::at_dir(op_dir.path().to_path_buf());
+        let daemon = HistoryStore::at_dir(dm_dir.path().to_path_buf());
+
+        let remote_src = || route(Topology::Remote, LocalRole::Source, Initiator::Cli, None);
+        operator
+            .append(&stamped(1, 100, remote_src()))
+            .expect("append");
+        operator
+            .append(&stamped(3, 300, remote_src()))
+            .expect("append");
+        daemon
+            .append(&stamped(2, 200, remote_src()))
+            .expect("append");
+        daemon
+            .append(&stamped(4, 400, remote_src()))
+            .expect("append");
+
+        let merged = read_merged_at(&operator, Some(&daemon), 0).expect("merged");
+        assert_eq!(merged.operator_path, operator.history_path());
+        assert_eq!(merged.daemon_path.as_deref(), Some(&*daemon.history_path()));
+        assert!(merged.daemon_note.is_none());
+        let shape: Vec<(u128, RecordOrigin)> = merged
+            .records
+            .iter()
+            .map(|r| (r.record.timestamp_epoch_ms, r.origin))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (100, RecordOrigin::Operator),
+                (200, RecordOrigin::Daemon),
+                (300, RecordOrigin::Operator),
+                (400, RecordOrigin::Daemon),
+            ]
+        );
+
+        let capped = read_merged_at(&operator, Some(&daemon), 3).expect("capped");
+        let shape: Vec<u128> = capped
+            .records
+            .iter()
+            .map(|r| r.record.timestamp_epoch_ms)
+            .collect();
+        assert_eq!(shape, vec![200, 300, 400], "cap keeps the union's newest");
+    }
+
+    /// No daemon store on the machine: pure operator report, no daemon
+    /// path, no note.
+    #[test]
+    fn merged_read_without_daemon_store_is_operator_only() {
+        let op_dir = tempfile::tempdir().expect("op dir");
+        let operator = HistoryStore::at_dir(op_dir.path().to_path_buf());
+        operator
+            .append(&stamped(
+                1,
+                100,
+                route(Topology::Local, LocalRole::Source, Initiator::Cli, None),
+            ))
+            .expect("append");
+
+        let merged = read_merged_at(&operator, None, 0).expect("merged");
+        assert!(merged.daemon_path.is_none());
+        assert!(merged.daemon_note.is_none());
+        assert_eq!(merged.records.len(), 1);
+        assert_eq!(merged.records[0].origin, RecordOrigin::Operator);
+    }
+
+    /// A daemon history that exists but cannot be read must be SAID —
+    /// the report notes it instead of silently narrowing to one store.
+    #[test]
+    fn merged_read_reports_unreadable_daemon_store() {
+        let op_dir = tempfile::tempdir().expect("op dir");
+        let dm_dir = tempfile::tempdir().expect("dm dir");
+        let operator = HistoryStore::at_dir(op_dir.path().to_path_buf());
+        let daemon = HistoryStore::at_dir(dm_dir.path().to_path_buf());
+        operator
+            .append(&stamped(
+                1,
+                100,
+                route(Topology::Local, LocalRole::Source, Initiator::Cli, None),
+            ))
+            .expect("append");
+        // A directory where the history FILE should be: exists() is
+        // true, opening for read fails.
+        fs::create_dir(daemon.history_path()).expect("dir in place of file");
+
+        let merged = read_merged_at(&operator, Some(&daemon), 0).expect("merged");
+        assert_eq!(merged.records.len(), 1, "operator rows still report");
+        assert!(
+            merged
+                .daemon_note
+                .as_deref()
+                .is_some_and(|n| n.contains("could not be read")),
+            "note: {:?}",
+            merged.daemon_note
+        );
+    }
+
+    /// ph-2 aggregates: origin, route identity, and peer key each split
+    /// the group — and only `RunKind::Real` rows count as `real_runs`
+    /// (R56-F1's lane rule carried into reporting).
+    #[test]
+    fn aggregates_stay_separate_per_key_origin_and_lane() {
+        let key_a = || {
+            route(
+                Topology::Remote,
+                LocalRole::Source,
+                Initiator::Cli,
+                Some("hostA:/data/"),
+            )
+        };
+        let mut dry = stamped(5, 300, key_a());
+        dry.run_kind = RunKind::DryRun;
+        let rows = vec![
+            MergedRecord {
+                origin: RecordOrigin::Operator,
+                record: stamped(10, 100, key_a()),
+            },
+            MergedRecord {
+                origin: RecordOrigin::Operator,
+                record: stamped(20, 200, key_a()),
+            },
+            MergedRecord {
+                origin: RecordOrigin::Operator,
+                record: dry,
+            },
+            // Same key, other store: separate row (a daemon-served run
+            // and an operator run must never blend).
+            MergedRecord {
+                origin: RecordOrigin::Daemon,
+                record: stamped(7, 400, key_a()),
+            },
+            // Other key, same store: separate row.
+            MergedRecord {
+                origin: RecordOrigin::Operator,
+                record: stamped(
+                    1,
+                    500,
+                    route(
+                        Topology::Remote,
+                        LocalRole::Source,
+                        Initiator::Cli,
+                        Some("hostB:/data/"),
+                    ),
+                ),
+            },
+        ];
+
+        let aggs = aggregate_by_route(&rows);
+        assert_eq!(aggs.len(), 3, "origin + peer key both split: {aggs:?}");
+
+        let find = |origin: RecordOrigin, key: &str| {
+            aggs.iter()
+                .find(|a| a.origin == origin && a.peer_key.as_deref() == Some(key))
+                .unwrap_or_else(|| panic!("missing {origin:?}/{key}: {aggs:?}"))
+        };
+        let op_a = find(RecordOrigin::Operator, "hostA:/data/");
+        assert_eq!(op_a.runs, 3);
+        assert_eq!(op_a.real_runs, 2, "dry-run counts in runs, never real_runs");
+        assert_eq!(op_a.total_files, 35);
+        let dm_a = find(RecordOrigin::Daemon, "hostA:/data/");
+        assert_eq!((dm_a.runs, dm_a.real_runs, dm_a.total_files), (1, 1, 7));
+        let op_b = find(RecordOrigin::Operator, "hostB:/data/");
+        assert_eq!((op_b.runs, op_b.total_files), (1, 1));
     }
 }

@@ -7,7 +7,9 @@ use crate::perf_history;
 use eyre::Result;
 use std::path::PathBuf;
 
-pub use crate::perf_history::PerformanceRecord;
+pub use crate::perf_history::{
+    MergedHistory, MergedRecord, PerformanceRecord, RecordOrigin, RouteAggregate,
+};
 
 /// Read the persisted "perf history enabled" flag. Separate
 /// so the CLI's `diagnostics perf` verb can treat the post-toggle
@@ -30,6 +32,19 @@ pub fn history_path() -> Result<PathBuf> {
 /// `crate::perf_history::read_recent_records`'s contract.
 pub fn read_records(limit: usize) -> Result<Vec<PerformanceRecord>> {
     perf_history::read_recent_records(limit)
+}
+
+/// Operator + daemon stores merged with origin labels (ph-2, R5b);
+/// `limit` caps the merged union to its newest rows (`0` = all).
+pub fn read_merged(limit: usize) -> Result<MergedHistory> {
+    perf_history::read_merged_recent_records(limit)
+}
+
+/// Per-key aggregate rows over merged records — one per
+/// `(origin, topology, role, initiator, peer_key)` group, in
+/// deterministic label order.
+pub fn aggregate(records: &[MergedRecord]) -> Vec<RouteAggregate> {
+    perf_history::aggregate_by_route(records)
 }
 
 /// Persist a new "perf history enabled" setting. Caller refreshes

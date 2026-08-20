@@ -453,6 +453,14 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/data/backups /home/shared
 
+# Writable service data (performance history store): systemd creates
+# /var/lib/blit and passes it as $STATE_DIRECTORY. Without it the
+# daemon has nowhere writable under ProtectSystem=strict, and its
+# transfers record no performance history. `blit profile` /
+# `blit diagnostics perf` merge records from this store into their
+# reports, labeled with origin "daemon".
+StateDirectory=blit
+
 [Install]
 WantedBy=multi-user.target
 ```
