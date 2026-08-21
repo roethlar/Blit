@@ -5,6 +5,18 @@ Per R5-F5 of `docs/reviews/followup_review_2026-05-02.md`: new entries
 go at the top of the file, immediately below this header, so reviewers
 scanning chronologically don't miss appended-at-the-bottom changes.
 
+- 2026-08-21T00:47Z — **v0.1.3 IS RELEASED.** Tag `v0.1.3` → `fe6b279d` pushed to
+  origin + github; tag-push CI run 32433036504 fully green — Check &
+  Format, Linux/macOS/Windows tests, three signed release builds, then
+  `Publish release` attached all six assets atomically to the
+  non-draft `Blit v0.1.3` release and `Update package managers`
+  re-dispatched brew/scoop/AUR/winget. Local gate before the tag: fmt,
+  clippy (-D warnings), full workspace test suite green on macOS.
+  Remaining owner-only step: crates.io publishes (`blit-core`,
+  `blit-transfer`, `blit-daemon`) — the agent-side `cargo publish`
+  is blocked by the harness permission classifier; `blit-core`
+  `--dry-run` packaged and verified clean.
+
 - 2026-08-21T00:25Z — **Release 0.1.3 cut (owner order)**: workspace version
   0.1.2→0.1.3 (root `Cargo.toml` + internal `blit-core` dep pins),
   `CHANGELOG.md` `[0.1.3]` written covering everything since `v0.1.2`
