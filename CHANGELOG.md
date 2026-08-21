@@ -2,6 +2,66 @@
 
 All notable changes to Blit are documented in this file.
 
+## [0.1.3] - 2026-08-20
+
+Consolidation and self-tuning: the workspace is now three crates with
+`blit-core` as the embeddable platform library, every install channel is
+live (Homebrew, winget, Scoop, AUR, cargo, GitHub Releases), and
+transfers record per-route performance history and warm-start their
+tuning from it instead of re-learning every run. Covers all work landed
+since `v0.1.2` (tagged 2026-08-08).
+
+### Workspace consolidated to three crates
+
+- `blit-app` and `blit-console-core` are folded into `blit-core`, the
+  single platform crate (published on crates.io); the gRPC proto now
+  ships inside it. `blit-tui`, `blit-gui`, and `blit-prometheus-bridge`
+  are removed: Blit in this repo is the CLI plus the daemon, and UIs are
+  developed out of tree. Shipped binaries are unchanged (`blit`,
+  `blit-daemon`).
+- On crates.io the CLI crate is named `blit-transfer` (the installed
+  command is still `blit`).
+
+### Install channels
+
+- Live channels: Homebrew (`roethlar/blit/blit-bin`), winget
+  (`Roethlar.Blit`), Scoop, AUR (`blit`, `blit-bin`), cargo
+  (`blit-transfer`, `blit-daemon`), and GitHub Releases. The release
+  pipeline updates the bot-maintained channels automatically on tag
+  publish.
+
+### Adaptive tuning from per-route performance history
+
+- Every transfer session records per-route performance history (schema
+  v3 with route identity, serialized writer, atomic compaction), on the
+  client and on the daemon side, including remote client sessions and
+  delegated coordinators.
+- Settled tuning dials persist as per-route seeds: later runs warm-start
+  the checker dial and session worker counts from those seeds, then keep
+  adapting up and down under load instead of re-learning from scratch.
+- Diagnostics report merged daemon + operator perf history with origin
+  labels, so telemetry reflects both ends of a route.
+
+### Protocol safety
+
+- A session now refuses a peer with a mismatched protocol contract
+  version up front instead of failing mid-transfer, and `blit scan`
+  surfaces the protocol version.
+- A local destination shaped like a daemon address (`host:/path`) gets a
+  warning instead of being treated silently as a local path.
+
+### Fixes
+
+- Streamed-receive mtime pinning compared Unix-epoch seconds against
+  1601-epoch seconds on Windows; metadata now stamps through the
+  retained descriptor, and streamed receives cache parent readiness.
+- Per-file error containment follow-ups: the containment decision is
+  cached per session and resume-path descriptors are stamped.
+- Progress output: the transfer-rate window stops measuring after the
+  last payload byte (no decaying tail rates), stall reporting separates
+  visible mid-payload stalls from silent tails, and summary colours are
+  byte-observable.
+
 ## [0.1.2] - 2026-08-08
 
 A patch version number, but not a small release: this covers everything

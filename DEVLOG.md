@@ -5,6 +5,14 @@ Per R5-F5 of `docs/reviews/followup_review_2026-05-02.md`: new entries
 go at the top of the file, immediately below this header, so reviewers
 scanning chronologically don't miss appended-at-the-bottom changes.
 
+- 2026-08-21T00:25Z — **Release 0.1.3 cut (owner order)**: workspace version
+  0.1.2→0.1.3 (root `Cargo.toml` + internal `blit-core` dep pins),
+  `CHANGELOG.md` `[0.1.3]` written covering everything since `v0.1.2`
+  (three-crate consolidation, install channels, per-route perf history
+  with warm-start tuning, contract-version session gate, sf-3 fixes,
+  progress/stall rework). Tag `v0.1.3`, tag-CI publish, and crates.io
+  publishes follow; results recorded when the tag run completes.
+
 - 2026-08-20T23:02Z — **CI green on `2fa0eccd`: master unblocked on both
   remotes**. Owner pushed `20d6e51f..2fa0eccd` to origin + github; GitHub CI
   run 32425865763 fully green — Check & Format on the rust 1.98.0 runner
