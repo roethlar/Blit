@@ -3,10 +3,10 @@
 **Status**: Draft — owner ordered the plan and a codex review loop to
 consensus (2026-09-25); no code until `Active`. Open rulings D1–D6 below.
 Review record: `REVIEW.md` §Plan reviews (openreview), rows
-`plan-ssc-2026-09-25-r*`; r1–r4 `acceptable_with_changes` (21 material
-changes: 17 adopted, staged writes carried into the design behind owner
-ruling D5 with its staging-budget sub-question, manifest-entry IDs
-declined → D6 — see §Review history).
+`plan-ssc-2026-09-25-r*`; r1–r5 `acceptable_with_changes` (26 material
+changes: 21 adopted, staged writes carried into the design behind owner
+ruling D5 whose staging-budget sub-question the reviewer has now raised
+twice, manifest-entry IDs declined → D6 — see §Review history).
 **Created**: 2026-09-25
 **Supersedes**: `docs/plan/PER_FILE_ERROR_CONTAINMENT.md` §Non-goals
 "Send-side source read stays fatal" (the deferred wire skip signal lands
@@ -137,7 +137,15 @@ a single error, we are violating all of those."
   a file that enumerated but cannot be delivered at payload time is in the
   manifest, so its destination counterpart is never extraneous. Skips and
   retractions never gate mirror deletion (D3 removes the apply-time
-  refusal that says otherwise).
+  refusal that says otherwise). **A failed path shields its destination
+  subtree**: `plan_session_deletions` (`mirror_planner.rs:213-235`) keeps
+  a source path and its ancestors but not its descendants, so a skipped
+  source *file* whose destination is a populated *directory* would have
+  that directory's contents deleted without the replacement landing (r5
+  F1). The mirror pass therefore receives the uncapped set of failed
+  paths (`SinkOutcome.failed_paths`, `sink.rs:229`, which today is not
+  carried by `merge_failures`, `:315` — it must be) and excludes each one
+  and every component-wise descendant from deletion (A19).
 - **Same handle, every route.** Every size or identity check on the
   source — remote carriers and the local copy cascade alike — uses the
   handle the bytes are read from (`OpenedSourceFile`, D-A); no route
@@ -250,6 +258,11 @@ a single error, we are violating all of those."
   `one_blocked_file_fixture` tests) is still contained under the new sink
   lifecycle: the record's framing is consumed through its terminator, the
   failure is that file's, the session continues.
+- [ ] **A19 (mirror shield):** a mirror in which a skipped or retracted
+  source file's path is a populated directory at the destination leaves
+  that directory and its contents untouched, reports the failure, and
+  still deletes genuinely extraneous entries elsewhere (regression per r5
+  F1; red today via `plan_session_deletions` descendant deletion).
 - [ ] **A18 (dry-run):** a `--dry-run` on every route creates no parent
   directory and no staging file under the new lifecycle (guard asserts
   the destination tree is unchanged, including after a mid-run
@@ -282,8 +295,15 @@ enum NeedState {
     Completed,
     Failed,
 }
-enum Lane { Control, DataPlane }   // in-stream control stream vs the TCP socket
+enum Lane { Control, DataPlane { epoch: u32, socket_id: u32 } }   // one lane per inbound TCP connection
 ```
+
+Every inbound TCP connection is its own lane (`data_plane.rs:294` spawns
+one receive worker per socket; `pipeline.rs:1381` accepts path-bearing
+`BLOCK_COMPLETE` on each), so a block or completion for a record
+activated on another socket is rejected at the first misplaced record,
+never finalised early or written across sockets (r5 F2). Resume blocks
+and completions carry the lane check exactly as file chunks do.
 
 Transitions, each a protocol violation if the current state does not
 allow it:
@@ -598,12 +618,24 @@ still exists (r4 F2), so the bound is workers × their current records,
 not one file; a destination that fills stays the volume-level fatal it
 is today (`failure_is_containable`), every in-process abort removes its
 staging file, and a fault-injected low-space run pins both. No admission
-budget is added (D5 sub-question: the reviewer proposed a byte-weighted
-budget across workers; this draft declines it as machinery for a
-condition that is already fatal and rare). One rename per streamed
-file, negligible next to a ≥ shard-threshold body; a staging file orphaned by a crash carries the recognisable prefix
-and is removed by the next run's sink before it stages the same target
-(and is extraneous under a mirror). Windows: the rename uses
+budget is added in this draft (D5 sub-question, raised by the reviewer in
+r4 and r5: a destination with room to replace each file sequentially but
+not for all workers' stages at once would hit ENOSPC where throttling
+staging concurrency would let it complete; the proposed remedy is an
+internal destination-scoped byte budget derived from record sizes and
+free space, no CLI surface). One rename per streamed file, negligible
+next to a ≥ shard-threshold body. **Crash orphans are never swept by
+name** (r5 F3): the stage-to-target mapping lives only in the
+`RecordWriter`, so a later run has no proof of ownership and a prefix
+sweep could delete a user's file or another concurrent session's live
+stage. In-process aborts always remove their stage; after a crash the
+orphan stays, visibly named, and is removed only as an extraneous entry
+by a mirror pass (the same rule that removes any other file the source
+does not have). **macOS clone first** (r5 F5): `fclonefileat` requires an
+absent destination (`copy/file_copy/mod.rs:95-104`, R58-F11), so the
+local cascade clones the opened source straight to a unique absent stage
+path and only creates the stage file when falling back to `fcopyfile` or
+buffered I/O — the constant-time APFS path is preserved (A17). Windows: the rename uses
 `MOVEFILE_REPLACE_EXISTING` semantics via `std::fs::rename`; a target
 held open by another process fails the rename → that file's contained
 failure, the staging file removed. If D5 rules "keep in place", `abort`
@@ -758,6 +790,19 @@ Executed order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-5.
   byte-weighted admission budget is declined in this draft and put to
   the owner inside D5. Records:
   `.review/results/2026-09-25-source-side-containment-plan-r4-*`.
+- **r5** (same reviewer; over `0bcad512..514b7568`):
+  `acceptable_with_changes`, 5 material changes, 5 findings (4 HIGH, 1
+  MEDIUM), all verified. Adopted: M1/F1 `plan_session_deletions` keeps a
+  source path and its ancestors, not its descendants
+  (`mirror_planner.rs:213-235`) → failed paths shield their subtree
+  (Constraints, A19); M2/F2 one `Lane::DataPlane` for N sockets →
+  per-connection lanes (D-A); M3/F3 prefix sweep has no ownership proof →
+  no sweep, orphans removed only as mirror-extraneous (D-H); M5/F5
+  `create_new` stage defeats `clonefile`'s absent-destination requirement
+  (`copy/file_copy/mod.rs:95-104`) → clone into the absent stage path
+  first (D-H). M4/F4 staging admission budget, second time: kept as the
+  D5 sub-question with the reviewer's scenario recorded. Records:
+  `.review/results/2026-09-25-source-side-containment-plan-r5-*`.
 
 ## Open questions
 
@@ -788,9 +833,12 @@ Executed order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-5.
   single-file records and the local single-file copy, rename on commit;
   resume and shard members unchanged; costs: transient space equal to
   the in-flight streamed records (workers × current record), one rename
-  per streamed file, crash-orphan cleanup by prefix; sub-question: add a
-  byte-weighted staging admission budget across workers (codex r4 M2) or
-  accept volume-full as the already-fatal class it is (this draft);
+  per streamed file, no orphan sweep (orphans go only as
+  mirror-extraneous); sub-question, raised by codex in r4 and r5: add an
+  internal destination-scoped byte budget so concurrent stages throttle
+  under low free space (scenario: sequential replacement fits, concurrent
+  stages do not), or accept volume-full as the already-fatal class it is
+  (this draft);
   (b) keep in place — `abort` removes the truncated target, A9/A12 read
   "path absent". Recommendation: (a); it is the only way "a source
   failure never costs the destination a file it already had" can be
