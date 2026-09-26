@@ -10,6 +10,25 @@ commit at which it was rotated out.
 
 ---
 
+## Rotated 2026-09-25 (at `0bcad512`) — pre-fix P1 evidence bullet, ldt-2/3 acceptance line, 2026-08-15 handoff
+
+Rotated by the SOURCE_SIDE_CONTAINMENT draft commit to hold STATE under its 200-line cap; all three are recorded in DEVLOG (2026-07-14, 2026-07-22, 2026-08-15 18:30Z) and closed by D-2026-07-22-2 / SMALL_FILE_CEILING §Slices.
+
+- **PRE-FIX P1 MEASUREMENT EVIDENCE IS CLOSED AND ARCHIVED.** MTU was killed
+  as a material cause (pf-0, `docs/bench/otp12-jumbo-win-2026-07-13/`); the
+  fast arm is bistable so any future counterfactual must measure its own
+  paired within-session floor; P1 reproduced on a second Mac pre-fix
+  (`docs/bench/otp12-q-baseline-2026-07-13/`); and the pf-final baseline
+  re-record constraints are D-2026-07-14-1. All superseded for cause by
+  D-2026-07-22-2 below — detail in DEVLOG 2026-07-14 and those bench dirs.
+- Recent code state: every transfer rides the ONE session. ldt-2 is accepted at `65a0f9f`; ldt-3 lifecycle/observer closure is accepted at review fix `406a7e5` after clean neutral r2 (`.review/findings/ldt-3.md`).
+
+## Handoff — 2026-08-15 (sf-3c LANDED: descriptor-retained metadata stamping)
+- Done: `write_file_stream`'s finalize tail now stamps mtime (Unix: permissions too) through the retained `std::fs::File` handle (`stamp_streamed_metadata_via_handle`) instead of dropping the file and reopening `dst` by path; named-stream/attribute calls stay path-based (no handle API exists). New pin `fs_sink_stamps_streamed_metadata_without_reopening` (portable `handle_metadata_stamps` counter, sf-3b's proxy pattern) mutation-proven red (0≠8) / green (8). Gates green: fmt, native + linux-cross clippy at `-D warnings`, full workspace test 1873 passed/0 failed/2 ignored (macOS), including `remote_regression`'s `pull_preserves_mtime_end_to_end`. Record: `docs/plan/SMALL_FILE_CEILING.md` Slices §4, DEVLOG 2026-08-15 18:30Z.
+- In flight: nothing further on SMALL_FILE_CEILING; sf-3a's third named candidate (contained-path canonicalization amortizing the readlink walk) is next in the ordered list, not yet selected. `finalize_resumed_file`'s near-identical by-path reopen (resume-completion path) was surfaced as an out-of-scope observation, also not yet selected.
+- First action: ask the owner whether to select the next sf-3x cut, or move to another queue item.
+
+
 ## Rotated 2026-09-25 (at `ab5ea073`) — sf-3b closure, in-repo UI ruling, BLIT_CONSOLE C1 shell
 
 Landed: sf-3b's closure (D-2026-08-14-1) is restated in the surviving
