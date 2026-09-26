@@ -3,10 +3,12 @@
 **Status**: Draft — owner ordered the plan and a codex review loop to
 consensus (2026-09-25); no code until `Active`. Open rulings D1–D6 below.
 Review record: `REVIEW.md` §Plan reviews (openreview), rows
-`plan-ssc-2026-09-25-r*`; r1–r5 `acceptable_with_changes` (26 material
-changes: 21 adopted, staged writes carried into the design behind owner
-ruling D5 whose staging-budget sub-question the reviewer has now raised
-twice, manifest-entry IDs declined → D6 — see §Review history).
+`plan-ssc-2026-09-25-r*`; six rounds, all `acceptable_with_changes`
+(29 material changes: 23 adopted; the rest are owner rulings — D5 staged
+writes with two sub-questions, D6 manifest-entry identity). **Loop
+closed 2026-09-26 at r6: every remaining material change is one the
+reviewer has raised repeatedly and that only an owner ruling can settle
+(openreview playbook: a contested round resolves by owner adjudication).**
 **Created**: 2026-09-25
 **Supersedes**: `docs/plan/PER_FILE_ERROR_CONTAINMENT.md` §Non-goals
 "Send-side source read stays fatal" (the deferred wire skip signal lands
@@ -608,7 +610,14 @@ filesystem's component-length limit still transfers (r4 F4); the
 target mapping lives only in the `RecordWriter`. Metadata is stamped on
 the staging file and `commit` renames it over the target
 (`std::fs::rename` replaces an existing file on every supported
-platform); `abort` removes only the staging file. Tar-shard members are unchanged (whole-in-memory shard,
+platform); `abort` removes only the staging file. **The stage is owned by an RAII
+guard** (r6 F3): cancellation (`CancelJob`, disconnect, an adjacent task
+failure) aborts receive tasks by dropping their futures
+(`remote/transfer/abort_on_drop.rs:84-90`), which would bypass an
+explicit `abort`, so the `RecordWriter` holds a guard that removes its
+exact stage path on `Drop` and is disarmed only by a successful rename;
+cancellation tests on the in-stream, data-plane and local routes pin it.
+Tar-shard members are unchanged (whole-in-memory shard,
 destination-side per-member containment as today); resume stays in place
 (Q2). Costs and their handling: transient space equal to the **sum of the
 in-flight streamed records' sizes** — one receive task per inbound TCP
@@ -631,7 +640,12 @@ sweep could delete a user's file or another concurrent session's live
 stage. In-process aborts always remove their stage; after a crash the
 orphan stays, visibly named, and is removed only as an extraneous entry
 by a mirror pass (the same rule that removes any other file the source
-does not have). **macOS clone first** (r5 F5): `fclonefileat` requires an
+does not have). A *concurrent* session's live stage is subject to that
+same mirror rule (r6 F2) — as is every in-progress target that session
+is writing today (`mirror_planner.rs:336-346` deletes any destination
+entry absent from the source set); two sessions writing one destination
+root concurrently is not a supported mode and this plan does not add
+ownership leases for it (recorded under D5). **macOS clone first** (r5 F5): `fclonefileat` requires an
 absent destination (`copy/file_copy/mod.rs:95-104`, R58-F11), so the
 local cascade clones the opened source straight to a unique absent stage
 path and only creates the stage file when falling back to `fcopyfile` or
@@ -803,6 +817,18 @@ Executed order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-5.
   first (D-H). M4/F4 staging admission budget, second time: kept as the
   D5 sub-question with the reviewer's scenario recorded. Records:
   `.review/results/2026-09-25-source-side-containment-plan-r5-*`.
+- **r6** (same reviewer; over `0bcad512..af9a24e0`):
+  `acceptable_with_changes`, 3 material changes, 3 findings (1 HIGH, 2
+  MEDIUM), all about staging. Adopted: M3/F3 explicit `abort` is bypassed
+  when a receive task is cancelled by drop (`abort_on_drop.rs:84-90`) →
+  RAII stage guard disarmed only by the rename (D-H). Recorded, not
+  adopted: M2/F2 a concurrent mirror can delete another session's live
+  stage — true, and equally true today of any in-progress target
+  (`mirror_planner.rs:336-346`); concurrent sessions on one destination
+  root are unsupported and ownership leases are out of scope (D5). M1/F1
+  staging admission budget, third time → D5. Loop closed here: no
+  material change remains that an owner ruling does not decide. Records:
+  `.review/results/2026-09-25-source-side-containment-plan-r6-*`.
 
 ## Open questions
 
@@ -836,9 +862,12 @@ Executed order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-5.
   per streamed file, no orphan sweep (orphans go only as
   mirror-extraneous); sub-question, raised by codex in r4 and r5: add an
   internal destination-scoped byte budget so concurrent stages throttle
-  under low free space (scenario: sequential replacement fits, concurrent
-  stages do not), or accept volume-full as the already-fatal class it is
-  (this draft);
+  under low free space (scenario: sequential replacement fits, concurrent stages do not; raised
+  in r4, r5 and r6), or accept volume-full as the already-fatal class it
+  is (this draft); second sub-question (r6): concurrent sessions writing
+  one destination root can delete each other's stages under mirror,
+  exactly as they can delete each other's in-progress targets today —
+  ownership leases are out of scope in this draft;
   (b) keep in place — `abort` removes the truncated target, A9/A12 read
   "path absent". Recommendation: (a); it is the only way "a source
   failure never costs the destination a file it already had" can be

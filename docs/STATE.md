@@ -39,7 +39,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   of killing the session; contract 6→7. Field failure: a Windows
   user-profile mirror on cargo 0.1.2 died with `tar shard entry: numeric
   field was not a number … cksum` (growing SQLite WAL corrupted its shard).
-  Open rulings D1–D6 (D5 staged streamed writes, D6 entry identity).
+  Codex loop CLOSED at r6 (2026-09-26); open rulings D1–D6 (D5 staged
+  streamed writes + budget, D6 entry identity) are the next owner step.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -64,9 +65,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 0. **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (DRAFT 2026-09-25)** — source-side
    per-file containment (skip record, shard fidelity, mid-record retraction,
    local pre-check retirement, non-UTF-8 reason). Codex openreview loop in
-   flight (r1–r4 acceptable_with_changes); owner rulings D1–D6 pending (D5
-   staged streamed writes, D6 manifest-entry identity); proposed RELEASE_1_0
-   G3 fix-now item.
+   closed at r6 (all acceptable_with_changes; 23 changes adopted); owner
+   rulings D1–D6 pending; proposed RELEASE_1_0 G3 fix-now item.
 0. **ULTRACODE 2026-08-18 (DEVLOG 23:00Z): cv-1+cv-2 LANDED `05529c19` (contract-version gate + scan surfacing; cv-3 waits for next release); sf-3d LANDED `7ffd929d` (containment cache + resume-path stamping; rig A/B still owed); clp-3 reviewed AND F1 closed `677a8ba9` (F2/F5 stay owner calls); residue triaged (2 dead, 1 dead-as-written; item 5 rate-window FIXED — one flagged judgement call on stall silence; item 2 perf-history scope needs an owner ruling); sweep-prefetch parked pending one netwatch-01 SMB run; pm-5 BLOCKED for v0.1.2 — source lane needs the next tag.** CI FULLY GREEN on `af9b48b3` (run 32195891519, 7/7 jobs — the slices are cross-platform proven). Stall-line revised-b landed after (three red-proven silence gates; mid-payload stalls visible, summary-wait/purge tails silent).
 1. **`docs/plan/INTERFACE_PLATFORM.md` (SHIPPED — owner declared 2026-08-18; all seven slices landed 2026-08-17)** — three standalone front-ends (CLI first, TUI/GUI later in BlitAdmin_UIs), all first-class consumers of `blit-core` ITSELF: `blit-app` + `blit-console-core` fold into core (no new crate, D-2026-08-17-2), `blit-core` publishes to crates.io (name available, verified; publish act owner-gated), third-party Rust apps embed via the crate, everything else via daemon gRPC. All rulings closed (D-2026-08-17-3/-4/-5: bridge, tui, gui all deleted; fresh UIs later; nothing pushes to BlitAdmin_UIs under this plan). Nothing open; execution record in the plan.
 2. **`docs/plan/SMALL_FILE_CEILING.md` — sf-3b closed (D-2026-08-14-1); sf-3c landed 2026-08-15; sf-3d landed 2026-08-18** — sf-3c stamps streamed-receive mtime/permissions through the retained write handle instead of reopening by path; sf-3d (sf-3a candidate 3, contained-path canonicalization cache + resume-path stamping, `7ffd929d`) closed the named-candidate list; proxy pins + mutation proofs in the plan's Slices section. Rig A/B for sf-3d still owed (Queue 0); no further cut selected.
