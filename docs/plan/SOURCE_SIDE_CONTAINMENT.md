@@ -3,9 +3,10 @@
 **Status**: Draft — owner ordered the plan and a codex review loop to
 consensus (2026-09-25); no code until `Active`. Open rulings D1–D6 below.
 Review record: `REVIEW.md` §Plan reviews (openreview), rows
-`plan-ssc-2026-09-25-r*`; r1–r3 `acceptable_with_changes` (16 material
-changes: 13 adopted, staged writes carried into the design behind owner
-ruling D5, manifest-entry IDs declined → D6 — see §Review history).
+`plan-ssc-2026-09-25-r*`; r1–r4 `acceptable_with_changes` (21 material
+changes: 17 adopted, staged writes carried into the design behind owner
+ruling D5 with its staging-budget sub-question, manifest-entry IDs
+declined → D6 — see §Review history).
 **Created**: 2026-09-25
 **Supersedes**: `docs/plan/PER_FILE_ERROR_CONTAINMENT.md` §Non-goals
 "Send-side source read stays fatal" (the deferred wire skip signal lands
@@ -249,6 +250,10 @@ a single error, we are violating all of those."
   `one_blocked_file_fixture` tests) is still contained under the new sink
   lifecycle: the record's framing is consumed through its terminator, the
   failure is that file's, the session continues.
+- [ ] **A18 (dry-run):** a `--dry-run` on every route creates no parent
+  directory and no staging file under the new lifecycle (guard asserts
+  the destination tree is unchanged, including after a mid-run
+  cancellation); the existing R58-F4 pins stay green.
 - [ ] **A17 (FAST, local):** the local large-file copy shows no throughput
   change beyond noise across the handle-based cascade change (ssc-4;
   `scripts/bench_local_mirror.sh` or its macOS/Windows variant on one
@@ -350,6 +355,10 @@ destination failure (today's drain-then-contain at `sink.rs:1168-1185`)
 returns a discarding writer that consumes the body and reports that
 file's failure at `commit`, so the already-shipped behaviour is
 preserved (A16) and the ledger's final state follows the sink outcome.
+In **dry-run** (`FsSinkConfig.dry_run`, today's R58-F4 short-circuits at
+`sink.rs:1138` and `:1377`) `begin_record` returns a non-writing writer
+that validates framing and counts, creating neither a parent directory
+nor a staging file (A18).
 Implementations: `FsTransferSink` — `begin_record` opens a **staging
 file beside the target** (D-H) with sf-3c's retained handle, `commit`
 stamps metadata on the staging file and renames it over the target,
@@ -362,13 +371,29 @@ upstream reason, so a contained failure propagates as a contained failure
 through every hop (A9 relay case). `NullSink` — counts only. The local
 route's `LocalApply` wrappers (`local.rs:1361`, `:1631`) delegate.
 
-**Opened source file** (r2 F4): `TransferSource::open_file`
-(`remote/transfer/source.rs:184-188`) returns
-`OpenedSourceFile { reader: Box<dyn AsyncRead + Unpin + Send>, metadata:
-async fn() -> io::Result<Metadata> }` backed by the same handle
-(`tokio::fs::File::metadata`), so every size check in D-C reads the file
-actually being sent, never a path that may now name a replacement inode.
-Fault-injecting test sources implement it directly.
+**Opened source file** (r2 F4, r3 F4, r4 F3): `TransferSource::open_file`
+(`remote/transfer/source.rs:184-188`) returns an `OpenedSourceFile`:
+
+```
+enum OpenedSourceFile {
+    Fs { file: tokio::fs::File, path: PathBuf },          // production: owns the descriptor/handle
+    Virtual { reader: Box<dyn AsyncRead + Unpin + Send>, len: u64 },  // tests, fault injection
+}
+impl OpenedSourceFile { async fn metadata(&self) -> io::Result<Metadata>; fn reader(&mut self) -> &mut (dyn AsyncRead + Unpin + Send); }
+```
+
+`Fs` exposes the concrete handle to the local copy cascade (D-C) so the
+platform fast paths run on the *opened* file: Linux `copy_file_range` /
+`sendfile` already take the source `File` (`copy/file_copy/mod.rs:
+162-180`); macOS switches `clonefile(src_path, …)` to `fclonefileat(src_fd,
+…)` and `fcopyfile(src_fd, dst_fd)`; Windows has no handle-based
+`CopyFileEx`, so the buffered copy runs on the handle. Nothing in the
+cascade reopens `src` by path any more (`copy_file(src: &Path, …)`,
+`mod.rs:29`, becomes `copy_opened(&OpenedSourceFile, dst, …)`). Every
+size check in D-C reads the file actually being sent, never a path that
+may now name a replacement inode; a test that atomically replaces the
+source path after open proves it (A12). `Virtual` is what fault-injecting
+test sources return.
 
 **Source emission.** In-stream `send_payload_records` (`mod.rs:3026-3155`):
 open and stat **before** `FileBegin` (today `FileBegin` at `:3074`
@@ -454,10 +479,11 @@ use the `OpenedSourceFile` handle (D-A), never the path.
   (src, dst, 0)` (`:1395`), which reopen the source independently, so a
   handle opened for validation can describe a different inode than the
   one copied (r3 F4). New shape: open the `OpenedSourceFile` once, stat
-  it, and pass the handle through the cascade — Linux `copy_file_range`
-  and macOS `fcopyfile` take descriptors; Windows has no handle-based
-  `CopyFileEx`, so the buffered copy runs on the opened handle (the
-  attribute-preservation quirk noted at `:1404-1407` disappears with it).
+  it, and pass the handle through the cascade (`copy_opened`, D-A —
+  descriptor fast paths on Linux and macOS, buffered-on-handle on Windows;
+  the `CopyFileEx` attribute-preservation quirk noted at `:1404-1407`
+  disappears with it). Dry-run keeps its pre-mkdir short-circuit
+  (`sink.rs:1374-1380`) untouched (A18).
   Copy bounded to `header.size`, re-stat the same handle after, and on any
   mismatch abort the staged destination (D-H) and `record_failure` with
   the changed-size reason (A12). Stamping happens only after the re-stat
@@ -554,16 +580,28 @@ Today `FsTransferSink` creates and truncates the target directly
 retracted record — leaves the last good destination copy destroyed (r2
 F1, r3 F1). D-2026-07-09-1 Q2 ruled in-place for **resume block
 patches** only. For **streamed single-file records** (and the local
-single-file copy, D-C), the sink writes to a staging file in the target's
-directory (`.<name>.blit-<nonce>`), stamps metadata there, and on
-`commit` renames it over the target (`std::fs::rename` replaces an
-existing file on every supported platform); `abort` removes only the
-staging file. Tar-shard members are unchanged (whole-in-memory shard,
+single-file copy, D-C), the sink writes to a staging file in the
+validated target directory named with a **fixed-length,
+target-independent basename** (`.blit-stage-<16 hex>`), created with
+`create_new` and retried on collision, so a target already at the
+filesystem's component-length limit still transfers (r4 F4); the
+target mapping lives only in the `RecordWriter`. Metadata is stamped on
+the staging file and `commit` renames it over the target
+(`std::fs::rename` replaces an existing file on every supported
+platform); `abort` removes only the staging file. Tar-shard members are unchanged (whole-in-memory shard,
 destination-side per-member containment as today); resume stays in place
-(Q2). Costs and their handling: transient space of one extra copy of the
-file being written (bounded by the largest single file, not the tree);
-one rename per streamed file, negligible next to a ≥ shard-threshold
-body; a staging file orphaned by a crash carries the recognisable prefix
+(Q2). Costs and their handling: transient space equal to the **sum of the
+in-flight streamed records' sizes** — one receive task per inbound TCP
+connection (`pipeline.rs:1202-1210`, `data_plane.rs:294`) and the local
+pipeline's workers each hold one staging file while its prior target
+still exists (r4 F2), so the bound is workers × their current records,
+not one file; a destination that fills stays the volume-level fatal it
+is today (`failure_is_containable`), every in-process abort removes its
+staging file, and a fault-injected low-space run pins both. No admission
+budget is added (D5 sub-question: the reviewer proposed a byte-weighted
+budget across workers; this draft declines it as machinery for a
+condition that is already fatal and rare). One rename per streamed
+file, negligible next to a ≥ shard-threshold body; a staging file orphaned by a crash carries the recognisable prefix
 and is removed by the next run's sink before it stages the same target
 (and is extraneous under a mirror). Windows: the rename uses
 `MOVEFILE_REPLACE_EXISTING` semantics via `std::fs::rename`; a target
@@ -703,6 +741,23 @@ Executed order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-5.
   changed to adopt, scoped). The wide half of M2 (manifest-entry IDs)
   stays declined for this plan (D6). Records:
   `.review/results/2026-09-25-source-side-containment-plan-r3-*`.
+- **r4** (same reviewer; over `0bcad512..4e86bfad`):
+  `acceptable_with_changes`, 5 material changes, 5 findings (3 HIGH, 1
+  MEDIUM, 1 LOW), all verified; neither contested item was raised again.
+  Adopted: M1/F1 dry-run must stay side-effect-free (`sink.rs:1138`,
+  `:1377`) → non-writing writer + A18; M3/F3 the drafted
+  `OpenedSourceFile` (reader + metadata) could not drive the
+  handle-based cascade (`copy/file_copy/mod.rs:29`, `:162-180` reopen by
+  path / use concrete `File`s) → `Fs`/`Virtual` variants and
+  `copy_opened` (D-A, D-C); M4/F4 `.<name>.blit-<nonce>` breaks
+  max-length names → fixed-length `create_new` basename (D-H); M5/F5
+  `docs/STATE.md` said D1–D4 → D1–D6. M2/F2 the "one largest file"
+  staging bound was wrong (one receive task per TCP connection,
+  `pipeline.rs:1202-1210`, `data_plane.rs:294`) → corrected to the
+  in-flight sum with low-space and concurrency pins; the proposed
+  byte-weighted admission budget is declined in this draft and put to
+  the owner inside D5. Records:
+  `.review/results/2026-09-25-source-side-containment-plan-r4-*`.
 
 ## Open questions
 
@@ -731,8 +786,11 @@ Executed order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-5.
   D-2026-07-09-1 ruled in-place for resume block patches; it did not rule
   on streamed full-file writes. Options: (a) adopt D-H — stage streamed
   single-file records and the local single-file copy, rename on commit;
-  resume and shard members unchanged; costs: transient space for one
-  file, one rename per streamed file, crash-orphan cleanup by prefix;
+  resume and shard members unchanged; costs: transient space equal to
+  the in-flight streamed records (workers × current record), one rename
+  per streamed file, crash-orphan cleanup by prefix; sub-question: add a
+  byte-weighted staging admission budget across workers (codex r4 M2) or
+  accept volume-full as the already-fatal class it is (this draft);
   (b) keep in place — `abort` removes the truncated target, A9/A12 read
   "path absent". Recommendation: (a); it is the only way "a source
   failure never costs the destination a file it already had" can be
