@@ -194,11 +194,13 @@ cargo test --workspace
 
 ## Remotes & Sync
 
-- `origin` — `http://127.0.0.1:3000/michael/Blit_v2.git` (**LAN gitea**,
-  re-verified against `git remote -v` 2026-08-18 — the URL moved from
-  `http://q:3000/michael/blit_v2.git` to localhost with the repo
-  renamed `Blit_v2`). This is what a bare `git push` /
-  `git ls-remote origin` talks to.
+- `origin` — `http://magneto:3001/michael/blit_v2.git` (**LAN gitea** on
+  magneto; re-verified against `git remote -v` 2026-09-25, and
+  `git ls-remote origin` answers). Earlier recorded values —
+  `http://q:3000/michael/blit_v2.git`, then
+  `http://127.0.0.1:3000/michael/Blit_v2.git` (2026-08-18) — are stale;
+  neither host answers on port 3000 as of 2026-09-25. This is what a bare
+  `git push` / `git ls-remote origin` talks to.
 - `github` — `https://github.com/roethlar/Blit.git` (**GitHub**; owner
   re-pointed the remote 2026-08-18 from the old lowercase
   `roethlar/blit.git`, which GitHub redirects).

@@ -10,6 +10,22 @@ commit at which it was rotated out.
 
 ---
 
+## Rotated 2026-09-25 (at `ab5ea073`) — sf-3b closure, in-repo UI ruling, BLIT_CONSOLE C1 shell
+
+Landed: sf-3b's closure (D-2026-08-14-1) is restated in the surviving
+`SMALL_FILE_CEILING` Now entry; the in-repo UI ruling (D-2026-08-15-1) is
+executed — `docs/plan/INTERFACE_PLATFORM.md` is **Shipped** (owner declared
+2026-08-18) and the `blit-gui`/`blit-tui`/bridge crates are deleted
+(D-2026-08-17-3..-5), so the C1 shell record no longer describes a crate in
+the tree. The ruling itself stays in `docs/STATE.md`'s header and
+`docs/DECISIONS.md`.
+
+Verbatim, as they stood in `docs/STATE.md`:
+
+> - **`SMALL_FILE_CEILING` sf-3b CLOSED (D-2026-08-14-1):** session parent readiness removes 9,989 of 10,000 create attempts on the rig fixture without bypassing per-file containment; stale cached parents recover. Proxy 16→1; daemon A/B neutral, client median −22.3%. After r1's transport failure the owner ordered an in-session review (working agent, no playbooks) and accepted its no-defect verdict; resolution in `.review/sf-3b-r1.contested.md`.
+> - **ALL IN-REPO UI WORK IS ENDED (D-2026-08-15-1).** Owner ran the landed C1 shell and ruled: Blit is the CLI and the daemon — no TUI, no GUI, ever, in this repo; UIs live in `http://q:3000/michael/BlitAdmin_UIs.git`. This supersedes the earlier "until the architecture is designed" pause. `docs/plan/INTERFACE_PLATFORM.md` executed the consolidation 2026-08-17: UI crates + bridge deleted, blit-app/console-core folded into blit-core; nothing moved to BlitAdmin_UIs (R3/R4 chose fresh starts).
+> - **BLIT_CONSOLE C1 GUI shell landed:** `crates/blit-gui` is a thin eframe face over `blit-console-core` — window, fleet sidebar (Local + mDNS daemons, labeled Refresh fleet), one browse pane (path, Up, directory buttons). Host (`Session`) executes Browse/Discover and drops stale completions via the core generation tags. In-flight listings are not clickable (cr-c1-3). Not in the GitHub Release archives. C1/C2 gates are dissolved (D-2026-08-15-1); this record is historical — the crate awaits the owner-gated removal plan. Core slices 1+2 unchanged at `7e6c68f5`; slice-1 review loop CLOSED (cr-c1-1 claude accepted, guard_confirmed=true; cr-c1-2 codex accepted, owner-ordered under D-2026-08-04-4).
+
 ## Rotated 2026-08-13 (at `384d251f`) — MACOS FIREWALL + THUNDERBOLT FOLLOW-UP
 
 Landed: `docs/plan/MACOS_TEST_FIREWALL_CLEANUP.md` is **Shipped**

@@ -45,7 +45,9 @@ Unix reports `ENOTDIR`, so the guard cannot go red there. It was proven on
 
 Method that worked: clone from the LAN gitea (`http://q:3000/michael/Blit_v2.git`),
 which the hosts can reach, so the exact pushed commit is under test rather
-than an rsync of a dirty tree.
+than an rsync of a dirty tree. **Updated 2026-09-25:** `origin` is now
+`http://magneto:3001/michael/blit_v2.git` (`git remote -v`; answers HTTP 200)
+and `q:3000` no longer answers — clone from magneto's gitea instead.
 
 ## Additional Linux hosts — BUILD ONLY (owner rule, 2026-07-12)
 
@@ -183,7 +185,9 @@ review loop from rig-W benchmarking** — the contention that destroyed a
 
 - **10GbE**: `en8` = **10.1.10.54**, MTU **9000**, media 10Gbase-T. This is the
   **Aquantia adapter physically moved off nagatha**, so nagatha's 10GbE is now a
-  *different* NIC at **10.1.10.92** (also MTU 9000). Any doc naming
+  *different* NIC at **10.1.10.92** (also MTU 9000) — **re-observed 2026-09-25:
+  nagatha's 10Gbase-T is now `en11` at 10.1.10.104, MTU 9000; `.92` is
+  stale.** Any doc naming
   "Aquantia @ .54 on nagatha" is stale.
 - **⚠ THE MULTI-NIC ROUTING TRAP (cost ~1h).** `q` has THREE IPs on
   10.1.10.0/24 — `en0` (1GbE, .221), `en1` (Wi-Fi, .108), `en8` (10GbE, .54) —
@@ -227,8 +231,12 @@ review loop from rig-W benchmarking** — the contention that destroyed a
   has the expected 1,930-commit target history. q's native Bash 3.2 no-SSH
   harness self-test passes all 96 arms. This stages no new product binary; the
   registered accepted `406a7e5` artifacts remain the run payload.
-- **`q` RUNS GITEA** (it is `origin`, `http://q:3000`). It idles cheaply, but
-  **do not push to `origin` during a benchmark session**.
+- **`q` RAN GITEA** (it was `origin`, `http://q:3000`). **Stale as of
+  2026-09-25:** `origin` is `http://magneto:3001/michael/blit_v2.git` and
+  `q:3000` does not answer; whether q still hosts gitea (and the
+  `BlitAdmin_UIs` repo recorded at `http://q:3000/michael/BlitAdmin_UIs.git`)
+  is unverified. The quiet-bench rule stands: **do not push to `origin`
+  during a benchmark session** (magneto is a bench end too).
 
 ## THE MAC IS A BENCH END — keep it quiet (recorded 2026-07-13, learned the hard way)
 

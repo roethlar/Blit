@@ -1,6 +1,6 @@
 # Blit Console — one core, two faces (GUI + TUI)
 
-**Status**: Superseded — D-2026-08-15-1 (2026-08-15): Blit is CLI + daemon only; no TUI, no GUI in this repo. UIs live in `http://q:3000/michael/BlitAdmin_UIs.git`. C1 landed, the owner ran it and rejected the direction; the UI crates sit untouched until an owner-approved removal plan and go.
+**Status**: Superseded — D-2026-08-15-1 (2026-08-15): Blit is CLI + daemon only; no TUI, no GUI in this repo. UIs live in `http://q:3000/michael/BlitAdmin_UIs.git`. C1 landed, the owner ran it and rejected the direction; the UI crates sit untouched until an owner-approved removal plan and go. (Executed: `docs/plan/INTERFACE_PLATFORM.md`, Shipped 2026-08-18 — `blit-gui`/`blit-tui`/bridge deleted 2026-08-17, D-2026-08-17-3..-5.)
 **Created**: 2026-08-02
 **Supersedes**: `TUI_REWORK.md` (scrapped whole by owner, 2026-08-02:
 "nothing about current TUI works for me. scrap the entire UI"); re-points
