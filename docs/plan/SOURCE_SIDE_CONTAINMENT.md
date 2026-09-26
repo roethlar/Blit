@@ -1,10 +1,11 @@
 # Source-Side Containment — a file the source cannot deliver is skipped, not fatal
 
 **Status**: Draft — owner ordered the plan and a codex review loop to
-consensus (2026-09-25); no code until `Active`. Open rulings D1–D4 below.
+consensus (2026-09-25); no code until `Active`. Open rulings D1–D6 below.
 Review record: `REVIEW.md` §Plan reviews (openreview), rows
-`plan-ssc-2026-09-25-r*`; r1 `acceptable_with_changes` (5 material
-changes, all adopted in this revision — see §Review history).
+`plan-ssc-2026-09-25-r*`; r1 and r2 `acceptable_with_changes` (11
+material changes: 9 adopted, 2 contested → owner rulings D5/D6 — see
+§Review history).
 **Created**: 2026-09-25
 **Supersedes**: `docs/plan/PER_FILE_ERROR_CONTAINMENT.md` §Non-goals
 "Send-side source read stays fatal" (the deferred wire skip signal lands
@@ -51,6 +52,17 @@ a single error, we are violating all of those."
   (D-2026-07-09-1 Q2); the failure block's re-run hint already says so.
 - No new CLI flag or option of any kind (D-2026-08-01-1, SIMPLE). No
   "ignore changing files" mode.
+- **No staged temp+rename writes** (owner ruling D-2026-07-09-1 Q2: "in-place
+  patch stays (no temp+rename atomicity …) — convergence-on-retry is the
+  reliability model"). A retracted record therefore leaves the destination
+  path absent, which is what today's session abort mid-write already
+  costs (`FsTransferSink` creates and truncates the target directly,
+  `remote/transfer/sink.rs:876`); this plan neither worsens nor fixes
+  that, and D5 puts the question to the owner explicitly.
+- **No manifest-entry IDs.** Path strings remain the protocol identity for
+  manifest, needs, records, skips and terminators, as they are for every
+  frame today; a lossless or opaque identity is a protocol redesign with
+  its own plan (D6).
 - Session-fatal classes stay fatal: transport death, protocol violations,
   path-safety/containment violations, destination-root unavailability,
   volume-level write failures (`failure_is_containable`,
@@ -64,14 +76,15 @@ a single error, we are violating all of those."
   stays a proto `string`; this plan marks a lossy name so it is reported
   honestly (D-F) but does not carry the original bytes. Two source names
   that collapse to the same lossy string are a pre-existing manifest
-  collision, out of scope here.
+  collision (`payload.rs:200-203` keys headers by `relative_path`), out of
+  scope here (D6).
 - No version compatibility: the contract bump (Constraints) means a
   pre-plan peer refuses at session open, by design (D-2026-08-18-2).
 
 ## Constraints
 
-- **Contract bump.** Both carriers change shape (skip record, record
-  terminators, resume-completion status, header flag), so
+- **Contract bump.** Both carriers change shape (skip record, chunked
+  bodies with terminators, resume-completion status, header flag), so
   `CONTRACT_VERSION` (`crates/blit-core/src/transfer_session/mod.rs:96`,
   currently 6) becomes **7** in ssc-1, with the history comment at
   `:88-95` extended. Every wire change in this plan lands under 7; if a
@@ -86,16 +99,28 @@ a single error, we are violating all of those."
   the CLI block, JSON fields, exit code 2 and the move source-delete gate
   need no parallel implementation.
 - **Nothing is finalised under a false header.** A destination record is
-  marked complete (mtime/attributes stamped, counted as transferred) only
-  when its terminator says the source delivered exactly `header.size`
-  bytes from a file that still had that size afterwards. Anything else is
-  discarded by the sink and reported.
+  committed (mtime/attributes stamped, counted as transferred) only when
+  its terminator says the source delivered exactly `header.size` bytes
+  from a handle that still had that size afterwards. Anything else is
+  aborted by the sink and reported.
 - **Explicit per-need state, one ledger.** The destination tracks each
-  granted path as `Granted → Active(lane, record) → Completed | Failed`
-  (D-A). Skips are accepted only in `Granted`; retractions only for the
-  `Active` record on the lane they arrive on. Anything else is a protocol
-  violation. There is no path-lookup heuristic and no unlink-by-path of a
-  file this session did not itself write in the active record.
+  granted path as `Granted → Active(lane) → Completed | Failed` (D-A).
+  Skips are accepted only in `Granted`; a terminator only for the
+  `Active` record on the lane it arrives on. Anything else is a protocol
+  violation. There is no path-lookup heuristic and no unlink-by-path: a
+  sink aborts only the record writer it opened.
+- **Record identity on the wire is the exact header path.** Skip records
+  and terminators carry `relative_path` verbatim, bounded only by the
+  existing per-carrier path bound (`data_plane.rs:493`, "relative path too
+  long for transfer"); the `MAX_FAILURE_PATH_BYTES` truncation
+  (`sink.rs:48`, `:188-191`) applies to the *reported* `FileFailure` at
+  `to_wire` only, never to a ledger key.
+- **FAST is not traded for this.** The data-plane body framing changes
+  (D-A: length-prefixed chunks); the chunk is the existing double-buffer
+  size (`data_plane.rs:483-535`) so the per-chunk overhead is a `u32` per
+  buffer, and ssc-1 records a before/after run of the data-plane tripwire
+  bench (`scripts/bench_tripwires.sh`) on one rig showing no change beyond
+  noise before the slice is called green.
 - **Reason strings are prefixed by side** so a reader of the failure block
   can tell where the file failed: reasons recorded by the source start with
   `source:` (e.g. `source: changed size during transfer (manifest 4096
@@ -108,6 +133,10 @@ a single error, we are violating all of those."
   manifest, so its destination counterpart is never extraneous. Skips and
   retractions never gate mirror deletion (D3 removes the apply-time
   refusal that says otherwise).
+- **Every slice lands green on its own.** A slice claims only the guards
+  its own code can pass; local-route containment of open failures cannot
+  be proven while the local availability pre-check still intercepts them,
+  so it is ssc-4's, not ssc-1's (r2 F6).
 - Rust edition 2021, rustfmt, `-D warnings` on native and Linux-cross
   clippy; tests deterministic and async-aware; verification per
   `.agents/repo-guidance.md` §Verification. Guards for behaviour that can
@@ -129,15 +158,16 @@ a single error, we are violating all of those."
   skipped and reported; shard-mates land.
 - [ ] **A3:** a single-file payload whose source open fails (locked /
   denied / vanished) is skipped before announcement on the in-stream
-  carrier, the data plane, and the local route; nothing is announced for
-  it on the wire (no `FileBegin`, no FILE record tag).
+  carrier and the data plane (ssc-1) and on the local route (ssc-4);
+  nothing is announced for it on the wire (no `FileBegin`, no FILE record
+  tag).
 - [ ] **A4:** a single-file payload whose size changed between scan and
   open is skipped before announcement on both carriers.
 - [ ] **A5:** the destination's "SourceDone with N needed file(s) never
   delivered" check (`mod.rs:4778-4786`) and its resume twin
   (`:4794-4802`) still fire for a need that is neither delivered, skipped,
-  nor retracted; a skip for a path not in `Granted`, or a failed
-  terminator on a lane with no `Active` record, is a protocol violation.
+  nor retracted; a skip for a path not in `Granted`, or a terminator on a
+  lane with no `Active` record, is a protocol violation.
 - [ ] **A6:** `move` refuses source deletion when a file was skipped or
   retracted (existing gate, `crates/blit-core/src/transfers/failures.rs:
   56-78`, reads `files_failed`; pin with a source-side skip).
@@ -151,10 +181,15 @@ a single error, we are violating all of those."
   (`transfer_session/local.rs:1222`) flips meaning and is renamed.
 - [ ] **A9 (retraction):** a read error or short EOF *after* a single-file
   record was announced, or a file whose size differs when re-checked after
-  its body was sent, ends with no file at that destination path, the
-  failure reported, the session complete — on both carriers. Red today
-  with `'<path>' hit EOF with N bytes still promised` session-fatal
-  (`mod.rs:3090-3101`, `data_plane.rs:566-570`).
+  its body was sent, ends with no committed file at that destination path,
+  the failure reported, the session complete — on both carriers, and
+  through the relay sink (`DataPlaneSink::write_file_stream`,
+  `sink.rs:2022-2038`, live at `transfer_session/data_plane.rs:2406`),
+  where the failed terminator is forwarded downstream and the downstream
+  destination reports the same failure. Red today with `'<path>' hit EOF
+  with N bytes still promised` session-fatal (`mod.rs:3090-3101`,
+  `data_plane.rs:566-570`). A failed record transmits no bytes beyond the
+  chunk in flight (no padding; pin by byte count).
 - [ ] **A10 (resume):** a resume-granted file whose source open fails is
   skipped; one whose source read fails or shrinks mid-diff is closed as
   failed — the destination's partial is left in place and **not stamped**,
@@ -174,9 +209,10 @@ a single error, we are violating all of those."
   mtime (`sink.rs:1371-1400`).
 - [ ] **A13 (non-UTF-8):** a source file whose name is not valid UTF-8 is
   reported as `source: filename is not valid UTF-8 (rename it to transfer)`
-  with exit 2 on every route, without the source opening any path by the
-  lossy name; the remote session no longer aborts. The 0.1.2 CHANGELOG
-  known-limitation text is retired in the Unreleased notes.
+  with exit 2 on every route (remote in ssc-1, local in ssc-4), without
+  the source opening any path by the lossy name; the remote session no
+  longer aborts. The 0.1.2 CHANGELOG known-limitation text is retired in
+  the Unreleased notes.
 - [ ] **A14 (words/docs):** the CLI failure block header no longer says
   "could not be written" (`crates/blit-cli/src/transfers/failures.rs:95`);
   the move gate message (`blit-core/src/transfers/failures.rs`) no longer
@@ -184,6 +220,9 @@ a single error, we are violating all of those."
   for a source-side failure. `docs/TRANSFER_SESSION.md` frame table
   (`:157-194`), the v6 failure section (`:196-250`) and Errors
   (`:464-520`) describe v7.
+- [ ] **A15 (FAST):** the data-plane tripwire bench shows no throughput
+  change beyond noise across the ssc-1 body-framing change (one rig,
+  before/after, recorded in the slice's DEVLOG entry).
 - [ ] Every new guard is mutation-proven red/green (revert the fix, watch
   it fail with the pre-plan message, restore). Test count never drops;
   the one flipped test (A8) is renamed, not removed.
@@ -193,13 +232,13 @@ a single error, we are violating all of those."
 
 ## Design
 
-### D-A. Need ledger, skip record, record terminators (ssc-1)
+### D-A. Need ledger, skip record, chunked records with terminators (ssc-1)
 
 **Ledger.** Replace the two destination sets — `OutstandingNeeds`
 (`transfer_session/data_plane.rs:76`, created `mod.rs:3952`) and
 `GrantedHeaders` (`data_plane.rs:80`, `mod.rs:3953`), which today are both
 removed at claim (`mod.rs:4354-4367`, `data_plane.rs:2007-2011`) — with one
-`NeedLedger: HashMap<String, NeedState>`:
+`NeedLedger: HashMap<String, NeedState>` keyed by the exact header path:
 
 ```
 enum NeedState {
@@ -218,17 +257,16 @@ allow it:
 |---|---|---|---|
 | grant (need sent) | absent | Granted | — |
 | skip record for path | Granted | Failed | `record_failure(path, reason)` |
-| `FileBegin` / FILE tag / shard header member | Granted | Active(L) (shard members go straight to Completed on shard success, Failed on per-member containment as today) | — |
-| terminator ok | Active(L), same L | Completed | sink finalises (stamp, count) |
-| terminator failed(reason) | Active(L), same L | Failed | sink **discards** the record's write; `record_failure` |
+| `FileBegin` / FILE tag / shard header member | Granted | Active(L) (shard members go straight to Completed on shard success, Failed on per-member containment as today) | sink `begin_record` |
+| terminator ok | Active(L), same L | Completed | sink `commit` (stamp, count); violation unless bytes == `header.size` |
+| terminator failed(reason) | Active(L), same L | Failed | sink `abort`; `record_failure` |
 | resume `BlockComplete` ok | Active(L, Resume) | Completed | stamp as today |
 | resume `BlockComplete` failed(reason) | Active(L, Resume) | Failed | leave partial unstamped; `record_failure` |
 | `SourceDone` | any Granted/Active remaining | — | violation, as today (`mod.rs:4778-4802`) |
 
 A lane processes records sequentially (`receive_file_record`,
-`mod.rs:6063-6121`; `pipeline.rs:1255-1261` reads the body through
-`take(file_size)` before the next tag), so "the Active record on this
-lane" is unambiguous: at most one per lane. The data-plane sink's
+`mod.rs:6063-6121`; `pipeline.rs:1255-1261`), so "the Active record on
+this lane" is unambiguous: at most one per lane. The data-plane sink's
 `claim`/`claim_shard` (`data_plane.rs:2071-2115`) become ledger
 transitions; the in-stream arms at `mod.rs:4354` and `:4514-4548` likewise.
 
@@ -236,55 +274,84 @@ transitions; the in-stream arms at `mod.rs:4354` and `:4514-4548` likewise.
 
 - In-stream: `Frame::FileSkipped(FileFailure)` — new oneof field 21 in
   `TransferFrame` (`crates/blit-core/proto/blit.proto:1153-1176`); add to
-  `frame_name` (`mod.rs:624-648`).
+  `frame_name` (`mod.rs:624-648`). `relative_path` is the exact header
+  path; `reason` is bounded by `MAX_FAILURE_REASON_BYTES`.
 - Data plane: `DATA_PLANE_RECORD_SKIP = 4` (`data_plane.rs:17-21`):
-  `u32 path_len, path, u32 reason_len, reason`, each bounded by
-  `MAX_FAILURE_PATH_BYTES` / `MAX_FAILURE_REASON_BYTES` (`sink.rs:40-48`);
+  `u32 path_len, path, u32 reason_len, reason`; path bounded by the
+  carrier's existing path bound, reason by `MAX_FAILURE_REASON_BYTES`;
   an over-long length bails like an unknown tag (`pipeline.rs:1431`).
 
-**Record terminators** (every single-file record now ends explicitly):
+**Chunked bodies and terminators** (every single-file record now ends
+explicitly, and a failed record ends at once — no padding, r2 F2):
 
-- In-stream: `Frame::FileEnd(RecordEnd)` — field 22;
-  `RecordEnd { bool ok = 1; string reason = 2; }`. The destination stops
-  counting body bytes on `FileEnd`: `ok` requires cumulative bytes ==
-  `header.size` (else violation); `!ok` is accepted at any cumulative
-  count (the source need not pad on this carrier).
-- Data plane: after the `file_size` body bytes, one status byte
-  (`0` ok; `1` failed, followed by `u32 reason_len, reason`). Because the
-  receiver reads exactly `file_size` bytes first, a source that fails
-  mid-body **pads with zeros to `file_size`** and then writes the failed
-  trailer.
+- In-stream: the body already arrives as discrete `FileData` frames
+  (`blit.proto:238`); add `Frame::FileEnd(RecordEnd)` — field 22,
+  `RecordEnd { bool ok = 1; string reason = 2; }`. `ok` requires
+  cumulative bytes == `header.size` (else violation); `!ok` is accepted at
+  any cumulative count.
+- Data plane: the FILE record body becomes `repeat { u32 len; len bytes }`
+  terminated by `len = 0`, followed by one status byte (`0` ok; `1`
+  failed, then `u32 reason_len, reason`). `len` is bounded by the
+  double-buffer size (`data_plane.rs:483-535`); the receiver
+  (`pipeline.rs:1255-1261`, today `take(file_size)`) loops on chunks into
+  the same buffers, sums them, and applies the `ok`-requires-`header.size`
+  rule. A source that fails mid-body writes the `0` sentinel and the
+  failed status immediately after the last chunk it sent.
 - Resume: `BlockComplete` (`blit.proto` field 15; data-plane tag
   `BLOCK_COMPLETE`) gains the same `ok`/`reason` pair.
 - Tar shards already end with `TarShardComplete`; members never fail
   mid-record because shards are built whole in memory (D-B).
 
-**Sink discard.** `TransferSink` gains `discard_active(path)`: the
-`FsTransferSink` streamed receive (`write_file_stream`, sf-3c's retained
-handle) drops the handle and unlinks the path it opened for this record —
-never a path it did not open — and never stamps. On the local route the
-sink both reads and writes (D-E), so discard is internal to
-`copy_resolved_file_payload`. `NullSink` discards nothing.
+**Sink lifecycle** (r2 F3): `TransferSink` (`sink.rs:568-597`) gains a
+record lifecycle beside `write_payload`:
+
+```
+async fn begin_record(&self, header: &FileHeader) -> Result<Box<dyn RecordWriter>>;
+trait RecordWriter { write(bytes); commit() -> SinkOutcome; abort(reason) -> SinkOutcome }
+```
+
+`write_file_stream` (`sink.rs:578`) is replaced by it; the caller
+(`receive_file_record`, `mod.rs:6061`, and the data-plane receiver) drives
+the writer and calls `commit` on an ok terminator or `abort` on a failed
+one. Implementations: `FsTransferSink` — `begin_record` opens the target
+as today (sf-3c's retained handle), `commit` stamps metadata and counts,
+`abort` drops the handle, removes the path it created for this record,
+records the failure (in-place model per D-2026-07-09-1 Q2; D5).
+`DataPlaneSink` (the relay, `sink.rs:2022-2038`) — `begin_record`
+announces the downstream FILE record, `write` forwards chunks, `commit`
+writes the ok trailer, `abort` writes the failed trailer with the
+upstream reason, so a contained failure propagates as a contained failure
+through every hop (A9 relay case). `NullSink` — counts only. The local
+route's `LocalApply` wrappers (`local.rs:1361`, `:1631`) delegate.
+
+**Opened source file** (r2 F4): `TransferSource::open_file`
+(`remote/transfer/source.rs:184-188`) returns
+`OpenedSourceFile { reader: Box<dyn AsyncRead + Unpin + Send>, metadata:
+async fn() -> io::Result<Metadata> }` backed by the same handle
+(`tokio::fs::File::metadata`), so every size check in D-C reads the file
+actually being sent, never a path that may now name a replacement inode.
+Fault-injecting test sources implement it directly.
 
 **Source emission.** In-stream `send_payload_records` (`mod.rs:3026-3155`):
-open and re-stat **before** `FileBegin` (today `FileBegin` at `:3074`
+open and stat **before** `FileBegin` (today `FileBegin` at `:3074`
 precedes `open_file` at `:3079`); open/stat failure → `FileSkipped`,
-`continue`; then body; then re-stat the handle (D-C); then `FileEnd`.
-Data plane `DataPlaneSession::send_file` (`data_plane.rs:464-475`): open
-already precedes the tag; failure → SKIP record instead of `?`; body via
-`take(size)`; re-stat; trailer. Resume: `ResumeBlockDiff::open` failure
+`continue`; body through `take(size)`; re-stat (D-C); `FileEnd`. Data
+plane `DataPlaneSession::send_file` (`data_plane.rs:464-475`): open
+already precedes the tag; failure → SKIP record instead of `?`; chunked
+body; re-stat; status. Resume: `ResumeBlockDiff::open` failure
 (`resume_diff.rs:66-77`) → skip; read/EOF error (`:101-119`) → failed
 `BlockComplete` on both carriers (`send_resume_block_records`, `mod.rs:
 3220-3226`; `DataPlaneSink` BLOCK records). Shard skips (D-B) are emitted
 before the shard header on both carriers and recorded directly on the
-local route.
+local route (ssc-2).
 
 Guards for ssc-1: ungated fault-injecting `TransferSource` whose
 `open_file` fails for one path (pattern: `TruncatedReadSource`,
 `crates/blit-core/tests/transfer_session_roles.rs:957-1000`) on both
 carriers; `cfg(windows)` guard opening the file with
-`OpenOptions::share_mode(0)`; ledger violation pins (A5); mutation proof:
-restore the `?` at `data_plane.rs:469-472` → the fatal returns.
+`OpenOptions::share_mode(0)`; ledger violation pins (A5); corrupt
+SKIP/trailer/chunk-length pins; mutation proof: restore the `?` at
+`data_plane.rs:469-472` → the fatal returns; tripwire bench (A15).
 
 ### D-B. Shard packer fidelity (ssc-2)
 
@@ -329,15 +396,16 @@ second file lands and the first is in `skipped`.
 ### D-C. Size drift: before, during and after the body (ssc-1/ssc-3)
 
 D1 policy, applied uniformly: a file whose size is not `header.size` at
-the moment the source finishes reading it is not delivered.
+the moment the source finishes reading it is not delivered. All checks
+use the `OpenedSourceFile` handle (D-A), never the path.
 
-- **Before announcement (both carriers):** `file.metadata().len()` from
-  the opened handle ≠ `header.size` → skip.
+- **Before announcement (both carriers):** handle `metadata().len()` ≠
+  `header.size` → skip.
 - **During:** the body is read through `.take(header.size)` on both
   carriers, so growth can never spill into the framing (the in-stream loop
-  already bounds by `remaining`, `mod.rs:3083`; the data-plane
-  double-buffered loop at `data_plane.rs:483-535` reads `file_size` bytes
-  — pin it). A short read (shrink) → failed terminator (A9).
+  already bounds by `remaining`, `mod.rs:3083`; the data-plane chunk loop
+  is bounded by construction). A short read (shrink) → failed terminator
+  (A9).
 - **After the body, before the terminator:** re-stat the handle; `len ≠
   header.size` → failed terminator with the changed-size reason (A9). A
   file that grew *after* the bytes were read is therefore retracted, not
@@ -351,19 +419,19 @@ the moment the source finishes reading it is not delivered.
   `record_failure` with the changed-size reason (A12). Stamping happens
   only after the re-stat matches.
 
-### D-D. Retraction is a terminator, not a heuristic (ssc-3)
+### D-D. Retraction is the record's own terminator (ssc-3)
 
 A post-announcement failure is expressed **inside the record** by its
 terminator (D-A), so the destination never has to decide whether a
 trailing skip refers to the record it just finished, an earlier one, or a
-pre-existing file — r1 F3. Ordering is the lane's own: the terminator is
-the next thing read after the body. The only destructive act is the
-sink's `discard_active`, scoped to the handle the sink opened for the
-active record. Pin with a decoy file at the same relative path planted
-before the session (the discard must remove only what this record wrote —
-on the in-place write model the decoy is overwritten and then removed;
-the test asserts the path is absent and the failure reported) and a decoy
-outside the destination root (untouched).
+pre-existing file (r1 F3). Ordering is the lane's own: the terminator is
+the next thing read after the last chunk. The only destructive act is
+`RecordWriter::abort`, scoped to the handle the sink opened for the
+active record. Pins: a decoy at the same relative path planted before the
+session is overwritten and then removed (in-place model, D5 — the test
+asserts the path is absent and the failure reported); a decoy outside the
+destination root is untouched; the relay forwards the failed terminator
+(A9).
 
 ### D-E. Preparation returns per-file outcomes (ssc-4)
 
@@ -398,10 +466,10 @@ principle (Constraints: deletion safety is enumeration completeness).
 ssc-4 deletes `check_availability`/`filter_readable_headers` and the
 apply-time refusal; the `TransferSource` trait loses the method
 (`source.rs:178`); the scan-time refusal at ManifestComplete and
-`LocalMirrorSummary.unreadable_paths` for scan-time entries stay. This
-also makes the LOCAL non-UTF-8 case a `files_failed` entry (today it is
-an `unreadable_paths` entry, and the 0.1.2 CHANGELOG's "exits 2" claim was
-not what the code does).
+`LocalMirrorSummary.unreadable_paths` for scan-time entries stay. Local
+A3/A8/A13 are proven here (r2 F6). This also makes the LOCAL non-UTF-8
+case a `files_failed` entry (today it is an `unreadable_paths` entry, and
+the 0.1.2 CHANGELOG's "exits 2" claim was not what the code does).
 
 ### D-F. Lossy names are flagged at the scan, never inferred (ssc-1 wire, ssc-5 reasons)
 
@@ -420,6 +488,8 @@ string is unsound (a legitimate U+FFFD name aliases it — r1 F5). Instead:
   `name_lossy` header **without opening anything**, reason
   `source: filename is not valid UTF-8 (rename it to transfer)`.
 - The destination never needs the flag; it is informational there.
+- Collision of a lossy name with a legitimate name that already contains
+  U+FFFD is the pre-existing manifest-key collision (Non-goals, D6).
 
 ### D-G. Words and docs (ssc-5)
 
@@ -429,10 +499,10 @@ string is unsound (a legitimate U+FFFD name aliases it — r1 F5). Instead:
 - `refuse_source_delete_on_failures` message: "… did not land at the
   destination" (drop "could not be written").
 - `docs/TRANSFER_SESSION.md`: frame table gains `FileSkipped`, `FileEnd`,
-  the `BlockComplete` status, the data-plane SKIP tag and trailer; the v7
-  section describes the ledger, skip and retraction semantics and the
-  reason prefix; Errors section drops "send-side source read" from the
-  fatal list.
+  the `BlockComplete` status, the data-plane SKIP tag, chunked body and
+  status trailer; the v7 section describes the ledger, skip and
+  retraction semantics, the sink lifecycle and the reason prefix; Errors
+  section drops "send-side source read" from the fatal list.
 - `CHANGELOG.md` Unreleased: reliability entry + retire the 0.1.2 non-UTF-8
   remote caveat; `docs/plan/RELEASE_1_0.md` G3 lists this plan as the
   fix-now item (owner ruling D4); `docs/plan/PER_FILE_ERROR_CONTAINMENT.md`
@@ -444,15 +514,15 @@ string is unsound (a legitimate U+FFFD name aliases it — r1 F5). Instead:
   violation, so a buggy source cannot silently drop or double-deliver a
   file. A5 pins the never-delivered check, the un-granted skip, and the
   terminator-without-active-record cases.
-- **Data-plane framing.** A malformed SKIP record or trailer (over-long
-  lengths, unknown status byte) bails like an unknown tag, never skips
-  past; pin with corrupt-record tests.
-- **Discard scope.** `discard_active` acts only through the handle the
-  sink opened for the active record; the decoy tests in D-D pin it.
-- **Zero padding on the data plane** costs up to `header.size` bytes of
-  zeros for a file that shrank mid-body — bounded by the file's own
-  manifest size, paid only on the failure path, and cheaper than the
-  session abort it replaces.
+- **Data-plane framing.** A malformed SKIP record, chunk length or trailer
+  (over-long lengths, unknown status byte, chunk sum ≠ `header.size` with
+  `ok`) bails like an unknown tag, never skips past; pin with
+  corrupt-record tests. The chunk loop touches the throughput hot path;
+  A15 guards it.
+- **Abort scope.** `RecordWriter::abort` acts only through the handle the
+  sink opened for the active record; the decoy tests in D-D pin it. On
+  the in-place model the prior destination copy is already gone by then
+  (Non-goals, D5).
 - **Reporting cap.** Thousands of skips (a whole live profile) exceed the
   64-entry list; `files_failed_total` still counts them all and the block
   prints the elided count — existing behaviour, unchanged.
@@ -462,33 +532,38 @@ string is unsound (a legitimate U+FFFD name aliases it — r1 F5). Instead:
 One coherent, testable change per slice — each its own go, commit, full
 gate, DEVLOG entry, CI on all three OSes before the next.
 
-1. **ssc-1 — contract 7: ledger, skip record, terminators, `name_lossy`
-   (A3, A4, A5, A6, A7, A13-wire).** Proto: `FileSkipped`=21,
+1. **ssc-1 — contract 7: ledger, skip record, chunked records +
+   terminators, sink lifecycle, `OpenedSourceFile`, `name_lossy` (A3
+   remote, A4, A5, A6, A7, A13 remote, A15).** Proto: `FileSkipped`=21,
    `FileEnd`=22, `RecordEnd`, `BlockComplete` ok/reason, `FileHeader.
-   name_lossy`=7; data plane: SKIP tag 4, body trailer, BLOCK_COMPLETE
-   status. Destination `NeedLedger` replacing `OutstandingNeeds` +
-   `GrantedHeaders`; every existing record path emits/expects an ok
-   terminator; `discard_active` on the sink; skip-before-announce for
-   single-file open/stat failure and `name_lossy` on both carriers and
-   the local route. Guards per D-A. Mutation proof: restore the `?` at
+   name_lossy`=7; data plane: SKIP tag 4, chunked FILE body + status,
+   BLOCK_COMPLETE status. Destination `NeedLedger` replacing
+   `OutstandingNeeds` + `GrantedHeaders`; `begin_record`/`RecordWriter`
+   on every sink including the relay; every existing record path
+   emits/expects an ok terminator; skip-before-announce for single-file
+   open/stat failure and `name_lossy` on both carriers. Guards per D-A;
+   tripwire bench before/after. Mutation proof: restore the `?` at
    `data_plane.rs:469-472`.
 2. **ssc-2 — shard packer fidelity (A1, A2).** D-B; `PreparedPayload::
-   TarShard.skipped`; emission at all three consumers. Red proof
-   reproduces the field message. Guards: grown, shrunk, vanished member;
-   all-members-skipped shard; existing `tar_safety` exact-header pins
-   still green.
-3. **ssc-3 — retraction and post-body drift, resume (A9, A10).** D-C
-   during/after checks on both carriers; failed terminators; resume
-   open→skip and mid-diff→failed `BlockComplete`; decoy pins (D-D).
-4. **ssc-4 — per-file preparation, local route (A8, A11, A12; owner D3).**
-   D-E: `PreparedPayload::Skipped`, per-member hydration, pipeline `Err`
-   reserved for infrastructure; delete `check_availability`/
-   `filter_readable_headers`/the apply-time mirror refusal; rename-and-flip
+   TarShard.skipped`; emission at all three consumers (the local route's
+   shard skips are recorded by the sink directly and need no pre-check
+   change). Red proof reproduces the field message. Guards: grown,
+   shrunk, vanished member; all-members-skipped shard; existing
+   `tar_safety` exact-header pins still green.
+3. **ssc-3 — retraction and post-body drift, resume, relay (A9, A10).**
+   D-C during/after checks on both carriers; failed terminators; resume
+   open→skip and mid-diff→failed `BlockComplete`; relay abort forwarding;
+   decoy pins (D-D).
+4. **ssc-4 — per-file preparation, local route (A3 local, A8, A11, A12,
+   A13 local; owner D3).** D-E: `PreparedPayload::Skipped`, per-member
+   hydration, pipeline `Err` reserved for infrastructure; delete
+   `check_availability`/`filter_readable_headers`/the apply-time mirror
+   refusal; rename-and-flip
    `mirror_refuses_when_availability_drops_after_clean_scan`;
    `VanishingSource` (`local.rs:1171-1210`) becomes the A8 fixture; local
    bounded copy + post-copy validation (A12).
-5. **ssc-5 — words, non-UTF-8 reasons, docs (A13, A14).** D-F reasons,
-   D-G, CHANGELOG Unreleased, RELEASE_1_0 G3 (D4),
+5. **ssc-5 — words, non-UTF-8 reasons, docs (A13 reasons, A14).** D-F
+   reasons, D-G, CHANGELOG Unreleased, RELEASE_1_0 G3 (D4),
    PER_FILE_ERROR_CONTAINMENT pointer.
 
 Executed order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-5.
@@ -506,6 +581,25 @@ Executed order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-5.
   bytes → D-C after-body re-stat + A12; F5 U+FFFD inference aliases
   legitimate names → `name_lossy` flag (D-F). Records:
   `.review/results/2026-09-25-source-side-containment-plan-r1-*`.
+- **r2** (same reviewer; over `0bcad512..86a3936b`):
+  `acceptable_with_changes`, 6 material changes, 6 findings (3 HIGH, 2
+  MEDIUM, 1 LOW). Adopted (verified): M2/F2 zero padding → chunked
+  data-plane bodies with an immediate failed terminator (D-A, A9, A15);
+  M3/F3 relay sink (`sink.rs:2022-2038`, live at `data_plane.rs:2406`)
+  not covered → `begin_record`/`RecordWriter` lifecycle on every sink,
+  relay forwards the failed terminator (D-A, A9); M4/F4 `open_file`
+  returns only a reader → `OpenedSourceFile` with same-handle metadata
+  (D-A, D-C); M5/F5 narrow half — skip/terminator paths were bounded by
+  the 4 KiB report cap → exact header path is the ledger key, report
+  truncation only at `to_wire` (Constraints); M6/F6 ssc-1 claimed local
+  guards the pre-check would defeat → local A3/A8/A13 move to ssc-4.
+  Contested, routed to the owner: M1/F1 staged temp+rename writes so an
+  aborted record preserves the prior destination copy — contradicts
+  D-2026-07-09-1 Q2 and is a whole-write-path change beyond this plan's
+  scope (D5); M5/F5 wide half — opaque manifest-entry IDs replacing path
+  identity on every frame — a protocol redesign beyond this plan's scope,
+  and the lossy-name collision it would fix is pre-existing (D6). Records:
+  `.review/results/2026-09-25-source-side-containment-plan-r2-*`.
 
 ## Open questions
 
@@ -528,3 +622,17 @@ Executed order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-5.
 - **D4 — 1.0 gate.** Record this plan under `RELEASE_1_0.md` G3 as a
   fix-now item? Recommendation: yes; backing up a live home directory is
   the everyday workload. — owner
+- **D5 — staged writes (codex r2 M1, HIGH).** Reviewer's case: an aborted
+  record on the in-place model destroys the last good destination copy;
+  staging beside the target and renaming on commit would preserve it.
+  This is today's behaviour on any abort and D-2026-07-09-1 Q2 ruled
+  in-place with convergence-on-retry. Options: (a) keep Q2, this plan
+  unchanged; (b) reopen Q2 in a separate plan (every full-file write on
+  every route, rename semantics on SMB/Windows, disk headroom). Recommend
+  (a) now, (b) filed as a TODO. — owner
+- **D6 — manifest-entry IDs (codex r2 M5, wide half).** Replace path
+  strings with opaque IDs on needs, records, skips and terminators; keep
+  the exact `PathBuf` at the source. Fixes the pre-existing lossy-name
+  collision and makes identity independent of path bounds. It is a
+  protocol redesign touching every frame; recommend declining for this
+  plan and filing a TODO. — owner
