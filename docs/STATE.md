@@ -34,15 +34,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 - **SOURCE_SIDE_CONTAINMENT DRAFT (2026-09-25, owner-ordered plan + codex
   openreview loop to consensus):** `docs/plan/SOURCE_SIDE_CONTAINMENT.md` —
-  a file the SOURCE cannot deliver (cannot open, cannot read, size drifted
-  since scan) is skipped and reported through the existing `record_failure`
-  chokepoint instead of killing the session; contract 6→7 (in-band skip
-  record on both carriers), shard packer writes exactly `header.size` bytes.
-  Field failure: Windows user-profile mirror on cargo 0.1.2 died with
-  `tar shard entry: numeric field was not a number … cksum` because a
-  growing SQLite WAL corrupted its shard. Open rulings D1–D6 in the plan
-  (D5 staged streamed writes, D6 manifest-entry identity);
-  no code until Active.
+  a file the SOURCE cannot deliver (open/read failure, size drift since
+  scan) is skipped or retracted and reported via `record_failure` instead
+  of killing the session; contract 6→7. Field failure: a Windows
+  user-profile mirror on cargo 0.1.2 died with `tar shard entry: numeric
+  field was not a number … cksum` (growing SQLite WAL corrupted its shard).
+  Open rulings D1–D6 (D5 staged streamed writes, D6 entry identity).
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
