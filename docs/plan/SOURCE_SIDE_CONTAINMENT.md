@@ -1,7 +1,9 @@
 # Source-Side Containment — a file the source cannot deliver is skipped, not fatal
 
 **Status**: Draft — owner ordered the plan and a codex review loop to
-consensus (2026-09-25); no code until `Active`. Open rulings D1–D6 below.
+consensus (2026-09-25); no code until `Active`. **Ruled 2026-09-28
+(D-2026-09-28-1): D1 = skip; D7 = automatic single end-of-run retry pass
+over the failed set.** Open rulings D2–D6 below.
 Review record: `REVIEW.md` §Plan reviews (openreview), rows
 `plan-ssc-2026-09-25-r*`; six rounds, all `acceptable_with_changes`
 (29 material changes: 23 adopted; the rest are owner rulings — D5 staged
@@ -51,8 +53,11 @@ a single error, we are violating all of those."
 - No consistent-snapshot copying (VSS, LVM, APFS snapshots). A file that
   changes during the run is reported and skipped (D1); blit never claims
   to have captured a consistent image of a live file.
-- No in-session retry. Convergence-on-re-run stays the reliability model
-  (D-2026-07-09-1 Q2); the failure block's re-run hint already says so.
+- No unbounded or interactive retry. D7 (D-2026-09-28-1) adds exactly
+  one automatic end-of-run retry pass over the failed set (D-I); anything
+  still failing after it is reported with the existing re-run hint, and
+  convergence-on-re-run remains the model beyond that single pass. No
+  prompt (unattended backups must not hang) and no flag (SIMPLE).
 - No new CLI flag or option of any kind (D-2026-08-01-1, SIMPLE). No
   "ignore changing files" mode.
 - **Resume patches stay in place** (owner ruling D-2026-07-09-1 Q2: "in-place
@@ -260,6 +265,17 @@ a single error, we are violating all of those."
   `one_blocked_file_fixture` tests) is still contained under the new sink
   lifecycle: the record's framing is consumed through its terminator, the
   failure is that file's, the session continues.
+- [ ] **A20 (retry pass, D7):** on every route, a run whose main pass
+  recorded failures performs exactly one automatic retry pass over the
+  failed paths — re-scanned (fresh size/mtime/metadata) and transferred
+  through the same session machinery — before mirror deletions and before
+  the summary; files that succeed on retry are counted as transferred and
+  absent from the failure block; files that fail again are reported once,
+  with the retry noted in their reason; a run with no failures performs
+  no retry pass and no extra scan. Pinned with a source whose file drifts
+  on the first read and is quiet on the second (lands), one that drifts
+  both times (reported once), and a run with zero failures (no second
+  scan observed).
 - [ ] **A19 (mirror shield):** a mirror in which a skipped or retracted
   source file's path is a populated directory at the destination leaves
   that directory and its contents untouched, reports the failure, and
@@ -655,6 +671,37 @@ held open by another process fails the rename → that file's contained
 failure, the staging file removed. If D5 rules "keep in place", `abort`
 removes the truncated target and A9/A12 read "path absent" instead.
 
+### D-I. One automatic retry pass over the failed set (ssc-6, D7)
+
+Owner ruling 2026-09-28 (D-2026-09-28-1), on the multi-terabyte case
+where a status file rewritten every 300 s would otherwise be skipped
+because hours pass between its scan and its read: "collect all errors,
+then … retry at the end of the transfer that will rescan and retry."
+Shape:
+
+- After the main pass completes and before mirror deletions and the
+  summary, if `contained_failures.failed_paths` (uncapped, D-A) is
+  non-empty, the CLI-side orchestrator runs **one** further session over
+  the same source and destination with `FileFilter.files_from`
+  (`fs_enum.rs:48`, the existing exact-path set filter) set to that set
+  — a fresh scan of just those paths (new size, mtime, metadata,
+  `name_lossy`), the same diff, the same payload machinery, the same
+  containment. No new wire: it is a second `Transfer` session on the
+  contract already defined here.
+- Retry everything in the set, source-side and destination-side reasons
+  alike: bounded by the failure count, and a destination lock from
+  minutes ago may be gone.
+- Accounting: a file that lands on retry is counted once as transferred
+  and dropped from the failure list; one that fails again keeps a single
+  entry whose reason gains `(retried)`; `files_failed` is the post-retry
+  count, so exit 2 and the move source-delete gate read the final state.
+  The retry pass's own scan is not a "second enumeration" for the mirror:
+  deletions are planned from the main pass's complete source set, and the
+  failed-path shield (A19) applies to the post-retry failed set.
+- Zero failures → no retry session, no extra scan, no output change.
+- Automatic and silent apart from one progress-row phase word
+  (`retrying N file(s)`); no prompt, no option.
+
 ### D-G. Words and docs (ssc-5)
 
 - `failure_block_styled` (`blit-cli/src/transfers/failures.rs:84-120`):
@@ -732,8 +779,13 @@ gate, DEVLOG entry, CI on all three OSes before the next.
 5. **ssc-5 — words, non-UTF-8 reasons, docs (A13 reasons, A14).** D-F
    reasons, D-G, CHANGELOG Unreleased, RELEASE_1_0 G3 (D4),
    PER_FILE_ERROR_CONTAINMENT pointer.
+6. **ssc-6 — retry pass (A20; D7).** D-I on every route: orchestrator
+   re-runs one session over `files_from = failed_paths`; accounting merge;
+   progress phase word; the three pins in A20. Depends on ssc-1..ssc-4
+   (needs the uncapped failed set and source-side skips to exist).
 
-Executed order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-5.
+Executed order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-6 → ssc-5 (ssc-5's
+CHANGELOG entry describes the retry pass, so it lands last).
 
 ## Review history
 
@@ -832,13 +884,15 @@ Executed order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-5.
 
 ## Open questions
 
-- **D1 — drift policy.** A file whose size changed since the scan: skip and
-  report (this draft), or land the bytes actually read under a corrected
-  header? Recommendation: skip. The manifest promised size+mtime; landing
-  different bytes under that mtime makes the next compare call it
-  converged when it is not. Skipping converges on re-run once the file is
-  quiet; a never-quiet file never lands and is always reported.
-  — owner
+- **D1 — drift policy. RULED 2026-09-28: skip** (D-2026-09-28-1). A file
+  whose size changed since the scan is skipped and reported, never landed
+  under a stale header; D7's retry pass is what makes this acceptable on
+  long transfers.
+- **D7 — automatic single retry pass. RULED 2026-09-28: adopt**
+  (D-2026-09-28-1; owner: "collect all errors, then … retry at the end of
+  the transfer that will rescan and retry"). Design D-I, slice ssc-6,
+  criterion A20. Amends D-2026-07-09-1 Q2's "no in-session retry" to
+  "one bounded end-of-run retry pass; convergence-on-re-run beyond it".
 - **D2 — retraction (ssc-3).** Adopt D-D, or keep post-announce read
   failures fatal? Recommendation: adopt; with terminators it is the
   natural shape of the record, and it is the last way one live file can
