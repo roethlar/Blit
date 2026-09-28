@@ -1,9 +1,11 @@
 # Source-Side Containment — a file the source cannot deliver is skipped, not fatal
 
 **Status**: Draft — owner ordered the plan and a codex review loop to
-consensus (2026-09-25); no code until `Active`. **Ruled 2026-09-28
-(D-2026-09-28-1): D1 = skip; D7 = automatic single end-of-run retry pass
-over the failed set.** Open rulings D2–D6 below.
+consensus (2026-09-25); no code until `Active`. **Ruled 2026-09-28: D1 = skip and D7 = one end-of-run retry pass
+(D-2026-09-28-1); D2 = adopt retraction — "no one error is EVER fatal to
+the entire run unless it is genuinely impossible for the run to
+continue" (D-2026-09-28-2).** Open rulings D3–D6 below; D7's switch
+shape (default) pending.
 Review record: `REVIEW.md` §Plan reviews (openreview), rows
 `plan-ssc-2026-09-25-r*`; six rounds, all `acceptable_with_changes`
 (29 material changes: 23 adopted; the rest are owner rulings — D5 staged
@@ -893,12 +895,16 @@ CHANGELOG entry describes the retry pass, so it lands last).
   the transfer that will rescan and retry"). Design D-I, slice ssc-6,
   criterion A20. Amends D-2026-07-09-1 Q2's "no in-session retry" to
   "one bounded end-of-run retry pass; convergence-on-re-run beyond it".
-- **D2 — retraction (ssc-3).** Adopt D-D, or keep post-announce read
-  failures fatal? Recommendation: adopt; with terminators it is the
-  natural shape of the record, and it is the last way one live file can
-  kill a run. If "keep fatal": ssc-3 shrinks to the resume open-skip, A9
-  and the retraction rows are struck, `FileEnd` keeps only `ok = true`.
-  — owner
+- **D2 — retraction. RULED 2026-09-28: adopt** (D-2026-09-28-2). Owner:
+  "no one error is EVER fatal to the entire run unless it is genuinely
+  impossible for the run to continue." A record that fails after its
+  bytes started flowing is closed as failed, its partial discarded, the
+  file joins the failed set and is retried by D7's pass. This is the
+  standing test for every "session-fatal" class in this plan's
+  Non-goals: each must be a case where the run genuinely cannot continue
+  (transport dead, protocol desynchronised, destination root gone,
+  volume unwritable, path-safety breach) — not a case that is merely
+  inconvenient to contain.
 - **D3 — retire the local availability pre-check and its apply-time mirror
   refusal (D-E).** Recommendation: retire; deletion safety is the scan's
   completeness, not a file's openability. — owner
