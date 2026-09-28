@@ -6,7 +6,8 @@ consensus (2026-09-25); no code until `Active`. **Ruled 2026-09-28: D1 = skip an
 the entire run unless it is genuinely impossible for the run to
 continue" (D-2026-09-28-2).** D7's switches ruled the same day (D-2026-09-28-3): `--retries <N>`/`-R`
 default 1, `--retry-wait <SECONDS>`/`-W` default 30, robocopy-adapted.
-Open rulings D3–D6 below.
+D3 (retire the local pre-check + apply-time mirror refusal) ruled
+2026-09-28 (D-2026-09-28-4). Open rulings D4–D6 below.
 Review record: `REVIEW.md` §Plan reviews (openreview), rows
 `plan-ssc-2026-09-25-r*`; six rounds, all `acceptable_with_changes`
 (29 material changes: 23 adopted; the rest are owner rulings — D5 staged
@@ -925,9 +926,11 @@ CHANGELOG entry describes the retry pass, so it lands last).
   (transport dead, protocol desynchronised, destination root gone,
   volume unwritable, path-safety breach) — not a case that is merely
   inconvenient to contain.
-- **D3 — retire the local availability pre-check and its apply-time mirror
-  refusal (D-E).** Recommendation: retire; deletion safety is the scan's
-  completeness, not a file's openability. — owner
+- **D3 — retire the local availability pre-check and its apply-time
+  mirror refusal (D-E). RULED 2026-09-28: retire** (D-2026-09-28-4;
+  owner: "D3 confirmed"). Deletion safety is the scan's completeness, not
+  a file's openability; under D-2026-09-28-2 the refusal was already
+  indefensible.
 - **D4 — 1.0 gate.** Record this plan under `RELEASE_1_0.md` G3 as a
   fix-now item? Recommendation: yes; backing up a live home directory is
   the everyday workload. — owner

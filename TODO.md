@@ -332,6 +332,19 @@ explicitly-deferred logging epic (F15).
       the separate interactive `blit-tui` navigation app, not this
       inline CLI progress output during a transfer.
 
+### Owner-queued (2026-09-28)
+
+- [ ] **CLI configuration file** (owner, 2026-09-28: "add an item for the
+  config file"). Today no user-level settings file exists: the platform
+  config dir (`blit-core/src/config.rs`, `--config-dir`) holds only perf
+  history/seeds, the daemon's TOML is daemon-only (`docs/DAEMON_CONFIG.md`),
+  env vars were ruled out (audit-l39). Recommended shape, to be planned
+  (`plan` word): `config.toml` in the existing config dir, precedence CLI >
+  file > defaults, keys named exactly as their long options, first keys
+  `retries`/`retry-wait` (D-2026-09-28-3). Per-source-tree `.blit/` file is
+  a separate, later question (a file inside the copied tree is transfer
+  data). Sequenced after SOURCE_SIDE_CONTAINMENT.
+
 ### Deferred design calls
 
 These are intentionally not next-actionable. Don't pick them up
