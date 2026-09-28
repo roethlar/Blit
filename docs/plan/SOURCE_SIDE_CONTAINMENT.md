@@ -4,8 +4,9 @@
 consensus (2026-09-25); no code until `Active`. **Ruled 2026-09-28: D1 = skip and D7 = one end-of-run retry pass
 (D-2026-09-28-1); D2 = adopt retraction — "no one error is EVER fatal to
 the entire run unless it is genuinely impossible for the run to
-continue" (D-2026-09-28-2).** Open rulings D3–D6 below; D7's switch
-shape (default) pending.
+continue" (D-2026-09-28-2).** D7's switches ruled the same day (D-2026-09-28-3): `--retries <N>`/`-R`
+default 1, `--retry-wait <SECONDS>`/`-W` default 30, robocopy-adapted.
+Open rulings D3–D6 below.
 Review record: `REVIEW.md` §Plan reviews (openreview), rows
 `plan-ssc-2026-09-25-r*`; six rounds, all `acceptable_with_changes`
 (29 material changes: 23 adopted; the rest are owner rulings — D5 staged
@@ -55,13 +56,15 @@ a single error, we are violating all of those."
 - No consistent-snapshot copying (VSS, LVM, APFS snapshots). A file that
   changes during the run is reported and skipped (D1); blit never claims
   to have captured a consistent image of a live file.
-- No unbounded or interactive retry. D7 (D-2026-09-28-1) adds exactly
-  one automatic end-of-run retry pass over the failed set (D-I); anything
-  still failing after it is reported with the existing re-run hint, and
-  convergence-on-re-run remains the model beyond that single pass. No
-  prompt (unattended backups must not hang) and no flag (SIMPLE).
-- No new CLI flag or option of any kind (D-2026-08-01-1, SIMPLE). No
-  "ignore changing files" mode.
+- No unbounded or interactive retry. D7 (D-2026-09-28-1/-3) adds
+  bounded end-of-run retry passes over the failed set (D-I), `--retries`
+  of them (default 1), `--retry-wait` seconds before each (default 30);
+  anything still failing after the last pass is reported with the
+  existing re-run hint, and convergence-on-re-run remains the model
+  beyond that. No prompt (unattended backups must not hang).
+- No new CLI flag or option beyond the two the owner asked for
+  (D-2026-09-28-3: `--retries`, `--retry-wait`); D-2026-08-01-1's rule
+  otherwise stands. No "ignore changing files" mode.
 - **Resume patches stay in place** (owner ruling D-2026-07-09-1 Q2: "in-place
   patch stays (no temp+rename atomicity …) — convergence-on-retry is the
   reliability model"). That ruling is scoped to resume block patching;
@@ -267,17 +270,20 @@ a single error, we are violating all of those."
   `one_blocked_file_fixture` tests) is still contained under the new sink
   lifecycle: the record's framing is consumed through its terminator, the
   failure is that file's, the session continues.
-- [ ] **A20 (retry pass, D7):** on every route, a run whose main pass
-  recorded failures performs exactly one automatic retry pass over the
-  failed paths — re-scanned (fresh size/mtime/metadata) and transferred
+- [ ] **A20 (retry passes, D7):** on every route, a run whose main pass
+  recorded failures performs up to `--retries` (default 1) retry passes
+  over the failed paths, waiting `--retry-wait` seconds (default 30)
+  before each, stopping early when a pass ends with zero failures;
+  `--retries 0` performs none. Each pass is — re-scanned (fresh size/mtime/metadata) and transferred
   through the same session machinery — before mirror deletions and before
   the summary; files that succeed on retry are counted as transferred and
   absent from the failure block; files that fail again are reported once,
-  with the retry noted in their reason; a run with no failures performs
-  no retry pass and no extra scan. Pinned with a source whose file drifts
-  on the first read and is quiet on the second (lands), one that drifts
-  both times (reported once), and a run with zero failures (no second
-  scan observed).
+  with the retry noted in their reason; a run with no failures performs no retry pass, no wait and no extra
+  scan. Pinned with a source whose file drifts on the first read and is
+  quiet on the second (lands), one that drifts on every pass (reported
+  once, `--retries 2` observed as exactly two passes), a run with zero
+  failures (no second scan observed), `--retries 0` (no pass), and the
+  wait honoured via an injected clock (no real sleep in tests).
 - [ ] **A19 (mirror shield):** a mirror in which a skipped or retracted
   source file's path is a populated directory at the destination leaves
   that directory and its contents untouched, reports the failure, and
@@ -683,8 +689,8 @@ Shape:
 
 - After the main pass completes and before mirror deletions and the
   summary, if `contained_failures.failed_paths` (uncapped, D-A) is
-  non-empty, the CLI-side orchestrator runs **one** further session over
-  the same source and destination with `FileFilter.files_from`
+  non-empty, the CLI-side orchestrator waits `--retry-wait` seconds and
+  runs a further session over the same source and destination with `FileFilter.files_from`
   (`fs_enum.rs:48`, the existing exact-path set filter) set to that set
   — a fresh scan of just those paths (new size, mtime, metadata,
   `name_lossy`), the same diff, the same payload machinery, the same
@@ -700,9 +706,19 @@ Shape:
   The retry pass's own scan is not a "second enumeration" for the mirror:
   deletions are planned from the main pass's complete source set, and the
   failed-path shield (A19) applies to the post-retry failed set.
-- Zero failures → no retry session, no extra scan, no output change.
-- Automatic and silent apart from one progress-row phase word
-  (`retrying N file(s)`); no prompt, no option.
+- Passes repeat while failures remain, up to `--retries` (pass k retries
+  pass k-1's failed set); a pass ending with zero failures stops the
+  loop. Zero failures after the main pass → no wait, no retry session,
+  no extra scan, no output change.
+- **Switches (D-2026-09-28-3, owner: "mimic robocopy. /R:n … /W:ss.
+  adapt to fit this cli"):** `--retries <N>` (short `-R`, default 1,
+  `0` disables) and `--retry-wait <SECONDS>` (short `-W`, default 30),
+  on every transfer verb, shown in help (`TransferArgs`,
+  `crates/blit-cli/src/cli.rs:198`). Robocopy's defaults (1,000,000 /
+  30) are per-file retries against flaky shares; these are end-of-run
+  passes, so the count default is the single pass ruled in D7 and the
+  wait keeps robocopy's 30 s so a file mid-rewrite has settled.
+  Progress row shows `retrying N file(s) (pass k of R)`; no prompt.
 
 ### D-G. Words and docs (ssc-5)
 
@@ -890,11 +906,15 @@ CHANGELOG entry describes the retry pass, so it lands last).
   whose size changed since the scan is skipped and reported, never landed
   under a stale header; D7's retry pass is what makes this acceptable on
   long transfers.
-- **D7 — automatic single retry pass. RULED 2026-09-28: adopt**
-  (D-2026-09-28-1; owner: "collect all errors, then … retry at the end of
-  the transfer that will rescan and retry"). Design D-I, slice ssc-6,
-  criterion A20. Amends D-2026-07-09-1 Q2's "no in-session retry" to
-  "one bounded end-of-run retry pass; convergence-on-re-run beyond it".
+- **D7 — end-of-run retry passes. RULED 2026-09-28: adopt**
+  (D-2026-09-28-1; owner: "collect all errors, then … retry at the end
+  of the transfer that will rescan and retry"), **with switches**
+  (D-2026-09-28-3; owner: "mimic robocopy. /R:n for number of retries,
+  /W:ss for seconds between tries. adapt to fit this cli"): `--retries`
+  default 1, `--retry-wait` default 30, confirmed. Design D-I, slice
+  ssc-6, criterion A20. Amends D-2026-07-09-1 Q2's "no in-session retry"
+  to "bounded end-of-run retry passes; convergence-on-re-run beyond
+  them".
 - **D2 — retraction. RULED 2026-09-28: adopt** (D-2026-09-28-2). Owner:
   "no one error is EVER fatal to the entire run unless it is genuinely
   impossible for the run to continue." A record that fails after its
