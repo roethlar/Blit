@@ -41,8 +41,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   field was not a number … cksum` (growing SQLite WAL corrupted its shard).
   Codex loop CLOSED at r6 (2026-09-26). D1 skip + D7 retry pass
   (D-2026-09-28-1) and D2 retraction (D-2026-09-28-2) RULED 2026-09-28;
-  D7 switches ruled (D-2026-09-28-3: `--retries` 1,
-  `--retry-wait` 30); D3–D6 open.
+  D7 switches ruled (D-2026-09-28-3); D3–D6 open.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
