@@ -7,12 +7,13 @@ the entire run unless it is genuinely impossible for the run to
 continue" (D-2026-09-28-2).** D7's switches ruled the same day (D-2026-09-28-3): `--retries <N>`/`-R`
 default 1, `--retry-wait <SECONDS>`/`-W` default 30, robocopy-adapted.
 D3 (retire the local pre-check + apply-time mirror refusal) ruled
-2026-09-28 (D-2026-09-28-4); D4 (1.0 gate G3 fix-now item) ruled
-2026-09-29 (D-2026-09-29-1). Open rulings D5–D6 below.
+2026-09-28 (D-2026-09-28-4); D4 (1.0 gate G3 fix-now item) ruled 2026-09-29 (D-2026-09-29-1); D5
+ruled 2026-09-29: **no staging files** (D-2026-09-29-2). Open ruling D6
+below.
 Review record: `REVIEW.md` §Plan reviews (openreview), rows
 `plan-ssc-2026-09-25-r*`; six rounds, all `acceptable_with_changes`
-(29 material changes: 23 adopted; the rest are owner rulings — D5 staged
-writes with two sub-questions, D6 manifest-entry identity). **Loop
+(29 material changes: 23 adopted; D5 staged writes REJECTED by the
+owner 2026-09-29, D6 manifest-entry identity pending). **Loop
 closed 2026-09-26 at r6: every remaining material change is one the
 reviewer has raised repeatedly and that only an owner ruling can settle
 (openreview playbook: a contested round resolves by owner adjudication).**
@@ -67,11 +68,14 @@ a single error, we are violating all of those."
 - No new CLI flag or option beyond the two the owner asked for
   (D-2026-09-28-3: `--retries`, `--retry-wait`); D-2026-08-01-1's rule
   otherwise stands. No "ignore changing files" mode.
-- **Resume patches stay in place** (owner ruling D-2026-07-09-1 Q2: "in-place
-  patch stays (no temp+rename atomicity …) — convergence-on-retry is the
-  reliability model"). That ruling is scoped to resume block patching;
-  streamed full-file records are a different write and are staged under
-  D-H, subject to owner ruling D5.
+- **No staging files, anywhere** (owner, 2026-09-29, D-2026-09-29-2: "no
+  staging files. that was decided last year"; recorded ruling
+  D-2026-07-09-1 Q2: "in-place patch stays (no temp+rename atomicity …)
+  — convergence-on-retry is the reliability model"). Every destination
+  write is in place. A retracted record therefore leaves the target path
+  absent, which is what today's abort mid-write already costs
+  (`FsTransferSink` creates and truncates the target directly,
+  `remote/transfer/sink.rs:876`); the D7 retry pass re-lands it.
 - **No manifest-entry IDs.** Path strings remain the protocol identity for
   manifest, needs, records, skips and terminators, as they are for every
   frame today; a lossless or opaque identity is a protocol redesign with
@@ -113,12 +117,11 @@ a single error, we are violating all of those."
   the CLI block, JSON fields, exit code 2 and the move source-delete gate
   need no parallel implementation.
 - **Nothing is finalised under a false header.** A destination record is
-  committed (mtime/attributes stamped, counted as transferred, and — for
-  staged streamed records, D-H — renamed over the target) only when its
-  terminator says the source delivered exactly `header.size` bytes from a
-  handle that still had that size afterwards. Anything else is aborted by
-  the sink and reported, and the target path is left exactly as it was
-  before the record began.
+  committed (mtime/attributes stamped, counted as transferred) only when
+  its terminator says the source delivered exactly `header.size` bytes
+  from a handle that still had that size afterwards. Anything else is
+  aborted by the sink — the partial target is removed — and reported; a
+  partial is never left looking like a finished file.
 - **Explicit per-need state, one ledger.** The destination tracks each
   granted path as `Granted → Active(lane) → Completed | Failed` (D-A).
   Skips are accepted only in `Granted`; a terminator only for the
@@ -212,9 +215,8 @@ a single error, we are violating all of those."
   (`transfer_session/local.rs:1222`) flips meaning and is renamed.
 - [ ] **A9 (retraction):** a read error or short EOF *after* a single-file
   record was announced, or a file whose size differs when re-checked after
-  its body was sent, ends with the destination path exactly as it was
-  before the record (a pre-existing copy intact, D-H; absent if there was
-  none), the failure reported, the session complete — on both carriers, and
+  its body was sent, ends with no file at that destination path (in-place model, D5), the
+  failure reported, the session complete — on both carriers, and
   through the relay sink (`DataPlaneSink::write_file_stream`,
   `sink.rs:2022-2038`, live at `transfer_session/data_plane.rs:2406`),
   where the failed terminator is forwarded downstream and the downstream
@@ -292,7 +294,7 @@ a single error, we are violating all of those."
   still deletes genuinely extraneous entries elsewhere (regression per r5
   F1; red today via `plan_session_deletions` descendant deletion).
 - [ ] **A18 (dry-run):** a `--dry-run` on every route creates no parent
-  directory and no staging file under the new lifecycle (guard asserts
+  directory and no file under the new lifecycle (guard asserts
   the destination tree is unchanged, including after a mid-run
   cancellation); the existing R58-F4 pins stay green.
 - [ ] **A17 (FAST, local):** the local large-file copy shows no throughput
@@ -341,7 +343,7 @@ allow it:
 | grant (need sent) | absent | Granted | — |
 | skip record for path | Granted | Failed | `record_failure(path, reason)` |
 | `FileBegin` / FILE tag / shard header member | Granted | Active(L) (shard members go straight to Completed on shard success, Failed on per-member containment as today) | sink `begin_record` → real writer, or a **discarding** writer carrying a contained destination failure (A16) |
-| terminator ok | Active(L), same L | Completed if the writer committed; Failed if it was discarding | sink `commit` (stamp, count, rename-over for staged records D-H); violation unless bytes == `header.size` |
+| terminator ok | Active(L), same L | Completed if the writer committed; Failed if it was discarding | sink `commit` (stamp, count); violation unless bytes == `header.size` |
 | terminator failed(reason) | Active(L), same L | Failed | sink `abort`; `record_failure` |
 | first `BlockTransfer` / BLOCK record | Granted(resume) | Active(L, Resume) | patch in place as today |
 | resume `BlockComplete` ok | Granted(resume) or Active(L, Resume), same L | Completed | stamp as today (zero-block case straight from the grant, A10) |
@@ -406,12 +408,10 @@ preserved (A16) and the ledger's final state follows the sink outcome.
 In **dry-run** (`FsSinkConfig.dry_run`, today's R58-F4 short-circuits at
 `sink.rs:1138` and `:1377`) `begin_record` returns a non-writing writer
 that validates framing and counts, creating neither a parent directory
-nor a staging file (A18).
-Implementations: `FsTransferSink` — `begin_record` opens a **staging
-file beside the target** (D-H) with sf-3c's retained handle, `commit`
-stamps metadata on the staging file and renames it over the target,
-`abort` drops the handle and removes only the staging file, leaving any
-prior destination copy intact.
+nor a file (A18). Implementations: `FsTransferSink` — `begin_record`
+opens the target in place exactly as today (`sink.rs:876`, sf-3c's
+retained handle), `commit` stamps metadata through that handle, `abort`
+drops the handle and removes the partial target it created (D-H).
 `DataPlaneSink` (the relay, `sink.rs:2022-2038`) — `begin_record`
 announces the downstream FILE record, `write` forwards chunks, `commit`
 writes the ok trailer, `abort` writes the failed trailer with the
@@ -533,8 +533,8 @@ use the `OpenedSourceFile` handle (D-A), never the path.
   disappears with it). Dry-run keeps its pre-mkdir short-circuit
   (`sink.rs:1374-1380`) untouched (A18).
   Copy bounded to `header.size`, re-stat the same handle after, and on any
-  mismatch abort the staged destination (D-H) and `record_failure` with
-  the changed-size reason (A12). Stamping happens only after the re-stat
+  mismatch remove the partial destination file (D-H) and `record_failure`
+  with the changed-size reason (A12). Stamping happens only after the re-stat
   matches. A17 guards the cost. Resume (`resume_copy_file`) keeps the
   in-place model (Q2) but reads through the same handle.
 
@@ -545,11 +545,12 @@ terminator (D-A), so the destination never has to decide whether a
 trailing skip refers to the record it just finished, an earlier one, or a
 pre-existing file (r1 F3). Ordering is the lane's own: the terminator is
 the next thing read after the last chunk. The only destructive act is
-`RecordWriter::abort`, scoped to the staging file the sink opened for
+`RecordWriter::abort`, scoped to the target handle the sink opened for
 the active record (D-H). Pins: a decoy at the same relative path planted
-before the session is byte-identical afterwards and the failure is
-reported; a decoy outside the destination root is untouched; the relay
-forwards the failed terminator (A9).
+before the session is overwritten in place and then removed (the path is
+absent afterwards and the failure reported — in-place model, D5); a
+decoy outside the destination root is untouched; the relay forwards the
+failed terminator (A9).
 
 ### D-E. Preparation returns per-file outcomes (ssc-4)
 
@@ -621,106 +622,35 @@ string is unsound (a legitimate U+FFFD name aliases it — r1 F5). Instead:
   and emits the skip instead, so a destination that ever granted one
   cannot make the source open the wrong path.
 
-### D-H. Staged streamed records (ssc-3, owner ruling D5)
+### D-H. In-place writes; abort removes the partial (owner ruling D5)
 
-Today `FsTransferSink` creates and truncates the target directly
-(`sink.rs:876`), so a session abort — and, without this section, a
-retracted record — leaves the last good destination copy destroyed (r2
-F1, r3 F1). D-2026-07-09-1 Q2 ruled in-place for **resume block
-patches** only. For **streamed single-file records** (and the local
-single-file copy, D-C), the sink writes to a staging file in the
-validated target directory named with a **fixed-length,
-target-independent basename** (`.blit-stage-<16 hex>`), created with
-`create_new` and retried on collision, so a target already at the
-filesystem's component-length limit still transfers (r4 F4); the
-target mapping lives only in the `RecordWriter`. Metadata is stamped on
-the staging file and `commit` renames it over the target
-(`std::fs::rename` replaces an existing file on every supported
-platform); `abort` removes only the staging file. **The stage is owned by an RAII
-guard** (r6 F3): cancellation (`CancelJob`, disconnect, an adjacent task
-failure) aborts receive tasks by dropping their futures
-(`remote/transfer/abort_on_drop.rs:84-90`), which would bypass an
-explicit `abort`, so the `RecordWriter` holds a guard that removes its
-exact stage path on `Drop` and is disarmed only by a successful rename;
-cancellation tests on the in-stream, data-plane and local routes pin it.
-Tar-shard members are unchanged (whole-in-memory shard,
-destination-side per-member containment as today); resume stays in place
-(Q2). Costs and their handling: transient space equal to the **sum of the
-in-flight streamed records' sizes** — one receive task per inbound TCP
-connection (`pipeline.rs:1202-1210`, `data_plane.rs:294`) and the local
-pipeline's workers each hold one staging file while its prior target
-still exists (r4 F2), so the bound is workers × their current records,
-not one file; a destination that fills stays the volume-level fatal it
-is today (`failure_is_containable`), every in-process abort removes its
-staging file, and a fault-injected low-space run pins both. No admission
-budget is added in this draft (D5 sub-question, raised by the reviewer in
-r4 and r5: a destination with room to replace each file sequentially but
-not for all workers' stages at once would hit ENOSPC where throttling
-staging concurrency would let it complete; the proposed remedy is an
-internal destination-scoped byte budget derived from record sizes and
-free space, no CLI surface). One rename per streamed file, negligible
-next to a ≥ shard-threshold body. **Crash orphans are never swept by
-name** (r5 F3): the stage-to-target mapping lives only in the
-`RecordWriter`, so a later run has no proof of ownership and a prefix
-sweep could delete a user's file or another concurrent session's live
-stage. In-process aborts always remove their stage; after a crash the
-orphan stays, visibly named, and is removed only as an extraneous entry
-by a mirror pass (the same rule that removes any other file the source
-does not have). A *concurrent* session's live stage is subject to that
-same mirror rule (r6 F2) — as is every in-progress target that session
-is writing today (`mirror_planner.rs:336-346` deletes any destination
-entry absent from the source set); two sessions writing one destination
-root concurrently is not a supported mode and this plan does not add
-ownership leases for it (recorded under D5). **macOS clone first** (r5 F5): `fclonefileat` requires an
-absent destination (`copy/file_copy/mod.rs:95-104`, R58-F11), so the
-local cascade clones the opened source straight to a unique absent stage
-path and only creates the stage file when falling back to `fcopyfile` or
-buffered I/O — the constant-time APFS path is preserved (A17). Windows: the rename uses
-`MOVEFILE_REPLACE_EXISTING` semantics via `std::fs::rename`; a target
-held open by another process fails the rename → that file's contained
-failure, the staging file removed. If D5 rules "keep in place", `abort`
-removes the truncated target and A9/A12 read "path absent" instead.
+Owner, 2026-09-29 (D-2026-09-29-2): "no staging files. that was decided
+last year." The recorded ruling is D-2026-07-09-1 Q2 (in-place, no
+temp+rename, convergence-on-retry). The review loop's staged-record
+proposal (r2 M1, r3 M1, r4 M1–M4, r5 M3–M5, r6 M1–M3 — see §Review
+history) is therefore **rejected**, and with it every staging-only
+concern: the staging-space bound and admission budget, orphaned stage
+files, stage-name length, concurrent-session stage deletion, and the
+clone-into-absent-stage ordering. What remains:
 
-### D-I. One automatic retry pass over the failed set (ssc-6, D7)
-
-Owner ruling 2026-09-28 (D-2026-09-28-1), on the multi-terabyte case
-where a status file rewritten every 300 s would otherwise be skipped
-because hours pass between its scan and its read: "collect all errors,
-then … retry at the end of the transfer that will rescan and retry."
-Shape:
-
-- After the main pass completes and before mirror deletions and the
-  summary, if `contained_failures.failed_paths` (uncapped, D-A) is
-  non-empty, the CLI-side orchestrator waits `--retry-wait` seconds and
-  runs a further session over the same source and destination with `FileFilter.files_from`
-  (`fs_enum.rs:48`, the existing exact-path set filter) set to that set
-  — a fresh scan of just those paths (new size, mtime, metadata,
-  `name_lossy`), the same diff, the same payload machinery, the same
-  containment. No new wire: it is a second `Transfer` session on the
-  contract already defined here.
-- Retry everything in the set, source-side and destination-side reasons
-  alike: bounded by the failure count, and a destination lock from
-  minutes ago may be gone.
-- Accounting: a file that lands on retry is counted once as transferred
-  and dropped from the failure list; one that fails again keeps a single
-  entry whose reason gains `(retried)`; `files_failed` is the post-retry
-  count, so exit 2 and the move source-delete gate read the final state.
-  The retry pass's own scan is not a "second enumeration" for the mirror:
-  deletions are planned from the main pass's complete source set, and the
-  failed-path shield (A19) applies to the post-retry failed set.
-- Passes repeat while failures remain, up to `--retries` (pass k retries
-  pass k-1's failed set); a pass ending with zero failures stops the
-  loop. Zero failures after the main pass → no wait, no retry session,
-  no extra scan, no output change.
-- **Switches (D-2026-09-28-3, owner: "mimic robocopy. /R:n … /W:ss.
-  adapt to fit this cli"):** `--retries <N>` (short `-R`, default 1,
-  `0` disables) and `--retry-wait <SECONDS>` (short `-W`, default 30),
-  on every transfer verb, shown in help (`TransferArgs`,
-  `crates/blit-cli/src/cli.rs:198`). Robocopy's defaults (1,000,000 /
-  30) are per-file retries against flaky shares; these are end-of-run
-  passes, so the count default is the single pass ruled in D7 and the
-  wait keeps robocopy's 30 s so a file mid-rewrite has settled.
-  Progress row shows `retrying N file(s) (pass k of R)`; no prompt.
+- `FsTransferSink::begin_record` opens the target in place as today
+  (`sink.rs:876`) and holds the handle (sf-3c). `commit` stamps and
+  counts. `abort` drops the handle and removes the partial target, so a
+  retracted record never leaves a truncated file that looks finished; the
+  prior copy was already overwritten, exactly as on today's abort, and
+  the D7 retry pass re-lands the file.
+- **The partial is owned by an RAII guard** (r6 F3, still applies):
+  cancellation aborts receive tasks by dropping their futures
+  (`remote/transfer/abort_on_drop.rs:84-90`), which would bypass an
+  explicit `abort`, so the `RecordWriter` holds a guard that removes the
+  exact target path it created on `Drop`, disarmed only by `commit`;
+  cancellation tests on the in-stream, data-plane and local routes pin it.
+  The guard removes only a path this record created or truncated — never
+  one it did not open.
+- macOS local copies keep today's R58-F11 ordering (clone into the absent
+  target first, create only on the fallback path,
+  `copy/file_copy/mod.rs:95-104`), now on the opened source handle (D-C).
+- Resume block patching and tar-shard members are unchanged.
 
 ### D-G. Words and docs (ssc-5)
 
@@ -750,11 +680,12 @@ Shape:
   `ok`) bails like an unknown tag, never skips past; pin with
   corrupt-record tests. The chunk loop touches the throughput hot path;
   A15 guards it.
-- **Abort scope.** `RecordWriter::abort` acts only on the staging file the
-  sink opened for the active record; the decoy tests in D-D pin it.
-- **Staging (D-H).** Transient space, rename-over on SMB/Windows targets,
-  orphaned staging files after a crash — each named with its handling in
-  D-H; the D5 ruling decides.
+- **Abort scope.** `RecordWriter::abort` and its drop guard act only on
+  the target path this record created or truncated; the decoy tests in
+  D-D pin it.
+- **In-place model (D5).** A retracted record leaves its path absent
+  until the D7 retry pass or a re-run re-lands it — the same exposure as
+  today's abort, now reported instead of fatal.
 - **Reporting cap.** Thousands of skips (a whole live profile) exceed the
   64-entry list; `files_failed_total` still counts them all and the block
   prints the elided count — existing behaviour, unchanged.
@@ -782,11 +713,11 @@ gate, DEVLOG entry, CI on all three OSes before the next.
    change). Red proof reproduces the field message. Guards: grown,
    shrunk, vanished member; all-members-skipped shard; existing
    `tar_safety` exact-header pins still green.
-3. **ssc-3 — retraction and post-body drift, resume, relay, staging (A9,
-   A10; owner D2, D5).** D-C during/after checks on both carriers; failed
+3. **ssc-3 — retraction and post-body drift, resume, relay (A9, A10;
+   owner D2, D5).** D-C during/after checks on both carriers; failed
    terminators; resume open→skip and mid-diff→failed `BlockComplete`
-   including the zero-block terminal; relay abort forwarding; staged
-   streamed records (D-H); decoy pins (D-D).
+   including the zero-block terminal; relay abort forwarding; in-place
+   abort + drop guard (D-H); decoy pins (D-D).
 4. **ssc-4 — per-file preparation, local route (A3 local, A8, A11, A12,
    A13 local; owner D3).** D-E: `PreparedPayload::Skipped`, per-member
    hydration, pipeline `Err` reserved for infrastructure; delete
@@ -935,28 +866,11 @@ CHANGELOG entry describes the retry pass, so it lands last).
 - **D4 — 1.0 gate. RULED 2026-09-29: yes** (D-2026-09-29-1). This plan
   is a `RELEASE_1_0.md` G3 fix-now item: v1.0.0 does not tag until
   ssc-1..ssc-6 have shipped with CI green on the candidate.
-- **D5 — staged streamed records (codex r2 M1 + r3 M1, HIGH; D-H).** An
-  aborted or retracted streamed record on the in-place model destroys the
-  last good destination copy (already true of any abort today). Q2 of
-  D-2026-07-09-1 ruled in-place for resume block patches; it did not rule
-  on streamed full-file writes. Options: (a) adopt D-H — stage streamed
-  single-file records and the local single-file copy, rename on commit;
-  resume and shard members unchanged; costs: transient space equal to
-  the in-flight streamed records (workers × current record), one rename
-  per streamed file, no orphan sweep (orphans go only as
-  mirror-extraneous); sub-question, raised by codex in r4 and r5: add an
-  internal destination-scoped byte budget so concurrent stages throttle
-  under low free space (scenario: sequential replacement fits, concurrent stages do not; raised
-  in r4, r5 and r6), or accept volume-full as the already-fatal class it
-  is (this draft); second sub-question (r6): concurrent sessions writing
-  one destination root can delete each other's stages under mirror,
-  exactly as they can delete each other's in-progress targets today —
-  ownership leases are out of scope in this draft;
-  (b) keep in place — `abort` removes the truncated target, A9/A12 read
-  "path absent". Recommendation: (a); it is the only way "a source
-  failure never costs the destination a file it already had" can be
-  true, and it is confined to the record type where a mid-body failure
-  can happen. — owner
+- **D5 — staged streamed records. RULED 2026-09-29: rejected**
+  (D-2026-09-29-2; owner: "no staging files. that was decided last
+  year"). Every write stays in place; `abort` removes the partial target;
+  the staging-budget and concurrent-session sub-questions are moot. D-H
+  rewritten accordingly.
 - **D6 — manifest-entry IDs (codex r2 M5 + r3 M2, wide half).** Replace
   path strings with opaque IDs on needs, records, skips and terminators;
   keep the exact `PathBuf` at the source. Fixes the lossy-name collision
