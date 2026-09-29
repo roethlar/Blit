@@ -1,29 +1,20 @@
 # Source-Side Containment — a file the source cannot deliver is skipped, not fatal
 
-**Status**: Draft — owner ordered the plan and a codex review loop to
-consensus (2026-09-25); no code until `Active`. **Ruled 2026-09-28: D1 = skip and D7 = one end-of-run retry pass
-(D-2026-09-28-1); D2 = adopt retraction — "no one error is EVER fatal to
-the entire run unless it is genuinely impossible for the run to
-continue" (D-2026-09-28-2).** D7's switches ruled the same day (D-2026-09-28-3): `--retries <N>`/`-R`
-default 1, `--retry-wait <SECONDS>`/`-W` default 30, robocopy-adapted.
-D3 (retire the local pre-check + apply-time mirror refusal) ruled
-2026-09-28 (D-2026-09-28-4); D4 (1.0 gate G3 fix-now item) ruled 2026-09-29 (D-2026-09-29-1); D5 ruled 2026-09-29: **no staging files** (D-2026-09-29-2); D6 ruled
-2026-09-29: **rsync parity — raw name bytes carried alongside the text**
-(D-2026-09-29-3). **No open rulings.** Awaiting the owner's Active flip.
-Review record: `REVIEW.md` §Plan reviews (openreview), rows
-`plan-ssc-2026-09-25-r*`; six rounds, all `acceptable_with_changes`
-(29 material changes: 23 adopted; D5 staged writes REJECTED by the
-owner 2026-09-29; D6 resolved by the owner as rsync parity, not IDs). **Loop
-closed 2026-09-26 at r6: every remaining material change is one the
-reviewer has raised repeatedly and that only an owner ruling can settle
-(openreview playbook: a contested round resolves by owner adjudication).**
+**Status**: Active — owner: "active" (2026-09-29, D-2026-09-29-4). All
+seven rulings closed (D1–D7: D-2026-09-28-1..-4, D-2026-09-29-1..-3);
+codex openreview loop closed at r6 (2026-09-26; `REVIEW.md` rows
+`plan-ssc-2026-09-25-r1..r6`). Each slice ssc-1..ssc-6 needs its own go;
+none has started. Plan history: drafted 2026-09-25 after the Windows
+user-profile mirror failure; owner rulings recorded in the Open questions
+section below.
 **Created**: 2026-09-25
 **Supersedes**: `docs/plan/PER_FILE_ERROR_CONTAINMENT.md` §Non-goals
 "Send-side source read stays fatal" (the deferred wire skip signal lands
 here); `CHANGELOG.md` 0.1.2 Known limitation "Non-UTF-8 source filenames …
 On REMOTE transfers it is not contained" (closed by ssc-1/ssc-5).
-**Decision ref**: pending (D-2026-07-09-1 supplies the governing principle;
-D-2026-08-01-2 shipped the destination half this plan completes)
+**Decision ref**: D-2026-09-29-4 (Active flip); rulings D-2026-09-28-1..-4,
+D-2026-09-29-1..-3; D-2026-07-09-1 supplies the governing principle and
+D-2026-08-01-2 shipped the destination half this plan completes
 
 ## Goal
 

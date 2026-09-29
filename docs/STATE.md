@@ -32,8 +32,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Now (active work)
 
-- **SOURCE_SIDE_CONTAINMENT DRAFT (2026-09-25, owner-ordered plan + codex
-  openreview loop to consensus):** `docs/plan/SOURCE_SIDE_CONTAINMENT.md` —
+- **SOURCE_SIDE_CONTAINMENT ACTIVE (D-2026-09-29-4; drafted 2026-09-25, codex
+  loop to consensus):** `docs/plan/SOURCE_SIDE_CONTAINMENT.md` —
   a file the SOURCE cannot deliver (open/read failure, size drift since
   scan) is skipped or retracted and reported via `record_failure` instead
   of killing the session; contract 6→7. Field failure: a Windows
@@ -41,7 +41,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   field was not a number … cksum` (growing SQLite WAL corrupted its shard).
   Codex loop CLOSED at r6 (2026-09-26). D1 skip + D7 retry pass
   (D-2026-09-28-1) and D2 retraction (D-2026-09-28-2) RULED 2026-09-28;
-  D4–D6 (D-2026-09-29-1..-3). ALL RULED — awaiting the owner's Active flip.
+  D4–D6 (D-2026-09-29-1..-3). ALL RULED; ACTIVE 2026-09-29 — next: owner go for ssc-1.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -63,11 +63,11 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   Principle: ceiling-driven, never competitor-relative (D-2026-07-04-4).
 ## Queue (ordered)
 
-0. **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (DRAFT 2026-09-25)** — source-side
+0. **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (ACTIVE 2026-09-29, D-2026-09-29-4)** — source-side
    per-file containment (skip record, shard fidelity, mid-record retraction,
    local pre-check retirement, non-UTF-8 reason). Codex openreview loop in
    closed at r6 (all acceptable_with_changes; 23 changes adopted); all rulings
-   D1–D7 closed (D-2026-09-28-1..-4, D-2026-09-29-1..-3), Active flip pending; RELEASE_1_0 G3 fix-now item (ruled).
+   D1–D7 closed (D-2026-09-28-1..-4, D-2026-09-29-1..-3), ssc-1 awaits its go; RELEASE_1_0 G3 fix-now item (ruled).
 0. **ULTRACODE 2026-08-18 (DEVLOG 23:00Z): cv-1+cv-2 LANDED `05529c19` (contract-version gate + scan surfacing; cv-3 waits for next release); sf-3d LANDED `7ffd929d` (containment cache + resume-path stamping; rig A/B still owed); clp-3 reviewed AND F1 closed `677a8ba9` (F2/F5 stay owner calls); residue triaged (2 dead, 1 dead-as-written; item 5 rate-window FIXED — one flagged judgement call on stall silence; item 2 perf-history scope needs an owner ruling); sweep-prefetch parked pending one netwatch-01 SMB run; pm-5 BLOCKED for v0.1.2 — source lane needs the next tag.** CI FULLY GREEN on `af9b48b3` (run 32195891519, 7/7 jobs — the slices are cross-platform proven). Stall-line revised-b landed after (three red-proven silence gates; mid-payload stalls visible, summary-wait/purge tails silent).
 1. **`docs/plan/INTERFACE_PLATFORM.md` (SHIPPED — owner declared 2026-08-18; all seven slices landed 2026-08-17)** — three standalone front-ends (CLI first, TUI/GUI later in BlitAdmin_UIs), all first-class consumers of `blit-core` ITSELF: `blit-app` + `blit-console-core` fold into core (no new crate, D-2026-08-17-2), `blit-core` publishes to crates.io (name available, verified; publish act owner-gated), third-party Rust apps embed via the crate, everything else via daemon gRPC. All rulings closed (D-2026-08-17-3/-4/-5: bridge, tui, gui all deleted; fresh UIs later; nothing pushes to BlitAdmin_UIs under this plan). Nothing open; execution record in the plan.
 2. **`docs/plan/SMALL_FILE_CEILING.md` — sf-3b closed (D-2026-08-14-1); sf-3c landed 2026-08-15; sf-3d landed 2026-08-18** — sf-3c stamps streamed-receive mtime/permissions through the retained write handle instead of reopening by path; sf-3d (sf-3a candidate 3, contained-path canonicalization cache + resume-path stamping, `7ffd929d`) closed the named-candidate list; proxy pins + mutation proofs in the plan's Slices section. Rig A/B for sf-3d still owed (Queue 0); no further cut selected.
@@ -170,8 +170,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   **`docs/plan/RELEASE_COMPLETION.md`**.
 - Historical live-tuning record: **`docs/plan/LIVE_DIAL_TUNING.md`**; exact
   session audit: **`docs/bench/ldt4-evidence-audit-2026-07-22/`**.
-- **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (Draft, 2026-09-25 — under codex
-  openreview; owner rulings D1–D6 pending).**
+- **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (ACTIVE, D-2026-09-29-4 — all
+  rulings closed; ssc-1 next on its own go).**
 - Active plans: `docs/plan/SMALL_FILE_CEILING.md` (**Active**; sf-3c/sf-3d
   landed, no further cut selected) and **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** (code-
   complete; measurement gates remain). REV4 superseded v1/REV2/REV3
