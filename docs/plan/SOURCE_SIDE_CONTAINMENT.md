@@ -7,13 +7,13 @@ the entire run unless it is genuinely impossible for the run to
 continue" (D-2026-09-28-2).** D7's switches ruled the same day (D-2026-09-28-3): `--retries <N>`/`-R`
 default 1, `--retry-wait <SECONDS>`/`-W` default 30, robocopy-adapted.
 D3 (retire the local pre-check + apply-time mirror refusal) ruled
-2026-09-28 (D-2026-09-28-4); D4 (1.0 gate G3 fix-now item) ruled 2026-09-29 (D-2026-09-29-1); D5
-ruled 2026-09-29: **no staging files** (D-2026-09-29-2). Open ruling D6
-below.
+2026-09-28 (D-2026-09-28-4); D4 (1.0 gate G3 fix-now item) ruled 2026-09-29 (D-2026-09-29-1); D5 ruled 2026-09-29: **no staging files** (D-2026-09-29-2); D6 ruled
+2026-09-29: **rsync parity — raw name bytes carried alongside the text**
+(D-2026-09-29-3). **No open rulings.** Awaiting the owner's Active flip.
 Review record: `REVIEW.md` §Plan reviews (openreview), rows
 `plan-ssc-2026-09-25-r*`; six rounds, all `acceptable_with_changes`
 (29 material changes: 23 adopted; D5 staged writes REJECTED by the
-owner 2026-09-29, D6 manifest-entry identity pending). **Loop
+owner 2026-09-29; D6 resolved by the owner as rsync parity, not IDs). **Loop
 closed 2026-09-26 at r6: every remaining material change is one the
 reviewer has raised repeatedly and that only an owner ruling can settle
 (openreview playbook: a contested round resolves by owner adjudication).**
@@ -76,11 +76,11 @@ a single error, we are violating all of those."
   absent, which is what today's abort mid-write already costs
   (`FsTransferSink` creates and truncates the target directly,
   `remote/transfer/sink.rs:876`); the D7 retry pass re-lands it.
-- **No manifest-entry IDs.** Path strings remain the protocol identity for
-  manifest, needs, records, skips and terminators, as they are for every
-  frame today; a lossless or opaque identity is a protocol redesign with
-  its own plan (D6). The collisions it would prevent are detected and
-  reported at manifest intake instead (D-F).
+- **No manifest-entry IDs.** Path strings remain the protocol identity
+  for manifest, needs, records, skips and terminators, as they are for
+  every frame today (D6 ruled: rsync parity instead — the raw name bytes
+  ride alongside the text, D-F). The collisions IDs would prevent are
+  detected and reported at manifest intake.
 - Session-fatal classes stay fatal: transport death, protocol violations,
   path-safety/containment violations, destination-root unavailability,
   volume-level write failures (`failure_is_containable`,
@@ -90,12 +90,14 @@ a single error, we are violating all of those."
   failures at the destination stay fatal too — this plan makes the source
   incapable of producing one from a changing file, it does not weaken the
   destination's refusal.
-- Lossless (byte) path identity on the wire. `FileHeader.relative_path`
-  stays a proto `string`; this plan marks a lossy name so it is reported
-  honestly (D-F) but does not carry the original bytes. Two source names
-  that collapse to the same lossy string collide in every path-keyed map
-  (`payload.rs:200-203`, `mod.rs:1922`); D-F reports the duplicate
-  instead of letting it overwrite (D6 would remove the collision itself).
+- Byte-string *identity* on the wire. `FileHeader.relative_path` stays a
+  proto `string` and remains the key every map and frame uses; the raw
+  bytes of a non-UTF-8 name ride in a separate optional field (D-F, D6)
+  so the destination can create the real name — the rsync model — but
+  they are never a key. Two source names that collapse to the same lossy
+  string still collide in the path-keyed maps (`payload.rs:200-203`,
+  `mod.rs:1922`); D-F reports the duplicate instead of letting it
+  overwrite.
 - No version compatibility: the contract bump (Constraints) means a
   pre-plan peer refuses at session open, by design (D-2026-08-18-2).
 
@@ -248,12 +250,16 @@ a single error, we are violating all of those."
   replacement's bytes under the manifest header. Red today: the current
   bytes land under the manifest mtime and the cascade reopens by path
   (`sink.rs:1371-1400`, `copy_file(src, dst, …)` at `:1398`).
-- [ ] **A13 (non-UTF-8):** a source file whose name is not valid UTF-8 is
-  reported as `source: filename is not valid UTF-8 (rename it to transfer)`
-  with exit 2 on every route (remote in ssc-1, local in ssc-4) **whatever
-  the diff would have decided for it** — a lossy entry the destination
-  would otherwise judge converged is still reported — and no payload is
-  ever requested for it; the remote session no longer aborts. Two manifest
+- [ ] **A13 (non-UTF-8, rsync parity — D6):** a source file whose name
+  is not valid UTF-8 **transfers** to a Linux or macOS destination under
+  its exact original bytes (created via `OsStr::from_bytes`), on every
+  route, and converges on re-run; a destination that cannot hold those
+  bytes (Windows; a filesystem that rejects them with EILSEQ/EINVAL)
+  reports it as `source: filename is not valid UTF-8; the destination
+  cannot store it (rename it to transfer)` with exit 2, **whatever the
+  diff would have decided for it**, and never opens or creates any path
+  by the lossy text; the remote session no longer aborts. Red today on
+  both halves (remote abort; local "unreadable"). Two manifest
   entries that collapse to one path are reported as
   `source: duplicate manifest path (lossy name collision)` for the second,
   never silently overwritten. The 0.1.2 CHANGELOG known-limitation text is retired in
@@ -590,37 +596,52 @@ A3/A8/A13 are proven here (r2 F6). This also makes the LOCAL non-UTF-8
 case a `files_failed` entry (today it is an `unreadable_paths` entry, and
 the 0.1.2 CHANGELOG's "exits 2" claim was not what the code does).
 
-### D-F. Lossy names are flagged at the scan, never inferred (ssc-1 wire, ssc-5 reasons)
+### D-F. Non-UTF-8 names: raw bytes alongside the text (ssc-1 wire, ssc-5 behaviour; D6)
 
 `relative_path_to_posix` (`path_posix.rs:36-44`) converts each component
 with `to_string_lossy`; the scan (`source.rs:482-485`) opens the real
-`absolute` path but emits the lossy `rel`, so the source later cannot
-re-open the file by its own header. Inferring lossiness from U+FFFD in the
-string is unsound (a legitimate U+FFFD name aliases it — r1 F5). Instead:
+`absolute` path but emits the lossy `rel`, so today the source cannot
+re-open the file by its own header and no route can transfer it.
+Inferring lossiness from U+FFFD in the string is unsound (a legitimate
+U+FFFD name aliases it — r1 F5). Owner ruling D6 (D-2026-09-29-3):
+**rsync parity** — rsync sends names as raw bytes and fails only the
+files whose bytes the destination filesystem refuses.
 
-- `FileHeader` gains `bool name_lossy = 7` (contract 7, ssc-1), set by
-  the scan when any component's `to_str()` is `None` (checked on the
-  `OsStr` before conversion). The lossy string stays the manifest identity
-  so mirror matching and deletion safety behave exactly as today.
-- **The destination acts on the flag at manifest intake** (r3 F5): a
-  `name_lossy` header is recorded through `record_failure` with reason
-  `source: filename is not valid UTF-8 (rename it to transfer)` the moment
-  it arrives (`mod.rs` manifest arm, before the diff), is never granted as
-  a need, and stays in `source_files` so a mirror never deletes its
-  destination counterpart. This holds whatever the diff would have said —
-  a lossy entry that looks converged is still reported (A13). On the
-  local route the same intake step does the same.
+- `FileHeader` gains `optional bytes raw_relative_path = 7` (contract 7,
+  ssc-1): set by the scan **only** when some component's `to_str()` is
+  `None` (checked on the `OsStr` before conversion), holding the exact
+  source bytes of the relative path with `/` separators. Absent for
+  every representable name, so the common case costs nothing. The lossy
+  `relative_path` string stays the manifest identity for every map,
+  need, record, skip and terminator; mirror matching and deletion safety
+  are unchanged.
+- **Source side:** every payload path (`send_payload_records`,
+  `send_file`, `build_tar_shard`, `ResumeBlockDiff::open`, hydration)
+  opens a header that carries `raw_relative_path` by those bytes
+  (`OsStr::from_bytes` on Unix), never by the lossy text. On a Windows
+  source the field is set from the wide name's WTF-8 bytes for the rare
+  unpaired-surrogate name and the same rule applies.
+- **Destination side:** where the field is present, the sink resolves
+  the destination path from the raw bytes (through the same path-safety
+  chokepoint, `safe_join_contained`, which validates bytes exactly as it
+  validates text: no `..`, no absolute, no escape). A destination that
+  can hold the bytes (Linux, macOS on filesystems that accept them)
+  creates the real name and the file lands like any other. A destination
+  that cannot — Windows always, or a filesystem returning EILSEQ/EINVAL
+  on create — records the file at manifest intake as
+  `source: filename is not valid UTF-8; the destination cannot store it
+  (rename it to transfer)`, never grants it, and keeps it in
+  `source_files` so a mirror never deletes a counterpart. Representability
+  is decided once per session from the destination's platform, plus the
+  create-time errno as the per-file backstop.
 - **Duplicate manifest paths are reported, not overwritten**: the retained
   manifest map (`mod.rs:1922`, `sent.insert`) and the planner map
   (`payload.rs:200-203`) treat a second header for a path already present
   as `source: duplicate manifest path (lossy name collision)` — recorded,
-  not granted; the first header wins (A13). This is the narrow fix for
-  the collision D6 would remove structurally.
-- Belt and braces at the source: every payload path
-  (`send_payload_records`, `send_file`, `build_tar_shard`,
-  `ResumeBlockDiff::open`, hydration) refuses to open a `name_lossy` header
-  and emits the skip instead, so a destination that ever granted one
-  cannot make the source open the wrong path.
+  not granted; the first header wins (A13). Two distinct byte names that
+  collapse to one text name are the only way to reach this; with the raw
+  bytes in hand the report can name both exactly.
+- Local route: the same two branches, in-process.
 
 ### D-H. In-place writes; abort removes the partial (owner ruling D5)
 
@@ -696,15 +717,16 @@ One coherent, testable change per slice — each its own go, commit, full
 gate, DEVLOG entry, CI on all three OSes before the next.
 
 1. **ssc-1 — contract 7: ledger, skip record, chunked records +
-   terminators, sink lifecycle, `OpenedSourceFile`, `name_lossy` intake
-   (A3 remote, A4, A5, A6, A7, A13 remote, A15, A16).** Proto: `FileSkipped`=21,
-   `FileEnd`=22, `RecordEnd`, `BlockComplete` ok/reason, `FileHeader.
-   name_lossy`=7; data plane: SKIP tag 4, chunked FILE body + status,
+   terminators, sink lifecycle, `OpenedSourceFile`, raw-name field (A3
+   remote, A4, A5, A6, A7, A15, A16).** Proto: `FileSkipped`=21,
+   `FileEnd`=22, `RecordEnd`, `BlockComplete` ok/reason,
+   `FileHeader.raw_relative_path`=7 (set by the scan; behaviour lands in
+   ssc-5); data plane: SKIP tag 4, chunked FILE body + status,
    BLOCK_COMPLETE status. Destination `NeedLedger` replacing
    `OutstandingNeeds` + `GrantedHeaders`; `begin_record`/`RecordWriter`
    on every sink including the relay; every existing record path
    emits/expects an ok terminator; skip-before-announce for single-file
-   open/stat failure and `name_lossy` on both carriers. Guards per D-A;
+   open/stat failure on both carriers. Guards per D-A;
    tripwire bench before/after. Mutation proof: restore the `?` at
    `data_plane.rs:469-472`.
 2. **ssc-2 — shard packer fidelity (A1, A2).** D-B; `PreparedPayload::
@@ -727,9 +749,14 @@ gate, DEVLOG entry, CI on all three OSes before the next.
    `VanishingSource` (`local.rs:1171-1210`) becomes the A8 fixture; local
    handle-based cascade + post-copy validation on the same handle (A12,
    A17).
-5. **ssc-5 — words, non-UTF-8 reasons, docs (A13 reasons, A14).** D-F
-   reasons, D-G, CHANGELOG Unreleased, RELEASE_1_0 G3 (D4),
-   PER_FILE_ERROR_CONTAINMENT pointer.
+5. **ssc-5 — non-UTF-8 names land (A13), words, docs (A14).** D-F
+   source-side open-by-bytes and destination-side create-by-bytes with
+   the representability decision and duplicate report; D-G; CHANGELOG
+   Unreleased (the 0.1.2 known limitation is retired outright);
+   RELEASE_1_0 G3 (D4); PER_FILE_ERROR_CONTAINMENT pointer. Guards:
+   Linux/macOS name round-trips byte-exact (ungated, `cfg(unix)` for the
+   byte API), Windows destination reports (ungated via a
+   representability-injecting sink), duplicate collapse reported once.
 6. **ssc-6 — retry pass (A20; D7).** D-I on every route: orchestrator
    re-runs one session over `files_from = failed_paths`; accounting merge;
    progress phase word; the three pins in A20. Depends on ssc-1..ssc-4
@@ -871,11 +898,8 @@ CHANGELOG entry describes the retry pass, so it lands last).
   year"). Every write stays in place; `abort` removes the partial target;
   the staging-budget and concurrent-session sub-questions are moot. D-H
   rewritten accordingly.
-- **D6 — manifest-entry IDs (codex r2 M5 + r3 M2, wide half).** Replace
-  path strings with opaque IDs on needs, records, skips and terminators;
-  keep the exact `PathBuf` at the source. Fixes the lossy-name collision
-  structurally and makes identity independent of path bounds. It is a
-  protocol redesign touching every frame; D-F now reports the collision
-  instead of suffering it. Recommend declining for this plan and filing a
-  TODO; the reviewer has raised it in every round, so this is the
-  adjudication the openreview playbook routes to the owner. — owner
+- **D6 — manifest-entry identity. RULED 2026-09-29: rsync parity, not
+  IDs** (D-2026-09-29-3; owner: "B."). Raw name bytes ride alongside the
+  text in `FileHeader.raw_relative_path`; Unix destinations create the
+  real name, non-representable destinations report; identity stays the
+  path string. Opaque per-entry IDs declined.
