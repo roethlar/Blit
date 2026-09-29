@@ -40,7 +40,13 @@ are the owner's act.
 - [ ] **G2 — CI green on the exact candidate**, both workflows (CI: fmt,
   strict clippy, Linux/macOS/Windows tests; Docs Gate).
 - [ ] **G3 — known broken behaviors dispositioned.** Fix now:
-  audit-16's open half (sink-less heartbeat ignores `--verbose`).
+  **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (owner ruling D-2026-09-29-1,
+  2026-09-29): a source-side per-file failure — locked, vanished, or
+  size-drifted since the scan — must never end the run (D-2026-09-28-2);
+  all six slices ssc-1..ssc-6 shipped with CI green on the candidate.**
+  audit-16's open half (sink-less heartbeat ignores `--verbose`) — CLOSED
+  2026-08-02 (DEVLOG 2026-08-02 03:25Z), listed here in error until the
+  2026-09-29 refresh.
   Owner design gates (fix pre-1.0 or ship documented): audit-18
   (non-UTF-8 filenames fail to transfer — per-file contained on LOCAL
   transfers only; a REMOTE push can still abort wholesale at source

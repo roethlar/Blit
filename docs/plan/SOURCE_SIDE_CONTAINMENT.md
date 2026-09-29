@@ -7,7 +7,8 @@ the entire run unless it is genuinely impossible for the run to
 continue" (D-2026-09-28-2).** D7's switches ruled the same day (D-2026-09-28-3): `--retries <N>`/`-R`
 default 1, `--retry-wait <SECONDS>`/`-W` default 30, robocopy-adapted.
 D3 (retire the local pre-check + apply-time mirror refusal) ruled
-2026-09-28 (D-2026-09-28-4). Open rulings D4–D6 below.
+2026-09-28 (D-2026-09-28-4); D4 (1.0 gate G3 fix-now item) ruled
+2026-09-29 (D-2026-09-29-1). Open rulings D5–D6 below.
 Review record: `REVIEW.md` §Plan reviews (openreview), rows
 `plan-ssc-2026-09-25-r*`; six rounds, all `acceptable_with_changes`
 (29 material changes: 23 adopted; the rest are owner rulings — D5 staged
@@ -931,9 +932,9 @@ CHANGELOG entry describes the retry pass, so it lands last).
   owner: "D3 confirmed"). Deletion safety is the scan's completeness, not
   a file's openability; under D-2026-09-28-2 the refusal was already
   indefensible.
-- **D4 — 1.0 gate.** Record this plan under `RELEASE_1_0.md` G3 as a
-  fix-now item? Recommendation: yes; backing up a live home directory is
-  the everyday workload. — owner
+- **D4 — 1.0 gate. RULED 2026-09-29: yes** (D-2026-09-29-1). This plan
+  is a `RELEASE_1_0.md` G3 fix-now item: v1.0.0 does not tag until
+  ssc-1..ssc-6 have shipped with CI green on the candidate.
 - **D5 — staged streamed records (codex r2 M1 + r3 M1, HIGH; D-H).** An
   aborted or retracted streamed record on the in-place model destroys the
   last good destination copy (already true of any abort today). Q2 of
