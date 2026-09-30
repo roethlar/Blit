@@ -50,9 +50,27 @@ fn hash_block(data: &[u8]) -> blake3::Hash {
 /// - Updating files with localized changes
 /// - Verifying and fixing corrupted copies
 pub fn resume_copy_file(src: &Path, dst: &Path, block_size: usize) -> Result<ResumeCopyOutcome> {
-    let src_meta = std::fs::metadata(src)
-        .with_context(|| format!("reading source metadata: {}", src.display()))?;
-    let src_len = src_meta.len();
+    let mut src_file =
+        File::open(src).with_context(|| format!("opening source: {}", src.display()))?;
+    let src_len = src_file
+        .metadata()
+        .with_context(|| format!("reading source metadata: {}", src.display()))?
+        .len();
+    resume_copy_from(&mut src_file, src_len, dst, block_size)
+}
+
+/// [`resume_copy_file`] on an already-OPENED source handle (ssc-4,
+/// SOURCE_SIDE_CONTAINMENT D-C): the caller validated `src_len` against
+/// the manifest on this same handle and re-stats it afterwards; the
+/// diff reads exactly `src_len` bytes from it and never re-opens a path.
+/// The destination is patched in place (D-2026-07-09-1 Q2).
+pub fn resume_copy_from(
+    src_file: &mut File,
+    src_len: u64,
+    dst: &Path,
+    block_size: usize,
+) -> Result<ResumeCopyOutcome> {
+    src_file.seek(SeekFrom::Start(0))?;
 
     // Get destination length (0 if doesn't exist)
     let dst_len = std::fs::metadata(dst).map(|m| m.len()).unwrap_or(0);
@@ -62,9 +80,6 @@ pub fn resume_copy_file(src: &Path, dst: &Path, block_size: usize) -> Result<Res
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating parent directory: {}", parent.display()))?;
     }
-
-    let mut src_file =
-        File::open(src).with_context(|| format!("opening source: {}", src.display()))?;
 
     let mut dst_file = OpenOptions::new()
         .read(true)

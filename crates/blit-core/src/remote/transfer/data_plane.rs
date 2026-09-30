@@ -414,6 +414,13 @@ impl<P: Probe> DataPlaneSession<P> {
         let mut stream = prepared_payload_stream(payloads, source.clone(), self.payload_prefetch);
         while let Some(prepared) = stream.next().await {
             match prepared? {
+                // ssc-4 (D-E): unprepared file → SKIP record, no completion.
+                PreparedPayload::Skipped(failure) => {
+                    self.send_skip(&failure.relative_path, &failure.reason)
+                        .await
+                        .wrap_err("sending skip for an unprepared file")?;
+                    continue;
+                }
                 PreparedPayload::File(header) => {
                     let sent = match self.send_file(source.clone(), &header).await {
                         Ok(sent) => sent,

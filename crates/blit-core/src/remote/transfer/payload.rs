@@ -46,34 +46,92 @@ pub enum TransferPayload {
     },
 }
 
+/// How a source hydrates one header's Windows metadata before the
+/// payload goes out: the production hydrator is
+/// [`crate::windows_metadata::hydrate_payload_header`]; a test source
+/// installs a failing one to prove that a per-file hydration failure is
+/// a skip, never a session fault (SOURCE_SIDE_CONTAINMENT D-E, A11).
+pub type Hydrator = Arc<dyn Fn(&Path, &mut FileHeader) -> Result<()> + Send + Sync>;
+
+/// The production hydrator.
+pub fn default_hydrator() -> Hydrator {
+    Arc::new(|path: &Path, header: &mut FileHeader| {
+        crate::windows_metadata::hydrate_payload_header(path, header)
+    })
+}
+
+/// The `source:` reason a hydration failure is reported under. A
+/// named-stream that changed size while being read, or metadata that no
+/// longer matches the manifest, is the same drift class as a body that
+/// changed size; everything else is "cannot read metadata".
+pub fn hydration_failure_reason(err: &eyre::Report) -> String {
+    let text = format!("{err:#}");
+    if text.contains("changed size while reading") || text.contains("Windows metadata changed") {
+        format!("source: changed size during transfer (Windows metadata: {text})")
+    } else {
+        format!("source: cannot read metadata: {text}")
+    }
+}
+
 pub async fn prepare_payload(
     payload: TransferPayload,
     source_root: PathBuf,
 ) -> Result<PreparedPayload> {
+    prepare_payload_with(payload, source_root, default_hydrator()).await
+}
+
+/// [`prepare_payload`] with an explicit hydrator. SOURCE_SIDE_CONTAINMENT
+/// D-E: preparation returns PER-FILE outcomes — a `File`/`ResumeFile`
+/// whose hydration fails becomes [`PreparedPayload::Skipped`], a shard
+/// member whose hydration fails joins the shard's `skipped` list, and
+/// only the infrastructure failures (a blocking worker that panicked)
+/// remain `Err`. Every consumer emits a `Skipped` as its carrier's skip
+/// record (or records it directly on the local route).
+pub async fn prepare_payload_with(
+    payload: TransferPayload,
+    source_root: PathBuf,
+    hydrate: Hydrator,
+) -> Result<PreparedPayload> {
     match payload {
-        TransferPayload::File(mut header) => {
-            if header.windows_metadata.is_none() {
-                return Ok(PreparedPayload::File(header));
-            }
-            task::spawn_blocking(move || {
+        TransferPayload::File(header) => {
+            let hydrate_one = move |mut header: FileHeader| {
                 let source_path = source_path_for_header(&source_root, &header);
-                crate::windows_metadata::hydrate_payload_header(&source_path, &mut header)?;
-                Ok(PreparedPayload::File(header))
-            })
-            .await
-            .map_err(|err| eyre!("file payload metadata worker failed: {err}"))?
+                match hydrate(&source_path, &mut header) {
+                    Ok(()) => PreparedPayload::File(header),
+                    Err(err) => PreparedPayload::Skipped(FileFailure {
+                        relative_path: header.relative_path,
+                        reason: hydration_failure_reason(&err),
+                    }),
+                }
+            };
+            if header.windows_metadata.is_none() {
+                // Nothing to read from disk: the production hydrator
+                // returns at once, so no blocking worker is paid for.
+                return Ok(hydrate_one(header));
+            }
+            task::spawn_blocking(move || hydrate_one(header))
+                .await
+                .map_err(|err| eyre!("file payload metadata worker failed: {err}"))
         }
         TransferPayload::TarShard { headers } => task::spawn_blocking(move || {
-            let mut headers = headers;
-            for header in &mut headers {
-                let source_path = source_path_for_header(&source_root, header);
-                crate::windows_metadata::hydrate_payload_header(&source_path, header)?;
+            let mut hydrated: Vec<FileHeader> = Vec::with_capacity(headers.len());
+            let mut skipped: Vec<FileFailure> = Vec::new();
+            for mut header in headers {
+                let source_path = source_path_for_header(&source_root, &header);
+                match hydrate(&source_path, &mut header) {
+                    Ok(()) => hydrated.push(header),
+                    Err(err) => skipped.push(FileFailure {
+                        relative_path: header.relative_path,
+                        reason: hydration_failure_reason(&err),
+                    }),
+                }
             }
             let TarShardBuild {
                 data,
                 headers,
-                skipped,
-            } = build_tar_shard(&source_root, &headers)?;
+                skipped: packer_skipped,
+            } = build_tar_shard(&source_root, &hydrated)?;
+            skipped.extend(packer_skipped);
             Ok(PreparedPayload::TarShard {
                 headers,
                 data,
@@ -92,28 +150,30 @@ pub async fn prepare_payload(
         // file inside the sink write (DataPlaneSink), where the record's
         // strict serialization lives. Pass through.
         TransferPayload::ResumeFile {
-            mut header,
+            header,
             block_size,
             dest_hashes,
         } => {
-            if header.windows_metadata.is_none() {
-                return Ok(PreparedPayload::ResumeFile {
-                    header,
-                    block_size,
-                    dest_hashes,
-                });
-            }
-            task::spawn_blocking(move || {
+            let hydrate_one = move |mut header: FileHeader| {
                 let source_path = source_path_for_header(&source_root, &header);
-                crate::windows_metadata::hydrate_payload_header(&source_path, &mut header)?;
-                Ok(PreparedPayload::ResumeFile {
-                    header,
-                    block_size,
-                    dest_hashes,
-                })
-            })
-            .await
-            .map_err(|err| eyre!("resume payload metadata worker failed: {err}"))?
+                match hydrate(&source_path, &mut header) {
+                    Ok(()) => PreparedPayload::ResumeFile {
+                        header,
+                        block_size,
+                        dest_hashes,
+                    },
+                    Err(err) => PreparedPayload::Skipped(FileFailure {
+                        relative_path: header.relative_path,
+                        reason: hydration_failure_reason(&err),
+                    }),
+                }
+            };
+            if header.windows_metadata.is_none() {
+                return Ok(hydrate_one(header));
+            }
+            task::spawn_blocking(move || hydrate_one(header))
+                .await
+                .map_err(|err| eyre!("resume payload metadata worker failed: {err}"))
         }
     }
 }
@@ -155,6 +215,15 @@ pub enum PreparedPayload {
         data: Vec<u8>,
         skipped: Vec<FileFailure>,
     },
+    /// SOURCE_SIDE_CONTAINMENT D-E (ssc-4): one planned file the source
+    /// could not prepare — its Windows metadata hydration failed
+    /// (vanished, access denied, a named stream that changed size).
+    /// Every consumer emits it as the carrier's skip record (in-stream
+    /// `FileSkipped`, data-plane SKIP) or records it directly (local
+    /// route); the destination closes the need Granted → Failed and
+    /// reports it through `record_failure`. Reasons start with
+    /// `source:`.
+    Skipped(FileFailure),
     /// Resume: write `bytes` at `offset` into the existing file at
     /// `dst_root.join(relative_path)`.
     FileBlock {

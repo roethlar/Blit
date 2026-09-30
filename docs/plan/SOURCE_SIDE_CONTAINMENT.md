@@ -827,6 +827,69 @@ read, read error} × both carriers × both initiators (block 0 landed,
 nothing past the fault, not stamped, `files_resumed` 0, the other file
 lands). Mutation proofs in DEVLOG.
 
+ssc-4 LANDED 2026-09-30 on master at `__SSC4_HASH__` (range
+`b70ef03a..__SSC4_HASH__`; CI on all three OSes pending the next push).
+What landed against the slice text: **D-E** — `prepare_payload` returns
+per-file outcomes: `PreparedPayload::Skipped(FileFailure)` for a `File` /
+`ResumeFile` whose Windows-metadata hydration fails, per-member hydration
+for shards with failures on the shard's `skipped` list; only
+infrastructure failures (a blocking worker that panicked) stay `Err`
+(`pipeline.rs` unchanged). The hydrator is a `Hydrator` seam on
+`FsTransferSource` (`with_hydrator`, test hook; production =
+`windows_metadata::hydrate_payload_header`) and runs for every header —
+inline, returning at once, when there is no metadata to read, so
+production cost is unchanged; reasons: `source: cannot read metadata: …`,
+or the drift class `source: changed size during transfer (Windows
+metadata: …)` when the text says a stream changed size / metadata
+changed. Every consumer handles `Skipped`: in-stream `send_payload_records`
+and the in-stream resume prepare (`InStreamResumePrepared::Skipped` →
+`FileSkipped`), `DataPlaneSink::write_payload` and the legacy sender (SKIP
+record), `FsTransferSink` / `NullSink` (recorded), `NeedListSink`
+(protocol violation — never a wire shape). **D3 (D-2026-09-28-4)** —
+`TransferSource::check_availability` and `filter_readable_headers` are
+deleted from the trait and every implementor (production, wrappers, 13
+test sources across three crates); `LocalApply::plan_chunk` plans the
+chunk as scanned; `LocalApply.unreadable` (the apply-time accumulator) is
+gone; the apply-time "mirror refused: N source entries could not be read
+during the transfer" abort at SourceDone is deleted (the SCAN-time
+refusal at ManifestComplete stays). **D-C local** — `copy_resolved_file_
+payload` opens the source ONCE (`source: cannot open: …` on failure),
+stats the handle and refuses a manifest mismatch before any write
+(`changed_size_reason`), compares through the handle
+(`copy::file_needs_copy_with_mode_opened`: size/mtime/hash from the
+opened file), copies through it (`copy::copy_opened`: Linux
+`copy_file_range`/`sendfile`/sparse on the descriptor, macOS
+`fclonefileat`→`fcopyfile`(fd)→buffered with R58-F11's clone-first
+ordering, Windows block clone with handles → buffered; every buffered
+tail bounded by `header.size` and wrapped so a read error reports
+`source: read error: …`; `resume_copy_from` for the resume path, still
+in place per D5), re-stats the SAME handle afterwards and on a mismatch
+removes the partial and fails the file with the drift reason, and stamps
+mtime/permissions from the handle's metadata
+(`preserve_metadata_from_handle`); nothing re-opens `src` by path.
+Flipped test (renamed, not removed): `mirror_refuses_when_availability_
+drops_after_clean_scan` → `mirror_completes_and_reports_a_file_that_
+vanished_after_a_clean_scan` (A8; `VanishingSource` now removes the file
+the moment its header is scanned, used as scan AND prepare source — the
+window a restored pre-check would silently swallow). A8 is pinned at the
+session level: the window is inside one process between enumeration and
+apply, so no CLI-level fixture can hit it deterministically. Guards
+(`transfer_session::local::tests` +3, `sink::tests` +3,
+`copy::file_copy` +1, `source_side_containment.rs` 30 → 33 + one
+`cfg(windows)` real-ADS guard): A8; A3 local
+(`local_single_file_that_cannot_be_opened_is_reported_with_the_source_
+prefix`, `cfg(unix)`, mode-000 after the scan); A11 local (shard member
+AND single file with a failing hydrator), A11 on both carriers × both
+initiators (`assert_hydration_skip_contained`, plus the drift-class
+reason), the Windows named-stream-grew guard (real `file:meta` ADS
+rewritten after the scan; runs on Windows CI only); A12
+(`local_copy_lands_the_opened_inode_not_a_path_replacement` — atomic
+rename over the source between open and copy lands the OPENED inode's
+bytes; `local_copy_reports_a_source_that_grew_after_open_and_removes_
+the_partial`; `copy_opened_copies_the_opened_inode_and_bounds_to_
+expected_len`), through a `cfg(test)` after-source-open hook in `sink.rs`
+keyed by path prefix. A17: this Mac, 4 × 1 GiB, 3 alternating runs: both binaries take the APFS clone path (0.49/0.39 s cold, 0.02–0.04 s after), fast path preserved; the buffered tail is not reachable same-volume and carries no throughput number. Mutation proofs in DEVLOG.
+
 1. **ssc-1 — contract 7: ledger, skip record, chunked records +
    terminators, sink lifecycle, `OpenedSourceFile`, raw-name field (A3
    remote, A4, A5, A6, A7, A15, A16).** Proto: `FileSkipped`=21,

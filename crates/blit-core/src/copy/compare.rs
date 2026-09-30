@@ -124,3 +124,58 @@ pub fn file_needs_copy_with_mode(src: &Path, dst: &Path, mode: ComparisonMode) -
         }
     }
 }
+
+/// [`file_needs_copy_with_mode`] on an already-OPENED source handle
+/// (ssc-4, SOURCE_SIDE_CONTAINMENT D-C): every source fact — size, mtime,
+/// hash — comes from `src` and `src_meta` (the handle's own metadata),
+/// never from a path re-stat that could describe a replacement inode.
+/// Leaves the handle rewound to offset 0.
+pub fn file_needs_copy_with_mode_opened(
+    src: &mut std::fs::File,
+    src_meta: &std::fs::Metadata,
+    dst: &Path,
+    mode: ComparisonMode,
+) -> Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    match mode {
+        ComparisonMode::IgnoreTimes | ComparisonMode::Force => Ok(true),
+        ComparisonMode::SizeOnly => {
+            if !dst.exists() {
+                return Ok(true);
+            }
+            let dst_meta = dst.metadata().context("stat dest for size compare")?;
+            Ok(src_meta.len() != dst_meta.len())
+        }
+        ComparisonMode::Checksum => {
+            if !dst.exists() {
+                return Ok(true);
+            }
+            let dst_meta = dst.metadata().context("stat dest for checksum compare")?;
+            if src_meta.len() != dst_meta.len() {
+                return Ok(true);
+            }
+            src.seek(SeekFrom::Start(0))?;
+            let src_hash = checksum::hash_reader(src, ChecksumType::Blake3)
+                .context("hashing the opened source")?;
+            src.seek(SeekFrom::Start(0))?;
+            let dst_hash = checksum::hash_file(dst, ChecksumType::Blake3)
+                .with_context(|| format!("hashing dest {}", dst.display()))?;
+            let _ = Read::by_ref(src);
+            Ok(src_hash != dst_hash)
+        }
+        ComparisonMode::SizeMtime | ComparisonMode::Unspecified => {
+            if !dst.exists() {
+                return Ok(true);
+            }
+            let dst_meta = dst.metadata().context("stat dest for size+mtime compare")?;
+            if src_meta.len() != dst_meta.len() {
+                return Ok(true);
+            }
+            let src_time = src_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let dst_time = dst_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            Ok(src_time
+                .duration_since(dst_time)
+                .is_ok_and(|diff| diff.as_secs() > 2))
+        }
+    }
+}

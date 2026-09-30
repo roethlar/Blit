@@ -356,14 +356,6 @@ impl blit_core::remote::transfer::source::TransferSource for StuckAfterFirstChun
         self.inner.prepare_payload(payload).await
     }
 
-    async fn check_availability(
-        &self,
-        headers: Vec<blit_core::generated::FileHeader>,
-        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
-    ) -> eyre::Result<Vec<blit_core::generated::FileHeader>> {
-        self.inner.check_availability(headers, unreadable).await
-    }
-
     async fn open_file(
         &self,
         header: &blit_core::generated::FileHeader,
@@ -1068,14 +1060,6 @@ impl blit_core::remote::transfer::source::TransferSource for TruncatedReadSource
         payload: blit_core::remote::transfer::payload::TransferPayload,
     ) -> eyre::Result<blit_core::remote::transfer::payload::PreparedPayload> {
         self.inner.prepare_payload(payload).await
-    }
-
-    async fn check_availability(
-        &self,
-        headers: Vec<blit_core::generated::FileHeader>,
-        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
-    ) -> eyre::Result<Vec<blit_core::generated::FileHeader>> {
-        self.inner.check_availability(headers, unreadable).await
     }
 
     async fn open_file(

@@ -2280,6 +2280,12 @@ impl TransferSink for NeedListSink {
                     "composite ResumeFile payload on the data-plane receive",
                 )));
             }
+            // Send-side preparation outcome (ssc-4) — never a wire shape.
+            PreparedPayload::Skipped(_) => {
+                return Err(eyre::Report::new(SessionFault::protocol_violation(
+                    "skipped-preparation payload on the data-plane receive",
+                )));
+            }
         }
         // Tag the inner write's failure with the file it concerned
         // (otp-7b-2) where the payload names exactly one file.

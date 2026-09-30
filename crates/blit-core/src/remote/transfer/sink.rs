@@ -12,7 +12,7 @@ use filetime::FileTime;
 
 use crate::buffer::BufferSizer;
 use crate::checksum::ChecksumType;
-use crate::copy::{copy_file, resume_copy_file};
+
 use crate::generated::{ComparisonMode, FileHeader};
 use crate::remote::transfer::payload::PreparedPayload;
 use crate::remote::transfer::progress::{ByteProgressSink, NoProbe, Probe};
@@ -1142,6 +1142,11 @@ impl TransferSink for FsTransferSink {
             PreparedPayload::ResumeFile { .. } => {
                 eyre::bail!("FsTransferSink does not consume composite ResumeFile payloads")
             }
+            // ssc-4 (D-E, local route): the source could not prepare the
+            // file — this sink's own recorded failure, nothing written.
+            PreparedPayload::Skipped(failure) => {
+                SinkOutcome::failed(failure.relative_path, failure.reason)
+            }
             PreparedPayload::File(_) | PreparedPayload::TarShard { .. } => {
                 let src_root = self.src_root.clone();
                 let dst_root = self.dst_root.clone();
@@ -1633,20 +1638,75 @@ fn copy_root_file_payload(
     copy_resolved_file_payload(src_root, dst_root, header, config)
 }
 
+/// Test seam (ssc-4, A12): runs after the local copy opened its source
+/// handle and validated its length, before any byte is copied — the
+/// window in which a test replaces or grows the source. Keyed by path
+/// prefix so parallel tests never see each other's hook. Production
+/// never sets it.
+#[cfg(test)]
+pub(super) type AfterSourceOpenHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+#[cfg(test)]
+pub(super) static AFTER_SOURCE_OPEN_HOOKS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, AfterSourceOpenHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn run_after_source_open_hook(src: &Path) {
+    let hooks: Vec<AfterSourceOpenHook> = AFTER_SOURCE_OPEN_HOOKS
+        .lock()
+        .map(|g| {
+            g.iter()
+                .filter(|(prefix, _)| src.starts_with(prefix))
+                .map(|(_, h)| Arc::clone(h))
+                .collect()
+        })
+        .unwrap_or_default();
+    for hook in hooks {
+        hook(src);
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn run_after_source_open_hook(_src: &Path) {}
+
 /// Shared tail of the File-payload write: dry-run gate, parent mkdir,
 /// resume/compare/copy cascade, mtime preservation.
+///
+/// ssc-4 (SOURCE_SIDE_CONTAINMENT D-C, A12): the source is opened ONCE
+/// and every source fact — the pre-copy length check against the
+/// manifest, the compare, the bytes, the post-copy re-stat, the mtime —
+/// comes from that handle; the cascade (`copy_opened`, `resume_copy_from`)
+/// never re-opens the path, so an atomic replacement of the source path
+/// between open and copy lands the opened inode's bytes or nothing.
+/// Source-side failures carry the `source:` prefix like every other
+/// carrier's; a size that drifted is reported and the partial removed.
 fn copy_resolved_file_payload(
     src: &Path,
     dst: &Path,
     header: &FileHeader,
     config: &FsSinkConfig,
 ) -> Result<SinkOutcome> {
+    use eyre::eyre;
     // R58-F4: dry-run must be side-effect-free. Bail before the
     // parent-mkdir so a dry-run doesn't create destination
     // directories on disk.
     if config.dry_run {
         return Ok(SinkOutcome::written(1, 0));
     }
+
+    let mut src_file = std::fs::File::open(src).map_err(|e| eyre!("source: cannot open: {e}"))?;
+    let src_meta = src_file
+        .metadata()
+        .map_err(|e| eyre!("source: cannot stat: {e}"))?;
+    if src_meta.len() != header.size {
+        return Err(eyre!(
+            "{}",
+            crate::remote::transfer::payload::changed_size_reason(header.size, src_meta.len())
+        ));
+    }
+    run_after_source_open_hook(src);
 
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)
@@ -1659,14 +1719,36 @@ fn copy_resolved_file_payload(
 
     let mut did_copy = false;
     if config.resume {
-        let outcome = resume_copy_file(src, dst, 0)
+        let outcome = crate::copy::resume_copy_from(&mut src_file, header.size, dst, 0)
             .with_context(|| format!("resume copy {}", header.relative_path))?;
         did_copy = outcome.bytes_transferred > 0;
-    } else if crate::copy::file_needs_copy_with_mode(src, dst, config.compare_mode)? {
+    } else if crate::copy::file_needs_copy_with_mode_opened(
+        &mut src_file,
+        &src_meta,
+        dst,
+        config.compare_mode,
+    )? {
         let sizer = BufferSizer::default();
-        copy_file(src, dst, &sizer, false)
-            .with_context(|| format!("copy {}", header.relative_path))?;
+        crate::copy::copy_opened(&src_file, src, dst, header.size, &sizer, false)?;
         did_copy = true;
+    }
+
+    // Post-copy re-stat of the SAME handle: a file that changed size
+    // while (or after) being read is not delivered under its manifest
+    // header — the partial goes, the file is this sink's failure, and
+    // the D7 retry pass re-lands it.
+    let now = src_file
+        .metadata()
+        .map_err(|e| eyre!("source: cannot stat: {e}"))?
+        .len();
+    if now != header.size {
+        if did_copy {
+            let _ = std::fs::remove_file(dst);
+        }
+        return Err(eyre!(
+            "{}",
+            crate::remote::transfer::payload::changed_size_reason(header.size, now)
+        ));
     }
 
     // Windows CopyFileEx preserves the source attributes, so a fresh copy of
@@ -1683,7 +1765,12 @@ fn copy_resolved_file_payload(
     if config.preserve_times {
         let fallback =
             (header.mtime_seconds > 0).then(|| FileTime::from_unix_time(header.mtime_seconds, 0));
-        if let Some(ft) = source_file_mtime(src, fallback) {
+        let ft = src_meta
+            .modified()
+            .map(FileTime::from_system_time)
+            .ok()
+            .or(fallback);
+        if let Some(ft) = ft {
             if let Err(e) = filetime::set_file_mtime(dst, ft) {
                 log::warn!("set mtime on {}: {}", dst.display(), e);
             }
@@ -2174,6 +2261,16 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
         let mut session = self.session.lock().await;
         match payload {
+            // ssc-4 (D-E): the source could not prepare the file — a SKIP
+            // record in the record's place, recorded on this lane so no
+            // completion is reported for it.
+            PreparedPayload::Skipped(failure) => {
+                session
+                    .send_skip(&failure.relative_path, &failure.reason)
+                    .await
+                    .context("sending skip for an unprepared file")?;
+                Ok(SinkOutcome::failed(failure.relative_path, failure.reason))
+            }
             PreparedPayload::File(header) => {
                 let size = header
                     .size
@@ -2532,6 +2629,10 @@ impl TransferSink for NullSink {
             PreparedPayload::ResumeFile { .. } => {
                 eyre::bail!("NullSink does not consume composite ResumeFile payloads")
             }
+            // ssc-4: counted as the failure it is.
+            PreparedPayload::Skipped(failure) => {
+                Ok(SinkOutcome::failed(failure.relative_path, failure.reason))
+            }
         }
     }
 
@@ -2565,6 +2666,174 @@ mod tests {
             windows_metadata: None,
             raw_relative_path: None,
         }
+    }
+
+    /// Installs an after-source-open hook for every source path under
+    /// `prefix` and removes it on drop (parallel tests never see each
+    /// other's).
+    struct HookGuard(PathBuf);
+
+    impl HookGuard {
+        fn install(prefix: &Path, hook: impl Fn(&Path) + Send + Sync + 'static) -> Self {
+            AFTER_SOURCE_OPEN_HOOKS
+                .lock()
+                .unwrap()
+                .push((prefix.to_path_buf(), Arc::new(hook)));
+            Self(prefix.to_path_buf())
+        }
+    }
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            if let Ok(mut g) = AFTER_SOURCE_OPEN_HOOKS.lock() {
+                g.retain(|(p, _)| p != &self.0);
+            }
+        }
+    }
+
+    fn local_sink(src: &Path, dst: &Path) -> FsTransferSink {
+        FsTransferSink::new(
+            src.to_path_buf(),
+            dst.to_path_buf(),
+            FsSinkConfig {
+                preserve_times: true,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
+            },
+        )
+    }
+
+    /// ssc-4 A12 (SOURCE_SIDE_CONTAINMENT D-C): the local copy reads the
+    /// inode it opened and validated, never whatever the path names by
+    /// the time the bytes are copied. A source atomically replaced
+    /// between open and copy lands the OPENED file's bytes under the
+    /// manifest header. (Pre-ssc-4 the cascade re-opened `src` by path
+    /// inside `copy_file`, so the replacement's bytes landed under the
+    /// old header.)
+    #[tokio::test]
+    async fn local_copy_lands_the_opened_inode_not_a_path_replacement() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let original: Vec<u8> = (0u8..=255).cycle().take(300_000).collect();
+        let replacement: Vec<u8> = std::iter::repeat_n(0x5Au8, 300_000).collect();
+        std::fs::write(src.join("a.bin"), &original).unwrap();
+        std::fs::write(src.join("b.bin"), &replacement).unwrap();
+        let src_for_hook = src.clone();
+        let _hook = HookGuard::install(&src, move |opened| {
+            if opened.ends_with("a.bin") {
+                // Atomic replace of the path the copy opened.
+                std::fs::rename(src_for_hook.join("b.bin"), src_for_hook.join("a.bin")).unwrap();
+            }
+        });
+
+        let sink = local_sink(&src, &dst);
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header(
+                "a.bin",
+                original.len() as u64,
+            )))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.files_failed_total, 0, "{:?}", outcome.failures);
+        assert_eq!(outcome.files_written, 1);
+        assert_eq!(
+            std::fs::read(dst.join("a.bin")).unwrap(),
+            original,
+            "the OPENED inode's bytes land, not the replacement's"
+        );
+    }
+
+    /// ssc-4 A12: a source that changed size after the copy opened it is
+    /// not delivered under its manifest header — the post-copy re-stat of
+    /// the SAME handle catches it, the partial is removed, the file is
+    /// this sink's `source:` failure. (Pre-ssc-4 the current bytes landed
+    /// under the manifest mtime.)
+    #[tokio::test]
+    async fn local_copy_reports_a_source_that_grew_after_open_and_removes_the_partial() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let original: Vec<u8> = (0u8..=255).cycle().take(200_000).collect();
+        std::fs::write(src.join("wal.bin"), &original).unwrap();
+        let _hook = HookGuard::install(&src, |opened| {
+            if opened.ends_with("wal.bin") {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(opened)
+                    .unwrap();
+                f.write_all(&[0xAB; 1000]).unwrap();
+            }
+        });
+
+        let sink = local_sink(&src, &dst);
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header(
+                "wal.bin",
+                original.len() as u64,
+            )))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.files_written, 0);
+        assert_eq!(outcome.files_failed_total, 1);
+        assert_eq!(outcome.failures[0].relative_path, "wal.bin");
+        assert!(
+            outcome.failures[0].reason.starts_with(
+                "source: changed size during transfer (manifest 200000 bytes, now 201000)"
+            ),
+            "{}",
+            outcome.failures[0].reason
+        );
+        assert!(
+            !dst.join("wal.bin").exists(),
+            "a partial under a stale header never stays"
+        );
+    }
+
+    /// ssc-4 A3 (local route): a source file the sink cannot open is that
+    /// file's failure, reported with the `source:` prefix every other
+    /// carrier uses.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_copy_reports_an_unopenable_source_with_the_source_prefix() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("locked.bin"), b"cannot be read").unwrap();
+        std::fs::set_permissions(src.join("locked.bin"), std::fs::Permissions::from_mode(0o0))
+            .unwrap();
+        if std::fs::File::open(src.join("locked.bin")).is_ok() {
+            eprintln!("running as a user that ignores mode 000; skipping");
+            return;
+        }
+
+        let sink = local_sink(&src, &dst);
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header("locked.bin", 14)))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.files_failed_total, 1);
+        assert!(
+            outcome.failures[0]
+                .reason
+                .starts_with("source: cannot open:"),
+            "{}",
+            outcome.failures[0].reason
+        );
+        assert!(!dst.join("locked.bin").exists());
     }
 
     /// otp-11a: a file-root File payload (empty relative_path — the

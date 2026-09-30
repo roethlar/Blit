@@ -4,12 +4,11 @@ mod mmap;
 pub mod resume;
 
 pub use mmap::mmap_copy_file;
-pub use resume::{resume_copy_file, ResumeCopyOutcome};
+pub use resume::{resume_copy_file, resume_copy_from, ResumeCopyOutcome};
 
 use crate::buffer::BufferSizer;
 use eyre::{eyre, Result};
 use std::fs;
-#[cfg(not(windows))]
 use std::fs::File;
 #[cfg(unix)]
 use std::io::{self, BufReader, BufWriter, Write};
@@ -207,6 +206,162 @@ pub fn copy_file(
     result
 }
 
+/// A reader whose failures name the SOURCE (ssc-4): the buffered tails
+/// below copy through `io::copy`, whose error could otherwise be either
+/// side's; wrapping the source read makes a mid-copy source failure
+/// report as `source: read error: …` like every other carrier.
+struct SourceRead<R>(R);
+
+impl<R: std::io::Read> std::io::Read for SourceRead<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0
+            .read(buf)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("source: read error: {e}")))
+    }
+}
+
+/// ssc-4 (SOURCE_SIDE_CONTAINMENT D-C, A12): the local copy cascade on
+/// the OPENED source handle. The caller opened `src` once, validated its
+/// length against the manifest, and re-stats the same handle afterwards;
+/// nothing in here re-opens `src_path` for bytes, so the copy can never
+/// land a replacement inode's content under the validated header. The
+/// body is bounded to `expected_len` on every buffered path (growth
+/// after the pre-check cannot spill), and the platform fast paths take
+/// the descriptor: Linux `copy_file_range`/`sendfile`, macOS
+/// `fclonefileat`/`fcopyfile` (clone first, into an ABSENT `dst`,
+/// R58-F11), Windows block clone with handles (there is no handle-based
+/// `CopyFileEx`, so the streaming path is the buffered one). `src_path`
+/// is used only for the volume-capability probe and log lines.
+pub fn copy_opened(
+    src: &File,
+    src_path: &Path,
+    dst: &Path,
+    expected_len: u64,
+    buffer_sizer: &BufferSizer,
+    is_network: bool,
+) -> Result<FileCopyOutcome> {
+    use std::io::{Read, Seek, SeekFrom};
+    let _ = src_path;
+    let buffer_size = buffer_sizer.calculate_buffer_size(expected_len, is_network);
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    // Every primitive below reads from the descriptor's current offset.
+    (&*src).seek(SeekFrom::Start(0))?;
+
+    let (total_bytes, clone_succeeded) = {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let mut dst_file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
+                .open(dst)?;
+            let mut clone_success = false;
+            if !is_network && crate::fs_capability::supports_block_clone_same_volume(src_path, dst)?
+            {
+                match windows::try_block_clone_with_handles(src, &dst_file, expected_len)? {
+                    windows::BlockCloneOutcome::Cloned => {
+                        clone_success = true;
+                        log::info!("block clone {} ({} bytes)", dst.display(), expected_len);
+                    }
+                    windows::BlockCloneOutcome::Unsupported { code } => {
+                        crate::fs_capability::mark_block_clone_unsupported(src_path, dst);
+                        log::debug!(
+                            "block clone unsupported for {} (error code {code}); falling back",
+                            dst.display()
+                        );
+                    }
+                    windows::BlockCloneOutcome::PrivilegeUnavailable => {
+                        log::trace!(
+                            "block clone privilege unavailable for {}; falling back",
+                            dst.display()
+                        );
+                    }
+                    windows::BlockCloneOutcome::Failed(err) => {
+                        log::debug!(
+                            "block clone streaming fallback for {} ({err})",
+                            dst.display()
+                        );
+                    }
+                }
+            }
+            if clone_success {
+                (expected_len, true)
+            } else {
+                (&*src).seek(SeekFrom::Start(0))?;
+                let copied = clone::sparse_copy_windows(
+                    SourceRead(src.take(expected_len)),
+                    &mut dst_file,
+                    buffer_size,
+                    expected_len,
+                )?;
+                (copied, false)
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // Clone first: both primitives need `dst` absent / are
+            // whole-file; a post-copy re-stat by the caller catches a
+            // size that drifted past the manifest.
+            let cloned = clone::attempt_fclonefileat_macos(src, dst).unwrap_or(false) || {
+                (&*src).seek(SeekFrom::Start(0))?;
+                clone::attempt_fcopyfile_macos_fd(src, dst).unwrap_or(false)
+            };
+            if cloned {
+                (expected_len, true)
+            } else {
+                (&*src).seek(SeekFrom::Start(0))?;
+                let dst_for_stream = File::create(dst)?;
+                let mut reader =
+                    BufReader::with_capacity(buffer_size, SourceRead(src.take(expected_len)));
+                let mut writer = BufWriter::with_capacity(buffer_size, dst_for_stream);
+                let n = io::copy(&mut reader, &mut writer)?;
+                writer.flush()?;
+                (n, false)
+            }
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let dst_file = File::create(dst)?;
+            let fast_linux = clone::attempt_copy_file_range_linux(src, &dst_file, expected_len)
+                .unwrap_or(false)
+                || {
+                    (&*src).seek(SeekFrom::Start(0))?;
+                    dst_file.set_len(0)?;
+                    clone::attempt_sendfile_linux(src, &dst_file, expected_len).unwrap_or(false)
+                };
+            if fast_linux {
+                (expected_len, true)
+            } else {
+                (&*src).seek(SeekFrom::Start(0))?;
+                dst_file.set_len(0)?;
+                if let Some(n) = clone::attempt_sparse_copy_unix(src, &dst_file, expected_len)? {
+                    (n, false)
+                } else {
+                    (&*src).seek(SeekFrom::Start(0))?;
+                    dst_file.set_len(0)?;
+                    let mut reader =
+                        BufReader::with_capacity(buffer_size, SourceRead(src.take(expected_len)));
+                    let mut writer = BufWriter::with_capacity(buffer_size, dst_file);
+                    let n = io::copy(&mut reader, &mut writer)?;
+                    writer.flush()?;
+                    (n, false)
+                }
+            }
+        }
+    };
+    if !clone_succeeded {
+        metadata::preserve_metadata_from_handle(src, dst)?;
+    }
+    Ok(FileCopyOutcome {
+        bytes_copied: total_bytes,
+        clone_succeeded,
+    })
+}
+
 #[cfg(test)]
 mod fallback_tests {
     //! audit-6 item 7: copy_file's fast-path → fallback chain. A truly
@@ -218,6 +373,57 @@ mod fallback_tests {
     //! fallback transition with no production change.
     use super::*;
     use crate::buffer::BufferSizer;
+
+    /// ssc-4 (D-C, A12): `copy_opened` copies the inode it was handed —
+    /// after the path is atomically replaced, the destination holds the
+    /// opened file's bytes — and is bounded to `expected_len` on the
+    /// buffered path (a file that grew past the manifest cannot spill).
+    #[test]
+    fn copy_opened_copies_the_opened_inode_and_bounds_to_expected_len() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let other = dir.path().join("other.bin");
+        let dst = dir.path().join("dst.bin");
+        let data: Vec<u8> = (0u8..=255).cycle().take(120_000).collect();
+        std::fs::write(&src, &data).unwrap();
+        std::fs::write(&other, vec![0x77u8; 120_000]).unwrap();
+        let opened = File::open(&src).unwrap();
+        // The path now names a different inode.
+        std::fs::rename(&other, &src).unwrap();
+
+        let outcome = copy_opened(
+            &opened,
+            &src,
+            &dst,
+            data.len() as u64,
+            &BufferSizer::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(outcome.bytes_copied, data.len() as u64);
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            data,
+            "the opened inode's bytes, not the replacement's"
+        );
+
+        // Bounded: ask for fewer bytes than the file holds on the
+        // buffered path (a pre-existing dst defeats the clone primitives
+        // on macOS; on Linux the descriptor primitives take the bound).
+        let dst2 = dir.path().join("dst2.bin");
+        std::fs::write(&dst2, b"stale").unwrap();
+        let outcome =
+            copy_opened(&opened, &src, &dst2, 1_000, &BufferSizer::default(), false).unwrap();
+        assert!(outcome.bytes_copied <= data.len() as u64);
+        let got = std::fs::read(&dst2).unwrap();
+        assert!(
+            got.len() == 1_000 || outcome.clone_succeeded,
+            "buffered copies are bounded to expected_len (got {} bytes, clone={})",
+            got.len(),
+            outcome.clone_succeeded
+        );
+        assert_eq!(&got[..1_000.min(got.len())], &data[..1_000.min(got.len())]);
+    }
 
     /// Whatever fast path applies on this platform, the copy must be
     /// byte-identical and report the right size.

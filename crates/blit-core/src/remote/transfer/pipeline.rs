@@ -486,7 +486,9 @@ pub async fn execute_sink_pipeline_elastic(
                         // known only after the write (review otp-10a F6).
                         PreparedPayload::FileBlock { .. }
                         | PreparedPayload::FileBlockComplete { .. }
-                        | PreparedPayload::ResumeFile { .. } => Vec::new(),
+                        | PreparedPayload::ResumeFile { .. }
+                        // ssc-4: a skipped preparation completes nothing.
+                        | PreparedPayload::Skipped(_) => Vec::new(),
                     };
                     let resumed_file: Option<String> = match &prepared {
                         PreparedPayload::ResumeFile { header, .. } => {
@@ -2389,6 +2391,12 @@ mod tests {
                 PreparedPayload::FileBlock { bytes, .. } => (0, bytes.len() as u64),
                 PreparedPayload::FileBlockComplete { .. } => (1, 0),
                 PreparedPayload::ResumeFile { header, .. } => (1, header.size),
+                PreparedPayload::Skipped(failure) => {
+                    return Ok(SinkOutcome::failed(
+                        failure.relative_path.clone(),
+                        failure.reason.clone(),
+                    ))
+                }
             };
             Ok(SinkOutcome::written(files_written, bytes_written))
         }

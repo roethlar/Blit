@@ -16,6 +16,38 @@ pub(crate) fn attempt_clonefile_macos(src: &Path, dst: &Path) -> Result<bool> {
     Ok(rc == 0)
 }
 
+/// ssc-4 (SOURCE_SIDE_CONTAINMENT D-C): clone from the OPENED source
+/// descriptor — `fclonefileat(2)` — so the clone is of the inode the
+/// caller validated, never of whatever the path names now. Like
+/// `clonefile(2)` it requires `dst` to be absent (EEXIST otherwise).
+#[cfg(target_os = "macos")]
+pub(crate) fn attempt_fclonefileat_macos(src: &std::fs::File, dst: &Path) -> Result<bool> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::AsRawFd;
+    let c_dst = CString::new(dst.as_os_str().as_bytes())?;
+    let rc = unsafe { libc::fclonefileat(src.as_raw_fd(), libc::AT_FDCWD, c_dst.as_ptr(), 0) };
+    Ok(rc == 0)
+}
+
+/// ssc-4: `fcopyfile(3)` from the OPENED source descriptor (see
+/// [`attempt_fclonefileat_macos`]); copies from the descriptor's current
+/// offset, so the caller rewinds first.
+#[cfg(target_os = "macos")]
+pub(crate) fn attempt_fcopyfile_macos_fd(src: &std::fs::File, dst: &Path) -> Result<bool> {
+    use std::os::unix::io::AsRawFd;
+    let d = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(dst)?;
+    let flags: libc::copyfile_flags_t =
+        libc::COPYFILE_ACL | libc::COPYFILE_STAT | libc::COPYFILE_XATTR | libc::COPYFILE_DATA;
+    let rc =
+        unsafe { libc::fcopyfile(src.as_raw_fd(), d.as_raw_fd(), std::ptr::null_mut(), flags) };
+    Ok(rc == 0)
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn attempt_fcopyfile_macos(src: &Path, dst: &Path) -> Result<bool> {
     use std::os::unix::io::AsRawFd;
@@ -219,8 +251,8 @@ pub(crate) fn mark_file_sparse(file: &File) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) fn sparse_copy_windows(
-    src: File,
+pub(crate) fn sparse_copy_windows<R: std::io::Read>(
+    src: R,
     dst: &mut File,
     buffer_size: usize,
     file_size: u64,

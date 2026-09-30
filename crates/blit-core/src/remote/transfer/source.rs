@@ -173,14 +173,6 @@ pub trait TransferSource: Send + Sync {
     /// Prepares a payload for transfer (e.g. opens a file or builds a tar shard).
     async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload>;
 
-    /// Checks if the files in the headers are available for transfer.
-    /// Returns a list of available headers.
-    async fn check_availability(
-        &self,
-        headers: Vec<FileHeader>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
-    ) -> Result<Vec<FileHeader>>;
-
     /// Opens a file for reading. The returned handle is the one the
     /// bytes are read from AND the one every size check consults
     /// (SOURCE_SIDE_CONTAINMENT D-A: a path re-stat could describe a
@@ -266,6 +258,16 @@ impl OpenedSourceFile {
         }
     }
 
+    /// The owned descriptor/handle as a blocking `std::fs::File`, for the
+    /// synchronous local copy cascade (ssc-4, D-C): the same handle every
+    /// size check consulted. `None` for a virtual reader.
+    pub fn try_into_std(self) -> Option<(std::fs::File, PathBuf)> {
+        match self {
+            Self::Fs { file, path } => file.try_into_std().ok().map(|f| (f, path)),
+            Self::Virtual { .. } => None,
+        }
+    }
+
     /// Give up the handle's identity and keep only the byte stream.
     pub fn into_reader(self) -> Box<dyn tokio::io::AsyncRead + Unpin + Send> {
         match self {
@@ -308,6 +310,12 @@ pub struct FsTransferSource {
     /// caller that threads the CLI's `--verbose`/`-v` flag through
     /// [`Self::with_verbose`] gets the lines back.
     verbose: bool,
+    /// SOURCE_SIDE_CONTAINMENT D-E (ssc-4): how this source hydrates a
+    /// header's Windows metadata before the payload goes out. Production
+    /// is `windows_metadata::hydrate_payload_header`; a test installs a
+    /// failing hydrator through [`Self::with_hydrator`] to prove that a
+    /// per-file hydration failure is a skip, never a session fault.
+    hydrator: crate::remote::transfer::payload::Hydrator,
 }
 
 impl FsTransferSource {
@@ -317,7 +325,15 @@ impl FsTransferSource {
             progress: None,
             phase_probe: LocalPhaseProbe::disabled(),
             verbose: false,
+            hydrator: crate::remote::transfer::payload::default_hydrator(),
         }
+    }
+
+    /// Test hook (ssc-4, A11): replace the Windows-metadata hydrator this
+    /// source runs at payload preparation. Production never calls this.
+    pub fn with_hydrator(mut self, hydrator: crate::remote::transfer::payload::Hydrator) -> Self {
+        self.hydrator = hydrator;
+        self
     }
 
     /// Attach the ls-1 phase probe. `LocalPhaseProbe::disabled()` (the
@@ -381,16 +397,8 @@ impl TransferSource for FsTransferSource {
     }
 
     async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
-        use crate::remote::transfer::payload::prepare_payload;
-        prepare_payload(payload, self.root.clone()).await
-    }
-
-    async fn check_availability(
-        &self,
-        headers: Vec<FileHeader>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
-    ) -> Result<Vec<FileHeader>> {
-        filter_readable_headers(&self.root, headers, &unreadable_paths).await
+        use crate::remote::transfer::payload::prepare_payload_with;
+        prepare_payload_with(payload, self.root.clone(), Arc::clone(&self.hydrator)).await
     }
 
     async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
@@ -727,55 +735,6 @@ fn record_unreadable_entry(list: &Arc<Mutex<Vec<String>>>, rel: &str, reason: &s
     }
 }
 
-/// Filter `headers` down to the ones whose files are still readable
-/// under `source_root`, recording the rest in `unreadable`
-/// (otp-10c-2: relocated verbatim from the deleted push driver's
-/// `client::helpers`).
-async fn filter_readable_headers(
-    source_root: &Path,
-    headers: Vec<FileHeader>,
-    unreadable: &Arc<Mutex<Vec<String>>>,
-) -> Result<Vec<FileHeader>> {
-    use eyre::eyre;
-    use std::io::ErrorKind;
-
-    let mut filtered = Vec::with_capacity(headers.len());
-    for header in headers {
-        let rel = header.relative_path.clone();
-        // Empty relative_path means "the root is itself the file" — a
-        // single-file source. `source_root.join("")` preserves a
-        // trailing separator that `File::open` then rejects as
-        // ENOTDIR, so treat the empty case specially.
-        let path = if rel.is_empty() {
-            source_root.to_path_buf()
-        } else {
-            source_root.join(&rel)
-        };
-        match fs::File::open(&path).await {
-            Ok(file) => drop(file),
-            Err(err) => match err.kind() {
-                ErrorKind::PermissionDenied => {
-                    record_unreadable_entry(unreadable, &rel, "permission denied");
-                    continue;
-                }
-                ErrorKind::NotFound => {
-                    record_unreadable_entry(unreadable, &rel, "not found");
-                    continue;
-                }
-                _ => {
-                    return Err(eyre!(format!(
-                        "opening {} during payload planning: {}",
-                        path.display(),
-                        err
-                    )));
-                }
-            },
-        }
-        filtered.push(header);
-    }
-    Ok(filtered)
-}
-
 /// Decorator that applies a `FileFilter` uniformly to any inner
 /// `TransferSource`'s scan output. This is the SINGLE filter chokepoint
 /// for every src/dst combination (local→local, push, pull, remote→remote);
@@ -818,16 +777,6 @@ impl TransferSource for WindowsMetadataDroppingSource {
         self.inner.prepare_payload(payload).await
     }
 
-    async fn check_availability(
-        &self,
-        headers: Vec<FileHeader>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
-    ) -> Result<Vec<FileHeader>> {
-        self.inner
-            .check_availability(headers, unreadable_paths)
-            .await
-    }
-
     async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
         self.inner.open_file(header).await
     }
@@ -865,16 +814,6 @@ impl TransferSource for FilteredSource {
 
     async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
         self.inner.prepare_payload(payload).await
-    }
-
-    async fn check_availability(
-        &self,
-        headers: Vec<FileHeader>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
-    ) -> Result<Vec<FileHeader>> {
-        self.inner
-            .check_availability(headers, unreadable_paths)
-            .await
     }
 
     async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
@@ -962,16 +901,6 @@ impl TransferSource for ChecksummingSource {
 
     async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
         self.inner.prepare_payload(payload).await
-    }
-
-    async fn check_availability(
-        &self,
-        headers: Vec<FileHeader>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
-    ) -> Result<Vec<FileHeader>> {
-        self.inner
-            .check_availability(headers, unreadable_paths)
-            .await
     }
 
     async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
@@ -1418,14 +1347,6 @@ mod filtered_source_tests {
             unimplemented!()
         }
 
-        async fn check_availability(
-            &self,
-            h: Vec<FileHeader>,
-            _: Arc<Mutex<Vec<String>>>,
-        ) -> Result<Vec<FileHeader>> {
-            Ok(h)
-        }
-
         async fn open_file(&self, _: &FileHeader) -> Result<OpenedSourceFile> {
             unimplemented!()
         }
@@ -1650,14 +1571,6 @@ mod checksumming_source_tests {
 
         async fn prepare_payload(&self, _: TransferPayload) -> Result<PreparedPayload> {
             unimplemented!()
-        }
-
-        async fn check_availability(
-            &self,
-            h: Vec<FileHeader>,
-            _: Arc<Mutex<Vec<String>>>,
-        ) -> Result<Vec<FileHeader>> {
-            Ok(h)
         }
 
         async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {

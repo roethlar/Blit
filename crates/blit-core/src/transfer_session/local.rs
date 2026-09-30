@@ -427,10 +427,6 @@ pub struct LocalApply {
     /// shape) unless the hidden `--workers` debug limiter set
     /// `debug_mode` (review otp-11a F7).
     pub(super) sink_workers: usize,
-    /// Shared unreadable-path accumulator (same Arc the source scan
-    /// feeds): apply-side availability failures land here too, so
-    /// `blit move`'s source-delete gate sees one merged list.
-    pub(super) unreadable: Arc<StdMutex<Vec<String>>>,
     /// Counters the entry folds into [`LocalMirrorSummary`] afterward.
     pub(super) stats: Arc<LocalApplyStats>,
     /// ls-1 wall-clock breakdown, resolved once by the session entry. Rides
@@ -530,20 +526,18 @@ impl LocalApply {
     }
 
     /// Group one diff chunk's needed headers into payloads, folding
-    /// the planner-mix counters. Unavailable (unreadable) entries are
-    /// dropped into the shared accumulator and skipped — the old local
-    /// pipeline's copy-what-is-readable posture; the caller-side move
-    /// gate refuses the source delete when the list is non-empty.
+    /// the planner-mix counters. SOURCE_SIDE_CONTAINMENT D-E / D3
+    /// (D-2026-09-28-4, ssc-4): the availability pre-open that used to
+    /// drop unopenable entries into the scan's unreadable list is gone —
+    /// the packer (shards) and the sink (single files) contain the same
+    /// failures per file, and an entry that enumerated is in the manifest,
+    /// so its unopenability never makes a mirror deletion unsafe.
     pub(super) async fn plan_chunk(&self, needed: Vec<FileHeader>) -> Result<Vec<TransferPayload>> {
         if needed.is_empty() {
             return Ok(Vec::new());
         }
-        let available = self
-            .prepare_source
-            .check_availability(needed, Arc::clone(&self.unreadable))
-            .await?;
         let payloads = crate::remote::transfer::payload::plan_transfer_payloads(
-            available,
+            needed,
             &self.src_root,
             self.plan_options,
         )?;
@@ -645,16 +639,6 @@ impl TransferSource for DestSubtreeExcludedSource {
         payload: TransferPayload,
     ) -> Result<crate::remote::transfer::payload::PreparedPayload> {
         self.inner.prepare_payload(payload).await
-    }
-
-    async fn check_availability(
-        &self,
-        headers: Vec<FileHeader>,
-        unreadable_paths: Arc<StdMutex<Vec<String>>>,
-    ) -> Result<Vec<FileHeader>> {
-        self.inner
-            .check_availability(headers, unreadable_paths)
-            .await
     }
 
     async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
@@ -872,7 +856,6 @@ pub async fn run_local_session(
         dry_run: options.dry_run,
         null_sink: options.null_sink,
         sink_workers: options.effective_sink_workers(),
-        unreadable: Arc::clone(&unreadable),
         stats: Arc::clone(&stats),
         phase_probe: phase_probe.clone(),
         checker_pool: checker_pool.clone(),
@@ -1154,11 +1137,14 @@ mod tests {
     use crate::generated::{ComparisonMode, TransferSummary};
     use crate::transfer_session::DestinationOutcome;
 
-    /// Delegates scan/prepare/open to a real fs source but drops one
-    /// path at `check_availability`, recording it unreadable — the
-    /// deterministic stand-in for a file vanishing between a CLEAN
-    /// scan and the apply (the window the SourceDone mirror guard
-    /// exists for; a mode-000 fixture is caught at scan time instead).
+    /// Delegates scan/prepare/open to a real fs source but REMOVES one
+    /// file from disk the moment its header has been scanned — before
+    /// the diff plans it — the deterministic stand-in for a file
+    /// vanishing between a CLEAN scan and the apply (a mode-000 fixture
+    /// is caught at scan time instead). ssc-4 (D3, D-2026-09-28-4): with
+    /// the availability pre-check retired, that file is the packer's /
+    /// sink's per-file failure and the run completes; a restored
+    /// pre-check would silently drop it from the plan instead.
     struct VanishingSource {
         inner: Arc<dyn TransferSource>,
         vanish: String,
@@ -1171,7 +1157,24 @@ mod tests {
             filter: Option<FileFilter>,
             unreadable_paths: Arc<StdMutex<Vec<String>>>,
         ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-            self.inner.scan(filter, unreadable_paths)
+            let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
+            let (tx, rx) = mpsc::channel(64);
+            let vanish = self.vanish.clone();
+            let root = self.inner.root().to_path_buf();
+            let task = tokio::spawn(async move {
+                while let Some(header) = inner_rx.recv().await {
+                    let gone = header.relative_path == vanish;
+                    if tx.send(header).await.is_err() {
+                        break;
+                    }
+                    if gone {
+                        std::fs::remove_file(root.join(&vanish))
+                            .expect("remove the vanishing file");
+                    }
+                }
+            });
+            scan.add_auxiliary(task);
+            (rx, scan)
         }
 
         async fn prepare_payload(
@@ -1179,23 +1182,6 @@ mod tests {
             payload: TransferPayload,
         ) -> eyre::Result<crate::remote::transfer::payload::PreparedPayload> {
             self.inner.prepare_payload(payload).await
-        }
-
-        async fn check_availability(
-            &self,
-            headers: Vec<FileHeader>,
-            unreadable_paths: Arc<StdMutex<Vec<String>>>,
-        ) -> eyre::Result<Vec<FileHeader>> {
-            let (gone, available): (Vec<_>, Vec<_>) = headers
-                .into_iter()
-                .partition(|h| h.relative_path == self.vanish);
-            if !gone.is_empty() {
-                unreadable_paths
-                    .lock()
-                    .expect("accumulator lock")
-                    .push(self.vanish.clone());
-            }
-            Ok(available)
         }
 
         async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
@@ -1248,16 +1234,6 @@ mod tests {
             self.inner.prepare_payload(payload).await
         }
 
-        async fn check_availability(
-            &self,
-            headers: Vec<FileHeader>,
-            unreadable_paths: Arc<StdMutex<Vec<String>>>,
-        ) -> eyre::Result<Vec<FileHeader>> {
-            self.inner
-                .check_availability(headers, unreadable_paths)
-                .await
-        }
-
         async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
             self.inner.open_file(header).await
         }
@@ -1304,7 +1280,6 @@ mod tests {
             dry_run: false,
             null_sink: false,
             sink_workers: 1,
-            unreadable: Arc::clone(&unreadable),
             stats: Arc::new(LocalApplyStats::default()),
             phase_probe: LocalPhaseProbe::disabled(),
             checker_pool: CheckerPool::new(1).expect("checker pool"),
@@ -1383,13 +1358,18 @@ mod tests {
         );
     }
 
-    /// R46-F2 carried onto the local carrier (review otp-11a F4): a
-    /// source entry that vanishes AFTER a clean scan (recorded
-    /// unreadable by the apply's availability check) must refuse the
-    /// mirror at SourceDone, before any deletion — the old engine
-    /// refused mirror deletions on ANY unreadable entry.
+    /// ssc-4 A8 (D3, D-2026-09-28-4) — flipped from R46-F2's
+    /// `mirror_refuses_when_availability_drops_after_clean_scan`: a source
+    /// entry that vanishes AFTER a clean scan is that file's failure
+    /// (`files_failed` 1, the `source:` reason, exit-2 material), the
+    /// mirror COMPLETES and still deletes the extraneous entry. The file
+    /// was enumerated, so its destination counterpart is never
+    /// extraneous and its unopenability cannot make a deletion unsafe.
+    /// (Timing at the CLI level cannot be made deterministic — the
+    /// window is between enumeration and apply inside one process — so
+    /// A8 is pinned here at the session level.)
     #[tokio::test]
-    async fn mirror_refuses_when_availability_drops_after_clean_scan() {
+    async fn mirror_completes_and_reports_a_file_that_vanished_after_a_clean_scan() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let src_root = tmp.path().join("src");
         let dst_root = tmp.path().join("dst");
@@ -1409,6 +1389,12 @@ mod tests {
         };
         let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
         let fs_source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
+        // The same wrapper scans AND prepares, as the production local
+        // route uses one source for both.
+        let vanishing: Arc<dyn TransferSource> = Arc::new(VanishingSource {
+            inner: fs_source,
+            vanish: "gone.txt".to_string(),
+        });
         let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
             src_root.clone(),
             dst_root.clone(),
@@ -1417,16 +1403,166 @@ mod tests {
         let local_apply = LocalApply {
             src_root: src_root.clone(),
             sink,
-            prepare_source: Arc::new(VanishingSource {
-                inner: fs_source,
-                vanish: "gone.txt".to_string(),
-            }),
+            prepare_source: Arc::clone(&vanishing),
             plan_options: PlanOptions::default(),
             mirror_scope_filter: FileFilter::default(),
             dry_run: false,
             null_sink: false,
             sink_workers: 1,
-            unreadable: Arc::clone(&unreadable),
+            stats: Arc::new(LocalApplyStats::default()),
+            phase_probe: LocalPhaseProbe::disabled(),
+            checker_pool: CheckerPool::new(1).expect("checker pool"),
+            dir_stats: Arc::default(),
+        };
+        let source_cfg = SourceSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::initiator(open),
+            plan_options: PlanOptions::default(),
+            data_plane_host: None,
+            instruments: SourceInstruments {
+                progress: None,
+                unreadable: Some(Arc::clone(&unreadable)),
+                trace_data_plane: false,
+                session_phase_trace: Default::default(),
+                lifecycle_trace: Default::default(),
+                small_file_probe: SmallFileProbe::disabled(),
+                on_terminal_summary: None,
+                stream_seed: None,
+                settled_streams_out: None,
+                #[cfg(test)]
+                dial_test_samples: None,
+                #[cfg(test)]
+                dial_terminal_test_gate: None,
+                #[cfg(test)]
+                dial_proposal_test_gate: None,
+                #[cfg(test)]
+                dial_membership_test_gate: None,
+            },
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::Responder,
+            data_plane_host: None,
+            receiver_capacity: None,
+            instruments: DestinationInstruments {
+                small_file_probe: SmallFileProbe::disabled(),
+                ..Default::default()
+            },
+            local_apply: Some(local_apply),
+        };
+        let (a, b) = in_process_pair();
+        let scan_source: Arc<dyn TransferSource> = Arc::clone(&vanishing);
+        let (_, dest_result): (
+            eyre::Result<TransferSummary>,
+            eyre::Result<DestinationOutcome>,
+        ) = tokio::join!(
+            run_source(source_cfg, a, scan_source),
+            run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
+        );
+
+        let dest = dest_result.expect("a vanished source file never ends the local mirror");
+        assert_eq!(
+            dest.summary.files_failed, 1,
+            "the vanished file is reported"
+        );
+        assert_eq!(dest.summary.failures[0].relative_path, "gone.txt");
+        assert!(
+            dest.summary.failures[0]
+                .reason
+                .starts_with("source: cannot open:"),
+            "{}",
+            dest.summary.failures[0].reason
+        );
+        assert_eq!(dest.summary.files_transferred, 1, "ok.txt lands");
+        assert_eq!(std::fs::read(dst_root.join("ok.txt")).unwrap(), b"fine");
+        assert!(!dst_root.join("gone.txt").exists());
+        assert!(
+            !dst_root.join("extraneous.txt").exists(),
+            "the mirror completes and deletes the extraneous entry"
+        );
+    }
+
+    /// A source wrapper that makes one file unopenable (mode 000) the
+    /// first time a payload is prepared — a file the sink itself opens
+    /// (a single-file payload) that fails at the source side.
+    #[cfg(unix)]
+    struct LockingSource {
+        inner: Arc<dyn TransferSource>,
+        lock: String,
+        applied: StdMutex<bool>,
+    }
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl TransferSource for LockingSource {
+        fn scan(
+            &self,
+            filter: Option<FileFilter>,
+            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+            self.inner.scan(filter, unreadable_paths)
+        }
+
+        async fn prepare_payload(
+            &self,
+            payload: TransferPayload,
+        ) -> eyre::Result<crate::remote::transfer::payload::PreparedPayload> {
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut applied = self.applied.lock().expect("applied lock");
+                if !*applied {
+                    std::fs::set_permissions(
+                        self.inner.root().join(&self.lock),
+                        std::fs::Permissions::from_mode(0o0),
+                    )
+                    .expect("lock the file");
+                    *applied = true;
+                }
+            }
+            self.inner.prepare_payload(payload).await
+        }
+
+        async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
+            self.inner.open_file(header).await
+        }
+
+        fn root(&self) -> &Path {
+            self.inner.root()
+        }
+    }
+
+    /// Drive one local mirror session src→dst with `prepare_source`.
+    async fn run_local_mirror(
+        src_root: &Path,
+        dst_root: &Path,
+        prepare_source: Arc<dyn TransferSource>,
+    ) -> (
+        eyre::Result<TransferSummary>,
+        eyre::Result<DestinationOutcome>,
+    ) {
+        let open = SessionOpen {
+            initiator_role: TransferRole::Source as i32,
+            compare_mode: ComparisonMode::SizeMtime as i32,
+            in_stream_bytes: true,
+            mirror_enabled: true,
+            mirror_kind: MirrorMode::All as i32,
+            ..Default::default()
+        };
+        let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
+            src_root.to_path_buf(),
+            dst_root.to_path_buf(),
+            FsSinkConfig::default(),
+        ));
+        let local_apply = LocalApply {
+            src_root: src_root.to_path_buf(),
+            sink,
+            prepare_source,
+            plan_options: PlanOptions::default(),
+            mirror_scope_filter: FileFilter::default(),
+            dry_run: false,
+            null_sink: false,
+            sink_workers: 1,
             stats: Arc::new(LocalApplyStats::default()),
             phase_probe: LocalPhaseProbe::disabled(),
             checker_pool: CheckerPool::new(1).expect("checker pool"),
@@ -1470,24 +1606,111 @@ mod tests {
         };
         let (a, b) = in_process_pair();
         let scan_source: Arc<dyn TransferSource> =
-            Arc::new(FsTransferSource::new(src_root.clone()));
-        let (_, dest_result): (
-            eyre::Result<TransferSummary>,
-            eyre::Result<DestinationOutcome>,
-        ) = tokio::join!(
+            Arc::new(FsTransferSource::new(src_root.to_path_buf()));
+        tokio::join!(
             run_source(source_cfg, a, scan_source),
-            run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
-        );
+            run_destination(
+                dest_cfg,
+                b,
+                DestinationTarget::Fixed(dst_root.to_path_buf())
+            ),
+        )
+    }
 
-        let err = dest_result.expect_err("apply-time unreadable must refuse the mirror");
+    /// ssc-4 A3 (local route): a single-file payload whose source the sink
+    /// cannot open is that file's failure with the `source:` prefix; the
+    /// mirror completes and the rest lands.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_single_file_that_cannot_be_opened_is_reported_with_the_source_prefix() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("mkdir src");
+        std::fs::create_dir_all(&dst_root).expect("mkdir dst");
+        // Above the shard threshold: the sink itself opens these.
+        std::fs::write(src_root.join("big_ok.bin"), vec![7u8; 2 * 1024 * 1024]).expect("write");
+        std::fs::write(src_root.join("big_locked.bin"), vec![9u8; 2 * 1024 * 1024]).expect("write");
+        let fs_source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
+        let (_, dest_result) = run_local_mirror(
+            &src_root,
+            &dst_root,
+            Arc::new(LockingSource {
+                inner: fs_source,
+                lock: "big_locked.bin".to_string(),
+                applied: StdMutex::new(false),
+            }),
+        )
+        .await;
+        let dest = dest_result.expect("an unopenable source file never ends the local run");
+        if dest.summary.files_failed == 0 {
+            eprintln!("running as a user that ignores mode 000; skipping");
+            return;
+        }
+        assert_eq!(dest.summary.files_failed, 1);
+        assert_eq!(dest.summary.failures[0].relative_path, "big_locked.bin");
         assert!(
-            format!("{err:#}").contains("could not be read during the transfer"),
-            "unexpected error: {err:#}"
+            dest.summary.failures[0]
+                .reason
+                .starts_with("source: cannot open:"),
+            "{}",
+            dest.summary.failures[0].reason
         );
-        assert!(
-            dst_root.join("extraneous.txt").exists(),
-            "a refused mirror must not have deleted anything"
-        );
+        assert_eq!(dest.summary.files_transferred, 1);
+        assert!(dst_root.join("big_ok.bin").exists());
+        assert!(!dst_root.join("big_locked.bin").exists());
+    }
+
+    /// ssc-4 A11 (local route, D-E): a file whose Windows-metadata
+    /// hydration fails at preparation is a per-file skip — for a shard
+    /// member AND a single-file payload — never a pipeline failure. The
+    /// hydrator seam stands in for the Windows read that fails for a
+    /// vanished / denied / drifted named stream.
+    #[tokio::test]
+    async fn local_hydration_failure_is_a_per_file_skip_on_shards_and_single_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("mkdir src");
+        std::fs::create_dir_all(&dst_root).expect("mkdir dst");
+        std::fs::write(src_root.join("small_ok.txt"), vec![1u8; 4096]).expect("write");
+        std::fs::write(src_root.join("small_meta.txt"), vec![2u8; 4096]).expect("write");
+        std::fs::write(src_root.join("big_ok.bin"), vec![7u8; 2 * 1024 * 1024]).expect("write");
+        std::fs::write(src_root.join("big_meta.bin"), vec![9u8; 2 * 1024 * 1024]).expect("write");
+        let failing: crate::remote::transfer::payload::Hydrator =
+            Arc::new(|path: &Path, _header: &mut FileHeader| {
+                if path.ends_with("small_meta.txt") || path.ends_with("big_meta.bin") {
+                    eyre::bail!(
+                        "reading Windows named stream \"meta\": Access is denied. (os error 5)"
+                    )
+                }
+                Ok(())
+            });
+        let source: Arc<dyn TransferSource> =
+            Arc::new(FsTransferSource::new(src_root.clone()).with_hydrator(failing));
+        let (_, dest_result) = run_local_mirror(&src_root, &dst_root, source).await;
+        let dest = dest_result.expect("a hydration failure never ends the local run");
+        assert_eq!(dest.summary.files_failed, 2, "{:?}", dest.summary.failures);
+        assert_eq!(dest.summary.files_transferred, 2);
+        let mut failed: Vec<(String, String)> = dest
+            .summary
+            .failures
+            .iter()
+            .map(|f| (f.relative_path.clone(), f.reason.clone()))
+            .collect();
+        failed.sort();
+        assert_eq!(failed[0].0, "big_meta.bin");
+        assert_eq!(failed[1].0, "small_meta.txt");
+        for (_, reason) in &failed {
+            assert!(
+                reason.starts_with("source: cannot read metadata:"),
+                "{reason}"
+            );
+        }
+        assert!(dst_root.join("small_ok.txt").exists());
+        assert!(dst_root.join("big_ok.bin").exists());
+        assert!(!dst_root.join("small_meta.txt").exists());
+        assert!(!dst_root.join("big_meta.bin").exists());
     }
 
     /// Wraps a real sink, holds each `write_payload` open for a fixed delay,
@@ -1879,7 +2102,6 @@ mod tests {
             dry_run: false,
             null_sink: false,
             sink_workers: 1,
-            unreadable: Arc::clone(&unreadable),
             stats: Arc::new(LocalApplyStats::default()),
             phase_probe: slow_probe.clone(),
             checker_pool: CheckerPool::new(1).expect("checker pool"),
@@ -2483,16 +2705,6 @@ mod tests {
                 self.inner.prepare_payload(payload).await
             }
 
-            async fn check_availability(
-                &self,
-                headers: Vec<FileHeader>,
-                unreadable_paths: Arc<StdMutex<Vec<String>>>,
-            ) -> eyre::Result<Vec<FileHeader>> {
-                self.inner
-                    .check_availability(headers, unreadable_paths)
-                    .await
-            }
-
             async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
                 self.inner.open_file(header).await
             }
@@ -2547,7 +2759,6 @@ mod tests {
             dry_run: false,
             null_sink: false,
             sink_workers: 1,
-            unreadable: Arc::default(),
             stats: Arc::new(LocalApplyStats::default()),
             phase_probe: LocalPhaseProbe::disabled(),
             checker_pool: CheckerPool::new(1).expect("checker pool"),

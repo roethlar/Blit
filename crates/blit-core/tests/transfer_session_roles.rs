@@ -977,16 +977,6 @@ impl TransferSource for TruncatedReadSource {
         self.inner.prepare_payload(payload).await
     }
 
-    async fn check_availability(
-        &self,
-        headers: Vec<FileHeader>,
-        unreadable_paths: Arc<std::sync::Mutex<Vec<String>>>,
-    ) -> eyre::Result<Vec<FileHeader>> {
-        self.inner
-            .check_availability(headers, unreadable_paths)
-            .await
-    }
-
     async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
         use tokio::io::AsyncReadExt;
         let opened = self.inner.open_file(header).await?;
@@ -1218,16 +1208,6 @@ impl TransferSource for GatedManifestSource {
 
     async fn prepare_payload(&self, payload: TransferPayload) -> eyre::Result<PreparedPayload> {
         self.inner.prepare_payload(payload).await
-    }
-
-    async fn check_availability(
-        &self,
-        headers: Vec<FileHeader>,
-        unreadable_paths: Arc<std::sync::Mutex<Vec<String>>>,
-    ) -> eyre::Result<Vec<FileHeader>> {
-        self.inner
-            .check_availability(headers, unreadable_paths)
-            .await
     }
 
     async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
@@ -3605,14 +3585,6 @@ impl TransferSource for FilterIgnoringSource {
 
     async fn prepare_payload(&self, payload: TransferPayload) -> eyre::Result<PreparedPayload> {
         self.inner.prepare_payload(payload).await
-    }
-
-    async fn check_availability(
-        &self,
-        headers: Vec<FileHeader>,
-        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
-    ) -> eyre::Result<Vec<FileHeader>> {
-        self.inner.check_availability(headers, unreadable).await
     }
 
     async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {

@@ -152,16 +152,6 @@ impl TransferSource for FaultySource {
         self.inner.prepare_payload(payload).await
     }
 
-    async fn check_availability(
-        &self,
-        headers: Vec<FileHeader>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
-    ) -> eyre::Result<Vec<FileHeader>> {
-        self.inner
-            .check_availability(headers, unreadable_paths)
-            .await
-    }
-
     async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
         match self.faults.get(header.relative_path.as_str()) {
             Some(Fault::OpenFails) => Err(eyre::eyre!(
@@ -343,6 +333,163 @@ async fn assert_skip_contained(carrier: Carrier, fault: Fault, reason_prefix: &s
             &failures_from_wire(&summary.failures),
         );
         assert!(gate.is_err(), "move must refuse source deletion on a skip");
+    }
+}
+
+/// ssc-4 A11 (D-E): a file whose Windows-metadata hydration fails at
+/// payload preparation is skipped before announcement — on both
+/// carriers, under both initiators — never a pipeline/session failure.
+/// The hydrator seam (`FsTransferSource::with_hydrator`) stands in for
+/// the Windows read of a named stream that vanished, is denied, or
+/// changed size; the reason class follows the error text.
+async fn assert_hydration_skip_contained(carrier: Carrier, error_text: &str, reason_prefix: &str) {
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(&src_root, &three_big_files());
+        let text = error_text.to_string();
+        let failing: blit_core::remote::transfer::payload::Hydrator =
+            Arc::new(move |path: &Path, _header: &mut FileHeader| {
+                if path.ends_with("locked.bin") {
+                    eyre::bail!("{text}")
+                }
+                Ok(())
+            });
+        let source: Arc<dyn TransferSource> = Arc::new(FaultySource {
+            inner: FsTransferSource::new(src_root.clone()).with_hydrator(failing),
+            faults: HashMap::new(),
+        });
+        let (sr, dr) = run_with(
+            open_for(initiator_role, carrier),
+            carrier,
+            source,
+            dst_root.clone(),
+        )
+        .await;
+        let summary = sr.unwrap_or_else(|e| panic!("source must complete ({carrier:?}): {e:#}"));
+        let dest = dr.unwrap_or_else(|e| panic!("destination must complete ({carrier:?}): {e:#}"));
+        assert_eq!(summary, dest.summary);
+        assert_eq!(summary.files_failed, 1, "{:?}", summary.failures);
+        assert_eq!(summary.files_transferred, 2);
+        assert_eq!(summary.failures[0].relative_path, "locked.bin");
+        assert!(
+            summary.failures[0].reason.starts_with(reason_prefix),
+            "({carrier:?}) {}",
+            summary.failures[0].reason
+        );
+        let landed = collect_tree(&dst_root);
+        assert_eq!(
+            landed.keys().collect::<Vec<_>>(),
+            vec!["ok1.bin", "sub/ok2.bin"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn in_stream_hydration_failure_is_skipped_and_reported() {
+    assert_hydration_skip_contained(
+        Carrier::InStream,
+        "reading Windows named stream \"meta\": Access is denied. (os error 5)",
+        "source: cannot read metadata:",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn data_plane_hydration_failure_is_skipped_and_reported() {
+    assert_hydration_skip_contained(
+        Carrier::DataPlane,
+        "reading Windows named stream \"meta\": Access is denied. (os error 5)",
+        "source: cannot read metadata:",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn named_stream_size_drift_at_hydration_is_the_drift_class() {
+    assert_hydration_skip_contained(
+        Carrier::InStream,
+        "Windows named stream \"meta\" on x changed size while reading: expected 4, got 9",
+        "source: changed size during transfer (Windows metadata:",
+    )
+    .await;
+}
+
+/// ssc-4 A11 on a REAL Windows named stream (runs on Windows CI only):
+/// the scan records the stream at 4 bytes; the stream is rewritten to 9
+/// bytes before the payload is prepared; hydration sees the drift and
+/// the file is skipped with the drift reason — the run completes.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_named_stream_that_changed_size_after_the_scan_is_skipped() {
+    struct StreamGrowSource {
+        inner: FsTransferSource,
+        grow: PathBuf,
+        applied: Mutex<bool>,
+    }
+    #[async_trait::async_trait]
+    impl TransferSource for StreamGrowSource {
+        fn scan(
+            &self,
+            filter: Option<blit_core::fs_enum::FileFilter>,
+            unreadable_paths: Arc<Mutex<Vec<String>>>,
+        ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
+            self.inner.scan(filter, unreadable_paths)
+        }
+        async fn prepare_payload(&self, payload: TransferPayload) -> eyre::Result<PreparedPayload> {
+            {
+                let mut applied = self.applied.lock().unwrap();
+                if !*applied {
+                    std::fs::write(&self.grow, b"nine byte").unwrap();
+                    *applied = true;
+                }
+            }
+            self.inner.prepare_payload(payload).await
+        }
+        async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
+            self.inner.open_file(header).await
+        }
+        fn root(&self) -> &Path {
+            self.inner.root()
+        }
+    }
+    for carrier in [Carrier::InStream, Carrier::DataPlane] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(&src_root, &three_big_files());
+        let stream_path = PathBuf::from(format!("{}:meta", src_root.join("locked.bin").display()));
+        std::fs::write(&stream_path, b"four").unwrap();
+        let source: Arc<dyn TransferSource> = Arc::new(StreamGrowSource {
+            inner: FsTransferSource::new(src_root.clone()),
+            grow: stream_path,
+            applied: Mutex::new(false),
+        });
+        let (sr, dr) = run_with(
+            open_for(TransferRole::Source, carrier),
+            carrier,
+            source,
+            dst_root.clone(),
+        )
+        .await;
+        let summary = sr.unwrap_or_else(|e| panic!("source must complete ({carrier:?}): {e:#}"));
+        let dest = dr.unwrap_or_else(|e| panic!("destination must complete ({carrier:?}): {e:#}"));
+        assert_eq!(summary, dest.summary);
+        assert_eq!(summary.files_failed, 1, "{:?}", summary.failures);
+        assert_eq!(summary.failures[0].relative_path, "locked.bin");
+        assert!(
+            summary.failures[0]
+                .reason
+                .starts_with("source: changed size during transfer (Windows metadata:"),
+            "{}",
+            summary.failures[0].reason
+        );
+        assert_eq!(summary.files_transferred, 2);
     }
 }
 
@@ -825,16 +972,6 @@ impl TransferSource for ShardDriftSource {
             }
         }
         self.inner.prepare_payload(payload).await
-    }
-
-    async fn check_availability(
-        &self,
-        headers: Vec<FileHeader>,
-        unreadable_paths: Arc<Mutex<Vec<String>>>,
-    ) -> eyre::Result<Vec<FileHeader>> {
-        self.inner
-            .check_availability(headers, unreadable_paths)
-            .await
     }
 
     async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {

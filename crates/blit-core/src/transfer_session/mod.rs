@@ -2121,7 +2121,21 @@ async fn source_send_half(
                                 }
                                 prepared = prepare_in_stream_resume(&source, header, hashes) => prepared?,
                             };
-                            let (header, block_size, dest_hashes) = prepared;
+                            let (header, block_size, dest_hashes) = match prepared {
+                                InStreamResumePrepared::Ready(h, b, d) => (h, b, d),
+                                // ssc-4 (D-E): hydration failed — skip the
+                                // resume grant before any block goes out.
+                                InStreamResumePrepared::Skipped(failure) => {
+                                    tx.send(frame(Frame::FileSkipped(
+                                        crate::generated::FileFailure {
+                                            relative_path: failure.relative_path,
+                                            reason: failure.reason,
+                                        },
+                                    )))
+                                    .await?;
+                                    continue;
+                                }
+                            };
                             // review 7b-2 G2: the whole in-stream record names
                             // its file on failure, matching the data-plane
                             // carrier's outer wrap. Same fault race as the
@@ -3084,6 +3098,16 @@ async fn send_payload_records(
     };
     for payload in payloads {
         match source.prepare_payload(payload).await? {
+            // ssc-4 (D-E): the source could not prepare this file (its
+            // metadata hydration failed) — skip it before announcement,
+            // exactly as an open failure.
+            PreparedPayload::Skipped(failure) => {
+                tx.send(frame(Frame::FileSkipped(crate::generated::FileFailure {
+                    relative_path: failure.relative_path,
+                    reason: failure.reason,
+                })))
+                .await?;
+            }
             PreparedPayload::File(header) => {
                 // Contract v7 (SOURCE_SIDE_CONTAINMENT D-A/D-C): open and
                 // stat BEFORE announcing the record, so a file that
@@ -3262,7 +3286,7 @@ async fn prepare_in_stream_resume(
     source: &Arc<dyn TransferSource>,
     header: FileHeader,
     hashes: BlockHashList,
-) -> Result<(FileHeader, u32, Vec<Vec<u8>>)> {
+) -> Result<InStreamResumePrepared> {
     let prepared = source
         .prepare_payload(TransferPayload::ResumeFile {
             header,
@@ -3275,11 +3299,25 @@ async fn prepare_in_stream_resume(
             header,
             block_size,
             dest_hashes,
-        } => Ok((header, block_size, dest_hashes)),
+        } => Ok(InStreamResumePrepared::Ready(
+            header,
+            block_size,
+            dest_hashes,
+        )),
+        // ssc-4 (D-E): hydration failed for this resume-flagged file —
+        // the caller skips it (Granted(resume) → Failed at the
+        // destination) instead of faulting the session.
+        PreparedPayload::Skipped(failure) => Ok(InStreamResumePrepared::Skipped(failure)),
         _ => Err(eyre::eyre!(
             "resume metadata preparation returned a non-resume payload"
         )),
     }
+}
+
+/// [`prepare_in_stream_resume`]'s per-file outcome (ssc-4).
+enum InStreamResumePrepared {
+    Ready(FileHeader, u32, Vec<Vec<u8>>),
+    Skipped(crate::remote::transfer::sink::FileFailure),
 }
 
 /// otp-7a: the SOURCE-side block phase for one resume-flagged need over
@@ -4836,27 +4874,14 @@ async fn destination_session_inner(
                     bytes_written = totals.bytes_written;
                     contained_failures.merge_failures(&totals);
                 }
-                // R46-F2 on the local carrier (review otp-11a F4): the
-                // scan-complete guard fired at ManifestComplete, but the
-                // local apply's availability checks can record
-                // unreadables AFTER it (a file vanishing or losing
-                // permissions between enumeration and apply). The old
-                // engine refused mirror deletions on ANY unreadable
-                // entry; carry that exact posture — checked here, after
-                // the apply pipeline joined, before any deletion.
-                if mirror_enabled {
-                    if let Some(la) = &local_apply {
-                        let unreadable_count = la.unreadable.lock().map(|g| g.len()).unwrap_or(0);
-                        if unreadable_count != 0 {
-                            return Err(eyre::Report::new(SessionFault::internal(format!(
-                                "mirror refused: {unreadable_count} source entr{} could \
-                                 not be read during the transfer — deleting now could \
-                                 remove files the source still has",
-                                if unreadable_count == 1 { "y" } else { "ies" }
-                            ))));
-                        }
-                    }
-                }
+                // SOURCE_SIDE_CONTAINMENT D3 (D-2026-09-28-4, ssc-4): the
+                // R46-F2 apply-time refusal ("N source entries could not
+                // be read during the transfer") is gone. A file that
+                // enumerated is in the manifest, so its destination
+                // counterpart is never extraneous and its unopenability
+                // cannot make a deletion unsafe; the file is a per-file
+                // failure (`files_failed`, exit 2, the D7 retry set). The
+                // SCAN-time refusal at ManifestComplete stays.
                 let final_logical_streams = resize_state.as_ref().map(|state| state.live_streams);
                 let peak_logical_streams = resize_state.as_ref().map(|state| state.peak_streams);
                 let receiver_ceiling = resize_state.as_ref().map(|state| state.ceiling);
@@ -6380,16 +6405,6 @@ mod tests {
             self.inner.prepare_payload(payload).await
         }
 
-        async fn check_availability(
-            &self,
-            headers: Vec<FileHeader>,
-            unreadable_paths: Arc<StdMutex<Vec<String>>>,
-        ) -> Result<Vec<FileHeader>> {
-            self.inner
-                .check_availability(headers, unreadable_paths)
-                .await
-        }
-
         async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
             self.inner.open_file(header).await
         }
@@ -6620,9 +6635,13 @@ mod tests {
         };
 
         let (header, block_size, prepared_hashes) =
-            prepare_in_stream_resume(&source, tar_test_header("resume.bin".into()), hashes)
+            match prepare_in_stream_resume(&source, tar_test_header("resume.bin".into()), hashes)
                 .await
-                .expect("prepare resume payload");
+                .expect("prepare resume payload")
+            {
+                InStreamResumePrepared::Ready(h, b, d) => (h, b, d),
+                InStreamResumePrepared::Skipped(f) => panic!("unexpected skip: {}", f.reason),
+            };
 
         assert_eq!(header.relative_path, "resume.bin");
         assert_eq!(block_size, MIN_RESUME_BLOCK_SIZE as u32);
@@ -6979,16 +6998,6 @@ mod tests {
             self.inner.prepare_payload(payload).await
         }
 
-        async fn check_availability(
-            &self,
-            headers: Vec<FileHeader>,
-            unreadable_paths: Arc<StdMutex<Vec<String>>>,
-        ) -> Result<Vec<FileHeader>> {
-            self.inner
-                .check_availability(headers, unreadable_paths)
-                .await
-        }
-
         async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
             self.inner.open_file(header).await
         }
@@ -7036,16 +7045,6 @@ mod tests {
             self.inner.prepare_payload(payload).await
         }
 
-        async fn check_availability(
-            &self,
-            headers: Vec<FileHeader>,
-            unreadable_paths: Arc<StdMutex<Vec<String>>>,
-        ) -> Result<Vec<FileHeader>> {
-            self.inner
-                .check_availability(headers, unreadable_paths)
-                .await
-        }
-
         async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
             self.inner.open_file(header).await
         }
@@ -7078,16 +7077,6 @@ mod tests {
 
         async fn prepare_payload(&self, _payload: TransferPayload) -> Result<PreparedPayload> {
             Err(eyre::eyre!("injected TCP source fault"))
-        }
-
-        async fn check_availability(
-            &self,
-            headers: Vec<FileHeader>,
-            unreadable_paths: Arc<StdMutex<Vec<String>>>,
-        ) -> Result<Vec<FileHeader>> {
-            self.inner
-                .check_availability(headers, unreadable_paths)
-                .await
         }
 
         async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
