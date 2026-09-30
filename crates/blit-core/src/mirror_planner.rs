@@ -295,17 +295,19 @@ impl MirrorPlanner {
         // identity it actually has here — a raw-named entry's exact bytes
         // where storable (its text names nothing of its own there), its text
         // otherwise.
+        // cr-fix2-3: a failed entry is known here by its TEXT only, and
+        // several distinct raw names can collapse to one text (the
+        // duplicate-collision case). Shield conservatively: the text path
+        // itself and EVERY raw entry that collapses to it, decoded where
+        // storable — never a first-match guess between them.
         let mut shield_set: HashSet<CasefoldKey> = HashSet::new();
         for rel in shielded {
-            let raw_entry = raw_entries.iter().find(|entry| &entry.text == rel);
-            match raw_entry.and_then(|entry| {
-                crate::raw_name::path_from_received_raw(&entry.raw, raw_names_storable)
-            }) {
-                Some(path) => {
+            shield_set.insert(CasefoldKey::new(Path::new(rel)));
+            for entry in raw_entries.iter().filter(|entry| &entry.text == rel) {
+                if let Some(path) =
+                    crate::raw_name::path_from_received_raw(&entry.raw, raw_names_storable)
+                {
                     shield_set.insert(CasefoldKey::new(&path));
-                }
-                None => {
-                    shield_set.insert(CasefoldKey::new(Path::new(rel)));
                 }
             }
         }
@@ -485,6 +487,43 @@ mod shield_tests {
             plan.files,
             vec![dst.join("extraneous.bin")],
             "the failed raw entry's subtree is untouched, the unrelated entry is planned: {plan:?}"
+        );
+        assert!(plan.dirs.is_empty(), "{plan:?}");
+    }
+
+    /// cr-fix2-3: two raw names collapse to one lossy text; the second is
+    /// the rejected duplicate and its destination path is a populated
+    /// directory. The shield for that text must cover EVERY raw entry
+    /// sharing it — the directory is untouched, the first file is kept,
+    /// and an unrelated extraneous entry is still planned.
+    #[test]
+    fn a_lossy_collision_shields_every_raw_entry_sharing_the_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(dst.join("second")).unwrap();
+        std::fs::write(dst.join("second/child.bin"), b"keep me").unwrap();
+        std::fs::write(dst.join("first.bin"), b"landed").unwrap();
+        std::fs::write(dst.join("extraneous.bin"), b"x").unwrap();
+        let text = "caf\u{fffd}.txt".to_string();
+        let raw = vec![
+            RawNamedEntry {
+                text: text.clone(),
+                raw: b"first.bin".to_vec(),
+            },
+            RawNamedEntry {
+                text: text.clone(),
+                raw: b"second".to_vec(),
+            },
+        ];
+        let shielded: HashSet<String> = HashSet::from([text]);
+        let filter = crate::fs_enum::FileFilter::default();
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions(&dst, &HashSet::new(), &raw, &shielded, true, &filter)
+            .unwrap();
+        assert_eq!(
+            plan.files,
+            vec![dst.join("extraneous.bin")],
+            "both raw identities are shielded; only the unrelated entry is planned: {plan:?}"
         );
         assert!(plan.dirs.is_empty(), "{plan:?}");
     }
