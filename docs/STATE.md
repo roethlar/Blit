@@ -35,7 +35,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   0.1.2 died on a growing SQLite WAL's tar shard). D1–D7 all ruled
   (D-2026-09-28-1..-4, D-2026-09-29-1..-4). **ssc-1 LANDED 2026-09-30**
   (contract 7: ledger, skip records, chunked records + terminators, sink
-  lifecycle). **ssc-2 LANDED 2026-09-30** (`SSC2_HASH`): the shard packer
+  lifecycle). **ssc-2 LANDED 2026-09-30** (`5a124669`): the shard packer
   appends a member only from exactly `header.size` bytes; drifted members
   are skipped before the shard record on every carrier and the local
   route (the field failure reproduces red with the old packer). Gates

@@ -743,8 +743,8 @@ data-plane fuzz cases for corrupt chunk/status/SKIP framing. Six
 mutation proofs red (DEVLOG 2026-09-30). A15: loopback A/B on this
 Mac, not a rig — see DEVLOG for the numbers and the caveat.
 
-ssc-2 LANDED 2026-09-30 on master at `SSC2_HASH` (range
-`6bc3d08f..SSC2_HASH`; CI pending the next push). What landed against
+ssc-2 LANDED 2026-09-30 on master at `5a124669` (range
+`6bc3d08f..5a124669`; CI pending the next push). What landed against
 the slice text: `build_tar_shard` (`remote/transfer/payload.rs`) returns
 `TarShardBuild { data, headers: packed, skipped }` and appends a member
 only from a buffer of exactly `header.size` bytes — open → stat from the
