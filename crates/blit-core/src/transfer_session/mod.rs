@@ -3127,10 +3127,19 @@ async fn send_payload_records(
                         continue;
                     }
                 };
-                let now = reader
-                    .len()
-                    .await
-                    .map_err(|e| tag_path(eyre::Report::new(e), &header.relative_path))?;
+                // cr-ssc1-5: a metadata failure on the opened handle is
+                // that file's failure, exactly like an open failure.
+                let now = match reader.len().await {
+                    Ok(now) => now,
+                    Err(err) => {
+                        tx.send(frame(Frame::FileSkipped(crate::generated::FileFailure {
+                            relative_path: header.relative_path.clone(),
+                            reason: format!("source: cannot read metadata: {err}"),
+                        })))
+                        .await?;
+                        continue;
+                    }
+                };
                 if now != header.size {
                     tx.send(frame(Frame::FileSkipped(crate::generated::FileFailure {
                         relative_path: header.relative_path.clone(),

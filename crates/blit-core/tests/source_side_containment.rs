@@ -106,6 +106,8 @@ enum Fault {
     /// ssc-3: the body is intact but the handle reports `n` bytes when
     /// re-checked after it (the file was rewritten while being read).
     DriftsAfterBody(u64),
+    /// cr-ssc1-5: the handle opens but its metadata cannot be read.
+    StatFails,
 }
 
 /// A reader that yields its inner bytes and then fails instead of
@@ -185,6 +187,13 @@ impl TransferSource for FaultySource {
                     opened.into_reader(),
                     header.size,
                     *after,
+                ))
+            }
+            Some(Fault::StatFails) => {
+                let opened = self.inner.open_file(header).await?;
+                Ok(OpenedSourceFile::virtual_reader_stat_fails(
+                    opened.into_reader(),
+                    header.size,
                 ))
             }
             None => self.inner.open_file(header).await,
@@ -508,6 +517,36 @@ async fn data_plane_source_open_failure_is_skipped_and_reported() {
     // `DataPlaneSession::send_file` and this test's source faults with
     // "opening locked.bin" instead of completing.
     assert_skip_contained(Carrier::DataPlane, Fault::OpenFails, "source: cannot open:").await;
+}
+
+// ---------------------------------------------------------------------------
+// cr-ssc1-5: a metadata failure on the opened handle, before
+// announcement, is a per-file skip on both carriers — never fatal
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_opened_handle_stat_failure_is_skipped_and_reported() {
+    // Mutation proof: restore `.map_err(tag_path)?` on the pre-announce
+    // `reader.len()` in `send_payload_records` and the source faults
+    // instead of completing.
+    assert_skip_contained(
+        Carrier::InStream,
+        Fault::StatFails,
+        "source: cannot read metadata:",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_opened_handle_stat_failure_is_skipped_and_reported() {
+    // Mutation proof: restore `.with_context(..)?` on the pre-announce
+    // `file.len()` in `DataPlaneSession::send_file`.
+    assert_skip_contained(
+        Carrier::DataPlane,
+        Fault::StatFails,
+        "source: cannot read metadata:",
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------

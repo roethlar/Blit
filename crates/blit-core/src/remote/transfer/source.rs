@@ -205,6 +205,9 @@ pub enum OpenedSourceFile {
         /// first reports — a file that changed size while its body was
         /// being read. `None` keeps `len` stable.
         len_after: Option<u64>,
+        /// Test hook (cr-ssc1-5): every `len()` call fails — a handle
+        /// that opened but whose metadata cannot be read.
+        len_fails: bool,
     },
 }
 
@@ -218,6 +221,22 @@ impl OpenedSourceFile {
             reader,
             len,
             len_after: None,
+            len_fails: false,
+        }
+    }
+
+    /// A virtual reader whose handle opened but whose `len()` always
+    /// fails (cr-ssc1-5 guards: a metadata error on the opened handle is
+    /// a per-file skip, never fatal).
+    pub fn virtual_reader_stat_fails(
+        reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        len: u64,
+    ) -> Self {
+        Self::Virtual {
+            reader,
+            len,
+            len_after: None,
+            len_fails: true,
         }
     }
 
@@ -233,6 +252,7 @@ impl OpenedSourceFile {
             reader,
             len,
             len_after: Some(len_after),
+            len_fails: false,
         }
     }
 
@@ -240,7 +260,17 @@ impl OpenedSourceFile {
     pub async fn len(&mut self) -> std::io::Result<u64> {
         match self {
             Self::Fs { file, .. } => Ok(file.metadata().await?.len()),
-            Self::Virtual { len, len_after, .. } => {
+            Self::Virtual {
+                len,
+                len_after,
+                len_fails,
+                ..
+            } => {
+                if *len_fails {
+                    return Err(std::io::Error::other(
+                        "Input/output error reading file metadata (os error 5)",
+                    ));
+                }
                 let now = *len;
                 if let Some(after) = len_after.take() {
                     *len = after;

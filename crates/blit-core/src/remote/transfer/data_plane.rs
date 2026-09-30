@@ -524,10 +524,16 @@ impl<P: Probe> DataPlaneSession<P> {
                 return Ok(FileSendOutcome::Skipped(reason));
             }
         };
-        let now = file
-            .len()
-            .await
-            .with_context(|| format!("reading the size of {rel}"))?;
+        // cr-ssc1-5: a metadata failure on the opened handle is that
+        // file's failure, exactly like an open failure.
+        let now = match file.len().await {
+            Ok(now) => now,
+            Err(err) => {
+                let reason = format!("source: cannot read metadata: {err}");
+                self.send_skip(rel, &reason).await?;
+                return Ok(FileSendOutcome::Skipped(reason));
+            }
+        };
         if now != header.size {
             let reason = format!(
                 "source: changed size during transfer (manifest {} bytes, now {now})",
