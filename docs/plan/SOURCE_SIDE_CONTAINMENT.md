@@ -782,8 +782,8 @@ cksum for …` (the exact variant depends on which overflow bytes land in
 the checksum field; the owner's run said "was not a number"). Mutation
 proofs in DEVLOG.
 
-ssc-3 LANDED 2026-09-30 on master at `SSC3_HASH` (range
-`905ddb37..SSC3_HASH`; CI on all three OSes pending the next push).
+ssc-3 LANDED 2026-09-30 on master at `b176a2ab` (range
+`905ddb37..b176a2ab`; CI on all three OSes pending the next push).
 What landed against the slice text: the SOURCE half of retraction on
 both carriers — in-stream `send_payload_records` and data-plane
 `DataPlaneSession::send_file` close a record FAILED (`FileEnd{ok:false}`
