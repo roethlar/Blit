@@ -35,7 +35,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   mirror on cargo 0.1.2 died on a growing SQLite WAL's tar shard). D1–D7
   all ruled (D-2026-09-28-1..-4, D-2026-09-29-1..-4). **ssc-1, ssc-2,
   ssc-3, ssc-4 LANDED 2026-09-30** (`bd4c48d0`, `5a124669`, `b176a2ab`,
-  `__SSC4_HASH__` — see the plan's Execution record and DEVLOG): ledger +
+  `c3a38876` — see the plan's Execution record and DEVLOG): ledger +
   skip records + terminators + sink lifecycle; exact-size shard packing
   (the field failure reproduces red with the old packer); retraction by
   the record's terminator incl. resume; per-file preparation, local

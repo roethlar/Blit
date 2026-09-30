@@ -827,8 +827,8 @@ read, read error} × both carriers × both initiators (block 0 landed,
 nothing past the fault, not stamped, `files_resumed` 0, the other file
 lands). Mutation proofs in DEVLOG.
 
-ssc-4 LANDED 2026-09-30 on master at `__SSC4_HASH__` (range
-`b70ef03a..__SSC4_HASH__`; CI on all three OSes pending the next push).
+ssc-4 LANDED 2026-09-30 on master at `c3a38876` (range
+`b70ef03a..c3a38876`; CI on all three OSes pending the next push).
 What landed against the slice text: **D-E** — `prepare_payload` returns
 per-file outcomes: `PreparedPayload::Skipped(FileFailure)` for a `File` /
 `ResumeFile` whose Windows-metadata hydration fails, per-member hydration
