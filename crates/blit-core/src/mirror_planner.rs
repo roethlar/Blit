@@ -297,18 +297,29 @@ impl MirrorPlanner {
         // otherwise.
         // cr-fix2-3: a failed entry is known here by its TEXT only, and
         // several distinct raw names can collapse to one text (the
-        // duplicate-collision case). Shield conservatively: the text path
-        // itself and EVERY raw entry that collapses to it, decoded where
-        // storable — never a first-match guess between them.
+        // duplicate-collision case). Shield conservatively: EVERY raw entry
+        // that collapses to it, decoded where storable — never a
+        // first-match guess between them.
+        // cr-fix3-1: and the text path itself only where it is a real
+        // identity of the failure — always where raw names are unstorable
+        // (the text is then the raw entry's identity), and on a storable
+        // host only when no raw entry claims the text or a representable
+        // source entry carries that very name. Otherwise the text names a
+        // distinct, unrelated destination path (see the keep set above),
+        // and shielding it would pin stale data forever.
         let mut shield_set: HashSet<CasefoldKey> = HashSet::new();
         for rel in shielded {
-            shield_set.insert(CasefoldKey::new(Path::new(rel)));
+            let mut claimed_by_raw = false;
             for entry in raw_entries.iter().filter(|entry| &entry.text == rel) {
+                claimed_by_raw = true;
                 if let Some(path) =
                     crate::raw_name::path_from_received_raw(&entry.raw, raw_names_storable)
                 {
                     shield_set.insert(CasefoldKey::new(&path));
                 }
+            }
+            if !raw_names_storable || !claimed_by_raw || source_files.contains(rel) {
+                shield_set.insert(CasefoldKey::new(Path::new(rel)));
             }
         }
 
@@ -526,6 +537,98 @@ mod shield_tests {
             "both raw identities are shielded; only the unrelated entry is planned: {plan:?}"
         );
         assert!(plan.dirs.is_empty(), "{plan:?}");
+    }
+
+    /// cr-fix3-1: a failed raw-named entry's lossy TEXT is a destination
+    /// identity of its own only where raw names cannot be stored, or where
+    /// a representable source entry carries that very name. On a
+    /// byte-capable destination with neither, a valid-UTF-8 directory
+    /// equal to the lossy rendering is unrelated and extraneous: it and
+    /// its contents are planned, while the failed entry's decoded raw
+    /// path stays shielded. (ASCII "raw" bytes keep this portable.)
+    #[test]
+    fn a_failed_raw_entry_shields_its_lossy_text_only_as_a_real_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        let text = "caf\u{fffd}dir".to_string();
+        std::fs::create_dir_all(dst.join(&text)).unwrap();
+        std::fs::write(dst.join(&text).join("child.bin"), b"unrelated").unwrap();
+        std::fs::create_dir_all(dst.join("realdir")).unwrap();
+        std::fs::write(dst.join("realdir/child.bin"), b"keep me").unwrap();
+        std::fs::write(dst.join("extraneous.bin"), b"x").unwrap();
+        let raw = vec![RawNamedEntry {
+            text: text.clone(),
+            raw: b"realdir".to_vec(),
+        }];
+        let shielded: HashSet<String> = HashSet::from([text.clone()]);
+        let filter = crate::fs_enum::FileFilter::default();
+        let sorted = |mut paths: Vec<PathBuf>| {
+            paths.sort();
+            paths
+        };
+
+        // Storable, no representable entry of that name: the lossy-text
+        // subtree is unrelated and planned; the raw subtree is shielded.
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions(&dst, &HashSet::new(), &raw, &shielded, true, &filter)
+            .unwrap();
+        assert_eq!(
+            sorted(plan.files.clone()),
+            sorted(vec![
+                dst.join("extraneous.bin"),
+                dst.join(&text).join("child.bin")
+            ]),
+            "storable: the unrelated lossy-text subtree is planned: {plan:?}"
+        );
+        assert_eq!(
+            plan.dirs,
+            vec![dst.join(&text)],
+            "storable: the unrelated lossy-text dir is planned: {plan:?}"
+        );
+
+        // Storable, and a representable source entry carries the text: the
+        // failure may be that entry's, so its subtree is shielded too.
+        let source_files: HashSet<String> = HashSet::from([text.clone()]);
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions(&dst, &source_files, &raw, &shielded, true, &filter)
+            .unwrap();
+        assert_eq!(
+            plan.files,
+            vec![dst.join("extraneous.bin")],
+            "storable + representable: the text subtree is kept: {plan:?}"
+        );
+        assert!(plan.dirs.is_empty(), "{plan:?}");
+
+        // Unstorable: the text IS the entry's identity and stays shielded;
+        // the raw bytes name nothing here, so `realdir` is extraneous.
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions(&dst, &HashSet::new(), &raw, &shielded, false, &filter)
+            .unwrap();
+        assert_eq!(
+            sorted(plan.files.clone()),
+            sorted(vec![
+                dst.join("extraneous.bin"),
+                dst.join("realdir/child.bin")
+            ]),
+            "unstorable: the text subtree is kept: {plan:?}"
+        );
+        assert_eq!(plan.dirs, vec![dst.join("realdir")], "{plan:?}");
+
+        // Storable, and NO raw entry claims the failed text: it is a
+        // failure of its own (cr-ssc1-1) and keeps its shield, listed in
+        // the manifest or not.
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions(&dst, &HashSet::new(), &[], &shielded, true, &filter)
+            .unwrap();
+        assert_eq!(
+            sorted(plan.files.clone()),
+            sorted(vec![
+                dst.join("extraneous.bin"),
+                dst.join("realdir/child.bin")
+            ]),
+            "unclaimed: the failed text path keeps its shield: {plan:?}"
+        );
+        assert_eq!(plan.dirs, vec![dst.join("realdir")], "{plan:?}");
     }
 
     /// cr-ssc5-5: a raw-named source entry has ONE destination identity.
