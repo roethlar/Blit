@@ -2634,6 +2634,14 @@ async fn assert_resume_hashes_the_raw_path(carrier: Carrier) {
         // an exact copy of the source.
         let stale = patterned(2 * HALF, 11);
         std::fs::write(dst_root.join(raw_name), &stale).unwrap();
+        // Same size as the source, so only the mtime makes it stale under
+        // the size+mtime compare: push it a day into the past.
+        std::fs::File::options()
+            .write(true)
+            .open(dst_root.join(raw_name))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(86_400))
+            .unwrap();
         std::fs::write(dst_root.join("caf\u{fffd}.txt"), &content).unwrap();
 
         let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
