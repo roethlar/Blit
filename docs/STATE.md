@@ -41,7 +41,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   `--retries`/`--retry-wait` naming; deletions after the main pass, not
   after retries. Next release must bump at least the minor version
   (blit-core API changed; CHANGELOG Unreleased).
-  Review-fix batch 2 landed 2026-09-30 (`44200834..5e9704cf`, 13 Verified).
+  Review-fix batches 2+3 landed (`44200834..51bd57a9`, 15 Verified); 1330/0/2.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive, D-2026-07-05-4 "flip
   the plan and go").** The invariant (plan doc, verbatim): ONE block of
   transfer code; direction/initiator/verb can NEVER affect wall time by

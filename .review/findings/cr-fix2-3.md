@@ -3,7 +3,7 @@
 **Severity**: HIGH — on a lossy-name collision the shield can resolve to the other raw entry, so a failed entry's populated destination directory is deleted under mirror
 **Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (filled after the fix commit)
+**Commit**: `51bd57a9`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range 44200834..be0b9fda (review-fix batch 2), record .review/results/ssc-fix2-range.codex.json)
 
 ## Evidence

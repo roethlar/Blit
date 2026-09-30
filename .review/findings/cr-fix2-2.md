@@ -3,7 +3,7 @@
 **Severity**: HIGH — when the scan-failure list overflows its wire budget the omitted failures are counted but the path set is reported complete; a further retry pass can clear them and exit 0 with files never landed (data loss under a success exit; move gate bypassed)
 **Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (filled after the fix commit)
+**Commit**: `42f67b40`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range 44200834..be0b9fda (review-fix batch 2), record .review/results/ssc-fix2-range.codex.json)
 
 ## Evidence

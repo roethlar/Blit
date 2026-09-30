@@ -1039,6 +1039,25 @@ destination identity per raw-named entry), cr-ssc5-4 `5e9704cf` (shield
 under the raw identity). Records: `.review/findings/`, index rows in
 `REVIEW.md`, mutations in the batch's DEVLOG entry.
 
+**Review fixes, batch 3 (2026-09-30, range `f4390025..51bd57a9`):** the
+codex review of batch 2 (`.review/results/ssc-fix2-range.codex.json`)
+returned three findings; one declined (cr-fix2-1: a contract bump for
+`ManifestComplete.scan_failures` — no released build carries contract 7,
+and this plan's Constraints already rule that every pre-release wire
+change lands under 7), two fixed one commit each: cr-fix2-2 `42f67b40` —
+a scoped retry scan's counted-but-unnamed failures (`scan_failures_dropped`)
+now mark the wire retry set truncated (`SinkOutcome::has_unnamed_failures`)
+and the CLI treats a set as exact only when every counted failure is
+represented, carrying the remainder as unretried through every later pass
+(a clean pass can no longer clear them; exit 2; move gate refuses); hidden
+`--diagnostics-scan-failure-name-cap` forces the path in tests;
+cr-fix2-3 `51bd57a9` — the mirror shield covers the text path and every
+raw-named entry collapsing to it instead of a first-match guess. Both
+guards portable (no Linux-only run needed); mutations red then green
+(`scratchpad/cr-ssc-mutations-3.txt`). Gate on macOS: fmt, clippy native
++ Linux-cross `-D warnings`, `cargo test --workspace` 1326 → 1330 passed /
+0 failed / 2 ignored; CI on three OSes unverified until a push.
+
 **ssc-6 LANDED 2026-09-30 on master at `048e55af` (range
 `b342d636..048e55af`): end-of-run retry passes, `--retries`/`-R`
 (default 1) and `--retry-wait`/`-W` (default 30).** What landed against
