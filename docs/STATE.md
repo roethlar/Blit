@@ -33,7 +33,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   run-fatal (D-2026-09-28-2); contract 6→7. ssc-1 `bd4c48d0`, ssc-2
   `5a124669`, ssc-3 `b176a2ab`, ssc-4 `c3a38876`, review fixes
   `14a6bc3f..5d557004`, ssc-6 `048e55af` (`--retries`/`--retry-wait`),
-  ssc-5 `__SSC5__` (non-UTF-8 names by raw bytes, wording, docs, cv-3).
+  ssc-5 `6c266dd4` (non-UTF-8 names by raw bytes, wording, docs, cv-3).
   Suite 1309/0/2 on macOS + Linux-cross clippy; Linux-only guards run
   on magneto. **CI on three OSes UNVERIFIED — push pending the owner.**
   Codex codereview: ssc-1..3 findings fixed; ssc-4/fix-batch/ssc-6/ssc-5

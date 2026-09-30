@@ -1047,8 +1047,8 @@ the switch parse test, the row-label test. Mutations (foreground,
 (b) red; both early stops removed → unit guard red; sleep removed →
 (a) red; wait recording removed → (b) red. Gate on macOS: fmt clean; clippy `-D warnings` clean native and `x86_64-unknown-linux-gnu`; `cargo test --workspace` 1285 → 1300 passed, 0 failed, 2 ignored; check-docs OK; diff-check clean.
 
-**ssc-5 LANDED 2026-09-30 on master at `__SSC5__` (range
-`e14d1b72..__SSC5__`): non-UTF-8 names land by raw bytes (D-F,
+**ssc-5 LANDED 2026-09-30 on master at `6c266dd4` (range
+`e14d1b72..6c266dd4`): non-UTF-8 names land by raw bytes (D-F,
 D-2026-09-29-3), failure wording (D-G, A14), contract-7 docs and
 changelog, cv-3 README.** What landed against the slice text: new
 `blit-core/src/raw_name.rs` (`raw_relative_bytes` — set by the scan only
@@ -1106,7 +1106,7 @@ is written but only runs on Windows CI. Gate on macOS: fmt clean; clippy `-D war
 **ALL SIX SLICES LANDED 2026-09-30** — ssc-1 `bd4c48d0`, ssc-2
 `5a124669`, ssc-3 `b176a2ab`, ssc-4 `c3a38876`, review fixes
 `14a6bc3f..5d557004` (cr-ssc1-1..5, cr-ssc2-1, cr-ssc2-3, cr-ssc3-1),
-ssc-6 `048e55af`, ssc-5 `__SSC5__`. Status stays **Active** until the
+ssc-6 `048e55af`, ssc-5 `6c266dd4`. Status stays **Active** until the
 owner declares Shipped: CI on the three OSes is not yet proven (push
 pending the owner). Two notes for the owner from ssc-6: (1) the CLI
 already had `--retry`/`--wait` (whole-transfer transient retries), so
