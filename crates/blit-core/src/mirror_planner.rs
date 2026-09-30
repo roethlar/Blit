@@ -291,10 +291,24 @@ impl MirrorPlanner {
             .into_iter()
             .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
             .collect::<Vec<_>>();
-        let shield_set: HashSet<CasefoldKey> = shielded
-            .iter()
-            .map(|rel| CasefoldKey::new(Path::new(rel)))
-            .collect();
+        // cr-ssc5-4: a failed entry shields its destination subtree under the
+        // identity it actually has here — a raw-named entry's exact bytes
+        // where storable (its text names nothing of its own there), its text
+        // otherwise.
+        let mut shield_set: HashSet<CasefoldKey> = HashSet::new();
+        for rel in shielded {
+            let raw_entry = raw_entries.iter().find(|entry| &entry.text == rel);
+            match raw_entry.and_then(|entry| {
+                crate::raw_name::path_from_received_raw(&entry.raw, raw_names_storable)
+            }) {
+                Some(path) => {
+                    shield_set.insert(CasefoldKey::new(&path));
+                }
+                None => {
+                    shield_set.insert(CasefoldKey::new(Path::new(rel)));
+                }
+            }
+        }
 
         Ok(plan_from_sets(dest_root, source_set, shield_set, dest_set))
     }
@@ -448,6 +462,33 @@ mod shield_tests {
     /// host that cannot store them — the entry counts by its text only,
     /// the plan is computed, and an unrelated extraneous entry is still
     /// planned.
+    /// cr-ssc5-4: a failed raw-named entry shields the destination subtree
+    /// under its RAW path (where storable): a populated directory there is
+    /// untouched, while an unrelated extraneous entry is still planned.
+    #[test]
+    fn a_failed_raw_named_entry_shields_its_raw_destination_subtree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(dst.join("realdir")).unwrap();
+        std::fs::write(dst.join("realdir/child.bin"), b"keep me").unwrap();
+        std::fs::write(dst.join("extraneous.bin"), b"x").unwrap();
+        let raw = vec![RawNamedEntry {
+            text: "caf\u{fffd}dir".to_string(),
+            raw: b"realdir".to_vec(),
+        }];
+        let shielded: HashSet<String> = HashSet::from(["caf\u{fffd}dir".to_string()]);
+        let filter = crate::fs_enum::FileFilter::default();
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions(&dst, &HashSet::new(), &raw, &shielded, true, &filter)
+            .unwrap();
+        assert_eq!(
+            plan.files,
+            vec![dst.join("extraneous.bin")],
+            "the failed raw entry's subtree is untouched, the unrelated entry is planned: {plan:?}"
+        );
+        assert!(plan.dirs.is_empty(), "{plan:?}");
+    }
+
     /// cr-ssc5-5: a raw-named source entry has ONE destination identity.
     /// Where raw names are storable, a distinct file under its lossy text
     /// is extraneous and is planned; where they are not, the text is the
