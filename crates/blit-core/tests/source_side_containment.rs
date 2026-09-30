@@ -625,6 +625,76 @@ async fn mirror_under_a_source_side_skip_deletes_extraneous_and_keeps_the_counte
 }
 
 // ---------------------------------------------------------------------------
+// cr-ssc1-1 — A19: a skipped source FILE whose destination is a populated
+// DIRECTORY shields that directory and its contents from mirror deletion;
+// unrelated extraneous entries still go
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mirror_shields_the_destination_subtree_of_a_skipped_source_file() {
+    for carrier in [Carrier::InStream, Carrier::DataPlane] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        // Source: `node` is a FILE (it will be skipped); ok1.bin lands.
+        write_tree(
+            &src_root,
+            &[
+                ("node", patterned(BIG, 2), 1_600_000_002),
+                ("ok1.bin", patterned(BIG, 1), 1_600_000_001),
+            ],
+        );
+        // Destination: `node/` is a populated DIRECTORY, plus one
+        // genuinely extraneous file elsewhere.
+        write_tree(
+            &dst_root,
+            &[
+                ("node/keep.txt", b"precious".to_vec(), 1_500_000_000),
+                ("node/deeper/also.txt", b"precious too".to_vec(), 1_500_000_000),
+                ("stale.txt", b"gone".to_vec(), 1_500_000_000),
+            ],
+        );
+        let mut open = open_for(TransferRole::Source, carrier);
+        open.mirror_enabled = true;
+        open.mirror_kind = MirrorMode::All as i32;
+        let source: Arc<dyn TransferSource> = Arc::new(FaultySource {
+            inner: FsTransferSource::new(src_root.clone()),
+            faults: HashMap::from([("node", Fault::OpenFails)]),
+        });
+        let (sr, dr) = run_with(open, carrier, source, dst_root.clone()).await;
+        let summary = sr.unwrap_or_else(|e| panic!("source must complete ({carrier:?}): {e:#}"));
+        let dest = dr.unwrap_or_else(|e| panic!("destination must complete ({carrier:?}): {e:#}"));
+        assert_eq!(summary, dest.summary);
+        assert_eq!(summary.files_failed, 1, "node is reported ({carrier:?})");
+        assert_eq!(summary.failures[0].relative_path, "node");
+        assert!(
+            !dst_root.join("stale.txt").exists(),
+            "the unrelated extraneous entry still goes ({carrier:?})"
+        );
+        assert_eq!(
+            std::fs::read(dst_root.join("node/keep.txt")).unwrap(),
+            b"precious",
+            "a skipped file's destination subtree is shielded ({carrier:?})"
+        );
+        assert_eq!(
+            std::fs::read(dst_root.join("node/deeper/also.txt")).unwrap(),
+            b"precious too",
+            "every descendant is shielded ({carrier:?})"
+        );
+        assert_eq!(
+            summary.entries_deleted, 1,
+            "exactly stale.txt was deleted ({carrier:?})"
+        );
+        assert_eq!(
+            std::fs::read(dst_root.join("ok1.bin")).unwrap(),
+            patterned(BIG, 1)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The real thing on Windows: a file held open with no sharing
 // ---------------------------------------------------------------------------
 

@@ -313,13 +313,12 @@ impl SinkOutcome {
     /// caller that keeps those per lane (the session counts writes lane by
     /// lane but reports failures as one bounded list).
     ///
-    /// Per-payload identity (`failed_paths`) is not folded in: a session's
-    /// failed set is unbounded, and the plan's bounded-report constraint
-    /// applies to everything a merged outcome carries. The merged total
-    /// then exceeds the identity kept, so [`SinkOutcome::file_failed`]
-    /// answers conservatively on the merged value — the safe direction.
-    /// The only completion lane that reads a merged outcome is the
-    /// single-file resume block record (see [`SinkOutcome::file_failed`]).
+    /// Per-payload identity (`failed_paths`) IS folded in (cr-ssc1-1,
+    /// SOURCE_SIDE_CONTAINMENT A19): the mirror pass needs the exact,
+    /// uncapped set of failed paths to shield their destination subtrees
+    /// from deletion, and an exact set also lets
+    /// [`SinkOutcome::file_failed`] answer per path on a merged outcome.
+    /// Only the wire report (`failures`) stays bounded.
     pub fn merge_failures(&mut self, other: &SinkOutcome) {
         self.files_failed_total = self
             .files_failed_total
@@ -327,6 +326,14 @@ impl SinkOutcome {
         let room = MAX_REPORTED_FILE_FAILURES.saturating_sub(self.failures.len());
         self.failures
             .extend(other.failures.iter().take(room).cloned());
+        self.failed_paths
+            .extend(other.failed_paths.iter().cloned());
+    }
+
+    /// Every path this outcome recorded as failed — uncapped, exact
+    /// (the wire report is the bounded view of the same set).
+    pub fn failed_paths(&self) -> &std::collections::HashSet<String> {
+        &self.failed_paths
     }
 
     /// This report's carried details in wire form, bounded by BOTH the

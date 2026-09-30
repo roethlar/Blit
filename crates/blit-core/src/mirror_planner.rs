@@ -94,7 +94,7 @@ impl MirrorPlanner {
             .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
             .collect::<Vec<_>>();
 
-        Ok(plan_from_sets(destination, source_set, dest_set))
+        Ok(plan_from_sets(destination, source_set, HashSet::new(), dest_set))
     }
 
     pub fn checksum_enabled(&self) -> bool {
@@ -140,7 +140,7 @@ impl MirrorPlanner {
             .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
             .collect::<Vec<_>>();
 
-        Ok(plan_from_sets(destination, source_set, dest_set))
+        Ok(plan_from_sets(destination, source_set, HashSet::new(), dest_set))
     }
 
     pub fn plan_remote_deletions(
@@ -166,7 +166,7 @@ impl MirrorPlanner {
             })
             .collect::<Vec<_>>();
 
-        plan_from_sets(dest_root, source_set, dest_set)
+        plan_from_sets(dest_root, source_set, HashSet::new(), dest_set)
     }
     pub fn plan_expected_deletions(
         &self,
@@ -188,7 +188,7 @@ impl MirrorPlanner {
             .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
             .collect::<Vec<_>>();
 
-        Ok(plan_from_sets(dest_root, source_keys, dest_set))
+        Ok(plan_from_sets(dest_root, source_keys, HashSet::new(), dest_set))
     }
 
     /// otp-6: the unified session's single mirror-delete rule. Given the
@@ -209,10 +209,19 @@ impl MirrorPlanner {
     /// it is the user's filter (so out-of-scope dest entries are never
     /// candidates); for `MirrorMode::All` it is `FileFilter::default()` (the
     /// whole dest tree is in scope).
+    ///
+    /// `shielded` (cr-ssc1-1, SOURCE_SIDE_CONTAINMENT A19) is the exact set
+    /// of source paths that FAILED to land in this session: each one and
+    /// every component-wise descendant of it at the destination is left
+    /// alone — a skipped source *file* whose destination is a populated
+    /// *directory* must not have that directory's contents deleted when
+    /// the replacement never arrived. Unrelated extraneous entries are
+    /// still deleted.
     pub fn plan_session_deletions(
         &self,
         dest_root: &Path,
         source_files: &HashSet<String>,
+        shielded: &HashSet<String>,
         filter: &FileFilter,
     ) -> Result<MirrorDeletionPlan> {
         let enumerator = FileEnumerator::new(filter.clone_without_cache());
@@ -238,8 +247,12 @@ impl MirrorPlanner {
             .into_iter()
             .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
             .collect::<Vec<_>>();
+        let shield_set: HashSet<CasefoldKey> = shielded
+            .iter()
+            .map(|rel| CasefoldKey::new(Path::new(rel)))
+            .collect();
 
-        Ok(plan_from_sets(dest_root, source_set, dest_set))
+        Ok(plan_from_sets(dest_root, source_set, shield_set, dest_set))
     }
 
     pub fn should_copy_remote_entry(
@@ -330,6 +343,7 @@ impl MirrorPlanner {
 fn plan_from_sets(
     dest_root: &Path,
     source_set: HashSet<CasefoldKey>,
+    shield_set: HashSet<CasefoldKey>,
     dest_entries: Vec<(PathBuf, bool)>,
 ) -> MirrorDeletionPlan {
     let mut files = Vec::new();
@@ -340,6 +354,11 @@ fn plan_from_sets(
             continue;
         }
         if source_set.contains(&CasefoldKey::new(&rel)) {
+            continue;
+        }
+        // cr-ssc1-1: the entry, or any ancestor of it, is a path that
+        // failed to land this session — shielded, whatever it holds.
+        if !shield_set.is_empty() && is_shielded(&rel, &shield_set) {
             continue;
         }
         let abs = dest_root.join(&rel);
@@ -354,6 +373,21 @@ fn plan_from_sets(
     dirs.reverse();
 
     MirrorDeletionPlan { files, dirs }
+}
+
+/// Whether `rel` or any of its ancestors is in `shield_set`.
+fn is_shielded(rel: &Path, shield_set: &HashSet<CasefoldKey>) -> bool {
+    let mut current = Some(rel);
+    while let Some(path) = current {
+        if path.as_os_str().is_empty() {
+            break;
+        }
+        if shield_set.contains(&CasefoldKey::new(path)) {
+            return true;
+        }
+        current = path.parent();
+    }
+    false
 }
 
 #[cfg(test)]

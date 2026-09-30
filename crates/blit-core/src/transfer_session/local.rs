@@ -1482,6 +1482,139 @@ mod tests {
         );
     }
 
+    /// cr-ssc1-1 (A19) on the local route: the vanished source FILE's
+    /// destination counterpart is a populated DIRECTORY; the mirror
+    /// completes, reports the file, deletes the unrelated extraneous
+    /// entry, and leaves that directory and everything under it alone.
+    #[tokio::test]
+    async fn mirror_shields_the_destination_subtree_of_a_vanished_source_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("mkdir src");
+        std::fs::create_dir_all(&dst_root).expect("mkdir dst");
+        // Source: `node` is a FILE that vanishes after the scan; at the
+        // destination `node/` is a populated DIRECTORY (cr-ssc1-1, A19).
+        std::fs::write(src_root.join("ok.txt"), b"fine").expect("write");
+        std::fs::write(src_root.join("node"), b"vanishes").expect("write");
+        std::fs::create_dir_all(dst_root.join("node/deeper")).expect("mkdir node");
+        std::fs::write(dst_root.join("node/keep.txt"), b"precious").expect("write");
+        std::fs::write(dst_root.join("node/deeper/also.txt"), b"precious too").expect("write");
+        std::fs::write(dst_root.join("extraneous.txt"), b"would die").expect("write");
+
+        let open = SessionOpen {
+            initiator_role: TransferRole::Source as i32,
+            compare_mode: ComparisonMode::SizeMtime as i32,
+            in_stream_bytes: true,
+            mirror_enabled: true,
+            mirror_kind: MirrorMode::All as i32,
+            ..Default::default()
+        };
+        let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let fs_source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
+        // The same wrapper scans AND prepares, as the production local
+        // route uses one source for both.
+        let vanishing: Arc<dyn TransferSource> = Arc::new(VanishingSource {
+            inner: fs_source,
+            vanish: "node".to_string(),
+        });
+        let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
+            src_root.clone(),
+            dst_root.clone(),
+            FsSinkConfig::default(),
+        ));
+        let local_apply = LocalApply {
+            src_root: src_root.clone(),
+            sink,
+            prepare_source: Arc::clone(&vanishing),
+            plan_options: PlanOptions::default(),
+            mirror_scope_filter: FileFilter::default(),
+            dry_run: false,
+            null_sink: false,
+            sink_workers: 1,
+            stats: Arc::new(LocalApplyStats::default()),
+            phase_probe: LocalPhaseProbe::disabled(),
+            checker_pool: CheckerPool::new(1).expect("checker pool"),
+            dir_stats: Arc::default(),
+        };
+        let source_cfg = SourceSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::initiator(open),
+            plan_options: PlanOptions::default(),
+            data_plane_host: None,
+            instruments: SourceInstruments {
+                progress: None,
+                unreadable: Some(Arc::clone(&unreadable)),
+                trace_data_plane: false,
+                session_phase_trace: Default::default(),
+                lifecycle_trace: Default::default(),
+                small_file_probe: SmallFileProbe::disabled(),
+                on_terminal_summary: None,
+                stream_seed: None,
+                settled_streams_out: None,
+                #[cfg(test)]
+                dial_test_samples: None,
+                #[cfg(test)]
+                dial_terminal_test_gate: None,
+                #[cfg(test)]
+                dial_proposal_test_gate: None,
+                #[cfg(test)]
+                dial_membership_test_gate: None,
+            },
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::Responder,
+            data_plane_host: None,
+            receiver_capacity: None,
+            instruments: DestinationInstruments {
+                small_file_probe: SmallFileProbe::disabled(),
+                ..Default::default()
+            },
+            local_apply: Some(local_apply),
+        };
+        let (a, b) = in_process_pair();
+        let scan_source: Arc<dyn TransferSource> = Arc::clone(&vanishing);
+        let (_, dest_result): (
+            eyre::Result<TransferSummary>,
+            eyre::Result<DestinationOutcome>,
+        ) = tokio::join!(
+            run_source(source_cfg, a, scan_source),
+            run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
+        );
+
+        let dest = dest_result.expect("a vanished source file never ends the local mirror");
+        assert_eq!(
+            dest.summary.files_failed, 1,
+            "the vanished file is reported"
+        );
+        assert_eq!(dest.summary.failures[0].relative_path, "node");
+        assert!(
+            dest.summary.failures[0]
+                .reason
+                .starts_with("source: cannot open:"),
+            "{}",
+            dest.summary.failures[0].reason
+        );
+        assert_eq!(dest.summary.files_transferred, 1, "ok.txt lands");
+        assert_eq!(std::fs::read(dst_root.join("ok.txt")).unwrap(), b"fine");
+        assert!(
+            !dst_root.join("extraneous.txt").exists(),
+            "the unrelated extraneous entry still goes"
+        );
+        assert_eq!(
+            std::fs::read(dst_root.join("node/keep.txt")).unwrap(),
+            b"precious",
+            "the vanished file's destination subtree is shielded from the delete pass"
+        );
+        assert_eq!(
+            std::fs::read(dst_root.join("node/deeper/also.txt")).unwrap(),
+            b"precious too",
+            "every descendant is shielded"
+        );
+        assert_eq!(dest.summary.entries_deleted, 1, "exactly extraneous.txt went");
+    }
+
     /// A source wrapper that makes one file unopenable (mode 000) the
     /// first time a payload is prepared — a file the sink itself opens
     /// (a single-file payload) that fails at the source side.

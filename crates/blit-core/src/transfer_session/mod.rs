@@ -3931,6 +3931,7 @@ fn tag_path(report: eyre::Report, path: &str) -> eyre::Report {
 fn mirror_delete_pass(
     dst_root: &Path,
     source_files: &HashSet<String>,
+    shielded: &HashSet<String>,
     filter: &crate::fs_enum::FileFilter,
     tolerate_nonempty_dirs: bool,
     canonical_dst_root: Option<&Path>,
@@ -3940,6 +3941,7 @@ fn mirror_delete_pass(
     let plan = crate::mirror_planner::MirrorPlanner::new(false).plan_session_deletions(
         dst_root,
         source_files,
+        shielded,
         filter,
     )?;
     // review otp-9b F2: a dropped session future (client disconnect,
@@ -4978,6 +4980,11 @@ async fn destination_session_inner(
                     let dst = dst_root.to_path_buf();
                     let canonical = canonical_dst_root.clone();
                     let files = std::mem::take(&mut source_files);
+                    // cr-ssc1-1 (A19): every path that failed to land —
+                    // source-side skip or retraction, destination-side
+                    // containment — shields its destination subtree from
+                    // the delete pass; the set is exact and uncapped.
+                    let shielded = contained_failures.failed_paths().clone();
                     let filter = mirror_filter.clone_without_cache();
                     let tolerate_nonempty = mirror_kind == MirrorMode::FilteredSubset;
                     // otp-11: `--dry-run` (local carrier only) plans the
@@ -5012,6 +5019,7 @@ async fn destination_session_inner(
                             mirror_delete_pass(
                                 &dst,
                                 &files,
+                                &shielded,
                                 &filter,
                                 tolerate_nonempty,
                                 canonical.as_deref(),
@@ -8602,6 +8610,7 @@ mod tests {
         let err = mirror_delete_pass(
             &dst,
             &source_files,
+            &HashSet::new(),
             &filter,
             false,
             Some(&elsewhere),
@@ -8623,6 +8632,7 @@ mod tests {
         let deleted = mirror_delete_pass(
             &dst,
             &source_files,
+            &HashSet::new(),
             &filter,
             false,
             Some(&real_root),
@@ -8648,6 +8658,7 @@ mod tests {
         let counts = mirror_delete_pass(
             tmp.path(),
             &source_files,
+            &HashSet::new(),
             &filter,
             false,
             None,
@@ -8674,6 +8685,7 @@ mod tests {
         let counts = mirror_delete_pass(
             tmp.path(),
             &source_files,
+            &HashSet::new(),
             &filter,
             false,
             None,
@@ -8910,6 +8922,7 @@ mod tests {
         let result = mirror_delete_pass(
             tmp.path(),
             &source_files,
+            &HashSet::new(),
             &filter,
             false,
             None,
@@ -8927,6 +8940,7 @@ mod tests {
         let deleted = mirror_delete_pass(
             tmp.path(),
             &source_files,
+            &HashSet::new(),
             &filter,
             false,
             None,
