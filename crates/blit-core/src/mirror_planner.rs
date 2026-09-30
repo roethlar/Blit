@@ -30,6 +30,14 @@ pub struct MirrorDeletionPlan {
     pub dirs: Vec<PathBuf>,
 }
 
+/// A manifest entry whose name is not valid UTF-8 (contract v7): the
+/// lossy text every map is keyed by, and the exact source bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawNamedEntry {
+    pub text: String,
+    pub raw: Vec<u8>,
+}
+
 // Case-sensitivity is a property of the platform's default filesystem, and
 // this key exists to model it so a mirror never deletes a file the source
 // kept under a different case. Windows (NTFS) and macOS (APFS) are
@@ -236,8 +244,9 @@ impl MirrorPlanner {
         &self,
         dest_root: &Path,
         source_files: &HashSet<String>,
-        source_raw_files: &[Vec<u8>],
+        raw_entries: &[RawNamedEntry],
         shielded: &HashSet<String>,
+        raw_names_storable: bool,
         filter: &FileFilter,
     ) -> Result<MirrorDeletionPlan> {
         let enumerator = FileEnumerator::new(filter.clone_without_cache());
@@ -263,8 +272,14 @@ impl MirrorPlanner {
         // Contract v7 (D-F): a source name that is not valid UTF-8 lives at
         // the destination under its exact bytes, which on a byte-keyed
         // filesystem never equal the lossy text — keep it by its bytes too.
-        for raw in source_raw_files {
-            keep(&crate::raw_name::path_from_raw(raw));
+        // cr-ssc5-3: received bytes are decoded only where this host can
+        // store them; elsewhere the entry's text is its only identity.
+        for entry in raw_entries {
+            if let Some(path) =
+                crate::raw_name::path_from_received_raw(&entry.raw, raw_names_storable)
+            {
+                keep(&path);
+            }
         }
 
         let dest_set = dest_entries
@@ -423,6 +438,34 @@ mod shield_tests {
     use super::*;
     use std::collections::HashSet;
 
+    /// cr-ssc5-3: foreign raw bytes (a Linux name reaching a Windows or
+    /// macOS destination) are never decoded during mirror planning on a
+    /// host that cannot store them — the entry counts by its text only,
+    /// the plan is computed, and an unrelated extraneous entry is still
+    /// planned.
+    #[test]
+    fn foreign_raw_bytes_are_not_decoded_where_unstorable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("extraneous.bin"), b"x").unwrap();
+        std::fs::write(dst.join("caf\u{fffd}.txt"), b"text counterpart").unwrap();
+        let source_files: HashSet<String> = HashSet::from(["caf\u{fffd}.txt".to_string()]);
+        let raw = vec![RawNamedEntry {
+            text: "caf\u{fffd}.txt".to_string(),
+            raw: b"caf\xe9.txt".to_vec(),
+        }];
+        let filter = crate::fs_enum::FileFilter::default();
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions(&dst, &source_files, &raw, &HashSet::new(), false, &filter)
+            .unwrap();
+        assert_eq!(
+            plan.files,
+            vec![dst.join("extraneous.bin")],
+            "only the unrelated entry is planned: {plan:?}"
+        );
+    }
+
     /// cr-fix1-1: a single-file source whose one file (relative path "")
     /// failed leaves a populated destination directory untouched — every
     /// entry descends from the empty failed path.
@@ -438,7 +481,7 @@ mod shield_tests {
 
         let shielded: HashSet<String> = HashSet::from([String::new()]);
         let plan = MirrorPlanner::new(false)
-            .plan_session_deletions(&dst, &source_files, &[], &shielded, &filter)
+            .plan_session_deletions(&dst, &source_files, &[], &shielded, true, &filter)
             .unwrap();
         assert!(
             plan.files.is_empty() && plan.dirs.is_empty(),
@@ -447,7 +490,7 @@ mod shield_tests {
 
         // Control: with nothing shielded the same tree IS extraneous.
         let plan = MirrorPlanner::new(false)
-            .plan_session_deletions(&dst, &source_files, &[], &HashSet::new(), &filter)
+            .plan_session_deletions(&dst, &source_files, &[], &HashSet::new(), true, &filter)
             .unwrap();
         assert_eq!(plan.files.len(), 2, "control: extraneous files are planned");
     }

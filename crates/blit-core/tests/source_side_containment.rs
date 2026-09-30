@@ -1302,9 +1302,7 @@ fn packer_skips_a_member_that_grows_between_stat_and_read() {
 /// and only the probe can tell.
 #[test]
 fn packer_probe_catches_growth_after_the_stat() {
-    use blit_core::remote::transfer::{
-        build_tar_shard_with, MemberOpenError, MemberOpenStage, OpenedMember,
-    };
+    use blit_core::remote::transfer::{build_tar_shard_with, MemberOpenError, OpenedMember};
 
     let header = FileHeader {
         relative_path: "grows-late.txt".into(),

@@ -3991,7 +3991,7 @@ fn tag_path(report: eyre::Report, path: &str) -> eyre::Report {
 fn mirror_delete_pass(
     dst_root: &Path,
     source_files: &HashSet<String>,
-    source_raw_files: &[Vec<u8>],
+    raw_entries: &[crate::mirror_planner::RawNamedEntry],
     shielded: &HashSet<String>,
     filter: &crate::fs_enum::FileFilter,
     tolerate_nonempty_dirs: bool,
@@ -4002,8 +4002,9 @@ fn mirror_delete_pass(
     let plan = crate::mirror_planner::MirrorPlanner::new(false).plan_session_deletions(
         dst_root,
         source_files,
-        source_raw_files,
+        raw_entries,
         shielded,
+        crate::raw_name::destination_can_store_raw_names(),
         filter,
     )?;
     // review otp-9b F2: a dropped session future (client disconnect,
@@ -4157,7 +4158,7 @@ async fn destination_session_inner(
     // that collapses to the same text is reported instead of overwriting;
     // and the raw bytes of every kept non-UTF-8 name, for the mirror pass.
     let mut seen_manifest: HashSet<String> = HashSet::new();
-    let mut source_raw_files: Vec<Vec<u8>> = Vec::new();
+    let mut source_raw_files: Vec<crate::mirror_planner::RawNamedEntry> = Vec::new();
     let raw_names_storable = sink.can_store_raw_names();
 
     // otp-7a: resume. Headers of resume-granted needs are retained so a
@@ -4386,7 +4387,10 @@ async fn destination_session_inner(
                 if mirror_enabled {
                     source_files.insert(header.relative_path.clone());
                     if let Some(raw) = &header.raw_relative_path {
-                        source_raw_files.push(raw.clone());
+                        source_raw_files.push(crate::mirror_planner::RawNamedEntry {
+                            text: header.relative_path.clone(),
+                            raw: raw.clone(),
+                        });
                     }
                 }
                 // Contract v7 (D-F, A13): two manifest entries that collapse

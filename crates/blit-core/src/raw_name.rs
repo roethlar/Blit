@@ -78,9 +78,13 @@ pub fn is_unrepresentable_name_error(error: &std::io::Error) -> bool {
     }
 }
 
-/// Rebuild the path a raw-name header names on THIS host's filesystem.
-/// Unix: the bytes verbatim. Windows: the bytes are the WTF-8 this same
-/// process's scan produced, so they round-trip exactly.
+/// Rebuild the path a raw-name header names on THIS host's filesystem,
+/// for bytes THIS PROCESS produced (its own scan's `raw_relative_bytes`)
+/// or bytes a capable Unix destination is about to create. Unix: the
+/// bytes verbatim. Windows: the bytes are the WTF-8 this same process's
+/// scan produced, so they round-trip exactly — never call this with
+/// bytes received from a peer on a host that cannot store raw names;
+/// use [`path_from_received_raw`] for those (cr-ssc5-3).
 pub fn path_from_raw(raw: &[u8]) -> PathBuf {
     #[cfg(unix)]
     {
@@ -107,6 +111,16 @@ pub fn path_from_raw(raw: &[u8]) -> PathBuf {
     {
         PathBuf::from(String::from_utf8_lossy(raw).into_owned())
     }
+}
+
+/// cr-ssc5-3: the local path for raw name bytes RECEIVED from a peer,
+/// or `None` when this host cannot store raw names (`storable` — normally
+/// [`destination_can_store_raw_names`]; explicit so planners can be
+/// tested on any host). Foreign bytes are never decoded on Windows or
+/// macOS: the entry is reported unstorable at intake and every consumer
+/// (mirror planning included) uses only its textual counterpart there.
+pub fn path_from_received_raw(raw: &[u8], storable: bool) -> Option<PathBuf> {
+    storable.then(|| path_from_raw(raw))
 }
 
 /// The on-disk path of `header` under `root`: by raw bytes when the name
@@ -185,6 +199,17 @@ mod tests {
         assert_eq!(
             source_path(Path::new("/root/f"), &root_file),
             PathBuf::from("/root/f")
+        );
+    }
+
+    /// cr-ssc5-3: foreign raw bytes are never decoded on a host that cannot
+    /// store them; a capable host decodes them verbatim.
+    #[test]
+    fn received_raw_bytes_are_decoded_only_where_storable() {
+        assert_eq!(path_from_received_raw(b"caf\xe9.txt", false), None);
+        assert_eq!(
+            path_from_received_raw(b"sub/ok.bin", true),
+            Some(PathBuf::from("sub/ok.bin"))
         );
     }
 
