@@ -306,7 +306,9 @@ where
         let mut pass_args = args.clone();
         pass_args.retry_only = Some(set);
         pass_args.retry_pass = Some((pass, total, n));
-        let result = run(pass_args).await?;
+        // win-1: one heap allocation per pass keeps the pass's session
+        // out of this loop's state and its caller's frame.
+        let result = Box::pin(run(pass_args)).await?;
         added_files = added_files.saturating_add(result.files_transferred);
         added_bytes = added_bytes.saturating_add(result.bytes_transferred);
         in_stream_carrier_used |= result.in_stream_carrier_used;

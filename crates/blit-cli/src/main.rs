@@ -36,7 +36,14 @@ use std::time::Duration;
 async fn main() -> Result<ExitCode> {
     let lifecycle_trace = TransferLifecycleTrace::from_env();
     lifecycle_trace.record("async_main_enter", None);
-    let result = run_cli(&lifecycle_trace).await;
+    // win-1: the command future lives on the heap, not in the main
+    // thread's frames. `#[tokio::main]` polls this body on the process's
+    // MAIN thread, whose stack is 1 MiB on Windows, and a debug build's
+    // poll frames hold every nested future inline — the destination
+    // routes overflowed it (see `docs/plan/SOURCE_SIDE_CONTAINMENT.md`,
+    // "Windows fixes"). `tests/main_thread_stack_budget.rs` holds the
+    // budget on every platform.
+    let result = Box::pin(run_cli(&lifecycle_trace)).await;
     finish_command_lifecycle(&lifecycle_trace, result).await
 }
 
@@ -78,6 +85,9 @@ async fn run_cli(lifecycle_trace: &TransferLifecycleTrace) -> Result<ExitCode> {
         // per-file failure verdict — 0 when every file landed, 2 when the
         // operation completed with files that did not. Propagated directly,
         // like `check` and `jobs` below.
+        // win-1: `run_with_retries` boxes each attempt, and `run_transfer`
+        // / `run_move` box their route dispatch, so this frame holds
+        // pointers rather than sessions.
         Commands::Copy(args) => {
             let wait = Duration::from_secs(args.wait);
             run_with_retries(args.retry, wait, |_n| {

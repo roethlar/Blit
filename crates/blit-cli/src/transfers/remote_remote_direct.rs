@@ -30,7 +30,9 @@ pub async fn run_remote_to_remote_direct_deferred(
     perf_history: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredDelegatedState> {
-    run_remote_to_remote_direct_inner(
+    // win-1: boxed so the main pass and each retry pass hold a pointer
+    // to the delegated run instead of the run itself.
+    Box::pin(run_remote_to_remote_direct_inner(
         args,
         src,
         dst,
@@ -39,7 +41,7 @@ pub async fn run_remote_to_remote_direct_deferred(
         true, // defer_output
         perf_history,
         lifecycle_trace,
-    )
+    ))
     .await
 }
 

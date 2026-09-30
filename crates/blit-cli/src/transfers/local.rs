@@ -25,7 +25,9 @@ pub async fn run_local_transfer_quiet(
     mirror: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<LocalMirrorSummary> {
-    run_local_transfer_inner(
+    // win-1: boxed so every caller (main pass and each retry pass) holds
+    // a pointer to the session instead of the session itself.
+    Box::pin(run_local_transfer_inner(
         ctx,
         args,
         src_path,
@@ -34,7 +36,7 @@ pub async fn run_local_transfer_quiet(
         true,
         false,
         Some(lifecycle_trace),
-    )
+    ))
     .await
 }
 
@@ -54,7 +56,11 @@ pub async fn run_local_transfer_deferred(
     dest_path: &Path,
     mirror: bool,
 ) -> Result<LocalMirrorSummary> {
-    run_local_transfer_inner(ctx, args, src_path, dest_path, mirror, true, true, None).await
+    // win-1: boxed, as in `run_local_transfer_quiet`.
+    Box::pin(run_local_transfer_inner(
+        ctx, args, src_path, dest_path, mirror, true, true, None,
+    ))
+    .await
 }
 
 /// Print the standard summary block for a completed local

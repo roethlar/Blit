@@ -1328,14 +1328,16 @@ pub async fn run_source(
     )
     .await?;
 
-    let result = drive_source(
+    // win-1: the session body is boxed so a caller polling `run_source`
+    // (a push, or one role of a local session) holds a pointer to it.
+    let result = Box::pin(drive_source(
         cfg.plan_options,
         cfg.data_plane_host,
         cfg.instruments,
         negotiated,
         transport,
         source,
-    )
+    ))
     .await;
     lifecycle_trace.record(
         "session_body_return",
@@ -3744,14 +3746,18 @@ pub async fn run_destination(
         },
     };
 
-    let result = drive_destination(
+    // win-1: the session body is boxed so a caller polling
+    // `run_destination` (a pull, or one role of a local session) holds a
+    // pointer to it — the destination routes are the ones that overflowed
+    // Windows' 1 MiB main thread in debug builds.
+    let result = Box::pin(drive_destination(
         &mut transport,
         negotiated,
         &dst_root,
         cfg.data_plane_host.as_deref(),
         cfg.instruments,
         cfg.local_apply,
-    )
+    ))
     .await;
     // ph-1c: graceful close for a DESTINATION initiator (the pull
     // client, incl. the delegated dst daemon). Its terminal summary is

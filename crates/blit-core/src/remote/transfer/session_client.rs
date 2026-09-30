@@ -253,7 +253,8 @@ pub async fn run_push_session(
             dial_membership_test_gate: None,
         },
     };
-    let summary = run_source(cfg, transport, source).await?;
+    // win-1: boxed, as in `run_pull_session_with_client`.
+    let summary = Box::pin(run_source(cfg, transport, source)).await?;
 
     let unreadable = unreadable
         .lock()
@@ -403,7 +404,11 @@ pub async fn run_pull_session(
         .lifecycle_trace
         .attach_initiator_role(SessionPhaseRole::Destination);
     let client = connect_transfer_client_with_trace(endpoint, &options.lifecycle_trace).await?;
-    run_pull_session_with_client(client, endpoint, dest_root, options).await
+    // win-1: boxed so a caller polling the pull holds a pointer to it.
+    Box::pin(run_pull_session_with_client(
+        client, endpoint, dest_root, options,
+    ))
+    .await
 }
 
 /// [`run_pull_session`] over an already-connected client (otp-9b). The
@@ -489,7 +494,14 @@ pub async fn run_pull_session_with_client(
         },
         local_apply: None,
     };
-    let outcome = run_destination(cfg, transport, DestinationTarget::Fixed(dest_root)).await?;
+    // win-1: the destination session is boxed so this client's own state
+    // (and its callers' frames) hold a pointer, not the session.
+    let outcome = Box::pin(run_destination(
+        cfg,
+        transport,
+        DestinationTarget::Fixed(dest_root),
+    ))
+    .await?;
 
     record_session_history(
         perf.as_ref(),

@@ -37,7 +37,10 @@ where
 {
     let mut attempt_no = 0u32;
     loop {
-        match attempt(attempt_no).await {
+        // win-1: each attempt is boxed, so the loop's state — and the
+        // frame of whoever polls it — holds a pointer, never a whole
+        // transfer session.
+        match Box::pin(attempt(attempt_no)).await {
             Ok(value) => return Ok(value),
             Err(err) => {
                 if attempt_no >= retries || !is_retryable(&err) {

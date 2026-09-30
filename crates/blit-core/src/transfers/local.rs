@@ -34,14 +34,19 @@ pub async fn run(
     options: LocalMirrorOptions,
 ) -> Result<LocalMirrorSummary> {
     let mirror = options.mirror;
-    crate::transfer_session::run_local_session(src, dst, options)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to {} from {} to {}",
-                if mirror { "mirror" } else { "copy" },
-                src.display(),
-                dst.display()
-            )
-        })
+    // win-1: boxed — the session holds both role drivers, and a caller
+    // polling this on a small stack (the CLI's main thread is 1 MiB on
+    // Windows) must hold a pointer, not the session.
+    Box::pin(crate::transfer_session::run_local_session(
+        src, dst, options,
+    ))
+    .await
+    .with_context(|| {
+        format!(
+            "failed to {} from {} to {}",
+            if mirror { "mirror" } else { "copy" },
+            src.display(),
+            dst.display()
+        )
+    })
 }

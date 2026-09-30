@@ -377,7 +377,9 @@ pub async fn run_remote_push_transfer_deferred(
     perf_history: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredPushState> {
-    run_remote_push_transfer_inner(
+    // win-1: boxed so the main pass and each retry pass hold a pointer
+    // to the session instead of the session itself.
+    Box::pin(run_remote_push_transfer_inner(
         args,
         source,
         remote,
@@ -386,7 +388,7 @@ pub async fn run_remote_push_transfer_deferred(
         true,
         perf_history,
         lifecycle_trace,
-    )
+    ))
     .await
 }
 
@@ -563,7 +565,10 @@ pub async fn run_remote_pull_transfer_deferred(
     perf_history: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredPullState> {
-    run_remote_pull_transfer_inner(
+    // win-1: boxed, as in `run_remote_push_transfer_deferred` — this is
+    // the DESTINATION route, the one that overflowed Windows' 1 MiB
+    // main thread.
+    Box::pin(run_remote_pull_transfer_inner(
         args,
         remote,
         dest_root,
@@ -572,7 +577,7 @@ pub async fn run_remote_pull_transfer_deferred(
         true,
         perf_history,
         lifecycle_trace,
-    )
+    ))
     .await
 }
 

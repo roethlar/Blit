@@ -208,7 +208,9 @@ pub async fn run_transfer(
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<ExitCode> {
     lifecycle_trace.record("transfer_dispatch_begin", None);
-    let result = run_transfer_inner(ctx, args, mode, lifecycle_trace).await;
+    // win-1: boxed — every route arm below holds a whole session (and
+    // its retry passes), far too much for a debug main-thread frame.
+    let result = Box::pin(run_transfer_inner(ctx, args, mode, lifecycle_trace)).await;
     lifecycle_trace.record(
         "transfer_dispatch_end",
         Some(crate::lifecycle_result_outcome(&result)),
@@ -559,7 +561,8 @@ pub async fn run_move(
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<ExitCode> {
     lifecycle_trace.record("transfer_dispatch_begin", None);
-    let result = run_move_inner(ctx, args, lifecycle_trace).await;
+    // win-1: boxed for the same reason as `run_transfer`.
+    let result = Box::pin(run_move_inner(ctx, args, lifecycle_trace)).await;
     lifecycle_trace.record(
         "transfer_dispatch_end",
         Some(crate::lifecycle_result_outcome(&result)),

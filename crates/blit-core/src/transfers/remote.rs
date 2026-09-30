@@ -272,7 +272,8 @@ pub async fn run_remote_push(
         ..PushSessionOptions::default()
     };
 
-    let summary = run_push_session(&execution.remote, source, options)
+    // win-1: boxed so the verb's caller holds a pointer to the session.
+    let summary = Box::pin(run_push_session(&execution.remote, source, options))
         .await
         .with_context(|| format!("pushing to {}", execution.remote_label))?;
 
@@ -399,15 +400,20 @@ pub async fn run_remote_pull(
             })
             .flatten(),
     };
-    let outcome = run_pull_session(&execution.remote, execution.dest_root.clone(), options)
-        .await
-        .with_context(|| {
-            format!(
-                "pulling from {} into {}",
-                execution.remote_label,
-                execution.dest_root.display()
-            )
-        })?;
+    // win-1: boxed so the verb's caller holds a pointer to the session.
+    let outcome = Box::pin(run_pull_session(
+        &execution.remote,
+        execution.dest_root.clone(),
+        options,
+    ))
+    .await
+    .with_context(|| {
+        format!(
+            "pulling from {} into {}",
+            execution.remote_label,
+            execution.dest_root.display()
+        )
+    })?;
 
     Ok(PullVerbOutcome {
         summary: outcome.summary,

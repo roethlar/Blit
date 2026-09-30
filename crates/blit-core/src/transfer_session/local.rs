@@ -925,13 +925,15 @@ pub async fn run_local_session(
     };
 
     let (a, b) = in_process_pair();
+    // win-1: both roles are polled from this one future, so each is boxed
+    // — the join then holds two pointers instead of two whole sessions.
     let (source_result, dest_result) = tokio::join!(
-        run_source(source_cfg, a, scan_source),
-        run_destination(
+        Box::pin(run_source(source_cfg, a, scan_source)),
+        Box::pin(run_destination(
             dest_cfg,
             b,
             DestinationTarget::Fixed(dst_root.to_path_buf())
-        ),
+        )),
     );
     // ls-1: emit before the fault match, so a failed session still yields its
     // breakdown — a run that died slowly is exactly the one worth timing.
