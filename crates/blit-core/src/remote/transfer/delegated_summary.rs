@@ -58,6 +58,8 @@ pub fn delegated_summary_from_session(
         source_peer_observed,
         files_failed: summary.files_failed,
         failures: summary.failures.clone(),
+        failed_paths: summary.failed_paths.clone(),
+        failed_paths_truncated: summary.failed_paths_truncated,
     }
 }
 
@@ -94,6 +96,8 @@ mod tests {
             files_resumed: 1,
             files_failed: contained.files_failed_total,
             failures: contained.wire_failures(),
+            failed_paths: Vec::new(),
+            failed_paths_truncated: false,
         }
     }
 

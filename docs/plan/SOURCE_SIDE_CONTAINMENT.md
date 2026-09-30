@@ -664,6 +664,63 @@ clone-into-absent-stage ordering. What remains:
   `copy/file_copy/mod.rs:95-104`), now on the opened source handle (D-C).
 - Resume block patching and tar-shard members are unchanged.
 
+### D-I. End-of-run retry passes over the failed set (ssc-6, D7)
+
+Owner rulings D-2026-09-28-1 ("collect all errors, then … retry at the
+end of the transfer that will rescan and retry") and D-2026-09-28-3
+(`--retries <N>`/`-R` default 1, `--retry-wait <SECONDS>`/`-W` default
+30, adapted from robocopy's /R and /W). Shape as landed:
+
+- After a route's main pass completes with its output deferred, if it
+  recorded per-file failures and `--retries > 0` (and the run is not a
+  dry run — nothing a dry run reported can converge), the CLI-side
+  orchestrator (`crates/blit-cli/src/transfers/retry.rs`) waits
+  `--retry-wait` seconds and runs one further session over the same
+  source and destination with `FileFilter.files_from` set to the exact
+  failed-path set (the `retry_only` filter input, threaded between
+  passes, never a flag) — a fresh scan of just those paths, the same
+  diff, payload machinery and containment. No new wire for the pass
+  itself: it is a second session on contract 7.
+- **The exact set rides the summary.** `TransferSummary.failed_paths`
+  (+ `failed_paths_truncated`, bounded by
+  `MAX_WIRE_FAILED_PATHS_ENCODED_BYTES` = 1 MiB) and the same pair on
+  `DelegatedPullSummary`; the local carrier's `LocalMirrorSummary`
+  carries it uncapped. `failures` stays the 64-entry report. When the
+  sender had to truncate, the pass retries the named report's paths and
+  the notice says so.
+- Pass k retries pass k-1's failed set; a pass ending with zero failures
+  stops the loop; at most `--retries` passes. Retry everything in the
+  set, source-side and destination-side reasons alike.
+- **Deletions are the main pass's.** A retry pass never mirror-deletes
+  (it runs with mirror off): the main pass plans deletions from its
+  complete source set with its failed paths shielding their destination
+  subtrees (A19). Deviation from the draft's "before mirror deletions"
+  ordering, chosen because deferring a remote destination's deletions
+  across sessions would need a wire "delete-only" session; the shield
+  during retries is therefore the main pass's set, a superset of the
+  final one, and a file that lands on retry replaces its destination
+  counterpart through the normal per-file path.
+- **Move** retries before the source-delete decision: a file that lands
+  on retry is moved; a persistent failure refuses the whole verb exactly
+  as today (Q1(b), `refuse_source_delete_on_failures` reads the final
+  state).
+- Accounting: files and bytes landed by retries are added once to the
+  summary; the failure report becomes the post-retry state, each
+  survivor's reason gaining ` (retried)`; `files_failed`, the JSON
+  `failures`/`files_failed`, exit 2 and the move gate all read the final
+  state. Zero failures after the main pass → no wait, no session, no
+  extra scan, no output change.
+- Progress: the live row's copy phase reads `retrying N file(s) (pass k
+  of R) • …` during a pass (local route; remote routes print the same
+  one-line notice on stderr when not `--json`). Diagnostics: the counter
+  file gets `retry_wait_seconds <s>` when a wait begins and
+  `retry_pass <k>` when a pass starts; the hidden
+  `--diagnostics-no-retry-wait` records the wait instead of sleeping so
+  tests never sleep for real. No prompt in any mode.
+- `--retry`/`--wait` (pre-existing: re-run the WHOLE transfer after a
+  transient failure such as a network drop) are unchanged; their help
+  now points at `--retries` for per-file failures, and vice versa.
+
 ### D-G. Words and docs (ssc-5)
 
 - `failure_block_styled` (`blit-cli/src/transfers/failures.rs:84-120`):
@@ -962,6 +1019,33 @@ cr-ssc2-2 (public API break under 0.1.3) declined as a defect and
 carried as ssc-5's release-version requirement. Each guard was proven
 red by mutation and green after (DEVLOG 2026-09-30). Gate on macOS:
 fmt clean; clippy `-D warnings` clean native and `x86_64-unknown-linux-gnu`; `cargo test --workspace` 1270 → 1285 passed, 0 failed, 2 ignored; check-docs OK; diff-check clean; CI on the three OSes unverified until a push.
+
+**ssc-6 LANDED 2026-09-30 on master at `__SSC6_HASH__` (range
+`b342d636..__SSC6_HASH__`): end-of-run retry passes, `--retries`/`-R`
+(default 1) and `--retry-wait`/`-W` (default 30).** What landed against
+the slice text: D-I as written above (the design section itself was
+restored in this commit — the D5 rewrite of D-H had swallowed it);
+`crates/blit-cli/src/transfers/retry.rs` (the pass loop, shared by the
+local, push, pull and delegated routes for copy/mirror and move);
+`TransferSummary`/`DelegatedPullSummary` `failed_paths` +
+`failed_paths_truncated` and `LocalMirrorSummary` likewise;
+`FilterInputs.retry_only`; the `retrying …` live-row phase word; the
+counter-file events; the inline (non-deferred) route entry points
+deleted, every route now runs deferred and prints once after the
+passes. Deviations recorded in D-I: deletions run at the end of the
+main pass (shield = main-pass failed set); move keeps Q1(b)'s
+whole-verb refusal on a persistent failure. Guards: `crates/blit-cli/
+tests/retry_pass.rs` (A20 a–g through the real CLI, with the counter
+file as the timing seam — every fixture fails on the destination side
+because a scan-time unreadable source is an `unreadable_paths` entry,
+not a per-file failure, and a payload-time source failure cannot be
+timed from outside a process; the source-side skip/retract path stays
+pinned at the session level), the loop's unit tests (early stop, bound,
+survivors marked, zero retries/zero failures, truncated set, dry run),
+the switch parse test, the row-label test. Mutations (foreground,
+`command cp -f`, `scratchpad/ssc6-mutations.txt`): loop disabled →
+(b) red; both early stops removed → unit guard red; sleep removed →
+(a) red; wait recording removed → (b) red. Gate on macOS: fmt clean; clippy `-D warnings` clean native and `x86_64-unknown-linux-gnu`; `cargo test --workspace` 1285 → 1300 passed, 0 failed, 2 ignored; check-docs OK; diff-check clean.
 
 ## Review history
 

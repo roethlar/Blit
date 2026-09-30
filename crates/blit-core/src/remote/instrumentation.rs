@@ -42,6 +42,19 @@ fn record(event: &str, value: u64) {
     }
 }
 
+/// ssc-6: one line per end-of-run retry pass (`retry_pass <k>`), so a
+/// test can count passes without timing the run.
+pub fn record_retry_pass(pass: u64) {
+    record("retry_pass", pass);
+}
+
+/// ssc-6: the wait the retry loop was asked to honour before a pass
+/// (`retry_wait_seconds <n>`), recorded whether or not the diagnostics
+/// switch replaced the real sleep.
+pub fn record_retry_wait_seconds(seconds: u64) {
+    record("retry_wait_seconds", seconds);
+}
+
 pub(crate) fn record_cli_data_plane_outbound_bytes(bytes: u64) {
     if bytes > 0 {
         record("cli_data_plane_outbound_bytes", bytes);

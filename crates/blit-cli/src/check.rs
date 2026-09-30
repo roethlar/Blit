@@ -34,6 +34,7 @@ pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         include: &args.include,
         exclude: &args.exclude,
         files_from: args.files_from.as_ref(),
+        retry_only: None,
         min_size: args.min_size.as_deref(),
         max_size: args.max_size.as_deref(),
         min_age: args.min_age.as_deref(),

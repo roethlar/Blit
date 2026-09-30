@@ -14,12 +14,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-/// Convenience wrapper for callers that always want the summary
-/// printed inline. Most CLI paths (copy / mirror) want this; move
-/// uses [`run_local_transfer_deferred`] so it can suppress the
-/// "success" output until after the source-delete decision is
-/// made (R49-F3).
-pub async fn run_local_transfer(
+/// ssc-6: the copy/mirror run with output deferred, so the orchestrator
+/// can run retry passes before printing the one final summary. Same
+/// compare mapping as [`run_local_transfer`] (not the move rule).
+pub async fn run_local_transfer_quiet(
     ctx: &AppContext,
     args: &TransferArgs,
     src_path: &Path,
@@ -33,7 +31,7 @@ pub async fn run_local_transfer(
         src_path,
         dest_path,
         mirror,
-        false,
+        true,
         false,
         Some(lifecycle_trace),
     )
@@ -152,6 +150,7 @@ async fn run_local_transfer_inner(
         mirror,
         src_path,
         dest_path,
+        args.retry_pass,
     )
     .map(|(sink, row)| {
         options.progress_events = Some(sink);
@@ -259,6 +258,9 @@ struct LiveRowState {
     /// segment. The per-file lane is the only cheap signal the session
     /// already emits; there is no in-flight-file event to prefer.
     current_file: Option<String>,
+    /// ssc-6: `(pass, of, files)` while an end-of-run retry pass runs, so
+    /// the copy row says "retrying …" instead of "copying …".
+    retry_pass: Option<(u32, u32, usize)>,
 }
 
 impl LiveRowState {
@@ -311,13 +313,21 @@ fn render_live_row(state: &LiveRowState, width: usize) -> String {
 /// palette, so the plain form cannot drift from the coloured one.
 fn render_live_row_styled(state: &LiveRowState, width: usize, palette: Palette) -> String {
     let totals = &state.totals;
-    let copy_row = || {
-        format!(
+    let copy_row = || match state.retry_pass {
+        // ssc-6: a retry pass is a copy over the failed set; the phase word
+        // says which pass and how many files it is retrying.
+        Some((pass, of, files)) => format!(
+            "retrying {files} file(s) (pass {pass} of {of}) • {}/{} files • {}",
+            totals.files,
+            totals.manifest_files,
+            format_bytes(totals.bytes)
+        ),
+        None => format!(
             "copying • {}/{} files • {}",
             totals.files,
             totals.manifest_files,
             format_bytes(totals.bytes)
-        )
+        ),
     };
     let (head, file) = match state.phase {
         // The pass deletes inside one blocking call, so there is no
@@ -361,7 +371,7 @@ fn render_live_row_styled(state: &LiveRowState, width: usize, palette: Palette) 
     // The phase the ROW is showing, which is not always `state.phase`: an
     // up-to-date tree renders the walk, and a diff-complete tree renders the
     // copy row before the first byte lands.
-    let shown = if head.starts_with("copying") {
+    let shown = if head.starts_with("copying") || head.starts_with("retrying") {
         LivePhase::Copying
     } else if head.starts_with("deleting") {
         LivePhase::Deleting
@@ -569,13 +579,29 @@ impl RowOutput for ProgressBar {
 /// testable end to end (feed a channel, assert the rendered row).
 /// Events are drained continuously — the pipeline must never wait on
 /// the renderer — and folded into one repaint per tick.
+#[cfg(test)]
 async fn drain_progress_lane(
-    mut rx: mpsc::UnboundedReceiver<ProgressEvent>,
+    rx: mpsc::UnboundedReceiver<ProgressEvent>,
     output: impl RowOutput,
     verbose: bool,
     palette: Palette,
 ) {
-    let mut state = LiveRowState::default();
+    drain_progress_lane_with(rx, output, verbose, palette, None).await
+}
+
+/// ssc-6: the drainer with the retry-pass label the row shows while an
+/// end-of-run retry pass runs (`None` for the main pass).
+async fn drain_progress_lane_with(
+    mut rx: mpsc::UnboundedReceiver<ProgressEvent>,
+    output: impl RowOutput,
+    verbose: bool,
+    palette: Palette,
+    retry_pass: Option<(u32, u32, usize)>,
+) {
+    let mut state = LiveRowState {
+        retry_pass,
+        ..LiveRowState::default()
+    };
     let mut pending_repaint = false;
     let mut ticker = interval(ROW_REFRESH);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -651,6 +677,7 @@ impl LiveProgressRow {
         mirror: bool,
         src_path: &Path,
         dest_path: &Path,
+        retry_pass: Option<(u32, u32, usize)>,
     ) -> Option<(RemoteTransferProgress, Self)> {
         if !progress_requested {
             // Probe nothing: constructing a bar on a terminal and
@@ -715,7 +742,9 @@ impl LiveProgressRow {
         // bar returns None above — so the terminal question is settled and
         // `detect` only adds the colour-specific conventions.
         let palette = Palette::detect(console::Term::stderr().features().colors_supported());
-        let consumer = tokio::spawn(drain_progress_lane(rx, threaded, verbose, palette));
+        let consumer = tokio::spawn(drain_progress_lane_with(
+            rx, threaded, verbose, palette, retry_pass,
+        ));
 
         Some((
             RemoteTransferProgress::new(tx),
@@ -1669,6 +1698,40 @@ mod live_row_tests {
     /// pair below counts one file and its bytes exactly once.
     /// (clp-2 adapted the expected string: the row now ends with the
     /// current-file segment, here the most recent completion.)
+    /// ssc-6: while an end-of-run retry pass runs, the copy row's phase word
+    /// says so — which pass, of how many, over how many files — and keeps
+    /// the copy phase's colour.
+    #[test]
+    fn a_retry_pass_relabels_the_copy_row() {
+        let mut state = fold(&[
+            ProgressEvent::Enumerated { files: 1 },
+            ProgressEvent::ManifestBatch {
+                files: 1,
+                bytes: 512,
+            },
+            ProgressEvent::Payload {
+                files: 0,
+                bytes: 512,
+            },
+        ]);
+        state.retry_pass = Some((2, 3, 4));
+        let row = render_live_row(&state, 120);
+        assert!(
+            row.starts_with("retrying 4 file(s) (pass 2 of 3) • 0/1 files • "),
+            "{row}"
+        );
+        let palette = Palette::with_depth(ColorDepth::TrueColor);
+        let styled = render_live_row_styled(&state, 120, palette);
+        assert!(
+            styled.starts_with(
+                &palette.paint(Role::PhaseCopying, "retrying 4 file(s) (pass 2 of 3)")
+            ),
+            "the retry word carries the copy phase colour: {styled:?}"
+        );
+        state.retry_pass = None;
+        assert!(render_live_row(&state, 120).starts_with("copying • 0/1 files"));
+    }
+
     #[test]
     fn copying_row_reports_completed_of_needed_and_bytes() {
         let state = fold(&[
@@ -2314,9 +2377,14 @@ mod live_row_loop_tests {
     /// constructed and no sink is handed to the session.
     #[test]
     fn no_row_is_built_when_progress_was_not_requested() {
-        assert!(
-            LiveProgressRow::start(false, false, true, Path::new("src"), Path::new("dst"))
-                .is_none()
-        );
+        assert!(LiveProgressRow::start(
+            false,
+            false,
+            true,
+            Path::new("src"),
+            Path::new("dst"),
+            None
+        )
+        .is_none());
     }
 }

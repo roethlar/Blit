@@ -3,6 +3,7 @@ pub(crate) mod failures;
 mod local;
 mod remote;
 mod remote_remote_direct;
+pub(crate) mod retry;
 
 // Endpoint types come from `blit_core::endpoints` directly. The
 // `transfers/endpoints.rs` shim now contains only the two
@@ -40,6 +41,7 @@ fn filter_inputs(args: &TransferArgs) -> FilterInputs<'_> {
         include: &args.include,
         exclude: &args.exclude,
         files_from: args.files_from.as_ref(),
+        retry_only: args.retry_only.as_ref(),
         min_size: args.min_size.as_deref(),
         max_size: args.max_size.as_deref(),
         min_age: args.min_age.as_deref(),
@@ -48,9 +50,6 @@ fn filter_inputs(args: &TransferArgs) -> FilterInputs<'_> {
 }
 use blit_core::endpoints::{ensure_remote_destination_supported, ensure_remote_source_supported};
 use endpoints::{ensure_remote_pull_supported, ensure_remote_push_supported};
-use local::run_local_transfer;
-use remote::{run_remote_pull_transfer, run_remote_push_transfer};
-use remote_remote_direct::run_remote_to_remote_direct;
 
 /// Render an endpoint for human-facing log lines, collapsing any runs of
 /// `/` into a single `/` in the local-path portion. Filesystems already
@@ -310,8 +309,56 @@ async fn run_transfer_inner(
             if !src.exists() {
                 bail!("source path does not exist: {}", src.display());
             }
-            let summary =
-                run_local_transfer(ctx, args, &src, &dst, mirror, lifecycle_trace).await?;
+            // ssc-6: the main pass defers its output so the retry passes
+            // (D-2026-09-28-1/-3) run before the one final summary; a retry
+            // pass never mirror-deletes (the main pass planned deletions
+            // from its complete source set, shielding the failed paths).
+            let mut summary =
+                local::run_local_transfer_quiet(ctx, args, &src, &dst, mirror, lifecycle_trace)
+                    .await?;
+            let retry = retry::run_retry_passes(
+                args,
+                retry::PassFailures::from_local(&summary),
+                |pass_args| {
+                    let src = src.clone();
+                    let dst = dst.clone();
+                    async move {
+                        let pass = local::run_local_transfer_quiet(
+                            ctx,
+                            &pass_args,
+                            &src,
+                            &dst,
+                            false,
+                            lifecycle_trace,
+                        )
+                        .await?;
+                        Ok(retry::PassResult {
+                            files_transferred: pass.copied_files as u64,
+                            bytes_transferred: pass.total_bytes,
+                            failures: retry::PassFailures::from_local(&pass),
+                        })
+                    }
+                },
+            )
+            .await?;
+            if retry.passes_run > 0 {
+                summary.copied_files = summary
+                    .copied_files
+                    .saturating_add(retry.added_files as usize);
+                summary.total_bytes = summary.total_bytes.saturating_add(retry.added_bytes);
+                retry.final_failures.apply_to_local(&mut summary);
+            }
+            render_result(lifecycle_trace, || {
+                local::print_local_transfer_summary(
+                    ctx,
+                    args,
+                    mirror,
+                    &summary,
+                    summary.duration,
+                    &src,
+                    &dst,
+                )
+            })?;
             Ok(exit_for_failures(summary.files_failed))
         }
         TransferRoute::LocalToRemote { src, dst, mirror } => {
@@ -320,23 +367,53 @@ async fn run_transfer_inner(
             }
             ensure_remote_push_supported(args)?;
             ensure_remote_destination_supported(&dst)?;
-            let state = run_remote_push_transfer(
+            let mut state = remote::run_remote_push_transfer_deferred(
                 args,
-                src,
-                dst,
+                src.clone(),
+                dst.clone(),
                 mirror,
                 ctx.perf_history_enabled,
                 lifecycle_trace,
             )
             .await?;
+            let retry = retry::run_retry_passes(
+                args,
+                retry::PassFailures::from_summary(&state.summary),
+                |pass_args| {
+                    let src = src.clone();
+                    let dst = dst.clone();
+                    async move {
+                        let pass = remote::run_remote_push_transfer_deferred(
+                            &pass_args,
+                            src,
+                            dst,
+                            false,
+                            ctx.perf_history_enabled,
+                            lifecycle_trace,
+                        )
+                        .await?;
+                        Ok(retry::PassResult {
+                            files_transferred: pass.summary.files_transferred,
+                            bytes_transferred: pass.summary.bytes_transferred,
+                            failures: retry::PassFailures::from_summary(&pass.summary),
+                        })
+                    }
+                },
+            )
+            .await?;
+            retry.fold_into_summary(&mut state.summary);
+            render_result(lifecycle_trace, || {
+                remote::print_deferred_push_result(args, &state);
+                Ok(())
+            })?;
             Ok(exit_for_failures(state.summary.files_failed))
         }
         TransferRoute::RemoteToLocal { src, dst, mirror } => {
             ensure_remote_pull_supported(args)?;
             ensure_remote_source_supported(&src)?;
-            let state = run_remote_pull_transfer(
+            let mut state = remote::run_remote_pull_transfer_deferred(
                 args,
-                src,
+                src.clone(),
                 &dst,
                 mirror,
                 false, // not a move — source survives
@@ -344,22 +421,91 @@ async fn run_transfer_inner(
                 lifecycle_trace,
             )
             .await?;
+            let retry = retry::run_retry_passes(
+                args,
+                retry::PassFailures::from_summary(&state.summary),
+                |pass_args| {
+                    let src = src.clone();
+                    let dst = dst.clone();
+                    async move {
+                        let pass = remote::run_remote_pull_transfer_deferred(
+                            &pass_args,
+                            src,
+                            &dst,
+                            false,
+                            false,
+                            ctx.perf_history_enabled,
+                            lifecycle_trace,
+                        )
+                        .await?;
+                        Ok(retry::PassResult {
+                            files_transferred: pass.summary.files_transferred,
+                            bytes_transferred: pass.summary.bytes_transferred,
+                            failures: retry::PassFailures::from_summary(&pass.summary),
+                        })
+                    }
+                },
+            )
+            .await?;
+            retry.fold_into_summary(&mut state.summary);
+            render_result(lifecycle_trace, || {
+                remote::print_deferred_pull_result(args, &state);
+                Ok(())
+            })?;
             Ok(exit_for_failures(state.summary.files_failed))
         }
         TransferRoute::RemoteToRemoteDelegated { src, dst, mirror } => {
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
             ensure_remote_pull_supported(args)?;
-            let state = run_remote_to_remote_direct(
+            // ssc-6: `--detach` hands the transfer to the daemon and exits
+            // before any summary exists, so there is nothing to retry; the
+            // deferred run below is the attached path only.
+            let mut state = remote_remote_direct::run_remote_to_remote_direct_deferred(
                 args,
-                src,
-                dst,
+                src.clone(),
+                dst.clone(),
                 mirror,
                 false, /* not a move */
                 ctx.perf_history_enabled,
                 lifecycle_trace,
             )
             .await?;
+            if !args.detach {
+                let retry = retry::run_retry_passes(
+                    args,
+                    retry::PassFailures::from_delegated(&state),
+                    |pass_args| {
+                        let src = src.clone();
+                        let dst = dst.clone();
+                        async move {
+                            let pass = remote_remote_direct::run_remote_to_remote_direct_deferred(
+                                &pass_args,
+                                src,
+                                dst,
+                                false,
+                                false,
+                                ctx.perf_history_enabled,
+                                lifecycle_trace,
+                            )
+                            .await?;
+                            Ok(retry::PassResult {
+                                files_transferred: pass.summary.files_transferred,
+                                bytes_transferred: pass.summary.bytes_transferred,
+                                failures: retry::PassFailures::from_delegated(&pass),
+                            })
+                        }
+                    },
+                )
+                .await?;
+                retry.fold_into_delegated(&mut state.summary);
+                render_result(lifecycle_trace, || {
+                    remote_remote_direct::print_deferred_delegated_result(args, &state);
+                    Ok(())
+                })?;
+            }
+            // (A detached run printed its own acknowledgement inside the
+            // inner function and returned an empty summary.)
             // cr-pfc4-1's accessor: the delegated re-encode is a second
             // summary message, so the count is read through it rather than
             // off a `TransferSummary`.
@@ -573,8 +719,37 @@ async fn run_move_inner(
             // a subsequent unreadable-paths refusal would exit
             // non-zero while stdout already contained a
             // "successful copy" document.
-            let summary =
+            let mut summary =
                 local::run_local_transfer_deferred(ctx, args, &src_path, &dst_path, false).await?;
+            // ssc-6: retry the failed files before the source-delete
+            // decision, so a file that lands on retry is moved and only a
+            // persistent failure refuses the verb.
+            let retry = retry::run_retry_passes(
+                args,
+                retry::PassFailures::from_local(&summary),
+                |pass_args| {
+                    let src = src_path.clone();
+                    let dst = dst_path.clone();
+                    async move {
+                        let pass =
+                            local::run_local_transfer_deferred(ctx, &pass_args, &src, &dst, false)
+                                .await?;
+                        Ok(retry::PassResult {
+                            files_transferred: pass.copied_files as u64,
+                            bytes_transferred: pass.total_bytes,
+                            failures: retry::PassFailures::from_local(&pass),
+                        })
+                    }
+                },
+            )
+            .await?;
+            if retry.passes_run > 0 {
+                summary.copied_files = summary
+                    .copied_files
+                    .saturating_add(retry.added_files as usize);
+                summary.total_bytes = summary.total_bytes.saturating_add(retry.added_bytes);
+                retry.final_failures.apply_to_local(&mut summary);
+            }
 
             // R47-F4 (data-loss): refuse to delete the source if
             // the scan was incomplete. The R46-F2 mirror gate only
@@ -658,7 +833,7 @@ async fn run_move_inner(
             // R51-F4: defer output so a failure during the
             // remote-source delete doesn't leave a success-looking
             // transfer summary on stdout.
-            let state = remote::run_remote_pull_transfer_deferred(
+            let mut state = remote::run_remote_pull_transfer_deferred(
                 args,
                 remote.clone(),
                 &dst_path,
@@ -668,6 +843,33 @@ async fn run_move_inner(
                 lifecycle_trace,
             )
             .await?;
+            let retry = retry::run_retry_passes(
+                args,
+                retry::PassFailures::from_summary(&state.summary),
+                |pass_args| {
+                    let remote = remote.clone();
+                    let dst = dst_path.clone();
+                    async move {
+                        let pass = remote::run_remote_pull_transfer_deferred(
+                            &pass_args,
+                            remote,
+                            &dst,
+                            false,
+                            true,
+                            ctx.perf_history_enabled,
+                            lifecycle_trace,
+                        )
+                        .await?;
+                        Ok(retry::PassResult {
+                            files_transferred: pass.summary.files_transferred,
+                            bytes_transferred: pass.summary.bytes_transferred,
+                            failures: retry::PassFailures::from_summary(&pass.summary),
+                        })
+                    }
+                },
+            )
+            .await?;
+            retry.fold_into_summary(&mut state.summary);
 
             // pfc-5 / Q1(b): refuse before the remote source is touched.
             refuse_source_delete_on_failures(
@@ -706,7 +908,7 @@ async fn run_move_inner(
             // R51-F4: defer output so a failure during the
             // local-source delete doesn't leave a success-looking
             // transfer summary on stdout.
-            let state = remote::run_remote_push_transfer_deferred(
+            let mut state = remote::run_remote_push_transfer_deferred(
                 args,
                 src_path.clone(),
                 remote.clone(),
@@ -715,6 +917,32 @@ async fn run_move_inner(
                 lifecycle_trace,
             )
             .await?;
+            let retry = retry::run_retry_passes(
+                args,
+                retry::PassFailures::from_summary(&state.summary),
+                |pass_args| {
+                    let src = src_path.clone();
+                    let remote = remote.clone();
+                    async move {
+                        let pass = remote::run_remote_push_transfer_deferred(
+                            &pass_args,
+                            src,
+                            remote,
+                            false,
+                            ctx.perf_history_enabled,
+                            lifecycle_trace,
+                        )
+                        .await?;
+                        Ok(retry::PassResult {
+                            files_transferred: pass.summary.files_transferred,
+                            bytes_transferred: pass.summary.bytes_transferred,
+                            failures: retry::PassFailures::from_summary(&pass.summary),
+                        })
+                    }
+                },
+            )
+            .await?;
+            retry.fold_into_summary(&mut state.summary);
 
             // pfc-5 / Q1(b): refuse before the local source is removed.
             refuse_source_delete_on_failures(
@@ -747,16 +975,43 @@ async fn run_move_inner(
             // R51-F4: defer output so a remote-source delete
             // failure doesn't leave a success-looking delegated
             // summary on stdout.
-            let state = remote_remote_direct::run_remote_to_remote_direct_deferred(
+            let mut state = remote_remote_direct::run_remote_to_remote_direct_deferred(
                 args,
                 src.clone(),
-                dst,
+                dst.clone(),
                 false,
                 true,
                 ctx.perf_history_enabled,
                 lifecycle_trace,
             )
             .await?;
+            let retry = retry::run_retry_passes(
+                args,
+                retry::PassFailures::from_delegated(&state),
+                |pass_args| {
+                    let src = src.clone();
+                    let dst = dst.clone();
+                    async move {
+                        let pass = remote_remote_direct::run_remote_to_remote_direct_deferred(
+                            &pass_args,
+                            src,
+                            dst,
+                            false,
+                            true,
+                            ctx.perf_history_enabled,
+                            lifecycle_trace,
+                        )
+                        .await?;
+                        Ok(retry::PassResult {
+                            files_transferred: pass.summary.files_transferred,
+                            bytes_transferred: pass.summary.bytes_transferred,
+                            failures: retry::PassFailures::from_delegated(&pass),
+                        })
+                    }
+                },
+            )
+            .await?;
+            retry.fold_into_delegated(&mut state.summary);
 
             // pfc-5 / Q1(b): refuse before the remote source is touched.
             // The delegated re-encode is a second summary message, so the
@@ -936,6 +1191,11 @@ mod tests {
             drop_windows_metadata: false,
             retry: 0,
             wait: 5,
+            retries: 1,
+            retry_wait: 30,
+            diagnostics_no_retry_wait: false,
+            retry_only: None,
+            retry_pass: None,
             null: false,
             json: false,
             exclude: vec![],
@@ -948,7 +1208,7 @@ mod tests {
             delete_scope: "subset".into(),
         };
 
-        runtime().block_on(run_local_transfer(
+        runtime().block_on(local::run_local_transfer_quiet(
             &ctx,
             &args,
             &src,
@@ -993,6 +1253,11 @@ mod tests {
             drop_windows_metadata: false,
             retry: 0,
             wait: 5,
+            retries: 1,
+            retry_wait: 30,
+            diagnostics_no_retry_wait: false,
+            retry_only: None,
+            retry_pass: None,
             null: false,
             json: false,
             exclude: vec![],
@@ -1005,7 +1270,7 @@ mod tests {
             delete_scope: "subset".into(),
         };
 
-        runtime().block_on(run_local_transfer(
+        runtime().block_on(local::run_local_transfer_quiet(
             &ctx,
             &args,
             &src,
@@ -1056,6 +1321,11 @@ mod tests {
             drop_windows_metadata: false,
             retry: 0,
             wait: 5,
+            retries: 1,
+            retry_wait: 30,
+            diagnostics_no_retry_wait: false,
+            retry_only: None,
+            retry_pass: None,
             null: false,
             json: false,
             exclude: vec![],

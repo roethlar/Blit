@@ -385,6 +385,11 @@ pub struct LocalMirrorSummary {
     /// same bounded report the wire carries, so local and remote runs
     /// render one shape.
     pub failures: Vec<FileFailure>,
+    /// ssc-6: the exact failed-path set (uncapped on the local carrier)
+    /// the CLI's end-of-run retry passes re-scan; `failed_paths_truncated`
+    /// mirrors the wire flag and is always false here.
+    pub failed_paths: Vec<String>,
+    pub failed_paths_truncated: bool,
     /// Files whose destination attributes were repaired in place at diff
     /// time, with no payload bytes re-sent (pfc-6). Counted by the
     /// destination end, so a remote session repairs the same way without
@@ -996,6 +1001,8 @@ pub async fn run_local_session(
             .iter()
             .map(FileFailure::from_wire)
             .collect(),
+        failed_paths: outcome.summary.failed_paths.clone(),
+        failed_paths_truncated: outcome.summary.failed_paths_truncated,
         // pfc-6: destination-local, so it comes off the outcome rather
         // than the wire summary the carriers exchange.
         files_repaired: outcome.files_repaired,

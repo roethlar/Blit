@@ -479,6 +479,14 @@ impl DelegatedPullOutcome {
     pub fn contained_failures(&self) -> Vec<FileFailure> {
         delegated_summary_failures(&self.summary)
     }
+    /// ssc-6: the exact failed-path set for retry passes, and whether the
+    /// sender had to truncate it (see `TransferSummary.failed_paths`).
+    pub fn failed_paths(&self) -> (&[String], bool) {
+        (
+            &self.summary.failed_paths,
+            self.summary.failed_paths_truncated,
+        )
+    }
 }
 
 /// Per-stream state tracked while consuming `BytesProgress`
@@ -1089,6 +1097,8 @@ mod tests {
             files_resumed: 0,
             files_failed: contained.files_failed_total,
             failures: contained.wire_failures(),
+            failed_paths: Vec::new(),
+            failed_paths_truncated: false,
         };
         let endpoint = delegated_endpoint(RemotePath::Module {
             module: "mod".to_string(),

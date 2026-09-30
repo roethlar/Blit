@@ -68,6 +68,11 @@ pub const MAX_FAILURE_PATH_BYTES: usize = 4 * 1024;
 /// more than an order of magnitude of headroom.
 pub const MAX_WIRE_FAILURES_ENCODED_BYTES: usize = 256 * 1024;
 
+/// ssc-6: ceiling on the encoded exact failed-path set a summary carries
+/// for retry passes (1 MiB ≈ 16k paths of 64 bytes). Past it the set is
+/// marked truncated and the initiator retries only the named report.
+pub const MAX_WIRE_FAILED_PATHS_ENCODED_BYTES: usize = 1024 * 1024;
+
 /// Encoded overhead one `failures` entry costs its parent message: the
 /// repeated field's tag plus its length delimiter. Field 7 of
 /// `TransferSummary` tags in one byte and a per-entry-bounded entry's
@@ -356,6 +361,36 @@ impl SinkOutcome {
     /// `files_failed_total` keeps the exact count the summary reports
     /// alongside the list, so a list shortened by either bound reads as
     /// "capped", never as "failures were forgotten".
+    /// ssc-6: the exact failed-path set for the initiator's retry passes,
+    /// bounded by encoded bytes rather than by entry count — a retry set
+    /// is a work list, not a report, so it carries every path it can and
+    /// says when it could not carry them all (`(paths, truncated)`).
+    pub fn wire_failed_paths(&self) -> (Vec<String>, bool) {
+        let mut out: Vec<String> = Vec::new();
+        let mut remaining = MAX_WIRE_FAILED_PATHS_ENCODED_BYTES;
+        // Deterministic order: the report's order for the named ones,
+        // then the rest sorted, so a retry set is reproducible.
+        let mut ordered: Vec<&String> = self.failures.iter().map(|f| &f.relative_path).collect();
+        let mut rest: Vec<&String> = self
+            .failed_paths
+            .iter()
+            .filter(|p| !self.failures.iter().any(|f| &f.relative_path == *p))
+            .collect();
+        rest.sort();
+        ordered.extend(rest);
+        for path in ordered {
+            // 4 bytes of envelope per repeated string entry is a safe
+            // over-estimate (tag + length varint).
+            let cost = path.len().saturating_add(4);
+            if cost > remaining {
+                return (out, true);
+            }
+            remaining -= cost;
+            out.push(path.clone());
+        }
+        (out, false)
+    }
+
     pub fn wire_failures(&self) -> Vec<crate::generated::FileFailure> {
         use prost::Message as _;
 
@@ -4667,6 +4702,8 @@ mod tests {
             files_resumed: 0,
             files_failed: outcome.files_failed_total,
             failures: outcome.wire_failures(),
+            failed_paths: Vec::new(),
+            failed_paths_truncated: false,
         }
     }
 

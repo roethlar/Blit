@@ -357,30 +357,6 @@ fn verb_compare_flags(args: &TransferArgs) -> CompareFlags {
     }
 }
 
-/// Returns the push state so the caller can read the destination's
-/// per-file failure report for the exit status (pfc-5); the summary is
-/// already printed inline.
-pub async fn run_remote_push_transfer(
-    args: &TransferArgs,
-    source: PathBuf,
-    remote: RemoteEndpoint,
-    mirror_mode: bool,
-    perf_history: bool,
-    lifecycle_trace: &TransferLifecycleTrace,
-) -> Result<DeferredPushState> {
-    run_remote_push_transfer_inner(
-        args,
-        source,
-        remote,
-        mirror_mode,
-        false,
-        false,
-        perf_history,
-        lifecycle_trace,
-    )
-    .await
-}
-
 /// R51-F4: move's variant of [`run_remote_push_transfer`]. Returns
 /// the push summary instead of printing inline so the caller can
 /// defer output until after source-delete.
@@ -572,31 +548,6 @@ async fn run_remote_push_transfer_inner(
         })?;
     }
     Ok(state)
-}
-
-/// Returns the pull state so the caller can read the destination's
-/// per-file failure report for the exit status (pfc-5); the summary is
-/// already printed inline.
-pub async fn run_remote_pull_transfer(
-    args: &TransferArgs,
-    remote: RemoteEndpoint,
-    dest_root: &Path,
-    mirror_mode: bool,
-    move_verb: bool,
-    perf_history: bool,
-    lifecycle_trace: &TransferLifecycleTrace,
-) -> Result<DeferredPullState> {
-    run_remote_pull_transfer_inner(
-        args,
-        remote,
-        dest_root,
-        mirror_mode,
-        move_verb,
-        false, // emit success summary inline (copy/mirror default)
-        perf_history,
-        lifecycle_trace,
-    )
-    .await
 }
 
 /// R51-F4: move's variant of `run_remote_pull_transfer` — runs the

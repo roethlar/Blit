@@ -18,28 +18,6 @@ use blit_core::endpoints::format_remote_endpoint;
 /// already imports.
 pub type DeferredDelegatedState = DelegatedPullOutcome;
 
-pub async fn run_remote_to_remote_direct(
-    args: &TransferArgs,
-    src: RemoteEndpoint,
-    dst: RemoteEndpoint,
-    mirror_mode: bool,
-    move_verb: bool,
-    perf_history: bool,
-    lifecycle_trace: &TransferLifecycleTrace,
-) -> Result<DeferredDelegatedState> {
-    run_remote_to_remote_direct_inner(
-        args,
-        src,
-        dst,
-        mirror_mode,
-        move_verb,
-        false, // defer_output
-        perf_history,
-        lifecycle_trace,
-    )
-    .await
-}
-
 /// R51-F4: move's variant of [`run_remote_to_remote_direct`].
 /// Returns the delegated summary instead of printing inline so
 /// the caller can defer output until after source-delete.
@@ -210,6 +188,8 @@ async fn run_remote_to_remote_direct_inner(
             // outcome is read.
             files_failed: 0,
             failures: Vec::new(),
+            failed_paths: Vec::new(),
+            failed_paths_truncated: false,
         };
         let state = DeferredDelegatedState {
             summary,
@@ -360,6 +340,11 @@ mod delegated_options_tests {
             drop_windows_metadata: false,
             retry: 0,
             wait: 5,
+            retries: 1,
+            retry_wait: 30,
+            diagnostics_no_retry_wait: false,
+            retry_only: None,
+            retry_pass: None,
             null: false,
             json: false,
             exclude: vec![],

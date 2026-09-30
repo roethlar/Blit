@@ -23,6 +23,10 @@ pub struct FilterInputs<'a> {
     pub include: &'a [String],
     pub exclude: &'a [String],
     pub files_from: Option<&'a PathBuf>,
+    /// ssc-6: an in-memory exact-path set (the previous pass's failed
+    /// files) that overrides `files_from` for a retry pass. Never set by
+    /// a CLI flag — the orchestrator threads it between passes.
+    pub retry_only: Option<&'a std::collections::HashSet<PathBuf>>,
     pub min_size: Option<&'a str>,
     pub max_size: Option<&'a str>,
     pub min_age: Option<&'a str>,
@@ -59,6 +63,9 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
     }
     if let Some(path) = inputs.files_from {
         filter.files_from = Some(FileFilter::load_files_from(path)?);
+    }
+    if let Some(set) = inputs.retry_only {
+        filter.files_from = Some(set.clone());
     }
     // R58-F12: validate glob patterns at filter-construction
     // time. The runtime build_globset silently drops invalid
@@ -117,6 +124,14 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
     }
+    if let Some(set) = inputs.retry_only {
+        let mut entries: Vec<String> = set
+            .iter()
+            .map(|p| crate::path_posix::relative_path_to_posix(p))
+            .collect();
+        entries.sort();
+        spec.files_from = entries;
+    }
     // review otp-10a F8: validate the globs at construction time, like
     // `build` does (R58-F12) — a malformed `--include`/`--exclude`
     // must fail before any connection is opened, not when the session
@@ -144,6 +159,7 @@ mod tests {
             include,
             exclude,
             files_from: None,
+            retry_only: None,
             min_size: None,
             max_size: None,
             min_age: None,

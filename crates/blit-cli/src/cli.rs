@@ -193,7 +193,7 @@ pub struct PerfArgs {
     pub json: bool,
 }
 
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone, Debug, Default)]
 #[command(after_long_help = PATH_SEMANTICS_HELP)]
 pub struct TransferArgs {
     /// Source path or remote endpoint (host:/module/path).
@@ -267,11 +267,49 @@ pub struct TransferArgs {
     /// to copy Windows metadata to a destination that cannot preserve it.
     #[arg(long, help_heading = "Reliability")]
     pub drop_windows_metadata: bool,
-    /// Retry the transfer up to N times on a transient failure (network
-    /// drop, stall timeout). Each retry re-runs destination comparison, so
-    /// normal comparison skips files now complete; flags that force copying
-    /// still apply. With --resume, eligible partial files continue at block
-    /// granularity. 0 (default) disables retries.
+    /// Number of end-of-run retry passes over files that failed (0 disables).
+    ///
+    /// After the main pass, files that could not be transferred — locked,
+    /// vanished, changed while being read, or refused at the destination —
+    /// are re-scanned and retried, pass after pass, until a pass ends with
+    /// no failures or N passes have run. Files still failing after the last
+    /// pass are reported. (Distinct from --retry, which re-runs the WHOLE
+    /// transfer after a transient failure such as a network drop.)
+    #[arg(
+        long,
+        short = 'R',
+        value_name = "N",
+        default_value_t = 1,
+        help_heading = "Reliability"
+    )]
+    pub retries: u32,
+    /// Seconds to wait before each retry pass (see --retries).
+    #[arg(
+        long,
+        short = 'W',
+        value_name = "SECONDS",
+        default_value_t = 30,
+        help_heading = "Reliability"
+    )]
+    pub retry_wait: u64,
+    /// Diagnostics only: record each retry wait to the counter file instead
+    /// of sleeping (integration tests must not sleep for real).
+    #[arg(long, hide = true)]
+    pub diagnostics_no_retry_wait: bool,
+    /// ssc-6 internal: the exact-path set a retry pass is limited to. Set
+    /// by the orchestrator between passes, never by a flag.
+    #[arg(skip)]
+    pub retry_only: Option<std::collections::HashSet<PathBuf>>,
+    /// ssc-6 internal: `(pass, of, files)` while a retry pass runs, so the
+    /// live row can say so. Never a flag.
+    #[arg(skip)]
+    pub retry_pass: Option<(u32, u32, usize)>,
+    /// Re-run the WHOLE transfer up to N times on a transient failure
+    /// (network drop, stall timeout). Each retry re-runs destination
+    /// comparison, so normal comparison skips files now complete; flags that
+    /// force copying still apply. With --resume, eligible partial files
+    /// continue at block granularity. 0 (default) disables. For retrying
+    /// individual files that failed, see --retries.
     #[arg(
         long,
         value_name = "N",
@@ -381,6 +419,18 @@ pub struct TransferArgs {
 }
 
 impl TransferArgs {
+    /// A test fixture: every switch at its type default (NOT the clap
+    /// default — `--retries` reads 0 here, `--delete-scope` is empty),
+    /// with the two positionals set. Unit tests set what they exercise.
+    #[cfg(test)]
+    pub(crate) fn for_tests(source: &str, destination: &str) -> Self {
+        Self {
+            source: source.to_string(),
+            destination: destination.to_string(),
+            ..Self::default()
+        }
+    }
+
     /// Effective progress setting: explicit `--progress` wins; otherwise
     /// enable automatically when stdout is a TTY and `--json` is off. This
     /// matches rsync/rclone/restic defaults so a first-time interactive
@@ -682,6 +732,56 @@ mod tests {
 
     /// retry-wait: the `--retry`/`--wait` flags parse, default to no
     /// retries / 5s, and accept explicit values.
+    /// ssc-6 (D-2026-09-28-3): the end-of-run retry switches, adapted from
+    /// robocopy's /R:n and /W:ss — `--retries`/`-R` default 1 (`0`
+    /// disables), `--retry-wait`/`-W` default 30 — parse on every transfer
+    /// verb, and their shorts collide with nothing.
+    #[test]
+    fn retries_and_retry_wait_switches_parse_with_the_ruled_defaults() {
+        fn transfer_args(argv: &[&str]) -> TransferArgs {
+            match Cli::try_parse_from(argv).expect("parses").command {
+                Commands::Copy(a) | Commands::Mirror(a) | Commands::Move(a) => a,
+                _ => panic!("transfer verb"),
+            }
+        }
+        for verb in ["copy", "mirror", "move"] {
+            let args = transfer_args(&["blit", verb, "src", "dst"]);
+            assert_eq!(args.retries, 1, "{verb}: --retries defaults to one pass");
+            assert_eq!(args.retry_wait, 30, "{verb}: --retry-wait defaults to 30 s");
+            assert!(args.retry_only.is_none() && args.retry_pass.is_none());
+            let args = transfer_args(&["blit", verb, "-R", "3", "-W", "7", "src", "dst"]);
+            assert_eq!((args.retries, args.retry_wait), (3, 7));
+            let args = transfer_args(&[
+                "blit",
+                verb,
+                "--retries",
+                "0",
+                "--retry-wait",
+                "0",
+                "src",
+                "dst",
+            ]);
+            assert_eq!((args.retries, args.retry_wait), (0, 0));
+        }
+        // The switches are advertised (owner-requested, D-2026-09-28-3); the
+        // diagnostics one is not.
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("copy")
+            .expect("copy")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--retries"), "help advertises --retries");
+        assert!(
+            help.contains("--retry-wait"),
+            "help advertises --retry-wait"
+        );
+        assert!(
+            !help.contains("diagnostics-no-retry-wait"),
+            "the diagnostics switch stays hidden"
+        );
+    }
+
     #[test]
     fn retry_wait_flags_parse_and_default() {
         let cli = Cli::try_parse_from(["blit", "copy", "src", "dst"]).expect("parse defaults");

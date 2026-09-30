@@ -701,6 +701,10 @@ message DelegatedPullSummary {
   // clean success while the requested files are absent.
   uint64 files_failed = 7;
   repeated FileFailure failures = 8;
+  // ssc-6: the exact failed-path set (see TransferSummary.failed_paths),
+  // re-encoded verbatim so a delegated initiator can retry precisely.
+  repeated string failed_paths = 9;
+  bool failed_paths_truncated = 10;
 }
 
 message DelegatedPullError {
@@ -1132,6 +1136,15 @@ message TransferSummary {
   // unbounded frame, while the total stays exact.
   uint64 files_failed = 6;
   repeated FileFailure failures = 7;
+  // ssc-6 (D-2026-09-28-1/-3): the EXACT set of paths that failed, so
+  // the initiator's end-of-run retry passes re-scan precisely those
+  // files — `failures` is capped at 64 named entries, which is a
+  // report, not a work list. Bounded by encoded bytes
+  // (MAX_WIRE_FAILED_PATHS_ENCODED_BYTES); when the set does not fit,
+  // `failed_paths_truncated` is true and the initiator falls back to
+  // the capped report's paths and says so.
+  repeated string failed_paths = 8;
+  bool failed_paths_truncated = 9;
 }
 
 // Structured refusal/abort — an end says why before closing.

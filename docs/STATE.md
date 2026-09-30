@@ -41,7 +41,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   on one handle (A12). Codex codereview of ssc-1..3: 8 findings FIXED
   (`ed4bc773..5d557004`, one per commit, mutation-proven) + 1 declined;
   ssc-4 review pending. Gates green on macOS + Linux-cross clippy, suite
-  1285/0/2; CI unverified until a push. Next: ssc-6, then ssc-5.
+  1300/0/2; CI unverified until a push; ssc-6 (retry passes) landed. Next: ssc-5.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can
@@ -67,7 +67,7 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
    per-file containment (skip record, shard fidelity, mid-record retraction,
    local pre-check retirement, non-UTF-8 reason). Codex openreview loop in
    closed at r6 (all acceptable_with_changes; 23 changes adopted); all rulings
-   D1–D7 closed (D-2026-09-28-1..-4, D-2026-09-29-1..-3), ssc-1..ssc-4 landed 2026-09-30, ssc-6 next then ssc-5; RELEASE_1_0 G3 fix-now item (ruled).
+   D1–D7 closed (D-2026-09-28-1..-4, D-2026-09-29-1..-3), ssc-1..ssc-4 + ssc-6 landed 2026-09-30, ssc-5 next; RELEASE_1_0 G3 fix-now item (ruled).
 0. **ULTRACODE 2026-08-18 (DEVLOG 23:00Z): cv-1+cv-2 LANDED `05529c19` (contract-version gate + scan surfacing; cv-3 waits for next release); sf-3d LANDED `7ffd929d` (containment cache + resume-path stamping; rig A/B still owed); clp-3 reviewed AND F1 closed `677a8ba9` (F2/F5 stay owner calls); residue triaged (2 dead, 1 dead-as-written; item 5 rate-window FIXED — one flagged judgement call on stall silence; item 2 perf-history scope needs an owner ruling); sweep-prefetch parked pending one netwatch-01 SMB run; pm-5 BLOCKED for v0.1.2 — source lane needs the next tag.** CI FULLY GREEN on `af9b48b3` (run 32195891519, 7/7 jobs — the slices are cross-platform proven). Stall-line revised-b landed after (three red-proven silence gates; mid-payload stalls visible, summary-wait/purge tails silent).
 1. **`docs/plan/INTERFACE_PLATFORM.md` (SHIPPED — owner declared 2026-08-18; all seven slices landed 2026-08-17)** — three standalone front-ends (CLI first, TUI/GUI later in BlitAdmin_UIs), all first-class consumers of `blit-core` ITSELF: `blit-app` + `blit-console-core` fold into core (no new crate, D-2026-08-17-2), `blit-core` publishes to crates.io (name available, verified; publish act owner-gated), third-party Rust apps embed via the crate, everything else via daemon gRPC. All rulings closed (D-2026-08-17-3/-4/-5: bridge, tui, gui all deleted; fresh UIs later; nothing pushes to BlitAdmin_UIs under this plan). Nothing open; execution record in the plan.
 2. **`docs/plan/SMALL_FILE_CEILING.md` — sf-3b closed (D-2026-08-14-1); sf-3c landed 2026-08-15; sf-3d landed 2026-08-18** — sf-3c stamps streamed-receive mtime/permissions through the retained write handle instead of reopening by path; sf-3d (sf-3a candidate 3, contained-path canonicalization cache + resume-path stamping, `7ffd929d`) closed the named-candidate list; proxy pins + mutation proofs in the plan's Slices section. Rig A/B for sf-3d still owed (Queue 0); no further cut selected.
