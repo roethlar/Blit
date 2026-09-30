@@ -68,8 +68,8 @@ pub fn refuse_source_delete_on_failures(
         .collect::<Vec<_>>()
         .join("; ");
     bail!(
-        "refusing to remove source {source}: {files_failed} file(s) could not \
-         be written and remain un-landed at the destination — deleting the \
+        "refusing to remove source {source}: {files_failed} file(s) did not land \
+         at the destination — deleting the \
          source now would destroy their only copy; first {}: {named}. Re-run \
          to converge, then move.",
         failures.len().min(REFUSAL_NAMED_FAILURES),
@@ -123,7 +123,7 @@ mod tests {
         let err = refuse_source_delete_on_failures("/src", 70, &failures)
             .expect_err("a capped report still refuses");
         let message = format!("{err:#}");
-        assert!(message.contains("70 file(s) could not"), "{message}");
+        assert!(message.contains("70 file(s) did not land"), "{message}");
         assert!(message.contains("f0.bin"), "{message}");
         assert!(
             !message.contains("f3.bin"),

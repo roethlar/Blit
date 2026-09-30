@@ -1997,3 +1997,337 @@ async fn data_plane_resume_read_error_mid_diff_is_reported_and_unstamped() {
     )
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// ssc-5 (D-F, D-2026-09-29-3, A13): names that are not valid UTF-8 travel as
+// raw bytes beside the lossy text. A destination that can hold the bytes
+// creates the real name and the file converges on re-run; one that cannot
+// reports the file at manifest intake — whatever the diff would have said —
+// and never creates a path by the lossy text. Two entries that collapse to
+// one text path are reported, never silently merged.
+// ---------------------------------------------------------------------------
+
+/// A source whose scan rewrites chosen manifest headers on their way out
+/// (duplicate them, decorate them with raw name bytes); payload paths
+/// delegate to the real filesystem source.
+struct ManifestRewritingSource {
+    inner: FsTransferSource,
+    rewrite: Arc<dyn Fn(FileHeader) -> Vec<FileHeader> + Send + Sync>,
+}
+
+#[async_trait::async_trait]
+impl TransferSource for ManifestRewritingSource {
+    fn scan(
+        &self,
+        filter: Option<blit_core::fs_enum::FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+    ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
+        let (mut rx, scan) = self.inner.scan(filter, unreadable_paths);
+        let (tx, out) = tokio::sync::mpsc::channel(64);
+        let rewrite = Arc::clone(&self.rewrite);
+        tokio::spawn(async move {
+            while let Some(header) = rx.recv().await {
+                for rewritten in rewrite(header) {
+                    if tx.send(rewritten).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        (out, scan)
+    }
+
+    async fn prepare_payload(&self, payload: TransferPayload) -> eyre::Result<PreparedPayload> {
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
+        self.inner.open_file(header).await
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+fn rewriting_source(
+    src_root: PathBuf,
+    rewrite: impl Fn(FileHeader) -> Vec<FileHeader> + Send + Sync + 'static,
+) -> Arc<dyn TransferSource> {
+    Arc::new(ManifestRewritingSource {
+        inner: FsTransferSource::new(src_root),
+        rewrite: Arc::new(rewrite),
+    })
+}
+
+/// A13: a second manifest entry for a text path already seen is reported
+/// as a lossy-name collision — the first wins and lands, nothing is
+/// overwritten, the session completes.
+async fn assert_duplicate_manifest_path_is_reported_once(carrier: Carrier) {
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&src_root).unwrap();
+    std::fs::create_dir_all(&dst_root).unwrap();
+    write_tree(
+        &src_root,
+        &[
+            ("dup.bin", patterned(BIG, 7), 1_600_000_011),
+            ("ok.bin", patterned(BIG, 8), 1_600_000_012),
+        ],
+    );
+    let source = rewriting_source(src_root.clone(), |header| {
+        if header.relative_path == "dup.bin" {
+            vec![header.clone(), header]
+        } else {
+            vec![header]
+        }
+    });
+    let (summary, outcome) = run_with(
+        open_for(TransferRole::Source, carrier),
+        carrier,
+        source,
+        dst_root.clone(),
+    )
+    .await;
+    let summary = summary.expect("session completes");
+    outcome.expect("destination completes");
+    assert_eq!(summary.files_failed, 1, "the duplicate is reported once");
+    let failures = failures_from_wire(&summary.failures);
+    assert_eq!(failures[0].relative_path, "dup.bin");
+    assert!(
+        failures[0]
+            .reason
+            .starts_with(blit_core::raw_name::DUPLICATE_MANIFEST_PATH_REASON),
+        "reason: {}",
+        failures[0].reason
+    );
+    assert_eq!(
+        summary.files_transferred, 2,
+        "the first header lands, so does ok.bin"
+    );
+    let landed = collect_tree(&dst_root);
+    assert_eq!(landed.get("dup.bin").map(Vec::len), Some(BIG));
+    assert_eq!(landed.get("ok.bin").map(Vec::len), Some(BIG));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_duplicate_manifest_path_is_reported_once_first_wins() {
+    assert_duplicate_manifest_path_is_reported_once(Carrier::InStream).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_duplicate_manifest_path_is_reported_once_first_wins() {
+    assert_duplicate_manifest_path_is_reported_once(Carrier::DataPlane).await;
+}
+
+/// The lossy text of `caf\xe9.txt` as the scan renders it.
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+const LOSSY_NAME: &str = "caf\u{fffd}.txt";
+const RAW_NAME: &[u8] = b"caf\xe9.txt";
+
+/// A13 on a destination that cannot store raw bytes (macOS, Windows —
+/// `raw_name::destination_can_store_raw_names()` is false there): the
+/// entry is reported at intake with the exact reason, never granted,
+/// nothing is created by the lossy text, and a pre-existing destination
+/// counterpart under the lossy text survives a mirror. The destination
+/// already holds an identical copy under the lossy text, so a diff would
+/// have called it converged — it is reported regardless.
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+async fn assert_unstorable_raw_name_is_reported_at_intake(carrier: Carrier) {
+    assert!(!blit_core::raw_name::destination_can_store_raw_names());
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&src_root).unwrap();
+    std::fs::create_dir_all(&dst_root).unwrap();
+    let lossy_content = patterned(BIG, 9);
+    write_tree(
+        &src_root,
+        &[
+            (LOSSY_NAME, lossy_content.clone(), 1_600_000_021),
+            ("ok.bin", patterned(BIG, 10), 1_600_000_022),
+        ],
+    );
+    // An identical converged copy under the lossy text, plus an extraneous
+    // entry the mirror must still delete.
+    write_tree(
+        &dst_root,
+        &[
+            (LOSSY_NAME, lossy_content.clone(), 1_600_000_021),
+            ("extraneous.bin", patterned(1024, 11), 1_600_000_023),
+        ],
+    );
+    let source = rewriting_source(src_root.clone(), |mut header| {
+        if header.relative_path == LOSSY_NAME {
+            header.raw_relative_path = Some(RAW_NAME.to_vec());
+        }
+        vec![header]
+    });
+    let mut open = open_for(TransferRole::Source, carrier);
+    open.mirror_enabled = true;
+    open.mirror_kind = MirrorMode::All as i32;
+    let (summary, outcome) = run_with(open, carrier, source, dst_root.clone()).await;
+    let summary = summary.expect("session completes");
+    outcome.expect("destination completes");
+    assert_eq!(summary.files_failed, 1);
+    let failures = failures_from_wire(&summary.failures);
+    assert_eq!(failures[0].relative_path, LOSSY_NAME);
+    assert_eq!(
+        failures[0].reason,
+        blit_core::raw_name::DESTINATION_CANNOT_STORE_REASON,
+        "exact intake reason"
+    );
+    assert_eq!(summary.files_transferred, 1, "only ok.bin lands");
+    let landed = collect_tree(&dst_root);
+    assert_eq!(landed.get("ok.bin").map(Vec::len), Some(BIG));
+    assert_eq!(
+        landed.get(LOSSY_NAME).cloned(),
+        Some(lossy_content),
+        "the counterpart under the lossy text is kept by the mirror, untouched"
+    );
+    assert!(
+        !landed.contains_key("extraneous.bin"),
+        "the mirror still deletes genuinely extraneous entries"
+    );
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_unstorable_raw_name_is_reported_at_intake_and_never_created() {
+    assert_unstorable_raw_name_is_reported_at_intake(Carrier::InStream).await;
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_unstorable_raw_name_is_reported_at_intake_and_never_created() {
+    assert_unstorable_raw_name_is_reported_at_intake(Carrier::DataPlane).await;
+}
+
+/// Linux (and the other byte-keyed Unix filesystems): the real name
+/// round-trips byte-exact on both carriers and converges on re-run; a
+/// mirror keeps the raw-named counterpart.
+#[cfg(all(unix, not(target_os = "macos")))]
+mod raw_round_trip {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    fn raw_path(root: &Path) -> PathBuf {
+        root.join(OsStr::from_bytes(RAW_NAME))
+    }
+
+    fn dest_names(root: &Path) -> Vec<Vec<u8>> {
+        let mut names: Vec<Vec<u8>> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().as_bytes().to_vec())
+            .collect();
+        names.sort();
+        names
+    }
+
+    async fn assert_raw_name_round_trips(carrier: Carrier) {
+        assert!(blit_core::raw_name::destination_can_store_raw_names());
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        let content = patterned(BIG, 12);
+        std::fs::write(raw_path(&src_root), &content).unwrap();
+        filetime::set_file_mtime(
+            raw_path(&src_root),
+            filetime::FileTime::from_unix_time(1_600_000_031, 0),
+        )
+        .unwrap();
+        write_tree(&src_root, &[("ok.bin", patterned(BIG, 13), 1_600_000_032)]);
+        std::fs::write(dst_root.join("extraneous.bin"), b"gone").unwrap();
+
+        let mut open = open_for(TransferRole::Source, carrier);
+        open.mirror_enabled = true;
+        open.mirror_kind = MirrorMode::All as i32;
+        let (summary, outcome) = run_with(
+            open.clone(),
+            carrier,
+            Arc::new(FsTransferSource::new(src_root.clone())),
+            dst_root.clone(),
+        )
+        .await;
+        let summary = summary.expect("session completes");
+        outcome.expect("destination completes");
+        assert_eq!(summary.files_failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.files_transferred, 2);
+        assert_eq!(
+            dest_names(&dst_root),
+            vec![RAW_NAME.to_vec(), b"ok.bin".to_vec()],
+            "the exact bytes name the destination file; nothing by the lossy text"
+        );
+        assert_eq!(std::fs::read(raw_path(&dst_root)).unwrap(), content);
+
+        // Re-run: converged (nothing copied), and the mirror keeps the
+        // raw-named counterpart.
+        let (summary, outcome) = run_with(
+            open,
+            carrier,
+            Arc::new(FsTransferSource::new(src_root.clone())),
+            dst_root.clone(),
+        )
+        .await;
+        let summary = summary.expect("second session completes");
+        outcome.expect("destination completes");
+        assert_eq!(summary.files_failed, 0);
+        assert_eq!(summary.files_transferred, 0, "converged on re-run");
+        assert_eq!(
+            dest_names(&dst_root),
+            vec![RAW_NAME.to_vec(), b"ok.bin".to_vec()]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn in_stream_raw_name_round_trips_byte_exact_and_converges() {
+        assert_raw_name_round_trips(Carrier::InStream).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn data_plane_raw_name_round_trips_byte_exact_and_converges() {
+        assert_raw_name_round_trips(Carrier::DataPlane).await;
+    }
+
+    /// The local route: same bytes, same convergence, through
+    /// `run_local_session`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn local_raw_name_round_trips_byte_exact_and_converges() {
+        use blit_core::transfer_session::{run_local_session, LocalMirrorOptions};
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        let content = patterned(BIG, 14);
+        std::fs::write(raw_path(&src_root), &content).unwrap();
+        std::fs::write(src_root.join("small.txt"), b"small").unwrap();
+        let options = || LocalMirrorOptions {
+            progress: false,
+            perf_history: false,
+            mirror: true,
+            ..Default::default()
+        };
+        let first = run_local_session(&src_root, &dst_root, options())
+            .await
+            .expect("first local session");
+        assert_eq!(first.files_failed, 0, "{:?}", first.failures);
+        assert_eq!(
+            dest_names(&dst_root),
+            vec![RAW_NAME.to_vec(), b"small.txt".to_vec()]
+        );
+        assert_eq!(std::fs::read(raw_path(&dst_root)).unwrap(), content);
+        let second = run_local_session(&src_root, &dst_root, options())
+            .await
+            .expect("second local session");
+        assert_eq!(second.files_failed, 0);
+        assert_eq!(second.copied_files, 0, "converged on re-run");
+        assert_eq!(
+            dest_names(&dst_root),
+            vec![RAW_NAME.to_vec(), b"small.txt".to_vec()]
+        );
+    }
+}

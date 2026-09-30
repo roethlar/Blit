@@ -236,6 +236,7 @@ impl MirrorPlanner {
         &self,
         dest_root: &Path,
         source_files: &HashSet<String>,
+        source_raw_files: &[Vec<u8>],
         shielded: &HashSet<String>,
         filter: &FileFilter,
     ) -> Result<MirrorDeletionPlan> {
@@ -245,8 +246,7 @@ impl MirrorPlanner {
         // Kept set = every source file plus each of its ancestor dirs, so a
         // directory holding a kept file is itself kept (never deleted).
         let mut source_set: HashSet<CasefoldKey> = HashSet::new();
-        for rel in source_files {
-            let path = Path::new(rel);
+        let mut keep = |path: &Path| {
             source_set.insert(CasefoldKey::new(path));
             let mut current = path.parent();
             while let Some(parent) = current {
@@ -256,6 +256,15 @@ impl MirrorPlanner {
                 source_set.insert(CasefoldKey::new(parent));
                 current = parent.parent();
             }
+        };
+        for rel in source_files {
+            keep(Path::new(rel));
+        }
+        // Contract v7 (D-F): a source name that is not valid UTF-8 lives at
+        // the destination under its exact bytes, which on a byte-keyed
+        // filesystem never equal the lossy text — keep it by its bytes too.
+        for raw in source_raw_files {
+            keep(&crate::raw_name::path_from_raw(raw));
         }
 
         let dest_set = dest_entries

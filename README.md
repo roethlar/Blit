@@ -87,13 +87,12 @@ cargo install blit-transfer   # installs the `blit` command
 cargo install blit-daemon
 ```
 
-Remote transfers require both peers to be the same build. Channel
-binaries (brew/scoop/AUR/releases) already match each other; cargo
-builds get a unique identity unless you pin one, e.g. for v0.1.3:
-
-```sh
-BLIT_GIT_SHA=fe6b279dfde0 cargo install blit-transfer blit-daemon
-```
+Remote transfers require both peers to speak the same protocol
+version (the `contract` number `blit scan` shows next to each daemon —
+`7` after this release). Any two builds of the same release do, whatever
+channel installed them; a peer on an older protocol is refused at
+session open with both versions named. `BLIT_GIT_SHA` is no longer
+needed for cargo installs.
 
 **Any platform — GitHub Releases**: download the archive for your
 platform plus its `.sha256` from

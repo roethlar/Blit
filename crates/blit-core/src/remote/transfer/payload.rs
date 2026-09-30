@@ -179,11 +179,9 @@ pub async fn prepare_payload_with(
 }
 
 fn source_path_for_header(source_root: &Path, header: &FileHeader) -> PathBuf {
-    if header.relative_path.is_empty() {
-        source_root.to_path_buf()
-    } else {
-        source_root.join(&header.relative_path)
-    }
+    // Contract v7 (D-F): raw name bytes, when present, are the only form
+    // that names the file on disk.
+    crate::raw_name::source_path(source_root, header)
 }
 
 /// A payload ready for a sink to consume.
@@ -269,8 +267,7 @@ pub fn plan_transfer_payloads(
 
     let mut entries: Vec<FileEntry> = Vec::with_capacity(headers.len());
     for header in &headers {
-        let rel_path = Path::new(&header.relative_path);
-        let absolute = source_root.join(rel_path);
+        let absolute = crate::raw_name::source_path(source_root, header);
         entries.push(FileEntry {
             path: absolute,
             // Tar payload cost includes named-stream content. Planning only on
@@ -448,13 +445,9 @@ pub fn build_tar_shard_with(
     for header in headers {
         let rel = Path::new(&header.relative_path);
         // Empty relative_path = "root is itself the file" (single-file
-        // source). See FsTransferSource::open_file for context — join("")
-        // can preserve a trailing separator that File::open rejects.
-        let full_path = if header.relative_path.is_empty() {
-            source_root.to_path_buf()
-        } else {
-            source_root.join(rel)
-        };
+        // source); raw name bytes win over the lossy text (contract v7,
+        // D-F). See FsTransferSource::open_file for the join("") caveat.
+        let full_path = crate::raw_name::source_path(source_root, header);
         let size = header.size;
         let mut skip = |reason: String| {
             log::warn!(

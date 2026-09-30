@@ -437,11 +437,9 @@ impl TransferSource for FsTransferSource {
         // PathBuf::join with some Path representations can produce a
         // trailing-slash form that OS interprets as "descend into" and
         // fails with ENOTDIR when the root is a regular file.
-        let path = if header.relative_path.is_empty() {
-            self.root.clone()
-        } else {
-            self.root.join(&header.relative_path)
-        };
+        // Contract v7 (D-F): a header carrying raw name bytes is opened
+        // by those bytes — the lossy text names nothing on disk.
+        let path = crate::raw_name::source_path(&self.root, header);
         let file = fs::File::open(&path).await?;
         Ok(OpenedSourceFile::fs(file, path))
     }
@@ -612,6 +610,10 @@ fn spawn_manifest_task(
         let scan_outcome = enumerator.enumerate_local_streaming_capturing(&root, |entry| {
             if let EntryKind::File { size } = entry.kind {
                 let rel = crate::path_posix::relative_path_to_posix(&entry.relative_path);
+                // Contract v7 (D-F): a name with a non-UTF-8 component also
+                // carries its exact bytes, so the payload paths open the
+                // real file and a capable destination creates the real name.
+                let raw_relative_path = crate::raw_name::raw_relative_bytes(&entry.relative_path);
                 let absolute = entry.absolute_path.clone();
 
                 if let Err(err) = std::fs::File::open(&absolute) {
@@ -636,7 +638,7 @@ fn spawn_manifest_task(
 
                 let mtime = crate::wire_metadata::mtime_seconds(&entry.metadata).unwrap_or(0);
                 let permissions = crate::wire_metadata::permissions_mode(&entry.metadata);
-                let Some(header) = file_header_with_windows_metadata_policy(
+                let Some(mut header) = file_header_with_windows_metadata_policy(
                     rel,
                     size,
                     mtime,
@@ -648,6 +650,7 @@ fn spawn_manifest_task(
                 ) else {
                     return Ok(());
                 };
+                header.raw_relative_path = raw_relative_path;
                 phase_probe.measure(LocalPhase::EnumerateBackpressure, || {
                     manifest_tx
                         .blocking_send(header)

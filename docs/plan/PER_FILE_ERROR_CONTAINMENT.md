@@ -220,7 +220,10 @@ tolerance tests fail.
 - Every contained failure logs `log::warn!` at the single
   `record_failure` chokepoint (interim visibility until pfc-5's summary
   block).
-- **Send-side source read stays fatal** (`prepare_payload`,
+- **Send-side source read stays fatal** — SUPERSEDED: closed by
+  `docs/plan/SOURCE_SIDE_CONTAINMENT.md` (contract 7, 2026-09-30; skip
+  records and record terminators are the wire skip signal this item
+  deferred). Original text: (`prepare_payload`,
   pipeline.rs): skipping a granted file at the SOURCE trips the
   DESTINATION's "needed file(s) never delivered" protocol check, so
   source-side containment needs a wire skip signal — pfc-4 at the

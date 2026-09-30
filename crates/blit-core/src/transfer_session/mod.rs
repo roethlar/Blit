@@ -3931,6 +3931,7 @@ fn tag_path(report: eyre::Report, path: &str) -> eyre::Report {
 fn mirror_delete_pass(
     dst_root: &Path,
     source_files: &HashSet<String>,
+    source_raw_files: &[Vec<u8>],
     shielded: &HashSet<String>,
     filter: &crate::fs_enum::FileFilter,
     tolerate_nonempty_dirs: bool,
@@ -3941,6 +3942,7 @@ fn mirror_delete_pass(
     let plan = crate::mirror_planner::MirrorPlanner::new(false).plan_session_deletions(
         dst_root,
         source_files,
+        source_raw_files,
         shielded,
         filter,
     )?;
@@ -4091,6 +4093,12 @@ async fn destination_session_inner(
             crate::fs_enum::FileFilter::default()
         };
     let mut source_files: HashSet<String> = HashSet::new();
+    // Contract v7 (D-F): every manifest text path seen, so a second header
+    // that collapses to the same text is reported instead of overwriting;
+    // and the raw bytes of every kept non-UTF-8 name, for the mirror pass.
+    let mut seen_manifest: HashSet<String> = HashSet::new();
+    let mut source_raw_files: Vec<Vec<u8>> = Vec::new();
+    let raw_names_storable = sink.can_store_raw_names();
 
     // otp-7a: resume. Headers of resume-granted needs are retained so a
     // record's completion can finalize with the manifest's
@@ -4317,6 +4325,33 @@ async fn destination_session_inner(
                 // diff (the need list keeps only files needing transfer).
                 if mirror_enabled {
                     source_files.insert(header.relative_path.clone());
+                    if let Some(raw) = &header.raw_relative_path {
+                        source_raw_files.push(raw.clone());
+                    }
+                }
+                // Contract v7 (D-F, A13): two manifest entries that collapse
+                // to one text path are reported, never silently merged —
+                // the first header wins, the second is recorded here and
+                // never granted.
+                if !seen_manifest.insert(header.relative_path.clone()) {
+                    let mut reason = crate::raw_name::DUPLICATE_MANIFEST_PATH_REASON.to_string();
+                    if let Some(raw) = &header.raw_relative_path {
+                        reason.push_str(": raw bytes ");
+                        reason.push_str(&crate::raw_name::escape_raw(raw));
+                    }
+                    contained_failures.record_failure(&header.relative_path, reason);
+                    continue;
+                }
+                // Contract v7 (D-F, A13): a name this destination cannot
+                // create from its bytes is reported at intake, whatever the
+                // diff would have said, and never granted; it stays in the
+                // mirror's kept set above so no counterpart is deleted.
+                if header.raw_relative_path.is_some() && !raw_names_storable {
+                    contained_failures.record_failure(
+                        &header.relative_path,
+                        crate::raw_name::DESTINATION_CANNOT_STORE_REASON.to_string(),
+                    );
+                    continue;
                 }
                 pending.push(header);
                 if pending.len() >= DEST_DIFF_CHUNK {
@@ -4482,6 +4517,13 @@ async fn destination_session_inner(
                         }
                     }
                 };
+                // Contract v7 (D-F): the manifest is authoritative for the
+                // name — the record's raw bytes are taken from it, never
+                // from the wire record.
+                let header = FileHeader {
+                    raw_relative_path: manifest_header.raw_relative_path.clone(),
+                    ..header
+                };
                 crate::windows_metadata::validate_payload_against_manifest(
                     header.windows_metadata.as_ref(),
                     manifest_header.windows_metadata.as_ref(),
@@ -4575,6 +4617,9 @@ async fn destination_session_inner(
                     &ledger,
                     true,
                 )?;
+                if let Some(raw) = header.raw_relative_path.as_deref() {
+                    sink.note_raw_name(&header.relative_path, raw);
+                }
                 let outcome =
                     receive_block_record(transport, sink.as_ref(), &header, block).await?;
                 files_written += outcome.files_written as u64;
@@ -4613,6 +4658,9 @@ async fn destination_session_inner(
                     &ledger,
                     false,
                 )?;
+                if let Some(raw) = header.raw_relative_path.as_deref() {
+                    sink.note_raw_name(&header.relative_path, raw);
+                }
                 let outcome = if complete.ok {
                     finish_block_record(sink.as_ref(), &header, &complete).await?
                 } else {
@@ -4980,6 +5028,7 @@ async fn destination_session_inner(
                     let dst = dst_root.to_path_buf();
                     let canonical = canonical_dst_root.clone();
                     let files = std::mem::take(&mut source_files);
+                    let raw_files = source_raw_files.clone();
                     // cr-ssc1-1 (A19): every path that failed to land —
                     // source-side skip or retraction, destination-side
                     // containment — shields its destination subtree from
@@ -5019,6 +5068,7 @@ async fn destination_session_inner(
                             mirror_delete_pass(
                                 &dst,
                                 &files,
+                                &raw_files,
                                 &shielded,
                                 &filter,
                                 tolerate_nonempty,
@@ -5707,11 +5757,17 @@ fn destination_needs(
     repair: &AttributeRepair,
     dir_stats: &dir_stat::DirStatCache,
 ) -> Result<NeedVerdict> {
+    // Contract v7 (D-F): a non-UTF-8 name is compared at its raw-byte
+    // path, the only place its destination copy can exist.
+    let raw = header.raw_relative_path.as_deref();
     let dst = match canonical_dst_root {
-        Some(canonical) => {
-            crate::path_safety::safe_join_contained(canonical, dst_root, &header.relative_path)
-        }
-        None => crate::path_safety::safe_join(dst_root, &header.relative_path),
+        Some(canonical) => crate::path_safety::safe_join_contained_named(
+            canonical,
+            dst_root,
+            &header.relative_path,
+            raw,
+        ),
+        None => crate::path_safety::safe_join_named(dst_root, &header.relative_path, raw),
     }
     .map_err(|err| {
         SessionFault::protocol_violation(format!(
@@ -8613,6 +8669,7 @@ mod tests {
         let err = mirror_delete_pass(
             &dst,
             &source_files,
+            &[],
             &HashSet::new(),
             &filter,
             false,
@@ -8635,6 +8692,7 @@ mod tests {
         let deleted = mirror_delete_pass(
             &dst,
             &source_files,
+            &[],
             &HashSet::new(),
             &filter,
             false,
@@ -8661,6 +8719,7 @@ mod tests {
         let counts = mirror_delete_pass(
             tmp.path(),
             &source_files,
+            &[],
             &HashSet::new(),
             &filter,
             false,
@@ -8688,6 +8747,7 @@ mod tests {
         let counts = mirror_delete_pass(
             tmp.path(),
             &source_files,
+            &[],
             &HashSet::new(),
             &filter,
             false,
@@ -8925,6 +8985,7 @@ mod tests {
         let result = mirror_delete_pass(
             tmp.path(),
             &source_files,
+            &[],
             &HashSet::new(),
             &filter,
             false,
@@ -8943,6 +9004,7 @@ mod tests {
         let deleted = mirror_delete_pass(
             tmp.path(),
             &source_files,
+            &[],
             &HashSet::new(),
             &filter,
             false,

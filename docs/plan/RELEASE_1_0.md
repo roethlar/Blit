@@ -43,7 +43,9 @@ are the owner's act.
   **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (owner ruling D-2026-09-29-1,
   2026-09-29): a source-side per-file failure — locked, vanished, or
   size-drifted since the scan — must never end the run (D-2026-09-28-2);
-  all six slices ssc-1..ssc-6 shipped with CI green on the candidate.**
+  all six slices ssc-1..ssc-6 shipped with CI green on the candidate.
+  Status 2026-09-30: all six slices LANDED on master (plan §Execution
+  record); CI on the three OSes pending the owner's push.**
   audit-16's open half (sink-less heartbeat ignores `--verbose`) — CLOSED
   2026-08-02 (DEVLOG 2026-08-02 03:25Z), listed here in error until the
   2026-09-29 refresh.

@@ -24,6 +24,7 @@ pub mod path_posix;
 pub mod path_safety;
 pub mod perf_history;
 pub mod profile;
+pub mod raw_name;
 pub mod remote;
 pub mod scan;
 pub mod seed_store;

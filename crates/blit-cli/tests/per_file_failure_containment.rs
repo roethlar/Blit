@@ -93,7 +93,7 @@ fn non_mirror_copy_contains_the_failure_lands_the_rest_and_exits_two() {
         "the landed files are still reported: {stdout}"
     );
     assert!(
-        stdout.contains("1 file(s) could not be written"),
+        stdout.contains("1 file(s) did not land at the destination"),
         "the block reports the count: {stdout}"
     );
     assert!(
@@ -144,7 +144,8 @@ fn a_wholly_failed_copy_still_reports_and_exits_two() {
         stderr_of(&output)
     );
     assert!(
-        stdout.contains("1 file(s) could not be written") && stdout.contains("blocked.txt"),
+        stdout.contains("1 file(s) did not land at the destination")
+            && stdout.contains("blocked.txt"),
         "a zero-copied run must not report only a clean summary: {stdout}"
     );
 }
@@ -170,7 +171,8 @@ fn mirror_deletes_extraneous_entries_under_a_contained_failure() {
         stderr_of(&output)
     );
     assert!(
-        stdout.contains("1 file(s) could not be written") && stdout.contains("blocked.txt"),
+        stdout.contains("1 file(s) did not land at the destination")
+            && stdout.contains("blocked.txt"),
         "the mirror reports its contained failure: {stdout}"
     );
     assert!(
@@ -263,7 +265,7 @@ fn json_mode_carries_the_failure_fields_and_still_exits_two() {
         "a carried failure names its reason: {document}"
     );
     assert!(
-        !stdout.contains("could not be written"),
+        !stdout.contains("did not land at the destination"),
         "the human block must not pollute the JSON document: {stdout}"
     );
 }

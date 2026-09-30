@@ -91,9 +91,7 @@ pub(crate) fn failure_block_styled(
     }
     let mut block = palette.paint(
         Role::Failure,
-        &format!(
-            "{files_failed} file(s) could not be written and did not land at the destination:"
-        ),
+        &format!("{files_failed} file(s) did not land at the destination:"),
     );
     for failure in failures {
         block.push_str(&format!(
@@ -226,7 +224,7 @@ mod tests {
         .expect("a block");
 
         assert!(
-            block.starts_with("\u{1b}[38;2;255;85;85m1 file(s) could not be written"),
+            block.starts_with("\u{1b}[38;2;255;85;85m1 file(s) did not land at the destination:"),
             "the header must be Dracula red: {block:?}"
         );
         assert!(
@@ -264,7 +262,7 @@ mod tests {
         )
         .expect("failures render a block");
         assert!(
-            block.starts_with("2 file(s) could not be written"),
+            block.starts_with("2 file(s) did not land at the destination:"),
             "{block}"
         );
         assert!(

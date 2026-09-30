@@ -2,6 +2,60 @@
 
 All notable changes to Blit are documented in this file.
 
+## [Unreleased]
+
+**Release requirement (recorded from review finding cr-ssc2-2):** the
+next release bumps at least the minor version (`0.2.0`, or `1.0.0` under
+`docs/plan/RELEASE_1_0.md`) — `blit-core`'s public API changed:
+`PreparedPayload::TarShard` gained `skipped` and `PreparedPayload::Skipped`
+was added; `build_tar_shard` returns `TarShardBuild`;
+`TransferSource::open_file` returns `OpenedSourceFile` and
+`check_availability` was removed; `TransferSink` gained
+`begin_record`/`RecordWriter`, `can_store_raw_names` and `note_raw_name`;
+`TransferSummary` gained `failed_paths`/`failed_paths_truncated`. The
+wire protocol is contract 7: a peer on an older release is refused at
+session open, by design.
+
+### Reliability: a file the source cannot deliver no longer ends the run
+
+Previously any source-side per-file failure — a file locked or vanished
+after the scan, a name that is not valid UTF-8, a file whose size changed
+while it was being read — ended the whole transfer; a growing file inside
+a small-file batch could even corrupt the batch and abort it (`tar shard
+entry: numeric field was not a number … cksum`).
+
+- Such a file is now skipped (before its record is announced) or
+  retracted (after), recorded through the same per-file failure report as
+  destination-side failures, and the rest of the manifest lands. Reasons
+  recorded by the source start with `source:`. Nothing is ever finalised
+  under a header its bytes do not match: single-file records end with an
+  explicit ok/failed terminator on both carriers, and small-file batches
+  are packed from exactly the bytes the manifest promised, so one
+  changing file can never corrupt its neighbours.
+- **End-of-run retry passes.** Files that failed are retried automatically
+  after the main pass, re-scanned fresh: `--retries <N>` (`-R`, default 1,
+  `0` disables) passes, `--retry-wait <SECONDS>` (`-W`, default 30) before
+  each. Files that land on retry count once; survivors are reported once
+  with `(retried)`. Mirror deletions run at the end of the main pass and
+  never touch the subtree under a failed path.
+- **Filenames that are not valid UTF-8 transfer**, rsync-style: the exact
+  bytes travel beside the text, a Linux (or other byte-keyed) destination
+  creates the real name and the file converges on re-run; a destination
+  that cannot store the bytes (Windows; macOS) reports the file as
+  `source: filename is not valid UTF-8; the destination cannot store it
+  (rename it to transfer)` and continues. Two source names that collapse
+  to one text name are reported as a lossy-name collision instead of
+  silently overwriting each other. This retires the 0.1.2 known
+  limitation "Non-UTF-8 source filenames fail to transfer".
+- The local route no longer refuses a whole mirror because a file became
+  unreadable between the scan and the copy; that file is reported and the
+  mirror completes. A file that vanished before the copy on the local
+  route is likewise reported, not fatal.
+- Wording: the end-of-run block now reads "N file(s) did not land at the
+  destination:", and the `move` source-delete refusal says the same,
+  since a failure may now be the source's.
+- Protocol contract 6 → 7 (`docs/TRANSFER_SESSION.md`).
+
 ## [0.1.3] - 2026-08-20
 
 Consolidation and self-tuning: the workspace is now three crates with

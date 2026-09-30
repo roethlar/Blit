@@ -242,9 +242,37 @@ alone.
   `SourceDone` with anything still Granted or Active are all
   `PROTOCOL_VIOLATION`s.
 - **`FileHeader.raw_relative_path`** (7, `optional bytes`) carries the
-  exact source bytes of a name that is not valid UTF-8 (present only
-  then; `relative_path` stays the lossy text and the protocol identity).
-  Wire-only in ssc-1; behaviour lands in ssc-5.
+  exact source bytes, `/`-separated, of a name with a component that is
+  not valid UTF-8 — present only then; `relative_path` stays the lossy
+  text and the protocol identity for every map, need, record, skip and
+  terminator (ssc-5, D-2026-09-29-3 — rsync parity). The SOURCE opens
+  such a file by the bytes, never by the text. The DESTINATION decides
+  once per session whether it can create names from bytes (Linux and the
+  other byte-keyed Unix filesystems can; macOS and Windows cannot): a
+  capable destination resolves the bytes through the same path-safety
+  rules as the text (no `..`, no absolute form, no NUL) and creates the
+  real name, so the file converges on re-run; an incapable one records
+  the entry at manifest intake as `source: filename is not valid UTF-8;
+  the destination cannot store it (rename it to transfer)`, whatever the
+  diff would have said, never grants it, and keeps it in the mirror's
+  kept set. The manifest is authoritative for the bytes: the DESTINATION
+  takes them from the retained grant, not from the record on the wire
+  (data-plane records carry only the text). A second manifest entry that
+  collapses to a text path already seen is recorded as `source: duplicate
+  manifest path (lossy name collision)` and never granted; the first
+  header wins.
+- **Sink lifecycle.** A DESTINATION sink opens one `RecordWriter` per
+  single-file record (`begin_record`), appends the body, and finalises it
+  only through `commit` (ok terminator) or `abort` (failed terminator or
+  drop on cancellation — the partial is removed in place, D-2026-09-29-2:
+  no staging files). A contained destination-open failure yields a
+  discarding writer (the record's bytes are consumed, the file reported);
+  a dry run yields a non-writing one.
+- **Retry passes** are the CLI's, not the session's: after a run whose
+  main pass recorded failures, the CLI re-scans exactly the failed paths
+  and runs further sessions over them (`--retries`, `--retry-wait`;
+  `TransferSummary.failed_paths` carries the exact set,
+  `failed_paths_truncated` when it did not fit).
 - Source-side failures reach the summary through the same
   `record_failure` chokepoint as destination-side ones: the same cap,
   the same `files_failed`, the same exit-2 semantics. A skipped or
@@ -524,6 +552,19 @@ push/pull-specific message.
   wire receives retain the timestamp precision carried by their header.
 
 ## Errors, cancel, stall
+
+**What is allowed to end a session (D-2026-09-28-2, owner ruling).** "No
+one error is EVER fatal to the entire run unless it is genuinely
+impossible for the run to continue." The session-fatal classes are
+exactly: transport death, a protocol desynchronisation (any ledger
+transition outside the contract-v7 table), the destination root being
+unavailable, a volume-level write failure (read-only or full
+destination), and a path-safety breach. A source-side per-file failure
+of any kind — cannot open, cannot stat, cannot read, changed size, a name
+the destination cannot store — is that file's failure (skip before the
+record, failed terminator after it) and never the session's; nor is a
+destination-side per-file failure. Anything not in the list above that
+ends a session is a defect.
 
 - `SessionError{code, message}` codes (plus both build ids on
   BUILD_MISMATCH):

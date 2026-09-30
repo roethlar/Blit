@@ -88,10 +88,43 @@ pub fn validate_wire_path(wire_path: &str) -> Result<PathBuf> {
         bail!("path uses Windows-absolute form: {:?}", wire_path);
     }
 
-    let path = Path::new(wire_path);
+    normalize_relative_components(Path::new(wire_path), wire_path)
+}
 
+/// Validate a wire-supplied relative path carried as raw name bytes
+/// (contract v7 `FileHeader.raw_relative_path`, `/`-separated exact source
+/// bytes — `docs/plan/SOURCE_SIDE_CONTAINMENT.md` D-F). The bytes are
+/// held to exactly the rules the text form is held to: no NUL, no
+/// absolute or Windows-absolute form, no prefix, no `..`; `.` components
+/// are stripped. A host that cannot create names from raw bytes
+/// ([`crate::raw_name::destination_can_store_raw_names`]) rejects every
+/// raw path with the intake reason, so nothing is ever created by the
+/// lossy text in its place.
+pub fn validate_wire_path_bytes(raw: &[u8]) -> Result<PathBuf> {
+    if !crate::raw_name::destination_can_store_raw_names() {
+        bail!("{}", crate::raw_name::DESTINATION_CANNOT_STORE_REASON);
+    }
+    let display = crate::raw_name::escape_raw(raw);
+    if raw.is_empty() {
+        bail!("raw path is empty");
+    }
+    if raw.contains(&0) {
+        bail!("raw path contains NUL byte: {display}");
+    }
+    let lossy = String::from_utf8_lossy(raw);
+    if looks_like_windows_absolute(&lossy) {
+        bail!("raw path uses Windows-absolute form: {display}");
+    }
+    let path = crate::raw_name::path_from_raw(raw);
+    normalize_relative_components(&path, &display)
+}
+
+/// The component walk shared by the text and raw-byte validators:
+/// rejects prefix, root and `..` components, strips `.`, and refuses a
+/// non-empty input that normalizes to nothing.
+fn normalize_relative_components(path: &Path, display: &str) -> Result<PathBuf> {
     if path.is_absolute() {
-        bail!("absolute path not allowed: {:?}", wire_path);
+        bail!("absolute path not allowed: {:?}", display);
     }
 
     let mut normalized = PathBuf::new();
@@ -100,14 +133,14 @@ pub fn validate_wire_path(wire_path: &str) -> Result<PathBuf> {
             Component::Prefix(_) => {
                 bail!(
                     "path has prefix component (Windows drive/UNC): {:?}",
-                    wire_path
+                    display
                 );
             }
             Component::RootDir => {
-                bail!("path has root component: {:?}", wire_path);
+                bail!("path has root component: {:?}", display);
             }
             Component::ParentDir => {
-                bail!("path has `..` component: {:?}", wire_path);
+                bail!("path has `..` component: {:?}", display);
             }
             Component::CurDir => {
                 // Strip `.` components silently. `./foo/bar` → `foo/bar`.
@@ -124,14 +157,24 @@ pub fn validate_wire_path(wire_path: &str) -> Result<PathBuf> {
     // is a directory hint, not a file path. Receivers expecting a file
     // path should reject these to avoid conflating them with the
     // single-file empty case.
-    if normalized.as_os_str().is_empty() && !wire_path.is_empty() {
+    if normalized.as_os_str().is_empty() && !display.is_empty() {
         bail!(
             "path normalizes to empty (only `.` components): {:?}",
-            wire_path
+            display
         );
     }
 
     Ok(normalized)
+}
+
+/// Validate a wire name — the text, or the raw bytes when the header
+/// carries them (contract v7). The raw bytes win: they are the only form
+/// that names the file on disk.
+pub fn validate_wire_name(wire_path: &str, raw: Option<&[u8]>) -> Result<PathBuf> {
+    match raw {
+        Some(raw) => validate_wire_path_bytes(raw),
+        None => validate_wire_path(wire_path),
+    }
 }
 
 /// Safely join a wire-supplied relative path under a destination root.
@@ -349,6 +392,29 @@ pub fn safe_join_contained(
     Ok(target)
 }
 
+/// [`safe_join`] for a wire name that may carry raw bytes (contract v7):
+/// the bytes, validated by [`validate_wire_path_bytes`], name the target;
+/// otherwise the text does. Empty text with no bytes is the single-file
+/// root case, as in [`safe_join`].
+pub fn safe_join_named(root: &Path, wire_path: &str, raw: Option<&[u8]>) -> Result<PathBuf> {
+    match raw {
+        Some(raw) => Ok(root.join(validate_wire_path_bytes(raw)?)),
+        None => safe_join(root, wire_path),
+    }
+}
+
+/// [`safe_join_contained`] for a wire name that may carry raw bytes.
+pub fn safe_join_contained_named(
+    canonical_root: &Path,
+    dest_root: &Path,
+    wire_path: &str,
+    raw: Option<&[u8]>,
+) -> Result<PathBuf> {
+    let target = safe_join_named(dest_root, wire_path, raw)?;
+    verify_contained(canonical_root, &target)?;
+    Ok(target)
+}
+
 // ─── Session amortization of the containment walk (sf-3d) ─────────
 
 /// One destination-parent component as it looked, WITHOUT following it,
@@ -443,7 +509,20 @@ impl ContainedPathCache {
         dest_root: &Path,
         wire_path: &str,
     ) -> Result<PathBuf> {
-        let validated = validate_wire_path(wire_path)?;
+        self.safe_join_contained_named(canonical_root, dest_root, wire_path, None)
+            .await
+    }
+
+    /// [`Self::safe_join_contained`] for a wire name that may carry raw
+    /// bytes (contract v7): the bytes name the target when present.
+    pub async fn safe_join_contained_named(
+        &self,
+        canonical_root: &Path,
+        dest_root: &Path,
+        wire_path: &str,
+        raw: Option<&[u8]>,
+    ) -> Result<PathBuf> {
+        let validated = validate_wire_name(wire_path, raw)?;
         if validated.as_os_str().is_empty() {
             // The single-file destination case: `dest_root` IS the target,
             // so there is no parent below the root to amortize against.
@@ -616,6 +695,94 @@ fn looks_like_windows_absolute(s: &str) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod raw_byte_tests {
+    //! Contract v7 (D-F): raw name bytes are held to exactly the text
+    //! rules — no `..`, no absolute or Windows-absolute form, no NUL —
+    //! and only a host that can create names from bytes accepts them.
+    use super::*;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    mod byte_capable {
+        use super::*;
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        #[test]
+        fn a_non_utf8_name_validates_to_its_exact_bytes() {
+            let validated = validate_wire_path_bytes(b"sub/caf\xe9.txt").unwrap();
+            assert_eq!(
+                validated,
+                PathBuf::from(OsStr::from_bytes(b"sub/caf\xe9.txt"))
+            );
+            let joined = safe_join_named(
+                Path::new("/root"),
+                "sub/caf\u{fffd}.txt",
+                Some(b"sub/caf\xe9.txt"),
+            )
+            .unwrap();
+            assert_eq!(
+                joined,
+                PathBuf::from(OsStr::from_bytes(b"/root/sub/caf\xe9.txt"))
+            );
+        }
+
+        #[test]
+        fn raw_bytes_are_refused_for_every_escape_the_text_form_refuses() {
+            for (raw, why) in [
+                (&b"../caf\xe9.txt"[..], "parent"),
+                (&b"/etc/caf\xe9"[..], "absolute"),
+                (&b"caf\xe9/../../x"[..], "parent inside"),
+                (&b"caf\0\xe9"[..], "NUL"),
+                (&b"C:\\caf\xe9"[..], "windows absolute"),
+                (&b"."[..], "normalizes to empty"),
+            ] {
+                assert!(
+                    validate_wire_path_bytes(raw).is_err(),
+                    "{why} must be refused"
+                );
+                assert!(
+                    safe_join_contained_named(
+                        Path::new("/root"),
+                        Path::new("/root"),
+                        "x",
+                        Some(raw)
+                    )
+                    .is_err(),
+                    "{why} must be refused by the contained join"
+                );
+            }
+        }
+
+        #[test]
+        fn dot_components_in_raw_bytes_are_stripped_like_text() {
+            let validated = validate_wire_path_bytes(b"./sub/./caf\xe9.txt").unwrap();
+            assert_eq!(
+                validated,
+                PathBuf::from(OsStr::from_bytes(b"sub/caf\xe9.txt"))
+            );
+        }
+    }
+
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    #[test]
+    fn a_host_that_cannot_store_raw_names_refuses_every_raw_path_with_the_intake_reason() {
+        let err = validate_wire_path_bytes(b"caf\xe9.txt").unwrap_err();
+        assert_eq!(
+            format!("{err}"),
+            crate::raw_name::DESTINATION_CANNOT_STORE_REASON
+        );
+        assert!(
+            safe_join_named(Path::new("/root"), "caf\u{fffd}.txt", Some(b"caf\xe9.txt")).is_err()
+        );
+        // The text form is unaffected.
+        assert_eq!(
+            safe_join_named(Path::new("/root"), "caf\u{fffd}.txt", None).unwrap(),
+            PathBuf::from("/root/caf\u{fffd}.txt")
+        );
+    }
 }
 
 #[cfg(test)]

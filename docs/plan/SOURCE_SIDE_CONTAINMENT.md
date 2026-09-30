@@ -1047,6 +1047,76 @@ the switch parse test, the row-label test. Mutations (foreground,
 (b) red; both early stops removed → unit guard red; sleep removed →
 (a) red; wait recording removed → (b) red. Gate on macOS: fmt clean; clippy `-D warnings` clean native and `x86_64-unknown-linux-gnu`; `cargo test --workspace` 1285 → 1300 passed, 0 failed, 2 ignored; check-docs OK; diff-check clean.
 
+**ssc-5 LANDED 2026-09-30 on master at `__SSC5__` (range
+`e14d1b72..__SSC5__`): non-UTF-8 names land by raw bytes (D-F,
+D-2026-09-29-3), failure wording (D-G, A14), contract-7 docs and
+changelog, cv-3 README.** What landed against the slice text: new
+`blit-core/src/raw_name.rs` (`raw_relative_bytes` — set by the scan only
+when a component's `to_str()` is `None`; `source_path` — every source
+payload path (`FsTransferSource::open_file`, `source_path_for_header`,
+the planner, `build_tar_shard`, the local sink's source open and tar
+restamp) opens by the bytes; `destination_can_store_raw_names()` =
+Linux and the other byte-keyed Unix filesystems, false on macOS
+(APFS/HFS+ reject invalid UTF-8) and Windows; `EILSEQ`/`EINVAL`
+create-time backstop mapped to the exact intake reason);
+`path_safety::validate_wire_path_bytes` / `safe_join_named` /
+`safe_join_contained_named` (+ the session cache's `_named`) hold raw
+bytes to exactly the text rules; the DESTINATION decides
+representability once per session (`TransferSink::can_store_raw_names`)
+and at manifest intake records an unstorable entry with
+`DESTINATION_CANNOT_STORE_REASON` (whatever the diff would have said),
+never grants it, keeps it in the mirror's kept set; a second header
+collapsing to a seen text path is recorded as
+`DUPLICATE_MANIFEST_PATH_REASON` (+ escaped raw bytes) and never
+granted, first wins; the manifest is authoritative for the bytes — the
+in-stream `FileBegin` arm, the data-plane `NeedListSink`
+(`activate_file`/`reserve_shard` return the grant's bytes) and both
+resume claims (`note_raw_name`) take them from the retained grant, so
+the data-plane framing is unchanged; `FsTransferSink` resolves every
+destination path `_named` (records, local File payloads, tar members
+via `ExtractedFile.raw`, resume via the noted-name registry);
+`destination_needs` and `compute_resume_block_hashes` compare at the
+raw path; `plan_session_deletions` keeps raw-named counterparts by
+their bytes. Wording: failure block "N file(s) did not land at the
+destination:"; move gate "did not land at the destination". Docs:
+`docs/TRANSFER_SESSION.md` (raw-name semantics, sink lifecycle, retry
+passes, the D-2026-09-28-2 fatal-class test in Errors), `CHANGELOG.md`
+Unreleased (reliability entry; 0.1.2 non-UTF-8 limitation retired; the
+cr-ssc2-2 release requirement: next release bumps at least the minor
+version), `RELEASE_1_0.md` G3, `PER_FILE_ERROR_CONTAINMENT.md` pointer,
+README same-build caveat replaced (cv-3 — `CONTRACT_VERSION_GATE.md`
+Shipped). Guards: `raw_name` unit pins; byte path-safety pins (Linux)
++ the refusal pin (macOS/Windows); `source_side_containment.rs`
+duplicate-collapse on both carriers (ungated); unstorable-name intake
+on both carriers under mirror with a converged lossy-text counterpart
+(macOS/Windows native); `raw_round_trip` (Linux): in-stream, data
+plane and local route land `caf\xe9.txt` byte-exact and converge on
+re-run with the mirror keeping the counterpart; the reworded CLI pins.
+Mutations (foreground, `command cp -f`, `scratchpad/ssc5-mutations.txt`
++ `ssc5-linux.txt`): (i) scan setter disabled → round-trip red (Linux);
+(ii) destination resolves by lossy text → round-trip red (Linux); (iii)
+duplicate detection disabled → collision guard red (macOS). Deviation:
+the "representability-injected sink" seam was not added — the two
+intake branches are each native on one CI platform (Linux lands;
+macOS/Windows report) and both were run (macOS here, Linux on
+magneto); an injected seam would only re-prove the branch the host
+already runs. Windows behaviour (WTF-8 setter, `cfg(windows)` refusal)
+is written but only runs on Windows CI. Gate on macOS: fmt clean; clippy `-D warnings` clean native and `x86_64-unknown-linux-gnu`; `cargo test --workspace` 1300 → 1309 passed, 0 failed, 2 ignored; check-docs OK; diff-check clean. Linux-only guards run on magneto from a working-tree copy: unit + byte path-safety pins, raw_round_trip in-stream/data-plane/local, local_session suite all green; mutations (i) and (ii) red then restored green (the local route stays green under (ii) by design — it never uses the wire resolver). CI on the three OSes unverified until a push.
+
+**ALL SIX SLICES LANDED 2026-09-30** — ssc-1 `bd4c48d0`, ssc-2
+`5a124669`, ssc-3 `b176a2ab`, ssc-4 `c3a38876`, review fixes
+`14a6bc3f..5d557004` (cr-ssc1-1..5, cr-ssc2-1, cr-ssc2-3, cr-ssc3-1),
+ssc-6 `048e55af`, ssc-5 `__SSC5__`. Status stays **Active** until the
+owner declares Shipped: CI on the three OSes is not yet proven (push
+pending the owner). Two notes for the owner from ssc-6: (1) the CLI
+already had `--retry`/`--wait` (whole-transfer transient retries), so
+`--retries`/`--retry-wait` sit beside them with cross-referenced help —
+the names are close; (2) mirror deletions run at the end of the main
+pass, not after the retry passes, because deferring a remote
+destination's deletions across sessions would need a wire
+"delete-only" session; the shield during retries is the main pass's
+failed set, a superset of the final one.
+
 ## Review history
 
 - **r1** (codex-cli 0.156.0 / gpt-5.6-sol / xhigh / frontier, grade

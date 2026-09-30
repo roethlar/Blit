@@ -653,6 +653,23 @@ pub trait TransferSink: Send + Sync {
     /// Write a single prepared payload to the destination.
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome>;
 
+    /// Contract v7 (D-F): whether this destination can create a file whose
+    /// name is not valid UTF-8 from its raw bytes. The session asks once
+    /// at manifest intake; a `false` makes every raw-named entry a
+    /// reported per-file failure that is never granted. Defaults to
+    /// `true` for sinks that hold no filesystem of their own (counters,
+    /// relays, test doubles); [`FsTransferSink`] answers for its host.
+    fn can_store_raw_names(&self) -> bool {
+        true
+    }
+
+    /// Contract v7 (D-F): tell the sink the raw name bytes behind a text
+    /// path whose later records (resume blocks and completions) carry
+    /// only the text. Sinks without a filesystem ignore it.
+    fn note_raw_name(&self, relative_path: &str, raw: &[u8]) {
+        let _ = (relative_path, raw);
+    }
+
     /// Open one single-file record (contract v7). Returns `Err` only for
     /// the session-fatal classes (path safety, destination root, volume,
     /// transport); a failure attributable to this one file — the
@@ -780,6 +797,10 @@ pub struct FsTransferSink {
     /// the destination root.
     canonical_dst_root: Option<PathBuf>,
     config: FsSinkConfig,
+    /// Contract v7 (D-F): raw name bytes noted by the session for text
+    /// paths whose resume records carry only the text
+    /// ([`TransferSink::note_raw_name`]).
+    raw_names: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
     /// Optional byte-level progress sink. When set,
     /// `write_file_stream` passes it into
     /// `receive_stream_double_buffered` so chunk-granularity
@@ -861,6 +882,7 @@ impl FsTransferSink {
             byte_progress: None,
             small_file_probe: None,
             failed_resume_reasons: std::sync::Mutex::new(std::collections::HashMap::new()),
+            raw_names: std::sync::Mutex::new(std::collections::HashMap::new()),
             ready_parents: std::sync::Mutex::new(std::collections::HashMap::new()),
             containment: crate::path_safety::ContainedPathCache::new(),
             #[cfg(test)]
@@ -899,11 +921,17 @@ impl FsTransferSink {
     /// without weakening any refusal (see [`ContainedPathCache`]).
     ///
     /// [`ContainedPathCache`]: crate::path_safety::ContainedPathCache
-    async fn resolve_destination(&self, wire_path: &str) -> Result<PathBuf> {
+    /// [`Self::resolve_destination`] for a wire name that may carry raw
+    /// bytes (contract v7, D-F): the bytes name the target when present.
+    async fn resolve_destination_named(
+        &self,
+        wire_path: &str,
+        raw: Option<&[u8]>,
+    ) -> Result<PathBuf> {
         match self.canonical_dst_root.as_ref() {
             Some(canonical) => {
                 self.containment
-                    .safe_join_contained(canonical, &self.dst_root, wire_path)
+                    .safe_join_contained_named(canonical, &self.dst_root, wire_path, raw)
                     .await
             }
             None => {
@@ -913,9 +941,18 @@ impl FsTransferSink {
                      (R46-F3 escape protection unavailable)",
                     self.dst_root.display()
                 );
-                crate::path_safety::safe_join(&self.dst_root, wire_path)
+                crate::path_safety::safe_join_named(&self.dst_root, wire_path, raw)
             }
         }
+    }
+
+    /// The raw name bytes noted for `relative_path`, if any (contract v7).
+    fn raw_name_for(&self, relative_path: &str) -> Option<Vec<u8>> {
+        self.raw_names
+            .lock()
+            .expect("raw-names lock poisoned")
+            .get(relative_path)
+            .cloned()
     }
 
     /// Hold the first resume-block failure for `relative_path`. Nothing
@@ -1095,6 +1132,17 @@ impl FsTransferSink {
 
 #[async_trait]
 impl TransferSink for FsTransferSink {
+    fn can_store_raw_names(&self) -> bool {
+        crate::raw_name::destination_can_store_raw_names()
+    }
+
+    fn note_raw_name(&self, relative_path: &str, raw: &[u8]) {
+        self.raw_names
+            .lock()
+            .expect("raw-names lock poisoned")
+            .insert(relative_path.to_string(), raw.to_vec());
+    }
+
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
         // Resume payloads need async I/O (file open + seek + write
         // through tokio). Local-source payloads (File / TarShard) stay
@@ -1116,6 +1164,7 @@ impl TransferSink for FsTransferSink {
                     &self.dst_root,
                     self.canonical_dst_root.as_deref(),
                     &relative_path,
+                    self.raw_name_for(&relative_path).as_deref(),
                     "block-write",
                 )
                 .await?;
@@ -1148,6 +1197,7 @@ impl TransferSink for FsTransferSink {
                     &self.dst_root,
                     self.canonical_dst_root.as_deref(),
                     &relative_path,
+                    self.raw_name_for(&relative_path).as_deref(),
                     "block-complete",
                 )
                 .await?;
@@ -1288,7 +1338,7 @@ impl TransferSink for FsTransferSink {
         // controlled relative path `link/file` would then write to
         // `/outside/file`.
         let dst = self
-            .resolve_destination(&header.relative_path)
+            .resolve_destination_named(&header.relative_path, header.raw_relative_path.as_deref())
             .await
             .with_context(|| format!("validating receive path {:?}", header.relative_path))?;
 
@@ -1624,7 +1674,8 @@ fn write_file_payload(
             Err(error) => per_file_failure(dst_root, "", error),
         };
     }
-    let src = src_root.join(&header.relative_path);
+    // Contract v7 (D-F): raw name bytes name the source file when present.
+    let src = crate::raw_name::source_path(src_root, header);
     // R47-F1: the FsTransferSink::write_payload arm for
     // PreparedPayload::File hit this helper, which previously
     // joined dst_root + header.relative_path lexically. A peer-
@@ -1632,13 +1683,15 @@ fn write_file_payload(
     // /outside` symlink would write outside the destination root.
     // Route through the same canonical-containment chokepoint that
     // write_file_stream uses.
+    let raw = header.raw_relative_path.as_deref();
     let dst = match canonical_dst_root {
-        Some(canonical) => {
-            crate::path_safety::safe_join_contained(canonical, dst_root, &header.relative_path)
-                .with_context(|| {
-                    format!("validating file payload path {:?}", header.relative_path)
-                })?
-        }
+        Some(canonical) => crate::path_safety::safe_join_contained_named(
+            canonical,
+            dst_root,
+            &header.relative_path,
+            raw,
+        )
+        .with_context(|| format!("validating file payload path {:?}", header.relative_path))?,
         None => {
             log::warn!(
                 "write_file_payload at '{}' has no canonical root; \
@@ -1646,9 +1699,9 @@ fn write_file_payload(
                  escape protection unavailable)",
                 dst_root.display()
             );
-            crate::path_safety::safe_join(dst_root, &header.relative_path).with_context(|| {
-                format!("validating file payload path {:?}", header.relative_path)
-            })?
+            crate::path_safety::safe_join_named(dst_root, &header.relative_path, raw).with_context(
+                || format!("validating file payload path {:?}", header.relative_path),
+            )?
         }
     };
 
@@ -1657,8 +1710,22 @@ fn write_file_payload(
     // its attributes — belongs to exactly this file.
     match copy_resolved_file_payload(&src, &dst, header, config) {
         Ok(outcome) => Ok(outcome),
+        Err(error) if is_unrepresentable_name_failure(&error) => Ok(SinkOutcome::failed(
+            &header.relative_path,
+            crate::raw_name::DESTINATION_CANNOT_STORE_REASON.to_string(),
+        )),
         Err(error) => per_file_failure(dst_root, &header.relative_path, error),
     }
+}
+
+/// Contract v7 (D-F) per-file backstop: the destination filesystem
+/// refused the bytes of the name itself (`EILSEQ`/`EINVAL` on create), so
+/// the file is reported with the intake reason rather than a raw errno.
+fn is_unrepresentable_name_failure(error: &eyre::Report) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(crate::raw_name::is_unrepresentable_name_error)
 }
 
 /// The file-root identity case of [`write_file_payload`]: `src_root`
@@ -1889,10 +1956,10 @@ fn restamp_local_tar_mtimes(src_root: &Path, files: &mut [super::tar_safety::Ext
         return;
     }
     for file in files {
-        let source = if file.rel.is_empty() {
-            src_root.to_path_buf()
-        } else {
-            src_root.join(&file.rel)
+        let source = match file.raw.as_deref() {
+            Some(raw) => src_root.join(crate::raw_name::path_from_raw(raw)),
+            None if file.rel.is_empty() => src_root.to_path_buf(),
+            None => src_root.join(&file.rel),
         };
         file.mtime = source_file_mtime(&source, file.mtime);
     }
@@ -2165,6 +2232,7 @@ async fn resolve_resume_destination(
     dst_root: &Path,
     canonical_dst_root: Option<&Path>,
     relative_path: &str,
+    raw: Option<&[u8]>,
     record: &str,
 ) -> Result<PathBuf> {
     // R46-F3: contained resolve when canonical root is available. sf-3d:
@@ -2172,10 +2240,10 @@ async fn resolve_resume_destination(
     // records share one parent proof instead of walking twice each.
     match canonical_dst_root {
         Some(canonical) => containment
-            .safe_join_contained(canonical, dst_root, relative_path)
+            .safe_join_contained_named(canonical, dst_root, relative_path, raw)
             .await
             .with_context(|| format!("validating {record} path {relative_path:?}")),
-        None => crate::path_safety::safe_join(dst_root, relative_path)
+        None => crate::path_safety::safe_join_named(dst_root, relative_path, raw)
             .with_context(|| format!("validating {record} path {relative_path:?}")),
     }
 }
@@ -5359,6 +5427,7 @@ mod tests {
         crate::remote::transfer::tar_safety::ExtractedFile {
             rel: rel.to_string(),
             dest_path: dst_root.join(rel),
+            raw: None,
             contents: contents.to_vec(),
             mtime: None,
             permissions: None,

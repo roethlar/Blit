@@ -1996,7 +1996,7 @@ impl NeedListSink {
 
     /// Validate a whole-file payload and move its need Granted → Active
     /// on this lane.
-    fn activate_file(&self, payload: &FileHeader) -> Result<()> {
+    fn activate_file(&self, payload: &FileHeader) -> Result<Option<Vec<u8>>> {
         let (wait_started, hold_started, mut ledger) = self.lock_for_claim();
         let manifest = match ledger.granted(&payload.relative_path) {
             Some((manifest, false)) => manifest.clone(),
@@ -2021,23 +2021,31 @@ impl NeedListSink {
         ledger.activate_file(&payload.relative_path, self.lane)?;
         drop(ledger);
         self.note_claim(wait_started, hold_started, 1, 1);
-        Ok(())
+        // Contract v7 (D-F): the manifest is authoritative for the name;
+        // the data-plane record carries only the text.
+        Ok(manifest.raw_relative_path)
     }
 
     /// Validate every shard member against its grant and reserve them all
     /// (`Granted` → `Active(lane, Shard)`) while holding the ledger once
     /// (cr-ssc1-3); the members settle after the shard is written.
-    fn reserve_shard(&self, payloads: &[FileHeader]) -> Result<()> {
+    fn reserve_shard(&self, payloads: &[FileHeader]) -> Result<Vec<FileHeader>> {
         let (wait_started, hold_started, mut ledger) = self.lock_for_claim();
+        let mut members = Vec::with_capacity(payloads.len());
         for payload in payloads {
+            let mut member = payload.clone();
             if let Some((manifest, _)) = ledger.granted(&payload.relative_path) {
                 Self::validate_against_grant(payload, manifest)?;
+                // Contract v7 (D-F): the manifest is authoritative for the
+                // name; the data-plane shard header carries only the text.
+                member.raw_relative_path = manifest.raw_relative_path.clone();
             }
+            members.push(member);
         }
         ledger.reserve_shard_members(payloads, self.lane)?;
         drop(ledger);
         self.note_claim(wait_started, hold_started, payloads.len(), payloads.len());
-        Ok(())
+        Ok(members)
     }
 
     fn lock_for_claim(
@@ -2084,6 +2092,9 @@ impl NeedListSink {
     fn check_block(&self, path: &str, offset: u64, len: u64) -> Result<()> {
         self.require_resume()?;
         let header = self.ledger().activate_resume(path, self.lane)?;
+        if let Some(raw) = header.raw_relative_path.as_deref() {
+            self.inner.note_raw_name(path, raw);
+        }
         if offset.saturating_add(len) > header.size {
             return Err(eyre::Report::new(
                 SessionFault::protocol_violation(format!(
@@ -2111,6 +2122,9 @@ impl NeedListSink {
     ) -> Result<()> {
         self.require_resume()?;
         let header = self.ledger().resume_completing(path, self.lane)?;
+        if let Some(raw) = header.raw_relative_path.as_deref() {
+            self.inner.note_raw_name(path, raw);
+        }
         if total_size != header.size {
             return Err(eyre::Report::new(
                 SessionFault::protocol_violation(format!(
@@ -2203,11 +2217,23 @@ impl RecordWriter for LedgerRecordWriter<'_> {
 
 #[async_trait]
 impl TransferSink for NeedListSink {
+    fn can_store_raw_names(&self) -> bool {
+        self.inner.can_store_raw_names()
+    }
+
+    fn note_raw_name(&self, relative_path: &str, raw: &[u8]) {
+        self.inner.note_raw_name(relative_path, raw);
+    }
+
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
         match &payload {
             PreparedPayload::File(header) => {
-                self.activate_file(header)?;
+                let raw = self.activate_file(header)?;
                 let path = header.relative_path.clone();
+                let payload = PreparedPayload::File(FileHeader {
+                    raw_relative_path: raw,
+                    ..header.clone()
+                });
                 let outcome = self
                     .inner
                     .write_payload(payload)
@@ -2217,10 +2243,24 @@ impl TransferSink for NeedListSink {
                     .settle_file(&path, self.lane, outcome.file_failed(&path))?;
                 return Ok(outcome);
             }
-            PreparedPayload::TarShard { headers, .. } => {
-                self.reserve_shard(headers)?;
-                let members = headers.clone();
-                let outcome = self.inner.write_payload(payload).await?;
+            PreparedPayload::TarShard { .. } => {
+                let PreparedPayload::TarShard {
+                    headers,
+                    data,
+                    skipped,
+                } = payload
+                else {
+                    unreachable!("matched TarShard above")
+                };
+                let members = self.reserve_shard(&headers)?;
+                let outcome = self
+                    .inner
+                    .write_payload(PreparedPayload::TarShard {
+                        headers: members.clone(),
+                        data,
+                        skipped,
+                    })
+                    .await?;
                 self.ledger()
                     .settle_shard_members(&members, self.lane, |p| outcome.file_failed(p))?;
                 return Ok(outcome);
@@ -2304,10 +2344,14 @@ impl TransferSink for NeedListSink {
     /// moves Granted → Active here; its terminator (through the returned
     /// writer) settles it.
     async fn begin_record<'a>(&'a self, header: &FileHeader) -> Result<Box<dyn RecordWriter + 'a>> {
-        self.activate_file(header)?;
+        let raw = self.activate_file(header)?;
+        let named = FileHeader {
+            raw_relative_path: raw,
+            ..header.clone()
+        };
         let inner = self
             .inner
-            .begin_record(header)
+            .begin_record(&named)
             .await
             .map_err(|e| super::tag_path(e, &header.relative_path))?;
         Ok(Box::new(LedgerRecordWriter {

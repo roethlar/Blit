@@ -1,7 +1,10 @@
 # Contract-Version Gate — protocol number replaces same-build refusal
 
-**Status**: Active — owner's blanket queue go, 2026-08-18 ("dispatch
-opus agents to handle all of these"). Direction ruled D-2026-08-18-2.
+**Status**: Shipped — cv-1 + cv-2 landed 2026-08-18 (`05529c19`), released in
+v0.1.3 (2026-08-20); cv-3 (README softening) landed 2026-09-30 with
+SOURCE_SIDE_CONTAINMENT ssc-5 (contract 7). Original ruling: owner's
+blanket queue go, 2026-08-18 ("dispatch opus agents to handle all of
+these"); direction D-2026-08-18-2.
 **Created**: 2026-08-18
 **Decision refs**: D-2026-08-18-2 (this plan's ruling; supersedes
 D-2026-07-05-2's same-build gate), D-2026-08-17-2 (embeddability),
@@ -49,8 +52,10 @@ mismatched builds would mis-cooperate instead of refusing.
 **Execution record:** cv-1 + cv-2 LANDED 2026-08-18 at `05529c19`
 (opus worktree agent under the owner's ultracode go; mutation-proved
 red/green on the new-behavior pin; DEVLOG 2026-08-18 23:00Z). cv-3
-remains open until the first release carrying cv-1. CI cross-platform
-evidence pending the next push.
+LANDED 2026-09-30 with SOURCE_SIDE_CONTAINMENT ssc-5: v0.1.3 was the
+first release carrying cv-1, so README's cargo same-build caveat now
+reads "peers need matching protocol versions" (contract 7 after the next
+release) and the `BLIT_GIT_SHA` pin recipe is gone. Plan Shipped.
 
 1. **cv-1 — the gate.** Drop the `build_id` half of the refusal;
    keep exact `contract_version` match. Keep the wire fault code

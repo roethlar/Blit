@@ -87,8 +87,12 @@ pub struct ExtractedFile {
     /// Wire-supplied relative path (validated, slash-normalized).
     pub rel: String,
     /// Absolute filesystem path. Already inside `dst_root` per
-    /// `safe_join`.
+    /// `safe_join` (or `safe_join_named` when the manifest header carried
+    /// raw name bytes — contract v7, D-F).
     pub dest_path: PathBuf,
+    /// The manifest's raw name bytes, when the name is not valid UTF-8
+    /// (contract v7): the only form that names the file on either disk.
+    pub raw: Option<Vec<u8>>,
     /// File contents from the tar entry. Length matches
     /// `FileHeader.size` exactly.
     pub contents: Vec<u8>,
@@ -174,8 +178,15 @@ pub fn safe_extract_tar_shard(
         // safe_join for the actual filesystem path.
         path_safety::validate_wire_path(&rel_string)
             .with_context(|| format!("validating tar shard entry {rel_string:?}"))?;
-        let dest_path = path_safety::safe_join(dst_root, &rel_string)
-            .with_context(|| format!("resolving tar shard dest {rel_string:?}"))?;
+        // Contract v7 (D-F): the manifest header's raw name bytes, when
+        // present, name the destination; the archive member name is the
+        // lossy text and stays the identity only.
+        let dest_path = path_safety::safe_join_named(
+            dst_root,
+            &rel_string,
+            header.raw_relative_path.as_deref(),
+        )
+        .with_context(|| format!("resolving tar shard dest {rel_string:?}"))?;
 
         // Bounded allocation; pathological size returns AllocError
         // instead of aborting.
@@ -214,6 +225,7 @@ pub fn safe_extract_tar_shard(
         out.push(ExtractedFile {
             rel: rel_string,
             dest_path,
+            raw: header.raw_relative_path.clone(),
             contents,
             mtime,
             permissions,
@@ -443,6 +455,7 @@ mod tests {
         let f = ExtractedFile {
             rel: "written.txt".into(),
             dest_path: dest.clone(),
+            raw: None,
             contents: b"payload".to_vec(),
             mtime: Some(FileTime::from_unix_time(1_577_836_800, 0)),
             permissions: Some(0o600),
@@ -467,6 +480,7 @@ mod tests {
         ExtractedFile {
             rel: rel.to_string(),
             dest_path: dst_root.join(rel),
+            raw: None,
             contents: contents.to_vec(),
             mtime: None,
             permissions: None,
