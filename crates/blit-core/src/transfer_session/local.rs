@@ -1478,9 +1478,14 @@ mod tests {
         );
         assert_eq!(dest.summary.failures[0].relative_path, "gone.txt");
         assert!(
-            dest.summary.failures[0]
-                .reason
-                .starts_with("source: cannot open:"),
+            // On Windows the source reads the file's attributes before
+            // opening it (Windows-metadata hydration), so a vanished file
+            // is reported at that step; elsewhere the open is first.
+            {
+                let reason = &dest.summary.failures[0].reason;
+                reason.starts_with("source: cannot open:")
+                    || (cfg!(windows) && reason.starts_with("source: cannot read metadata:"))
+            },
             "{}",
             dest.summary.failures[0].reason
         );
@@ -1601,9 +1606,14 @@ mod tests {
         );
         assert_eq!(dest.summary.failures[0].relative_path, "node");
         assert!(
-            dest.summary.failures[0]
-                .reason
-                .starts_with("source: cannot open:"),
+            // On Windows the source reads the file's attributes before
+            // opening it (Windows-metadata hydration), so a vanished file
+            // is reported at that step; elsewhere the open is first.
+            {
+                let reason = &dest.summary.failures[0].reason;
+                reason.starts_with("source: cannot open:")
+                    || (cfg!(windows) && reason.starts_with("source: cannot read metadata:"))
+            },
             "{}",
             dest.summary.failures[0].reason
         );
