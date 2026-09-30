@@ -149,6 +149,11 @@ fn a_file_freed_during_the_wait_lands_on_the_retry_pass() {
         !stdout.contains("did not land") && !stdout.contains("blocked.txt"),
         "no failure block after a successful retry:\n{stdout}"
     );
+    // cr-ssc6-2: the run transferred a file; it is not "up to date".
+    assert!(
+        !stdout.contains("Up to date"),
+        "a file landed on retry, so the outcome is a transfer:\n{stdout}"
+    );
     assert!(
         stderr.contains("retrying 1 file(s) (pass 1 of 1)"),
         "the pass is announced:\n{stderr}"
@@ -419,4 +424,37 @@ fn a_failed_file_missing_at_retry_stays_reported() {
         "the failure block names the file and says it was missing at retry:\n{stdout}"
     );
     assert_eq!(counter_lines(&counters, "retry_pass"), vec![1]);
+}
+
+/// cr-ssc6-2: when the sole file lands only on the retry pass, the
+/// final outcome is a transfer (not "up to date") and the duration spans
+/// the whole operation, the retry wait included.
+#[test]
+fn a_retry_landed_file_reports_a_transfer_and_the_whole_duration() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (src, dst) = one_blocked_file_fixture(temp.path());
+    let counters = temp.path().join("counters.txt");
+    let child = spawn(
+        "copy",
+        &["--json", "--retries", "1", "--retry-wait", "2"],
+        &src,
+        &dst,
+        &counters,
+    );
+    wait_for_counter(&counters, "retry_wait_seconds", Duration::from_secs(60));
+    fs::remove_dir_all(dst.join("blocked.txt")).expect("free the blocked path");
+    let output = finish(child);
+    let stdout = stdout_of(&output);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    let doc: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON document");
+    assert_eq!(doc["outcome"], "transferred", "{doc}");
+    assert_eq!(doc["files_failed"], 0, "{doc}");
+    assert!(
+        doc["files_transferred"].as_u64().unwrap_or(0) >= 1,
+        "the retry-landed file is counted: {doc}"
+    );
+    assert!(
+        doc["duration_ms"].as_u64().unwrap_or(0) >= 2000,
+        "the duration spans the retry wait: {doc}"
+    );
 }

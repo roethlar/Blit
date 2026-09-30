@@ -5,6 +5,30 @@ mod remote;
 mod remote_remote_direct;
 pub(crate) mod retry;
 
+/// cr-ssc6-2: fold the retry passes into a local summary. Files and bytes
+/// the retries landed are added once, the failure report becomes the
+/// final state, a file that landed on a retry makes the outcome a
+/// transfer whatever the main pass alone concluded, and the duration is
+/// the whole operation — every pass and the waits between them.
+fn fold_local_retry(
+    summary: &mut blit_core::transfer_session::local::LocalMirrorSummary,
+    retry: &retry::RetryOutcome,
+    operation_started: std::time::Instant,
+) {
+    if retry.passes_run == 0 {
+        return;
+    }
+    summary.copied_files = summary
+        .copied_files
+        .saturating_add(retry.added_files as usize);
+    summary.total_bytes = summary.total_bytes.saturating_add(retry.added_bytes);
+    retry.final_failures.apply_to_local(summary);
+    if retry.added_files > 0 {
+        summary.outcome = blit_core::transfer_session::local::TransferOutcome::Transferred;
+    }
+    summary.duration = operation_started.elapsed();
+}
+
 // Endpoint types come from `blit_core::endpoints` directly. The
 // `transfers/endpoints.rs` shim now contains only the two
 // clap-arg adapter wrappers (`ensure_remote_pull_supported` /
@@ -313,6 +337,9 @@ async fn run_transfer_inner(
             // (D-2026-09-28-1/-3) run before the one final summary; a retry
             // pass never mirror-deletes (the main pass planned deletions
             // from its complete source set, shielding the failed paths).
+            // cr-ssc6-2: the operation the user sees is every pass plus the
+            // waits between them, so the reported duration spans all of it.
+            let operation_started = std::time::Instant::now();
             let mut summary =
                 local::run_local_transfer_quiet(ctx, args, &src, &dst, mirror, lifecycle_trace)
                     .await?;
@@ -341,13 +368,7 @@ async fn run_transfer_inner(
                 },
             )
             .await?;
-            if retry.passes_run > 0 {
-                summary.copied_files = summary
-                    .copied_files
-                    .saturating_add(retry.added_files as usize);
-                summary.total_bytes = summary.total_bytes.saturating_add(retry.added_bytes);
-                retry.final_failures.apply_to_local(&mut summary);
-            }
+            fold_local_retry(&mut summary, &retry, operation_started);
             render_result(lifecycle_trace, || {
                 local::print_local_transfer_summary(
                     ctx,
@@ -719,6 +740,9 @@ async fn run_move_inner(
             // a subsequent unreadable-paths refusal would exit
             // non-zero while stdout already contained a
             // "successful copy" document.
+            // cr-ssc6-2: the operation the user sees is every pass plus the
+            // waits between them, so the reported duration spans all of it.
+            let operation_started = std::time::Instant::now();
             let mut summary =
                 local::run_local_transfer_deferred(ctx, args, &src_path, &dst_path, false).await?;
             // ssc-6: retry the failed files before the source-delete
@@ -743,13 +767,7 @@ async fn run_move_inner(
                 },
             )
             .await?;
-            if retry.passes_run > 0 {
-                summary.copied_files = summary
-                    .copied_files
-                    .saturating_add(retry.added_files as usize);
-                summary.total_bytes = summary.total_bytes.saturating_add(retry.added_bytes);
-                retry.final_failures.apply_to_local(&mut summary);
-            }
+            fold_local_retry(&mut summary, &retry, operation_started);
 
             // R47-F4 (data-loss): refuse to delete the source if
             // the scan was incomplete. The R46-F2 mirror gate only
