@@ -363,6 +363,8 @@ async fn run_transfer_inner(
                             files_transferred: pass.copied_files as u64,
                             bytes_transferred: pass.total_bytes,
                             failures: retry::PassFailures::from_local(&pass),
+                            in_stream_carrier_used: false,
+                            files_resumed: 0,
                         })
                     }
                 },
@@ -417,6 +419,8 @@ async fn run_transfer_inner(
                             files_transferred: pass.summary.files_transferred,
                             bytes_transferred: pass.summary.bytes_transferred,
                             failures: retry::PassFailures::from_summary(&pass.summary),
+                            in_stream_carrier_used: pass.summary.in_stream_carrier_used,
+                            files_resumed: pass.summary.files_resumed,
                         })
                     }
                 },
@@ -463,6 +467,8 @@ async fn run_transfer_inner(
                             files_transferred: pass.summary.files_transferred,
                             bytes_transferred: pass.summary.bytes_transferred,
                             failures: retry::PassFailures::from_summary(&pass.summary),
+                            in_stream_carrier_used: pass.summary.in_stream_carrier_used,
+                            files_resumed: pass.summary.files_resumed,
                         })
                     }
                 },
@@ -519,6 +525,10 @@ async fn run_transfer_inner(
                                 files_transferred: pass.summary.files_transferred,
                                 bytes_transferred: pass.summary.bytes_transferred,
                                 failures: retry::PassFailures::from_delegated(&pass),
+                                // The delegated wire carries the carrier fact as
+                                // `tcp_fallback_used` and no resume count.
+                                in_stream_carrier_used: pass.summary.tcp_fallback_used,
+                                files_resumed: 0,
                             })
                         }
                     },
@@ -767,6 +777,8 @@ async fn run_move_inner(
                             files_transferred: pass.copied_files as u64,
                             bytes_transferred: pass.total_bytes,
                             failures: retry::PassFailures::from_local(&pass),
+                            in_stream_carrier_used: false,
+                            files_resumed: 0,
                         })
                     }
                 },
@@ -887,6 +899,8 @@ async fn run_move_inner(
                             files_transferred: pass.summary.files_transferred,
                             bytes_transferred: pass.summary.bytes_transferred,
                             failures: retry::PassFailures::from_summary(&pass.summary),
+                            in_stream_carrier_used: pass.summary.in_stream_carrier_used,
+                            files_resumed: pass.summary.files_resumed,
                         })
                     }
                 },
@@ -960,6 +974,8 @@ async fn run_move_inner(
                             files_transferred: pass.summary.files_transferred,
                             bytes_transferred: pass.summary.bytes_transferred,
                             failures: retry::PassFailures::from_summary(&pass.summary),
+                            in_stream_carrier_used: pass.summary.in_stream_carrier_used,
+                            files_resumed: pass.summary.files_resumed,
                         })
                     }
                 },
@@ -1034,6 +1050,10 @@ async fn run_move_inner(
                             files_transferred: pass.summary.files_transferred,
                             bytes_transferred: pass.summary.bytes_transferred,
                             failures: retry::PassFailures::from_delegated(&pass),
+                            // The delegated wire carries the carrier fact as
+                            // `tcp_fallback_used` and no resume count.
+                            in_stream_carrier_used: pass.summary.tcp_fallback_used,
+                            files_resumed: 0,
                         })
                     }
                 },

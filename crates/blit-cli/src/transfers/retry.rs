@@ -185,6 +185,11 @@ pub(crate) struct PassResult {
     pub files_transferred: u64,
     pub bytes_transferred: u64,
     pub failures: PassFailures,
+    /// cr-ssc6-4: carrier and resume facts of the pass, folded into the
+    /// final summary (OR / sum) so a retry that fell back to the
+    /// in-stream carrier or resumed block-wise is reported as such.
+    pub in_stream_carrier_used: bool,
+    pub files_resumed: u64,
 }
 
 /// What the loop hands back for the route to fold into its final
@@ -195,6 +200,10 @@ pub(crate) struct RetryOutcome {
     pub added_bytes: u64,
     pub final_failures: PassFailures,
     pub passes_run: u32,
+    /// cr-ssc6-4: true when any retry pass used the in-stream carrier.
+    pub in_stream_carrier_used: bool,
+    /// cr-ssc6-4: files the retry passes resumed block-wise, summed.
+    pub files_resumed: u64,
 }
 
 impl RetryOutcome {
@@ -207,6 +216,8 @@ impl RetryOutcome {
         }
         summary.files_transferred = summary.files_transferred.saturating_add(self.added_files);
         summary.bytes_transferred = summary.bytes_transferred.saturating_add(self.added_bytes);
+        summary.in_stream_carrier_used |= self.in_stream_carrier_used;
+        summary.files_resumed = summary.files_resumed.saturating_add(self.files_resumed);
         self.final_failures.apply_to_summary(summary);
     }
 
@@ -220,6 +231,10 @@ impl RetryOutcome {
         }
         summary.files_transferred = summary.files_transferred.saturating_add(self.added_files);
         summary.bytes_transferred = summary.bytes_transferred.saturating_add(self.added_bytes);
+        // The delegated summary names the carrier fact `tcp_fallback_used`
+        // and carries no resume count (cr-ssc6-4 known gap: a delegated
+        // retry's block-wise resumes are not reported).
+        summary.tcp_fallback_used |= self.in_stream_carrier_used;
         summary.files_failed = self.final_failures.files_failed;
         summary.failures = self
             .final_failures
@@ -248,6 +263,8 @@ where
     let mut added_files = 0u64;
     let mut added_bytes = 0u64;
     let mut passes_run = 0u32;
+    let mut in_stream_carrier_used = false;
+    let mut files_resumed = 0u64;
     // A dry run writes nothing, so nothing it reported can converge by
     // retrying; the report stands as the first pass produced it.
     let retries = if args.dry_run { 0 } else { args.retries };
@@ -280,6 +297,8 @@ where
         let result = run(pass_args).await?;
         added_files = added_files.saturating_add(result.files_transferred);
         added_bytes = added_bytes.saturating_add(result.bytes_transferred);
+        in_stream_carrier_used |= result.in_stream_carrier_used;
+        files_resumed = files_resumed.saturating_add(result.files_resumed);
         current = current.after_pass(n, truncated, result.failures);
         passes_run = pass;
     }
@@ -291,6 +310,8 @@ where
         added_bytes,
         final_failures: current,
         passes_run,
+        in_stream_carrier_used,
+        files_resumed,
     })
 }
 
@@ -346,6 +367,8 @@ mod tests {
                     files_transferred: 2,
                     bytes_transferred: 10,
                     failures: PassFailures::default(),
+                    in_stream_carrier_used: false,
+                    files_resumed: 0,
                 })
             }
         })
@@ -368,6 +391,8 @@ mod tests {
                     files_transferred: 0,
                     bytes_transferred: 0,
                     failures: failures(&["a"]),
+                    in_stream_carrier_used: false,
+                    files_resumed: 0,
                 })
             }
         })
@@ -421,6 +446,8 @@ mod tests {
                     files_transferred: 2,
                     bytes_transferred: 0,
                     failures: PassFailures::default(),
+                    in_stream_carrier_used: false,
+                    files_resumed: 0,
                 })
             }
         })
@@ -467,6 +494,8 @@ mod tests {
                 files_transferred: 1,
                 bytes_transferred: 0,
                 failures: failures(&["b"]),
+                in_stream_carrier_used: false,
+                files_resumed: 0,
             })
         })
         .await
@@ -494,6 +523,48 @@ mod tests {
         let mut attached = args(2);
         attached.detach = false;
         assert!(detach_retry_notice(&attached).is_none());
+    }
+
+    /// cr-ssc6-4: a retry pass that rode the in-stream carrier or resumed
+    /// block-wise is reported in the final summary (OR / sum), not lost
+    /// with the pass.
+    #[tokio::test]
+    async fn retry_passes_carry_carrier_and_resume_facts_into_the_summary() {
+        let out = run_retry_passes(&args(2), failures(&["a", "b"]), |pass_args| {
+            let pass = pass_args.retry_pass.map(|(k, _, _)| k).unwrap_or(0);
+            async move {
+                Ok(PassResult {
+                    files_transferred: 1,
+                    bytes_transferred: 0,
+                    failures: if pass == 1 {
+                        failures(&["b"])
+                    } else {
+                        PassFailures::default()
+                    },
+                    in_stream_carrier_used: pass == 2,
+                    files_resumed: 1,
+                })
+            }
+        })
+        .await
+        .expect("loop");
+        assert_eq!(out.passes_run, 2);
+        let mut summary = TransferSummary::default();
+        out.fold_into_summary(&mut summary);
+        assert!(
+            summary.in_stream_carrier_used,
+            "one pass used the in-stream carrier"
+        );
+        assert_eq!(
+            summary.files_resumed, 2,
+            "resumed files are summed across passes"
+        );
+        let mut delegated = blit_core::generated::DelegatedPullSummary::default();
+        out.fold_into_delegated(&mut delegated);
+        assert!(
+            delegated.tcp_fallback_used,
+            "the delegated summary's carrier fact"
+        );
     }
 
     #[tokio::test]
