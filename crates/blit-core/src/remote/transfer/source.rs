@@ -597,8 +597,38 @@ fn spawn_manifest_task(
     filter: FileFilter,
     unreadable: Arc<Mutex<Vec<String>>>,
     preserve_windows_metadata: bool,
+    heartbeat: EnumerationHeartbeat,
+    phase_probe: LocalPhaseProbe,
+) -> (
+    mpsc::Receiver<FileHeader>,
+    tokio::task::JoinHandle<Result<u64>>,
+) {
+    spawn_manifest_task_with(
+        root,
+        filter,
+        unreadable,
+        preserve_windows_metadata,
+        heartbeat,
+        phase_probe,
+        open_for_scan,
+    )
+}
+
+/// The scan's per-file readability probe: can the file be opened at all?
+fn open_for_scan(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path).map(drop)
+}
+
+/// [`spawn_manifest_task`] with the per-file open probe injected, so a
+/// unit test can make an enumerated file fail to open with any error.
+fn spawn_manifest_task_with(
+    root: PathBuf,
+    filter: FileFilter,
+    unreadable: Arc<Mutex<Vec<String>>>,
+    preserve_windows_metadata: bool,
     mut heartbeat: EnumerationHeartbeat,
     phase_probe: LocalPhaseProbe,
+    scan_open: fn(&Path) -> std::io::Result<()>,
 ) -> (
     mpsc::Receiver<FileHeader>,
     tokio::task::JoinHandle<Result<u64>>,
@@ -626,7 +656,7 @@ fn spawn_manifest_task(
                 let raw_relative_path = crate::raw_name::raw_relative_bytes(&entry.relative_path);
                 let absolute = entry.absolute_path.clone();
 
-                if let Err(err) = std::fs::File::open(&absolute) {
+                if let Err(err) = scan_open(&absolute) {
                     match err.kind() {
                         ErrorKind::PermissionDenied => {
                             record_unreadable_entry(&unreadable, &rel, "permission denied");
@@ -636,12 +666,25 @@ fn spawn_manifest_task(
                             record_unreadable_entry(&unreadable, &rel, "not found");
                             return Ok(());
                         }
+                        // win-2 (D-2026-09-28-2, D-2026-09-28-4): any other
+                        // failure — a Windows sharing violation (a file held
+                        // open with no sharing: NTUSER.DAT, a live database),
+                        // a transient EIO or EMFILE — is one file's problem,
+                        // never the session's, and the file DID enumerate. Its
+                        // header goes on the manifest like any other, so it
+                        // cannot be mistaken for extraneous by a mirror, the
+                        // scan stays complete, and the payload path reports it
+                        // per file (`source: cannot open: …`) if it still
+                        // cannot be read then — which is also what puts it in
+                        // the retry passes' set. Before this, the error ended
+                        // the whole session at scan time.
                         _ => {
-                            return Err(eyre!(format!(
-                                "manifest open {}: {}",
-                                absolute.display(),
+                            log::debug!(
+                                "scan: '{}' enumerated but did not open ({}); \
+                                 listing it so the payload path reports it per file",
+                                rel,
                                 err
-                            )));
+                            );
                         }
                     }
                 }
@@ -1206,6 +1249,96 @@ mod enumeration_heartbeat_tests {
             "completion line drifted: {}",
             lines[3]
         );
+    }
+}
+
+/// win-2: what the scan does with a file that enumerated but does not
+/// open. A permission refusal or a vanished file stays an unreadable
+/// entry (the scan is incomplete, which a mirror refuses — owner-pinned);
+/// every other open error lists the file, so it fails per file at payload
+/// time instead of ending the session.
+#[cfg(test)]
+mod scan_open_tests {
+    use super::*;
+
+    /// The injected probe fails `locked.bin` with `error`'s shape and opens
+    /// everything else for real.
+    fn probe(path: &Path, error: fn() -> std::io::Error) -> std::io::Result<()> {
+        if path.file_name() == Some(std::ffi::OsStr::new("locked.bin")) {
+            return Err(error());
+        }
+        open_for_scan(path)
+    }
+
+    /// What Windows returns for a file held open with no sharing
+    /// (ERROR_SHARING_VIOLATION): std maps it to no specific kind.
+    fn busy(path: &Path) -> std::io::Result<()> {
+        probe(path, || {
+            std::io::Error::other(
+                "The process cannot access the file because it is being used by \
+                 another process. (os error 32)",
+            )
+        })
+    }
+
+    fn denied(path: &Path) -> std::io::Result<()> {
+        probe(path, || {
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        })
+    }
+
+    /// Scan `ok.txt` + `locked.bin` with `scan_open`; return the listed
+    /// names, the unreadable entries, and the scan's own result.
+    async fn scan_with(
+        scan_open: fn(&Path) -> std::io::Result<()>,
+    ) -> (Vec<String>, Vec<String>, Result<u64>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("ok.txt"), b"fine").expect("fixture");
+        std::fs::write(dir.path().join("locked.bin"), b"held").expect("fixture");
+        let unreadable: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (mut headers, task) = spawn_manifest_task_with(
+            dir.path().to_path_buf(),
+            FileFilter::default(),
+            Arc::clone(&unreadable),
+            true,
+            EnumerationHeartbeat::new(None, false),
+            LocalPhaseProbe::disabled(),
+            scan_open,
+        );
+        let mut listed = Vec::new();
+        while let Some(header) = headers.recv().await {
+            listed.push(header.relative_path);
+        }
+        listed.sort();
+        let result = task.await.expect("scan task joined");
+        let unreadable = unreadable.lock().expect("unreadable list").clone();
+        (listed, unreadable, result)
+    }
+
+    #[tokio::test]
+    async fn a_file_that_enumerates_but_will_not_open_is_listed_and_the_scan_completes() {
+        let (listed, unreadable, result) = scan_with(busy).await;
+        assert_eq!(
+            result.expect("one file's open error never ends the scan"),
+            2
+        );
+        assert_eq!(
+            listed,
+            ["locked.bin", "ok.txt"],
+            "the file is on the manifest"
+        );
+        assert!(
+            unreadable.is_empty(),
+            "the scan is complete — the payload path reports the file: {unreadable:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_permission_refusal_at_scan_is_still_an_unreadable_entry() {
+        let (listed, unreadable, result) = scan_with(denied).await;
+        assert_eq!(result.expect("scan completes"), 1);
+        assert_eq!(listed, ["ok.txt"]);
+        assert_eq!(unreadable, ["locked.bin (permission denied)"]);
     }
 }
 

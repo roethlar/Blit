@@ -830,6 +830,71 @@ async fn windows_sharing_violation_is_skipped_and_reported() {
     }
 }
 
+/// win-2 (D-2026-09-28-2, D-2026-09-28-4): the same held file under a
+/// mirror. It enumerated, so the scan lists it even though it will not
+/// open — the scan is complete (the mirror runs rather than refusing), the
+/// file is reported per file, its destination counterpart is on the
+/// manifest and therefore never extraneous, and a genuinely extraneous
+/// entry still goes. Windows metadata is preserved (the default), so the
+/// scan's metadata read of the held file is part of what this runs.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn windows_sharing_violation_under_mirror_keeps_the_counterpart() {
+    use std::os::windows::fs::OpenOptionsExt;
+    for carrier in [Carrier::InStream, Carrier::DataPlane] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(&src_root, &three_big_files());
+        write_tree(
+            &dst_root,
+            &[
+                ("locked.bin", b"previous version".to_vec(), 1_500_000_000),
+                ("stale.txt", b"gone".to_vec(), 1_500_000_000),
+            ],
+        );
+        let _held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(src_root.join("locked.bin"))
+            .unwrap();
+        let mut open = open_for(TransferRole::Source, carrier);
+        open.mirror_enabled = true;
+        open.mirror_kind = MirrorMode::All as i32;
+        let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
+        let (sr, dr) = run_with(open, carrier, source, dst_root.clone()).await;
+        let summary = sr.unwrap_or_else(|e| panic!("source must complete ({carrier:?}): {e:#}"));
+        let dest = dr.unwrap_or_else(|e| panic!("destination must complete ({carrier:?}): {e:#}"));
+        assert_eq!(summary, dest.summary);
+        assert_eq!(
+            summary.files_failed, 1,
+            "{carrier:?}: {:?}",
+            summary.failures
+        );
+        assert_eq!(summary.failures[0].relative_path, "locked.bin");
+        assert!(
+            summary.failures[0]
+                .reason
+                .starts_with("source: cannot open:"),
+            "{carrier:?}: {}",
+            summary.failures[0].reason
+        );
+        assert_eq!(
+            std::fs::read(dst_root.join("locked.bin")).unwrap(),
+            b"previous version",
+            "the held file's counterpart is on the manifest, never extraneous ({carrier:?})"
+        );
+        assert!(
+            !dst_root.join("stale.txt").exists(),
+            "the extraneous entry still goes ({carrier:?})"
+        );
+        assert_eq!(summary.entries_deleted, 1, "{carrier:?}");
+        assert_eq!(summary.files_transferred, 2, "{carrier:?}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // A5: the ledger's violations, scripted peer on the in-stream carrier
 // ---------------------------------------------------------------------------

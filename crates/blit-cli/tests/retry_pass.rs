@@ -535,3 +535,94 @@ fn counted_but_unnamed_scan_failures_survive_a_clean_retry_pass() {
         "the unretried remainder is reported once:\n{stdout}"
     );
 }
+
+/// win-2 end to end, on the platform where it happens: a SOURCE file held
+/// open with no sharing (what NTUSER.DAT or a live database looks like to
+/// a backup). Before win-2 the scan's open check ended the whole session
+/// on it. Now the scan lists it, the main pass reports it per file, the
+/// retry pass retries it, and under mirror its destination counterpart is
+/// kept while a genuinely extraneous entry still goes; freed during the
+/// wait, it lands on the retry.
+#[cfg(windows)]
+#[test]
+fn windows_a_locked_source_file_is_retried_and_its_counterpart_kept() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    fn fixture(root: &Path) -> (PathBuf, PathBuf, fs::File) {
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::create_dir_all(&src).expect("mkdir src");
+        fs::create_dir_all(&dst).expect("mkdir dst");
+        fs::write(src.join("landed.txt"), b"alpha").expect("write landed");
+        fs::write(src.join("locked.bin"), b"current").expect("write locked");
+        fs::write(dst.join("locked.bin"), b"previous version").expect("counterpart");
+        fs::write(dst.join("stale.txt"), b"extraneous").expect("stale");
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(src.join("locked.bin"))
+            .expect("hold the source file with no sharing");
+        (src, dst, held)
+    }
+
+    // Held for the whole run: reported once, marked retried, exit 2.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (src, dst, held) = fixture(temp.path());
+    let counters = temp.path().join("counters.txt");
+    let output = run(
+        "mirror",
+        &["--retries", "1", "--diagnostics-no-retry-wait"],
+        &src,
+        &dst,
+        &counters,
+    );
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_PARTIAL_FAILURE),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout.matches("locked.bin").count(),
+        1,
+        "reported exactly once:\n{stdout}"
+    );
+    assert!(stdout.contains("(retried)"), "marked as retried:\n{stdout}");
+    assert_eq!(counter_lines(&counters, "retry_pass"), vec![1]);
+    assert_eq!(
+        fs::read(dst.join("locked.bin")).expect("counterpart kept"),
+        b"previous version",
+        "the held file is on the manifest, so its counterpart is never extraneous"
+    );
+    assert!(!dst.join("stale.txt").exists(), "extraneous entry deleted");
+    assert_eq!(fs::read(dst.join("landed.txt")).expect("landed"), b"alpha");
+    drop(held);
+
+    // Freed during the wait: the retry lands it, exit 0.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (src, dst, held) = fixture(temp.path());
+    let counters = temp.path().join("counters.txt");
+    let child = spawn(
+        "mirror",
+        &["--retries", "1", "--retry-wait", "4"],
+        &src,
+        &dst,
+        &counters,
+    );
+    wait_for_counter(&counters, "retry_wait_seconds", Duration::from_secs(60));
+    drop(held);
+    let output = finish(child);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout_of(&output),
+        stderr_of(&output)
+    );
+    assert_eq!(
+        fs::read(dst.join("locked.bin")).expect("landed on retry"),
+        b"current"
+    );
+    assert!(!dst.join("stale.txt").exists(), "extraneous entry deleted");
+}
