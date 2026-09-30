@@ -340,6 +340,18 @@ Coder loop: pick the topmost `[ ]` row. W2.3 requires a `docs/plan/` doc with
 | plan-ssc-2026-09-25-r6 | `docs/plan/SOURCE_SIDE_CONTAINMENT.md` (Draft r6) over `0bcad512..af9a24e0` (docs-only; guard N/A) | **acceptable_with_changes** — openreview codex (gpt-5.6-sol @ xhigh, frontier/fallback; codex-cli 0.156.0 headless one-shot; same ptk hook note); capability_ok=true; SHAs pin-verified. 3 material changes, all staging: adopted M3 RAII stage guard for drop-cancellation; recorded M2 concurrent-session stage deletion under mirror as a pre-existing unsupported mode (D5); M1 admission budget (third time) → D5. **Loop closed: remaining material changes are owner rulings D5/D6.** 3 findings (1 HIGH, 2 MEDIUM) verified (plan §Review history). | `.review/results/2026-09-25-source-side-containment-plan-r6-verdict.json` + `-events.jsonl` |
 | plan-perf-history-2026-08-20 | `docs/plan/PERF_HISTORY_PLANNING.md` (Draft) over `47f27238..d9021896` (docs-only; guard N/A) | **acceptable_with_changes** — codex / gpt-5.6-sol / default / owner-directed dispatch; codex-cli headless one-shot; capability_ok=true; SHAs pin-verified. 3 HIGH (epoch-zero seed vs no-wire constraint; daemon store invisible under service sandbox/user split; checker cannot unwind a high seed), 2 MEDIUM (route taxonomy omits RemoteToRemoteDelegated + daemon role split; JSONL rotation unsafe under daemon concurrency). 4 material changes pending owner triage. | `.review/results/2026-08-20-perf-history-plan-verdict.json` + `-events.jsonl` |
 
+## SOURCE_SIDE_CONTAINMENT slice reviews (codereview, D-2026-07-31-3 standing)
+
+| ID | Range | Verdict | Findings | Record |
+|----|-------|---------|----------|--------|
+| ssc-1-range | `f74b0b1a..6bc3d08f` (ssc-1 `bd4c48d0`) | **findings** — codex / gpt-5.6-sol / xhigh / standard; capability_ok=true; SHAs pin-verified | 5 admitted: cr-ssc1-1 HIGH mirror shield (A19), cr-ssc1-2 HIGH cumulative chunk bound, cr-ssc1-3 MEDIUM shard reservation race, cr-ssc1-4 MEDIUM TCP resume open failure fatal, cr-ssc1-5 MEDIUM opened-handle stat failure fatal | `.review/results/ssc-1-range.codex.json` + `.events.jsonl`; `.review/findings/cr-ssc1-*.md` |
+| ssc-2-range | `6bc3d08f..905ddb37` (ssc-2 `5a124669`) | **findings** — same reviewer; capability_ok=true; SHAs pin-verified | 2 admitted: cr-ssc2-1 MEDIUM shard hydration bypasses containment (expected closed by ssc-4 — verify), cr-ssc2-3 LOW growth probe unexercised; 1 declined: cr-ssc2-2 public API break under 0.1.3 → release-version requirement carried by ssc-5 (`.review/findings/cr-ssc2-2.contested.md`) | `.review/results/ssc-2-range.codex.json` + `.events.jsonl` |
+| ssc-3-range | `905ddb37..b70ef03a` (ssc-3 `b176a2ab`) | **findings** — same reviewer; capability_ok=true; SHAs pin-verified | 1 admitted: cr-ssc3-1 HIGH resume skips the source-size check (short file reported resumed; `move --resume` data loss) | `.review/results/ssc-3-range.codex.json` + `.events.jsonl` |
+
+Finding rows: `[ ]` open → `[x]` verified-closed with the fix commit, one finding per commit (`Fix <id>: …`).
+
+- [ ] cr-ssc1-1 · [ ] cr-ssc1-2 · [ ] cr-ssc1-3 · [ ] cr-ssc1-4 · [ ] cr-ssc1-5 · [ ] cr-ssc2-1 · [-] cr-ssc2-2 (declined) · [ ] cr-ssc2-3 · [ ] cr-ssc3-1
+
 ## Reconciled legacy finding groups
 
 The former unversioned “Open findings” rollup was stale. Its B/M-Jobs/C/A.1/D/E
