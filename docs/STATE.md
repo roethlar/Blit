@@ -33,8 +33,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   never run-fatal (D-2026-09-28-2); contract 6→7. ssc-1 `bd4c48d0`, ssc-2
   `5a124669`, ssc-3 `b176a2ab`, ssc-4 `c3a38876`, ssc-6 `048e55af`
   (`--retries`/`--retry-wait`), ssc-5 `6c266dd4` (non-UTF-8 by raw bytes).
-  Codex codereview of every slice and fix batch: 34 findings admitted and
-  Verified, 4 declined with records; final round over `5251584c..c1fe0e1b`
+  Codex codereview of every slice and fix batch: 24 findings admitted and
+  Verified, 3 declined with records; final round over `5251584c..c1fe0e1b`
   **clean** (REVIEW.md §SOURCE_SIDE_CONTAINMENT slice reviews). Suite
   1331/0/2 on macOS + Linux-cross clippy; Linux-only guards run on
   magneto. **CI on three OSes UNVERIFIED — push pending the owner; the
