@@ -1985,14 +1985,20 @@ async fn source_send_half(
                     let mut sent = sent.lock().expect("sent-manifest lock poisoned");
                     let wait = wait_started.elapsed();
                     let map_op_started = probe.start();
-                    sent.insert(header.relative_path.clone(), header.clone());
+                    // cr-ssc5-1: first wins, as at the destination — a second
+                    // header collapsing to the same text is reported there and
+                    // never granted, so this end must keep resolving the text
+                    // to the header that was granted.
+                    sent.entry(header.relative_path.clone())
+                        .or_insert_with(|| header.clone());
                     let map_op = map_op_started.elapsed();
                     drop(sent);
                     probe.note_manifest_insert(wait, map_op);
                 } else {
                     sent.lock()
                         .expect("sent-manifest lock poisoned")
-                        .insert(header.relative_path.clone(), header.clone());
+                        .entry(header.relative_path.clone())
+                        .or_insert_with(|| header.clone());
                 }
                 tx.send(frame(Frame::ManifestEntry(header))).await?;
             }

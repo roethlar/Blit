@@ -2481,3 +2481,130 @@ fn a_shard_member_stat_failure_is_reported_as_a_metadata_failure() {
         .reason
         .starts_with("source: cannot open: EACCES"));
 }
+
+/// cr-ssc5-1: a source that emits two manifest headers collapsing to one
+/// text path (two distinct files whose names differ only in bytes the
+/// text cannot represent). The destination keeps the first and reports
+/// the second; the source must resolve the granted need to the FIRST
+/// header too — never send the second file's bytes under the first's
+/// name.
+struct DuplicatingSource {
+    inner: FsTransferSource,
+}
+
+#[async_trait::async_trait]
+impl TransferSource for DuplicatingSource {
+    fn scan(
+        &self,
+        filter: Option<blit_core::fs_enum::FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+    ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
+        let (mut inner_rx, mut scan) = self.inner.scan(filter, unreadable_paths);
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let forwarder = tokio::spawn(async move {
+            let mut second: Option<FileHeader> = None;
+            let mut first_sent = false;
+            while let Some(header) = inner_rx.recv().await {
+                if header.relative_path == "dup2.bin" {
+                    // The second physical file, presented under the first's
+                    // text with its own bytes as the raw name.
+                    let mut h = header.clone();
+                    h.relative_path = "dup.bin".to_string();
+                    h.raw_relative_path = Some(b"dup2.bin".to_vec());
+                    if first_sent {
+                        let _ = tx.send(h).await;
+                    } else {
+                        second = Some(h);
+                    }
+                    continue;
+                }
+                let is_first = header.relative_path == "dup.bin";
+                if tx.send(header).await.is_err() {
+                    return;
+                }
+                if is_first {
+                    first_sent = true;
+                    if let Some(h) = second.take() {
+                        let _ = tx.send(h).await;
+                    }
+                }
+            }
+        });
+        scan.add_auxiliary(forwarder);
+        (rx, scan)
+    }
+
+    async fn prepare_payload(&self, payload: TransferPayload) -> eyre::Result<PreparedPayload> {
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
+        self.inner.open_file(header).await
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+async fn assert_first_header_wins_at_the_source(carrier: Carrier) {
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        let first = patterned(BIG, 7);
+        let second = patterned(BIG + 4096, 9);
+        write_tree(
+            &src_root,
+            &[
+                ("dup.bin", first.clone(), 1_600_000_001),
+                ("dup2.bin", second.clone(), 1_600_000_002),
+                ("other.bin", patterned(BIG, 3), 1_600_000_003),
+            ],
+        );
+        let source: Arc<dyn TransferSource> = Arc::new(DuplicatingSource {
+            inner: FsTransferSource::new(src_root.clone()),
+        });
+        let (sr, dr) = run_with(
+            open_for(initiator_role, carrier),
+            carrier,
+            source,
+            dst_root.clone(),
+        )
+        .await;
+        let summary = sr.unwrap_or_else(|e| panic!("source must complete ({carrier:?}): {e:#}"));
+        let dest = dr.unwrap_or_else(|e| panic!("destination must complete ({carrier:?}): {e:#}"));
+        assert_eq!(summary, dest.summary);
+        assert_eq!(
+            summary.files_failed, 1,
+            "exactly the duplicate is reported ({carrier:?}): {:?}",
+            summary.failures
+        );
+        assert!(
+            summary.failures[0]
+                .reason
+                .starts_with("source: duplicate manifest path"),
+            "{:?}",
+            summary.failures
+        );
+        let landed = collect_tree(&dst_root);
+        assert_eq!(
+            landed["dup.bin"], first,
+            "the FIRST header's bytes land under the text ({carrier:?}), never the second's"
+        );
+        assert_eq!(landed["other.bin"], patterned(BIG, 3));
+        assert_eq!(landed.len(), 2, "{:?}", landed.keys());
+    }
+}
+
+#[tokio::test]
+async fn in_stream_first_header_wins_at_the_source_on_a_lossy_collision() {
+    assert_first_header_wins_at_the_source(Carrier::InStream).await;
+}
+
+#[tokio::test]
+async fn data_plane_first_header_wins_at_the_source_on_a_lossy_collision() {
+    assert_first_header_wins_at_the_source(Carrier::DataPlane).await;
+}
