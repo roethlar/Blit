@@ -482,6 +482,11 @@ async fn run_transfer_inner(
             // ssc-6: `--detach` hands the transfer to the daemon and exits
             // before any summary exists, so there is nothing to retry; the
             // deferred run below is the attached path only.
+            // cr-ssc6-3: say once that a detached job gets no retry passes
+            // rather than accept `--retries` silently.
+            if let Some(notice) = retry::detach_retry_notice(args) {
+                eprintln!("{notice}");
+            }
             let mut state = remote_remote_direct::run_remote_to_remote_direct_deferred(
                 args,
                 src.clone(),
@@ -993,6 +998,11 @@ async fn run_move_inner(
             // R51-F4: defer output so a remote-source delete
             // failure doesn't leave a success-looking delegated
             // summary on stdout.
+            // cr-ssc6-3: say once that a detached job gets no retry passes
+            // rather than accept `--retries` silently.
+            if let Some(notice) = retry::detach_retry_notice(args) {
+                eprintln!("{notice}");
+            }
             let mut state = remote_remote_direct::run_remote_to_remote_direct_deferred(
                 args,
                 src.clone(),
