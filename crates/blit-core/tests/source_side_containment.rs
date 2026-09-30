@@ -2440,7 +2440,9 @@ async fn data_plane_scoped_scan_reports_requested_paths_it_cannot_enumerate() {
 /// the reason names the actual cause.
 #[test]
 fn a_shard_member_stat_failure_is_reported_as_a_metadata_failure() {
-    use blit_core::remote::transfer::{build_tar_shard_with, MemberOpenError, MemberOpenStage};
+    use blit_core::remote::transfer::{
+        build_tar_shard_with, MemberOpenError, MemberOpenStage, OpenedMember,
+    };
     let header = FileHeader {
         relative_path: "m.bin".to_string(),
         size: 16,
