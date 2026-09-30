@@ -2611,9 +2611,11 @@ async fn data_plane_first_header_wins_at_the_source_on_a_lossy_collision() {
 
 /// cr-ssc5-2 (byte-keyed destinations only): a resume grant for a
 /// raw-named file hashes the file at the RAW path — the one the blocks
-/// are applied to — never the distinct lossy-text file beside it. The raw
-/// file is resumed to the source's content; the lossy-text file is left
-/// alone.
+/// are applied to — never the distinct lossy-text file beside it. The
+/// lossy-text neighbour is made IDENTICAL to the source so that hashing
+/// it would report every block present and the source would send
+/// nothing, leaving the raw file's stale bytes stamped as resumed; hashing
+/// the raw path finds every block stale and re-lands the file.
 #[cfg(all(unix, not(target_os = "macos")))]
 async fn assert_resume_hashes_the_raw_path(carrier: Carrier) {
     use std::os::unix::ffi::OsStrExt as _;
@@ -2627,11 +2629,12 @@ async fn assert_resume_hashes_the_raw_path(carrier: Carrier) {
         let content = patterned(2 * HALF, 5);
         let raw_name = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
         std::fs::write(src_root.join(raw_name), &content).unwrap();
-        // Destination: the raw file holds the first half (resumable); the
-        // distinct lossy-text file holds unrelated bytes of the same size.
-        std::fs::write(dst_root.join(raw_name), &content[..HALF]).unwrap();
-        let decoy = patterned(2 * HALF, 11);
-        std::fs::write(dst_root.join("caf\u{fffd}.txt"), &decoy).unwrap();
+        // Destination: the raw file holds stale bytes of the full size (every
+        // block differs from the source); the distinct lossy-text file is
+        // an exact copy of the source.
+        let stale = patterned(2 * HALF, 11);
+        std::fs::write(dst_root.join(raw_name), &stale).unwrap();
+        std::fs::write(dst_root.join("caf\u{fffd}.txt"), &content).unwrap();
 
         let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
         let (sr, dr) = run_with(
@@ -2656,7 +2659,7 @@ async fn assert_resume_hashes_the_raw_path(carrier: Carrier) {
         );
         assert_eq!(
             std::fs::read(dst_root.join("caf\u{fffd}.txt")).unwrap(),
-            decoy,
+            content,
             "the lossy-text neighbour is untouched"
         );
     }
