@@ -2024,16 +2024,17 @@ impl NeedListSink {
         Ok(())
     }
 
-    /// Validate every shard member against its grant while holding the
-    /// ledger once; the members settle after the shard is written.
-    fn check_shard(&self, payloads: &[FileHeader]) -> Result<()> {
-        let (wait_started, hold_started, ledger) = self.lock_for_claim();
-        ledger.check_shard_members(payloads)?;
+    /// Validate every shard member against its grant and reserve them all
+    /// (`Granted` → `Active(lane, Shard)`) while holding the ledger once
+    /// (cr-ssc1-3); the members settle after the shard is written.
+    fn reserve_shard(&self, payloads: &[FileHeader]) -> Result<()> {
+        let (wait_started, hold_started, mut ledger) = self.lock_for_claim();
         for payload in payloads {
             if let Some((manifest, _)) = ledger.granted(&payload.relative_path) {
                 Self::validate_against_grant(payload, manifest)?;
             }
         }
+        ledger.reserve_shard_members(payloads, self.lane)?;
         drop(ledger);
         self.note_claim(wait_started, hold_started, payloads.len(), payloads.len());
         Ok(())
@@ -2217,11 +2218,11 @@ impl TransferSink for NeedListSink {
                 return Ok(outcome);
             }
             PreparedPayload::TarShard { headers, .. } => {
-                self.check_shard(headers)?;
+                self.reserve_shard(headers)?;
                 let members = headers.clone();
                 let outcome = self.inner.write_payload(payload).await?;
                 self.ledger()
-                    .settle_shard_members(&members, |p| outcome.file_failed(p));
+                    .settle_shard_members(&members, self.lane, |p| outcome.file_failed(p))?;
                 return Ok(outcome);
             }
             // otp-7b: resume block records ride the data plane. A

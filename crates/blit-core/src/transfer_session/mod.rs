@@ -4657,16 +4657,23 @@ async fn destination_session_inner(
                 // Contract v7: every member must be an ordinary Granted need
                 // (a resume-flagged grant may not be satisfied through a
                 // tar shard — review F3) and match its retained manifest
-                // header. Checked under one ledger lock; the members
-                // settle after the record is written, from its outcome.
+                // header. Checked and RESERVED (`Granted` →
+                // `Active(control, Shard)`, cr-ssc1-3) under one ledger
+                // lock; the members settle after the record is written,
+                // from its outcome.
                 {
                     let wait_started = small_file_probe.as_ref().map(|p| p.start());
-                    let ledger = ledger.lock().expect("need ledger lock poisoned");
+                    let mut ledger = ledger.lock().expect("need ledger lock poisoned");
                     let hold_started = small_file_probe.as_ref().map(|p| p.start());
-                    ledger.check_shard_members(&shard.files)?;
                     for header in &shard.files {
                         let Some((manifest, _)) = ledger.granted(&header.relative_path) else {
-                            unreachable!("check_shard_members verified every member is granted")
+                            return Err(violation_for(
+                                &header.relative_path,
+                                format!(
+                                    "tar shard entry '{}' which is not on the need list",
+                                    header.relative_path
+                                ),
+                            ));
                         };
                         crate::windows_metadata::validate_payload_against_manifest(
                             header.windows_metadata.as_ref(),
@@ -4694,6 +4701,7 @@ async fn destination_session_inner(
                             ));
                         }
                     }
+                    ledger.reserve_shard_members(&shard.files, need_ledger::Lane::Control)?;
                     drop(ledger);
                     if let (Some(probe), Some(wait_started), Some(hold_started)) =
                         (&small_file_probe, wait_started, hold_started)
@@ -4726,7 +4734,9 @@ async fn destination_session_inner(
                 ledger
                     .lock()
                     .expect("need ledger lock poisoned")
-                    .settle_shard_members(&shard_members, |path| outcome.file_failed(path));
+                    .settle_shard_members(&shard_members, need_ledger::Lane::Control, |path| {
+                        outcome.file_failed(path)
+                    })?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
                 contained_failures.merge_failures(&outcome);

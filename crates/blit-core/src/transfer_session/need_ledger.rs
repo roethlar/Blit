@@ -62,6 +62,9 @@ impl std::fmt::Display for Lane {
 pub(super) enum RecordKind {
     File,
     Resume,
+    /// cr-ssc1-3: a member reserved by a tar shard record on its lane,
+    /// from reservation until the shard's outcome settles it.
+    Shard,
 }
 
 #[derive(Clone, Debug)]
@@ -203,6 +206,7 @@ impl NeedLedger {
                     match kind {
                         RecordKind::File => "file record terminator",
                         RecordKind::Resume => "block record",
+                        RecordKind::Shard => "tar shard settlement",
                     },
                     describe(other)
                 ),
@@ -228,16 +232,27 @@ impl NeedLedger {
         Ok(())
     }
 
-    /// Shard members: every listed path must be `Granted` (non-resume);
-    /// they go straight to `Completed` or `Failed` per `failed(path)` once
-    /// the shard has been written. Validation of the members against
-    /// their retained headers is the caller's, through [`Self::granted`],
-    /// before the shard is consumed; this settles them afterwards. The
-    /// check-then-settle split keeps the shard's ordered-failure
-    /// behaviour (an invalid later member faults before any is settled).
-    pub(super) fn check_shard_members(&self, headers: &[FileHeader]) -> Result<()> {
+    /// cr-ssc1-3: reserve a tar shard's members atomically. Every listed
+    /// path must be a distinct `Granted` (non-resume) need; validation of
+    /// the members against their retained headers is the caller's,
+    /// through [`Self::granted`], under the same lock and BEFORE this
+    /// call. Nothing mutates unless every member passes; then every
+    /// member moves `Granted` → `Active(lane, Shard)` in one step, so a
+    /// second delivery of any member — on another socket, in another
+    /// shard, or as a FILE/SKIP record — is a violation at the ledger,
+    /// never a concurrent write to the same destination. An invalid later
+    /// member still faults before any is reserved (ordered-failure
+    /// behaviour kept).
+    pub(super) fn reserve_shard_members(&mut self, headers: &[FileHeader], lane: Lane) -> Result<()> {
+        let mut seen = std::collections::HashSet::with_capacity(headers.len());
         for header in headers {
             let path = &header.relative_path;
+            if !seen.insert(path.as_str()) {
+                return Err(violation(
+                    path,
+                    format!("tar shard lists '{path}' twice (a member is delivered once)"),
+                ));
+            }
             match self.entries.get(path) {
                 Some(NeedState::Granted { resume: false, .. }) => {}
                 Some(NeedState::Granted { resume: true, .. }) => {
@@ -260,29 +275,48 @@ impl NeedLedger {
                 }
             }
         }
+        for header in headers {
+            let path = &header.relative_path;
+            let Some(NeedState::Granted { header: retained, .. }) = self.entries.get(path) else {
+                unreachable!("every member was verified Granted above")
+            };
+            let retained = retained.clone();
+            self.entries.insert(
+                path.clone(),
+                NeedState::Active {
+                    header: retained,
+                    lane,
+                    kind: RecordKind::Shard,
+                },
+            );
+        }
         Ok(())
     }
 
+    /// Settle a reserved shard's members from the sink's outcome: each
+    /// must be `Active(lane, Shard)` on THIS lane (anything else is a
+    /// violation — the reservation is the only way in) and goes to
+    /// `Completed` or `Failed` per `failed(path)`.
     pub(super) fn settle_shard_members(
         &mut self,
         headers: &[FileHeader],
+        lane: Lane,
         failed: impl Fn(&str) -> bool,
-    ) {
+    ) -> Result<()> {
+        for header in headers {
+            self.active(&header.relative_path, lane, RecordKind::Shard)?;
+        }
         for header in headers {
             let path = &header.relative_path;
-            if matches!(
-                self.entries.get(path),
-                Some(NeedState::Granted { resume: false, .. })
-            ) {
-                let state = if failed(path) {
-                    NeedState::Failed
-                } else {
-                    NeedState::Completed
-                };
-                self.entries.insert(path.clone(), state);
-                self.close(false);
-            }
+            let state = if failed(path) {
+                NeedState::Failed
+            } else {
+                NeedState::Completed
+            };
+            self.entries.insert(path.clone(), state);
+            self.close(false);
         }
+        Ok(())
     }
 
     /// A block record for a resume grant: `Granted{resume}` →
@@ -392,6 +426,10 @@ fn describe(state: Option<&NeedState>) -> &'static str {
             kind: RecordKind::Resume,
             ..
         }) => "already open as a block record",
+        Some(NeedState::Active {
+            kind: RecordKind::Shard,
+            ..
+        }) => "already reserved by a tar shard record",
         Some(NeedState::Completed) => "already delivered",
         Some(NeedState::Failed) => "already failed",
     }
@@ -418,6 +456,61 @@ mod tests {
         epoch: 0,
         socket_id: 1,
     };
+
+    /// cr-ssc1-3: a shard reserves its members atomically on its lane;
+    /// a second delivery of any member — another socket's shard, or a
+    /// duplicate inside one shard — is a violation, and the settlement
+    /// must come from the reserving lane.
+    #[test]
+    fn shard_reservation_is_atomic_per_member_and_per_lane() {
+        let mut ledger = NeedLedger::default();
+        for p in ["a", "b", "c"] {
+            assert!(ledger.grant(header(p), false));
+        }
+        // Duplicate inside one shard: rejected before anything moves.
+        let dup = [header("a"), header("a")];
+        let err = ledger.reserve_shard_members(&dup, SOCK0).unwrap_err();
+        assert!(format!("{err:#}").contains("twice"), "{err:#}");
+        assert!(
+            matches!(ledger.entries.get("a"), Some(NeedState::Granted { .. })),
+            "a failed reservation reserves nothing"
+        );
+        // An invalid later member faults before any earlier one is reserved.
+        let mixed = [header("a"), header("zzz")];
+        assert!(ledger.reserve_shard_members(&mixed, SOCK0).is_err());
+        assert!(matches!(ledger.entries.get("a"), Some(NeedState::Granted { .. })));
+        // A valid shard reserves every member on its lane.
+        ledger.reserve_shard_members(&[header("a"), header("b")], SOCK0).unwrap();
+        assert!(matches!(
+            ledger.entries.get("a"),
+            Some(NeedState::Active { lane: SOCK0, kind: RecordKind::Shard, .. })
+        ));
+        // Another socket cannot deliver a reserved member again.
+        let err = ledger.reserve_shard_members(&[header("a")], SOCK1).unwrap_err();
+        assert!(format!("{err:#}").contains("already reserved by a tar shard record"), "{err:#}");
+        // Nor can a FILE record or a skip claim it.
+        assert!(ledger.activate_file("a", SOCK1).is_err());
+        assert!(ledger.skip("b").is_err());
+        // Settlement must come from the reserving lane.
+        let err = ledger
+            .settle_shard_members(&[header("a"), header("b")], SOCK1, |_| false)
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("on the"), "{err:#}");
+        assert!(
+            matches!(ledger.entries.get("a"), Some(NeedState::Active { .. })),
+            "a rejected settlement settles nothing"
+        );
+        ledger
+            .settle_shard_members(&[header("a"), header("b")], SOCK0, |p| p == "b")
+            .unwrap();
+        assert!(matches!(ledger.entries.get("a"), Some(NeedState::Completed)));
+        assert!(matches!(ledger.entries.get("b"), Some(NeedState::Failed)));
+        assert_eq!(ledger.open_count(), 1, "only c is still open");
+        // Settling twice is a violation, not a silent no-op.
+        assert!(ledger
+            .settle_shard_members(&[header("a")], SOCK0, |_| false)
+            .is_err());
+    }
 
     #[test]
     fn grant_dedups_and_counts_open_needs() {
@@ -516,7 +609,9 @@ mod tests {
         ledger.grant(header("r"), true);
         let err = ledger.activate_file("r", CONTROL).unwrap_err();
         assert!(err.to_string().contains("resume-flagged"));
-        let err = ledger.check_shard_members(&[header("r")]).unwrap_err();
+        let err = ledger
+            .reserve_shard_members(&[header("r")], CONTROL)
+            .unwrap_err();
         assert!(err.to_string().contains("resume-flagged"));
     }
 
@@ -526,9 +621,11 @@ mod tests {
         ledger.grant(header("a"), false);
         ledger.grant(header("b"), false);
         ledger
-            .check_shard_members(&[header("a"), header("b")])
+            .reserve_shard_members(&[header("a"), header("b")], CONTROL)
             .unwrap();
-        ledger.settle_shard_members(&[header("a"), header("b")], |p| p == "b");
+        ledger
+            .settle_shard_members(&[header("a"), header("b")], CONTROL, |p| p == "b")
+            .unwrap();
         assert_eq!(ledger.open_count(), 0);
         assert!(matches!(
             ledger.entries.get("a"),

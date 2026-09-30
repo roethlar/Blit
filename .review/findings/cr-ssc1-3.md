@@ -1,7 +1,7 @@
 # cr-ssc1-3: Reserve tar-shard needs atomically before writing them
 
 **Severity**: MEDIUM — duplicate concurrent delivery can succeed with nondeterministic contents instead of a protocol violation
-**Status**: Open
+**Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: (filled after the fix commit)
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range f74b0b1a..6bc3d08f, record .review/results/ssc-1-range.codex.json)
@@ -18,10 +18,10 @@ Two data-plane sockets can concurrently submit the same granted path, or a shard
 After validating the complete shard under one lock, atomically move every unique member into a shard-reserved Active state tied to its lane. Settle only that exact state after the sink returns, and reject duplicate paths within a shard.
 
 ## What
-(coder fills in)
+`NeedLedger::check_shard_members` is replaced by `reserve_shard_members(headers, lane)`: under the one lock the caller already holds for header validation, every member must be a distinct `Granted` (non-resume) need — a duplicate path within the shard, a resume grant, or a member in any other state is a violation and nothing moves — and then every member goes `Granted → Active(lane, Shard)` atomically (new `RecordKind::Shard`). `settle_shard_members(headers, lane, failed)` now requires each member to be `Active(lane, Shard)` on the settling lane (a second settlement, another lane, or a never-reserved member is a violation) before moving them to `Completed`/`Failed`. Both consumers changed: `NeedListSink::reserve_shard` (data plane, per-socket lane) and the in-stream `TarShardHeader` arm (`Lane::Control`). A second delivery of a reserved member on any socket, by any record type, is now rejected at the ledger instead of racing the write.
 
 ## Guard proof
 (red/green proof of the new guard; mutation described)
 
 ## Known gaps
-(none yet)
+The guard is unit-level on the ledger (the concurrent-socket race is a state-machine property); the data-plane sink's `reserve_shard` and the in-stream arm are exercised by the existing shard integration tests.
