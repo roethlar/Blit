@@ -1,7 +1,7 @@
 # cr-ssc1-4: Contain resume-source open failures on the TCP carrier
 
 **Severity**: MEDIUM — one unopenable resume-granted file still ends the whole run on the data plane, against D-2026-09-28-2
-**Status**: Open
+**Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: (filled after the fix commit)
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range f74b0b1a..6bc3d08f, record .review/results/ssc-1-range.codex.json)
@@ -18,10 +18,10 @@ During a resume-enabled data-plane transfer, a file deleted, locked, or denied a
 Catch ResumeBlockDiff::open failures before any BLOCK record, send `send_skip` with a bounded `source:` reason, and return a failed SinkOutcome so the pipeline continues.
 
 ## What
-(coder fills in)
+`DataPlaneSink::write_payload`'s `ResumeFile` arm (`remote/transfer/sink.rs`) now matches on `ResumeBlockDiff::open`: an open failure sends a SKIP record (`source: cannot open: …`) before any BLOCK and returns `SinkOutcome::failed` for that file, so the pipeline continues — the rule the in-stream carrier already had.
 
 ## Guard proof
 (red/green proof of the new guard; mutation described)
 
 ## Known gaps
-(none yet)
+None.

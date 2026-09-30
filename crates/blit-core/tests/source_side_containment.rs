@@ -1546,6 +1546,86 @@ async fn assert_resume_fault_contained(carrier: Carrier, fault: Fault, reason_pr
     }
 }
 
+/// cr-ssc1-4: a resume-granted file whose source cannot be opened is
+/// skipped before any block record — the destination partial is left
+/// exactly as it was, the file is reported, the other file lands — on
+/// both carriers.
+async fn assert_resume_open_failure_skipped(carrier: Carrier) {
+    let bs = RESUME_BS as usize;
+    let content = patterned(3 * bs, 9);
+    const DST_MTIME: i64 = 1_600_001_000;
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(
+            &src_root,
+            &[
+                ("partial.bin", content.clone(), 1_600_001_100),
+                ("ok1.bin", patterned(BIG, 1), 1_600_000_001),
+            ],
+        );
+        write_tree(
+            &dst_root,
+            &[("partial.bin", vec![0x11; content.len()], DST_MTIME)],
+        );
+        let source: Arc<dyn TransferSource> = Arc::new(FaultySource {
+            inner: FsTransferSource::new(src_root.clone()),
+            faults: HashMap::from([("partial.bin", Fault::OpenFails)]),
+        });
+        let (sr, dr) = run_with(
+            resume_open_for(initiator_role, carrier),
+            carrier,
+            source,
+            dst_root.clone(),
+        )
+        .await;
+        let summary = sr.unwrap_or_else(|e| {
+            panic!("source must complete ({carrier:?}, init {initiator_role:?}): {e:#}")
+        });
+        let dest = dr.unwrap_or_else(|e| {
+            panic!("destination must complete ({carrier:?}, init {initiator_role:?}): {e:#}")
+        });
+        assert_eq!(summary, dest.summary, "both ends agree ({carrier:?})");
+        assert_eq!(summary.files_failed, 1, "the unopenable file fails once");
+        assert_eq!(summary.files_resumed, 0);
+        assert_eq!(summary.files_transferred, 1, "the other file lands");
+        assert_eq!(summary.failures[0].relative_path, "partial.bin");
+        assert!(
+            summary.failures[0].reason.starts_with("source: cannot open:"),
+            "reason must be the source's ({carrier:?}): {}",
+            summary.failures[0].reason
+        );
+        let partial = dst_root.join("partial.bin");
+        assert_eq!(
+            std::fs::read(&partial).unwrap(),
+            vec![0x11; content.len()],
+            "no block touched the partial ({carrier:?})"
+        );
+        assert_eq!(
+            mtime_seconds(&partial),
+            DST_MTIME,
+            "the partial is untouched, not stamped ({carrier:?})"
+        );
+        assert_eq!(collect_tree(&dst_root)["ok1.bin"], patterned(BIG, 1));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_resume_source_open_failure_is_skipped_and_reported() {
+    assert_resume_open_failure_skipped(Carrier::InStream).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_resume_source_open_failure_is_skipped_and_reported() {
+    // Mutation proof: restore `.await?` on `ResumeBlockDiff::open` in
+    // `DataPlaneSink::write_payload`'s ResumeFile arm and the source's
+    // pipeline faults instead of completing.
+    assert_resume_open_failure_skipped(Carrier::DataPlane).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn in_stream_resume_short_read_mid_diff_is_reported_and_unstamped() {
     assert_resume_fault_contained(

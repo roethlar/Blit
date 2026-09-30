@@ -2369,16 +2369,30 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                     // inside the receiver's stall window and answer each
                     // with a zero-length BLOCK (a no-op in-place write),
                     // so a healthy scan never reads as a stalled peer.
-                    let mut diff = ResumeBlockDiff::open(
+                    // cr-ssc1-4 (contract v7, the in-stream carrier's
+                    // rule): a source that cannot open the file skips it
+                    // before any BLOCK goes out — a SKIP record and a
+                    // failed-file outcome, never a pipeline failure.
+                    let mut diff = match ResumeBlockDiff::open(
                         &self.source,
                         &header,
                         block_size as usize,
                         dest_hashes,
                     )
-                    .await?
-                    .with_keepalive(
-                        crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT / 3,
-                    );
+                    .await
+                    {
+                        Ok(diff) => diff.with_keepalive(
+                            crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT / 3,
+                        ),
+                        Err(err) => {
+                            let reason = format!("source: cannot open: {err:#}");
+                            session
+                                .send_skip(&header.relative_path, &reason)
+                                .await
+                                .context("sending resume skip record")?;
+                            return Ok(SinkOutcome::failed(header.relative_path.clone(), reason));
+                        }
+                    };
                     let mut bytes_written: u64 = 0;
                     // ssc-3 (A10): a source read error or short read
                     // mid-diff closes the record FAILED (the destination
