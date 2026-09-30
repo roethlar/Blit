@@ -1020,8 +1020,8 @@ carried as ssc-5's release-version requirement. Each guard was proven
 red by mutation and green after (DEVLOG 2026-09-30). Gate on macOS:
 fmt clean; clippy `-D warnings` clean native and `x86_64-unknown-linux-gnu`; `cargo test --workspace` 1270 → 1285 passed, 0 failed, 2 ignored; check-docs OK; diff-check clean; CI on the three OSes unverified until a push.
 
-**ssc-6 LANDED 2026-09-30 on master at `__SSC6_HASH__` (range
-`b342d636..__SSC6_HASH__`): end-of-run retry passes, `--retries`/`-R`
+**ssc-6 LANDED 2026-09-30 on master at `048e55af` (range
+`b342d636..048e55af`): end-of-run retry passes, `--retries`/`-R`
 (default 1) and `--retry-wait`/`-W` (default 30).** What landed against
 the slice text: D-I as written above (the design section itself was
 restored in this commit — the D5 rewrite of D-H had swallowed it);
