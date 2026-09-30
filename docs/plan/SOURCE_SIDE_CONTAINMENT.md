@@ -939,6 +939,30 @@ keyed by path prefix. A17: this Mac, 4 × 1 GiB, 3 alternating runs: both binari
 Executed order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-6 → ssc-5 (ssc-5's
 CHANGELOG entry describes the retry pass, so it lands last).
 
+**Review fixes (codereview of ssc-1..ssc-3, landed 2026-09-30 on master
+after ssc-4, batch `ed4bc773..5d557004`, one finding per commit):**
+cr-ssc1-2 `14a6bc3f` — `ChunkedBody` bounded by the header size, so a
+peer cannot write past its granted size (ok and failed records);
+cr-ssc1-5 `458ca62c` — a stat failure on the opened handle before
+announcement is a skip on both carriers; cr-ssc1-4 `61cc82ab` — the TCP
+sink's resume arm skips an unopenable source instead of faulting;
+cr-ssc3-1 `e4405156` — `ResumeBlockDiff` checks the handle's size before
+the diff (skip) and once after it (failed `BlockComplete`), so a grown
+file is never resumed short nor its tail deleted under `move --resume`;
+cr-ssc1-3 `14ec438b` — shard members are reserved atomically
+(`Granted → Active(lane, Shard)`) before the write and settled only from
+that lane; cr-ssc1-1 `8c1b8dad` + `5d557004` — A19: `merge_failures`
+carries the exact failed-path set and the mirror pass shields every
+failed path and its descendants (the pfc-2 "merged outcomes answer
+conservatively" pin flipped to the exact per-path answer); cr-ssc2-1
+`19de5136` — remote guards that a shard member whose hydration fails is
+skipped (closed by ssc-4's per-member hydration); cr-ssc2-3 `fa430f8b`
+— `build_tar_shard_with` member-opener seam exercises the growth probe.
+cr-ssc2-2 (public API break under 0.1.3) declined as a defect and
+carried as ssc-5's release-version requirement. Each guard was proven
+red by mutation and green after (DEVLOG 2026-09-30). Gate on macOS:
+fmt clean; clippy `-D warnings` clean native and `x86_64-unknown-linux-gnu`; `cargo test --workspace` 1270 → 1285 passed, 0 failed, 2 ignored; check-docs OK; diff-check clean; CI on the three OSes unverified until a push.
+
 ## Review history
 
 - **r1** (codex-cli 0.156.0 / gpt-5.6-sol / xhigh / frontier, grade

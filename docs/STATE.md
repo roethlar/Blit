@@ -35,13 +35,13 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   mirror on cargo 0.1.2 died on a growing SQLite WAL's tar shard). D1–D7
   all ruled (D-2026-09-28-1..-4, D-2026-09-29-1..-4). **ssc-1, ssc-2,
   ssc-3, ssc-4 LANDED 2026-09-30** (`bd4c48d0`, `5a124669`, `b176a2ab`,
-  `c3a38876` — see the plan's Execution record and DEVLOG): ledger +
-  skip records + terminators + sink lifecycle; exact-size shard packing
-  (the field failure reproduces red with the old packer); retraction by
-  the record's terminator incl. resume; per-file preparation, local
-  pre-check retired (D3), local copy on one handle (A12). Gates green on
-  macOS + Linux-cross clippy; CI unverified until the next push. Next:
-  ssc-6 (retry passes, `--retries`/`--retry-wait`), then ssc-5.
+  `c3a38876`; plan Execution record + DEVLOG): ledger, skip records,
+  terminators, sink lifecycle; exact-size shard packing; retraction incl.
+  resume; per-file preparation, local pre-check retired (D3), local copy
+  on one handle (A12). Codex codereview of ssc-1..3: 8 findings FIXED
+  (`ed4bc773..5d557004`, one per commit, mutation-proven) + 1 declined;
+  ssc-4 review pending. Gates green on macOS + Linux-cross clippy, suite
+  1285/0/2; CI unverified until a push. Next: ssc-6, then ssc-5.
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
   D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
   verbatim): ONE block of transfer code; direction/initiator/verb can

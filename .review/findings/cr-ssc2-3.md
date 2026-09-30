@@ -3,7 +3,7 @@
 **Severity**: LOW — a regression of the one-byte growth probe is not detected by the existing guard
 **Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (filled after the fix commit)
+**Commit**: `fa430f8b`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range 6bc3d08f..905ddb37, record .review/results/ssc-2-range.codex.json)
 
 ## Evidence

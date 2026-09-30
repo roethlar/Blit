@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — one per-inode metadata error still ends the whole run, against D-2026-09-28-2
 **Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (filled after the fix commit)
+**Commit**: `458ca62c`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range f74b0b1a..6bc3d08f, record .review/results/ssc-1-range.codex.json)
 
 ## Evidence

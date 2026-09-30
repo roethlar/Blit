@@ -3,7 +3,7 @@
 **Severity**: HIGH — an authenticated peer can write unbounded bytes past a tiny advertised size before any check (disk exhaustion)
 **Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (filled after the fix commit)
+**Commit**: `14a6bc3f`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range f74b0b1a..6bc3d08f, record .review/results/ssc-1-range.codex.json)
 
 ## Evidence

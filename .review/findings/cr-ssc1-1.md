@@ -3,7 +3,7 @@
 **Severity**: HIGH — contained source failure silently destroys pre-existing destination data under mirror
 **Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (filled after the fix commit)
+**Commit**: `8c1b8dad (+ follow-up 5d557004)`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range f74b0b1a..6bc3d08f, record .review/results/ssc-1-range.codex.json)
 
 ## Evidence

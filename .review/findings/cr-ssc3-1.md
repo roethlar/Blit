@@ -3,7 +3,7 @@
 **Severity**: HIGH — a resumed file that grew after the scan is finalised short and reported successful; with `move --resume` the omitted tail is deleted at the source (data loss under a "success" exit)
 **Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (filled after the fix commit)
+**Commit**: `e4405156`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range 905ddb37..b70ef03a, record .review/results/ssc-3-range.codex.json)
 
 ## Evidence

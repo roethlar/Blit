@@ -3,7 +3,7 @@
 **Severity**: MEDIUM — on Windows a vanished shard member still aborts the run before the packer's containment (against D-2026-09-28-2); ssc-2's own Windows CI leg would fail
 **Status**: Verified — closed by ssc-4 `c3a38876` (per-member hydration, D-E) plus the guard added here
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (filled after the fix commit)
+**Commit**: `19de5136 (closed by ssc-4 c3a38876)`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range 6bc3d08f..905ddb37, record .review/results/ssc-2-range.codex.json)
 
 ## Evidence
