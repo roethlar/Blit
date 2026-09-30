@@ -209,6 +209,10 @@ pub enum OpenedSourceFile {
     Virtual {
         reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
         len: u64,
+        /// Test hook (ssc-3): the length every `len()` call AFTER the
+        /// first reports — a file that changed size while its body was
+        /// being read. `None` keeps `len` stable.
+        len_after: Option<u64>,
     },
 }
 
@@ -218,14 +222,39 @@ impl OpenedSourceFile {
     }
 
     pub fn virtual_reader(reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>, len: u64) -> Self {
-        Self::Virtual { reader, len }
+        Self::Virtual {
+            reader,
+            len,
+            len_after: None,
+        }
+    }
+
+    /// A virtual reader whose first `len()` reports `len` and every later
+    /// one `len_after` — a file that drifted while being read (ssc-3
+    /// post-body re-stat guards).
+    pub fn virtual_reader_drifting(
+        reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        len: u64,
+        len_after: u64,
+    ) -> Self {
+        Self::Virtual {
+            reader,
+            len,
+            len_after: Some(len_after),
+        }
     }
 
     /// The file's current length, read from the opened handle itself.
     pub async fn len(&mut self) -> std::io::Result<u64> {
         match self {
             Self::Fs { file, .. } => Ok(file.metadata().await?.len()),
-            Self::Virtual { len, .. } => Ok(*len),
+            Self::Virtual { len, len_after, .. } => {
+                let now = *len;
+                if let Some(after) = len_after.take() {
+                    *len = after;
+                }
+                Ok(now)
+            }
         }
     }
 

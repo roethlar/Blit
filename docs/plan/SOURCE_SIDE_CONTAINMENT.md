@@ -782,6 +782,51 @@ cksum for …` (the exact variant depends on which overflow bytes land in
 the checksum field; the owner's run said "was not a number"). Mutation
 proofs in DEVLOG.
 
+ssc-3 LANDED 2026-09-30 on master at `SSC3_HASH` (range
+`905ddb37..SSC3_HASH`; CI on all three OSes pending the next push).
+What landed against the slice text: the SOURCE half of retraction on
+both carriers — in-stream `send_payload_records` and data-plane
+`DataPlaneSession::send_file` close a record FAILED (`FileEnd{ok:false}`
+/ chunk sentinel + failed status right after the last chunk sent, no
+padding) on a mid-body read error (`source: read error: …`), a short
+read, or a post-body re-stat of the same `OpenedSourceFile` handle that
+no longer matches `header.size` (`source: changed size during transfer
+(manifest N bytes, now M)`); `send_file_double_buffered` returns the
+body's outcome (`Ok(Some(reason))` = source failed) and only socket
+writes stay `Err`; `FileSendOutcome::Retracted`; the legacy
+`send_payloads_with_progress` no longer counts a skipped/retracted file
+as complete. Resume (A10): `ResumeBlockDiff::next_event` errors are
+`source:`-prefixed by construction (it reads nothing but the source) and
+both carriers close the record with a FAILED `BlockComplete` instead of
+faulting the session — the destination halves ssc-1 pinned (partial
+unstamped, file reported) now have a source to exercise them.
+Relay: `DataPlaneRecordWriter::abort` already forwarded the failed
+status downstream (ssc-1); it is now pinned end to end
+(`relay_forwards_a_failed_terminator_downstream`). Note: no production
+path constructs a relay today (the only `DataPlaneSink` constructions
+are the SOURCE-side data-plane sinks), so the pin is the unit-level one.
+Cancellation: `FsRecordWriter`'s drop guard pinned
+(`dropping_an_uncommitted_record_writer_removes_the_partial`). Two
+existing tests flipped meaning, not deleted:
+`transfer_session_roles.rs` `mid_resume_source_fault_surfaces_cleanly_
+to_both_ends` → `mid_resume_source_fault_is_contained_and_reported_at_
+both_ends` (both ends complete, summary names the file, partial
+unstamped) and the daemon e2e `mid_resume_fault_names_the_file_in_the_
+end_of_operation_summary` → `mid_resume_fault_is_contained_and_named_
+in_the_summary`. Deviation recorded: A10's "not stamped" is asserted as
+"not stamped with the source's mtime" — the in-place block write itself
+bumps the OS mtime, so "unchanged" was never the property; what must
+not happen is the finalisation stamp that would make the next compare
+call the partial converged. Guards: `source_side_containment.rs` 20 →
+30 — `assert_retraction_contained` × {read error, short read,
+post-body size drift} × {in-stream, data plane} × both initiators (the
+faulted file's stale destination decoy is ABSENT afterwards, an
+outside-root decoy untouched, the other two files land, both ends
+agree, move gate refuses); `assert_resume_fault_contained` × {short
+read, read error} × both carriers × both initiators (block 0 landed,
+nothing past the fault, not stamped, `files_resumed` 0, the other file
+lands). Mutation proofs in DEVLOG.
+
 1. **ssc-1 — contract 7: ledger, skip record, chunked records +
    terminators, sink lifecycle, `OpenedSourceFile`, raw-name field (A3
    remote, A4, A5, A6, A7, A15, A16).** Proto: `FileSkipped`=21,

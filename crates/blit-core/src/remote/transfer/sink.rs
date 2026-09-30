@@ -2198,6 +2198,11 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                     FileSendOutcome::Skipped(reason) => {
                         Ok(SinkOutcome::failed(header.relative_path, reason))
                     }
+                    // ssc-3: the record went out and was closed FAILED;
+                    // same accounting — the destination discarded it.
+                    FileSendOutcome::Retracted(reason) => {
+                        Ok(SinkOutcome::failed(header.relative_path, reason))
+                    }
                 }
             }
             PreparedPayload::TarShard {
@@ -2278,23 +2283,35 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                         crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT / 3,
                     );
                     let mut bytes_written: u64 = 0;
-                    while let Some(event) = diff.next_event().await? {
-                        match event {
-                            ResumeDiffEvent::Stale { offset, bytes } => {
+                    // ssc-3 (A10): a source read error or short read
+                    // mid-diff closes the record FAILED (the destination
+                    // leaves the partial unstamped and reports the file)
+                    // instead of ending the session; the diff's errors are
+                    // `source:`-prefixed by construction.
+                    let mut failed: Option<String> = None;
+                    loop {
+                        match diff.next_event().await {
+                            Ok(Some(ResumeDiffEvent::Stale { offset, bytes })) => {
                                 session
                                     .send_block(&header.relative_path, offset, bytes)
                                     .await
                                     .context("sending resume block")?;
                                 bytes_written += bytes.len() as u64;
                             }
-                            ResumeDiffEvent::KeepAlive { offset } => {
+                            Ok(Some(ResumeDiffEvent::KeepAlive { offset })) => {
                                 session
                                     .send_block(&header.relative_path, offset, &[])
                                     .await
                                     .context("sending resume keepalive block")?;
                             }
+                            Ok(None) => break,
+                            Err(err) => {
+                                failed = Some(err.to_string());
+                                break;
+                            }
                         }
                     }
+                    let ok = failed.is_none();
                     session
                         .send_block_complete(
                             &header.relative_path,
@@ -2302,11 +2319,14 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                             header.mtime_seconds,
                             header.permissions,
                             header.windows_metadata.as_ref(),
-                            true,
-                            "",
+                            ok,
+                            failed.as_deref().unwrap_or(""),
                         )
                         .await
                         .context("sending resume block complete")?;
+                    if let Some(reason) = failed {
+                        return Ok(SinkOutcome::failed(header.relative_path.clone(), reason));
+                    }
                     Ok(SinkOutcome::written(
                         1,
                         bytes_written
@@ -5232,6 +5252,118 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("logged/one.bin") && line.contains("access is denied")),
             "expected a warn naming the failed file and its reason; got: {logged:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ssc3_tests {
+    //! SOURCE_SIDE_CONTAINMENT ssc-3: the sink-level halves of
+    //! retraction — the RAII guard on a dropped record writer, and the
+    //! relay forwarding a failed terminator downstream.
+    use super::*;
+    use crate::buffer::BufferPool;
+    use crate::remote::transfer::pipeline::execute_receive_pipeline;
+    use crate::remote::transfer::source::FsTransferSource;
+    use tokio::net::{TcpListener, TcpStream};
+
+    fn header(rel: &str, size: u64) -> FileHeader {
+        FileHeader {
+            relative_path: rel.to_string(),
+            size,
+            mtime_seconds: 0,
+            permissions: 0o644,
+            checksum: Vec::new(),
+            windows_metadata: None,
+            raw_relative_path: None,
+        }
+    }
+
+    /// A record writer dropped without `commit` — cancellation by drop
+    /// (`abort_on_drop`), an adjacent task failure — removes the partial
+    /// it created, so no truncated file is left looking finished.
+    #[tokio::test]
+    async fn dropping_an_uncommitted_record_writer_removes_the_partial() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink = FsTransferSink::new(src, dst.clone(), FsSinkConfig::default());
+        let mut writer = sink.begin_record(&header("part.bin", 100)).await.unwrap();
+        writer.write(b"partial bytes").await.unwrap();
+        assert!(
+            dst.join("part.bin").exists(),
+            "the in-place partial exists mid-record"
+        );
+        drop(writer);
+        assert!(
+            !dst.join("part.bin").exists(),
+            "the guard must remove the partial when the writer is dropped uncommitted"
+        );
+    }
+
+    /// The relay sink (`DataPlaneSink` as a `RecordWriter` producer)
+    /// forwards an upstream failed terminator downstream as a failed
+    /// status: the downstream destination discards its partial and
+    /// reports the same file with the same reason.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relay_forwards_a_failed_terminator_downstream() {
+        let tmp = tempfile::tempdir().unwrap();
+        let up_src = tmp.path().join("up_src");
+        let up_dst = tmp.path().join("up_dst");
+        let down_src = tmp.path().join("down_src");
+        let down_dst = tmp.path().join("down_dst");
+        for d in [&up_src, &up_dst, &down_src, &down_dst] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let downstream_dst = down_dst.clone();
+        let downstream = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
+                down_src,
+                downstream_dst,
+                FsSinkConfig::default(),
+            ));
+            execute_receive_pipeline(&mut sock, sink, None).await
+        });
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        let pool = Arc::new(BufferPool::new(64 * 1024, 4, None));
+        let session = DataPlaneSession::from_stream(client, false, 64 * 1024, 1, pool).await;
+        let relay = DataPlaneSink::new(session, Arc::new(FsTransferSource::new(up_src)), up_dst);
+        {
+            let mut writer = relay
+                .begin_record(&header("relayed.bin", 1000))
+                .await
+                .unwrap();
+            writer.write(&[7u8; 300]).await.unwrap();
+            let outcome = writer
+                .abort("source: read error: upstream died")
+                .await
+                .unwrap();
+            assert_eq!(outcome.files_failed_total, 1);
+        }
+        relay.finish().await.unwrap();
+        drop(relay);
+
+        let outcome = downstream
+            .await
+            .unwrap()
+            .expect("downstream receive completes");
+        assert_eq!(outcome.files_written, 0);
+        assert_eq!(outcome.files_failed_total, 1);
+        assert_eq!(outcome.failures[0].relative_path, "relayed.bin");
+        assert_eq!(
+            outcome.failures[0].reason,
+            "source: read error: upstream died"
+        );
+        assert!(
+            !down_dst.join("relayed.bin").exists(),
+            "the downstream partial must be discarded"
         );
     }
 }

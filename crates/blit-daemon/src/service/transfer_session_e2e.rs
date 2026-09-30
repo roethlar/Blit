@@ -1104,7 +1104,11 @@ impl blit_core::remote::transfer::source::TransferSource for TruncatedReadSource
 /// and the end-of-operation summary the CLI will print (otp-10) names
 /// the affected file and suggests a re-run to converge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn mid_resume_fault_names_the_file_in_the_end_of_operation_summary() {
+async fn mid_resume_fault_is_contained_and_named_in_the_summary() {
+    // SOURCE_SIDE_CONTAINMENT ssc-3 (A10): over the daemon-served
+    // session, a source reader that dies mid-resume closes the record
+    // FAILED — the push COMPLETES with a summary naming the file and the
+    // source's reason, the partial is left unstamped for the next run.
     const BS: usize = 64 * 1024;
     let daemon = Daemon::start(false).await;
     let src = tempfile::tempdir().unwrap();
@@ -1133,7 +1137,7 @@ async fn mid_resume_fault_names_the_file_in_the_end_of_operation_summary() {
         fail_path: "big.bin",
         limit: (BS + BS / 2) as u64,
     });
-    let err = tokio::time::timeout(
+    let summary = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         run_push_session(
             &daemon.endpoint,
@@ -1147,20 +1151,28 @@ async fn mid_resume_fault_names_the_file_in_the_end_of_operation_summary() {
     )
     .await
     .expect("a mid-resume fault must not hang")
-    .expect_err("a truncated source must fault the session");
+    .expect("a truncated source is contained, never a session fault");
 
-    let fault = fault_of(&err);
-    assert_eq!(
-        fault.relative_path.as_deref(),
-        Some("big.bin"),
-        "the fault carries structured file identity: {fault:?}"
-    );
-    let summary = fault
-        .end_of_operation_summary()
-        .expect("a file-naming fault yields the end-of-operation summary");
+    assert_eq!(summary.files_failed, 1);
+    assert_eq!(summary.files_resumed, 0);
+    assert_eq!(summary.failures[0].relative_path, "big.bin");
     assert!(
-        summary.contains("big.bin") && summary.contains("re-run"),
-        "the summary names the file and suggests a re-run: {summary}"
+        summary.failures[0]
+            .reason
+            .starts_with("source: changed size during transfer"),
+        "the summary carries the source's reason: {}",
+        summary.failures[0].reason
+    );
+    let stamped = std::fs::metadata(daemon.dest_root.join("big.bin"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_ne!(
+        stamped, 1_600_000_100,
+        "a failed resume must not stamp the partial as converged"
     );
 
     daemon.stop().await;

@@ -68,7 +68,8 @@ use crate::remote::transfer::source::{FsTransferSource, TransferSource};
 use crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT;
 use crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES;
 use crate::remote::transfer::{
-    AbortOnDrop, FaultedPath, MembershipOutcome, RemoteTransferProgress, CONTROL_PLANE_CHUNK_SIZE,
+    changed_size_reason, AbortOnDrop, FaultedPath, MembershipOutcome, RemoteTransferProgress,
+    CONTROL_PLANE_CHUNK_SIZE,
 };
 use crate::transfer_plan::PlanOptions;
 use crate::windows_metadata::DestinationMetadataVerdict;
@@ -3118,31 +3119,56 @@ async fn send_payload_records(
                     continue;
                 }
                 tx.send(frame(Frame::FileBegin(header.clone()))).await?;
+                // ssc-3 (D-C/D-D, D-2026-09-28-2): the body is bounded by
+                // the manifest size; a read error or a short read closes
+                // the record FAILED — the destination discards the
+                // partial and reports the file — and the same handle is
+                // re-stat'ed after the body so a file that changed while
+                // being read is retracted instead of delivered as a stale
+                // prefix under a stale mtime. Only transport errors (`?`)
+                // end the session.
                 let mut remaining = header.size;
+                let mut failed: Option<String> = None;
                 while remaining > 0 {
                     let want = read_buf.len().min(remaining as usize);
-                    let got = reader
-                        .read(&mut read_buf[..want])
-                        .await
-                        .map_err(|e| tag_path(eyre::Report::new(e), &header.relative_path))?;
+                    let got = match reader.read(&mut read_buf[..want]).await {
+                        Ok(got) => got,
+                        Err(e) => {
+                            failed = Some(format!("source: read error: {e}"));
+                            break;
+                        }
+                    };
                     if got == 0 {
                         // Shorter on disk than the manifest promised —
                         // the record can no longer complete at
-                        // header.size; abort rather than pad.
-                        return Err(tag_path(
-                            eyre::eyre!(
-                                "'{}' hit EOF with {} bytes still promised",
-                                header.relative_path,
-                                remaining
-                            ),
-                            &header.relative_path,
-                        ));
+                        // header.size; retract rather than pad.
+                        let read_so_far = header.size - remaining;
+                        let now = reader.len().await.unwrap_or(read_so_far);
+                        failed = Some(changed_size_reason(header.size, now));
+                        break;
                     }
                     tx.send(frame(Frame::FileData(FileData {
                         content: read_buf[..got].to_vec(),
                     })))
                     .await?;
                     remaining -= got as u64;
+                }
+                if failed.is_none() {
+                    match reader.len().await {
+                        Ok(now) if now != header.size => {
+                            failed = Some(changed_size_reason(header.size, now));
+                        }
+                        Ok(_) => {}
+                        Err(e) => failed = Some(format!("source: cannot stat after read: {e}")),
+                    }
+                }
+                if let Some(reason) = failed {
+                    tx.send(frame(Frame::FileEnd(crate::generated::RecordEnd {
+                        ok: false,
+                        reason,
+                    })))
+                    .await?;
+                    continue;
                 }
                 tx.send(frame(Frame::FileEnd(crate::generated::RecordEnd {
                     ok: true,
@@ -3301,9 +3327,15 @@ async fn send_resume_block_records(
             }
         };
     let mut stale_bytes: u64 = 0;
-    while let Some(event) = diff.next_event().await? {
-        match event {
-            ResumeDiffEvent::Stale { offset, bytes } => {
+    // ssc-3 (A10): a source read error or short read mid-diff closes the
+    // record FAILED — the destination leaves the partial unstamped and
+    // reports the file — instead of ending the session. The diff's
+    // errors are `source:`-prefixed by construction (it reads nothing
+    // but the source).
+    let mut failed: Option<String> = None;
+    loop {
+        match diff.next_event().await {
+            Ok(Some(ResumeDiffEvent::Stale { offset, bytes })) => {
                 stale_bytes += bytes.len() as u64;
                 tx.send(frame(Frame::Block(BlockTransfer {
                     relative_path: header.relative_path.clone(),
@@ -3312,17 +3344,26 @@ async fn send_resume_block_records(
                 })))
                 .await?;
             }
-            ResumeDiffEvent::KeepAlive { .. } => {}
+            Ok(Some(ResumeDiffEvent::KeepAlive { .. })) => {}
+            Ok(None) => break,
+            Err(err) => {
+                failed = Some(err.to_string());
+                break;
+            }
         }
     }
+    let ok = failed.is_none();
     tx.send(frame(Frame::BlockComplete(BlockTransferComplete {
         relative_path: header.relative_path.clone(),
         total_bytes: header.size,
         windows_metadata: header.windows_metadata.clone(),
-        ok: true,
-        reason: String::new(),
+        ok,
+        reason: failed.unwrap_or_default(),
     })))
     .await?;
+    if !ok {
+        return Ok(());
+    }
     // review otp-10a F6: a resumed file finishes like any other (w6-1:
     // per-file lane, counted once); its bytes are the stale blocks
     // actually sent — the same convention as the data-plane carrier.

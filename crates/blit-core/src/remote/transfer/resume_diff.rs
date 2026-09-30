@@ -43,12 +43,13 @@ pub enum ResumeDiffEvent<'a> {
 /// Sequential block reader + staleness filter over one resume-flagged
 /// source file. Yields the stale blocks (and, when armed, keepalive
 /// ticks); fresh blocks (hash match) are read, verified, and skipped.
-/// The manifest promised `header.size`, so hitting EOF short of it
-/// aborts exactly as a whole-file record does — never pad, never
-/// silently truncate.
+/// The manifest promised `header.size`, so hitting EOF short of it, or a
+/// read error, ends the diff with a `source:`-prefixed error
+/// (`Self::next_event`'s `Err`) that the caller closes the record with
+/// as a FAILED `BlockComplete` (contract v7, SOURCE_SIDE_CONTAINMENT
+/// ssc-3) — never pad, never silently truncate, never end the session.
 pub struct ResumeBlockDiff {
     reader: OpenedSourceFile,
-    relative_path: String,
     size: u64,
     block_size: usize,
     dest_hashes: Vec<Vec<u8>>,
@@ -77,7 +78,6 @@ impl ResumeBlockDiff {
             .map_err(|e| e.wrap_err(FaultedPath(header.relative_path.clone())))?;
         Ok(Self {
             reader,
-            relative_path: header.relative_path.clone(),
             size: header.size,
             block_size,
             dest_hashes,
@@ -103,20 +103,21 @@ impl ResumeBlockDiff {
             let this = (self.size - self.offset).min(self.block_size as u64) as usize;
             let mut filled = 0usize;
             while filled < this {
-                let got = self
-                    .reader
-                    .read(&mut self.buf[filled..this])
-                    .await
-                    .map_err(|e| {
-                        eyre::Report::new(e).wrap_err(FaultedPath(self.relative_path.clone()))
-                    })?;
+                let got = match self.reader.read(&mut self.buf[filled..this]).await {
+                    Ok(got) => got,
+                    Err(e) => return Err(eyre::eyre!("source: read error: {e}")),
+                };
                 if got == 0 {
+                    // Shorter on disk than the manifest promised: the
+                    // record cannot complete at `size`. Report the size
+                    // the handle sees now (the bytes actually read when
+                    // the handle cannot say).
+                    let read_so_far = self.offset + filled as u64;
+                    let now = self.reader.len().await.unwrap_or(read_so_far);
                     return Err(eyre::eyre!(
-                        "'{}' hit EOF with {} bytes still promised",
-                        self.relative_path,
-                        self.size - self.offset - filled as u64
-                    )
-                    .wrap_err(FaultedPath(self.relative_path.clone())));
+                        "source: changed size during transfer (manifest {} bytes, now {now})",
+                        self.size
+                    ));
                 }
                 filled += got;
             }

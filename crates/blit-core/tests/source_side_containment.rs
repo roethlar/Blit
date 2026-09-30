@@ -11,6 +11,13 @@
 //! need never delivered nor skipped, a skip for an un-granted path, a
 //! record terminator with no open record, and an `ok` terminator short
 //! of the header's size.
+//!
+//! ssc-3 (D2, D-2026-09-28-2): a file that fails AFTER its record was
+//! announced — a read error, a short read, or a size that no longer
+//! matches when re-checked after the body — is RETRACTED by its own
+//! terminator: the destination discards the partial in place, the file
+//! is reported, the session continues. The same for a resume record
+//! whose source read fails mid-diff (A10): the partial stays unstamped.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -20,7 +27,8 @@ use std::time::Duration;
 use blit_core::generated::transfer_frame::Frame;
 use blit_core::generated::{
     session_error, FileData, FileFailure, FileHeader, ManifestComplete, MirrorMode, RecordEnd,
-    SessionHello, SessionOpen, SourceDone, TransferFrame, TransferRole, TransferSummary,
+    ResumeSettings, SessionHello, SessionOpen, SourceDone, TransferFrame, TransferRole,
+    TransferSummary,
 };
 use blit_core::remote::transfer::source::{
     FsTransferSource, OpenedSourceFile, SourceScan, TransferSource,
@@ -88,6 +96,41 @@ enum Fault {
     /// `open_file` succeeds but the handle reports this length — a file
     /// whose size drifted since the scan.
     DeclaresLen(u64),
+    /// ssc-3: the body reads `n` bytes and then the reader fails (an
+    /// I/O error mid-copy). The handle's length is the manifest's, so
+    /// the record is announced first and retracted mid-body.
+    ReadErrorAfter(u64),
+    /// ssc-3: the body ends after `n` bytes though the manifest promised
+    /// more (the file shrank while being read).
+    TruncateAt(u64),
+    /// ssc-3: the body is intact but the handle reports `n` bytes when
+    /// re-checked after it (the file was rewritten while being read).
+    DriftsAfterBody(u64),
+}
+
+/// A reader that yields its inner bytes and then fails instead of
+/// reporting EOF — a source whose disk errors mid-file.
+struct FailAfter {
+    inner: tokio::io::Take<Box<dyn tokio::io::AsyncRead + Unpin + Send>>,
+}
+
+impl tokio::io::AsyncRead for FailAfter {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let this = self.get_mut();
+        match std::pin::Pin::new(&mut this.inner).poll_read(cx, buf) {
+            std::task::Poll::Ready(Ok(())) if buf.filled().len() == before => {
+                std::task::Poll::Ready(Err(std::io::Error::other(
+                    "Input/output error (os error 5)",
+                )))
+            }
+            other => other,
+        }
+    }
 }
 
 struct FaultySource {
@@ -127,6 +170,32 @@ impl TransferSource for FaultySource {
             Some(Fault::DeclaresLen(len)) => {
                 let opened = self.inner.open_file(header).await?;
                 Ok(OpenedSourceFile::virtual_reader(opened.into_reader(), *len))
+            }
+            Some(Fault::ReadErrorAfter(n)) => {
+                use tokio::io::AsyncReadExt as _;
+                let opened = self.inner.open_file(header).await?;
+                Ok(OpenedSourceFile::virtual_reader(
+                    Box::new(FailAfter {
+                        inner: opened.into_reader().take(*n),
+                    }),
+                    header.size,
+                ))
+            }
+            Some(Fault::TruncateAt(n)) => {
+                use tokio::io::AsyncReadExt as _;
+                let opened = self.inner.open_file(header).await?;
+                Ok(OpenedSourceFile::virtual_reader(
+                    Box::new(opened.into_reader().take(*n)),
+                    header.size,
+                ))
+            }
+            Some(Fault::DriftsAfterBody(after)) => {
+                let opened = self.inner.open_file(header).await?;
+                Ok(OpenedSourceFile::virtual_reader_drifting(
+                    opened.into_reader(),
+                    header.size,
+                    *after,
+                ))
             }
             None => self.inner.open_file(header).await,
         }
@@ -1051,4 +1120,292 @@ async fn a_fully_skipped_shard_sends_only_skips_and_the_session_completes() {
             "nothing lands from a fully-skipped shard ({carrier:?})"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// ssc-3 — A9: a record announced and then failed is RETRACTED by its own
+// terminator (D2, D-2026-09-28-2): the partial is discarded in place
+// (D5, D-2026-09-29-2), the file is reported, the session continues.
+// ---------------------------------------------------------------------------
+
+fn mtime_seconds(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// The A9 property, one mid-body fault at a time, on `carrier` under
+/// both initiator roles: the faulted file is reported with a `source:`
+/// reason, its destination path is ABSENT afterwards even though a
+/// stale decoy was there before the run (in-place model: overwritten,
+/// then removed on abort), a decoy outside the destination root is
+/// untouched, the other two files land, both ends agree.
+async fn assert_retraction_contained(carrier: Carrier, fault: Fault, reason_prefix: &str) {
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        write_tree(&src_root, &three_big_files());
+        // A stale decoy at the faulted path (different size and mtime,
+        // so the diff wants the file) and one outside the root.
+        write_tree(&dst_root, &[("locked.bin", vec![0xEE; 10], 1_500_000_000)]);
+        write_tree(&outside, &[("decoy.bin", vec![0xDD; 10], 1_500_000_000)]);
+
+        let source: Arc<dyn TransferSource> = Arc::new(FaultySource {
+            inner: FsTransferSource::new(src_root.clone()),
+            faults: HashMap::from([("locked.bin", fault)]),
+        });
+        let (sr, dr) = run_with(
+            open_for(initiator_role, carrier),
+            carrier,
+            source,
+            dst_root.clone(),
+        )
+        .await;
+        let summary = sr.unwrap_or_else(|e| {
+            panic!("source must complete ({carrier:?}, init {initiator_role:?}): {e:#}")
+        });
+        let dest = dr.unwrap_or_else(|e| {
+            panic!("destination must complete ({carrier:?}, init {initiator_role:?}): {e:#}")
+        });
+        assert_eq!(summary, dest.summary, "both ends agree ({carrier:?})");
+        assert_eq!(
+            summary.in_stream_carrier_used,
+            carrier == Carrier::InStream,
+            "the fixture must ride the carrier under test"
+        );
+        assert_eq!(summary.files_failed, 1, "exactly the faulted file fails");
+        assert_eq!(summary.files_transferred, 2, "the other two land");
+        assert_eq!(summary.failures.len(), 1);
+        assert_eq!(summary.failures[0].relative_path, "locked.bin");
+        assert!(
+            summary.failures[0].reason.starts_with(reason_prefix),
+            "reason must be the source's ({carrier:?}): {}",
+            summary.failures[0].reason
+        );
+        let landed = collect_tree(&dst_root);
+        assert_eq!(
+            landed.keys().collect::<Vec<_>>(),
+            vec!["ok1.bin", "sub/ok2.bin"],
+            "the retracted record leaves no file at its path ({carrier:?}, init {initiator_role:?})"
+        );
+        assert_eq!(landed["ok1.bin"], patterned(BIG, 1));
+        assert_eq!(landed["sub/ok2.bin"], patterned(BIG, 3));
+        assert_eq!(
+            std::fs::read(outside.join("decoy.bin")).unwrap(),
+            vec![0xDD; 10],
+            "nothing outside the destination root is touched"
+        );
+        let gate = refuse_source_delete_on_failures(
+            "src",
+            summary.files_failed,
+            &failures_from_wire(&summary.failures),
+        );
+        assert!(
+            gate.is_err(),
+            "move must refuse source deletion on a retraction"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_read_error_mid_body_is_retracted_and_reported() {
+    assert_retraction_contained(
+        Carrier::InStream,
+        Fault::ReadErrorAfter((BIG / 2) as u64),
+        "source: read error",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_read_error_mid_body_is_retracted_and_reported() {
+    assert_retraction_contained(
+        Carrier::DataPlane,
+        Fault::ReadErrorAfter((BIG / 2) as u64),
+        "source: read error",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_short_read_mid_body_is_retracted_and_reported() {
+    assert_retraction_contained(
+        Carrier::InStream,
+        Fault::TruncateAt((BIG / 2) as u64),
+        "source: changed size during transfer",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_short_read_mid_body_is_retracted_and_reported() {
+    assert_retraction_contained(
+        Carrier::DataPlane,
+        Fault::TruncateAt((BIG / 2) as u64),
+        "source: changed size during transfer",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_size_drift_after_body_is_retracted_and_reported() {
+    assert_retraction_contained(
+        Carrier::InStream,
+        Fault::DriftsAfterBody(BIG as u64 + 7),
+        "source: changed size during transfer",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_size_drift_after_body_is_retracted_and_reported() {
+    assert_retraction_contained(
+        Carrier::DataPlane,
+        Fault::DriftsAfterBody(BIG as u64 + 7),
+        "source: changed size during transfer",
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// ssc-3 — A10: a resume record whose source read fails mid-diff is closed
+// FAILED — the partial stays in place and UNSTAMPED, the file is
+// reported, the session continues — on both carriers.
+// ---------------------------------------------------------------------------
+
+const RESUME_BS: u32 = 64 * 1024;
+
+fn resume_open_for(initiator_role: TransferRole, carrier: Carrier) -> SessionOpen {
+    SessionOpen {
+        resume: Some(ResumeSettings {
+            enabled: true,
+            block_size: RESUME_BS,
+        }),
+        ..open_for(initiator_role, carrier)
+    }
+}
+
+async fn assert_resume_fault_contained(carrier: Carrier, fault: Fault, reason_prefix: &str) {
+    let bs = RESUME_BS as usize;
+    let content = patterned(3 * bs, 9);
+    const DST_MTIME: i64 = 1_600_001_000;
+    const SRC_MTIME: i64 = 1_600_001_100;
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(
+            &src_root,
+            &[
+                ("partial.bin", content.clone(), SRC_MTIME),
+                ("ok1.bin", patterned(BIG, 1), 1_600_000_001),
+            ],
+        );
+        // Every dest block is stale, so the source sends block records
+        // immediately; its reader fails inside block 2.
+        write_tree(
+            &dst_root,
+            &[("partial.bin", vec![0x11; content.len()], DST_MTIME)],
+        );
+        let source: Arc<dyn TransferSource> = Arc::new(FaultySource {
+            inner: FsTransferSource::new(src_root.clone()),
+            faults: HashMap::from([("partial.bin", fault)]),
+        });
+        let (sr, dr) = run_with(
+            resume_open_for(initiator_role, carrier),
+            carrier,
+            source,
+            dst_root.clone(),
+        )
+        .await;
+        let summary = sr.unwrap_or_else(|e| {
+            panic!("source must complete ({carrier:?}, init {initiator_role:?}): {e:#}")
+        });
+        let dest = dr.unwrap_or_else(|e| {
+            panic!("destination must complete ({carrier:?}, init {initiator_role:?}): {e:#}")
+        });
+        assert_eq!(summary, dest.summary, "both ends agree ({carrier:?})");
+        assert_eq!(summary.files_failed, 1, "the resumed file fails once");
+        assert_eq!(summary.files_resumed, 0, "a failed resume is not a resume");
+        assert_eq!(summary.files_transferred, 1, "the other file lands");
+        assert_eq!(summary.failures[0].relative_path, "partial.bin");
+        assert!(
+            summary.failures[0].reason.starts_with(reason_prefix),
+            "reason must be the source's ({carrier:?}): {}",
+            summary.failures[0].reason
+        );
+        // In-place model: block 0 landed before the fault, nothing past
+        // it, and the partial is NOT stamped as converged.
+        let partial = dst_root.join("partial.bin");
+        let patched = std::fs::read(&partial).unwrap();
+        assert_eq!(
+            &patched[..bs],
+            &content[..bs],
+            "block 0 landed ({carrier:?})"
+        );
+        assert_eq!(
+            patched[bs], 0x11,
+            "nothing past the faulted block lands ({carrier:?})"
+        );
+        // The in-place block write itself bumps the OS mtime; what must
+        // NOT happen is the finalisation stamp that would make the next
+        // compare call this partial converged (the source's mtime).
+        assert_ne!(
+            mtime_seconds(&partial),
+            SRC_MTIME,
+            "a failed resume must not stamp the partial as converged ({carrier:?}, init {initiator_role:?})"
+        );
+        assert_eq!(collect_tree(&dst_root)["ok1.bin"], patterned(BIG, 1));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_resume_short_read_mid_diff_is_reported_and_unstamped() {
+    assert_resume_fault_contained(
+        Carrier::InStream,
+        Fault::TruncateAt((RESUME_BS + RESUME_BS / 2) as u64),
+        "source: changed size during transfer",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_resume_short_read_mid_diff_is_reported_and_unstamped() {
+    assert_resume_fault_contained(
+        Carrier::DataPlane,
+        Fault::TruncateAt((RESUME_BS + RESUME_BS / 2) as u64),
+        "source: changed size during transfer",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_resume_read_error_mid_diff_is_reported_and_unstamped() {
+    assert_resume_fault_contained(
+        Carrier::InStream,
+        Fault::ReadErrorAfter((RESUME_BS + RESUME_BS / 2) as u64),
+        "source: read error",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_resume_read_error_mid_diff_is_reported_and_unstamped() {
+    assert_resume_fault_contained(
+        Carrier::DataPlane,
+        Fault::ReadErrorAfter((RESUME_BS + RESUME_BS / 2) as u64),
+        "source: read error",
+    )
+    .await;
 }

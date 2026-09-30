@@ -415,8 +415,16 @@ impl<P: Probe> DataPlaneSession<P> {
         while let Some(prepared) = stream.next().await {
             match prepared? {
                 PreparedPayload::File(header) => {
-                    if let Err(err) = self.send_file(source.clone(), &header).await {
-                        return Err(err.wrap_err(format!("sending {}", header.relative_path)));
+                    let sent = match self.send_file(source.clone(), &header).await {
+                        Ok(sent) => sent,
+                        Err(err) => {
+                            return Err(err.wrap_err(format!("sending {}", header.relative_path)));
+                        }
+                    };
+                    // A skipped or retracted file is not a completion
+                    // (contract v7); the destination's summary reports it.
+                    if sent != FileSendOutcome::Sent {
+                        continue;
                     }
                     let payload_bytes = header
                         .size
@@ -521,8 +529,45 @@ impl<P: Probe> DataPlaneSession<P> {
             self.send_skip(rel, &reason).await?;
             return Ok(FileSendOutcome::Skipped(reason));
         }
-        self.send_file_from_reader(header, &mut file).await?;
-        Ok(FileSendOutcome::Sent)
+        // ssc-3 (D-C/D-D): the body rides the chunk framing; a read error
+        // or a short read ends the record FAILED right after the last chunk
+        // sent (no padding), and the same handle is re-stat'ed after the
+        // body so a file that changed while being read is retracted.
+        self.begin_file_record(header).await?;
+        let mut failed = self
+            .send_file_double_buffered(&mut file, header, rel)
+            .await?;
+        if failed.is_none() {
+            match file.len().await {
+                Ok(now) if now != header.size => {
+                    failed = Some(super::payload::changed_size_reason(header.size, now));
+                }
+                Ok(_) => {}
+                Err(e) => failed = Some(format!("source: cannot stat after read: {e}")),
+            }
+        }
+        self.finish_file_record(rel, failed).await
+    }
+
+    /// Close the open FILE record with the body's outcome: `None` → ok,
+    /// `Some(reason)` → failed with that `source:` reason.
+    async fn finish_file_record(
+        &mut self,
+        rel: &str,
+        failed: Option<String>,
+    ) -> Result<FileSendOutcome> {
+        match failed {
+            Some(reason) => {
+                trace_client!(self, "file '{}' retracted: {}", rel, reason);
+                self.end_file_record(false, &reason).await?;
+                Ok(FileSendOutcome::Retracted(reason))
+            }
+            None => {
+                self.end_file_record(true, "").await?;
+                trace_client!(self, "file '{}' sent", rel);
+                Ok(FileSendOutcome::Sent)
+            }
+        }
     }
 
     /// Contract v7: tell the receiver a granted file will not arrive.
@@ -650,16 +695,15 @@ impl<P: Probe> DataPlaneSession<P> {
         &mut self,
         header: &FileHeader,
         reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
-    ) -> Result<()> {
+    ) -> Result<FileSendOutcome> {
         let rel = &header.relative_path;
         trace_client!(self, "sending file '{}' ({} bytes)", rel, header.size);
         self.begin_file_record(header).await?;
         // Double-buffered I/O: overlaps source reads with network writes;
         // every buffer goes out as one length-prefixed chunk (contract v7).
-        self.send_file_double_buffered(reader, header, rel).await?;
-        self.end_file_record(true, "").await?;
-        trace_client!(self, "file '{}' sent ({} bytes)", rel, header.size);
-        Ok(())
+        // A reader that fails or ends short closes the record FAILED.
+        let failed = self.send_file_double_buffered(reader, header, rel).await?;
+        self.finish_file_record(rel, failed).await
     }
 
     /// Double-buffered file sending: overlaps disk reads with network writes.
@@ -667,15 +711,21 @@ impl<P: Probe> DataPlaneSession<P> {
     ///
     /// Pattern: While buffer A is being written to network, buffer B is filled from disk.
     /// This hides disk latency behind network latency for improved throughput.
+    ///
+    /// Contract v7 (ssc-3): the body's outcome is the return value —
+    /// `Ok(None)` when exactly `header.size` bytes went out, `Ok(Some(reason))`
+    /// when the SOURCE failed (read error, or EOF before `header.size`)
+    /// after the chunks sent so far; the caller then closes the record
+    /// failed. Only socket writes are `Err` (transport, session-fatal).
     async fn send_file_double_buffered(
         &mut self,
         file: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
         header: &FileHeader,
         rel: &str,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let mut remaining = header.size;
         if remaining == 0 {
-            return Ok(());
+            return Ok(None);
         }
 
         // Acquire two buffers for double-buffering. Each buffer is one
@@ -686,17 +736,16 @@ impl<P: Probe> DataPlaneSession<P> {
         debug_assert!(buf_a.as_slice().len() <= MAX_FILE_CHUNK_BYTES as usize);
 
         // Initial read into buf_a
-        let mut bytes_a = file
-            .read(buf_a.as_mut_slice())
-            .await
-            .with_context(|| format!("reading {}", rel))?;
+        let mut bytes_a = match file.read(buf_a.as_mut_slice()).await {
+            Ok(n) => n,
+            Err(e) => return Ok(Some(format!("source: read error: {e}"))),
+        };
 
         if bytes_a == 0 {
-            bail!(
-                "unexpected EOF while reading {} ({} bytes remaining)",
-                rel,
-                remaining
-            );
+            return Ok(Some(super::payload::changed_size_reason(
+                header.size,
+                header.size - remaining,
+            )));
         }
         // Clamp to the declared size before subtracting. A source that
         // returns more bytes than `header.size` — a file that grew after
@@ -746,14 +795,16 @@ impl<P: Probe> DataPlaneSession<P> {
             self.probe.record_bytes(bytes_a as u64);
             crate::remote::instrumentation::record_cli_data_plane_outbound_bytes(bytes_a as u64);
 
-            let bytes_b = read_result.with_context(|| format!("reading {}", rel))?;
+            let bytes_b = match read_result {
+                Ok(n) => n,
+                Err(e) => return Ok(Some(format!("source: read error: {e}"))),
+            };
 
             if bytes_b == 0 && remaining > 0 {
-                bail!(
-                    "unexpected EOF while reading {} ({} bytes remaining)",
-                    rel,
-                    remaining
-                );
+                return Ok(Some(super::payload::changed_size_reason(
+                    header.size,
+                    header.size - remaining,
+                )));
             }
             // Same clamp as the initial read: never subtract more than
             // `remaining`, so an over-returning reader can neither
@@ -793,7 +844,7 @@ impl<P: Probe> DataPlaneSession<P> {
         }
 
         // Buffers return to pool automatically on drop
-        Ok(())
+        Ok(None)
     }
 
     pub async fn send_prepared_tar_shard(
@@ -1081,6 +1132,10 @@ pub enum FileSendOutcome {
     Sent,
     /// A SKIP record went out instead; the reason (starts with `source:`).
     Skipped(String),
+    /// The record was announced and then closed FAILED (ssc-3): the
+    /// source could not deliver the body as promised. The destination
+    /// discarded the partial; the reason starts with `source:`.
+    Retracted(String),
 }
 
 /// `[len:4][bytes]`, bounded to [`MAX_WIRE_REASON_BYTES`] (cut on a char

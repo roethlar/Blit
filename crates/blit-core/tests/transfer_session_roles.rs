@@ -1008,13 +1008,14 @@ impl TransferSource for TruncatedReadSource {
 }
 
 #[tokio::test]
-async fn mid_resume_source_fault_surfaces_cleanly_to_both_ends() {
-    // Plan guard-proof 4 (mid-resume-failure, D4): the source faults
-    // mid-block-phase — after at least one BlockTransfer landed — and a
-    // clean `SessionFault` surfaces at BOTH ends within the suite
-    // timeout (no deadlock), with no summary and so no false
-    // `files_resumed`. The partial is left partially patched by design
-    // (in-place model); the next run re-syncs it.
+async fn mid_resume_source_fault_is_contained_and_reported_at_both_ends() {
+    // SOURCE_SIDE_CONTAINMENT ssc-3 (A10, D-2026-09-28-2) flips the
+    // otp-7b guard-proof 4 meaning: the source's reader dies mid-block
+    // phase — after at least one BlockTransfer landed — and the record
+    // is closed FAILED instead of faulting the session. Both ends
+    // COMPLETE, agree on one summary that names the file with the
+    // source's reason, the partial stays partially patched in place
+    // (in-place model) and is NOT stamped as converged.
     let bs = RESUME_BS as usize;
     let content = make_patterned(3 * bs);
     for initiator_role in [TransferRole::Source, TransferRole::Destination] {
@@ -1072,52 +1073,29 @@ async fn mid_resume_source_fault_surfaces_cleanly_to_both_ends() {
         .await
         .expect("mid-resume fault must not deadlock");
 
-        let source_err = source_result.expect_err("source must fault");
-        let source_fault = fault_of(&source_err);
-        assert_eq!(source_fault.code, session_error::Code::Internal);
+        let summary = source_result.unwrap_or_else(|e| {
+            panic!("source must complete (initiator {initiator_role:?}): {e:#}")
+        });
+        let dest = dest_result.unwrap_or_else(|e| {
+            panic!("destination must complete (initiator {initiator_role:?}): {e:#}")
+        });
+        assert_eq!(summary, dest.summary, "both ends agree on the summary");
+        assert_eq!(summary.files_failed, 1);
+        assert_eq!(summary.files_resumed, 0, "a failed resume is not a resume");
+        assert_eq!(summary.failures[0].relative_path, "partial.bin");
         assert!(
-            source_fault.message.contains("partial.bin"),
-            "source fault must name the file: {}",
-            source_fault.message
+            summary.failures[0]
+                .reason
+                .starts_with("source: changed size during transfer"),
+            "the source's reason names the fault: {}",
+            summary.failures[0].reason
         );
-        // otp-7b-2 (D-2026-07-09-1 Q2 rider): STRUCTURED file identity on
-        // the fault — locally lifted from the FaultedPath marker — and an
-        // end-of-operation summary naming it with a re-run suggestion.
-        assert_eq!(
-            source_fault.relative_path.as_deref(),
-            Some("partial.bin"),
-            "source fault carries the structured path (initiator {initiator_role:?})"
-        );
-        let summary = source_fault
-            .end_of_operation_summary()
-            .expect("a file-naming fault yields the end-of-operation summary");
-        assert!(summary.contains("partial.bin") && summary.contains("re-run"));
-        let dest_err = dest_result.expect_err("destination must fault");
-        let dest_fault = fault_of(&dest_err);
-        assert_eq!(
-            dest_fault.code,
-            session_error::Code::Internal,
-            "the destination must surface the source's framed fault, got: {}",
-            dest_fault.message
-        );
-        assert!(
-            dest_fault.message.contains("partial.bin"),
-            "destination fault must name the file: {}",
-            dest_fault.message
-        );
-        // The identity crossed the wire (SessionError.relative_path), so
-        // the OTHER end can name the file in its summary too.
-        assert_eq!(
-            dest_fault.relative_path.as_deref(),
-            Some("partial.bin"),
-            "destination fault carries the structured path over the wire \
-             (initiator {initiator_role:?})"
-        );
-        // The fault was genuinely MID-record (review F6): block 0 landed
-        // in place before the reader died in block 1, so the partial is
-        // partially patched — the in-place model D4 documents — and the
-        // never-sent tail is untouched.
-        let patched = std::fs::read(dst_root.join("partial.bin")).unwrap();
+        // Genuinely MID-record: block 0 landed in place before the reader
+        // died in block 1 (the in-place model D4 documents), the
+        // never-sent tail is untouched, and the partial is not stamped
+        // with the source's mtime (the next run re-syncs it).
+        let partial = dst_root.join("partial.bin");
+        let patched = std::fs::read(&partial).unwrap();
         assert_eq!(
             &patched[..bs],
             &content[..bs],
@@ -1127,6 +1105,17 @@ async fn mid_resume_source_fault_surfaces_cleanly_to_both_ends() {
         assert_eq!(
             patched[bs], 0x11,
             "no byte past the faulted block may land (initiator {initiator_role:?})"
+        );
+        let stamped = std::fs::metadata(&partial)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_ne!(
+            stamped, 1_600_001_100,
+            "a failed resume must not stamp the partial as converged"
         );
     }
 }
