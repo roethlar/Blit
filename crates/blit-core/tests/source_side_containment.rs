@@ -397,6 +397,87 @@ async fn assert_hydration_skip_contained(carrier: Carrier, error_text: &str, rea
     }
 }
 
+/// cr-ssc2-1: a SHARD member whose Windows-metadata hydration fails at
+/// preparation — the member vanished after the scan, on a platform whose
+/// scan populated `windows_metadata` — is a per-file skip on both
+/// carriers; its shard-mates land. (Reviewer's prediction for ssc-2 on
+/// Windows CI: the whole transfer aborted at `hydrate_payload_header(..)?`
+/// before the packer's containment ran; ssc-4 made hydration per member.)
+async fn assert_shard_member_hydration_failure_skipped(carrier: Carrier) {
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        // Three small files plan as ONE tar shard.
+        write_tree(
+            &src_root,
+            &[
+                ("a.txt", patterned(4096, 1), 1_600_000_001),
+                ("vanished.txt", patterned(4096, 2), 1_600_000_002),
+                ("sub/c.txt", patterned(4096, 3), 1_600_000_003),
+            ],
+        );
+        let failing: blit_core::remote::transfer::payload::Hydrator =
+            Arc::new(move |path: &Path, _header: &mut FileHeader| {
+                if path.ends_with("vanished.txt") {
+                    // What the Windows named-stream read reports for a
+                    // member deleted after the scan.
+                    let _ = std::fs::remove_file(path);
+                    eyre::bail!(
+                        "reading Windows named streams: The system cannot find the file specified. (os error 2)"
+                    )
+                }
+                Ok(())
+            });
+        let source: Arc<dyn TransferSource> = Arc::new(FaultySource {
+            inner: FsTransferSource::new(src_root.clone()).with_hydrator(failing),
+            faults: HashMap::new(),
+        });
+        let (sr, dr) = run_with(
+            open_for(initiator_role, carrier),
+            carrier,
+            source,
+            dst_root.clone(),
+        )
+        .await;
+        let summary = sr.unwrap_or_else(|e| {
+            panic!("source must complete ({carrier:?}, init {initiator_role:?}): {e:#}")
+        });
+        let dest = dr.unwrap_or_else(|e| {
+            panic!("destination must complete ({carrier:?}, init {initiator_role:?}): {e:#}")
+        });
+        assert_eq!(summary, dest.summary);
+        assert_eq!(summary.files_failed, 1, "{:?}", summary.failures);
+        assert_eq!(summary.files_transferred, 2, "the shard-mates land");
+        assert_eq!(summary.failures[0].relative_path, "vanished.txt");
+        assert!(
+            summary.failures[0].reason.starts_with("source:"),
+            "({carrier:?}) {}",
+            summary.failures[0].reason
+        );
+        let landed = collect_tree(&dst_root);
+        assert_eq!(landed.keys().collect::<Vec<_>>(), vec!["a.txt", "sub/c.txt"]);
+        assert_eq!(landed["a.txt"], patterned(4096, 1));
+        assert_eq!(landed["sub/c.txt"], patterned(4096, 3));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_shard_member_hydration_failure_is_skipped_and_reported() {
+    assert_shard_member_hydration_failure_skipped(Carrier::InStream).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_shard_member_hydration_failure_is_skipped_and_reported() {
+    // Mutation proof: make the shard hydration loop in
+    // `prepare_payload_with` propagate the error (`hydrate(..)?`, the
+    // pre-ssc-4 shape) and the source's pipeline faults instead of
+    // completing.
+    assert_shard_member_hydration_failure_skipped(Carrier::DataPlane).await;
+}
+
 #[tokio::test]
 async fn in_stream_hydration_failure_is_skipped_and_reported() {
     assert_hydration_skip_contained(

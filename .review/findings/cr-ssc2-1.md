@@ -1,7 +1,7 @@
 # cr-ssc2-1: Windows metadata hydration bypasses per-member shard containment
 
 **Severity**: MEDIUM — on Windows a vanished shard member still aborts the run before the packer's containment (against D-2026-09-28-2); ssc-2's own Windows CI leg would fail
-**Status**: Open — expected closed by ssc-4 (per-member hydration, D-E); verify on landing
+**Status**: Verified — closed by ssc-4 `c3a38876` (per-member hydration, D-E) plus the guard added here
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: (filled after the fix commit)
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range 6bc3d08f..905ddb37, record .review/results/ssc-2-range.codex.json)
@@ -16,10 +16,10 @@ On Windows, deleting a small shard member after scanning aborts the entire trans
 Hydrate members individually inside the containment loop, converting per-file hydration/open failures into `FileFailure` entries and passing only successfully hydrated headers to the packer.
 
 ## What
-(coder fills in)
+No production change in this commit: ssc-4 (`c3a38876`) already made shard-member hydration per member (`prepare_payload_with` in `remote/transfer/payload.rs` collects a failing member into the shard's `skipped` list instead of `?`). This commit adds the guard the finding asked for on the remote carriers (the local route already had `local_hydration_failure_is_a_per_file_skip_on_shards_and_single_files`).
 
 ## Guard proof
-(red/green proof; mutation described)
+`{in_stream,data_plane}_shard_member_hydration_failure_is_skipped_and_reported` (`assert_shard_member_hydration_failure_skipped`: three small files planned as one shard; the hydrator deletes `vanished.txt` and fails with the Windows not-found text; the member is reported with a `source:` reason, both shard-mates land byte-exact, both ends agree, both initiators). Mutation: the pre-ssc-4 shape restored in the shard hydration loop (`hydrate(..)?`) → the data-plane guard FAILED (source pipeline faulted; `scratchpad/cr-ssc-mutations.txt`); restored → green.
 
 ## Known gaps
-(none yet)
+The Windows-only real named-stream variant is ssc-4's `cfg(windows)` guard, which runs on Windows CI only.
