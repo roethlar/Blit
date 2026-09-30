@@ -32,9 +32,9 @@ pub use lifecycle_trace::{
     TransferLifecycleTrace,
 };
 pub use payload::{
-    build_tar_shard, changed_size_reason, payload_file_count, plan_transfer_payloads,
-    prepare_payload, prepared_payload_stream, PreparedPayload, TarShardBuild, TransferPayload,
-    DEFAULT_PAYLOAD_PREFETCH,
+    build_tar_shard, build_tar_shard_with, changed_size_reason, payload_file_count,
+    plan_transfer_payloads, prepare_payload, prepared_payload_stream, OpenedMember,
+    PreparedPayload, TarShardBuild, TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
 };
 pub use pipeline::{
     execute_sink_pipeline, execute_sink_pipeline_elastic, execute_sink_pipeline_streaming,

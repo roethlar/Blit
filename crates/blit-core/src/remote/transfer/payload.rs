@@ -410,6 +410,35 @@ pub struct TarShardBuild {
 /// alone: the probe is what makes the guarantee hold if the file changes
 /// between the stat and the read.
 pub fn build_tar_shard(source_root: &Path, headers: &[FileHeader]) -> Result<TarShardBuild> {
+    build_tar_shard_with(source_root, headers, &open_member_from_fs)
+}
+
+/// One shard member as the packer sees it: the length the opened handle
+/// reports and the bytes it yields. Production opens the file
+/// ([`open_member_from_fs`]); a test opener can make the two disagree to
+/// exercise the read-side checks deterministically (cr-ssc2-3).
+pub struct OpenedMember {
+    pub len: u64,
+    pub reader: Box<dyn std::io::Read>,
+}
+
+/// The production member opener: `File::open` + `metadata().len()` on
+/// that handle, the handle as the reader.
+pub fn open_member_from_fs(path: &Path) -> std::io::Result<OpenedMember> {
+    let file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    Ok(OpenedMember {
+        len,
+        reader: Box::new(file),
+    })
+}
+
+/// [`build_tar_shard`] with an explicit member opener (test seam).
+pub fn build_tar_shard_with(
+    source_root: &Path,
+    headers: &[FileHeader],
+    open: &dyn Fn(&Path) -> std::io::Result<OpenedMember>,
+) -> Result<TarShardBuild> {
     use std::io::Read;
 
     let mut builder = Builder::new(Vec::new());
@@ -438,17 +467,13 @@ pub fn build_tar_shard(source_root: &Path, headers: &[FileHeader]) -> Result<Tar
             });
         };
 
-        let mut file = match std::fs::File::open(&full_path) {
-            Ok(file) => file,
+        let OpenedMember {
+            len: now,
+            reader: mut file,
+        } = match open(&full_path) {
+            Ok(opened) => opened,
             Err(err) => {
                 skip(format!("source: cannot open: {err}"));
-                continue;
-            }
-        };
-        let now = match file.metadata() {
-            Ok(meta) => meta.len(),
-            Err(err) => {
-                skip(format!("source: cannot stat: {err}"));
                 continue;
             }
         };

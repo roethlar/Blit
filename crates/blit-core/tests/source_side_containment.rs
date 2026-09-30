@@ -1285,6 +1285,44 @@ fn packer_skips_a_member_that_grows_between_stat_and_read() {
     );
 }
 
+/// cr-ssc2-3: the one-byte probe past `size` is the check that catches a
+/// member that grew AFTER the stat and the bounded read — the only
+/// window the stat cannot see. A member opener that reports the
+/// manifest size but yields one byte more makes that window
+/// deterministic: the stat passes, the `take(size)` read fills exactly,
+/// and only the probe can tell.
+#[test]
+fn packer_probe_catches_growth_after_the_stat() {
+    use blit_core::remote::transfer::{build_tar_shard_with, OpenedMember};
+
+    let header = FileHeader {
+        relative_path: "grows-late.txt".into(),
+        size: SMALL as u64,
+        mtime_seconds: 1,
+        permissions: 0o644,
+        ..Default::default()
+    };
+    let opener = |_: &Path| -> std::io::Result<OpenedMember> {
+        Ok(OpenedMember {
+            len: SMALL as u64,
+            reader: Box::new(std::io::Cursor::new(patterned(SMALL + 1, 13))),
+        })
+    };
+    let built = build_tar_shard_with(Path::new("/unused"), &[header], &opener).unwrap();
+    assert!(
+        built.headers.is_empty(),
+        "a member that grew after the stat is not packed (mutation: remove the probe and it is)"
+    );
+    assert_eq!(built.skipped.len(), 1);
+    assert!(
+        built.skipped[0]
+            .reason
+            .starts_with("source: changed size during transfer"),
+        "{}",
+        built.skipped[0].reason
+    );
+}
+
 /// The A1/A2 property end to end: the drifted member is reported with a
 /// `source:` reason, its two shard-mates land byte-exact, both ends hold
 /// the same summary, both carriers, both initiator roles.
