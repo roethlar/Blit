@@ -5582,6 +5582,7 @@ async fn diff_chunk_and_send_needs(
             dst_root,
             canonical_dst_root,
             &header.relative_path,
+            header.raw_relative_path.as_deref(),
             resume_block_size,
         )
         .await?;
@@ -6064,13 +6065,20 @@ async fn compute_resume_block_hashes(
     dst_root: &Path,
     canonical_dst_root: Option<&Path>,
     relative_path: &str,
+    raw_relative_path: Option<&[u8]>,
     block_size: usize,
 ) -> Result<Vec<Vec<u8>>> {
+    // cr-ssc5-2: hash the file the blocks will be applied to — by its raw
+    // bytes when the name carries them (contract v7), exactly as the sink
+    // resolves the record — never the lossy-text path beside it.
     let dst = match canonical_dst_root {
-        Some(canonical) => {
-            crate::path_safety::safe_join_contained(canonical, dst_root, relative_path)
-        }
-        None => crate::path_safety::safe_join(dst_root, relative_path),
+        Some(canonical) => crate::path_safety::safe_join_contained_named(
+            canonical,
+            dst_root,
+            relative_path,
+            raw_relative_path,
+        ),
+        None => crate::path_safety::safe_join_named(dst_root, relative_path, raw_relative_path),
     }
     .map_err(|err| {
         SessionFault::protocol_violation(format!(

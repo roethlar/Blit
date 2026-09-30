@@ -2608,3 +2608,68 @@ async fn in_stream_first_header_wins_at_the_source_on_a_lossy_collision() {
 async fn data_plane_first_header_wins_at_the_source_on_a_lossy_collision() {
     assert_first_header_wins_at_the_source(Carrier::DataPlane).await;
 }
+
+/// cr-ssc5-2 (byte-keyed destinations only): a resume grant for a
+/// raw-named file hashes the file at the RAW path — the one the blocks
+/// are applied to — never the distinct lossy-text file beside it. The raw
+/// file is resumed to the source's content; the lossy-text file is left
+/// alone.
+#[cfg(all(unix, not(target_os = "macos")))]
+async fn assert_resume_hashes_the_raw_path(carrier: Carrier) {
+    use std::os::unix::ffi::OsStrExt as _;
+    const HALF: usize = 4 * RESUME_BS as usize;
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        let content = patterned(2 * HALF, 5);
+        let raw_name = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
+        std::fs::write(src_root.join(raw_name), &content).unwrap();
+        // Destination: the raw file holds the first half (resumable); the
+        // distinct lossy-text file holds unrelated bytes of the same size.
+        std::fs::write(dst_root.join(raw_name), &content[..HALF]).unwrap();
+        let decoy = patterned(2 * HALF, 11);
+        std::fs::write(dst_root.join("caf\u{fffd}.txt"), &decoy).unwrap();
+
+        let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
+        let (sr, dr) = run_with(
+            resume_open_for(initiator_role, carrier),
+            carrier,
+            source,
+            dst_root.clone(),
+        )
+        .await;
+        let summary = sr.unwrap_or_else(|e| panic!("source must complete ({carrier:?}): {e:#}"));
+        let dest = dr.unwrap_or_else(|e| panic!("destination must complete ({carrier:?}): {e:#}"));
+        assert_eq!(summary, dest.summary);
+        assert_eq!(summary.files_failed, 0, "{:?}", summary.failures);
+        assert_eq!(
+            summary.files_resumed, 1,
+            "the raw-named file is resumed block-wise"
+        );
+        assert_eq!(
+            std::fs::read(dst_root.join(raw_name)).unwrap(),
+            content,
+            "the raw path holds the source's bytes ({carrier:?})"
+        );
+        assert_eq!(
+            std::fs::read(dst_root.join("caf\u{fffd}.txt")).unwrap(),
+            decoy,
+            "the lossy-text neighbour is untouched"
+        );
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn in_stream_resume_hashes_the_raw_named_destination_file() {
+    assert_resume_hashes_the_raw_path(Carrier::InStream).await;
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn data_plane_resume_hashes_the_raw_named_destination_file() {
+    assert_resume_hashes_the_raw_path(Carrier::DataPlane).await;
+}
