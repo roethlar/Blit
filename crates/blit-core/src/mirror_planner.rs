@@ -403,15 +403,54 @@ fn plan_from_sets(
 fn is_shielded(rel: &Path, shield_set: &HashSet<CasefoldKey>) -> bool {
     let mut current = Some(rel);
     while let Some(path) = current {
-        if path.as_os_str().is_empty() {
-            break;
-        }
+        // cr-fix1-1: test the path BEFORE stopping at the empty ancestor —
+        // the empty relative path is a real identity (a single-file source
+        // root), and a failed single-file mirror shields the whole
+        // destination directory beneath it.
         if shield_set.contains(&CasefoldKey::new(path)) {
             return true;
+        }
+        if path.as_os_str().is_empty() {
+            break;
         }
         current = path.parent();
     }
     false
+}
+
+#[cfg(test)]
+mod shield_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// cr-fix1-1: a single-file source whose one file (relative path "")
+    /// failed leaves a populated destination directory untouched — every
+    /// entry descends from the empty failed path.
+    #[test]
+    fn an_empty_failed_path_shields_every_destination_descendant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(dst.join("b")).unwrap();
+        std::fs::write(dst.join("a"), b"a").unwrap();
+        std::fs::write(dst.join("b/c"), b"c").unwrap();
+        let source_files: HashSet<String> = HashSet::from([String::new()]);
+        let filter = crate::fs_enum::FileFilter::default();
+
+        let shielded: HashSet<String> = HashSet::from([String::new()]);
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions(&dst, &source_files, &[], &shielded, &filter)
+            .unwrap();
+        assert!(
+            plan.files.is_empty() && plan.dirs.is_empty(),
+            "nothing under a failed single-file root is deleted: {plan:?}"
+        );
+
+        // Control: with nothing shielded the same tree IS extraneous.
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions(&dst, &source_files, &[], &HashSet::new(), &filter)
+            .unwrap();
+        assert_eq!(plan.files.len(), 2, "control: extraneous files are planned");
+    }
 }
 
 #[cfg(test)]
