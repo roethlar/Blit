@@ -3367,7 +3367,7 @@ async fn send_resume_block_records(
             Err(err) => {
                 tx.send(frame(Frame::FileSkipped(crate::generated::FileFailure {
                     relative_path: header.relative_path.clone(),
-                    reason: format!("source: cannot open: {err:#}"),
+                    reason: ResumeBlockDiff::skip_reason(&err),
                 })))
                 .await?;
                 return Ok(());

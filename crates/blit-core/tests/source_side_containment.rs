@@ -1546,11 +1546,16 @@ async fn assert_resume_fault_contained(carrier: Carrier, fault: Fault, reason_pr
     }
 }
 
-/// cr-ssc1-4: a resume-granted file whose source cannot be opened is
+/// cr-ssc1-4 / cr-ssc3-1: a resume-granted file the source cannot open,
+/// or whose size no longer matches the manifest before the diff, is
 /// skipped before any block record — the destination partial is left
-/// exactly as it was, the file is reported, the other file lands — on
-/// both carriers.
+/// exactly as it was, the file is reported, the other file lands, the
+/// move gate refuses — on both carriers.
 async fn assert_resume_open_failure_skipped(carrier: Carrier) {
+    assert_resume_pre_diff_skip(carrier, Fault::OpenFails, "source: cannot open:").await;
+}
+
+async fn assert_resume_pre_diff_skip(carrier: Carrier, fault: Fault, reason_prefix: &str) {
     let bs = RESUME_BS as usize;
     let content = patterned(3 * bs, 9);
     const DST_MTIME: i64 = 1_600_001_000;
@@ -1573,7 +1578,7 @@ async fn assert_resume_open_failure_skipped(carrier: Carrier) {
         );
         let source: Arc<dyn TransferSource> = Arc::new(FaultySource {
             inner: FsTransferSource::new(src_root.clone()),
-            faults: HashMap::from([("partial.bin", Fault::OpenFails)]),
+            faults: HashMap::from([("partial.bin", fault)]),
         });
         let (sr, dr) = run_with(
             resume_open_for(initiator_role, carrier),
@@ -1589,14 +1594,25 @@ async fn assert_resume_open_failure_skipped(carrier: Carrier) {
             panic!("destination must complete ({carrier:?}, init {initiator_role:?}): {e:#}")
         });
         assert_eq!(summary, dest.summary, "both ends agree ({carrier:?})");
-        assert_eq!(summary.files_failed, 1, "the unopenable file fails once");
+        assert_eq!(summary.files_failed, 1, "the skipped file fails once");
         assert_eq!(summary.files_resumed, 0);
         assert_eq!(summary.files_transferred, 1, "the other file lands");
         assert_eq!(summary.failures[0].relative_path, "partial.bin");
         assert!(
-            summary.failures[0].reason.starts_with("source: cannot open:"),
+            summary.failures[0].reason.starts_with(reason_prefix),
             "reason must be the source's ({carrier:?}): {}",
             summary.failures[0].reason
+        );
+        // `move --resume`-shaped: the source-delete gate reads this
+        // summary and must refuse while the file did not land.
+        assert!(
+            refuse_source_delete_on_failures(
+                "src",
+                summary.files_failed,
+                &failures_from_wire(&summary.failures),
+            )
+            .is_err(),
+            "move must refuse source deletion ({carrier:?})"
         );
         let partial = dst_root.join("partial.bin");
         assert_eq!(
@@ -1624,6 +1640,125 @@ async fn data_plane_resume_source_open_failure_is_skipped_and_reported() {
     // `DataPlaneSink::write_payload`'s ResumeFile arm and the source's
     // pipeline faults instead of completing.
     assert_resume_open_failure_skipped(Carrier::DataPlane).await;
+}
+
+// ---------------------------------------------------------------------------
+// cr-ssc3-1: a resumed file whose size changed — before the diff (skip)
+// or while being diffed (failed record) — is never finalised short
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_resume_growth_before_the_diff_is_skipped() {
+    assert_resume_pre_diff_skip(
+        Carrier::InStream,
+        Fault::DeclaresLen(3 * RESUME_BS as u64 + 4096),
+        "source: changed size during transfer (manifest",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_resume_growth_before_the_diff_is_skipped() {
+    // Mutation proof: remove the pre-diff `len()` check in
+    // `ResumeBlockDiff::open` and the grown file is resumed at the
+    // manifest size and stamped — this guard then fails on
+    // `files_failed`.
+    assert_resume_pre_diff_skip(
+        Carrier::DataPlane,
+        Fault::DeclaresLen(3 * RESUME_BS as u64 - 1),
+        "source: changed size during transfer (manifest",
+    )
+    .await;
+}
+
+/// The file grew while its blocks were being diffed: every block lands
+/// (they were read from the manifest-sized prefix), but the record closes
+/// FAILED with the changed-size reason, the partial is NOT stamped as
+/// converged, and the move gate refuses — on both carriers.
+async fn assert_resume_growth_during_diff_contained(carrier: Carrier) {
+    let bs = RESUME_BS as usize;
+    let content = patterned(3 * bs, 9);
+    const DST_MTIME: i64 = 1_600_001_000;
+    const SRC_MTIME: i64 = 1_600_001_100;
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(
+            &src_root,
+            &[
+                ("partial.bin", content.clone(), SRC_MTIME),
+                ("ok1.bin", patterned(BIG, 1), 1_600_000_001),
+            ],
+        );
+        write_tree(
+            &dst_root,
+            &[("partial.bin", vec![0x11; content.len()], DST_MTIME)],
+        );
+        let source: Arc<dyn TransferSource> = Arc::new(FaultySource {
+            inner: FsTransferSource::new(src_root.clone()),
+            faults: HashMap::from([(
+                "partial.bin",
+                Fault::DriftsAfterBody(3 * RESUME_BS as u64 + 4096),
+            )]),
+        });
+        let (sr, dr) = run_with(
+            resume_open_for(initiator_role, carrier),
+            carrier,
+            source,
+            dst_root.clone(),
+        )
+        .await;
+        let summary = sr.unwrap_or_else(|e| {
+            panic!("source must complete ({carrier:?}, init {initiator_role:?}): {e:#}")
+        });
+        let dest = dr.unwrap_or_else(|e| {
+            panic!("destination must complete ({carrier:?}, init {initiator_role:?}): {e:#}")
+        });
+        assert_eq!(summary, dest.summary, "both ends agree ({carrier:?})");
+        assert_eq!(summary.files_failed, 1, "the grown file fails once");
+        assert_eq!(summary.files_resumed, 0, "a failed resume is not a resume");
+        assert_eq!(summary.files_transferred, 1, "the other file lands");
+        assert_eq!(summary.failures[0].relative_path, "partial.bin");
+        assert!(
+            summary.failures[0]
+                .reason
+                .starts_with("source: changed size during transfer (manifest"),
+            "reason must be the drift class ({carrier:?}): {}",
+            summary.failures[0].reason
+        );
+        let partial = dst_root.join("partial.bin");
+        assert_ne!(
+            mtime_seconds(&partial),
+            SRC_MTIME,
+            "a file that grew during the diff must not be stamped as converged ({carrier:?}, init {initiator_role:?})"
+        );
+        assert!(
+            refuse_source_delete_on_failures(
+                "src",
+                summary.files_failed,
+                &failures_from_wire(&summary.failures),
+            )
+            .is_err(),
+            "move --resume must refuse source deletion ({carrier:?})"
+        );
+        assert_eq!(collect_tree(&dst_root)["ok1.bin"], patterned(BIG, 1));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_resume_growth_during_the_diff_is_reported_and_unstamped() {
+    assert_resume_growth_during_diff_contained(Carrier::InStream).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_resume_growth_during_the_diff_is_reported_and_unstamped() {
+    // Mutation proof: remove the post-diff `len()` check in
+    // `ResumeBlockDiff::next_event` and the grown file is resumed at the
+    // manifest size and stamped — this guard then fails on `files_failed`.
+    assert_resume_growth_during_diff_contained(Carrier::DataPlane).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

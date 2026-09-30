@@ -58,6 +58,8 @@ pub struct ResumeBlockDiff {
     index: usize,
     keepalive: Option<Duration>,
     last_emit: Instant,
+    /// cr-ssc3-1: the post-diff re-stat runs exactly once.
+    end_checked: bool,
 }
 
 impl ResumeBlockDiff {
@@ -72,10 +74,28 @@ impl ResumeBlockDiff {
     ) -> Result<Self> {
         // otp-7b-2 review G2: the open failure names its file too, on
         // both carriers.
-        let reader = source
+        let mut reader = source
             .open_file(header)
             .await
             .map_err(|e| e.wrap_err(FaultedPath(header.relative_path.clone())))?;
+        // cr-ssc3-1 (D-C, the whole-file rule applied to resume): the
+        // opened handle must still be the manifest's size before any
+        // block goes out. A grown or shrunk file is skipped here — never
+        // resumed short and stamped as converged.
+        let now = match reader.len().await {
+            Ok(now) => now,
+            Err(e) => {
+                return Err(eyre::eyre!("source: cannot read metadata: {e}")
+                    .wrap_err(FaultedPath(header.relative_path.clone())))
+            }
+        };
+        if now != header.size {
+            return Err(eyre::eyre!(
+                "source: changed size during transfer (manifest {} bytes, now {now})",
+                header.size
+            )
+            .wrap_err(FaultedPath(header.relative_path.clone())));
+        }
         Ok(Self {
             reader,
             size: header.size,
@@ -86,7 +106,21 @@ impl ResumeBlockDiff {
             index: 0,
             keepalive: None,
             last_emit: Instant::now(),
+            end_checked: false,
         })
+    }
+
+    /// The `source:` skip reason for an `open` failure: the innermost
+    /// `source:`-prefixed message when the failure is the file's own
+    /// (size drift, metadata), else the open error itself.
+    pub fn skip_reason(err: &eyre::Report) -> String {
+        for cause in err.chain() {
+            let text = cause.to_string();
+            if text.starts_with("source:") {
+                return text;
+            }
+        }
+        format!("source: cannot open: {err:#}")
     }
 
     /// Arm keepalive ticks: a [`ResumeDiffEvent::KeepAlive`] is emitted
@@ -142,6 +176,24 @@ impl ResumeBlockDiff {
                         offset: block_offset,
                     }));
                 }
+            }
+        }
+        // cr-ssc3-1: the diff read exactly `size` bytes; before the
+        // record can close ok, the same handle must still report that
+        // size — a file that grew while being diffed would otherwise be
+        // finalised short (and, under `move --resume`, its tail deleted
+        // at the source). Exactly once.
+        if !self.end_checked {
+            self.end_checked = true;
+            let now = match self.reader.len().await {
+                Ok(now) => now,
+                Err(e) => return Err(eyre::eyre!("source: cannot read metadata: {e}")),
+            };
+            if now != self.size {
+                return Err(eyre::eyre!(
+                    "source: changed size during transfer (manifest {} bytes, now {now})",
+                    self.size
+                ));
             }
         }
         Ok(None)

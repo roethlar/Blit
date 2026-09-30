@@ -2385,7 +2385,7 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                             crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT / 3,
                         ),
                         Err(err) => {
-                            let reason = format!("source: cannot open: {err:#}");
+                            let reason = ResumeBlockDiff::skip_reason(&err);
                             session
                                 .send_skip(&header.relative_path, &reason)
                                 .await
