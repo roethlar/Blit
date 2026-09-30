@@ -23,7 +23,9 @@ use blit_core::generated::{
     SessionError, SessionHello, SessionOpen, SourceDone, TransferFrame, TransferRole,
     TransferSummary,
 };
-use blit_core::remote::transfer::source::{FsTransferSource, SourceScan, TransferSource};
+use blit_core::remote::transfer::source::{
+    FsTransferSource, OpenedSourceFile, SourceScan, TransferSource,
+};
 use blit_core::remote::transfer::{
     PreparedPayload, ProgressEvent, RemoteTransferProgress, SessionPhaseEvent, SessionPhaseRole,
     SessionPhaseTrace, SmallFileCarrier, SmallFileProbe, SmallFileProbeReport, TimingAggregate,
@@ -884,6 +886,7 @@ async fn file_record_for_resume_flagged_path_is_protocol_violation() {
         permissions: 0o644,
         checksum: vec![],
         windows_metadata: None,
+        raw_relative_path: None,
     };
     peer.send(wire(Frame::ManifestEntry(header.clone())))
         .await
@@ -984,16 +987,18 @@ impl TransferSource for TruncatedReadSource {
             .await
     }
 
-    async fn open_file(
-        &self,
-        header: &FileHeader,
-    ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+    async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
         use tokio::io::AsyncReadExt;
-        let reader = self.inner.open_file(header).await?;
+        let opened = self.inner.open_file(header).await?;
         if header.relative_path == self.fail_path {
-            Ok(Box::new(reader.take(self.limit)))
+            // The declared length stays the manifest's: the fault is a
+            // mid-body short read, not a pre-announce size drift.
+            Ok(OpenedSourceFile::virtual_reader(
+                Box::new(opened.into_reader().take(self.limit)),
+                header.size,
+            ))
         } else {
-            Ok(reader)
+            Ok(opened)
         }
     }
 
@@ -1236,10 +1241,7 @@ impl TransferSource for GatedManifestSource {
             .await
     }
 
-    async fn open_file(
-        &self,
-        header: &FileHeader,
-    ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+    async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
         self.inner.open_file(header).await
     }
 
@@ -3233,6 +3235,7 @@ async fn mirror_refused_when_source_scan_incomplete() {
         permissions: 0o644,
         checksum: vec![],
         windows_metadata: None,
+        raw_relative_path: None,
     })))
     .await
     .unwrap();
@@ -3390,6 +3393,7 @@ async fn cancel_mid_file_record_surfaces_the_peers_fault() {
         permissions: 0o644,
         checksum: vec![],
         windows_metadata: None,
+        raw_relative_path: None,
     };
     peer.send(wire(Frame::ManifestEntry(header.clone())))
         .await
@@ -3497,6 +3501,7 @@ async fn incomplete_scan_refused_when_completeness_required() {
         permissions: 0o644,
         checksum: vec![],
         windows_metadata: None,
+        raw_relative_path: None,
     })))
     .await
     .unwrap();
@@ -3621,10 +3626,7 @@ impl TransferSource for FilterIgnoringSource {
         self.inner.check_availability(headers, unreadable).await
     }
 
-    async fn open_file(
-        &self,
-        header: &FileHeader,
-    ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+    async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
         self.inner.open_file(header).await
     }
 
@@ -3758,6 +3760,7 @@ async fn in_stream_payload_before_manifest_complete_is_protocol_violation() {
         permissions: 0o644,
         checksum: vec![],
         windows_metadata: None,
+        raw_relative_path: None,
     };
     peer.send(wire(Frame::ManifestEntry(header.clone())))
         .await
@@ -4017,6 +4020,7 @@ async fn manifest_entry_after_manifest_complete_is_protocol_violation() {
         permissions: 0o644,
         checksum: vec![],
         windows_metadata: None,
+        raw_relative_path: None,
     })))
     .await
     .unwrap();

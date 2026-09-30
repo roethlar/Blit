@@ -17,6 +17,7 @@ pub mod checkers;
 mod data_plane;
 pub mod dir_stat;
 pub mod local;
+mod need_ledger;
 pub mod phase_probe;
 pub mod transport;
 
@@ -60,6 +61,8 @@ use crate::remote::transfer::small_file_probe::{
     BoundSmallFileProbe, SmallFileCarrier, SmallFileProbe,
 };
 #[cfg(test)]
+use crate::remote::transfer::source::OpenedSourceFile;
+#[cfg(test)]
 use crate::remote::transfer::source::SourceScan;
 use crate::remote::transfer::source::{FsTransferSource, TransferSource};
 use crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT;
@@ -93,7 +96,15 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// (`remote::transfer::delegated_summary`, cr-pfc4-1) — a future
 /// summary field has to land there too or the delegated topology loses
 /// it.
-pub const CONTRACT_VERSION: u32 = 6;
+/// v7: source-side per-file containment (SOURCE_SIDE_CONTAINMENT ssc-1,
+/// D-2026-09-29-4): `TransferFrame.file_skipped` (21) and `file_end`
+/// (22, `RecordEnd{ok, reason}`), `BlockTransferComplete.ok/reason`,
+/// `FileHeader.raw_relative_path` (7); on the data plane a SKIP record
+/// tag, length-prefixed FILE record bodies closed by a status byte, and
+/// a status on BLOCK_COMPLETE. The destination tracks every granted need
+/// through one ledger (Granted → Active(lane) → Completed | Failed) and
+/// a record is never inferred complete from a byte count alone.
+pub const CONTRACT_VERSION: u32 = 7;
 
 /// Payload chunk size on the in-stream carrier. Same unit the gRPC
 /// control plane uses today; the data plane (otp-4) has its own.
@@ -643,6 +654,8 @@ fn frame_name(f: &Option<Frame>) -> &'static str {
         Some(Frame::SourceDone(_)) => "SourceDone",
         Some(Frame::Summary(_)) => "TransferSummary",
         Some(Frame::Error(_)) => "SessionError",
+        Some(Frame::FileSkipped(_)) => "FileSkipped",
+        Some(Frame::FileEnd(_)) => "FileEnd",
         None => "empty frame",
     }
 }
@@ -3071,15 +3084,40 @@ async fn send_payload_records(
     for payload in payloads {
         match source.prepare_payload(payload).await? {
             PreparedPayload::File(header) => {
-                tx.send(frame(Frame::FileBegin(header.clone()))).await?;
-                if header.size == 0 {
-                    report_files(&[(header.relative_path.clone(), 0)]);
-                    continue; // record complete at 0 cumulative bytes
-                }
-                let mut reader = source
-                    .open_file(&header)
+                // Contract v7 (SOURCE_SIDE_CONTAINMENT D-A/D-C): open and
+                // stat BEFORE announcing the record, so a file that
+                // cannot be opened or whose size no longer matches the
+                // manifest is SKIPPED — nothing of it goes on the wire —
+                // instead of killing the session. Every reason starts
+                // with `source:`; the destination reports it through the
+                // same chokepoint as its own contained failures.
+                let mut reader = match source.open_file(&header).await {
+                    Ok(reader) => reader,
+                    Err(err) => {
+                        tx.send(frame(Frame::FileSkipped(crate::generated::FileFailure {
+                            relative_path: header.relative_path.clone(),
+                            reason: format!("source: cannot open: {err:#}"),
+                        })))
+                        .await?;
+                        continue;
+                    }
+                };
+                let now = reader
+                    .len()
                     .await
-                    .map_err(|e| tag_path(e, &header.relative_path))?;
+                    .map_err(|e| tag_path(eyre::Report::new(e), &header.relative_path))?;
+                if now != header.size {
+                    tx.send(frame(Frame::FileSkipped(crate::generated::FileFailure {
+                        relative_path: header.relative_path.clone(),
+                        reason: format!(
+                            "source: changed size during transfer (manifest {} bytes, now {now})",
+                            header.size
+                        ),
+                    })))
+                    .await?;
+                    continue;
+                }
+                tx.send(frame(Frame::FileBegin(header.clone()))).await?;
                 let mut remaining = header.size;
                 while remaining > 0 {
                     let want = read_buf.len().min(remaining as usize);
@@ -3106,6 +3144,11 @@ async fn send_payload_records(
                     .await?;
                     remaining -= got as u64;
                 }
+                tx.send(frame(Frame::FileEnd(crate::generated::RecordEnd {
+                    ok: true,
+                    reason: String::new(),
+                })))
+                .await?;
                 report_files(&[(
                     header.relative_path.clone(),
                     header
@@ -3223,7 +3266,20 @@ async fn send_resume_block_records(
     // stays unarmed: the control lane carries no receive stall guard,
     // so a silent scan cannot trip one (review 7b-1 F1 is a data-plane
     // concern; `DataPlaneSink` arms it there).
-    let mut diff = ResumeBlockDiff::open(source, header, block_size as usize, dest_hashes).await?;
+    // Contract v7: a source that cannot open the file skips it before
+    // any block goes out (the same rule as a whole-file record).
+    let mut diff =
+        match ResumeBlockDiff::open(source, header, block_size as usize, dest_hashes).await {
+            Ok(diff) => diff,
+            Err(err) => {
+                tx.send(frame(Frame::FileSkipped(crate::generated::FileFailure {
+                    relative_path: header.relative_path.clone(),
+                    reason: format!("source: cannot open: {err:#}"),
+                })))
+                .await?;
+                return Ok(());
+            }
+        };
     let mut stale_bytes: u64 = 0;
     while let Some(event) = diff.next_event().await? {
         match event {
@@ -3243,6 +3299,8 @@ async fn send_resume_block_records(
         relative_path: header.relative_path.clone(),
         total_bytes: header.size,
         windows_metadata: header.windows_metadata.clone(),
+        ok: true,
+        reason: String::new(),
     })))
     .await?;
     // review otp-10a F6: a resumed file finishes like any other (w6-1:
@@ -3934,23 +3992,24 @@ async fn destination_session_inner(
     // land on the sockets. The block size is chosen below, once the
     // carrier is known (the ceiling is per carrier).
     let resume_enabled = resume_negotiated(&negotiated.open);
-    let resume_headers: data_plane::ResumeHeaders = Arc::default();
     let files_resumed = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    // Two sets, deliberately separate (review otp-4b-1 fix-review F1):
-    // `granted` is the ever-granted DEDUP set — control-loop-local,
-    // insert-only, never removed, so a concurrent data-plane claim can
-    // never re-open a grant (a duplicate manifest path is granted at
-    // most once regardless of delivery timing). `outstanding` is the
-    // not-yet-delivered COMPLETION set — inserted for each freshly
-    // granted path before its NeedBatch, claimed by both carriers (the
-    // in-stream arms inline, the data-plane NeedListSink as payloads
-    // land), and empty at SourceDone. A count proxy was insufficient
-    // (F1); merging the two into one set raced the data-plane claim
-    // against the diff (fix-review F1).
+    // Contract v7 (SOURCE_SIDE_CONTAINMENT D-A): ONE ledger of granted
+    // needs, shared between this control loop and the data-plane receive
+    // workers, replaces the old outstanding/retained-header/resume-grant
+    // trio. A need is Granted before its NeedBatch goes out (the source
+    // can only send a payload after receiving its need, so
+    // insert-before-send orders every socket-side lookup strictly after
+    // the grant exists), moves to Active(lane) when a record announces
+    // it, and settles Completed or Failed from the record's terminator —
+    // or Failed from a skip. Nothing is ever removed, so a duplicate
+    // manifest path is granted at most once and a late frame for a
+    // settled need is named for what it is.
+    let ledger: need_ledger::SharedNeedLedger = Arc::default();
+    // The LOCAL carrier (otp-11) grants nothing on a wire: its apply
+    // pipeline dedups manifest paths on this control-loop-local set
+    // (`diff_chunk_and_apply_local`) and never enters the ledger.
     let mut granted: HashSet<String> = HashSet::new();
-    let outstanding: data_plane::OutstandingNeeds = Arc::new(StdMutex::new(HashSet::new()));
-    let granted_headers: data_plane::GrantedHeaders = Arc::default();
 
     // Data plane (otp-4b/5b): when a TCP data plane is in play, payload
     // bytes arrive on sockets (not the control lane). Set it up NOW —
@@ -3967,13 +4026,11 @@ async fn destination_session_inner(
     // ceiling for both connection layouts; only socket acquisition differs.
     let recv_sink: Arc<dyn TransferSink> = Arc::new(data_plane::NeedListSink::new(
         Arc::clone(&sink),
-        Arc::clone(&outstanding),
-        Arc::clone(&granted_headers),
+        Arc::clone(&ledger),
         // otp-7b: only a resume session accepts block records on the
         // data plane; the sink validates + claims them against the same
-        // shared grant state the in-stream arms use.
+        // ledger the in-stream arms use.
         resume_enabled.then(|| data_plane::ResumeRecv {
-            headers: Arc::clone(&resume_headers),
             resumed: Arc::clone(&files_resumed),
         }),
         small_file_probe.clone(),
@@ -4178,10 +4235,7 @@ async fn destination_session_inner(
                             &compare_opts,
                             resume_enabled,
                             resume_block_size,
-                            &resume_headers,
-                            &mut granted,
-                            &outstanding,
-                            &granted_headers,
+                            &ledger,
                             &mut needed_paths,
                             progress.as_ref(),
                             phase_trace.as_ref(),
@@ -4252,10 +4306,7 @@ async fn destination_session_inner(
                         &compare_opts,
                         resume_enabled,
                         resume_block_size,
-                        &resume_headers,
-                        &mut granted,
-                        &outstanding,
-                        &granted_headers,
+                        &ledger,
                         &mut needed_paths,
                         progress.as_ref(),
                         phase_trace.as_ref(),
@@ -4298,34 +4349,29 @@ async fn destination_session_inner(
                         header.relative_path
                     )));
                 }
-                // A resume-flagged grant may be satisfied ONLY by its
-                // block record — a whole-file record for it bypasses the
-                // hash choreography this end committed to (review F3).
-                if resume_headers
-                    .lock()
-                    .expect("resume-headers lock poisoned")
-                    .contains_key(&header.relative_path)
-                {
-                    return Err(violation(format!(
-                        "file record for resume-flagged '{}' — the contract requires \
-                         its block record",
-                        header.relative_path
-                    )));
-                }
-                let manifest_header = granted_headers
-                    .lock()
-                    .expect("granted-headers lock poisoned")
-                    .get(&header.relative_path)
-                    .cloned()
-                    .ok_or_else(|| {
-                        violation_for(
-                            &header.relative_path,
-                            format!(
-                                "payload for '{}' has no retained manifest grant",
-                                header.relative_path
-                            ),
-                        )
-                    })?;
+                // Contract v7: the ledger holds the grant. A resume-flagged
+                // grant may be satisfied ONLY by its block record (review
+                // F3); a path that is not Granted is named for what it is
+                // (announced twice, delivered, failed, never granted).
+                let manifest_header = {
+                    let granted = ledger
+                        .lock()
+                        .expect("need ledger lock poisoned")
+                        .granted(&header.relative_path)
+                        .map(|(manifest, resume)| (manifest.clone(), resume));
+                    match granted {
+                        Some((manifest, false)) => manifest,
+                        _ => {
+                            // Not an ordinary grant: the ledger words the
+                            // violation (resume-flagged, or not on the list).
+                            ledger
+                                .lock()
+                                .expect("need ledger lock poisoned")
+                                .activate_file(&header.relative_path, need_ledger::Lane::Control)?;
+                            unreachable!("activate_file rejects every non-granted state")
+                        }
+                    }
+                };
                 crate::windows_metadata::validate_payload_against_manifest(
                     header.windows_metadata.as_ref(),
                     manifest_header.windows_metadata.as_ref(),
@@ -4351,21 +4397,22 @@ async fn destination_session_inner(
                         ),
                     ));
                 }
-                if !outstanding
+                ledger
                     .lock()
-                    .expect("outstanding-needs lock poisoned")
-                    .remove(&header.relative_path)
-                {
-                    return Err(violation(format!(
-                        "payload for '{}' which is not on the need list",
-                        header.relative_path
-                    )));
-                }
-                granted_headers
-                    .lock()
-                    .expect("granted-headers lock poisoned")
-                    .remove(&header.relative_path);
+                    .expect("need ledger lock poisoned")
+                    .activate_file(&header.relative_path, need_ledger::Lane::Control)?;
                 let outcome = receive_file_record(transport, sink.as_ref(), &header).await?;
+                // The record's terminator settles the need from the
+                // sink's own outcome: Completed if the writer committed,
+                // Failed if it was discarding or the source retracted.
+                ledger
+                    .lock()
+                    .expect("need ledger lock poisoned")
+                    .settle_file(
+                        &header.relative_path,
+                        need_ledger::Lane::Control,
+                        outcome.file_failed(&header.relative_path),
+                    )?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
                 contained_failures.merge_failures(&outcome);
@@ -4381,6 +4428,31 @@ async fn destination_session_inner(
                     }
                 }
             }
+            Some(Frame::FileSkipped(skipped)) => {
+                // Contract v7 (SOURCE_SIDE_CONTAINMENT D-A): the SOURCE
+                // will not deliver this granted file. Valid only on the
+                // carrier the payloads ride, after ManifestComplete, and
+                // only for a need still Granted — the ledger words any
+                // other state as the violation it is. The failure goes
+                // through the one chokepoint every contained failure uses.
+                if data_plane_recv.is_some() {
+                    return Err(violation(format!(
+                        "skip for '{}' on the control lane while a TCP data plane is active",
+                        skipped.relative_path
+                    )));
+                }
+                if !manifest_complete {
+                    return Err(violation(format!(
+                        "skip for '{}' before ManifestComplete",
+                        skipped.relative_path
+                    )));
+                }
+                ledger
+                    .lock()
+                    .expect("need ledger lock poisoned")
+                    .skip(&skipped.relative_path)?;
+                contained_failures.record_failure(skipped.relative_path, skipped.reason);
+            }
             Some(Frame::Block(block)) => {
                 // otp-7a: a resume block record opens with its first
                 // BlockTransfer (no begin frame). Claim the need and run
@@ -4390,8 +4462,8 @@ async fn destination_session_inner(
                     resume_enabled,
                     data_plane_recv.is_some(),
                     manifest_complete,
-                    &resume_headers,
-                    &outstanding,
+                    &ledger,
+                    true,
                 )?;
                 let outcome =
                     receive_block_record(transport, sink.as_ref(), &header, block).await?;
@@ -4400,9 +4472,14 @@ async fn destination_session_inner(
                 contained_failures.merge_failures(&outcome);
                 // The whole block record (patch bytes + completion) ran
                 // to its completion frame — one resumed file done, unless
-                // the sink contained it as a per-file failure: that is
-                // neither a resumed file nor a completion.
+                // the sink contained it as a per-file failure or the
+                // source closed it failed: that is neither a resumed file
+                // nor a completion.
                 let resumed = !outcome.file_failed(&header.relative_path);
+                ledger
+                    .lock()
+                    .expect("need ledger lock poisoned")
+                    .settle_resume(&header.relative_path, need_ledger::Lane::Control, !resumed)?;
                 if resumed {
                     files_resumed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -4423,14 +4500,27 @@ async fn destination_session_inner(
                     resume_enabled,
                     data_plane_recv.is_some(),
                     manifest_complete,
-                    &resume_headers,
-                    &outstanding,
+                    &ledger,
+                    false,
                 )?;
-                let outcome = finish_block_record(sink.as_ref(), &header, &complete).await?;
+                let outcome = if complete.ok {
+                    finish_block_record(sink.as_ref(), &header, &complete).await?
+                } else {
+                    // Contract v7: a failed close leaves the partial
+                    // unstamped and reports the file.
+                    crate::remote::transfer::SinkOutcome::failed(
+                        header.relative_path.clone(),
+                        complete.reason.clone(),
+                    )
+                };
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
                 contained_failures.merge_failures(&outcome);
                 let resumed = !outcome.file_failed(&header.relative_path);
+                ledger
+                    .lock()
+                    .expect("need ledger lock poisoned")
+                    .settle_resume(&header.relative_path, need_ledger::Lane::Control, !resumed)?;
                 if resumed {
                     files_resumed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -4456,34 +4546,20 @@ async fn destination_session_inner(
                 if !manifest_complete {
                     return Err(violation("tar shard record before ManifestComplete".into()));
                 }
-                // Same rule as file records (review F3): a resume-flagged
-                // grant may not be satisfied through a tar shard.
+                // Contract v7: every member must be an ordinary Granted need
+                // (a resume-flagged grant may not be satisfied through a
+                // tar shard — review F3) and match its retained manifest
+                // header. Checked under one ledger lock; the members
+                // settle after the record is written, from its outcome.
                 {
-                    let held = resume_headers.lock().expect("resume-headers lock poisoned");
-                    for h in &shard.files {
-                        if held.contains_key(&h.relative_path) {
-                            return Err(violation(format!(
-                                "tar shard entry for resume-flagged '{}' — the contract \
-                                 requires its block record",
-                                h.relative_path
-                            )));
-                        }
-                    }
-                }
-                {
-                    let retained = granted_headers
-                        .lock()
-                        .expect("granted-headers lock poisoned");
+                    let wait_started = small_file_probe.as_ref().map(|p| p.start());
+                    let ledger = ledger.lock().expect("need ledger lock poisoned");
+                    let hold_started = small_file_probe.as_ref().map(|p| p.start());
+                    ledger.check_shard_members(&shard.files)?;
                     for header in &shard.files {
-                        let manifest = retained.get(&header.relative_path).ok_or_else(|| {
-                            violation_for(
-                                &header.relative_path,
-                                format!(
-                                    "tar shard entry '{}' has no retained manifest grant",
-                                    header.relative_path
-                                ),
-                            )
-                        })?;
+                        let Some((manifest, _)) = ledger.granted(&header.relative_path) else {
+                            unreachable!("check_shard_members verified every member is granted")
+                        };
                         crate::windows_metadata::validate_payload_against_manifest(
                             header.windows_metadata.as_ref(),
                             manifest.windows_metadata.as_ref(),
@@ -4510,51 +4586,21 @@ async fn destination_session_inner(
                             ));
                         }
                     }
-                }
-                if let Some(probe) = &small_file_probe {
-                    let wait_started = probe.start();
-                    let mut out = outstanding.lock().expect("outstanding-needs lock poisoned");
-                    let wait = wait_started.elapsed();
-                    let hold_started = probe.start();
-                    let mut removed = 0usize;
-                    for h in &shard.files {
-                        if !out.remove(&h.relative_path) {
-                            return Err(violation(format!(
-                                "tar shard entry '{}' which is not on the need list",
-                                h.relative_path
-                            )));
-                        }
-                        removed += 1;
-                    }
-                    drop(out);
-                    let hold = hold_started.elapsed();
-                    probe.note_claim(
-                        SmallFileCarrier::InStream,
-                        shard.files.len(),
-                        1,
-                        removed,
-                        wait,
-                        hold,
-                    );
-                } else {
-                    let mut out = outstanding.lock().expect("outstanding-needs lock poisoned");
-                    for h in &shard.files {
-                        if !out.remove(&h.relative_path) {
-                            return Err(violation(format!(
-                                "tar shard entry '{}' which is not on the need list",
-                                h.relative_path
-                            )));
-                        }
+                    drop(ledger);
+                    if let (Some(probe), Some(wait_started), Some(hold_started)) =
+                        (&small_file_probe, wait_started, hold_started)
+                    {
+                        probe.note_claim(
+                            SmallFileCarrier::InStream,
+                            shard.files.len(),
+                            1,
+                            shard.files.len(),
+                            hold_started.duration_since(wait_started),
+                            hold_started.elapsed(),
+                        );
                     }
                 }
-                {
-                    let mut retained = granted_headers
-                        .lock()
-                        .expect("granted-headers lock poisoned");
-                    for header in &shard.files {
-                        retained.remove(&header.relative_path);
-                    }
-                }
+                let shard_members = shard.files.clone();
                 // Capture member paths for the per-file progress lane
                 // before the record consumes the shard (the data-plane
                 // receive does the same); skip the allocation when no one
@@ -4569,6 +4615,10 @@ async fn destination_session_inner(
                 let outcome =
                     receive_tar_record(transport, sink.as_ref(), shard, small_file_probe.as_ref())
                         .await?;
+                ledger
+                    .lock()
+                    .expect("need ledger lock poisoned")
+                    .settle_shard_members(&shard_members, |path| outcome.file_failed(path));
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
                 contained_failures.merge_failures(&outcome);
@@ -4775,10 +4825,10 @@ async fn destination_session_inner(
                     }
                     None => (true, None),
                 };
-                let unfulfilled = outstanding
+                let unfulfilled = ledger
                     .lock()
-                    .expect("outstanding-needs lock poisoned")
-                    .len();
+                    .expect("need ledger lock poisoned")
+                    .open_count();
                 if unfulfilled != 0 {
                     return Err(violation(format!(
                         "SourceDone with {unfulfilled} needed file(s) never delivered"
@@ -4791,10 +4841,10 @@ async fn destination_session_inner(
                 // invariant directly rather than infer it. The data
                 // plane's finish() above drained every receive worker,
                 // so all socket-side claims have landed.
-                let unresumed = resume_headers
+                let unresumed = ledger
                     .lock()
-                    .expect("resume-headers lock poisoned")
-                    .len();
+                    .expect("need ledger lock poisoned")
+                    .open_resume_count();
                 if unresumed != 0 {
                     return Err(violation(format!(
                         "SourceDone with {unresumed} resume grant(s) never completed by a block record"
@@ -5169,18 +5219,12 @@ async fn diff_chunk_and_send_needs(
     compare_opts: &CompareOptions,
     resume_enabled: bool,
     resume_block_size: usize,
-    // Headers of resume-granted needs, retained for record finalization
-    // (shared with the data-plane receive, otp-7b).
-    resume_headers: &data_plane::ResumeHeaders,
-    // Ever-granted DEDUP set (control-loop-local, insert-only): a path
-    // the source manifests twice is granted at most once, and because it
-    // is never removed, a concurrent data-plane claim can't re-open the
-    // grant (fix-review F1).
-    granted: &mut HashSet<String>,
-    // Not-yet-delivered COMPLETION set (shared with the receive).
-    outstanding: &data_plane::OutstandingNeeds,
-    // Retained manifest descriptors for ordinary payload validation.
-    granted_headers: &data_plane::GrantedHeaders,
+    // Contract v7: the one ledger every grant enters (shared with the
+    // data-plane receive). `grant` dedups — a path the source manifests
+    // twice is granted at most once, and nothing is ever removed, so a
+    // concurrent socket-side lookup can never re-open a grant
+    // (fix-review F1 posture, kept).
+    ledger: &need_ledger::SharedNeedLedger,
     needed_paths: &mut Vec<String>,
     // otp-10b-2: w6-1 denominator — each NeedBatch sent reports a
     // ManifestBatch (files this DESTINATION requested), mirroring what
@@ -5218,35 +5262,27 @@ async fn diff_chunk_and_send_needs(
             .map(|(header, resume_eligible)| (header, resume_enabled && resume_eligible))
             .collect();
 
-    // Dedup on the ever-granted set (no lock — control-loop-local), then
-    // insert the freshly granted paths into the shared `outstanding`
-    // completion set BEFORE the NeedBatch goes out. The source can only
-    // send a payload after receiving its need, so insert-before-send
-    // orders the data-plane receive's `claim` strictly after this insert.
-    let fresh: Vec<(FileHeader, bool)> = needed
-        .into_iter()
-        .filter(|(header, _)| granted.insert(header.relative_path.clone()))
-        .collect();
-    let entries: Vec<NeedEntry> = {
-        let mut retained = granted_headers
-            .lock()
-            .expect("granted-headers lock poisoned");
-        let mut out = outstanding.lock().expect("outstanding-needs lock poisoned");
-        fresh
-            .iter()
-            .map(|(header, resume)| {
-                needed_paths.push(header.relative_path.clone());
-                out.insert(header.relative_path.clone());
-                if !*resume {
-                    retained.insert(header.relative_path.clone(), header.clone());
-                }
-                NeedEntry {
-                    relative_path: header.relative_path.clone(),
-                    resume: *resume,
-                }
-            })
+    // Grant into the shared ledger BEFORE the NeedBatch goes out (dedup
+    // is the ledger's). The source can only send a payload after
+    // receiving its need, so grant-before-send orders the data-plane
+    // receive's lookup strictly after the grant exists.
+    let fresh: Vec<(FileHeader, bool)> = {
+        let mut ledger = ledger.lock().expect("need ledger lock poisoned");
+        needed
+            .into_iter()
+            .filter(|(header, resume)| ledger.grant(header.clone(), *resume))
             .collect()
     };
+    let entries: Vec<NeedEntry> = fresh
+        .iter()
+        .map(|(header, resume)| {
+            needed_paths.push(header.relative_path.clone());
+            NeedEntry {
+                relative_path: header.relative_path.clone(),
+                resume: *resume,
+            }
+        })
+        .collect();
     if entries.is_empty() {
         return Ok(());
     }
@@ -5303,15 +5339,10 @@ async fn diff_chunk_and_send_needs(
             resume_block_size,
         )
         .await?;
-        // Retain the grant BEFORE the hash list goes out (otp-7b): the
-        // data-plane receive validates arriving block records against
-        // this map on another task, so insert-before-send is what
-        // orders its lookup strictly after the grant exists — the same
-        // rule `outstanding` follows above.
-        resume_headers
-            .lock()
-            .expect("resume-headers lock poisoned")
-            .insert(header.relative_path.clone(), header.clone());
+        // The resume grant was retained in the ledger with its
+        // NeedBatch above (otp-7b ordering: the data-plane receive
+        // validates arriving block records against it on another task,
+        // and the source holds the need until this list arrives).
         transport
             .send(frame(Frame::BlockHashes(BlockHashList {
                 relative_path: header.relative_path.clone(),
@@ -5861,8 +5892,12 @@ fn claim_resume_record(
     resume_enabled: bool,
     data_plane_active: bool,
     manifest_complete: bool,
-    resume_headers: &data_plane::ResumeHeaders,
-    outstanding: &data_plane::OutstandingNeeds,
+    ledger: &need_ledger::SharedNeedLedger,
+    // `true` for the record's first `BlockTransfer` (Granted → Active on
+    // the control lane), `false` for a `BlockTransferComplete` arriving
+    // with no blocks before it (the zero-block record, contract v7:
+    // accepted straight from Granted).
+    first_block: bool,
 ) -> Result<FileHeader> {
     if !resume_enabled {
         return Err(violation_for(
@@ -5884,29 +5919,12 @@ fn claim_resume_record(
             format!("block record for '{relative_path}' before ManifestComplete"),
         ));
     }
-    let header = resume_headers
-        .lock()
-        .expect("resume-headers lock poisoned")
-        .remove(relative_path)
-        .ok_or_else(|| {
-            violation_for(
-                relative_path,
-                format!(
-                    "block record for '{relative_path}' which was not granted a resume-flagged need"
-                ),
-            )
-        })?;
-    if !outstanding
-        .lock()
-        .expect("outstanding-needs lock poisoned")
-        .remove(relative_path)
-    {
-        return Err(violation_for(
-            relative_path,
-            format!("block record for '{relative_path}' which is not on the need list"),
-        ));
+    let mut ledger = ledger.lock().expect("need ledger lock poisoned");
+    if first_block {
+        ledger.activate_resume(relative_path, need_ledger::Lane::Control)
+    } else {
+        ledger.resume_completing(relative_path, need_ledger::Lane::Control)
     }
-    Ok(header)
 }
 
 /// otp-7a: receive one strictly-serialized resume block record whose
@@ -5978,6 +5996,16 @@ async fn receive_block_record(
             Some(Frame::BlockComplete(complete))
                 if complete.relative_path == header.relative_path =>
             {
+                if !complete.ok {
+                    // Contract v7: the source closed the record failed —
+                    // the partial stays unstamped (D-2026-07-09-1's
+                    // re-run resumes it) and the file is reported.
+                    record.merge(&crate::remote::transfer::SinkOutcome::failed(
+                        header.relative_path.clone(),
+                        complete.reason.clone(),
+                    ));
+                    return Ok(record);
+                }
                 let outcome = finish_block_record(sink, header, &complete).await?;
                 record.merge(&outcome);
                 return Ok(record);
@@ -6050,18 +6078,26 @@ async fn finish_block_record(
 
 /// Receive one strictly-serialized file record (`file_begin` already
 /// consumed) and stream its bytes into the sink through a bounded
-/// in-memory pipe — record completion is exactly `header.size`
-/// cumulative bytes (contract §Transport selection).
+/// in-memory pipe. Contract v7: the record ends with the source's
+/// `FileEnd` — `ok` requires exactly `header.size` cumulative bytes and
+/// commits the sink's writer; `!ok` is accepted at any byte count and
+/// aborts it (the partial is discarded, the file reported failed with
+/// the source's reason). A record is never inferred complete from a
+/// byte count alone.
 async fn receive_file_record(
     transport: &mut FrameTransport,
     sink: &dyn TransferSink,
     header: &FileHeader,
 ) -> Result<crate::remote::transfer::SinkOutcome> {
+    let mut writer = sink
+        .begin_record(header)
+        .await
+        .map_err(|e| tag_path(e, &header.relative_path))?;
     let (mut pipe_wr, mut pipe_rd) = tokio::io::duplex(FILE_RECORD_PIPE_BYTES);
-    let write = sink.write_file_stream(header, &mut pipe_rd);
+    let write = writer.write_from(&mut pipe_rd);
     let feed = async {
         let mut remaining = header.size;
-        while remaining > 0 {
+        loop {
             // review 7b-2 G3: a transport break inside the record names
             // the file the record already identified.
             let received = match transport
@@ -6096,6 +6132,19 @@ async fn receive_file_record(
                     pipe_wr.write_all(&data.content).await?;
                     remaining -= len;
                 }
+                Some(Frame::FileEnd(end)) => {
+                    if end.ok && remaining != 0 {
+                        return Err(violation_for(
+                            &header.relative_path,
+                            format!(
+                                "file record '{}' ended ok with {} byte(s) still promised",
+                                header.relative_path, remaining
+                            ),
+                        ));
+                    }
+                    pipe_wr.shutdown().await?;
+                    return Ok(end);
+                }
                 Some(Frame::Error(err)) => {
                     // A mid-record abort (plan D4): the peer says why
                     // before closing — surface ITS fault (a CANCELLED
@@ -6118,11 +6167,15 @@ async fn receive_file_record(
                 }
             }
         }
-        pipe_wr.shutdown().await?;
-        Ok(())
     };
-    let (outcome, ()) =
+    let (_written, end) =
         tokio::try_join!(write, feed).map_err(|e| tag_path(e, &header.relative_path))?;
+    let outcome = if end.ok {
+        writer.commit().await
+    } else {
+        writer.abort(&end.reason).await
+    }
+    .map_err(|e| tag_path(e, &header.relative_path))?;
     Ok(outcome)
 }
 
@@ -6275,10 +6328,7 @@ mod tests {
                 .await
         }
 
-        async fn open_file(
-            &self,
-            header: &FileHeader,
-        ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
             self.inner.open_file(header).await
         }
 
@@ -6467,6 +6517,7 @@ mod tests {
                 file_attributes: 0x20,
                 named_streams: Vec::new(),
             }),
+            raw_relative_path: None,
         };
 
         let error = destination_needs(
@@ -6876,10 +6927,7 @@ mod tests {
                 .await
         }
 
-        async fn open_file(
-            &self,
-            header: &FileHeader,
-        ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
             self.inner.open_file(header).await
         }
 
@@ -6936,10 +6984,7 @@ mod tests {
                 .await
         }
 
-        async fn open_file(
-            &self,
-            header: &FileHeader,
-        ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
             self.inner.open_file(header).await
         }
 
@@ -6983,10 +7028,7 @@ mod tests {
                 .await
         }
 
-        async fn open_file(
-            &self,
-            header: &FileHeader,
-        ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
             self.inner.open_file(header).await
         }
 
@@ -8834,6 +8876,7 @@ mod tests {
             permissions: 0o644,
             checksum: Vec::new(),
             windows_metadata: None,
+            raw_relative_path: None,
         }
     }
 

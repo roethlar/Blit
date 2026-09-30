@@ -18,7 +18,7 @@ use tokio::io::AsyncReadExt;
 use crate::generated::FileHeader;
 
 use super::faulted_path::FaultedPath;
-use super::source::TransferSource;
+use super::source::{OpenedSourceFile, TransferSource};
 
 /// One step of the resume block diff.
 #[derive(Debug)]
@@ -47,7 +47,7 @@ pub enum ResumeDiffEvent<'a> {
 /// aborts exactly as a whole-file record does — never pad, never
 /// silently truncate.
 pub struct ResumeBlockDiff {
-    reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+    reader: OpenedSourceFile,
     relative_path: String,
     size: u64,
     block_size: usize,

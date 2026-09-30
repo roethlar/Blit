@@ -27,7 +27,6 @@
 //! connection initiator dials and the responder accepts). Workload shape
 //! selects payload strategy, never a worker target.
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -66,35 +65,16 @@ use crate::remote::transfer::{
     StreamProbeRegistry, SUB_TOKEN_LEN,
 };
 
+use super::need_ledger::{Lane, NeedLedger, SharedNeedLedger};
 use super::{SessionFault, SourceInstruments};
-
-/// The set of granted-but-not-yet-received needs, shared between the
-/// destination's control loop (which inserts each path before sending
-/// its `NeedBatch`) and the data-plane receive (which claims each path
-/// as its payload lands). Completion is an empty set — the same signal
-/// the in-stream carrier uses via its inline `outstanding.remove`.
-pub(super) type OutstandingNeeds = Arc<StdMutex<HashSet<String>>>;
-
-/// Manifest headers for ordinary (non-resume) granted needs. Payload metadata
-/// is validated against this retained descriptor before the need is claimed.
-pub(super) type GrantedHeaders = Arc<StdMutex<HashMap<String, FileHeader>>>;
-
-/// Headers of resume-granted needs (otp-7a/7b), keyed by relative path
-/// and retained until the grant's block record completes. Shared
-/// between the destination's control loop (which inserts each header
-/// before sending that file's `BlockHashList`, and claims it inline on
-/// the in-stream carrier) and the data-plane receive (which validates
-/// and claims it as block records land on the sockets) — the same
-/// sharing shape as [`OutstandingNeeds`].
-pub(super) type ResumeHeaders = Arc<StdMutex<HashMap<String, FileHeader>>>;
+use crate::remote::transfer::sink::RecordWriter;
 
 /// otp-7b: the resume half of the data-plane receive contract — present
-/// only when the session negotiated resume. `headers` is the shared
-/// grant map above; `resumed` is the destination's `files_resumed`
-/// counter, incremented here because the control loop never sees
-/// data-plane block records.
+/// only when the session negotiated resume. The grants themselves live
+/// in the shared [`NeedLedger`] (contract v7); `resumed` is the
+/// destination's `files_resumed` counter, incremented here because the
+/// control loop never sees data-plane block records.
 pub(super) struct ResumeRecv {
-    pub(super) headers: ResumeHeaders,
     pub(super) resumed: Arc<AtomicU64>,
 }
 
@@ -575,7 +555,11 @@ fn spawn_receive(
             },
         );
     }
-    let sink = Arc::clone(sink);
+    // Contract v7: each inbound connection is its own ledger lane, so
+    // the need-list sink hands out a view bound to this socket.
+    let sink = sink
+        .for_lane(epoch, socket_id)
+        .unwrap_or_else(|| Arc::clone(sink));
     // Construct the sentinel before spawning. A JoinSet task can be aborted
     // before its first poll; keeping the sentinel in the future's captured
     // state makes that path observable too.
@@ -1921,64 +1905,67 @@ impl SourceDataPlane {
 // Need-list enforcement for the data-plane receive
 // ---------------------------------------------------------------------------
 
-/// Sink decorator that enforces the session's need-list contract on the
-/// data-plane receive, giving it the SAME strictness the in-stream
-/// carrier applies inline in the control loop (`outstanding.remove`).
-/// `execute_receive_pipeline` writes socket-provided paths directly, so
-/// without this a peer could substitute an off-need-list path for a
-/// needed one (count-preserving), duplicate one, or send resume block
-/// records the session never negotiated (review otp-4b-1 F1). Every
-/// written path must be a granted, not-yet-received need. Resume
-/// sessions (otp-7b) additionally validate + claim block records
-/// against the shared [`ResumeHeaders`] grant map — with the identical
-/// strictness the in-stream `claim_resume_record` applies — and count
-/// completions into the shared resumed counter; in a non-resume session
-/// block records are rejected outright. The shared [`OutstandingNeeds`]
-/// set makes completion `is_empty()` for both carriers.
+/// The data-plane receive's need-list guard (review otp-4b-1 F1): every
+/// record that lands on a socket is checked against the shared
+/// [`NeedLedger`] with the identical strictness the in-stream control
+/// loop applies inline, so the sockets can never deliver files the
+/// session never granted, deliver one twice, or close a record that was
+/// opened on another socket (contract v7: one [`Lane`] per inbound
+/// connection). Resume sessions (otp-7b) validate + claim block records
+/// against the same ledger and count completions into the shared
+/// resumed counter; in a non-resume session block records are rejected
+/// outright.
 pub(super) struct NeedListSink {
     inner: Arc<dyn TransferSink>,
-    outstanding: OutstandingNeeds,
-    granted_headers: GrantedHeaders,
+    ledger: SharedNeedLedger,
     small_file_probe: Option<BoundSmallFileProbe>,
-    /// `Some` iff the session negotiated resume (otp-7b): the shared
-    /// grant map + resumed counter block records are validated and
-    /// claimed against. `None` ⇒ any block record is a violation.
+    /// `Some` iff the session negotiated resume (otp-7b). `None` ⇒ any
+    /// block record is a violation.
     resume: Option<ResumeRecv>,
+    /// The inbound connection this view serves. The base sink is bound
+    /// to epoch 0 / socket 0; [`TransferSink::for_lane`] produces the
+    /// view each receive worker actually drives.
+    lane: Lane,
 }
 
 impl NeedListSink {
     pub(super) fn new(
         inner: Arc<dyn TransferSink>,
-        outstanding: OutstandingNeeds,
-        granted_headers: GrantedHeaders,
+        ledger: SharedNeedLedger,
         resume: Option<ResumeRecv>,
         small_file_probe: Option<BoundSmallFileProbe>,
     ) -> Self {
         Self {
             inner,
-            outstanding,
-            granted_headers,
+            ledger,
             resume,
             small_file_probe,
+            lane: Lane::DataPlane {
+                epoch: 0,
+                socket_id: 0,
+            },
         }
     }
 
-    fn validate_and_claim_header(&self, payload: &FileHeader) -> Result<()> {
-        let manifest = self
-            .granted_headers
-            .lock()
-            .expect("granted-headers lock poisoned")
-            .get(&payload.relative_path)
-            .cloned()
-            .ok_or_else(|| {
-                eyre::Report::new(
-                    SessionFault::protocol_violation(format!(
-                        "data-plane payload for '{}' has no retained manifest grant",
-                        payload.relative_path
-                    ))
-                    .with_path(payload.relative_path.as_str()),
-                )
-            })?;
+    fn with_lane(&self, epoch: u32, socket_id: u32) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            ledger: Arc::clone(&self.ledger),
+            resume: self.resume.as_ref().map(|r| ResumeRecv {
+                resumed: Arc::clone(&r.resumed),
+            }),
+            small_file_probe: self.small_file_probe.clone(),
+            lane: Lane::DataPlane { epoch, socket_id },
+        }
+    }
+
+    fn ledger(&self) -> std::sync::MutexGuard<'_, NeedLedger> {
+        self.ledger.lock().expect("need ledger lock poisoned")
+    }
+
+    /// Validate one payload header against its retained manifest grant
+    /// (metadata shape, size, mtime, permissions).
+    fn validate_against_grant(payload: &FileHeader, manifest: &FileHeader) -> Result<()> {
         crate::windows_metadata::validate_payload_against_manifest(
             payload.windows_metadata.as_ref(),
             manifest.windows_metadata.as_ref(),
@@ -2004,231 +1991,104 @@ impl NeedListSink {
                 .with_path(payload.relative_path.as_str()),
             ));
         }
-        self.granted_headers
-            .lock()
-            .expect("granted-headers lock poisoned")
-            .remove(&payload.relative_path);
-        self.claim(&payload.relative_path)
+        Ok(())
     }
 
-    fn validate_and_claim_shard_headers(&self, payloads: &[FileHeader]) -> Result<()> {
-        {
-            let manifests = self
-                .granted_headers
-                .lock()
-                .expect("granted-headers lock poisoned");
-            for payload in payloads {
-                let manifest = manifests.get(&payload.relative_path).ok_or_else(|| {
-                    eyre::Report::new(
-                        SessionFault::protocol_violation(format!(
-                            "data-plane tar member '{}' has no retained manifest grant",
-                            payload.relative_path
-                        ))
-                        .with_path(payload.relative_path.as_str()),
-                    )
-                })?;
-                crate::windows_metadata::validate_payload_against_manifest(
-                    payload.windows_metadata.as_ref(),
-                    manifest.windows_metadata.as_ref(),
-                )
-                .map_err(|error| {
-                    eyre::Report::new(
-                        SessionFault::protocol_violation(format!(
-                            "invalid Windows metadata for '{}': {error:#}",
-                            payload.relative_path
-                        ))
-                        .with_path(payload.relative_path.as_str()),
-                    )
-                })?;
-                if payload.size != manifest.size
-                    || payload.mtime_seconds != manifest.mtime_seconds
-                    || payload.permissions != manifest.permissions
-                {
-                    return Err(eyre::Report::new(
-                        SessionFault::protocol_violation(format!(
-                            "data-plane tar header for '{}' changed after the manifest",
-                            payload.relative_path
-                        ))
-                        .with_path(payload.relative_path.as_str()),
-                    ));
-                }
-            }
-        }
-        {
-            let mut manifests = self
-                .granted_headers
-                .lock()
-                .expect("granted-headers lock poisoned");
-            for payload in payloads {
-                manifests.remove(&payload.relative_path);
-            }
-        }
-        self.claim_shard(payloads)
-    }
-
-    /// Remove `path` from the outstanding set, or fault: a path that is
-    /// not present is either off the need list or a duplicate delivery.
-    fn claim(&self, path: &str) -> Result<()> {
-        let removed = if let Some(probe) = &self.small_file_probe {
-            let wait_started = probe.start();
-            let mut outstanding = self
-                .outstanding
-                .lock()
-                .expect("outstanding-needs lock poisoned");
-            let wait = wait_started.elapsed();
-            let hold_started = probe.start();
-            let removed = outstanding.remove(path);
-            drop(outstanding);
-            let hold = hold_started.elapsed();
-            probe.note_claim(
-                SmallFileCarrier::Tcp,
-                1,
-                1,
-                usize::from(removed),
-                wait,
-                hold,
-            );
-            removed
-        } else {
-            self.outstanding
-                .lock()
-                .expect("outstanding-needs lock poisoned")
-                .remove(path)
-        };
-        if removed {
-            Ok(())
-        } else {
-            Err(eyre::Report::new(
-                SessionFault::protocol_violation(format!(
-                    "data-plane payload for '{path}' which is not an outstanding need \
-                 (off the need list, or a duplicate delivery)"
-                ))
-                .with_path(path),
-            ))
-        }
-    }
-
-    /// Claim one tar shard while holding the outstanding-set mutex once.
-    /// This preserves the single-file claim's ordered failure behavior (an
-    /// invalid later member faults after earlier members were claimed) without
-    /// paying one lock/unlock pair per small file.
-    fn claim_shard(&self, headers: &[FileHeader]) -> Result<()> {
-        let rejected = if let Some(probe) = &self.small_file_probe {
-            let wait_started = probe.start();
-            let mut outstanding = self
-                .outstanding
-                .lock()
-                .expect("outstanding-needs lock poisoned");
-            let wait = wait_started.elapsed();
-            let hold_started = probe.start();
-            let mut rejected = None;
-            let mut removed = 0usize;
-            for header in headers {
-                if outstanding.remove(&header.relative_path) {
-                    removed += 1;
-                } else {
-                    rejected = Some(header.relative_path.clone());
-                    break;
-                }
-            }
-            drop(outstanding);
-            let hold = hold_started.elapsed();
-            probe.note_claim(SmallFileCarrier::Tcp, headers.len(), 1, removed, wait, hold);
-            rejected
-        } else {
-            let mut outstanding = self
-                .outstanding
-                .lock()
-                .expect("outstanding-needs lock poisoned");
-            let mut rejected = None;
-            for header in headers {
-                if !outstanding.remove(&header.relative_path) {
-                    rejected = Some(header.relative_path.clone());
-                    break;
-                }
-            }
-            rejected
-        };
-        match rejected {
-            None => Ok(()),
-            Some(path) => Err(eyre::Report::new(
-                SessionFault::protocol_violation(format!(
-                    "data-plane payload for '{path}' which is not an outstanding need \
-                     (off the need list, or a duplicate delivery)"
-                ))
-                .with_path(path),
-            )),
-        }
-    }
-
-    /// review otp-7a F3, data-plane parity: a resume-flagged grant may
-    /// be satisfied ONLY by its block record — a whole-file or tar-shard
-    /// delivery for it bypasses the hash choreography this end committed
-    /// to.
-    fn reject_resume_flagged(&self, path: &str) -> Result<()> {
-        if let Some(resume) = &self.resume {
-            if resume
-                .headers
-                .lock()
-                .expect("resume-headers lock poisoned")
-                .contains_key(path)
-            {
+    /// Validate a whole-file payload and move its need Granted → Active
+    /// on this lane.
+    fn activate_file(&self, payload: &FileHeader) -> Result<()> {
+        let (wait_started, hold_started, mut ledger) = self.lock_for_claim();
+        let manifest = match ledger.granted(&payload.relative_path) {
+            Some((manifest, false)) => manifest.clone(),
+            Some((_, true)) => {
                 return Err(eyre::Report::new(
                     SessionFault::protocol_violation(format!(
-                        "data-plane file payload for resume-flagged '{path}' — the \
-                         contract requires its block record"
+                        "data-plane file payload for resume-flagged '{}' — the contract \
+                         requires its block record",
+                        payload.relative_path
                     ))
-                    .with_path(path),
-                ));
+                    .with_path(payload.relative_path.as_str()),
+                ))
+            }
+            None => {
+                // Not Granted: let the ledger word it (announced twice,
+                // already delivered, never granted).
+                ledger.activate_file(&payload.relative_path, self.lane)?;
+                unreachable!("activate_file on a non-granted need is a violation")
+            }
+        };
+        Self::validate_against_grant(payload, &manifest)?;
+        ledger.activate_file(&payload.relative_path, self.lane)?;
+        drop(ledger);
+        self.note_claim(wait_started, hold_started, 1, 1);
+        Ok(())
+    }
+
+    /// Validate every shard member against its grant while holding the
+    /// ledger once; the members settle after the shard is written.
+    fn check_shard(&self, payloads: &[FileHeader]) -> Result<()> {
+        let (wait_started, hold_started, ledger) = self.lock_for_claim();
+        ledger.check_shard_members(payloads)?;
+        for payload in payloads {
+            if let Some((manifest, _)) = ledger.granted(&payload.relative_path) {
+                Self::validate_against_grant(payload, manifest)?;
             }
         }
+        drop(ledger);
+        self.note_claim(wait_started, hold_started, payloads.len(), payloads.len());
         Ok(())
+    }
+
+    fn lock_for_claim(
+        &self,
+    ) -> (
+        Option<std::time::Instant>,
+        Option<std::time::Instant>,
+        std::sync::MutexGuard<'_, NeedLedger>,
+    ) {
+        let wait_started = self.small_file_probe.as_ref().map(|p| p.start());
+        let ledger = self.ledger();
+        let hold_started = self.small_file_probe.as_ref().map(|p| p.start());
+        (wait_started, hold_started, ledger)
+    }
+
+    fn note_claim(
+        &self,
+        wait_started: Option<std::time::Instant>,
+        hold_started: Option<std::time::Instant>,
+        members: usize,
+        removed: usize,
+    ) {
+        if let (Some(probe), Some(wait_started), Some(hold_started)) =
+            (&self.small_file_probe, wait_started, hold_started)
+        {
+            let hold = hold_started.elapsed();
+            let wait = hold_started.duration_since(wait_started);
+            probe.note_claim(SmallFileCarrier::Tcp, members, 1, removed, wait, hold);
+        }
+    }
+
+    fn require_resume(&self) -> Result<&ResumeRecv> {
+        self.resume.as_ref().ok_or_else(|| {
+            eyre::Report::new(SessionFault::protocol_violation(
+                "resume block record on the data plane of a non-resume session",
+            ))
+        })
     }
 
     /// otp-7b: validate one mid-record `FileBlock` against its grant —
-    /// the path must hold a live resume grant, still be an outstanding
-    /// need (its completion has not claimed it), and the block must stay
-    /// inside the manifested size. The grant is NOT claimed here;
-    /// [`Self::claim_block_complete`] does that exactly once.
+    /// the path must hold a live resume grant on THIS lane (the first
+    /// block opens it) and the block must stay inside the manifested
+    /// size. The grant is closed only by its completion.
     fn check_block(&self, path: &str, offset: u64, len: u64) -> Result<()> {
-        let Some(resume) = &self.resume else {
-            return Err(eyre::Report::new(SessionFault::protocol_violation(
-                "resume block record on the data plane of a non-resume session",
-            )));
-        };
-        let size = {
-            let held = resume.headers.lock().expect("resume-headers lock poisoned");
-            match held.get(path) {
-                Some(header) => header.size,
-                None => {
-                    return Err(eyre::Report::new(
-                        SessionFault::protocol_violation(format!(
-                            "data-plane block record for '{path}' which was not granted \
-                             a resume-flagged need"
-                        ))
-                        .with_path(path),
-                    ))
-                }
-            }
-        };
-        if !self
-            .outstanding
-            .lock()
-            .expect("outstanding-needs lock poisoned")
-            .contains(path)
-        {
-            return Err(eyre::Report::new(
-                SessionFault::protocol_violation(format!(
-                    "data-plane block record for '{path}' which is not an outstanding need"
-                ))
-                .with_path(path),
-            ));
-        }
-        if offset.saturating_add(len) > size {
+        self.require_resume()?;
+        let header = self.ledger().activate_resume(path, self.lane)?;
+        if offset.saturating_add(len) > header.size {
             return Err(eyre::Report::new(
                 SessionFault::protocol_violation(format!(
                     "block record '{path}' overran its size: offset {offset} + {len} \
-                     byte(s) > {size}"
+                     byte(s) > {}",
+                    header.size
                 ))
                 .with_path(path),
             ));
@@ -2236,13 +2096,11 @@ impl NeedListSink {
         Ok(())
     }
 
-    /// otp-7b: claim one `FileBlockComplete` — remove the grant, verify
-    /// the completed size against the manifest promise, and claim the
-    /// outstanding need. Mirrors the in-stream `claim_resume_record` +
-    /// `finish_block_record` checks. The resumed COUNT happens in
-    /// `write_payload` only after the finalization write lands, matching
-    /// the in-stream ordering.
-    fn claim_block_complete(
+    /// otp-7b: validate one `FileBlockComplete` against the grant it
+    /// closes (straight from Granted for a zero-block record, or the
+    /// Active record on this lane) — size, mtime, permissions, metadata.
+    /// The grant settles after the finalization write, from its outcome.
+    fn check_block_complete(
         &self,
         path: &str,
         total_size: u64,
@@ -2250,26 +2108,8 @@ impl NeedListSink {
         permissions: u32,
         windows_metadata: Option<&crate::generated::WindowsFileMetadata>,
     ) -> Result<()> {
-        let Some(resume) = &self.resume else {
-            return Err(eyre::Report::new(SessionFault::protocol_violation(
-                "resume block record on the data plane of a non-resume session",
-            )));
-        };
-        let header = resume
-            .headers
-            .lock()
-            .expect("resume-headers lock poisoned")
-            .get(path)
-            .cloned()
-            .ok_or_else(|| {
-                eyre::Report::new(
-                    SessionFault::protocol_violation(format!(
-                        "data-plane block complete for '{path}' which was not granted \
-                         a resume-flagged need"
-                    ))
-                    .with_path(path),
-                )
-            })?;
+        self.require_resume()?;
+        let header = self.ledger().resume_completing(path, self.lane)?;
         if total_size != header.size {
             return Err(eyre::Report::new(
                 SessionFault::protocol_violation(format!(
@@ -2300,12 +2140,63 @@ impl NeedListSink {
                 .with_path(path),
             )
         })?;
-        resume
-            .headers
+        Ok(())
+    }
+}
+
+/// The receive-side [`RecordWriter`]: the inner sink's writer plus the
+/// ledger transition its terminator drives.
+struct LedgerRecordWriter<'a> {
+    inner: Box<dyn RecordWriter + 'a>,
+    ledger: SharedNeedLedger,
+    path: String,
+    lane: Lane,
+}
+
+#[async_trait]
+impl RecordWriter for LedgerRecordWriter<'_> {
+    async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.inner.write(bytes).await
+    }
+
+    async fn write_from(
+        &mut self,
+        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<u64> {
+        self.inner.write_from(reader).await
+    }
+
+    fn written(&self) -> u64 {
+        self.inner.written()
+    }
+
+    async fn commit(self: Box<Self>) -> Result<SinkOutcome> {
+        let outcome = self
+            .inner
+            .commit()
+            .await
+            .map_err(|e| super::tag_path(e, &self.path))?;
+        // Completed if the writer committed; Failed if it was discarding
+        // (a contained destination failure) — the ledger's final state
+        // follows the sink outcome.
+        self.ledger
             .lock()
-            .expect("resume-headers lock poisoned")
-            .remove(path);
-        self.claim(path)
+            .expect("need ledger lock poisoned")
+            .settle_file(&self.path, self.lane, outcome.file_failed(&self.path))?;
+        Ok(outcome)
+    }
+
+    async fn abort(self: Box<Self>, reason: &str) -> Result<SinkOutcome> {
+        let outcome = self
+            .inner
+            .abort(reason)
+            .await
+            .map_err(|e| super::tag_path(e, &self.path))?;
+        self.ledger
+            .lock()
+            .expect("need ledger lock poisoned")
+            .settle_file(&self.path, self.lane, true)?;
+        Ok(outcome)
     }
 }
 
@@ -2314,22 +2205,32 @@ impl TransferSink for NeedListSink {
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
         match &payload {
             PreparedPayload::File(header) => {
-                self.reject_resume_flagged(&header.relative_path)?;
-                self.validate_and_claim_header(header)?;
+                self.activate_file(header)?;
+                let path = header.relative_path.clone();
+                let outcome = self
+                    .inner
+                    .write_payload(payload)
+                    .await
+                    .map_err(|e| super::tag_path(e, &path))?;
+                self.ledger()
+                    .settle_file(&path, self.lane, outcome.file_failed(&path))?;
+                return Ok(outcome);
             }
             PreparedPayload::TarShard { headers, .. } => {
-                for header in headers {
-                    self.reject_resume_flagged(&header.relative_path)?;
-                }
-                self.validate_and_claim_shard_headers(headers)?;
+                self.check_shard(headers)?;
+                let members = headers.clone();
+                let outcome = self.inner.write_payload(payload).await?;
+                self.ledger()
+                    .settle_shard_members(&members, |p| outcome.file_failed(p));
+                return Ok(outcome);
             }
             // otp-7b: resume block records ride the data plane. A
-            // mid-record block validates against its live grant (claimed
-            // only at completion); the completion claims the grant, the
-            // outstanding need, and the resumed count — all against the
-            // same shared state the in-stream arms use inline. In a
-            // non-resume session both are violations, never a
-            // silently-applied patch.
+            // mid-record block validates against its live grant (opened
+            // on this lane by the first block); the completion closes the
+            // grant, from its finalization outcome, and counts the
+            // resumed file — all against the same ledger the in-stream
+            // arms use inline. In a non-resume session both are
+            // violations, never a silently-applied patch.
             PreparedPayload::FileBlock {
                 relative_path,
                 offset,
@@ -2344,7 +2245,7 @@ impl TransferSink for NeedListSink {
                 permissions,
                 windows_metadata,
             } => {
-                self.claim_block_complete(
+                self.check_block_complete(
                     relative_path,
                     *total_size,
                     *mtime_seconds,
@@ -2357,14 +2258,16 @@ impl TransferSink for NeedListSink {
                     .write_payload(payload)
                     .await
                     .map_err(|e| super::tag_path(e, &path))?;
-                // Count only after the finalization write landed —
-                // the same ordering the in-stream arms follow. A file the
-                // sink contained as a per-file failure never landed, so it
-                // is not a resumed file (D-2026-07-30-1).
-                if !outcome.file_failed(&path) {
+                // Settle and count only after the finalization write
+                // landed — the same ordering the in-stream arms follow. A
+                // file the sink contained as a per-file failure never
+                // landed, so it is not a resumed file (D-2026-07-30-1).
+                let failed = outcome.file_failed(&path);
+                self.ledger().settle_resume(&path, self.lane, failed)?;
+                if !failed {
                     self.resume
                         .as_ref()
-                        .expect("claim_block_complete verified resume is negotiated")
+                        .expect("check_block_complete verified resume is negotiated")
                         .resumed
                         .fetch_add(1, Ordering::Relaxed);
                 }
@@ -2380,32 +2283,51 @@ impl TransferSink for NeedListSink {
         }
         // Tag the inner write's failure with the file it concerned
         // (otp-7b-2) where the payload names exactly one file.
-        let tag: Option<String> = match &payload {
-            PreparedPayload::File(h) => Some(h.relative_path.clone()),
-            PreparedPayload::FileBlock { relative_path, .. } => Some(relative_path.clone()),
-            _ => None,
+        let path = match &payload {
+            PreparedPayload::FileBlock { relative_path, .. } => relative_path.clone(),
+            _ => unreachable!("every other shape returned above"),
         };
-        match tag {
-            Some(path) => self
-                .inner
-                .write_payload(payload)
-                .await
-                .map_err(|e| super::tag_path(e, &path)),
-            None => self.inner.write_payload(payload).await,
-        }
+        self.inner
+            .write_payload(payload)
+            .await
+            .map_err(|e| super::tag_path(e, &path))
     }
 
-    async fn write_file_stream(
-        &self,
-        header: &FileHeader,
-        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
-    ) -> Result<SinkOutcome> {
-        self.reject_resume_flagged(&header.relative_path)?;
-        self.validate_and_claim_header(header)?;
-        self.inner
-            .write_file_stream(header, reader)
+    /// Contract v7: open one whole-file record on this lane. The need
+    /// moves Granted → Active here; its terminator (through the returned
+    /// writer) settles it.
+    async fn begin_record<'a>(&'a self, header: &FileHeader) -> Result<Box<dyn RecordWriter + 'a>> {
+        self.activate_file(header)?;
+        let inner = self
+            .inner
+            .begin_record(header)
             .await
-            .map_err(|e| super::tag_path(e, &header.relative_path))
+            .map_err(|e| super::tag_path(e, &header.relative_path))?;
+        Ok(Box::new(LedgerRecordWriter {
+            inner,
+            ledger: Arc::clone(&self.ledger),
+            path: header.relative_path.clone(),
+            lane: self.lane,
+        }))
+    }
+
+    /// Contract v7: a SKIP record — Granted → Failed, or a violation.
+    async fn skip_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
+        self.ledger().skip(relative_path)?;
+        Ok(SinkOutcome::failed(relative_path, reason))
+    }
+
+    /// Contract v7: a failed BLOCK_COMPLETE — the resume grant (Granted,
+    /// or Active on this lane) → Failed; the partial stays unstamped.
+    async fn fail_resume_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
+        self.require_resume()?;
+        self.ledger()
+            .settle_resume(relative_path, self.lane, true)?;
+        Ok(SinkOutcome::failed(relative_path, reason))
+    }
+
+    fn for_lane(&self, epoch: u32, socket_id: u32) -> Option<Arc<dyn TransferSink>> {
+        Some(Arc::new(self.with_lane(epoch, socket_id)))
     }
 
     async fn finish(&self) -> Result<()> {
@@ -2618,28 +2540,21 @@ mod tests {
 
     /// review otp-4b-1 F1: the data-plane receive must enforce the same
     /// need-list contract the in-stream carrier does inline. A path not
-    /// on the outstanding set, a duplicate delivery, and a resume block
-    /// record (non-resume session) all fault; a granted path claims once.
+    /// granted, a duplicate delivery, and a resume block record
+    /// (non-resume session) all fault; a granted path claims once.
     #[tokio::test]
     async fn need_list_sink_enforces_membership_and_rejects_blocks() {
         use crate::remote::transfer::sink::NullSink;
 
-        let outstanding: OutstandingNeeds =
-            Arc::new(StdMutex::new(HashSet::from(["a.txt".to_string()])));
-        let granted_headers: GrantedHeaders = Arc::new(StdMutex::new(HashMap::from([(
-            "a.txt".to_string(),
+        let ledger: SharedNeedLedger = Arc::default();
+        ledger.lock().unwrap().grant(
             FileHeader {
                 relative_path: "a.txt".to_string(),
                 ..Default::default()
             },
-        )])));
-        let sink = NeedListSink::new(
-            Arc::new(NullSink::new()),
-            Arc::clone(&outstanding),
-            granted_headers,
-            None,
-            None,
+            false,
         );
+        let sink = NeedListSink::new(Arc::new(NullSink::new()), Arc::clone(&ledger), None, None);
 
         let file = |path: &str| {
             PreparedPayload::File(FileHeader {
@@ -2649,7 +2564,7 @@ mod tests {
         };
 
         // Metadata that was absent from the manifest is rejected before the
-        // need or retained header is consumed, so no sink can publish success.
+        // need is activated, so no sink can publish success.
         let err = sink
             .write_payload(PreparedPayload::File(FileHeader {
                 relative_path: "a.txt".to_string(),
@@ -2662,7 +2577,7 @@ mod tests {
             .await
             .expect_err("metadata mismatch must fault before claim");
         assert!(format!("{err:#}").contains("Windows metadata"));
-        assert!(outstanding.lock().expect("lock").contains("a.txt"));
+        assert_eq!(ledger.lock().unwrap().open_count(), 1, "still granted");
 
         // Off-need-list path faults with a SessionFault.
         let err = sink
@@ -2678,9 +2593,10 @@ mod tests {
         sink.write_payload(file("a.txt"))
             .await
             .expect("granted need writes");
-        assert!(
-            outstanding.lock().expect("lock").is_empty(),
-            "claimed need is removed from the outstanding set"
+        assert_eq!(
+            ledger.lock().unwrap().open_count(),
+            0,
+            "a delivered need is no longer open"
         );
         let _ = sink
             .write_payload(file("a.txt"))
@@ -2706,33 +2622,42 @@ mod tests {
     /// grant and the manifested size, completion claims exactly once
     /// and counts, ungranted paths and wrong sizes fault, and a
     /// whole-file delivery for a resume-flagged grant is rejected.
+    /// Contract v7 adds: blocks and the completion must stay on the
+    /// socket that opened the record.
     #[tokio::test]
     async fn need_list_sink_enforces_the_resume_grant_contract() {
         use crate::remote::transfer::sink::NullSink;
 
-        let outstanding: OutstandingNeeds = Arc::new(StdMutex::new(HashSet::from([
-            "part.bin".to_string(),
-            "plain.txt".to_string(),
-        ])));
-        let headers: ResumeHeaders = Arc::new(StdMutex::new(HashMap::from([(
-            "part.bin".to_string(),
-            FileHeader {
-                relative_path: "part.bin".to_string(),
-                size: 100,
-                ..Default::default()
-            },
-        )])));
+        let ledger: SharedNeedLedger = Arc::default();
+        {
+            let mut l = ledger.lock().unwrap();
+            l.grant(
+                FileHeader {
+                    relative_path: "part.bin".to_string(),
+                    size: 100,
+                    ..Default::default()
+                },
+                true,
+            );
+            l.grant(
+                FileHeader {
+                    relative_path: "plain.txt".to_string(),
+                    ..Default::default()
+                },
+                false,
+            );
+        }
         let resumed = Arc::new(AtomicU64::new(0));
-        let sink = NeedListSink::new(
+        let base = NeedListSink::new(
             Arc::new(NullSink::new()),
-            Arc::clone(&outstanding),
-            GrantedHeaders::default(),
+            Arc::clone(&ledger),
             Some(ResumeRecv {
-                headers: Arc::clone(&headers),
                 resumed: Arc::clone(&resumed),
             }),
             None,
         );
+        let sink = base.with_lane(0, 0);
+        let other_socket = base.with_lane(0, 1);
 
         // A whole-file record for the resume-flagged grant bypasses the
         // hash choreography — rejected (review otp-7a F3 parity).
@@ -2764,7 +2689,7 @@ mod tests {
             .await
             .expect_err("block overrunning the manifest size must fault");
 
-        // In-bounds blocks pass and do NOT claim the need.
+        // In-bounds blocks pass and do NOT close the grant.
         sink.write_payload(PreparedPayload::FileBlock {
             relative_path: "part.bin".to_string(),
             offset: 0,
@@ -2772,11 +2697,35 @@ mod tests {
         })
         .await
         .expect("in-bounds block writes");
-        assert!(
-            outstanding.lock().expect("lock").contains("part.bin"),
-            "a mid-record block must not claim the outstanding need"
+        assert_eq!(
+            ledger.lock().unwrap().open_resume_count(),
+            1,
+            "a mid-record block must not close the resume grant"
         );
         assert_eq!(resumed.load(Ordering::Relaxed), 0);
+
+        // Contract v7 (A5): a block or completion for this record on
+        // another socket is a violation at the first misplaced record.
+        let cross = other_socket
+            .write_payload(PreparedPayload::FileBlock {
+                relative_path: "part.bin".to_string(),
+                offset: 50,
+                bytes: vec![0u8; 10],
+            })
+            .await
+            .expect_err("a block on another socket must fault");
+        assert!(format!("{cross:#}").contains("socket 0"), "{cross:#}");
+        let cross = other_socket
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "part.bin".to_string(),
+                total_size: 100,
+                mtime_seconds: 0,
+                permissions: 0,
+                windows_metadata: None,
+            })
+            .await
+            .expect_err("a completion on another socket must fault");
+        assert!(format!("{cross:#}").contains("socket 0"), "{cross:#}");
 
         // A completion at the wrong size faults.
         let _ = sink
@@ -2790,16 +2739,6 @@ mod tests {
             .await
             .expect_err("completion at the wrong size must fault");
 
-        // Replacing the same retained grant is harmless and keeps this setup
-        // explicit for the happy-path completion claim.
-        headers.lock().expect("lock").insert(
-            "part.bin".to_string(),
-            FileHeader {
-                relative_path: "part.bin".to_string(),
-                size: 100,
-                ..Default::default()
-            },
-        );
         sink.write_payload(PreparedPayload::FileBlockComplete {
             relative_path: "part.bin".to_string(),
             total_size: 100,
@@ -2809,13 +2748,10 @@ mod tests {
         })
         .await
         .expect("correct completion claims");
-        assert!(
-            !outstanding.lock().expect("lock").contains("part.bin"),
-            "completion claims the outstanding need"
-        );
-        assert!(
-            headers.lock().expect("lock").is_empty(),
-            "completion consumes the grant"
+        assert_eq!(
+            ledger.lock().unwrap().open_resume_count(),
+            0,
+            "completion closes the resume grant"
         );
         assert_eq!(resumed.load(Ordering::Relaxed), 1, "completion counts");
 
@@ -2830,5 +2766,75 @@ mod tests {
             })
             .await
             .expect_err("duplicate completion must fault");
+    }
+
+    /// Contract v7 (A5, A10): a zero-block resume closes straight from
+    /// its grant; a failed completion leaves the grant Failed and the
+    /// resumed count untouched; a skip is valid only for a granted need.
+    #[tokio::test]
+    async fn need_list_sink_zero_block_completion_skip_and_failed_completion() {
+        use crate::remote::transfer::sink::NullSink;
+
+        let ledger: SharedNeedLedger = Arc::default();
+        {
+            let mut l = ledger.lock().unwrap();
+            for (path, resume) in [("zero.bin", true), ("fail.bin", true), ("skip.txt", false)] {
+                l.grant(
+                    FileHeader {
+                        relative_path: path.to_string(),
+                        size: 8,
+                        ..Default::default()
+                    },
+                    resume,
+                );
+            }
+        }
+        let resumed = Arc::new(AtomicU64::new(0));
+        let sink = NeedListSink::new(
+            Arc::new(NullSink::new()),
+            Arc::clone(&ledger),
+            Some(ResumeRecv {
+                resumed: Arc::clone(&resumed),
+            }),
+            None,
+        )
+        .with_lane(0, 3);
+
+        sink.write_payload(PreparedPayload::FileBlockComplete {
+            relative_path: "zero.bin".to_string(),
+            total_size: 8,
+            mtime_seconds: 0,
+            permissions: 0,
+            windows_metadata: None,
+        })
+        .await
+        .expect("zero-block completion straight from the grant");
+        assert_eq!(resumed.load(Ordering::Relaxed), 1);
+
+        let outcome = sink
+            .fail_resume_record("fail.bin", "source: read error")
+            .await
+            .expect("a failed completion is contained");
+        assert_eq!(outcome.files_failed_total, 1);
+        assert_eq!(
+            resumed.load(Ordering::Relaxed),
+            1,
+            "a failed record is not resumed"
+        );
+
+        let outcome = sink
+            .skip_record("skip.txt", "source: cannot open")
+            .await
+            .expect("a skip for a granted need is contained");
+        assert!(outcome.file_failed("skip.txt"));
+        let _ = sink
+            .skip_record("skip.txt", "source: cannot open")
+            .await
+            .expect_err("a second skip is a violation");
+        let _ = sink
+            .skip_record("never.txt", "source: cannot open")
+            .await
+            .expect_err("a skip for an un-granted path is a violation");
+        assert_eq!(ledger.lock().unwrap().open_count(), 0);
     }
 }

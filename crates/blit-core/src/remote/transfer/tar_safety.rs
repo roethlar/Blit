@@ -313,6 +313,7 @@ mod tests {
             permissions: 0o644,
             checksum: vec![],
             windows_metadata: None,
+            raw_relative_path: None,
         }
     }
 

@@ -43,7 +43,7 @@ use blit_core::remote::transfer::session_client::{
     connect_transfer_client_with_trace, run_pull_session, run_push_session, PullSessionOptions,
     PushSessionOptions,
 };
-use blit_core::remote::transfer::source::FsTransferSource;
+use blit_core::remote::transfer::source::{FsTransferSource, OpenedSourceFile};
 use blit_core::remote::transfer::{
     SessionPhaseRole, TransferLifecycleEvent, TransferLifecycleOutcome, TransferLifecycleTrace,
 };
@@ -367,7 +367,7 @@ impl blit_core::remote::transfer::source::TransferSource for StuckAfterFirstChun
     async fn open_file(
         &self,
         header: &blit_core::generated::FileHeader,
-    ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+    ) -> eyre::Result<OpenedSourceFile> {
         let mut inner = self.inner.open_file(header).await?;
         // Small duplex buffer (< one chunk) so `write_all` of the chunk
         // only completes once the data-plane send pipeline has DRAINED it
@@ -390,7 +390,7 @@ impl blit_core::remote::transfer::source::TransferSource for StuckAfterFirstChun
             std::future::pending::<()>().await;
             drop(w);
         });
-        Ok(Box::new(r))
+        Ok(OpenedSourceFile::virtual_reader(Box::new(r), header.size))
     }
 
     fn root(&self) -> &Path {
@@ -1081,13 +1081,16 @@ impl blit_core::remote::transfer::source::TransferSource for TruncatedReadSource
     async fn open_file(
         &self,
         header: &blit_core::generated::FileHeader,
-    ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+    ) -> eyre::Result<OpenedSourceFile> {
         use tokio::io::AsyncReadExt;
-        let reader = self.inner.open_file(header).await?;
+        let opened = self.inner.open_file(header).await?;
         if header.relative_path == self.fail_path {
-            Ok(Box::new(reader.take(self.limit)))
+            Ok(OpenedSourceFile::virtual_reader(
+                Box::new(opened.into_reader().take(self.limit)),
+                header.size,
+            ))
         } else {
-            Ok(reader)
+            Ok(opened)
         }
     }
 

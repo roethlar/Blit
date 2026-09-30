@@ -181,14 +181,82 @@ pub trait TransferSource: Send + Sync {
         unreadable_paths: Arc<Mutex<Vec<String>>>,
     ) -> Result<Vec<FileHeader>>;
 
-    /// Opens a file for reading.
-    async fn open_file(
-        &self,
-        header: &FileHeader,
-    ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>>;
+    /// Opens a file for reading. The returned handle is the one the
+    /// bytes are read from AND the one every size check consults
+    /// (SOURCE_SIDE_CONTAINMENT D-A: a path re-stat could describe a
+    /// replacement inode; the handle cannot).
+    async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile>;
 
     /// Returns the root path of the source (if applicable).
     fn root(&self) -> &Path;
+}
+
+/// One opened source file (contract v7, SOURCE_SIDE_CONTAINMENT D-A):
+/// the reader the record's bytes come from, plus the same handle's
+/// length. Production sources return [`OpenedSourceFile::Fs`], which owns
+/// the descriptor/handle so the local copy cascade (ssc-4) can drive the
+/// platform fast paths on the opened file; test and fault-injecting
+/// sources return [`OpenedSourceFile::Virtual`] with the length they
+/// declare.
+pub enum OpenedSourceFile {
+    /// Owns the descriptor/handle; `len()` is `metadata()` on it.
+    Fs {
+        file: tokio::fs::File,
+        path: PathBuf,
+    },
+    /// Any reader with a declared length (tests, fault injection,
+    /// relays).
+    Virtual {
+        reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        len: u64,
+    },
+}
+
+impl OpenedSourceFile {
+    pub fn fs(file: tokio::fs::File, path: PathBuf) -> Self {
+        Self::Fs { file, path }
+    }
+
+    pub fn virtual_reader(reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>, len: u64) -> Self {
+        Self::Virtual { reader, len }
+    }
+
+    /// The file's current length, read from the opened handle itself.
+    pub async fn len(&mut self) -> std::io::Result<u64> {
+        match self {
+            Self::Fs { file, .. } => Ok(file.metadata().await?.len()),
+            Self::Virtual { len, .. } => Ok(*len),
+        }
+    }
+
+    /// The path the handle was opened by, when there is one.
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Fs { path, .. } => Some(path.as_path()),
+            Self::Virtual { .. } => None,
+        }
+    }
+
+    /// Give up the handle's identity and keep only the byte stream.
+    pub fn into_reader(self) -> Box<dyn tokio::io::AsyncRead + Unpin + Send> {
+        match self {
+            Self::Fs { file, .. } => Box::new(file),
+            Self::Virtual { reader, .. } => reader,
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for OpenedSourceFile {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Fs { file, .. } => std::pin::Pin::new(file).poll_read(cx, buf),
+            Self::Virtual { reader, .. } => std::pin::Pin::new(reader).poll_read(cx, buf),
+        }
+    }
 }
 
 pub struct FsTransferSource {
@@ -296,10 +364,7 @@ impl TransferSource for FsTransferSource {
         filter_readable_headers(&self.root, headers, &unreadable_paths).await
     }
 
-    async fn open_file(
-        &self,
-        header: &FileHeader,
-    ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+    async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
         // An empty relative_path means "the root itself" — used when the
         // enumeration root is a single file. Don't join, because
         // PathBuf::join with some Path representations can produce a
@@ -311,7 +376,7 @@ impl TransferSource for FsTransferSource {
             self.root.join(&header.relative_path)
         };
         let file = fs::File::open(&path).await?;
-        Ok(Box::new(file))
+        Ok(OpenedSourceFile::fs(file, path))
     }
 
     fn root(&self) -> &Path {
@@ -581,6 +646,7 @@ fn file_header_with_windows_metadata_policy(
             permissions,
             checksum: Vec::new(),
             windows_metadata: None,
+            raw_relative_path: None,
         });
     }
     file_header_with_windows_metadata(
@@ -621,6 +687,7 @@ fn file_header_with_windows_metadata(
         permissions,
         checksum: vec![],
         windows_metadata,
+        raw_relative_path: None,
     })
 }
 
@@ -732,10 +799,7 @@ impl TransferSource for WindowsMetadataDroppingSource {
             .await
     }
 
-    async fn open_file(
-        &self,
-        header: &FileHeader,
-    ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+    async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
         self.inner.open_file(header).await
     }
 
@@ -784,10 +848,7 @@ impl TransferSource for FilteredSource {
             .await
     }
 
-    async fn open_file(
-        &self,
-        header: &FileHeader,
-    ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+    async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
         self.inner.open_file(header).await
     }
 
@@ -884,10 +945,7 @@ impl TransferSource for ChecksummingSource {
             .await
     }
 
-    async fn open_file(
-        &self,
-        header: &FileHeader,
-    ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+    async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
         self.inner.open_file(header).await
     }
 
@@ -1339,10 +1397,7 @@ mod filtered_source_tests {
             Ok(h)
         }
 
-        async fn open_file(
-            &self,
-            _: &FileHeader,
-        ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        async fn open_file(&self, _: &FileHeader) -> Result<OpenedSourceFile> {
             unimplemented!()
         }
 
@@ -1359,6 +1414,7 @@ mod filtered_source_tests {
             permissions: 0,
             checksum: vec![],
             windows_metadata: None,
+            raw_relative_path: None,
         }
     }
 
@@ -1575,14 +1631,14 @@ mod checksumming_source_tests {
             Ok(h)
         }
 
-        async fn open_file(
-            &self,
-            header: &FileHeader,
-        ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
             if header.relative_path.starts_with("unhashable") {
                 bail!("permission denied (stub)");
             }
-            Ok(Box::new(std::io::Cursor::new(b"content".to_vec())))
+            Ok(OpenedSourceFile::virtual_reader(
+                Box::new(std::io::Cursor::new(b"content".to_vec())),
+                7,
+            ))
         }
 
         fn root(&self) -> &Path {
@@ -1598,6 +1654,7 @@ mod checksumming_source_tests {
             permissions: 0,
             checksum: vec![],
             windows_metadata: None,
+            raw_relative_path: None,
         }
     }
 

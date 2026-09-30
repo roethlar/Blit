@@ -1191,8 +1191,157 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::data_plane::{
     DATA_PLANE_RECORD_BLOCK, DATA_PLANE_RECORD_BLOCK_COMPLETE, DATA_PLANE_RECORD_END,
-    DATA_PLANE_RECORD_FILE, DATA_PLANE_RECORD_TAR_SHARD,
+    DATA_PLANE_RECORD_FILE, DATA_PLANE_RECORD_SKIP, DATA_PLANE_RECORD_TAR_SHARD,
+    MAX_FILE_CHUNK_BYTES, MAX_WIRE_REASON_BYTES, RECORD_STATUS_FAILED, RECORD_STATUS_OK,
 };
+
+/// The body of one contract-v7 FILE record as an `AsyncRead`: a run of
+/// `[len:4][bytes]` chunks closed by a zero length. Reads yield the chunk
+/// bytes and end (0) at the sentinel, so the sink's own overlapped copy
+/// consumes the body without knowing its length in advance; the caller
+/// then reads the status byte that follows and judges the byte count
+/// against the header. A chunk length above [`MAX_FILE_CHUNK_BYTES`] is
+/// malformed framing and errors out like an unknown record tag would.
+struct ChunkedBody<'a, R: AsyncRead + Unpin> {
+    inner: &'a mut R,
+    /// Bytes left in the current chunk.
+    remaining: u32,
+    /// Bytes of the next length prefix already read.
+    prefix: [u8; 4],
+    prefix_filled: usize,
+    done: bool,
+}
+
+impl<'a, R: AsyncRead + Unpin> ChunkedBody<'a, R> {
+    fn new(inner: &'a mut R) -> Self {
+        Self {
+            inner,
+            remaining: 0,
+            prefix: [0; 4],
+            prefix_filled: 0,
+            done: false,
+        }
+    }
+
+    /// Whether the body's sentinel has been consumed.
+    fn finished(&self) -> bool {
+        self.done
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ChunkedBody<'_, R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::task::Poll;
+        loop {
+            if self.done {
+                return Poll::Ready(Ok(()));
+            }
+            if self.remaining == 0 {
+                // Read (the rest of) the next length prefix.
+                let filled = self.prefix_filled;
+                let mut prefix = self.prefix;
+                let mut pb = tokio::io::ReadBuf::new(&mut prefix[filled..]);
+                match std::pin::Pin::new(&mut *self.inner).poll_read(cx, &mut pb) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Ok(())) => {
+                        let got = pb.filled().len();
+                        if got == 0 {
+                            return Poll::Ready(Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "socket closed inside a file record body",
+                            )));
+                        }
+                        self.prefix = prefix;
+                        self.prefix_filled = filled + got;
+                        if self.prefix_filled < 4 {
+                            continue;
+                        }
+                        self.prefix_filled = 0;
+                        let len = u32::from_be_bytes(self.prefix);
+                        if len == 0 {
+                            self.done = true;
+                            return Poll::Ready(Ok(()));
+                        }
+                        if len > MAX_FILE_CHUNK_BYTES {
+                            return Poll::Ready(Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!(
+                                    "file chunk length {len} exceeds max {MAX_FILE_CHUNK_BYTES} \
+                                     (rejecting malformed framing)"
+                                ),
+                            )));
+                        }
+                        self.remaining = len;
+                    }
+                }
+            }
+            // Read chunk bytes, at most `remaining`.
+            let want = (self.remaining as usize).min(buf.remaining());
+            if want == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let before = buf.filled().len();
+            let mut limited = buf.take(want);
+            match std::pin::Pin::new(&mut *self.inner).poll_read(cx, &mut limited) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(())) => {
+                    let got = limited.filled().len();
+                    if got == 0 {
+                        return Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "socket closed inside a file record chunk",
+                        )));
+                    }
+                    // SAFETY-free bookkeeping: `take` initialised these
+                    // bytes through the inner read.
+                    unsafe { buf.assume_init(before + got - before) };
+                    buf.set_filled(before + got);
+                    self.remaining -= got as u32;
+                    return Poll::Ready(Ok(()));
+                }
+            }
+        }
+    }
+}
+
+/// `[len:4][bytes]` bounded by [`MAX_WIRE_REASON_BYTES`].
+async fn read_reason<R: AsyncRead + Unpin>(socket: &mut R) -> Result<String> {
+    let len = read_u32(socket).await.context("reading reason length")? as usize;
+    if len > MAX_WIRE_REASON_BYTES {
+        bail!(
+            "wire reason length {} exceeds max {} (rejecting malformed record)",
+            len,
+            MAX_WIRE_REASON_BYTES
+        );
+    }
+    let mut buf = vec![0u8; len];
+    socket
+        .read_exact(&mut buf)
+        .await
+        .context("reading reason bytes")?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// The contract-v7 status that closes a FILE or BLOCK_COMPLETE record:
+/// `Ok(None)` for ok, `Ok(Some(reason))` for failed.
+async fn read_status<R: AsyncRead + Unpin>(socket: &mut R) -> Result<Option<String>> {
+    let mut status = [0u8; 1];
+    socket
+        .read_exact(&mut status)
+        .await
+        .context("reading record status")?;
+    match status[0] {
+        RECORD_STATUS_OK => Ok(None),
+        RECORD_STATUS_FAILED => Ok(Some(read_reason(socket).await?)),
+        other => bail!("unknown record status: 0x{:02X}", other),
+    }
+}
 
 /// Drive a `TransferSink` from a TCP wire stream.
 ///
@@ -1251,15 +1400,47 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                 header.mtime_seconds = mtime;
                 header.permissions = perms;
                 header.windows_metadata = windows_metadata;
-                // Use AsyncReadExt::take to give the sink exactly
-                // file_size bytes of the wire. tokio's Take is the
-                // canonical way to limit a borrowed AsyncRead.
-                use tokio::io::AsyncReadExt;
-                let mut reader = (&mut *socket).take(file_size);
-                let outcome = sink
-                    .write_file_stream(&header, &mut reader)
+                // Contract v7: the sink opens the record, the chunked
+                // body streams into it, and the status that follows the
+                // body decides commit or abort — a record is never
+                // inferred complete from a byte count alone.
+                let mut writer = sink
+                    .begin_record(&header)
                     .await
                     .with_context(|| format!("receiving {}", header.relative_path))?;
+                let mut body = ChunkedBody::new(&mut *socket);
+                let got = writer
+                    .write_from(&mut body)
+                    .await
+                    .with_context(|| format!("receiving {}", header.relative_path))?;
+                if !body.finished() {
+                    bail!(
+                        "file record '{}' body ended without its sentinel",
+                        header.relative_path
+                    );
+                }
+                let outcome = match read_status(&mut *socket).await? {
+                    None => {
+                        if got != file_size {
+                            // The writer's guard drops the partial.
+                            drop(writer);
+                            bail!(
+                                "file record '{}' ended ok at {} byte(s), header promised {}",
+                                header.relative_path,
+                                got,
+                                file_size
+                            );
+                        }
+                        writer
+                            .commit()
+                            .await
+                            .with_context(|| format!("receiving {}", header.relative_path))?
+                    }
+                    Some(reason) => writer
+                        .abort(&reason)
+                        .await
+                        .with_context(|| format!("receiving {}", header.relative_path))?,
+                };
                 if let Some(p) = progress {
                     p.report_payload(0, outcome.bytes_written);
                     // A per-file failure is not a completion.
@@ -1267,6 +1448,21 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                         p.report_file_complete(header.relative_path.clone());
                     }
                 }
+                total.merge(&outcome);
+            }
+            DATA_PLANE_RECORD_SKIP => {
+                // Contract v7: the SOURCE will not deliver this granted
+                // file. The sink moves the need to Failed (a need that is
+                // not Granted is a protocol violation there) and reports
+                // the file; nothing else about the record exists.
+                let path = read_string(socket).await?;
+                let reason = read_reason(socket)
+                    .await
+                    .map_err(|e| e.wrap_err(super::faulted_path::FaultedPath(path.clone())))?;
+                let outcome = sink
+                    .skip_record(&path, &reason)
+                    .await
+                    .with_context(|| format!("skipping {path}"))?;
                 total.merge(&outcome);
             }
             DATA_PLANE_RECORD_TAR_SHARD => {
@@ -1400,6 +1596,17 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                     .await
                     .context("reading block complete Windows metadata")
                     .map_err(tag)?;
+                // Contract v7: the record's status. A failed close leaves
+                // the partial unstamped and reports the file (the sink
+                // moves the resume grant to Failed).
+                if let Some(reason) = read_status(socket).await.map_err(tag)? {
+                    let outcome = sink
+                        .fail_resume_record(&path, &reason)
+                        .await
+                        .with_context(|| format!("failing resume record {path}"))?;
+                    total.merge(&outcome);
+                    continue;
+                }
                 let path_for_progress = progress.map(|_| path.clone());
                 let payload = PreparedPayload::FileBlockComplete {
                     relative_path: path,
@@ -1507,6 +1714,7 @@ async fn read_file_header<R: AsyncRead + Unpin>(socket: &mut R) -> Result<FileHe
         permissions: 0,
         checksum: vec![],
         windows_metadata: None,
+        raw_relative_path: None,
     })
 }
 
@@ -1561,6 +1769,7 @@ async fn read_tar_shard_with_header_budget<R: AsyncRead + Unpin>(
             permissions,
             checksum: vec![],
             windows_metadata,
+            raw_relative_path: None,
         });
     }
     let tar_size = read_u64(socket).await?;
@@ -1938,6 +2147,58 @@ mod tests {
                 v
             }),
             ("unknown record tag", vec![0xAB, DATA_PLANE_RECORD_END]),
+            // ---- contract v7 framing ----
+            ("file with a chunk longer than the bound", {
+                let mut v = vec![DATA_PLANE_RECORD_FILE];
+                v.extend_from_slice(&3u32.to_be_bytes());
+                v.extend_from_slice(b"abc");
+                v.extend_from_slice(&4u64.to_be_bytes());
+                v.extend_from_slice(&0i64.to_be_bytes());
+                v.extend_from_slice(&0o644u32.to_be_bytes());
+                v.push(0);
+                v.extend_from_slice(&u32::MAX.to_be_bytes()); // chunk len
+                v
+            }),
+            ("file with body but no status byte", {
+                let mut v = encode_file(b"abc", b"data", 0, 0o644);
+                v.pop(); // drop the status
+                v
+            }),
+            ("file with an unknown status byte", {
+                let mut v = encode_file(b"abc", b"data", 0, 0o644);
+                v.pop();
+                v.push(0x7F);
+                v
+            }),
+            ("file ended ok short of its size", {
+                let mut v = vec![DATA_PLANE_RECORD_FILE];
+                v.extend_from_slice(&3u32.to_be_bytes());
+                v.extend_from_slice(b"abc");
+                v.extend_from_slice(&10u64.to_be_bytes()); // promises 10
+                v.extend_from_slice(&0i64.to_be_bytes());
+                v.extend_from_slice(&0o644u32.to_be_bytes());
+                v.push(0);
+                v.extend_from_slice(&4u32.to_be_bytes());
+                v.extend_from_slice(b"data");
+                v.extend_from_slice(&0u32.to_be_bytes());
+                v.push(RECORD_STATUS_OK);
+                v
+            }),
+            (
+                "file ended failed mid-body",
+                encode_failed_file(b"abc", 10, b"data", "source: read error"),
+            ),
+            ("skip with an over-long reason", {
+                let mut v = vec![DATA_PLANE_RECORD_SKIP];
+                v.extend_from_slice(&3u32.to_be_bytes());
+                v.extend_from_slice(b"abc");
+                v.extend_from_slice(&u32::MAX.to_be_bytes());
+                v
+            }),
+            (
+                "skip well-formed",
+                encode_skip(b"abc", "source: cannot open"),
+            ),
             ("only unknown record tag (no END)", vec![0x42]),
             // ---- edge-case sizes ----
             ("file with declared size=MAX (no content)", {
@@ -2007,7 +2268,45 @@ mod tests {
         v.extend_from_slice(&mtime.to_be_bytes());
         v.extend_from_slice(&perms.to_be_bytes());
         v.push(0); // no Windows metadata
-        v.extend_from_slice(content);
+                   // Contract v7 body: one chunk (when non-empty), the sentinel,
+                   // the ok status.
+        if !content.is_empty() {
+            v.extend_from_slice(&(content.len() as u32).to_be_bytes());
+            v.extend_from_slice(content);
+        }
+        v.extend_from_slice(&0u32.to_be_bytes());
+        v.push(RECORD_STATUS_OK);
+        v
+    }
+
+    /// A contract-v7 FILE record whose source failed mid-body after
+    /// `sent` bytes: chunk, sentinel, failed status + reason.
+    fn encode_failed_file(path: &[u8], size: u64, sent: &[u8], reason: &str) -> Vec<u8> {
+        let mut v = vec![DATA_PLANE_RECORD_FILE];
+        v.extend_from_slice(&(path.len() as u32).to_be_bytes());
+        v.extend_from_slice(path);
+        v.extend_from_slice(&size.to_be_bytes());
+        v.extend_from_slice(&0i64.to_be_bytes());
+        v.extend_from_slice(&0o644u32.to_be_bytes());
+        v.push(0);
+        if !sent.is_empty() {
+            v.extend_from_slice(&(sent.len() as u32).to_be_bytes());
+            v.extend_from_slice(sent);
+        }
+        v.extend_from_slice(&0u32.to_be_bytes());
+        v.push(RECORD_STATUS_FAILED);
+        v.extend_from_slice(&(reason.len() as u32).to_be_bytes());
+        v.extend_from_slice(reason.as_bytes());
+        v
+    }
+
+    /// A contract-v7 SKIP record.
+    fn encode_skip(path: &[u8], reason: &str) -> Vec<u8> {
+        let mut v = vec![DATA_PLANE_RECORD_SKIP];
+        v.extend_from_slice(&(path.len() as u32).to_be_bytes());
+        v.extend_from_slice(path);
+        v.extend_from_slice(&(reason.len() as u32).to_be_bytes());
+        v.extend_from_slice(reason.as_bytes());
         v
     }
 
@@ -2054,6 +2353,7 @@ mod tests {
         v.extend_from_slice(&0i64.to_be_bytes());
         v.extend_from_slice(&0o644u32.to_be_bytes());
         v.push(0); // no Windows metadata
+        v.push(RECORD_STATUS_OK); // contract v7 status
         v
     }
 
@@ -2087,14 +2387,35 @@ mod tests {
             Ok(SinkOutcome::written(files_written, bytes_written))
         }
 
-        async fn write_file_stream(
-            &self,
-            _header: &FileHeader,
-            reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
-        ) -> Result<SinkOutcome> {
-            let mut buf = Vec::new();
-            tokio::io::AsyncReadExt::read_to_end(reader, &mut buf).await?;
-            Ok(SinkOutcome::written(1, buf.len() as u64))
+        async fn begin_record<'a>(
+            &'a self,
+            header: &FileHeader,
+        ) -> Result<Box<dyn crate::remote::transfer::sink::RecordWriter + 'a>> {
+            use crate::remote::transfer::sink::RecordWriter;
+            struct Counting {
+                path: String,
+                written: u64,
+            }
+            #[async_trait::async_trait]
+            impl RecordWriter for Counting {
+                async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+                    self.written += bytes.len() as u64;
+                    Ok(())
+                }
+                fn written(&self) -> u64 {
+                    self.written
+                }
+                async fn commit(self: Box<Self>) -> Result<SinkOutcome> {
+                    Ok(SinkOutcome::written(1, self.written))
+                }
+                async fn abort(self: Box<Self>, reason: &str) -> Result<SinkOutcome> {
+                    Ok(SinkOutcome::failed(self.path, reason))
+                }
+            }
+            Ok(Box::new(Counting {
+                path: header.relative_path.clone(),
+                written: 0,
+            }))
         }
 
         fn root(&self) -> &Path {
@@ -2563,6 +2884,7 @@ mod tests {
                     permissions: 0o644,
                     checksum: Vec::new(),
                     windows_metadata: None,
+                    raw_relative_path: None,
                 })
             })
             .collect();

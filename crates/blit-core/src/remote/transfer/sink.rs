@@ -21,6 +21,7 @@ use crate::remote::transfer::source::TransferSource;
 
 // Re-export for consumers.
 pub use super::data_plane::DataPlaneSession;
+use super::data_plane::FileSendOutcome;
 
 /// Upper bound on the per-file failures one outcome reports.
 /// [`SinkOutcome::files_failed_total`] keeps counting past it, so a
@@ -37,7 +38,7 @@ pub const MAX_REPORTED_FILE_FAILURES: usize = 64;
 /// without limit. The report's job is to say WHY a file failed, and the
 /// head of that chain is what says it, so the head is what survives the
 /// bound.
-pub const MAX_FAILURE_REASON_BYTES: usize = 1024;
+pub(crate) const MAX_FAILURE_REASON_BYTES: usize = 1024;
 
 /// Ceiling on one reported failure's `relative_path`, in bytes
 /// (cr-pfc4-2). Deliberately generous: the path is the report's
@@ -560,6 +561,53 @@ pub(super) fn classify_shard_member<S>(
     }
 }
 
+/// One in-flight single-file record at a sink (contract v7,
+/// `docs/plan/SOURCE_SIDE_CONTAINMENT.md` D-A). The record's body is
+/// appended through [`RecordWriter::write`] / [`RecordWriter::write_from`]
+/// and the record ends with exactly one of [`RecordWriter::commit`] (the
+/// source's ok terminator arrived and the body is complete) or
+/// [`RecordWriter::abort`] (the source's failed terminator arrived).
+/// Nothing is finalised — stamped, counted, reported complete — before
+/// `commit`; a writer dropped without either (cancellation) leaves no
+/// half-written file that looks finished.
+#[async_trait]
+pub trait RecordWriter: Send {
+    /// Append body bytes.
+    async fn write(&mut self, bytes: &[u8]) -> Result<()>;
+
+    /// Append body bytes from `reader` until it ends, returning how many
+    /// were consumed. The default chunks through [`Self::write`]; sinks
+    /// with an overlapped receive path override it.
+    async fn write_from(
+        &mut self,
+        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<u64> {
+        use tokio::io::AsyncReadExt as _;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut total = 0u64;
+        loop {
+            let got = reader.read(&mut buf).await?;
+            if got == 0 {
+                return Ok(total);
+            }
+            self.write(&buf[..got]).await?;
+            total += got as u64;
+        }
+    }
+
+    /// Body bytes appended so far.
+    fn written(&self) -> u64;
+
+    /// The source ended the record ok: finalise it. A writer that was
+    /// discarding (a contained destination failure at open, A16) reports
+    /// that file's failure here instead of a written file.
+    async fn commit(self: Box<Self>) -> Result<SinkOutcome>;
+
+    /// The source ended the record failed: discard what was written and
+    /// report the file failed with `reason`.
+    async fn abort(self: Box<Self>, reason: &str) -> Result<SinkOutcome>;
+}
+
 /// A pluggable write backend for the transfer pipeline.
 ///
 /// Implementations receive [`PreparedPayload`] items produced by a [`TransferSource`]
@@ -569,22 +617,71 @@ pub trait TransferSink: Send + Sync {
     /// Write a single prepared payload to the destination.
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome>;
 
-    /// Stream a file payload from a borrowed async reader.
-    ///
-    /// Used by the receive pipeline so file bytes that arrive on a TCP
-    /// wire can be written through the same sink as local copies — no
-    /// double-buffering into a `'static` reader. Outbound-only sinks
-    /// (e.g. `DataPlaneSink`) inherit the default error implementation.
-    async fn write_file_stream(
-        &self,
-        header: &FileHeader,
-        _reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
-    ) -> Result<SinkOutcome> {
+    /// Open one single-file record (contract v7). Returns `Err` only for
+    /// the session-fatal classes (path safety, destination root, volume,
+    /// transport); a failure attributable to this one file — the
+    /// destination path cannot be created — returns a writer that
+    /// consumes the body and reports the file failed at `commit`
+    /// (today's drain-then-contain, kept). Outbound-only sinks inherit
+    /// the default error implementation.
+    async fn begin_record<'a>(&'a self, header: &FileHeader) -> Result<Box<dyn RecordWriter + 'a>> {
         eyre::bail!(
-            "{} does not support write_file_stream (called for {})",
+            "{} does not support streamed records (called for {})",
             std::any::type_name::<Self>(),
             header.relative_path
         )
+    }
+
+    /// Stream one whole file record from a borrowed async reader that
+    /// yields exactly `header.size` bytes: `begin_record`, the body,
+    /// `commit`. A reader that ends short is an error (the record could
+    /// not complete at `header.size`), exactly as the pre-v7 receive
+    /// behaved. Kept as the convenience the local wrappers and the sink
+    /// tests drive; the wire receivers drive the writer themselves so the
+    /// source's terminator decides commit or abort.
+    async fn write_file_stream(
+        &self,
+        header: &FileHeader,
+        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<SinkOutcome> {
+        use tokio::io::AsyncReadExt as _;
+        let mut writer = self.begin_record(header).await?;
+        let mut bounded = reader.take(header.size);
+        let got = writer.write_from(&mut bounded).await?;
+        if got != header.size {
+            // Drop the writer before reporting: its guard discards the
+            // partial, and the record cannot be completed at size.
+            drop(writer);
+            eyre::bail!(
+                "unexpected EOF: {got} bytes received, {} expected (record for {})",
+                header.size,
+                header.relative_path
+            );
+        }
+        writer.commit().await
+    }
+
+    /// The SOURCE will not deliver `relative_path` (a v7 skip record).
+    /// The default reports the file failed; a sink that tracks granted
+    /// needs overrides it to move the need to `Failed` first.
+    async fn skip_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
+        Ok(SinkOutcome::failed(relative_path, reason))
+    }
+
+    /// The SOURCE closed `relative_path`'s resume record failed (a v7
+    /// `BLOCK_COMPLETE` with `ok = false`): the partial stays unstamped
+    /// and the file is reported failed. Same override rule as
+    /// [`Self::skip_record`].
+    async fn fail_resume_record(&self, relative_path: &str, reason: &str) -> Result<SinkOutcome> {
+        Ok(SinkOutcome::failed(relative_path, reason))
+    }
+
+    /// A sink that keys record ordering per inbound connection returns
+    /// a view of itself bound to that lane (contract v7: one lane per
+    /// data-plane socket); every other sink is lane-agnostic and returns
+    /// `None`, and the caller keeps using it directly.
+    fn for_lane(&self, _epoch: u32, _socket_id: u32) -> Option<Arc<dyn TransferSink>> {
+        None
     }
 
     /// Signal that all payloads have been sent. Flushes buffers, sends terminators, etc.
@@ -1111,18 +1208,15 @@ impl TransferSink for FsTransferSink {
         Ok(outcome)
     }
 
-    /// Stream file bytes from the wire to the destination filesystem
-    /// using the same double-buffered helper the send side uses. This
-    /// is what makes push and pull receive symmetric on the FsTransferSink.
-    async fn write_file_stream(
-        &self,
-        header: &FileHeader,
-        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
-    ) -> Result<SinkOutcome> {
-        use crate::remote::transfer::data_plane::{
-            receive_stream_double_buffered, RECEIVE_CHUNK_SIZE,
-        };
-
+    /// Open one streamed record on the destination filesystem (contract
+    /// v7). The target is created IN PLACE exactly as before (D5,
+    /// D-2026-09-29-2: no staging files) and its handle retained through
+    /// the record; `commit` flushes and stamps metadata through that same
+    /// handle (sf-3c), `abort` drops it and removes the partial, and the
+    /// writer's own guard removes the partial if the record is dropped
+    /// mid-way (cancellation). This is what makes push and pull receive
+    /// symmetric on the FsTransferSink.
+    async fn begin_record<'a>(&'a self, header: &FileHeader) -> Result<Box<dyn RecordWriter + 'a>> {
         // R46-F3: lexical resolve + canonical containment check via
         // resolve_destination. Pre-fix this was a bare safe_join,
         // which rejected lexical traversal (`../`) but didn't catch
@@ -1135,28 +1229,19 @@ impl TransferSink for FsTransferSink {
             .await
             .with_context(|| format!("validating receive path {:?}", header.relative_path))?;
 
-        // R58-F4: dry-run must be side-effect-free. Drain the wire
-        // for protocol-stream alignment, but skip the parent-mkdir
-        // and the file write. Pre-fix the parent-mkdir ran before
-        // the dry-run check below, so `--dry-run` over a remote
-        // transfer would create destination directories.
+        // R58-F4: dry-run must be side-effect-free. The record's bytes
+        // are still consumed for protocol-stream alignment, but no
+        // parent-mkdir and no file write happen (A18). Pre-fix the
+        // parent-mkdir ran before the dry-run check below, so
+        // `--dry-run` over a remote transfer would create destination
+        // directories.
         if self.config.dry_run {
-            let mut sink = tokio::io::sink();
-            // Dry-run: drain wire bytes for protocol alignment.
-            // Do NOT report against `byte_progress` — by contract
-            // dry-run is side-effect-free and these bytes never
-            // hit user disk; we don't want a daemon-side bytes_completed
-            // counter to advance for an aborted preview.
-            receive_stream_double_buffered(
-                reader,
-                &mut sink,
-                header.size,
-                RECEIVE_CHUNK_SIZE,
-                None,
-            )
-            .await
-            .with_context(|| format!("draining {} (dry-run)", header.relative_path))?;
-            return Ok(SinkOutcome::written(1, 0));
+            return Ok(Box::new(FsRecordWriter::new(
+                self,
+                header.clone(),
+                dst,
+                FsRecordMode::DryRun,
+            )));
         }
 
         // Peer-supplied metadata shape is a protocol violation, not one
@@ -1169,130 +1254,290 @@ impl TransferSink for FsTransferSink {
         // own subpath, readonly/stream preparation, create. Each failure
         // is this file's, but the record's bytes are still on the wire —
         // an undrained record would desync the protocol stream, so the
-        // record is drained before the failure is contained. A drain
-        // failure is transport, and stays fatal.
+        // writer returned for a contained failure DISCARDS the body and
+        // reports the failure at commit (A16). A fatal class ends the
+        // session here; there is no next record to stay aligned with.
         let prepared = self
             .create_stream_destination(&dst, header.windows_metadata.as_ref())
             .await;
-        let mut file = match prepared {
-            Ok(file) => file,
+        let mode = match prepared {
+            Ok(file) => FsRecordMode::Real { file: Some(file) },
             Err(error)
                 if !failure_is_containable(&self.dst_root, &header.relative_path, &error) =>
             {
-                // Fatal class: the session ends here, so there is no next
-                // record to stay aligned with and nothing to drain.
                 return Err(error);
             }
-            Err(error) => {
-                let mut drain = tokio::io::sink();
-                receive_stream_double_buffered(
-                    reader,
-                    &mut drain,
-                    header.size,
-                    RECEIVE_CHUNK_SIZE,
-                    None,
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "draining {} after its destination could not be opened",
-                        header.relative_path
-                    )
-                })?;
-                return per_file_failure(&self.dst_root, &header.relative_path, error);
-            }
+            Err(error) => FsRecordMode::Discard(error),
         };
-
-        let written = {
-            use tokio::io::AsyncWriteExt as _;
-            // Wire read and disk write are one operation here: a failure
-            // leaves an unknown number of record bytes unread, so the
-            // stream cannot be resynchronized and this stays fatal.
-            receive_stream_double_buffered(
-                reader,
-                &mut file,
-                header.size,
-                RECEIVE_CHUNK_SIZE,
-                self.byte_progress.as_ref(),
-            )
-            .await
-            .with_context(|| format!("writing {}", dst.display()))?;
-            // Flush the tokio File's internal buffer state (does NOT
-            // fsync — just ensures user-space buffering is drained
-            // before we apply mtime through the retained handle).
-            // Without this, set_file_mtime raced deferred writes from
-            // tokio's blocking-thread pool: 5/8 of mtimes were
-            // observed silently bumped to "now" on the receive side.
-            //
-            // POST_REVIEW_FIXES §1.1: flush failure is a data-loss
-            // signal — the user believes the file is durable when it
-            // isn't. Never swallowed; the record is fully consumed by
-            // now, so it is this file's failure.
-            file.flush()
-                .await
-                .with_context(|| format!("flushing {}", dst.display()))
-        };
-
-        // Intentionally no sync_all: ZFS commits per fsync are
-        // multi-second on spinning rust and crater throughput
-        // (9.3 → 3.3 Gbps observed). The transfer's durability signal
-        // is its END marker plus the OS's own flush; matches rsync's
-        // default behavior. Add a config flag if a caller needs sync.
-
-        // Metadata tail, past the last wire byte of the record: every
-        // failure below concerns exactly this file. sf-3c: on a
-        // successful write the descriptor is retained through this tail
-        // instead of being dropped and reopened by path —
-        // `stamp_streamed_metadata_via_handle` removes the openat+close
-        // pair sf-3a measured at one/file
-        // (`docs/bench/sf3a-per-file-cost-2026-08-13/README.md`).
-        // `into_std` waits on the same in-flight-completion check
-        // `flush` above already satisfied, so it cannot reintroduce the
-        // deferred-write race, and no writes happen after this point.
-        // A failed write/flush has nothing to stamp, so its handle is
-        // dropped immediately — same release point as before.
-        let stamped = match written {
-            Ok(()) => {
-                let std_file = file.into_std().await;
-                #[cfg(test)]
-                self.handle_metadata_stamps
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                stamp_streamed_metadata_via_handle(&std_file, &dst, header, &self.config)
-            }
-            Err(error) => {
-                drop(file);
-                Err(error)
-            }
-        };
-        let windows_bytes = match stamped {
-            Ok(windows_bytes) => windows_bytes,
-            Err(error) => {
-                // pfc-4 byte-lane reconciliation (the pfc-2 landing
-                // note's owed item). The chunk hook above already
-                // reported this file's payload to the LIVE counter —
-                // exactly `header.size` bytes, since the stream returned
-                // Ok — while the outcome below counts zero for a
-                // contained failure and the summary reports zero with it.
-                // Give those bytes back so the live lane never claims
-                // work the authoritative summary denies. The sibling
-                // containment route above (destination could not be
-                // opened) drains with `None`, so it has nothing to
-                // withdraw.
-                if let Some(bp) = &self.byte_progress {
-                    bp.withdraw(header.size);
-                }
-                return per_file_failure(&self.dst_root, &header.relative_path, error);
-            }
-        };
-
-        Ok(SinkOutcome::written(
-            1,
-            header.size.saturating_add(windows_bytes),
-        ))
+        Ok(Box::new(FsRecordWriter::new(
+            self,
+            header.clone(),
+            dst,
+            mode,
+        )))
     }
 
     fn root(&self) -> &Path {
         &self.dst_root
+    }
+}
+
+/// How one streamed record lands on the filesystem sink.
+enum FsRecordMode {
+    /// The target was created; bytes go to it through the retained handle.
+    Real { file: Option<tokio::fs::File> },
+    /// The destination could not be materialised for this one file
+    /// (containable): the body is consumed and dropped, the failure is
+    /// reported at commit — today's drain-then-contain, kept (A16).
+    Discard(eyre::Report),
+    /// `--dry-run`: consume and count, touch nothing (R58-F4, A18).
+    DryRun,
+}
+
+/// The [`RecordWriter`] of [`FsTransferSink`] (contract v7). Owns the
+/// in-place target handle for the record's duration and the guard that
+/// removes the partial target unless the record is committed.
+struct FsRecordWriter<'a> {
+    sink: &'a FsTransferSink,
+    header: FileHeader,
+    dst: PathBuf,
+    mode: FsRecordMode,
+    written: u64,
+    /// Bytes reported to the live byte counter for this record; given
+    /// back on abort (pfc-4 byte-lane reconciliation).
+    reported: u64,
+    /// Cleared by `commit`/`abort`; while set, `Drop` removes the
+    /// partial target a real record created (cancellation path — the
+    /// receive task is aborted by dropping its future,
+    /// `abort_on_drop.rs`, which would otherwise leave a truncated file
+    /// that looks finished).
+    guard_armed: bool,
+}
+
+impl<'a> FsRecordWriter<'a> {
+    fn new(sink: &'a FsTransferSink, header: FileHeader, dst: PathBuf, mode: FsRecordMode) -> Self {
+        let guard_armed = matches!(mode, FsRecordMode::Real { .. });
+        Self {
+            sink,
+            header,
+            dst,
+            mode,
+            written: 0,
+            reported: 0,
+            guard_armed,
+        }
+    }
+
+    fn remove_partial(&mut self) {
+        // Release the handle first: on Windows an open file cannot be
+        // unlinked.
+        if let FsRecordMode::Real { file } = &mut self.mode {
+            file.take();
+        }
+        match std::fs::remove_file(&self.dst) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => log::warn!(
+                "could not remove partial destination {} after a failed record: {error}",
+                self.dst.display()
+            ),
+        }
+    }
+
+    fn withdraw_reported(&mut self) {
+        if self.reported > 0 {
+            if let Some(bp) = &self.sink.byte_progress {
+                bp.withdraw(self.reported);
+            }
+            self.reported = 0;
+        }
+    }
+}
+
+impl Drop for FsRecordWriter<'_> {
+    fn drop(&mut self) {
+        if self.guard_armed {
+            self.guard_armed = false;
+            self.remove_partial();
+            self.withdraw_reported();
+        }
+    }
+}
+
+#[async_trait]
+impl RecordWriter for FsRecordWriter<'_> {
+    async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        if let FsRecordMode::Real { file: Some(file) } = &mut self.mode {
+            use tokio::io::AsyncWriteExt as _;
+            file.write_all(bytes)
+                .await
+                .with_context(|| format!("writing {}", self.dst.display()))?;
+            if let Some(bp) = &self.sink.byte_progress {
+                bp.report(bytes.len() as u64);
+                self.reported += bytes.len() as u64;
+            }
+        }
+        self.written += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// The overlapped receive path: wire reads and disk writes run as
+    /// one double-buffered operation, so a disk failure mid-body leaves
+    /// an unknown number of record bytes unread and stays fatal — the
+    /// stream cannot be resynchronised from here.
+    async fn write_from(
+        &mut self,
+        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<u64> {
+        use crate::remote::transfer::data_plane::{
+            copy_stream_double_buffered, RECEIVE_CHUNK_SIZE,
+        };
+        let got = match &mut self.mode {
+            FsRecordMode::Real { file: Some(file) } => {
+                let got = copy_stream_double_buffered(
+                    reader,
+                    file,
+                    RECEIVE_CHUNK_SIZE,
+                    self.sink.byte_progress.as_ref(),
+                )
+                .await
+                .with_context(|| format!("writing {}", self.dst.display()))?;
+                self.reported += got;
+                got
+            }
+            _ => {
+                // Discard / dry-run: consume the body for stream
+                // alignment; never feed the live counter (these bytes
+                // never hit user disk).
+                let mut drain = tokio::io::sink();
+                copy_stream_double_buffered(reader, &mut drain, RECEIVE_CHUNK_SIZE, None)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "draining {} (record not written)",
+                            self.header.relative_path
+                        )
+                    })?
+            }
+        };
+        self.written += got;
+        Ok(got)
+    }
+
+    fn written(&self) -> u64 {
+        self.written
+    }
+
+    async fn commit(mut self: Box<Self>) -> Result<SinkOutcome> {
+        let header = self.header.clone();
+        let dst = self.dst.clone();
+        let sink = self.sink;
+        match std::mem::replace(&mut self.mode, FsRecordMode::DryRun) {
+            FsRecordMode::DryRun => {
+                self.guard_armed = false;
+                Ok(SinkOutcome::written(1, 0))
+            }
+            FsRecordMode::Discard(error) => {
+                self.guard_armed = false;
+                per_file_failure(&sink.dst_root, &header.relative_path, error)
+            }
+            FsRecordMode::Real { file } => {
+                let Some(mut file) = file else {
+                    eyre::bail!("record for {} committed twice", header.relative_path);
+                };
+                if self.written != header.size {
+                    // The callers enforce the ok-requires-size rule
+                    // before committing; reaching here is a caller bug,
+                    // never a file the destination may finalise.
+                    self.mode = FsRecordMode::Real { file: Some(file) };
+                    self.remove_partial();
+                    self.withdraw_reported();
+                    self.guard_armed = false;
+                    eyre::bail!(
+                        "record for {} committed at {} byte(s), header promised {}",
+                        header.relative_path,
+                        self.written,
+                        header.size
+                    );
+                }
+                // From here the record is fully consumed: every failure
+                // below concerns exactly this file. The partial is no
+                // longer the guard's to remove — a failed metadata tail
+                // leaves the written bytes in place (the pre-v7 posture;
+                // the file is reported failed and re-run converges it).
+                self.guard_armed = false;
+                let written = {
+                    use tokio::io::AsyncWriteExt as _;
+                    // Flush the tokio File's internal buffer state (does
+                    // NOT fsync — just ensures user-space buffering is
+                    // drained before we apply mtime through the retained
+                    // handle). Without this, set_file_mtime raced deferred
+                    // writes from tokio's blocking-thread pool.
+                    //
+                    // POST_REVIEW_FIXES §1.1: flush failure is a data-loss
+                    // signal — never swallowed; the record is fully
+                    // consumed by now, so it is this file's failure.
+                    file.flush()
+                        .await
+                        .with_context(|| format!("flushing {}", dst.display()))
+                };
+                // Intentionally no sync_all: ZFS commits per fsync are
+                // multi-second on spinning rust and crater throughput
+                // (9.3 → 3.3 Gbps observed). The transfer's durability
+                // signal is its END marker plus the OS's own flush;
+                // matches rsync's default behavior.
+
+                // Metadata tail, past the last wire byte of the record.
+                // sf-3c: on a successful write the descriptor is retained
+                // through this tail instead of being dropped and reopened
+                // by path — `stamp_streamed_metadata_via_handle` removes
+                // the openat+close pair sf-3a measured at one/file. A
+                // failed flush has nothing to stamp, so its handle is
+                // dropped immediately.
+                let stamped = match written {
+                    Ok(()) => {
+                        let std_file = file.into_std().await;
+                        #[cfg(test)]
+                        sink.handle_metadata_stamps
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        stamp_streamed_metadata_via_handle(&std_file, &dst, &header, &sink.config)
+                    }
+                    Err(error) => {
+                        drop(file);
+                        Err(error)
+                    }
+                };
+                match stamped {
+                    Ok(windows_bytes) => Ok(SinkOutcome::written(
+                        1,
+                        header.size.saturating_add(windows_bytes),
+                    )),
+                    Err(error) => {
+                        // pfc-4 byte-lane reconciliation: the chunk hook
+                        // already reported this file's payload to the LIVE
+                        // counter while the outcome below counts zero for
+                        // a contained failure. Give those bytes back so
+                        // the live lane never claims work the
+                        // authoritative summary denies.
+                        self.withdraw_reported();
+                        per_file_failure(&sink.dst_root, &header.relative_path, error)
+                    }
+                }
+            }
+        }
+    }
+
+    async fn abort(mut self: Box<Self>, reason: &str) -> Result<SinkOutcome> {
+        let path = self.header.relative_path.clone();
+        if matches!(self.mode, FsRecordMode::Real { .. }) {
+            self.remove_partial();
+        }
+        self.withdraw_reported();
+        self.guard_armed = false;
+        // The source's reason wins even for a discarding writer: the
+        // file did not land, and the source is the end that said why
+        // first.
+        Ok(SinkOutcome::failed(path, reason))
     }
 }
 
@@ -1913,7 +2158,7 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                     .saturating_add(crate::windows_metadata::payload_bytes(&header));
                 // otp-7b-2: name the file structurally on failure, so a
                 // mid-record fault reaches the end-of-operation summary.
-                session
+                let sent = session
                     .send_file(self.source.clone(), &header)
                     .await
                     .with_context(|| format!("sending {}", header.relative_path))
@@ -1922,7 +2167,16 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                             header.relative_path.clone(),
                         ))
                     })?;
-                Ok(SinkOutcome::written(1, size))
+                match sent {
+                    FileSendOutcome::Sent => Ok(SinkOutcome::written(1, size)),
+                    // Contract v7: a SKIP went out in the record's place.
+                    // This end's lane records it as the file's failure so
+                    // no completion is reported for it; the destination's
+                    // summary is the authoritative report.
+                    FileSendOutcome::Skipped(reason) => {
+                        Ok(SinkOutcome::failed(header.relative_path, reason))
+                    }
+                }
             }
             PreparedPayload::TarShard { headers, data } => {
                 let bytes: u64 = headers
@@ -2000,6 +2254,8 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                             header.mtime_seconds,
                             header.permissions,
                             header.windows_metadata.as_ref(),
+                            true,
+                            "",
                         )
                         .await
                         .context("sending resume block complete")?;
@@ -2019,23 +2275,24 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
         }
     }
 
-    /// Relay case: bytes arrive on `reader` (e.g. from a DataPlaneSource
-    /// during a remote→remote transfer) and forward to the next hop.
-    async fn write_file_stream(
-        &self,
-        header: &FileHeader,
-        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
-    ) -> Result<SinkOutcome> {
-        let size = header.size;
+    /// Relay case (contract v7): bytes arrive from an upstream record
+    /// (e.g. a DataPlaneSource during a remote→remote transfer) and are
+    /// forwarded to the next hop as one downstream FILE record whose
+    /// terminator is the upstream one — a contained failure upstream
+    /// propagates as a contained failure downstream, never as a
+    /// desynchronised partial. The session lock is held for the record's
+    /// duration so its chunks and status ride one socket in order.
+    async fn begin_record<'a>(&'a self, header: &FileHeader) -> Result<Box<dyn RecordWriter + 'a>> {
         let mut session = self.session.lock().await;
         session
-            .send_file_from_reader(header, reader)
+            .begin_file_record(header)
             .await
             .with_context(|| format!("relaying {}", header.relative_path))?;
-        Ok(SinkOutcome::written(
-            1,
-            size.saturating_add(crate::windows_metadata::payload_bytes(header)),
-        ))
+        Ok(Box::new(DataPlaneRecordWriter {
+            session,
+            header: header.clone(),
+            written: 0,
+        }))
     }
 
     async fn finish(&self) -> Result<()> {
@@ -2057,6 +2314,100 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
 /// Useful for benchmarking source + network throughput without destination
 /// I/O as a bottleneck. The pipeline still prepares payloads (reading source
 /// files, building tar shards) so this measures everything except the write.
+/// The relay's [`RecordWriter`]: forwards chunks and the terminator to
+/// the downstream FILE record it announced at `begin_record`.
+struct DataPlaneRecordWriter<'a, P: Probe> {
+    session: tokio::sync::MutexGuard<'a, DataPlaneSession<P>>,
+    header: FileHeader,
+    written: u64,
+}
+
+#[async_trait]
+impl<P: Probe> RecordWriter for DataPlaneRecordWriter<'_, P> {
+    async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.session
+            .write_file_chunk(bytes)
+            .await
+            .with_context(|| format!("relaying {}", self.header.relative_path))?;
+        self.written += bytes.len() as u64;
+        Ok(())
+    }
+
+    fn written(&self) -> u64 {
+        self.written
+    }
+
+    async fn commit(mut self: Box<Self>) -> Result<SinkOutcome> {
+        self.session
+            .end_file_record(true, "")
+            .await
+            .with_context(|| format!("relaying {}", self.header.relative_path))?;
+        Ok(SinkOutcome::written(
+            1,
+            self.header
+                .size
+                .saturating_add(crate::windows_metadata::payload_bytes(&self.header)),
+        ))
+    }
+
+    async fn abort(mut self: Box<Self>, reason: &str) -> Result<SinkOutcome> {
+        self.session
+            .end_file_record(false, reason)
+            .await
+            .with_context(|| format!("relaying {}", self.header.relative_path))?;
+        Ok(SinkOutcome::failed(
+            self.header.relative_path.clone(),
+            reason,
+        ))
+    }
+}
+
+/// [`NullSink`]'s [`RecordWriter`]: counts only.
+struct NullRecordWriter {
+    header: FileHeader,
+    written: u64,
+}
+
+#[async_trait]
+impl RecordWriter for NullRecordWriter {
+    async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.written += bytes.len() as u64;
+        Ok(())
+    }
+
+    async fn write_from(
+        &mut self,
+        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<u64> {
+        use crate::remote::transfer::data_plane::{
+            copy_stream_double_buffered, RECEIVE_CHUNK_SIZE,
+        };
+        let mut sink = tokio::io::sink();
+        // --null benchmark: bytes never land on user disk; do not
+        // advance a daemon-side progress counter for these drains.
+        let n = copy_stream_double_buffered(reader, &mut sink, RECEIVE_CHUNK_SIZE, None)
+            .await
+            .with_context(|| format!("draining {} (null sink)", self.header.relative_path))?;
+        self.written += n;
+        Ok(n)
+    }
+
+    fn written(&self) -> u64 {
+        self.written
+    }
+
+    async fn commit(self: Box<Self>) -> Result<SinkOutcome> {
+        Ok(SinkOutcome::written(1, self.written))
+    }
+
+    async fn abort(self: Box<Self>, reason: &str) -> Result<SinkOutcome> {
+        Ok(SinkOutcome::failed(
+            self.header.relative_path.clone(),
+            reason,
+        ))
+    }
+}
+
 pub struct NullSink {
     label: PathBuf,
 }
@@ -2109,29 +2460,11 @@ impl TransferSink for NullSink {
     /// Drain the wire so the protocol stream stays aligned, then count
     /// the bytes. Lets `--null` benchmark the receive path end-to-end
     /// without paying for disk writes.
-    async fn write_file_stream(
-        &self,
-        header: &FileHeader,
-        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
-    ) -> Result<SinkOutcome> {
-        use crate::remote::transfer::data_plane::{
-            receive_stream_double_buffered, RECEIVE_CHUNK_SIZE,
-        };
-        let mut sink = tokio::io::sink();
-        // --null benchmark: bytes never land on user disk; do
-        // not advance a daemon-side progress counter for these
-        // drains. Same reasoning as the dry-run path on
-        // FsTransferSink.
-        let n = receive_stream_double_buffered(
-            reader,
-            &mut sink,
-            header.size,
-            RECEIVE_CHUNK_SIZE,
-            None,
-        )
-        .await
-        .with_context(|| format!("draining {} (null sink)", header.relative_path))?;
-        Ok(SinkOutcome::written(1, n))
+    async fn begin_record<'a>(&'a self, header: &FileHeader) -> Result<Box<dyn RecordWriter + 'a>> {
+        Ok(Box::new(NullRecordWriter {
+            header: header.clone(),
+            written: 0,
+        }))
     }
 
     fn root(&self) -> &Path {
@@ -2152,6 +2485,7 @@ mod tests {
             permissions: 0o644,
             checksum: Vec::new(),
             windows_metadata: None,
+            raw_relative_path: None,
         }
     }
 

@@ -32,7 +32,7 @@ use crate::remote::transfer::sink::{
     FileFailure, FsSinkConfig, FsTransferSink, NullSink, SinkOutcome, TransferSink,
 };
 use crate::remote::transfer::source::{
-    FilteredSource, FsTransferSource, SourceScan, TransferSource,
+    FilteredSource, FsTransferSource, OpenedSourceFile, SourceScan, TransferSource,
 };
 use crate::remote::transfer::{RemoteTransferProgress, SmallFileProbe};
 use crate::transfer_plan::PlanOptions;
@@ -657,10 +657,7 @@ impl TransferSource for DestSubtreeExcludedSource {
             .await
     }
 
-    async fn open_file(
-        &self,
-        header: &FileHeader,
-    ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+    async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
         self.inner.open_file(header).await
     }
 
@@ -1201,10 +1198,7 @@ mod tests {
             Ok(available)
         }
 
-        async fn open_file(
-            &self,
-            header: &FileHeader,
-        ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
             self.inner.open_file(header).await
         }
 
@@ -1353,12 +1347,11 @@ mod tests {
             out
         }
 
-        async fn write_file_stream(
-            &self,
+        async fn begin_record<'a>(
+            &'a self,
             header: &FileHeader,
-            reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
-        ) -> eyre::Result<SinkOutcome> {
-            self.inner.write_file_stream(header, reader).await
+        ) -> eyre::Result<Box<dyn crate::remote::transfer::sink::RecordWriter + 'a>> {
+            self.inner.begin_record(header).await
         }
 
         fn root(&self) -> &Path {
@@ -1623,12 +1616,11 @@ mod tests {
             self.inner.write_payload(payload).await
         }
 
-        async fn write_file_stream(
-            &self,
+        async fn begin_record<'a>(
+            &'a self,
             header: &FileHeader,
-            reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
-        ) -> eyre::Result<SinkOutcome> {
-            self.inner.write_file_stream(header, reader).await
+        ) -> eyre::Result<Box<dyn crate::remote::transfer::sink::RecordWriter + 'a>> {
+            self.inner.begin_record(header).await
         }
 
         fn root(&self) -> &Path {
@@ -2325,10 +2317,7 @@ mod tests {
                     .await
             }
 
-            async fn open_file(
-                &self,
-                header: &FileHeader,
-            ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+            async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
                 self.inner.open_file(header).await
             }
 

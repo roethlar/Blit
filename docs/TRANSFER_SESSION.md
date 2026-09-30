@@ -182,6 +182,8 @@ INITIATOR                                RESPONDER
 | 18 | `SourceDone source_done` | SOURCE | closing |
 | 19 | `TransferSummary summary` | DESTINATION | closing |
 | 20 | `SessionError error` | both | any |
+| 21 | `FileFailure file_skipped` | SOURCE | payload phase (contract v7) |
+| 22 | `RecordEnd file_end` | SOURCE | in-stream carrier, closes every file record (contract v7) |
 
 Shared messages (`FileHeader`, `FileData`, `TarShard*`,
 `BlockTransfer*`, `BlockHashList`, `ManifestComplete`,
@@ -193,6 +195,62 @@ messages (`SessionHello`, `SessionOpen`,
 `NeedComplete`, `SourceDone`, `TransferSummary`, `FileFailure`,
 `SessionError`) are defined in the proto with their field numbers.
 
+### Source-side per-file containment (contract v7)
+
+Contract v7 (`docs/plan/SOURCE_SIDE_CONTAINMENT.md`, ssc-1,
+D-2026-09-29-4) makes a file the SOURCE cannot deliver one file's
+failure instead of a session abort, and makes every single-file record
+end explicitly. A record is never inferred complete from a byte count
+alone.
+
+- **Skip record.** `TransferFrame.file_skipped` (21, a `FileFailure`)
+  on the in-stream carrier; on the TCP data plane the `SKIP` record tag
+  (`4`): `[tag:1][path_len:4][path][reason_len:4][reason]`. The SOURCE
+  sends one instead of a record when it cannot open a granted file, or
+  when the opened handle's size no longer matches the manifest (the
+  reason starts with `source:`, e.g. `source: cannot open: …`,
+  `source: changed size during transfer (manifest N bytes, now M)`).
+  Nothing else about that file goes on the wire. A skip is valid only
+  for a need the DESTINATION still holds as Granted; any other state is
+  a `PROTOCOL_VIOLATION`.
+- **Record terminator.** Every in-stream file record ends with
+  `file_end` (22, `RecordEnd{bool ok; string reason}`): `ok` requires
+  the record's cumulative `file_data` bytes to equal `FileHeader.size`
+  (else violation); `ok = false` is accepted at any byte count, the
+  DESTINATION discards what it wrote and reports the file with the
+  reason. On the data plane the FILE record body is chunked —
+  `repeat{[len:4][bytes]}` ended by `len = 0` — and followed by a status
+  byte (`0` ok; `1` failed then `[reason_len:4][reason]`); the receiver
+  sums the chunks and applies the same ok-requires-size rule. Chunks
+  are bounded (`MAX_FILE_CHUNK_BYTES`, 64 MiB); reasons by the summary's
+  per-entry cap (1 KiB).
+- **Resume status.** `BlockTransferComplete` gains `ok` (4) and
+  `reason` (5); `BLOCK_COMPLETE` on the data plane carries the same
+  status byte after its metadata. A failed close leaves the partial
+  unstamped (D-2026-07-09-1's re-run resumes it) and reports the file.
+  Every v7 sender sets `ok`; the proto3 default is not ok.
+- **Need ledger.** The DESTINATION keeps every granted need for the
+  whole session in one ledger — `Granted → Active(lane) → Completed |
+  Failed` — where a lane is the control stream or one inbound
+  data-plane connection (`epoch`, `socket_id`). A skip moves Granted →
+  Failed; a `file_begin` / FILE tag moves Granted → Active on its lane;
+  the terminator settles the Active record on that same lane from the
+  sink's outcome; a resume grant opens on its first block and closes
+  from Granted (zero-block record) or from Active on the same lane. A
+  block or completion for a record open on another socket, a terminator
+  with no open record on its lane, a skip for a non-Granted need, and a
+  `SourceDone` with anything still Granted or Active are all
+  `PROTOCOL_VIOLATION`s.
+- **`FileHeader.raw_relative_path`** (7, `optional bytes`) carries the
+  exact source bytes of a name that is not valid UTF-8 (present only
+  then; `relative_path` stays the lossy text and the protocol identity).
+  Wire-only in ssc-1; behaviour lands in ssc-5.
+- Source-side failures reach the summary through the same
+  `record_failure` chokepoint as destination-side ones: the same cap,
+  the same `files_failed`, the same exit-2 semantics. A skipped or
+  retracted file is in the manifest, so a mirror never treats its
+  destination counterpart as extraneous.
+
 ### `TransferSummary` per-file failure report (contract v6)
 
 `TransferSummary` adds field 6, `uint64 files_failed`, and field 7,
@@ -201,7 +259,10 @@ messages (`SessionHello`, `SessionOpen`,
 
 - The DESTINATION records a per-file failure when a file it could not
   materialize is attributable to exactly that one file; the session
-  continues and the rest of the manifest lands (D-2026-07-30-1).
+  continues and the rest of the manifest lands (D-2026-07-30-1). Since
+  contract v7 the SOURCE's own per-file failures (a file it cannot open,
+  or whose size drifted since the scan) arrive here too, via the skip
+  record and the failed terminator above.
   Failures that are not attributable to one file — containment or
   path-safety violations, tar-shard structural parse errors,
   destination-root unavailability, transport death — remain
@@ -415,10 +476,11 @@ push/pull-specific message.
   **Record grammar (fail-fast):** payload records on the
   source-lane are STRICTLY SERIALIZED — after `file_begin(header)`,
   only `file_data` frames for that file may follow on the lane until
-  the record completes; completion is inferred at exactly
-  `header.size` cumulative bytes (a `file_begin`/`tar_shard_header`/
-  `block` arriving early, or bytes overrunning `size`, is
-  `PROTOCOL_VIOLATION`). Tar-shard records run
+  its `file_end` (contract v7) closes it; `file_end{ok}` requires
+  exactly `header.size` cumulative bytes (a `file_begin`/
+  `tar_shard_header`/`block` arriving early, bytes overrunning `size`,
+  or an ok end short of it, is `PROTOCOL_VIOLATION`; `file_end{!ok}`
+  is a contained retraction). Tar-shard records run
   `tar_shard_header … tar_shard_chunk* … tar_shard_complete`; block
   records complete with `block_complete`. Payload records may begin
   only AFTER the source's `ManifestComplete` — this per-transport

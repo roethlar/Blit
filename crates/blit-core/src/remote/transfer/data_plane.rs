@@ -18,7 +18,24 @@ pub const DATA_PLANE_RECORD_FILE: u8 = 0;
 pub const DATA_PLANE_RECORD_TAR_SHARD: u8 = 1;
 pub const DATA_PLANE_RECORD_BLOCK: u8 = 2;
 pub const DATA_PLANE_RECORD_BLOCK_COMPLETE: u8 = 3;
+/// Contract v7 (SOURCE_SIDE_CONTAINMENT D-A): the SOURCE will not deliver
+/// a granted file. `[tag:1][path_len:4][path][reason_len:4][reason]`.
+pub const DATA_PLANE_RECORD_SKIP: u8 = 4;
 pub const DATA_PLANE_RECORD_END: u8 = 0xFF;
+/// Contract v7 record status byte, after a FILE record's chunked body
+/// and after BLOCK_COMPLETE's metadata: `0` ok, `1` failed followed by
+/// `[reason_len:4][reason]`.
+pub const RECORD_STATUS_OK: u8 = 0;
+pub const RECORD_STATUS_FAILED: u8 = 1;
+/// Upper bound on one FILE-record body chunk's declared length. The
+/// sender's chunks are its pool buffers (≤ 16 MiB); the receiver streams
+/// a chunk into its own buffers without allocating it whole, so this is a
+/// sanity bound against garbage framing, aligned with the block-record
+/// bound.
+pub const MAX_FILE_CHUNK_BYTES: u32 = 64 * 1024 * 1024;
+/// Upper bound on a wire reason string (SKIP records, failed statuses);
+/// the same per-entry cap the closing summary applies.
+pub const MAX_WIRE_REASON_BYTES: usize = crate::remote::transfer::sink::MAX_FAILURE_REASON_BYTES;
 const WINDOWS_METADATA_PRESENT: u8 = 1;
 const WINDOWS_METADATA_ABSENT: u8 = 0;
 pub(crate) const MAX_WINDOWS_METADATA_WIRE_BYTES: usize =
@@ -461,38 +478,76 @@ impl<P: Probe> DataPlaneSession<P> {
         self.bytes_sent
     }
 
+    /// Send one whole-file record, or — when the source cannot open the
+    /// file, or its size no longer matches the manifest (contract v7,
+    /// SOURCE_SIDE_CONTAINMENT D-A/D-C) — a SKIP record in its place.
+    /// Nothing of a skipped file is announced on the wire.
     pub async fn send_file(
         &mut self,
         source: Arc<dyn TransferSource>,
         header: &FileHeader,
-    ) -> Result<()> {
+    ) -> Result<FileSendOutcome> {
         let rel = &header.relative_path;
-        let mut file = source
-            .open_file(header)
+        let mut file = match source.open_file(header).await {
+            Ok(file) => file,
+            Err(err) => {
+                let reason = format!("source: cannot open: {err:#}");
+                self.send_skip(rel, &reason).await?;
+                return Ok(FileSendOutcome::Skipped(reason));
+            }
+        };
+        let now = file
+            .len()
             .await
-            .with_context(|| format!("opening {}", rel))?;
-        self.send_file_from_reader(header, &mut file).await
+            .with_context(|| format!("reading the size of {rel}"))?;
+        if now != header.size {
+            let reason = format!(
+                "source: changed size during transfer (manifest {} bytes, now {now})",
+                header.size
+            );
+            self.send_skip(rel, &reason).await?;
+            return Ok(FileSendOutcome::Skipped(reason));
+        }
+        self.send_file_from_reader(header, &mut file).await?;
+        Ok(FileSendOutcome::Sent)
     }
 
-    /// Send a file payload whose bytes come from an arbitrary async
-    /// reader (not a local file). Used by `DataPlaneSink` for the
-    /// remote→remote relay case, where bytes arrive from an inbound
-    /// `DataPlaneSource` and need to be forwarded to the next hop.
-    ///
-    /// Same wire format and double-buffered loop as `send_file`.
-    pub async fn send_file_from_reader(
-        &mut self,
-        header: &FileHeader,
-        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
-    ) -> Result<()> {
-        let rel = &header.relative_path;
-        trace_client!(self, "sending file '{}' ({} bytes)", rel, header.size);
+    /// Contract v7: tell the receiver a granted file will not arrive.
+    pub async fn send_skip(&mut self, relative_path: &str, reason: &str) -> Result<()> {
+        let path_bytes = relative_path.as_bytes();
+        if path_bytes.len() > u32::MAX as usize {
+            bail!("relative path too long for transfer: {}", relative_path);
+        }
+        trace_client!(self, "skipping file '{}': {}", relative_path, reason);
+        let phase_write = self.take_first_payload_write_trace();
+        self.stream
+            .write_all(&[DATA_PLANE_RECORD_SKIP])
+            .await
+            .context("writing skip record tag")?;
+        if let Some(trace) = phase_write {
+            trace.socket_first_write(self.phase_epoch, self.phase_socket);
+        }
+        self.stream
+            .write_all(&(path_bytes.len() as u32).to_be_bytes())
+            .await
+            .context("writing path length")?;
+        self.stream
+            .write_all(path_bytes)
+            .await
+            .context("writing path bytes")?;
+        write_reason(&mut self.stream, reason).await
+    }
 
+    /// Contract v7 relay support: announce a FILE record whose body the
+    /// caller streams through [`Self::write_file_chunk`] and closes with
+    /// [`Self::end_file_record`]. `send_file_from_reader` is the
+    /// one-shot form of the same three steps.
+    pub async fn begin_file_record(&mut self, header: &FileHeader) -> Result<()> {
+        let rel = &header.relative_path;
         let path_bytes = rel.as_bytes();
         if path_bytes.len() > u32::MAX as usize {
             bail!("relative path too long for transfer: {}", rel);
         }
-
         let phase_write = self.take_first_payload_write_trace();
         self.stream
             .write_all(&[DATA_PLANE_RECORD_FILE])
@@ -509,7 +564,6 @@ impl<P: Probe> DataPlaneSession<P> {
             .write_all(path_bytes)
             .await
             .context("writing path bytes")?;
-
         self.stream
             .write_all(&header.size.to_be_bytes())
             .await
@@ -526,13 +580,72 @@ impl<P: Probe> DataPlaneSession<P> {
             .write_all(&header.permissions.to_be_bytes())
             .await
             .context("writing permissions")?;
-        write_windows_metadata(&mut self.stream, header.windows_metadata.as_ref()).await?;
+        write_windows_metadata(&mut self.stream, header.windows_metadata.as_ref()).await
+    }
 
-        // Double-buffered I/O: overlaps source reads with network writes
+    /// One length-prefixed body chunk of the open FILE record. A
+    /// zero-length chunk is never written (the empty prefix is the
+    /// body's sentinel).
+    pub async fn write_file_chunk(&mut self, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if bytes.len() > MAX_FILE_CHUNK_BYTES as usize {
+            bail!(
+                "file chunk of {} bytes exceeds the wire chunk bound {}",
+                bytes.len(),
+                MAX_FILE_CHUNK_BYTES
+            );
+        }
+        let started = if P::ACTIVE {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        self.stream
+            .write_all(&(bytes.len() as u32).to_be_bytes())
+            .await
+            .context("writing file chunk length")?;
+        self.stream
+            .write_all(bytes)
+            .await
+            .context("writing file chunk")?;
+        if let Some(t) = started {
+            self.probe.note_write_blocked(t.elapsed().as_nanos() as u64);
+        }
+        self.probe.record_bytes(bytes.len() as u64);
+        crate::remote::instrumentation::record_cli_data_plane_outbound_bytes(bytes.len() as u64);
+        Ok(())
+    }
+
+    /// Close the open FILE record: the body sentinel, then the status.
+    pub async fn end_file_record(&mut self, ok: bool, reason: &str) -> Result<()> {
+        self.stream
+            .write_all(&0u32.to_be_bytes())
+            .await
+            .context("writing file body sentinel")?;
+        write_status(&mut self.stream, ok, reason).await
+    }
+
+    /// Send a file payload whose bytes come from an arbitrary async
+    /// reader (not a local file). Used by `DataPlaneSink` for the
+    /// remote→remote relay case, where bytes arrive from an inbound
+    /// `DataPlaneSource` and need to be forwarded to the next hop.
+    ///
+    /// Same wire format and double-buffered loop as `send_file`.
+    pub async fn send_file_from_reader(
+        &mut self,
+        header: &FileHeader,
+        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<()> {
+        let rel = &header.relative_path;
+        trace_client!(self, "sending file '{}' ({} bytes)", rel, header.size);
+        self.begin_file_record(header).await?;
+        // Double-buffered I/O: overlaps source reads with network writes;
+        // every buffer goes out as one length-prefixed chunk (contract v7).
         self.send_file_double_buffered(reader, header, rel).await?;
-
+        self.end_file_record(true, "").await?;
         trace_client!(self, "file '{}' sent ({} bytes)", rel, header.size);
-
         Ok(())
     }
 
@@ -552,9 +665,12 @@ impl<P: Probe> DataPlaneSession<P> {
             return Ok(());
         }
 
-        // Acquire two buffers for double-buffering
+        // Acquire two buffers for double-buffering. Each buffer is one
+        // wire chunk (≤ the pool's buffer size, which stays under
+        // `MAX_FILE_CHUNK_BYTES`).
         let mut buf_a = self.pool.acquire().await;
         let mut buf_b = self.pool.acquire().await;
+        debug_assert!(buf_a.as_slice().len() <= MAX_FILE_CHUNK_BYTES as usize);
 
         // Initial read into buf_a
         let mut bytes_a = file
@@ -591,6 +707,7 @@ impl<P: Probe> DataPlaneSession<P> {
             // Gated on the compile-time `P::ACTIVE` constant so
             // `DataPlaneSession<NoProbe>` reads no clock.
             let write_slice = &buf_a.as_slice()[..bytes_a];
+            let chunk_len = (bytes_a as u32).to_be_bytes();
             let stream = &mut self.stream;
             let (write_outcome, read_result) = tokio::join!(
                 async {
@@ -599,7 +716,10 @@ impl<P: Probe> DataPlaneSession<P> {
                     } else {
                         None
                     };
-                    let result = stream.write_all(write_slice).await;
+                    let result = match stream.write_all(&chunk_len).await {
+                        Ok(()) => stream.write_all(write_slice).await,
+                        Err(e) => Err(e),
+                    };
                     (result, started.map(|t| t.elapsed()))
                 },
                 file.read(buf_b.as_mut_slice())
@@ -642,6 +762,10 @@ impl<P: Probe> DataPlaneSession<P> {
             } else {
                 None
             };
+            self.stream
+                .write_all(&(bytes_a as u32).to_be_bytes())
+                .await
+                .with_context(|| format!("sending {}", rel))?;
             self.stream
                 .write_all(&buf_a.as_slice()[..bytes_a])
                 .await
@@ -839,6 +963,8 @@ impl<P: Probe> DataPlaneSession<P> {
         mtime_seconds: i64,
         permissions: u32,
         windows_metadata: Option<&WindowsFileMetadata>,
+        ok: bool,
+        reason: &str,
     ) -> Result<()> {
         let path_bytes = relative_path.as_bytes();
         if path_bytes.len() > u32::MAX as usize {
@@ -881,6 +1007,8 @@ impl<P: Probe> DataPlaneSession<P> {
             .await
             .context("writing permissions")?;
         write_windows_metadata(&mut self.stream, windows_metadata).await?;
+        // Contract v7: the record's status closes it.
+        write_status(&mut self.stream, ok, reason).await?;
 
         self.bytes_sent = self.bytes_sent.saturating_add(
             windows_metadata
@@ -934,6 +1062,89 @@ pub const RECEIVE_CHUNK_SIZE: usize = 1024 * 1024;
 /// reports. Callers that don't need byte-level instrumentation
 /// pass `None` and pay nothing — the inner loop's
 /// `if let Some(p)` branch is a single predicted-taken jump.
+/// What [`DataPlaneSession::send_file`] did for one file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileSendOutcome {
+    Sent,
+    /// A SKIP record went out instead; the reason (starts with `source:`).
+    Skipped(String),
+}
+
+/// `[len:4][bytes]`, bounded to [`MAX_WIRE_REASON_BYTES`] (cut on a char
+/// boundary).
+pub(crate) async fn write_reason<W: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut W,
+    reason: &str,
+) -> Result<()> {
+    let mut end = reason.len().min(MAX_WIRE_REASON_BYTES);
+    while end > 0 && !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    let bytes = &reason.as_bytes()[..end];
+    stream
+        .write_all(&(bytes.len() as u32).to_be_bytes())
+        .await
+        .context("writing reason length")?;
+    stream.write_all(bytes).await.context("writing reason")
+}
+
+/// The contract v7 record status: `0` ok, or `1` followed by the reason.
+pub(crate) async fn write_status<W: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut W,
+    ok: bool,
+    reason: &str,
+) -> Result<()> {
+    if ok {
+        stream
+            .write_all(&[RECORD_STATUS_OK])
+            .await
+            .context("writing record status")
+    } else {
+        stream
+            .write_all(&[RECORD_STATUS_FAILED])
+            .await
+            .context("writing record status")?;
+        write_reason(stream, reason).await
+    }
+}
+
+/// Copy `src` to `dst` until `src` ends, with the same read/write overlap
+/// as [`receive_stream_double_buffered`] but no expected length: the
+/// caller learns the body's length from the wire framing (contract v7
+/// chunked bodies end with a sentinel) and judges it against the header
+/// afterwards. Returns the bytes copied; reports each written buffer to
+/// `byte_progress` after it lands.
+pub async fn copy_stream_double_buffered<R, W>(
+    src: &mut R,
+    dst: &mut W,
+    buffer_size: usize,
+    byte_progress: Option<&crate::remote::transfer::progress::ByteProgressSink>,
+) -> Result<u64>
+where
+    R: tokio::io::AsyncRead + Unpin + ?Sized,
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    let cap = buffer_size.max(crate::buffer::DATA_PLANE_BUFFER_FLOOR);
+    let mut buf_a = vec![0u8; cap];
+    let mut buf_b = vec![0u8; cap];
+
+    let mut bytes_a = src.read(&mut buf_a).await.context("reading record body")?;
+    let mut total: u64 = 0;
+    while bytes_a > 0 {
+        let (write_res, read_res) =
+            tokio::join!(dst.write_all(&buf_a[..bytes_a]), src.read(&mut buf_b),);
+        write_res.context("writing received bytes to disk")?;
+        total += bytes_a as u64;
+        if let Some(progress) = byte_progress {
+            progress.report(bytes_a as u64);
+        }
+        let bytes_b = read_res.context("reading record body")?;
+        std::mem::swap(&mut buf_a, &mut buf_b);
+        bytes_a = bytes_b;
+    }
+    Ok(total)
+}
+
 pub async fn receive_stream_double_buffered<R, W>(
     src: &mut R,
     dst: &mut W,
@@ -1230,9 +1441,13 @@ mod underflow_tests {
         // Close the write side so the drain task's read_to_end completes.
         drop(session);
         let received = drain.await.unwrap();
+        // Contract v7: the body is one length-prefixed chunk here (the
+        // 1 KiB buffer holds all 100 bytes), so the wire carries exactly
+        // 4 + header.size bytes — never the reader's excess.
         assert_eq!(
-            received as u64, declared,
-            "must send exactly header.size bytes, never the reader's excess"
+            received as u64,
+            declared + 4,
+            "must send exactly one chunk prefix plus header.size bytes, never the reader's excess"
         );
     }
 }

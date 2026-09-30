@@ -219,6 +219,13 @@ message FileHeader {
   // source. Manifest headers carry descriptors/hashes with empty `content`;
   // payload headers carry the complete validated named-stream bytes.
   optional WindowsFileMetadata windows_metadata = 6;
+  // Contract v7 (SOURCE_SIDE_CONTAINMENT D-F, D-2026-09-29-3): the exact
+  // source bytes of `relative_path`, present ONLY when some component is
+  // not valid UTF-8 (so `relative_path` above is the lossy text). The
+  // text stays the protocol identity everywhere; these bytes let a
+  // destination that can hold them create the real name. Wire-only in
+  // ssc-1; set by the scan and consumed in ssc-5.
+  optional bytes raw_relative_path = 7;
 }
 
 message WindowsFileMetadata {
@@ -249,6 +256,17 @@ message TarShardChunk {
 }
 
 message TarShardComplete {}
+
+// Contract v7: explicit end of one single-file record (SOURCE_SIDE_CONTAINMENT
+// D-A). `ok` requires the record's cumulative `file_data` bytes to equal
+// `FileHeader.size`; a failed end is accepted at any byte count and names
+// why in `reason` (the same reason string the destination reports). Every
+// file record ends with one, so a record can never be inferred complete
+// from a byte count alone.
+message RecordEnd {
+  bool ok = 1;
+  string reason = 2;
+}
 
 message ManifestComplete {
   // R59 #1 F1: the SOURCE tells the DESTINATION whether its scan
@@ -282,6 +300,12 @@ message BlockTransferComplete {
   string relative_path = 1;              // File that's now complete
   uint64 total_bytes = 2;                // Final file size (for truncation if needed)
   optional WindowsFileMetadata windows_metadata = 3; // contract-v4 payload form
+  // Contract v7: a resume record closes with a status. `ok` finalizes as
+  // before; `!ok` leaves the destination partial unstamped and records
+  // `reason` as that file's failure (mid-diff source failures, ssc-3).
+  // Absent (proto3 default false) is NOT ok — every v7 sender sets it.
+  bool ok = 4;
+  string reason = 5;
 }
 
 message ListRequest { string module = 1; string path = 2; }
@@ -1172,5 +1196,11 @@ message TransferFrame {
     SourceDone source_done = 18;
     TransferSummary summary = 19;
     SessionError error = 20;
+    // Contract v7 (SOURCE_SIDE_CONTAINMENT D-A): the SOURCE will not deliver
+    // this granted file; `reason` starts with `source:`. Accepted only for
+    // a need in the Granted state.
+    FileFailure file_skipped = 21;
+    // Contract v7: the terminator of one single-file record.
+    RecordEnd file_end = 22;
   }
 }

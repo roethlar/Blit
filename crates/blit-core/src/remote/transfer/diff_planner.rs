@@ -89,6 +89,7 @@ mod tests {
             permissions: 0,
             checksum: vec![],
             windows_metadata: None,
+            raw_relative_path: None,
         }
     }
 

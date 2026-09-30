@@ -707,6 +707,42 @@ clone-into-absent-stage ordering. What remains:
 One coherent, testable change per slice — each its own go, commit, full
 gate, DEVLOG entry, CI on all three OSes before the next.
 
+**Execution record.** ssc-1 LANDED 2026-09-30 on master (commit hash in
+the DEVLOG entry of the same day; CI on all three OSes pending the next
+push). What landed against the slice text: proto `FileSkipped`=21,
+`FileEnd`=22 (`RecordEnd`), `BlockTransferComplete.ok/reason`,
+`FileHeader.raw_relative_path`=7 (wire only), `CONTRACT_VERSION` 7; data
+plane SKIP tag 4, chunked FILE bodies + status byte, BLOCK_COMPLETE
+status; `transfer_session/need_ledger.rs` (Granted → Active(lane) →
+Completed | Failed, `Lane::DataPlane{epoch, socket_id}` per inbound
+connection) replacing `OutstandingNeeds`/`GrantedHeaders`/
+`ResumeHeaders`; `TransferSink::begin_record` + `RecordWriter`
+(commit/abort, RAII drop guard on the in-place partial, discarding
+writer for contained destination-open failures, non-writing writer for
+dry-run) on `FsTransferSink`, the relay `DataPlaneSink`, `NullSink`,
+`NeedListSink` (lane views via `for_lane`) and the local wrappers;
+`OpenedSourceFile` (`Fs` owns the handle, `Virtual` for tests);
+skip-before-announce on both carriers for open failure and size drift;
+resume open failure → skip. Deviations from the slice text, recorded
+here: (1) `write_file_stream` stays on the trait as a convenience
+(`begin_record` + body + `commit`) for the local wrappers and sink
+tests rather than being deleted; (2) `FsRecordWriter` does not implement
+the D-C post-body re-stat (ssc-3) — its `commit` enforces the
+ok-requires-size rule the callers already check; (3) the in-stream
+receive keeps the bounded pipe and feeds the writer's `write_from`, so
+the sf-3c overlapped receive path is unchanged; (4) the `raw_relative_path`
+scan-side setter is deferred with the rest of D-F to ssc-5 (the field is
+on the wire, never set). Guards: `crates/blit-core/tests/
+source_side_containment.rs` (A3/A4 both carriers × both initiators,
+A5 four violations + the zero-block resume path in the ledger unit
+tests, A6 through the move gate, A7 mirror shield, A16 via the kept
+`write_file_stream_contains_failure_after_draining_the_record`, A18 via
+the kept R58-F4 dry-run pins, the destination half of A9, and the
+`cfg(windows)` `share_mode(0)` guard), `need_ledger.rs` unit tests, the
+data-plane fuzz cases for corrupt chunk/status/SKIP framing. Six
+mutation proofs red (DEVLOG 2026-09-30). A15: loopback A/B on this
+Mac, not a rig — see DEVLOG for the numbers and the caveat.
+
 1. **ssc-1 — contract 7: ledger, skip record, chunked records +
    terminators, sink lifecycle, `OpenedSourceFile`, raw-name field (A3
    remote, A4, A5, A6, A7, A15, A16).** Proto: `FileSkipped`=21,
