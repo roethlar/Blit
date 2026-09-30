@@ -2333,6 +2333,7 @@ async fn source_send_half(
                     if let Some(p) = instruments.progress.as_ref() {
                         p.report_summary_reconciled(
                             summary.files_failed,
+                            summary.files_transferred,
                             summary.bytes_transferred,
                         );
                     }

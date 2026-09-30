@@ -349,10 +349,15 @@ impl ActiveJobProgress {
             // at all. `finish` re-stores the same summary totals at
             // close; this makes the live row converge before then.
             ProgressEvent::SummaryReconciled {
-                files_failed,
+                files_failed: _,
+                files_landed,
                 bytes_landed,
             } => {
-                atomic_saturating_sub(&self.counters.files_completed, *files_failed);
+                // cr-ssc4-3: adopt the destination's landed count (a skip
+                // that never completed has nothing to give back).
+                self.counters
+                    .files_completed
+                    .store(*files_landed, Ordering::Relaxed);
                 if report_payload_bytes {
                     self.counters
                         .bytes_completed
@@ -394,12 +399,6 @@ impl ActiveJobProgress {
 fn atomic_saturating_add(counter: &AtomicU64, delta: u64) {
     let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
         Some(value.saturating_add(delta))
-    });
-}
-
-fn atomic_saturating_sub(counter: &AtomicU64, delta: u64) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-        Some(value.saturating_sub(delta))
     });
 }
 
@@ -2185,6 +2184,7 @@ mod tests {
 
         progress.report_source_event(&ProgressEvent::SummaryReconciled {
             files_failed: 1,
+            files_landed: 2,
             bytes_landed: 20,
         });
         let snap = table.snapshot();
@@ -2217,6 +2217,7 @@ mod tests {
 
         progress.report_destination_event(&ProgressEvent::SummaryReconciled {
             files_failed: 1,
+            files_landed: 0,
             bytes_landed: 0,
         });
         let snap = table.snapshot();

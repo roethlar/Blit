@@ -105,6 +105,12 @@ pub enum ProgressEvent {
     /// correction would subtract the same files twice.
     SummaryReconciled {
         files_failed: u64,
+        /// cr-ssc4-3: the destination's authoritative count of files that
+        /// landed. The fold ADOPTS it rather than subtracting
+        /// `files_failed` from the optimistic completions, because a
+        /// pre-announcement skip never emitted a completion to retract —
+        /// subtracting it would under-report every mixed run.
+        files_landed: u64,
         bytes_landed: u64,
     },
 }
@@ -160,11 +166,15 @@ impl ProgressTotals {
             }
             ProgressEvent::SummaryReconciled {
                 files_failed,
+                files_landed,
                 bytes_landed,
             } => {
-                // Saturating: the retraction can never drive the landed
-                // count below zero, whatever a producer reports.
-                self.files = self.files.saturating_sub(*files_failed);
+                // cr-ssc4-3: adopt the destination's landed count. It is
+                // authoritative in both directions — the optimistic
+                // completions may be too high (a file the destination could
+                // not write) or too low (a skip announced no completion to
+                // retract).
+                self.files = *files_landed;
                 self.files_failed = self.files_failed.saturating_add(*files_failed);
                 // Not a delta — the destination's total is authoritative
                 // (see the variant's docs for why no delta exists).
@@ -289,6 +299,7 @@ mod progress_totals_tests {
         });
         totals.apply(&ProgressEvent::SummaryReconciled {
             files_failed: 1,
+            files_landed: 0,
             bytes_landed: 0,
         });
         assert_eq!(totals.files, 0, "every completion retracted");
@@ -467,6 +478,7 @@ mod progress_totals_tests {
 
         totals.apply(&ProgressEvent::SummaryReconciled {
             files_failed: 1,
+            files_landed: 2,
             bytes_landed: 20,
         });
         assert_eq!(totals.files, 2, "only what landed is counted complete");
@@ -486,6 +498,7 @@ mod progress_totals_tests {
         totals.apply(&ProgressEvent::FileComplete { path: "a".into() });
         totals.apply(&ProgressEvent::Payload { files: 0, bytes: 7 });
         totals.apply(&ProgressEvent::SummaryReconciled {
+            files_landed: 0,
             files_failed: 9,
             bytes_landed: 0,
         });
@@ -499,14 +512,45 @@ mod progress_totals_tests {
     fn reported_summary_reconciliation_reaches_the_lane() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let progress = RemoteTransferProgress::new(tx);
-        progress.report_summary_reconciled(4, 512);
+        progress.report_summary_reconciled(4, 9, 512);
         assert!(matches!(
             rx.try_recv().expect("reconciliation event"),
             ProgressEvent::SummaryReconciled {
                 files_failed: 4,
+                files_landed: 9,
                 bytes_landed: 512
             }
         ));
+    }
+
+    /// cr-ssc4-3: a pre-announcement skip never emitted a completion, so
+    /// there is nothing to retract for it — the fold adopts the
+    /// destination's landed count. One landed file plus one skipped file
+    /// ends at 1 landed, not 0.
+    #[test]
+    fn a_skip_that_never_completed_does_not_retract_a_landed_file() {
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::ManifestBatch {
+            files: 2,
+            bytes: 20,
+        });
+        totals.apply(&ProgressEvent::Payload {
+            files: 0,
+            bytes: 10,
+        });
+        totals.apply(&ProgressEvent::FileComplete {
+            path: "landed.bin".into(),
+        });
+        // The skipped file announced nothing; the destination reports it
+        // failed and exactly one file landed.
+        totals.apply(&ProgressEvent::SummaryReconciled {
+            files_failed: 1,
+            files_landed: 1,
+            bytes_landed: 10,
+        });
+        assert_eq!(totals.files, 1, "the landed file stays counted");
+        assert_eq!(totals.files_failed, 1);
+        assert_eq!(totals.bytes, 10);
     }
 
     /// Both phase reporters put their event on the one lane.
@@ -949,9 +993,15 @@ impl RemoteTransferProgress {
     /// destination's summary (pfc-4) — see
     /// [`ProgressEvent::SummaryReconciled`]. SOURCE side only, once, at
     /// the summary boundary.
-    pub fn report_summary_reconciled(&self, files_failed: u64, bytes_landed: u64) {
+    pub fn report_summary_reconciled(
+        &self,
+        files_failed: u64,
+        files_landed: u64,
+        bytes_landed: u64,
+    ) {
         let _ = self.sender.send(ProgressEvent::SummaryReconciled {
             files_failed,
+            files_landed,
             bytes_landed,
         });
     }

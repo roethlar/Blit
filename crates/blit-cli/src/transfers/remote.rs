@@ -1165,6 +1165,7 @@ mod rate_window_tests {
         assert!(!carries_payload(&ProgressEvent::DeleteBegin));
         assert!(!carries_payload(&ProgressEvent::SummaryReconciled {
             files_failed: 1,
+            files_landed: 0,
             bytes_landed: 7,
         }));
     }
