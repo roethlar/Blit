@@ -275,6 +275,15 @@ message ManifestComplete {
   // the session refuses an incomplete-scan mirror, and refuses
   // outright when the open set require_complete_scan (otp-9b F1).
   bool scan_complete = 1;
+  // cr-ssc6-1 (contract v7, SOURCE_SIDE_CONTAINMENT D-I): for a
+  // `files_from`-scoped scan (a retry pass), every requested path the
+  // scan did not enumerate — missing, or unreadable at scan time — as a
+  // per-file failure the DESTINATION records verbatim, so a retry pass
+  // can never silently drop a file it was asked to re-land. Absent for
+  // an unscoped scan. Bounded like `TransferSummary.failed_paths`;
+  // `scan_failures_dropped` counts entries that did not fit.
+  repeated FileFailure scan_failures = 2;
+  uint64 scan_failures_dropped = 3;
 }
 // Progress: enumeration discovered X files (reused by
 // DelegatedPullProgress and TransferProgress).

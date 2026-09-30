@@ -181,6 +181,16 @@ pub trait TransferSource: Send + Sync {
 
     /// Returns the root path of the source (if applicable).
     fn root(&self) -> &Path;
+
+    /// cr-ssc6-1: the exact-path set this source's scan is scoped to
+    /// (`FileFilter.files_from`), when there is one — a retry pass (D-I)
+    /// scans exactly the paths that failed. The session's source half
+    /// reports every requested path the scan did not enumerate as that
+    /// file's failure (`ManifestComplete.scan_failures`). Wrappers
+    /// delegate; sources with no scope answer `None`.
+    fn files_from_scope(&self) -> Option<std::collections::HashSet<PathBuf>> {
+        None
+    }
 }
 
 /// One opened source file (contract v7, SOURCE_SIDE_CONTAINMENT D-A):
@@ -814,6 +824,10 @@ impl TransferSource for WindowsMetadataDroppingSource {
         self.inner.open_file(header).await
     }
 
+    fn files_from_scope(&self) -> Option<std::collections::HashSet<PathBuf>> {
+        self.inner.files_from_scope()
+    }
+
     fn root(&self) -> &Path {
         self.inner.root()
     }
@@ -851,6 +865,13 @@ impl TransferSource for FilteredSource {
 
     async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
         self.inner.open_file(header).await
+    }
+
+    fn files_from_scope(&self) -> Option<std::collections::HashSet<PathBuf>> {
+        self.filter
+            .files_from
+            .clone()
+            .or_else(|| self.inner.files_from_scope())
     }
 
     fn root(&self) -> &Path {
@@ -938,6 +959,10 @@ impl TransferSource for ChecksummingSource {
 
     async fn open_file(&self, header: &FileHeader) -> Result<OpenedSourceFile> {
         self.inner.open_file(header).await
+    }
+
+    fn files_from_scope(&self) -> Option<std::collections::HashSet<PathBuf>> {
+        self.inner.files_from_scope()
     }
 
     fn root(&self) -> &Path {

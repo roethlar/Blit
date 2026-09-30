@@ -380,3 +380,43 @@ fn move_with_retries_deletes_the_source_only_once_everything_landed() {
     assert!(src.join("blocked.txt").is_file(), "source intact");
     assert_eq!(counter_lines(&counters, "retry_pass"), vec![1]);
 }
+
+/// cr-ssc6-1: a failed file that is gone from the SOURCE by the time the
+/// retry pass scans is still a failure — the pass names it as missing —
+/// so the run exits 2 and says so instead of reporting a clean retry
+/// while the destination lacks the file.
+#[test]
+fn a_failed_file_missing_at_retry_stays_reported() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (src, dst) = one_blocked_file_fixture(temp.path());
+    let counters = temp.path().join("counters.txt");
+    let child = spawn(
+        "copy",
+        &["--retries", "1", "--retry-wait", "4"],
+        &src,
+        &dst,
+        &counters,
+    );
+    wait_for_counter(&counters, "retry_wait_seconds", Duration::from_secs(60));
+    // Free the destination so a retry COULD land it, then remove the
+    // source: the retry scan has nothing to re-land.
+    fs::remove_dir_all(dst.join("blocked.txt")).expect("free the blocked path");
+    fs::remove_file(src.join("blocked.txt")).expect("remove the source file");
+    let output = finish(child);
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_PARTIAL_FAILURE),
+        "a file the retry could not find is still a failure\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !dst.join("blocked.txt").exists(),
+        "nothing landed for the missing file"
+    );
+    assert!(
+        stdout.contains("blocked.txt") && stdout.contains("missing at retry"),
+        "the failure block names the file and says it was missing at retry:\n{stdout}"
+    );
+    assert_eq!(counter_lines(&counters, "retry_pass"), vec![1]);
+}

@@ -285,6 +285,14 @@ impl SinkOutcome {
         }
     }
 
+    /// cr-ssc6-1: count failures the peer could not name (a scoped scan's
+    /// overflow past the wire budget). They raise `files_failed_total`
+    /// without a path, so the report's elided count carries them and
+    /// `file_failed` answers conservatively for the rest of the session.
+    pub fn record_unnamed_failures(&mut self, count: u64) {
+        self.files_failed_total = self.files_failed_total.saturating_add(count);
+    }
+
     /// Whether this outcome failed `relative_path`.
     ///
     /// Exact for the outcome of one payload, however many members that

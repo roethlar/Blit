@@ -26,8 +26,8 @@ use std::time::Duration;
 
 use blit_core::generated::transfer_frame::Frame;
 use blit_core::generated::{
-    session_error, FileData, FileFailure, FileHeader, ManifestComplete, MirrorMode, RecordEnd,
-    ResumeSettings, SessionHello, SessionOpen, SourceDone, TransferFrame, TransferRole,
+    session_error, FileData, FileFailure, FileHeader, FilterSpec, ManifestComplete, MirrorMode,
+    RecordEnd, ResumeSettings, SessionHello, SessionOpen, SourceDone, TransferFrame, TransferRole,
     TransferSummary,
 };
 use blit_core::remote::transfer::source::{
@@ -907,6 +907,7 @@ async fn scripted_source_with_one_grant(
         .unwrap();
     peer.send(wire(Frame::ManifestComplete(ManifestComplete {
         scan_complete: true,
+        ..Default::default()
     })))
     .await
     .unwrap();
@@ -2330,4 +2331,104 @@ mod raw_round_trip {
             vec![RAW_NAME.to_vec(), b"small.txt".to_vec()]
         );
     }
+}
+
+/// cr-ssc6-1 (D-I): a `files_from`-scoped scan — what a retry pass runs
+/// — accounts for every requested path. One the walk cannot enumerate
+/// (gone from the source, or unreadable at scan time) is the
+/// destination's recorded failure with a `source:` reason, so a retry
+/// pass can never silently drop a file it was asked to re-land. The
+/// present requested file still lands; nothing outside the set is
+/// touched.
+async fn assert_scoped_scan_reports_unscanned_requests(carrier: Carrier) {
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(
+            &src_root,
+            &[
+                ("present.bin", patterned(BIG, 1), 1_600_000_001),
+                ("outside.bin", patterned(BIG, 2), 1_600_000_002),
+                ("sub/unreadable.bin", patterned(BIG, 3), 1_600_000_003),
+            ],
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                src_root.join("sub/unreadable.bin"),
+                std::fs::Permissions::from_mode(0o000),
+            )
+            .unwrap();
+        }
+        let mut open = open_for(initiator_role, carrier);
+        let mut files_from = vec!["present.bin".to_string(), "gone.bin".to_string()];
+        if cfg!(unix) {
+            files_from.push("sub/unreadable.bin".to_string());
+        }
+        open.filter = Some(FilterSpec {
+            files_from,
+            ..Default::default()
+        });
+        let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
+        let (sr, dr) = run_with(open, carrier, source, dst_root.clone()).await;
+        let summary = sr.unwrap_or_else(|e| panic!("source must complete ({carrier:?}): {e:#}"));
+        let dest = dr.unwrap_or_else(|e| panic!("destination must complete ({carrier:?}): {e:#}"));
+        assert_eq!(summary, dest.summary, "both ends agree ({carrier:?})");
+        let expected_failed = if cfg!(unix) { 2 } else { 1 };
+        assert_eq!(
+            summary.files_failed, expected_failed,
+            "every requested path the scan could not enumerate is a failure ({carrier:?}): {:?}",
+            summary.failures
+        );
+        assert_eq!(
+            summary.files_transferred, 1,
+            "the present requested file lands"
+        );
+        let by_path: HashMap<_, _> = summary
+            .failures
+            .iter()
+            .map(|f| (f.relative_path.as_str(), f.reason.as_str()))
+            .collect();
+        assert!(
+            by_path["gone.bin"].starts_with("source: missing at retry"),
+            "a path the scan never saw is missing: {:?}",
+            by_path
+        );
+        #[cfg(unix)]
+        assert!(
+            by_path["sub/unreadable.bin"]
+                .starts_with("source: unreadable at retry: permission denied"),
+            "a path the scan could not open keeps its reason: {:?}",
+            by_path
+        );
+        let landed = collect_tree(&dst_root);
+        assert_eq!(
+            landed.keys().collect::<Vec<_>>(),
+            vec!["present.bin"],
+            "only the requested, present file lands ({carrier:?})"
+        );
+        let gate = refuse_source_delete_on_failures(
+            "src",
+            summary.files_failed,
+            &failures_from_wire(&summary.failures),
+        );
+        assert!(
+            gate.is_err(),
+            "move must refuse while a requested file did not land"
+        );
+    }
+}
+
+#[tokio::test]
+async fn in_stream_scoped_scan_reports_requested_paths_it_cannot_enumerate() {
+    assert_scoped_scan_reports_unscanned_requests(Carrier::InStream).await;
+}
+
+#[tokio::test]
+async fn data_plane_scoped_scan_reports_requested_paths_it_cannot_enumerate() {
+    assert_scoped_scan_reports_unscanned_requests(Carrier::DataPlane).await;
 }

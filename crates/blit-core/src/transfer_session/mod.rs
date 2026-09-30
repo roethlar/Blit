@@ -1353,6 +1353,52 @@ pub async fn run_source(
 /// by [`run_source`] (initiator or direct-responder) and
 /// [`run_responder`] (the daemon SOURCE responder), so the send/receive
 /// choreography is single-sourced.
+/// cr-ssc6-1: the requested paths of a `files_from`-scoped scan that the
+/// walk did not put on the manifest, each as a `source:` failure. A path
+/// the scan recorded as unreadable keeps that reason; one it never saw
+/// is missing. Bounded by the same encoded budget as the summary's
+/// failed-path list; the overflow is returned as a count.
+fn requested_but_unscanned(
+    scope: Option<&HashSet<PathBuf>>,
+    sent: &HashMap<String, FileHeader>,
+    unreadable: &[String],
+) -> (Vec<crate::generated::FileFailure>, u64) {
+    let Some(scope) = scope else {
+        return (Vec::new(), 0);
+    };
+    let mut out = Vec::new();
+    let mut dropped = 0u64;
+    let mut budget = crate::remote::transfer::sink::MAX_WIRE_FAILED_PATHS_ENCODED_BYTES;
+    // Deterministic report order, whatever the set's iteration order.
+    let mut requested: Vec<&PathBuf> = scope.iter().collect();
+    requested.sort();
+    for requested in requested {
+        let rel = crate::path_posix::relative_path_to_posix(requested);
+        if sent.contains_key(&rel) {
+            continue;
+        }
+        let prefix = format!("{rel} (");
+        let reason = match unreadable.iter().find(|entry| entry.starts_with(&prefix)) {
+            Some(entry) => format!(
+                "source: unreadable at retry: {}",
+                entry[prefix.len()..].trim_end_matches(')')
+            ),
+            None => "source: missing at retry (not found by the retry scan)".to_string(),
+        };
+        let cost = rel.len() + reason.len() + 8;
+        if cost > budget {
+            dropped += 1;
+            continue;
+        }
+        budget -= cost;
+        out.push(crate::generated::FileFailure {
+            relative_path: rel,
+            reason,
+        });
+    }
+    (out, dropped)
+}
+
 async fn drive_source(
     plan_options: PlanOptions,
     data_plane_host: Option<String>,
@@ -1978,9 +2024,22 @@ async fn source_send_half(
                 SessionPhaseFields::default(),
             );
         }
+        // cr-ssc6-1: a `files_from`-scoped scan (a retry pass, D-I) must
+        // account for every requested path. Whatever the walk did not
+        // enumerate — gone from the source, or unreadable at scan time —
+        // is reported to the DESTINATION as that file's failure, so the
+        // retry pass can never quietly drop a file it was asked to
+        // re-land. Unscoped scans report nothing here.
+        let (scan_failures, scan_failures_dropped) = requested_but_unscanned(
+            scan_source.files_from_scope().as_ref(),
+            &sent.lock().expect("sent-manifest lock poisoned"),
+            &unreadable.lock().expect("unreadable list lock poisoned"),
+        );
         manifest_sent.store(true, Ordering::Release);
         tx.send(frame(Frame::ManifestComplete(ManifestComplete {
             scan_complete,
+            scan_failures,
+            scan_failures_dropped,
         })))
         .await?;
         if let Some(trace) = &phase_trace {
@@ -4398,6 +4457,16 @@ async fn destination_session_inner(
                 }
                 if manifest_complete {
                     return Err(violation("duplicate ManifestComplete".into()));
+                }
+                // cr-ssc6-1: a scoped (retry) scan names every requested
+                // path it could not put on the manifest; each is this
+                // session's contained failure, recorded before the diff so
+                // the summary, the exit status and the move gate all see it.
+                for failure in &complete.scan_failures {
+                    contained_failures.record_failure(&failure.relative_path, &failure.reason);
+                }
+                if complete.scan_failures_dropped > 0 {
+                    contained_failures.record_unnamed_failures(complete.scan_failures_dropped);
                 }
                 // otp-6b: mirror deletions are data-loss-dangerous when the
                 // source scan was incomplete — a source file missing from an

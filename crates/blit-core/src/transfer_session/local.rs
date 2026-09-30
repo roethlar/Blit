@@ -650,6 +650,10 @@ impl TransferSource for DestSubtreeExcludedSource {
         self.inner.open_file(header).await
     }
 
+    fn files_from_scope(&self) -> Option<std::collections::HashSet<PathBuf>> {
+        self.inner.files_from_scope()
+    }
+
     fn root(&self) -> &Path {
         self.inner.root()
     }

@@ -42,6 +42,11 @@ pub(crate) struct PassFailures {
     pub failures: Vec<FileFailure>,
     pub failed_paths: Vec<String>,
     pub failed_paths_truncated: bool,
+    /// cr-ssc6-1: failures no retry pass was ever given — the unnamed
+    /// remainder of a truncated retry set. They stay failed (they were
+    /// never observed to converge), are counted in `files_failed`, and
+    /// are reported once as a synthesized entry.
+    pub unretried: u64,
 }
 
 impl PassFailures {
@@ -51,6 +56,7 @@ impl PassFailures {
             failures: super::failures::failures_from_wire(&summary.failures),
             failed_paths: summary.failed_paths.clone(),
             failed_paths_truncated: summary.failed_paths_truncated,
+            unretried: 0,
         }
     }
 
@@ -60,6 +66,7 @@ impl PassFailures {
             failures: summary.failures.clone(),
             failed_paths: summary.failed_paths.clone(),
             failed_paths_truncated: summary.failed_paths_truncated,
+            unretried: 0,
         }
     }
 
@@ -70,6 +77,7 @@ impl PassFailures {
             failures: outcome.contained_failures(),
             failed_paths: paths.to_vec(),
             failed_paths_truncated: truncated,
+            unretried: 0,
         }
     }
 
@@ -91,13 +99,43 @@ impl PassFailures {
         )
     }
 
-    /// Mark every remaining failure as one that survived a retry.
+    /// Mark every remaining failure as one that survived a retry, and
+    /// name the ones no pass could reach.
     fn mark_retried(&mut self) {
         for failure in &mut self.failures {
             if !failure.reason.ends_with(RETRIED_SUFFIX) {
                 failure.reason.push_str(RETRIED_SUFFIX);
             }
         }
+        if self.unretried > 0 {
+            self.failures.push(FileFailure {
+                relative_path: UNRETRIED_PATH.to_string(),
+                reason: format!(
+                    "{} file(s) were not retried: the retry set was truncated to the \
+                     named report; re-run to converge",
+                    self.unretried
+                ),
+            });
+        }
+    }
+
+    /// cr-ssc6-1: fold one pass's result over the set it was given. A
+    /// pass positively accounts for every path it was asked to retry — a
+    /// scoped scan reports what it could not enumerate as that file's
+    /// failure (`ManifestComplete.scan_failures`), and the diff/sink
+    /// report the rest — so its failure report IS the pending set of the
+    /// paths it retried. What the pass was never given (the unnamed
+    /// remainder of a truncated set) is carried forward unchanged.
+    fn after_pass(&self, retried: usize, truncated: bool, mut next: PassFailures) -> PassFailures {
+        let previously_named = self.files_failed.saturating_sub(self.unretried);
+        let not_given = if truncated {
+            previously_named.saturating_sub(retried as u64)
+        } else {
+            0
+        };
+        next.unretried = self.unretried.saturating_add(not_given);
+        next.files_failed = next.files_failed.saturating_add(next.unretried);
+        next
     }
 
     /// Write the final state back onto a wire-shaped summary.
@@ -119,6 +157,10 @@ impl PassFailures {
 
 /// Appended to the reason of a file that failed again on a retry pass.
 pub(crate) const RETRIED_SUFFIX: &str = " (retried)";
+
+/// The path column of the synthesized report entry for failures no retry
+/// pass was given (cr-ssc6-1).
+pub(crate) const UNRETRIED_PATH: &str = "(not retried)";
 
 /// What one retry pass returns to the loop.
 pub(crate) struct PassResult {
@@ -220,7 +262,7 @@ where
         let result = run(pass_args).await?;
         added_files = added_files.saturating_add(result.files_transferred);
         added_bytes = added_bytes.saturating_add(result.bytes_transferred);
-        current = result.failures;
+        current = current.after_pass(n, truncated, result.failures);
         passes_run = pass;
     }
     if passes_run > 0 {
@@ -263,6 +305,7 @@ mod tests {
             failures: paths.iter().map(|p| failure(p)).collect(),
             failed_paths: paths.iter().map(|p| p.to_string()).collect(),
             failed_paths_truncated: false,
+            unretried: 0,
         }
     }
 
@@ -366,6 +409,53 @@ mod tests {
         .await
         .expect("loop");
         assert_eq!(out.passes_run, 1);
+        // cr-ssc6-1: the three failures the report could not name were
+        // never retried, so they are still failed — counted, named once
+        // as a synthesized entry, and enough for the move gate to refuse.
+        assert_eq!(out.final_failures.files_failed, 3);
+        assert_eq!(out.final_failures.unretried, 3);
+        let synth: Vec<_> = out
+            .final_failures
+            .failures
+            .iter()
+            .filter(|f| f.relative_path == UNRETRIED_PATH)
+            .collect();
+        assert_eq!(
+            synth.len(),
+            1,
+            "one synthesized entry: {:?}",
+            out.final_failures.failures
+        );
+        assert!(synth[0].reason.starts_with("3 file(s) were not retried"));
+        assert!(
+            blit_core::transfers::failures::refuse_source_delete_on_failures(
+                "src",
+                out.final_failures.files_failed,
+                &out.final_failures.failures,
+            )
+            .is_err(),
+            "a move must refuse while unretried failures remain"
+        );
+    }
+
+    /// cr-ssc6-1: a pass that reports fewer failures than it was given
+    /// has positively accounted for the rest (the scoped scan names what
+    /// it could not enumerate); nothing unnamed is invented for a
+    /// complete set, and a truncated remainder survives a clean pass.
+    #[tokio::test]
+    async fn unretried_remainder_survives_a_clean_pass_only_when_truncated() {
+        let out = run_retry_passes(&args(1), failures(&["a", "b"]), |_| async {
+            Ok(PassResult {
+                files_transferred: 1,
+                bytes_transferred: 0,
+                failures: failures(&["b"]),
+            })
+        })
+        .await
+        .expect("loop");
+        assert_eq!(out.final_failures.files_failed, 1);
+        assert_eq!(out.final_failures.unretried, 0);
+        assert_eq!(out.final_failures.failures.len(), 1);
     }
 
     #[tokio::test]

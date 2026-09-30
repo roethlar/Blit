@@ -893,6 +893,7 @@ async fn file_record_for_resume_flagged_path_is_protocol_violation() {
         .unwrap();
     peer.send(wire(Frame::ManifestComplete(ManifestComplete {
         scan_complete: true,
+        ..Default::default()
     })))
     .await
     .unwrap();
@@ -3210,6 +3211,7 @@ async fn mirror_refused_when_source_scan_incomplete() {
     .unwrap();
     peer.send(wire(Frame::ManifestComplete(ManifestComplete {
         scan_complete: false,
+        ..Default::default()
     })))
     .await
     .unwrap();
@@ -3281,6 +3283,7 @@ async fn cancel_frame_during_mirror_purge_aborts_the_deletions() {
     // all 2000 files. Queue the cancel right behind SourceDone.
     peer.send(wire(Frame::ManifestComplete(ManifestComplete {
         scan_complete: true,
+        ..Default::default()
     })))
     .await
     .unwrap();
@@ -3369,6 +3372,7 @@ async fn cancel_mid_file_record_surfaces_the_peers_fault() {
         .unwrap();
     peer.send(wire(Frame::ManifestComplete(ManifestComplete {
         scan_complete: true,
+        ..Default::default()
     })))
     .await
     .unwrap();
@@ -3476,6 +3480,7 @@ async fn incomplete_scan_refused_when_completeness_required() {
     .unwrap();
     peer.send(wire(Frame::ManifestComplete(ManifestComplete {
         scan_complete: false,
+        ..Default::default()
     })))
     .await
     .unwrap();
@@ -3971,6 +3976,7 @@ async fn manifest_entry_after_manifest_complete_is_protocol_violation() {
 
     peer.send(wire(Frame::ManifestComplete(ManifestComplete {
         scan_complete: true,
+        ..Default::default()
     })))
     .await
     .unwrap();
