@@ -1,7 +1,7 @@
 # cr-ssc1-2: Bound chunked FILE bodies by the manifest size before bytes reach the writer
 
 **Severity**: HIGH — an authenticated peer can write unbounded bytes past a tiny advertised size before any check (disk exhaustion)
-**Status**: Open
+**Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: (filled after the fix commit)
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range f74b0b1a..6bc3d08f, record .review/results/ssc-1-range.codex.json)
@@ -18,10 +18,10 @@ An authenticated peer can advertise a tiny file and send an arbitrary number of 
 Give ChunkedBody the advertised remaining length and reject any chunk whose length exceeds it before yielding bytes to the writer. Enforce the cumulative upper bound for both successful and failed records.
 
 ## What
-(coder fills in)
+`ChunkedBody` (`remote/transfer/pipeline.rs`) now carries the header's advertised size (`limit`) and the bytes announced so far (`total`); a chunk whose length prefix would push the total past the limit is rejected as `InvalidData` at the prefix — before one byte of it is yielded to the record writer — for ok and failed records alike. The FILE receive arm constructs it with `file_size`. The existing ok-requires-`header.size` check at the status byte stays (the bound is the upper half, that check the exact-match half).
 
 ## Guard proof
-(red/green proof of the new guard; mutation described)
+`file_body_exceeding_the_header_size_is_rejected_before_the_writer_sees_it` (pipeline.rs tests): header promises 4 bytes, the body streams two 4-byte chunks, once with an ok status and once with a failed status; asserts the error names the cumulative bound and the destination never holds more than 4 bytes. Mutation: `if announced > self.limit && false` → the guard FAILED (record accepted; `scratchpad/cr-ssc-mutations.txt`); restored → green, fuzz harness green.
 
 ## Known gaps
-(none yet)
+None. The chunk-length cap (`MAX_FILE_CHUNK_BYTES`) and the reason-length cap were already enforced; this closes the cumulative gap only.

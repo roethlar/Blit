@@ -1204,8 +1204,19 @@ use super::data_plane::{
 /// then reads the status byte that follows and judges the byte count
 /// against the header. A chunk length above [`MAX_FILE_CHUNK_BYTES`] is
 /// malformed framing and errors out like an unknown record tag would.
+///
+/// cr-ssc1-2: the body is also bounded by the header's advertised size —
+/// a chunk whose length would push the cumulative total past `limit` is
+/// rejected at its length prefix, before one byte of it reaches the
+/// writer, for ok and failed records alike. A peer cannot write past the
+/// size it was granted.
 struct ChunkedBody<'a, R: AsyncRead + Unpin> {
     inner: &'a mut R,
+    /// The header's advertised size: the most the body may carry.
+    limit: u64,
+    /// Bytes of chunk payload announced so far (each chunk is counted at
+    /// its length prefix).
+    total: u64,
     /// Bytes left in the current chunk.
     remaining: u32,
     /// Bytes of the next length prefix already read.
@@ -1215,9 +1226,11 @@ struct ChunkedBody<'a, R: AsyncRead + Unpin> {
 }
 
 impl<'a, R: AsyncRead + Unpin> ChunkedBody<'a, R> {
-    fn new(inner: &'a mut R) -> Self {
+    fn new(inner: &'a mut R, limit: u64) -> Self {
         Self {
             inner,
+            limit,
+            total: 0,
             remaining: 0,
             prefix: [0; 4],
             prefix_filled: 0,
@@ -1278,6 +1291,19 @@ impl<R: AsyncRead + Unpin> AsyncRead for ChunkedBody<'_, R> {
                                 ),
                             )));
                         }
+                        let announced = self.total.saturating_add(u64::from(len));
+                        if announced > self.limit {
+                            return Poll::Ready(Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!(
+                                    "file record body would exceed the header's {} byte(s) \
+                                     ({} already announced, next chunk {len}) — rejecting \
+                                     the record before writing past its granted size",
+                                    self.limit, self.total
+                                ),
+                            )));
+                        }
+                        self.total = announced;
                         self.remaining = len;
                     }
                 }
@@ -1410,7 +1436,7 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                     .begin_record(&header)
                     .await
                     .with_context(|| format!("receiving {}", header.relative_path))?;
-                let mut body = ChunkedBody::new(&mut *socket);
+                let mut body = ChunkedBody::new(&mut *socket, file_size);
                 let got = writer
                     .write_from(&mut body)
                     .await
@@ -2024,6 +2050,86 @@ mod tests {
         for i in 0..8 {
             let content = std::fs::read_to_string(dst.join(format!("f{i}.txt"))).unwrap();
             assert_eq!(content, format!("n{i}"));
+        }
+    }
+
+    /// cr-ssc1-2: a peer that announces a small file and then streams
+    /// more chunk bytes than the header allows is rejected at the first
+    /// overflowing chunk's length prefix — the writer never receives the
+    /// overflow — for an ok-terminated and a failed-terminated record
+    /// alike, and the destination never holds more than `header.size`.
+    #[tokio::test]
+    async fn file_body_exceeding_the_header_size_is_rejected_before_the_writer_sees_it() {
+        use std::path::PathBuf;
+        for failed_status in [false, true] {
+            let tmp = tempdir().unwrap();
+            let dst = tmp.path().to_path_buf();
+            let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
+                PathBuf::from("/nonexistent-src"),
+                dst.clone(),
+                FsSinkConfig {
+                    preserve_times: false,
+                    dry_run: false,
+                    checksum: None,
+                    resume: false,
+                    compare_mode: ComparisonMode::SizeMtime,
+                },
+            ));
+            // Header promises 4 bytes; the body carries two 4-byte
+            // chunks (8 bytes) before its sentinel and status.
+            let mut bytes = vec![DATA_PLANE_RECORD_FILE];
+            bytes.extend_from_slice(&(b"over.bin".len() as u32).to_be_bytes());
+            bytes.extend_from_slice(b"over.bin");
+            bytes.extend_from_slice(&4u64.to_be_bytes());
+            bytes.extend_from_slice(&0i64.to_be_bytes());
+            bytes.extend_from_slice(&0o644u32.to_be_bytes());
+            bytes.push(0);
+            for chunk in [b"abcd", b"efgh"] {
+                bytes.extend_from_slice(&4u32.to_be_bytes());
+                bytes.extend_from_slice(chunk);
+            }
+            bytes.extend_from_slice(&0u32.to_be_bytes());
+            if failed_status {
+                bytes.push(RECORD_STATUS_FAILED);
+                bytes.extend_from_slice(&(b"source: read error".len() as u32).to_be_bytes());
+                bytes.extend_from_slice(b"source: read error");
+            } else {
+                bytes.push(RECORD_STATUS_OK);
+            }
+            bytes.push(DATA_PLANE_RECORD_END);
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("local addr");
+            let (client_res, server_res) =
+                tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept(),);
+            let mut writer = client_res.expect("connect");
+            let (mut reader, _) = server_res.expect("accept");
+            let writer_handle = tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = writer.write_all(&bytes).await;
+                let _ = writer.shutdown().await;
+            });
+            let result = execute_receive_pipeline(&mut reader, sink, None).await;
+            let _ = writer_handle.await;
+
+            let err = match result {
+                Err(e) => format!("{e:#}"),
+                Ok(outcome) => panic!(
+                    "over-long body (failed_status={failed_status}) was accepted: {outcome:?}"
+                ),
+            };
+            assert!(
+                err.contains("would exceed the header's 4 byte(s)"),
+                "failed_status={failed_status}: expected the cumulative bound to fire, got: {err}"
+            );
+            let landed = dst.join("over.bin");
+            if landed.exists() {
+                let len = std::fs::metadata(&landed).unwrap().len();
+                assert!(
+                    len <= 4,
+                    "failed_status={failed_status}: destination holds {len} bytes past the 4-byte header"
+                );
+            }
         }
     }
 
