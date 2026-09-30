@@ -707,8 +707,8 @@ clone-into-absent-stage ordering. What remains:
 One coherent, testable change per slice — each its own go, commit, full
 gate, DEVLOG entry, CI on all three OSes before the next.
 
-**Execution record.** ssc-1 LANDED 2026-09-30 on master (commit hash in
-the DEVLOG entry of the same day; CI on all three OSes pending the next
+**Execution record.** ssc-1 LANDED 2026-09-30 on master at `bd4c48d0`
+(range `f74b0b1a..bd4c48d0`; CI on all three OSes pending the next
 push). What landed against the slice text: proto `FileSkipped`=21,
 `FileEnd`=22 (`RecordEnd`), `BlockTransferComplete.ok/reason`,
 `FileHeader.raw_relative_path`=7 (wire only), `CONTRACT_VERSION` 7; data
