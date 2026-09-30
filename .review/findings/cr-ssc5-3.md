@@ -1,9 +1,9 @@
 # cr-ssc5-3: Windows mirror planning performs an unsafe decode of remote Unix filename bytes
 
 **Severity**: HIGH — Windows mirror planning calls OsStr::from_encoded_bytes_unchecked on arbitrary bytes received from a Unix source — a standard-library safety-contract violation (panic or undefined behaviour) during deletion planning
-**Status**: Open
+**Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (filled after the fix commit)
+**Commit**: `b1277b6f`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range e14d1b72..69390931 (ssc-5), record .review/results/ssc-5-range.codex.json)
 
 ## Evidence
@@ -16,10 +16,10 @@ A Windows mirror receiving a Linux filename such as caf\xe9.txt violates the sta
 Never decode foreign raw bytes on platforms where can_store_raw_names is false. Preserve only the safe textual counterpart there, or introduce an explicitly tagged, safely decoded platform encoding.
 
 ## What
-(coder fills in)
+`path_from_raw` is local-bytes-only; `path_from_received_raw(raw, storable)` is the consumer for peer bytes and answers `None` wherever raw names are unstorable (Windows, macOS). The planner takes `RawNamedEntry {text, raw}` plus the capability explicitly.
 
 ## Guard proof
-(red/green proof; mutation described)
+Unit pins: foreign bytes decode to `None` where unstorable; a planner run with Linux bytes on an unstorable host completes and plans only the unrelated entry. Mutation: capability ignored → red.
 
 ## Known gaps
-(none yet)
+none

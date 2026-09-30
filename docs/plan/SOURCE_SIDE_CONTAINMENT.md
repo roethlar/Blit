@@ -1020,6 +1020,25 @@ carried as ssc-5's release-version requirement. Each guard was proven
 red by mutation and green after (DEVLOG 2026-09-30). Gate on macOS:
 fmt clean; clippy `-D warnings` clean native and `x86_64-unknown-linux-gnu`; `cargo test --workspace` 1270 → 1285 passed, 0 failed, 2 ignored; check-docs OK; diff-check clean; CI on the three OSes unverified until a push.
 
+**Review fixes, batch 2 (2026-09-30, range `44200834..5e9704cf`):** the
+eight findings admitted from the ssc-4, fix-batch-1 and ssc-6 reviews and
+the five from the ssc-5 review, one commit each: cr-ssc6-1 `02e102bd`
+(scoped scans report unscanned requests on `ManifestComplete.scan_failures`;
+truncated remainder stays failed), cr-fix1-1 `be1d90f4` (empty path
+shields), cr-ssc4-2 `2322acb6` (RAII partial-target guard on local copies),
+cr-ssc6-2 `7c0dc993` (`fold_local_retry`: outcome + whole-operation
+duration), cr-ssc6-3 `93b93d26`+`a8628e16` (detach notice; daemon-side
+retry passes are a known gap, TODO), cr-ssc4-3 `d9076b92`
+(`SummaryReconciled.files_landed` adopted), cr-ssc6-4 `c1cf9117` (carrier
+and resume facts across passes), cr-fix1-2 `fbebb01c`+`6d16cad5` (opener
+stage in the reason), cr-ssc5-3 `b1277b6f` (`path_from_received_raw`;
+planner takes the capability), cr-ssc5-1 `c28c902d` (source manifest
+first-wins), cr-ssc5-2 `3c7d1b95`+`b90613b7`+`42beaa3f` (resume hashes at
+the raw path; Linux guard proven on magneto), cr-ssc5-5 `0322a708` (one
+destination identity per raw-named entry), cr-ssc5-4 `5e9704cf` (shield
+under the raw identity). Records: `.review/findings/`, index rows in
+`REVIEW.md`, mutations in the batch's DEVLOG entry.
+
 **ssc-6 LANDED 2026-09-30 on master at `048e55af` (range
 `b342d636..048e55af`): end-of-run retry passes, `--retries`/`-R`
 (default 1) and `--retry-wait`/`-W` (default 30).** What landed against

@@ -154,6 +154,14 @@ INITIATOR                                RESPONDER
   v6 adds the per-file failure report to it (below): the destination
   is the scorer for what did NOT land, too.
 
+`ManifestComplete` also carries `scan_failures` (v7, cr-ssc6-1): for a
+`files_from`-scoped scan — a retry pass — every requested path the walk did
+not enumerate, as a `FileFailure` (`source: missing at retry …` or
+`source: unreadable at retry: …`), bounded like the summary's failed-path
+list with `scan_failures_dropped` counting the overflow. The DESTINATION
+records each through `record_failure` before the diff, so a retry pass can
+never silently drop a file it was asked to re-land.
+
 ## Frame set and field numbers
 
 `rpc Transfer(stream TransferFrame) returns (stream TransferFrame)`

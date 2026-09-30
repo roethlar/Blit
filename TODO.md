@@ -345,6 +345,13 @@ explicitly-deferred logging epic (F15).
   a separate, later question (a file inside the copied tree is transfer
   data). Sequenced after SOURCE_SIDE_CONTAINMENT.
 
+- [ ] **Daemon-owned retry passes for detached jobs** (cr-ssc6-3, 2026-09-30).
+  `--detach` hands a remote→remote transfer to the destination daemon and
+  exits before any summary exists, so the CLI-side `--retries`/`--retry-wait`
+  passes (D-2026-09-28-1/-3) cannot run; a detached run prints one notice
+  instead. Closing it needs the retry count and wait on the delegated
+  request and the pass loop inside the daemon-owned job.
+
 ### Deferred design calls
 
 These are intentionally not next-actionable. Don't pick them up

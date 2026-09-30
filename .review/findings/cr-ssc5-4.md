@@ -1,9 +1,9 @@
 # cr-ssc5-4: Mirror deletion does not shield descendants of a failed raw-name path
 
 **Severity**: HIGH — the failed-path shield is built from lossy text only, so a failed raw-name source file whose destination path is a populated directory loses that subtree under mirror
-**Status**: Open
+**Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (filled after the fix commit)
+**Commit**: `5e9704cf`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range e14d1b72..69390931 (ssc-5), record .review/results/ssc-5-range.codex.json)
 
 ## Evidence
@@ -16,10 +16,10 @@ On a byte-keyed destination, if a raw-named source file fails to land while the 
 Retain the raw identity associated with each manifest entry and add that raw path to the shield whenever the entry fails, including duplicate-collision failures.
 
 ## What
-(coder fills in)
+The planner shields each failed entry under the identity it has on this destination: the exact bytes where storable, the text otherwise.
 
 ## Guard proof
-(red/green proof; mutation described)
+Planner unit pin: a failed raw entry over a populated directory at its raw path plans nothing under it while an unrelated extraneous entry is still planned. Mutation: text-only shield restored → red.
 
 ## Known gaps
-(none yet)
+none

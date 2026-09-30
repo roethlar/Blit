@@ -1,9 +1,9 @@
 # cr-fix1-1: Empty failed path does not shield the destination root
 
 **Severity**: HIGH — a failed single-file mirror source (empty relative path) leaves its populated destination root unshielded; the mirror can erase the whole destination directory while reporting one contained failure
-**Status**: Open
+**Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (filled after the fix commit)
+**Commit**: `be1d90f4`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range ed4bc773..b342d636 (review-fix batch), record .review/results/ssc-fix1-range.codex.json)
 
 ## Evidence
@@ -16,10 +16,10 @@ If a single-file mirror source fails after enumeration while its destination roo
 Check the current path against shield_set before stopping at the empty path, and add a regression covering an empty failed path with populated destination descendants.
 
 ## What
-(coder fills in)
+`is_shielded` tests the path before stopping at the empty ancestor, so the empty relative path (single-file source root) shields every destination descendant.
 
 ## Guard proof
-(red/green proof; mutation described)
+Planner unit test: empty failed path over a populated destination plans nothing (control: unshielded plans both files). Mutation: original order restored → red.
 
 ## Known gaps
-(none yet)
+none

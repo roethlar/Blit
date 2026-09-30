@@ -1,9 +1,9 @@
 # cr-ssc6-3: Detached transfers silently ignore the retries option
 
 **Severity**: MEDIUM — `--detach` accepts `--retries N` and silently applies none; recoverable files stay missing from the daemon-owned job
-**Status**: Open
+**Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (filled after the fix commit)
+**Commit**: `93b93d26 + a8628e16`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range b342d636..e14d1b72 (ssc-6), record .review/results/ssc-6-range.codex.json)
 
 ## Evidence
@@ -16,10 +16,10 @@ crates/blit-cli/src/transfers/mod.rs:474 — all retry-pass orchestration is ski
 Carry the retry count and wait policy in the delegated request and execute retry passes in the daemon-owned job, or explicitly reject the option for detached transfers instead of accepting and ignoring it.
 
 ## What
-(coder fills in)
+A detached run with `--retries` above zero prints one stderr notice naming the ignored value and the `--retries 0` opt-out (`retry::detach_retry_notice`), wired into both delegated routes before the run starts. Carrying the passes into the daemon-owned job needs the pass loop and its switches on the wire — recorded as a known gap and a TODO item.
 
 ## Guard proof
-(red/green proof; mutation described)
+Unit pin: notice text for detach+retries, none for `--retries 0` or attached runs. Mutation: notice suppressed → red.
 
 ## Known gaps
-(none yet)
+Daemon-owned (detached) jobs get no retry passes; tracked in TODO.md.

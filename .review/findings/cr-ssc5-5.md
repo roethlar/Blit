@@ -1,9 +1,9 @@
 # cr-ssc5-5: A successful raw-name mirror preserves an extraneous lossy-text counterpart
 
 **Severity**: MEDIUM — a distinct lossy-text counterpart at the destination survives a successful raw-name mirror as an unreported extraneous file
-**Status**: Open
+**Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (filled after the fix commit)
+**Commit**: `0322a708`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range e14d1b72..69390931 (ssc-5), record .review/results/ssc-5-range.codex.json)
 
 ## Evidence
@@ -16,10 +16,10 @@ On Linux, mirroring a sole source file caf\xe9.txt into a destination that also 
 Model each manifest entry as one physical destination identity: use its raw path on byte-capable destinations and its text path otherwise. Preserve the text path separately only when an actual representable source entry has that name.
 
 ## What
-(coder fills in)
+Manifest intake sends raw-named entries to the planner as (text, bytes) and puts only representable names in the text keep set; the planner keeps a raw-named entry by its bytes where storable, by its text otherwise — never both.
 
 ## Guard proof
-(red/green proof; mutation described)
+Planner unit pin in both capability branches; Linux mirror pin (proven on magneto): a distinct caf\u{FFFD}.txt beside the raw-named source file is deleted. Mutation: both identities kept → red.
 
 ## Known gaps
-(none yet)
+none

@@ -41,12 +41,12 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   `--retries`/`--retry-wait` naming; deletions after the main pass, not
   after retries. Next release must bump at least the minor version
   (blit-core API changed; CHANGELOG Unreleased).
-- **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
-  D-2026-07-05-4 "flip the plan and go").** The invariant (plan doc,
-  verbatim): ONE block of transfer code; direction/initiator/verb can
-  NEVER affect wall time by blit's doing — impossible by construction
-  because the per-direction drivers and `Push`/`PullSync` are deleted
-  at cutover. Slices otp-1..13; converge-up per cell (±10%);
+  Review-fix batch 2 landed 2026-09-30 (`44200834..5e9704cf`, 13 Verified).
+- **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive, D-2026-07-05-4 "flip
+  the plan and go").** The invariant (plan doc, verbatim): ONE block of
+  transfer code; direction/initiator/verb can NEVER affect wall time by
+  blit's doing — impossible by construction because the per-direction
+  drivers and `Push`/`PullSync` are deleted at cutover. Slices otp-1..13; converge-up per cell (±10%);
   symmetric-fs disk-to-disk verdict cells. **D-2026-07-05-2:
   same-build peers only, refusal at session open.**
   Slice status, the closed-slice record, and the otp-12 worker-parity
