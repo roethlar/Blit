@@ -743,6 +743,45 @@ data-plane fuzz cases for corrupt chunk/status/SKIP framing. Six
 mutation proofs red (DEVLOG 2026-09-30). A15: loopback A/B on this
 Mac, not a rig — see DEVLOG for the numbers and the caveat.
 
+ssc-2 LANDED 2026-09-30 on master at `SSC2_HASH` (range
+`6bc3d08f..SSC2_HASH`; CI pending the next push). What landed against
+the slice text: `build_tar_shard` (`remote/transfer/payload.rs`) returns
+`TarShardBuild { data, headers: packed, skipped }` and appends a member
+only from a buffer of exactly `header.size` bytes — open → stat from the
+handle → `take(size).read_to_end` → one-byte probe — skipping with
+`source: cannot open: …` / `source: cannot stat: …` / `source: read
+error: …` / `source: changed size during transfer (manifest N bytes,
+now M)` (`changed_size_reason`, re-exported); a fully-skipped shard
+returns empty `data`/`headers` and only skips. `PreparedPayload::TarShard`
+gained `skipped: Vec<FileFailure>`; emission BEFORE the shard record at
+every consumer: in-stream `send_payload_records` (`FileSkipped` per
+entry, then `TarShardHeader` over the packed list, or only the skips),
+`DataPlaneSink::write_payload` and the legacy
+`send_payloads_with_progress` (SKIP records, then the shard), the local
+route's `FsTransferSink::write_payload` (`record_failure` into the
+shard's own outcome), `NullSink` (counted). `bound_in_stream_tar_headers`
+needed no change (it splits `TransferPayload` before packing). The
+destination needed no change: skipped members close Granted → Failed on
+their skip record, so the shard header's member list is a strict subset
+and `check_shard_members`/`settle_shard_members` already accept it.
+Deviation recorded: per-payload outcomes carry skips through
+`record_failure` on the written outcome, never `SinkOutcome::merge` —
+`merge` deliberately drops `failed_paths`, which turned `file_failed`
+conservative for healthy members and broke four pfc-3 pins in the first
+gate run. Guards: `source_side_containment.rs` — packer unit proofs
+(`packer_never_lets_a_grown_member_corrupt_its_shard_mate`,
+`packer_skips_a_member_that_grows_between_stat_and_read`), grown /
+shrunk / vanished member on both carriers × both initiators
+(`assert_shard_drift_contained`), the fully-skipped shard on both
+carriers; `transfer_session/local.rs` `local_shard_member_that_grew_
+is_reported_and_its_mates_land` for the local route. Red proof: with the
+pre-ssc-2 packer restored and the pre-ssc-2 sender shape (full header
+list to the extractor) the field failure reproduces verbatim —
+`tar shard entry: numeric field did not have utf-8 text: … when getting
+cksum for …` (the exact variant depends on which overflow bytes land in
+the checksum field; the owner's run said "was not a number"). Mutation
+proofs in DEVLOG.
+
 1. **ssc-1 — contract 7: ledger, skip record, chunked records +
    terminators, sink lifecycle, `OpenedSourceFile`, raw-name field (A3
    remote, A4, A5, A6, A7, A15, A16).** Proto: `FileSkipped`=21,

@@ -10,6 +10,14 @@ commit at which it was rotated out.
 
 ---
 
+## Rotated 2026-09-30 (at `6bc3d08f`) — 2026-08-19 handoff
+
+Rotated by the ssc-2 landing commit to hold STATE under its 200-line cap; its content is in DEVLOG 2026-08-17..19 and the INTERFACE_PLATFORM / CONTRACT_VERSION_GATE / SMALL_FILE_CEILING plans, and its "first action" (CI on `0a8c928f`) was verified green on 2026-08-19.
+
+## Handoff — 2026-08-19 (HEAD `0a8c928f`; the two-day sprint is closed)
+- Done (detail in DEVLOG 2026-08-17..19 and the plans): INTERFACE_PLATFORM SHIPPED (3 crates; blit-core = the platform crate); AI references excised; v0.1.2 live on brew/scoop/AUR/cargo/Releases, winget PR #420041 in Microsoft review; CONTRACT_VERSION_GATE cv-1+cv-2 landed (cv-3 waits for next release); sf-3d landed; clp-3 F1 + progress rate-window + revised-b stall line landed. CI 7/7 green at `af9b48b3` (run 32195891519); `0a8c928f`'s run was in flight at handoff — verify before building on it (`gh run list`). Tests 1162→1195, nothing removed.
+- First action: check CI on `0a8c928f`; then the owner items: sf-3d + sweep-prefetch rig runs (magneto/skippy, netwatch-01 SMB), perf-history scope ruling (remote runs in `blit profile`?), next release tag (unlocks homebrew-core pm-5, cv-3 README softening, clean crates.io versions).
+
 ## Rotated 2026-09-25 (at `0bcad512`) — pre-fix P1 evidence bullet, ldt-2/3 acceptance line, 2026-08-15 handoff
 
 Rotated by the SOURCE_SIDE_CONTAINMENT draft commit to hold STATE under its 200-line cap; all three are recorded in DEVLOG (2026-07-14, 2026-07-22, 2026-08-15 18:30Z) and closed by D-2026-07-22-2 / SMALL_FILE_CEILING §Slices.

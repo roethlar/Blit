@@ -1207,6 +1207,182 @@ mod tests {
         }
     }
 
+    /// ssc-2 on the LOCAL route: a shard member that grew between the
+    /// scan and the pack is the sink's own recorded failure; its
+    /// shard-mates extract, the run completes with `files_failed` 1.
+    /// Pre-ssc-2 the packer streamed the grown member to EOF under its
+    /// stale header size and the extractor died on the overflow
+    /// (`tar shard entry: numeric field was not a number …`).
+    struct ShardGrowSource {
+        inner: Arc<dyn TransferSource>,
+        grow: String,
+        applied: StdMutex<bool>,
+    }
+
+    #[async_trait::async_trait]
+    impl TransferSource for ShardGrowSource {
+        fn scan(
+            &self,
+            filter: Option<FileFilter>,
+            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+            self.inner.scan(filter, unreadable_paths)
+        }
+
+        async fn prepare_payload(
+            &self,
+            payload: TransferPayload,
+        ) -> eyre::Result<crate::remote::transfer::payload::PreparedPayload> {
+            {
+                let mut applied = self.applied.lock().expect("applied lock");
+                if !*applied {
+                    use std::io::Write;
+                    let mut f = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(self.inner.root().join(&self.grow))
+                        .expect("open for append");
+                    f.write_all(&[0xAB; 1000]).expect("grow");
+                    *applied = true;
+                }
+            }
+            self.inner.prepare_payload(payload).await
+        }
+
+        async fn check_availability(
+            &self,
+            headers: Vec<FileHeader>,
+            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        ) -> eyre::Result<Vec<FileHeader>> {
+            self.inner
+                .check_availability(headers, unreadable_paths)
+                .await
+        }
+
+        async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
+            self.inner.open_file(header).await
+        }
+
+        fn root(&self) -> &Path {
+            self.inner.root()
+        }
+    }
+
+    #[tokio::test]
+    async fn local_shard_member_that_grew_is_reported_and_its_mates_land() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(src_root.join("sub")).expect("mkdir src");
+        std::fs::create_dir_all(&dst_root).expect("mkdir dst");
+        std::fs::write(src_root.join("a.txt"), vec![1u8; 4096]).expect("write");
+        std::fs::write(src_root.join("wal.txt"), vec![2u8; 4096]).expect("write");
+        std::fs::write(src_root.join("sub/c.txt"), vec![3u8; 4096]).expect("write");
+
+        let open = SessionOpen {
+            initiator_role: TransferRole::Source as i32,
+            compare_mode: ComparisonMode::SizeMtime as i32,
+            in_stream_bytes: true,
+            ..Default::default()
+        };
+        let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let fs_source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
+        let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
+            src_root.clone(),
+            dst_root.clone(),
+            FsSinkConfig::default(),
+        ));
+        let local_apply = LocalApply {
+            src_root: src_root.clone(),
+            sink,
+            prepare_source: Arc::new(ShardGrowSource {
+                inner: fs_source,
+                grow: "wal.txt".to_string(),
+                applied: StdMutex::new(false),
+            }),
+            plan_options: PlanOptions::default(),
+            mirror_scope_filter: FileFilter::default(),
+            dry_run: false,
+            null_sink: false,
+            sink_workers: 1,
+            unreadable: Arc::clone(&unreadable),
+            stats: Arc::new(LocalApplyStats::default()),
+            phase_probe: LocalPhaseProbe::disabled(),
+            checker_pool: CheckerPool::new(1).expect("checker pool"),
+            dir_stats: Arc::default(),
+        };
+        let source_cfg = SourceSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::initiator(open),
+            plan_options: PlanOptions::default(),
+            data_plane_host: None,
+            instruments: SourceInstruments {
+                progress: None,
+                unreadable: Some(Arc::clone(&unreadable)),
+                trace_data_plane: false,
+                session_phase_trace: Default::default(),
+                lifecycle_trace: Default::default(),
+                small_file_probe: SmallFileProbe::disabled(),
+                on_terminal_summary: None,
+                stream_seed: None,
+                settled_streams_out: None,
+                #[cfg(test)]
+                dial_test_samples: None,
+                #[cfg(test)]
+                dial_terminal_test_gate: None,
+                #[cfg(test)]
+                dial_proposal_test_gate: None,
+                #[cfg(test)]
+                dial_membership_test_gate: None,
+            },
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::Responder,
+            data_plane_host: None,
+            receiver_capacity: None,
+            instruments: DestinationInstruments {
+                small_file_probe: SmallFileProbe::disabled(),
+                ..Default::default()
+            },
+            local_apply: Some(local_apply),
+        };
+        let (a, b) = in_process_pair();
+        let scan_source: Arc<dyn TransferSource> =
+            Arc::new(FsTransferSource::new(src_root.clone()));
+        let (source_result, dest_result): (
+            eyre::Result<TransferSummary>,
+            eyre::Result<DestinationOutcome>,
+        ) = tokio::join!(
+            run_source(source_cfg, a, scan_source),
+            run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
+        );
+        let summary = source_result.expect("source completes");
+        let dest = dest_result.expect("a drifted shard member never ends the local run");
+        assert_eq!(summary, dest.summary);
+        assert_eq!(summary.files_failed, 1, "the grown member is reported");
+        assert_eq!(summary.files_transferred, 2, "its shard-mates land");
+        assert_eq!(summary.failures[0].relative_path, "wal.txt");
+        assert!(
+            summary.failures[0]
+                .reason
+                .starts_with("source: changed size during transfer"),
+            "{}",
+            summary.failures[0].reason
+        );
+        assert_eq!(
+            std::fs::read(dst_root.join("a.txt")).unwrap(),
+            vec![1u8; 4096]
+        );
+        assert_eq!(
+            std::fs::read(dst_root.join("sub/c.txt")).unwrap(),
+            vec![3u8; 4096]
+        );
+        assert!(
+            !dst_root.join("wal.txt").exists(),
+            "nothing of the grown member lands"
+        );
+    }
+
     /// R46-F2 carried onto the local carrier (review otp-11a F4): a
     /// source entry that vanishes AFTER a clean scan (recorded
     /// unreadable by the apply's availability check) must refuse the

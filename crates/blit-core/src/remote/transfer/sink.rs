@@ -1165,12 +1165,27 @@ impl TransferSink for FsTransferSink {
                         &header,
                         &config,
                     ),
-                    PreparedPayload::TarShard { headers, data } => {
+                    PreparedPayload::TarShard {
+                        headers,
+                        data,
+                        skipped,
+                    } => {
+                        // ssc-2 (local route): the packer's skipped members
+                        // are this sink's failures, recorded before the
+                        // packed members are extracted; a fully-skipped
+                        // shard extracts nothing.
+                        if headers.is_empty() {
+                            let mut outcome = SinkOutcome::default();
+                            for failure in skipped {
+                                outcome.record_failure(failure.relative_path, failure.reason);
+                            }
+                            return Ok(outcome);
+                        }
                         let worker_started = tar_probe.as_ref().map(|_| std::time::Instant::now());
                         let blocking_pool_wait = tar_probe.as_ref().zip(worker_started).map(
                             |((_, _, queued), worker)| worker.saturating_duration_since(*queued),
                         );
-                        write_tar_shard_payload(
+                        let mut outcome = write_tar_shard_payload(
                             &src_root,
                             &dst_root,
                             canonical_dst_root.as_deref(),
@@ -1182,7 +1197,14 @@ impl TransferSink for FsTransferSink {
                                     (probe, shard_id.as_str(), *queued, wait)
                                 },
                             ),
-                        )
+                        )?;
+                        // Skipped members join the shard's own outcome via
+                        // `record_failure` (identity kept — see the relay
+                        // sink's note); `merge` would drop `failed_paths`.
+                        for failure in skipped {
+                            outcome.record_failure(failure.relative_path, failure.reason);
+                        }
+                        Ok(outcome)
                     }
                     _ => unreachable!("outer match guarantees File or TarShard"),
                 })
@@ -2178,21 +2200,47 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                     }
                 }
             }
-            PreparedPayload::TarShard { headers, data } => {
-                let bytes: u64 = headers
-                    .iter()
-                    .map(|header| {
-                        header
-                            .size
-                            .saturating_add(crate::windows_metadata::payload_bytes(header))
-                    })
-                    .sum();
-                let count = headers.len();
-                session
-                    .send_prepared_tar_shard(headers, &data)
-                    .await
-                    .context("sending tar shard")?;
-                Ok(SinkOutcome::written(count, bytes))
+            PreparedPayload::TarShard {
+                headers,
+                data,
+                skipped,
+            } => {
+                // ssc-2: skipped members go out as SKIP records before the
+                // shard record (see the in-stream twin in
+                // `send_payload_records`); this lane records them as
+                // failures so no completion is reported for them.
+                for failure in &skipped {
+                    session
+                        .send_skip(&failure.relative_path, &failure.reason)
+                        .await
+                        .context("sending tar shard member skip")?;
+                }
+                // One per-payload outcome, built by `record_failure` so its
+                // per-path identity survives (`merge` deliberately drops
+                // `failed_paths`, which would make `file_failed` answer
+                // true for the healthy members too).
+                let mut outcome = if headers.is_empty() {
+                    SinkOutcome::default()
+                } else {
+                    let bytes: u64 = headers
+                        .iter()
+                        .map(|header| {
+                            header
+                                .size
+                                .saturating_add(crate::windows_metadata::payload_bytes(header))
+                        })
+                        .sum();
+                    let count = headers.len();
+                    session
+                        .send_prepared_tar_shard(headers, &data)
+                        .await
+                        .context("sending tar shard")?;
+                    SinkOutcome::written(count, bytes)
+                };
+                for failure in skipped {
+                    outcome.record_failure(failure.relative_path, failure.reason);
+                }
+                Ok(outcome)
             }
             // Resume payloads can't be relayed without a reverse-resume
             // protocol on the next hop. Reject explicitly.
@@ -2436,15 +2484,25 @@ impl TransferSink for NullSink {
                     .size
                     .saturating_add(crate::windows_metadata::payload_bytes(&header)),
             )),
-            PreparedPayload::TarShard { headers, data } => Ok(SinkOutcome::written(
-                headers.len(),
-                (data.len() as u64).saturating_add(
-                    headers
-                        .iter()
-                        .map(crate::windows_metadata::payload_bytes)
-                        .sum(),
-                ),
-            )),
+            PreparedPayload::TarShard {
+                headers,
+                data,
+                skipped,
+            } => {
+                let mut outcome = SinkOutcome::written(
+                    headers.len(),
+                    (data.len() as u64).saturating_add(
+                        headers
+                            .iter()
+                            .map(crate::windows_metadata::payload_bytes)
+                            .sum(),
+                    ),
+                );
+                for failure in skipped {
+                    outcome.record_failure(failure.relative_path, failure.reason);
+                }
+                Ok(outcome)
+            }
             PreparedPayload::FileBlock { bytes, .. } => {
                 Ok(SinkOutcome::written(0, bytes.len() as u64))
             }
@@ -3137,6 +3195,7 @@ mod tests {
             .write_payload(PreparedPayload::TarShard {
                 headers,
                 data: tar_data,
+                skipped: Vec::new(),
             })
             .await
             .unwrap();
@@ -3186,6 +3245,7 @@ mod tests {
         sink.write_payload(PreparedPayload::TarShard {
             headers: vec![file_header],
             data,
+            skipped: Vec::new(),
         })
         .await
         .unwrap();
@@ -3250,7 +3310,11 @@ mod tests {
         let data = vec![0u8; 4096]; // fake tar data
 
         let outcome = sink
-            .write_payload(PreparedPayload::TarShard { headers, data })
+            .write_payload(PreparedPayload::TarShard {
+                headers,
+                data,
+                skipped: Vec::new(),
+            })
             .await
             .unwrap();
 
@@ -3583,6 +3647,7 @@ mod tests {
         let payload = PreparedPayload::TarShard {
             headers,
             data: tar_buf,
+            skipped: Vec::new(),
         };
         let err = sink
             .write_payload(payload)
@@ -3659,6 +3724,7 @@ mod tests {
             .write_payload(PreparedPayload::TarShard {
                 headers,
                 data: tar_data,
+                skipped: Vec::new(),
             })
             .await
             .unwrap();
@@ -4647,7 +4713,11 @@ mod tests {
             FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default());
 
         let outcome = sink
-            .write_payload(PreparedPayload::TarShard { headers, data })
+            .write_payload(PreparedPayload::TarShard {
+                headers,
+                data,
+                skipped: Vec::new(),
+            })
             .await
             .expect("one member's failure must not abort the whole shard");
 
@@ -4694,7 +4764,11 @@ mod tests {
         let sink =
             FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default());
         let outcome = sink
-            .write_payload(PreparedPayload::TarShard { headers, data })
+            .write_payload(PreparedPayload::TarShard {
+                headers,
+                data,
+                skipped: Vec::new(),
+            })
             .await
             .expect("a shard past the report cap is still not a session failure");
 
@@ -4746,7 +4820,11 @@ mod tests {
 
         let (headers, data) = shard_payload(&[("blocked.txt", b"blocked"), ("fine.txt", b"fine")]);
         let outcome = sink
-            .write_payload(PreparedPayload::TarShard { headers, data })
+            .write_payload(PreparedPayload::TarShard {
+                headers,
+                data,
+                skipped: Vec::new(),
+            })
             .await
             .expect("the probed writer contains a member failure too");
 
@@ -4772,6 +4850,7 @@ mod tests {
             .write_payload(PreparedPayload::TarShard {
                 headers: vec![make_file_header("a.txt", 5)],
                 data: vec![0x41u8; 2048], // not a tar
+                skipped: Vec::new(),
             })
             .await
             .expect_err("a shard that will not parse is session-fatal");
@@ -4815,6 +4894,7 @@ mod tests {
             .write_payload(PreparedPayload::TarShard {
                 headers: vec![make_file_header("../escape.txt", 3)],
                 data,
+                skipped: Vec::new(),
             })
             .await
             .expect_err("a traversal entry is a containment violation, not a member failure");

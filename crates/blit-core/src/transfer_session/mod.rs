@@ -3156,7 +3156,27 @@ async fn send_payload_records(
                         .saturating_add(crate::windows_metadata::payload_bytes(&header)),
                 )]);
             }
-            PreparedPayload::TarShard { headers, data } => {
+            PreparedPayload::TarShard {
+                headers,
+                data,
+                skipped,
+            } => {
+                // ssc-2: members the packer could not deliver as promised
+                // are closed at the destination by a skip record BEFORE
+                // the shard header, so the header's member list is a
+                // strict subset of what was granted and the ledger sees
+                // every planned member settle exactly once.
+                for failure in skipped {
+                    tx.send(frame(Frame::FileSkipped(crate::generated::FileFailure {
+                        relative_path: failure.relative_path,
+                        reason: failure.reason,
+                    })))
+                    .await?;
+                }
+                if headers.is_empty() {
+                    // Every member was skipped: no shard record at all.
+                    continue;
+                }
                 let shard_files: Vec<(String, u64)> = headers
                     .iter()
                     .map(|h| {
@@ -6233,6 +6253,7 @@ async fn receive_tar_record(
                 let payload = PreparedPayload::TarShard {
                     headers: shard.files,
                     data,
+                    skipped: Vec::new(),
                 };
                 let sink_started = receive_started.map(|_| std::time::Instant::now());
                 let outcome = sink.write_payload(payload).await?;

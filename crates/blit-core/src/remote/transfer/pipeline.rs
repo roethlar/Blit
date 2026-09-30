@@ -1480,7 +1480,11 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                 // one is listening (the daemon receive path).
                 let member_paths: Option<Vec<String>> =
                     progress.map(|_| headers.iter().map(|h| h.relative_path.clone()).collect());
-                let payload = PreparedPayload::TarShard { headers, data };
+                let payload = PreparedPayload::TarShard {
+                    headers,
+                    data,
+                    skipped: Vec::new(),
+                };
                 let sink_started = receive_started.map(|_| std::time::Instant::now());
                 let outcome = sink
                     .write_payload(payload)
@@ -2379,7 +2383,9 @@ mod tests {
         async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
             let (files_written, bytes_written) = match &payload {
                 PreparedPayload::File(h) => (1, h.size),
-                PreparedPayload::TarShard { headers, data } => (headers.len(), data.len() as u64),
+                PreparedPayload::TarShard { headers, data, .. } => {
+                    (headers.len(), data.len() as u64)
+                }
                 PreparedPayload::FileBlock { bytes, .. } => (0, bytes.len() as u64),
                 PreparedPayload::FileBlockComplete { .. } => (1, 0),
                 PreparedPayload::ResumeFile { header, .. } => (1, header.size),
@@ -2713,7 +2719,7 @@ mod tests {
             .await
             .unwrap();
         let (prepared_headers, data) = match prepared {
-            PreparedPayload::TarShard { headers, data } => (headers, data),
+            PreparedPayload::TarShard { headers, data, .. } => (headers, data),
             other => panic!("expected a prepared tar shard, got {other:?}"),
         };
         let entries: Vec<(&str, u64, i64, u32)> = prepared_headers

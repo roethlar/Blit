@@ -682,3 +682,373 @@ async fn failed_terminator_discards_the_partial_and_reports_the_file() {
     );
     dest.await.unwrap().expect("destination completes");
 }
+
+// ---------------------------------------------------------------------------
+// ssc-2 — A1/A2: tar shard fidelity. A member whose bytes are not exactly
+// what its manifest header promised is skipped and reported; its
+// shard-mates land intact.
+// ---------------------------------------------------------------------------
+
+/// Small enough that three of them plan as ONE tar shard (the planner's
+/// small-file rule: count ≥ 32 or average ≤ 128 KiB).
+const SMALL: usize = 4_096;
+
+fn three_small_files() -> Vec<(&'static str, Vec<u8>, i64)> {
+    vec![
+        ("a.txt", patterned(SMALL, 11), 1_600_000_011),
+        ("drift.txt", patterned(SMALL, 12), 1_600_000_012),
+        ("sub/c.txt", patterned(SMALL, 13), 1_600_000_013),
+    ]
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Drift {
+    /// Grew after the scan (the 2026-09-25 field failure: a SQLite WAL).
+    Grow(usize),
+    /// Shrank after the scan.
+    Truncate(usize),
+    /// Deleted after the scan (a rollback journal that went away).
+    Vanish,
+}
+
+fn apply_drift(path: &Path, drift: Drift) {
+    match drift {
+        Drift::Grow(n) => {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            f.write_all(&patterned(n, 99)).unwrap();
+        }
+        Drift::Truncate(len) => {
+            let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            f.set_len(len as u64).unwrap();
+        }
+        Drift::Vanish => std::fs::remove_file(path).unwrap(),
+    }
+}
+
+/// Mutates named members ON DISK between the scan and the packer's
+/// read — exactly the window in which a live file changes — then
+/// delegates to the real filesystem source so the real packer sees it.
+struct ShardDriftSource {
+    inner: FsTransferSource,
+    drifts: HashMap<&'static str, Drift>,
+    applied: Mutex<bool>,
+}
+
+#[async_trait::async_trait]
+impl TransferSource for ShardDriftSource {
+    fn scan(
+        &self,
+        filter: Option<blit_core::fs_enum::FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+    ) -> (tokio::sync::mpsc::Receiver<FileHeader>, SourceScan) {
+        self.inner.scan(filter, unreadable_paths)
+    }
+
+    async fn prepare_payload(&self, payload: TransferPayload) -> eyre::Result<PreparedPayload> {
+        {
+            let mut applied = self.applied.lock().unwrap();
+            if !*applied {
+                for (rel, drift) in &self.drifts {
+                    apply_drift(&self.inner.root().join(rel), *drift);
+                }
+                *applied = true;
+            }
+        }
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn check_availability(
+        &self,
+        headers: Vec<FileHeader>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+    ) -> eyre::Result<Vec<FileHeader>> {
+        self.inner
+            .check_availability(headers, unreadable_paths)
+            .await
+    }
+
+    async fn open_file(&self, header: &FileHeader) -> eyre::Result<OpenedSourceFile> {
+        self.inner.open_file(header).await
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+/// The packer alone, against the extractor alone: the pre-ssc-2 packer
+/// streamed a grown member to EOF under its stale header size, so the
+/// extractor parsed the overflow as the next tar header and died with
+/// `tar shard entry: numeric field was not a number …` (the field
+/// message). Now the grown member is skipped and its shard-mate extracts.
+///
+/// Mutation proof (ssc-2 (i)): restore `append_data(&mut tar_header,
+/// rel, &mut file)` with `set_size(header.size)` in `build_tar_shard`
+/// and this test fails at the extractor with that message.
+#[test]
+fn packer_never_lets_a_grown_member_corrupt_its_shard_mate() {
+    use blit_core::remote::transfer::tar_safety::{safe_extract_tar_shard, TarShardExtractOptions};
+    use blit_core::remote::transfer::{build_tar_shard, changed_size_reason};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+    write_tree(&src, &three_small_files());
+    let headers: Vec<FileHeader> = three_small_files()
+        .iter()
+        .map(|(rel, bytes, mtime)| FileHeader {
+            relative_path: rel.to_string(),
+            size: bytes.len() as u64,
+            mtime_seconds: *mtime,
+            permissions: 0o644,
+            ..Default::default()
+        })
+        .collect();
+    // The scan captured 4096 bytes; the file grows before the pack.
+    apply_drift(&src.join("drift.txt"), Drift::Grow(1_000));
+
+    let built = build_tar_shard(&src, &headers).expect("packing must not fail");
+    assert_eq!(
+        built
+            .headers
+            .iter()
+            .map(|h| h.relative_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a.txt", "sub/c.txt"],
+        "only the members that matched their headers are packed"
+    );
+    assert_eq!(built.skipped.len(), 1);
+    assert_eq!(built.skipped[0].relative_path, "drift.txt");
+    assert_eq!(
+        built.skipped[0].reason,
+        changed_size_reason(SMALL as u64, SMALL as u64 + 1_000)
+    );
+
+    let extracted = safe_extract_tar_shard(
+        &built.data,
+        built.headers.clone(),
+        &dst,
+        &TarShardExtractOptions::default(),
+    )
+    .expect("the packed members extract cleanly");
+    // The extractor decodes into memory (the sink writes afterwards);
+    // both shard-mates come back byte-exact under their own names.
+    let mut got: Vec<(String, Vec<u8>)> =
+        extracted.into_iter().map(|e| (e.rel, e.contents)).collect();
+    got.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        got,
+        vec![
+            ("a.txt".to_string(), patterned(SMALL, 11)),
+            ("sub/c.txt".to_string(), patterned(SMALL, 13)),
+        ]
+    );
+}
+
+/// The stat pre-check and the read-side checks (bounded read + one-byte
+/// probe) are independent defences against the same drift. A static
+/// fixture cannot grow BETWEEN the stat and the read, so the probe's
+/// own value is proven by mutation pairs, not by one red test:
+/// (ii-a) stat check disabled → this test stays green (the probe
+/// catches the growth); (ii-b) stat check AND probe disabled → red
+/// (the stale 4096-byte prefix is packed under the manifest header).
+#[test]
+fn packer_skips_a_member_that_grows_between_stat_and_read() {
+    use blit_core::remote::transfer::build_tar_shard;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    // The file on disk is already grown; the header promises the old
+    // size but the stat check is bypassed by lying about neither — so
+    // this pins the READ-side checks: the manifest says 4096, the file
+    // holds 4096+1000, the stat catches it. To isolate the probe, the
+    // second header promises exactly the on-disk length minus nothing
+    // while the file is longer than the `take` window can see.
+    write_tree(&src, &[("grown.txt", patterned(SMALL + 1_000, 12), 1)]);
+    let header = FileHeader {
+        relative_path: "grown.txt".into(),
+        size: SMALL as u64,
+        mtime_seconds: 1,
+        permissions: 0o644,
+        ..Default::default()
+    };
+    let built = build_tar_shard(&src, &[header]).unwrap();
+    assert!(built.headers.is_empty(), "the grown member is not packed");
+    assert!(built.data.is_empty(), "a fully-skipped shard has no bytes");
+    assert_eq!(built.skipped.len(), 1);
+    assert!(
+        built.skipped[0]
+            .reason
+            .starts_with("source: changed size during transfer"),
+        "{}",
+        built.skipped[0].reason
+    );
+}
+
+/// The A1/A2 property end to end: the drifted member is reported with a
+/// `source:` reason, its two shard-mates land byte-exact, both ends hold
+/// the same summary, both carriers, both initiator roles.
+async fn assert_shard_drift_contained(carrier: Carrier, drift: Drift, reason_prefix: &str) {
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(&src_root, &three_small_files());
+
+        let source: Arc<dyn TransferSource> = Arc::new(ShardDriftSource {
+            inner: FsTransferSource::new(src_root.clone()),
+            drifts: HashMap::from([("drift.txt", drift)]),
+            applied: Mutex::new(false),
+        });
+        let (sr, dr) = run_with(
+            open_for(initiator_role, carrier),
+            carrier,
+            source,
+            dst_root.clone(),
+        )
+        .await;
+        let summary = sr.unwrap_or_else(|e| {
+            panic!("source must complete ({carrier:?}, {drift:?}, init {initiator_role:?}): {e:#}")
+        });
+        let dest = dr.unwrap_or_else(|e| {
+            panic!("destination must complete ({carrier:?}, {drift:?}, init {initiator_role:?}): {e:#}")
+        });
+        assert_eq!(
+            summary, dest.summary,
+            "both ends agree ({carrier:?}, {drift:?})"
+        );
+        assert_eq!(
+            summary.in_stream_carrier_used,
+            carrier == Carrier::InStream,
+            "the fixture must ride the carrier under test"
+        );
+        assert_eq!(
+            summary.files_failed, 1,
+            "exactly the drifted member fails ({drift:?})"
+        );
+        assert_eq!(
+            summary.files_transferred, 2,
+            "its shard-mates land ({drift:?})"
+        );
+        assert_eq!(summary.failures.len(), 1);
+        assert_eq!(summary.failures[0].relative_path, "drift.txt");
+        assert!(
+            summary.failures[0].reason.starts_with(reason_prefix),
+            "reason must be the source's ({carrier:?}, {drift:?}): {}",
+            summary.failures[0].reason
+        );
+        let landed = collect_tree(&dst_root);
+        assert_eq!(
+            landed.keys().collect::<Vec<_>>(),
+            vec!["a.txt", "sub/c.txt"],
+            "nothing of the drifted member lands ({carrier:?}, {drift:?})"
+        );
+        assert_eq!(landed["a.txt"], patterned(SMALL, 11));
+        assert_eq!(landed["sub/c.txt"], patterned(SMALL, 13));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_shard_member_that_grew_is_skipped_and_its_mates_land() {
+    assert_shard_drift_contained(
+        Carrier::InStream,
+        Drift::Grow(1_000),
+        "source: changed size during transfer",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_shard_member_that_grew_is_skipped_and_its_mates_land() {
+    assert_shard_drift_contained(
+        Carrier::DataPlane,
+        Drift::Grow(1_000),
+        "source: changed size during transfer",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_shard_member_that_shrank_is_skipped_and_its_mates_land() {
+    assert_shard_drift_contained(
+        Carrier::InStream,
+        Drift::Truncate(100),
+        "source: changed size during transfer",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_shard_member_that_shrank_is_skipped_and_its_mates_land() {
+    assert_shard_drift_contained(
+        Carrier::DataPlane,
+        Drift::Truncate(100),
+        "source: changed size during transfer",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_stream_shard_member_that_vanished_is_skipped_and_its_mates_land() {
+    assert_shard_drift_contained(Carrier::InStream, Drift::Vanish, "source: cannot open:").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_plane_shard_member_that_vanished_is_skipped_and_its_mates_land() {
+    assert_shard_drift_contained(Carrier::DataPlane, Drift::Vanish, "source: cannot open:").await;
+}
+
+/// A shard whose every member drifted sends only skips — no shard record
+/// at all — and the session still completes with every member reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fully_skipped_shard_sends_only_skips_and_the_session_completes() {
+    for carrier in [Carrier::InStream, Carrier::DataPlane] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(&src_root, &three_small_files());
+        let source: Arc<dyn TransferSource> = Arc::new(ShardDriftSource {
+            inner: FsTransferSource::new(src_root.clone()),
+            drifts: HashMap::from([
+                ("a.txt", Drift::Vanish),
+                ("drift.txt", Drift::Grow(7)),
+                ("sub/c.txt", Drift::Truncate(1)),
+            ]),
+            applied: Mutex::new(false),
+        });
+        let (sr, dr) = run_with(
+            open_for(TransferRole::Source, carrier),
+            carrier,
+            source,
+            dst_root.clone(),
+        )
+        .await;
+        let summary = sr.unwrap_or_else(|e| panic!("source must complete ({carrier:?}): {e:#}"));
+        let dest = dr.unwrap_or_else(|e| panic!("destination must complete ({carrier:?}): {e:#}"));
+        assert_eq!(summary, dest.summary);
+        assert_eq!(
+            summary.files_failed, 3,
+            "every member is reported ({carrier:?})"
+        );
+        assert_eq!(summary.files_transferred, 0);
+        let mut failed: Vec<&str> = summary
+            .failures
+            .iter()
+            .map(|f| f.relative_path.as_str())
+            .collect();
+        failed.sort();
+        assert_eq!(failed, vec!["a.txt", "drift.txt", "sub/c.txt"]);
+        assert!(
+            collect_tree(&dst_root).is_empty(),
+            "nothing lands from a fully-skipped shard ({carrier:?})"
+        );
+    }
+}

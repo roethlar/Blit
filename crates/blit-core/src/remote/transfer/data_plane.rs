@@ -427,7 +427,20 @@ impl<P: Probe> DataPlaneSession<P> {
                         progress.report_file_complete(header.relative_path.clone());
                     }
                 }
-                PreparedPayload::TarShard { headers, data } => {
+                PreparedPayload::TarShard {
+                    headers,
+                    data,
+                    skipped,
+                } => {
+                    // ssc-2: skips before the shard record, as every carrier.
+                    for failure in &skipped {
+                        self.send_skip(&failure.relative_path, &failure.reason)
+                            .await
+                            .wrap_err("sending tar shard member skip")?;
+                    }
+                    if headers.is_empty() {
+                        continue;
+                    }
                     let shard_bytes: u64 = headers
                         .iter()
                         .map(|header| {

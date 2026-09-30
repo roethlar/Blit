@@ -10,6 +10,7 @@ use crate::generated::FileHeader;
 use crate::transfer_plan::{self, PlanOptions, TransferTask};
 use tar::{Builder, EntryType, Header};
 
+use crate::remote::transfer::sink::FileFailure;
 use crate::remote::transfer::source::TransferSource;
 use std::sync::Arc;
 
@@ -68,8 +69,16 @@ pub async fn prepare_payload(
                 let source_path = source_path_for_header(&source_root, header);
                 crate::windows_metadata::hydrate_payload_header(&source_path, header)?;
             }
-            let data = build_tar_shard(&source_root, &headers)?;
-            Ok(PreparedPayload::TarShard { headers, data })
+            let TarShardBuild {
+                data,
+                headers,
+                skipped,
+            } = build_tar_shard(&source_root, &headers)?;
+            Ok(PreparedPayload::TarShard {
+                headers,
+                data,
+                skipped,
+            })
         })
         .await
         .map_err(|err| eyre!("tar shard worker failed: {err}"))?,
@@ -133,10 +142,18 @@ pub enum PreparedPayload {
     /// The sink performs a (zero-copy when possible) local copy.
     File(FileHeader),
     /// In-memory tar shard. Already buffered (bounded by the planner's
-    /// shard threshold).
+    /// shard threshold). `headers` lists exactly the members packed into
+    /// `data`; `skipped` names the planned members the packer could not
+    /// deliver as promised (ssc-2: open/read failure, or a size that no
+    /// longer matches the manifest header) — each consumer emits those
+    /// as contract-v7 skips BEFORE the shard record, so the destination
+    /// closes them as failures and the shard's member list is a strict
+    /// subset of what was granted. A shard whose every member was
+    /// skipped has empty `headers` and `data` and carries only skips.
     TarShard {
         headers: Vec<FileHeader>,
         data: Vec<u8>,
+        skipped: Vec<FileFailure>,
     },
     /// Resume: write `bytes` at `offset` into the existing file at
     /// `dst_root.join(relative_path)`.
@@ -293,8 +310,42 @@ pub fn prepared_payload_stream(
     .buffered(capacity)
 }
 
-pub fn build_tar_shard(source_root: &Path, headers: &[FileHeader]) -> Result<Vec<u8>> {
+/// The packer's result: the shard bytes, the members actually packed
+/// (in order), and the planned members that were skipped instead.
+#[derive(Debug, Default)]
+pub struct TarShardBuild {
+    pub data: Vec<u8>,
+    pub headers: Vec<FileHeader>,
+    pub skipped: Vec<FileFailure>,
+}
+
+/// Pack `headers` into one tar shard, appending each member ONLY from a
+/// buffer that is exactly `header.size` bytes long (ssc-2, plan D-B).
+///
+/// The pre-ssc-2 packer set the tar header's size from the manifest and
+/// then streamed the file to EOF; `tar::Builder::append_data` copies the
+/// reader to its end and pads on the bytes it actually copied, so a
+/// member that had grown since the scan pushed its extra bytes into the
+/// next header slot and the destination died with `tar shard entry:
+/// numeric field was not a number …` (the 2026-09-25 field failure). A
+/// member that had shrunk misaligned the archive the same way. Now a
+/// member whose bytes are not exactly what the manifest promised is
+/// skipped — reported through the contract-v7 skip record by the
+/// caller — and its shard-mates land intact.
+///
+/// Order of checks per member: open (`source: cannot open`), stat from
+/// the opened handle (`source: changed size …`, the cheap pre-check that
+/// also yields the exact "now" size for the message), a bounded read of
+/// `size` bytes (`source: read error` / shrank mid-read), then a
+/// one-byte probe past `size` (grew mid-read). The stat is not trusted
+/// alone: the probe is what makes the guarantee hold if the file changes
+/// between the stat and the read.
+pub fn build_tar_shard(source_root: &Path, headers: &[FileHeader]) -> Result<TarShardBuild> {
+    use std::io::Read;
+
     let mut builder = Builder::new(Vec::new());
+    let mut packed: Vec<FileHeader> = Vec::with_capacity(headers.len());
+    let mut skipped: Vec<FileFailure> = Vec::new();
 
     for header in headers {
         let rel = Path::new(&header.relative_path);
@@ -306,8 +357,61 @@ pub fn build_tar_shard(source_root: &Path, headers: &[FileHeader]) -> Result<Vec
         } else {
             source_root.join(rel)
         };
-        let mut file = std::fs::File::open(&full_path)
-            .with_context(|| format!("opening {}", full_path.display()))?;
+        let size = header.size;
+        let mut skip = |reason: String| {
+            log::warn!(
+                "tar shard member skipped, shard continues: {} ({reason})",
+                header.relative_path
+            );
+            skipped.push(FileFailure {
+                relative_path: header.relative_path.clone(),
+                reason,
+            });
+        };
+
+        let mut file = match std::fs::File::open(&full_path) {
+            Ok(file) => file,
+            Err(err) => {
+                skip(format!("source: cannot open: {err}"));
+                continue;
+            }
+        };
+        let now = match file.metadata() {
+            Ok(meta) => meta.len(),
+            Err(err) => {
+                skip(format!("source: cannot stat: {err}"));
+                continue;
+            }
+        };
+        if now != size {
+            skip(changed_size_reason(size, now));
+            continue;
+        }
+        let mut buf: Vec<u8> = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+        if let Err(err) = (&mut file).take(size).read_to_end(&mut buf) {
+            skip(format!("source: read error: {err}"));
+            continue;
+        }
+        if buf.len() as u64 != size {
+            // Shrank between the stat and the read.
+            skip(changed_size_reason(size, buf.len() as u64));
+            continue;
+        }
+        let mut probe = [0u8; 1];
+        match file.read(&mut probe) {
+            Ok(0) => {}
+            Ok(_) => {
+                // Grew between the stat and the read: the exact "now"
+                // size is unknowable without another racy stat, so the
+                // message reports the lower bound the probe proved.
+                skip(changed_size_reason(size, size.saturating_add(1)));
+                continue;
+            }
+            Err(err) => {
+                skip(format!("source: read error: {err}"));
+                continue;
+            }
+        }
 
         let mut tar_header = Header::new_gnu();
         tar_header.set_entry_type(EntryType::Regular);
@@ -317,7 +421,7 @@ pub fn build_tar_shard(source_root: &Path, headers: &[FileHeader]) -> Result<Vec
             header.permissions
         };
         tar_header.set_mode(mode);
-        tar_header.set_size(header.size);
+        tar_header.set_size(size);
         let mtime = if header.mtime_seconds >= 0 {
             header.mtime_seconds as u64
         } else {
@@ -327,9 +431,29 @@ pub fn build_tar_shard(source_root: &Path, headers: &[FileHeader]) -> Result<Vec
         tar_header.set_cksum();
 
         builder
-            .append_data(&mut tar_header, rel, &mut file)
+            .append_data(&mut tar_header, rel, &buf[..])
             .with_context(|| format!("adding {} to tar shard", full_path.display()))?;
+        packed.push(header.clone());
     }
 
-    builder.into_inner().context("finalizing tar shard")
+    if packed.is_empty() {
+        // Every member was skipped: no shard record at all, only skips.
+        return Ok(TarShardBuild {
+            data: Vec::new(),
+            headers: packed,
+            skipped,
+        });
+    }
+    let data = builder.into_inner().context("finalizing tar shard")?;
+    Ok(TarShardBuild {
+        data,
+        headers: packed,
+        skipped,
+    })
+}
+
+/// The `source:`-prefixed reason every carrier reports for a member (or
+/// single file) whose size no longer matches its manifest header.
+pub fn changed_size_reason(manifest: u64, now: u64) -> String {
+    format!("source: changed size during transfer (manifest {manifest} bytes, now {now})")
 }
