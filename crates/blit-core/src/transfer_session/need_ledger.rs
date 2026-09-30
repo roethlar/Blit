@@ -243,7 +243,11 @@ impl NeedLedger {
     /// never a concurrent write to the same destination. An invalid later
     /// member still faults before any is reserved (ordered-failure
     /// behaviour kept).
-    pub(super) fn reserve_shard_members(&mut self, headers: &[FileHeader], lane: Lane) -> Result<()> {
+    pub(super) fn reserve_shard_members(
+        &mut self,
+        headers: &[FileHeader],
+        lane: Lane,
+    ) -> Result<()> {
         let mut seen = std::collections::HashSet::with_capacity(headers.len());
         for header in headers {
             let path = &header.relative_path;
@@ -277,7 +281,10 @@ impl NeedLedger {
         }
         for header in headers {
             let path = &header.relative_path;
-            let Some(NeedState::Granted { header: retained, .. }) = self.entries.get(path) else {
+            let Some(NeedState::Granted {
+                header: retained, ..
+            }) = self.entries.get(path)
+            else {
                 unreachable!("every member was verified Granted above")
             };
             let retained = retained.clone();
@@ -478,16 +485,30 @@ mod tests {
         // An invalid later member faults before any earlier one is reserved.
         let mixed = [header("a"), header("zzz")];
         assert!(ledger.reserve_shard_members(&mixed, SOCK0).is_err());
-        assert!(matches!(ledger.entries.get("a"), Some(NeedState::Granted { .. })));
-        // A valid shard reserves every member on its lane.
-        ledger.reserve_shard_members(&[header("a"), header("b")], SOCK0).unwrap();
         assert!(matches!(
             ledger.entries.get("a"),
-            Some(NeedState::Active { lane: SOCK0, kind: RecordKind::Shard, .. })
+            Some(NeedState::Granted { .. })
+        ));
+        // A valid shard reserves every member on its lane.
+        ledger
+            .reserve_shard_members(&[header("a"), header("b")], SOCK0)
+            .unwrap();
+        assert!(matches!(
+            ledger.entries.get("a"),
+            Some(NeedState::Active {
+                lane: SOCK0,
+                kind: RecordKind::Shard,
+                ..
+            })
         ));
         // Another socket cannot deliver a reserved member again.
-        let err = ledger.reserve_shard_members(&[header("a")], SOCK1).unwrap_err();
-        assert!(format!("{err:#}").contains("already reserved by a tar shard record"), "{err:#}");
+        let err = ledger
+            .reserve_shard_members(&[header("a")], SOCK1)
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("already reserved by a tar shard record"),
+            "{err:#}"
+        );
         // Nor can a FILE record or a skip claim it.
         assert!(ledger.activate_file("a", SOCK1).is_err());
         assert!(ledger.skip("b").is_err());
@@ -503,7 +524,10 @@ mod tests {
         ledger
             .settle_shard_members(&[header("a"), header("b")], SOCK0, |p| p == "b")
             .unwrap();
-        assert!(matches!(ledger.entries.get("a"), Some(NeedState::Completed)));
+        assert!(matches!(
+            ledger.entries.get("a"),
+            Some(NeedState::Completed)
+        ));
         assert!(matches!(ledger.entries.get("b"), Some(NeedState::Failed)));
         assert_eq!(ledger.open_count(), 1, "only c is still open");
         // Settling twice is a violation, not a silent no-op.

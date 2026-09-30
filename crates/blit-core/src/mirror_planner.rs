@@ -94,7 +94,12 @@ impl MirrorPlanner {
             .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
             .collect::<Vec<_>>();
 
-        Ok(plan_from_sets(destination, source_set, HashSet::new(), dest_set))
+        Ok(plan_from_sets(
+            destination,
+            source_set,
+            HashSet::new(),
+            dest_set,
+        ))
     }
 
     pub fn checksum_enabled(&self) -> bool {
@@ -140,7 +145,12 @@ impl MirrorPlanner {
             .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
             .collect::<Vec<_>>();
 
-        Ok(plan_from_sets(destination, source_set, HashSet::new(), dest_set))
+        Ok(plan_from_sets(
+            destination,
+            source_set,
+            HashSet::new(),
+            dest_set,
+        ))
     }
 
     pub fn plan_remote_deletions(
@@ -188,7 +198,12 @@ impl MirrorPlanner {
             .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
             .collect::<Vec<_>>();
 
-        Ok(plan_from_sets(dest_root, source_keys, HashSet::new(), dest_set))
+        Ok(plan_from_sets(
+            dest_root,
+            source_keys,
+            HashSet::new(),
+            dest_set,
+        ))
     }
 
     /// otp-6: the unified session's single mirror-delete rule. Given the

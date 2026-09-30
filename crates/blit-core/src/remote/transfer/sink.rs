@@ -285,17 +285,12 @@ impl SinkOutcome {
     /// Exact for the outcome of one payload, however many members that
     /// payload failed (pfc-3): a tar shard past the reported-list cap
     /// still answers `false` for the members that landed, so the
-    /// progress lane completes them. A merged outcome carries a total
-    /// larger than the identity it kept and answers `true` for every
-    /// path rather than let a failed file be reported complete. The
-    /// completion lanes ask a payload's own outcome before any merge,
-    /// with ONE deliberate exception: the resume block-record lane
-    /// (`receive_block_record`) reads an outcome merged across one
-    /// FILE's block records, where the conservative answer coincides
-    /// with the exact one. Any future aggregator that merges a
-    /// MULTI-file outcome and feeds a completion lane would suppress
-    /// healthy files' completions — keep merged outcomes away from
-    /// completion filtering.
+    /// progress lane completes them. Since cr-ssc1-1 a merged outcome
+    /// carries the exact failed-path set too (the mirror shield needs
+    /// it), so it answers per path as well; only an outcome whose total
+    /// exceeds the identity it holds — a wire-decoded summary past the
+    /// report cap — answers `true` for every path rather than let a
+    /// failed file be reported complete.
     pub fn file_failed(&self, relative_path: &str) -> bool {
         if self.files_failed_total > self.failed_paths.len() as u64 {
             return true;
@@ -326,8 +321,7 @@ impl SinkOutcome {
         let room = MAX_REPORTED_FILE_FAILURES.saturating_sub(self.failures.len());
         self.failures
             .extend(other.failures.iter().take(room).cloned());
-        self.failed_paths
-            .extend(other.failed_paths.iter().cloned());
+        self.failed_paths.extend(other.failed_paths.iter().cloned());
     }
 
     /// Every path this outcome recorded as failed — uncapped, exact
@@ -4880,12 +4874,15 @@ mod tests {
         assert_eq!(FileFailure::from_wire(&failure.to_wire()), failure);
     }
 
-    /// Merging drops per-payload identity on purpose — a session's failed
-    /// set has no bound — so a merged outcome keeps pfc-2's conservative
-    /// answer. Nothing reads completions off a merged outcome: every
-    /// completion lane asks the payload's own outcome, before the merge.
+    /// cr-ssc1-1 flipped pfc-2's rule: merging now CARRIES per-payload
+    /// identity (the mirror pass needs the exact, uncapped failed set to
+    /// shield destination subtrees), so a merged outcome answers per
+    /// path — `b.bin` failed, `a.bin` did not. The conservative
+    /// every-path answer remains only for an outcome whose total exceeds
+    /// the identity it holds (a wire-decoded summary past the report
+    /// cap).
     #[test]
-    fn a_merged_outcome_answers_conservatively_for_every_path() {
+    fn a_merged_outcome_answers_per_path_because_identity_is_carried() {
         let mut total = SinkOutcome::written(1, 10);
         let mut other = SinkOutcome::default();
         other.record_failure("b.bin", "synthetic");
@@ -4894,9 +4891,10 @@ mod tests {
         assert_eq!(total.files_failed_total, 1);
         assert!(total.file_failed("b.bin"));
         assert!(
-            total.file_failed("a.bin"),
-            "identity is not merged, so the merged answer stays conservative"
+            !total.file_failed("a.bin"),
+            "identity is merged, so the merged answer is exact"
         );
+        assert!(total.failed_paths().contains("b.bin"));
     }
 
     /// Merging holds the same bound and sums both totals, so the

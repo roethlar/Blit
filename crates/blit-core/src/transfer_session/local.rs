@@ -1612,7 +1612,10 @@ mod tests {
             b"precious too",
             "every descendant is shielded"
         );
-        assert_eq!(dest.summary.entries_deleted, 1, "exactly extraneous.txt went");
+        assert_eq!(
+            dest.summary.entries_deleted, 1,
+            "exactly extraneous.txt went"
+        );
     }
 
     /// A source wrapper that makes one file unopenable (mode 000) the

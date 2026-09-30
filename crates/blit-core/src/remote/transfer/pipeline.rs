@@ -2098,7 +2098,9 @@ mod tests {
             }
             bytes.push(DATA_PLANE_RECORD_END);
 
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
             let addr = listener.local_addr().expect("local addr");
             let (client_res, server_res) =
                 tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept(),);

@@ -419,8 +419,8 @@ async fn assert_shard_member_hydration_failure_skipped(carrier: Carrier) {
                 ("sub/c.txt", patterned(4096, 3), 1_600_000_003),
             ],
         );
-        let failing: blit_core::remote::transfer::payload::Hydrator =
-            Arc::new(move |path: &Path, _header: &mut FileHeader| {
+        let failing: blit_core::remote::transfer::payload::Hydrator = Arc::new(
+            move |path: &Path, _header: &mut FileHeader| {
                 if path.ends_with("vanished.txt") {
                     // What the Windows named-stream read reports for a
                     // member deleted after the scan.
@@ -430,7 +430,8 @@ async fn assert_shard_member_hydration_failure_skipped(carrier: Carrier) {
                     )
                 }
                 Ok(())
-            });
+            },
+        );
         let source: Arc<dyn TransferSource> = Arc::new(FaultySource {
             inner: FsTransferSource::new(src_root.clone()).with_hydrator(failing),
             faults: HashMap::new(),
@@ -458,7 +459,10 @@ async fn assert_shard_member_hydration_failure_skipped(carrier: Carrier) {
             summary.failures[0].reason
         );
         let landed = collect_tree(&dst_root);
-        assert_eq!(landed.keys().collect::<Vec<_>>(), vec!["a.txt", "sub/c.txt"]);
+        assert_eq!(
+            landed.keys().collect::<Vec<_>>(),
+            vec!["a.txt", "sub/c.txt"]
+        );
         assert_eq!(landed["a.txt"], patterned(4096, 1));
         assert_eq!(landed["sub/c.txt"], patterned(4096, 3));
     }
@@ -733,7 +737,11 @@ async fn mirror_shields_the_destination_subtree_of_a_skipped_source_file() {
             &dst_root,
             &[
                 ("node/keep.txt", b"precious".to_vec(), 1_500_000_000),
-                ("node/deeper/also.txt", b"precious too".to_vec(), 1_500_000_000),
+                (
+                    "node/deeper/also.txt",
+                    b"precious too".to_vec(),
+                    1_500_000_000,
+                ),
                 ("stale.txt", b"gone".to_vec(), 1_500_000_000),
             ],
         );
