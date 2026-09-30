@@ -419,11 +419,47 @@ pub struct OpenedMember {
     pub reader: Box<dyn std::io::Read>,
 }
 
+/// cr-fix1-2: which stage of opening a shard member failed, so the
+/// contained failure names its actual cause — a file that opened but
+/// whose handle metadata could not be read is not "cannot open".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberOpenStage {
+    Open,
+    Stat,
+}
+
+/// A shard member opener's error: the stage that failed and the I/O error.
+#[derive(Debug)]
+pub struct MemberOpenError {
+    pub stage: MemberOpenStage,
+    pub error: std::io::Error,
+}
+
+impl MemberOpenError {
+    /// The `source:` reason the packer records for this failure.
+    pub fn reason(&self) -> String {
+        match self.stage {
+            MemberOpenStage::Open => format!("source: cannot open: {}", self.error),
+            MemberOpenStage::Stat => format!("source: cannot read metadata: {}", self.error),
+        }
+    }
+}
+
 /// The production member opener: `File::open` + `metadata().len()` on
-/// that handle, the handle as the reader.
-pub fn open_member_from_fs(path: &Path) -> std::io::Result<OpenedMember> {
-    let file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
+/// that handle, the handle as the reader; each stage's failure keeps its
+/// identity (cr-fix1-2).
+pub fn open_member_from_fs(path: &Path) -> Result<OpenedMember, MemberOpenError> {
+    let file = std::fs::File::open(path).map_err(|error| MemberOpenError {
+        stage: MemberOpenStage::Open,
+        error,
+    })?;
+    let len = file
+        .metadata()
+        .map_err(|error| MemberOpenError {
+            stage: MemberOpenStage::Stat,
+            error,
+        })?
+        .len();
     Ok(OpenedMember {
         len,
         reader: Box::new(file),
@@ -434,7 +470,7 @@ pub fn open_member_from_fs(path: &Path) -> std::io::Result<OpenedMember> {
 pub fn build_tar_shard_with(
     source_root: &Path,
     headers: &[FileHeader],
-    open: &dyn Fn(&Path) -> std::io::Result<OpenedMember>,
+    open: &dyn Fn(&Path) -> Result<OpenedMember, MemberOpenError>,
 ) -> Result<TarShardBuild> {
     use std::io::Read;
 
@@ -466,7 +502,7 @@ pub fn build_tar_shard_with(
         } = match open(&full_path) {
             Ok(opened) => opened,
             Err(err) => {
-                skip(format!("source: cannot open: {err}"));
+                skip(err.reason());
                 continue;
             }
         };

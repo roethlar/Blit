@@ -1302,7 +1302,9 @@ fn packer_skips_a_member_that_grows_between_stat_and_read() {
 /// and only the probe can tell.
 #[test]
 fn packer_probe_catches_growth_after_the_stat() {
-    use blit_core::remote::transfer::{build_tar_shard_with, OpenedMember};
+    use blit_core::remote::transfer::{
+        build_tar_shard_with, MemberOpenError, MemberOpenStage, OpenedMember,
+    };
 
     let header = FileHeader {
         relative_path: "grows-late.txt".into(),
@@ -1311,7 +1313,7 @@ fn packer_probe_catches_growth_after_the_stat() {
         permissions: 0o644,
         ..Default::default()
     };
-    let opener = |_: &Path| -> std::io::Result<OpenedMember> {
+    let opener = |_: &Path| -> Result<OpenedMember, MemberOpenError> {
         Ok(OpenedMember {
             len: SMALL as u64,
             reader: Box::new(std::io::Cursor::new(patterned(SMALL + 1, 13))),
@@ -2431,4 +2433,51 @@ async fn in_stream_scoped_scan_reports_requested_paths_it_cannot_enumerate() {
 #[tokio::test]
 async fn data_plane_scoped_scan_reports_requested_paths_it_cannot_enumerate() {
     assert_scoped_scan_reports_unscanned_requests(Carrier::DataPlane).await;
+}
+
+/// cr-fix1-2: a shard member that opened but whose handle metadata could
+/// not be read is reported as a metadata failure, not as "cannot open" —
+/// the reason names the actual cause.
+#[test]
+fn a_shard_member_stat_failure_is_reported_as_a_metadata_failure() {
+    use blit_core::remote::transfer::{build_tar_shard_with, MemberOpenError, MemberOpenStage};
+    let header = FileHeader {
+        relative_path: "m.bin".to_string(),
+        size: 16,
+        ..Default::default()
+    };
+    let opener = |_: &Path| -> Result<OpenedMember, MemberOpenError> {
+        Err(MemberOpenError {
+            stage: MemberOpenStage::Stat,
+            error: std::io::Error::other("fstat: input/output error"),
+        })
+    };
+    let built = build_tar_shard_with(Path::new("/unused"), &[header], &opener).unwrap();
+    assert_eq!(built.skipped.len(), 1, "{:?}", built.skipped);
+    assert!(
+        built.skipped[0]
+            .reason
+            .starts_with("source: cannot read metadata: fstat"),
+        "the stat stage keeps its identity: {}",
+        built.skipped[0].reason
+    );
+    let opener = |_: &Path| -> Result<OpenedMember, MemberOpenError> {
+        Err(MemberOpenError {
+            stage: MemberOpenStage::Open,
+            error: std::io::Error::other("EACCES"),
+        })
+    };
+    let built = build_tar_shard_with(
+        Path::new("/unused"),
+        &[FileHeader {
+            relative_path: "m.bin".to_string(),
+            size: 16,
+            ..Default::default()
+        }],
+        &opener,
+    )
+    .unwrap();
+    assert!(built.skipped[0]
+        .reason
+        .starts_with("source: cannot open: EACCES"));
 }
