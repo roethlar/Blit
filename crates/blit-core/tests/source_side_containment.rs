@@ -1447,7 +1447,18 @@ async fn assert_shard_drift_contained(carrier: Carrier, drift: Drift, reason_pre
         assert_eq!(summary.failures.len(), 1);
         assert_eq!(summary.failures[0].relative_path, "drift.txt");
         assert!(
-            summary.failures[0].reason.starts_with(reason_prefix),
+            // win-3: on Windows the source reads a file's attributes
+            // before opening it (Windows-metadata hydration), so a member
+            // that vanished is reported at that step; elsewhere the open
+            // is first. The same allowance 5eeff4ac made for the two
+            // local-route vanish tests.
+            {
+                let reason = &summary.failures[0].reason;
+                reason.starts_with(reason_prefix)
+                    || (cfg!(windows)
+                        && matches!(drift, Drift::Vanish)
+                        && reason.starts_with("source: cannot read metadata:"))
+            },
             "reason must be the source's ({carrier:?}, {drift:?}): {}",
             summary.failures[0].reason
         );
