@@ -1782,6 +1782,68 @@ fn run_after_source_open_hook(src: &Path) {
 #[inline]
 fn run_after_source_open_hook(_src: &Path) {}
 
+/// Test seam (cr-ssc4-2): runs right after the local copy wrote its
+/// bytes and before the post-copy validation — an `Err` stands in for a
+/// source-side I/O failure that a real filesystem cannot be made to
+/// produce deterministically mid-copy. Prefix-keyed like the
+/// after-source-open hook. Production never sets it.
+#[cfg(test)]
+pub(super) type AfterCopyFaultHook = Arc<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>;
+#[cfg(test)]
+pub(super) static AFTER_COPY_FAULT_HOOKS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, AfterCopyFaultHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn run_after_copy_fault_hook(dst: &Path) -> std::io::Result<()> {
+    let hooks: Vec<AfterCopyFaultHook> = AFTER_COPY_FAULT_HOOKS
+        .lock()
+        .map(|g| {
+            g.iter()
+                .filter(|(prefix, _)| dst.starts_with(prefix))
+                .map(|(_, h)| Arc::clone(h))
+                .collect()
+        })
+        .unwrap_or_default();
+    for hook in hooks {
+        hook(dst)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+#[inline]
+fn run_after_copy_fault_hook(_dst: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// cr-ssc4-2: the destination file a local non-resume copy is writing,
+/// removed on every exit but the validated success. The in-place model
+/// (D-2026-09-29-2) already overwrote whatever was there; what must never
+/// remain is a truncated or partial file that a later size/mtime compare
+/// could take for a finished copy. Armed when the copy starts, disarmed
+/// only after the post-copy validation and the metadata tail succeed.
+/// Resume copies (`resume_copy_from`) never arm it — their partial is
+/// the resumable state by design (D-2026-07-09-1 Q2).
+struct PartialTarget<'a> {
+    dst: &'a Path,
+    armed: bool,
+}
+
+impl PartialTarget<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PartialTarget<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(self.dst);
+        }
+    }
+}
+
 /// Shared tail of the File-payload write: dry-run gate, parent mkdir,
 /// resume/compare/copy cascade, mtime preservation.
 ///
@@ -1829,6 +1891,7 @@ fn copy_resolved_file_payload(
     crate::windows_metadata::prepare_destination(dst, header.windows_metadata.as_ref())?;
 
     let mut did_copy = false;
+    let mut partial = PartialTarget { dst, armed: false };
     if config.resume {
         let outcome = crate::copy::resume_copy_from(&mut src_file, header.size, dst, 0)
             .with_context(|| format!("resume copy {}", header.relative_path))?;
@@ -1839,23 +1902,26 @@ fn copy_resolved_file_payload(
         dst,
         config.compare_mode,
     )? {
+        // cr-ssc4-2: from here until the validated success, any exit
+        // removes the destination — a source read error mid-copy, a
+        // post-copy stat failure, a metadata-tail failure — so nothing
+        // partial can pass for a finished copy.
+        partial.armed = true;
         let sizer = BufferSizer::default();
         crate::copy::copy_opened(&src_file, src, dst, header.size, &sizer, false)?;
+        run_after_copy_fault_hook(dst).map_err(|e| eyre!("source: read error: {e}"))?;
         did_copy = true;
     }
 
     // Post-copy re-stat of the SAME handle: a file that changed size
     // while (or after) being read is not delivered under its manifest
-    // header — the partial goes, the file is this sink's failure, and
-    // the D7 retry pass re-lands it.
+    // header — the partial goes (the guard), the file is this sink's
+    // failure, and the D7 retry pass re-lands it.
     let now = src_file
         .metadata()
         .map_err(|e| eyre!("source: cannot stat: {e}"))?
         .len();
     if now != header.size {
-        if did_copy {
-            let _ = std::fs::remove_file(dst);
-        }
         return Err(eyre!(
             "{}",
             crate::remote::transfer::payload::changed_size_reason(header.size, now)
@@ -1889,6 +1955,7 @@ fn copy_resolved_file_payload(
     }
     crate::windows_metadata::apply_attributes(dst, header.windows_metadata.as_ref())?;
 
+    partial.disarm();
     Ok(SinkOutcome::written(
         1,
         (if did_copy { header.size } else { 0 }).saturating_add(windows_bytes),
@@ -2872,6 +2939,49 @@ mod tests {
             std::fs::read(dst.join("a.bin")).unwrap(),
             original,
             "the OPENED inode's bytes land, not the replacement's"
+        );
+    }
+
+    /// cr-ssc4-2: a source-side error after the copy started leaves NO
+    /// destination file behind — not a truncated one a later size/mtime
+    /// compare could mistake for a finished copy. The fault seam stands
+    /// in for a mid-copy read error; the failure is this sink's, contained.
+    #[tokio::test]
+    async fn local_copy_error_after_the_write_started_leaves_no_partial_destination() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let bytes: Vec<u8> = (0u8..=255).cycle().take(200_000).collect();
+        std::fs::write(src.join("a.bin"), &bytes).unwrap();
+        // A stale prior copy at the destination: the in-place model
+        // overwrites it; what must not survive is a partial.
+        std::fs::write(dst.join("a.bin"), b"stale").unwrap();
+        AFTER_COPY_FAULT_HOOKS.lock().unwrap().push((
+            dst.clone(),
+            Arc::new(|_: &Path| Err(std::io::Error::other("injected mid-copy source fault"))),
+        ));
+        let sink = local_sink(&src, &dst);
+        let outcome = sink
+            .write_payload(PreparedPayload::File(make_file_header(
+                "a.bin",
+                bytes.len() as u64,
+            )))
+            .await
+            .unwrap();
+        if let Ok(mut g) = AFTER_COPY_FAULT_HOOKS.lock() {
+            g.retain(|(p, _)| p != &dst);
+        }
+        assert_eq!(outcome.files_failed_total, 1, "{:?}", outcome.failures);
+        assert!(
+            outcome.failures[0].reason.contains("source: read error"),
+            "{:?}",
+            outcome.failures
+        );
+        assert!(
+            !dst.join("a.bin").exists(),
+            "no partial destination file survives a contained source-side copy error"
         );
     }
 
