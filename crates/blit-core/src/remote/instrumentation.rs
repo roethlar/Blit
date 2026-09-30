@@ -33,6 +33,22 @@ pub fn set_counter_path(path: PathBuf) {
     let _ = COUNTER_PATH.set(path);
 }
 
+/// cr-fix2-2 diagnostics: an upper bound on how many requested-but-
+/// unscanned paths a retry scan NAMES on `ManifestComplete.scan_failures`
+/// (the rest are counted as dropped). Production has no cap beyond the
+/// wire budget; the CLI's hidden `--diagnostics-scan-failure-name-cap`
+/// installs one so an integration test can force the unnamed-remainder
+/// path without a megabyte of paths. Installed once per process.
+static SCAN_FAILURE_NAME_CAP: OnceLock<usize> = OnceLock::new();
+
+pub fn set_scan_failure_name_cap(cap: usize) {
+    let _ = SCAN_FAILURE_NAME_CAP.set(cap);
+}
+
+pub fn scan_failure_name_cap() -> Option<usize> {
+    SCAN_FAILURE_NAME_CAP.get().copied()
+}
+
 fn record(event: &str, value: u64) {
     let Some(path) = COUNTER_PATH.get() else {
         return;

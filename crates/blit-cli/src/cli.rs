@@ -56,6 +56,12 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH", hide_short_help = true)]
     pub diagnostics_counter_file: Option<PathBuf>,
 
+    /// Diagnostics only (cr-fix2-2): cap how many requested-but-unscanned
+    /// paths a retry scan names on the wire, so an integration test can
+    /// force the unnamed-remainder path. Not intended for operator use.
+    #[arg(long, global = true, value_name = "N", hide = true)]
+    pub diagnostics_scan_failure_name_cap: Option<usize>,
+
     #[command(subcommand)]
     pub command: Commands,
 }

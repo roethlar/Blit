@@ -48,6 +48,7 @@ async fn run_cli(lifecycle_trace: &TransferLifecycleTrace) -> Result<ExitCode> {
     let Cli {
         config_dir,
         diagnostics_counter_file,
+        diagnostics_scan_failure_name_cap,
         command,
     } = Cli::parse();
     lifecycle_trace.record(
@@ -63,6 +64,9 @@ async fn run_cli(lifecycle_trace: &TransferLifecycleTrace) -> Result<ExitCode> {
     // are out for app + diagnostic config; install via the CLI flag.
     if let Some(path) = diagnostics_counter_file {
         blit_core::remote::instrumentation::set_counter_path(path);
+    }
+    if let Some(cap) = diagnostics_scan_failure_name_cap {
+        blit_core::remote::instrumentation::set_scan_failure_name_cap(cap);
     }
 
     lifecycle_trace.record("context_load_begin", None);

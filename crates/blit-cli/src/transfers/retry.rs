@@ -85,8 +85,20 @@ impl PassFailures {
     /// sender could carry it; otherwise the named report's paths, with
     /// `truncated` telling the caller to say so.
     fn retry_set(&self) -> (HashSet<PathBuf>, bool) {
-        if !self.failed_paths_truncated && !self.failed_paths.is_empty() {
+        // cr-fix2-2: the exact set is exact only when every counted
+        // failure has a path in it (the unretried remainder is carried
+        // separately). A peer that counted failures it could not name
+        // (`scan_failures_dropped`) may still send `truncated = false`
+        // when its named paths fit; the count exposes the gap, and the
+        // set is then inexact — the difference must survive as unretried,
+        // never be cleared by a later clean pass.
+        let represented = (self.failed_paths.len() as u64).saturating_add(self.unretried);
+        let all_represented = self.files_failed <= represented;
+        if !self.failed_paths_truncated && !self.failed_paths.is_empty() && all_represented {
             return (self.failed_paths.iter().map(PathBuf::from).collect(), false);
+        }
+        if !self.failed_paths_truncated && !self.failed_paths.is_empty() {
+            return (self.failed_paths.iter().map(PathBuf::from).collect(), true);
         }
         let truncated =
             self.failed_paths_truncated || (self.files_failed as usize) > self.failures.len();
@@ -577,5 +589,74 @@ mod tests {
         .await
         .expect("loop");
         assert_eq!(out.passes_run, 0);
+    }
+}
+
+/// cr-fix2-2: a pass whose failure count exceeds the paths it names has
+/// failures no retry can be given; they are carried as unretried and
+/// survive a later clean pass, and the move gate refuses on them.
+#[cfg(test)]
+mod cr_fix2_2_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn counted_but_unnamed_failures_survive_a_clean_retry_pass() {
+        // The shape an older sender produced: one named path, three
+        // counted failures, and the set NOT flagged truncated because
+        // the one name fit the wire budget.
+        let main = PassFailures {
+            files_failed: 3,
+            failures: vec![FileFailure {
+                relative_path: "a".to_string(),
+                reason: "source: missing at retry".to_string(),
+            }],
+            failed_paths: vec!["a".to_string()],
+            failed_paths_truncated: false,
+            unretried: 0,
+        };
+        let mut args = TransferArgs::for_tests("src", "dst");
+        args.retries = 2;
+        args.retry_wait = 0;
+        let mut given: Vec<usize> = Vec::new();
+        let out = run_retry_passes(&args, main, |pass_args| {
+            given.push(pass_args.retry_only.as_ref().map_or(0, |s| s.len()));
+            async move {
+                // The named file converges; nothing else was given.
+                Ok(PassResult {
+                    files_transferred: 1,
+                    bytes_transferred: 0,
+                    failures: PassFailures::default(),
+                    in_stream_carrier_used: false,
+                    files_resumed: 0,
+                })
+            }
+        })
+        .await
+        .expect("loop");
+        assert_eq!(given, vec![1], "only the named path was retried, once");
+        assert_eq!(
+            out.final_failures.unretried, 2,
+            "the two unnamed failures were never retried: {:?}",
+            out.final_failures
+        );
+        assert_eq!(out.final_failures.files_failed, 2);
+        assert!(
+            out.final_failures
+                .failures
+                .iter()
+                .any(|f| f.relative_path == UNRETRIED_PATH
+                    && f.reason.starts_with("2 file(s) were not retried")),
+            "{:?}",
+            out.final_failures.failures
+        );
+        assert!(
+            blit_core::transfers::failures::refuse_source_delete_on_failures(
+                "src",
+                out.final_failures.files_failed,
+                &out.final_failures.failures,
+            )
+            .is_err(),
+            "a move must refuse while unretried failures remain"
+        );
     }
 }

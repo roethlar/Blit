@@ -293,6 +293,16 @@ impl SinkOutcome {
         self.files_failed_total = self.files_failed_total.saturating_add(count);
     }
 
+    /// cr-fix2-2: whether this outcome counts failures it cannot name —
+    /// `files_failed_total` exceeds the represented path identities. A
+    /// retry set built from such an outcome is inexact by construction,
+    /// whatever the wire budget says, and must be reported as truncated
+    /// so the initiator carries the unnamed remainder forward instead of
+    /// letting a later clean pass erase it.
+    pub fn has_unnamed_failures(&self) -> bool {
+        self.files_failed_total > self.failed_paths.len() as u64
+    }
+
     /// Whether this outcome failed `relative_path`.
     ///
     /// Exact for the outcome of one payload, however many members that
@@ -376,6 +386,11 @@ impl SinkOutcome {
     pub fn wire_failed_paths(&self) -> (Vec<String>, bool) {
         let mut out: Vec<String> = Vec::new();
         let mut remaining = MAX_WIRE_FAILED_PATHS_ENCODED_BYTES;
+        // cr-fix2-2: failures with no path identity (a scoped scan's
+        // dropped overflow) make the set inexact even when every named
+        // path fits — say so, or a later clean retry pass would clear
+        // failures no pass was ever given.
+        let unnamed = self.has_unnamed_failures();
         // Deterministic order: the report's order for the named ones,
         // then the rest sorted, so a retry set is reproducible.
         let mut ordered: Vec<&String> = self.failures.iter().map(|f| &f.relative_path).collect();
@@ -396,7 +411,7 @@ impl SinkOutcome {
             remaining -= cost;
             out.push(path.clone());
         }
-        (out, false)
+        (out, unnamed)
     }
 
     pub fn wire_failures(&self) -> Vec<crate::generated::FileFailure> {
@@ -5876,6 +5891,36 @@ mod ssc3_tests {
         assert!(
             !down_dst.join("relayed.bin").exists(),
             "the downstream partial must be discarded"
+        );
+    }
+}
+
+/// cr-fix2-2: an outcome that counts failures it cannot name never
+/// reports its retry set as exact.
+#[cfg(test)]
+mod cr_fix2_2_tests {
+    use super::SinkOutcome;
+
+    #[test]
+    fn unnamed_failures_make_the_wire_retry_set_inexact() {
+        let mut outcome = SinkOutcome::default();
+        outcome.record_failure("a.txt", "source: missing at retry");
+        let (paths, truncated) = outcome.wire_failed_paths();
+        assert_eq!(paths, vec!["a.txt".to_string()]);
+        assert!(!truncated, "a fully named set is exact");
+        assert!(!outcome.has_unnamed_failures());
+
+        outcome.record_unnamed_failures(2);
+        assert!(outcome.has_unnamed_failures());
+        let (paths, truncated) = outcome.wire_failed_paths();
+        assert_eq!(
+            paths,
+            vec!["a.txt".to_string()],
+            "the named path still travels"
+        );
+        assert!(
+            truncated,
+            "two counted-but-unnamed failures must mark the set truncated"
         );
     }
 }

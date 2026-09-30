@@ -458,3 +458,80 @@ fn a_retry_landed_file_reports_a_transfer_and_the_whole_duration() {
         "the duration spans the retry wait: {doc}"
     );
 }
+
+/// Block until the counter file carries at least `n` lines of `event`.
+fn wait_for_counter_count(counters: &Path, event: &str, n: usize, timeout: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if counter_lines(counters, event).len() >= n {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("fewer than {n} `{event}` counters within {timeout:?}");
+}
+
+/// cr-fix2-2: three files fail the main pass; during the first wait all
+/// three sources vanish, and the retry scan (name cap 1) can name only
+/// one of them — the other two are counted, not named. During the second
+/// wait the named one reappears and lands on pass 2. The two the retry
+/// could never name must survive that clean pass: exit 2, reported once
+/// as not retried, and the run never claims success.
+#[test]
+fn counted_but_unnamed_scan_failures_survive_a_clean_retry_pass() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let src = temp.path().join("src");
+    let dst = temp.path().join("dst");
+    fs::create_dir_all(&src).expect("mkdir src");
+    fs::create_dir_all(&dst).expect("mkdir dst");
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(src.join(name), b"payload").expect("write source");
+        fs::create_dir_all(dst.join(name)).expect("block the destination path");
+    }
+    let counters = temp.path().join("counters.txt");
+    let child = spawn(
+        "copy",
+        &[
+            "--retries",
+            "2",
+            "--retry-wait",
+            "4",
+            "--diagnostics-scan-failure-name-cap",
+            "1",
+        ],
+        &src,
+        &dst,
+        &counters,
+    );
+    // Wait 1: every source vanishes and every destination path is freed,
+    // so pass 1 finds nothing to re-land and can name only one failure.
+    wait_for_counter_count(&counters, "retry_wait_seconds", 1, Duration::from_secs(60));
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::remove_file(src.join(name)).expect("remove the source file");
+        fs::remove_dir_all(dst.join(name)).expect("free the blocked path");
+    }
+    // Wait 2: the one named file (sorted first) reappears; pass 2 lands it.
+    wait_for_counter_count(&counters, "retry_wait_seconds", 2, Duration::from_secs(60));
+    fs::write(src.join("a.txt"), b"payload").expect("restore the named source");
+    let output = finish(child);
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(
+        counter_lines(&counters, "retry_pass"),
+        vec![1, 2],
+        "{stderr}"
+    );
+    assert!(
+        dst.join("a.txt").is_file(),
+        "the named file landed on pass 2\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_PARTIAL_FAILURE),
+        "two failures no pass could name are still failures\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("2 file(s) were not retried"),
+        "the unretried remainder is reported once:\n{stdout}"
+    );
+}

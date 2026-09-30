@@ -1386,7 +1386,11 @@ fn requested_but_unscanned(
             None => "source: missing at retry (not found by the retry scan)".to_string(),
         };
         let cost = rel.len() + reason.len() + 8;
-        if cost > budget {
+        // cr-fix2-2: the diagnostics name cap forces the dropped-count
+        // path in tests; production is bounded by the byte budget alone.
+        let capped = crate::remote::instrumentation::scan_failure_name_cap()
+            .is_some_and(|cap| out.len() >= cap);
+        if cost > budget || capped {
             dropped += 1;
             continue;
         }
