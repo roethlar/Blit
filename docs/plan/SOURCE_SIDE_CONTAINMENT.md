@@ -1057,6 +1057,14 @@ guards portable (no Linux-only run needed); mutations red then green
 (`scratchpad/cr-ssc-mutations-3.txt`). Gate on macOS: fmt, clippy native
 + Linux-cross `-D warnings`, `cargo test --workspace` 1326 → 1330 passed /
 0 failed / 2 ignored; CI on three OSes unverified until a push.
+The codex review of batch 3 (`.review/results/ssc-fix3-range.codex.json`)
+returned one finding, fixed as cr-fix3-1 `3c3e56fb`: the shield inserts a
+failed entry's text path only where it is a real identity (raw names
+unstorable, no raw entry claims the text, or a representable source entry
+carries it), so on a byte-capable destination an unrelated valid-UTF-8
+path equal to a failed raw entry's lossy rendering is deleted like any
+other extraneous entry (guard four-arm, mutations red then green in
+`scratchpad/cr-ssc-mutations-4.txt`; 1330 → 1331 passed on macOS).
 
 **ssc-6 LANDED 2026-09-30 on master at `048e55af` (range
 `b342d636..048e55af`): end-of-run retry passes, `--retries`/`-R`
