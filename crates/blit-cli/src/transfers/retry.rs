@@ -162,6 +162,24 @@ pub(crate) const RETRIED_SUFFIX: &str = " (retried)";
 /// pass was given (cr-ssc6-1).
 pub(crate) const UNRETRIED_PATH: &str = "(not retried)";
 
+/// cr-ssc6-3: `--detach` hands the transfer to the destination daemon
+/// and exits before any summary exists, so no retry pass can run on this
+/// side; a daemon-owned retry would need the pass loop and its switches
+/// on the wire (recorded as a known gap). Rather than accept `--retries`
+/// silently, a detached run says so once — unless the caller already
+/// opted out with `--retries 0`. Returned as text so the notice is
+/// testable; the caller prints it to stderr.
+pub(crate) fn detach_retry_notice(args: &TransferArgs) -> Option<String> {
+    if !args.detach || args.retries == 0 {
+        return None;
+    }
+    Some(format!(
+        "retry passes are not applied to detached jobs (--retries {} ignored); \
+         pass --retries 0 to silence this notice",
+        args.retries
+    ))
+}
+
 /// What one retry pass returns to the loop.
 pub(crate) struct PassResult {
     pub files_transferred: u64,
@@ -456,6 +474,26 @@ mod tests {
         assert_eq!(out.final_failures.files_failed, 1);
         assert_eq!(out.final_failures.unretried, 0);
         assert_eq!(out.final_failures.failures.len(), 1);
+    }
+
+    /// cr-ssc6-3: a detached run with retries requested says once that
+    /// none will be applied; `--retries 0` (the opt-out) and attached
+    /// runs say nothing.
+    #[test]
+    fn a_detached_run_with_retries_is_told_none_apply() {
+        let mut a = args(2);
+        a.detach = true;
+        let notice = detach_retry_notice(&a).expect("notice");
+        assert!(notice.contains("not applied to detached jobs"), "{notice}");
+        assert!(notice.contains("--retries 2 ignored"), "{notice}");
+        a.retries = 0;
+        assert!(
+            detach_retry_notice(&a).is_none(),
+            "--retries 0 is the opt-out"
+        );
+        let mut attached = args(2);
+        attached.detach = false;
+        assert!(detach_retry_notice(&attached).is_none());
     }
 
     #[tokio::test]
