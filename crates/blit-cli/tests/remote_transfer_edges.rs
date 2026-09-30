@@ -220,3 +220,53 @@ fn test_pull_empty_module() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// win-4: a copy or mirror PUSH compares with the copy rule (size +
+/// mtime), so pushing an unchanged tree a second time transfers nothing.
+/// ssc-6 routed the copy/mirror push through the deferred push wrapper,
+/// which was move's and hard-coded move's compare (transfer every file
+/// unconditionally): every push re-sent the whole tree. Only Windows'
+/// `windows_metadata` test noticed (an erased named stream came back on a
+/// size/mtime-matched file); this pins the rule itself on every platform.
+#[test]
+fn a_second_push_of_an_unchanged_tree_transfers_nothing() {
+    for verb in ["copy", "mirror"] {
+        let ctx = TestContext::new();
+        let src_dir = ctx.workspace.join("src");
+        fs::create_dir_all(src_dir.join("sub")).expect("src dirs");
+        fs::write(src_dir.join("a.txt"), b"alpha").expect("write a");
+        fs::write(src_dir.join("sub/b.txt"), b"bravo").expect("write b");
+        fs::write(src_dir.join("big.bin"), vec![7u8; 2_000_000]).expect("write big");
+        let src_arg = format!("{}/", src_dir.display());
+        let dest_remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+        let push = || {
+            let mut cli_cmd = Command::new(&ctx.cli_bin);
+            cli_cmd
+                .arg("--config-dir")
+                .arg(&ctx.config_dir)
+                .arg(verb)
+                .arg("--yes")
+                .arg("--json")
+                .arg(&src_arg)
+                .arg(&dest_remote);
+            let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
+            assert!(
+                output.status.success(),
+                "{verb} push failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let doc: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("one JSON document");
+            doc["files_transferred"]
+                .as_u64()
+                .expect("files_transferred")
+        };
+        assert_eq!(push(), 3, "{verb}: the first push lands the tree");
+        assert_eq!(
+            push(),
+            0,
+            "{verb}: an unchanged tree is up to date on the second push"
+        );
+    }
+}

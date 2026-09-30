@@ -357,23 +357,28 @@ fn verb_compare_flags(args: &TransferArgs) -> CompareFlags {
     }
 }
 
-/// R51-F4: move's variant of [`run_remote_push_transfer`]. Returns
-/// the push summary instead of printing inline so the caller can
-/// defer output until after source-delete.
+/// The push with its summary deferred: returns the state instead of
+/// printing, so the caller prints once after its own follow-up — the
+/// retry passes (ssc-6) for copy/mirror, the source-delete for move
+/// (R51-F4).
 ///
-/// review otp-10a F1: move maps through `move_comparison_mode` —
-/// `IgnoreTimes` (transfer every file unconditionally), or `Checksum`
-/// when the user asked for it (a content-proven skip is safe). Move
-/// deletes the source on success, so a metadata-shaped skip of a
-/// same-size file whose content differs would destroy the only copy;
-/// the mapping makes the delete safe by construction. Copy/mirror map
-/// through the shared copy mapping (SizeMtime default, whose
-/// same-size dest-newer skip is the standing owner question).
+/// `move_verb` picks the compare mapping (review otp-10a F1): move maps
+/// through `move_comparison_mode` — `IgnoreTimes` (transfer every file
+/// unconditionally), or `Checksum` when the user asked for it (a
+/// content-proven skip is safe). Move deletes the source on success, so
+/// a metadata-shaped skip of a same-size file whose content differs
+/// would destroy the only copy; the mapping makes the delete safe by
+/// construction. Copy/mirror map through the shared copy mapping
+/// (SizeMtime default, whose same-size dest-newer skip is the standing
+/// owner question). win-4: this was move's alone and hard-coded the move
+/// mapping; when ssc-6 routed copy/mirror here too, every copy push
+/// re-sent every file.
 pub async fn run_remote_push_transfer_deferred(
     args: &TransferArgs,
     source: PathBuf,
     remote: RemoteEndpoint,
     mirror_mode: bool,
+    move_verb: bool,
     perf_history: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<DeferredPushState> {
@@ -384,7 +389,7 @@ pub async fn run_remote_push_transfer_deferred(
         source,
         remote,
         mirror_mode,
-        true,
+        move_verb,
         true,
         perf_history,
         lifecycle_trace,

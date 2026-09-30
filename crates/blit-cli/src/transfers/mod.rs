@@ -397,6 +397,7 @@ async fn run_transfer_inner(
                 src.clone(),
                 dst.clone(),
                 mirror,
+                false, // not a move — the copy compare mapping (win-4)
                 ctx.perf_history_enabled,
                 lifecycle_trace,
             )
@@ -413,6 +414,7 @@ async fn run_transfer_inner(
                             src,
                             dst,
                             false,
+                            false, // not a move
                             ctx.perf_history_enabled,
                             lifecycle_trace,
                         )
@@ -953,6 +955,7 @@ async fn run_move_inner(
                 src_path.clone(),
                 remote.clone(),
                 false,
+                true, // move: the move compare mapping
                 ctx.perf_history_enabled,
                 lifecycle_trace,
             )
@@ -969,6 +972,7 @@ async fn run_move_inner(
                             src,
                             remote,
                             false,
+                            true, // move
                             ctx.perf_history_enabled,
                             lifecycle_trace,
                         )
