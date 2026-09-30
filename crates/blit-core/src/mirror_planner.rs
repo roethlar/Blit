@@ -240,6 +240,9 @@ impl MirrorPlanner {
     /// *directory* must not have that directory's contents deleted when
     /// the replacement never arrived. Unrelated extraneous entries are
     /// still deleted.
+    /// `source_files` holds the text names of the REPRESENTABLE source
+    /// entries; every raw-named entry comes through `raw_entries` and is
+    /// kept under exactly one identity (cr-ssc5-5).
     pub fn plan_session_deletions(
         &self,
         dest_root: &Path,
@@ -270,15 +273,17 @@ impl MirrorPlanner {
             keep(Path::new(rel));
         }
         // Contract v7 (D-F): a source name that is not valid UTF-8 lives at
-        // the destination under its exact bytes, which on a byte-keyed
-        // filesystem never equal the lossy text — keep it by its bytes too.
-        // cr-ssc5-3: received bytes are decoded only where this host can
-        // store them; elsewhere the entry's text is its only identity.
+        // the destination under ONE physical identity (cr-ssc5-5): its
+        // exact bytes where this host can store them, its lossy text
+        // otherwise. cr-ssc5-3: received bytes are decoded only where
+        // storable. The text of a raw-named entry is kept on a storable
+        // host only when a representable source entry has that very name
+        // (`source_files` holds representable names only) — otherwise a
+        // distinct file under the lossy text is extraneous.
         for entry in raw_entries {
-            if let Some(path) =
-                crate::raw_name::path_from_received_raw(&entry.raw, raw_names_storable)
-            {
-                keep(&path);
+            match crate::raw_name::path_from_received_raw(&entry.raw, raw_names_storable) {
+                Some(path) => keep(&path),
+                None => keep(Path::new(&entry.text)),
             }
         }
 
@@ -443,6 +448,40 @@ mod shield_tests {
     /// host that cannot store them — the entry counts by its text only,
     /// the plan is computed, and an unrelated extraneous entry is still
     /// planned.
+    /// cr-ssc5-5: a raw-named source entry has ONE destination identity.
+    /// Where raw names are storable, a distinct file under its lossy text
+    /// is extraneous and is planned; where they are not, the text is the
+    /// identity and is kept. (ASCII "raw" bytes keep this portable.)
+    #[test]
+    fn a_raw_named_entry_keeps_exactly_one_destination_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("real.bin"), b"raw-named file").unwrap();
+        std::fs::write(dst.join("caf\u{fffd}.txt"), b"distinct lossy-text file").unwrap();
+        let raw = vec![RawNamedEntry {
+            text: "caf\u{fffd}.txt".to_string(),
+            raw: b"real.bin".to_vec(),
+        }];
+        let filter = crate::fs_enum::FileFilter::default();
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions(&dst, &HashSet::new(), &raw, &HashSet::new(), true, &filter)
+            .unwrap();
+        assert_eq!(
+            plan.files,
+            vec![dst.join("caf\u{fffd}.txt")],
+            "storable: the lossy-text neighbour is extraneous, the raw file is kept: {plan:?}"
+        );
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions(&dst, &HashSet::new(), &raw, &HashSet::new(), false, &filter)
+            .unwrap();
+        assert_eq!(
+            plan.files,
+            vec![dst.join("real.bin")],
+            "unstorable: the text is the identity and is kept: {plan:?}"
+        );
+    }
+
     #[test]
     fn foreign_raw_bytes_are_not_decoded_where_unstorable() {
         let tmp = tempfile::tempdir().unwrap();

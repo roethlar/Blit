@@ -2684,3 +2684,44 @@ async fn in_stream_resume_hashes_the_raw_named_destination_file() {
 async fn data_plane_resume_hashes_the_raw_named_destination_file() {
     assert_resume_hashes_the_raw_path(Carrier::DataPlane).await;
 }
+
+/// cr-ssc5-5 (byte-keyed destinations only): a mirror of a raw-named
+/// source file keeps exactly its raw-named counterpart; a distinct file
+/// under the lossy text is extraneous and is deleted.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn mirror_of_a_raw_named_file_deletes_the_distinct_lossy_text_neighbour() {
+    use std::os::unix::ffi::OsStrExt as _;
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        let raw_name = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
+        std::fs::write(src_root.join(raw_name), b"raw-named source file").unwrap();
+        std::fs::write(
+            dst_root.join("caf\u{fffd}.txt"),
+            b"distinct lossy-text file",
+        )
+        .unwrap();
+        let mut open = open_for(initiator_role, Carrier::InStream);
+        open.mirror_enabled = true;
+        open.mirror_kind = MirrorMode::All as i32;
+        let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
+        let (sr, dr) = run_with(open, Carrier::InStream, source, dst_root.clone()).await;
+        let summary = sr.unwrap_or_else(|e| panic!("source must complete: {e:#}"));
+        let dest = dr.unwrap_or_else(|e| panic!("destination must complete: {e:#}"));
+        assert_eq!(summary, dest.summary);
+        assert_eq!(summary.files_failed, 0, "{:?}", summary.failures);
+        assert_eq!(
+            std::fs::read(dst_root.join(raw_name)).unwrap(),
+            b"raw-named source file"
+        );
+        assert!(
+            !dst_root.join("caf\u{fffd}.txt").exists(),
+            "the distinct lossy-text file is extraneous under mirror"
+        );
+        assert_eq!(summary.entries_deleted, 1);
+    }
+}

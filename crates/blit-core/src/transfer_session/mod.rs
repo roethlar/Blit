@@ -4391,12 +4391,18 @@ async fn destination_session_inner(
                 // otp-6b: retain the full source path set for the mirror
                 // diff (the need list keeps only files needing transfer).
                 if mirror_enabled {
-                    source_files.insert(header.relative_path.clone());
-                    if let Some(raw) = &header.raw_relative_path {
-                        source_raw_files.push(crate::mirror_planner::RawNamedEntry {
+                    // cr-ssc5-5: one identity per entry — a raw-named entry
+                    // goes to the planner as (text, bytes) and is kept under
+                    // whichever this destination stores; only representable
+                    // names enter the text set.
+                    match &header.raw_relative_path {
+                        Some(raw) => source_raw_files.push(crate::mirror_planner::RawNamedEntry {
                             text: header.relative_path.clone(),
                             raw: raw.clone(),
-                        });
+                        }),
+                        None => {
+                            source_files.insert(header.relative_path.clone());
+                        }
                     }
                 }
                 // Contract v7 (D-F, A13): two manifest entries that collapse
