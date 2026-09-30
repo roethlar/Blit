@@ -257,7 +257,9 @@ pub(crate) fn sparse_copy_windows<R: std::io::Read>(
     buffer_size: usize,
     file_size: u64,
 ) -> Result<u64> {
-    use std::io::{Read, Seek, SeekFrom, Write};
+    // `src` is read through its `R: Read` bound, so only the handle
+    // traits `dst` needs are imported here.
+    use std::io::{Seek, SeekFrom, Write};
 
     let _ = mark_file_sparse(dst);
 
