@@ -51,6 +51,13 @@ entry: numeric field was not a number … cksum`).
   unreadable between the scan and the copy; that file is reported and the
   mirror completes. A file that vanished before the copy on the local
   route is likewise reported, not fatal.
+- A file that cannot be opened when the scan reaches it — on Windows, a
+  file held open with no sharing, such as `NTUSER.DAT` or a live database
+  — no longer ends the run at scan time. It is listed, reported per file
+  (`source: cannot open: …`) if it still cannot be read, retried, and its
+  destination counterpart is kept under mirror. (A permission refusal at
+  scan still marks the scan incomplete, so a mirror refuses; that is an
+  open owner question.)
 - Wording: the end-of-run block now reads "N file(s) did not land at the
   destination:", and the `move` source-delete refusal says the same,
   since a failure may now be the source's.

@@ -1163,6 +1163,38 @@ destination's deletions across sessions would need a wire
 "delete-only" session; the shield during retries is the main pass's
 failed set, a superset of the final one.
 
+**Windows fixes (2026-09-30, after the first push).** CI's Windows leg
+only ran the blit-core lib tests (cargo stops at the first failing
+binary), so the whole suite was run on a Windows 11 ARM64 VM (Rust
+1.97.1; CI is x86_64): 18 binaries failed. Five defects, one commit each,
+range `5eeff4ac..8da5614b`; red/green proofs and the VM runs are in
+DEVLOG 2026-09-30 "WINDOWS FIXES". **win-1** `a67c16b8` — every
+DESTINATION run of the debug `blit` binary overflowed Windows' 1 MiB main
+thread: the ssc-6 retry passes inlined a second session into every route
+arm (`run_transfer_inner`'s poll frame 108 → 230 KB). The session futures
+are boxed where one nests another (CLI and blit-core); no stack-size
+setting. Guards `blit-cli/tests/main_thread_stack_budget.rs` (real
+binary, 768 KiB main thread on Unix, native 1 MiB on Windows) and
+`blit-core/tests/stack_budget.rs` (256 KiB thread). **win-2** `91e64d88`
+— a file that enumerated but would not open at scan with any error other
+than PermissionDenied/NotFound (a Windows sharing violation) ended the
+session; it is now listed, so it fails per file at payload time, is
+retried, and keeps its counterpart under mirror (D-2026-09-28-2/-4). The
+scan's Windows-metadata read succeeds on a held file (proven on the VM),
+so it needed no change. **win-3** `d275e862` — the shard vanish tests
+accept Windows' metadata-first reason. **win-4** `44442e54` — since ssc-6
+every copy/mirror PUSH compared with the move rule (IgnoreTimes) and
+re-sent every file, on every platform: the deferred push wrapper was
+move's and hard-coded `move_verb`. Only Windows' `windows_metadata`
+test noticed; `a_second_push_of_an_unchanged_tree_transfers_nothing` now
+pins it everywhere. **win-5** `8da5614b` — a Windows-only unused import
+(clippy). Excluded from the must-be-green set: `local_session`
+`metadata_repair::failed_repair_degrades_to_transfer_and_the_session_completes`
+fails identically at `ab5ea073` on this VM — its deny-WriteAttributes
+fixture does not bite because the VM's SSH token holds SeRestorePrivilege
+enabled and SetFileAttributesW succeeds through the deny ACE (attrib.exe
+is refused); environment, not code. Open owner question D8 below.
+
 ## Review history
 
 - **r1** (codex-cli 0.156.0 / gpt-5.6-sol / xhigh / frontier, grade
@@ -1301,3 +1333,15 @@ failed set, a superset of the final one.
   text in `FileHeader.raw_relative_path`; Unix destinations create the
   real name, non-representable destinations report; identity stays the
   path string. Opaque per-entry IDs declined.
+- **D8 — PermissionDenied at scan. OPEN (raised 2026-09-30 by win-2).**
+  A file that enumerates but whose scan-time open is refused with
+  PermissionDenied is recorded unreadable: the scan is incomplete, so a
+  mirror refuses (R46-F2, owner-pinned, unchanged by win-2). win-2 made
+  every OTHER open error per file — the file is listed, fails at payload
+  time, is retried, and keeps its counterpart. Should PermissionDenied
+  follow? (a) Keep: one access-denied file keeps blocking a whole
+  mirror's deletions. (b) Per file: the file enumerated, so under
+  D-2026-09-28-4 its counterpart is never extraneous; it is reported and
+  retried and the mirror's other deletions run. Recommendation (b).
+  NotFound at scan (vanished between the walk and the open) stays an
+  unreadable entry under either option.

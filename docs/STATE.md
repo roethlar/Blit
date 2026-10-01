@@ -37,8 +37,8 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   Verified, 3 declined with records; final round over `5251584c..c1fe0e1b`
   **clean** (REVIEW.md §SOURCE_SIDE_CONTAINMENT slice reviews). Suite
   1331/0/2 on macOS + Linux-cross clippy; Linux-only guards run on
-  magneto. **Pushed `e6217b94`; CI run 36769845141 red on Windows only
-  (2 test assertions, fix committed locally; push pending the owner).** Owner notes: `--retry`/`--wait`
+  magneto. **Windows fixes `5eeff4ac..8da5614b` green on the Windows VM
+  (one env-specific test); not pushed — push and owner ruling D8 pending.** Owner notes: `--retry`/`--wait`
   vs `--retries`/`--retry-wait` naming; deletions after the main pass, not
   after retries; `--detach` ignores `--retries` (notice; TODO). Next
   release bumps at least the minor version (blit-core API; CHANGELOG).
