@@ -25,23 +25,25 @@ CI `build-release` signs the shipped binaries when the signing secrets are prese
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff` procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
+## Handoff — 2026-10-01 (HEAD `2cfcb2fd`; nothing pushed since `e6217b94`)
+- Done: SOURCE_SIDE_CONTAINMENT slices + 4 codex fix batches; Windows fixes win-1..5 green on the ARM64 VM (all 43 binaries; restricted token for one) + Mac 1344/0/2; Windows VM recorded in `.agents/machines.md`.
+- In flight: nothing. Open: cr-win-1 HIGH (`.review/findings/cr-win-1.md`); owner ruling D8 (plan §Open questions); owner offers an x86_64 Windows box (Ryzen 9) in the morning.
+- First action: fix cr-win-1 (retry passes compare with IgnoreTimes; guard red→green), Mac gate + ARM VM run; then set up the Ryzen box per the machines note and run `--no-fail-fast` there; then ask the owner for `/git push all` and watch CI.
+
 ## Now (active work)
 
-- **SOURCE_SIDE_CONTAINMENT ACTIVE (D-2026-09-29-4) — ALL SIX SLICES
-  LANDED + REVIEWED CLEAN 2026-09-30:** `docs/plan/SOURCE_SIDE_CONTAINMENT.md`
-  — a file the SOURCE cannot deliver is skipped or retracted and reported,
-  never run-fatal (D-2026-09-28-2); contract 6→7. ssc-1 `bd4c48d0`, ssc-2
-  `5a124669`, ssc-3 `b176a2ab`, ssc-4 `c3a38876`, ssc-6 `048e55af`
-  (`--retries`/`--retry-wait`), ssc-5 `6c266dd4` (non-UTF-8 by raw bytes).
-  Codex codereview of every slice and fix batch: 24 findings admitted and
-  Verified, 3 declined with records; final round over `5251584c..c1fe0e1b`
-  **clean** (REVIEW.md §SOURCE_SIDE_CONTAINMENT slice reviews). Suite
-  1331/0/2 on macOS + Linux-cross clippy; Linux-only guards run on
-  magneto. **Windows fixes `5eeff4ac..8da5614b` green on the Windows VM
-  (one env-specific test); not pushed — push and owner ruling D8 pending.** Owner notes: `--retry`/`--wait`
-  vs `--retries`/`--retry-wait` naming; deletions after the main pass, not
-  after retries; `--detach` ignores `--retries` (notice; TODO). Next
-  release bumps at least the minor version (blit-core API; CHANGELOG).
+- **SOURCE_SIDE_CONTAINMENT ACTIVE (D-2026-09-29-4):** all six slices
+  landed 2026-09-30 (`docs/plan/SOURCE_SIDE_CONTAINMENT.md`; a file the
+  SOURCE cannot deliver is skipped or retracted and reported, never
+  run-fatal; contract 7). Pushed `e6217b94`; its Windows CI leg was red.
+  Windows fixes win-1..5 `5eeff4ac..8da5614b` (stack overflow, scan-time
+  sharing violation, push compare regression) are green on the Windows
+  ARM64 VM and the Mac (1344/0/2); **local only, not pushed.** Codex
+  review of win-1..5 admitted **cr-win-1 HIGH (open)**: retry passes use
+  the ordinary compare since win-4 and can clear a stream failure. Owner
+  notes: `--retry`/`--wait` vs `--retries`/`--retry-wait` naming;
+  deletions after the main pass; `--detach` ignores `--retries`. Next
+  release bumps at least the minor version (blit-core API).
 - **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive, D-2026-07-05-4 "flip
   the plan and go").** The invariant (plan doc, verbatim): ONE block of
   transfer code; direction/initiator/verb can NEVER affect wall time by
@@ -62,11 +64,9 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
   Principle: ceiling-driven, never competitor-relative (D-2026-07-04-4).
 ## Queue (ordered)
 
-0. **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (ACTIVE 2026-09-29, D-2026-09-29-4)** — source-side
-   per-file containment (skip record, shard fidelity, mid-record retraction,
-   local pre-check retirement, non-UTF-8 reason). Codex openreview loop in
-   closed at r6 (all acceptable_with_changes; 23 changes adopted); all rulings
-   D1–D7 closed (D-2026-09-28-1..-4, D-2026-09-29-1..-3), all six slices landed 2026-09-30, CI pending push; RELEASE_1_0 G3 fix-now item (ruled).
+0. **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (ACTIVE)** — fix cr-win-1, then
+   the Windows x86_64 run on the owner's Ryzen machine, push, CI on three
+   OSes; then the owner's Shipped flip. RELEASE_1_0 G3 fix-now item.
 0. **ULTRACODE 2026-08-18 (DEVLOG 23:00Z): cv-1+cv-2 LANDED `05529c19` (contract-version gate + scan surfacing; cv-3 waits for next release); sf-3d LANDED `7ffd929d` (containment cache + resume-path stamping; rig A/B still owed); clp-3 reviewed AND F1 closed `677a8ba9` (F2/F5 stay owner calls); residue triaged (2 dead, 1 dead-as-written; item 5 rate-window FIXED — one flagged judgement call on stall silence; item 2 perf-history scope needs an owner ruling); sweep-prefetch parked pending one netwatch-01 SMB run; pm-5 BLOCKED for v0.1.2 — source lane needs the next tag.** CI FULLY GREEN on `af9b48b3` (run 32195891519, 7/7 jobs — the slices are cross-platform proven). Stall-line revised-b landed after (three red-proven silence gates; mid-payload stalls visible, summary-wait/purge tails silent).
 1. **`docs/plan/INTERFACE_PLATFORM.md` (SHIPPED — owner declared 2026-08-18; all seven slices landed 2026-08-17)** — three standalone front-ends (CLI first, TUI/GUI later in BlitAdmin_UIs), all first-class consumers of `blit-core` ITSELF: `blit-app` + `blit-console-core` fold into core (no new crate, D-2026-08-17-2), `blit-core` publishes to crates.io (name available, verified; publish act owner-gated), third-party Rust apps embed via the crate, everything else via daemon gRPC. All rulings closed (D-2026-08-17-3/-4/-5: bridge, tui, gui all deleted; fresh UIs later; nothing pushes to BlitAdmin_UIs under this plan). Nothing open; execution record in the plan.
 2. **`docs/plan/SMALL_FILE_CEILING.md` — sf-3b closed (D-2026-08-14-1); sf-3c landed 2026-08-15; sf-3d landed 2026-08-18** — sf-3c stamps streamed-receive mtime/permissions through the retained write handle instead of reopening by path; sf-3d (sf-3a candidate 3, contained-path canonicalization cache + resume-path stamping, `7ffd929d`) closed the named-candidate list; proxy pins + mutation proofs in the plan's Slices section. Rig A/B for sf-3d still owed (Queue 0); no further cut selected.
@@ -197,4 +197,4 @@ Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 line
 
 ## Open questions
 
-- `INTERFACE_PLATFORM.md`: Shipped (owner declared 2026-08-18); no open rulings (D-2026-08-17-1..-5). The old UI_REMOVAL `blit-app` question is absorbed: `blit-app` becomes the SDK. 1.0 UX gate stays CLOSED (D-2026-08-15-2).
+- **D8 (SOURCE_SIDE_CONTAINMENT):** a file that is PermissionDenied at scan still marks the scan incomplete, so a mirror refuses all deletions. Per-file like win-2's locked files (recommended), or keep? Plan §Open questions.

@@ -79,6 +79,13 @@ ARM64 results are OS evidence, not a substitute for CI.
   (asynchronous — wait, then `type` the log). Under it the token holds only
   SeChangeNotifyPrivilege and all 7 `metadata_repair` tests pass
   (verified 2026-09-30 at `8da5614b`).
+- 2026-10-01: Rust is now 1.98.1 (CI's stable) with the
+  `x86_64-pc-windows-msvc` target added; the x64-hosted MSVC toolset
+  (`Hostx64\x64`) builds it and the binaries run under Prism emulation.
+  Emulated x86_64 results are supporting evidence only (timing tests can
+  fail). Disk is tight (~16 GB free when clean): delete `target\debug` or
+  `target\x86_64-pc-windows-msvc` between runs and build with
+  `CARGO_INCREMENTAL=0` (as CI does).
 
 ## Additional Linux hosts — BUILD ONLY (owner rule, 2026-07-12)
 
