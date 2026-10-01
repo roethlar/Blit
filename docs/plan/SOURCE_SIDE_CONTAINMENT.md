@@ -1193,7 +1193,9 @@ pins it everywhere. **win-5** `8da5614b` — a Windows-only unused import
 fails identically at `ab5ea073` on this VM — its deny-WriteAttributes
 fixture does not bite because the VM's SSH token holds SeRestorePrivilege
 enabled and SetFileAttributesW succeeds through the deny ACE (attrib.exe
-is refused); environment, not code. Open owner question D8 below.
+is refused); environment, not code — under a restricted token
+(`runas /trustlevel:0x20000`) all 7 `metadata_repair` tests pass at
+`8da5614b`. Open owner question D8 below.
 
 ## Review history
 

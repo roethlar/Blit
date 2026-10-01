@@ -3,7 +3,7 @@
 ## This Mac (owner's workstation) — recorded 2026-07-10, moved here 2026-07-11
 
 - Rig SSH keys installed: zoey (root), Windows box (`michael@10.1.10.173`),
-  skippy (`admin@skippy`).
+  skippy (`admin@skippy`), Windows dev VM (`michael@10.1.10.222`, 2026-09-30).
 - NOPASSWD sudoers rule for the zoey pool-drain/purge helper.
 - zig + cargo-zigbuild toolchain (aarch64-musl static daemon builds).
 - ssh ControlMaster sockets configured for the rigs.
@@ -48,6 +48,37 @@ which the hosts can reach, so the exact pushed commit is under test rather
 than an rsync of a dirty tree. **Updated 2026-09-25:** `origin` is now
 `http://magneto:3001/michael/blit_v2.git` (`git remote -v`; answers HTTP 200)
 and `q:3000` no longer answers — clone from magneto's gitea instead.
+
+## Windows dev VM for CROSS-PLATFORM VERIFICATION (owner, 2026-09-30)
+
+`ssh michael@10.1.10.222` — the owner's UTM VM on the Mac: Windows 11
+ARM64 (10.0.26100), Rust 1.97.1 `aarch64-pc-windows-msvc` via rustup, VS
+2022 Build Tools, Git, ~16 GB free. Key auth; default shell cmd.exe.
+**Owner: a throwaway dev VM — "you have approval to make any changes
+needed to the VM"; it can be rebuilt.** CI's Windows runner is x86_64, so
+ARM64 results are OS evidence, not a substitute for CI.
+
+- Clone: `C:\Users\michael\Dev\blit` from the LAN gitea
+  (`http://magneto:3001/michael/blit_v2.git`, reachable from the VM). To
+  test unpushed commits: `git bundle create <scratch>/fix.bundle
+  origin/master..master`, `scp` it to `C:\Users\michael\fix.bundle`, then
+  `git fetch -f C:\Users\michael\fix.bundle master:bundle-fix && git
+  checkout --detach bundle-fix` in the clone. `C:\Users\michael\Dev\blit-base`
+  holds a baseline clone at `ab5ea073`.
+- Run the suite with a FOREGROUND ssh command (`cargo test --workspace
+  --no-fail-fast`, streamed to a log on the Mac from a background shell);
+  processes started with `Start-Process` inside an ssh session are killed
+  when the session ends. Use `--no-fail-fast`: plain `cargo test` stops at
+  the first failing binary, which is how CI hid 17 failing Windows test
+  binaries on 2026-09-30.
+- The ssh session token is High integrity with SeBackup/SeRestore/
+  SeTakeOwnership ENABLED. Tests whose fixture relies on a deny ACE (e.g.
+  `local_session` `metadata_repair::failed_repair_degrades_to_transfer_and_the_session_completes`)
+  fail under it; run that binary under a restricted token instead:
+  `runas /trustlevel:0x20000 "cmd /c cd /d <crate dir> && <test exe> <filter> > C:\Users\michael\out.log 2>&1"`
+  (asynchronous — wait, then `type` the log). Under it the token holds only
+  SeChangeNotifyPrivilege and all 7 `metadata_repair` tests pass
+  (verified 2026-09-30 at `8da5614b`).
 
 ## Additional Linux hosts — BUILD ONLY (owner rule, 2026-07-12)
 
