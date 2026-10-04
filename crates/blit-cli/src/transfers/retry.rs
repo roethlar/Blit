@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use blit_core::generated::TransferSummary;
+use blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE;
 use blit_core::remote::transfer::FileFailure;
 use blit_core::transfer_session::local::LocalMirrorSummary;
 use blit_core::transfers::remote::DelegatedPullOutcome;
@@ -109,6 +110,26 @@ impl PassFailures {
                 .collect(),
             truncated,
         )
+    }
+
+    /// cr-win-1: the named failures whose reason says this run left an
+    /// incomplete copy of the file at the destination (the sink's
+    /// [`INCOMPLETE_LEFT_IN_PLACE`]).
+    fn left_in_place(&self) -> HashSet<PathBuf> {
+        self.failures
+            .iter()
+            .filter(|failure| failure.reason.contains(INCOMPLETE_LEFT_IN_PLACE))
+            .map(|failure| PathBuf::from(&failure.relative_path))
+            .collect()
+    }
+
+    /// Fold a second session of the same pass into this report.
+    fn merge(&mut self, other: PassFailures) {
+        self.files_failed = self.files_failed.saturating_add(other.files_failed);
+        self.failures.extend(other.failures);
+        self.failed_paths.extend(other.failed_paths);
+        self.failed_paths_truncated |= other.failed_paths_truncated;
+        self.unretried = self.unretried.saturating_add(other.unretried);
     }
 
     /// Mark every remaining failure as one that survived a retry, and
@@ -202,6 +223,21 @@ pub(crate) struct PassResult {
     /// in-stream carrier or resumed block-wise is reported as such.
     pub in_stream_carrier_used: bool,
     pub files_resumed: u64,
+}
+
+impl PassResult {
+    /// Fold a second session of the same pass into this result.
+    fn merge(&mut self, other: PassResult) {
+        self.files_transferred = self
+            .files_transferred
+            .saturating_add(other.files_transferred);
+        self.bytes_transferred = self
+            .bytes_transferred
+            .saturating_add(other.bytes_transferred);
+        self.failures.merge(other.failures);
+        self.in_stream_carrier_used |= other.in_stream_carrier_used;
+        self.files_resumed = self.files_resumed.saturating_add(other.files_resumed);
+    }
 }
 
 /// What the loop hands back for the route to fold into its final
@@ -304,20 +340,41 @@ where
         }
         blit_core::remote::instrumentation::record_retry_pass(u64::from(pass));
         let mut pass_args = args.clone();
-        pass_args.retry_only = Some(set);
         pass_args.retry_pass = Some((pass, total, n));
-        // cr-win-1: a retry pass re-sends its set unconditionally. Each
-        // file in it already failed once, and that failure can leave a
-        // destination the copy compare reads as current — a named stream
-        // rejected after the bytes landed keeps the bytes at the write
-        // time (same size, newer), which SizeMtime and SizeOnly both skip,
-        // clearing the failure with the stream still missing. Every route
-        // gives `ignore_times` top precedence; a move with `--checksum`
-        // keeps its Checksum compare, whose verdict covers named streams.
-        pass_args.ignore_times = true;
+        // cr-win-1: a retry pass compares exactly as the main pass did —
+        // a failed write never leaves a target that looks finished (the
+        // sink removes it or holds it one byte off the source's size), so
+        // the user's compare is trusted here as on any later run. The one
+        // exception is --ignore-existing: a path whose failure left this
+        // run's own incomplete copy at the destination exists there now,
+        // and that copy is not one the user asked to keep — those paths
+        // retry with it off.
+        let left: HashSet<PathBuf> = if args.ignore_existing {
+            current
+                .left_in_place()
+                .intersection(&set)
+                .cloned()
+                .collect()
+        } else {
+            HashSet::new()
+        };
         // win-1: one heap allocation per pass keeps the pass's session
         // out of this loop's state and its caller's frame.
-        let result = Box::pin(run(pass_args)).await?;
+        let result = if left.is_empty() {
+            pass_args.retry_only = Some(set);
+            Box::pin(run(pass_args)).await?
+        } else {
+            let rest: HashSet<PathBuf> = set.difference(&left).cloned().collect();
+            let mut left_args = pass_args.clone();
+            left_args.retry_only = Some(left);
+            left_args.ignore_existing = false;
+            let mut result = Box::pin(run(left_args)).await?;
+            if !rest.is_empty() {
+                pass_args.retry_only = Some(rest);
+                result.merge(Box::pin(run(pass_args)).await?);
+            }
+            result
+        };
         added_files = added_files.saturating_add(result.files_transferred);
         added_bytes = added_bytes.saturating_add(result.bytes_transferred);
         in_stream_carrier_used |= result.in_stream_carrier_used;
@@ -376,6 +433,93 @@ mod tests {
         args.retries = retries;
         args.retry_wait = 0;
         args
+    }
+
+    /// cr-win-1: a retry pass compares like the main pass — the user's
+    /// compare flags reach it unchanged.
+    #[tokio::test]
+    async fn a_retry_pass_keeps_the_users_compare() {
+        let mut a = args(1);
+        a.size_only = true;
+        run_retry_passes(&a, failures(&["a"]), |pass_args| {
+            assert!(pass_args.size_only && !pass_args.ignore_times && !pass_args.force);
+            async move {
+                Ok(PassResult {
+                    files_transferred: 1,
+                    bytes_transferred: 1,
+                    failures: PassFailures::default(),
+                    in_stream_carrier_used: false,
+                    files_resumed: 0,
+                })
+            }
+        })
+        .await
+        .expect("loop");
+    }
+
+    /// cr-win-1: under --ignore-existing, a path whose failure left this
+    /// run's own incomplete copy at the destination retries with it off,
+    /// in its own session; every other path keeps the user's flag, and
+    /// the two results fold into one pass.
+    #[tokio::test]
+    async fn ignore_existing_retries_this_runs_own_leftovers_without_it() {
+        let mut a = args(1);
+        a.ignore_existing = true;
+        let mut main = failures(&["left", "other"]);
+        main.failures[0].reason =
+            format!("writing named stream: {INCOMPLETE_LEFT_IN_PLACE}: it could not be removed");
+        let mut sessions: Vec<(Vec<PathBuf>, bool)> = Vec::new();
+        let out = run_retry_passes(&a, main, |pass_args| {
+            let mut set: Vec<PathBuf> = pass_args
+                .retry_only
+                .clone()
+                .expect("retry set")
+                .into_iter()
+                .collect();
+            set.sort();
+            sessions.push((set, pass_args.ignore_existing));
+            async move {
+                Ok(PassResult {
+                    files_transferred: 1,
+                    bytes_transferred: 5,
+                    failures: PassFailures::default(),
+                    in_stream_carrier_used: false,
+                    files_resumed: 0,
+                })
+            }
+        })
+        .await
+        .expect("loop");
+        assert_eq!(
+            sessions,
+            vec![
+                (vec![PathBuf::from("left")], false),
+                (vec![PathBuf::from("other")], true),
+            ]
+        );
+        assert_eq!(out.passes_run, 1);
+        assert_eq!(out.added_files, 2);
+        assert_eq!(out.final_failures.files_failed, 0);
+
+        // Without --ignore-existing nothing is split.
+        let mut main = failures(&["left", "other"]);
+        main.failures[0].reason = format!("x: {INCOMPLETE_LEFT_IN_PLACE}");
+        let mut calls = 0;
+        run_retry_passes(&args(1), main, |_| {
+            calls += 1;
+            async move {
+                Ok(PassResult {
+                    files_transferred: 2,
+                    bytes_transferred: 10,
+                    failures: PassFailures::default(),
+                    in_stream_carrier_used: false,
+                    files_resumed: 0,
+                })
+            }
+        })
+        .await
+        .expect("loop");
+        assert_eq!(calls, 1);
     }
 
     #[tokio::test]

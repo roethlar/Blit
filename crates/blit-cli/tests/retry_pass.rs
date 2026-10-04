@@ -459,96 +459,122 @@ fn a_retry_landed_file_reports_a_transfer_and_the_whole_duration() {
     );
 }
 
-/// Replace the blocking directory with a file the copy compare reads as
-/// current: the source's size and mtime, other bytes.
-fn plant_current_looking_file(source: &Path, blocked: &Path) {
+/// Replace a blocking directory with a file of the source's size holding
+/// `bytes`, its mtime the source's plus `newer_by` seconds.
+fn plant(source: &Path, blocked: &Path, bytes: &[u8], newer_by: u64) {
     fs::remove_dir_all(blocked).expect("free the blocked path");
-    let len = fs::metadata(source).expect("stat source").len() as usize;
-    fs::write(blocked, vec![b'x'; len]).expect("plant the lookalike");
+    assert_eq!(
+        fs::metadata(source).expect("stat source").len(),
+        bytes.len() as u64
+    );
+    fs::write(blocked, bytes).expect("plant");
     let mtime = fs::metadata(source)
         .and_then(|meta| meta.modified())
-        .expect("source mtime");
+        .expect("source mtime")
+        + Duration::from_secs(newer_by);
     fs::File::options()
         .write(true)
         .open(blocked)
         .and_then(|file| file.set_modified(mtime))
-        .expect("give the lookalike the source's mtime");
+        .expect("set the planted mtime");
 }
 
-/// cr-win-1: a retry pass re-sends the files it was given instead of
-/// re-comparing them. A file's own failure can leave its destination
-/// looking current — on Windows a named stream rejected after the bytes
-/// landed leaves those bytes in place, same size and newer — and a retry
-/// that re-ran the copy compare skipped it, cleared the failure and
-/// exited 0 with the stream missing. The portable stand-in: during the
-/// wait the blocked path becomes a file with the source's size and mtime
-/// but other bytes. Exit 0 must mean the source's bytes landed. Local and
-/// push routes; the one retry loop serves both.
+/// cr-win-1: a retry pass compares exactly as the main pass does. Two
+/// files fail the main pass; during the wait one destination becomes a
+/// current copy (same bytes, same mtime) and the other a NEWER same-size
+/// file. The retry re-sends neither — the newer one is kept, as the
+/// default compare keeps it on any run — and the run converges. (The
+/// 501c408d fix re-sent both and overwrote the newer file; the failed
+/// copy itself is never left looking finished — the sink's guards.)
+/// Local and push routes; the one retry loop serves both.
 #[test]
-fn a_retry_pass_re_sends_a_file_whose_destination_looks_current() {
+fn a_retry_pass_compares_like_the_main_pass() {
+    fn fixture(src: &Path, dst: &Path) {
+        fs::create_dir_all(src).expect("mkdir src");
+        fs::create_dir_all(dst).expect("mkdir dst");
+        fs::write(src.join("landed.txt"), b"alpha").expect("write landed");
+        fs::write(src.join("current.txt"), b"same bytes").expect("write current");
+        fs::write(src.join("newer.txt"), b"older text").expect("write newer");
+        fs::create_dir_all(dst.join("current.txt")).expect("block current");
+        fs::create_dir_all(dst.join("newer.txt")).expect("block newer");
+    }
+    fn settle_during_wait(src: &Path, dst: &Path, counters: &Path) {
+        wait_for_counter(counters, "retry_wait_seconds", Duration::from_secs(60));
+        plant(
+            &src.join("current.txt"),
+            &dst.join("current.txt"),
+            b"same bytes",
+            0,
+        );
+        plant(
+            &src.join("newer.txt"),
+            &dst.join("newer.txt"),
+            b"NEWER TEXT",
+            3600,
+        );
+    }
+    fn check(route: &str, output: &Output, dst: &Path) {
+        let stdout = stdout_of(output);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{route}\nstdout:\n{stdout}\nstderr:\n{}",
+            stderr_of(output)
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("one JSON document");
+        assert_eq!(
+            doc["files_transferred"], 1,
+            "{route}: only the main pass's landed file — the retry re-sent nothing: {doc}"
+        );
+        assert_eq!(fs::read(dst.join("current.txt")).unwrap(), b"same bytes");
+        assert_eq!(
+            fs::read(dst.join("newer.txt")).unwrap(),
+            b"NEWER TEXT",
+            "{route}: the newer destination file is kept"
+        );
+    }
+
     let temp = tempfile::tempdir().expect("tempdir");
-    let (src, dst) = one_blocked_file_fixture(temp.path());
+    let (src, dst) = (temp.path().join("src"), temp.path().join("dst"));
+    fixture(&src, &dst);
     let counters = temp.path().join("counters.txt");
     let child = spawn(
         "copy",
-        &["--retries", "1", "--retry-wait", "4"],
+        &["--json", "--retries", "1", "--retry-wait", "4"],
         &src,
         &dst,
         &counters,
     );
-    wait_for_counter(&counters, "retry_wait_seconds", Duration::from_secs(60));
-    plant_current_looking_file(&src.join("blocked.txt"), &dst.join("blocked.txt"));
-    let output = finish(child);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "local: the retry landed the file\nstdout:\n{}\nstderr:\n{}",
-        stdout_of(&output),
-        stderr_of(&output)
-    );
-    assert_eq!(
-        fs::read(dst.join("blocked.txt")).expect("read the destination"),
-        b"lands on retry",
-        "local: the retry re-sent the file rather than skipping the lookalike"
-    );
+    settle_during_wait(&src, &dst, &counters);
+    check("local", &finish(child), &dst);
 
     let ctx = TestContext::new();
     let src = ctx.workspace.join("src");
-    fs::create_dir_all(&src).expect("mkdir src");
-    fs::write(src.join("landed.txt"), b"alpha").expect("write landed");
-    fs::write(src.join("blocked.txt"), b"lands on retry").expect("write blocked");
-    fs::create_dir_all(ctx.module_dir.join("blocked.txt")).expect("block the destination path");
+    fixture(&src, &ctx.module_dir);
     let counters = ctx.workspace.join("counters.txt");
     let child = Command::new(&ctx.cli_bin)
         .arg("--config-dir")
         .arg(&ctx.config_dir)
         .arg("--diagnostics-counter-file")
         .arg(&counters)
-        .args(["copy", "--yes", "--retries", "1", "--retry-wait", "4"])
+        .args([
+            "copy",
+            "--yes",
+            "--json",
+            "--retries",
+            "1",
+            "--retry-wait",
+            "4",
+        ])
         .arg(format!("{}/", src.display()))
         .arg(format!("127.0.0.1:{}:/test/", ctx.daemon_port))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn blit");
-    wait_for_counter(&counters, "retry_wait_seconds", Duration::from_secs(60));
-    plant_current_looking_file(
-        &src.join("blocked.txt"),
-        &ctx.module_dir.join("blocked.txt"),
-    );
-    let output = finish(child);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "push: the retry landed the file\nstdout:\n{}\nstderr:\n{}",
-        stdout_of(&output),
-        stderr_of(&output)
-    );
-    assert_eq!(
-        fs::read(ctx.module_dir.join("blocked.txt")).expect("read the destination"),
-        b"lands on retry",
-        "push: the retry re-sent the file rather than skipping the lookalike"
-    );
+    settle_during_wait(&src, &ctx.module_dir, &counters);
+    check("push", &finish(child), &ctx.module_dir);
 }
 
 /// Block until the counter file carries at least `n` lines of `event`.
@@ -796,5 +822,49 @@ fn windows_a_rejected_named_stream_is_re_sent_on_the_retry_pass() {
         fs::read(stream(&destination, "meta")).expect("read destination stream"),
         b"current stream",
         "the retry re-sent the file and replaced the stale stream"
+    );
+
+    // A plain re-run converges too: with no retry pass the run reports the
+    // file (exit 2); once the stream is free, the next ordinary run — the
+    // default compare, which never looks at streams — re-sends it, because
+    // the failed copy was not left looking finished.
+    fs::remove_file(&destination).expect("reset the destination");
+    fs::write(&destination, b"old").expect("write destination");
+    fs::write(stream(&destination, "meta"), b"stale stream").expect("write stale stream");
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(stream(&destination, "meta"))
+        .expect("hold the destination stream again");
+    let push = || {
+        let mut cmd = Command::new(&ctx.cli_bin);
+        cmd.arg("--config-dir")
+            .arg(&ctx.config_dir)
+            .args(["copy", "--yes", "--retries", "0"])
+            .arg(format!("{}\\", src.display()))
+            .arg(format!("127.0.0.1:{}:/test/", ctx.daemon_port));
+        run_with_timeout(cmd, Duration::from_secs(90))
+    };
+    let first = push();
+    assert_eq!(
+        first.status.code(),
+        Some(EXIT_PARTIAL_FAILURE),
+        "the rejected stream is reported\nstdout:\n{}\nstderr:\n{}",
+        stdout_of(&first),
+        stderr_of(&first)
+    );
+    drop(held);
+    let second = push();
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "a plain re-run lands the file\nstdout:\n{}\nstderr:\n{}",
+        stdout_of(&second),
+        stderr_of(&second)
+    );
+    assert_eq!(
+        fs::read(stream(&destination, "meta")).expect("read destination stream"),
+        b"current stream",
+        "the plain re-run replaced the stale stream"
     );
 }
