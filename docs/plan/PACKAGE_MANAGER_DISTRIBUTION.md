@@ -60,7 +60,9 @@ build tool, not a user install channel (D-2026-08-12-4).
   `.github/workflows/ci.yml` `build-release` signs `blit`/`blit-daemon`
   when the Apple and Azure secret sets are present: Developer ID Application
   + hardened runtime + timestamp + `notarytool` (unstapled by design; flat
-  executables have no staple target), and Azure Trusted Signing with RFC 3161.
+  executables have no staple target), and Azure Trusted Signing with RFC 3161
+  (Windows signing ENDED 2026-10-04: subscription cancelled, `AZURE_*`
+  secrets deleted; Windows ships unsigned).
   Those secrets are the same certificate family used by sibling apps
   (`../certs` Developer ID p12 + App Store Connect API key; Azure account
   `roethlar-app-signing`). Package-manager work consumes the signed bytes.
@@ -169,7 +171,7 @@ No new signing implementation. Confirm, do not replace:
 | Platform | Mechanism already in CI | Secret / cert source |
 |---|---|---|
 | macOS | `codesign` Developer ID + `notarytool` | `APPLE_CERTIFICATE` (p12 from `../certs`) + API key p8 |
-| Windows | `Invoke-TrustedSigning` | Azure Trusted Signing (`roethlar-app-signing`) |
+| Windows | `Invoke-TrustedSigning` (skipped: secrets absent) | none since 2026-10-04 — Azure subscription cancelled, `AZURE_*` secrets deleted; Windows ships unsigned |
 | Linux | none | standing policy |
 
 Package-manager CI and external PRs never receive those secrets.
