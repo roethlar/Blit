@@ -192,8 +192,8 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
 
 - **Rig facts:** `.agents/machines.md` is canonical; no host pairings here.
 - **Two stale test firewall entries await separately approved cleanup** (helper shipped, entries untouched; re-verified present 2026-10-04); paths + no-reuse/no-removal gate: `.agents/machines.md`.
-- **pm-5 (homebrew-core): its recorded block is CLEARED; not started.** Queue 0 parked it until "the next tag" because v0.1.2's tree predates pm-1; verified 2026-10-04 that `v0.1.3` (`fe6b279d`) contains pm-1 `042d79ad` and the `blit-transfer` package name. Starting it is the owner's call (`docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` pm-5).
+- **pm-5 (homebrew-core): HELD by the owner until everything works 100% (D-2026-10-04-2).** Its technical block cleared (`v0.1.3` `fe6b279d` carries pm-1 `042d79ad`); `docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` pm-5.
 
 ## Open questions
 
-- **D8 (SOURCE_SIDE_CONTAINMENT):** a file that is PermissionDenied at scan still marks the scan incomplete, so a mirror refuses all deletions. Per-file like win-2's locked files (recommended), or keep? Plan §Open questions.
+- None open. D8 RULED per file (D-2026-10-04-1); implementation pending.

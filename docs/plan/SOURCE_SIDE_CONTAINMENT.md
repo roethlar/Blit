@@ -4,7 +4,7 @@
 seven rulings closed (D1–D7: D-2026-09-28-1..-4, D-2026-09-29-1..-3);
 codex openreview loop closed at r6 (2026-09-26; `REVIEW.md` rows
 `plan-ssc-2026-09-25-r1..r6`). All six slices ssc-1..ssc-6 landed
-2026-09-30 (execution record below); D8 is open. Plan history: drafted 2026-09-25 after the Windows
+2026-09-30 (execution record below); D8 RULED 2026-10-04 (D-2026-10-04-1), not yet implemented. Plan history: drafted 2026-09-25 after the Windows
 user-profile mirror failure; owner rulings recorded in the Open questions
 section below.
 **Created**: 2026-09-25
@@ -1349,7 +1349,9 @@ Record: `.review/findings/cr-win-1.md`.
   text in `FileHeader.raw_relative_path`; Unix destinations create the
   real name, non-representable destinations report; identity stays the
   path string. Opaque per-entry IDs declined.
-- **D8 — PermissionDenied at scan. OPEN (raised 2026-09-30 by win-2).**
+- **D8 — PermissionDenied at scan. RULED 2026-10-04: (b) per file**
+  (D-2026-10-04-1; owner: "consistency"); implementation pending. Raised
+  2026-09-30 by win-2.
   A file that enumerates but whose scan-time open is refused with
   PermissionDenied is recorded unreadable: the scan is incomplete, so a
   mirror refuses (R46-F2, owner-pinned, unchanged by win-2). win-2 made

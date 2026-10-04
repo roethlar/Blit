@@ -316,7 +316,9 @@ One coherent, testable change each. No slice starts without Draft→Active.
    `v0.1.2` once the tap remote and token exist. Prove `brew install`
    on arm64 macOS: both binaries on PATH, version identity, `codesign`
    still Developer ID. Docs after proof.
-6. **pm-5 — Homebrew core (source).** **BLOCKED FOR v0.1.2, mechanism
+6. **pm-5 — Homebrew core (source).** **HELD BY THE OWNER until
+   everything works 100% (D-2026-10-04-2);** the tag block below cleared
+   with v0.1.3. **BLOCKED FOR v0.1.2, mechanism
    PROVEN (2026-08-18, DEVLOG 23:00Z):** the v0.1.2 tag tree predates
    pm-1 itself (042d79ad landed after tag commit 98084edf), so a
    pristine tag build silently ignores the formula's `BLIT_GIT_SHA`

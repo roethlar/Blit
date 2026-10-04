@@ -902,3 +902,13 @@ Format:
 - Decision: `docs/plan/SOURCE_SIDE_CONTAINMENT.md` is **Active** (owner: "active", 2026-09-29). Slices ssc-1..ssc-6 execute in the order ssc-1 → ssc-2 → ssc-3 → ssc-4 → ssc-6 → ssc-5, each on its own go, with the full gate, a DEVLOG entry, and CI green on all three OSes before the next; landed slices get the standing codex `codereview` (D-2026-07-31-3). The plan is a RELEASE_1_0 G3 fix-now item (D-2026-09-29-1).
 - Why: every open ruling is closed (D1 skip, D2 retraction, D3 pre-check retired, D4 1.0 gate, D5 no staging, D6 raw name bytes, D7 retry passes with `--retries`/`--retry-wait`) and the codex openreview loop reached consensus at r6 with every remaining material change resolved by an owner ruling; the flip is the approval the plan procedure requires.
 - Supersedes: nothing (the plan's "pending" decision-ref placeholder now points here).
+
+## D-2026-10-04-1 — PermissionDenied at scan is per file, like every other open error (SOURCE_SIDE_CONTAINMENT D8)
+- Decision: owner ruled option (b), "consistency" (2026-10-04), on D8 of `docs/plan/SOURCE_SIDE_CONTAINMENT.md`: a file that enumerates but whose scan-time open is refused with PermissionDenied follows win-2 — it is listed, fails per file at payload time, is retried, and under mirror its counterpart is kept while the mirror's other deletions run. It no longer marks the scan incomplete. NotFound at scan (vanished between walk and open) stays an unreadable entry.
+- Why: win-2 already made every other open error per file; one access-denied file blocking a whole mirror's deletions is the run-fatal posture D-2026-07-09-1 rejects, and the file enumerated, so under D-2026-09-28-4 its counterpart is never extraneous.
+- Supersedes: the D8 OPEN entry in the plan's Open questions (rewritten as RULED); the R46-F2 scan-incomplete treatment for PermissionDenied at scan only.
+
+## D-2026-10-04-2 — pm-5 (Homebrew core) held until everything works
+- Decision: owner (2026-10-04): pm-5 does not start "until everything is working 100%." Its mechanical block (a tag carrying pm-1) cleared with v0.1.3; the hold is now the owner's, not a technical one.
+- Why: a homebrew-core submission is outward-facing and slow to retract; it waits for a release the owner judges fully working.
+- Supersedes: nothing (amends the plan's pm-5 entry and STATE's Blocked line).
