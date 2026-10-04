@@ -57,6 +57,10 @@ ARM64 (10.0.26100), Rust `aarch64-pc-windows-msvc` via rustup (1.98.1 since 2026
 2022 Build Tools, Git, ~16 GB free. Key auth; default shell cmd.exe.
 Network: UTM "Bridged" onto nagatha's `en11` (the 10GbE port) — if `en11`
 has no carrier the VM will not come up on the LAN (2026-10-04).
+**No native x86_64 Windows host:** the Ryzen 9 box the owner offered on
+2026-10-01 is no longer available (owner, 2026-10-04). CI's Windows leg is
+the only native x86_64 Windows evidence; the VM's Prism-emulated x86_64
+run is supporting evidence only.
 **Owner: a throwaway dev VM — "you have approval to make any changes
 needed to the VM"; it can be rebuilt.** CI's Windows runner is x86_64, so
 ARM64 results are OS evidence, not a substitute for CI.
