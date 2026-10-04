@@ -306,6 +306,15 @@ where
         let mut pass_args = args.clone();
         pass_args.retry_only = Some(set);
         pass_args.retry_pass = Some((pass, total, n));
+        // cr-win-1: a retry pass re-sends its set unconditionally. Each
+        // file in it already failed once, and that failure can leave a
+        // destination the copy compare reads as current — a named stream
+        // rejected after the bytes landed keeps the bytes at the write
+        // time (same size, newer), which SizeMtime and SizeOnly both skip,
+        // clearing the failure with the stream still missing. Every route
+        // gives `ignore_times` top precedence; a move with `--checksum`
+        // keeps its Checksum compare, whose verdict covers named streams.
+        pass_args.ignore_times = true;
         // win-1: one heap allocation per pass keeps the pass's session
         // out of this loop's state and its caller's frame.
         let result = Box::pin(run(pass_args)).await?;
