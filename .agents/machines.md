@@ -55,6 +55,8 @@ a dirty tree.
 `ssh michael@10.1.10.222` — the owner's UTM VM on the Mac: Windows 11
 ARM64 (10.0.26100), Rust `aarch64-pc-windows-msvc` via rustup (1.98.1 since 2026-10-01, below), VS
 2022 Build Tools, Git, ~16 GB free. Key auth; default shell cmd.exe.
+Network: UTM "Bridged" onto nagatha's `en11` (the 10GbE port) — if `en11`
+has no carrier the VM will not come up on the LAN (2026-10-04).
 **Owner: a throwaway dev VM — "you have approval to make any changes
 needed to the VM"; it can be rebuilt.** CI's Windows runner is x86_64, so
 ARM64 results are OS evidence, not a substitute for CI.
@@ -225,9 +227,11 @@ review loop from rig-W benchmarking** — the contention that destroyed a
 - **10GbE**: `en8` = **10.1.10.54**, MTU **9000**, media 10Gbase-T. This is the
   **Aquantia adapter physically moved off nagatha**; any doc naming
   "Aquantia @ .54 on nagatha" is stale. nagatha's own 10GbE was `en11` at
-  10.1.10.104, MTU 9000 on 2026-09-25; **on 2026-10-04 `en11` (Thunderbolt
-  Ethernet Slot 1) had no carrier and nagatha's only 10.1.10.x address was
-  `en0` 10.1.10.11 — re-check live before any bench use.**
+  10.1.10.104, MTU 9000 on 2026-09-25; on 2026-10-04 `en11` (Thunderbolt
+  Ethernet Slot 1) lost carrier, then the owner restored it the same day:
+  10Gbase-T, 10.1.10.104, **MTU 1500** (not 9000) — re-check live before any
+  bench use. The Windows dev VM bridges onto `en11` (UTM "Bridged", see the
+  VM section): with `en11` down the VM cannot start or is unreachable.
 - **⚠ THE MULTI-NIC ROUTING TRAP (cost ~1h).** `q` has THREE IPs on
   10.1.10.0/24 — `en0` (1GbE, .221), `en1` (Wi-Fi, .108), `en8` (10GbE, .54) —
   and macOS routes the subnet via the highest-ranked **network service**, not by

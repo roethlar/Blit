@@ -358,7 +358,7 @@ Coder loop: pick the topmost `[ ]` row. W2.3 requires a `docs/plan/` doc with
 
 Finding rows: `[ ]` open → `[x]` verified-closed with the fix commit, one finding per commit (`Fix <id>: …`).
 
-- [x] cr-ssc1-1 `8c1b8dad`+`5d557004` (mirror shield, A19) · [x] cr-ssc1-2 `14a6bc3f` (cumulative chunk bound) · [x] cr-ssc1-3 `14ec438b` (atomic shard reservation) · [x] cr-ssc1-4 `61cc82ab` (TCP resume open failure → skip) · [x] cr-ssc1-5 `458ca62c` (opened-handle stat failure → skip) · [x] cr-ssc2-1 `19de5136` (closed by ssc-4 `c3a38876`; remote guards added) · [-] cr-ssc2-2 (declined, `.review/findings/cr-ssc2-2.contested.md`) · [x] cr-ssc2-3 `fa430f8b` (growth probe exercised) · [x] cr-ssc3-1 `e4405156` (resume size checks before/after the diff). All VERIFIED 2026-09-30 with red/green mutation proofs (`.review/findings/<id>.md` §Guard proof); batch range `ed4bc773..5d557004`. · [x] cr-ssc4-2 `2322acb6` · [x] cr-ssc4-3 `d9076b92` · [-] cr-ssc4-1 (duplicate of cr-ssc1-1) · [x] cr-fix1-1 `be1d90f4` · [x] cr-fix1-2 `fbebb01c` · [x] cr-ssc6-1 `02e102bd` · [x] cr-ssc6-2 `7c0dc993` · [x] cr-ssc6-3 `93b93d26` · [x] cr-ssc6-4 `c1cf9117` · [x] cr-ssc5-1 `c28c902d` · [x] cr-ssc5-2 `3c7d1b95` · [x] cr-ssc5-3 `b1277b6f` · [x] cr-ssc5-4 `5e9704cf` · [x] cr-ssc5-5 `0322a708` · [x] cr-fix2-2 `42f67b40` (unnamed failures make the retry set inexact) · [x] cr-fix2-3 `51bd57a9` (collision shields every raw entry) · [-] cr-fix2-1 (declined: no released build carries contract 7) · [x] cr-fix3-1 `3c3e56fb` (lossy text shielded only as a real identity) · [~] cr-win-1 `501c408d` (a retry pass re-sends its set; portable guard red/green on macOS; Windows guard run pending)
+- [x] cr-ssc1-1 `8c1b8dad`+`5d557004` (mirror shield, A19) · [x] cr-ssc1-2 `14a6bc3f` (cumulative chunk bound) · [x] cr-ssc1-3 `14ec438b` (atomic shard reservation) · [x] cr-ssc1-4 `61cc82ab` (TCP resume open failure → skip) · [x] cr-ssc1-5 `458ca62c` (opened-handle stat failure → skip) · [x] cr-ssc2-1 `19de5136` (closed by ssc-4 `c3a38876`; remote guards added) · [-] cr-ssc2-2 (declined, `.review/findings/cr-ssc2-2.contested.md`) · [x] cr-ssc2-3 `fa430f8b` (growth probe exercised) · [x] cr-ssc3-1 `e4405156` (resume size checks before/after the diff). All VERIFIED 2026-09-30 with red/green mutation proofs (`.review/findings/<id>.md` §Guard proof); batch range `ed4bc773..5d557004`. · [x] cr-ssc4-2 `2322acb6` · [x] cr-ssc4-3 `d9076b92` · [-] cr-ssc4-1 (duplicate of cr-ssc1-1) · [x] cr-fix1-1 `be1d90f4` · [x] cr-fix1-2 `fbebb01c` · [x] cr-ssc6-1 `02e102bd` · [x] cr-ssc6-2 `7c0dc993` · [x] cr-ssc6-3 `93b93d26` · [x] cr-ssc6-4 `c1cf9117` · [x] cr-ssc5-1 `c28c902d` · [x] cr-ssc5-2 `3c7d1b95` · [x] cr-ssc5-3 `b1277b6f` · [x] cr-ssc5-4 `5e9704cf` · [x] cr-ssc5-5 `0322a708` · [x] cr-fix2-2 `42f67b40` (unnamed failures make the retry set inexact) · [x] cr-fix2-3 `51bd57a9` (collision shields every raw entry) · [-] cr-fix2-1 (declined: no released build carries contract 7) · [x] cr-fix3-1 `3c3e56fb` (lossy text shielded only as a real identity) · [x] cr-win-1 `501c408d` (a retry pass re-sends its set; local closure: red/green on macOS and the Windows ARM64 VM)
 
 ## Reconciled legacy finding groups
 
@@ -366,8 +366,7 @@ The former unversioned “Open findings” rollup was stale. Its B/M-Jobs/C/A.1/
 feature groups and audit-1 through audit-15 groups are represented by the
 verified `[x]` rows above and below, including their review and fix commits.
 Hardware benchmark capture is post-release work under D-2026-07-22-1, not a
-known product defect. One canonical review row is in progress: cr-win-1
-(fixed `501c408d`; its Windows guard has not yet run on Windows).
+known product defect. There are no open canonical review rows.
 
 ## Verified history
 

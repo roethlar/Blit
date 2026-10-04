@@ -1207,8 +1207,9 @@ the stream missing. A retry pass now re-sends its set unconditionally
 (`run_retry_passes` sets `ignore_times`; every route gives it top
 precedence); the main pass keeps the user's compare. Guards in
 `blit-cli/tests/retry_pass.rs`: a portable local + push lookalike test
-(red/green on macOS) and a Windows rejected-stream test (Windows run
-pending). Record: `.review/findings/cr-win-1.md`.
+(red/green on macOS) and a Windows rejected-stream test (red/green on
+the ARM64 VM; full VM suite 1318/1/2, the one the known token test).
+Record: `.review/findings/cr-win-1.md`.
 
 ## Review history
 
