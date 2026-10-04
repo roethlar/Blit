@@ -4716,6 +4716,10 @@ async fn destination_session_inner(
                 if let Some(raw) = header.raw_relative_path.as_deref() {
                     sink.note_raw_name(&header.relative_path, raw);
                 }
+                // cr-win-1: before the first patch lands, so an interrupted
+                // record never leaves the partial at the source's size.
+                sink.hold_resume_partial(&header.relative_path, header.size)
+                    .await?;
                 let outcome =
                     receive_block_record(transport, sink.as_ref(), &header, block).await?;
                 files_written += outcome.files_written as u64;

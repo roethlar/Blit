@@ -1808,6 +1808,14 @@ async fn assert_resume_fault_contained(carrier: Carrier, fault: Fault, reason_pr
             patched[bs], 0x11,
             "nothing past the faulted block lands ({carrier:?})"
         );
+        // cr-win-1: the partial is the source's size here and its mtime
+        // the write time, so at the source's size every later compare
+        // would take it for finished. It is held one byte longer.
+        assert_eq!(
+            patched.len(),
+            content.len() + 1,
+            "the interrupted partial is held off the source's size ({carrier:?}, init {initiator_role:?})"
+        );
         // The in-place block write itself bumps the OS mtime; what must
         // NOT happen is the finalisation stamp that would make the next
         // compare call this partial converged (the source's mtime).

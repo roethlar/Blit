@@ -89,6 +89,18 @@ pub fn resume_copy_from(
         .open(dst)
         .with_context(|| format!("opening destination: {}", dst.display()))?;
 
+    // cr-win-1: while blocks are patched in place the destination must
+    // never be the source's size — an interruption would otherwise leave a
+    // half-patched file every compare takes for a finished copy (a
+    // same-size file patched in place keeps its size, and its mtime is the
+    // write time). Hold it one byte longer until the patch completes; the
+    // comparison below still reads the original `dst_len` bytes.
+    if dst_len <= src_len {
+        dst_file
+            .set_len(src_len + 1)
+            .with_context(|| format!("marking {} unfinished", dst.display()))?;
+    }
+
     let block_size = if block_size == 0 {
         DEFAULT_BLOCK_SIZE
     } else {
@@ -157,10 +169,9 @@ pub fn resume_copy_from(
         offset += this_block as u64;
     }
 
-    // Truncate if destination is longer than source
-    if dst_len > src_len {
-        dst_file.set_len(src_len)?;
-    }
+    // Truncate to the source's length: an older destination that was
+    // longer, or the one-byte unfinished mark set above.
+    dst_file.set_len(src_len)?;
 
     // Sync to disk
     dst_file.sync_all()?;
@@ -177,6 +188,25 @@ pub fn resume_copy_from(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// cr-win-1: blocks patch the destination in place, so an interrupted
+    /// resume of a same-size file kept the source's size with a write-time
+    /// mtime and passed for finished on every later compare. It stays one
+    /// byte longer than the source until the patch completes.
+    #[test]
+    fn an_interrupted_resume_never_leaves_the_source_size() -> Result<()> {
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src.bin");
+        let dst = tmp.path().join("dst.bin");
+        std::fs::write(&src, vec![1u8; 10_000])?;
+        std::fs::write(&dst, vec![2u8; 12_000])?;
+        // The source claims 12,000 bytes but holds 10,000: the read fails
+        // mid-patch, after the blocks before it already landed.
+        let mut src_file = File::open(&src)?;
+        assert!(resume_copy_from(&mut src_file, 12_000, &dst, 1024).is_err());
+        assert_eq!(std::fs::metadata(&dst)?.len(), 12_001);
+        Ok(())
+    }
 
     #[test]
     fn test_resume_new_file() -> Result<()> {

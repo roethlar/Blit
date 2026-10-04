@@ -693,6 +693,20 @@ pub trait TransferSink: Send + Sync {
         let _ = (relative_path, raw);
     }
 
+    /// cr-win-1: a resume block record for `relative_path`, manifested at
+    /// `total_size`, is about to patch its partial in place — called
+    /// before each block, so it must be idempotent. [`FsTransferSink`]
+    /// holds the partial one byte longer than the source until the
+    /// completion record truncates and stamps it: a same-size file whose
+    /// patch is interrupted (a failed block, a dropped session, a killed
+    /// process) would otherwise keep the source's size with a write-time
+    /// mtime and pass for a finished copy on every later compare. Sinks
+    /// without a filesystem ignore it.
+    async fn hold_resume_partial(&self, relative_path: &str, total_size: u64) -> Result<()> {
+        let _ = (relative_path, total_size);
+        Ok(())
+    }
+
     /// Open one single-file record (contract v7). Returns `Err` only for
     /// the session-fatal classes (path safety, destination root, volume,
     /// transport); a failure attributable to this one file — the
@@ -847,6 +861,9 @@ pub struct FsTransferSink {
     /// for a file whose blocks and completion arrive on different
     /// sockets.
     failed_resume_reasons: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    /// Resume partials already held unfinished this session
+    /// ([`TransferSink::hold_resume_partial`] runs before every block).
+    resume_held: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Successful parent-directory readiness, shared by every receive
     /// worker that owns this session sink. The map lock only protects
     /// lookup/insertion; each parent has its own async once-cell so first
@@ -905,6 +922,7 @@ impl FsTransferSink {
             byte_progress: None,
             small_file_probe: None,
             failed_resume_reasons: std::sync::Mutex::new(std::collections::HashMap::new()),
+            resume_held: std::sync::Mutex::new(std::collections::HashSet::new()),
             raw_names: std::sync::Mutex::new(std::collections::HashMap::new()),
             ready_parents: std::sync::Mutex::new(std::collections::HashMap::new()),
             containment: crate::path_safety::ContainedPathCache::new(),
@@ -1109,23 +1127,43 @@ impl FsTransferSink {
             .open(dst)
             .await
             .with_context(|| format!("opening {} for truncation", dst.display()))?;
-        file.set_len(total_size)
-            .await
-            .with_context(|| format!("truncating {} to {}", dst.display(), total_size))?;
-        file.sync_all()
-            .await
-            .with_context(|| format!("syncing {}", dst.display()))?;
+        let finalized = async {
+            file.set_len(total_size)
+                .await
+                .with_context(|| format!("truncating {} to {}", dst.display(), total_size))?;
+            file.sync_all()
+                .await
+                .with_context(|| format!("syncing {}", dst.display()))?;
+            Ok::<_, eyre::Report>(())
+        }
+        .await;
         let std_file = file.into_std().await;
-        #[cfg(test)]
-        self.resumed_handle_metadata_stamps
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let windows_bytes = stamp_resumed_metadata_via_handle(
-            &std_file,
-            dst,
-            mtime_seconds,
-            permissions,
-            windows_metadata.as_ref(),
-        )?;
+        let stamped = finalized.and_then(|()| {
+            #[cfg(test)]
+            self.resumed_handle_metadata_stamps
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            stamp_resumed_metadata_via_handle(
+                &std_file,
+                dst,
+                mtime_seconds,
+                permissions,
+                windows_metadata.as_ref(),
+            )
+        });
+        // cr-win-1: a completion that fails keeps its partial for the next
+        // run to resume — never at the source's size, which the truncation
+        // above just gave it and every compare would take for finished.
+        let windows_bytes = stamped.map_err(|error| {
+            with_settle_note(
+                error,
+                settle_failed_target(
+                    dst,
+                    Some(std_file),
+                    total_size,
+                    OnFailure::KeepUnfinished { created: false },
+                ),
+            )
+        })?;
         Ok(SinkOutcome::written(1, windows_bytes))
     }
 
@@ -1164,6 +1202,31 @@ impl TransferSink for FsTransferSink {
             .lock()
             .expect("raw-names lock poisoned")
             .insert(relative_path.to_string(), raw.to_vec());
+    }
+
+    async fn hold_resume_partial(&self, relative_path: &str, total_size: u64) -> Result<()> {
+        if self.config.dry_run
+            || !self
+                .resume_held
+                .lock()
+                .expect("resume-held lock poisoned")
+                .insert(relative_path.to_string())
+        {
+            return Ok(());
+        }
+        let dst = resolve_resume_destination(
+            &self.containment,
+            &self.dst_root,
+            self.canonical_dst_root.as_deref(),
+            relative_path,
+            self.raw_name_for(relative_path).as_deref(),
+            "block-hold",
+        )
+        .await?;
+        tokio::task::spawn_blocking(move || hold_partial_unfinished(&dst, total_size))
+            .await
+            .context("sink worker panicked")?;
+        Ok(())
     }
 
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
@@ -1228,6 +1291,17 @@ impl TransferSink for FsTransferSink {
                     // Finalizing here would stamp a stale file as
                     // converged (see `failed_resume_reasons`); the file
                     // fails once, and this is the record that names it.
+                    // cr-win-1: the grant held the partial one byte longer
+                    // than the source; if it reached the source's size
+                    // anyway (recreated after it vanished), mark it.
+                    if std::fs::metadata(&dst).is_ok_and(|meta| meta.len() == total_size) {
+                        let _ = settle_failed_target(
+                            &dst,
+                            None,
+                            total_size,
+                            OnFailure::KeepUnfinished { created: false },
+                        );
+                    }
                     SinkOutcome::failed(&relative_path, reason)
                 } else {
                     match self
@@ -1464,20 +1538,20 @@ impl<'a> FsRecordWriter<'a> {
         }
     }
 
-    fn remove_partial(&mut self) {
-        // Release the handle first: on Windows an open file cannot be
-        // unlinked.
-        if let FsRecordMode::Real { file } = &mut self.mode {
-            file.take();
+    /// Settle the target of a record that failed after creating it
+    /// (cr-win-1): removed, or — when something else holds it — left one
+    /// byte longer than the source through this writer's own handle.
+    /// Returns the note the failure reason carries when it stays behind.
+    fn remove_partial(&mut self) -> Option<String> {
+        let handle = match &mut self.mode {
+            FsRecordMode::Real { file } => file.take().and_then(|file| file.try_into_std().ok()),
+            _ => None,
+        };
+        let note = settle_failed_target(&self.dst, handle, self.header.size, OnFailure::Remove);
+        if let Some(note) = &note {
+            log::warn!("{}: {note}", self.dst.display());
         }
-        match std::fs::remove_file(&self.dst) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => log::warn!(
-                "could not remove partial destination {} after a failed record: {error}",
-                self.dst.display()
-            ),
-        }
+        note
     }
 
     fn withdraw_reported(&mut self) {
@@ -1597,10 +1671,12 @@ impl RecordWriter for FsRecordWriter<'_> {
                     );
                 }
                 // From here the record is fully consumed: every failure
-                // below concerns exactly this file. The partial is no
-                // longer the guard's to remove — a failed metadata tail
-                // leaves the written bytes in place (the pre-v7 posture;
-                // the file is reported failed and re-run converges it).
+                // below concerns exactly this file, and is settled here
+                // rather than by the drop guard so its reason can say what
+                // stayed behind. cr-win-1: a failed flush or metadata tail
+                // no longer leaves the written bytes in place — same size,
+                // stamped at the write time, they passed for a finished
+                // copy on every later compare.
                 self.guard_armed = false;
                 let written = {
                     use tokio::io::AsyncWriteExt as _;
@@ -1630,19 +1706,19 @@ impl RecordWriter for FsRecordWriter<'_> {
                 // the openat+close pair sf-3a measured at one/file. A
                 // failed flush has nothing to stamp, so its handle is
                 // dropped immediately.
-                let stamped = match written {
-                    Ok(()) => {
-                        let std_file = file.into_std().await;
-                        #[cfg(test)]
-                        sink.handle_metadata_stamps
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        stamp_streamed_metadata_via_handle(&std_file, &dst, &header, &sink.config)
-                    }
-                    Err(error) => {
-                        drop(file);
-                        Err(error)
-                    }
-                };
+                let std_file = file.into_std().await;
+                let stamped = written.and_then(|()| {
+                    #[cfg(test)]
+                    sink.handle_metadata_stamps
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    stamp_streamed_metadata_via_handle(&std_file, &dst, &header, &sink.config)
+                });
+                let stamped = stamped.map_err(|error| {
+                    with_settle_note(
+                        error,
+                        settle_failed_target(&dst, Some(std_file), header.size, OnFailure::Remove),
+                    )
+                });
                 match stamped {
                     Ok(windows_bytes) => Ok(SinkOutcome::written(
                         1,
@@ -1665,15 +1741,20 @@ impl RecordWriter for FsRecordWriter<'_> {
 
     async fn abort(mut self: Box<Self>, reason: &str) -> Result<SinkOutcome> {
         let path = self.header.relative_path.clone();
-        if matches!(self.mode, FsRecordMode::Real { .. }) {
-            self.remove_partial();
-        }
+        let note = if matches!(self.mode, FsRecordMode::Real { .. }) {
+            self.remove_partial()
+        } else {
+            None
+        };
         self.withdraw_reported();
         self.guard_armed = false;
         // The source's reason wins even for a discarding writer: the
         // file did not land, and the source is the end that said why
-        // first.
-        Ok(SinkOutcome::failed(path, reason))
+        // first; what stayed behind is added to it (cr-win-1).
+        match note {
+            Some(note) => Ok(SinkOutcome::failed(path, format!("{reason}; {note}"))),
+            None => Ok(SinkOutcome::failed(path, reason)),
+        }
     }
 }
 
@@ -1832,31 +1913,209 @@ fn run_after_copy_fault_hook(_dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// cr-ssc4-2: the destination file a local non-resume copy is writing,
-/// removed on every exit but the validated success. The in-place model
-/// (D-2026-09-29-2) already overwrote whatever was there; what must never
-/// remain is a truncated or partial file that a later size/mtime compare
-/// could take for a finished copy. Armed when the copy starts, disarmed
-/// only after the post-copy validation and the metadata tail succeed.
-/// Resume copies (`resume_copy_from`) never arm it — their partial is
-/// the resumable state by design (D-2026-07-09-1 Q2).
-struct PartialTarget<'a> {
-    dst: &'a Path,
-    armed: bool,
+/// cr-win-1: carried in a per-file failure reason when this run left an
+/// incomplete copy of the file at the destination (it could not be
+/// removed, or it is a resume partial of a file that did not exist
+/// before). Under `--ignore-existing` the CLI's retry pass re-sends those
+/// paths regardless — the copy there is this run's own, not one the user
+/// asked to keep.
+pub const INCOMPLETE_LEFT_IN_PLACE: &str = "an incomplete copy was left at the destination";
+
+/// What a write that fails after touching its in-place target does with
+/// it (D-2026-09-29-2: "nothing that looks finished is left behind").
+#[derive(Clone, Copy, Debug)]
+enum OnFailure {
+    /// Remove the target.
+    Remove,
+    /// Keep it for the next run to resume, one byte longer than the
+    /// source so no compare can take it for a finished copy. `created`:
+    /// the file did not exist before this write.
+    KeepUnfinished { created: bool },
 }
 
-impl PartialTarget<'_> {
+/// Make `file` one byte longer than its source: no compare — size, mtime
+/// or content — can then match it, while a resume still finds every
+/// block it already landed.
+fn mark_unfinished(file: &std::fs::File, source_size: u64) -> std::io::Result<()> {
+    file.set_len(source_size.saturating_add(1))
+}
+
+/// cr-win-1: hold a resume partial one byte longer than its source before
+/// the first block patches it (see [`TransferSink::hold_resume_partial`]).
+/// Best-effort: a partial this end cannot open for writing cannot be
+/// patched either, so its blocks fail and the file is reported. Created
+/// when missing, as the block writes would create it.
+fn hold_partial_unfinished(dst: &Path, total_size: u64) {
+    let held = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dst)
+        .and_then(|file| {
+            let meta = file.metadata()?;
+            if meta.is_file() && meta.len() <= total_size {
+                mark_unfinished(&file, total_size)?;
+            }
+            Ok(())
+        });
+    if let Err(error) = held {
+        log::warn!(
+            "could not hold the resume partial {} unfinished: {error}",
+            dst.display()
+        );
+    }
+}
+
+/// cr-win-1: settle a target whose write failed after touching it, so it
+/// can never pass for a finished copy — the same-size, write-time-stamped
+/// file a failed metadata tail used to leave was skipped by every compare,
+/// on a retry pass and on any later run. `handle` is this write's own open
+/// handle when it still has one: a holder that blocks the removal cannot
+/// block marking through it, and the removal is tried again once it is
+/// closed (a filesystem that refuses to unlink an open file). Returns what
+/// the failure reason should add when an incomplete copy stays behind.
+fn settle_failed_target(
+    dst: &Path,
+    handle: Option<std::fs::File>,
+    source_size: u64,
+    on_failure: OnFailure,
+) -> Option<String> {
+    let mark = |handle: Option<&std::fs::File>| match handle {
+        Some(file) => mark_unfinished(file, source_size),
+        None => std::fs::OpenOptions::new()
+            .write(true)
+            .open(dst)
+            .and_then(|file| mark_unfinished(&file, source_size)),
+    };
+    let remove = || match std::fs::remove_file(dst) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    };
+    match on_failure {
+        OnFailure::Remove => {
+            if remove().is_ok() {
+                return None;
+            }
+            let marked = mark(handle.as_ref());
+            drop(handle);
+            let remove_error = match remove() {
+                Ok(()) => return None,
+                Err(error) => error,
+            };
+            Some(match marked {
+                Ok(()) => format!(
+                    "{INCOMPLETE_LEFT_IN_PLACE}: it could not be removed ({remove_error}), \
+                     so it was left one byte longer than the source"
+                ),
+                Err(mark_error) => format!(
+                    "{INCOMPLETE_LEFT_IN_PLACE}: it could not be removed ({remove_error}) \
+                     or marked unfinished ({mark_error})"
+                ),
+            })
+        }
+        OnFailure::KeepUnfinished { created } => match mark(handle.as_ref()) {
+            Ok(()) => created.then(|| {
+                format!(
+                    "{INCOMPLETE_LEFT_IN_PLACE}, one byte longer than the source, for the \
+                     next run to resume"
+                )
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                log::warn!(
+                    "could not mark the resume partial {} unfinished: {error}",
+                    dst.display()
+                );
+                created.then(|| format!("{INCOMPLETE_LEFT_IN_PLACE}: {error}"))
+            }
+        },
+    }
+}
+
+/// Attach [`settle_failed_target`]'s note, if any, to a file's failure.
+fn with_settle_note(error: eyre::Report, note: Option<String>) -> eyre::Report {
+    match note {
+        Some(note) => error.wrap_err(note),
+        None => error,
+    }
+}
+
+/// cr-ssc4-2: the destination file a local copy is writing, settled on
+/// every exit but the validated success. The in-place model
+/// (D-2026-09-29-2) already overwrote whatever was there; what must never
+/// remain is a truncated or partial file that a later compare could take
+/// for a finished copy. Armed when the copy starts, disarmed only after
+/// the post-copy validation and the metadata tail succeed. A plain copy
+/// removes its target; a resume copy keeps its partial — the resumable
+/// state by design (D-2026-07-09-1 Q2) — one byte longer than the source
+/// (cr-win-1). `settle` reports what stayed behind; `Drop` covers a panic.
+struct PartialTarget<'a> {
+    dst: &'a Path,
+    source_size: u64,
+    armed: Option<OnFailure>,
+}
+
+impl<'a> PartialTarget<'a> {
+    fn new(dst: &'a Path, source_size: u64) -> Self {
+        Self {
+            dst,
+            source_size,
+            armed: None,
+        }
+    }
+
+    fn arm(&mut self, on_failure: OnFailure) {
+        self.armed = Some(on_failure);
+    }
+
     fn disarm(&mut self) {
-        self.armed = false;
+        self.armed = None;
+    }
+
+    fn settle(&mut self, error: eyre::Report) -> eyre::Report {
+        match self.armed.take() {
+            Some(on_failure) => with_settle_note(
+                error,
+                settle_failed_target(self.dst, None, self.source_size, on_failure),
+            ),
+            None => error,
+        }
     }
 }
 
 impl Drop for PartialTarget<'_> {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = std::fs::remove_file(self.dst);
+        if let Some(on_failure) = self.armed.take() {
+            let _ = settle_failed_target(self.dst, None, self.source_size, on_failure);
         }
     }
+}
+
+/// Test seam (cr-win-1): runs at the start of every metadata tail — an
+/// `Err` stands in for a tail the destination refuses (a named stream,
+/// attributes, a flush), which only a Windows volume can be made to do
+/// deterministically. Prefix-keyed like the copy hooks. Production never
+/// sets it.
+#[cfg(test)]
+pub(super) static METADATA_TAIL_FAULT_PREFIXES: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn run_metadata_tail_fault_hook(dst: &Path) -> Result<()> {
+    let faulted = METADATA_TAIL_FAULT_PREFIXES
+        .lock()
+        .map(|g| g.iter().any(|prefix| dst.starts_with(prefix)))
+        .unwrap_or(false);
+    if faulted {
+        eyre::bail!("injected metadata-tail fault on {}", dst.display());
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+#[inline]
+fn run_metadata_tail_fault_hook(_dst: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Shared tail of the File-payload write: dry-run gate, parent mkdir,
@@ -1905,15 +2164,45 @@ fn copy_resolved_file_payload(
         .with_context(|| format!("validating Windows metadata for {}", header.relative_path))?;
     crate::windows_metadata::prepare_destination(dst, header.windows_metadata.as_ref())?;
 
+    let mut partial = PartialTarget::new(dst, header.size);
+    let landed = copy_and_stamp_opened(
+        &mut src_file,
+        &src_meta,
+        src,
+        dst,
+        header,
+        config,
+        &mut partial,
+    );
+    landed.map_err(|error| partial.settle(error))
+}
+
+/// The copy cascade and metadata tail of [`copy_resolved_file_payload`],
+/// arming `partial` the moment the target is touched so the caller can
+/// settle any failure from here on (cr-ssc4-2, cr-win-1).
+fn copy_and_stamp_opened(
+    src_file: &mut std::fs::File,
+    src_meta: &std::fs::Metadata,
+    src: &Path,
+    dst: &Path,
+    header: &FileHeader,
+    config: &FsSinkConfig,
+    partial: &mut PartialTarget<'_>,
+) -> Result<SinkOutcome> {
+    use eyre::eyre;
     let mut did_copy = false;
-    let mut partial = PartialTarget { dst, armed: false };
     if config.resume {
-        let outcome = crate::copy::resume_copy_from(&mut src_file, header.size, dst, 0)
+        // cr-win-1: the partial is kept for the next run to resume, and
+        // `resume_copy_from` holds it one byte longer than the source until
+        // it completes; a failure after that keeps it marked the same way.
+        let created = std::fs::symlink_metadata(dst).is_err();
+        partial.arm(OnFailure::KeepUnfinished { created });
+        let outcome = crate::copy::resume_copy_from(src_file, header.size, dst, 0)
             .with_context(|| format!("resume copy {}", header.relative_path))?;
         did_copy = outcome.bytes_transferred > 0;
     } else if crate::copy::file_needs_copy_with_mode_opened(
-        &mut src_file,
-        &src_meta,
+        src_file,
+        src_meta,
         dst,
         config.compare_mode,
     )? {
@@ -1921,9 +2210,9 @@ fn copy_resolved_file_payload(
         // removes the destination — a source read error mid-copy, a
         // post-copy stat failure, a metadata-tail failure — so nothing
         // partial can pass for a finished copy.
-        partial.armed = true;
+        partial.arm(OnFailure::Remove);
         let sizer = BufferSizer::default();
-        crate::copy::copy_opened(&src_file, src, dst, header.size, &sizer, false)?;
+        crate::copy::copy_opened(src_file, src, dst, header.size, &sizer, false)?;
         run_after_copy_fault_hook(dst).map_err(|e| eyre!("source: read error: {e}"))?;
         did_copy = true;
     }
@@ -1951,6 +2240,7 @@ fn copy_resolved_file_payload(
         crate::windows_metadata::prepare_destination(dst, header.windows_metadata.as_ref())?;
     }
 
+    run_metadata_tail_fault_hook(dst)?;
     let windows_bytes =
         crate::windows_metadata::replace_streams(dst, header.windows_metadata.as_ref())?;
 
@@ -1996,6 +2286,7 @@ fn stamp_streamed_metadata_via_handle(
     header: &FileHeader,
     config: &FsSinkConfig,
 ) -> Result<u64> {
+    run_metadata_tail_fault_hook(dst)?;
     let windows_bytes =
         crate::windows_metadata::replace_streams(dst, header.windows_metadata.as_ref())?;
 
@@ -2182,17 +2473,24 @@ fn write_tar_shard_payload(
                 let mut file = std::fs::File::create(&f.dest_path)
                     .with_context(|| format!("open {}", f.dest_path.display()))?;
                 let open = open_started.elapsed();
-                let write_started = std::time::Instant::now();
-                file.write_all(&f.contents)
-                    .with_context(|| format!("write {}", f.dest_path.display()))?;
-                let write = write_started.elapsed();
-                let close_started = std::time::Instant::now();
-                drop(file);
-                let close = close_started.elapsed();
+                // cr-win-1: the target is overwritten from here; any
+                // failure settles it (same as `write_shard_member`).
+                let landed = (|| -> Result<_> {
+                    let write_started = std::time::Instant::now();
+                    file.write_all(&f.contents)
+                        .with_context(|| format!("write {}", f.dest_path.display()))?;
+                    let write = write_started.elapsed();
+                    let close_started = std::time::Instant::now();
+                    drop(file);
+                    let close = close_started.elapsed();
 
-                let metadata_started = std::time::Instant::now();
-                let windows_bytes = stamp_shard_member_metadata(&f)?;
-                let metadata = metadata_started.elapsed();
+                    let metadata_started = std::time::Instant::now();
+                    let windows_bytes = stamp_shard_member_metadata(&f)?;
+                    let metadata = metadata_started.elapsed();
+                    Ok((windows_bytes, write, close, metadata))
+                })()
+                .map_err(|error| discard_failed_member(&f, error))?;
+                let (windows_bytes, write, close, metadata) = landed;
                 Ok((
                     f.size.saturating_add(windows_bytes),
                     (mkdir, open, write, close, metadata, total_started.elapsed()),
@@ -2240,10 +2538,35 @@ fn write_shard_member(file: &super::tar_safety::ExtractedFile) -> Result<u64> {
             .with_context(|| format!("create dir {}", parent.display()))?;
     }
     crate::windows_metadata::prepare_destination(&file.dest_path, file.windows_metadata.as_ref())?;
-    std::fs::write(&file.dest_path, &file.contents)
-        .with_context(|| format!("write {}", file.dest_path.display()))?;
-    let windows_bytes = stamp_shard_member_metadata(file)?;
-    Ok(file.size.saturating_add(windows_bytes))
+    let target = std::fs::File::create(&file.dest_path)
+        .with_context(|| format!("open {}", file.dest_path.display()))?;
+    // cr-win-1: the target is overwritten from here, so any failure
+    // settles it — a member whose bytes landed but whose tail failed must
+    // not pass for a finished copy.
+    let landed = (|| -> Result<u64> {
+        use std::io::Write as _;
+        let mut target = target;
+        target
+            .write_all(&file.contents)
+            .with_context(|| format!("write {}", file.dest_path.display()))?;
+        drop(target);
+        stamp_shard_member_metadata(file)
+    })();
+    landed
+        .map(|windows_bytes| file.size.saturating_add(windows_bytes))
+        .map_err(|error| discard_failed_member(file, error))
+}
+
+/// Settle a shard member that failed after its target was created
+/// (cr-win-1).
+fn discard_failed_member(
+    file: &super::tar_safety::ExtractedFile,
+    error: eyre::Report,
+) -> eyre::Report {
+    with_settle_note(
+        error,
+        settle_failed_target(&file.dest_path, None, file.size, OnFailure::Remove),
+    )
 }
 
 /// Stamp a written shard member's metadata tail: named streams, mtime,
@@ -2251,6 +2574,7 @@ fn write_shard_member(file: &super::tar_safety::ExtractedFile) -> Result<u64> {
 /// Shared by both rayon writers so the probed path measures exactly the
 /// work the probe-less path does.
 fn stamp_shard_member_metadata(file: &super::tar_safety::ExtractedFile) -> Result<u64> {
+    run_metadata_tail_fault_hook(&file.dest_path)?;
     let windows_bytes =
         crate::windows_metadata::replace_streams(&file.dest_path, file.windows_metadata.as_ref())?;
     if let Some(ft) = file.mtime {
@@ -2393,6 +2717,7 @@ fn stamp_resumed_metadata_via_handle(
     permissions: u32,
     windows_metadata: Option<&crate::generated::WindowsFileMetadata>,
 ) -> Result<u64> {
+    run_metadata_tail_fault_hook(dst)?;
     let windows_bytes = crate::windows_metadata::replace_streams(dst, windows_metadata)?;
     if mtime_seconds > 0 {
         let ft = FileTime::from_unix_time(mtime_seconds, 0);
@@ -4489,6 +4814,12 @@ mod tests {
             0,
             "the live counter must not claim bytes the summary counts as zero"
         );
+        // cr-win-1: the refused tail no longer leaves the written bytes in
+        // place looking finished.
+        assert!(
+            !dst.join("tail.bin").exists(),
+            "the failed record's target is removed"
+        );
     }
 
     /// Classification boundary: a hostile wire path is a protocol
@@ -5922,5 +6253,286 @@ mod cr_fix2_2_tests {
             truncated,
             "two counted-but-unnamed failures must mark the set truncated"
         );
+    }
+}
+
+/// cr-win-1: a write that fails after touching its in-place target never
+/// leaves one that a later compare could take for a finished copy.
+#[cfg(test)]
+mod cr_win_1_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use tempfile::tempdir;
+
+    fn make_file_header(rel: &str, size: u64) -> FileHeader {
+        FileHeader {
+            relative_path: rel.to_string(),
+            size,
+            permissions: 0o644,
+            ..FileHeader::default()
+        }
+    }
+
+    fn local_sink(src: &Path, dst: &Path) -> FsTransferSink {
+        FsTransferSink::new(
+            src.to_path_buf(),
+            dst.to_path_buf(),
+            FsSinkConfig::default(),
+        )
+    }
+
+    /// Installs a metadata-tail fault for every destination under `prefix`
+    /// and removes it on drop (parallel tests never see each other's).
+    struct TailFaultGuard(PathBuf);
+
+    impl TailFaultGuard {
+        fn install(prefix: &Path) -> Self {
+            METADATA_TAIL_FAULT_PREFIXES
+                .lock()
+                .unwrap()
+                .push(prefix.to_path_buf());
+            Self(prefix.to_path_buf())
+        }
+    }
+
+    impl Drop for TailFaultGuard {
+        fn drop(&mut self) {
+            if let Ok(mut g) = METADATA_TAIL_FAULT_PREFIXES.lock() {
+                g.retain(|p| p != &self.0);
+            }
+        }
+    }
+
+    /// The streamed receive (push, pull, remote-to-remote). Before
+    /// cr-win-1 a failed tail left the written bytes in place — the
+    /// source's size, stamped at the write time — which every compare,
+    /// a retry pass's included, took for a finished copy.
+    #[tokio::test]
+    async fn a_streamed_record_whose_metadata_tail_fails_leaves_no_target() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("tail.bin"), b"older version").unwrap();
+        let _fault = TailFaultGuard::install(&dst);
+        let sink =
+            FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default());
+        let mut reader: &[u8] = b"payloadNEXT-RECORD";
+        let outcome = sink
+            .write_file_stream(&make_file_header("tail.bin", 7), &mut reader)
+            .await
+            .expect("a failed tail is one file's failure");
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert!(
+            outcome.failures[0]
+                .reason
+                .contains("injected metadata-tail fault"),
+            "{:?}",
+            outcome.failures
+        );
+        assert!(
+            !dst.join("tail.bin").exists(),
+            "no same-size copy may stay behind looking finished"
+        );
+    }
+
+    /// A tar-shard member (small files) whose tail fails is removed; its
+    /// siblings land.
+    #[tokio::test]
+    async fn a_shard_member_whose_metadata_tail_fails_leaves_no_target() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(dst.join("sub")).unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, content) in [("a.txt", &b"alpha"[..]), ("sub/b.txt", &b"bravo"[..])] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, content).unwrap();
+        }
+        let _fault = TailFaultGuard::install(&dst.join("sub"));
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig::default(),
+        );
+        let outcome = sink
+            .write_payload(PreparedPayload::TarShard {
+                headers: vec![
+                    make_file_header("a.txt", 5),
+                    make_file_header("sub/b.txt", 5),
+                ],
+                data: builder.into_inner().unwrap(),
+                skipped: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_written, 1, "{outcome:?}");
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"alpha");
+        assert!(
+            !dst.join("sub/b.txt").exists(),
+            "the failed member may not stay behind looking finished"
+        );
+    }
+
+    /// The local route's plain copy: the guard already removed a partial
+    /// on a mid-copy error (cr-ssc4-2); a failed tail is settled the same
+    /// way.
+    #[tokio::test]
+    async fn a_local_copy_whose_metadata_tail_fails_leaves_no_target() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("a.bin"), b"new content").unwrap();
+        std::fs::write(dst.join("a.bin"), b"stale").unwrap();
+        let _fault = TailFaultGuard::install(&dst);
+        let outcome = local_sink(&src, &dst)
+            .write_payload(PreparedPayload::File(make_file_header("a.bin", 11)))
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert!(!dst.join("a.bin").exists());
+    }
+
+    /// The local route's resume copy keeps its partial for the next run,
+    /// one byte longer than the source so no compare can match it. A file
+    /// that did not exist before says so in its reason, which is how the
+    /// CLI's retry pass knows to re-send it under `--ignore-existing`.
+    #[tokio::test]
+    async fn a_local_resume_whose_metadata_tail_fails_keeps_an_unfinished_partial() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("old.bin"), b"0123456789").unwrap();
+        std::fs::write(src.join("new.bin"), b"0123456789").unwrap();
+        std::fs::write(dst.join("old.bin"), b"abcdefghij").unwrap();
+        let _fault = TailFaultGuard::install(&dst);
+        let sink = FsTransferSink::new(
+            src.clone(),
+            dst.clone(),
+            FsSinkConfig {
+                resume: true,
+                ..FsSinkConfig::default()
+            },
+        );
+        for (name, created) in [("old.bin", false), ("new.bin", true)] {
+            let outcome = sink
+                .write_payload(PreparedPayload::File(make_file_header(name, 10)))
+                .await
+                .unwrap();
+            assert_eq!(outcome.files_failed_total, 1, "{name}: {outcome:?}");
+            assert_eq!(
+                std::fs::metadata(dst.join(name)).unwrap().len(),
+                11,
+                "{name}: the partial stays, one byte longer than the source"
+            );
+            assert_eq!(
+                outcome.failures[0]
+                    .reason
+                    .contains(INCOMPLETE_LEFT_IN_PLACE),
+                created,
+                "{name}: {:?}",
+                outcome.failures
+            );
+        }
+    }
+
+    /// A resume completion whose tail fails keeps the partial for the next
+    /// run — never at the source's size, which its truncation just gave it.
+    #[tokio::test]
+    async fn a_resume_completion_whose_metadata_tail_fails_keeps_an_unfinished_partial() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("r.bin"), b"0123456789X").unwrap();
+        let _fault = TailFaultGuard::install(&dst);
+        let sink =
+            FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default());
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "r.bin".to_string(),
+                total_size: 10,
+                mtime_seconds: 1_700_000_000,
+                permissions: 0o644,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert_eq!(std::fs::metadata(dst.join("r.bin")).unwrap().len(), 11);
+    }
+
+    /// Blocks patch a resume partial in place, so a same-size file whose
+    /// patch is interrupted kept the source's size at the write time and
+    /// passed for finished. Held one byte longer from the first block
+    /// until the completion truncates it.
+    #[tokio::test]
+    async fn a_resume_partial_is_held_off_the_source_size_until_it_completes() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("r.bin"), b"0123456789").unwrap();
+        let sink =
+            FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default());
+        let len = || std::fs::metadata(dst.join("r.bin")).unwrap().len();
+        sink.hold_resume_partial("r.bin", 10).await.unwrap();
+        assert_eq!(len(), 11, "held before the first block");
+        sink.write_payload(PreparedPayload::FileBlock {
+            relative_path: "r.bin".to_string(),
+            offset: 0,
+            bytes: b"ABCDE".to_vec(),
+        })
+        .await
+        .unwrap();
+        sink.hold_resume_partial("r.bin", 10).await.unwrap();
+        assert_eq!(len(), 11, "still held mid-record (idempotent)");
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "r.bin".to_string(),
+                total_size: 10,
+                mtime_seconds: 1_700_000_000,
+                permissions: 0o644,
+                windows_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 0, "{outcome:?}");
+        assert_eq!(std::fs::read(dst.join("r.bin")).unwrap(), b"ABCDE56789");
+    }
+
+    /// When something else keeps the failed target from being removed,
+    /// it is left one byte longer than the source through the write's own
+    /// handle, and the reason says an incomplete copy stayed. A read-only
+    /// directory stands in for the holder (Windows: a handle without
+    /// delete sharing).
+    #[cfg(unix)]
+    #[test]
+    fn a_target_that_cannot_be_removed_is_left_one_byte_longer() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("locked");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dst = dir.join("a.bin");
+        std::fs::write(&dst, b"12345").unwrap();
+        let handle = std::fs::OpenOptions::new().write(true).open(&dst).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root unlinks through a read-only directory; nothing to prove there.
+        let probe = dir.join("probe");
+        let privileged = std::fs::write(&probe, b"").is_ok();
+        let note =
+            (!privileged).then(|| settle_failed_target(&dst, Some(handle), 5, OnFailure::Remove));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Some(note) = note else {
+            eprintln!("skipped: privileged user unlinks through a read-only directory");
+            return;
+        };
+        let note = note.expect("the target stayed, so the reason says so");
+        assert!(note.contains(INCOMPLETE_LEFT_IN_PLACE), "{note}");
+        assert_eq!(std::fs::metadata(&dst).unwrap().len(), 6);
     }
 }

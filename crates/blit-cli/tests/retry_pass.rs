@@ -774,10 +774,14 @@ fn windows_a_rejected_named_stream_is_re_sent_on_the_retry_pass() {
         .spawn()
         .expect("spawn blit");
     wait_for_counter(&counters, "retry_wait_seconds", Duration::from_secs(60));
-    assert_eq!(
-        fs::read(&destination).expect("read destination"),
-        b"current bytes",
-        "the main pass landed the bytes before the stream failed"
+    // cr-win-1: the failed copy is removed — or, if the held stream keeps
+    // it from being removed, left one byte longer than the source — never
+    // left at the source's size, which every compare takes for finished.
+    let left = fs::metadata(&destination).map(|meta| meta.len()).ok();
+    assert_ne!(
+        left,
+        Some(b"current bytes".len() as u64),
+        "the failed copy is not left looking finished"
     );
     drop(held);
     let output = finish(child);

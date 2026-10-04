@@ -2089,7 +2089,8 @@ impl NeedListSink {
     /// the path must hold a live resume grant on THIS lane (the first
     /// block opens it) and the block must stay inside the manifested
     /// size. The grant is closed only by its completion.
-    fn check_block(&self, path: &str, offset: u64, len: u64) -> Result<()> {
+    /// Returns the grant's manifested size.
+    fn check_block(&self, path: &str, offset: u64, len: u64) -> Result<u64> {
         self.require_resume()?;
         let header = self.ledger().activate_resume(path, self.lane)?;
         if let Some(raw) = header.raw_relative_path.as_deref() {
@@ -2105,7 +2106,7 @@ impl NeedListSink {
                 .with_path(path),
             ));
         }
-        Ok(())
+        Ok(header.size)
     }
 
     /// otp-7b: validate one `FileBlockComplete` against the grant it
@@ -2217,6 +2218,12 @@ impl RecordWriter for LedgerRecordWriter<'_> {
 
 #[async_trait]
 impl TransferSink for NeedListSink {
+    async fn hold_resume_partial(&self, relative_path: &str, total_size: u64) -> Result<()> {
+        self.inner
+            .hold_resume_partial(relative_path, total_size)
+            .await
+    }
+
     fn can_store_raw_names(&self) -> bool {
         self.inner.can_store_raw_names()
     }
@@ -2277,7 +2284,11 @@ impl TransferSink for NeedListSink {
                 offset,
                 bytes,
             } => {
-                self.check_block(relative_path, *offset, bytes.len() as u64)?;
+                let total_size = self.check_block(relative_path, *offset, bytes.len() as u64)?;
+                // cr-win-1: see `TransferSink::hold_resume_partial`.
+                self.inner
+                    .hold_resume_partial(relative_path, total_size)
+                    .await?;
             }
             PreparedPayload::FileBlockComplete {
                 relative_path,
