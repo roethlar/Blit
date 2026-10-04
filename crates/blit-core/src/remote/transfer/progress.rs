@@ -256,7 +256,7 @@ impl ByteProgressSink {
     pub fn withdraw(&self, delta: u64) {
         let _ = self
             .counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 Some(value.saturating_sub(delta))
             });
     }

@@ -397,7 +397,7 @@ impl ActiveJobProgress {
 }
 
 fn atomic_saturating_add(counter: &AtomicU64, delta: u64) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
         Some(value.saturating_add(delta))
     });
 }

@@ -1569,7 +1569,7 @@ impl SourceDataPlane {
         // connection later in the session.
         let member_id = StreamId(
             self.next_member_id
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                     next.checked_add(1)
                 })
                 .map_err(|_| dp_fault("data-plane stream member id exhausted"))?,
