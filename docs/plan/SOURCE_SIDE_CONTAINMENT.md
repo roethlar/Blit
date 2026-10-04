@@ -1197,6 +1197,19 @@ is refused); environment, not code — under a restricted token
 (`runas /trustlevel:0x20000`) all 7 `metadata_repair` tests pass at
 `8da5614b`. Open owner question D8 below.
 
+**cr-win-1 (codex review of win-1..5, HIGH)** `501c408d` — with win-4
+the copy/mirror push retry passes compared with the copy rule, as the
+local, pull and delegated ones always had. A pushed file whose named
+stream is rejected after its bytes land keeps those bytes at the write
+time (same size, newer, mtime never stamped), which SizeMtime and
+SizeOnly skip: the retry cleared the failure and the run exited 0 with
+the stream missing. A retry pass now re-sends its set unconditionally
+(`run_retry_passes` sets `ignore_times`; every route gives it top
+precedence); the main pass keeps the user's compare. Guards in
+`blit-cli/tests/retry_pass.rs`: a portable local + push lookalike test
+(red/green on macOS) and a Windows rejected-stream test (Windows run
+pending). Record: `.review/findings/cr-win-1.md`.
+
 ## Review history
 
 - **r1** (codex-cli 0.156.0 / gpt-5.6-sol / xhigh / frontier, grade
