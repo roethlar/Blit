@@ -7,7 +7,8 @@
 - NOPASSWD sudoers rule for the zoey pool-drain/purge helper.
 - zig + cargo-zigbuild toolchain (aarch64-musl static daemon builds).
 - ssh ControlMaster sockets configured for the rigs.
-- As of 2026-07-23, macOS Application Firewall inventory contains the stale
+- As of 2026-07-23 (re-verified present 2026-10-04 with a read-only
+  `socketfilterfw --listapps`), macOS Application Firewall inventory contains the stale
   prior-test path
   `/Volumes/BLIT_ETL_BUILD/etl3-review/target/release/blit-daemon` despite its
   historical cleanup record. Its later provenance is unestablished. Do not
@@ -43,16 +44,16 @@ Unix reports `ENOTDIR`, so the guard cannot go red there. It was proven on
 - `michael@altiera` — reachable, x86_64, but **no cargo installed** as of
   2026-08-01. Not usable for this without a toolchain first.
 
-Method that worked: clone from the LAN gitea (`http://q:3000/michael/Blit_v2.git`),
-which the hosts can reach, so the exact pushed commit is under test rather
-than an rsync of a dirty tree. **Updated 2026-09-25:** `origin` is now
-`http://magneto:3001/michael/blit_v2.git` (`git remote -v`; answers HTTP 200)
-and `q:3000` no longer answers — clone from magneto's gitea instead.
+Method that worked: clone from the LAN gitea
+(`http://magneto:3001/michael/blit_v2.git`, `origin` per `git remote -v`
+since 2026-09-25; the older `q:3000` URL no longer answers), which the hosts
+can reach, so the exact pushed commit is under test rather than an rsync of
+a dirty tree.
 
 ## Windows dev VM for CROSS-PLATFORM VERIFICATION (owner, 2026-09-30)
 
 `ssh michael@10.1.10.222` — the owner's UTM VM on the Mac: Windows 11
-ARM64 (10.0.26100), Rust 1.97.1 `aarch64-pc-windows-msvc` via rustup, VS
+ARM64 (10.0.26100), Rust `aarch64-pc-windows-msvc` via rustup (1.98.1 since 2026-10-01, below), VS
 2022 Build Tools, Git, ~16 GB free. Key auth; default shell cmd.exe.
 **Owner: a throwaway dev VM — "you have approval to make any changes
 needed to the VM"; it can be rebuilt.** CI's Windows runner is x86_64, so
@@ -133,13 +134,13 @@ every Linux target in play).
   TCP, not ping): Mac↔Windows 231/225 MB/s, Mac↔skippy 157 MB/s (all
   ssh-encrypted, so CPU-bound floors — the wire is not the limit). The
   UniFi switching passes 9018-byte frames fine.
-- **Windows (netwatch-01) ran at MTU 1500 for EVERY benchmark ever
-  recorded** (otp-2w, otp-12a/b/c). It was raised to 9000 on 2026-07-13.
-  Every prior measurement therefore negotiated down to a 1460-byte MSS:
-  **jumbo has never been exercised in a blit benchmark.** Those numbers
-  are valid — they are simply *1500-MTU* numbers — and rig W at jumbo is
-  a genuinely untested condition. magneto is still 1500 (raise
-  `enp1s0f1` to 9000 to make the Linux rig jumbo too).
+- **Windows (netwatch-01) ran at MTU 1500 for every benchmark recorded
+  before 2026-07-13** (otp-2w, otp-12a/b/c). It was raised to 9000 on
+  2026-07-13. Those earlier measurements negotiated down to a 1460-byte
+  MSS — valid, simply *1500-MTU* numbers. Rig W at jumbo was first
+  measured by the A-B-B-A MTU experiment (S1/S4 at 9000,
+  `docs/bench/otp12-jumbo-win-2026-07-13/`); magneto was raised to 9000
+  the same day (fleet table below).
 - Mismatched MTUs on one L2 segment are fine: TCP MSS negotiation
   handles it, each host advertising what it can receive. What is NOT
   fine is a host advertising a size it cannot actually send.
@@ -222,11 +223,11 @@ review loop from rig-W benchmarking** — the contention that destroyed a
   `NETWATCH-01` / `.173`.
 
 - **10GbE**: `en8` = **10.1.10.54**, MTU **9000**, media 10Gbase-T. This is the
-  **Aquantia adapter physically moved off nagatha**, so nagatha's 10GbE is now a
-  *different* NIC at **10.1.10.92** (also MTU 9000) — **re-observed 2026-09-25:
-  nagatha's 10Gbase-T is now `en11` at 10.1.10.104, MTU 9000; `.92` is
-  stale.** Any doc naming
-  "Aquantia @ .54 on nagatha" is stale.
+  **Aquantia adapter physically moved off nagatha**; any doc naming
+  "Aquantia @ .54 on nagatha" is stale. nagatha's own 10GbE was `en11` at
+  10.1.10.104, MTU 9000 on 2026-09-25; **on 2026-10-04 `en11` (Thunderbolt
+  Ethernet Slot 1) had no carrier and nagatha's only 10.1.10.x address was
+  `en0` 10.1.10.11 — re-check live before any bench use.**
 - **⚠ THE MULTI-NIC ROUTING TRAP (cost ~1h).** `q` has THREE IPs on
   10.1.10.0/24 — `en0` (1GbE, .221), `en1` (Wi-Fi, .108), `en8` (10GbE, .54) —
   and macOS routes the subnet via the highest-ranked **network service**, not by
@@ -271,10 +272,11 @@ review loop from rig-W benchmarking** — the contention that destroyed a
   registered accepted `406a7e5` artifacts remain the run payload.
 - **`q` RAN GITEA** (it was `origin`, `http://q:3000`). **Stale as of
   2026-09-25:** `origin` is `http://magneto:3001/michael/blit_v2.git` and
-  `q:3000` does not answer; whether q still hosts gitea (and the
-  `BlitAdmin_UIs` repo recorded at `http://q:3000/michael/BlitAdmin_UIs.git`)
-  is unverified. The quiet-bench rule stands: **do not push to `origin`
-  during a benchmark session** (magneto is a bench end too).
+  `q:3000` does not answer (re-checked 2026-10-04); `BlitAdmin_UIs` answers
+  at `http://magneto:3001/michael/BlitAdmin_UIs.git` (`git ls-remote`,
+  2026-10-04). Whether q still runs gitea at all is unverified. The
+  quiet-bench rule stands: **do not push to `origin` during a benchmark
+  session** (magneto is a bench end too).
 
 ## THE MAC IS A BENCH END — keep it quiet (recorded 2026-07-13, learned the hard way)
 
@@ -347,6 +349,10 @@ retraction: a cost billed to one arm and not the other.)
   pair (see Additional Linux hosts). Platform-vs-role confounds on a
   mixed-OS two-host rig still need a code-level counterfactual
   (see `docs/plan/OTP12_PERF_FINDINGS.md`).
+- **zoey standing owner safety rule** (moved from `docs/STATE.md` Queue 7,
+  2026-10-04): ALL activity on rig `zoey` stays inside its blit-temp folder
+  (path below) — nothing written outside it, ever; no daemon runs on zoey
+  without a fresh go.
 - zoey: binaries staged 2026-07-10 in `blit-temp/` — **corrected <!-- lint: allow (owner ruled leave-it, 2026-07-25: staging dir on zoey, not a repo path) -->
   2026-07-12**: the staged daemon embeds `731023bfc8a1.dirty.…`, NOT
   `e757dcc` as previously recorded (otp-2 README carries the full

@@ -3,8 +3,8 @@
 **Status**: Active — owner: "active" (2026-09-29, D-2026-09-29-4). All
 seven rulings closed (D1–D7: D-2026-09-28-1..-4, D-2026-09-29-1..-3);
 codex openreview loop closed at r6 (2026-09-26; `REVIEW.md` rows
-`plan-ssc-2026-09-25-r1..r6`). Each slice ssc-1..ssc-6 needs its own go;
-none has started. Plan history: drafted 2026-09-25 after the Windows
+`plan-ssc-2026-09-25-r1..r6`). All six slices ssc-1..ssc-6 landed
+2026-09-30 (execution record below); D8 is open. Plan history: drafted 2026-09-25 after the Windows
 user-profile mirror failure; owner rulings recorded in the Open questions
 section below.
 **Created**: 2026-09-25

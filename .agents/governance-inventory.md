@@ -66,7 +66,9 @@ reconciliation's scope; noted here only because discovery surfaced it as a
 governance-adjacent path under `.claude/`. Worth a deliberate owner decision
 (intentional tracking vs. accidental `git add`), but not touched by this run.
 Re-observed unchanged (still 236 tracked files, still no `.git` in that
-directory) during the 2026-07-04 confirmation run below.
+directory) during the 2026-07-04 confirmation run below. **Closed:**
+`fbef546a` (2026-07-12, owner ack) dropped the snapshot; `git ls-files
+.claude/worktrees` is empty (re-checked 2026-10-04).
 
 ## 2026-07-04 confirmation run
 
