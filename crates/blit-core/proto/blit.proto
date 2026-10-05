@@ -714,6 +714,9 @@ message DelegatedPullSummary {
   // re-encoded verbatim so a delegated initiator can retry precisely.
   repeated string failed_paths = 9;
   bool failed_paths_truncated = 10;
+  // cr-rework-1: see TransferSummary.left_in_place, re-encoded verbatim.
+  repeated string left_in_place = 11;
+  bool left_in_place_truncated = 12;
 }
 
 message DelegatedPullError {
@@ -1154,6 +1157,18 @@ message TransferSummary {
   // the capped report's paths and says so.
   repeated string failed_paths = 8;
   bool failed_paths_truncated = 9;
+  // cr-rework-1 (contract v7, cr-win-1): the subset of `failed_paths`
+  // whose failure left this run's own incomplete copy at the destination
+  // (a target that could not be removed, or a resume partial of a file
+  // that did not exist before). Under --ignore-existing the initiator's
+  // retry passes re-send exactly these with that flag off — the copy is
+  // not one the user asked to keep — and the set must be exact, not read
+  // off the 64-entry `failures` report. Bounded by encoded bytes
+  // (MAX_WIRE_LEFT_IN_PLACE_ENCODED_BYTES); `left_in_place_truncated`
+  // says the set did not fit, and the initiator then retries none of the
+  // paths it cannot classify rather than guess.
+  repeated string left_in_place = 10;
+  bool left_in_place_truncated = 11;
 }
 
 // Structured refusal/abort — an end says why before closing.

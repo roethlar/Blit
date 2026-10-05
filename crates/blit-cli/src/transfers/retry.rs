@@ -26,7 +26,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use blit_core::generated::TransferSummary;
-use blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE;
 use blit_core::remote::transfer::FileFailure;
 use blit_core::transfer_session::local::LocalMirrorSummary;
 use blit_core::transfers::remote::DelegatedPullOutcome;
@@ -43,6 +42,11 @@ pub(crate) struct PassFailures {
     pub failures: Vec<FileFailure>,
     pub failed_paths: Vec<String>,
     pub failed_paths_truncated: bool,
+    /// cr-rework-1: the exact subset of `failed_paths` whose failure left
+    /// this run's own incomplete copy at the destination, and whether the
+    /// sender could carry all of it.
+    pub left_in_place: Vec<String>,
+    pub left_in_place_truncated: bool,
     /// cr-ssc6-1: failures no retry pass was ever given — the unnamed
     /// remainder of a truncated retry set. They stay failed (they were
     /// never observed to converge), are counted in `files_failed`, and
@@ -57,6 +61,8 @@ impl PassFailures {
             failures: super::failures::failures_from_wire(&summary.failures),
             failed_paths: summary.failed_paths.clone(),
             failed_paths_truncated: summary.failed_paths_truncated,
+            left_in_place: summary.left_in_place.clone(),
+            left_in_place_truncated: summary.left_in_place_truncated,
             unretried: 0,
         }
     }
@@ -67,17 +73,22 @@ impl PassFailures {
             failures: summary.failures.clone(),
             failed_paths: summary.failed_paths.clone(),
             failed_paths_truncated: summary.failed_paths_truncated,
+            left_in_place: summary.left_in_place.clone(),
+            left_in_place_truncated: summary.left_in_place_truncated,
             unretried: 0,
         }
     }
 
     pub(crate) fn from_delegated(outcome: &DelegatedPullOutcome) -> Self {
         let (paths, truncated) = outcome.failed_paths();
+        let (left, left_truncated) = outcome.left_in_place();
         Self {
             files_failed: outcome.files_failed(),
             failures: outcome.contained_failures(),
             failed_paths: paths.to_vec(),
             failed_paths_truncated: truncated,
+            left_in_place: left.to_vec(),
+            left_in_place_truncated: left_truncated,
             unretried: 0,
         }
     }
@@ -112,15 +123,11 @@ impl PassFailures {
         )
     }
 
-    /// cr-win-1: the named failures whose reason says this run left an
-    /// incomplete copy of the file at the destination (the sink's
-    /// [`INCOMPLETE_LEFT_IN_PLACE`]).
+    /// cr-win-1 / cr-rework-1: the failed paths whose failure left this
+    /// run's own incomplete copy at the destination — the exact set the
+    /// destination sends beside `failed_paths`, never the capped report.
     fn left_in_place(&self) -> HashSet<PathBuf> {
-        self.failures
-            .iter()
-            .filter(|failure| failure.reason.contains(INCOMPLETE_LEFT_IN_PLACE))
-            .map(|failure| PathBuf::from(&failure.relative_path))
-            .collect()
+        self.left_in_place.iter().map(PathBuf::from).collect()
     }
 
     /// Fold a second session of the same pass into this report.
@@ -129,6 +136,8 @@ impl PassFailures {
         self.failures.extend(other.failures);
         self.failed_paths.extend(other.failed_paths);
         self.failed_paths_truncated |= other.failed_paths_truncated;
+        self.left_in_place.extend(other.left_in_place);
+        self.left_in_place_truncated |= other.left_in_place_truncated;
         self.unretried = self.unretried.saturating_add(other.unretried);
     }
 
@@ -144,8 +153,8 @@ impl PassFailures {
             self.failures.push(FileFailure {
                 relative_path: UNRETRIED_PATH.to_string(),
                 reason: format!(
-                    "{} file(s) were not retried: the retry set was truncated to the \
-                     named report; re-run to converge",
+                    "{} file(s) were not retried: the retry set could not name them all; \
+                     re-run to converge",
                     self.unretried
                 ),
             });
@@ -177,6 +186,8 @@ impl PassFailures {
         summary.failures = self.failures.iter().map(FileFailure::to_wire).collect();
         summary.failed_paths = self.failed_paths.clone();
         summary.failed_paths_truncated = self.failed_paths_truncated;
+        summary.left_in_place = self.left_in_place.clone();
+        summary.left_in_place_truncated = self.left_in_place_truncated;
     }
 
     /// Write the final state back onto a local summary.
@@ -185,6 +196,8 @@ impl PassFailures {
         summary.failures = self.failures.clone();
         summary.failed_paths = self.failed_paths.clone();
         summary.failed_paths_truncated = self.failed_paths_truncated;
+        summary.left_in_place = self.left_in_place.clone();
+        summary.left_in_place_truncated = self.left_in_place_truncated;
     }
 }
 
@@ -292,6 +305,8 @@ impl RetryOutcome {
             .collect();
         summary.failed_paths = self.final_failures.failed_paths.clone();
         summary.failed_paths_truncated = self.final_failures.failed_paths_truncated;
+        summary.left_in_place = self.final_failures.left_in_place.clone();
+        summary.left_in_place_truncated = self.final_failures.left_in_place_truncated;
     }
 }
 
@@ -321,6 +336,34 @@ where
             break;
         }
         let (set, truncated) = current.retry_set();
+        // cr-win-1: a retry pass compares exactly as the main pass did —
+        // a failed write never leaves a target that looks finished (the
+        // sink removes it or holds it one byte off the source's size), so
+        // the user's compare is trusted here as on any later run. The one
+        // exception is --ignore-existing: a path whose failure left this
+        // run's own incomplete copy at the destination exists there now,
+        // and that copy is not one the user asked to keep — those paths
+        // retry with it off. cr-rework-1: they come from the exact set the
+        // destination sends beside the failed paths, never the capped
+        // report; if even that set did not fit, the paths it does not
+        // name cannot be classified — retried with the flag a leftover is
+        // skipped and its failure cleared, retried without it a file the
+        // user asked to keep is overwritten — so none of them is retried:
+        // they stay reported as not retried.
+        let left: HashSet<PathBuf> = if args.ignore_existing {
+            current
+                .left_in_place()
+                .intersection(&set)
+                .cloned()
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let (set, truncated) = if args.ignore_existing && current.left_in_place_truncated {
+            (left.clone(), true)
+        } else {
+            (set, truncated)
+        };
         if set.is_empty() {
             break;
         }
@@ -341,23 +384,6 @@ where
         blit_core::remote::instrumentation::record_retry_pass(u64::from(pass));
         let mut pass_args = args.clone();
         pass_args.retry_pass = Some((pass, total, n));
-        // cr-win-1: a retry pass compares exactly as the main pass did —
-        // a failed write never leaves a target that looks finished (the
-        // sink removes it or holds it one byte off the source's size), so
-        // the user's compare is trusted here as on any later run. The one
-        // exception is --ignore-existing: a path whose failure left this
-        // run's own incomplete copy at the destination exists there now,
-        // and that copy is not one the user asked to keep — those paths
-        // retry with it off.
-        let left: HashSet<PathBuf> = if args.ignore_existing {
-            current
-                .left_in_place()
-                .intersection(&set)
-                .cloned()
-                .collect()
-        } else {
-            HashSet::new()
-        };
         // win-1: one heap allocation per pass keeps the pass's session
         // out of this loop's state and its caller's frame.
         let result = if left.is_empty() {
@@ -424,6 +450,8 @@ mod tests {
             failures: paths.iter().map(|p| failure(p)).collect(),
             failed_paths: paths.iter().map(|p| p.to_string()).collect(),
             failed_paths_truncated: false,
+            left_in_place: Vec::new(),
+            left_in_place_truncated: false,
             unretried: 0,
         }
     }
@@ -457,17 +485,28 @@ mod tests {
         .expect("loop");
     }
 
-    /// cr-win-1: under --ignore-existing, a path whose failure left this
-    /// run's own incomplete copy at the destination retries with it off,
-    /// in its own session; every other path keeps the user's flag, and
-    /// the two results fold into one pass.
+    fn clean(files: u64) -> PassResult {
+        PassResult {
+            files_transferred: files,
+            bytes_transferred: files * 5,
+            failures: PassFailures::default(),
+            in_stream_carrier_used: false,
+            files_resumed: 0,
+        }
+    }
+
+    /// cr-win-1 / cr-rework-1: under --ignore-existing, a path whose
+    /// failure left this run's own incomplete copy at the destination
+    /// retries with it off, in its own session; every other path keeps
+    /// the user's flag, and the two results fold into one pass. The
+    /// leftovers come from the exact set the destination sends — never
+    /// the capped report, whose reasons here say nothing about them.
     #[tokio::test]
     async fn ignore_existing_retries_this_runs_own_leftovers_without_it() {
         let mut a = args(1);
         a.ignore_existing = true;
         let mut main = failures(&["left", "other"]);
-        main.failures[0].reason =
-            format!("writing named stream: {INCOMPLETE_LEFT_IN_PLACE}: it could not be removed");
+        main.left_in_place = vec!["left".to_string()];
         let mut sessions: Vec<(Vec<PathBuf>, bool)> = Vec::new();
         let out = run_retry_passes(&a, main, |pass_args| {
             let mut set: Vec<PathBuf> = pass_args
@@ -478,15 +517,7 @@ mod tests {
                 .collect();
             set.sort();
             sessions.push((set, pass_args.ignore_existing));
-            async move {
-                Ok(PassResult {
-                    files_transferred: 1,
-                    bytes_transferred: 5,
-                    failures: PassFailures::default(),
-                    in_stream_carrier_used: false,
-                    files_resumed: 0,
-                })
-            }
+            async move { Ok(clean(1)) }
         })
         .await
         .expect("loop");
@@ -503,23 +534,118 @@ mod tests {
 
         // Without --ignore-existing nothing is split.
         let mut main = failures(&["left", "other"]);
-        main.failures[0].reason = format!("x: {INCOMPLETE_LEFT_IN_PLACE}");
+        main.left_in_place = vec!["left".to_string()];
         let mut calls = 0;
         run_retry_passes(&args(1), main, |_| {
             calls += 1;
-            async move {
-                Ok(PassResult {
-                    files_transferred: 2,
-                    bytes_transferred: 10,
-                    failures: PassFailures::default(),
-                    in_stream_carrier_used: false,
-                    files_resumed: 0,
-                })
-            }
+            async move { Ok(clean(2)) }
         })
         .await
         .expect("loop");
         assert_eq!(calls, 1);
+    }
+
+    /// cr-rework-1: every route's summary hands the loop the exact
+    /// left-in-place set and its truncation flag.
+    #[test]
+    fn every_route_carries_the_left_in_place_set() {
+        let wire = TransferSummary {
+            files_failed: 1,
+            failed_paths: vec!["a".into()],
+            left_in_place: vec!["a".into()],
+            left_in_place_truncated: true,
+            ..TransferSummary::default()
+        };
+        let from_wire = PassFailures::from_summary(&wire);
+        assert_eq!(from_wire.left_in_place, vec!["a".to_string()]);
+        assert!(from_wire.left_in_place_truncated);
+
+        let local = LocalMirrorSummary {
+            files_failed: 1,
+            failed_paths: vec!["a".into()],
+            left_in_place: vec!["a".into()],
+            left_in_place_truncated: true,
+            ..LocalMirrorSummary::default()
+        };
+        let from_local = PassFailures::from_local(&local);
+        assert_eq!(from_local.left_in_place, vec!["a".to_string()]);
+        assert!(from_local.left_in_place_truncated);
+
+        let endpoint = blit_core::remote::RemoteEndpoint::parse("host:/m/").expect("endpoint");
+        let delegated = DelegatedPullOutcome {
+            summary: blit_core::remote::transfer::delegated_summary::delegated_summary_from_session(
+                &wire,
+                String::new(),
+            ),
+            src: endpoint.clone(),
+            dst: endpoint,
+        };
+        let from_delegated = PassFailures::from_delegated(&delegated);
+        assert_eq!(from_delegated.left_in_place, vec!["a".to_string()]);
+        assert!(from_delegated.left_in_place_truncated);
+    }
+
+    /// cr-rework-1: more leftovers than the 64-entry named report holds —
+    /// the 65th is still recognised, because the set is exact.
+    #[tokio::test]
+    async fn leftovers_past_the_named_report_cap_are_still_recognised() {
+        let names: Vec<String> = (0..70).map(|i| format!("f{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut main = failures(&refs);
+        main.failures.truncate(64);
+        main.left_in_place = names.clone();
+        let mut a = args(1);
+        a.ignore_existing = true;
+        let mut sessions: Vec<(usize, bool)> = Vec::new();
+        run_retry_passes(&a, main, |pass_args| {
+            let n = pass_args.retry_only.as_ref().expect("retry set").len();
+            sessions.push((n, pass_args.ignore_existing));
+            async move { Ok(clean(n as u64)) }
+        })
+        .await
+        .expect("loop");
+        assert_eq!(
+            sessions,
+            vec![(70, false)],
+            "all 70 leftovers retry without --ignore-existing"
+        );
+    }
+
+    /// cr-rework-1: when even the exact set did not fit, the paths it does
+    /// not name cannot be classified, so none of them is retried under
+    /// --ignore-existing: the known leftovers retry, the rest stay failed
+    /// and reported as not retried — never cleared by a skip.
+    #[tokio::test]
+    async fn an_unclassifiable_remainder_is_not_retried_under_ignore_existing() {
+        let mut main = failures(&["known", "u1", "u2"]);
+        main.left_in_place = vec!["known".to_string()];
+        main.left_in_place_truncated = true;
+        let mut a = args(1);
+        a.ignore_existing = true;
+        let mut sessions: Vec<(Vec<PathBuf>, bool)> = Vec::new();
+        let out = run_retry_passes(&a, main, |pass_args| {
+            let mut set: Vec<PathBuf> = pass_args
+                .retry_only
+                .clone()
+                .expect("retry set")
+                .into_iter()
+                .collect();
+            set.sort();
+            sessions.push((set, pass_args.ignore_existing));
+            async move { Ok(clean(1)) }
+        })
+        .await
+        .expect("loop");
+        assert_eq!(sessions, vec![(vec![PathBuf::from("known")], false)]);
+        assert_eq!(
+            out.final_failures.files_failed, 2,
+            "the unclassified two stay failed"
+        );
+        assert!(out
+            .final_failures
+            .failures
+            .iter()
+            .any(|f| f.reason.starts_with("2 file(s) were not retried")));
     }
 
     #[tokio::test]
@@ -767,6 +893,8 @@ mod cr_fix2_2_tests {
             }],
             failed_paths: vec!["a".to_string()],
             failed_paths_truncated: false,
+            left_in_place: Vec::new(),
+            left_in_place_truncated: false,
             unretried: 0,
         };
         let mut args = TransferArgs::for_tests("src", "dst");

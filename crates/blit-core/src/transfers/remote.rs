@@ -493,6 +493,14 @@ impl DelegatedPullOutcome {
             self.summary.failed_paths_truncated,
         )
     }
+    /// cr-rework-1: the failed paths that left this run's own incomplete
+    /// copy at the destination (see `TransferSummary.left_in_place`).
+    pub fn left_in_place(&self) -> (&[String], bool) {
+        (
+            &self.summary.left_in_place,
+            self.summary.left_in_place_truncated,
+        )
+    }
 }
 
 /// Per-stream state tracked while consuming `BytesProgress`
@@ -1105,6 +1113,8 @@ mod tests {
             failures: contained.wire_failures(),
             failed_paths: Vec::new(),
             failed_paths_truncated: false,
+            left_in_place: Vec::new(),
+            left_in_place_truncated: false,
         };
         let endpoint = delegated_endpoint(RemotePath::Module {
             module: "mod".to_string(),

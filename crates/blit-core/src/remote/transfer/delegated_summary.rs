@@ -60,6 +60,8 @@ pub fn delegated_summary_from_session(
         failures: summary.failures.clone(),
         failed_paths: summary.failed_paths.clone(),
         failed_paths_truncated: summary.failed_paths_truncated,
+        left_in_place: summary.left_in_place.clone(),
+        left_in_place_truncated: summary.left_in_place_truncated,
     }
 }
 
@@ -98,6 +100,8 @@ mod tests {
             failures: contained.wire_failures(),
             failed_paths: Vec::new(),
             failed_paths_truncated: false,
+            left_in_place: Vec::new(),
+            left_in_place_truncated: false,
         }
     }
 
@@ -206,5 +210,22 @@ mod tests {
         assert_eq!(delegated.files_failed, 0);
         assert!(delegated.failures.is_empty());
         assert!(delegated_summary_failures(&delegated).is_empty());
+    }
+
+    /// cr-rework-1: the exact left-in-place set rides the re-encode
+    /// verbatim, truncation flag included, so a delegated initiator's
+    /// retry reads the same set a direct one does.
+    #[test]
+    fn the_left_in_place_set_is_re_encoded_verbatim() {
+        let summary = TransferSummary {
+            files_failed: 2,
+            failed_paths: vec!["a".into(), "b".into()],
+            left_in_place: vec!["a".into()],
+            left_in_place_truncated: true,
+            ..TransferSummary::default()
+        };
+        let delegated = delegated_summary_from_session(&summary, String::new());
+        assert_eq!(delegated.left_in_place, vec!["a".to_string()]);
+        assert!(delegated.left_in_place_truncated);
     }
 }

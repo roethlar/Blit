@@ -5241,6 +5241,8 @@ async fn destination_session_inner(
                     0
                 };
                 let (retry_paths, retry_paths_truncated) = contained_failures.wire_failed_paths();
+                let (left_in_place, left_in_place_truncated) =
+                    contained_failures.wire_left_in_place();
                 let summary = TransferSummary {
                     files_transferred: files_written,
                     bytes_transferred: bytes_written,
@@ -5263,6 +5265,8 @@ async fn destination_session_inner(
                     failures: contained_failures.wire_failures(),
                     failed_paths: retry_paths,
                     failed_paths_truncated: retry_paths_truncated,
+                    left_in_place,
+                    left_in_place_truncated,
                 };
                 // ph-1c: this end is the scorer and its score is now
                 // final — signal terminal state before the send, whose

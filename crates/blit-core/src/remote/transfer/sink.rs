@@ -73,6 +73,13 @@ pub const MAX_WIRE_FAILURES_ENCODED_BYTES: usize = 256 * 1024;
 /// marked truncated and the initiator retries only the named report.
 pub const MAX_WIRE_FAILED_PATHS_ENCODED_BYTES: usize = 1024 * 1024;
 
+/// cr-rework-1: ceiling on the encoded exact set of failed paths that
+/// left this run's own incomplete copy at the destination
+/// ([`INCOMPLETE_LEFT_IN_PLACE`]). A subset of the failed-path set; 256 KiB
+/// keeps the summary frame far below tonic's 4 MiB limit beside the other
+/// two budgets. Past it the set is marked truncated.
+pub const MAX_WIRE_LEFT_IN_PLACE_ENCODED_BYTES: usize = 256 * 1024;
+
 /// Encoded overhead one `failures` entry costs its parent message: the
 /// repeated field's tag plus its length delimiter. Field 7 of
 /// `TransferSummary` tags in one byte and a per-entry-bounded entry's
@@ -233,6 +240,12 @@ pub struct SinkOutcome {
     /// [`SinkOutcome::file_failed`] reads as "identity is incomplete
     /// here, answer conservatively".
     failed_paths: std::collections::HashSet<String>,
+    /// cr-rework-1: the exact subset of `failed_paths` whose failure left
+    /// this run's own incomplete copy at the destination — recorded from
+    /// the reason [`settle_failed_target`] annotates, here at the one
+    /// point every failure passes through, so it never depends on the
+    /// capped report. Merged like `failed_paths`.
+    left_in_place: std::collections::HashSet<String>,
 }
 
 impl SinkOutcome {
@@ -246,6 +259,7 @@ impl SinkOutcome {
             failures: Vec::new(),
             files_failed_total: 0,
             failed_paths: std::collections::HashSet::new(),
+            left_in_place: std::collections::HashSet::new(),
         }
     }
 
@@ -277,6 +291,9 @@ impl SinkOutcome {
         log::warn!("file failed, session continues: {named} ({reason})");
         self.files_failed_total = self.files_failed_total.saturating_add(1);
         self.failed_paths.insert(relative_path.clone());
+        if reason.contains(INCOMPLETE_LEFT_IN_PLACE) {
+            self.left_in_place.insert(relative_path.clone());
+        }
         if self.failures.len() < MAX_REPORTED_FILE_FAILURES {
             self.failures.push(FileFailure {
                 relative_path,
@@ -345,6 +362,27 @@ impl SinkOutcome {
         self.failures
             .extend(other.failures.iter().take(room).cloned());
         self.failed_paths.extend(other.failed_paths.iter().cloned());
+        self.left_in_place
+            .extend(other.left_in_place.iter().cloned());
+    }
+
+    /// cr-rework-1: the failed paths whose failure left this run's own
+    /// incomplete copy at the destination, in wire form — sorted, bounded
+    /// by [`MAX_WIRE_LEFT_IN_PLACE_ENCODED_BYTES`], `(paths, truncated)`.
+    pub fn wire_left_in_place(&self) -> (Vec<String>, bool) {
+        let mut paths: Vec<&String> = self.left_in_place.iter().collect();
+        paths.sort();
+        let mut out = Vec::new();
+        let mut remaining = MAX_WIRE_LEFT_IN_PLACE_ENCODED_BYTES;
+        for path in paths {
+            let cost = path.len().saturating_add(4);
+            if cost > remaining {
+                return (out, true);
+            }
+            remaining -= cost;
+            out.push(path.clone());
+        }
+        (out, false)
     }
 
     /// Every path this outcome recorded as failed — uncapped, exact
@@ -2097,7 +2135,7 @@ impl Drop for PartialTarget<'_> {
 /// deterministically. Prefix-keyed like the copy hooks. Production never
 /// sets it.
 #[cfg(test)]
-pub(super) static METADATA_TAIL_FAULT_PREFIXES: std::sync::Mutex<Vec<std::path::PathBuf>> =
+pub(crate) static METADATA_TAIL_FAULT_PREFIXES: std::sync::Mutex<Vec<std::path::PathBuf>> =
     std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
@@ -5236,6 +5274,8 @@ mod tests {
             failures: outcome.wire_failures(),
             failed_paths: Vec::new(),
             failed_paths_truncated: false,
+            left_in_place: Vec::new(),
+            left_in_place_truncated: false,
         }
     }
 
