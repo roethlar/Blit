@@ -1,7 +1,7 @@
 # cr-win-1: Copy/mirror push retries can falsely clear a named-stream failure
 
 **Severity**: HIGH — a retry pass can skip a file whose first-pass failure left the main bytes intact (e.g. a rejected NTFS stream), clear the failure, and exit 0 with an incomplete backup
-**Status**: Fixed (reworked) — red/green on macOS; the rework's Windows run and the owner-approved codex review are pending
+**Status**: Fixed (reworked) — red/green on macOS and the Windows 11 ARM64 VM; the owner-approved codex review is pending
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: `0528e78c` + `4a06aec5` (rework; the first fix `501c408d` is superseded by the second)
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range 5eeff4ac..8a1f04cb (Windows fixes win-1..5), record .review/results/ssc-win-range.codex.json)
@@ -50,9 +50,13 @@ Rework 2/2:
 - Unit tests `a_retry_pass_keeps_the_users_compare` and `ignore_existing_retries_this_runs_own_leftovers_without_it`.
 - Mutations: putting the forced re-send back reddened both compare tests; dropping the leftover override reddened the split test.
 
-Windows (compile-checked by cross-clippy only; the run is pending):
+Windows (ARM64 VM at `2be91345`, run 2026-10-05):
 - The sink's real-NTFS refused-tail test (a 300-character stream name) now asserts the target is removed.
 - `windows_a_rejected_named_stream_is_re_sent_on_the_retry_pass` asserts the failed copy is not left at the source's size, and gains a plain re-run half: `--retries 0` exits 2, then an ordinary re-run lands the stream.
+- Green: `retry_pass` 14/14, the sink test, and `cr_win_1_tests` 6/6 (the removal-fallback test is unix-only).
+- Red: with the streamed settle reverted (`{ drop(std_file); None }`, via Git for Windows `sed`), both tests FAILED. The sink test found the target still present. The CLI test found the failed copy left at exactly the source's 13 bytes, the original false-finished state.
+- Restored with `git checkout`: both green.
+- Full VM suite at `2be91345` (`--no-fail-fast`, `CARGO_INCREMENTAL=0`): 43 binaries, 1327/1/2 (1318 before; the 9 new tests that compile on Windows). The one failure is the known elevated-token `metadata_repair` test, which CI's Windows leg passes.
 
 Gate (macOS): `0528e78c` 1353/0/2; `4a06aec5` 1355/0/2; fmt and clippy `-D warnings` clean native, linux-cross, and windows-msvc-cross (`blake3/pure`).
 
@@ -63,4 +67,4 @@ First fix's proof, for the record: `501c408d` was red/green on macOS and the ARM
 - `--ignore-existing` leftovers are recognised from the named failure report, so leftovers beyond the report cap retry under the user's flag.
 - Under `--ignore-existing`, a plain re-run (not a retry pass) still skips this run's own leftover, because a later run cannot know whose copy it is. The run's report names it.
 - The local copy guard still removes a destination whose copy failed at open, before any byte was written. This pre-existing cr-ssc4-2 behavior was not changed.
-- No Windows run of the rework yet. The VM was not running on 2026-10-05. The x86_64 evidence will come from CI.
+- No native x86_64 Windows run: the x86_64 evidence comes from CI after the push. The ARM64 VM run is complete.
