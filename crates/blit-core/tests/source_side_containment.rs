@@ -2482,11 +2482,13 @@ async fn assert_scoped_scan_reports_unscanned_requests(carrier: Carrier) {
             "a path the scan never saw is missing: {:?}",
             by_path
         );
+        // D8 (D-2026-10-04-1): a permission refusal at scan lists the
+        // file like any other open error, so it fails per file at payload
+        // time with the open error as its reason.
         #[cfg(unix)]
         assert!(
-            by_path["sub/unreadable.bin"]
-                .starts_with("source: unreadable at retry: permission denied"),
-            "a path the scan could not open keeps its reason: {:?}",
+            by_path["sub/unreadable.bin"].starts_with("source: cannot open:"),
+            "a path the source could not open keeps its reason: {:?}",
             by_path
         );
         let landed = collect_tree(&dst_root);

@@ -1176,9 +1176,9 @@ async fn resume_completes_stale_partial_byte_identical() -> Result<()> {
     Ok(())
 }
 
-/// An unreadable source file is skipped (readable siblings land) and
-/// recorded in `unreadable_paths` — the summary signal `blit move`'s
-/// caller-side source-delete gate (R47-F4) relies on.
+/// An unreadable source file fails on its own (readable siblings land)
+/// and is reported — the summary signal `blit move`'s caller-side
+/// source-delete gate relies on (R47-F4; a per-file failure since D8).
 #[cfg(unix)]
 #[tokio::test]
 async fn unreadable_source_file_lands_in_summary_and_copy_continues() -> Result<()> {
@@ -1197,9 +1197,23 @@ async fn unreadable_source_file_lands_in_summary_and_copy_continues() -> Result<
     let summary = result?;
 
     assert_eq!(fs::read(dest.join("ok.txt"))?, b"readable");
+    // D8 (D-2026-10-04-1): a permission refusal at scan is listed like any
+    // other open error, so the file fails per file at payload time — which
+    // the move gate refuses on exactly as it refused an unreadable entry —
+    // instead of marking the scan incomplete.
     assert!(
-        !summary.unreadable_paths.is_empty(),
-        "the unreadable file must be recorded for the move gate"
+        summary.unreadable_paths.is_empty(),
+        "{:?}",
+        summary.unreadable_paths
+    );
+    assert_eq!(summary.files_failed, 1, "{:?}", summary.failures);
+    assert_eq!(summary.failures[0].relative_path, "locked.txt");
+    assert!(
+        summary.failures[0]
+            .reason
+            .starts_with("source: cannot open:"),
+        "{:?}",
+        summary.failures
     );
     Ok(())
 }

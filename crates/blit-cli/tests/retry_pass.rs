@@ -868,3 +868,62 @@ fn windows_a_rejected_named_stream_is_re_sent_on_the_retry_pass() {
         "the plain re-run replaced the stale stream"
     );
 }
+
+/// D8 (D-2026-10-04-1, owner: "consistency"): a SOURCE file that enumerates
+/// but whose open is refused with a permission error follows win-2's locked
+/// files. Before, it marked the scan incomplete and the mirror refused every
+/// deletion over that one file. Now it is listed and reported once (retried),
+/// its destination counterpart is kept, and a genuinely extraneous entry
+/// still goes.
+#[cfg(unix)]
+#[test]
+fn a_permission_denied_source_file_is_reported_and_the_mirror_still_deletes() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (src, dst) = (temp.path().join("src"), temp.path().join("dst"));
+    fs::create_dir_all(&src).expect("mkdir src");
+    fs::create_dir_all(&dst).expect("mkdir dst");
+    fs::write(src.join("landed.txt"), b"alpha").expect("write landed");
+    fs::write(src.join("denied.bin"), b"current").expect("write denied");
+    fs::write(dst.join("denied.bin"), b"previous version").expect("counterpart");
+    fs::write(dst.join("stale.txt"), b"extraneous").expect("stale");
+    fs::set_permissions(src.join("denied.bin"), fs::Permissions::from_mode(0o000))
+        .expect("deny the source file");
+    if fs::read(src.join("denied.bin")).is_ok() {
+        fs::set_permissions(src.join("denied.bin"), fs::Permissions::from_mode(0o644)).ok();
+        eprintln!("skipped: a privileged user reads through mode 000");
+        return;
+    }
+    let counters = temp.path().join("counters.txt");
+    let output = run(
+        "mirror",
+        &["--retries", "1", "--diagnostics-no-retry-wait"],
+        &src,
+        &dst,
+        &counters,
+    );
+    fs::set_permissions(src.join("denied.bin"), fs::Permissions::from_mode(0o644)).ok();
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_PARTIAL_FAILURE),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout.matches("denied.bin").count(),
+        1,
+        "reported exactly once:\n{stdout}"
+    );
+    assert!(stdout.contains("(retried)"), "marked as retried:\n{stdout}");
+    assert_eq!(
+        fs::read(dst.join("denied.bin")).expect("counterpart kept"),
+        b"previous version",
+        "the denied file is on the manifest, so its counterpart is never extraneous"
+    );
+    assert!(
+        !dst.join("stale.txt").exists(),
+        "the mirror's other deletions run:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(fs::read(dst.join("landed.txt")).expect("landed"), b"alpha");
+}

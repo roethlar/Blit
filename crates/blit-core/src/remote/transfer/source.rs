@@ -658,10 +658,6 @@ fn spawn_manifest_task_with(
 
                 if let Err(err) = scan_open(&absolute) {
                     match err.kind() {
-                        ErrorKind::PermissionDenied => {
-                            record_unreadable_entry(&unreadable, &rel, "permission denied");
-                            return Ok(());
-                        }
                         ErrorKind::NotFound => {
                             record_unreadable_entry(&unreadable, &rel, "not found");
                             return Ok(());
@@ -677,7 +673,12 @@ fn spawn_manifest_task_with(
                         // per file (`source: cannot open: …`) if it still
                         // cannot be read then — which is also what puts it in
                         // the retry passes' set. Before this, the error ended
-                        // the whole session at scan time.
+                        // the whole session at scan time. D8 (D-2026-10-04-1,
+                        // owner: "consistency"): a permission refusal is no
+                        // different — it used to mark the scan incomplete, so
+                        // one access-denied file refused a whole mirror's
+                        // deletions. Only a file that vanished since the walk
+                        // stays an unreadable entry.
                         _ => {
                             log::debug!(
                                 "scan: '{}' enumerated but did not open ({}); \
@@ -1253,10 +1254,11 @@ mod enumeration_heartbeat_tests {
 }
 
 /// win-2: what the scan does with a file that enumerated but does not
-/// open. A permission refusal or a vanished file stays an unreadable
-/// entry (the scan is incomplete, which a mirror refuses — owner-pinned);
-/// every other open error lists the file, so it fails per file at payload
-/// time instead of ending the session.
+/// open. A vanished file stays an unreadable entry (the scan is
+/// incomplete, which a mirror refuses — owner-pinned); every other open
+/// error — a permission refusal too since D8 (D-2026-10-04-1) — lists the
+/// file, so it fails per file at payload time instead of ending the
+/// session or blocking a mirror's deletions.
 #[cfg(test)]
 mod scan_open_tests {
     use super::*;
@@ -1333,12 +1335,15 @@ mod scan_open_tests {
         );
     }
 
+    /// D8 (D-2026-10-04-1): a permission refusal at scan is listed like
+    /// every other open error; before, it marked the scan incomplete and a
+    /// mirror refused all its deletions over one file.
     #[tokio::test]
-    async fn a_permission_refusal_at_scan_is_still_an_unreadable_entry() {
+    async fn a_permission_refusal_at_scan_is_listed_like_any_other_open_error() {
         let (listed, unreadable, result) = scan_with(denied).await;
-        assert_eq!(result.expect("scan completes"), 1);
-        assert_eq!(listed, ["ok.txt"]);
-        assert_eq!(unreadable, ["locked.bin (permission denied)"]);
+        assert_eq!(result.expect("scan completes"), 2);
+        assert_eq!(listed, ["locked.bin", "ok.txt"]);
+        assert!(unreadable.is_empty(), "{unreadable:?}");
     }
 }
 
