@@ -4,7 +4,7 @@
 seven rulings closed (D1–D7: D-2026-09-28-1..-4, D-2026-09-29-1..-3);
 codex openreview loop closed at r6 (2026-09-26; `REVIEW.md` rows
 `plan-ssc-2026-09-25-r1..r6`). All six slices ssc-1..ssc-6 landed
-2026-09-30 (execution record below); D8 RULED 2026-10-04 (D-2026-10-04-1), not yet implemented. Plan history: drafted 2026-09-25 after the Windows
+2026-09-30 (execution record below); D8 RULED 2026-10-04 (D-2026-10-04-1) and implemented (`85e82f84`). Plan history: drafted 2026-09-25 after the Windows
 user-profile mirror failure; owner rulings recorded in the Open questions
 section below.
 **Created**: 2026-09-25
@@ -1197,19 +1197,29 @@ is refused); environment, not code — under a restricted token
 (`runas /trustlevel:0x20000`) all 7 `metadata_repair` tests pass at
 `8da5614b`. Open owner question D8 below.
 
-**cr-win-1 (codex review of win-1..5, HIGH)** `501c408d` — with win-4
-the copy/mirror push retry passes compared with the copy rule, as the
-local, pull and delegated ones always had. A pushed file whose named
-stream is rejected after its bytes land keeps those bytes at the write
-time (same size, newer, mtime never stamped), which SizeMtime and
-SizeOnly skip: the retry cleared the failure and the run exited 0 with
-the stream missing. A retry pass now re-sends its set unconditionally
-(`run_retry_passes` sets `ignore_times`; every route gives it top
-precedence); the main pass keeps the user's compare. Guards in
-`blit-cli/tests/retry_pass.rs`: a portable local + push lookalike test
-(red/green on macOS) and a Windows rejected-stream test (red/green on
-the ARM64 VM; full VM suite 1318/1/2, the one the known token test).
-Record: `.review/findings/cr-win-1.md`.
+**cr-win-1 (codex review of win-1..5, HIGH)**, reworked as `0528e78c` +
+`4a06aec5`. The first fix, `501c408d`, made retries re-send blindly; the
+owner rejected it on 2026-10-04 ("why would I accept this? fix it").
+
+**The defect.** A file that failed after its bytes landed (a pushed
+file's named stream rejected, say) was left at the source's size with a
+write-time mtime. Every compare took it for finished, on a retry and on
+any later run. That breaks D-2026-09-29-2's "nothing that looks
+finished is left behind."
+
+**The rework:**
+- A failed streamed record, tar-shard member or local copy now removes
+  its target.
+- A resume partial is held one byte longer than the source from the
+  first patched block until it completes. This holds on both remote
+  lanes and locally, so an interrupted same-size patch never looks
+  finished.
+- A target another process keeps from being removed is left one byte
+  longer, and its reason says an incomplete copy stayed.
+- Retry passes compare exactly as the main pass does. Under
+  `--ignore-existing`, this run's own leftovers retry with that flag off.
+
+Guards and mutation proofs are in `.review/findings/cr-win-1.md`.
 
 ## Review history
 
@@ -1350,8 +1360,9 @@ Record: `.review/findings/cr-win-1.md`.
   real name, non-representable destinations report; identity stays the
   path string. Opaque per-entry IDs declined.
 - **D8 — PermissionDenied at scan. RULED 2026-10-04: (b) per file**
-  (D-2026-10-04-1; owner: "consistency"); implementation pending. Raised
-  2026-09-30 by win-2.
+  (D-2026-10-04-1; owner: "consistency"); **implemented `85e82f84`** —
+  guard `retry_pass::a_permission_denied_source_file_is_reported_and_the_mirror_still_deletes`.
+  Raised 2026-09-30 by win-2.
   A file that enumerates but whose scan-time open is refused with
   PermissionDenied is recorded unreadable: the scan is incomplete, so a
   mirror refuses (R46-F2, owner-pinned, unchanged by win-2). win-2 made
