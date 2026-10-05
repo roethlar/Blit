@@ -64,7 +64,7 @@ First fix's proof, for the record: `501c408d` was red/green on macOS and the ARM
 
 ## Known gaps
 - Crash consistency (a killed process, power loss) between a streamed record's last byte and its tail, or between a resume completion's truncate and its stamp, can still leave a complete-content target without its metadata. That is in-place writing with no staging (D-2026-09-29-2), and the windows are milliseconds.
-- `--ignore-existing` leftovers are recognised from the named failure report, so leftovers beyond the report cap retry under the user's flag.
+- ~~`--ignore-existing` leftovers are recognised from the named failure report~~: that gap was a false-success defect, admitted by the codex review as cr-rework-1 and fixed `75462ba9`. The set now travels exactly.
 - Under `--ignore-existing`, a plain re-run (not a retry pass) still skips this run's own leftover, because a later run cannot know whose copy it is. The run's report names it.
 - The local copy guard still removes a destination whose copy failed at open, before any byte was written. This pre-existing cr-ssc4-2 behavior was not changed.
 - No native x86_64 Windows run: the x86_64 evidence comes from CI after the push. The ARM64 VM run is complete.
