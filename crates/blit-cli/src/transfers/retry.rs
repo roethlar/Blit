@@ -177,6 +177,25 @@ impl PassFailures {
         };
         next.unretried = self.unretried.saturating_add(not_given);
         next.files_failed = next.files_failed.saturating_add(next.unretried);
+        // cr-rework-2: a leftover stays this run's own copy for as long as
+        // its path keeps failing. A pass that failed it on the source side
+        // never touched the copy, so its report — which names no leftover
+        // for the path — cannot un-classify it; only a path that succeeded
+        // leaves the set.
+        let still_failing: HashSet<&str> = next.failed_paths.iter().map(String::as_str).collect();
+        let mut left: HashSet<String> = std::mem::take(&mut next.left_in_place)
+            .into_iter()
+            .collect();
+        left.extend(
+            self.left_in_place
+                .iter()
+                .filter(|path| still_failing.contains(path.as_str()))
+                .cloned(),
+        );
+        let mut left: Vec<String> = left.into_iter().collect();
+        left.sort();
+        next.left_in_place = left;
+        next.left_in_place_truncated |= self.left_in_place_truncated;
         next
     }
 
@@ -583,6 +602,46 @@ mod tests {
         let from_delegated = PassFailures::from_delegated(&delegated);
         assert_eq!(from_delegated.left_in_place, vec!["a".to_string()]);
         assert!(from_delegated.left_in_place_truncated);
+    }
+
+    /// cr-rework-2: a leftover stays classified while its path keeps
+    /// failing. The main pass leaves the copy; retry 1 fails on the source
+    /// side, so its report names no leftover; retry 2 must still re-send
+    /// the path with --ignore-existing off, or it would skip the copy still
+    /// there and clear the failure.
+    #[tokio::test]
+    async fn a_leftover_stays_classified_through_a_source_side_retry_failure() {
+        let mut a = args(2);
+        a.ignore_existing = true;
+        let mut main = failures(&["left"]);
+        main.left_in_place = vec!["left".to_string()];
+        let mut sessions: Vec<bool> = Vec::new();
+        let out = run_retry_passes(&a, main, |pass_args| {
+            sessions.push(pass_args.ignore_existing);
+            let pass = sessions.len();
+            async move {
+                if pass == 1 {
+                    Ok(PassResult {
+                        files_transferred: 0,
+                        bytes_transferred: 0,
+                        failures: failures(&["left"]),
+                        in_stream_carrier_used: false,
+                        files_resumed: 0,
+                    })
+                } else {
+                    Ok(clean(1))
+                }
+            }
+        })
+        .await
+        .expect("loop");
+        assert_eq!(
+            sessions,
+            vec![false, false],
+            "both retries re-send the leftover without --ignore-existing"
+        );
+        assert_eq!(out.passes_run, 2);
+        assert_eq!(out.final_failures.files_failed, 0);
     }
 
     /// cr-rework-1: more leftovers than the 64-entry named report holds —
