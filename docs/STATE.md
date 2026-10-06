@@ -40,7 +40,7 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
   are green on the Windows ARM64 VM, the Mac (1344/0/2 as of `8da5614b`)
   and CI's three test legs as of `fe172fbd` (run 36812553117). Codex
   review of win-1..5 admitted **cr-win-1 HIGH, reworked `0528e78c`+`4a06aec5`**
-  (a failed write never looks finished; retries compare like the main pass; D8 per file `85e82f84`); codex review admitted cr-rework-1, fixed `75462ba9`; re-review admitted cr-rework-2, fixed `a60368b1` (Mac 1362/0/2). Owner
+  (a failed write never looks finished; retries compare like the main pass; D8 per file `85e82f84`); codex review admitted cr-rework-1, fixed `75462ba9`; re-reviews admitted cr-rework-2 (`a60368b1`) and cr-rework-3 (`7c607672`; Mac 1366/0/2, VM 1337/1/2). Owner
   notes: `--retry`/`--wait` vs `--retries`/`--retry-wait` naming;
   deletions after the main pass; `--detach` ignores `--retries`. Next
   release bumps at least the minor version (blit-core API).
@@ -64,7 +64,7 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
   Principle: ceiling-driven, never competitor-relative (D-2026-07-04-4).
 ## Queue (ordered)
 
-0. **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (ACTIVE)** — next: push cr-rework-2 `a60368b1`, CI on
+0. **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (ACTIVE)** — next: push cr-rework-3 `7c607672`, CI on
    three OSes; owner's call on closing the cr-win-1 review rows (CI's leg is the only native x86_64 Windows evidence; the Ryzen
    box is gone); then the owner's Shipped flip. RELEASE_1_0 G3 fix-now item.
 0. **ULTRACODE 2026-08-18 (DEVLOG 23:00Z): cv-1+cv-2 LANDED `05529c19` (contract-version gate + scan surfacing; cv-3 landed 2026-09-30 with ssc-5 `6c266dd4`); sf-3d LANDED `7ffd929d` (containment cache + resume-path stamping; rig A/B still owed); clp-3 reviewed AND F1 closed `677a8ba9` (F2/F5 stay owner calls); residue triaged (2 dead, 1 dead-as-written; item 5 rate-window FIXED — its stall-silence call was owner-ruled as revised-b, landed below; item 2 perf-history scope ruled "both" by D-2026-08-20-1 and shipped, D-2026-08-20-4); sweep-prefetch parked pending one netwatch-01 SMB run; pm-5: see Blocked / waiting.** CI FULLY GREEN on `af9b48b3` (run 32195891519, 7/7 jobs — the slices are cross-platform proven). Stall-line revised-b landed after (three red-proven silence gates; mid-payload stalls visible, summary-wait/purge tails silent).
@@ -181,7 +181,7 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
   and triage only. `docs/agent/GPT_REVIEW_LOOP.md` is historical;
   `.review/README.md` is retired as the grading mechanism (its
   `findings/`/`results/` records and the REVIEW.md index remain live).
-- Review loop: `REVIEW.md` (in progress: cr-win-1, cr-rework-1, cr-rework-2 — closing the owner's call) + `.review/findings|results/`.
+- Review loop: `REVIEW.md` (in progress: cr-win-1, cr-rework-1..3 — closing the owner's call) + `.review/findings|results/`.
 - **`docs/plan/PACKAGE_MANAGER_DISTRIBUTION.md` (ACTIVE, D-2026-08-12-7).**
 - Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (module delete ratified
   D-2026-06-12-1, executes w8-1; **capability unparked D-2026-07-05-3** —
