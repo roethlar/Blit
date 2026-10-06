@@ -300,7 +300,9 @@ pub fn write_extracted_shard(dst_root: &Path, files: &[ExtractedFile]) -> Result
     let results: Vec<(String, super::sink::ClassifiedMember<()>)> = files
         .iter()
         .map(|file| {
-            let written = write_extracted_file(file).map(|()| (file.size, ()));
+            let written = write_extracted_file(file)
+                .map(|()| (file.size, ()))
+                .map_err(super::sink::FailedWrite::from);
             (
                 file.rel.clone(),
                 super::sink::classify_shard_member(dst_root, &file.rel, written),

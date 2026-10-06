@@ -717,6 +717,9 @@ message DelegatedPullSummary {
   // cr-rework-1: see TransferSummary.left_in_place, re-encoded verbatim.
   repeated string left_in_place = 11;
   bool left_in_place_truncated = 12;
+  // cr-rework-3: see TransferSummary.removed_incomplete, re-encoded verbatim.
+  repeated string removed_incomplete = 13;
+  bool removed_incomplete_truncated = 14;
 }
 
 message DelegatedPullError {
@@ -1169,6 +1172,14 @@ message TransferSummary {
   // paths it cannot classify rather than guess.
   repeated string left_in_place = 10;
   bool left_in_place_truncated = 11;
+  // cr-rework-3 (contract v7): the subset of `failed_paths` whose
+  // incomplete copy this session positively removed. The initiator keeps
+  // a path classified as this run's leftover across retry passes only
+  // while its copy is still there; once removed, a file that appears at
+  // the path later is protected by --ignore-existing like any other.
+  // Bounded like `left_in_place`.
+  repeated string removed_incomplete = 12;
+  bool removed_incomplete_truncated = 13;
 }
 
 // Structured refusal/abort — an end says why before closing.

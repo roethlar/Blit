@@ -47,6 +47,10 @@ pub(crate) struct PassFailures {
     /// sender could carry all of it.
     pub left_in_place: Vec<String>,
     pub left_in_place_truncated: bool,
+    /// cr-rework-3: the failed paths whose incomplete copy the pass that
+    /// produced this report positively removed, and whether all fit.
+    pub removed_incomplete: Vec<String>,
+    pub removed_incomplete_truncated: bool,
     /// cr-ssc6-1: failures no retry pass was ever given — the unnamed
     /// remainder of a truncated retry set. They stay failed (they were
     /// never observed to converge), are counted in `files_failed`, and
@@ -63,6 +67,8 @@ impl PassFailures {
             failed_paths_truncated: summary.failed_paths_truncated,
             left_in_place: summary.left_in_place.clone(),
             left_in_place_truncated: summary.left_in_place_truncated,
+            removed_incomplete: summary.removed_incomplete.clone(),
+            removed_incomplete_truncated: summary.removed_incomplete_truncated,
             unretried: 0,
         }
     }
@@ -75,6 +81,8 @@ impl PassFailures {
             failed_paths_truncated: summary.failed_paths_truncated,
             left_in_place: summary.left_in_place.clone(),
             left_in_place_truncated: summary.left_in_place_truncated,
+            removed_incomplete: summary.removed_incomplete.clone(),
+            removed_incomplete_truncated: summary.removed_incomplete_truncated,
             unretried: 0,
         }
     }
@@ -82,6 +90,7 @@ impl PassFailures {
     pub(crate) fn from_delegated(outcome: &DelegatedPullOutcome) -> Self {
         let (paths, truncated) = outcome.failed_paths();
         let (left, left_truncated) = outcome.left_in_place();
+        let (removed, removed_truncated) = outcome.removed_incomplete();
         Self {
             files_failed: outcome.files_failed(),
             failures: outcome.contained_failures(),
@@ -89,6 +98,8 @@ impl PassFailures {
             failed_paths_truncated: truncated,
             left_in_place: left.to_vec(),
             left_in_place_truncated: left_truncated,
+            removed_incomplete: removed.to_vec(),
+            removed_incomplete_truncated: removed_truncated,
             unretried: 0,
         }
     }
@@ -138,6 +149,8 @@ impl PassFailures {
         self.failed_paths_truncated |= other.failed_paths_truncated;
         self.left_in_place.extend(other.left_in_place);
         self.left_in_place_truncated |= other.left_in_place_truncated;
+        self.removed_incomplete.extend(other.removed_incomplete);
+        self.removed_incomplete_truncated |= other.removed_incomplete_truncated;
         self.unretried = self.unretried.saturating_add(other.unretried);
     }
 
@@ -181,21 +194,34 @@ impl PassFailures {
         // its path keeps failing. A pass that failed it on the source side
         // never touched the copy, so its report — which names no leftover
         // for the path — cannot un-classify it; only a path that succeeded
-        // leaves the set.
+        // leaves the set. cr-rework-3: nor does one whose copy the pass
+        // positively removed — it is an ordinary failure from then on, and
+        // a file that appears at the path later is protected by
+        // --ignore-existing like any other. If the removed set did not
+        // fit, a prior leftover it does not name may or may not still be
+        // there: it is carried as neither, and classification is marked
+        // incomplete, so the next pass retries only the leftovers it can
+        // name and leaves the rest reported as not retried.
         let still_failing: HashSet<&str> = next.failed_paths.iter().map(String::as_str).collect();
+        let removed: HashSet<&str> = next.removed_incomplete.iter().map(String::as_str).collect();
         let mut left: HashSet<String> = std::mem::take(&mut next.left_in_place)
             .into_iter()
             .collect();
-        left.extend(
-            self.left_in_place
-                .iter()
-                .filter(|path| still_failing.contains(path.as_str()))
-                .cloned(),
-        );
+        let carried: Vec<&String> = self
+            .left_in_place
+            .iter()
+            .filter(|path| still_failing.contains(path.as_str()))
+            .filter(|path| !removed.contains(path.as_str()))
+            .filter(|path| !left.contains(*path))
+            .collect();
+        let ambiguous = next.removed_incomplete_truncated && !carried.is_empty();
+        if !ambiguous {
+            left.extend(carried.into_iter().cloned());
+        }
         let mut left: Vec<String> = left.into_iter().collect();
         left.sort();
         next.left_in_place = left;
-        next.left_in_place_truncated |= self.left_in_place_truncated;
+        next.left_in_place_truncated |= self.left_in_place_truncated || ambiguous;
         next
     }
 
@@ -207,6 +233,8 @@ impl PassFailures {
         summary.failed_paths_truncated = self.failed_paths_truncated;
         summary.left_in_place = self.left_in_place.clone();
         summary.left_in_place_truncated = self.left_in_place_truncated;
+        summary.removed_incomplete = self.removed_incomplete.clone();
+        summary.removed_incomplete_truncated = self.removed_incomplete_truncated;
     }
 
     /// Write the final state back onto a local summary.
@@ -217,6 +245,8 @@ impl PassFailures {
         summary.failed_paths_truncated = self.failed_paths_truncated;
         summary.left_in_place = self.left_in_place.clone();
         summary.left_in_place_truncated = self.left_in_place_truncated;
+        summary.removed_incomplete = self.removed_incomplete.clone();
+        summary.removed_incomplete_truncated = self.removed_incomplete_truncated;
     }
 }
 
@@ -326,6 +356,8 @@ impl RetryOutcome {
         summary.failed_paths_truncated = self.final_failures.failed_paths_truncated;
         summary.left_in_place = self.final_failures.left_in_place.clone();
         summary.left_in_place_truncated = self.final_failures.left_in_place_truncated;
+        summary.removed_incomplete = self.final_failures.removed_incomplete.clone();
+        summary.removed_incomplete_truncated = self.final_failures.removed_incomplete_truncated;
     }
 }
 
@@ -471,6 +503,8 @@ mod tests {
             failed_paths_truncated: false,
             left_in_place: Vec::new(),
             left_in_place_truncated: false,
+            removed_incomplete: Vec::new(),
+            removed_incomplete_truncated: false,
             unretried: 0,
         }
     }
@@ -573,22 +607,30 @@ mod tests {
             failed_paths: vec!["a".into()],
             left_in_place: vec!["a".into()],
             left_in_place_truncated: true,
+            removed_incomplete: vec!["a".into()],
+            removed_incomplete_truncated: true,
             ..TransferSummary::default()
         };
         let from_wire = PassFailures::from_summary(&wire);
         assert_eq!(from_wire.left_in_place, vec!["a".to_string()]);
         assert!(from_wire.left_in_place_truncated);
+        assert_eq!(from_wire.removed_incomplete, vec!["a".to_string()]);
+        assert!(from_wire.removed_incomplete_truncated);
 
         let local = LocalMirrorSummary {
             files_failed: 1,
             failed_paths: vec!["a".into()],
             left_in_place: vec!["a".into()],
             left_in_place_truncated: true,
+            removed_incomplete: vec!["a".into()],
+            removed_incomplete_truncated: true,
             ..LocalMirrorSummary::default()
         };
         let from_local = PassFailures::from_local(&local);
         assert_eq!(from_local.left_in_place, vec!["a".to_string()]);
         assert!(from_local.left_in_place_truncated);
+        assert_eq!(from_local.removed_incomplete, vec!["a".to_string()]);
+        assert!(from_local.removed_incomplete_truncated);
 
         let endpoint = blit_core::remote::RemoteEndpoint::parse("host:/m/").expect("endpoint");
         let delegated = DelegatedPullOutcome {
@@ -602,6 +644,8 @@ mod tests {
         let from_delegated = PassFailures::from_delegated(&delegated);
         assert_eq!(from_delegated.left_in_place, vec!["a".to_string()]);
         assert!(from_delegated.left_in_place_truncated);
+        assert_eq!(from_delegated.removed_incomplete, vec!["a".to_string()]);
+        assert!(from_delegated.removed_incomplete_truncated);
     }
 
     /// cr-rework-2: a leftover stays classified while its path keeps
@@ -642,6 +686,82 @@ mod tests {
         );
         assert_eq!(out.passes_run, 2);
         assert_eq!(out.final_failures.files_failed, 0);
+    }
+
+    /// cr-rework-3: once a retry positively removed this run's leftover,
+    /// the path is an ordinary failure. Retry 1 touches the copy, fails on
+    /// the source side and removes it; retry 2 runs the path WITH
+    /// --ignore-existing, so a file another process created there during
+    /// the wait is kept, not overwritten.
+    #[tokio::test]
+    async fn a_leftover_the_retry_removed_is_no_longer_classified() {
+        let mut a = args(2);
+        a.ignore_existing = true;
+        let mut main = failures(&["left"]);
+        main.left_in_place = vec!["left".to_string()];
+        let mut sessions: Vec<bool> = Vec::new();
+        run_retry_passes(&a, main, |pass_args| {
+            sessions.push(pass_args.ignore_existing);
+            let pass = sessions.len();
+            async move {
+                if pass == 1 {
+                    let mut failed = failures(&["left"]);
+                    failed.removed_incomplete = vec!["left".to_string()];
+                    Ok(PassResult {
+                        files_transferred: 0,
+                        bytes_transferred: 0,
+                        failures: failed,
+                        in_stream_carrier_used: false,
+                        files_resumed: 0,
+                    })
+                } else {
+                    Ok(clean(0))
+                }
+            }
+        })
+        .await
+        .expect("loop");
+        assert_eq!(
+            sessions,
+            vec![false, true],
+            "retry 2 keeps --ignore-existing once the copy is gone"
+        );
+    }
+
+    /// cr-rework-3: if the removed set did not fit, a prior leftover it
+    /// does not name may or may not still be there — retried under
+    /// --ignore-existing it could be a skipped leftover cleared to exit 0,
+    /// retried without it a newly created file overwritten — so it is not
+    /// retried at all and stays failed.
+    #[tokio::test]
+    async fn an_ambiguous_leftover_is_not_retried_under_ignore_existing() {
+        let mut a = args(2);
+        a.ignore_existing = true;
+        let mut main = failures(&["left"]);
+        main.left_in_place = vec!["left".to_string()];
+        let mut sessions: Vec<bool> = Vec::new();
+        let out = run_retry_passes(&a, main, |pass_args| {
+            sessions.push(pass_args.ignore_existing);
+            async move {
+                let mut failed = failures(&["left"]);
+                failed.removed_incomplete_truncated = true;
+                Ok(PassResult {
+                    files_transferred: 0,
+                    bytes_transferred: 0,
+                    failures: failed,
+                    in_stream_carrier_used: false,
+                    files_resumed: 0,
+                })
+            }
+        })
+        .await
+        .expect("loop");
+        assert_eq!(
+            sessions,
+            vec![false],
+            "no second pass for the ambiguous path"
+        );
+        assert_eq!(out.final_failures.files_failed, 1, "it stays failed");
     }
 
     /// cr-rework-1: more leftovers than the 64-entry named report holds —
@@ -954,6 +1074,8 @@ mod cr_fix2_2_tests {
             failed_paths_truncated: false,
             left_in_place: Vec::new(),
             left_in_place_truncated: false,
+            removed_incomplete: Vec::new(),
+            removed_incomplete_truncated: false,
             unretried: 0,
         };
         let mut args = TransferArgs::for_tests("src", "dst");

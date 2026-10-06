@@ -194,6 +194,8 @@ async fn run_remote_to_remote_direct_inner(
             failed_paths_truncated: false,
             left_in_place: Vec::new(),
             left_in_place_truncated: false,
+            removed_incomplete: Vec::new(),
+            removed_incomplete_truncated: false,
         };
         let state = DeferredDelegatedState {
             summary,

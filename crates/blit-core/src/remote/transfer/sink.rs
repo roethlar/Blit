@@ -215,6 +215,24 @@ impl FileFailure {
     }
 }
 
+/// A path set in wire form: sorted, bounded by
+/// [`MAX_WIRE_LEFT_IN_PLACE_ENCODED_BYTES`], `(paths, truncated)`.
+fn wire_path_set(set: &std::collections::HashSet<String>) -> (Vec<String>, bool) {
+    let mut paths: Vec<&String> = set.iter().collect();
+    paths.sort();
+    let mut out = Vec::new();
+    let mut remaining = MAX_WIRE_LEFT_IN_PLACE_ENCODED_BYTES;
+    for path in paths {
+        let cost = path.len().saturating_add(4);
+        if cost > remaining {
+            return (out, true);
+        }
+        remaining -= cost;
+        out.push(path.clone());
+    }
+    (out, false)
+}
+
 /// Outcome of writing payload(s) to a sink.
 #[derive(Debug, Default, Clone)]
 pub struct SinkOutcome {
@@ -246,6 +264,12 @@ pub struct SinkOutcome {
     /// point every failure passes through, so it never depends on the
     /// capped report. Merged like `failed_paths`.
     left_in_place: std::collections::HashSet<String>,
+    /// cr-rework-3: the exact set of failed paths whose incomplete copy
+    /// this outcome's writes positively removed. The retry loop keeps a
+    /// path classified as this run's leftover only while the copy is
+    /// still there; once a retry removed it, a file that appears at the
+    /// path later is protected by `--ignore-existing` like any other.
+    removed_incomplete: std::collections::HashSet<String>,
 }
 
 impl SinkOutcome {
@@ -260,7 +284,19 @@ impl SinkOutcome {
             files_failed_total: 0,
             failed_paths: std::collections::HashSet::new(),
             left_in_place: std::collections::HashSet::new(),
+            removed_incomplete: std::collections::HashSet::new(),
         }
+    }
+
+    /// cr-rework-3: name `relative_path` among the failures whose
+    /// incomplete copy was removed.
+    pub fn mark_removed_incomplete(&mut self, relative_path: impl Into<String>) {
+        self.removed_incomplete.insert(relative_path.into());
+    }
+
+    /// cr-rework-3: the failed paths whose incomplete copy was removed.
+    pub fn removed_incomplete(&self) -> &std::collections::HashSet<String> {
+        &self.removed_incomplete
     }
 
     /// One file that could not be written. Nothing is counted as landed
@@ -364,25 +400,21 @@ impl SinkOutcome {
         self.failed_paths.extend(other.failed_paths.iter().cloned());
         self.left_in_place
             .extend(other.left_in_place.iter().cloned());
+        self.removed_incomplete
+            .extend(other.removed_incomplete.iter().cloned());
     }
 
     /// cr-rework-1: the failed paths whose failure left this run's own
     /// incomplete copy at the destination, in wire form — sorted, bounded
     /// by [`MAX_WIRE_LEFT_IN_PLACE_ENCODED_BYTES`], `(paths, truncated)`.
     pub fn wire_left_in_place(&self) -> (Vec<String>, bool) {
-        let mut paths: Vec<&String> = self.left_in_place.iter().collect();
-        paths.sort();
-        let mut out = Vec::new();
-        let mut remaining = MAX_WIRE_LEFT_IN_PLACE_ENCODED_BYTES;
-        for path in paths {
-            let cost = path.len().saturating_add(4);
-            if cost > remaining {
-                return (out, true);
-            }
-            remaining -= cost;
-            out.push(path.clone());
-        }
-        (out, false)
+        wire_path_set(&self.left_in_place)
+    }
+
+    /// cr-rework-3: [`SinkOutcome::removed_incomplete`] in wire form,
+    /// bounded like the left-in-place set.
+    pub fn wire_removed_incomplete(&self) -> (Vec<String>, bool) {
+        wire_path_set(&self.removed_incomplete)
     }
 
     /// Every path this outcome recorded as failed — uncapped, exact
@@ -629,7 +661,8 @@ pub(super) enum ClassifiedMember<S> {
     Written(u64, S),
     /// The member failed and the shared classifier read that failure as
     /// attributable to this member alone: recorded, shard continues.
-    Contained(eyre::Report),
+    /// `removed`: its incomplete copy was removed (cr-rework-3).
+    Contained { error: eyre::Report, removed: bool },
     /// The member failed and the shared classifier read that failure as
     /// root-wide or volume-level: session-fatal, exactly as on the
     /// single-file paths.
@@ -647,14 +680,17 @@ pub(super) enum ClassifiedMember<S> {
 pub(super) fn classify_shard_member<S>(
     dst_root: &Path,
     relative_path: &str,
-    result: Result<(u64, S)>,
+    result: std::result::Result<(u64, S), FailedWrite>,
 ) -> ClassifiedMember<S> {
     match result {
         Ok((bytes, sample)) => ClassifiedMember::Written(bytes, sample),
-        Err(error) if failure_is_containable(dst_root, relative_path, &error) => {
-            ClassifiedMember::Contained(error)
+        Err(failed) if failure_is_containable(dst_root, relative_path, &failed.error) => {
+            ClassifiedMember::Contained {
+                error: failed.error,
+                removed: failed.removed,
+            }
         }
-        Err(error) => ClassifiedMember::Fatal(error),
+        Err(failed) => ClassifiedMember::Fatal(failed.error),
     }
 }
 
@@ -1199,7 +1235,8 @@ impl FsTransferSink {
                     Some(std_file),
                     total_size,
                     OnFailure::KeepUnfinished { created: false },
-                ),
+                )
+                .note,
             )
         })?;
         Ok(SinkOutcome::written(1, windows_bytes))
@@ -1580,16 +1617,16 @@ impl<'a> FsRecordWriter<'a> {
     /// (cr-win-1): removed, or — when something else holds it — left one
     /// byte longer than the source through this writer's own handle.
     /// Returns the note the failure reason carries when it stays behind.
-    fn remove_partial(&mut self) -> Option<String> {
+    fn remove_partial(&mut self) -> Settled {
         let handle = match &mut self.mode {
             FsRecordMode::Real { file } => file.take().and_then(|file| file.try_into_std().ok()),
             _ => None,
         };
-        let note = settle_failed_target(&self.dst, handle, self.header.size, OnFailure::Remove);
-        if let Some(note) = &note {
+        let settled = settle_failed_target(&self.dst, handle, self.header.size, OnFailure::Remove);
+        if let Some(note) = &settled.note {
             log::warn!("{}: {note}", self.dst.display());
         }
-        note
+        settled
     }
 
     fn withdraw_reported(&mut self) {
@@ -1752,7 +1789,7 @@ impl RecordWriter for FsRecordWriter<'_> {
                     stamp_streamed_metadata_via_handle(&std_file, &dst, &header, &sink.config)
                 });
                 let stamped = stamped.map_err(|error| {
-                    with_settle_note(
+                    FailedWrite::settled(
                         error,
                         settle_failed_target(&dst, Some(std_file), header.size, OnFailure::Remove),
                     )
@@ -1770,7 +1807,7 @@ impl RecordWriter for FsRecordWriter<'_> {
                         // the live lane never claims work the
                         // authoritative summary denies.
                         self.withdraw_reported();
-                        per_file_failure(&sink.dst_root, &header.relative_path, error)
+                        failed_write_outcome(&sink.dst_root, &header.relative_path, error)
                     }
                 }
             }
@@ -1779,20 +1816,24 @@ impl RecordWriter for FsRecordWriter<'_> {
 
     async fn abort(mut self: Box<Self>, reason: &str) -> Result<SinkOutcome> {
         let path = self.header.relative_path.clone();
-        let note = if matches!(self.mode, FsRecordMode::Real { .. }) {
+        let settled = if matches!(self.mode, FsRecordMode::Real { .. }) {
             self.remove_partial()
         } else {
-            None
+            Settled::default()
         };
         self.withdraw_reported();
         self.guard_armed = false;
         // The source's reason wins even for a discarding writer: the
         // file did not land, and the source is the end that said why
         // first; what stayed behind is added to it (cr-win-1).
-        match note {
-            Some(note) => Ok(SinkOutcome::failed(path, format!("{reason}; {note}"))),
-            None => Ok(SinkOutcome::failed(path, reason)),
+        let mut outcome = match settled.note {
+            Some(note) => SinkOutcome::failed(&path, format!("{reason}; {note}")),
+            None => SinkOutcome::failed(&path, reason),
+        };
+        if settled.removed {
+            outcome.mark_removed_incomplete(&path);
         }
+        Ok(outcome)
     }
 }
 
@@ -1813,7 +1854,7 @@ fn write_file_payload(
     if header.relative_path.is_empty() {
         return match copy_root_file_payload(src_root, dst_root, header, config) {
             Ok(outcome) => Ok(outcome),
-            Err(error) => per_file_failure(dst_root, "", error),
+            Err(failed) => failed_write_outcome(dst_root, "", failed),
         };
     }
     // Contract v7 (D-F): raw name bytes name the source file when present.
@@ -1852,11 +1893,11 @@ fn write_file_payload(
     // its attributes — belongs to exactly this file.
     match copy_resolved_file_payload(&src, &dst, header, config) {
         Ok(outcome) => Ok(outcome),
-        Err(error) if is_unrepresentable_name_failure(&error) => Ok(SinkOutcome::failed(
+        Err(failed) if is_unrepresentable_name_failure(&failed.error) => Ok(SinkOutcome::failed(
             &header.relative_path,
             crate::raw_name::DESTINATION_CANNOT_STORE_REASON.to_string(),
         )),
-        Err(error) => per_file_failure(dst_root, &header.relative_path, error),
+        Err(failed) => failed_write_outcome(dst_root, &header.relative_path, failed),
     }
 }
 
@@ -1879,7 +1920,7 @@ fn copy_root_file_payload(
     dst_root: &Path,
     header: &FileHeader,
     config: &FsSinkConfig,
-) -> Result<SinkOutcome> {
+) -> std::result::Result<SinkOutcome, FailedWrite> {
     copy_resolved_file_payload(src_root, dst_root, header, config)
 }
 
@@ -2012,12 +2053,27 @@ fn hold_partial_unfinished(dst: &Path, total_size: u64) {
 /// block marking through it, and the removal is tried again once it is
 /// closed (a filesystem that refuses to unlink an open file). Returns what
 /// the failure reason should add when an incomplete copy stays behind.
+/// What settling a failed target left behind: the note the failure
+/// reason carries when an incomplete copy stayed, and whether the target
+/// was positively removed (cr-rework-3: the retry loop stops treating a
+/// path as this run's leftover once its copy is gone).
+#[derive(Debug, Default)]
+struct Settled {
+    note: Option<String>,
+    removed: bool,
+}
+
+const REMOVED: Settled = Settled {
+    note: None,
+    removed: true,
+};
+
 fn settle_failed_target(
     dst: &Path,
     handle: Option<std::fs::File>,
     source_size: u64,
     on_failure: OnFailure,
-) -> Option<String> {
+) -> Settled {
     let mark = |handle: Option<&std::fs::File>| match handle {
         Some(file) => mark_unfinished(file, source_size),
         None => std::fs::OpenOptions::new()
@@ -2032,15 +2088,15 @@ fn settle_failed_target(
     match on_failure {
         OnFailure::Remove => {
             if remove().is_ok() {
-                return None;
+                return REMOVED;
             }
             let marked = mark(handle.as_ref());
             drop(handle);
             let remove_error = match remove() {
-                Ok(()) => return None,
+                Ok(()) => return REMOVED,
                 Err(error) => error,
             };
-            Some(match marked {
+            let note = Some(match marked {
                 Ok(()) => format!(
                     "{INCOMPLETE_LEFT_IN_PLACE}: it could not be removed ({remove_error}), \
                      so it was left one byte longer than the source"
@@ -2049,25 +2105,75 @@ fn settle_failed_target(
                     "{INCOMPLETE_LEFT_IN_PLACE}: it could not be removed ({remove_error}) \
                      or marked unfinished ({mark_error})"
                 ),
-            })
-        }
-        OnFailure::KeepUnfinished { created } => match mark(handle.as_ref()) {
-            Ok(()) => created.then(|| {
-                format!(
-                    "{INCOMPLETE_LEFT_IN_PLACE}, one byte longer than the source, for the \
-                     next run to resume"
-                )
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                log::warn!(
-                    "could not mark the resume partial {} unfinished: {error}",
-                    dst.display()
-                );
-                created.then(|| format!("{INCOMPLETE_LEFT_IN_PLACE}: {error}"))
+            });
+            Settled {
+                note,
+                removed: false,
             }
-        },
+        }
+        OnFailure::KeepUnfinished { created } => {
+            let note = match mark(handle.as_ref()) {
+                Ok(()) => created.then(|| {
+                    format!(
+                        "{INCOMPLETE_LEFT_IN_PLACE}, one byte longer than the source, for the \
+                         next run to resume"
+                    )
+                }),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    log::warn!(
+                        "could not mark the resume partial {} unfinished: {error}",
+                        dst.display()
+                    );
+                    created.then(|| format!("{INCOMPLETE_LEFT_IN_PLACE}: {error}"))
+                }
+            };
+            Settled {
+                note,
+                removed: false,
+            }
+        }
     }
+}
+
+/// A file write that failed, with whether settling removed its target
+/// (cr-rework-3) — carried beside the error, never in its text, so the
+/// reason stays the failure's own (`source:` and the rest).
+pub(super) struct FailedWrite {
+    error: eyre::Report,
+    removed: bool,
+}
+
+impl From<eyre::Report> for FailedWrite {
+    fn from(error: eyre::Report) -> Self {
+        Self {
+            error,
+            removed: false,
+        }
+    }
+}
+
+impl FailedWrite {
+    fn settled(error: eyre::Report, settled: Settled) -> Self {
+        Self {
+            error: with_settle_note(error, settled.note),
+            removed: settled.removed,
+        }
+    }
+}
+
+/// [`per_file_failure`] for a [`FailedWrite`]: the outcome also names the
+/// path among those whose incomplete copy this write removed.
+fn failed_write_outcome(
+    dst_root: &Path,
+    relative_path: &str,
+    failed: FailedWrite,
+) -> Result<SinkOutcome> {
+    let mut outcome = per_file_failure(dst_root, relative_path, failed.error)?;
+    if failed.removed {
+        outcome.mark_removed_incomplete(relative_path);
+    }
+    Ok(outcome)
 }
 
 /// Attach [`settle_failed_target`]'s note, if any, to a file's failure.
@@ -2110,13 +2216,13 @@ impl<'a> PartialTarget<'a> {
         self.armed = None;
     }
 
-    fn settle(&mut self, error: eyre::Report) -> eyre::Report {
+    fn settle(&mut self, error: eyre::Report) -> FailedWrite {
         match self.armed.take() {
-            Some(on_failure) => with_settle_note(
+            Some(on_failure) => FailedWrite::settled(
                 error,
                 settle_failed_target(self.dst, None, self.source_size, on_failure),
             ),
-            None => error,
+            None => FailedWrite::from(error),
         }
     }
 }
@@ -2172,7 +2278,7 @@ fn copy_resolved_file_payload(
     dst: &Path,
     header: &FileHeader,
     config: &FsSinkConfig,
-) -> Result<SinkOutcome> {
+) -> std::result::Result<SinkOutcome, FailedWrite> {
     use eyre::eyre;
     // R58-F4: dry-run must be side-effect-free. Bail before the
     // parent-mkdir so a dry-run doesn't create destination
@@ -2189,7 +2295,8 @@ fn copy_resolved_file_payload(
         return Err(eyre!(
             "{}",
             crate::remote::transfer::payload::changed_size_reason(header.size, src_meta.len())
-        ));
+        )
+        .into());
     }
     run_after_source_open_hook(src);
 
@@ -2491,7 +2598,7 @@ fn write_tar_shard_payload(
     let results: Vec<(String, ClassifiedMember<MemberSample>)> = extracted
         .into_par_iter()
         .map(|f: ExtractedFile| {
-            let written = (|| -> Result<(u64, MemberSample)> {
+            let written = (|| -> std::result::Result<(u64, MemberSample), FailedWrite> {
                 use std::io::Write as _;
 
                 let total_started = std::time::Instant::now();
@@ -2570,7 +2677,9 @@ fn write_tar_shard_payload(
 /// then the metadata tail. Every failure here concerns exactly this
 /// member — the shard's structural parse and its containment checks
 /// already ran, serially, before any member was written.
-fn write_shard_member(file: &super::tar_safety::ExtractedFile) -> Result<u64> {
+fn write_shard_member(
+    file: &super::tar_safety::ExtractedFile,
+) -> std::result::Result<u64, FailedWrite> {
     if let Some(parent) = file.dest_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create dir {}", parent.display()))?;
@@ -2600,8 +2709,8 @@ fn write_shard_member(file: &super::tar_safety::ExtractedFile) -> Result<u64> {
 fn discard_failed_member(
     file: &super::tar_safety::ExtractedFile,
     error: eyre::Report,
-) -> eyre::Report {
-    with_settle_note(
+) -> FailedWrite {
+    FailedWrite::settled(
         error,
         settle_failed_target(&file.dest_path, None, file.size, OnFailure::Remove),
     )
@@ -2667,7 +2776,10 @@ pub(super) fn fold_shard_member_results<S>(
                 record_sample(sample);
             }
             ClassifiedMember::Fatal(error) => return Err(error),
-            ClassifiedMember::Contained(error) => {
+            ClassifiedMember::Contained { error, removed } => {
+                if removed {
+                    outcome.mark_removed_incomplete(relative_path.clone());
+                }
                 outcome.record_failure(relative_path, format!("{error:#}"))
             }
         }
@@ -4955,7 +5067,7 @@ mod tests {
     ) -> (String, ClassifiedMember<()>) {
         (
             relative_path.to_string(),
-            classify_shard_member(dst_root, relative_path, result),
+            classify_shard_member(dst_root, relative_path, result.map_err(FailedWrite::from)),
         )
     }
 
@@ -5276,6 +5388,8 @@ mod tests {
             failed_paths_truncated: false,
             left_in_place: Vec::new(),
             left_in_place_truncated: false,
+            removed_incomplete: Vec::new(),
+            removed_incomplete_truncated: false,
         }
     }
 
@@ -5985,6 +6099,7 @@ mod tests {
             "{:#}",
             written
                 .as_ref()
+                .map_err(|failed| &failed.error)
                 .expect_err("a dead root must fail the member write")
         );
         // The worker's verdict, taken while the root is still dead.
@@ -6373,6 +6488,10 @@ mod cr_win_1_tests {
             !dst.join("tail.bin").exists(),
             "no same-size copy may stay behind looking finished"
         );
+        assert!(
+            outcome.removed_incomplete().contains("tail.bin"),
+            "cr-rework-3: the removal is reported"
+        );
     }
 
     /// A tar-shard member (small files) whose tail fails is removed; its
@@ -6414,6 +6533,11 @@ mod cr_win_1_tests {
             !dst.join("sub/b.txt").exists(),
             "the failed member may not stay behind looking finished"
         );
+        assert!(
+            outcome.removed_incomplete().contains("sub/b.txt"),
+            "cr-rework-3: the removal is reported"
+        );
+        assert!(!outcome.removed_incomplete().contains("a.txt"));
     }
 
     /// The local route's plain copy: the guard already removed a partial
@@ -6435,6 +6559,31 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
         assert!(!dst.join("a.bin").exists());
+        assert!(
+            outcome.removed_incomplete().contains("a.bin"),
+            "cr-rework-3: the removal is reported"
+        );
+    }
+
+    /// cr-rework-3: a record the source closed failed after its bytes
+    /// started landing is removed, and the removal is reported.
+    #[tokio::test]
+    async fn an_aborted_record_reports_its_removed_target() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let sink =
+            FsTransferSink::new(tmp.path().join("src"), dst.clone(), FsSinkConfig::default());
+        let mut record = sink
+            .begin_record(&make_file_header("half.bin", 10))
+            .await
+            .unwrap();
+        record.write(b"12345").await.unwrap();
+        let outcome = record.abort("source: read error: injected").await.unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert!(!dst.join("half.bin").exists());
+        assert!(outcome.removed_incomplete().contains("half.bin"));
+        assert!(outcome.failures[0].reason.starts_with("source: read error"));
     }
 
     /// The local route's resume copy keeps its partial for the next run,
@@ -6571,7 +6720,8 @@ mod cr_win_1_tests {
             eprintln!("skipped: privileged user unlinks through a read-only directory");
             return;
         };
-        let note = note.expect("the target stayed, so the reason says so");
+        assert!(!note.removed, "the target stayed");
+        let note = note.note.expect("the target stayed, so the reason says so");
         assert!(note.contains(INCOMPLETE_LEFT_IN_PLACE), "{note}");
         assert_eq!(std::fs::metadata(&dst).unwrap().len(), 6);
     }

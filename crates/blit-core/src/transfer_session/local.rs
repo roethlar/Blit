@@ -395,6 +395,10 @@ pub struct LocalMirrorSummary {
     /// `TransferSummary.left_in_place`).
     pub left_in_place: Vec<String>,
     pub left_in_place_truncated: bool,
+    /// cr-rework-3: the failed paths whose incomplete copy was removed
+    /// (see `TransferSummary.removed_incomplete`).
+    pub removed_incomplete: Vec<String>,
+    pub removed_incomplete_truncated: bool,
     /// Files whose destination attributes were repaired in place at diff
     /// time, with no payload bytes re-sent (pfc-6). Counted by the
     /// destination end, so a remote session repairs the same way without
@@ -1016,6 +1020,8 @@ pub async fn run_local_session(
         failed_paths_truncated: outcome.summary.failed_paths_truncated,
         left_in_place: outcome.summary.left_in_place.clone(),
         left_in_place_truncated: outcome.summary.left_in_place_truncated,
+        removed_incomplete: outcome.summary.removed_incomplete.clone(),
+        removed_incomplete_truncated: outcome.summary.removed_incomplete_truncated,
         // pfc-6: destination-local, so it comes off the outcome rather
         // than the wire summary the carriers exchange.
         files_repaired: outcome.files_repaired,
@@ -2465,6 +2471,50 @@ mod tests {
             summary.left_in_place
         );
         assert!(!summary.left_in_place_truncated);
+    }
+
+    /// cr-rework-3: the exact removed set reaches the summary past the
+    /// report cap. Seventy files copied without resume, every metadata
+    /// tail failed: each target is removed, and the summary names all
+    /// seventy as removed — none as left in place.
+    #[tokio::test]
+    async fn the_removed_set_reaches_the_summary_past_the_report_cap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        let body = vec![9u8; 1_048_577];
+        for i in 0..70 {
+            std::fs::write(src_root.join(format!("g{i:02}.bin")), &body).unwrap();
+        }
+        crate::remote::transfer::sink::METADATA_TAIL_FAULT_PREFIXES
+            .lock()
+            .unwrap()
+            .push(dst_root.clone());
+        let summary = run_local_session(
+            &src_root,
+            &dst_root,
+            LocalMirrorOptions {
+                perf_history: false,
+                ..LocalMirrorOptions::default()
+            },
+        )
+        .await;
+        crate::remote::transfer::sink::METADATA_TAIL_FAULT_PREFIXES
+            .lock()
+            .unwrap()
+            .retain(|p| p != &dst_root);
+        let summary = summary.expect("per-file failures never fault the session");
+        assert_eq!(summary.files_failed, 70);
+        assert_eq!(summary.failures.len(), 64, "the report is capped");
+        assert_eq!(
+            summary.removed_incomplete.len(),
+            70,
+            "the removed set is exact"
+        );
+        assert!(!summary.removed_incomplete_truncated);
+        assert!(summary.left_in_place.is_empty());
     }
 
     /// The same failure in a mirror is contained the same way, and the
