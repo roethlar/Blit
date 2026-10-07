@@ -314,7 +314,20 @@ pub(crate) struct RetryOutcome {
     pub in_stream_carrier_used: bool,
     /// cr-ssc6-4: files the retry passes resumed block-wise, summed.
     pub files_resumed: u64,
+    /// 2026-10-07 defect (b): the user pressed Ctrl-C during the retry
+    /// wait or a retry pass. The retries stopped; `final_failures` is the
+    /// state before the pass that was cut short.
+    pub interrupted: bool,
 }
+
+/// 2026-10-07 defect (b): what a run interrupted during its retries says
+/// after its report, which names the files that did not land.
+pub(crate) const INTERRUPTED_NOTE: &str =
+    "blit: interrupted during the retries — the files listed \
+     above did not land and were not retried further; re-run the same command to converge";
+
+/// The exit code of a run interrupted during its retries (128 + SIGINT).
+pub(crate) const INTERRUPTED_EXIT: u8 = 130;
 
 impl RetryOutcome {
     /// Fold the retries into a wire-shaped summary: files and bytes the
@@ -364,15 +377,58 @@ impl RetryOutcome {
 /// The pass loop, shared by every route. `run` executes one retry pass
 /// with the prepared arguments (the retry-only set and the pass label
 /// already threaded in) and returns that pass's result.
+///
+/// 2026-10-07 defect (b): Ctrl-C during the retry wait or a retry pass
+/// stops the retries instead of killing the process, so the route still
+/// prints the report of the pass that already ran — its deletions
+/// included — and exits [`INTERRUPTED_EXIT`]. Once the handler has been
+/// installed, a later Ctrl-C exits at once, as the default did.
 pub(crate) async fn run_retry_passes<F, Fut>(
     args: &TransferArgs,
     main: PassFailures,
-    mut run: F,
+    run: F,
 ) -> Result<RetryOutcome>
 where
     F: FnMut(TransferArgs) -> Fut,
     Fut: Future<Output = Result<PassResult>>,
 {
+    let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let interrupt = {
+        let armed = std::sync::Arc::clone(&armed);
+        async move {
+            armed.store(true, std::sync::atomic::Ordering::Relaxed);
+            if tokio::signal::ctrl_c().await.is_err() {
+                // No handler could be installed: never interrupt.
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    let outcome = run_retry_passes_until(args, main, run, interrupt).await;
+    if armed.load(std::sync::atomic::Ordering::Relaxed) {
+        tokio::spawn(async {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                std::process::exit(i32::from(INTERRUPTED_EXIT));
+            }
+        });
+    }
+    outcome
+}
+
+/// [`run_retry_passes`] with the interrupt as an input, so tests can
+/// trigger it.
+pub(crate) async fn run_retry_passes_until<F, Fut, I>(
+    args: &TransferArgs,
+    main: PassFailures,
+    mut run: F,
+    interrupt: I,
+) -> Result<RetryOutcome>
+where
+    F: FnMut(TransferArgs) -> Fut,
+    Fut: Future<Output = Result<PassResult>>,
+    I: Future<Output = ()>,
+{
+    let mut interrupt = std::pin::pin!(interrupt);
+    let mut interrupted = false;
     let mut current = main;
     let mut added_files = 0u64;
     let mut added_bytes = 0u64;
@@ -420,7 +476,14 @@ where
         }
         let total = retries;
         let n = set.len();
-        wait_before_pass(args, pass).await;
+        tokio::select! {
+            biased;
+            () = interrupt.as_mut() => {
+                interrupted = true;
+                break;
+            }
+            () = wait_before_pass(args, pass) => {}
+        }
         if !args.json {
             if truncated {
                 eprintln!(
@@ -437,20 +500,32 @@ where
         pass_args.retry_pass = Some((pass, total, n));
         // win-1: one heap allocation per pass keeps the pass's session
         // out of this loop's state and its caller's frame.
-        let result = if left.is_empty() {
-            pass_args.retry_only = Some(set);
-            Box::pin(run(pass_args)).await?
-        } else {
-            let rest: HashSet<PathBuf> = set.difference(&left).cloned().collect();
-            let mut left_args = pass_args.clone();
-            left_args.retry_only = Some(left);
-            left_args.ignore_existing = false;
-            let mut result = Box::pin(run(left_args)).await?;
-            if !rest.is_empty() {
-                pass_args.retry_only = Some(rest);
-                result.merge(Box::pin(run(pass_args)).await?);
+        let pass_run = async {
+            if left.is_empty() {
+                pass_args.retry_only = Some(set);
+                Box::pin(run(pass_args)).await
+            } else {
+                let rest: HashSet<PathBuf> = set.difference(&left).cloned().collect();
+                let mut left_args = pass_args.clone();
+                left_args.retry_only = Some(left);
+                left_args.ignore_existing = false;
+                let mut result = Box::pin(run(left_args)).await?;
+                if !rest.is_empty() {
+                    pass_args.retry_only = Some(rest);
+                    result.merge(Box::pin(run(pass_args)).await?);
+                }
+                Ok(result)
             }
-            result
+        };
+        // Dropping a pass cut short ends its session; the sink's guards
+        // settle any record it had open.
+        let result = tokio::select! {
+            biased;
+            () = interrupt.as_mut() => {
+                interrupted = true;
+                break;
+            }
+            result = pass_run => result?,
         };
         added_files = added_files.saturating_add(result.files_transferred);
         added_bytes = added_bytes.saturating_add(result.bytes_transferred);
@@ -469,6 +544,7 @@ where
         passes_run,
         in_stream_carrier_used,
         files_resumed,
+        interrupted,
     })
 }
 
@@ -825,6 +901,49 @@ mod tests {
             .failures
             .iter()
             .any(|f| f.reason.starts_with("2 file(s) were not retried")));
+    }
+
+    /// 2026-10-07 defect (b): Ctrl-C during the retry wait stops the
+    /// retries before any pass; the first pass's failures stand. The wait
+    /// is an hour, so only an interrupt that cuts the wait itself short
+    /// returns in time.
+    #[tokio::test]
+    async fn an_interrupt_during_the_wait_stops_the_retries() {
+        let mut a = args(2);
+        a.retry_wait = 3600;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            run_retry_passes_until(
+                &a,
+                failures(&["a"]),
+                |_| async { panic!("no retry pass may start once interrupted") },
+                std::future::ready(()),
+            ),
+        )
+        .await
+        .expect("the interrupt cuts the hour-long wait short")
+        .expect("loop");
+        assert!(out.interrupted);
+        assert_eq!(out.passes_run, 0);
+        assert_eq!(out.final_failures.files_failed, 1);
+        assert_eq!(out.final_failures.failures[0].relative_path, "a");
+    }
+
+    /// 2026-10-07 defect (b): Ctrl-C during a retry pass cuts it short;
+    /// the report is the state before that pass.
+    #[tokio::test]
+    async fn an_interrupt_during_a_pass_stops_the_retries() {
+        let out = run_retry_passes_until(
+            &args(2),
+            failures(&["a", "b"]),
+            |_| async { std::future::pending::<Result<PassResult>>().await },
+            tokio::time::sleep(std::time::Duration::from_millis(20)),
+        )
+        .await
+        .expect("loop");
+        assert!(out.interrupted);
+        assert_eq!(out.passes_run, 0, "the cut-short pass does not count");
+        assert_eq!(out.final_failures.files_failed, 2);
     }
 
     #[tokio::test]

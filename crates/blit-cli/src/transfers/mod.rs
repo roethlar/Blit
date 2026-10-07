@@ -384,6 +384,10 @@ async fn run_transfer_inner(
                     &dst,
                 )
             })?;
+            if retry.interrupted {
+                eprintln!("{}", retry::INTERRUPTED_NOTE);
+                return Ok(ExitCode::from(retry::INTERRUPTED_EXIT));
+            }
             Ok(exit_for_failures(summary.files_failed))
         }
         TransferRoute::LocalToRemote { src, dst, mirror } => {
@@ -435,6 +439,10 @@ async fn run_transfer_inner(
                 remote::print_deferred_push_result(args, &state);
                 Ok(())
             })?;
+            if retry.interrupted {
+                eprintln!("{}", retry::INTERRUPTED_NOTE);
+                return Ok(ExitCode::from(retry::INTERRUPTED_EXIT));
+            }
             Ok(exit_for_failures(state.summary.files_failed))
         }
         TransferRoute::RemoteToLocal { src, dst, mirror } => {
@@ -483,6 +491,10 @@ async fn run_transfer_inner(
                 remote::print_deferred_pull_result(args, &state);
                 Ok(())
             })?;
+            if retry.interrupted {
+                eprintln!("{}", retry::INTERRUPTED_NOTE);
+                return Ok(ExitCode::from(retry::INTERRUPTED_EXIT));
+            }
             Ok(exit_for_failures(state.summary.files_failed))
         }
         TransferRoute::RemoteToRemoteDelegated { src, dst, mirror } => {
@@ -543,6 +555,10 @@ async fn run_transfer_inner(
                     remote_remote_direct::print_deferred_delegated_result(args, &state);
                     Ok(())
                 })?;
+                if retry.interrupted {
+                    eprintln!("{}", retry::INTERRUPTED_NOTE);
+                    return Ok(ExitCode::from(retry::INTERRUPTED_EXIT));
+                }
             }
             // (A detached run printed its own acknowledgement inside the
             // inner function and returned an empty summary.)
@@ -790,6 +806,11 @@ async fn run_move_inner(
             )
             .await?;
             fold_local_retry(&mut summary, &retry, operation_started);
+            // 2026-10-07 defect (b): Ctrl-C stopped the retries; the files
+            // that did not land keep the source, and the gate below names them.
+            if retry.interrupted {
+                eprintln!("{}", retry::INTERRUPTED_NOTE);
+            }
 
             // R47-F4 (data-loss): refuse to delete the source if
             // the scan was incomplete. The R46-F2 mirror gate only
@@ -912,6 +933,11 @@ async fn run_move_inner(
             )
             .await?;
             retry.fold_into_summary(&mut state.summary);
+            // 2026-10-07 defect (b): Ctrl-C stopped the retries; the files
+            // that did not land keep the source, and the gate below names them.
+            if retry.interrupted {
+                eprintln!("{}", retry::INTERRUPTED_NOTE);
+            }
 
             // pfc-5 / Q1(b): refuse before the remote source is touched.
             refuse_source_delete_on_failures(
@@ -989,6 +1015,11 @@ async fn run_move_inner(
             )
             .await?;
             retry.fold_into_summary(&mut state.summary);
+            // 2026-10-07 defect (b): Ctrl-C stopped the retries; the files
+            // that did not land keep the source, and the gate below names them.
+            if retry.interrupted {
+                eprintln!("{}", retry::INTERRUPTED_NOTE);
+            }
 
             // pfc-5 / Q1(b): refuse before the local source is removed.
             refuse_source_delete_on_failures(
@@ -1067,6 +1098,11 @@ async fn run_move_inner(
             )
             .await?;
             retry.fold_into_delegated(&mut state.summary);
+            // 2026-10-07 defect (b): Ctrl-C stopped the retries; the files
+            // that did not land keep the source, and the gate below names them.
+            if retry.interrupted {
+                eprintln!("{}", retry::INTERRUPTED_NOTE);
+            }
 
             // pfc-5 / Q1(b): refuse before the remote source is touched.
             // The delegated re-encode is a second summary message, so the

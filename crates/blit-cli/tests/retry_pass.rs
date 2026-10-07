@@ -927,3 +927,51 @@ fn a_permission_denied_source_file_is_reported_and_the_mirror_still_deletes() {
     );
     assert_eq!(fs::read(dst.join("landed.txt")).expect("landed"), b"alpha");
 }
+
+/// 2026-10-07 defect (b): Ctrl-C during the retry wait no longer loses the
+/// report. The first pass already ran (and, for a mirror, deleted); the
+/// run prints its report — the file that did not land — notes the
+/// interruption, and exits 130.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_during_the_retry_wait_still_prints_the_report() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (src, dst) = one_blocked_file_fixture(temp.path());
+    let counters = temp.path().join("counters.txt");
+    let child = spawn(
+        "copy",
+        &["--retries", "1", "--retry-wait", "30"],
+        &src,
+        &dst,
+        &counters,
+    );
+    wait_for_counter(&counters, "retry_wait_seconds", Duration::from_secs(60));
+    let status = Command::new("kill")
+        .arg("-INT")
+        .arg(child.id().to_string())
+        .status()
+        .expect("send SIGINT");
+    assert!(status.success());
+    let started = Instant::now();
+    let output = finish(child);
+    let stdout = stdout_of(&output);
+    let stderr = stderr_of(&output);
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the interrupt cuts the 30 s wait short"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("did not land") && stdout.contains("blocked.txt"),
+        "the report names the file that did not land:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("interrupted during the retries"),
+        "the interruption is said:\n{stderr}"
+    );
+    assert_eq!(fs::read(dst.join("landed.txt")).expect("landed"), b"alpha");
+}
