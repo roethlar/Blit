@@ -45,6 +45,24 @@ Shaping, same day (the owner thinking aloud, then ruling):
 - R7 (retention): "50 default, blit.conf option for others".
 - R8 (rejecting a two-command surface and dropping saved jobs): "no, result
   of above." — saved, reusable jobs are in scope.
+- R9 (where settings and job files live): "config can't be in /etc because
+  this is also a windows app. toml is fine, details are up to you. ~/.blit is
+  universal, or we can use the userprofile to keep it in AppData\Local,
+  ~/Library/Application Support, etc."
+
+Agent's design call under R9's delegation (2026-10-07): one per-user folder
+per machine, the platform's own — macOS `~/Library/Application
+Support/com.Blit.Blit` and Linux `~/.config/blit` (the folders
+`config_dir()` already resolves, holding `recents.jsonl` and the perf
+history), and Windows `%LOCALAPPDATA%\Blit` (moved from the roaming
+`%APPDATA%\Blit\Blit\config` `config_dir()` returns today, because job
+records can be large and a roaming profile copies them at every sign-in; the
+existing small files move with it once). Inside it: `config.toml` (settings,
+e.g. how many run records to keep), `jobs/runs/` (run records) and
+`jobs/saved/` (saved jobs). The daemon keeps its existing machine-wide
+`config.toml` (`/etc/blit/config.toml` on Linux/macOS,
+`C:\ProgramData\Blit\config.toml` on Windows — Windows is already covered)
+for its own settings, and its job records beside its existing recents.
 
 ## Non-goals
 
@@ -109,7 +127,8 @@ Asked one at a time, in this order:
 - Q3. What `blit retry` re-runs: only the files that failed, with the
   original options, or the whole job? — owner
 - Q4. How long records are kept — RULED by R7: the last 50 by default,
-  configurable in the config file. Whether a saved job (R5) counts toward the
+  configurable in `config.toml` (R9: TOML, per-user folder; the daemon's in
+  its own `config.toml`). Whether a saved job (R5) counts toward the
   50 is open (proposed: no — a saved job is kept until deleted). — owner
 - Q5. The cleaned-up command surface for R5 (`--save <name>`, export by job
   ID, running a saved job, listing and deleting saved jobs) — proposed to the
