@@ -251,6 +251,10 @@ pub struct TransferRecord {
     /// Whether payload used the in-stream gRPC carrier rather than TCP.
     #[serde(default)]
     pub tcp_fallback_used: bool,
+    /// Files that failed on their own while the job went on (jl-1c). A
+    /// record from before this field reads as zero.
+    #[serde(default)]
+    pub files_failed: u64,
     /// `true` if the handler reported success (Subscribe-era
     /// `TransferComplete`); `false` if it failed or the
     /// guard drained without a recorded outcome (panic,
@@ -287,6 +291,7 @@ struct JobProgressCounters {
     files_completed: AtomicU64,
     files_total: AtomicU64,
     tcp_fallback_used: AtomicBool,
+    files_failed: AtomicU64,
 }
 
 /// Cumulative progress snapshot shared by GetState, daemon events, delegated
@@ -298,6 +303,7 @@ pub struct JobProgressSnapshot {
     pub files_completed: u64,
     pub files_total: u64,
     pub tcp_fallback_used: bool,
+    pub files_failed: u64,
 }
 
 /// Cloneable producer handle for one active job's progress counters.
@@ -395,6 +401,14 @@ impl ActiveJobProgress {
             .store(tcp_fallback_used, Ordering::Relaxed);
     }
 
+    /// The job's count of files that failed on their own, from its
+    /// summary (jl-1c).
+    pub fn note_files_failed(&self, files_failed: u64) {
+        self.counters
+            .files_failed
+            .store(files_failed, Ordering::Relaxed);
+    }
+
     pub fn snapshot(&self) -> JobProgressSnapshot {
         progress_snapshot(&self.counters)
     }
@@ -413,6 +427,7 @@ fn progress_snapshot(counters: &JobProgressCounters) -> JobProgressSnapshot {
         files_completed: counters.files_completed.load(Ordering::Relaxed),
         files_total: counters.files_total.load(Ordering::Relaxed),
         tcp_fallback_used: counters.tcp_fallback_used.load(Ordering::Relaxed),
+        files_failed: counters.files_failed.load(Ordering::Relaxed),
     }
 }
 
@@ -1242,6 +1257,7 @@ fn build_record(
         tcp_fallback_used: progress.tcp_fallback_used,
         ok,
         error_message,
+        files_failed: progress.files_failed,
     }
 }
 
@@ -1653,6 +1669,7 @@ mod tests {
             tcp_fallback_used: true,
             ok: true,
             error_message: String::new(),
+            files_failed: 0,
         }
     }
 

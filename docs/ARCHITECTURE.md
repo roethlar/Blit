@@ -372,13 +372,17 @@ service Blit {
   rpc Subscribe(SubscribeRequest) returns (stream DaemonEvent);
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
   rpc ClearRecent(ClearRecentRequest) returns (ClearRecentResponse);
+  rpc GetJobLog(GetJobLogRequest) returns (stream JobLogChunk);
 }
 ```
 
 `DelegatedPull` lets a daemon pull from another daemon on a client's
 behalf (remote→remote). `GetState` / `Subscribe` expose live transfer
 state; `CancelJob` cancels an in-flight transfer (authorized to the
-originating peer); `ClearRecent` wipes the recent-transfers ring.
+originating peer); `ClearRecent` wipes the recent-transfers ring;
+`GetJobLog` streams the log a daemon kept for a job — every file copied,
+deleted and failed, phases and summary (`blit_core::job_log`,
+`docs/plan/JOB_LOGS.md`).
 
 ### Hybrid Data Plane
 

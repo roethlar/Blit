@@ -516,6 +516,7 @@ pub(crate) async fn run_transfer_session(
                 summary.bytes_transferred,
                 summary.in_stream_carrier_used,
             );
+            job_progress.note_files_failed(summary.files_failed);
             Ok(())
         }
         Err(report) => {

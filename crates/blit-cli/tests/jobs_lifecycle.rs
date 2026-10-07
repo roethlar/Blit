@@ -280,6 +280,82 @@ fn detached_copy_watch_to_terminal_then_cancel_is_not_found() {
     );
 }
 
+/// Defect (c) of 2026-10-07, closed by JOB_LOGS jl-1c: a detached
+/// remote-to-remote job whose one file failed on its own used to be
+/// recorded ok, and `jobs watch` reported success. Now `watch` exits 1 and
+/// names the file and its reason (from the job's log), `jobs list` shows
+/// the count, and `jobs log` shows the file.
+#[test]
+fn a_detached_job_with_a_failed_file_is_not_reported_as_success() {
+    let ctx = DelegationContext::with_real_source();
+    let src_dir = ctx.module_src_dir.as_ref().expect("real source");
+    fs::write(src_dir.join("blocked.txt"), b"never lands").expect("write src file");
+    fs::write(src_dir.join("fine.txt"), b"lands").expect("write src file");
+    // A folder in the way fails the one file on its own.
+    fs::create_dir_all(ctx.module_dst_dir.join("blocked.txt")).expect("block one path");
+
+    let transfer_id = detach_copy(&ctx);
+    let dest_host = ctx.dest_host();
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+
+    let watch = ctx.run_blit(&[
+        "jobs",
+        "watch",
+        &dest_host,
+        &transfer_id,
+        "--timeout-secs",
+        "30",
+    ]);
+    let watch_err = text(&watch.stderr);
+    assert_eq!(
+        watch.status.code(),
+        Some(1),
+        "a job with a failed file is not a success
+stderr:
+{watch_err}"
+    );
+    assert!(
+        watch_err.contains("1 file(s) failed in transfer"),
+        "watch says files failed:
+{watch_err}"
+    );
+    assert!(
+        watch_err.contains("  blocked.txt: "),
+        "watch names the file and its reason:
+{watch_err}"
+    );
+    assert_eq!(
+        fs::read(ctx.module_dst_dir.join("fine.txt")).expect("the healthy file landed"),
+        b"lands"
+    );
+
+    let list = ctx.run_blit(&["jobs", "list", &dest_host, "--json"]);
+    let state: serde_json::Value = serde_json::from_slice(&list.stdout).expect("list JSON");
+    let record = state["recent"]
+        .as_array()
+        .and_then(|recent| {
+            recent
+                .iter()
+                .find(|job| job["transfer_id"] == transfer_id.as_str())
+        })
+        .unwrap_or_else(|| panic!("the job is in the recent list: {state}"));
+    assert_eq!(record["files_failed"], 1, "{record}");
+    let human = ctx.run_blit(&["jobs", "list", &dest_host]);
+    assert!(
+        text(&human.stdout).contains("FAILED: 1 file(s) did not land"),
+        "{}",
+        text(&human.stdout)
+    );
+
+    let log = ctx.run_blit(&["jobs", "log", &dest_host, &transfer_id]);
+    assert!(log.status.success(), "{}", text(&log.stderr));
+    assert!(
+        text(&log.stdout).contains("FAILED   blocked.txt: "),
+        "{}",
+        text(&log.stdout)
+    );
+}
+
 #[test]
 fn cancel_of_active_delegated_job_exits_zero() {
     // A fake source that accepts the gRPC connection but never

@@ -576,6 +576,24 @@ async fn a_delegated_pull_logs_each_file_and_the_failure() {
 
     let (role, log) = dst.job_log(&transfer_id).await;
     assert_eq!(role, "destination");
+    // jl-1c: the destination's record of the job carries the count.
+    let state = blit_core::admin::jobs::query(
+        &blit_core::remote::RemoteEndpoint {
+            host: "127.0.0.1".into(),
+            port: dst.port,
+            path: blit_core::remote::RemotePath::Discovery,
+        },
+        0,
+    )
+    .await
+    .expect("GetState");
+    let record = state
+        .recent
+        .iter()
+        .find(|record| record.transfer_id == transfer_id)
+        .expect("the job is in the recent list");
+    assert!(record.ok);
+    assert_eq!(record.files_failed, 1);
     let EventBody::RunStart(start) = &log[0] else {
         panic!("first event: {:?}", log[0]);
     };

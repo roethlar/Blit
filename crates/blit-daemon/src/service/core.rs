@@ -338,6 +338,7 @@ pub(crate) fn build_transfer_finished_event(
                 files: progress.files_completed,
                 duration_ms: guard.elapsed_ms(),
                 tcp_fallback_used: progress.tcp_fallback_used,
+                files_failed: progress.files_failed,
             })),
         }
     } else {
@@ -489,6 +490,7 @@ impl Blit for BlitService {
                         summary.bytes_transferred,
                         summary.in_stream_carrier_used,
                     );
+                    job.progress().note_files_failed(summary.files_failed);
                 }
             }
             recorder.record(ok);
@@ -1054,6 +1056,7 @@ impl Blit for BlitService {
                 tcp_fallback_used: r.tcp_fallback_used,
                 ok: r.ok,
                 error_message: r.error_message,
+                files_failed: r.files_failed,
             })
             .collect();
 
@@ -2061,6 +2064,8 @@ mod tests {
             "/".to_string(),
         );
         guard.progress().finish(3, 2048, true);
+        // jl-1c: a job that ran to its end with files failed says so.
+        guard.progress().note_files_failed(2);
 
         let ev = build_transfer_finished_event(&guard, true, None);
         match ev.payload.unwrap() {
@@ -2068,6 +2073,7 @@ mod tests {
                 assert_eq!(c.transfer_id, guard.transfer_id());
                 assert_eq!(c.bytes, 2048);
                 assert_eq!(c.files, 3);
+                assert_eq!(c.files_failed, 2);
                 // duration_ms is `unix_ms_now() - start_unix_ms`
                 // — small (test runs fast) but not negative.
                 let _ = c.duration_ms;

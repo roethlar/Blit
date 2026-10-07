@@ -499,6 +499,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
                 outcome.summary.bytes_transferred,
                 outcome.summary.in_stream_carrier_used,
             );
+            progress_for_finish.note_files_failed(outcome.summary.files_failed);
             log_for_finish.note_summary(&outcome.summary);
             if let Some(streams) = outcome.data_plane_streams {
                 log_for_finish.note(format!("data-plane streams: {streams}"));

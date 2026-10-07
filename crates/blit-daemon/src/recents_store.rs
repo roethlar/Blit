@@ -111,6 +111,7 @@ mod tests {
             tcp_fallback_used: true,
             ok: true,
             error_message: String::new(),
+            files_failed: 0,
         }
     }
 

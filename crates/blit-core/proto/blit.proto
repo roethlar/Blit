@@ -846,6 +846,10 @@ message TransferRecord {
   string error_message = 11;
   // True when payload used the in-stream gRPC carrier rather than TCP.
   bool tcp_fallback_used = 12;
+  // Contract 7 (JOB_LOGS jl-1c): files that failed on their own while
+  // the job went on. `ok` stays true for such a job — it ran to its
+  // end — so a reader checks this too; `GetJobLog` names the files.
+  uint64 files_failed = 13;
 }
 
 message Counters {
@@ -1010,6 +1014,8 @@ message TransferComplete {
   uint64 duration_ms = 4;
   // True when payload used the in-stream gRPC carrier rather than TCP.
   bool tcp_fallback_used = 5;
+  // Contract 7 (JOB_LOGS jl-1c): as `TransferRecord.files_failed`.
+  uint64 files_failed = 6;
 }
 
 // Fired when a transfer drains in a failure state

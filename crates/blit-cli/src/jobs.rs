@@ -7,6 +7,7 @@ use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Return shape from [`run_jobs`]. `list` always exits with
@@ -184,6 +185,7 @@ impl ActiveSnapshot {
             tcp_fallback_used: c.tcp_fallback_used,
             ok: true,
             error_message: String::new(),
+            files_failed: c.files_failed,
         }
     }
 
@@ -213,6 +215,7 @@ impl ActiveSnapshot {
             tcp_fallback_used: false,
             ok: false,
             error_message: e.message.clone(),
+            files_failed: 0,
         }
     }
 }
@@ -224,8 +227,9 @@ impl ActiveSnapshot {
 ///
 /// Exit codes:
 ///
-///   Finished + ok=true   → 0
-///   Finished + ok=false  → 1
+///   Finished + ok=true, no file failed → 0
+///   Finished + ok=false, or files failed → 1 (the failed files are
+///                              named from the job's log)
 ///   NotFound             → 2 (id never seen, or completed
 ///                              before subscribe + rotated out
 ///                              of the recent ring)
@@ -245,7 +249,8 @@ impl ActiveSnapshot {
 ///    - NotFound           → emit not-found, return 2.
 /// 3. Consume Subscribe stream events for the transfer:
 ///    - TransferProgress → update progress line / JSON.
-///    - TransferComplete → emit terminal line, return 0.
+///    - TransferComplete → emit terminal line, return 0 — or 1, naming
+///      the failed files, when any failed.
 ///    - TransferError    → emit failed line, return 1.
 ///    - TransferStarted  → ignored (initial GetState already
 ///      reported state).
@@ -303,12 +308,11 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
                 print_watch_json(&snap);
             } else {
                 emit_human_finished(r);
+                if r.ok && r.files_failed > 0 {
+                    print_failed_files(&remote, &args.remote, &r.transfer_id, r.files_failed).await;
+                }
             }
-            return Ok(if r.ok {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            });
+            return Ok(finished_exit(r.ok, r.files_failed));
         }
         WatchSnapshot::NotFound => {
             if args.json {
@@ -410,8 +414,17 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
                         print_watch_json(&WatchSnapshot::Finished(merged));
                     } else {
                         emit_human_complete(&c);
+                        if c.files_failed > 0 {
+                            print_failed_files(
+                                &remote,
+                                &args.remote,
+                                &c.transfer_id,
+                                c.files_failed,
+                            )
+                            .await;
+                        }
                     }
-                    return Ok(ExitCode::SUCCESS);
+                    return Ok(finished_exit(true, c.files_failed));
                 }
                 Some(daemon_event::Payload::TransferError(e)) => {
                     if args.json {
@@ -468,12 +481,11 @@ async fn reconcile_via_get_state(
         WatchSnapshot::Finished(r) => {
             if !args.json {
                 emit_human_finished(&r);
+                if r.ok && r.files_failed > 0 {
+                    print_failed_files(remote, &args.remote, &r.transfer_id, r.files_failed).await;
+                }
             }
-            Ok(if r.ok {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            })
+            Ok(finished_exit(r.ok, r.files_failed))
         }
         WatchSnapshot::Active(a) => {
             if !args.json {
@@ -526,12 +538,103 @@ fn emit_human_active(a: &blit_core::generated::ActiveTransfer, note: Option<&str
     }
 }
 
-fn emit_human_finished(r: &blit_core::generated::TransferRecord) {
-    let status = if r.ok {
-        "ok".to_string()
-    } else {
+/// How a finished job ended, in words: a job whose files failed on their
+/// own ran to its end but did not succeed (jl-1c).
+fn finished_status(r: &blit_core::generated::TransferRecord) -> String {
+    if !r.ok {
         format!("FAILED: {}", r.error_message)
-    };
+    } else if r.files_failed > 0 {
+        format!("FAILED: {} file(s) did not land", r.files_failed)
+    } else {
+        "ok".to_string()
+    }
+}
+
+/// `jobs watch`'s exit for a finished job: 0 only when it ran to its end
+/// with no file failed; 1 otherwise (jl-1c — before, a job whose files
+/// failed one by one exited 0, defect (c) of 2026-10-07).
+fn finished_exit(ok: bool, files_failed: u64) -> ExitCode {
+    if ok && files_failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// Name the files a finished job failed, from the job's log on the daemon
+/// (jl-1c). The daemon closes the log a moment after the job's record, so
+/// this waits briefly for the log to finish; at most [`FAILED_SHOWN`] are
+/// listed, with a pointer to `blit jobs log` for the rest.
+async fn print_failed_files(
+    remote: &RemoteEndpoint,
+    remote_arg: &str,
+    transfer_id: &str,
+    files_failed: u64,
+) {
+    eprintln!("blit: {files_failed} file(s) failed in transfer {transfer_id}:");
+    let mut named: Vec<(String, String)> = Vec::new();
+    let mut total = 0u64;
+    let mut problem = None;
+    for _ in 0..50 {
+        // (first FAILED_SHOWN failures, how many in all, every log finished)
+        let collected = Arc::new(Mutex::new((Vec::new(), 0u64, true)));
+        let sink = Arc::clone(&collected);
+        let read = jobs::read_job_logs(remote, transfer_id, None, move |header, lines| {
+            let mut found = Vec::new();
+            let mut count = 0u64;
+            for line in LogLines::new(lines) {
+                if let LogLine::Event(job_log::Event {
+                    body: job_log::EventBody::FileFailed { path, reason },
+                    ..
+                }) = line?
+                {
+                    if found.len() < FAILED_SHOWN {
+                        found.push((path, reason));
+                    }
+                    count += 1;
+                }
+            }
+            let mut collected = sink.lock().unwrap_or_else(|e| e.into_inner());
+            let room = FAILED_SHOWN.saturating_sub(collected.0.len());
+            collected.0.extend(found.into_iter().take(room));
+            collected.1 += count;
+            collected.2 &= header.finished;
+            Ok(())
+        })
+        .await;
+        match read {
+            Ok(()) => {
+                let (list, count, finished) =
+                    std::mem::take(&mut *collected.lock().unwrap_or_else(|e| e.into_inner()));
+                named = list;
+                total = count;
+                problem = None;
+                if finished {
+                    break;
+                }
+            }
+            Err(error) => problem = Some(format!("{error:#}")),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    for (path, reason) in &named {
+        eprintln!("  {path}: {reason}");
+    }
+    if let Some(problem) = problem {
+        eprintln!("  (could not read the job's log: {problem})");
+    } else if total > named.len() as u64 {
+        eprintln!(
+            "  ... and {} more; `blit jobs log {remote_arg} {transfer_id}` lists them all",
+            total - named.len() as u64
+        );
+    }
+}
+
+/// How many failed files `jobs watch` names before pointing at `jobs log`.
+const FAILED_SHOWN: usize = 20;
+
+fn emit_human_finished(r: &blit_core::generated::TransferRecord) {
+    let status = finished_status(r);
     eprintln!(
         "[done] {} {} bytes={} files={} carrier={} duration={} {}",
         jobs::kind_label(r.kind),
@@ -574,8 +677,13 @@ fn format_progress_pair(completed: u64, total: u64) -> String {
 }
 
 fn emit_human_complete(c: &blit_core::generated::TransferComplete) {
+    let status = if c.files_failed > 0 {
+        format!("FAILED: {} file(s) did not land", c.files_failed)
+    } else {
+        "ok".to_string()
+    };
     eprintln!(
-        "[done] transfer {} bytes={} files={} carrier={} duration={} ok",
+        "[done] transfer {} bytes={} files={} carrier={} duration={} {status}",
         c.transfer_id,
         c.bytes,
         c.files,
@@ -649,6 +757,7 @@ fn watch_json(snap: &WatchSnapshot) -> serde_json::Value {
             "tcp_fallback_used": r.tcp_fallback_used,
             "ok": r.ok,
             "error_message": r.error_message,
+            "files_failed": r.files_failed,
         }),
         WatchSnapshot::NotFound => json!({
             "state": "not_found",
@@ -756,6 +865,7 @@ fn print_json(state: &DaemonState) -> Result<()> {
                 "tcp_fallback_used": r.tcp_fallback_used,
                 "ok": r.ok,
                 "error_message": r.error_message,
+                "files_failed": r.files_failed,
             })
         })
         .collect();
@@ -843,11 +953,7 @@ fn print_human(remote: &RemoteEndpoint, state: &DaemonState) {
         // oldest-first, so iterate in reverse.
         println!("Recent ({}):", state.recent.len());
         for r in state.recent.iter().rev() {
-            let status = if r.ok {
-                "ok".to_string()
-            } else {
-                format!("FAILED: {}", r.error_message)
-            };
+            let status = finished_status(r);
             println!(
                 "  {}  {}  {}  peer={}  duration={}  {}",
                 r.transfer_id,
@@ -1005,8 +1111,10 @@ mod tests {
             files: 4,
             duration_ms: 1200,
             tcp_fallback_used: true,
+            files_failed: 2,
         };
         let merged = snap.to_finished_complete(&complete);
+        assert_eq!(merged.files_failed, 2);
         assert_eq!(merged.transfer_id, "t1-7");
         assert_eq!(merged.kind, snap.kind);
         assert_eq!(merged.peer, snap.peer);

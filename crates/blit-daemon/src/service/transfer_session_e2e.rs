@@ -2165,6 +2165,11 @@ async fn a_served_pull_logs_the_destinations_failures() {
     assert_eq!(outcome.summary.files_failed, 1);
 
     let logs = daemon.job_logs().await;
+    // jl-1c: the job's record carries the count, though the job ran to
+    // its end.
+    let record = &daemon.active_jobs.recent()[0];
+    assert!(record.ok);
+    assert_eq!(record.files_failed, 1);
     let (role, _, events) = &logs[0];
     assert_eq!(role, "source");
     let failed: Vec<&str> = events

@@ -358,6 +358,16 @@ Small first, per R1; each slice is one coherent, testable change.
 3. **jl-1c — failures in the job list.** `jobs list`/`watch` show the
    failed-file count and `watch` exits non-zero when files failed (closes
    defect (c)).
+   **Landed 2026-10-07.** `TransferRecord` and `TransferComplete` gain
+   `files_failed` (contract 7; `ok` stays true for a job that ran to its
+   end, so readers check both); the daemon sets it from the job's summary.
+   `jobs list` shows `FAILED: N file(s) did not land` (and `files_failed`
+   in `--json`); `jobs watch` exits 1 — its existing finished-failed code —
+   and names up to 20 failed files with their reasons from the job's log,
+   pointing at `blit jobs log` for the rest. The first acceptance criterion
+   (a detached remote-to-remote job with one failed file) is exercised end
+   to end by `a_detached_job_with_a_failed_file_is_not_reported_as_success`
+   (macOS); declaring it met is the owner's call.
 4. **jl-2 — one run ID everywhere, local logs.** The CLI creates the job ID and
    sends it, so both daemons of a remote-to-remote job and the CLI machine log
    under it; local runs write logs too; the per-user folder (Windows moved to

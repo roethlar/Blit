@@ -401,6 +401,7 @@ mod tests {
             tcp_fallback_used: false,
             ok,
             error_message: err.to_string(),
+            files_failed: 0,
         }
     }
 
