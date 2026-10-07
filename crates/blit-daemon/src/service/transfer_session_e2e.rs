@@ -70,6 +70,8 @@ struct Daemon {
     /// ph-1c: this daemon's own isolated history store; the recording
     /// matrix asserts what the served end wrote here.
     perf_dir: tempfile::TempDir,
+    /// jl-1b: this daemon's state dir; every served job logs here.
+    _job_state: tempfile::TempDir,
 }
 
 impl Daemon {
@@ -99,6 +101,7 @@ impl Daemon {
             },
         );
         let perf_dir = tempfile::tempdir().expect("perf dir");
+        let job_state = tempfile::tempdir().expect("job log state dir");
         let service = BlitService::from_runtime(
             modules,
             None,
@@ -109,7 +112,11 @@ impl Daemon {
             Some(blit_core::perf_history::HistoryStore::at_dir(
                 perf_dir.path().to_path_buf(),
             )),
-        );
+        )
+        .with_job_logs(Some(
+            crate::job_logs::JobLogs::open(job_state.path(), blit_core::job_log::DEFAULT_KEEP)
+                .expect("job logs"),
+        ));
         let active_jobs = service.active_jobs.clone();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -144,7 +151,55 @@ impl Daemon {
             dest_root: canonical,
             active_jobs,
             perf_dir,
+            _job_state: job_state,
         }
+    }
+
+    /// jl-1b: every log this daemon kept for its one finished job, read
+    /// back over `GetJobLog` as `(role, finished, events)`. Waits for the
+    /// dispatcher to close the log, which it does after the client already
+    /// holds its summary.
+    async fn job_logs(&self) -> Vec<(String, bool, Vec<blit_core::job_log::EventBody>)> {
+        let mut transfer_id = None;
+        for _ in 0..500 {
+            if let Some(record) = self.active_jobs.recent().first() {
+                transfer_id = Some(record.transfer_id.clone());
+            }
+            if let Some(id) = &transfer_id {
+                let mut logs = Vec::new();
+                let fetched = Arc::new(Mutex::new(Vec::new()));
+                let sink = Arc::clone(&fetched);
+                let read = blit_core::admin::jobs::read_job_logs(
+                    &self.endpoint,
+                    id,
+                    None,
+                    move |header, lines| {
+                        let mut events = Vec::new();
+                        for line in blit_core::job_log::LogLines::new(lines) {
+                            match line? {
+                                blit_core::job_log::LogLine::Event(event) => {
+                                    events.push(event.body)
+                                }
+                                other => eyre::bail!("unreadable log line: {other:?}"),
+                            }
+                        }
+                        sink.lock()
+                            .unwrap()
+                            .push((header.role, header.finished, events));
+                        Ok(())
+                    },
+                )
+                .await;
+                if read.is_ok() {
+                    logs.append(&mut fetched.lock().unwrap());
+                    if !logs.is_empty() && logs.iter().all(|(_, finished, _)| *finished) {
+                        return logs;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the job's log never finished (job {transfer_id:?})");
     }
 
     /// The records this daemon's own store holds, oldest first.
@@ -1793,4 +1848,438 @@ async fn unknown_module_refuses_the_pull_session() {
     .expect_err("unknown module must refuse the pull session");
     assert_eq!(fault_of(&err).code, session_error::Code::ModuleUnknown);
     daemon.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// jl-1b: each served job leaves a log naming every file, read back over
+// GetJobLog through the client the CLI uses.
+// ---------------------------------------------------------------------------
+
+fn kinds_and_names(events: &[blit_core::job_log::EventBody]) -> Vec<String> {
+    use blit_core::job_log::{EventBody, PhaseState};
+    events
+        .iter()
+        .filter_map(|event| match event {
+            EventBody::Phase { name, state } => Some(format!(
+                "phase {name} {}",
+                if *state == PhaseState::Start {
+                    "start"
+                } else {
+                    "end"
+                }
+            )),
+            EventBody::FileCopied { path, .. } => Some(format!("copied {path}")),
+            EventBody::FileSent { path } => Some(format!("sent {path}")),
+            EventBody::FileDeleted { path } => Some(format!("deleted {path}")),
+            EventBody::FileFailed { path, .. } => Some(format!("failed {path}")),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_served_mirror_push_logs_every_copy_and_deletion() {
+    use blit_core::job_log::{EventBody, Outcome, Role};
+    let src = tempfile::tempdir().unwrap();
+    write_tree(src.path(), &small_tree());
+    let daemon = Daemon::start(false).await;
+    write_tree(
+        &daemon.dest_root,
+        &[("stale.txt", b"old", 1), ("gone/old.txt", b"old", 1)],
+    );
+
+    run_push_session(
+        &daemon.endpoint,
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions {
+            mirror_enabled: true,
+            mirror_kind: blit_core::generated::MirrorMode::All,
+            ..PushSessionOptions::default()
+        },
+    )
+    .await
+    .expect("mirror push succeeds");
+
+    let logs = daemon.job_logs().await;
+    assert_eq!(logs.len(), 1, "one log: {logs:?}");
+    let (role, _, events) = &logs[0];
+    assert_eq!(role, "destination");
+    let EventBody::RunStart(start) = &events[0] else {
+        panic!("first event: {:?}", events[0]);
+    };
+    assert_eq!(
+        (
+            start.role,
+            start.run.verb.as_str(),
+            start.run.destination.as_str()
+        ),
+        (Role::Destination, "push", "/test")
+    );
+    assert!(
+        start.run.options.contains(&"mirror=all".to_string()),
+        "{start:?}"
+    );
+
+    let mut named = kinds_and_names(events);
+    // Files land in any order; the phases frame them.
+    let copies: Vec<String> = {
+        let mut copies: Vec<String> = named
+            .iter()
+            .filter(|line| line.starts_with("copied "))
+            .cloned()
+            .collect();
+        copies.sort();
+        copies
+    };
+    assert_eq!(
+        copies,
+        [
+            "copied a.txt",
+            "copied dir one/b.log",
+            "copied dir one/deeper/c.dat",
+            "copied empty.bin",
+        ]
+    );
+    named.retain(|line| !line.starts_with("copied "));
+    assert_eq!(
+        named,
+        [
+            "phase transfer start",
+            "phase transfer end",
+            "phase delete start",
+            "deleted gone/old.txt",
+            "deleted stale.txt",
+            "deleted gone/",
+            "phase delete end",
+        ]
+    );
+    let summary = events
+        .iter()
+        .find_map(|event| match event {
+            EventBody::Summary(summary) => Some(*summary),
+            _ => None,
+        })
+        .expect("a summary");
+    assert_eq!(
+        (
+            summary.files_copied,
+            summary.files_deleted,
+            summary.files_failed
+        ),
+        (4, 3, 0)
+    );
+    assert!(matches!(
+        events.last(),
+        Some(EventBody::RunEnd {
+            outcome: Outcome::Ok,
+            detail: None
+        })
+    ));
+
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_served_pull_logs_each_file_sent() {
+    use blit_core::job_log::{EventBody, Outcome, Role};
+    let daemon = Daemon::start(false).await;
+    write_tree(&daemon.dest_root, &small_tree());
+    let dest = tempfile::tempdir().unwrap();
+
+    run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions::default(),
+    )
+    .await
+    .expect("pull succeeds");
+
+    let logs = daemon.job_logs().await;
+    assert_eq!(logs.len(), 1, "one log: {logs:?}");
+    let (role, _, events) = &logs[0];
+    assert_eq!(role, "source");
+    let EventBody::RunStart(start) = &events[0] else {
+        panic!("first event: {:?}", events[0]);
+    };
+    assert_eq!(
+        (
+            start.role,
+            start.run.verb.as_str(),
+            start.run.source.as_str()
+        ),
+        (Role::Source, "pull", "/test")
+    );
+    let mut sent: Vec<String> = kinds_and_names(events)
+        .into_iter()
+        .filter(|line| line.starts_with("sent "))
+        .collect();
+    sent.sort();
+    assert_eq!(
+        sent,
+        [
+            "sent a.txt",
+            "sent dir one/b.log",
+            "sent dir one/deeper/c.dat",
+            "sent empty.bin",
+        ]
+    );
+    assert!(matches!(
+        events.last(),
+        Some(EventBody::RunEnd {
+            outcome: Outcome::Ok,
+            ..
+        })
+    ));
+
+    daemon.stop().await;
+}
+
+/// A destination directory the daemon cannot write into fails its one file
+/// on its own; the log names it, with the reason, and the job ends failed.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_served_push_logs_a_file_that_failed_and_why() {
+    use blit_core::job_log::{EventBody, Outcome};
+    use std::os::unix::fs::PermissionsExt;
+    let src = tempfile::tempdir().unwrap();
+    write_tree(
+        src.path(),
+        &[
+            ("ok.txt", b"fine", 1_600_000_001),
+            ("locked/f.txt", b"no", 1_600_000_002),
+        ],
+    );
+    let daemon = Daemon::start(false).await;
+    let locked = daemon.dest_root.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let summary = run_push_session(
+        &daemon.endpoint,
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions::default(),
+    )
+    .await
+    .expect("the push finishes, with one file failed");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(summary.files_failed, 1, "{summary:?}");
+
+    let logs = daemon.job_logs().await;
+    let (_, _, events) = &logs[0];
+    let failed: Vec<(&str, &str)> = events
+        .iter()
+        .filter_map(|event| match event {
+            EventBody::FileFailed { path, reason } => Some((path.as_str(), reason.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed.len(), 1, "named once: {failed:?}");
+    assert_eq!(failed[0].0, "locked/f.txt");
+    assert!(
+        failed[0].1.to_lowercase().contains("permission denied"),
+        "{failed:?}"
+    );
+    assert!(kinds_and_names(events).contains(&"copied ok.txt".to_string()));
+    assert!(matches!(
+        events.last(),
+        Some(EventBody::RunEnd { outcome: Outcome::Failed, detail: Some(detail) })
+            if detail == "1 file(s) failed"
+    ));
+
+    daemon.stop().await;
+}
+
+/// More failures than the summary keeps reasons for: every one is still
+/// named with its own reason, because the destination reports each as it
+/// fails rather than leaving the log to the capped summary. Both carriers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_served_push_logs_every_failure_past_the_summarys_cap() {
+    use blit_core::job_log::EventBody;
+    for in_stream_bytes in [false, true] {
+        let src = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(false).await;
+        let names: Vec<String> = (0..70).map(|n| format!("f{n:02}.txt")).collect();
+        for name in &names {
+            std::fs::write(src.path().join(name), b"x").unwrap();
+            // A folder in the way fails the file on its own.
+            std::fs::create_dir(daemon.dest_root.join(name)).unwrap();
+        }
+
+        let summary = run_push_session(
+            &daemon.endpoint,
+            Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+            PushSessionOptions {
+                in_stream_bytes,
+                ..PushSessionOptions::default()
+            },
+        )
+        .await
+        .expect("the push finishes, every file failed");
+        assert_eq!(summary.files_failed, 70);
+        assert!(summary.failures.len() < 70, "the summary caps its reasons");
+
+        let logs = daemon.job_logs().await;
+        let (_, _, events) = &logs[0];
+        let mut failed: Vec<(&str, &str)> = events
+            .iter()
+            .filter_map(|event| match event {
+                EventBody::FileFailed { path, reason } => Some((path.as_str(), reason.as_str())),
+                _ => None,
+            })
+            .collect();
+        failed.sort();
+        assert_eq!(
+            failed.iter().map(|(path, _)| *path).collect::<Vec<_>>(),
+            names.iter().map(String::as_str).collect::<Vec<_>>(),
+            "in_stream_bytes={in_stream_bytes}"
+        );
+        assert!(
+            failed
+                .iter()
+                .all(|(_, reason)| !reason.contains("the transfer's report kept no reason")),
+            "in_stream_bytes={in_stream_bytes}: a failure fell back to the summary: {failed:?}"
+        );
+
+        daemon.stop().await;
+    }
+}
+
+/// A file the pulling end could not write is named in the serving
+/// source's log too — from the destination's summary, the only account a
+/// source gets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_served_pull_logs_the_destinations_failures() {
+    use blit_core::job_log::EventBody;
+    let daemon = Daemon::start(false).await;
+    write_tree(&daemon.dest_root, &small_tree());
+    let dest = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dest.path().join("a.txt")).unwrap();
+
+    let outcome = run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions::default(),
+    )
+    .await
+    .expect("the pull finishes, one file failed");
+    assert_eq!(outcome.summary.files_failed, 1);
+
+    let logs = daemon.job_logs().await;
+    let (role, _, events) = &logs[0];
+    assert_eq!(role, "source");
+    let failed: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            EventBody::FileFailed { path, .. } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed, ["a.txt"]);
+
+    daemon.stop().await;
+}
+
+/// A source that cannot open any file: every granted file is skipped by
+/// the sending side, the containment path a vanished or locked file takes.
+struct CannotOpenSource {
+    inner: FsTransferSource,
+}
+
+#[async_trait::async_trait]
+impl blit_core::remote::transfer::source::TransferSource for CannotOpenSource {
+    fn scan(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> (
+        tokio::sync::mpsc::Receiver<blit_core::generated::FileHeader>,
+        blit_core::remote::transfer::source::SourceScan,
+    ) {
+        self.inner.scan(filter, unreadable)
+    }
+
+    async fn prepare_payload(
+        &self,
+        payload: blit_core::remote::transfer::payload::TransferPayload,
+    ) -> eyre::Result<blit_core::remote::transfer::payload::PreparedPayload> {
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn open_file(
+        &self,
+        _header: &blit_core::generated::FileHeader,
+    ) -> eyre::Result<OpenedSourceFile> {
+        eyre::bail!("refused by the test")
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+/// Each kind of single-file record logs its failure as it happens — inside
+/// the transfer phase — not only from the summary at the end: a file the
+/// destination could not write, and a file the source skipped. Both
+/// carriers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_single_file_failure_is_logged_as_it_happens() {
+    use blit_core::job_log::{EventBody, PhaseState};
+    for in_stream_bytes in [false, true] {
+        for source_skips in [false, true] {
+            let case = format!("in_stream_bytes={in_stream_bytes} source_skips={source_skips}");
+            let src = tempfile::tempdir().unwrap();
+            // One small file is never batched: it travels as its own record.
+            std::fs::write(src.path().join("one.txt"), b"x").unwrap();
+            let daemon = Daemon::start(false).await;
+            let source: Arc<dyn blit_core::remote::transfer::source::TransferSource> =
+                if source_skips {
+                    Arc::new(CannotOpenSource {
+                        inner: FsTransferSource::new(src.path().to_path_buf()),
+                    })
+                } else {
+                    std::fs::create_dir(daemon.dest_root.join("one.txt")).unwrap();
+                    Arc::new(FsTransferSource::new(src.path().to_path_buf()))
+                };
+
+            let summary = run_push_session(
+                &daemon.endpoint,
+                source,
+                PushSessionOptions {
+                    in_stream_bytes,
+                    ..PushSessionOptions::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{case}: the push finishes: {err:#}"));
+            assert_eq!(summary.files_failed, 1, "{case}");
+
+            let logs = daemon.job_logs().await;
+            let (_, _, events) = &logs[0];
+            let failed_at = events
+                .iter()
+                .position(|event| matches!(event, EventBody::FileFailed { path, .. } if path == "one.txt"))
+                .unwrap_or_else(|| panic!("{case}: no failure logged: {events:?}"));
+            let phase_end = events
+                .iter()
+                .position(|event| {
+                    matches!(event, EventBody::Phase { name, state: PhaseState::End } if name == "transfer")
+                })
+                .unwrap_or_else(|| panic!("{case}: no transfer end: {events:?}"));
+            assert!(
+                failed_at < phase_end,
+                "{case}: the failure was only learned from the summary: {events:?}"
+            );
+            if source_skips {
+                let EventBody::FileFailed { reason, .. } = &events[failed_at] else {
+                    unreachable!()
+                };
+                assert!(
+                    reason.starts_with("source: cannot open"),
+                    "{case}: {reason}"
+                );
+            }
+
+            daemon.stop().await;
+        }
+    }
 }

@@ -94,6 +94,10 @@ read_only = false
 # [delegation]
 # allow_delegated_pull = false
 # allowed_source_hosts = ["server-a.lan", "10.0.0.0/8"]
+
+# Optional: how many finished job logs to keep (newest first).
+# [jobs]
+# keep = 50
 ```
 
 ### Configuration Reference
@@ -138,6 +142,20 @@ loopback IP-form rule.
 |--------|------|---------|-------------|
 | `allow_delegated_pull` | boolean | `false` | Master switch. When false, the daemon refuses `DelegatedPull` requests. |
 | `allowed_source_hosts` | array of strings | `[]` | Source allowlist. Accepts hostnames (IDNA-normalized), CIDR blocks (IPv4 or IPv6, parsed via `ipnet`), and bare IP literals (with optional brackets for IPv6). Invalid entries fail config load. Empty + master switch true means "any host." |
+
+#### `[jobs]` Section
+
+Every job the daemon runs leaves a log naming each file copied, deleted
+and failed, with phase times; `blit jobs log <host> <job-id>` reads it
+(as text, or `--json`). Logs live in `jobs/logs/` under the daemon's state
+directory — systemd's `$STATE_DIRECTORY` when the unit sets
+`StateDirectory=`, else the per-user configuration directory — stored
+compressed once a job ends. A log a stopped daemon left unfinished is
+closed as interrupted at the next start. Logging never fails a transfer.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `keep` | integer | `50` | How many finished job logs to keep. When a job ends, the oldest beyond this number are removed. |
 
 #### Path containment
 

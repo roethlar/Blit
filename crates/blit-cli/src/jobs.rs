@@ -1,9 +1,11 @@
-use crate::cli::{JobsCancelArgs, JobsCommand, JobsListArgs, JobsWatchArgs};
+use crate::cli::{JobsCancelArgs, JobsCommand, JobsListArgs, JobsLogArgs, JobsWatchArgs, LogRole};
 use blit_core::admin::jobs;
 use blit_core::admin::jobs::{CancelJobOutcome, WatchSnapshot};
-use blit_core::generated::{daemon_event, DaemonState};
+use blit_core::generated::{daemon_event, DaemonState, JobLogHeader};
+use blit_core::job_log::{self, LogLine, LogLines, Role};
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
+use std::io::{BufRead, Write};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -26,6 +28,85 @@ pub async fn run_jobs(command: JobsCommand) -> Result<ExitCode> {
         }
         JobsCommand::Cancel(args) => run_jobs_cancel(args).await,
         JobsCommand::Watch(args) => run_jobs_watch(args).await,
+        JobsCommand::Log(args) => {
+            run_jobs_log(args).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// `blit jobs log` (JOB_LOGS jl-1b): each log the daemon kept for the job,
+/// as text or, with `--json`, as its JSON lines.
+async fn run_jobs_log(args: JobsLogArgs) -> Result<()> {
+    let remote = RemoteEndpoint::parse(&args.remote)
+        .with_context(|| format!("parsing remote endpoint '{}'", args.remote))?;
+    let role = args.role.map(|role| match role {
+        LogRole::Initiator => Role::Initiator,
+        LogRole::Source => Role::Source,
+        LogRole::Destination => Role::Destination,
+    });
+    let json = args.json;
+    let mut first = true;
+    jobs::read_job_logs(&remote, &args.transfer_id, role, move |header, lines| {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        if json {
+            write_json_log(&mut out, lines)?;
+        } else {
+            if !first {
+                writeln!(out)?;
+            }
+            write_text_log(&mut out, &header, lines)?;
+        }
+        first = false;
+        out.flush()?;
+        Ok(())
+    })
+    .await
+}
+
+fn write_text_log(
+    out: &mut impl Write,
+    header: &JobLogHeader,
+    lines: Box<dyn BufRead + Send>,
+) -> Result<()> {
+    let unfinished = if header.finished {
+        ""
+    } else {
+        " — not finished: the job is running, or the daemon stopped during it"
+    };
+    writeln!(
+        out,
+        "== {} log from machine {} (attempt {}){unfinished} ==",
+        header.role, header.participant, header.attempt
+    )?;
+    for line in LogLines::new(lines) {
+        match line? {
+            LogLine::Event(event) => writeln!(out, "{}", job_log::text_line(&event))?,
+            LogLine::Unreadable { line, torn: true } => {
+                writeln!(out, "(line {line} was cut short)")?
+            }
+            LogLine::Unreadable { line, torn: false } => {
+                writeln!(out, "(line {line} is not a log event)")?
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The log's lines as stored. A log cut short mid-line still ends with a
+/// newline, so the next log starts on a line of its own.
+fn write_json_log(out: &mut impl Write, mut lines: Box<dyn BufRead + Send>) -> Result<()> {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if lines.read_until(b'\n', &mut line)? == 0 {
+            return Ok(());
+        }
+        out.write_all(&line)?;
+        if !line.ends_with(b"\n") {
+            out.write_all(b"\n")?;
+        }
     }
 }
 

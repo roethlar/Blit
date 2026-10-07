@@ -73,6 +73,15 @@ pub enum ProgressEvent {
     /// finished. Deliberately carries no byte count — bytes ride
     /// [`ProgressEvent::Payload`] only.
     FileComplete { path: String },
+    /// Per-file lane, DESTINATION side (JOB_LOGS jl-1b): the file at the
+    /// wire `path` did not land, and `reason` says why — so a job log can
+    /// name every failed file as it fails. Moves no count: the
+    /// destination's summary `files_failed` is authoritative.
+    FileFailed { path: String, reason: String },
+    /// DESTINATION side (JOB_LOGS jl-1b): the mirror-delete pass removed
+    /// the entry at the wire `path`; a directory's path ends in `/`. Moves
+    /// no count: the summary's `entries_deleted` is authoritative.
+    Deleted { path: String },
     /// Phase signal (clp-2): the DESTINATION has diffed the whole
     /// source manifest, so the `ManifestBatch` denominator is final.
     /// Zero needed files after this means "up to date", not "still
@@ -182,6 +191,8 @@ impl ProgressTotals {
             }
             // Phase signals carry no counts by construction (clp-2).
             ProgressEvent::DiffComplete | ProgressEvent::DeleteBegin => {}
+            // Names for a job log; the summary owns these counts.
+            ProgressEvent::FileFailed { .. } | ProgressEvent::Deleted { .. } => {}
         }
     }
 
@@ -929,6 +940,11 @@ impl Probe for LiveProbe {
     }
 }
 
+/// The reason [`RemoteTransferProgress::report_file_outcome`] gives a failed
+/// file whose own reason the capped failure list did not keep.
+pub const REASON_NOT_KEPT: &str =
+    "failed (its reason was not kept: more files in its batch failed than a report holds)";
+
 #[derive(Clone)]
 pub struct RemoteTransferProgress {
     sender: UnboundedSender<ProgressEvent>,
@@ -974,6 +990,36 @@ impl RemoteTransferProgress {
     /// report those via [`report_payload`](Self::report_payload).
     pub fn report_file_complete(&self, path: String) {
         let _ = self.sender.send(ProgressEvent::FileComplete { path });
+    }
+
+    /// Report how one file's record ended on the DESTINATION: complete,
+    /// or — when `outcome` holds it as a contained failure — failed, with
+    /// the reason the outcome kept. A shard's outcome keeps at most
+    /// [`super::sink::MAX_REPORTED_FILE_FAILURES`] reasons; a member past
+    /// that is reported failed with [`REASON_NOT_KEPT`].
+    pub fn report_file_outcome(&self, path: &str, outcome: &super::sink::SinkOutcome) {
+        if outcome.file_failed(path) {
+            let reason = outcome
+                .failures
+                .iter()
+                .find(|failure| failure.relative_path == path)
+                .map_or(REASON_NOT_KEPT, |failure| failure.reason.as_str());
+            self.report_file_failed(path.to_string(), reason.to_string());
+        } else {
+            self.report_file_complete(path.to_string());
+        }
+    }
+
+    /// Report a file that did not land on the DESTINATION — see
+    /// [`ProgressEvent::FileFailed`].
+    pub fn report_file_failed(&self, path: String, reason: String) {
+        let _ = self.sender.send(ProgressEvent::FileFailed { path, reason });
+    }
+
+    /// Report an entry the mirror-delete pass removed — see
+    /// [`ProgressEvent::Deleted`].
+    pub fn report_deleted(&self, path: String) {
+        let _ = self.sender.send(ProgressEvent::Deleted { path });
     }
 
     /// Report that the destination's diff has consumed the whole source

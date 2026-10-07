@@ -72,6 +72,8 @@ pub(crate) struct DaemonRuntime {
     /// false; the operator must opt the daemon in (and may further
     /// constrain via `allowed_source_hosts`).
     pub(crate) delegation: DelegationConfig,
+    /// `[jobs] keep`: how many finished job logs to keep (JOB_LOGS R7).
+    pub(crate) jobs_keep: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -121,6 +123,15 @@ struct RawConfig {
     modules: Vec<RawModule>,
     #[serde(default)]
     delegation: RawDelegationSection,
+    #[serde(default)]
+    jobs: RawJobsSection,
+}
+
+/// `[jobs]` block from the daemon config (JOB_LOGS jl-1b).
+#[derive(Debug, Default, Deserialize)]
+struct RawJobsSection {
+    /// How many finished job logs to keep; the newest stay.
+    keep: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -356,6 +367,7 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
         warnings,
         server_checksums_enabled,
         delegation,
+        jobs_keep: raw.jobs.keep.unwrap_or(blit_core::job_log::DEFAULT_KEEP),
     })
 }
 
@@ -502,6 +514,14 @@ mod delegation_config_tests {
         };
         let runtime = load_runtime(&args).expect("config loads");
         assert!(!runtime.modules["alpha"].delegation_allowed);
+    }
+
+    #[test]
+    fn jobs_keep_defaults_to_fifty_and_reads_the_config() {
+        let (_dir, args) = with_config("");
+        assert_eq!(load_runtime(&args).expect("default load").jobs_keep, 50);
+        let (_dir, args) = with_config("[jobs]\nkeep = 7\n");
+        assert_eq!(load_runtime(&args).expect("config loads").jobs_keep, 7);
     }
 }
 

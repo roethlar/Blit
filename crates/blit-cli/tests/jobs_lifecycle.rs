@@ -350,6 +350,17 @@ impl blit_core::generated::blit_server::Blit for StallingTransferBlit {
         unreachable!("pending() never resolves")
     }
 
+    type GetJobLogStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::JobLogChunk, tonic::Status>,
+    >;
+
+    async fn get_job_log(
+        &self,
+        _: tonic::Request<blit_core::generated::GetJobLogRequest>,
+    ) -> Result<tonic::Response<Self::GetJobLogStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("test double"))
+    }
+
     async fn subscribe(
         &self,
         _: tonic::Request<blit_core::generated::SubscribeRequest>,

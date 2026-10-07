@@ -41,6 +41,8 @@ struct Daemon {
     /// ph-1c: this daemon's own isolated history store; the recording
     /// matrix asserts what each participant wrote here.
     perf_dir: tempfile::TempDir,
+    /// jl-1b: this daemon's state dir; every job logs here.
+    _job_state: tempfile::TempDir,
 }
 
 impl Daemon {
@@ -67,6 +69,7 @@ impl Daemon {
             allowed_source_hosts: Vec::new(),
         };
         let perf_dir = tempfile::tempdir().expect("perf dir");
+        let job_state = tempfile::tempdir().expect("job log state dir");
         let service = BlitService::from_runtime(
             modules,
             None,
@@ -77,7 +80,11 @@ impl Daemon {
             Some(blit_core::perf_history::HistoryStore::at_dir(
                 perf_dir.path().to_path_buf(),
             )),
-        );
+        )
+        .with_job_logs(Some(
+            crate::job_logs::JobLogs::open(job_state.path(), blit_core::job_log::DEFAULT_KEEP)
+                .expect("job logs"),
+        ));
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind loopback listener");
@@ -102,7 +109,46 @@ impl Daemon {
             _root: dir,
             root: canonical,
             perf_dir,
+            _job_state: job_state,
         }
+    }
+
+    /// jl-1b: this daemon's finished log of job `id`, read back over
+    /// `GetJobLog`, as `(role, events)`. Waits for the dispatcher to close
+    /// it, which it does after the stream already ended.
+    async fn job_log(&self, id: &str) -> (String, Vec<blit_core::job_log::EventBody>) {
+        let endpoint = blit_core::remote::RemoteEndpoint {
+            host: "127.0.0.1".into(),
+            port: self.port,
+            path: blit_core::remote::RemotePath::Discovery,
+        };
+        for _ in 0..500 {
+            let fetched = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = std::sync::Arc::clone(&fetched);
+            let read =
+                blit_core::admin::jobs::read_job_logs(&endpoint, id, None, move |header, lines| {
+                    let mut events = Vec::new();
+                    for line in blit_core::job_log::LogLines::new(lines) {
+                        if let blit_core::job_log::LogLine::Event(event) = line? {
+                            events.push(event.body);
+                        }
+                    }
+                    sink.lock()
+                        .unwrap()
+                        .push((header.role, header.finished, events));
+                    Ok(())
+                })
+                .await;
+            if read.is_ok() {
+                let mut logs = std::mem::take(&mut *fetched.lock().unwrap());
+                if logs.len() == 1 && logs[0].1 {
+                    let (role, _, events) = logs.remove(0);
+                    return (role, events);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("job {id}'s log never finished");
     }
 
     /// The records this daemon's own store holds, oldest first.
@@ -503,6 +549,125 @@ async fn delegated_force_grpc_rides_the_in_stream_carrier() {
         "force_grpc rides the in-stream carrier and reports on the wire-compat bit"
     );
     assert_trees_identical(&src.root, &dst.root);
+
+    src.stop().await;
+    dst.stop().await;
+}
+
+/// jl-1b: the delegated destination's log names the file that did not
+/// land, with its reason, and the files that did; the job ends failed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delegated_pull_logs_each_file_and_the_failure() {
+    use blit_core::job_log::{EventBody, Outcome, Role};
+    let src = Daemon::start("srcmod", false).await;
+    let dst = Daemon::start("dstmod", true).await;
+    write_tree(&src.root, SRC_TREE);
+    std::fs::create_dir_all(dst.root.join("a.txt")).expect("block one destination path");
+
+    let events = run_delegated(dst.port, src.port, "dstmod", spec("srcmod")).await;
+    assert_no_error(&events);
+    let transfer_id = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            Some(ProgressPayload::Started(started)) => Some(started.transfer_id.clone()),
+            _ => None,
+        })
+        .expect("Started names the job");
+
+    let (role, log) = dst.job_log(&transfer_id).await;
+    assert_eq!(role, "destination");
+    let EventBody::RunStart(start) = &log[0] else {
+        panic!("first event: {:?}", log[0]);
+    };
+    assert_eq!(
+        (start.role, start.run.verb.as_str()),
+        (Role::Destination, "delegated-pull")
+    );
+    assert_eq!(
+        start.run.source,
+        format!("127.0.0.1:{}/srcmod/", src.port),
+        "{start:?}"
+    );
+    let mut copied: Vec<&str> = log
+        .iter()
+        .filter_map(|event| match event {
+            EventBody::FileCopied { path, .. } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    copied.sort();
+    assert_eq!(copied, ["dir one/b.log", "dir one/deeper/c.dat"]);
+    let failed: Vec<(&str, &str)> = log
+        .iter()
+        .filter_map(|event| match event {
+            EventBody::FileFailed { path, reason } => Some((path.as_str(), reason.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed.len(), 1, "named once: {failed:?}");
+    assert_eq!(failed[0].0, "a.txt");
+    assert!(!failed[0].1.is_empty());
+    assert!(matches!(
+        log.last(),
+        Some(EventBody::RunEnd { outcome: Outcome::Failed, detail: Some(detail) })
+            if detail == "1 file(s) failed"
+    ));
+
+    src.stop().await;
+    dst.stop().await;
+}
+
+/// jl-1b: a delegated pull refused before it starts keeps its own reason in
+/// the log — the jobs record has only a marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_delegated_pull_logs_why() {
+    use blit_core::job_log::{EventBody, Outcome};
+    let src = Daemon::start("srcmod", false).await;
+    // Delegation off on the destination: the gate refuses.
+    let dst = Daemon::start("dstmod", false).await;
+
+    let events = run_delegated(dst.port, src.port, "dstmod", spec("srcmod")).await;
+    let refusal = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            Some(ProgressPayload::Error(error)) => Some(error.upstream_message.clone()),
+            _ => None,
+        })
+        .expect("the gate refuses");
+    // The gate refuses before Started, so the stream names no job; the
+    // job's one log on disk does.
+    let logs_dir = dst._job_state.path().join("jobs").join("logs");
+    let mut transfer_id = None;
+    for _ in 0..500 {
+        transfer_id = std::fs::read_dir(&logs_dir).ok().and_then(|entries| {
+            entries.flatten().find_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let stem = name.strip_suffix(".jsonl.gz")?;
+                blit_core::job_log::LogKey::from_file_stem(stem).map(|key| key.run_id().to_string())
+            })
+        });
+        if transfer_id.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let transfer_id = transfer_id.expect("the refused job left a finished log");
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event.payload, Some(ProgressPayload::Started(_)))),
+        "the refusal comes before Started"
+    );
+
+    let (_, log) = dst.job_log(&transfer_id).await;
+    assert!(
+        matches!(
+            log.last(),
+            Some(EventBody::RunEnd { outcome: Outcome::Failed, detail: Some(detail) })
+                if *detail == refusal
+        ),
+        "{log:?}"
+    );
 
     src.stop().await;
     dst.stop().await;

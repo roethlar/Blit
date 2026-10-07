@@ -4014,6 +4014,7 @@ fn mirror_delete_pass(
     canonical_dst_root: Option<&Path>,
     abort: &AtomicBool,
     execute: bool,
+    removed: &mut dyn FnMut(&Path, bool),
 ) -> Result<(u64, u64)> {
     let plan = crate::mirror_planner::MirrorPlanner::new(false).plan_session_deletions(
         dst_root,
@@ -4026,7 +4027,7 @@ fn mirror_delete_pass(
     // review otp-9b F2: a dropped session future (client disconnect,
     // CancelJob) cannot abort a running blocking task — the shared executor
     // checks this drop-guard before every filesystem operation.
-    let stats = crate::deletion::execute_deletion_plan(
+    let stats = crate::deletion::execute_deletion_plan_reporting(
         &plan.files,
         &plan.dirs,
         crate::deletion::DeletionOptions {
@@ -4038,6 +4039,7 @@ fn mirror_delete_pass(
                 tolerate_nonempty: tolerate_nonempty_dirs,
             },
         },
+        removed,
     )
     .map_err(eyre::Report::new)?;
     Ok((stats.files, stats.dirs))
@@ -4671,9 +4673,7 @@ async fn destination_session_inner(
                 // this lane (D-2026-07-30-1).
                 if let Some(p) = &progress {
                     p.report_payload(0, outcome.bytes_written);
-                    if !outcome.file_failed(&header.relative_path) {
-                        p.report_file_complete(header.relative_path.clone());
-                    }
+                    p.report_file_outcome(&header.relative_path, &outcome);
                 }
             }
             Some(Frame::FileSkipped(skipped)) => {
@@ -4699,6 +4699,9 @@ async fn destination_session_inner(
                     .lock()
                     .expect("need ledger lock poisoned")
                     .skip(&skipped.relative_path)?;
+                if let Some(p) = &progress {
+                    p.report_file_failed(skipped.relative_path.clone(), skipped.reason.clone());
+                }
                 contained_failures.record_failure(skipped.relative_path, skipped.reason);
             }
             Some(Frame::Block(block)) => {
@@ -4740,9 +4743,7 @@ async fn destination_session_inner(
                 }
                 if let Some(p) = &progress {
                     p.report_payload(0, outcome.bytes_written);
-                    if resumed {
-                        p.report_file_complete(header.relative_path.clone());
-                    }
+                    p.report_file_outcome(&header.relative_path, &outcome);
                 }
             }
             Some(Frame::BlockComplete(complete)) => {
@@ -4789,9 +4790,7 @@ async fn destination_session_inner(
                     if outcome.bytes_written > 0 {
                         p.report_payload(0, outcome.bytes_written);
                     }
-                    if resumed {
-                        p.report_file_complete(header.relative_path.clone());
-                    }
+                    p.report_file_outcome(&header.relative_path, &outcome);
                 }
             }
             Some(Frame::TarShardHeader(shard)) => {
@@ -4897,9 +4896,7 @@ async fn destination_session_inner(
                     // outcome answers per member (the data-plane carrier
                     // filters the same way at `pipeline.rs`).
                     for path in member_paths.unwrap_or_default() {
-                        if !outcome.file_failed(&path) {
-                            p.report_file_complete(path);
-                        }
+                        p.report_file_outcome(&path, &outcome);
                     }
                 }
             }
@@ -5163,7 +5160,21 @@ async fn destination_session_inner(
                         .as_ref()
                         .map(|la| la.phase_probe.clone())
                         .unwrap_or_else(LocalPhaseProbe::disabled);
+                    // jl-1b: name each removal on the progress lane, as the
+                    // wire-relative path (a directory's ends in `/`).
+                    let deleted_progress = progress.clone();
                     let mut pass = tokio::task::spawn_blocking(move || {
+                        let mut removed = |target: &Path, is_dir: bool| {
+                            if let Some(p) = &deleted_progress {
+                                if let Ok(relative) = target.strip_prefix(&dst) {
+                                    let mut path = crate::path_posix::relative_path_to_posix(relative);
+                                    if is_dir {
+                                        path.push('/');
+                                    }
+                                    p.report_deleted(path);
+                                }
+                            }
+                        };
                         delete_probe.measure(LocalPhase::Delete, || {
                             mirror_delete_pass(
                                 &dst,
@@ -5175,6 +5186,7 @@ async fn destination_session_inner(
                                 canonical.as_deref(),
                                 &abort,
                                 execute,
+                                &mut removed,
                             )
                         })
                     });
@@ -8792,6 +8804,7 @@ mod tests {
             Some(&elsewhere),
             &abort,
             true,
+            &mut |_, _| {},
         )
         .expect_err("a target outside the canonical root must refuse");
         assert!(
@@ -8815,6 +8828,7 @@ mod tests {
             Some(&real_root),
             &abort,
             true,
+            &mut |_, _| {},
         )
         .expect("in-root deletion proceeds");
         assert_eq!(deleted, (1, 0));
@@ -8842,6 +8856,7 @@ mod tests {
             None,
             &abort,
             false,
+            &mut |_, _| {},
         )
         .expect("plan-only pass");
         assert_eq!(counts, (2, 1));
@@ -8870,6 +8885,7 @@ mod tests {
             None,
             &abort,
             true,
+            &mut |_, _| {},
         )
         .expect("pass");
         assert_eq!(counts, (2, 2));
@@ -9108,6 +9124,7 @@ mod tests {
             None,
             &abort,
             true,
+            &mut |_, _| {},
         );
         assert!(result.is_err(), "an aborted pass reports the abort");
         assert!(
@@ -9127,6 +9144,7 @@ mod tests {
             None,
             &abort,
             true,
+            &mut |_, _| {},
         )
         .expect("pass succeeds");
         assert_eq!(deleted, (1, 0));

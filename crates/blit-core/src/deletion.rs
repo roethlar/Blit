@@ -139,6 +139,19 @@ pub fn execute_deletion_plan(
     dirs: &[PathBuf],
     options: DeletionOptions<'_>,
 ) -> Result<DeletionStats, DeletionError> {
+    execute_deletion_plan_reporting(files, dirs, options, &mut |_, _| {})
+}
+
+/// [`execute_deletion_plan`], calling `removed(target, is_dir)` for each
+/// entry it actually removed — not for one already missing, and not on a
+/// dry run (`execute: false`) — so a job log can name every deletion
+/// (JOB_LOGS jl-1b).
+pub fn execute_deletion_plan_reporting(
+    files: &[PathBuf],
+    dirs: &[PathBuf],
+    options: DeletionOptions<'_>,
+    removed: &mut dyn FnMut(&Path, bool),
+) -> Result<DeletionStats, DeletionError> {
     let prepare = |target: &Path| -> Result<(), DeletionError> {
         if options
             .abort
@@ -177,7 +190,10 @@ pub fn execute_deletion_plan(
         #[cfg(windows)]
         crate::win_fs::clear_readonly_recursive(file);
         match std::fs::remove_file(file) {
-            Ok(()) => stats.files += 1,
+            Ok(()) => {
+                stats.files += 1;
+                removed(file, false);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error)
                 if error.kind() == std::io::ErrorKind::IsADirectory
@@ -186,7 +202,10 @@ pub fn execute_deletion_plan(
                 #[cfg(windows)]
                 crate::win_fs::clear_readonly_recursive(file);
                 match std::fs::remove_dir_all(file) {
-                    Ok(()) => stats.dirs += 1,
+                    Ok(()) => {
+                        stats.dirs += 1;
+                        removed(file, true);
+                    }
                     Err(inner) if inner.kind() == std::io::ErrorKind::NotFound => {}
                     Err(inner) => {
                         return Err(filesystem_error("remove directory tree", file, inner))
@@ -210,7 +229,10 @@ pub fn execute_deletion_plan(
             DirectoryMode::Recursive => std::fs::remove_dir_all(dir),
         };
         match result {
-            Ok(()) => stats.dirs += 1,
+            Ok(()) => {
+                stats.dirs += 1;
+                removed(dir, true);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error)
                 if matches!(

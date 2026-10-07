@@ -22,6 +22,24 @@ pub fn config_dir_override() -> Option<PathBuf> {
     CONFIG_DIR_OVERRIDE.read().clone()
 }
 
+/// Where a daemon keeps its own state (performance history, job logs):
+/// systemd's `$STATE_DIRECTORY` when the unit sets `StateDirectory=` (the
+/// explicitly writable service data directory under
+/// `ProtectSystem=strict`), else [`config_dir`] (foreground and dev runs,
+/// where it is writable).
+pub fn daemon_state_dir() -> Result<PathBuf> {
+    if let Some(raw) = std::env::var_os("STATE_DIRECTORY") {
+        // systemd passes a colon-separated list when multiple directories
+        // are configured; the first is ours.
+        if let Some(first) = std::env::split_paths(&raw).next() {
+            if !first.as_os_str().is_empty() {
+                return Ok(first);
+            }
+        }
+    }
+    config_dir()
+}
+
 /// Resolve the configuration directory.
 /// Priority: explicit override -> platform standard -> ~/.config/blit
 pub fn config_dir() -> Result<PathBuf> {

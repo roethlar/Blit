@@ -62,7 +62,11 @@ e.g. how many run records to keep), `jobs/runs/` (run records) and
 `jobs/saved/` (saved jobs). The daemon keeps its existing machine-wide
 `config.toml` (`/etc/blit/config.toml` on Linux/macOS,
 `C:\ProgramData\Blit\config.toml` on Windows — Windows is already covered)
-for its own settings, and its job records beside its existing recents.
+for its own settings, and its job logs in `jobs/logs/` under its state
+directory — systemd's `$STATE_DIRECTORY` when the unit sets
+`StateDirectory=`, else its config folder, the rule its performance
+history already follows (decided at jl-1b, 2026-10-07: under
+`ProtectSystem=strict` only the state directory is writable).
 
 - R10 (settings format): "toml if it makes sense. that is up to you. if json
   is simpler, fine". Agent's call: TOML for the settings file — a person
@@ -269,8 +273,11 @@ waiting — `retry` refuses until the outcome is known.
 - The event schema is defined and versioned before any storage or retrieval
   is built (slice jl-1a): one event per line, each with a timestamp, a
   sequence number and a kind (`run-start`, `phase`, `file-copied`,
-  `file-deleted`, `file-failed`, `stall`, `diagnostic`, `summary`,
-  `run-end`, `log-incomplete`).
+  `file-sent`, `file-deleted`, `file-failed`, `stall`, `diagnostic`,
+  `summary`, `run-end`, `log-incomplete`). Settled at jl-1b, before any
+  release: `file-sent` names what a source sent (whether it landed is the
+  destination's to say), and `file-copied` carries the size only when the
+  recorder knows it.
 
 ### Crash safety, pruning and backpressure (R17, review r1 MC4/F3)
 
@@ -333,6 +340,21 @@ Small first, per R1; each slice is one coherent, testable change.
    (keyed run + participant + role + attempt) through jl-1a, runs startup
    recovery, and reads `[jobs] keep` from its `config.toml`; `GetJobLog`;
    `blit jobs log <host> <job-id> [--json] [--role]`.
+   **Landed 2026-10-07.** Served pushes and pulls log from the open on,
+   delegated pulls from dispatch; the log is owned by the job's dispatcher
+   task and closed after the job's record. The engine names each file as
+   it lands, fails (new `FileFailed` progress event, at every destination
+   record site) or is deleted by the mirror pass (new `Deleted`); the
+   summary's exact failed list fills in anything not seen live. The daemon
+   makes its machine ID here (planned for jl-3; the CLI reuses it there).
+   Known gaps, each for a later slice or its own ruling: no run ID crosses
+   the wire yet (jl-2), so a delegated job's two daemon logs carry
+   different job IDs; a source's log learns failures only from the
+   destination's summary (reasons for the first 64, names exact unless
+   that list was cut short); a daemon source records no scan timing; a
+   move's source-side delete (`Purge`) is not a job and leaves no log; the
+   resume-record failure sites are reported live but not test-pinned
+   (the summary still names those files).
 3. **jl-1c — failures in the job list.** `jobs list`/`watch` show the
    failed-file count and `watch` exits non-zero when files failed (closes
    defect (c)).

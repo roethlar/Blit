@@ -46,7 +46,9 @@ use blit_core::transfer_session::{
 use super::util::{resolve_contained_path, resolve_module, resolve_relative_path};
 use crate::active_jobs::ActiveJobKind;
 use crate::active_jobs::ActiveJobProgress;
+use crate::job_logs::{option_words, JobLog};
 use crate::runtime::{ModuleConfig, RootExport};
+use blit_core::job_log::{Role, RunInfo};
 
 /// The dispatcher's open hook (review otp-10b-2 F4): called exactly once
 /// per session, at the moment the received `SessionOpen` resolves
@@ -117,6 +119,10 @@ impl ServedSessionRecorder {
             open: std::sync::Mutex::new(None),
             terminal: std::sync::Mutex::new(None),
         })
+    }
+
+    pub(crate) fn peer(&self) -> &str {
+        &self.peer
     }
 
     fn note_open(&self, facts: OpenPerfFacts) {
@@ -240,6 +246,53 @@ fn with_perf_capture(
     })
 }
 
+/// Wrap an [`OpenResolver`] so a successful resolve also starts the job's
+/// log (JOB_LOGS jl-1b) in the role this resolver serves, naming the open's
+/// endpoint and options. Kept separate from the other hooks, like
+/// [`with_perf_capture`].
+fn with_log_start(
+    inner: Box<OpenResolver>,
+    job_log: JobLog,
+    role: Role,
+    peer: String,
+) -> Box<OpenResolver> {
+    Box::new(move |open: &SessionOpen| {
+        let here = format!("/{}/{}", open.module, open.path)
+            .trim_end_matches('/')
+            .replace("//", "/");
+        let here = if here.is_empty() {
+            "/".to_string()
+        } else {
+            here
+        };
+        let (verb, source, destination) = match role {
+            Role::Source => ("pull", here, peer.clone()),
+            _ => ("push", peer.clone(), here),
+        };
+        let run = RunInfo {
+            verb: verb.into(),
+            source,
+            destination,
+            options: option_words(
+                open.compare_mode(),
+                open.mirror_enabled.then(|| open.mirror_kind()),
+                open.filter.as_ref(),
+                open.resume.as_ref(),
+                open.ignore_existing,
+                open.require_complete_scan,
+            ),
+        };
+        let fut = inner(open);
+        let job_log = job_log.clone();
+        Box::pin(async move {
+            let resolved = fut.await?;
+            job_log.start(role, run);
+            job_log.note(format!("local root: {}", resolved.root.display()));
+            Ok(resolved)
+        })
+    })
+}
+
 /// The stable host portion of the dispatcher's peer string
 /// (`SocketAddr` rendering or `"unknown"`): the port churns per
 /// connection and must not fragment seed keys.
@@ -326,20 +379,27 @@ pub(crate) async fn run_transfer_session(
     // ph-1c: dispatcher-owned session observer; this function fills it
     // from inside the session, the dispatcher reads it after the race.
     recorder: Arc<ServedSessionRecorder>,
+    // jl-1b: the job's log, owned by the dispatcher; the open starts it
+    // and the relays feed it.
+    job_log: JobLog,
 ) -> Result<(), Status> {
     let transport = grpc_daemon_transport(tx, inbound);
     let (source_progress_tx, mut source_progress_rx) = mpsc::unbounded_channel();
     let source_job_progress = job_progress.clone();
+    let source_log = job_log.clone();
     let relay_source_bytes = async move {
         while let Some(event) = source_progress_rx.recv().await {
             source_job_progress.report_source_event(&event);
+            source_log.observe(&event).await;
         }
     };
     let (destination_progress_tx, mut destination_progress_rx) = mpsc::unbounded_channel();
     let destination_job_progress = job_progress.clone();
+    let destination_log = job_log.clone();
     let relay_destination_progress = async move {
         while let Some(event) = destination_progress_rx.recv().await {
             destination_job_progress.report_destination_event(&event);
+            destination_log.observe(&event).await;
         }
     };
     // The same module→root resolver serves both roles; only the one the
@@ -349,22 +409,34 @@ pub(crate) async fn run_transfer_session(
     // consulted source-resolver means the daemon serves SOURCE (the
     // client pulls — the old PullSync verbs' kind), a consulted
     // dest-resolver means the daemon receives (push-equivalent).
-    let source_resolver = with_perf_capture(
-        with_open_hook(
-            make_open_resolver(Arc::clone(&modules), default_root.clone()),
-            Arc::clone(&on_open),
-            ActiveJobKind::PullSync,
+    let source_resolver = with_log_start(
+        with_perf_capture(
+            with_open_hook(
+                make_open_resolver(Arc::clone(&modules), default_root.clone()),
+                Arc::clone(&on_open),
+                ActiveJobKind::PullSync,
+            ),
+            Arc::clone(&recorder),
         ),
-        Arc::clone(&recorder),
+        job_log.clone(),
+        Role::Source,
+        recorder.peer().to_string(),
     );
-    let dest_resolver = with_perf_capture(
-        with_open_hook(
-            make_open_resolver(modules, default_root),
-            on_open,
-            ActiveJobKind::Push,
+    let dest_resolver = with_log_start(
+        with_perf_capture(
+            with_open_hook(
+                make_open_resolver(modules, default_root),
+                on_open,
+                ActiveJobKind::Push,
+            ),
+            Arc::clone(&recorder),
         ),
-        Arc::clone(&recorder),
+        job_log.clone(),
+        Role::Destination,
+        recorder.peer().to_string(),
     );
+    // jl-1b: what the source's scan could not read, for its log.
+    let unreadable = Arc::new(std::sync::Mutex::new(Vec::new()));
     // ph-1c: terminal-summary hooks fire inside the session at the
     // contract's closing point, so the dispatcher still knows the
     // session completed even if the initiator's immediate hangup drops
@@ -385,6 +457,7 @@ pub(crate) async fn run_transfer_session(
         source: SourceInstruments {
             progress: Some(RemoteTransferProgress::new(source_progress_tx)),
             on_terminal_summary: Some(source_terminal),
+            unreadable: Some(Arc::clone(&unreadable)),
             ..Default::default()
         },
         destination: DestinationInstruments {
@@ -406,6 +479,13 @@ pub(crate) async fn run_transfer_session(
         relay_source_bytes,
         relay_destination_progress,
     );
+    for entry in unreadable
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .drain(..)
+    {
+        job_log.note(format!("could not read during the scan: {entry}"));
+    }
     match outcome {
         // Either role completing cleanly is a successful transfer; the
         // daemon record does not distinguish push- from pull-equivalent
@@ -419,6 +499,15 @@ pub(crate) async fn run_transfer_session(
             let summary = match outcome {
                 blit_core::transfer_session::ResponderOutcome::Source(summary) => summary,
                 blit_core::transfer_session::ResponderOutcome::Destination(outcome) => {
+                    if let Some(streams) = outcome.data_plane_streams {
+                        job_log.note(format!("data-plane streams: {streams}"));
+                    }
+                    if outcome.files_repaired > 0 {
+                        job_log.note(format!(
+                            "metadata repaired, content already in place: {} file(s)",
+                            outcome.files_repaired
+                        ));
+                    }
                     outcome.summary
                 }
             };

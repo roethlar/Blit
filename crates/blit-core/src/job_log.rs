@@ -98,6 +98,21 @@ impl Role {
     }
 }
 
+impl std::str::FromStr for Role {
+    type Err = eyre::Report;
+
+    fn from_str(text: &str) -> eyre::Result<Self> {
+        Self::parse(text).ok_or_else(|| {
+            eyre::eyre!("unknown role {text:?}: expected initiator, source or destination")
+        })
+    }
+}
+
+/// Whether `id` can be a run or participant ID in a [`LogKey`].
+pub fn valid_id(id: &str) -> bool {
+    check_id("ID", id).is_ok()
+}
+
 /// Which log: run ID + participant + role + attempt.
 ///
 /// The parts become the log's file name, so the two IDs are limited to 1–64
@@ -210,8 +225,17 @@ pub enum EventBody {
     /// A phase (`scan`, `transfer`, `delete`, …) starting or ending. The
     /// log is synced at each one.
     Phase { name: String, state: PhaseState },
-    /// A file that landed, and its size.
-    FileCopied { path: String, bytes: u64 },
+    /// A file that landed at the destination, and its size when the
+    /// recorder knew it.
+    FileCopied {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bytes: Option<u64>,
+    },
+    /// A file the source finished sending. Whether it landed is the
+    /// destination's to say; a file that did not follows as
+    /// `file-failed`.
+    FileSent { path: String },
     /// A file removed — from the destination by a mirror, from the source by
     /// a move.
     FileDeleted { path: String },
@@ -956,19 +980,210 @@ pub fn prune(dir: &Path, keep: usize) -> io::Result<Vec<PathBuf>> {
 
 /// The log for `key` in `dir`: its finished file, or the partial of a run
 /// still going (or not yet recovered); `None` if there is neither.
-pub fn log_path(dir: &Path, key: &LogKey) -> Option<PathBuf> {
+pub fn find_log(dir: &Path, key: &LogKey) -> Option<FoundLog> {
     let stem = key.file_stem();
     let finished = path_of(dir, &stem, FINISHED_SUFFIX);
     let partial = path_of(dir, &stem, PARTIAL_SUFFIX);
+    let found = |path: PathBuf, finished: bool| FoundLog {
+        key: key.clone(),
+        path,
+        finished,
+    };
     // Finished, partial, then finished again: a run that finishes between the
     // first two looks is still found.
     if finished.is_file() {
-        return Some(finished);
+        return Some(found(finished, true));
     }
     if partial.is_file() {
-        return Some(partial);
+        return Some(found(partial, false));
     }
-    finished.is_file().then_some(finished)
+    finished.is_file().then(|| found(finished, true))
+}
+
+/// A log found in a folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoundLog {
+    pub key: LogKey,
+    pub path: PathBuf,
+    /// `false` for a partial: the run is going, or its log waits for
+    /// [`recover`].
+    pub finished: bool,
+}
+
+/// Every log in `dir` for the run `run_id` — in `role` only, when given —
+/// ordered by role, participant and attempt. Errors only when `run_id`
+/// cannot name a log or `dir` cannot be read; a missing `dir` holds no logs.
+pub fn logs_for_run(dir: &Path, run_id: &str, role: Option<Role>) -> eyre::Result<Vec<FoundLog>> {
+    check_id("run ID", run_id)?;
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(eyre::Report::new(error)),
+    };
+    let mut found: Vec<FoundLog> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let (stem, finished) = if let Some(stem) = name.strip_suffix(FINISHED_SUFFIX) {
+            (stem, true)
+        } else if let Some(stem) = name.strip_suffix(PARTIAL_SUFFIX) {
+            (stem, false)
+        } else {
+            continue;
+        };
+        let Some(key) = LogKey::from_file_stem(stem) else {
+            continue;
+        };
+        if key.run_id != run_id || role.is_some_and(|role| role != key.role) {
+            continue;
+        }
+        // A run caught between finishing and removing its partial shows
+        // once, as finished.
+        if let Some(seen) = found.iter_mut().find(|seen| seen.key == key) {
+            if finished {
+                *seen = FoundLog {
+                    key,
+                    path: entry.path(),
+                    finished,
+                };
+            }
+            continue;
+        }
+        found.push(FoundLog {
+            key,
+            path: entry.path(),
+            finished,
+        });
+    }
+    found.sort_by(|a, b| {
+        (a.key.role.as_str(), &a.key.participant, a.key.attempt).cmp(&(
+            b.key.role.as_str(),
+            &b.key.participant,
+            b.key.attempt,
+        ))
+    });
+    Ok(found)
+}
+
+/// One event as a line of text, for `blit jobs log` without `--json`
+/// (R1's "json to txt converter"). Times are shown in the reader's local
+/// time zone.
+pub fn text_line(event: &Event) -> String {
+    let when = i64::try_from(event.ts_ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|time| {
+            time.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string()
+        })
+        .unwrap_or_else(|| event.ts_ms.to_string());
+    format!("{when}  {}", describe(&event.body))
+}
+
+fn describe(body: &EventBody) -> String {
+    let seconds = |ms: u64| format!("{:.1}s", ms as f64 / 1000.0);
+    match body {
+        EventBody::RunStart(start) => {
+            let host = if start.host.is_empty() {
+                &start.participant
+            } else {
+                &start.host
+            };
+            let mut text = format!(
+                "start    {} {} -> {} (job {}, {} on {host}, attempt {}, blit {})",
+                start.run.verb,
+                start.run.source,
+                start.run.destination,
+                start.run_id,
+                start.role.as_str(),
+                start.attempt,
+                start.build,
+            );
+            if !start.run.options.is_empty() {
+                text.push_str(&format!(" options: {}", start.run.options.join(" ")));
+            }
+            text
+        }
+        EventBody::Phase { name, state } => {
+            let state = match state {
+                PhaseState::Start => "started",
+                PhaseState::End => "ended",
+            };
+            format!("phase    {name} {state}")
+        }
+        EventBody::FileCopied { path, bytes } => match bytes {
+            Some(bytes) => format!("copied   {path} ({})", crate::display::format_bytes(*bytes)),
+            None => format!("copied   {path}"),
+        },
+        EventBody::FileSent { path } => format!("sent     {path}"),
+        EventBody::FileDeleted { path } => format!("deleted  {path}"),
+        EventBody::FileFailed { path, reason } => format!("FAILED   {path}: {reason}"),
+        EventBody::Stall { idle_ms, detail } => {
+            format!("stall    nothing moved for {}: {detail}", seconds(*idle_ms))
+        }
+        EventBody::Diagnostic { message } => format!("info     {message}"),
+        EventBody::Summary(summary) => format!(
+            "summary  {} copied ({}), {} deleted, {} failed, in {}",
+            summary.files_copied,
+            crate::display::format_bytes(summary.bytes_copied),
+            summary.files_deleted,
+            summary.files_failed,
+            seconds(summary.elapsed_ms),
+        ),
+        EventBody::RunEnd { outcome, detail } => {
+            let outcome = match outcome {
+                Outcome::Ok => "ok",
+                Outcome::Failed => "failed",
+                Outcome::Cancelled => "cancelled",
+                Outcome::Interrupted => "interrupted",
+            };
+            match detail {
+                Some(detail) => format!("end      {outcome}: {detail}"),
+                None => format!("end      {outcome}"),
+            }
+        }
+        EventBody::LogIncomplete { reason } => {
+            format!("LOG INCOMPLETE  {reason}; nothing after this was kept")
+        }
+        EventBody::Unknown => "unknown  an event from a newer blit".into(),
+    }
+}
+
+const MACHINE_ID_FILE: &str = "machine-id";
+
+/// This machine's participant ID, kept in `dir`: made on first use (128
+/// random bits as lowercase hex) and read back after. Host names change; this
+/// does not.
+pub fn machine_id(dir: &Path) -> io::Result<String> {
+    let path = dir.join(MACHINE_ID_FILE);
+    if !path.exists() {
+        use rand::{rngs::SysRng, TryRng};
+        let mut bits = [0u8; 16];
+        SysRng
+            .try_fill_bytes(&mut bits)
+            .map_err(|error| io::Error::other(format!("system RNG unavailable: {error}")))?;
+        let id: String = bits.iter().map(|byte| format!("{byte:02x}")).collect();
+        fs::create_dir_all(dir)?;
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(format!("{id}\n").as_bytes())?;
+                file.sync_all()?;
+            }
+            // Another process made it first; read theirs.
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let text = fs::read_to_string(&path)?;
+    let id = text.trim();
+    if check_id("machine ID", id).is_err() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} does not hold a machine ID", path.display()),
+        ));
+    }
+    Ok(id.to_string())
 }
 
 /// One line of a log, as read back.
@@ -987,18 +1202,19 @@ pub enum LogLine {
 /// left by a crash) or an exported plain copy. Compression is detected from
 /// the content, not the name. Blank lines are skipped.
 pub fn open_log(path: &Path) -> io::Result<LogLines> {
-    let mut file = BufReader::new(File::open(path)?);
-    let gzip = file.fill_buf()?.starts_with(&[0x1f, 0x8b]);
-    let reader: Box<dyn BufRead + Send> = if gzip {
-        Box::new(BufReader::new(MultiGzDecoder::new(file)))
+    Ok(LogLines::new(decode(File::open(path)?)?))
+}
+
+/// A log's JSON lines from its bytes as stored — gzip-compressed or plain,
+/// told apart by the content — for a caller that wants the lines as written
+/// (`blit jobs log --json`) rather than parsed.
+pub fn decode(reader: impl Read + Send + 'static) -> io::Result<Box<dyn BufRead + Send>> {
+    let mut reader = BufReader::new(reader);
+    let gzip = reader.fill_buf()?.starts_with(&[0x1f, 0x8b]);
+    Ok(if gzip {
+        Box::new(BufReader::new(MultiGzDecoder::new(reader)))
     } else {
-        Box::new(file)
-    };
-    Ok(LogLines {
-        reader,
-        buf: Vec::new(),
-        line: 0,
-        done: false,
+        Box::new(reader)
     })
 }
 
@@ -1008,6 +1224,18 @@ pub struct LogLines {
     buf: Vec<u8>,
     line: u64,
     done: bool,
+}
+
+impl LogLines {
+    /// The lines of a log already [`decode`]d.
+    pub fn new(reader: Box<dyn BufRead + Send>) -> Self {
+        Self {
+            reader,
+            buf: Vec::new(),
+            line: 0,
+            done: false,
+        }
+    }
 }
 
 impl Iterator for LogLines {
@@ -1073,7 +1301,7 @@ mod tests {
     fn copied(path: &str) -> EventBody {
         EventBody::FileCopied {
             path: path.into(),
-            bytes: 3,
+            bytes: Some(3),
         }
     }
 
@@ -1769,15 +1997,149 @@ mod tests {
     }
 
     #[test]
-    fn log_path_finds_the_finished_log_first() {
+    fn a_runs_logs_are_found_by_role_and_shown_once() {
+        let dir = TempDir::new().unwrap();
+        for name in [
+            "r1.m1.source.1.jsonl.gz",
+            "r1.m1.destination.1.partial.jsonl",
+            // Finished, but its partial was not yet removed.
+            "r1.m1.destination.2.jsonl.gz",
+            "r1.m1.destination.2.partial.jsonl",
+            "r2.m1.source.1.jsonl.gz",
+            "r1.m1.source.1.lock",
+            "notes.txt",
+        ] {
+            fs::write(dir.path().join(name), b"").unwrap();
+        }
+        let found = |role| {
+            logs_for_run(dir.path(), "r1", role)
+                .unwrap()
+                .into_iter()
+                .map(|log| {
+                    (
+                        log.path.file_name().unwrap().to_string_lossy().into_owned(),
+                        log.finished,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let owned = |list: &[(&str, bool)]| {
+            list.iter()
+                .map(|(name, finished)| (name.to_string(), *finished))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            found(None),
+            owned(&[
+                ("r1.m1.destination.1.partial.jsonl", false),
+                ("r1.m1.destination.2.jsonl.gz", true),
+                ("r1.m1.source.1.jsonl.gz", true),
+            ])
+        );
+        assert_eq!(
+            found(Some(Role::Source)),
+            owned(&[("r1.m1.source.1.jsonl.gz", true)])
+        );
+        assert_eq!(found(Some(Role::Initiator)), owned(&[]));
+        assert!(logs_for_run(dir.path(), "../r1", None).is_err());
+        assert_eq!(
+            logs_for_run(&dir.path().join("missing"), "r1", None).unwrap(),
+            []
+        );
+    }
+
+    #[test]
+    fn a_log_reads_the_same_compressed_or_plain() {
+        let dir = TempDir::new().unwrap();
+        let writer = LogWriter::start(dir.path(), key("r1"), info(), DEFAULT_KEEP);
+        writer.record(copied("a"));
+        let finished = writer.finish(Outcome::Ok, None).path.unwrap();
+        let mut plain = String::new();
+        decode(File::open(&finished).unwrap())
+            .unwrap()
+            .read_to_string(&mut plain)
+            .unwrap();
+        let exported = dir.path().join("exported.jsonl");
+        fs::write(&exported, &plain).unwrap();
+
+        assert!(plain
+            .lines()
+            .nth(1)
+            .unwrap()
+            .contains(r#""kind":"file-copied""#));
+        assert_eq!(events(&exported), events(&finished));
+    }
+
+    #[test]
+    fn events_read_as_text() {
+        let text = |body| {
+            let line = text_line(&event(0, body));
+            // The time zone is the reader's; only the part after the time
+            // is fixed.
+            line.split_once("  ").unwrap().1.to_string()
+        };
+        assert_eq!(text(copied("a/b")), "copied   a/b (3 B)");
+        assert_eq!(
+            text(EventBody::FileCopied {
+                path: "a/b".into(),
+                bytes: None
+            }),
+            "copied   a/b"
+        );
+        assert_eq!(text(EventBody::FileSent { path: "s".into() }), "sent     s");
+        assert_eq!(
+            text(EventBody::FileFailed {
+                path: "c".into(),
+                reason: "denied".into()
+            }),
+            "FAILED   c: denied"
+        );
+        assert_eq!(
+            text(EventBody::Summary(Summary {
+                files_copied: 2,
+                files_deleted: 1,
+                files_failed: 0,
+                bytes_copied: 2048,
+                elapsed_ms: 1500,
+            })),
+            "summary  2 copied (2.00 KiB), 1 deleted, 0 failed, in 1.5s"
+        );
+        assert_eq!(
+            text(EventBody::RunEnd {
+                outcome: Outcome::Interrupted,
+                detail: Some("why".into())
+            }),
+            "end      interrupted: why"
+        );
+        assert!(text_line(&event(0, EventBody::Unknown)).contains("newer blit"));
+    }
+
+    #[test]
+    fn the_machine_id_is_made_once_and_kept() {
+        let dir = TempDir::new().unwrap();
+        let first = machine_id(&dir.path().join("cfg")).unwrap();
+        assert_eq!(first.len(), 32);
+        assert!(LogKey::new("r1", first.clone(), Role::Source, 1).is_ok());
+        assert_eq!(machine_id(&dir.path().join("cfg")).unwrap(), first);
+        assert_ne!(machine_id(&dir.path().join("other")).unwrap(), first);
+
+        fs::write(dir.path().join("cfg").join("machine-id"), "../evil\n").unwrap();
+        let error = machine_id(&dir.path().join("cfg")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn find_log_prefers_the_finished_log() {
         let dir = TempDir::new().unwrap();
         let key = key("r1");
-        assert_eq!(log_path(dir.path(), &key), None);
+        let found = |dir: &Path| find_log(dir, &key).map(|log| (log.path, log.finished));
+        assert_eq!(found(dir.path()), None);
         let partial = dir.path().join("r1.m1.destination.1.partial.jsonl");
         fs::write(&partial, b"").unwrap();
-        assert_eq!(log_path(dir.path(), &key), Some(partial));
+        assert_eq!(found(dir.path()), Some((partial, false)));
         let finished = dir.path().join("r1.m1.destination.1.jsonl.gz");
         fs::write(&finished, b"").unwrap();
-        assert_eq!(log_path(dir.path(), &key), Some(finished));
+        assert_eq!(found(dir.path()), Some((finished, true)));
     }
 }

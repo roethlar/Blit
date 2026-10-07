@@ -452,6 +452,9 @@ pub fn spawn_daemon(
         for arg in &opts.extra_args {
             cmd.arg(arg);
         }
+        // The daemon's own state (job logs, perf history) stays in this
+        // test's workspace, never the developer's config folder.
+        cmd.env("STATE_DIRECTORY", workspace.join(format!("{name}-state")));
         // Drain stderr concurrently so daemon logging cannot fill an unread pipe.
         // The bounded tail is retained for readiness failures and test panics.
         let mut child = cmd

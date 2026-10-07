@@ -1,5 +1,6 @@
 mod active_jobs;
 mod delegation_gate;
+mod job_logs;
 mod metrics;
 mod net_timeout;
 mod recents_store;
@@ -31,6 +32,7 @@ async fn main() -> Result<()> {
         warnings,
         server_checksums_enabled,
         delegation,
+        jobs_keep,
     } = runtime;
 
     for warning in &warnings {
@@ -112,6 +114,28 @@ async fn main() -> Result<()> {
             None
         }
     };
+    // jl-1b: job logs in the daemon's state dir, finishing any a stopped
+    // daemon left behind before serving. Unresolvable is a warning and no
+    // logs — never a startup failure (logging never fails a transfer).
+    let job_logs = match blit_core::config::daemon_state_dir() {
+        Ok(state_dir) => {
+            match tokio::task::spawn_blocking(move || {
+                job_logs::JobLogs::open(&state_dir, jobs_keep)
+            })
+            .await?
+            {
+                Ok(logs) => Some(logs),
+                Err(err) => {
+                    eprintln!("blitd: job logs disabled: {err}");
+                    None
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("blitd: job logs disabled: {err:#}");
+            None
+        }
+    };
     let service = BlitService::from_runtime(
         modules,
         default_root,
@@ -120,7 +144,8 @@ async fn main() -> Result<()> {
         metrics,
         delegation,
         perf_store,
-    );
+    )
+    .with_job_logs(job_logs);
     // c-4: kick off the periodic `TransferProgress` emitter.
     // The handle is owned by the runtime for the daemon's
     // lifetime; on process exit tokio aborts in-flight tasks.

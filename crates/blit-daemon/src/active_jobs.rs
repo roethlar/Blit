@@ -365,8 +365,12 @@ impl ActiveJobProgress {
                 }
             }
             // Phase signals (clp-2) carry no counts; a jobs row reports
-            // numbers, so they move nothing here.
-            ProgressEvent::DiffComplete | ProgressEvent::DeleteBegin => {}
+            // numbers, so they move nothing here. Nor do the names a job
+            // log keeps (jl-1b): the summary owns those counts.
+            ProgressEvent::DiffComplete
+            | ProgressEvent::DeleteBegin
+            | ProgressEvent::FileFailed { .. }
+            | ProgressEvent::Deleted { .. } => {}
         }
     }
 

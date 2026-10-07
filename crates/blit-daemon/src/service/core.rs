@@ -92,6 +92,10 @@ pub struct BlitService {
     /// harness that opted out) — a missing record must never fail a
     /// transfer.
     pub(crate) perf_store: Option<blit_core::perf_history::HistoryStore>,
+    /// Where each job's log is written (JOB_LOGS jl-1b). `None` means no
+    /// logs — unresolvable at startup, or a test that opted out; a job
+    /// runs the same either way.
+    pub(crate) job_logs: Option<crate::job_logs::JobLogs>,
 }
 
 impl BlitService {
@@ -116,7 +120,13 @@ impl BlitService {
             events_tx,
             started_at: std::time::Instant::now(),
             perf_store,
+            job_logs: None,
         }
+    }
+
+    pub(crate) fn with_job_logs(mut self, job_logs: Option<crate::job_logs::JobLogs>) -> Self {
+        self.job_logs = job_logs;
+        self
     }
 
     #[cfg(test)]
@@ -348,6 +358,14 @@ impl Blit for BlitService {
     type SubscribeStream =
         std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<DaemonEvent, Status>> + Send>>;
     type TransferStream = ReceiverStream<Result<blit_core::generated::TransferFrame, Status>>;
+    type GetJobLogStream = crate::job_logs::JobLogStream;
+
+    async fn get_job_log(
+        &self,
+        request: Request<blit_core::generated::GetJobLogRequest>,
+    ) -> Result<Response<Self::GetJobLogStream>, Status> {
+        crate::job_logs::serve(self.job_logs.as_ref(), request.into_inner()).await
+    }
 
     /// ONE_TRANSFER_PATH otp-4a: the daemon serves the unified session
     /// by running `run_destination` as the Responder — the byte
@@ -429,6 +447,8 @@ impl Blit for BlitService {
         let recorder =
             super::transfer::ServedSessionRecorder::new(self.perf_store.clone(), peer.clone());
         let peer_for_task = peer;
+        // jl-1b: the job's log, owned by this dispatcher like the recorder.
+        let job_log = crate::job_logs::JobLog::new(self.job_logs.clone(), job.transfer_id());
 
         tokio::spawn(async move {
             let guard = guard;
@@ -449,6 +469,7 @@ impl Blit for BlitService {
                     job_progress,
                     on_open,
                     Arc::clone(&recorder),
+                    job_log.clone(),
                 ),
                 &tx,
                 &cancel_token,
@@ -495,6 +516,16 @@ impl Blit for BlitService {
             drop(guard);
             let _ = events_tx.send(finished_event);
             metrics.log_completion("transfer", started.elapsed(), ok);
+            // jl-1b: close the log last — compressing a large one takes a
+            // moment, and the job's row and events must not wait on it.
+            let summary = recorder.terminal_summary();
+            let (outcome, detail) = crate::job_logs::job_outcome(
+                ok,
+                err_msg.as_deref(),
+                cancel_token.is_cancelled(),
+                summary.as_ref().map_or(0, |summary| summary.files_failed),
+            );
+            job_log.close(outcome, detail, summary).await;
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -683,6 +714,13 @@ impl Blit for BlitService {
         let cancel_token = job.cancellation_token().clone();
         let events_tx = self.events_tx();
         let perf_store = self.perf_store.clone();
+        // jl-1b: this daemon is the delegated pull's DESTINATION, known
+        // at dispatch, so its log starts now.
+        let job_log = crate::job_logs::JobLog::new(self.job_logs.clone(), job.transfer_id());
+        job_log.start(
+            blit_core::job_log::Role::Destination,
+            delegated_run_info(&req),
+        );
         tokio::spawn(async move {
             // `job` moves into the spawned task alongside the
             // metrics guard; its Drop runs on every exit path
@@ -722,6 +760,7 @@ impl Blit for BlitService {
                     byte_progress,
                     job_progress,
                     perf_store,
+                    job_log.clone(),
                 ),
                 tx.closed(),
                 cancel_token.cancelled(),
@@ -751,7 +790,7 @@ impl Blit for BlitService {
                 None if cancel_token.is_cancelled() => {
                     (false, Some("cancelled via CancelJob".to_string()))
                 }
-                None => (false, Some("client cancelled".to_string())),
+                None => (false, Some(crate::job_logs::CLIENT_HUNG_UP.to_string())),
             };
             job.record_outcome(job_ok, job_err.clone());
             // c-3 round 2: build the terminal event while the
@@ -784,6 +823,15 @@ impl Blit for BlitService {
             // error counter) is committed — safe to broadcast.
             let _ = events_tx.send(finished_event);
             metrics_for_log.log_completion("delegated_pull", started.elapsed(), ok);
+            // jl-1b: close the log last (see `transfer`); the summary and
+            // the real failure message were noted from inside the handler.
+            let (outcome, detail) = crate::job_logs::job_outcome(
+                job_ok,
+                job_err.as_deref(),
+                cancel_token.is_cancelled(),
+                job_log.noted_files_failed(),
+            );
+            job_log.close(outcome, detail, None).await;
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -1205,6 +1253,34 @@ impl Blit for BlitService {
     }
 }
 
+/// What a delegated pull's log names as its run (JOB_LOGS jl-1b).
+fn delegated_run_info(req: &DelegatedPullRequest) -> blit_core::job_log::RunInfo {
+    let source = match (&req.src, &req.spec) {
+        (Some(src), Some(spec)) => format!(
+            "{}:{}/{}/{}",
+            src.host, src.port, spec.module, spec.source_path
+        ),
+        (Some(src), None) => format!("{}:{}", src.host, src.port),
+        _ => String::new(),
+    };
+    let options = req.spec.as_ref().map_or_else(Vec::new, |spec| {
+        crate::job_logs::option_words(
+            spec.compare_mode(),
+            Some(spec.mirror_mode()),
+            spec.filter.as_ref(),
+            spec.resume.as_ref(),
+            spec.ignore_existing,
+            spec.require_complete_scan,
+        )
+    });
+    blit_core::job_log::RunInfo {
+        verb: "delegated-pull".into(),
+        source,
+        destination: format!("/{}/{}", req.dst_module, req.dst_destination_path),
+        options,
+    }
+}
+
 /// Format the remote peer of a tonic request as `<ip>:<port>`,
 /// or `"unknown"` when the transport didn't surface one (eg.
 /// in-process tests that bypass the network).
@@ -1328,7 +1404,7 @@ where
                 .await;
             (false, Some("cancelled via CancelJob".to_string()))
         }
-        None => (false, Some("client cancelled".to_string())),
+        None => (false, Some(crate::job_logs::CLIENT_HUNG_UP.to_string())),
     }
 }
 

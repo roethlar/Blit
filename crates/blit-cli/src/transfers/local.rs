@@ -287,8 +287,11 @@ impl LiveRowState {
                 self.current_file = Some(sanitize_row_text(path));
                 LivePhase::Copying
             }
+            // A file that did not land names nothing to show as
+            // copying; the row keeps its phase.
+            ProgressEvent::FileFailed { .. } => self.phase,
             // The mirror's delete pass — no longer "copying".
-            ProgressEvent::DeleteBegin => LivePhase::Deleting,
+            ProgressEvent::DeleteBegin | ProgressEvent::Deleted { .. } => LivePhase::Deleting,
             // pfc-4: the summary reconciliation only corrects the
             // counters (`ProgressTotals::apply`, folded above) — it names
             // no file and starts no phase, so the row keeps whatever

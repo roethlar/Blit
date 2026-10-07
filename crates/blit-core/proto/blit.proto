@@ -111,6 +111,18 @@ service Blit {
   // behind). TUI consumers handle this by re-subscribing and
   // refreshing snapshot state via `GetState`.
   rpc Subscribe(SubscribeRequest) returns (stream DaemonEvent);
+
+  // Read the logs this daemon kept for one job (JOB_LOGS jl-1b,
+  // contract 7): each log as a JobLogHeader followed by its bytes as
+  // stored — gzip-compressed JSON lines for a finished log, plain JSON
+  // lines for a running one (or one its process left for recovery).
+  // `blit_core::job_log::open_log` reads either.
+  //
+  // Status semantics:
+  //   OK        → one or more logs follow.
+  //   NOT_FOUND → this daemon kept no log for the job (in that role).
+  //   INVALID_ARGUMENT → the job ID or role cannot name a log.
+  rpc GetJobLog(GetJobLogRequest) returns (stream JobLogChunk);
 }
 
 // Removed: `BlitAuth` service stub (2026-05-13). Original design
@@ -1251,4 +1263,35 @@ message TransferFrame {
     // Contract v7: the terminator of one single-file record.
     RecordEnd file_end = 22;
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// GetJobLog — one job's logs on this daemon (JOB_LOGS jl-1b).
+// ─────────────────────────────────────────────────────────────────────
+
+message GetJobLogRequest {
+  // The job ID, as `blit jobs list` and `--detach` show it.
+  string transfer_id = 1;
+  // Only the log kept in this role: "initiator", "source" or
+  // "destination". Empty for every role this daemon played.
+  string role = 2;
+}
+
+message JobLogChunk {
+  oneof payload {
+    // Starts each log; its bytes follow in `data` chunks.
+    JobLogHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message JobLogHeader {
+  // "initiator", "source" or "destination".
+  string role = 1;
+  // The machine ID of the daemon that kept the log.
+  string participant = 2;
+  uint32 attempt = 3;
+  // False while the run is going, or while its log waits for the
+  // daemon's next start to finish it.
+  bool finished = 4;
 }

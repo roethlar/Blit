@@ -7,11 +7,13 @@
 //! does its own formatting.
 
 use crate::generated::{
-    CancelJobRequest, ClearRecentRequest, DaemonEvent, DaemonState, GetStateRequest,
-    SubscribeRequest,
+    job_log_chunk, CancelJobRequest, ClearRecentRequest, DaemonEvent, DaemonState,
+    GetJobLogRequest, GetStateRequest, JobLogHeader, SubscribeRequest,
 };
+use crate::job_log::Role;
 use crate::remote::endpoint::RemoteEndpoint;
 use eyre::Result;
+use std::io::{self, BufRead, Read};
 use tonic::Code;
 
 /// Issue the `GetState` RPC against `remote`. `recent_limit = 0`
@@ -213,6 +215,131 @@ pub fn kind_label(kind: i32) -> &'static str {
         Ok(TransferKind::PullSync) => "pull_sync",
         Ok(TransferKind::DelegatedPull) => "delegated_pull",
         Ok(TransferKind::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+/// Fetch the logs `remote` kept for job `transfer_id` — in `role` only, when
+/// given — and hand each to `consume` as it streams in (JOB_LOGS jl-1b):
+/// its header, and its JSON lines decoded (see
+/// [`crate::job_log::decode`]). `consume` runs on a blocking thread and
+/// reads each log as its bytes arrive, so a log of any size is never held
+/// in memory; it should read each log to its end before returning.
+pub async fn read_job_logs<F>(
+    remote: &RemoteEndpoint,
+    transfer_id: &str,
+    role: Option<Role>,
+    mut consume: F,
+) -> Result<()>
+where
+    F: FnMut(JobLogHeader, Box<dyn BufRead + Send>) -> Result<()> + Send + 'static,
+{
+    let uri = remote.control_plane_uri();
+    let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
+    let mut stream = client
+        .get_job_log(GetJobLogRequest {
+            transfer_id: transfer_id.to_string(),
+            role: role
+                .map(|role| role.as_str().to_string())
+                .unwrap_or_default(),
+        })
+        .await
+        .map_err(|status| match status.code() {
+            Code::NotFound | Code::InvalidArgument => eyre::eyre!("{}", status.message()),
+            _ => eyre::eyre!("GetJobLog failed ({}): {}", status.code(), status.message()),
+        })?
+        .into_inner();
+
+    let (logs_tx, logs_rx) = std::sync::mpsc::channel::<(JobLogHeader, ChunkReader)>();
+    let consumer = tokio::task::spawn_blocking(move || -> Result<()> {
+        for (header, chunks) in logs_rx {
+            consume(header, crate::job_log::decode(chunks)?)?;
+        }
+        Ok(())
+    });
+    // The sender for the log being received; replacing it ends the last
+    // log for the consumer.
+    let mut current: Option<tokio::sync::mpsc::Sender<io::Result<Vec<u8>>>> = None;
+    let mut fetched = Ok(());
+    loop {
+        match stream.message().await {
+            Ok(Some(chunk)) => match chunk.payload {
+                Some(job_log_chunk::Payload::Header(header)) => {
+                    let (tx, rx) = tokio::sync::mpsc::channel(16);
+                    current = Some(tx);
+                    if logs_tx.send((header, ChunkReader::new(rx))).is_err() {
+                        break;
+                    }
+                }
+                Some(job_log_chunk::Payload::Data(bytes)) => {
+                    let Some(tx) = &current else {
+                        fetched = Err(eyre::eyre!("the daemon sent log bytes before a log header"));
+                        break;
+                    };
+                    // The consumer stopped reading; its error is the one to report.
+                    if tx.send(Ok(bytes)).await.is_err() {
+                        break;
+                    }
+                }
+                None => {}
+            },
+            Ok(None) => break,
+            Err(status) => {
+                if let Some(tx) = &current {
+                    let _ = tx
+                        .send(Err(io::Error::other(status.message().to_string())))
+                        .await;
+                }
+                fetched = Err(eyre::eyre!(
+                    "reading the job log failed ({}): {}",
+                    status.code(),
+                    status.message()
+                ));
+                break;
+            }
+        }
+    }
+    drop(current);
+    drop(logs_tx);
+    let consumed = consumer
+        .await
+        .map_err(|error| eyre::eyre!("the log reader stopped: {error}"))?;
+    fetched?;
+    consumed
+}
+
+/// One log's bytes as they arrive, read on a blocking thread.
+struct ChunkReader {
+    rx: tokio::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    chunk: Vec<u8>,
+    pos: usize,
+}
+
+impl ChunkReader {
+    fn new(rx: tokio::sync::mpsc::Receiver<io::Result<Vec<u8>>>) -> Self {
+        Self {
+            rx,
+            chunk: Vec::new(),
+            pos: 0,
+        }
+    }
+}
+
+impl Read for ChunkReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        while self.pos == self.chunk.len() {
+            match self.rx.blocking_recv() {
+                Some(Ok(chunk)) => {
+                    self.chunk = chunk;
+                    self.pos = 0;
+                }
+                Some(Err(error)) => return Err(error),
+                None => return Ok(0),
+            }
+        }
+        let n = out.len().min(self.chunk.len() - self.pos);
+        out[..n].copy_from_slice(&self.chunk[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
     }
 }
 

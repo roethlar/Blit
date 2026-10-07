@@ -2641,29 +2641,38 @@ mod tests {
         .expect("local mirror with progress attached");
         assert_eq!(summary.deleted_files, 1, "the extraneous file is purged");
 
-        let mut diff_complete = 0usize;
-        let mut delete_begin = 0usize;
-        let mut last: Option<ProgressEvent> = None;
+        let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            match &event {
-                ProgressEvent::DiffComplete => diff_complete += 1,
-                ProgressEvent::DeleteBegin => delete_begin += 1,
-                _ => {}
-            }
-            last = Some(event);
+            events.push(event);
         }
+        let count =
+            |wanted: fn(&ProgressEvent) -> bool| events.iter().filter(|e| wanted(e)).count();
         assert_eq!(
-            diff_complete, 1,
+            count(|e| matches!(e, ProgressEvent::DiffComplete)),
+            1,
             "the destination reports its diff finishing exactly once"
         );
         assert_eq!(
-            delete_begin, 1,
+            count(|e| matches!(e, ProgressEvent::DeleteBegin)),
+            1,
             "the mirror-delete pass announces itself exactly once"
         );
-        assert!(
-            matches!(last, Some(ProgressEvent::DeleteBegin)),
-            "the purge is the last thing the lane reports, not a stale copy \
-             event: {last:?}"
+        // The purge is the last thing the lane reports, not a stale copy
+        // event: after its announcement come only its removals (jl-1b
+        // names each one).
+        let begin = events
+            .iter()
+            .position(|e| matches!(e, ProgressEvent::DeleteBegin))
+            .unwrap();
+        assert_eq!(
+            events[begin + 1..]
+                .iter()
+                .map(|e| match e {
+                    ProgressEvent::Deleted { path } => path.as_str(),
+                    other => panic!("a copy event after the purge began: {other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            ["extraneous.txt"]
         );
     }
 

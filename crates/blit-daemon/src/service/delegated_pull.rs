@@ -211,6 +211,8 @@ pub(crate) async fn handle_delegated_pull(
     // ph-1c: the daemon's own history store for this end's record
     // (`None` = recording structurally off).
     perf_store: Option<blit_core::perf_history::HistoryStore>,
+    // jl-1b: the job's log, owned by the dispatcher.
+    job_log: crate::job_logs::JobLog,
 ) -> bool {
     let resolver = StdResolver;
     let lifecycle_trace = TransferLifecycleTrace::from_env();
@@ -228,6 +230,7 @@ pub(crate) async fn handle_delegated_pull(
         &job_progress,
         &lifecycle_trace,
         perf_store,
+        &job_log,
     )
     .await;
 
@@ -235,6 +238,10 @@ pub(crate) async fn handle_delegated_pull(
         Ok(()) => (true, TransferLifecycleOutcome::Success),
         Err(error_progress) => {
             let terminal_outcome = delegated_terminal_outcome(&error_progress);
+            // The dispatcher only has a marker; the log keeps the reason.
+            if let Some(ProgressPayload::Error(error)) = &error_progress.payload {
+                job_log.note_error(error.upstream_message.clone());
+            }
             // Surface the phased error to the CLI. We use a one-shot
             // send-and-ignore here: if the CLI has already disconnected we
             // can't (and don't need to) report.
@@ -262,6 +269,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     job_progress: &ActiveJobProgress,
     lifecycle_trace: &TransferLifecycleTrace,
     perf_store: Option<blit_core::perf_history::HistoryStore>,
+    job_log: &crate::job_logs::JobLog,
 ) -> Result<(), DelegatedPullProgress> {
     use blit_core::generated::delegated_pull_error::Phase;
 
@@ -470,12 +478,16 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
         progress_tx,
     ));
     let progress_for_events = job_progress.clone();
+    let log_for_events = job_log.clone();
     let relay_job_progress = async move {
         while let Some(event) = progress_rx.recv().await {
             progress_for_events.report_destination_event(&event);
+            log_for_events.observe(&event).await;
         }
     };
     let progress_for_finish = job_progress.clone();
+    let log_for_finish = job_log.clone();
+    job_log.note(format!("local root: {}", dest_root.display()));
     let transfer = async move {
         let (outcome, ()) = tokio::join!(
             run_pull_session_with_client(client, &endpoint, dest_root, options),
@@ -487,6 +499,16 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
                 outcome.summary.bytes_transferred,
                 outcome.summary.in_stream_carrier_used,
             );
+            log_for_finish.note_summary(&outcome.summary);
+            if let Some(streams) = outcome.data_plane_streams {
+                log_for_finish.note(format!("data-plane streams: {streams}"));
+            }
+            if outcome.files_repaired > 0 {
+                log_for_finish.note(format!(
+                    "metadata repaired, content already in place: {} file(s)",
+                    outcome.files_repaired
+                ));
+            }
         }
         outcome
     };
@@ -880,6 +902,7 @@ mod tests {
             guard.bytes_counter(),
             guard.progress(),
             None,
+            crate::job_logs::JobLog::new(None, "t-test"),
         )
         .await;
         assert!(

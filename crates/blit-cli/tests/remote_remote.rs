@@ -317,6 +317,17 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
         Err(tonic::Status::unimplemented("otp-1 stub"))
     }
 
+    type GetJobLogStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::JobLogChunk, tonic::Status>,
+    >;
+
+    async fn get_job_log(
+        &self,
+        _: tonic::Request<blit_core::generated::GetJobLogRequest>,
+    ) -> Result<tonic::Response<Self::GetJobLogStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("test double"))
+    }
+
     async fn subscribe(
         &self,
         _: tonic::Request<blit_core::generated::SubscribeRequest>,
@@ -438,6 +449,17 @@ impl blit_core::generated::blit_server::Blit for RejectingTransferBlit {
         Err(tonic::Status::permission_denied(
             "source ACL rejected delegated peer",
         ))
+    }
+
+    type GetJobLogStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::JobLogChunk, tonic::Status>,
+    >;
+
+    async fn get_job_log(
+        &self,
+        _: tonic::Request<blit_core::generated::GetJobLogRequest>,
+    ) -> Result<tonic::Response<Self::GetJobLogStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("test double"))
     }
 
     async fn subscribe(

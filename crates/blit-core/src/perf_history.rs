@@ -373,16 +373,9 @@ impl HistoryStore {
     /// directory under `ProtectSystem=strict`), else the process
     /// config dir (foreground / dev runs, where it is writable).
     pub fn daemon() -> Result<Self> {
-        if let Some(raw) = std::env::var_os("STATE_DIRECTORY") {
-            // systemd passes a colon-separated list when multiple
-            // directories are configured; the first is ours.
-            if let Some(first) = std::env::split_paths(&raw).next() {
-                if !first.as_os_str().is_empty() {
-                    return Ok(Self { dir: first });
-                }
-            }
-        }
-        Self::user()
+        Ok(Self {
+            dir: config::daemon_state_dir()?,
+        })
     }
 
     /// A store rooted at an explicit directory (tests, tools).

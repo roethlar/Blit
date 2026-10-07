@@ -115,6 +115,9 @@ pub enum JobsCommand {
     Cancel(JobsCancelArgs),
     /// Watch an active transfer until it completes
     Watch(JobsWatchArgs),
+    /// Show a job's log from a remote daemon: every file copied, deleted
+    /// and failed, with phase times
+    Log(JobsLogArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -159,6 +162,30 @@ pub struct JobsCancelArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct JobsLogArgs {
+    /// Remote host (e.g. server or server:port)
+    pub remote: String,
+    /// Job id — as shown by `blit jobs list <remote>` or the `--detach`
+    /// output.
+    pub transfer_id: String,
+    /// Print the log's JSON lines as stored instead of text
+    #[arg(long)]
+    pub json: bool,
+    /// Only the log the daemon kept in this role (a daemon that was both
+    /// ends of a job keeps one log per role)
+    #[arg(long, value_enum)]
+    pub role: Option<LogRole>,
+}
+
+/// The part a daemon played in a job, for `blit jobs log --role`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogRole {
+    Initiator,
+    Source,
+    Destination,
 }
 
 #[derive(Subcommand)]
@@ -866,6 +893,29 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("--interval-ms"));
+    }
+
+    #[test]
+    fn jobs_log_takes_a_role() {
+        let cli = Cli::try_parse_from([
+            "blit", "jobs", "log", "server", "t1-0", "--role", "source", "--json",
+        ])
+        .expect("parse jobs log");
+        let Commands::Jobs {
+            command: JobsCommand::Log(args),
+        } = cli.command
+        else {
+            panic!("expected jobs log");
+        };
+        assert_eq!(
+            (
+                args.remote.as_str(),
+                args.transfer_id.as_str(),
+                args.json,
+                args.role
+            ),
+            ("server", "t1-0", true, Some(LogRole::Source))
+        );
     }
 
     #[test]
