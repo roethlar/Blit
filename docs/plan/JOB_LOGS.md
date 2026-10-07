@@ -256,6 +256,35 @@ Small first, per R1; each slice is one coherent, testable change.
    machinery; refuse on another machine; a `--detach` job's outcome fetched
    by ID from the receiving daemon's log.
 
+## Review history
+
+- **r1** (2026-10-07; openreview codex, gpt-5.6-sol @ xhigh, frontier/fallback,
+  codex-cli 0.159.3; over `13bff7d8..92192a33`; capability_ok, guard_confirmed,
+  SHAs pinned; record `.review/results/joblogs-plan-r1.codex.json`):
+  **acceptable_with_changes**. The reviewer's goal statement matches the
+  owner's; it endorses the commands, logs on every machine, retention,
+  compression, one run identity and the incremental slices. A Claude dispatch
+  of the same review was stopped by the owner (D-2026-10-07-4) and is excluded.
+  - Material changes, each awaiting an owner ruling:
+    MC1 separate and version a JobSpec, a RunRecord and a per-participant
+    EventLog instead of one loosely defined JSON format;
+    MC2 define detached-job reconciliation for every local jobs operation,
+    not only retry;
+    MC3 key logs by run ID plus participant, role and attempt, and define the
+    event schema before storage and retrieval;
+    MC4 specify partial-log recovery, atomic finalization, pruning
+    concurrency, writer backpressure and logging-failure behavior, and split
+    jl-1 so these are independently testable.
+  - Findings, intake 2026-10-07 — all ADMITTED as plan revisions (no code
+    exists yet): F1 HIGH a detached run cannot finalize the initiating
+    machine's record (the CLI has exited; only retry was given a fetch);
+    F2 HIGH saved jobs are not reproducible across working directories,
+    changed `--files-from` contents or format changes (raw path strings);
+    F3 HIGH post-run compression leaves a crashed run's partial log
+    undiscoverable; F4 MEDIUM a job ID alone cannot key logs when one daemon
+    is both delegated destination and served source. Each lands in the plan
+    with the material change it belongs to (F1→MC2, F2→MC1, F3→MC4, F4→MC3).
+
 ## Open questions
 
 Asked one at a time, in this order:
