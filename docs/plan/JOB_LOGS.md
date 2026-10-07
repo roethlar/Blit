@@ -321,11 +321,17 @@ Small first, per R1; each slice is one coherent, testable change.
 1. **jl-1a — the event schema and a crash-safe log writer (the small start).**
    The versioned event schema; the per-log writer (bounded queue, partial
    file, sync points, compress-and-rename on finish, torn-line tolerance);
-   startup recovery of orphaned partials; locked pruning to the newest 50
-   (`[jobs] keep` in the daemon's `config.toml`); "logging never fails a
-   transfer". Library-level, tested without a network.
+   startup recovery of orphaned partials; locked pruning to the newest
+   `keep` (default 50); "logging never fails a transfer". Library-level,
+   tested without a network.
+   **Landed 2026-10-07** as `blit_core::job_log` (21 tests, each guard
+   mutation-proven red), adding `flate2` (its default pure-Rust backend) to
+   blit-core for the `.jsonl.gz` files. Reading the `[jobs] keep` setting
+   moved to jl-1b, where the daemon first writes logs; jl-1a has nothing that
+   reads it.
 2. **jl-1b — daemon logs and retrieval.** The daemon writes each job's log
-   (keyed run + participant + role + attempt) through jl-1a; `GetJobLog`;
+   (keyed run + participant + role + attempt) through jl-1a, runs startup
+   recovery, and reads `[jobs] keep` from its `config.toml`; `GetJobLog`;
    `blit jobs log <host> <job-id> [--json] [--role]`.
 3. **jl-1c — failures in the job list.** `jobs list`/`watch` show the
    failed-file count and `watch` exits non-zero when files failed (closes

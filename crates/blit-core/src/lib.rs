@@ -16,6 +16,7 @@ pub mod endpoints;
 pub mod enumeration;
 pub mod fs_capability;
 pub mod fs_enum;
+pub mod job_log;
 pub mod manifest;
 pub mod mdns;
 pub mod mirror_planner;
