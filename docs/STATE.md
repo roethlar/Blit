@@ -32,7 +32,7 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
 
 ## Now (active work)
 
-- **SOURCE_SIDE_CONTAINMENT ACTIVE (D-2026-09-29-4):** all six slices
+- **SOURCE_SIDE_CONTAINMENT SHIPPED (owner declared 2026-10-07, D-2026-10-07-1):** all six slices
   landed 2026-09-30 (`docs/plan/SOURCE_SIDE_CONTAINMENT.md`; a file the
   SOURCE cannot deliver is skipped or retracted and reported, never
   run-fatal; contract 7). Windows fixes win-1..5 `5eeff4ac..8da5614b`
@@ -64,9 +64,9 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
   Principle: ceiling-driven, never competitor-relative (D-2026-07-04-4).
 ## Queue (ordered)
 
-0. **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (ACTIVE)** — all slices, D8 and every review finding closed;
-   CI green at `189ae11b`. Next: the owner's Shipped flip (CI's leg is the only native x86_64 Windows evidence; the Ryzen
-   box is gone); then the owner's Shipped flip. RELEASE_1_0 G3 fix-now item.
+0. **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (SHIPPED — owner declared 2026-10-07, D-2026-10-07-1)** —
+   all slices, D8 and every review finding closed; CI green at `189ae11b`. Met RELEASE_1_0
+   G3's fix-now item (G3's checkbox stays the owner's). Nothing open.
 0. **ULTRACODE 2026-08-18 (DEVLOG 23:00Z): cv-1+cv-2 LANDED `05529c19` (contract-version gate + scan surfacing; cv-3 landed 2026-09-30 with ssc-5 `6c266dd4`); sf-3d LANDED `7ffd929d` (containment cache + resume-path stamping; rig A/B still owed); clp-3 reviewed AND F1 closed `677a8ba9` (F2/F5 stay owner calls); residue triaged (2 dead, 1 dead-as-written; item 5 rate-window FIXED — its stall-silence call was owner-ruled as revised-b, landed below; item 2 perf-history scope ruled "both" by D-2026-08-20-1 and shipped, D-2026-08-20-4); sweep-prefetch parked pending one netwatch-01 SMB run; pm-5: see Blocked / waiting.** CI FULLY GREEN on `af9b48b3` (run 32195891519, 7/7 jobs — the slices are cross-platform proven). Stall-line revised-b landed after (three red-proven silence gates; mid-payload stalls visible, summary-wait/purge tails silent).
 1. **`docs/plan/INTERFACE_PLATFORM.md` (SHIPPED — owner declared 2026-08-18; all seven slices landed 2026-08-17)** — three standalone front-ends (CLI first, TUI/GUI later in BlitAdmin_UIs), all first-class consumers of `blit-core` ITSELF: `blit-app` + `blit-console-core` fold into core (no new crate, D-2026-08-17-2), `blit-core` publishes to crates.io (name available, verified; publish act owner-gated), third-party Rust apps embed via the crate, everything else via daemon gRPC. All rulings closed (D-2026-08-17-3/-4/-5: bridge, tui, gui all deleted; fresh UIs later; nothing pushes to BlitAdmin_UIs under this plan). Nothing open; execution record in the plan.
 2. **`docs/plan/SMALL_FILE_CEILING.md` — sf-3b closed (D-2026-08-14-1); sf-3c landed 2026-08-15; sf-3d landed 2026-08-18** — sf-3c stamps streamed-receive mtime/permissions through the retained write handle instead of reopening by path; sf-3d (sf-3a candidate 3, contained-path canonicalization cache + resume-path stamping, `7ffd929d`) closed the named-candidate list; proxy pins + mutation proofs in the plan's Slices section. Rig A/B for sf-3d still owed (Queue 0); no further cut selected.
@@ -167,9 +167,8 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
   **`docs/plan/RELEASE_COMPLETION.md`**.
 - Historical live-tuning record: **`docs/plan/LIVE_DIAL_TUNING.md`**; exact
   session audit: **`docs/bench/ldt4-evidence-audit-2026-07-22/`**.
-- **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (ACTIVE, D-2026-09-29-4 — all
-  six slices landed 2026-09-30; cr-win-1 and its review findings closed 2026-10-07; Shipped is the owner's
-  word).**
+- **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (SHIPPED 2026-10-07, D-2026-10-07-1 —
+  all six slices landed 2026-09-30; cr-win-1 and its review findings closed 2026-10-07).**
 - Active plans: `docs/plan/SMALL_FILE_CEILING.md` (**Active**; sf-3c/sf-3d
   landed, no further cut selected) and **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** (code-
   complete; measurement gates remain). REV4 superseded v1/REV2/REV3

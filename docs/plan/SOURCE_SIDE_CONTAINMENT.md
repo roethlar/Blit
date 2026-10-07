@@ -1,6 +1,7 @@
 # Source-Side Containment — a file the source cannot deliver is skipped, not fatal
 
-**Status**: Active — owner: "active" (2026-09-29, D-2026-09-29-4). All
+**Status**: Shipped — owner declared 2026-10-07 (D-2026-10-07-1); CI fully
+green at `189ae11b`. Was Active — owner: "active" (2026-09-29, D-2026-09-29-4). All
 seven rulings closed (D1–D7: D-2026-09-28-1..-4, D-2026-09-29-1..-3);
 codex openreview loop closed at r6 (2026-09-26; `REVIEW.md` rows
 `plan-ssc-2026-09-25-r1..r6`). All six slices ssc-1..ssc-6 landed

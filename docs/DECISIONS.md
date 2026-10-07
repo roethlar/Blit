@@ -912,3 +912,8 @@ Format:
 - Decision: owner (2026-10-04): pm-5 does not start "until everything is working 100%." Its mechanical block (a tag carrying pm-1) cleared with v0.1.3; the hold is now the owner's, not a technical one.
 - Why: a homebrew-core submission is outward-facing and slow to retract; it waits for a release the owner judges fully working.
 - Supersedes: nothing (amends the plan's pm-5 entry and STATE's Blocked line).
+
+## D-2026-10-07-1 — SOURCE_SIDE_CONTAINMENT flipped Active → Shipped
+- Decision: owner declared `docs/plan/SOURCE_SIDE_CONTAINMENT.md` **Shipped** ("mark shipped", 2026-10-07). All six slices ssc-1..ssc-6 landed 2026-09-30; the Windows fixes win-1..5 and D8 (D-2026-10-04-1, `85e82f84`) landed after them; cr-win-1 was reworked on the owner's ruling (`0528e78c`, `4a06aec5`), and its codex review and re-reviews' findings cr-rework-1..3 were fixed (`75462ba9`, `a60368b1`, `7c607672`) and closed by owner ruling; CI fully green on the three OSes at `189ae11b` (run 37570469240).
+- Why: the plan's goal — a file the SOURCE cannot deliver is skipped or retracted and reported, never run-fatal (D-2026-09-28-2) — is delivered on every route with CI green, and no review row stays open.
+- Supersedes: D-2026-09-29-4's Active status (the plan header now reads Shipped); the RELEASE_1_0 G3 "fix now" entry for this plan is met (G3's own checkbox stays the owner's).

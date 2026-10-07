@@ -45,7 +45,8 @@ are the owner's act.
   size-drifted since the scan — must never end the run (D-2026-09-28-2);
   all six slices ssc-1..ssc-6 shipped with CI green on the candidate.
   Status 2026-09-30: all six slices LANDED on master (plan §Execution
-  record); CI on the three OSes pending the owner's push.**
+  record). Status 2026-10-07: plan SHIPPED (D-2026-10-07-1), CI fully
+  green on the three OSes at `189ae11b` (run 37570469240).**
   audit-16's open half (sink-less heartbeat ignores `--verbose`) — CLOSED
   2026-08-02 (DEVLOG 2026-08-02 03:25Z), listed here in error until the
   2026-09-29 refresh.
