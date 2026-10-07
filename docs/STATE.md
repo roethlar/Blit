@@ -195,4 +195,5 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
 
 ## Open questions
 
-- None open. D8 RULED per file (D-2026-10-04-1) and implemented (`85e82f84`).
+- **Defects found 2026-10-07 answering the owner's retry questions (no code yet; awaiting the owner):** (a) the local single-file copy arms its cleanup before the destination is opened, so a destination it cannot open is deleted (a file the user cannot write) or mislabelled as this run's leftover (a folder in the way); (b) Ctrl-C during the retry wait or a retry pass prints no report at all, though the first pass already ran and deleted; (c) a `--detach` job records only ok/bytes/files and a whole-job error, so per-file failures are never shown — `blit jobs watch` reports success. Owner questions: retries for detached jobs (daemon-side), and whether defaults differ per front-end.
+- G3 (RELEASE_1_0) still open: audit-19 (`--exclude` matches nothing for absolute paths and bare directory names) — fix or document before 1.0.

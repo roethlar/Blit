@@ -917,3 +917,13 @@ Format:
 - Decision: owner declared `docs/plan/SOURCE_SIDE_CONTAINMENT.md` **Shipped** ("mark shipped", 2026-10-07). All six slices ssc-1..ssc-6 landed 2026-09-30; the Windows fixes win-1..5 and D8 (D-2026-10-04-1, `85e82f84`) landed after them; cr-win-1 was reworked on the owner's ruling (`0528e78c`, `4a06aec5`), and its codex review and re-reviews' findings cr-rework-1..3 were fixed (`75462ba9`, `a60368b1`, `7c607672`) and closed by owner ruling; CI fully green on the three OSes at `189ae11b` (run 37570469240).
 - Why: the plan's goal — a file the SOURCE cannot deliver is skipped or retracted and reported, never run-fatal (D-2026-09-28-2) — is delivered on every route with CI green, and no review row stays open.
 - Supersedes: D-2026-09-29-4's Active status (the plan header now reads Shipped); the RELEASE_1_0 G3 "fix now" entry for this plan is met (G3's own checkbox stays the owner's).
+
+## D-2026-10-07-2 — Retry flag names stay as they are
+- Decision: owner (2026-10-07): "keep both as-is". `--retries`/`-R` and `--retry-wait`/`-W` (end-of-run per-file retry passes, D-2026-09-28-3) stay beside the older `--retry`/`--wait` (re-run the whole transfer after a transient failure); their help texts keep pointing at each other.
+- Why: the new pair follows the owner's robocopy ruling, and the old pair already shipped.
+- Supersedes: the open owner note on the naming (SOURCE_SIDE_CONTAINMENT ssc-6 notes; STATE).
+
+## D-2026-10-07-3 — Ship nothing until the open work is done
+- Decision: owner (2026-10-07): "ship nothing until this is done" — no release, tag or publish (crates.io included, so 0.1.3 is not published there) until the open decisions and defects recorded in `docs/STATE.md` on 2026-10-07 are resolved. Owner's estimate: single-digit users.
+- Why: the next release carries contract 7 and the new retry/containment behavior; it should ship once, complete.
+- Supersedes: STATE's "OPEN, owner-only" crates.io publish of 0.1.3 (dropped, not pending).
