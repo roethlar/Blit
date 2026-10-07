@@ -85,6 +85,7 @@ for its own settings, and its job records beside its existing recents.
   forensically".
 - R15 (Q6, naming files): "B" — a log names every file copied, deleted, and
   failed.
+- R16 (Q7): "store logs compressed."
 
 ## Non-goals
 
@@ -126,7 +127,29 @@ for its own settings, and its job records beside its existing recents.
 
 ## Acceptance criteria
 
-- [ ] (to be written once the open questions below are answered)
+- [ ] A `--detach` remote-to-remote job with one file that fails on its own:
+      `blit jobs watch` exits non-zero and names the file; `blit jobs list`
+      shows a failed-file count; `blit jobs log <host> <job-id>` shows the
+      file and its reason (closes defect (c) of 2026-10-07).
+- [ ] Every run — local copy, push, pull, remote-to-remote — leaves a log on
+      each machine involved, all under one job ID; `blit jobs log` reads each
+      as text and, with `--json`, as the raw events.
+- [ ] A log names every file copied, deleted and failed (with reasons), holds
+      what `-v` adds, phase start/end times and stall notices; it is written
+      as the run goes and stored compressed.
+- [ ] Retention: with the default, the 51st run's log replaces the oldest;
+      the `config.toml` value is honored; saved jobs are never removed by it.
+- [ ] `--save <name>`, `--export <file>`, `blit jobs save|export|run|delete|list`
+      behave as the Design's command surface says; `blit jobs run <name>`
+      re-runs the same transfer.
+- [ ] `blit jobs retry <job-id|file>` re-sends only the files that failed,
+      with the original options; on another machine it refuses with a plain
+      message naming the machine the job belongs to.
+- [ ] Windows keeps settings, jobs and logs under `%LOCALAPPDATA%\Blit`; files
+      found in the old roaming folder are moved once.
+- [ ] FAST: logging costs no measurable slowdown on the existing small-file
+      and large-file benches (within run-to-run noise).
+- [ ] Every new sub-verb answers `--help` with its own help (R12).
 
 ## Design
 
@@ -186,15 +209,52 @@ run on every machine involved, newest 50 kept, R5/R6/R7) and **saved jobs**
 - Size (agent's design, follows from R15): a million-file backup's log is
   on the order of 100 MB, and 50 are kept per machine. The log is written to
   disk as the run goes — one JSON event per line — never held in memory, so
-  a large job costs disk, not RAM. Whether finished logs are compressed is
-  open (Q7).
+  a large job costs disk, not RAM, and is compressed when the run finishes
+  (R16). `blit jobs log` reads it as text or JSON transparently; `blit jobs
+  export` writes it uncompressed.
 
-The rest of the design is written once the remaining open questions are
-answered.
+### Identity, protocol and retention (agent's design within the rulings)
+
+- **Job ID.** The machine where the command is typed creates the ID (a
+  random 128-bit ID shown in short form, like `--detach` shows today) and
+  sends it with the transfer, so every machine involved logs under the same
+  ID. A daemon still creates one for a job no CLI started.
+- **Machine ID.** Created once per machine and kept in the per-user folder;
+  every job records it, and `blit jobs retry`/`run` refuse a job whose ID is
+  not this machine's (R4). Hostnames change, so they are not used.
+- **Protocol (contract 7, unreleased).** The job ID rides the session-open
+  and delegated-pull requests; a new `GetJobLog` call returns one log by ID;
+  the finished-job record (`TransferRecord`) gains the failed-file count.
+- **Retention.** Per machine, the newest 50 logs and the newest 50 run
+  records (R7) — `[jobs] keep = 50` in the CLI's new per-user `config.toml`
+  and in the daemon's existing `config.toml`. Saved jobs are kept until
+  deleted. Pruning happens when a run finishes; nothing to manage.
+- **Exposure.** A daemon's logs name files; `blit jobs log <host>` reads them
+  with the same reach `blit ls`/`find` already have on that daemon — no new
+  access.
 
 ## Slices
 
-(to be cut once the design is agreed; the first slice stays small, per R1)
+Small first, per R1; each slice is one coherent, testable change.
+
+1. **jl-1 — daemon logs (the small start).** The daemon writes each job's
+   log (identity, `-v` diagnostics, phase times and stalls, every copied,
+   deleted and failed file) as it runs, compressed when it ends, keeps the
+   newest 50 (`[jobs] keep` in its `config.toml`); `GetJobLog`; `blit jobs log
+   <host> <job-id> [--json]`; `jobs list`/`watch` show the failed-file count
+   and `watch` exits non-zero when files failed (closes defect (c)).
+2. **jl-2 — one job ID everywhere, local logs.** The CLI creates the job ID and
+   sends it, so both daemons of a remote-to-remote job and the CLI machine log
+   under it; local runs write logs too; the per-user folder (Windows moved to
+   `%LOCALAPPDATA%\Blit`, old files moved once), the CLI's `config.toml`;
+   `blit jobs log <job-id|file>` and `blit jobs list` locally.
+3. **jl-3 — jobs.** Every run writes its job (what to run, how it ended,
+   exact failed paths) locally; machine ID; `--save`, `--export`, `blit jobs
+   save|export|run|delete`.
+4. **jl-4 — retry.** `blit jobs retry <job-id|file>`: re-send only the failed
+   paths with the original options, through the existing retry-pass
+   machinery; refuse on another machine; a `--detach` job's outcome fetched
+   by ID from the receiving daemon's log.
 
 ## Open questions
 
@@ -215,6 +275,4 @@ Asked one at a time, in this order:
 - Q5. The cleaned-up command surface — RULED (R12): see Design.
 - Q6. Whether a log names files — RULED (R15): every file copied, deleted
   and failed.
-- Q7. Compress finished logs? A million-file log is ~100 MB as written and
-  ~10 MB compressed; `blit jobs log` would read either transparently.
-  — owner
+- Q7. Compress finished logs — RULED (R16): yes.
