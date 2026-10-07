@@ -1,9 +1,9 @@
 # Job logs — every job's full record, retrievable, and retryable from it
 
-**Status**: Draft
+**Status**: Active — owner: "go" (2026-10-07, D-2026-10-07-5), after the r1 review's changes were adopted (R17)
 **Created**: 2026-10-07
 **Supersedes**: nothing
-**Decision ref**: pending (set when the owner flips this to Active)
+**Decision ref**: D-2026-10-07-5
 
 ## Goal
 
