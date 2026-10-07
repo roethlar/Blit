@@ -28,6 +28,24 @@ Requirements as the owner stated them (2026-10-07, verbatim):
 - R4: "this should probably be limited to the original machine to avoid the
   footgun."
 
+Shaping, same day (the owner thinking aloud, then ruling):
+
+- Brainstorm: save jobs, local or daemon, "in the same .json format as the
+  retry jobs, then we can do a blit job <job.json> or something like that",
+  with every daemon run stored as "a job_run-<timestamp>.log or similar for
+  retries"; then "we need a way to manage jobs, prune old ones, etc. saving
+  every local run by default seems like a burden. simplify it for me."
+- R5 (rejecting "only failed local runs leave a record"): "no. successful
+  runs are pretty likely to be reused. backup tasks, stuff like that. I think
+  we need a --save <jobname> and a --export that takes a job ID and works
+  in-line with --save to save it to the .blit folder internally and export to
+  the filename specified. that needs to be cleaned up, but you get the idea."
+- R6: "daemon logs need to live on both daemons, or log hunting will be
+  annoying."
+- R7 (retention): "50 default, blit.conf option for others".
+- R8 (rejecting a two-command surface and dropping saved jobs): "no, result
+  of above." — saved, reusable jobs are in scope.
+
 ## Non-goals
 
 - Spiralling scope (R1: "start small"): the first slices deliver the record,
@@ -58,6 +76,13 @@ Requirements as the owner stated them (2026-10-07, verbatim):
 - Defect (c) of 2026-10-07 (STATE): a `--detach` job whose files failed one by
   one is recorded ok, and `blit jobs watch` reports success. A job record that
   carries the failures closes it.
+- There is no `blit.conf` and no `.blit` folder today. The daemon reads a TOML
+  config (`/etc/blit/config.toml`, `C:\ProgramData\Blit\config.toml`;
+  `docs/DAEMON_CONFIG.md`); the CLI has no config file, only its per-user
+  data folder (`blit_core::config::config_dir()`: `~/Library/Application
+  Support/com.Blit.Blit` on macOS, `~/.config/blit` on Linux), which already
+  holds `recents.jsonl` and the perf history. R7's "blit.conf" and R5's
+  ".blit folder" map onto these unless the owner rules otherwise.
 
 ## Acceptance criteria
 
@@ -75,13 +100,17 @@ Requirements as the owner stated them (2026-10-07, verbatim):
 
 Asked one at a time, in this order:
 
-- Q1. Which runs write a job record: every blit run (local copies, pushes,
-  pulls, remote-to-remote) on the machine that ran it, or only jobs a daemon
-  runs? — owner
-- Q2. For a remote-to-remote job, which is "the original machine" (R4): the
-  one where the command was typed, or the daemon host that ran the transfer?
-  — owner
+- Q1. Which runs write a job record? — RULED by R5/R6: every run (a
+  successful run is likely reused); every machine involved in a job keeps it
+  — for remote-to-remote, both daemons (R6).
+- Q2. For a remote-to-remote job, which is "the original machine" (R4)?
+  — open; R6 puts the record on both daemons, so retry needs a rule for which
+  end re-runs it. — owner
 - Q3. What `blit retry` re-runs: only the files that failed, with the
   original options, or the whole job? — owner
-- Q4. How long records are kept (count, age, or size), given that a full
-  `-v` record of a large job lists every file. — owner
+- Q4. How long records are kept — RULED by R7: the last 50 by default,
+  configurable in the config file. Whether a saved job (R5) counts toward the
+  50 is open (proposed: no — a saved job is kept until deleted). — owner
+- Q5. The cleaned-up command surface for R5 (`--save <name>`, export by job
+  ID, running a saved job, listing and deleting saved jobs) — proposed to the
+  owner 2026-10-07, awaiting a ruling. — owner
