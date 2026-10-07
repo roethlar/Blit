@@ -72,6 +72,12 @@ for its own settings, and its job records beside its existing recents.
 - R11 (on the proposed `blit jobs export`): "also needs an in-line --export
   that works with --save to save it locally and exported." Owner's question
   on the proposed `blit retry`: "why not jobs retry?" (answered in Design).
+- R12 (confirming the command surface): "right, then we can have a blit jobs
+  --help for specific help. we should have that same syntax for all verbs.
+  Yes." Verified 2026-10-07: every verb and sub-verb already answers
+  `--help` with its own help (clap); the new `jobs` sub-verbs inherit it.
+  `blit jobs`'s one-line help ("Inspect transfer jobs on a remote daemon")
+  must change to cover local jobs.
 
 ## Non-goals
 
@@ -117,7 +123,7 @@ for its own settings, and its job records beside its existing recents.
 
 ## Design
 
-### Command surface (proposed 2026-10-07; pending the owner's confirmation, Q5)
+### Command surface (confirmed by the owner 2026-10-07, R12)
 
 Two kinds of saved file, one JSON format: **run records** (written by every
 run on every machine involved, newest 50 kept, R5/R6/R7) and **saved jobs**
@@ -156,12 +162,11 @@ Asked one at a time, in this order:
 - Q2. For a remote-to-remote job, which is "the original machine" (R4)?
   — open; R6 puts the record on both daemons, so retry needs a rule for which
   end re-runs it. — owner
-- Q3. What `blit retry` re-runs: only the files that failed, with the
-  original options, or the whole job? — owner
+- Q3. What a retry re-runs — RULED with the command surface (R12):
+  `blit jobs retry` re-sends only what failed, with the original options;
+  `blit jobs run` re-runs a whole saved job.
 - Q4. How long records are kept — RULED by R7: the last 50 by default,
   configurable in `config.toml` (R9: TOML, per-user folder; the daemon's in
-  its own `config.toml`). Whether a saved job (R5) counts toward the
-  50 is open (proposed: no — a saved job is kept until deleted). — owner
-- Q5. The cleaned-up command surface for R5 (`--save <name>`, export by job
-  ID, running a saved job, listing and deleting saved jobs) — proposed to the
-  owner 2026-10-07, awaiting a ruling. — owner
+  its own `config.toml`). A saved job does not count toward the 50 — it is
+  kept until deleted (proposed with the command surface, confirmed R12).
+- Q5. The cleaned-up command surface — RULED (R12): see Design.
