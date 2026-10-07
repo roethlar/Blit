@@ -927,3 +927,8 @@ Format:
 - Decision: owner (2026-10-07): "ship nothing until this is done" — no release, tag or publish (crates.io included, so 0.1.3 is not published there) until the open decisions and defects recorded in `docs/STATE.md` on 2026-10-07 are resolved. Owner's estimate: single-digit users.
 - Why: the next release carries contract 7 and the new retry/containment behavior; it should ship once, complete.
 - Supersedes: STATE's "OPEN, owner-only" crates.io publish of 0.1.3 (dropped, not pending).
+
+## D-2026-10-07-4 — Reviews use external models only; formal openreview dispatches Codex
+- Decision: owner (2026-10-07), stopping a formal plan review dispatched to Claude Opus 4.8 by a Claude-authored session: "you're running the review with your own family. no. reviews ONLY with external models. use codex." A review is never run by the model family that wrote the change — a Claude-authored change is never reviewed by Claude. Every formal `openreview` dispatches Codex (the frontier pair recorded in the machine-local harness cache, at its highest effort); the existing rule that Codex is not independent when Codex authored the change still holds, and such a change needs another external reviewer named by the owner.
+- Why: an author's own model family is not an independent reviewer; the point of the review is a second mind.
+- Supersedes: D-2026-07-23-2's selection of Claude Opus 4.8/max for formal `openreview` and the Claude-specific dispatch details in `.agents/repo-guidance.md` (rewritten); `docs/agent/PROTOCOL.md` plan step 5 and slice step; `docs/STATE.md`'s Process line.

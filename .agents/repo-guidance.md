@@ -87,9 +87,11 @@ D-2026-07-16-4 and D-2026-07-16-3): formal
 `openreview` is selected in proportion to risk and uncertainty, not required
 for every code or plan change.** Grok may provide ordinary advisory second eyes
 and tactical slice checks when they add value, but a Grok result is never a
-formal `openreview` acceptance verdict. Every formal `openreview` uses Claude
-CLI with `--model claude-opus-4-8 --effort max`; Fable is retired for all future
-reviews. **Per D-2026-07-23-7, selection is only a recommendation: every
+formal `openreview` acceptance verdict. Per D-2026-10-07-4, reviews use external
+models only — never the family of the model that wrote the change (a
+Claude-authored change is never reviewed by Claude) — and every formal
+`openreview` dispatches Codex (the frontier pair in the machine-local harness
+cache, at its highest effort). Fable is retired for all future reviews. **Per D-2026-07-23-7, selection is only a recommendation: every
 external or paid review dispatch, formal or advisory, requires the owner's
 explicit approval for that exact invocation. Prior model selection is not
 dispatch approval, and an invalid, failed, or interrupted attempt is never
@@ -106,11 +108,11 @@ the reviewer independently runs a red/green guard in an isolated worktree and
 its structured result must include literal `guard_confirmed: true` alongside
 the fixed base/head identity. Missing or false guard confirmation fails that
 review closed even though the portable openreview schema does not require the
-field. Formal Claude dispatches must also be observable: use print mode with
-`--brief --output-format stream-json`, retain the raw event stream, and require
-the reviewer itself to send concise progress heartbeats before the final JSON
-at major phase changes, around long-running checks, and during prolonged
-tool-heavy work. Heartbeats report only the current activity, never a
+field. Formal dispatches must also be observable: run the harness in its
+JSON event-stream mode (`codex exec --json`, stdin closed), retain the raw event
+stream, and ask the reviewer to state its current activity briefly at major
+phase changes, around long-running checks, and during prolonged tool-heavy
+work. Heartbeats report only the current activity, never a
 provisional verdict or finding, so they add no substantive review framing.
 Only the terminal schema-valid result is the acceptance record. Do not
 calculate token or monetary usage as a review-health signal; if heartbeats

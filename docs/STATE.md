@@ -173,8 +173,8 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
   complete; measurement gates remain). REV4 superseded v1/REV2/REV3
   (history only).
 - Process: `.agents/playbooks/openreview.md` — synchronous unprimed review only
-  after exact owner approval under D-2026-07-23-7 (formal review uses Claude
-  Opus 4.8/max; Grok advisory; landed-slice codex dispatch is standing under
+  after exact owner approval under D-2026-07-23-7 (reviews external models only,
+  formal review dispatches Codex, D-2026-10-07-4; Grok advisory; landed-slice codex dispatch is standing under
   D-2026-07-31-3); `.agents/playbooks/codereview.md` supplies finding intake
   and triage only. `docs/agent/GPT_REVIEW_LOOP.md` is historical;
   `.review/README.md` is retired as the grading mechanism (its
