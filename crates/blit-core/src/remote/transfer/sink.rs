@@ -2322,6 +2322,23 @@ fn copy_resolved_file_payload(
     landed.map_err(|error| partial.settle(error))
 }
 
+/// 2026-10-07 defect (a): whether this copy can open `dst` for writing,
+/// before anything arms the cleanup for it. Opening without `truncate`
+/// changes nothing; every copy path opens the destination the same way
+/// (none removes it first — `fclonefileat` refuses an existing target and
+/// falls through), so this fails exactly when the copy itself would. A
+/// missing destination is fine: anything created from here on is this
+/// copy's.
+fn probe_destination_writable(dst: &Path) -> Result<()> {
+    match std::fs::OpenOptions::new().write(true).open(dst) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        // The same bare error the copy's own open would have raised, so the
+        // reason a user sees is unchanged.
+        Err(error) => Err(eyre::Report::new(error)),
+    }
+}
+
 /// The copy cascade and metadata tail of [`copy_resolved_file_payload`],
 /// arming `partial` the moment the target is touched so the caller can
 /// settle any failure from here on (cr-ssc4-2, cr-win-1).
@@ -2351,6 +2368,12 @@ fn copy_and_stamp_opened(
         dst,
         config.compare_mode,
     )? {
+        // 2026-10-07 defect (a): arm the cleanup only for a destination this
+        // copy can write. One it cannot open — a folder in the way, a file
+        // the user may not write — is not this copy's: the cleanup would
+        // delete the user's file without having written a byte, or report a
+        // folder as this run's incomplete copy.
+        probe_destination_writable(dst)?;
         // cr-ssc4-2: from here until the validated success, any exit
         // removes the destination — a source read error mid-copy, a
         // post-copy stat failure, a metadata-tail failure — so nothing
@@ -6724,5 +6747,70 @@ mod cr_win_1_tests {
         let note = note.note.expect("the target stayed, so the reason says so");
         assert!(note.contains(INCOMPLETE_LEFT_IN_PLACE), "{note}");
         assert_eq!(std::fs::metadata(&dst).unwrap().len(), 6);
+    }
+
+    /// 2026-10-07 defect (a): a destination the copy cannot open is not
+    /// this copy's. A file the user may not write is kept, untouched —
+    /// before the fix the cleanup deleted it without writing a byte.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_destination_the_copy_cannot_open_is_left_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("a.bin"), b"new content").unwrap();
+        std::fs::write(dst.join("a.bin"), b"the user's file").unwrap();
+        std::fs::set_permissions(dst.join("a.bin"), std::fs::Permissions::from_mode(0o444))
+            .unwrap();
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .open(dst.join("a.bin"))
+            .is_ok()
+        {
+            eprintln!("skipped: a privileged user writes through mode 444");
+            return;
+        }
+        let outcome = local_sink(&src, &dst)
+            .write_payload(PreparedPayload::File(make_file_header("a.bin", 11)))
+            .await
+            .unwrap();
+        std::fs::set_permissions(dst.join("a.bin"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert_eq!(
+            std::fs::read(dst.join("a.bin")).unwrap(),
+            b"the user's file",
+            "the user's file is kept"
+        );
+        assert!(outcome.removed_incomplete().is_empty());
+    }
+
+    /// 2026-10-07 defect (a): a folder in the way is reported as the
+    /// failure it is — never as this run's incomplete copy.
+    #[tokio::test]
+    async fn a_folder_in_the_way_is_not_reported_as_a_leftover() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(dst.join("a.bin")).unwrap();
+        std::fs::write(dst.join("a.bin/inner.txt"), b"kept").unwrap();
+        std::fs::write(src.join("a.bin"), b"new content").unwrap();
+        let outcome = local_sink(&src, &dst)
+            .write_payload(PreparedPayload::File(make_file_header("a.bin", 11)))
+            .await
+            .unwrap();
+        assert_eq!(outcome.files_failed_total, 1, "{outcome:?}");
+        assert!(
+            !outcome.failures[0]
+                .reason
+                .contains(INCOMPLETE_LEFT_IN_PLACE),
+            "{:?}",
+            outcome.failures
+        );
+        assert_eq!(std::fs::read(dst.join("a.bin/inner.txt")).unwrap(), b"kept");
     }
 }
