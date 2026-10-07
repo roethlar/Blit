@@ -1220,6 +1220,11 @@ finished is left behind."
   `--ignore-existing`, this run's own leftovers retry with that flag off.
 
 Guards and mutation proofs are in `.review/findings/cr-win-1.md`.
+The codex review of the rework and two re-reviews admitted three more
+(cr-rework-1..3: the `--ignore-existing` leftover set made exact, kept
+while a path keeps failing, and dropped once its copy is removed), fixed
+`75462ba9`, `a60368b1`, `7c607672`; all four closed 2026-10-07 by owner
+ruling, CI fully green at `189ae11b`.
 
 ## Review history
 

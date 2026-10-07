@@ -1,7 +1,7 @@
 # cr-rework-2: a retry-side source failure drops a path's leftover classification
 
 **Severity**: HIGH — with `--ignore-existing` and two or more retries, a copy/mirror can exit 0 with this run's incomplete copy still at the destination
-**Status**: Fixed — red/green on macOS; retry tests green on the Windows ARM64 VM; a re-review is the owner's call
+**Status**: Verified (closed by owner ruling 2026-10-07 on local red/green proof, the Windows ARM64 VM, and CI fully green at `189ae11b`, run 37570469240; its codex re-review returned cr-rework-3, fixed)
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: `a60368b1`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (owner-approved re-review of the cr-rework-1 fix, range 6e0e5a7b..4cdef0a8; record .review/results/rework-fix-range.codex.json)

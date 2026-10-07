@@ -1,7 +1,7 @@
 # cr-rework-1: --ignore-existing retries can falsely clear leftovers beyond the 64-entry named report
 
 **Severity**: HIGH — a run with more than 64 incomplete copies left behind under `--ignore-existing` can exit 0 with incomplete files at the destination
-**Status**: Fixed — red/green on macOS; Windows ARM64 VM suite green; a re-review of the fix is the owner's call
+**Status**: Verified (closed by owner ruling 2026-10-07 on local red/green proof, the Windows ARM64 VM, and CI fully green at `189ae11b`, run 37570469240; its codex re-review returned cr-rework-2, fixed)
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: `75462ba9`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (owner-approved codereview over c4b69fa6..2be91345, the cr-win-1 rework + D8; record .review/results/ssc-rework-range.codex.json)

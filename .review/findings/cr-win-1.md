@@ -1,7 +1,7 @@
 # cr-win-1: Copy/mirror push retries can falsely clear a named-stream failure
 
 **Severity**: HIGH — a retry pass can skip a file whose first-pass failure left the main bytes intact (e.g. a rejected NTFS stream), clear the failure, and exit 0 with an incomplete backup
-**Status**: Fixed (reworked) — red/green on macOS and the Windows 11 ARM64 VM; the owner-approved codex review is pending
+**Status**: Verified (closed by owner ruling 2026-10-07 on local red/green proof, the Windows ARM64 VM, and CI fully green at `189ae11b`, run 37570469240; codex review returned cr-rework-1, fixed)
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: `0528e78c` + `4a06aec5` (rework; the first fix `501c408d` is superseded by the second)
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (D-2026-07-31-3 standing codereview; range 5eeff4ac..8a1f04cb (Windows fixes win-1..5), record .review/results/ssc-win-range.codex.json)

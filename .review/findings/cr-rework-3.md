@@ -1,7 +1,7 @@
 # cr-rework-3: a leftover the retry removed stays classified, so a file recreated during the wait is overwritten
 
 **Severity**: HIGH (reviewer) — under `--ignore-existing`, a file another process creates at a failed path during the retry wait can be overwritten
-**Status**: Fixed — red/green on macOS; Windows ARM64 VM suite green; closing is the owner's call
+**Status**: Verified (closed by owner ruling 2026-10-07 on local red/green proof, the Windows ARM64 VM, and CI fully green at `189ae11b`, run 37570469240; no re-review of this fix, by the owner's choice)
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: `7c607672`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / standard (owner-approved re-review of the cr-rework-2 fix, range 343ddf6f..9118a88e; record .review/results/rework2-fix-range.codex.json)
