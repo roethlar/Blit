@@ -86,6 +86,10 @@ for its own settings, and its job records beside its existing recents.
 - R15 (Q6, naming files): "B" — a log names every file copied, deleted, and
   failed.
 - R16 (Q7): "store logs compressed."
+- R17 (2026-10-07, on the r1 review's four material changes, presented with
+  "logging never fails a transfer" inside the fourth): "yes" — all four
+  adopted (Design: "Three artifacts", "Detached jobs", "Log keys and event
+  schema", "Crash safety, pruning and backpressure"; slices re-cut).
 
 ## Non-goals
 
@@ -150,6 +154,18 @@ for its own settings, and its job records beside its existing recents.
 - [ ] FAST: logging costs no measurable slowdown on the existing small-file
       and large-file benches (within run-to-run noise).
 - [ ] Every new sub-verb answers `--help` with its own help (R12).
+- [ ] Crash: a daemon killed mid-run leaves a log that startup finalizes as
+      interrupted and `blit jobs log` reads.
+- [ ] Logging failure: with the log directory unwritable the transfer still
+      completes, and its report says the log is incomplete.
+- [ ] Detached: after a `--detach` job finishes, `blit jobs list` on the
+      initiating machine shows its outcome (fetched from the daemon) and
+      `blit jobs retry` re-runs exactly its failed files.
+- [ ] Saved jobs reproduce: `blit jobs run <name>` from another working
+      directory, or after the `--files-from` file changed, transfers exactly
+      what the original run did.
+- [ ] Self-delegation: a daemon that is both ends of one run keeps two
+      distinct logs, labeled by role.
 
 ## Design
 
@@ -182,9 +198,8 @@ run on every machine involved, newest 50 kept, R5/R6/R7) and **saved jobs**
   typed. `jobs save`, `jobs export`, `jobs run` and `jobs retry` act there and
   nowhere else (R4). A remote-to-remote job's failed paths already come back
   to the CLI in the delegated summary (`failed_paths`, exact), so its local
-  job holds them. Proposed for a `--detach` job, whose CLI exits before the
-  outcome exists: `jobs retry` fetches the outcome by job ID from the
-  receiving daemon's log, then re-runs from this machine.
+  job holds them. A `--detach` job's outcome is reconciled from the
+  receiving daemon (see "Detached jobs").
 - A **log** — the forensic record of everything a `-p -v` run would show plus
   internal detail (R2) — is kept by every machine that took part, each for
   its own part, under the same job ID: the local machine for a local copy;
@@ -213,6 +228,72 @@ run on every machine involved, newest 50 kept, R5/R6/R7) and **saved jobs**
   (R16). `blit jobs log` reads it as text or JSON transparently; `blit jobs
   export` writes it uncompressed.
 
+### Three artifacts (R17, review r1 MC1/F2)
+
+One family of versioned JSON documents, each with a `format` and `version`
+field and explicit migrations from every earlier version:
+
+- **JobSpec** — what to run. Written at submission, never changed. Holds the
+  verb, every transfer-affecting option (and only those), the working
+  directory the command was typed in, local endpoints resolved to absolute
+  paths, remote endpoints as typed locators (host, port, module, path), the
+  *contents* of any `--files-from` list (not its path), and the machine ID.
+  Validation on load rejects a spec this build cannot run faithfully. A
+  saved job (`--save`, `jobs save`) is a JobSpec under a name.
+- **RunRecord** — one run of a JobSpec: run ID, attempt number, parent run
+  (for a retry), start and end, outcome, counts, and the exact failed paths
+  with the left-in-place and removed sets. States: running, finished,
+  interrupted, or waiting on a named daemon (detached). Lives on the
+  initiating machine only (R13).
+- **EventLog** — one participant's forensic record of one run (R2/R14/R15),
+  on every machine involved (R6); see "Log keys and event schema".
+
+### Detached jobs (R17, review r1 MC2/F1)
+
+A `--detach` run writes its JobSpec and a RunRecord in the state "waiting on
+<daemon>" before the CLI exits. Every local `jobs` operation that reads a run
+— `list`, `log`, `save`, `export`, `retry` — first asks that daemon for the
+run's outcome by run ID; once the daemon reports it finished, the local
+RunRecord is updated atomically and the daemon is not asked again. If the
+daemon is unreachable, the operation says so and shows the record as still
+waiting — `retry` refuses until the outcome is known.
+
+### Log keys and event schema (R17, review r1 MC3/F4)
+
+- A log is keyed by **run ID + participant + role + attempt**: the participant
+  is the machine ID, the role is `initiator`, `source` or `destination`, and
+  the attempt counts retries of the run. One daemon that is both the
+  delegated destination and the served source of the same run therefore
+  writes two logs, never one interleaved file. `blit jobs log` shows the
+  participant logs it finds, labeled, or one with `--role`.
+- The event schema is defined and versioned before any storage or retrieval
+  is built (slice jl-1a): one event per line, each with a timestamp, a
+  sequence number and a kind (`run-start`, `phase`, `file-copied`,
+  `file-deleted`, `file-failed`, `stall`, `diagnostic`, `summary`,
+  `run-end`, `log-incomplete`).
+
+### Crash safety, pruning and backpressure (R17, review r1 MC4/F3)
+
+- **While running** a log is written to `<key>.partial.jsonl`, appending whole
+  lines and syncing at phase changes and every few seconds; a torn last line
+  is tolerated on read. **Finishing** compresses it to `<key>.jsonl.gz` and
+  renames it into place in one step, then removes the partial.
+- **After a crash**, startup finds every `.partial.jsonl` without a live
+  owner, appends a `run-end` marked interrupted, and finalizes it; the
+  RunRecord, where it lives on this machine, becomes interrupted.
+- **Retrieval** serves an active partial, a recovered log and a finished log
+  alike.
+- **Pruning** runs when a run finishes, holds a lock, and only ever removes
+  finished logs and records beyond the newest 50 — never a partial, never a
+  saved JobSpec.
+- **Backpressure:** events go through a bounded queue to one writer per log;
+  when the writer falls behind, the transfer waits for it rather than drop
+  events, because a log with holes misleads.
+- **Logging never fails a transfer** (R17): if a log cannot be written (disk
+  full, permissions), logging stops, the transfer continues, a
+  `log-incomplete` event is attempted, and the run's report says the log is
+  incomplete.
+
 ### Identity, protocol and retention (agent's design within the rulings)
 
 - **Job ID.** The machine where the command is typed creates the ID (a
@@ -237,24 +318,31 @@ run on every machine involved, newest 50 kept, R5/R6/R7) and **saved jobs**
 
 Small first, per R1; each slice is one coherent, testable change.
 
-1. **jl-1 — daemon logs (the small start).** The daemon writes each job's
-   log (identity, `-v` diagnostics, phase times and stalls, every copied,
-   deleted and failed file) as it runs, compressed when it ends, keeps the
-   newest 50 (`[jobs] keep` in its `config.toml`); `GetJobLog`; `blit jobs log
-   <host> <job-id> [--json]`; `jobs list`/`watch` show the failed-file count
-   and `watch` exits non-zero when files failed (closes defect (c)).
-2. **jl-2 — one job ID everywhere, local logs.** The CLI creates the job ID and
+1. **jl-1a — the event schema and a crash-safe log writer (the small start).**
+   The versioned event schema; the per-log writer (bounded queue, partial
+   file, sync points, compress-and-rename on finish, torn-line tolerance);
+   startup recovery of orphaned partials; locked pruning to the newest 50
+   (`[jobs] keep` in the daemon's `config.toml`); "logging never fails a
+   transfer". Library-level, tested without a network.
+2. **jl-1b — daemon logs and retrieval.** The daemon writes each job's log
+   (keyed run + participant + role + attempt) through jl-1a; `GetJobLog`;
+   `blit jobs log <host> <job-id> [--json] [--role]`.
+3. **jl-1c — failures in the job list.** `jobs list`/`watch` show the
+   failed-file count and `watch` exits non-zero when files failed (closes
+   defect (c)).
+4. **jl-2 — one run ID everywhere, local logs.** The CLI creates the job ID and
    sends it, so both daemons of a remote-to-remote job and the CLI machine log
    under it; local runs write logs too; the per-user folder (Windows moved to
    `%LOCALAPPDATA%\Blit`, old files moved once), the CLI's `config.toml`;
    `blit jobs log <job-id|file>` and `blit jobs list` locally.
-3. **jl-3 — jobs.** Every run writes its job (what to run, how it ended,
-   exact failed paths) locally; machine ID; `--save`, `--export`, `blit jobs
+5. **jl-3 — jobs.** Every run writes its JobSpec and RunRecord locally
+   (versioned, with migrations); machine ID; detached reconciliation for
+   every local `jobs` operation; `--save`, `--export`, `blit jobs
    save|export|run|delete`.
-4. **jl-4 — retry.** `blit jobs retry <job-id|file>`: re-send only the failed
-   paths with the original options, through the existing retry-pass
-   machinery; refuse on another machine; a `--detach` job's outcome fetched
-   by ID from the receiving daemon's log.
+6. **jl-4 — retry.** `blit jobs retry <job-id|file>`: a child run (next
+   attempt, parent recorded) re-sending only the failed paths with the
+   original JobSpec, through the existing retry-pass machinery; refuse on
+   another machine; refuse a detached run until its outcome is known.
 
 ## Review history
 
@@ -265,7 +353,7 @@ Small first, per R1; each slice is one coherent, testable change.
   owner's; it endorses the commands, logs on every machine, retention,
   compression, one run identity and the incremental slices. A Claude dispatch
   of the same review was stopped by the owner (D-2026-10-07-4) and is excluded.
-  - Material changes, each awaiting an owner ruling:
+  - Material changes — all four ADOPTED by the owner (R17, 2026-10-07):
     MC1 separate and version a JobSpec, a RunRecord and a per-participant
     EventLog instead of one loosely defined JSON format;
     MC2 define detached-job reconciliation for every local jobs operation,
