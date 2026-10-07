@@ -83,6 +83,8 @@ for its own settings, and its job records beside its existing recents.
 - R14 (what a log holds, after seeing that blit's `-v` lists no files, only a
   few diagnostic lines): "okay, so keep -v. drop -p unless that is relevant
   forensically".
+- R15 (Q6, naming files): "B" — a log names every file copied, deleted, and
+  failed.
 
 ## Non-goals
 
@@ -180,7 +182,12 @@ run on every machine involved, newest 50 kept, R5/R6/R7) and **saved jobs**
   under R14): when each phase (scan, transfer, delete) started and ended, and
   any stall notice. The redrawn progress line and periodic progress
   snapshots are not kept.
-- Whether to name the files copied and deleted — open (Q6).
+- Every file copied and every file deleted, by name (R15).
+- Size (agent's design, follows from R15): a million-file backup's log is
+  on the order of 100 MB, and 50 are kept per machine. The log is written to
+  disk as the run goes — one JSON event per line — never held in memory, so
+  a large job costs disk, not RAM. Whether finished logs are compressed is
+  open (Q7).
 
 The rest of the design is written once the remaining open questions are
 answered.
@@ -206,8 +213,8 @@ Asked one at a time, in this order:
   its own `config.toml`). A saved job does not count toward the 50 — it is
   kept until deleted (proposed with the command surface, confirmed R12).
 - Q5. The cleaned-up command surface — RULED (R12): see Design.
-- Q6. Whether a log names files: A — every deleted and every failed file
-  (proposed; deletions cannot be undone and are usually few), copied files as
-  counts; B — A plus every copied file (answers "was X copied?", but a
-  million-file backup makes a very large log); C — no names beyond failures.
+- Q6. Whether a log names files — RULED (R15): every file copied, deleted
+  and failed.
+- Q7. Compress finished logs? A million-file log is ~100 MB as written and
+  ~10 MB compressed; `blit jobs log` would read either transparently.
   — owner
