@@ -64,6 +64,12 @@ e.g. how many run records to keep), `jobs/runs/` (run records) and
 `C:\ProgramData\Blit\config.toml` on Windows — Windows is already covered)
 for its own settings, and its job records beside its existing recents.
 
+- R10 (settings format): "toml if it makes sense. that is up to you. if json
+  is simpler, fine". Agent's call: TOML for the settings file — a person
+  edits it, TOML allows comments, and the daemon's settings are already TOML
+  (one format for both); JSON for run records and saved jobs — machine-
+  written, and the format the owner asked records to be stored in (R1).
+
 ## Non-goals
 
 - Spiralling scope (R1: "start small"): the first slices deliver the record,
