@@ -78,6 +78,8 @@ for its own settings, and its job records beside its existing recents.
   `--help` with its own help (clap); the new `jobs` sub-verbs inherit it.
   `blit jobs`'s one-line help ("Inspect transfer jobs on a remote daemon")
   must change to cover local jobs.
+- R13 (correcting the proposal that a daemon job could be retried from
+  anywhere): "no, JOBS are local. LOGS are both. sorry that was unclear."
 
 ## Non-goals
 
@@ -145,7 +147,24 @@ run on every machine involved, newest 50 kept, R5/R6/R7) and **saved jobs**
    the raw file.
 8. `blit jobs list [<host>]`, `blit jobs delete <name>`.
 
-The rest of the design is written once Q2, Q3 and the open half of Q4 are
+### Jobs and logs (R13)
+
+- A **job** — what to run again, and how its last run ended (outcome and the
+  exact failed paths) — lives only on the machine where the command was
+  typed. `jobs save`, `jobs export`, `jobs run` and `jobs retry` act there and
+  nowhere else (R4). A remote-to-remote job's failed paths already come back
+  to the CLI in the delegated summary (`failed_paths`, exact), so its local
+  job holds them. Proposed for a `--detach` job, whose CLI exits before the
+  outcome exists: `jobs retry` fetches the outcome by job ID from the
+  receiving daemon's log, then re-runs from this machine.
+- A **log** — the forensic record of everything a `-p -v` run would show plus
+  internal detail (R2) — is kept by every machine that took part, each for
+  its own part, under the same job ID: the local machine for a local copy;
+  the CLI machine and the daemon for a push or pull; both daemons for a
+  remote-to-remote job (R6), and the CLI machine for what it saw.
+  `blit jobs log [<host>] <job-id>` reads any of them.
+
+The rest of the design is written once the remaining open questions are
 answered.
 
 ## Slices
@@ -159,9 +178,8 @@ Asked one at a time, in this order:
 - Q1. Which runs write a job record? — RULED by R5/R6: every run (a
   successful run is likely reused); every machine involved in a job keeps it
   — for remote-to-remote, both daemons (R6).
-- Q2. For a remote-to-remote job, which is "the original machine" (R4)?
-  — open; R6 puts the record on both daemons, so retry needs a rule for which
-  end re-runs it. — owner
+- Q2. Which machine re-runs a job — RULED (R13): jobs are local to the
+  machine where the command was typed; logs live on every machine involved.
 - Q3. What a retry re-runs — RULED with the command surface (R12):
   `blit jobs retry` re-sends only what failed, with the original options;
   `blit jobs run` re-runs a whole saved job.
