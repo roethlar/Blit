@@ -340,7 +340,7 @@ Small first, per R1; each slice is one coherent, testable change.
    (keyed run + participant + role + attempt) through jl-1a, runs startup
    recovery, and reads `[jobs] keep` from its `config.toml`; `GetJobLog`;
    `blit jobs log <host> <job-id> [--json] [--role]`.
-   **Landed 2026-10-07.** Served pushes and pulls log from the open on,
+   **Landed `51da3977` 2026-10-07.** Served pushes and pulls log from the open on,
    delegated pulls from dispatch; the log is owned by the job's dispatcher
    task and closed after the job's record. The engine names each file as
    it lands, fails (new `FileFailed` progress event, at every destination
