@@ -80,6 +80,9 @@ for its own settings, and its job records beside its existing recents.
   must change to cover local jobs.
 - R13 (correcting the proposal that a daemon job could be retried from
   anywhere): "no, JOBS are local. LOGS are both. sorry that was unclear."
+- R14 (what a log holds, after seeing that blit's `-v` lists no files, only a
+  few diagnostic lines): "okay, so keep -v. drop -p unless that is relevant
+  forensically".
 
 ## Non-goals
 
@@ -164,6 +167,21 @@ run on every machine involved, newest 50 kept, R5/R6/R7) and **saved jobs**
   remote-to-remote job (R6), and the CLI machine for what it saw.
   `blit jobs log [<host>] <job-id>` reads any of them.
 
+### What a log holds (R2, R14)
+
+- The run's identity: job ID, machine, verb, source, destination, options,
+  start and end time, and the outcome.
+- Everything `-v` adds today, whether or not `-v` was given: scan time,
+  average rate, workers used, the planned count and bytes, and how files
+  were batched (verified 2026-10-07: blit's `-v` lists no file names).
+- The final summary: counts of files copied, deleted, failed; bytes.
+- Every failed file with its reason.
+- From `-p`, only what answers after the fact where time went (agent's call
+  under R14): when each phase (scan, transfer, delete) started and ended, and
+  any stall notice. The redrawn progress line and periodic progress
+  snapshots are not kept.
+- Whether to name the files copied and deleted — open (Q6).
+
 The rest of the design is written once the remaining open questions are
 answered.
 
@@ -188,3 +206,8 @@ Asked one at a time, in this order:
   its own `config.toml`). A saved job does not count toward the 50 — it is
   kept until deleted (proposed with the command surface, confirmed R12).
 - Q5. The cleaned-up command surface — RULED (R12): see Design.
+- Q6. Whether a log names files: A — every deleted and every failed file
+  (proposed; deletions cannot be undone and are usually few), copied files as
+  counts; B — A plus every copied file (answers "was X copied?", but a
+  million-file backup makes a very large log); C — no names beyond failures.
+  — owner
