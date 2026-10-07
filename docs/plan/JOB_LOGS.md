@@ -69,6 +69,9 @@ for its own settings, and its job records beside its existing recents.
   edits it, TOML allows comments, and the daemon's settings are already TOML
   (one format for both); JSON for run records and saved jobs — machine-
   written, and the format the owner asked records to be stored in (R1).
+- R11 (on the proposed `blit jobs export`): "also needs an in-line --export
+  that works with --save to save it locally and exported." Owner's question
+  on the proposed `blit retry`: "why not jobs retry?" (answered in Design).
 
 ## Non-goals
 
@@ -114,7 +117,30 @@ for its own settings, and its job records beside its existing recents.
 
 ## Design
 
-(to be written once the open questions below are answered)
+### Command surface (proposed 2026-10-07; pending the owner's confirmation, Q5)
+
+Two kinds of saved file, one JSON format: **run records** (written by every
+run on every machine involved, newest 50 kept, R5/R6/R7) and **saved jobs**
+(written only on request, kept until deleted).
+
+1. `blit copy|mirror|move … --save <name>` — run it and keep it as a saved
+   job `<name>` in the per-user folder.
+2. `blit copy|mirror|move … --export <file>` — run it and also write its job
+   to `<file>`; with `--save`, both (R11).
+3. `blit jobs save <job-id> <name>` — keep a past run as a saved job.
+4. `blit jobs export <job-id|name> <file>` — write a run record or saved job
+   to a file.
+5. `blit jobs run <name|file>` — run a saved job again.
+6. `blit jobs retry <job-id|file>` — re-send only what failed. Moved under
+   `jobs` from R3's `blit retry` on the owner's question ("why not jobs
+   retry?"): every job action then lives under `jobs`, and it cannot be
+   confused with the transfer flags `--retry`/`--retries`.
+7. `blit jobs log [<host>] <job-id>` — show a record as text; `--json` for
+   the raw file.
+8. `blit jobs list [<host>]`, `blit jobs delete <name>`.
+
+The rest of the design is written once Q2, Q3 and the open half of Q4 are
+answered.
 
 ## Slices
 
