@@ -358,7 +358,7 @@ Small first, per R1; each slice is one coherent, testable change.
 3. **jl-1c — failures in the job list.** `jobs list`/`watch` show the
    failed-file count and `watch` exits non-zero when files failed (closes
    defect (c)).
-   **Landed 2026-10-07.** `TransferRecord` and `TransferComplete` gain
+   **Landed `f78008b7` 2026-10-07.** `TransferRecord` and `TransferComplete` gain
    `files_failed` (contract 7; `ok` stays true for a job that ran to its
    end, so readers check both); the daemon sets it from the job's summary.
    `jobs list` shows `FAILED: N file(s) did not land` (and `files_failed`
