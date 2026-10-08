@@ -26,5 +26,5 @@ Admitted. `watch` keyed its de-duplication on `raw.unwrap_or(path)`, so a raw-by
 - `jobs::tests::failed_names_are_told_apart_by_identity`: a raw-byte name and a look-alike UTF-8 name count and show as two, and a repeat counts once.
 - `events_read_as_text` now expects `raw:caf\\xe9`.
 - Mutations, each red, then restored:
-  - a flattened key → the tally test
+  - a flattened key → the tally test. At the fix commit this mutation stayed green, because the label alone separated the test's two names. The follow-up test commit adds a UTF-8 file literally named `raw:caf\\xe9`, the collision the label cannot prevent, and the mutation is now red.
   - no `raw:` label → the text test

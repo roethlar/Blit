@@ -1040,20 +1040,24 @@ mod tests {
         let mut named = FailedNames::default();
         named.add("caf\u{fffd}".into(), Some("caf\\xe9".into()), "a".into());
         named.add("caf\\xe9".into(), None, "b".into());
+        // A UTF-8 name that reads exactly like the raw one's label.
+        named.add("raw:caf\\xe9".into(), None, "c".into());
         named.add(
             "caf\u{fffd}".into(),
             Some("caf\\xe9".into()),
             "a again".into(),
         );
-        assert_eq!(named.distinct.len(), 2);
+        assert_eq!(named.distinct.len(), 3);
         assert_eq!(
             named.shown,
             [
                 ("raw:caf\\xe9".to_string(), "a".to_string()),
                 ("caf\\xe9".to_string(), "b".to_string()),
+                ("raw:caf\\xe9".to_string(), "c".to_string()),
             ]
         );
     }
+
     use super::*;
 
     #[test]
