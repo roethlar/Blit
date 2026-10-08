@@ -512,6 +512,7 @@ impl Blit for BlitService {
                 };
                 active_jobs.emit_event(&events_tx, job.transfer_id(), event);
             }
+            job.updater().set_run_id(job_log.run_id());
             job.record_outcome(ok, err_msg.clone());
             let finished_event = build_transfer_finished_event(&job, ok, err_msg.as_deref());
             drop(job);
@@ -722,6 +723,7 @@ impl Blit for BlitService {
         job_log.start(
             blit_core::job_log::Role::Destination,
             delegated_run_info(&req),
+            blit_core::job_log::RunTag::from_wire(&req.run_id, req.attempt),
         );
         tokio::spawn(async move {
             // `job` moves into the spawned task alongside the
@@ -794,6 +796,7 @@ impl Blit for BlitService {
                 }
                 None => (false, Some(crate::job_logs::CLIENT_HUNG_UP.to_string())),
             };
+            job.updater().set_run_id(job_log.run_id());
             job.record_outcome(job_ok, job_err.clone());
             // c-3 round 2: build the terminal event while the
             // guard is still alive (we need its byte counter
@@ -1057,6 +1060,7 @@ impl Blit for BlitService {
                 ok: r.ok,
                 error_message: r.error_message,
                 files_failed: r.files_failed,
+                run_id: r.run_id,
             })
             .collect();
 
@@ -1281,6 +1285,7 @@ fn delegated_run_info(req: &DelegatedPullRequest) -> blit_core::job_log::RunInfo
         source,
         destination: format!("/{}/{}", req.dst_module, req.dst_destination_path),
         options,
+        job_id: None,
     }
 }
 

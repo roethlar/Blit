@@ -25,11 +25,10 @@
 //! Ordering is only observable at the process boundary, so it is asserted
 //! here against the real binary's real output (cr-ls1-13).
 
-use std::process::Command;
 use std::time::Duration;
 
 mod common;
-use common::{cli_bin, run_with_timeout};
+use common::{cli_command, run_with_timeout};
 
 /// A local path guaranteed not to exist, inside a temp dir that is removed
 /// when the guard drops.
@@ -45,7 +44,7 @@ fn missing_local_source() -> (tempfile::TempDir, String) {
 /// timeout fails the test. It cannot silently pass either way.
 fn run_gated(subcommand: &str, extra: &[&str]) -> (tempfile::TempDir, std::process::Output) {
     let (tmp, source) = missing_local_source();
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg(subcommand);
     for arg in extra {
         cmd.arg(arg);
@@ -119,7 +118,7 @@ fn a_piped_summary_carries_no_escape_bytes() {
     }
 
     let run = |source: &std::path::Path, destination: &std::path::Path, extra: &[&str]| -> String {
-        let mut cmd = Command::new(cli_bin());
+        let mut cmd = cli_command();
         cmd.arg("copy").arg("--yes");
         for arg in extra {
             cmd.arg(arg);

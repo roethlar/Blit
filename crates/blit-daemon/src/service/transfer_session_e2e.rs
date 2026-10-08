@@ -2366,3 +2366,66 @@ async fn a_served_job_refused_at_open_is_logged() {
 
     daemon.stop().await;
 }
+
+/// JOB_LOGS jl-2: a served job logs under the run ID the initiator sent,
+/// with the session's number; its record names the run; and the log is
+/// found by the daemon's own job ID as well as by the run's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_served_job_logs_under_the_initiators_run_id() {
+    use blit_core::job_log::{EventBody, RunTag};
+    let src = tempfile::tempdir().unwrap();
+    write_tree(src.path(), &small_tree());
+    let daemon = Daemon::start(false).await;
+    let run = RunTag {
+        run_id: "0123456789abcdef0123456789abcdef".into(),
+        attempt: 3,
+    };
+
+    run_push_session(
+        &daemon.endpoint,
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions {
+            run: run.clone(),
+            ..PushSessionOptions::default()
+        },
+    )
+    .await
+    .expect("push succeeds");
+
+    // Found by the job ID (`job_logs` asks by it) ...
+    let logs = daemon.job_logs().await;
+    let (_, _, events) = &logs[0];
+    let EventBody::RunStart(start) = &events[0] else {
+        panic!("first event: {:?}", events[0]);
+    };
+    let record = daemon.active_jobs.recent()[0].clone();
+    assert_eq!(
+        (start.run_id.as_str(), start.attempt),
+        (run.run_id.as_str(), 3)
+    );
+    assert_eq!(
+        start.run.job_id.as_deref(),
+        Some(record.transfer_id.as_str())
+    );
+    assert_eq!(record.run_id, run.run_id);
+    // ... and by the run's ID.
+    let counted = Arc::new(Mutex::new(0));
+    let sink = Arc::clone(&counted);
+    blit_core::admin::jobs::read_job_logs(
+        &daemon.endpoint,
+        &run.run_id,
+        None,
+        false,
+        move |_, mut lines| {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut lines, &mut text)?;
+            *sink.lock().unwrap() += 1;
+            Ok(())
+        },
+    )
+    .await
+    .expect("found by the run ID");
+    assert_eq!(*counted.lock().unwrap(), 1);
+
+    daemon.stop().await;
+}

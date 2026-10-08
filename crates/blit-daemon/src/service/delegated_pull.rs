@@ -298,6 +298,9 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     // use — validates spec_version, FilterSpec globs, and
     // contradictory flag combinations BEFORE we do any DNS, outbound
     // connect, or manifest enumeration (R30-F3).
+    // JOB_LOGS jl-2: forwarded in this end's open, so the source daemon
+    // logs the run under the same ID.
+    let run = blit_core::job_log::RunTag::from_wire(&req.run_id, req.attempt).unwrap_or_default();
     let spec = req
         .spec
         .ok_or_else(|| err_progress(Phase::DelegationRejected as i32, "missing transfer spec"))?;
@@ -431,6 +434,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     // transport down and the src daemon's served session cleans up.
     let mirror_active = delete_list_authorized(spec.mirror_mode);
     let options = PullSessionOptions {
+        run,
         compare_mode: ComparisonMode::try_from(spec.compare_mode)
             .unwrap_or(ComparisonMode::SizeMtime),
         ignore_existing: spec.ignore_existing,
@@ -877,6 +881,8 @@ mod tests {
             }),
             trace_data_plane: false,
             detach: false,
+            run_id: String::new(),
+            attempt: 0,
         };
         let modules = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<
             String,

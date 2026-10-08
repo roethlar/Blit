@@ -100,6 +100,15 @@ path, then push it.
   predictor's coefficients per transfer mode (`--json` for
   scripting). Reads `perf_local.jsonl` and the predictor state
   file; no network access.
+- `jobs list [<host>]` lists the jobs run on this machine, newest first,
+  with how each ended; with a host, that daemon's active and recent
+  transfers.
+- `jobs log [<host>] <job-id>` shows a job's log: every file copied,
+  sent, deleted and failed, with phase times. Without a host it reads
+  this machine's log of the job; `jobs log <file>` reads a log file.
+  `--json` prints the raw events; `--role` picks one of a daemon's logs.
+- `jobs watch <host> <job-id>` follows a daemon's job to its end;
+  `jobs cancel <host> <job-id>` stops it.
 
 ## OPTIONS
 ### Transfer Options
@@ -178,8 +187,16 @@ performed. Intended for bug reports: `blit diagnostics dump SRC DST --json
 - `--config-dir <PATH>` overrides the default configuration directory.
 
 ## FILES
-- `${XDG_CONFIG_HOME:-$HOME/.config}/blit/perf_local.jsonl` – local performance history.
-- `${XDG_CONFIG_HOME:-$HOME/.config}/blit/settings.json` – persisted CLI settings.
+The configuration directory is `~/Library/Application Support/com.Blit.Blit`
+on macOS, `${XDG_CONFIG_HOME:-$HOME/.config}/blit` on Linux, and
+`%LOCALAPPDATA%\Blit` on Windows (files in the old roaming
+`%APPDATA%\Blit\Blit\config` are moved there once).
+
+- `perf_local.jsonl` – local performance history.
+- `settings.json` – persisted CLI settings.
+- `config.toml` – `[jobs] keep = N` keeps the newest N job logs (default 50).
+- `jobs/logs/` – this machine's job logs, one compressed JSON-lines file
+  per run; every copy, mirror and move writes one.
 
 ## SECURITY
 Remote transfers do not include built-in TLS encryption. Data is transmitted in

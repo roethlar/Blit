@@ -11,6 +11,7 @@ mod list_modules;
 mod ls;
 mod profile;
 mod rm;
+mod run_log;
 mod scan;
 mod style;
 mod transfers;
@@ -88,26 +89,50 @@ async fn run_cli(lifecycle_trace: &TransferLifecycleTrace) -> Result<ExitCode> {
         // win-1: `run_with_retries` boxes each attempt, and `run_transfer`
         // / `run_move` box their route dispatch, so this frame holds
         // pointers rather than sessions.
-        Commands::Copy(args) => {
+        Commands::Copy(mut args) => {
+            // JOB_LOGS jl-2: one run per command, shared by every pass and
+            // rerun, with its own log.
+            args.run = crate::run_log::CommandRun::start("copy", &args).await;
+            let run = args.run.clone();
             let wait = Duration::from_secs(args.wait);
-            run_with_retries(args.retry, wait, |_n| {
+            let result = run_with_retries(args.retry, wait, |_n| {
                 run_transfer(&ctx, &args, TransferKind::Copy, lifecycle_trace)
             })
-            .await?
+            .await;
+            if let Some(run) = &run {
+                run.finish(&result).await;
+            }
+            result?
         }
-        Commands::Mirror(args) => {
+        Commands::Mirror(mut args) => {
+            // JOB_LOGS jl-2: one run per command, shared by every pass and
+            // rerun, with its own log.
+            args.run = crate::run_log::CommandRun::start("mirror", &args).await;
+            let run = args.run.clone();
             let wait = Duration::from_secs(args.wait);
-            run_with_retries(args.retry, wait, |_n| {
+            let result = run_with_retries(args.retry, wait, |_n| {
                 run_transfer(&ctx, &args, TransferKind::Mirror, lifecycle_trace)
             })
-            .await?
+            .await;
+            if let Some(run) = &run {
+                run.finish(&result).await;
+            }
+            result?
         }
-        Commands::Move(args) => {
+        Commands::Move(mut args) => {
+            // JOB_LOGS jl-2: one run per command, shared by every pass and
+            // rerun, with its own log.
+            args.run = crate::run_log::CommandRun::start("move", &args).await;
+            let run = args.run.clone();
             let wait = Duration::from_secs(args.wait);
-            run_with_retries(args.retry, wait, |_n| {
+            let result = run_with_retries(args.retry, wait, |_n| {
                 run_move(&ctx, &args, lifecycle_trace)
             })
-            .await?
+            .await;
+            if let Some(run) = &run {
+                run.finish(&result).await;
+            }
+            result?
         }
         Commands::Scan(args) => {
             scan::run_scan(args).await?;

@@ -112,6 +112,7 @@ mod tests {
             ok: true,
             error_message: String::new(),
             files_failed: 0,
+            run_id: String::new(),
         }
     }
 

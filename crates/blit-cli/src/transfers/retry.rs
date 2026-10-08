@@ -498,6 +498,15 @@ where
         blit_core::remote::instrumentation::record_retry_pass(u64::from(pass));
         let mut pass_args = args.clone();
         pass_args.retry_pass = Some((pass, total, n));
+        // JOB_LOGS jl-2: each pass is a phase of the run's log.
+        let pass_phase = format!("retry pass {pass} of {total}");
+        if let Some(run) = &args.run {
+            run.record(blit_core::job_log::EventBody::Phase {
+                name: pass_phase.clone(),
+                state: blit_core::job_log::PhaseState::Start,
+            })
+            .await;
+        }
         // win-1: one heap allocation per pass keeps the pass's session
         // out of this loop's state and its caller's frame.
         let pass_run = async {
@@ -527,6 +536,13 @@ where
             }
             result = pass_run => result?,
         };
+        if let Some(run) = &args.run {
+            run.record(blit_core::job_log::EventBody::Phase {
+                name: pass_phase,
+                state: blit_core::job_log::PhaseState::End,
+            })
+            .await;
+        }
         added_files = added_files.saturating_add(result.files_transferred);
         added_bytes = added_bytes.saturating_add(result.bytes_transferred);
         in_stream_carrier_used |= result.in_stream_carrier_used;

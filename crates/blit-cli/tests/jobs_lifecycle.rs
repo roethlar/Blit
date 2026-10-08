@@ -521,3 +521,35 @@ impl blit_core::generated::blit_server::Blit for StallingTransferBlit {
         Err(tonic::Status::unimplemented("stalling fake source"))
     }
 }
+
+/// JOB_LOGS jl-2: a `--detach` command's own log ends `detached`, naming
+/// the daemon and the job the run went on as.
+#[test]
+fn a_detached_runs_own_log_says_where_it_went_on() {
+    let ctx = DelegationContext::with_real_source();
+    fs::write(
+        ctx.module_src_dir
+            .as_ref()
+            .expect("real source")
+            .join("payload.txt"),
+        b"jobs-lifecycle-e2e",
+    )
+    .expect("write src file");
+
+    let transfer_id = detach_copy(&ctx);
+
+    let listed = ctx.run_blit(&["jobs", "list", "--json"]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listing: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("JSON");
+    let job = &listing["jobs"][0];
+    assert_eq!(job["outcome"], "detached", "{listing}");
+    let detail = job["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains(&ctx.dest_host()) && detail.contains(&format!("as job {transfer_id}")),
+        "{detail}"
+    );
+}

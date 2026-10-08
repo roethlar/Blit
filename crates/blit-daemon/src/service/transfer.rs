@@ -283,8 +283,13 @@ fn with_log_start(
                 open.ignore_existing,
                 open.require_complete_scan,
             ),
+            job_id: None,
         };
-        job_log.start(role, run);
+        job_log.start(
+            role,
+            run,
+            blit_core::job_log::RunTag::from_wire(&open.run_id, open.attempt),
+        );
         let fut = inner(open);
         let job_log = job_log.clone();
         Box::pin(async move {

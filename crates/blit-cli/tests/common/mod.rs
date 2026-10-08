@@ -90,6 +90,20 @@ pub fn cli_bin() -> PathBuf {
     bin_dir().join(if cfg!(windows) { "blit.exe" } else { "blit" })
 }
 
+/// The per-user folder for a CLI run whose test names none: one under the
+/// target directory, never the developer's own — every transfer keeps a
+/// job log there (JOB_LOGS jl-2), and its retention would evict theirs.
+pub fn isolated_config_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("blit-cli-config")
+}
+
+/// `blit`, with [`isolated_config_dir`] as its per-user folder.
+pub fn cli_command() -> Command {
+    let mut cmd = Command::new(cli_bin());
+    cmd.arg("--config-dir").arg(isolated_config_dir());
+    cmd
+}
+
 pub fn daemon_bin() -> PathBuf {
     bin_dir().join(if cfg!(windows) {
         "blit-daemon.exe"

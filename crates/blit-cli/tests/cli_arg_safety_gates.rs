@@ -12,16 +12,15 @@
 //!   - R54-F2: `--force` / `--ignore-times` rejected on move
 
 use std::fs;
-use std::process::Command;
 use std::time::Duration;
 
 use tempfile::tempdir;
 
 mod common;
-use common::{cli_bin, run_with_timeout};
+use common::{cli_command, run_with_timeout};
 
 fn assert_rejected(args: &[&str], expect_in_stderr: &str) {
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     for a in args {
         cmd.arg(a);
     }
@@ -126,7 +125,7 @@ fn local_copy_null_still_accepted() {
     fs::create_dir_all(&src).unwrap();
     fs::write(src.join("file.txt"), b"payload").unwrap();
 
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("copy")
         .arg("--null")
         .arg(format!("{}/", src.display()))
@@ -155,7 +154,7 @@ fn local_move_rejects_force_flag() {
     fs::create_dir_all(&dst).unwrap();
     fs::write(src.join("file.txt"), b"src content").unwrap();
 
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("move")
         .arg("--yes")
         .arg("--force")
@@ -202,7 +201,7 @@ fn local_move_rejects_ignore_times_flag() {
     fs::create_dir_all(&dst).unwrap();
     fs::write(src.join("file.txt"), b"src content").unwrap();
 
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("move")
         .arg("--yes")
         .arg("--ignore-times")
@@ -246,7 +245,7 @@ fn local_move_rejects_size_only_flag() {
     fs::create_dir_all(&dst).unwrap();
     fs::write(src.join("file.txt"), b"src content").unwrap();
 
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("move")
         .arg("--yes")
         .arg("--size-only")
@@ -278,7 +277,7 @@ fn windows_metadata_downgrade_warns_and_copies_primary_bytes() {
     let dst = tmp.path().join("destination.bin");
     fs::write(&src, b"primary bytes").unwrap();
 
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("copy")
         .arg("--drop-windows-metadata")
         .arg(&src)

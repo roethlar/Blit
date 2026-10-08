@@ -799,7 +799,14 @@ pub async fn run_local_session(
     // there.
     let fs_source: Arc<dyn TransferSource> = Arc::new(
         FsTransferSource::new(src_root.to_path_buf())
-            .with_progress(options.progress_events.clone())
+            // A handle that only feeds a job log draws nothing, so the
+            // source keeps its plain heartbeat (JOB_LOGS jl-2).
+            .with_progress(
+                options
+                    .progress_events
+                    .clone()
+                    .filter(RemoteTransferProgress::has_ui),
+            )
             .with_phase_probe(phase_probe.clone())
             // audit-16: a sink-less run (no progress lane attached) only
             // prints the raw enumeration heartbeat under `--verbose`, or

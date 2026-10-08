@@ -100,7 +100,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: DiagnosticsCommand,
     },
-    /// Inspect transfer jobs on a remote daemon
+    /// Inspect transfer jobs and their logs, on this machine or a daemon
     Jobs {
         #[command(subcommand)]
         command: JobsCommand,
@@ -109,23 +109,25 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum JobsCommand {
-    /// List active and recent transfers on a remote daemon
+    /// List the jobs run on this machine, or a daemon's active and recent
+    /// transfers
     List(JobsListArgs),
     /// Cancel an active transfer on a remote daemon
     Cancel(JobsCancelArgs),
     /// Watch an active transfer until it completes
     Watch(JobsWatchArgs),
-    /// Show a job's log from a remote daemon: every file copied, deleted
-    /// and failed, with phase times
+    /// Show a job's log — every file copied, deleted and failed, with phase
+    /// times — from this machine, a log file, or a daemon
     Log(JobsLogArgs),
 }
 
 #[derive(Args, Clone, Debug)]
 pub struct JobsListArgs {
-    /// Remote host (e.g. server or server:port)
-    pub remote: String,
+    /// Remote host (e.g. server or server:port); without one, the jobs run
+    /// on this machine
+    pub remote: Option<String>,
     /// Maximum number of recent transfers to return. 0 means
-    /// the daemon's default (50).
+    /// the daemon's default (50), or every job kept on this machine.
     #[arg(long, default_value_t = 0)]
     pub recent_limit: u32,
     /// Output as JSON
@@ -166,11 +168,15 @@ pub struct JobsCancelArgs {
 
 #[derive(Args, Clone, Debug)]
 pub struct JobsLogArgs {
-    /// Remote host (e.g. server or server:port)
-    pub remote: String,
-    /// Job id — as shown by `blit jobs list <remote>` or the `--detach`
-    /// output.
-    pub transfer_id: String,
+    /// A remote host (e.g. server or server:port) followed by a job ID; or,
+    /// alone, a job run on this machine (as `blit jobs list` shows it) or a
+    /// log file
+    #[arg(value_name = "HOST|JOB|FILE")]
+    pub target: String,
+    /// The job ID on that host — as `blit jobs list <host>` or `--detach`
+    /// shows it
+    #[arg(value_name = "JOB_ID")]
+    pub job_id: Option<String>,
     /// Print the log's JSON lines as stored instead of text
     #[arg(long)]
     pub json: bool,
@@ -337,6 +343,10 @@ pub struct TransferArgs {
     /// live row can say so. Never a flag.
     #[arg(skip)]
     pub retry_pass: Option<(u32, u32, usize)>,
+    /// JOB_LOGS jl-2 internal: this command's run, made once per command
+    /// and shared by every pass and rerun. Never a flag.
+    #[arg(skip)]
+    pub run: Option<crate::run_log::CommandRun>,
     /// Re-run the WHOLE transfer up to N times on a transient failure
     /// (network drop, stall timeout). Each retry re-runs destination
     /// comparison, so normal comparison skips files now complete; flags that
@@ -452,6 +462,15 @@ pub struct TransferArgs {
 }
 
 impl TransferArgs {
+    /// The run tag for the next session this command opens (JOB_LOGS jl-2);
+    /// no run ID when the command has no run.
+    pub fn next_session(&self) -> blit_core::job_log::RunTag {
+        self.run
+            .as_ref()
+            .map(crate::run_log::CommandRun::next_session)
+            .unwrap_or_default()
+    }
+
     /// A test fixture: every switch at its type default (NOT the clap
     /// default — `--retries` reads 0 here, `--delete-scope` is empty),
     /// with the two positionals set. Unit tests set what they exercise.
@@ -909,13 +928,22 @@ mod tests {
         };
         assert_eq!(
             (
-                args.remote.as_str(),
-                args.transfer_id.as_str(),
+                args.target.as_str(),
+                args.job_id.as_deref(),
                 args.json,
                 args.role
             ),
-            ("server", "t1-0", true, Some(LogRole::Source))
+            ("server", Some("t1-0"), true, Some(LogRole::Source))
         );
+        // Alone, it names a job here (or a log file).
+        let cli = Cli::try_parse_from(["blit", "jobs", "log", "0123abcd"]).expect("parse");
+        let Commands::Jobs {
+            command: JobsCommand::Log(args),
+        } = cli.command
+        else {
+            panic!("expected jobs log");
+        };
+        assert_eq!((args.target.as_str(), args.job_id), ("0123abcd", None));
     }
 
     #[test]

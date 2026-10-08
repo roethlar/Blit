@@ -10,13 +10,12 @@
 //! data-loss bug.
 
 use std::fs;
-use std::process::Command;
 use std::time::Duration;
 
 use tempfile::tempdir;
 
 mod common;
-use common::{cli_bin, run_with_timeout};
+use common::{cli_command, run_with_timeout};
 
 #[test]
 fn local_move_preserves_unrelated_destination_entries() {
@@ -38,7 +37,7 @@ fn local_move_preserves_unrelated_destination_entries() {
     fs::create_dir_all(dst.join("keep_dir")).unwrap();
     fs::write(dst.join("keep_dir/inner.txt"), b"inner survivor").unwrap();
 
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("move")
         .arg("--yes")
         .arg(format!("{}/", src.display()))
@@ -103,7 +102,7 @@ fn local_move_lands_source_bytes_over_same_size_same_mtime_destination() {
     );
     filetime::set_file_mtime(dst.join("clash.txt"), src_mtime).unwrap();
 
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("move")
         .arg("--yes")
         .arg(format!("{}/", src.display()))
@@ -171,7 +170,7 @@ fn local_move_refuses_when_source_scan_incomplete() {
     }
     let _guard = PermGuard(blocked.clone());
 
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("move")
         .arg("--yes")
         .arg(format!("{}/", src.display()))
@@ -220,7 +219,7 @@ fn local_move_rejects_filter_args() {
     fs::write(src.join("keep.txt"), b"keep").unwrap();
     fs::write(src.join("secret.log"), b"sensitive - do not lose").unwrap();
 
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("move")
         .arg("--yes")
         .arg("--exclude")
@@ -286,7 +285,7 @@ fn local_move_json_no_premature_success_output_on_refusal() {
     }
     let _g = PermGuard(blocked.clone());
 
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("move")
         .arg("--yes")
         .arg("--json")
@@ -323,7 +322,7 @@ fn local_move_rejects_ignore_existing() {
     fs::write(src.join("file.txt"), b"new content").unwrap();
     fs::write(dst.join("file.txt"), b"stale dst content").unwrap();
 
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("move")
         .arg("--yes")
         .arg("--ignore-existing")
@@ -362,7 +361,7 @@ fn local_move_rejects_null_sink() {
     fs::create_dir_all(&dst).unwrap();
     fs::write(src.join("file.txt"), b"would have been erased").unwrap();
 
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("move")
         .arg("--null")
         .arg("--yes")

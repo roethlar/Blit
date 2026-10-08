@@ -143,6 +143,8 @@ pub struct PushExecution {
     /// route threads `LocalMirrorOptions::perf_history`; in-repo tests
     /// and benches set it `false` so they never touch the real store.
     pub perf_history: bool,
+    /// JOB_LOGS jl-2: the run this session belongs to, sent in its open.
+    pub run: crate::job_log::RunTag,
 }
 
 /// Output of [`run_remote_push`]. `summary` is the
@@ -269,6 +271,7 @@ pub async fn run_remote_push(
         trace_data_plane: execution.trace_data_plane,
         lifecycle_trace: execution.lifecycle_trace,
         perf: perf.flatten(),
+        run: execution.run,
         ..PushSessionOptions::default()
     };
 
@@ -321,6 +324,8 @@ pub struct PullExecution {
     pub lifecycle_trace: TransferLifecycleTrace,
     /// ph-1: see [`PushExecution::perf_history`].
     pub perf_history: bool,
+    /// JOB_LOGS jl-2: see [`PushExecution::run`].
+    pub run: crate::job_log::RunTag,
 }
 
 /// Output of [`run_remote_pull`]: the session [`TransferSummary`] this
@@ -360,6 +365,7 @@ pub async fn run_remote_pull(
     // missing parent. The old pull's explicit parent-creation step is
     // redundant on this path.
     let options = PullSessionOptions {
+        run: execution.run.clone(),
         compare_mode: execution.compare_mode,
         ignore_existing: execution.ignore_existing,
         require_complete_scan: execution.require_complete_scan,
@@ -445,6 +451,9 @@ pub struct DelegatedPullExecution {
     /// delegated run directly — and only when it stays to observe the
     /// summary (a `detach` run exits before one exists).
     pub perf_history: bool,
+    /// JOB_LOGS jl-2: the run this job belongs to, sent in the request
+    /// and forwarded by the destination daemon to the source daemon.
+    pub run: crate::job_log::RunTag,
 }
 
 /// Output of [`run_delegated_pull`]. The `src` / `dst` endpoints
@@ -708,6 +717,8 @@ where
         spec: Some(spec),
         trace_data_plane: execution.trace_data_plane,
         detach: execution.detach,
+        run_id: execution.run.run_id.clone(),
+        attempt: execution.run.attempt,
     };
 
     let uri = execution.dst.control_plane_uri();
@@ -897,6 +908,8 @@ pub async fn run_delegated_pull_until_started(
         spec: Some(spec),
         trace_data_plane: execution.trace_data_plane,
         detach: execution.detach,
+        run_id: execution.run.run_id.clone(),
+        attempt: execution.run.attempt,
     };
 
     let uri = execution.dst.control_plane_uri();
@@ -1071,6 +1084,7 @@ mod tests {
             lifecycle_trace: Default::default(),
             // Never touch the operator's real store from a test.
             perf_history: false,
+            run: Default::default(),
         };
         let err = run_delegated_pull_until_started(execution)
             .await

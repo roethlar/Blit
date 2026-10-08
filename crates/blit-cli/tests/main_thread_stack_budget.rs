@@ -32,7 +32,7 @@ use std::process::{Command, Output};
 use std::time::Duration;
 
 mod common;
-use common::{cli_bin, run_with_timeout, TestContext};
+use common::{cli_bin, isolated_config_dir, run_with_timeout, TestContext};
 
 /// The main-thread stack `blit` gets on Unix, in KiB. Red before win-1's
 /// boxing on every shape here, green after with a ~1.5x margin over the
@@ -54,9 +54,8 @@ fn budgeted_blit(config_dir: Option<&Path>, args: &[String]) -> Command {
     };
     #[cfg(windows)]
     let mut cmd = Command::new(cli_bin());
-    if let Some(dir) = config_dir {
-        cmd.arg("--config-dir").arg(dir);
-    }
+    let dir = config_dir.map_or_else(isolated_config_dir, Path::to_path_buf);
+    cmd.arg("--config-dir").arg(dir);
     cmd.args(args);
     cmd
 }

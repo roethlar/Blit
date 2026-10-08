@@ -16,6 +16,7 @@ use blit_core::transfers::remote::{
 };
 
 use blit_core::endpoints::format_remote_endpoint;
+use blit_core::run_log::End;
 
 /// CLI-facing alias for the library's pull-outcome struct — since
 /// otp-10b-2 the session verb outcome (`summary` + `dest_root`); the
@@ -464,6 +465,11 @@ async fn run_remote_push_transfer_inner(
         args.json,
         defer_output, // R53-F1: suppress the final progress line on move
     );
+    // JOB_LOGS jl-2: the run's log reads the files sent on its own lane.
+    let progress_handle = match &args.run {
+        Some(run) => run.with_log(progress_handle, End::Sending),
+        None => progress_handle,
+    };
 
     // Filter parity: the wire FilterSpec rides `SessionOpen.filter`
     // (otp-10a); the session's SOURCE end applies it through the
@@ -497,6 +503,7 @@ async fn run_remote_push_transfer_inner(
     };
 
     let execution = PushExecution {
+        run: args.next_session(),
         source,
         remote: remote.clone(),
         filter: Some(filter_spec),
@@ -625,6 +632,12 @@ async fn run_remote_pull_transfer_inner(
         args.json,
         defer_output, // R53-F1: suppress final progress line on move
     );
+    // JOB_LOGS jl-2: the run's log reads each file landed, failed or deleted
+    // on its own lane.
+    let progress_handle = match &args.run {
+        Some(run) => run.with_log(progress_handle, End::Receiving),
+        None => progress_handle,
+    };
 
     // R59 #1 F2: --delete-scope → wire MirrorMode, same mapping as the
     // push verb (FilteredSubset default so `--include … --mirror`
@@ -647,6 +660,7 @@ async fn run_remote_pull_transfer_inner(
     };
 
     let execution = PullExecution {
+        run: args.next_session(),
         remote: remote.clone(),
         dest_root: dest_root.to_path_buf(),
         filter: Some(filter_spec),

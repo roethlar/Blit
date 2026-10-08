@@ -407,6 +407,7 @@ mod tests {
             ok,
             error_message: err.to_string(),
             files_failed: 0,
+            run_id: String::new(),
         }
     }
 

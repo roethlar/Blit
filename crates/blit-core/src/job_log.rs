@@ -320,6 +320,30 @@ pub struct RunInfo {
     pub source: String,
     pub destination: String,
     pub options: Vec<String>,
+    /// A daemon's own ID for its part of the run (`t…`, what
+    /// `blit jobs list` shows), when a daemon writes the log.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+}
+
+/// The run a session belongs to and its number within it (JOB_LOGS jl-2),
+/// carried from the command to every machine involved. The default — no
+/// run ID — means the initiator made none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunTag {
+    pub run_id: String,
+    /// The session's number within the run, from 1; 0 with no run ID.
+    pub attempt: u32,
+}
+
+impl RunTag {
+    /// The tag a session's open carries, when it names a usable run.
+    pub fn from_wire(run_id: &str, attempt: u32) -> Option<Self> {
+        valid_id(run_id).then(|| Self {
+            run_id: run_id.to_string(),
+            attempt: attempt.max(1),
+        })
+    }
 }
 
 /// `summary`'s fields.
@@ -353,6 +377,21 @@ pub enum Outcome {
     /// The run ended without saying how: its process stopped, or it never
     /// closed its log.
     Interrupted,
+    /// The run went on, on a daemon, after the command that started it
+    /// returned (`--detach`); that daemon's log holds how it ended.
+    Detached,
+}
+
+impl Outcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Ok => "ok",
+            Outcome::Failed => "failed",
+            Outcome::Cancelled => "cancelled",
+            Outcome::Interrupted => "interrupted",
+            Outcome::Detached => "detached",
+        }
+    }
 }
 
 /// What became of a log, for the run's report.
@@ -1169,6 +1208,145 @@ pub fn logs_for_run(dir: &Path, run_id: &str, role: Option<Role>) -> eyre::Resul
     Ok(found)
 }
 
+/// Every log in `dir`, newest first (by when its run last wrote); a
+/// missing `dir` holds none.
+pub fn logs_in(dir: &Path) -> io::Result<Vec<FoundLog>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut found: Vec<(SystemTime, FoundLog)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let (stem, finished) = if let Some(stem) = name.strip_suffix(FINISHED_SUFFIX) {
+            (stem, true)
+        } else if let Some(stem) = name.strip_suffix(PARTIAL_SUFFIX) {
+            (stem, false)
+        } else {
+            continue;
+        };
+        let Some(key) = LogKey::from_file_stem(stem) else {
+            continue;
+        };
+        // A run caught between finishing and removing its partial shows
+        // once, as finished.
+        if let Some(seen) = found.iter_mut().find(|(_, seen)| seen.key == key) {
+            if finished {
+                seen.1.path = entry.path();
+                seen.1.finished = true;
+            }
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(UNIX_EPOCH);
+        found.push((
+            modified,
+            FoundLog {
+                key,
+                path: entry.path(),
+                finished,
+            },
+        ));
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.path.cmp(&a.1.path)));
+    Ok(found.into_iter().map(|(_, log)| log).collect())
+}
+
+/// What a log says about its run, for a listing (`blit jobs list`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct LogOverview {
+    pub run_id: String,
+    pub role: Option<Role>,
+    pub attempt: u32,
+    pub started_ms: Option<u64>,
+    pub run: RunInfo,
+    /// How the run ended; `None` while it runs (or its log was cut short).
+    pub outcome: Option<Outcome>,
+    pub detail: Option<String>,
+    pub summary: Option<Summary>,
+}
+
+/// Read a log through for its [`LogOverview`].
+pub fn overview(path: &Path) -> io::Result<LogOverview> {
+    let mut found = LogOverview::default();
+    for line in open_log(path)? {
+        let LogLine::Event(event) = line? else {
+            continue;
+        };
+        match event.body {
+            EventBody::RunStart(start) => {
+                found.run_id = start.run_id;
+                found.role = Some(start.role);
+                found.attempt = start.attempt;
+                found.started_ms = Some(event.ts_ms);
+                found.run = start.run;
+            }
+            EventBody::Summary(summary) => found.summary = Some(summary),
+            EventBody::RunEnd { outcome, detail } => {
+                found.outcome = Some(outcome);
+                found.detail = detail;
+            }
+            _ => {}
+        }
+    }
+    Ok(found)
+}
+
+/// A log's `run-start` header, checked as [`open_log`] checks it.
+pub fn read_start(path: &Path) -> io::Result<RunStart> {
+    match open_log(path)?.next() {
+        Some(Ok(LogLine::Event(Event {
+            body: EventBody::RunStart(start),
+            ..
+        }))) => Ok(*start),
+        Some(Err(error)) => Err(error),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a blit job log: it does not start with its header",
+        )),
+    }
+}
+
+/// Whether `path` names a log still being written — or waiting for
+/// [`recover`] — by the name the log folder gives it.
+pub fn is_partial(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(PARTIAL_SUFFIX))
+}
+
+/// The run whose log in `dir` was written by a daemon for its job
+/// `job_id` (`RunInfo::job_id` in `run-start`), so a job is found by the
+/// daemon's own ID as well as by its run's (JOB_LOGS jl-2). Reads only
+/// each log's first line.
+pub fn run_for_job(dir: &Path, job_id: &str) -> Option<String> {
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !(name.ends_with(FINISHED_SUFFIX) || name.ends_with(PARTIAL_SUFFIX)) {
+            continue;
+        }
+        let Ok(mut lines) = open_log(&entry.path()) else {
+            continue;
+        };
+        if let Some(Ok(LogLine::Event(Event {
+            body: EventBody::RunStart(start),
+            ..
+        }))) = lines.next()
+        {
+            if start.run.job_id.as_deref() == Some(job_id) {
+                return Some(start.run_id);
+            }
+        }
+    }
+    None
+}
+
 /// One event as a line of text, for `blit jobs log` without `--json`
 /// (R1's "json to txt converter"). Times are shown in the reader's local
 /// time zone.
@@ -1262,12 +1440,7 @@ fn describe(body: &EventBody) -> String {
             seconds(summary.elapsed_ms),
         ),
         EventBody::RunEnd { outcome, detail } => {
-            let outcome = match outcome {
-                Outcome::Ok => "ok",
-                Outcome::Failed => "failed",
-                Outcome::Cancelled => "cancelled",
-                Outcome::Interrupted => "interrupted",
-            };
+            let outcome = outcome.as_str();
             match detail {
                 Some(detail) => format!("end      {outcome}: {detail}"),
                 None => format!("end      {outcome}"),
@@ -1282,18 +1455,29 @@ fn describe(body: &EventBody) -> String {
 
 const MACHINE_ID_FILE: &str = "machine-id";
 
+/// A new run ID (JOB_LOGS "Identity"): 128 random bits as lowercase hex,
+/// made where the command is typed and sent with the transfer, so every
+/// machine involved logs the run under it.
+pub fn new_run_id() -> io::Result<String> {
+    random_id()
+}
+
+fn random_id() -> io::Result<String> {
+    use rand::{rngs::SysRng, TryRng};
+    let mut bits = [0u8; 16];
+    SysRng
+        .try_fill_bytes(&mut bits)
+        .map_err(|error| io::Error::other(format!("system RNG unavailable: {error}")))?;
+    Ok(bits.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// This machine's participant ID, kept in `dir`: made on first use (128
 /// random bits as lowercase hex) and read back after. Host names change; this
 /// does not.
 pub fn machine_id(dir: &Path) -> io::Result<String> {
     let path = dir.join(MACHINE_ID_FILE);
     if !path.exists() {
-        use rand::{rngs::SysRng, TryRng};
-        let mut bits = [0u8; 16];
-        SysRng
-            .try_fill_bytes(&mut bits)
-            .map_err(|error| io::Error::other(format!("system RNG unavailable: {error}")))?;
-        let id: String = bits.iter().map(|byte| format!("{byte:02x}")).collect();
+        let id = random_id()?;
         fs::create_dir_all(dir)?;
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
@@ -1494,6 +1678,7 @@ mod tests {
             source: "/src".into(),
             destination: "host:/dst".into(),
             options: vec!["--retry".into()],
+            job_id: None,
         }
     }
 
@@ -2488,6 +2673,15 @@ mod tests {
         assert_eq!(shown_name("utf8:x", None), "utf8:utf8:x");
         assert_eq!(shown_name("caf\u{fffd}", Some("caf\\xe9")), "raw:caf\\xe9");
         assert_eq!(shown_name("plain", None), "plain");
+    }
+
+    #[test]
+    fn run_ids_are_fresh_and_name_logs() {
+        let first = new_run_id().unwrap();
+        let second = new_run_id().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 32);
+        assert!(valid_id(&first));
     }
 
     #[test]

@@ -31,7 +31,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 mod common;
-use common::{cli_bin, run_with_timeout, TestContext};
+use common::{cli_command, run_with_timeout, TestContext};
 
 const EXIT_PARTIAL_FAILURE: i32 = 2;
 
@@ -50,7 +50,7 @@ fn one_blocked_file_fixture(root: &Path) -> (PathBuf, PathBuf) {
 }
 
 fn command(verb: &str, extra: &[&str], src: &Path, dst: &Path, counters: &Path) -> Command {
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("--diagnostics-counter-file").arg(counters);
     cmd.arg(verb).arg("--yes");
     for arg in extra {

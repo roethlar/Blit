@@ -373,6 +373,75 @@ Small first, per R1; each slice is one coherent, testable change.
    under it; local runs write logs too; the per-user folder (Windows moved to
    `%LOCALAPPDATA%\Blit`, old files moved once), the CLI's `config.toml`;
    `blit jobs log <job-id|file>` and `blit jobs list` locally.
+   **Design at implementation (agent's calls within the rulings, 2026-10-07):**
+   - *Run ID on the wire (contract 7).* `SessionOpen.run_id` (14) and
+     `.attempt` (15); `DelegatedPullRequest.run_id` (3) and `.attempt` (4);
+     a delegated destination forwards both in its own open to the source
+     daemon. A daemon keys its log by the run ID it is given (its own
+     `t…` job ID when none is), and records its job ID in `run-start`
+     (`job_id`) and the run ID in its finished job's record
+     (`TransferRecord.run_id`, in `blit jobs list <host> --json`), so
+     `blit jobs log <host> <id>` finds a log by either ID. Jobs rows stay keyed by the daemon's job ID: one daemon
+     can hold two sessions of one run at once (both ends of a delegated
+     run).
+   - *Attempt = the run's sessions, numbered from 1.* Every session a
+     command opens — the main pass, each retry pass, the leftover session
+     of an `--ignore-existing` pass, each `--retry` rerun — takes the next
+     number, so no two sessions of a run share a daemon log key. The
+     initiator's own log covers the whole command as attempt 1. (jl-4's
+     `jobs retry` is a new run, its parent recorded.)
+   - *One log adapter.* The progress-to-log adapter (and its end-of-run
+     fill-in of failures the summary names) moves into blit-core, taking a
+     route-neutral summary, so the CLI and the daemon log alike.
+   - *The CLI's log.* Every command writes `<per-user folder>/jobs/logs/`
+     `<run>.<machine>.initiator.1.*`, through the audit lane where the
+     route has per-file events (local, pull; push names files sent), plus
+     the `-v` diagnostics, retry passes, a move's source removal, and how
+     it ended (`detached` for `--detach`, naming the daemon's job). Each
+     command first finishes logs an earlier, killed command left. Keep:
+     `[jobs] keep` in the per-user `config.toml` (default 50). `-v` prints
+     the run's ID.
+   - *Local `jobs`.* `blit jobs list` with no host lists this machine's
+     logs, newest first; `blit jobs log <job-id|file>` reads one here (a
+     job ID, or an exported/copied log file); with a host first, as
+     before.
+   **Landed 2026-10-08** (commit recorded in `docs/STATE.md`). As designed
+   above, plus what implementing it settled:
+   - *Sent, not copied, on a push.* An initiator is either end of its
+     transfer, so its log's lane says which (`run_log::End`): a push's own
+     log names each file `sent` (the destination's log says `copied`); a
+     local copy and a pull say `copied`. A daemon's lane goes by its role.
+   - *`jobs log <job-id|file>` without a host*: a name that is a file is
+     read as one log (`--json` shows any file's lines as stored, a damaged
+     log's too; `--role` is refused for a file); any other name is a job
+     ID, all of its logs here. Listing and reading here first finish any
+     log a killed command left (a running command's log is left alone).
+   - *`jobs list` without a host*: one line per log — ID, start time, verb,
+     source -> destination, outcome with counts — `--recent-limit` keeping
+     the newest; `--json` gives each log's overview, its path and whether
+     it is finished. A daemon's `jobs list --json` rows carry `run_id`.
+   - *A daemon's job ID finds its run's logs*, waiting too: `GetJobLog`
+     resolves a job ID to the run it logged under once, and its
+     `wait_finished` wait re-lists that run (re-listing the job ID found
+     nothing, so `jobs watch` could not name a detached job's failed files
+     — caught by jl-1c's acceptance test; pinned by a daemon test that
+     waits on a job ID).
+   - *Tests*: CLI end to end — a local copy's log listed and read by ID,
+     by file and as JSON, newest first and limited; a push logged here
+     (`sent`) and on the daemon under one run ID, its record naming the
+     run and its job ID finding the same log; a pull (`copied`); a
+     remote-to-remote run logged on all three machines under one ID, and a
+     daemon at both ends keeping two logs by role; `--detach` ending
+     `detached`, naming the daemon's job; `[jobs] keep` from `config.toml`;
+     a move logging its source removal. Each guard mutation-proven red.
+     CLI test runs that name no `--config-dir` now get one under the
+     target directory (`common::cli_command`), so the suite never writes
+     the developer's own job logs.
+   - *Known gaps*: the Windows folder move is tested only by its
+     platform-neutral half (`move_folder_contents`) off Windows;
+     `--retry` reruns keep the last rerun's totals, not a sum; `jobs list`
+     here reads each log through for its overview (jl-3's run records are
+     the index that replaces that).
 5. **jl-3 — jobs.** Every run writes its JobSpec and RunRecord locally
    (versioned, with migrations); machine ID; detached reconciliation for
    every local `jobs` operation; `--save`, `--export`, `blit jobs

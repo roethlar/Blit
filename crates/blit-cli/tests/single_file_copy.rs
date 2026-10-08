@@ -5,15 +5,13 @@
 //! report "0 files" with success.
 
 use std::fs;
-use std::process::Command;
 use std::time::Duration;
 
 mod common;
-use common::{cli_bin, run_with_timeout};
+use common::{cli_command, run_with_timeout};
 
 fn run_copy(args: &[&str]) -> std::process::Output {
-    let bin = cli_bin();
-    let mut cmd = Command::new(&bin);
+    let mut cmd = cli_command();
     cmd.arg("copy").arg("--yes");
     for a in args {
         cmd.arg(a);

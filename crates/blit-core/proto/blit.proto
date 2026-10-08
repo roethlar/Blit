@@ -604,6 +604,11 @@ message DelegatedPullRequest {
   // ── Source-side / universal contract ──────────────────────────────
   // Where this daemon should pull from. Strictly typed; arbitrary URI
   // schemes are rejected during locator parsing.
+  // Contract 7 (JOB_LOGS jl-2): the run this job belongs to and the
+  // session's number within it, forwarded in the destination's own open
+  // to the source daemon so both daemons log the run under one ID.
+  string run_id = 3;
+  uint32 attempt = 4;
   RemoteSourceLocator src = 10;
 
   // The universal transfer contract. Reuses TransferOperationSpec
@@ -850,6 +855,9 @@ message TransferRecord {
   // the job went on. `ok` stays true for such a job — it ran to its
   // end — so a reader checks this too; `GetJobLog` names the files.
   uint64 files_failed = 13;
+  // Contract 7 (JOB_LOGS jl-2): the run the job belonged to, the ID every
+  // machine involved logged it under; empty when its initiator made none.
+  string run_id = 14;
 }
 
 message Counters {
@@ -1093,6 +1101,13 @@ message SessionOpen {
   // makes the SOURCE strip Windows attributes and named data streams before
   // manifest emission, so no metadata payload is read or sent.
   bool drop_windows_metadata = 13;
+  // Contract 7 (JOB_LOGS jl-2): the run this session belongs to, made by
+  // the machine where the command was typed, so every machine involved
+  // logs the run under one ID; empty when the initiator made none.
+  string run_id = 14;
+  // The session's number within that run, from 1: the main pass, then
+  // each retry session. 0 when no run ID is given.
+  uint32 attempt = 15;
 }
 
 // Responder's reply. Refusals are SessionError frames, never silent

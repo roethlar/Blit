@@ -1073,6 +1073,9 @@ pub struct RemoteTransferProgress {
     sender: UnboundedSender<ProgressEvent>,
     /// The audit lane a job log reads, when one is attached.
     audit: Option<AuditSender>,
+    /// Whether anything reads the UI lane; false for a handle made only to
+    /// feed a log ([`audit_only`](Self::audit_only)).
+    ui: bool,
 }
 
 /// Hand-written so option structs that carry a sink (e.g.
@@ -1089,7 +1092,26 @@ impl RemoteTransferProgress {
         Self {
             sender,
             audit: None,
+            ui: true,
         }
+    }
+
+    /// A handle that feeds only a job log's audit lane (JOB_LOGS jl-2), for
+    /// a run that shows no live progress: nothing reads its UI lane, and
+    /// [`has_ui`](Self::has_ui) says so, so a source still prints its plain
+    /// scan heartbeat.
+    pub fn audit_only(audit: AuditSender) -> Self {
+        let (sender, _) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            sender,
+            audit: Some(audit),
+            ui: false,
+        }
+    }
+
+    /// Whether a live display reads this handle's events.
+    pub fn has_ui(&self) -> bool {
+        self.ui
     }
 
     /// Also put the per-file facts on `audit`, a bounded lane a job log

@@ -210,6 +210,17 @@ async fn run_delegated(
     dst_module: &str,
     spec: TransferOperationSpec,
 ) -> Vec<DelegatedPullProgress> {
+    run_delegated_as(dst_port, src_port, dst_module, spec, Default::default()).await
+}
+
+/// [`run_delegated`] for a run the CLI made (JOB_LOGS jl-2).
+async fn run_delegated_as(
+    dst_port: u16,
+    src_port: u16,
+    dst_module: &str,
+    spec: TransferOperationSpec,
+    run: blit_core::job_log::RunTag,
+) -> Vec<DelegatedPullProgress> {
     let mut client = BlitClient::connect(format!("http://127.0.0.1:{dst_port}"))
         .await
         .expect("connect dst daemon");
@@ -224,6 +235,8 @@ async fn run_delegated(
             spec: Some(spec),
             trace_data_plane: false,
             detach: false,
+            run_id: run.run_id.clone(),
+            attempt: run.attempt,
         })
         .await
         .expect("delegated_pull opens")
@@ -393,6 +406,7 @@ async fn coordinator_records_delegated_run_in_operator_store() {
         detach: false,
         lifecycle_trace: TransferLifecycleTrace::disabled(),
         perf_history: true,
+        run: Default::default(),
     };
     let outcome = run_delegated_pull(execution, None, |_| {}).await;
 
@@ -691,6 +705,48 @@ async fn a_refused_delegated_pull_logs_why() {
         ),
         "{log:?}"
     );
+
+    src.stop().await;
+    dst.stop().await;
+}
+
+/// JOB_LOGS jl-2: both daemons of a delegated job log it under the run ID
+/// the CLI sent — the destination from the request, the source from the
+/// destination's own open — and with the session's number.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn both_daemons_log_a_delegated_job_under_one_run_id() {
+    use blit_core::job_log::{EventBody, RunTag};
+    let src = Daemon::start("srcmod", false).await;
+    let dst = Daemon::start("dstmod", true).await;
+    write_tree(&src.root, SRC_TREE);
+    let run = RunTag {
+        run_id: "0123456789abcdef0123456789abcdef".into(),
+        attempt: 2,
+    };
+
+    let events = run_delegated_as(dst.port, src.port, "dstmod", spec("srcmod"), run.clone()).await;
+    assert_no_error(&events);
+
+    for (daemon, role) in [(&dst, "destination"), (&src, "source")] {
+        let (logged_role, log) = daemon.job_log(&run.run_id).await;
+        assert_eq!(logged_role, role);
+        let EventBody::RunStart(start) = &log[0] else {
+            panic!("first event: {:?}", log[0]);
+        };
+        assert_eq!(
+            (start.run_id.as_str(), start.attempt),
+            (run.run_id.as_str(), 2),
+            "{role}"
+        );
+        assert!(
+            start
+                .run
+                .job_id
+                .as_deref()
+                .is_some_and(|job| job.starts_with('t')),
+            "{role} records its own job ID: {start:?}"
+        );
+    }
 
     src.stop().await;
     dst.stop().await;

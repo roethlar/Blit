@@ -26,6 +26,9 @@ tar = "0.4"
 # JOB_LOGS jl-1a: finished job logs are stored gzip-compressed
 # (`<key>.jsonl.gz`), through the default pure-Rust (miniz_oxide) backend.
 flate2 = "1"
+# JOB_LOGS jl-2: the per-user `config.toml` (same crate/version the daemon
+# reads its config with).
+toml = "1.1"
 num_cpus = "1.17"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

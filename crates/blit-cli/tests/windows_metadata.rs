@@ -12,7 +12,7 @@ use std::process::Command;
 use std::time::Duration;
 
 mod common;
-use common::{cli_bin, run_with_timeout, TestContext};
+use common::{cli_command, run_with_timeout, TestContext};
 
 const REQUIRED_ATTRIBUTES: u32 = 0x1 | 0x2 | 0x4 | 0x20; // READONLY | HIDDEN | SYSTEM | ARCHIVE
 const ADS_CONTENT: &[u8] = b"rel-4-ads";
@@ -124,7 +124,7 @@ fn create_batch(root: &Path) -> PathBuf {
 }
 
 fn run_local_copy(src: &Path, dst: &Path) {
-    let mut command = Command::new(cli_bin());
+    let mut command = cli_command();
     command.arg("copy").arg("--yes").arg(src).arg(dst);
     let output = run_with_timeout(command, Duration::from_secs(30));
     assert!(
@@ -136,7 +136,7 @@ fn run_local_copy(src: &Path, dst: &Path) {
 }
 
 fn run_local_checksum_copy(src: &Path, dst: &Path) {
-    let mut command = Command::new(cli_bin());
+    let mut command = cli_command();
     command
         .arg("copy")
         .arg("--yes")

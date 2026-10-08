@@ -2,10 +2,11 @@ use crate::cli::{JobsCancelArgs, JobsCommand, JobsListArgs, JobsLogArgs, JobsWat
 use blit_core::admin::jobs;
 use blit_core::admin::jobs::{CancelJobOutcome, WatchSnapshot};
 use blit_core::generated::{daemon_event, DaemonState, JobLogHeader};
-use blit_core::job_log::{self, LogLine, LogLines, Role};
+use blit_core::job_log::{self, FoundLog, LogLine, LogLines, LogOverview, Role};
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
 use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -36,56 +37,166 @@ pub async fn run_jobs(command: JobsCommand) -> Result<ExitCode> {
     }
 }
 
-/// `blit jobs log` (JOB_LOGS jl-1b): each log the daemon kept for the job,
+/// `blit jobs log` (JOB_LOGS jl-1b, jl-2): each log kept for the job — by
+/// the daemon named first, or on this machine — or the one log file named,
 /// as text or, with `--json`, as its JSON lines.
 async fn run_jobs_log(args: JobsLogArgs) -> Result<()> {
-    let remote = RemoteEndpoint::parse(&args.remote)
-        .with_context(|| format!("parsing remote endpoint '{}'", args.remote))?;
     let role = args.role.map(|role| match role {
         LogRole::Initiator => Role::Initiator,
         LogRole::Source => Role::Source,
         LogRole::Destination => Role::Destination,
     });
     let json = args.json;
-    let mut first = true;
-    jobs::read_job_logs(
-        &remote,
-        &args.transfer_id,
-        role,
-        false,
-        move |header, lines| {
+    let Some(job_id) = args.job_id else {
+        let target = args.target;
+        return tokio::task::spawn_blocking(move || {
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
-            if json {
-                write_json_log(&mut out, lines)?;
-            } else {
-                if !first {
-                    writeln!(out)?;
-                }
-                write_text_log(&mut out, &header, lines)?;
+            write_local_log(&mut out, &target, role, json)
+        })
+        .await
+        .context("reading the log")?;
+    };
+    let remote = RemoteEndpoint::parse(&args.target)
+        .with_context(|| format!("parsing remote endpoint '{}'", args.target))?;
+    let mut first = true;
+    jobs::read_job_logs(&remote, &job_id, role, false, move |header, lines| {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        if json {
+            write_json_log(&mut out, lines)?;
+        } else {
+            if !first {
+                writeln!(out)?;
             }
-            first = false;
-            out.flush()?;
-            Ok(())
-        },
-    )
+            write_text_log(&mut out, &Heading::from_daemon(&header), lines)?;
+        }
+        first = false;
+        out.flush()?;
+        Ok(())
+    })
     .await
+}
+
+/// What `blit jobs log` prints above a log's text.
+struct Heading {
+    role: String,
+    participant: String,
+    attempt: u32,
+    /// Why the log may not be finished, when it is not.
+    unfinished: Option<&'static str>,
+}
+
+impl Heading {
+    fn from_daemon(header: &JobLogHeader) -> Self {
+        Self {
+            role: header.role.clone(),
+            participant: header.participant.clone(),
+            attempt: header.attempt,
+            unfinished: (!header.finished)
+                .then_some("the job is running, or the daemon stopped during it"),
+        }
+    }
+
+    fn from_disk(role: Role, participant: &str, attempt: u32, finished: bool) -> Self {
+        Self {
+            role: role.as_str().to_string(),
+            participant: participant.to_string(),
+            attempt,
+            unfinished: (!finished).then_some("the job is running"),
+        }
+    }
+}
+
+/// `blit jobs log <job-id|file>` (jl-2): a job run on this machine — every
+/// log kept for it here — or the one log file named. A name that is a file
+/// is read as one; any other is a job ID.
+fn write_local_log(
+    out: &mut impl Write,
+    target: &str,
+    role: Option<Role>,
+    json: bool,
+) -> Result<()> {
+    let file = Path::new(target);
+    let logs: Vec<(PathBuf, Heading)> = if file.is_file() {
+        if role.is_some() {
+            eyre::bail!("--role picks among a job's logs; {target} is one log file");
+        }
+        if json {
+            // Any file's lines as stored, a damaged log's too.
+            write_json_log(out, open_stored(file)?)?;
+            out.flush()?;
+            return Ok(());
+        }
+        let start =
+            job_log::read_start(file).with_context(|| format!("reading {}", file.display()))?;
+        let heading = Heading::from_disk(
+            start.role,
+            &start.participant,
+            start.attempt,
+            !job_log::is_partial(file),
+        );
+        vec![(file.to_path_buf(), heading)]
+    } else if job_log::valid_id(target) {
+        let dir = crate::run_log::logs_dir(&blit_core::config::config_dir()?);
+        let found = job_log::logs_for_run(&dir, target, role)?;
+        if found.is_empty() {
+            eyre::bail!(
+                "no log for job {target} on this machine (`blit jobs list` shows the \
+                 jobs kept here; for a daemon's job, name its host first: \
+                 `blit jobs log <host> <job-id>`)"
+            );
+        }
+        found
+            .into_iter()
+            .map(|log| {
+                let heading = Heading::from_disk(
+                    log.key.role(),
+                    log.key.participant(),
+                    log.key.attempt(),
+                    log.finished,
+                );
+                (log.path, heading)
+            })
+            .collect()
+    } else {
+        eyre::bail!("{target} is not a log file or a job ID");
+    };
+    for (index, (path, heading)) in logs.iter().enumerate() {
+        let lines = open_stored(path)?;
+        if json {
+            write_json_log(out, lines)?;
+        } else {
+            if index > 0 {
+                writeln!(out)?;
+            }
+            write_text_log(out, heading, lines)?;
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// A log file's lines as stored.
+fn open_stored(path: &Path) -> Result<Box<dyn BufRead + Send>> {
+    std::fs::File::open(path)
+        .and_then(job_log::decode)
+        .with_context(|| format!("reading {}", path.display()))
 }
 
 fn write_text_log(
     out: &mut impl Write,
-    header: &JobLogHeader,
+    heading: &Heading,
     lines: Box<dyn BufRead + Send>,
 ) -> Result<()> {
-    let unfinished = if header.finished {
-        ""
-    } else {
-        " — not finished: the job is running, or the daemon stopped during it"
-    };
+    let unfinished = heading
+        .unfinished
+        .map(|why| format!(" — not finished: {why}"))
+        .unwrap_or_default();
     writeln!(
         out,
         "== {} log from machine {} (attempt {}){unfinished} ==",
-        header.role, header.participant, header.attempt
+        heading.role, heading.participant, heading.attempt
     )?;
     for line in LogLines::new(lines) {
         match line? {
@@ -118,8 +229,19 @@ fn write_json_log(out: &mut impl Write, mut lines: Box<dyn BufRead + Send>) -> R
 }
 
 async fn run_jobs_list(args: JobsListArgs) -> Result<()> {
-    let remote = RemoteEndpoint::parse(&args.remote)
-        .with_context(|| format!("parsing remote endpoint '{}'", args.remote))?;
+    let Some(remote) = args.remote else {
+        let (limit, json) = (args.recent_limit, args.json);
+        return tokio::task::spawn_blocking(move || {
+            let dir = crate::run_log::logs_dir(&blit_core::config::config_dir()?);
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            write_local_list(&mut out, &dir, limit, json)
+        })
+        .await
+        .context("listing the jobs")?;
+    };
+    let remote = RemoteEndpoint::parse(&remote)
+        .with_context(|| format!("parsing remote endpoint '{remote}'"))?;
     let state = jobs::query(&remote, args.recent_limit).await?;
 
     if args.json {
@@ -128,6 +250,98 @@ async fn run_jobs_list(args: JobsListArgs) -> Result<()> {
         print_human(&remote, &state);
     }
     Ok(())
+}
+
+/// `blit jobs list` with no host (jl-2): the jobs whose logs this machine
+/// keeps, newest first — `limit` of them, or all when 0.
+fn write_local_list(out: &mut impl Write, dir: &Path, limit: u32, json: bool) -> Result<()> {
+    let mut logs = job_log::logs_in(dir).with_context(|| format!("reading {}", dir.display()))?;
+    if limit > 0 {
+        logs.truncate(limit as usize);
+    }
+    let rows: Vec<(FoundLog, std::io::Result<LogOverview>)> = logs
+        .into_iter()
+        .map(|log| {
+            let overview = job_log::overview(&log.path);
+            (log, overview)
+        })
+        .collect();
+    if json {
+        let jobs: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(log, overview)| {
+                let mut row = match overview {
+                    Ok(overview) => serde_json::to_value(overview)?,
+                    Err(error) => serde_json::json!({
+                        "run_id": log.key.run_id(),
+                        "error": error.to_string(),
+                    }),
+                };
+                row["log"] = log.path.display().to_string().into();
+                row["finished"] = log.finished.into();
+                Ok(row)
+            })
+            .collect::<Result<_, serde_json::Error>>()?;
+        let listing = serde_json::json!({
+            "logs_dir": dir.display().to_string(),
+            "jobs": jobs,
+        });
+        writeln!(out, "{}", serde_json::to_string_pretty(&listing)?)?;
+    } else if rows.is_empty() {
+        writeln!(out, "Jobs on this machine: (none)")?;
+    } else {
+        writeln!(
+            out,
+            "Jobs on this machine ({}), newest first — logs in {}:",
+            rows.len(),
+            dir.display()
+        )?;
+        for (log, overview) in &rows {
+            match overview {
+                Ok(overview) => writeln!(out, "  {}", local_row(log, overview))?,
+                Err(error) => writeln!(out, "  {}  (log unreadable: {error})", log.key.run_id())?,
+            }
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// One job's line in `blit jobs list` (no host): its ID, when it started,
+/// what it did, and how it ended.
+fn local_row(log: &FoundLog, overview: &LogOverview) -> String {
+    let started = overview
+        .started_ms
+        .and_then(|ms| i64::try_from(ms).ok())
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|time| {
+            time.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|| "-".into());
+    let run = &overview.run;
+    let mut status = match (overview.outcome, log.finished) {
+        (Some(outcome), _) => outcome.as_str().to_string(),
+        (None, false) => "running".into(),
+        (None, true) => "log cut short".into(),
+    };
+    if let Some(detail) = &overview.detail {
+        status.push_str(&format!(": {detail}"));
+    }
+    if let Some(summary) = &overview.summary {
+        status.push_str(&format!(
+            " ({} copied, {} deleted, {} failed)",
+            summary.files_copied, summary.files_deleted, summary.files_failed
+        ));
+    }
+    format!(
+        "{}  {started}  {}  {} -> {}  {status}",
+        log.key.run_id(),
+        run.verb,
+        run.source,
+        run.destination
+    )
 }
 
 async fn run_jobs_cancel(args: JobsCancelArgs) -> Result<ExitCode> {
@@ -192,6 +406,7 @@ impl ActiveSnapshot {
             ok: true,
             error_message: String::new(),
             files_failed: c.files_failed,
+            run_id: String::new(),
         }
     }
 
@@ -222,6 +437,7 @@ impl ActiveSnapshot {
             ok: false,
             error_message: e.message.clone(),
             files_failed: 0,
+            run_id: String::new(),
         }
     }
 }
@@ -877,6 +1093,7 @@ fn print_json(state: &DaemonState) -> Result<()> {
                 "ok": r.ok,
                 "error_message": r.error_message,
                 "files_failed": r.files_failed,
+                "run_id": r.run_id,
             })
         })
         .collect();

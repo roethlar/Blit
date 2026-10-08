@@ -5,6 +5,7 @@ use blit_core::display::{format_bps, format_bytes};
 use blit_core::remote::transfer::{
     ProgressEvent, ProgressTotals, RemoteTransferProgress, TransferLifecycleTrace,
 };
+use blit_core::run_log::End;
 use blit_core::transfer_session::{LocalMirrorOptions, LocalMirrorSummary, TransferOutcome};
 use eyre::{bail, Result};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -162,6 +163,11 @@ async fn run_local_transfer_inner(
         options.progress_events = Some(sink);
         row
     });
+    // JOB_LOGS jl-2: the run's log reads the same facts on its own bounded
+    // lane, whether or not a live row draws them.
+    if let Some(run) = &args.run {
+        options.progress_events = run.with_log(options.progress_events.take(), End::Receiving);
+    }
 
     let start = Instant::now();
     let result = blit_core::transfers::local::run(src_path, dest_path, options).await;

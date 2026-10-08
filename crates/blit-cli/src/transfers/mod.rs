@@ -373,6 +373,16 @@ async fn run_transfer_inner(
             )
             .await?;
             fold_local_retry(&mut summary, &retry, operation_started);
+            log_run_end(
+                args,
+                crate::run_log::totals_from_local(&summary),
+                retry.interrupted,
+            );
+            if let Some(run) = &args.run {
+                for line in crate::run_log::local_details(&summary) {
+                    run.note(line);
+                }
+            }
             render_result(lifecycle_trace, || {
                 local::print_local_transfer_summary(
                     ctx,
@@ -435,6 +445,11 @@ async fn run_transfer_inner(
             )
             .await?;
             retry.fold_into_summary(&mut state.summary);
+            log_run_end(
+                args,
+                blit_core::run_log::RunTotals::from(&state.summary),
+                retry.interrupted,
+            );
             render_result(lifecycle_trace, || {
                 remote::print_deferred_push_result(args, &state);
                 Ok(())
@@ -487,6 +502,11 @@ async fn run_transfer_inner(
             )
             .await?;
             retry.fold_into_summary(&mut state.summary);
+            log_run_end(
+                args,
+                blit_core::run_log::RunTotals::from(&state.summary),
+                retry.interrupted,
+            );
             render_result(lifecycle_trace, || {
                 remote::print_deferred_pull_result(args, &state);
                 Ok(())
@@ -551,6 +571,11 @@ async fn run_transfer_inner(
                 )
                 .await?;
                 retry.fold_into_delegated(&mut state.summary);
+                log_run_end(
+                    args,
+                    crate::run_log::totals_from_delegated(&state.summary),
+                    retry.interrupted,
+                );
                 render_result(lifecycle_trace, || {
                     remote_remote_direct::print_deferred_delegated_result(args, &state);
                     Ok(())
@@ -811,6 +836,16 @@ async fn run_move_inner(
             if retry.interrupted {
                 eprintln!("{}", retry::INTERRUPTED_NOTE);
             }
+            log_run_end(
+                args,
+                crate::run_log::totals_from_local(&summary),
+                retry.interrupted,
+            );
+            if let Some(run) = &args.run {
+                for line in crate::run_log::local_details(&summary) {
+                    run.note(line);
+                }
+            }
 
             // R47-F4 (data-loss): refuse to delete the source if
             // the scan was incomplete. The R46-F2 mirror gate only
@@ -861,6 +896,7 @@ async fn run_move_inner(
                 fs::remove_file(&src_path)
                     .with_context(|| format!("removing {}", src_path.display()))?;
             }
+            note_source_removed(args, &src_path.display().to_string());
 
             // R49-F3: source-delete succeeded, emit the deferred
             // summary now so JSON consumers see one self-contained
@@ -938,6 +974,11 @@ async fn run_move_inner(
             if retry.interrupted {
                 eprintln!("{}", retry::INTERRUPTED_NOTE);
             }
+            log_run_end(
+                args,
+                blit_core::run_log::RunTotals::from(&state.summary),
+                retry.interrupted,
+            );
 
             // pfc-5 / Q1(b): refuse before the remote source is touched.
             refuse_source_delete_on_failures(
@@ -954,6 +995,7 @@ async fn run_move_inner(
                 _ => bail!("unsupported remote source for move"),
             };
             delete_remote_path(&remote, &rel_path).await?;
+            note_source_removed(args, &format_remote_endpoint(&remote));
             render_result(lifecycle_trace, || {
                 remote::print_deferred_pull_result(args, &state);
                 Ok(())
@@ -1020,6 +1062,11 @@ async fn run_move_inner(
             if retry.interrupted {
                 eprintln!("{}", retry::INTERRUPTED_NOTE);
             }
+            log_run_end(
+                args,
+                blit_core::run_log::RunTotals::from(&state.summary),
+                retry.interrupted,
+            );
 
             // pfc-5 / Q1(b): refuse before the local source is removed.
             refuse_source_delete_on_failures(
@@ -1036,6 +1083,7 @@ async fn run_move_inner(
                 fs::remove_file(&src_path)
                     .with_context(|| format!("removing {}", src_path.display()))?;
             }
+            note_source_removed(args, &src_path.display().to_string());
             render_result(lifecycle_trace, || {
                 remote::print_deferred_push_result(args, &state);
                 Ok(())
@@ -1103,6 +1151,11 @@ async fn run_move_inner(
             if retry.interrupted {
                 eprintln!("{}", retry::INTERRUPTED_NOTE);
             }
+            log_run_end(
+                args,
+                crate::run_log::totals_from_delegated(&state.summary),
+                retry.interrupted,
+            );
 
             // pfc-5 / Q1(b): refuse before the remote source is touched.
             // The delegated re-encode is a second summary message, so the
@@ -1121,6 +1174,7 @@ async fn run_move_inner(
                 _ => bail!("unsupported remote source for move"),
             };
             delete_remote_path(&src, &rel_path).await?;
+            note_source_removed(args, &format_remote_endpoint(&src));
             render_result(lifecycle_trace, || {
                 remote_remote_direct::print_deferred_delegated_result(args, &state);
                 Ok(())
@@ -1157,6 +1211,24 @@ pub(crate) fn reject_unsupported_checker_pin(
         );
     }
     Ok(())
+}
+
+/// JOB_LOGS jl-2: give the run's log its final account across every pass,
+/// and say when Ctrl-C stopped the retries.
+fn log_run_end(args: &TransferArgs, totals: blit_core::run_log::RunTotals, interrupted: bool) {
+    if let Some(run) = &args.run {
+        run.note_totals(totals);
+        if interrupted {
+            run.note_interrupted(retry::INTERRUPTED_NOTE.to_string());
+        }
+    }
+}
+
+/// JOB_LOGS jl-2: a move removed its source, for the run's log.
+fn note_source_removed(args: &TransferArgs, source: &str) {
+    if let Some(run) = &args.run {
+        run.note(format!("move: removed the source {source}"));
+    }
 }
 
 #[cfg(test)]
@@ -1297,6 +1369,7 @@ mod tests {
             min_age: None,
             max_age: None,
             delete_scope: "subset".into(),
+            run: None,
         };
 
         runtime().block_on(local::run_local_transfer_quiet(
@@ -1359,6 +1432,7 @@ mod tests {
             min_age: None,
             max_age: None,
             delete_scope: "subset".into(),
+            run: None,
         };
 
         runtime().block_on(local::run_local_transfer_quiet(
@@ -1427,6 +1501,7 @@ mod tests {
             min_age: None,
             max_age: None,
             delete_scope: "subset".into(),
+            run: None,
         }
     }
 

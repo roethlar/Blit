@@ -223,6 +223,8 @@ pub struct ActiveJob {
     pub files_completed: u64,
     /// Files represented by the needed manifest entries.
     pub files_total: u64,
+    /// The run the job belongs to (JOB_LOGS jl-2); empty until known.
+    pub run_id: String,
 }
 
 /// One entry in the recent-runs ring buffer. Fields mirror
@@ -255,6 +257,9 @@ pub struct TransferRecord {
     /// record from before this field reads as zero.
     #[serde(default)]
     pub files_failed: u64,
+    /// The run the job belonged to, the ID its log is kept under (jl-2).
+    #[serde(default)]
+    pub run_id: String,
     /// `true` if the handler reported success (Subscribe-era
     /// `TransferComplete`); `false` if it failed or the
     /// guard drained without a recorded outcome (panic,
@@ -566,6 +571,7 @@ impl ActiveJobs {
             bytes_total: 0,
             files_completed: 0,
             files_total: 0,
+            run_id: String::new(),
         };
         let cancellation = CancellationToken::new();
         let progress = Arc::new(JobProgressCounters::default());
@@ -1084,6 +1090,15 @@ impl ActiveJobUpdater {
             entry.job.path = path;
         }
     }
+
+    /// JOB_LOGS jl-2: the run this job belongs to — the ID its log is kept
+    /// under — for the job's record.
+    pub fn set_run_id(&self, run_id: String) {
+        let mut table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = table.get_mut(&self.transfer_id) {
+            entry.job.run_id = run_id;
+        }
+    }
 }
 
 impl ActiveJobGuard {
@@ -1259,6 +1274,7 @@ fn build_record(
         ok,
         error_message,
         files_failed: progress.files_failed,
+        run_id: row.run_id,
     }
 }
 
@@ -1671,6 +1687,7 @@ mod tests {
             ok: true,
             error_message: String::new(),
             files_failed: 0,
+            run_id: String::new(),
         }
     }
 

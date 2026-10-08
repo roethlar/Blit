@@ -59,6 +59,7 @@ fn pull_execution(port: u16, dest_root: &Path) -> PullExecution {
         // ph-1: never write to the machine's real perf-history store
         // from a test.
         perf_history: false,
+        run: Default::default(),
     }
 }
 

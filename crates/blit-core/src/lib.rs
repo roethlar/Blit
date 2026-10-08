@@ -27,6 +27,7 @@ pub mod perf_history;
 pub mod profile;
 pub mod raw_name;
 pub mod remote;
+pub mod run_log;
 pub mod scan;
 pub mod seed_store;
 pub mod stderr_log;

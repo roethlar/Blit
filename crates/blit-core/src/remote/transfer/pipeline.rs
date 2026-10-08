@@ -518,10 +518,11 @@ pub async fn execute_sink_pipeline_elastic(
                         if !files.is_empty() {
                             p.report_payload(0, outcome.bytes_written);
                         }
+                        // JOB_LOGS jl-2: a file this payload failed is
+                        // reported as failed, with its reason, so a run's
+                        // log names it as it happens on this lane too.
                         for name in &files {
-                            if !outcome.file_failed(name) {
-                                p.report_file_complete(name.clone()).await;
-                            }
+                            p.report_file_outcome(name, &outcome).await;
                         }
                         // A resumed file finishes like any other (w6-1:
                         // counted once, per-file lane); its bytes are the
@@ -532,9 +533,7 @@ pub async fn execute_sink_pipeline_elastic(
                         // one phase, and reporting both would double it.
                         if let Some(name) = resumed_file {
                             p.report_payload(0, outcome.bytes_written);
-                            if !outcome.file_failed(&name) {
-                                p.report_file_complete(name).await;
-                            }
+                            p.report_file_outcome(&name, &outcome).await;
                         }
                     }
                     let mut t = total.lock().unwrap();

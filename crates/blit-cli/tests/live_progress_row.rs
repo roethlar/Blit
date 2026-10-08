@@ -16,7 +16,7 @@ use std::process::Command;
 use std::time::Duration;
 
 mod common;
-use common::{cli_bin, run_with_timeout, TestContext};
+use common::{cli_command, run_with_timeout, TestContext};
 
 /// The line blit-core prints when a manifest scan ends with no progress
 /// sink attached. Its presence is the observable proof the sink stayed
@@ -31,7 +31,7 @@ fn copy_with_progress(extra: &[&str]) -> std::process::Output {
     fs::write(src.join("a.txt"), b"first").expect("write a");
     fs::write(src.join("b.txt"), b"second").expect("write b");
 
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("copy").arg("--yes");
     for arg in extra {
         cmd.arg(arg);

@@ -13,11 +13,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::Duration;
 
 mod common;
-use common::{cli_bin, run_with_timeout};
+use common::{cli_command, run_with_timeout};
 
 /// Exit status for "the operation completed, but some files did not land"
 /// (`transfers::failures::EXIT_PARTIAL_FAILURE`). Duplicated as a literal
@@ -41,7 +41,7 @@ fn one_blocked_file_fixture(root: &Path) -> (PathBuf, PathBuf) {
 }
 
 fn run_verb(verb: &str, extra: &[&str], src: &Path, dst: &Path) -> Output {
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg(verb).arg("--yes");
     for arg in extra {
         cmd.arg(arg);

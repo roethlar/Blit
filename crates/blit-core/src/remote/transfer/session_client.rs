@@ -101,6 +101,8 @@ pub struct PushSessionOptions {
     /// `LocalMirrorOptions::perf_history` flag is, so a unit test can
     /// never write to the operator's real store.
     pub perf: Option<perf_history::RecordSink>,
+    /// JOB_LOGS jl-2: the run this session belongs to, sent in the open.
+    pub run: crate::job_log::RunTag,
 }
 
 impl Default for PushSessionOptions {
@@ -121,6 +123,7 @@ impl Default for PushSessionOptions {
             trace_data_plane: false,
             lifecycle_trace: TransferLifecycleTrace::disabled(),
             perf: None,
+            run: Default::default(),
         }
     }
 }
@@ -173,6 +176,8 @@ pub async fn run_push_session(
         filter: options.filter,
         mirror_enabled: options.mirror_enabled,
         mirror_kind: options.mirror_kind as i32,
+        run_id: options.run.run_id.clone(),
+        attempt: options.run.attempt,
         ..Default::default()
     };
 
@@ -359,6 +364,8 @@ pub struct PullSessionOptions {
     /// ph-1: see [`PushSessionOptions::perf`] — same opt-in posture,
     /// DESTINATION role.
     pub perf: Option<perf_history::RecordSink>,
+    /// JOB_LOGS jl-2: see [`PushSessionOptions::run`].
+    pub run: crate::job_log::RunTag,
 }
 
 impl Default for PullSessionOptions {
@@ -379,6 +386,7 @@ impl Default for PullSessionOptions {
             trace_data_plane: false,
             lifecycle_trace: TransferLifecycleTrace::disabled(),
             perf: None,
+            run: Default::default(),
         }
     }
 }
@@ -454,6 +462,8 @@ pub async fn run_pull_session_with_client(
         filter: options.filter,
         mirror_enabled: options.mirror_enabled,
         mirror_kind: options.mirror_kind as i32,
+        run_id: options.run.run_id.clone(),
+        attempt: options.run.attempt,
         ..Default::default()
     };
 

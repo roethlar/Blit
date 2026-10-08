@@ -3,23 +3,16 @@
 //! `<state dir>/jobs/logs`, finished at startup when a stopped daemon left
 //! one behind, and served by `GetJobLog`.
 
-use blit_core::display::format_bytes;
 use blit_core::generated::{
     job_log_chunk, ComparisonMode, FilterSpec, GetJobLogRequest, JobLogChunk, JobLogHeader,
     MirrorMode, ResumeSettings, TransferSummary,
 };
-use blit_core::job_log::{
-    self, EventBody, FoundLog, LogKey, LogSender, LogWriter, Outcome, PhaseState, Role, RunInfo,
-    Summary,
-};
-use blit_core::remote::transfer::progress::{
-    audit_lane, AuditSender, PlannedTotals, AUDIT_LANE_DEPTH,
-};
-use blit_core::remote::transfer::ProgressEvent;
-use std::collections::{HashMap, HashSet};
+use blit_core::job_log::{self, FoundLog, Outcome, Role, RunInfo, RunTag};
+use blit_core::remote::transfer::progress::AuditSender;
+use blit_core::run_log::{LogPlace, RunLog, RunTotals};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -72,380 +65,108 @@ impl JobLogs {
         &self.dir
     }
 
-    /// Start the log of job `run_id` in `role`. `None`, with a warning, only
-    /// when the ID cannot name a log; a log never stops a job.
-    pub(crate) fn start(&self, run_id: &str, role: Role, run: RunInfo) -> Option<LogWriter> {
-        match LogKey::new(run_id, self.participant.clone(), role, 1) {
-            Ok(key) => Some(LogWriter::start(&self.dir, key, run, self.keep)),
-            Err(error) => {
-                log::warn!("job {run_id}: not logged: {error:#}");
-                None
-            }
+    /// Where a job's [`RunLog`] keeps its file.
+    pub(crate) fn place(&self) -> LogPlace {
+        LogPlace {
+            dir: self.dir.clone(),
+            participant: self.participant.clone(),
+            keep: self.keep,
+            finished: Some(Arc::clone(&self.finished)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start(
+        &self,
+        run_id: &str,
+        attempt: u32,
+        role: Role,
+        run: RunInfo,
+    ) -> Option<blit_core::job_log::LogWriter> {
+        self.place().start(run_id, attempt, role, run)
     }
 }
 
-/// What `TransferSummary.failed_paths` names but a file's own failure was
-/// never seen live gets this reason when the summary's capped list kept
-/// none.
-const NO_REASON_REPORTED: &str = "failed (the transfer's report kept no reason)";
-
-/// How long closing a log waits for its audit lane to drain.
-const RELAY_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// One job's log as the daemon's parts see it. Made when the job
-/// registers and owned by the job's dispatcher task, which outlives the
+/// One job's log as the daemon's parts see it: a [`RunLog`] made when the
+/// job registers and owned by the job's dispatcher task, which outlives the
 /// raced session future; started once the job's role is known (a served
-/// session learns it at open); fed from the progress relays; closed by the
+/// session learns it at open); fed from the job's audit lane; closed by the
 /// dispatcher after the race settles. Cheap to clone.
 #[derive(Clone)]
 pub(crate) struct JobLog {
-    inner: Arc<Mutex<LogState>>,
-}
-
-struct LogState {
-    logs: Option<JobLogs>,
-    run_id: String,
-    active: Option<ActiveLog>,
-    /// Diagnostics to record at close.
-    notes: Vec<String>,
-    summary: Option<TransferSummary>,
-    /// The job's own failure message, when the dispatcher only has a
-    /// marker (a delegated pull's phased error).
-    error: Option<String>,
-    /// The task draining the job's audit lane into the log (review
-    /// cr-jl1b-2), and the lane's planned totals.
-    relay: Option<tokio::task::JoinHandle<()>>,
-    planned: Option<Arc<PlannedTotals>>,
-}
-
-struct ActiveLog {
-    writer: LogWriter,
-    sender: LogSender,
-    role: Role,
-    started: Instant,
-    deleting: bool,
-    /// Failed files already named, so the summary's list adds only the
-    /// rest.
-    failed: HashSet<String>,
-    /// The exact bytes, escaped, of each name in this run that is not
-    /// valid UTF-8, by its text (review cr-jl1a-1). The first wins, as at
-    /// both ends of the transfer.
-    raw_names: HashMap<String, String>,
+    log: RunLog,
+    /// This daemon's own ID for the job (`t…`).
+    job_id: String,
+    /// One audit lane per job: a daemon job is one session.
+    lane_made: Arc<AtomicBool>,
 }
 
 impl JobLog {
-    pub(crate) fn new(logs: Option<JobLogs>, run_id: &str) -> Self {
+    pub(crate) fn new(logs: Option<JobLogs>, job_id: &str) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(LogState {
-                logs,
-                run_id: run_id.to_string(),
-                active: None,
-                notes: Vec::new(),
-                summary: None,
-                error: None,
-                relay: None,
-                planned: None,
-            })),
+            log: RunLog::new(logs.map(|logs| logs.place()), job_id),
+            job_id: job_id.to_string(),
+            lane_made: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, LogState> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    /// Start the log in `role`, recording this daemon's job ID in
+    /// `run-start`; see [`RunLog::start`].
+    pub(crate) fn start(&self, role: Role, mut run: RunInfo, tag: Option<RunTag>) {
+        run.job_id = Some(self.job_id.clone());
+        self.log.start(role, run, tag);
     }
 
-    /// Start the log in `role`; once only, and only when the daemon keeps
-    /// logs. Safe from sync code inside a runtime: the only event it
-    /// records goes into a fresh, empty queue, so it never waits.
-    pub(crate) fn start(&self, role: Role, run: RunInfo) {
-        let mut state = self.state();
-        if state.active.is_some() {
-            return;
-        }
-        let Some(writer) = state
-            .logs
-            .as_ref()
-            .and_then(|logs| logs.start(&state.run_id, role, run))
-        else {
-            return;
-        };
-        let sender = writer.sender();
-        sender.record(EventBody::Phase {
-            name: "transfer".into(),
-            state: PhaseState::Start,
-        });
-        state.active = Some(ActiveLog {
-            writer,
-            sender,
-            role,
-            started: Instant::now(),
-            deleting: false,
-            failed: HashSet::new(),
-            raw_names: HashMap::new(),
-        });
+    /// The run ID the log is kept under (the job ID when the initiator sent
+    /// none).
+    pub(crate) fn run_id(&self) -> String {
+        self.log.run_id()
     }
 
-    /// The bounded lane this job's transfer reports its log's facts on, and
-    /// the task that drains it into the log (review cr-jl1b-2): while the
-    /// log falls behind, the transfer waits. Made once per job; `None` when
-    /// the daemon keeps no logs, or for a second call. The dispatcher's
-    /// [`close`](Self::close) waits for the lane to drain, which it does
-    /// once the transfer has dropped every sender.
+    /// The job's one audit lane (review cr-jl1b-2); `None` when the daemon
+    /// keeps no logs, or for a second call.
     pub(crate) fn audit_lane(&self) -> Option<AuditSender> {
-        let mut state = self.state();
-        if state.logs.is_none() || state.relay.is_some() {
+        if self.lane_made.swap(true, Ordering::Relaxed) {
             return None;
         }
-        let (sender, receiver) = audit_lane(AUDIT_LANE_DEPTH);
-        state.planned = Some(receiver.planned());
-        let log = self.clone();
-        state.relay = Some(tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
-                log.observe(&event).await;
-            }
-        }));
-        Some(sender)
+        self.log.audit_lane()
     }
 
-    /// Record what a progress event names: each file copied (or, on a
-    /// source, sent), failed or deleted, and the phase changes.
-    pub(crate) async fn observe(&self, event: &ProgressEvent) {
-        let (sender, bodies) = {
-            let mut state = self.state();
-            let (planned_files, planned_bytes) = state
-                .planned
-                .as_ref()
-                .map_or((0, 0), |planned| planned.get());
-            let Some(active) = state.active.as_mut() else {
-                return;
-            };
-            let raw = |path: &str| active.raw_names.get(path).cloned();
-            let bodies = match event {
-                ProgressEvent::FileComplete { path } => vec![match active.role {
-                    Role::Source => EventBody::FileSent {
-                        path: path.clone(),
-                        raw: raw(path),
-                    },
-                    _ => EventBody::FileCopied {
-                        path: path.clone(),
-                        bytes: None,
-                        raw: raw(path),
-                    },
-                }],
-                ProgressEvent::FileFailed { path, reason } => {
-                    let body = EventBody::FileFailed {
-                        path: path.clone(),
-                        reason: reason.clone(),
-                        raw: raw(path),
-                    };
-                    active.failed.insert(path.clone());
-                    vec![body]
-                }
-                ProgressEvent::Deleted { path, raw } => vec![EventBody::FileDeleted {
-                    path: path.clone(),
-                    raw: raw.as_deref().map(blit_core::raw_name::escape_raw),
-                }],
-                ProgressEvent::RawName { path, raw } => {
-                    active
-                        .raw_names
-                        .entry(path.clone())
-                        .or_insert_with(|| blit_core::raw_name::escape_raw(raw));
-                    vec![]
-                }
-                ProgressEvent::DiffComplete => vec![EventBody::Diagnostic {
-                    message: format!(
-                        "compared the whole source list: {planned_files} file(s), {} to send",
-                        format_bytes(planned_bytes)
-                    ),
-                }],
-                ProgressEvent::DeleteBegin => {
-                    active.deleting = true;
-                    vec![
-                        EventBody::Phase {
-                            name: "transfer".into(),
-                            state: PhaseState::End,
-                        },
-                        EventBody::Phase {
-                            name: "delete".into(),
-                            state: PhaseState::Start,
-                        },
-                    ]
-                }
-                _ => vec![],
-            };
-            (active.sender.clone(), bodies)
-        };
-        for body in bodies {
-            sender.record_async(body).await;
-        }
+    #[cfg(test)]
+    pub(crate) async fn observe(&self, event: &blit_core::remote::transfer::ProgressEvent) {
+        self.log.observe(event).await;
     }
 
     /// A diagnostic line for the log, recorded at close.
     pub(crate) fn note(&self, line: String) {
-        self.state().notes.push(line);
+        self.log.note(line);
     }
 
     /// The job's summary, when the part that has it is not the dispatcher.
     pub(crate) fn note_summary(&self, summary: &TransferSummary) {
-        self.state().summary = Some(summary.clone());
+        self.log.note_totals(RunTotals::from(summary));
     }
 
     /// How many files failed on their own, by the noted summary.
     pub(crate) fn noted_files_failed(&self) -> u64 {
-        self.state()
-            .summary
-            .as_ref()
-            .map_or(0, |summary| summary.files_failed)
+        self.log.noted_files_failed()
     }
 
     /// The job's own failure message, kept over the dispatcher's marker.
     pub(crate) fn note_error(&self, message: String) {
-        self.state().error = Some(message);
+        self.log.note_error(message);
     }
 
-    /// Close the log: name the failed files the summary lists that were not
-    /// seen live, end the open phase, record the diagnostics and the
-    /// summary, then `run-end`, and finish the file.
+    /// Close the log; see [`RunLog::close`].
     pub(crate) async fn close(
         &self,
         outcome: Outcome,
         detail: Option<String>,
         summary: Option<TransferSummary>,
     ) {
-        // Every fact the transfer reported reaches the log before it
-        // closes: the relay ends once the transfer has dropped its senders.
-        let relay = self.state().relay.take();
-        let mut relay_cut = false;
-        if let Some(mut relay) = relay {
-            if tokio::time::timeout(RELAY_DRAIN_LIMIT, &mut relay)
-                .await
-                .is_err()
-            {
-                relay.abort();
-                relay_cut = true;
-            }
-        }
-        let (active, notes, summary, error, run_id, planned) = {
-            let mut state = self.state();
-            let Some(active) = state.active.take() else {
-                return;
-            };
-            (
-                active,
-                std::mem::take(&mut state.notes),
-                summary.or_else(|| state.summary.take()),
-                state.error.take(),
-                state.run_id.clone(),
-                state
-                    .planned
-                    .as_ref()
-                    .map_or((0, 0), |planned| planned.get()),
-            )
-        };
-        // The open phase ends first: what the summary adds below was learned
-        // at the end, while every failure seen live sits inside the phase.
-        let mut bodies = vec![EventBody::Phase {
-            name: if active.deleting {
-                "delete"
-            } else {
-                "transfer"
-            }
-            .into(),
-            state: PhaseState::End,
-        }];
-        if let Some(summary) = &summary {
-            for path in &summary.failed_paths {
-                if active.failed.contains(path) {
-                    continue;
-                }
-                let reason = summary
-                    .failures
-                    .iter()
-                    .find(|failure| &failure.relative_path == path)
-                    .map_or(NO_REASON_REPORTED, |failure| failure.reason.as_str());
-                bodies.push(EventBody::FileFailed {
-                    path: path.clone(),
-                    reason: reason.to_string(),
-                    raw: active.raw_names.get(path).cloned(),
-                });
-            }
-            if summary.failed_paths_truncated {
-                bodies.push(EventBody::Diagnostic {
-                    message: format!(
-                        "the list of failed files was cut short for size; {} failed in all",
-                        summary.files_failed
-                    ),
-                });
-            }
-        }
-        if relay_cut {
-            bodies.push(EventBody::Diagnostic {
-                message: "the transfer still held its log lane open when the job ended; \
-                          events it had not handed over are missing"
-                    .into(),
-            });
-        }
-        let elapsed = active.started.elapsed();
-        let (planned_files, planned_bytes) = planned;
-        if planned_files > 0 {
-            bodies.push(EventBody::Diagnostic {
-                message: format!(
-                    "planned: {planned_files} file(s), {}",
-                    format_bytes(planned_bytes)
-                ),
-            });
-        }
-        for message in notes {
-            bodies.push(EventBody::Diagnostic { message });
-        }
-        if let Some(summary) = &summary {
-            bodies.push(EventBody::Diagnostic {
-                message: if summary.in_stream_carrier_used {
-                    "payload carrier: in-stream (gRPC)".into()
-                } else {
-                    "payload carrier: TCP data plane".into()
-                },
-            });
-            if summary.files_resumed > 0 {
-                bodies.push(EventBody::Diagnostic {
-                    message: format!("resumed: {} file(s)", summary.files_resumed),
-                });
-            }
-            let seconds = elapsed.as_secs_f64();
-            if seconds > 0.0 && summary.bytes_transferred > 0 {
-                bodies.push(EventBody::Diagnostic {
-                    message: format!(
-                        "average: {}/s over the whole job",
-                        format_bytes((summary.bytes_transferred as f64 / seconds) as u64)
-                    ),
-                });
-            }
-            bodies.push(EventBody::Summary(Summary {
-                files_copied: summary.files_transferred,
-                files_deleted: summary.entries_deleted,
-                files_failed: summary.files_failed,
-                bytes_copied: summary.bytes_transferred,
-                elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-            }));
-        }
-        for body in bodies {
-            active.sender.record_async(body).await;
-        }
-        let detail = error.or(detail);
-        let writer = active.writer;
-        match tokio::task::spawn_blocking(move || writer.finish(outcome, detail)).await {
-            Ok(report) if !report.complete => log::warn!(
-                "job {run_id}: its log is incomplete: {}",
-                report.problem.unwrap_or_default()
-            ),
-            Ok(_) => {}
-            Err(error) => log::warn!("job {run_id}: closing its log failed: {error}"),
-        }
-        if let Some(logs) = self.state().logs.as_ref() {
-            logs.finished.notify_waiters();
-        }
+        self.log
+            .close(outcome, detail, summary.as_ref().map(RunTotals::from))
+            .await;
     }
 }
 
@@ -563,17 +284,31 @@ pub(crate) async fn serve(
         return Err(Status::not_found("this daemon keeps no job logs"));
     };
     let dir = logs.dir.clone();
-    let list = || {
+    let list = |run: String| {
         let dir = dir.clone();
-        let id = id.clone();
         async move {
-            tokio::task::spawn_blocking(move || job_log::logs_for_run(&dir, &id, role))
+            tokio::task::spawn_blocking(move || job_log::logs_for_run(&dir, &run, role))
                 .await
                 .map_err(|error| Status::internal(format!("listing job logs: {error}")))?
                 .map_err(|error| Status::internal(format!("listing job logs: {error:#}")))
         }
     };
-    let mut found = list().await?;
+    // The run whose logs are sent: the ID asked for, or — JOB_LOGS jl-2 — the
+    // run this daemon's own job ID belongs to (what `blit jobs list` and
+    // `--detach` show), since a daemon keeps its log under the run's ID.
+    let mut run = id.clone();
+    let mut found = list(run.clone()).await?;
+    if found.is_empty() {
+        let scan_dir = dir.clone();
+        let job = id.clone();
+        let owner = tokio::task::spawn_blocking(move || job_log::run_for_job(&scan_dir, &job))
+            .await
+            .map_err(|error| Status::internal(format!("finding a job's run: {error}")))?;
+        if let Some(owner) = owner {
+            run = owner;
+            found = list(run.clone()).await?;
+        }
+    }
     if request.wait_finished {
         // Review cr-jl1c-1: wait here, woken as logs finish, rather than
         // have the caller re-download an unfinished log. A job with no log
@@ -583,7 +318,7 @@ pub(crate) async fn serve(
             let notified = logs.finished.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            found = list().await?;
+            found = list(run.clone()).await?;
             if found.iter().all(|log| log.finished) {
                 break;
             }
@@ -598,7 +333,7 @@ pub(crate) async fn serve(
                 notified,
             )
             .await;
-            found = list().await?;
+            found = list(run.clone()).await?;
         }
     }
     if found.is_empty() {
@@ -699,6 +434,7 @@ mod tests {
             source: "client".into(),
             destination: "backup:/".into(),
             options: vec![],
+            job_id: None,
         }
     }
 
@@ -743,7 +479,9 @@ mod tests {
     async fn a_jobs_logs_are_served_by_role() {
         let state = tempfile::tempdir().unwrap();
         let logs = JobLogs::open(state.path(), job_log::DEFAULT_KEEP).unwrap();
-        let destination = logs.start("t1-0", Role::Destination, run_info()).unwrap();
+        let destination = logs
+            .start("t1-0", 1, Role::Destination, run_info())
+            .unwrap();
         destination.record(EventBody::FileCopied {
             path: "a".into(),
             bytes: Some(1),
@@ -751,7 +489,7 @@ mod tests {
         });
         destination.finish(Outcome::Ok, None);
         // Still running: served as its partial. A phase change syncs it.
-        let source = logs.start("t1-0", Role::Source, run_info()).unwrap();
+        let source = logs.start("t1-0", 1, Role::Source, run_info()).unwrap();
         source.record(EventBody::Phase {
             name: "transfer".into(),
             state: job_log::PhaseState::Start,
@@ -847,7 +585,7 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let logs = JobLogs::open(state.path(), job_log::DEFAULT_KEEP).unwrap();
         let log = JobLog::new(Some(logs.clone()), "t1-0");
-        log.start(Role::Destination, run_info());
+        log.start(Role::Destination, run_info(), None);
         let (ui_tx, _ui_rx) = tokio::sync::mpsc::unbounded_channel();
         let progress = blit_core::remote::transfer::RemoteTransferProgress::new(ui_tx)
             .with_audit(log.audit_lane().expect("a lane"));
@@ -884,7 +622,7 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let logs = JobLogs::open(state.path(), job_log::DEFAULT_KEEP).unwrap();
         let log = JobLog::new(Some(logs.clone()), "t1-0");
-        log.start(Role::Destination, run_info());
+        log.start(Role::Destination, run_info(), None);
         let lossy = "caf\u{fffd}.txt".to_string();
         for event in [
             ProgressEvent::RawName {
@@ -942,17 +680,33 @@ mod tests {
     /// until the job's log closes and then sends it whole, once.
     #[tokio::test]
     async fn wait_finished_sends_the_log_once_it_closes() {
+        wait_finished_case(None, "t1-0").await;
+    }
+
+    /// JOB_LOGS jl-2: a log kept under the initiator's run ID, asked for by
+    /// this daemon's own job ID, is waited for under the run's ID.
+    #[tokio::test]
+    async fn wait_finished_follows_a_job_id_to_its_runs_log() {
+        let tag = RunTag {
+            run_id: "0123456789abcdef0123456789abcdef".into(),
+            attempt: 1,
+        };
+        wait_finished_case(Some(tag), "t1-0").await;
+    }
+
+    /// Start job `t1-0`'s log (under `tag`'s run when given), ask for it by
+    /// `ask` with `wait_finished`, and check the reply waits for the close
+    /// and then sends the finished log.
+    async fn wait_finished_case(tag: Option<RunTag>, ask: &str) {
         let state = tempfile::tempdir().unwrap();
         let logs = JobLogs::open(state.path(), job_log::DEFAULT_KEEP).unwrap();
         let log = JobLog::new(Some(logs.clone()), "t1-0");
-        log.start(Role::Destination, run_info());
-        // As in a real job, the log's file exists well before anyone asks
-        // (the writer makes it on its own thread just after the start).
+        log.start(Role::Destination, run_info(), tag);
+        // As in a real job, the log's file — header first — exists well
+        // before anyone asks (the writer makes it on its own thread just
+        // after the start).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while job_log::logs_for_run(logs.dir(), "t1-0", None)
-            .unwrap()
-            .is_empty()
-        {
+        while job_log::run_for_job(logs.dir(), "t1-0").is_none() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the log never appeared"
@@ -960,7 +714,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         let request = GetJobLogRequest {
-            transfer_id: "t1-0".into(),
+            transfer_id: ask.into(),
             role: String::new(),
             wait_finished: true,
         };

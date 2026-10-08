@@ -61,6 +61,7 @@ fn push_execution(src: &Path, port: u16) -> PushExecution {
         // ph-1: never write to the machine's real perf-history store
         // from a test.
         perf_history: false,
+        run: Default::default(),
     }
 }
 
