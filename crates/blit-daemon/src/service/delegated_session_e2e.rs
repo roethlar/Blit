@@ -618,7 +618,7 @@ async fn a_delegated_pull_logs_each_file_and_the_failure() {
     let failed: Vec<(&str, &str)> = log
         .iter()
         .filter_map(|event| match event {
-            EventBody::FileFailed { path, reason } => Some((path.as_str(), reason.as_str())),
+            EventBody::FileFailed { path, reason, .. } => Some((path.as_str(), reason.as_str())),
             _ => None,
         })
         .collect();

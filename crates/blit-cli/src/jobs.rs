@@ -584,12 +584,12 @@ async fn print_failed_files(
             let mut count = 0u64;
             for line in LogLines::new(lines) {
                 if let LogLine::Event(job_log::Event {
-                    body: job_log::EventBody::FileFailed { path, reason },
+                    body: job_log::EventBody::FileFailed { path, reason, raw },
                     ..
                 }) = line?
                 {
                     if found.len() < FAILED_SHOWN {
-                        found.push((path, reason));
+                        found.push((raw.unwrap_or(path), reason));
                     }
                     count += 1;
                 }

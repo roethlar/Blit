@@ -376,7 +376,8 @@ impl ActiveJobProgress {
             ProgressEvent::DiffComplete
             | ProgressEvent::DeleteBegin
             | ProgressEvent::FileFailed { .. }
-            | ProgressEvent::Deleted { .. } => {}
+            | ProgressEvent::Deleted { .. }
+            | ProgressEvent::RawName { .. } => {}
         }
     }
 

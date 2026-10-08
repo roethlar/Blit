@@ -289,7 +289,7 @@ impl LiveRowState {
             }
             // A file that did not land names nothing to show as
             // copying; the row keeps its phase.
-            ProgressEvent::FileFailed { .. } => self.phase,
+            ProgressEvent::FileFailed { .. } | ProgressEvent::RawName { .. } => self.phase,
             // The mirror's delete pass — no longer "copying".
             ProgressEvent::DeleteBegin | ProgressEvent::Deleted { .. } => LivePhase::Deleting,
             // pfc-4: the summary reconciliation only corrects the

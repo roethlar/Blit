@@ -216,6 +216,16 @@ pub struct Event {
 }
 
 /// What an event says; `kind` on the wire.
+///
+/// # Raw names
+///
+/// A file event's `path` is the name as text. When the name is not valid
+/// UTF-8 (Blit transfers such names, contract 7 `raw_relative_path`), that
+/// text shows it with replacement characters and `raw` carries its exact
+/// bytes, escaped by [`crate::raw_name::escape_raw`]: printable ASCII as
+/// itself, every other byte — and `\` — as `\xNN`, so the bytes can be
+/// recovered and two such names never read the same (review cr-jl1a-1).
+/// `raw` is absent for every name that is valid UTF-8.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum EventBody {
@@ -231,16 +241,33 @@ pub enum EventBody {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bytes: Option<u64>,
+        /// The exact bytes of a name that is not valid UTF-8; see
+        /// [`EventBody`]'s *Raw names*.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw: Option<String>,
     },
     /// A file the source finished sending. Whether it landed is the
     /// destination's to say; a file that did not follows as
     /// `file-failed`.
-    FileSent { path: String },
+    FileSent {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw: Option<String>,
+    },
     /// A file removed — from the destination by a mirror, from the source by
     /// a move.
-    FileDeleted { path: String },
+    FileDeleted {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw: Option<String>,
+    },
     /// A file that did not land, and why.
-    FileFailed { path: String, reason: String },
+    FileFailed {
+        path: String,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw: Option<String>,
+    },
     /// Work outstanding but nothing moving for `idle_ms`.
     Stall { idle_ms: u64, detail: String },
     /// A line of what `-v` shows — scan time, rate, workers, the plan, how
@@ -1081,6 +1108,11 @@ pub fn text_line(event: &Event) -> String {
     format!("{when}  {}", describe(&event.body))
 }
 
+/// A name as text: its escaped exact bytes when it is not valid UTF-8.
+fn shown<'a>(path: &'a str, raw: &'a Option<String>) -> &'a str {
+    raw.as_deref().unwrap_or(path)
+}
+
 fn describe(body: &EventBody) -> String {
     let seconds = |ms: u64| format!("{:.1}s", ms as f64 / 1000.0);
     match body {
@@ -1112,13 +1144,20 @@ fn describe(body: &EventBody) -> String {
             };
             format!("phase    {name} {state}")
         }
-        EventBody::FileCopied { path, bytes } => match bytes {
-            Some(bytes) => format!("copied   {path} ({})", crate::display::format_bytes(*bytes)),
-            None => format!("copied   {path}"),
-        },
-        EventBody::FileSent { path } => format!("sent     {path}"),
-        EventBody::FileDeleted { path } => format!("deleted  {path}"),
-        EventBody::FileFailed { path, reason } => format!("FAILED   {path}: {reason}"),
+        EventBody::FileCopied { path, bytes, raw } => {
+            let path = shown(path, raw);
+            match bytes {
+                Some(bytes) => {
+                    format!("copied   {path} ({})", crate::display::format_bytes(*bytes))
+                }
+                None => format!("copied   {path}"),
+            }
+        }
+        EventBody::FileSent { path, raw } => format!("sent     {}", shown(path, raw)),
+        EventBody::FileDeleted { path, raw } => format!("deleted  {}", shown(path, raw)),
+        EventBody::FileFailed { path, reason, raw } => {
+            format!("FAILED   {}: {reason}", shown(path, raw))
+        }
         EventBody::Stall { idle_ms, detail } => {
             format!("stall    nothing moved for {}: {detail}", seconds(*idle_ms))
         }
@@ -1347,6 +1386,7 @@ mod tests {
         EventBody::FileCopied {
             path: path.into(),
             bytes: Some(3),
+            raw: None,
         }
     }
 
@@ -1420,8 +1460,12 @@ mod tests {
             EventBody::FileFailed {
                 path: "b".into(),
                 reason: "denied".into(),
+                raw: None,
             },
-            EventBody::FileDeleted { path: "c".into() },
+            EventBody::FileDeleted {
+                path: "c".into(),
+                raw: None,
+            },
             EventBody::Stall {
                 idle_ms: 5_000,
                 detail: "no bytes moved".into(),
@@ -1504,6 +1548,7 @@ mod tests {
             EventBody::FileFailed {
                 path: "a".into(),
                 reason: "r".into(),
+                raw: None,
             },
         ))
         .unwrap();
@@ -1532,7 +1577,13 @@ mod tests {
             r#"{"ts_ms":1,"seq":0,"kind":"file-deleted","path":"p","why":"x"}"#,
         )
         .unwrap();
-        assert_eq!(extra.body, EventBody::FileDeleted { path: "p".into() });
+        assert_eq!(
+            extra.body,
+            EventBody::FileDeleted {
+                path: "p".into(),
+                raw: None
+            }
+        );
     }
 
     #[test]
@@ -2177,15 +2228,32 @@ mod tests {
         assert_eq!(
             text(EventBody::FileCopied {
                 path: "a/b".into(),
-                bytes: None
+                bytes: None,
+                raw: None,
             }),
             "copied   a/b"
         );
-        assert_eq!(text(EventBody::FileSent { path: "s".into() }), "sent     s");
+        assert_eq!(
+            text(EventBody::FileSent {
+                path: "s".into(),
+                raw: None
+            }),
+            "sent     s"
+        );
+        // A name that is not valid UTF-8 shows its exact bytes, escaped.
+        assert_eq!(
+            text(EventBody::FileFailed {
+                path: "caf\u{fffd}".into(),
+                reason: "denied".into(),
+                raw: Some("caf\\xe9".into()),
+            }),
+            "FAILED   caf\\xe9: denied"
+        );
         assert_eq!(
             text(EventBody::FileFailed {
                 path: "c".into(),
-                reason: "denied".into()
+                reason: "denied".into(),
+                raw: None,
             }),
             "FAILED   c: denied"
         );

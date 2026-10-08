@@ -2668,7 +2668,7 @@ mod tests {
             events[begin + 1..]
                 .iter()
                 .map(|e| match e {
-                    ProgressEvent::Deleted { path } => path.as_str(),
+                    ProgressEvent::Deleted { path, .. } => path.as_str(),
                     other => panic!("a copy event after the purge began: {other:?}"),
                 })
                 .collect::<Vec<_>>(),

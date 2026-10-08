@@ -1869,8 +1869,8 @@ fn kinds_and_names(events: &[blit_core::job_log::EventBody]) -> Vec<String> {
                 }
             )),
             EventBody::FileCopied { path, .. } => Some(format!("copied {path}")),
-            EventBody::FileSent { path } => Some(format!("sent {path}")),
-            EventBody::FileDeleted { path } => Some(format!("deleted {path}")),
+            EventBody::FileSent { path, .. } => Some(format!("sent {path}")),
+            EventBody::FileDeleted { path, .. } => Some(format!("deleted {path}")),
             EventBody::FileFailed { path, .. } => Some(format!("failed {path}")),
             _ => None,
         })
@@ -2069,7 +2069,7 @@ async fn a_served_push_logs_a_file_that_failed_and_why() {
     let failed: Vec<(&str, &str)> = events
         .iter()
         .filter_map(|event| match event {
-            EventBody::FileFailed { path, reason } => Some((path.as_str(), reason.as_str())),
+            EventBody::FileFailed { path, reason, .. } => Some((path.as_str(), reason.as_str())),
             _ => None,
         })
         .collect();
@@ -2123,7 +2123,9 @@ async fn a_served_push_logs_every_failure_past_the_summarys_cap() {
         let mut failed: Vec<(&str, &str)> = events
             .iter()
             .filter_map(|event| match event {
-                EventBody::FileFailed { path, reason } => Some((path.as_str(), reason.as_str())),
+                EventBody::FileFailed { path, reason, .. } => {
+                    Some((path.as_str(), reason.as_str()))
+                }
                 _ => None,
             })
             .collect();
@@ -2287,4 +2289,43 @@ async fn a_single_file_failure_is_logged_as_it_happens() {
             daemon.stop().await;
         }
     }
+}
+
+/// Review cr-jl1a-1, end to end: a pushed file whose name is not valid
+/// UTF-8 is logged on the daemon with its exact bytes. Linux only — the
+/// one platform here whose file system stores such a name; this guard
+/// cannot fail on macOS or Windows.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_raw_named_file_is_logged_with_its_exact_bytes() {
+    use blit_core::job_log::EventBody;
+    use std::os::unix::ffi::OsStrExt as _;
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(
+        src.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9.txt")),
+        b"x",
+    )
+    .unwrap();
+    let daemon = Daemon::start(false).await;
+
+    run_push_session(
+        &daemon.endpoint,
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions::default(),
+    )
+    .await
+    .expect("the push lands the raw-named file");
+
+    let logs = daemon.job_logs().await;
+    let (_, _, events) = &logs[0];
+    let copied: Vec<Option<&str>> = events
+        .iter()
+        .filter_map(|event| match event {
+            EventBody::FileCopied { raw, .. } => Some(raw.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(copied, [Some("caf\\xe9.txt")]);
+
+    daemon.stop().await;
 }

@@ -79,9 +79,15 @@ pub enum ProgressEvent {
     /// destination's summary `files_failed` is authoritative.
     FileFailed { path: String, reason: String },
     /// DESTINATION side (JOB_LOGS jl-1b): the mirror-delete pass removed
-    /// the entry at the wire `path`; a directory's path ends in `/`. Moves
-    /// no count: the summary's `entries_deleted` is authoritative.
-    Deleted { path: String },
+    /// the entry at the wire `path`; a directory's path ends in `/`. `raw`
+    /// is the entry's exact name bytes when they are not valid UTF-8
+    /// (review cr-jl1a-1). Moves no count: the summary's `entries_deleted`
+    /// is authoritative.
+    Deleted { path: String, raw: Option<Vec<u8>> },
+    /// Audit lane only (review cr-jl1a-1): the text `path` stands for a
+    /// name that is not valid UTF-8, whose exact bytes are `raw`, so a job
+    /// log can name it exactly. Never sent on the UI lane.
+    RawName { path: String, raw: Vec<u8> },
     /// Phase signal (clp-2): the DESTINATION has diffed the whole
     /// source manifest, so the `ManifestBatch` denominator is final.
     /// Zero needed files after this means "up to date", not "still
@@ -192,7 +198,9 @@ impl ProgressTotals {
             // Phase signals carry no counts by construction (clp-2).
             ProgressEvent::DiffComplete | ProgressEvent::DeleteBegin => {}
             // Names for a job log; the summary owns these counts.
-            ProgressEvent::FileFailed { .. } | ProgressEvent::Deleted { .. } => {}
+            ProgressEvent::FileFailed { .. }
+            | ProgressEvent::Deleted { .. }
+            | ProgressEvent::RawName { .. } => {}
         }
     }
 
@@ -599,7 +607,7 @@ mod progress_totals_tests {
                 .report_file_failed("g".into(), "denied".into())
                 .await;
             let deleting = progress.clone();
-            tokio::task::spawn_blocking(move || deleting.report_deleted("old".into()))
+            tokio::task::spawn_blocking(move || deleting.report_deleted("old".into(), None))
                 .await
                 .unwrap();
         });
@@ -623,7 +631,7 @@ mod progress_totals_tests {
                 r#"FileComplete { path: "f1" }"#,
                 r#"FileComplete { path: "f2" }"#,
                 r#"FileFailed { path: "g", reason: "denied" }"#,
-                r#"Deleted { path: "old" }"#,
+                r#"Deleted { path: "old", raw: None }"#,
             ]
         );
         assert_eq!(receiver.planned().get(), (3, 30));
@@ -1172,11 +1180,20 @@ impl RemoteTransferProgress {
     /// Report an entry the mirror-delete pass removed — see
     /// [`ProgressEvent::Deleted`]. Called from the pass's blocking thread,
     /// so a full audit lane blocks that thread, never a runtime worker.
-    pub fn report_deleted(&self, path: String) {
+    pub fn report_deleted(&self, path: String, raw: Option<Vec<u8>>) {
         if let Some(audit) = &self.audit {
-            let _ = audit.tx.send(ProgressEvent::Deleted { path: path.clone() });
+            let _ = audit.tx.send(ProgressEvent::Deleted {
+                path: path.clone(),
+                raw: raw.clone(),
+            });
         }
-        let _ = self.sender.send(ProgressEvent::Deleted { path });
+        let _ = self.sender.send(ProgressEvent::Deleted { path, raw });
+    }
+
+    /// Name the exact bytes `path` stands for, for a job log — see
+    /// [`ProgressEvent::RawName`]. Audit lane only.
+    pub async fn report_raw_name(&self, path: String, raw: Vec<u8>) {
+        self.audit(ProgressEvent::RawName { path, raw }).await;
     }
 
     /// Report that the destination's diff has consumed the whole source

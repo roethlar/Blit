@@ -2006,6 +2006,14 @@ async fn source_send_half(
                         .entry(header.relative_path.clone())
                         .or_insert_with(|| header.clone());
                 }
+                // Review cr-jl1a-1: a job log names a raw-named file by its
+                // exact bytes.
+                if let (Some(p), Some(raw)) =
+                    (instruments.progress.as_ref(), &header.raw_relative_path)
+                {
+                    p.report_raw_name(header.relative_path.clone(), raw.clone())
+                        .await;
+                }
                 tx.send(frame(Frame::ManifestEntry(header))).await?;
             }
             scan.finish().await
@@ -4434,6 +4442,12 @@ async fn destination_session_inner(
                     contained_failures.record_failure(&header.relative_path, reason);
                     continue;
                 }
+                // Review cr-jl1a-1: a job log names this entry by its exact
+                // bytes, not only the lossy text every key here uses.
+                if let (Some(p), Some(raw)) = (&progress, &header.raw_relative_path) {
+                    p.report_raw_name(header.relative_path.clone(), raw.clone())
+                        .await;
+                }
                 // Contract v7 (D-F, A13): a name this destination cannot
                 // create from its bytes is reported at intake, whatever the
                 // diff would have said, and never granted; it stays in the
@@ -5173,10 +5187,14 @@ async fn destination_session_inner(
                             if let Some(p) = &deleted_progress {
                                 if let Ok(relative) = target.strip_prefix(&dst) {
                                     let mut path = crate::path_posix::relative_path_to_posix(relative);
+                                    let mut raw = crate::raw_name::raw_relative_bytes(relative);
                                     if is_dir {
                                         path.push('/');
+                                        if let Some(raw) = raw.as_mut() {
+                                            raw.push(b'/');
+                                        }
                                     }
-                                    p.report_deleted(path);
+                                    p.report_deleted(path, raw);
                                 }
                             }
                         };

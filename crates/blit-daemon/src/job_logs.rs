@@ -16,7 +16,7 @@ use blit_core::remote::transfer::progress::{
     audit_lane, AuditSender, PlannedTotals, AUDIT_LANE_DEPTH,
 };
 use blit_core::remote::transfer::ProgressEvent;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -121,6 +121,10 @@ struct ActiveLog {
     /// Failed files already named, so the summary's list adds only the
     /// rest.
     failed: HashSet<String>,
+    /// The exact bytes, escaped, of each name in this run that is not
+    /// valid UTF-8, by its text (review cr-jl1a-1). The first wins, as at
+    /// both ends of the transfer.
+    raw_names: HashMap<String, String>,
 }
 
 impl JobLog {
@@ -172,6 +176,7 @@ impl JobLog {
             started: Instant::now(),
             deleting: false,
             failed: HashSet::new(),
+            raw_names: HashMap::new(),
         });
     }
 
@@ -209,23 +214,38 @@ impl JobLog {
             let Some(active) = state.active.as_mut() else {
                 return;
             };
+            let raw = |path: &str| active.raw_names.get(path).cloned();
             let bodies = match event {
                 ProgressEvent::FileComplete { path } => vec![match active.role {
-                    Role::Source => EventBody::FileSent { path: path.clone() },
+                    Role::Source => EventBody::FileSent {
+                        path: path.clone(),
+                        raw: raw(path),
+                    },
                     _ => EventBody::FileCopied {
                         path: path.clone(),
                         bytes: None,
+                        raw: raw(path),
                     },
                 }],
                 ProgressEvent::FileFailed { path, reason } => {
-                    active.failed.insert(path.clone());
-                    vec![EventBody::FileFailed {
+                    let body = EventBody::FileFailed {
                         path: path.clone(),
                         reason: reason.clone(),
-                    }]
+                        raw: raw(path),
+                    };
+                    active.failed.insert(path.clone());
+                    vec![body]
                 }
-                ProgressEvent::Deleted { path } => {
-                    vec![EventBody::FileDeleted { path: path.clone() }]
+                ProgressEvent::Deleted { path, raw } => vec![EventBody::FileDeleted {
+                    path: path.clone(),
+                    raw: raw.as_deref().map(blit_core::raw_name::escape_raw),
+                }],
+                ProgressEvent::RawName { path, raw } => {
+                    active
+                        .raw_names
+                        .entry(path.clone())
+                        .or_insert_with(|| blit_core::raw_name::escape_raw(raw));
+                    vec![]
                 }
                 ProgressEvent::DiffComplete => vec![EventBody::Diagnostic {
                     message: format!(
@@ -341,6 +361,7 @@ impl JobLog {
                 bodies.push(EventBody::FileFailed {
                     path: path.clone(),
                     reason: reason.to_string(),
+                    raw: active.raw_names.get(path).cloned(),
                 });
             }
             if summary.failed_paths_truncated {
@@ -685,6 +706,7 @@ mod tests {
         destination.record(EventBody::FileCopied {
             path: "a".into(),
             bytes: Some(1),
+            raw: None,
         });
         destination.finish(Outcome::Ok, None);
         // Still running: served as its partial. A phase change syncs it.
@@ -725,7 +747,8 @@ mod tests {
             destination[1],
             EventBody::FileCopied {
                 path: "a".into(),
-                bytes: Some(1)
+                bytes: Some(1),
+                raw: None,
             }
         );
         assert!(matches!(destination[0], EventBody::RunStart(_)));
@@ -808,6 +831,70 @@ mod tests {
             })
             .count();
         assert_eq!(copied, 1000);
+    }
+
+    /// Review cr-jl1a-1: a name that is not valid UTF-8 is logged with its
+    /// exact bytes — from the manifest's raw name, the summary's fill-in,
+    /// and the mirror pass's own path — so two such names never read the
+    /// same.
+    #[tokio::test]
+    async fn a_raw_name_is_logged_with_its_exact_bytes() {
+        use blit_core::remote::transfer::ProgressEvent;
+        let state = tempfile::tempdir().unwrap();
+        let logs = JobLogs::open(state.path(), job_log::DEFAULT_KEEP).unwrap();
+        let log = JobLog::new(Some(logs.clone()), "t1-0");
+        log.start(Role::Destination, run_info());
+        let lossy = "caf\u{fffd}.txt".to_string();
+        for event in [
+            ProgressEvent::RawName {
+                path: lossy.clone(),
+                raw: b"caf\xe9.txt".to_vec(),
+            },
+            // A second name collapsing to the same text never replaces the
+            // first, as at both ends.
+            ProgressEvent::RawName {
+                path: lossy.clone(),
+                raw: b"caf\xe8.txt".to_vec(),
+            },
+            ProgressEvent::FileComplete {
+                path: lossy.clone(),
+            },
+            ProgressEvent::Deleted {
+                path: "old\u{fffd}/".into(),
+                raw: Some(b"old\xff/".to_vec()),
+            },
+        ] {
+            log.observe(&event).await;
+        }
+        let summary = TransferSummary {
+            files_failed: 1,
+            failed_paths: vec![lossy.clone()],
+            ..Default::default()
+        };
+        log.close(Outcome::Failed, None, Some(summary)).await;
+
+        let found = job_log::logs_for_run(logs.dir(), "t1-0", None).unwrap();
+        let named: Vec<(String, Option<String>)> = job_log::open_log(&found[0].path)
+            .unwrap()
+            .filter_map(|line| match line.unwrap() {
+                LogLine::Event(job_log::Event {
+                    body:
+                        EventBody::FileCopied { path, raw, .. }
+                        | EventBody::FileDeleted { path, raw }
+                        | EventBody::FileFailed { path, raw, .. },
+                    ..
+                }) => Some((path, raw)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            named,
+            [
+                (lossy.clone(), Some("caf\\xe9.txt".to_string())),
+                ("old\u{fffd}/".to_string(), Some("old\\xff/".to_string())),
+                (lossy, Some("caf\\xe9.txt".to_string())),
+            ]
+        );
     }
 
     #[test]
