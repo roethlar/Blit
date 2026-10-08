@@ -565,12 +565,12 @@ mod progress_totals_tests {
     }
 
     /// Both phase reporters put their event on the one lane.
-    #[test]
-    fn reported_phase_signals_reach_the_lane() {
+    #[tokio::test]
+    async fn reported_phase_signals_reach_the_lane() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let progress = RemoteTransferProgress::new(tx);
-        progress.report_diff_complete();
-        progress.report_delete_begin();
+        progress.report_diff_complete().await;
+        progress.report_delete_begin().await;
         assert!(matches!(
             rx.try_recv().expect("diff-complete signal"),
             ProgressEvent::DiffComplete
@@ -579,6 +579,59 @@ mod progress_totals_tests {
             rx.try_recv().expect("delete-begin signal"),
             ProgressEvent::DeleteBegin
         ));
+    }
+
+    /// Review cr-jl1b-2: the facts a job log keeps ride a bounded lane, so
+    /// while its reader lags the producer waits — nothing piles up in memory
+    /// and nothing is dropped — and every event still reaches the UI lane.
+    #[tokio::test]
+    async fn a_full_audit_lane_makes_the_producer_wait() {
+        let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (audit, receiver) = audit_lane(1);
+        let progress = RemoteTransferProgress::new(ui_tx).with_audit(audit);
+        progress.report_manifest_batch(3, 30);
+        let producer = tokio::spawn(async move {
+            progress.report_diff_complete().await;
+            for n in 0..3 {
+                progress.report_file_complete(format!("f{n}")).await;
+            }
+            progress
+                .report_file_failed("g".into(), "denied".into())
+                .await;
+            let deleting = progress.clone();
+            tokio::task::spawn_blocking(move || deleting.report_deleted("old".into()))
+                .await
+                .unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !producer.is_finished(),
+            "the producer ran ahead of a lane holding one event"
+        );
+        let mut audited = Vec::new();
+        while let Some(event) = receiver.recv().await {
+            audited.push(format!("{event:?}"));
+        }
+        producer.await.unwrap();
+
+        assert_eq!(
+            audited,
+            [
+                "DiffComplete",
+                r#"FileComplete { path: "f0" }"#,
+                r#"FileComplete { path: "f1" }"#,
+                r#"FileComplete { path: "f2" }"#,
+                r#"FileFailed { path: "g", reason: "denied" }"#,
+                r#"Deleted { path: "old" }"#,
+            ]
+        );
+        assert_eq!(receiver.planned().get(), (3, 30));
+        let mut ui = 0;
+        while ui_rx.try_recv().is_ok() {
+            ui += 1;
+        }
+        assert_eq!(ui, 7, "the UI lane still sees every event");
     }
 
     /// Totals saturate instead of wrapping on pathological inputs.
@@ -945,9 +998,73 @@ impl Probe for LiveProbe {
 pub const REASON_NOT_KEPT: &str =
     "failed (its reason was not kept: more files in its batch failed than a report holds)";
 
+/// How many events the audit lane holds before a producer waits.
+pub const AUDIT_LANE_DEPTH: usize = 1024;
+
+/// The sending end of an audit lane (JOB_LOGS, review cr-jl1b-2): the facts
+/// a job log keeps — each file landed, sent, failed or deleted, and the
+/// phase changes — on a bounded lane of their own, so a producer waits
+/// while the log falls behind instead of a queue growing without bound.
+/// The UI lane stays unbounded and best-effort. Planned totals are shared
+/// counters, not events: they only ever add up.
+#[derive(Clone)]
+pub struct AuditSender {
+    tx: flume::Sender<ProgressEvent>,
+    planned: Arc<PlannedTotals>,
+}
+
+/// The receiving end of an audit lane; see [`audit_lane`].
+pub struct AuditReceiver {
+    rx: flume::Receiver<ProgressEvent>,
+    planned: Arc<PlannedTotals>,
+}
+
+/// The files and bytes the destination's diff decided to send so far.
+#[derive(Debug, Default)]
+pub struct PlannedTotals {
+    files: AtomicU64,
+    bytes: AtomicU64,
+}
+
+impl PlannedTotals {
+    pub fn get(&self) -> (u64, u64) {
+        (
+            self.files.load(Ordering::Relaxed),
+            self.bytes.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// A new audit lane holding at most `capacity` events.
+pub fn audit_lane(capacity: usize) -> (AuditSender, AuditReceiver) {
+    let (tx, rx) = flume::bounded(capacity);
+    let planned = Arc::new(PlannedTotals::default());
+    (
+        AuditSender {
+            tx,
+            planned: Arc::clone(&planned),
+        },
+        AuditReceiver { rx, planned },
+    )
+}
+
+impl AuditReceiver {
+    /// The next event; `None` once every sender is gone and the lane is
+    /// drained.
+    pub async fn recv(&self) -> Option<ProgressEvent> {
+        self.rx.recv_async().await.ok()
+    }
+
+    pub fn planned(&self) -> Arc<PlannedTotals> {
+        Arc::clone(&self.planned)
+    }
+}
+
 #[derive(Clone)]
 pub struct RemoteTransferProgress {
     sender: UnboundedSender<ProgressEvent>,
+    /// The audit lane a job log reads, when one is attached.
+    audit: Option<AuditSender>,
 }
 
 /// Hand-written so option structs that carry a sink (e.g.
@@ -961,12 +1078,36 @@ impl std::fmt::Debug for RemoteTransferProgress {
 
 impl RemoteTransferProgress {
     pub fn new(sender: UnboundedSender<ProgressEvent>) -> Self {
-        Self { sender }
+        Self {
+            sender,
+            audit: None,
+        }
+    }
+
+    /// Also put the per-file facts on `audit`, a bounded lane a job log
+    /// reads; the reporters below then wait while it is full.
+    pub fn with_audit(mut self, audit: AuditSender) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
+    /// Put `event` on the audit lane, waiting while it is full.
+    async fn audit(&self, event: ProgressEvent) {
+        if let Some(audit) = &self.audit {
+            let _ = audit.tx.send_async(event).await;
+        }
     }
 
     /// Announce `files` more expected files (the denominator). Never
     /// adds to transferred totals.
     pub fn report_manifest_batch(&self, files: usize, bytes: u64) {
+        if let Some(audit) = &self.audit {
+            audit
+                .planned
+                .files
+                .fetch_add(files as u64, Ordering::Relaxed);
+            audit.planned.bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
         let _ = self
             .sender
             .send(ProgressEvent::ManifestBatch { files, bytes });
@@ -988,7 +1129,11 @@ impl RemoteTransferProgress {
     /// Report one finished file on the per-file lane. `path` is the
     /// source-relative wire path. Carries no bytes by construction —
     /// report those via [`report_payload`](Self::report_payload).
-    pub fn report_file_complete(&self, path: String) {
+    pub async fn report_file_complete(&self, path: String) {
+        if self.audit.is_some() {
+            self.audit(ProgressEvent::FileComplete { path: path.clone() })
+                .await;
+        }
         let _ = self.sender.send(ProgressEvent::FileComplete { path });
     }
 
@@ -997,41 +1142,55 @@ impl RemoteTransferProgress {
     /// the reason the outcome kept. A shard's outcome keeps at most
     /// [`super::sink::MAX_REPORTED_FILE_FAILURES`] reasons; a member past
     /// that is reported failed with [`REASON_NOT_KEPT`].
-    pub fn report_file_outcome(&self, path: &str, outcome: &super::sink::SinkOutcome) {
+    pub async fn report_file_outcome(&self, path: &str, outcome: &super::sink::SinkOutcome) {
         if outcome.file_failed(path) {
             let reason = outcome
                 .failures
                 .iter()
                 .find(|failure| failure.relative_path == path)
                 .map_or(REASON_NOT_KEPT, |failure| failure.reason.as_str());
-            self.report_file_failed(path.to_string(), reason.to_string());
+            self.report_file_failed(path.to_string(), reason.to_string())
+                .await;
         } else {
-            self.report_file_complete(path.to_string());
+            self.report_file_complete(path.to_string()).await;
         }
     }
 
     /// Report a file that did not land on the DESTINATION — see
     /// [`ProgressEvent::FileFailed`].
-    pub fn report_file_failed(&self, path: String, reason: String) {
+    pub async fn report_file_failed(&self, path: String, reason: String) {
+        if self.audit.is_some() {
+            self.audit(ProgressEvent::FileFailed {
+                path: path.clone(),
+                reason: reason.clone(),
+            })
+            .await;
+        }
         let _ = self.sender.send(ProgressEvent::FileFailed { path, reason });
     }
 
     /// Report an entry the mirror-delete pass removed — see
-    /// [`ProgressEvent::Deleted`].
+    /// [`ProgressEvent::Deleted`]. Called from the pass's blocking thread,
+    /// so a full audit lane blocks that thread, never a runtime worker.
     pub fn report_deleted(&self, path: String) {
+        if let Some(audit) = &self.audit {
+            let _ = audit.tx.send(ProgressEvent::Deleted { path: path.clone() });
+        }
         let _ = self.sender.send(ProgressEvent::Deleted { path });
     }
 
     /// Report that the destination's diff has consumed the whole source
     /// manifest (clp-2). Phase signal only — see
     /// [`ProgressEvent::DiffComplete`].
-    pub fn report_diff_complete(&self) {
+    pub async fn report_diff_complete(&self) {
+        self.audit(ProgressEvent::DiffComplete).await;
         let _ = self.sender.send(ProgressEvent::DiffComplete);
     }
 
     /// Report that the mirror-delete pass has started (clp-2). Phase
     /// signal only — see [`ProgressEvent::DeleteBegin`].
-    pub fn report_delete_begin(&self) {
+    pub async fn report_delete_begin(&self) {
+        self.audit(ProgressEvent::DeleteBegin).await;
         let _ = self.sender.send(ProgressEvent::DeleteBegin);
     }
 

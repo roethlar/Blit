@@ -439,7 +439,9 @@ impl<P: Probe> DataPlaneSession<P> {
                     self.bytes_sent = self.bytes_sent.saturating_add(payload_bytes);
                     if let Some(progress) = progress {
                         progress.report_payload(0, payload_bytes);
-                        progress.report_file_complete(header.relative_path.clone());
+                        progress
+                            .report_file_complete(header.relative_path.clone())
+                            .await;
                     }
                 }
                 PreparedPayload::TarShard {
@@ -476,7 +478,9 @@ impl<P: Probe> DataPlaneSession<P> {
                                     .size
                                     .saturating_add(crate::windows_metadata::payload_bytes(header)),
                             );
-                            progress.report_file_complete(header.relative_path.clone());
+                            progress
+                                .report_file_complete(header.relative_path.clone())
+                                .await;
                         }
                     }
                 }

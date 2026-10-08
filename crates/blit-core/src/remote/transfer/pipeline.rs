@@ -520,7 +520,7 @@ pub async fn execute_sink_pipeline_elastic(
                         }
                         for name in &files {
                             if !outcome.file_failed(name) {
-                                p.report_file_complete(name.clone());
+                                p.report_file_complete(name.clone()).await;
                             }
                         }
                         // A resumed file finishes like any other (w6-1:
@@ -533,7 +533,7 @@ pub async fn execute_sink_pipeline_elastic(
                         if let Some(name) = resumed_file {
                             p.report_payload(0, outcome.bytes_written);
                             if !outcome.file_failed(&name) {
-                                p.report_file_complete(name);
+                                p.report_file_complete(name).await;
                             }
                         }
                     }
@@ -1472,7 +1472,7 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                 if let Some(p) = progress {
                     p.report_payload(0, outcome.bytes_written);
                     // A per-file failure is not a completion.
-                    p.report_file_outcome(&header.relative_path, &outcome);
+                    p.report_file_outcome(&header.relative_path, &outcome).await;
                 }
                 total.merge(&outcome);
             }
@@ -1486,7 +1486,7 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                     .await
                     .map_err(|e| e.wrap_err(super::faulted_path::FaultedPath(path.clone())))?;
                 if let Some(p) = progress {
-                    p.report_file_failed(path.clone(), reason.clone());
+                    p.report_file_failed(path.clone(), reason.clone()).await;
                 }
                 let outcome = sink
                     .skip_record(&path, &reason)
@@ -1557,7 +1557,7 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                     // were never transferred file content either.
                     p.report_payload(0, outcome.bytes_written);
                     for path in member_paths.unwrap_or_default() {
-                        p.report_file_outcome(&path, &outcome);
+                        p.report_file_outcome(&path, &outcome).await;
                     }
                 }
                 total.merge(&outcome);
@@ -1632,7 +1632,7 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                 // moves the resume grant to Failed).
                 if let Some(reason) = read_status(socket).await.map_err(tag)? {
                     if let Some(p) = progress {
-                        p.report_file_failed(path.clone(), reason.clone());
+                        p.report_file_failed(path.clone(), reason.clone()).await;
                     }
                     let outcome = sink
                         .fail_resume_record(&path, &reason)
@@ -1663,7 +1663,7 @@ pub(crate) async fn execute_receive_pipeline_with_phase<R: AsyncRead + Unpin + S
                     let path = path_for_progress.unwrap_or_default();
                     // A finalization the sink refused (its patch failed, or
                     // the truncate/stamp did) is not a completion.
-                    p.report_file_outcome(&path, &outcome);
+                    p.report_file_outcome(&path, &outcome).await;
                 }
                 total.merge(&outcome);
             }

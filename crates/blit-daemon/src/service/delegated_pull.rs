@@ -474,15 +474,16 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     };
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let mut options = options;
-    options.progress = Some(blit_core::remote::transfer::RemoteTransferProgress::new(
-        progress_tx,
-    ));
+    // Review cr-jl1b-2: the log's facts ride their own bounded lane.
+    let progress = blit_core::remote::transfer::RemoteTransferProgress::new(progress_tx);
+    options.progress = Some(match job_log.audit_lane() {
+        Some(audit) => progress.with_audit(audit),
+        None => progress,
+    });
     let progress_for_events = job_progress.clone();
-    let log_for_events = job_log.clone();
     let relay_job_progress = async move {
         while let Some(event) = progress_rx.recv().await {
             progress_for_events.report_destination_event(&event);
-            log_for_events.observe(&event).await;
         }
     };
     let progress_for_finish = job_progress.clone();

@@ -3160,14 +3160,14 @@ async fn send_payload_records(
     // lanes against the destination's summary at close (pfc-4,
     // cr-pfc2-2) — do not add per-file filtering here, there is nothing
     // to filter against.
-    let report_files = |files: &[(String, u64)]| {
+    async fn report_files(progress: Option<&RemoteTransferProgress>, files: &[(String, u64)]) {
         if let Some(p) = progress {
             for (name, size) in files {
                 p.report_payload(0, *size);
-                p.report_file_complete(name.clone());
+                p.report_file_complete(name.clone()).await;
             }
         }
-    };
+    }
     for payload in payloads {
         match source.prepare_payload(payload).await? {
             // ssc-4 (D-E): the source could not prepare this file (its
@@ -3280,12 +3280,16 @@ async fn send_payload_records(
                     reason: String::new(),
                 })))
                 .await?;
-                report_files(&[(
-                    header.relative_path.clone(),
-                    header
-                        .size
-                        .saturating_add(crate::windows_metadata::payload_bytes(&header)),
-                )]);
+                report_files(
+                    progress,
+                    &[(
+                        header.relative_path.clone(),
+                        header
+                            .size
+                            .saturating_add(crate::windows_metadata::payload_bytes(&header)),
+                    )],
+                )
+                .await;
             }
             PreparedPayload::TarShard {
                 headers,
@@ -3333,7 +3337,7 @@ async fn send_payload_records(
                 }
                 tx.send(frame(Frame::TarShardComplete(TarShardComplete {})))
                     .await?;
-                report_files(&shard_files);
+                report_files(progress, &shard_files).await;
             }
             PreparedPayload::FileBlock { .. }
             | PreparedPayload::FileBlockComplete { .. }
@@ -3491,7 +3495,7 @@ async fn send_resume_block_records(
             0,
             stale_bytes.saturating_add(crate::windows_metadata::payload_bytes(header)),
         );
-        p.report_file_complete(header.relative_path.clone());
+        p.report_file_complete(header.relative_path.clone()).await;
     }
     Ok(())
 }
@@ -4564,7 +4568,7 @@ async fn destination_session_inner(
                 // Without the signal a consumer cannot tell an up-to-date
                 // tree (nothing needed, ever) from a scan still running.
                 if let Some(p) = progress.as_ref() {
-                    p.report_diff_complete();
+                    p.report_diff_complete().await;
                 }
                 // NeedComplete only after ManifestComplete received
                 // AND every entry diffed — both true here.
@@ -4673,7 +4677,7 @@ async fn destination_session_inner(
                 // this lane (D-2026-07-30-1).
                 if let Some(p) = &progress {
                     p.report_payload(0, outcome.bytes_written);
-                    p.report_file_outcome(&header.relative_path, &outcome);
+                    p.report_file_outcome(&header.relative_path, &outcome).await;
                 }
             }
             Some(Frame::FileSkipped(skipped)) => {
@@ -4700,7 +4704,8 @@ async fn destination_session_inner(
                     .expect("need ledger lock poisoned")
                     .skip(&skipped.relative_path)?;
                 if let Some(p) = &progress {
-                    p.report_file_failed(skipped.relative_path.clone(), skipped.reason.clone());
+                    p.report_file_failed(skipped.relative_path.clone(), skipped.reason.clone())
+                        .await;
                 }
                 contained_failures.record_failure(skipped.relative_path, skipped.reason);
             }
@@ -4743,7 +4748,7 @@ async fn destination_session_inner(
                 }
                 if let Some(p) = &progress {
                     p.report_payload(0, outcome.bytes_written);
-                    p.report_file_outcome(&header.relative_path, &outcome);
+                    p.report_file_outcome(&header.relative_path, &outcome).await;
                 }
             }
             Some(Frame::BlockComplete(complete)) => {
@@ -4790,7 +4795,7 @@ async fn destination_session_inner(
                     if outcome.bytes_written > 0 {
                         p.report_payload(0, outcome.bytes_written);
                     }
-                    p.report_file_outcome(&header.relative_path, &outcome);
+                    p.report_file_outcome(&header.relative_path, &outcome).await;
                 }
             }
             Some(Frame::TarShardHeader(shard)) => {
@@ -4896,7 +4901,7 @@ async fn destination_session_inner(
                     // outcome answers per member (the data-plane carrier
                     // filters the same way at `pipeline.rs`).
                     for path in member_paths.unwrap_or_default() {
-                        p.report_file_outcome(&path, &outcome);
+                        p.report_file_outcome(&path, &outcome).await;
                     }
                 }
             }
@@ -5151,7 +5156,7 @@ async fn destination_session_inner(
                     // removing anything, so it must not announce deletion.
                     if execute {
                         if let Some(p) = progress.as_ref() {
-                            p.report_delete_begin();
+                            p.report_delete_begin().await;
                         }
                     }
                     // ls-1: the delete pass owns one blocking call, so its

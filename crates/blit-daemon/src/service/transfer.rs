@@ -386,20 +386,28 @@ pub(crate) async fn run_transfer_session(
     let transport = grpc_daemon_transport(tx, inbound);
     let (source_progress_tx, mut source_progress_rx) = mpsc::unbounded_channel();
     let source_job_progress = job_progress.clone();
-    let source_log = job_log.clone();
     let relay_source_bytes = async move {
         while let Some(event) = source_progress_rx.recv().await {
             source_job_progress.report_source_event(&event);
-            source_log.observe(&event).await;
         }
     };
     let (destination_progress_tx, mut destination_progress_rx) = mpsc::unbounded_channel();
     let destination_job_progress = job_progress.clone();
-    let destination_log = job_log.clone();
     let relay_destination_progress = async move {
         while let Some(event) = destination_progress_rx.recv().await {
             destination_job_progress.report_destination_event(&event);
-            destination_log.observe(&event).await;
+        }
+    };
+    // jl-1b, review cr-jl1b-2: the log's facts ride a bounded lane of their
+    // own, drained by a task the job log owns, so a lagging log makes the
+    // transfer wait instead of a queue growing; the jobs-row relays above
+    // stay on the unbounded UI lane.
+    let audit = job_log.audit_lane();
+    let progress = |tx| {
+        let progress = RemoteTransferProgress::new(tx);
+        match &audit {
+            Some(audit) => progress.with_audit(audit.clone()),
+            None => progress,
         }
     };
     // The same module→root resolver serves both roles; only the one the
@@ -455,13 +463,13 @@ pub(crate) async fn run_transfer_session(
     };
     let instruments = ResponderInstruments {
         source: SourceInstruments {
-            progress: Some(RemoteTransferProgress::new(source_progress_tx)),
+            progress: Some(progress(source_progress_tx)),
             on_terminal_summary: Some(source_terminal),
             unreadable: Some(Arc::clone(&unreadable)),
             ..Default::default()
         },
         destination: DestinationInstruments {
-            progress: Some(RemoteTransferProgress::new(destination_progress_tx)),
+            progress: Some(progress(destination_progress_tx)),
             byte_progress: Some(byte_progress),
             on_terminal_summary: Some(destination_terminal),
             ..Default::default()

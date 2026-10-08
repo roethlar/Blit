@@ -12,6 +12,9 @@ use blit_core::job_log::{
     self, EventBody, FoundLog, LogKey, LogSender, LogWriter, Outcome, PhaseState, Role, RunInfo,
     Summary,
 };
+use blit_core::remote::transfer::progress::{
+    audit_lane, AuditSender, PlannedTotals, AUDIT_LANE_DEPTH,
+};
 use blit_core::remote::transfer::ProgressEvent;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -80,6 +83,9 @@ impl JobLogs {
 /// none.
 const NO_REASON_REPORTED: &str = "failed (the transfer's report kept no reason)";
 
+/// How long closing a log waits for its audit lane to drain.
+const RELAY_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// One job's log as the daemon's parts see it. Made when the job
 /// registers and owned by the job's dispatcher task, which outlives the
 /// raced session future; started once the job's role is known (a served
@@ -100,6 +106,10 @@ struct LogState {
     /// The job's own failure message, when the dispatcher only has a
     /// marker (a delegated pull's phased error).
     error: Option<String>,
+    /// The task draining the job's audit lane into the log (review
+    /// cr-jl1b-2), and the lane's planned totals.
+    relay: Option<tokio::task::JoinHandle<()>>,
+    planned: Option<Arc<PlannedTotals>>,
 }
 
 struct ActiveLog {
@@ -107,8 +117,6 @@ struct ActiveLog {
     sender: LogSender,
     role: Role,
     started: Instant,
-    planned_files: u64,
-    planned_bytes: u64,
     deleting: bool,
     /// Failed files already named, so the summary's list adds only the
     /// rest.
@@ -125,6 +133,8 @@ impl JobLog {
                 notes: Vec::new(),
                 summary: None,
                 error: None,
+                relay: None,
+                planned: None,
             })),
         }
     }
@@ -160,11 +170,31 @@ impl JobLog {
             sender,
             role,
             started: Instant::now(),
-            planned_files: 0,
-            planned_bytes: 0,
             deleting: false,
             failed: HashSet::new(),
         });
+    }
+
+    /// The bounded lane this job's transfer reports its log's facts on, and
+    /// the task that drains it into the log (review cr-jl1b-2): while the
+    /// log falls behind, the transfer waits. Made once per job; `None` when
+    /// the daemon keeps no logs, or for a second call. The dispatcher's
+    /// [`close`](Self::close) waits for the lane to drain, which it does
+    /// once the transfer has dropped every sender.
+    pub(crate) fn audit_lane(&self) -> Option<AuditSender> {
+        let mut state = self.state();
+        if state.logs.is_none() || state.relay.is_some() {
+            return None;
+        }
+        let (sender, receiver) = audit_lane(AUDIT_LANE_DEPTH);
+        state.planned = Some(receiver.planned());
+        let log = self.clone();
+        state.relay = Some(tokio::spawn(async move {
+            while let Some(event) = receiver.recv().await {
+                log.observe(&event).await;
+            }
+        }));
+        Some(sender)
     }
 
     /// Record what a progress event names: each file copied (or, on a
@@ -172,6 +202,10 @@ impl JobLog {
     pub(crate) async fn observe(&self, event: &ProgressEvent) {
         let (sender, bodies) = {
             let mut state = self.state();
+            let (planned_files, planned_bytes) = state
+                .planned
+                .as_ref()
+                .map_or((0, 0), |planned| planned.get());
             let Some(active) = state.active.as_mut() else {
                 return;
             };
@@ -193,16 +227,10 @@ impl JobLog {
                 ProgressEvent::Deleted { path } => {
                     vec![EventBody::FileDeleted { path: path.clone() }]
                 }
-                ProgressEvent::ManifestBatch { files, bytes } => {
-                    active.planned_files = active.planned_files.saturating_add(*files as u64);
-                    active.planned_bytes = active.planned_bytes.saturating_add(*bytes);
-                    vec![]
-                }
                 ProgressEvent::DiffComplete => vec![EventBody::Diagnostic {
                     message: format!(
-                        "compared the whole source list: {} file(s), {} to send",
-                        active.planned_files,
-                        format_bytes(active.planned_bytes)
+                        "compared the whole source list: {planned_files} file(s), {} to send",
+                        format_bytes(planned_bytes)
                     ),
                 }],
                 ProgressEvent::DeleteBegin => {
@@ -259,7 +287,20 @@ impl JobLog {
         detail: Option<String>,
         summary: Option<TransferSummary>,
     ) {
-        let (active, notes, summary, error, run_id) = {
+        // Every fact the transfer reported reaches the log before it
+        // closes: the relay ends once the transfer has dropped its senders.
+        let relay = self.state().relay.take();
+        let mut relay_cut = false;
+        if let Some(mut relay) = relay {
+            if tokio::time::timeout(RELAY_DRAIN_LIMIT, &mut relay)
+                .await
+                .is_err()
+            {
+                relay.abort();
+                relay_cut = true;
+            }
+        }
+        let (active, notes, summary, error, run_id, planned) = {
             let mut state = self.state();
             let Some(active) = state.active.take() else {
                 return;
@@ -270,6 +311,10 @@ impl JobLog {
                 summary.or_else(|| state.summary.take()),
                 state.error.take(),
                 state.run_id.clone(),
+                state
+                    .planned
+                    .as_ref()
+                    .map_or((0, 0), |planned| planned.get()),
             )
         };
         // The open phase ends first: what the summary adds below was learned
@@ -307,13 +352,20 @@ impl JobLog {
                 });
             }
         }
+        if relay_cut {
+            bodies.push(EventBody::Diagnostic {
+                message: "the transfer still held its log lane open when the job ended; \
+                          events it had not handed over are missing"
+                    .into(),
+            });
+        }
         let elapsed = active.started.elapsed();
-        if active.planned_files > 0 {
+        let (planned_files, planned_bytes) = planned;
+        if planned_files > 0 {
             bodies.push(EventBody::Diagnostic {
                 message: format!(
-                    "planned: {} file(s), {}",
-                    active.planned_files,
-                    format_bytes(active.planned_bytes)
+                    "planned: {planned_files} file(s), {}",
+                    format_bytes(planned_bytes)
                 ),
             });
         }
@@ -722,6 +774,40 @@ mod tests {
             tonic::Code::InvalidArgument
         );
         assert_eq!(code(fetch(None, "t1-0", "").await), tonic::Code::NotFound);
+    }
+
+    /// Review cr-jl1b-2: closing a log waits for its audit lane to drain,
+    /// so every fact the transfer handed over is in the log.
+    #[tokio::test]
+    async fn closing_a_log_waits_for_its_lane_to_drain() {
+        let state = tempfile::tempdir().unwrap();
+        let logs = JobLogs::open(state.path(), job_log::DEFAULT_KEEP).unwrap();
+        let log = JobLog::new(Some(logs.clone()), "t1-0");
+        log.start(Role::Destination, run_info());
+        let (ui_tx, _ui_rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = blit_core::remote::transfer::RemoteTransferProgress::new(ui_tx)
+            .with_audit(log.audit_lane().expect("a lane"));
+        assert!(log.audit_lane().is_none(), "one lane per job");
+        for n in 0..1000 {
+            progress.report_file_complete(format!("f{n}")).await;
+        }
+        drop(progress);
+        log.close(Outcome::Ok, None, None).await;
+
+        let found = job_log::logs_for_run(logs.dir(), "t1-0", None).unwrap();
+        let copied = job_log::open_log(&found[0].path)
+            .unwrap()
+            .filter(|line| {
+                matches!(
+                    line,
+                    Ok(LogLine::Event(job_log::Event {
+                        body: EventBody::FileCopied { .. },
+                        ..
+                    }))
+                )
+            })
+            .count();
+        assert_eq!(copied, 1000);
     }
 
     #[test]
