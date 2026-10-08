@@ -149,7 +149,8 @@ pub struct JobsExportArgs {
 
 #[derive(Args, Clone, Debug)]
 pub struct JobsRunArgs {
-    /// A saved job's name, or a job file (`--export`, `blit jobs export`)
+    /// A saved job's name, or a job file given as a path (`./job.json`;
+    /// written by `--export` or `blit jobs export`)
     #[arg(value_name = "NAME|FILE")]
     pub job: String,
 }
@@ -218,7 +219,7 @@ pub struct JobsCancelArgs {
 pub struct JobsLogArgs {
     /// A remote host (e.g. server or server:port) followed by a job ID; or,
     /// alone, a job run on this machine (as `blit jobs list` shows it) or a
-    /// log file
+    /// log file given as a path (`./run.jsonl.gz`)
     #[arg(value_name = "HOST|JOB|FILE")]
     pub target: String,
     /// The job ID on that host — as `blit jobs list <host>` or `--detach`

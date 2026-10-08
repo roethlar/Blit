@@ -190,13 +190,22 @@ pub(crate) async fn job_to_run(target: &str) -> Result<JobToRun> {
 
 fn job_to_run_blocking(target: &str) -> Result<JobToRun> {
     let (config_dir, _, saved) = local_stores()?;
-    let job = if Path::new(target).is_file() {
+    // Review cr-jl3b-1: a path is a job file; a bare word is a saved job,
+    // whatever files the current folder holds.
+    let job = if job_record::names_a_path(target) {
         let bytes = std::fs::read(target).with_context(|| format!("reading {target}"))?;
         job_record::read_job_file(&bytes).with_context(|| format!("reading {target}"))?
     } else if job_record::valid_job_name(target) {
-        saved.load(target).map_err(|error| eyre::eyre!("{error}"))?
+        saved.load(target).map_err(|error| {
+            let hint = if Path::new(target).is_file() {
+                format!(" (to run the file {target}, give it as a path: ./{target})")
+            } else {
+                String::new()
+            };
+            eyre::eyre!("{error}{hint}")
+        })?
     } else {
-        eyre::bail!("{target} is not a saved job's name or a job file");
+        eyre::bail!("{target} is not a saved job's name; give a job file as a path (./{target})");
     };
     let machine = job_log::machine_id(&config_dir)
         .map_err(|error| eyre::eyre!("this machine's ID: {error}"))?;
@@ -316,7 +325,7 @@ async fn run_jobs_log(args: JobsLogArgs) -> Result<()> {
 /// there, once the daemon is asked (its record is updated), or why that is
 /// not known yet. `None` for any other job, or a file.
 async fn detached_ending(target: &str) -> Option<String> {
-    if Path::new(target).is_file() || !job_log::valid_id(target) {
+    if job_record::names_a_path(target) || !job_log::valid_id(target) {
         return None;
     }
     let store = RunStore::new(crate::run_log::runs_dir(
@@ -390,7 +399,8 @@ fn write_local_log(
     json: bool,
 ) -> Result<()> {
     let file = Path::new(target);
-    let logs: Vec<(PathBuf, Heading)> = if file.is_file() {
+    // Review cr-jl3b-1: a path is a file, a bare word a job ID.
+    let logs: Vec<(PathBuf, Heading)> = if job_record::names_a_path(target) {
         if role.is_some() {
             eyre::bail!("--role picks among a job's logs; {target} is one log file");
         }

@@ -332,13 +332,26 @@ pub fn read_job_file(bytes: &[u8]) -> io::Result<JobFile> {
 }
 
 /// Whether `name` can name a saved job: 1 to 64 letters, digits, `-`, `_`
-/// or `.`, not starting with `.`.
+/// or `.`, not starting with `.`, and not shaped like a run ID (32
+/// lowercase hex digits), so a bare word names one job only (review
+/// cr-jl3b-1).
 pub fn valid_job_name(name: &str) -> bool {
+    let run_id_shaped =
+        name.len() == 32 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     (1..=64).contains(&name.len())
         && !name.starts_with('.')
+        && !run_id_shaped
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Whether a `blit jobs` target names a file: it is a path — it holds a
+/// separator (`./job.json`, `/tmp/x.jsonl.gz`). A bare word is a saved
+/// job's name or a run ID, whatever files the current folder holds
+/// (review cr-jl3b-1).
+pub fn names_a_path(target: &str) -> bool {
+    target.contains('/') || (cfg!(windows) && target.contains('\\'))
 }
 
 /// A machine's saved jobs: `<per-user folder>/jobs/saved/<name>.json`, kept
@@ -1316,7 +1329,8 @@ mod tests {
             "{error}"
         );
         assert!(saved.delete("nightly").is_err());
-        for bad in ["", ".hidden", "a/b", "a b", &"x".repeat(65)] {
+        let run_id_shaped = "0123456789abcdef0123456789abcdef";
+        for bad in ["", ".hidden", "a/b", "a b", &"x".repeat(65), run_id_shaped] {
             assert!(saved.save(bad, &job).is_err(), "{bad:?}");
         }
     }

@@ -133,7 +133,7 @@ fn a_job_is_exported_saved_run_from_its_file_and_deleted() {
 
     // The file runs again.
     fs::remove_dir_all(&dst).unwrap();
-    let rerun = blit_in(&ctx, &ctx.workspace, &["jobs", "run", "job.json"]);
+    let rerun = blit_in(&ctx, &ctx.workspace, &["jobs", "run", "./job.json"]);
     assert!(rerun.status.success(), "{}", text(&rerun.stderr));
     assert_eq!(fs::read(dst.join("a.txt")).unwrap(), b"alpha");
 
@@ -182,7 +182,7 @@ fn a_job_from_another_machine_is_refused() {
     fs::write(&path, serde_json::to_vec(&job).unwrap()).unwrap();
     fs::remove_dir_all(ctx.workspace.join("dst")).unwrap();
 
-    let refused = blit_in(&ctx, &ctx.workspace, &["jobs", "run", "job.json"]);
+    let refused = blit_in(&ctx, &ctx.workspace, &["jobs", "run", "./job.json"]);
     assert!(!refused.status.success());
     let stderr = text(&refused.stderr);
     assert!(
@@ -211,4 +211,70 @@ fn a_job_name_must_be_a_plain_name_and_every_sub_verb_has_help() {
         assert!(help.status.success(), "{verb}: {}", text(&help.stderr));
         assert!(text(&help.stdout).contains("Usage: blit jobs"), "{verb}");
     }
+}
+
+/// Review cr-jl3b-1: a bare word is a saved job, whatever the current
+/// folder holds; a job file is given as a path.
+#[test]
+fn a_saved_jobs_name_means_the_saved_job_wherever_it_is_typed() {
+    let ctx = TestContext::new();
+    let src = ctx.workspace.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), b"alpha").unwrap();
+    let saved = blit_in(
+        &ctx,
+        &ctx.workspace,
+        &["copy", "--save", "nightly", "src/", "saved-dst/"],
+    );
+    assert!(saved.status.success(), "{}", text(&saved.stderr));
+    // Another job, exported to a file named like the saved one.
+    let other = blit_in(
+        &ctx,
+        &ctx.workspace,
+        &["copy", "--export", "nightly", "src/", "file-dst/"],
+    );
+    assert!(other.status.success(), "{}", text(&other.stderr));
+    fs::remove_dir_all(ctx.workspace.join("saved-dst")).unwrap();
+    fs::remove_dir_all(ctx.workspace.join("file-dst")).unwrap();
+
+    let by_name = blit_in(&ctx, &ctx.workspace, &["jobs", "run", "nightly"]);
+    assert!(by_name.status.success(), "{}", text(&by_name.stderr));
+    assert!(
+        ctx.workspace.join("saved-dst/a.txt").is_file(),
+        "the saved job ran"
+    );
+    assert!(!ctx.workspace.join("file-dst").exists(), "not the file");
+
+    let by_path = blit_in(&ctx, &ctx.workspace, &["jobs", "run", "./nightly"]);
+    assert!(by_path.status.success(), "{}", text(&by_path.stderr));
+    assert!(
+        ctx.workspace.join("file-dst/a.txt").is_file(),
+        "the file's job ran"
+    );
+
+    // Nor does a file named like a run ID shadow that job's log.
+    let listed = listing(&ctx);
+    let run_id = listed["jobs"][0]["run_id"].as_str().unwrap().to_string();
+    fs::write(ctx.workspace.join(&run_id), b"not a log").unwrap();
+    let log = blit_in(&ctx, &ctx.workspace, &["jobs", "log", &run_id]);
+    assert!(log.status.success(), "{}", text(&log.stderr));
+    assert!(
+        text(&log.stdout).starts_with("== initiator log from machine "),
+        "{}",
+        text(&log.stdout)
+    );
+
+    // A name shaped like a run ID is not a job name.
+    let shaped = blit_in(
+        &ctx,
+        &ctx.workspace,
+        &[
+            "copy",
+            "--save",
+            "0123456789abcdef0123456789abcdef",
+            "src/",
+            "x/",
+        ],
+    );
+    assert!(!shaped.status.success());
 }

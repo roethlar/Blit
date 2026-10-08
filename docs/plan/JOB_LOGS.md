@@ -528,6 +528,11 @@ Small first, per R1; each slice is one coherent, testable change.
      `--files-from` list runs from the spec's lines, written to a file in
      the per-user folder for the run and removed after.
    - *`blit jobs list` here* adds the saved jobs (`--json`: `saved`).
+   - *Review fix* (jl3b-r1, cr-jl3b-1): one rule for every `blit jobs`
+     target — a path (anything holding a separator: `./job.json`) is a
+     file; a bare word is a saved job's name or a run ID, whatever files
+     the current folder holds (`jobs log` included); and a saved job may
+     not take a name shaped like a run ID (32 lowercase hex).
    - *Tests* (blit-cli `saved_jobs`): the acceptance case — a job saved
      with relative paths and a `--files-from` list, its list then changed,
      run again from another folder: exactly the original file lands; a

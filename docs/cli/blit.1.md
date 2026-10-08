@@ -110,7 +110,8 @@ path, then push it.
 - `jobs save <job-id> <name>` keeps a job run here as a saved job;
   `jobs export <job-id|name> <file>` writes a run (with how it went) or a
   saved job to a file; `jobs run <name|file>` runs a saved job or a job
-  file again, only on the machine it was made on; `jobs delete <name>`
+  file again, only on the machine it was made on (a job file is given as
+  a path, `./job.json`; a bare word is a saved job's name); `jobs delete <name>`
   deletes a saved job. `copy`, `mirror` and `move` take `--save <name>`
   (keep this command as a saved job) and `--export <file>` (write its job
   and how the run went).
