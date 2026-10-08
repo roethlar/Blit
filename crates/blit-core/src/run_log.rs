@@ -170,8 +170,10 @@ struct ActiveLog {
     role: Role,
     started: Instant,
     deleting: bool,
-    /// Failed files already named, so the summary's list adds only the rest.
-    failed: HashSet<String>,
+    /// Failures already named, by text and escaped bytes (review
+    /// cr-jl3afix2-1: two entries of one text are two files), so the
+    /// summary's list adds only the rest.
+    failed: HashSet<(String, Option<String>)>,
     /// The exact bytes, escaped, of each name in this run that is not valid
     /// UTF-8, by its text (review cr-jl1a-1). The first wins, as at both
     /// ends of a transfer.
@@ -359,7 +361,7 @@ impl RunLog {
                         reason: reason.clone(),
                         raw: raw(path),
                     };
-                    active.failed.insert(path.clone());
+                    active.failed.insert((path.clone(), raw(path)));
                     vec![body]
                 }
                 ProgressEvent::Deleted { path, raw } => vec![EventBody::FileDeleted {
@@ -458,7 +460,7 @@ impl RunLog {
                 relay_cut = true;
             }
         }
-        let (active, notes, totals, error, run_id, planned, finished, disposition) = {
+        let (mut active, notes, totals, error, run_id, planned, finished, disposition) = {
             let mut state = self.state();
             let active = state.active.take()?;
             state.closed_raw_names = active.raw_names.clone();
@@ -491,35 +493,40 @@ impl RunLog {
             state: PhaseState::End,
         }];
         if let Some(totals) = &totals {
+            // Reviews cr-jl3afix1-1, cr-jl3afix2-1: each failure named for a
+            // text, by its own bytes when it has them — two entries whose
+            // names collapse to one text are two files — and each named
+            // once: one already named live, with those bytes, is not again.
+            let mut failed = std::mem::take(&mut active.failed);
             for path in &totals.failed_paths {
-                if active.failed.contains(path) {
-                    continue;
-                }
-                // Review cr-jl3afix1-1: each failure named for this text,
-                // by its own bytes when it has them — two entries whose
-                // names collapse to one text are two files.
                 let named: Vec<&FileFailure> = totals
                     .failures
                     .iter()
                     .filter(|failure| &failure.relative_path == path)
                     .collect();
                 if named.is_empty() {
-                    bodies.push(EventBody::FileFailed {
-                        path: path.clone(),
-                        reason: NO_REASON_REPORTED.to_string(),
-                        raw: active.raw_names.get(path).cloned(),
-                    });
+                    let raw = active.raw_names.get(path).cloned();
+                    if failed.insert((path.clone(), raw.clone())) {
+                        bodies.push(EventBody::FileFailed {
+                            path: path.clone(),
+                            reason: NO_REASON_REPORTED.to_string(),
+                            raw,
+                        });
+                    }
                 }
                 for failure in named {
-                    bodies.push(EventBody::FileFailed {
-                        path: path.clone(),
-                        reason: failure.reason.clone(),
-                        raw: failure
-                            .raw_relative_path
-                            .as_deref()
-                            .map(crate::raw_name::escape_raw)
-                            .or_else(|| active.raw_names.get(path).cloned()),
-                    });
+                    let raw = failure
+                        .raw_relative_path
+                        .as_deref()
+                        .map(crate::raw_name::escape_raw)
+                        .or_else(|| active.raw_names.get(path).cloned());
+                    if failed.insert((path.clone(), raw.clone())) {
+                        bodies.push(EventBody::FileFailed {
+                            path: path.clone(),
+                            reason: failure.reason.clone(),
+                            raw,
+                        });
+                    }
                 }
             }
             if totals.failed_paths_truncated {
@@ -728,5 +735,80 @@ mod tests {
             })
             .collect();
         assert_eq!(raws, [Some(crate::raw_name::escape_raw(b"dup\xff.bin"))]);
+    }
+
+    /// Review cr-jl3afix2-1: a failure named live hides no other failure
+    /// of its text — the second entry the summary names, with its own
+    /// bytes, is logged too — and is not logged twice.
+    #[tokio::test]
+    async fn a_live_failure_hides_no_other_failure_of_its_text() {
+        use crate::job_log::{open_log, LogLine};
+        let dir = tempfile::tempdir().unwrap();
+        let log = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "0123456789abcdef0123456789abcdef",
+        );
+        log.start(Role::Initiator, RunInfo::default(), None);
+        let progress = crate::remote::transfer::RemoteTransferProgress::audit_only(
+            log.audit_lane_at(End::Receiving).expect("a lane"),
+        );
+        let text = "dup\u{FFFD}.bin".to_string();
+        progress
+            .report_raw_name(text.clone(), b"dup\xfe.bin".to_vec())
+            .await;
+        // The first entry fails during the transfer.
+        progress
+            .report_file_failed(text.clone(), "denied".into())
+            .await;
+        drop(progress);
+        let totals = RunTotals {
+            files_failed: 2,
+            failed_paths: vec![text.clone()],
+            failures: vec![
+                FileFailure {
+                    relative_path: text.clone(),
+                    reason: "denied".into(),
+                    raw_relative_path: None,
+                },
+                FileFailure {
+                    relative_path: text.clone(),
+                    reason: "duplicate".into(),
+                    raw_relative_path: Some(b"dup\xff.bin".to_vec()),
+                },
+            ],
+            ..RunTotals::default()
+        };
+        let report = log
+            .close(Outcome::Failed, None, Some(totals))
+            .await
+            .expect("a report");
+        let failed: Vec<(String, Option<String>)> = open_log(&report.path.expect("a log"))
+            .unwrap()
+            .filter_map(|line| match line.unwrap() {
+                LogLine::Event(event) => match event.body {
+                    EventBody::FileFailed { reason, raw, .. } => Some((reason, raw)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            failed,
+            [
+                (
+                    "denied".to_string(),
+                    Some(crate::raw_name::escape_raw(b"dup\xfe.bin"))
+                ),
+                (
+                    "duplicate".to_string(),
+                    Some(crate::raw_name::escape_raw(b"dup\xff.bin"))
+                ),
+            ]
+        );
     }
 }
