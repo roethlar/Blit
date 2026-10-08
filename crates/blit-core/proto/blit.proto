@@ -1281,6 +1281,11 @@ message GetJobLogRequest {
   // Only the log kept in this role: "initiator", "source" or
   // "destination". Empty for every role this daemon played.
   string role = 2;
+  // Wait, bounded, until every log of the job is finished before sending
+  // (review cr-jl1c-1): a job's end is announced a moment before its log
+  // closes, and `blit jobs watch` reads the log once, whole. A log still
+  // unfinished when the wait runs out is sent as it stands.
+  bool wait_finished = 3;
 }
 
 message JobLogChunk {

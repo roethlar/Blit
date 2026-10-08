@@ -223,11 +223,15 @@ pub fn kind_label(kind: i32) -> &'static str {
 /// its header, and its JSON lines decoded (see
 /// [`crate::job_log::decode`]). `consume` runs on a blocking thread and
 /// reads each log as its bytes arrive, so a log of any size is never held
-/// in memory; it should read each log to its end before returning.
+/// in memory; it should read each log to its end before returning. With
+/// `wait_finished` the daemon first waits, bounded, for the job's logs to
+/// finish (review cr-jl1c-1); a log still unfinished then arrives with
+/// `finished` false.
 pub async fn read_job_logs<F>(
     remote: &RemoteEndpoint,
     transfer_id: &str,
     role: Option<Role>,
+    wait_finished: bool,
     mut consume: F,
 ) -> Result<()>
 where
@@ -241,6 +245,7 @@ where
             role: role
                 .map(|role| role.as_str().to_string())
                 .unwrap_or_default(),
+            wait_finished,
         })
         .await
         .map_err(|status| match status.code() {

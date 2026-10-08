@@ -173,6 +173,7 @@ impl Daemon {
                     &self.endpoint,
                     id,
                     None,
+                    false,
                     move |header, lines| {
                         let mut events = Vec::new();
                         for line in blit_core::job_log::LogLines::new(lines) {

@@ -48,21 +48,27 @@ async fn run_jobs_log(args: JobsLogArgs) -> Result<()> {
     });
     let json = args.json;
     let mut first = true;
-    jobs::read_job_logs(&remote, &args.transfer_id, role, move |header, lines| {
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        if json {
-            write_json_log(&mut out, lines)?;
-        } else {
-            if !first {
-                writeln!(out)?;
+    jobs::read_job_logs(
+        &remote,
+        &args.transfer_id,
+        role,
+        false,
+        move |header, lines| {
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            if json {
+                write_json_log(&mut out, lines)?;
+            } else {
+                if !first {
+                    writeln!(out)?;
+                }
+                write_text_log(&mut out, &header, lines)?;
             }
-            write_text_log(&mut out, &header, lines)?;
-        }
-        first = false;
-        out.flush()?;
-        Ok(())
-    })
+            first = false;
+            out.flush()?;
+            Ok(())
+        },
+    )
     .await
 }
 
@@ -572,61 +578,56 @@ async fn print_failed_files(
     files_failed: u64,
 ) {
     eprintln!("blit: {files_failed} file(s) failed in transfer {transfer_id}:");
-    let mut named: Vec<(String, String)> = Vec::new();
-    let mut total = 0u64;
-    let mut problem = None;
-    for _ in 0..50 {
-        // (first FAILED_SHOWN failures, how many in all, every log finished)
-        let collected = Arc::new(Mutex::new((Vec::new(), 0u64, true)));
-        let sink = Arc::clone(&collected);
-        let read = jobs::read_job_logs(remote, transfer_id, None, move |header, lines| {
-            let mut found = Vec::new();
-            let mut count = 0u64;
-            for line in LogLines::new(lines) {
-                if let LogLine::Event(job_log::Event {
-                    body: job_log::EventBody::FileFailed { path, reason, raw },
-                    ..
-                }) = line?
-                {
-                    if found.len() < FAILED_SHOWN {
-                        found.push((raw.unwrap_or(path), reason));
-                    }
-                    count += 1;
-                }
-            }
-            let mut collected = sink.lock().unwrap_or_else(|e| e.into_inner());
-            let room = FAILED_SHOWN.saturating_sub(collected.0.len());
-            collected.0.extend(found.into_iter().take(room));
-            collected.1 += count;
-            collected.2 &= header.finished;
-            Ok(())
-        })
-        .await;
-        match read {
-            Ok(()) => {
-                let (list, count, finished) =
-                    std::mem::take(&mut *collected.lock().unwrap_or_else(|e| e.into_inner()));
-                named = list;
-                total = count;
-                problem = None;
-                if finished {
-                    break;
-                }
-            }
-            Err(error) => problem = Some(format!("{error:#}")),
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    // Review cr-jl1c-1: the daemon waits for the job's log to finish and
+    // sends it once; nothing here re-reads it.
+    #[derive(Default)]
+    struct Named {
+        shown: Vec<(String, String)>,
+        distinct: std::collections::HashSet<String>,
+        unfinished: bool,
     }
-    for (path, reason) in &named {
+    let named = Arc::new(Mutex::new(Named::default()));
+    let sink = Arc::clone(&named);
+    let read = jobs::read_job_logs(remote, transfer_id, None, true, move |header, lines| {
+        let mut named = sink.lock().unwrap_or_else(|e| e.into_inner());
+        named.unfinished |= !header.finished;
+        for line in LogLines::new(lines) {
+            if let LogLine::Event(job_log::Event {
+                body: job_log::EventBody::FileFailed { path, reason, raw },
+                ..
+            }) = line?
+            {
+                let name = raw.unwrap_or(path);
+                if named.distinct.insert(name.clone()) && named.shown.len() < FAILED_SHOWN {
+                    named.shown.push((name, reason));
+                }
+            }
+        }
+        Ok(())
+    })
+    .await;
+    let named = std::mem::take(&mut *named.lock().unwrap_or_else(|e| e.into_inner()));
+    for (path, reason) in &named.shown {
         eprintln!("  {path}: {reason}");
     }
-    if let Some(problem) = problem {
-        eprintln!("  (could not read the job's log: {problem})");
-    } else if total > named.len() as u64 {
+    if let Err(error) = read {
+        eprintln!("  (could not read the job's log: {error:#})");
+        return;
+    }
+    let distinct = named.distinct.len() as u64;
+    if distinct > named.shown.len() as u64 {
         eprintln!(
             "  ... and {} more; `blit jobs log {remote_arg} {transfer_id}` lists them all",
-            total - named.len() as u64
+            distinct - named.shown.len() as u64
         );
+    }
+    if distinct != files_failed {
+        let why = if named.unfinished {
+            "; the log was still being written"
+        } else {
+            ""
+        };
+        eprintln!("  (the job's log names {distinct} of the {files_failed} failed file(s){why})");
     }
 }
 

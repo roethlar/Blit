@@ -125,8 +125,12 @@ impl Daemon {
         for _ in 0..500 {
             let fetched = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let sink = std::sync::Arc::clone(&fetched);
-            let read =
-                blit_core::admin::jobs::read_job_logs(&endpoint, id, None, move |header, lines| {
+            let read = blit_core::admin::jobs::read_job_logs(
+                &endpoint,
+                id,
+                None,
+                false,
+                move |header, lines| {
                     let mut events = Vec::new();
                     for line in blit_core::job_log::LogLines::new(lines) {
                         if let blit_core::job_log::LogLine::Event(event) = line? {
@@ -137,8 +141,9 @@ impl Daemon {
                         .unwrap()
                         .push((header.role, header.finished, events));
                     Ok(())
-                })
-                .await;
+                },
+            )
+            .await;
             if read.is_ok() {
                 let mut logs = std::mem::take(&mut *fetched.lock().unwrap());
                 if logs.len() == 1 && logs[0].1 {

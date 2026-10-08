@@ -25,6 +25,9 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Response, Status};
 
+/// The longest `GetJobLog` waits for a job's logs to finish.
+const WAIT_FINISHED_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Bytes per `data` chunk of a served log.
 const CHUNK_BYTES: usize = 64 * 1024;
 
@@ -34,6 +37,9 @@ pub(crate) struct JobLogs {
     dir: PathBuf,
     participant: String,
     keep: usize,
+    /// Woken whenever one of this daemon's logs finishes (review
+    /// cr-jl1c-1), for `GetJobLog`'s `wait_finished`.
+    finished: Arc<tokio::sync::Notify>,
 }
 
 impl JobLogs {
@@ -57,6 +63,7 @@ impl JobLogs {
             dir,
             participant,
             keep,
+            finished: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -436,6 +443,9 @@ impl JobLog {
             Ok(_) => {}
             Err(error) => log::warn!("job {run_id}: closing its log failed: {error}"),
         }
+        if let Some(logs) = self.state().logs.as_ref() {
+            logs.finished.notify_waiters();
+        }
     }
 }
 
@@ -553,14 +563,44 @@ pub(crate) async fn serve(
         return Err(Status::not_found("this daemon keeps no job logs"));
     };
     let dir = logs.dir.clone();
-    let found = {
+    let list = || {
         let dir = dir.clone();
         let id = id.clone();
-        tokio::task::spawn_blocking(move || job_log::logs_for_run(&dir, &id, role))
-            .await
-            .map_err(|error| Status::internal(format!("listing job logs: {error}")))?
-            .map_err(|error| Status::internal(format!("listing job logs: {error:#}")))?
+        async move {
+            tokio::task::spawn_blocking(move || job_log::logs_for_run(&dir, &id, role))
+                .await
+                .map_err(|error| Status::internal(format!("listing job logs: {error}")))?
+                .map_err(|error| Status::internal(format!("listing job logs: {error:#}")))
+        }
     };
+    let mut found = list().await?;
+    if request.wait_finished {
+        // Review cr-jl1c-1: wait here, woken as logs finish, rather than
+        // have the caller re-download an unfinished log. A job with no log
+        // at all gets none by waiting: its log starts at its open.
+        let deadline = tokio::time::Instant::now() + WAIT_FINISHED_LIMIT;
+        while !found.is_empty() && found.iter().any(|log| !log.finished) {
+            let notified = logs.finished.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            found = list().await?;
+            if found.iter().all(|log| log.finished) {
+                break;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            // The re-check after a short sleep covers a log finished by
+            // another path (startup recovery) that wakes no one.
+            let _ = tokio::time::timeout(
+                (deadline - now).min(std::time::Duration::from_secs(1)),
+                notified,
+            )
+            .await;
+            found = list().await?;
+        }
+    }
     if found.is_empty() {
         return Err(Status::not_found(match role {
             Some(role) => format!("no {} log for job {id}", role.as_str()),
@@ -673,6 +713,7 @@ mod tests {
             GetJobLogRequest {
                 transfer_id: id.into(),
                 role: role.into(),
+                wait_finished: false,
             },
         )
         .await?
@@ -895,6 +936,56 @@ mod tests {
                 (lossy, Some("caf\\xe9.txt".to_string())),
             ]
         );
+    }
+
+    /// Review cr-jl1c-1: with `wait_finished`, `GetJobLog` holds the reply
+    /// until the job's log closes and then sends it whole, once.
+    #[tokio::test]
+    async fn wait_finished_sends_the_log_once_it_closes() {
+        let state = tempfile::tempdir().unwrap();
+        let logs = JobLogs::open(state.path(), job_log::DEFAULT_KEEP).unwrap();
+        let log = JobLog::new(Some(logs.clone()), "t1-0");
+        log.start(Role::Destination, run_info());
+        // As in a real job, the log's file exists well before anyone asks
+        // (the writer makes it on its own thread just after the start).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while job_log::logs_for_run(logs.dir(), "t1-0", None)
+            .unwrap()
+            .is_empty()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the log never appeared"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let request = GetJobLogRequest {
+            transfer_id: "t1-0".into(),
+            role: String::new(),
+            wait_finished: true,
+        };
+        let serving = {
+            let logs = logs.clone();
+            tokio::spawn(async move { serve(Some(&logs), request).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!serving.is_finished(), "the reply waited for the log");
+
+        log.close(Outcome::Ok, None, None).await;
+        // Woken by the close itself, well inside the one-second re-check.
+        let mut stream = tokio::time::timeout(std::time::Duration::from_millis(400), serving)
+            .await
+            .expect("woken when the log closed")
+            .unwrap()
+            .unwrap()
+            .into_inner();
+        let mut headers = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            if let job_log_chunk::Payload::Header(header) = chunk.unwrap().payload.unwrap() {
+                headers.push(header.finished);
+            }
+        }
+        assert_eq!(headers, [true]);
     }
 
     #[test]
