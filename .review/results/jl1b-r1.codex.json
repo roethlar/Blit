@@ -1,0 +1,30 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "b613912c02146d1ae28e9cb849023d411abf4266",
+ "base_sha": "f6ca55c051e8f9edd746436498c8cc12485f29a3",
+ "goal": "Make every daemon-side transfer leave a crash-safe, compressed, role-scoped per-file log that operators can retrieve by job ID as readable text or JSON.",
+ "recommended_approach": "Retain the crash-safe LogWriter, streaming GetJobLog RPC, and CLI decoder, but start served-session logs as soon as SessionOpen identifies the role, before endpoint resolution can fail, and carry durable per-file events through an end-to-end bounded path whose backpressure reaches transfer producers.",
+ "comparison": "The storage, recovery, retrieval, and CLI decomposition is sound, and the focused storage/retrieval tests passed. However, the implementation misses logs for served jobs rejected during endpoint resolution and places unbounded progress queues ahead of the bounded writer. A temporary in-process guard failed at the reviewed head, passed after moving log start before resolution, and the worktree was restored exactly to the head SHA.",
+ "material_changes": [
+  "Start and close a served-session log even when module/path resolution rejects the SessionOpen, with a regression test covering retrieval of that failed job.",
+  "Replace the unbounded per-file relay ahead of JobLog::observe with a bounded durable-event path so the documented writer backpressure actually bounds memory and reaches producers."
+ ],
+ "findings": [
+  {
+   "title": "Served jobs rejected during open never create a log",
+   "evidence": "crates/blit-daemon/src/service/transfer.rs:287 \u2014 with_log_start awaits endpoint resolution before calling JobLog::start; when resolution returns Err, crates/blit-daemon/src/job_logs.rs:264 makes close return without writing anything.",
+   "predicted_failure": "A push or pull rejected for an unknown module, read-only destination, or invalid/escaping path still receives a job ID and recent-jobs record, but `blit jobs log` returns NOT_FOUND, losing the forensic record for that failure.",
+   "severity": "MEDIUM",
+   "better_approach": "Start the role-specific log after SessionOpen is parsed but before invoking the resolver; add the resolved local root only on success, and always close the log with the resolver error on refusal."
+  },
+  {
+   "title": "Durable logging backpressure is bypassed by unbounded progress queues",
+   "evidence": "crates/blit-daemon/src/service/transfer.rs:396 \u2014 per-file events enter mpsc::unbounded_channel before the relay awaits destination_log.observe at line 402; crates/blit-core/src/remote/transfer/progress.rs:950 confirms RemoteTransferProgress uses an UnboundedSender.",
+   "predicted_failure": "When a high-file-count transfer produces events faster than the state volume can serialize them, paths and failure reasons accumulate without a memory bound; a sufficiently large or slow-disk run can exhaust daemon memory instead of making the transfer wait as the approved design requires.",
+   "severity": "HIGH",
+   "better_approach": "Give durable audit events their own bounded sink and await capacity at async production points, using blocking sends only from existing blocking workers; keep best-effort UI progress separate, and test that a tiny queue blocks and resumes without dropping events."
+  }
+ ]
+}

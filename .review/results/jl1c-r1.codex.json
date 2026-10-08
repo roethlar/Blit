@@ -1,0 +1,22 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "6dd33e22a60139187013702af3041cdfc8f6985b",
+ "base_sha": "b613912c02146d1ae28e9cb849023d411abf4266",
+ "goal": "Ensure detached jobs with survivable per-file failures are no longer reported as successful by propagating their failed-file count and exposing failure details through jobs list, watch, and log.",
+ "recommended_approach": "Carry files_failed from the authoritative transfer summary through one terminalization path into recent records and TransferComplete, derive list/watch status and exit codes from ok && files_failed == 0, and have watch request one finalized log via a server-side completion wait or notification before printing a bounded, deduplicated failure preview.",
+ "comparison": "The change correctly propagates the count, preserves the useful distinction between whole-job failure and contained file failure, updates human and JSON output, and passes its end-to-end guard. The guard passed at head, failed after removing the implementation because watch exited 0, and passed again after restoration. However, failure-name retrieval polls by repeatedly reading the complete log, so this is not the best implementation for large logs.",
+ "material_changes": [
+  "Replace repeated whole-log polling in print_failed_files with a server-side finalization wait or notification followed by one log read, and explicitly report any mismatch between files_failed and the failure details retrieved."
+ ],
+ "findings": [
+  {
+   "title": "Failure-name lookup repeatedly downloads unfinished logs",
+   "evidence": "crates/blit-cli/src/jobs.rs:578 \u2014 print_failed_files performs up to 50 complete GetJobLog reads and rescans every event; crates/blit-daemon/src/service/core.rs:519 \u2014 the terminal event is broadcast before job_log.close at line 530, so a live watcher normally enters this loop while finalization is still running.",
+   "predicted_failure": "For a large job log, jobs watch can repeatedly transfer and parse the entire log while gzip finalization runs, causing substantial CPU, disk, and network amplification and delaying exit; if finalization outlasts the attempts, it can silently print a partial or empty filename list despite the authoritative failed count.",
+   "severity": "MEDIUM",
+   "better_approach": "Add an internal wait-for-finalized mode or completion notification to GetJobLog so watch waits efficiently and streams the log once; preserve immediate partial reads for ordinary jobs log calls, deduplicate failure entries, and report when retrieved details do not match files_failed."
+  }
+ ]
+}
