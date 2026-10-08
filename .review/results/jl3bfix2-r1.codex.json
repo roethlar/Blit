@@ -1,0 +1,12 @@
+{
+ "verdict": "best_approach",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "51c9e4c607a050c3b9036cdeb40b8efe94508532",
+ "base_sha": "75419ea9ceeb0839764d0162f4774bfec83ff9bf",
+ "goal": "Ensure every rejected saved-job name, especially one shaped like a run ID, receives an accurate explanation instead of guidance that the name already satisfies.",
+ "recommended_approach": "Centralize saved-job name validation in one function that returns the specific rejection reason, derive the existing boolean predicate from it, reuse the reason in both CLI parsing and storage errors, and cover the run-ID case at both layers.",
+ "comparison": "The change follows that approach cleanly, preserves one source of truth, and adds focused core and CLI coverage. Mutating the run-ID diagnostic made both guards fail; restoring it made both pass, the surrounding saved-job tests and formatting passed, and the worktree was restored exactly to the reviewed head.",
+ "material_changes": [],
+ "findings": []
+}
