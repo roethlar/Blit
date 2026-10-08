@@ -1,0 +1,22 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "f3d685fadb3b0f78bb444d398853278e40a76e37",
+ "base_sha": "0333cc3e9faa2ff10b85f4c426b509ff9121c7e0",
+ "goal": "Enable operators to save or export a transfer as a versioned, machine-bound job and later rerun it faithfully, independent of the original working directory or files-from file.",
+ "recommended_approach": "Keep the versioned JobSpec/RunRecord/JobFile model, captured absolute endpoints and file-list contents, atomic persistence, same-machine validation, and shared transfer runner, but make target resolution deterministic: bare valid names should address saved jobs, filesystem jobs should require explicit paths, and saved names should not overlap the run-ID namespace.",
+ "comparison": "The change largely implements the recommended architecture cleanly and with focused end-to-end coverage, but its file-first target resolver makes a saved job's meaning depend on the current directory. The guard passed at head, failed when captured files-from replay was removed, passed after restoration, and the complete saved_jobs test target passed; the worktree was restored cleanly to the reviewed SHA.",
+ "material_changes": [
+  "Disambiguate saved-job names, job-file paths, and run IDs so `jobs run <name>` always selects the named saved job regardless of current-directory contents, and add collision tests."
+ ],
+ "findings": [
+  {
+   "title": "A current-directory file shadows a saved job with the same name",
+   "evidence": "crates/blit-cli/src/jobs.rs:193 \u2014 `job_to_run_blocking` tests `Path::is_file()` before consulting `SavedJobs`, so a bare saved-job name is resolved differently depending on the caller's working directory.",
+   "predicted_failure": "Running `blit jobs run nightly` from a directory containing an ordinary file named `nightly` fails with \u201cnot a blit-job document\u201d; if that file is a valid machine-bound job file, it silently runs that different transfer instead, potentially including a destructive mirror or move, violating cwd-independent replay.",
+   "severity": "MEDIUM",
+   "better_approach": "Resolve valid bare names from the saved-job store first and require an explicit filesystem path such as `./job.json` for job files; also reject saved names shaped like run IDs or otherwise provide explicit namespace selectors."
+  }
+ ]
+}
