@@ -1,7 +1,7 @@
 # cr-jl2fix1-1: a dry run's projected bytes come from the bytes actually written
 
 **Severity**: MEDIUM (reviewer: MEDIUM)
-**Status**: Open
+**Status**: Fixed — awaiting re-review
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: —
 **Reviewer**: codex / gpt-5.6-sol / xhigh / frontier (fallback grade), codex-cli 0.159.3; openreview jl2fix1-r1 over `8288d2f1..8cf9380d` (record `.review/results/jl2fix1-r1.codex.json`); owner goal of 2026-10-07
@@ -17,3 +17,9 @@ Format the dry-run projection with planned_files and planned_bytes from the audi
 
 ## Intake
 Admitted. A dry run writes nothing, so its written-bytes total is 0; the projection must come from what the run planned.
+
+## What
+A dry run's closing line now gives what it would have copied from what the run planned (the audit lane's planned files and bytes); its written totals stay out of it. A `--null` run's line keeps its totals: that run did read the data it discarded.
+
+## Guard proof
+`a_run_that_writes_nothing_logs_no_copies` now requires the exact projection — `it would have copied 1 file(s), 5 B, and deleted 0` for the 5-byte file. Mutation — format the written bytes again — makes it fail; restored, green.

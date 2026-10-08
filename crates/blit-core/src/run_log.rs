@@ -532,12 +532,13 @@ impl RunLog {
             }
             match disposition {
                 Disposition::Written => {}
+                // Review cr-jl2fix1-1: what it would have copied is what it
+                // planned; a dry run's written totals are nothing.
                 Disposition::DryRun => bodies.push(EventBody::Diagnostic {
                     message: format!(
-                        "dry run: nothing was written; it would have copied {} file(s), {}, \
-                         and deleted {}",
-                        totals.files_copied,
-                        format_bytes(totals.bytes_copied),
+                        "dry run: nothing was written; it would have copied {planned_files} \
+                         file(s), {}, and deleted {}",
+                        format_bytes(planned_bytes),
                         totals.files_deleted
                     ),
                 }),

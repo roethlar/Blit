@@ -510,7 +510,10 @@ fn a_run_that_writes_nothing_logs_no_copies() {
     assert!(dry.contains("options: dry-run"), "{dry}");
     assert!(!dry.contains("copied   "), "{dry}");
     assert!(
-        dry.contains("info     dry run: nothing was written; it would have copied 1 file(s)"),
+        dry.contains(
+            "info     dry run: nothing was written; it would have copied 1 file(s), 5 B, \
+             and deleted 0"
+        ),
         "{dry}"
     );
     assert!(
