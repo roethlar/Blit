@@ -118,6 +118,35 @@ struct State {
     /// planned totals.
     relay: Option<tokio::task::JoinHandle<()>>,
     planned: Option<Arc<PlannedTotals>>,
+    disposition: Disposition,
+}
+
+/// What became of what a run moved (review cr-jl2-1): written, or —
+/// a dry run, a null-sink run — nothing. A run that wrote nothing names no
+/// file copied and counts none; its log says so, and what it would have
+/// copied (a dry run) or read and discarded (`--null`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Disposition {
+    #[default]
+    Written,
+    /// `--dry-run`: planned, nothing changed.
+    DryRun,
+    /// `--null`: read, then discarded.
+    Discarded,
+}
+
+impl Disposition {
+    /// What a log says of a run that wrote nothing; `None` for one that
+    /// wrote.
+    pub fn nothing_written(self) -> Option<&'static str> {
+        match self {
+            Disposition::Written => None,
+            Disposition::DryRun => Some("dry run: nothing was written"),
+            Disposition::Discarded => {
+                Some("--null: what was read was discarded; nothing was written")
+            }
+        }
+    }
 }
 
 /// Which end of a transfer an audit lane watches. A file finished on the
@@ -158,6 +187,7 @@ impl RunLog {
                 error: None,
                 relay: None,
                 planned: None,
+                disposition: Disposition::Written,
             })),
         }
     }
@@ -207,6 +237,12 @@ impl RunLog {
             failed: HashSet::new(),
             raw_names: HashMap::new(),
         });
+    }
+
+    /// What became of what the run moves: a dry run or a null-sink run
+    /// writes nothing, and its log says so (review cr-jl2-1).
+    pub fn set_disposition(&self, disposition: Disposition) {
+        self.state().disposition = disposition;
     }
 
     /// The run ID the log is kept under (the own ID until a run is adopted
@@ -272,11 +308,16 @@ impl RunLog {
                 .planned
                 .as_ref()
                 .map_or((0, 0), |planned| planned.get());
+            let disposition = state.disposition;
             let Some(active) = state.active.as_mut() else {
                 return;
             };
             let raw = |path: &str| active.raw_names.get(path).cloned();
             let bodies = match event {
+                // A run that writes nothing copies nothing.
+                ProgressEvent::FileComplete { .. } if disposition != Disposition::Written => {
+                    vec![]
+                }
                 ProgressEvent::FileComplete { path } => {
                     vec![match end.unwrap_or(match active.role {
                         Role::Source => End::Sending,
@@ -398,7 +439,7 @@ impl RunLog {
                 relay_cut = true;
             }
         }
-        let (active, notes, totals, error, run_id, planned, finished) = {
+        let (active, notes, totals, error, run_id, planned, finished, disposition) = {
             let mut state = self.state();
             let active = state.active.take()?;
             (
@@ -415,6 +456,7 @@ impl RunLog {
                     .place
                     .as_ref()
                     .and_then(|place| place.finished.clone()),
+                state.disposition,
             )
         };
         // The open phase ends first: what the summary adds below was learned
@@ -488,8 +530,27 @@ impl RunLog {
                     message: format!("resumed: {} file(s)", totals.files_resumed),
                 });
             }
+            match disposition {
+                Disposition::Written => {}
+                Disposition::DryRun => bodies.push(EventBody::Diagnostic {
+                    message: format!(
+                        "dry run: nothing was written; it would have copied {} file(s), {}, \
+                         and deleted {}",
+                        totals.files_copied,
+                        format_bytes(totals.bytes_copied),
+                        totals.files_deleted
+                    ),
+                }),
+                Disposition::Discarded => bodies.push(EventBody::Diagnostic {
+                    message: format!(
+                        "--null: nothing was written; {} file(s), {} read and discarded",
+                        totals.files_copied,
+                        format_bytes(totals.bytes_copied)
+                    ),
+                }),
+            }
             let seconds = elapsed.as_secs_f64();
-            if seconds > 0.0 && totals.bytes_copied > 0 {
+            if seconds > 0.0 && totals.bytes_copied > 0 && disposition != Disposition::DryRun {
                 bodies.push(EventBody::Diagnostic {
                     message: format!(
                         "average: {}/s over the whole run",
@@ -497,18 +558,21 @@ impl RunLog {
                     ),
                 });
             }
+            let written = disposition == Disposition::Written;
             bodies.push(EventBody::Summary(Summary {
-                files_copied: totals.files_copied,
-                files_deleted: totals.files_deleted,
+                files_copied: if written { totals.files_copied } else { 0 },
+                files_deleted: if written { totals.files_deleted } else { 0 },
                 files_failed: totals.files_failed,
-                bytes_copied: totals.bytes_copied,
+                bytes_copied: if written { totals.bytes_copied } else { 0 },
                 elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
             }));
         }
         for body in bodies {
             active.sender.record_async(body).await;
         }
-        let detail = error.or(detail);
+        let detail = error
+            .or(detail)
+            .or_else(|| disposition.nothing_written().map(str::to_string));
         let writer = active.writer;
         let report = match tokio::task::spawn_blocking(move || writer.finish(outcome, detail)).await
         {

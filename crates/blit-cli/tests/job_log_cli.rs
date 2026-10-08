@@ -481,3 +481,84 @@ fn a_move_logs_that_it_removed_its_source() {
     );
     assert!(shown.contains("end      ok"), "{shown}");
 }
+
+/// Review cr-jl2-1: a run that writes nothing — `--dry-run`, `--null` —
+/// names no file copied or deleted and counts none; its log says nothing
+/// was written, and what the run would have done.
+#[test]
+fn a_run_that_writes_nothing_logs_no_copies() {
+    let ctx = TestContext::new();
+    let src = ctx.workspace.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("planned.txt"), b"alpha").unwrap();
+    let log_of = |args: &[&str]| -> String {
+        let ran = run(&ctx, args);
+        assert!(ran.status.success(), "{}", text(&ran.stderr));
+        let id = job_id_in(&text(&ran.stderr));
+        text(&run(&ctx, &["jobs", "log", &id]).stdout)
+    };
+
+    let dst = ctx.workspace.join("dry");
+    let dry = log_of(&[
+        "copy",
+        "-v",
+        "--dry-run",
+        &format!("{}/", src.display()),
+        &format!("{}/", dst.display()),
+    ]);
+    assert!(!dst.join("planned.txt").exists());
+    assert!(dry.contains("options: dry-run"), "{dry}");
+    assert!(!dry.contains("copied   "), "{dry}");
+    assert!(
+        dry.contains("info     dry run: nothing was written; it would have copied 1 file(s)"),
+        "{dry}"
+    );
+    assert!(
+        dry.contains("summary  0 copied (0 B), 0 deleted, 0 failed"),
+        "{dry}"
+    );
+    assert!(
+        dry.contains("end      ok: dry run: nothing was written"),
+        "{dry}"
+    );
+
+    let discarded = log_of(&[
+        "copy",
+        "-v",
+        "--null",
+        &format!("{}/", src.display()),
+        &format!("{}/", ctx.workspace.join("null").display()),
+    ]);
+    assert!(discarded.contains("options: null"), "{discarded}");
+    assert!(!discarded.contains("copied   "), "{discarded}");
+    assert!(
+        discarded
+            .contains("info     --null: nothing was written; 1 file(s), 5 B read and discarded"),
+        "{discarded}"
+    );
+    assert!(
+        discarded.contains("summary  0 copied (0 B), 0 deleted, 0 failed"),
+        "{discarded}"
+    );
+
+    // A dry-run mirror deletes nothing, and says so.
+    let mirror_dst = ctx.workspace.join("mirror");
+    fs::create_dir_all(&mirror_dst).unwrap();
+    fs::write(mirror_dst.join("extra.txt"), b"stays").unwrap();
+    let mirrored = log_of(&[
+        "mirror",
+        "-v",
+        "--yes",
+        "--dry-run",
+        &format!("{}/", src.display()),
+        &format!("{}/", mirror_dst.display()),
+    ]);
+    assert!(mirror_dst.join("extra.txt").exists());
+    assert!(!mirrored.contains("deleted  "), "{mirrored}");
+    assert!(mirrored.contains("and deleted 1"), "{mirrored}");
+    assert!(!mirrored.contains("copied   "), "{mirrored}");
+    assert!(
+        mirrored.contains("summary  0 copied (0 B), 0 deleted, 0 failed"),
+        "{mirrored}"
+    );
+}

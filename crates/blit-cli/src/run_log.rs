@@ -7,7 +7,7 @@ use crate::cli::TransferArgs;
 use blit_core::config;
 use blit_core::job_log::{self, EventBody, Outcome, Role, RunInfo, RunTag};
 use blit_core::remote::transfer::RemoteTransferProgress;
-use blit_core::run_log::{End, LogPlace, RunLog, RunTotals};
+use blit_core::run_log::{Disposition, End, LogPlace, RunLog, RunTotals};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -46,6 +46,15 @@ impl CommandRun {
             .ok()
             .flatten();
         let log = RunLog::new(place, &run_id);
+        // Review cr-jl2-1: a dry run or a null-sink run writes nothing, and
+        // its log must not say otherwise.
+        log.set_disposition(if args.dry_run {
+            Disposition::DryRun
+        } else if args.null {
+            Disposition::Discarded
+        } else {
+            Disposition::Written
+        });
         log.start(
             Role::Initiator,
             RunInfo {
@@ -229,6 +238,7 @@ fn option_words(args: &TransferArgs) -> Vec<String> {
         (args.force, "force"),
         (args.resume, "resume"),
         (args.detach, "detach"),
+        (args.null, "null"),
     ];
     words.extend(
         flags
