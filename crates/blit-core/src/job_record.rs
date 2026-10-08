@@ -319,22 +319,53 @@ pub fn read_record(bytes: &[u8]) -> io::Result<RunRecord> {
 
 /// Write `value` to `path` whole: a temp file beside it, synced, then
 /// renamed over it.
+///
+/// Review cr-jl3a-2: each write stages in a file of its own — two writers
+/// of one document (two `blit jobs` commands settling the same run) never
+/// share one — and the folder is synced after the rename, so the new
+/// document survives a crash.
 pub fn write_document(path: &Path, value: &impl Serialize) -> io::Result<()> {
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(TEMP_SUFFIX);
-    let temp = PathBuf::from(temp);
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} names no file", path.display()),
+        )
+    })?;
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut staged = std::ffi::OsString::from(".");
+    staged.push(name);
+    staged.push(format!(".{}{TEMP_SUFFIX}", crate::job_log::new_run_id()?));
+    let temp = dir.join(staged);
     let result = (|| {
-        let mut file = File::create(&temp)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
         serde_json::to_writer_pretty(&mut file, value)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&temp, path)
+        fs::rename(&temp, path)?;
+        sync_dir(dir);
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+/// Make a folder's entries durable (Unix; elsewhere the rename is).
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(handle) = File::open(dir) {
+        let _ = handle.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 /// A machine's run records: `<per-user folder>/jobs/runs/`.
@@ -768,6 +799,37 @@ mod tests {
         let on_disk =
             read_record(&fs::read(dir.path().join(format!("{RUN}.run.json"))).unwrap()).unwrap();
         assert_eq!(on_disk.state, RunState::Interrupted);
+    }
+
+    /// Review cr-jl3a-2: writers of one document at once never share a
+    /// staging file — every write lands whole, and none fails.
+    #[test]
+    fn concurrent_writes_of_one_record_each_land_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("{RUN}.run.json"));
+        let record = RunRecord::starting(RUN, &spec());
+        let writers: Vec<_> = (0..8u64)
+            .map(|n| {
+                let (path, mut record) = (path.clone(), record.clone());
+                std::thread::spawn(move || {
+                    for round in 0..40 {
+                        record.files_copied = n * 1000 + round;
+                        write_document(&path, &record).expect("every write lands");
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let landed = read_record(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(landed.files_copied % 1000, 39, "a whole last write");
+        let left: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(left.len(), 1, "no staging file left: {left:?}");
     }
 
     #[test]
