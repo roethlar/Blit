@@ -1,0 +1,22 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "4b65db0cf6efcfc06076d10add4aae3d562b4589",
+ "base_sha": "739c722db193749e85e9218ba7b0660846d2a82f",
+ "goal": "Ensure job logs and saved run records attach the correct raw filename bytes to each failure when distinct non-UTF-8 names collapse to the same display path.",
+ "recommended_approach": "Carry optional raw filename identity from failure creation through FileFailure, wire summaries, RunTotals, logs, and run records, then reconcile live and closing failures by composite identity rather than display path alone, with collision tests covering both carriers and live-plus-summary failures.",
+ "comparison": "The change correctly extends FileFailure, protobuf summaries, conversions, and run-record serialization, and its narrow collision tests pass; however, log reconciliation still deduplicates by lossy display path, which can discard a distinct failure carrying different raw bytes.",
+ "material_changes": [
+  "Track already-logged failures by composite identity, such as display path, raw bytes, and reason, and emit every closing-summary failure whose exact identity was not observed live; retain the focused live-plus-summary collision regression test."
+ ],
+ "findings": [
+  {
+   "title": "A live failure suppresses another raw-name failure with the same display path",
+   "evidence": "crates/blit-core/src/run_log.rs:495 \u2014 closing skips the entire summary bucket when active.failed contains the lossy path, before examining the multiple raw-aware FileFailure entries at lines 501\u2013521.",
+   "predicted_failure": "If the first of two raw Unix filenames that render identically fails during transfer and the second is rejected as a duplicate, the job log contains only the first failure; the duplicate failure and its distinct raw bytes are omitted. A temporary regression test failed with one event instead of two, then passed when reconciliation used composite failure identity; the worktree was restored cleanly to the reviewed head.",
+   "severity": "MEDIUM",
+   "better_approach": "Store observed live failures using their path, resolved raw identity, and reason, then compare each summary FileFailure against that set individually instead of skipping all failures sharing a display path."
+  }
+ ]
+}
