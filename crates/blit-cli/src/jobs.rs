@@ -580,13 +580,7 @@ async fn print_failed_files(
     eprintln!("blit: {files_failed} file(s) failed in transfer {transfer_id}:");
     // Review cr-jl1c-1: the daemon waits for the job's log to finish and
     // sends it once; nothing here re-reads it.
-    #[derive(Default)]
-    struct Named {
-        shown: Vec<(String, String)>,
-        distinct: std::collections::HashSet<String>,
-        unfinished: bool,
-    }
-    let named = Arc::new(Mutex::new(Named::default()));
+    let named = Arc::new(Mutex::new(FailedNames::default()));
     let sink = Arc::clone(&named);
     let read = jobs::read_job_logs(remote, transfer_id, None, true, move |header, lines| {
         let mut named = sink.lock().unwrap_or_else(|e| e.into_inner());
@@ -597,10 +591,7 @@ async fn print_failed_files(
                 ..
             }) = line?
             {
-                let name = raw.unwrap_or(path);
-                if named.distinct.insert(name.clone()) && named.shown.len() < FAILED_SHOWN {
-                    named.shown.push((name, reason));
-                }
+                named.add(path, raw, reason);
             }
         }
         Ok(())
@@ -628,6 +619,25 @@ async fn print_failed_files(
             ""
         };
         eprintln!("  (the job's log names {distinct} of the {files_failed} failed file(s){why})");
+    }
+}
+
+/// The failed files `jobs watch` names, de-duplicated by the file's identity
+/// — its text and, for a name that is not valid UTF-8, its exact bytes —
+/// never by how it reads (review cr-jlfix1-2).
+#[derive(Default)]
+struct FailedNames {
+    shown: Vec<(String, String)>,
+    distinct: std::collections::HashSet<(String, Option<String>)>,
+    unfinished: bool,
+}
+
+impl FailedNames {
+    fn add(&mut self, path: String, raw: Option<String>, reason: String) {
+        let name = job_log::shown_name(&path, raw.as_deref());
+        if self.distinct.insert((path, raw)) && self.shown.len() < FAILED_SHOWN {
+            self.shown.push((name, reason));
+        }
     }
 }
 
@@ -1021,6 +1031,29 @@ fn age_ms_since(start_unix_ms: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// Review cr-jlfix1-2: a raw-byte name and a UTF-8 name that reads like
+    /// its escape are two files, counted and shown apart; the same file
+    /// named twice counts once.
+    #[test]
+    fn failed_names_are_told_apart_by_identity() {
+        let mut named = FailedNames::default();
+        named.add("caf\u{fffd}".into(), Some("caf\\xe9".into()), "a".into());
+        named.add("caf\\xe9".into(), None, "b".into());
+        named.add(
+            "caf\u{fffd}".into(),
+            Some("caf\\xe9".into()),
+            "a again".into(),
+        );
+        assert_eq!(named.distinct.len(), 2);
+        assert_eq!(
+            named.shown,
+            [
+                ("raw:caf\\xe9".to_string(), "a".to_string()),
+                ("caf\\xe9".to_string(), "b".to_string()),
+            ]
+        );
+    }
     use super::*;
 
     #[test]

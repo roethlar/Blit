@@ -1,7 +1,7 @@
 # cr-jlfix1-2: `jobs watch` de-duplicates failed files by their flattened text
 
 **Severity**: LOW (reviewer: LOW)
-**Status**: Admitted — open
+**Status**: Fixed — awaiting re-review
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: —
 **Reviewer**: codex / gpt-5.6-sol / xhigh / frontier (fallback grade), codex-cli 0.159.3; openreview jlfix1-r1c over `7d2bd7d3..efe53362` (record `.review/results/jlfix1-r1c.codex.json`); owner goal of 2026-10-07
@@ -17,3 +17,14 @@ Deduplicate by a tagged key such as (path, raw), and label or otherwise render r
 
 ## Intake
 Admitted. `watch` keyed its de-duplication on `raw.unwrap_or(path)`, so a raw-byte name whose escape reads like a literal UTF-8 name merges with it. Fix: de-duplicate on (path, raw); the text form labels a raw-byte name (`raw:` before its escaped bytes) so the two read differently.
+
+## What
+- **`watch`:** de-duplicates failed files on their identity, `(path, raw)`, in a small `FailedNames` tally, never on how the name reads.
+- **Text form:** `job_log::shown_name` puts `raw:` before a raw-byte name's escaped bytes, so it never reads like a UTF-8 name whose characters look like an escape. Both the text form of a log and `watch`'s list use it.
+
+## Guard proof
+- `jobs::tests::failed_names_are_told_apart_by_identity`: a raw-byte name and a look-alike UTF-8 name count and show as two, and a repeat counts once.
+- `events_read_as_text` now expects `raw:caf\\xe9`.
+- Mutations, each red, then restored:
+  - a flattened key → the tally test
+  - no `raw:` label → the text test

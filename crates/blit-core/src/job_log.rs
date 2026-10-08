@@ -1184,8 +1184,18 @@ pub fn text_line(event: &Event) -> String {
 }
 
 /// A name as text: its escaped exact bytes when it is not valid UTF-8.
-fn shown<'a>(path: &'a str, raw: &'a Option<String>) -> &'a str {
-    raw.as_deref().unwrap_or(path)
+/// A file event's name as text: a name that is not valid UTF-8 shows its
+/// escaped exact bytes after `raw:`, so it never reads like a UTF-8 name
+/// whose characters happen to look like an escape (review cr-jlfix1-2).
+pub fn shown_name(path: &str, raw: Option<&str>) -> String {
+    match raw {
+        Some(raw) => format!("raw:{raw}"),
+        None => path.to_string(),
+    }
+}
+
+fn shown(path: &str, raw: &Option<String>) -> String {
+    shown_name(path, raw.as_deref())
 }
 
 fn describe(body: &EventBody) -> String {
@@ -2392,7 +2402,7 @@ mod tests {
                 reason: "denied".into(),
                 raw: Some("caf\\xe9".into()),
             }),
-            "FAILED   caf\\xe9: denied"
+            "FAILED   raw:caf\\xe9: denied"
         );
         assert_eq!(
             text(EventBody::FileFailed {
