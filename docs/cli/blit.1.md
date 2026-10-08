@@ -101,8 +101,8 @@ path, then push it.
   scripting). Reads `perf_local.jsonl` and the predictor state
   file; no network access.
 - `jobs list [<host>]` lists the jobs run on this machine, newest first,
-  with how each ended; with a host, that daemon's active and recent
-  transfers.
+  with how each ended — a `--detach` job's outcome is fetched from its
+  daemon; with a host, that daemon's active and recent transfers.
 - `jobs log [<host>] <job-id>` shows a job's log: every file copied,
   sent, deleted and failed, with phase times. Without a host it reads
   this machine's log of the job; `jobs log <file>` reads a log file.
@@ -197,6 +197,9 @@ on macOS, `${XDG_CONFIG_HOME:-$HOME/.config}/blit` on Linux, and
 - `config.toml` – `[jobs] keep = N` keeps the newest N job logs (default 50).
 - `jobs/logs/` – this machine's job logs, one compressed JSON-lines file
   per run; every copy, mirror and move writes one.
+- `jobs/runs/` – this machine's jobs: for each run, what was run
+  (`<id>.spec.json`) and how it went (`<id>.run.json`); `[jobs] keep`
+  applies here too.
 
 ## SECURITY
 Remote transfers do not include built-in TLS encryption. Data is transmitted in

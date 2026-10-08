@@ -938,13 +938,20 @@ fn an_interrupt_during_the_retry_wait_still_prints_the_report() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (src, dst) = one_blocked_file_fixture(temp.path());
     let counters = temp.path().join("counters.txt");
-    let child = spawn(
-        "copy",
-        &["--retries", "1", "--retry-wait", "30"],
-        &src,
-        &dst,
-        &counters,
-    );
+    // Its own per-user folder, to read the run's record after.
+    let config = temp.path().join("config");
+    let child = Command::new(common::cli_bin())
+        .arg("--config-dir")
+        .arg(&config)
+        .arg("--diagnostics-counter-file")
+        .arg(&counters)
+        .args(["copy", "--yes", "--retries", "1", "--retry-wait", "30"])
+        .arg(format!("{}/", src.display()))
+        .arg(format!("{}/", dst.display()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn blit");
     wait_for_counter(&counters, "retry_wait_seconds", Duration::from_secs(60));
     let status = Command::new("kill")
         .arg("-INT")
@@ -974,4 +981,19 @@ fn an_interrupt_during_the_retry_wait_still_prints_the_report() {
         "the interruption is said:\n{stderr}"
     );
     assert_eq!(fs::read(dst.join("landed.txt")).expect("landed"), b"alpha");
+    // JOB_LOGS jl-3: the run's record says it was interrupted, with what
+    // the first pass did.
+    let runs = config.join("jobs").join("runs");
+    let record_file = fs::read_dir(&runs)
+        .expect("the runs folder")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.to_string_lossy().ends_with(".run.json"))
+        .expect("a run record");
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(record_file).unwrap()).unwrap();
+    assert_eq!(record["state"], "interrupted", "{record}");
+    assert_eq!(record["outcome"], "interrupted", "{record}");
+    assert_eq!(record["files_failed"], 1, "{record}");
+    assert_eq!(record["failures"][0]["path"], "blocked.txt", "{record}");
 }

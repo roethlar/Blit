@@ -1,15 +1,23 @@
-//! This command's run (JOB_LOGS jl-2): the run ID made where the command is
-//! typed and sent with every session it opens, so every machine involved
-//! logs the run under one ID; the numbering of those sessions; and the
-//! command's own log — the initiator's — in the per-user folder.
+//! This command's run (JOB_LOGS jl-2, jl-3): the run ID made where the
+//! command is typed and sent with every session it opens, so every machine
+//! involved logs the run under one ID; the numbering of those sessions; the
+//! command's own log — the initiator's — in the per-user folder; and the
+//! run's job record there: its spec (what to run again) and its record
+//! (how this run went).
 
 use crate::cli::TransferArgs;
 use blit_core::config;
+use blit_core::endpoints::{parse_transfer_endpoint, Endpoint};
 use blit_core::job_log::{self, EventBody, Outcome, Role, RunInfo, RunTag};
+use blit_core::job_record::{
+    self, Failure, JobSpec, LiveRun, RunRecord, RunState, RunStore, SpecEndpoint, SpecOptions,
+};
 use blit_core::remote::transfer::RemoteTransferProgress;
+use blit_core::remote::RemotePath;
 use blit_core::run_log::{Disposition, End, LogPlace, RunLog, RunTotals};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// One copy, mirror or move command's run, shared by every pass and every
@@ -25,7 +33,33 @@ struct Inner {
     sessions: AtomicU32,
     log: RunLog,
     /// How the run ended, when a route says so before it returns.
-    ending: Mutex<Option<(Outcome, String)>>,
+    ending: Mutex<Option<Ending>>,
+    /// The run's job record, when one could be kept.
+    record: Mutex<Option<Recorded>>,
+    /// The run's final account, for its record.
+    totals: Mutex<Option<RunTotals>>,
+    source_removed: AtomicBool,
+    /// Whether the run writes what it moves (review cr-jl2-1).
+    disposition: Disposition,
+}
+
+/// How a route said the run ended.
+enum Ending {
+    Interrupted(String),
+    /// Went on on `daemon` as its job `job_id`.
+    Detached {
+        daemon: String,
+        job_id: String,
+    },
+}
+
+/// A run's record in the store, its command going.
+struct Recorded {
+    store: RunStore,
+    record: RunRecord,
+    keep: usize,
+    /// Held while the command goes.
+    _live: LiveRun,
 }
 
 impl std::fmt::Debug for CommandRun {
@@ -34,27 +68,43 @@ impl std::fmt::Debug for CommandRun {
     }
 }
 
+/// This machine as the CLI keeps it: the per-user folder, its ID and
+/// settings.
+struct Machine {
+    config_dir: PathBuf,
+    id: String,
+    keep: usize,
+}
+
 impl CommandRun {
-    /// Start this command's run and its log in the per-user folder, after
-    /// finishing any log an earlier, killed command left there. `None` only
-    /// when the system cannot make a random ID; a log that cannot be kept
-    /// is skipped with a warning — a log never stops a command.
+    /// Start this command's run, its log and its job record in the per-user
+    /// folder, after finishing any log an earlier, killed command left
+    /// there. `None` only when the system cannot make a random ID; a log or
+    /// record that cannot be kept is skipped with a warning — neither ever
+    /// stops a command.
     pub async fn start(verb: &str, args: &TransferArgs) -> Option<Self> {
         let run_id = job_log::new_run_id().ok()?;
-        let place = tokio::task::spawn_blocking(cli_log_place)
+        let machine = tokio::task::spawn_blocking(this_machine)
             .await
             .ok()
             .flatten();
+        let place = machine.as_ref().map(|machine| LogPlace {
+            dir: logs_dir(&machine.config_dir),
+            participant: machine.id.clone(),
+            keep: machine.keep,
+            finished: None,
+        });
         let log = RunLog::new(place, &run_id);
         // Review cr-jl2-1: a dry run or a null-sink run writes nothing, and
         // its log must not say otherwise.
-        log.set_disposition(if args.dry_run {
+        let disposition = if args.dry_run {
             Disposition::DryRun
         } else if args.null {
             Disposition::Discarded
         } else {
             Disposition::Written
-        });
+        };
+        log.set_disposition(disposition);
         log.start(
             Role::Initiator,
             RunInfo {
@@ -69,6 +119,16 @@ impl CommandRun {
                 attempt: 1,
             }),
         );
+        let recorded = match machine {
+            Some(machine) => {
+                let (verb, args, run_id) = (verb.to_string(), args.clone(), run_id.clone());
+                tokio::task::spawn_blocking(move || begin_record(&machine, &verb, &args, &run_id))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            None => None,
+        };
         if args.verbose && !args.json {
             eprintln!("blit: job {run_id} (`blit jobs log {run_id}` shows its log)");
         }
@@ -78,6 +138,10 @@ impl CommandRun {
                 sessions: AtomicU32::new(0),
                 log,
                 ending: Mutex::new(None),
+                record: Mutex::new(recorded),
+                totals: Mutex::new(None),
+                source_removed: AtomicBool::new(false),
+                disposition,
             }),
         })
     }
@@ -97,6 +161,10 @@ impl CommandRun {
                 run_id,
                 sessions: AtomicU32::new(0),
                 ending: Mutex::new(None),
+                record: Mutex::new(None),
+                totals: Mutex::new(None),
+                source_removed: AtomicBool::new(false),
+                disposition: Disposition::Written,
             }),
         }
     }
@@ -141,38 +209,49 @@ impl CommandRun {
 
     /// The run's final account, across every pass.
     pub fn note_totals(&self, totals: RunTotals) {
+        *lock(&self.inner.totals) = Some(totals.clone());
         self.inner.log.note_totals(totals);
     }
 
-    /// The run went on, on a daemon, after this command returns
-    /// (`--detach`).
-    pub fn note_detached(&self, detail: String) {
-        *self.ending() = Some((Outcome::Detached, detail));
+    /// A move removed its source.
+    pub fn note_source_removed(&self, source: &str) {
+        self.inner.source_removed.store(true, Ordering::Relaxed);
+        self.note(format!("move: removed the source {source}"));
+    }
+
+    /// The run went on on `daemon` (`host:port`) as its job `job_id` after
+    /// this command returns (`--detach`).
+    pub fn note_detached(&self, daemon: &str, job_id: &str) {
+        *lock(&self.inner.ending) = Some(Ending::Detached {
+            daemon: daemon.to_string(),
+            job_id: job_id.to_string(),
+        });
     }
 
     /// The run stopped on Ctrl-C.
     pub fn note_interrupted(&self, detail: String) {
-        *self.ending() = Some((Outcome::Interrupted, detail));
+        *lock(&self.inner.ending) = Some(Ending::Interrupted(detail));
     }
 
-    fn ending(&self) -> std::sync::MutexGuard<'_, Option<(Outcome, String)>> {
-        self.inner
-            .ending
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Close the run's log with how the command ended.
+    /// Close the run's log, and finish its record, with how the command
+    /// ended.
     pub async fn finish(&self, result: &eyre::Result<ExitCode>) {
-        let (outcome, detail) = match (self.ending().take(), result) {
-            (Some((outcome, detail)), _) => (outcome, Some(detail)),
+        let ending = lock(&self.inner.ending).take();
+        let (outcome, mut detail) = match (&ending, result) {
+            (Some(Ending::Interrupted(detail)), _) => (Outcome::Interrupted, Some(detail.clone())),
+            (Some(Ending::Detached { daemon, job_id }), _) => (
+                Outcome::Detached,
+                Some(format!(
+                    "runs on {daemon} as job {job_id} (`blit jobs log {daemon} {job_id}`)"
+                )),
+            ),
             (None, Err(error)) => (Outcome::Failed, Some(format!("{error:#}"))),
             (None, Ok(_)) => match self.inner.log.noted_files_failed() {
                 0 => (Outcome::Ok, None),
                 failed => (Outcome::Failed, Some(format!("{failed} file(s) failed"))),
             },
         };
-        if let Some(report) = self.inner.log.close(outcome, detail, None).await {
+        if let Some(report) = self.inner.log.close(outcome, detail.clone(), None).await {
             if !report.complete {
                 eprintln!(
                     "blit: this run's log is incomplete: {}",
@@ -180,39 +259,253 @@ impl CommandRun {
                 );
             }
         }
+        let Some(recorded) = lock(&self.inner.record).take() else {
+            return;
+        };
+        let mut totals = lock(&self.inner.totals).take();
+        // Review cr-jl2-1: a run that wrote nothing copied nothing.
+        if let Some(said) = self.inner.disposition.nothing_written() {
+            if let Some(totals) = totals.as_mut() {
+                totals.files_copied = 0;
+                totals.files_deleted = 0;
+                totals.bytes_copied = 0;
+            }
+            if detail.is_none() {
+                detail = Some(said.to_string());
+            }
+        }
+        let source_removed = self.inner.source_removed.load(Ordering::Relaxed);
+        let _ = tokio::task::spawn_blocking(move || {
+            finish_record(recorded, ending, outcome, detail, totals, source_removed)
+        })
+        .await;
     }
 }
 
-/// Where this machine's per-user logs live: `<per-user folder>/jobs/logs`,
-/// kept to `[jobs] keep` from the per-user `config.toml`. Finishes any log
-/// an earlier, killed command left there. `None`, with a warning, when the
-/// folder or the machine ID cannot be had. Blocking.
-fn cli_log_place() -> Option<LogPlace> {
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The per-user folder, this machine's ID and its settings. `None`, with a
+/// warning, when the folder or the ID cannot be had. Blocking.
+fn this_machine() -> Option<Machine> {
     let warn = |what: String| eprintln!("blit: warning: this run is not logged: {what}");
-    let dir = match config::config_dir() {
+    let config_dir = match config::config_dir() {
         Ok(dir) => dir,
         Err(error) => {
             warn(format!("{error:#}"));
             return None;
         }
     };
-    let settings = config::load_settings(&dir).unwrap_or_else(|error| {
+    let settings = config::load_settings(&config_dir).unwrap_or_else(|error| {
         eprintln!("blit: warning: {error:#}; using the default settings");
         config::Settings::default()
     });
-    let participant = match job_log::machine_id(&dir) {
+    let id = match job_log::machine_id(&config_dir) {
         Ok(id) => id,
         Err(error) => {
             warn(format!("{error}"));
             return None;
         }
     };
-    Some(LogPlace {
-        dir: logs_dir(&dir),
-        participant,
+    Some(Machine {
+        config_dir,
+        id,
         keep: settings.jobs_keep,
-        finished: None,
     })
+}
+
+/// This machine's run records: `<per-user folder>/jobs/runs`.
+pub fn runs_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("jobs").join("runs")
+}
+
+/// Write the run's spec and its `running` record. `None`, with a warning,
+/// when either cannot be kept — the command runs regardless. Blocking.
+fn begin_record(
+    machine: &Machine,
+    verb: &str,
+    args: &TransferArgs,
+    run_id: &str,
+) -> Option<Recorded> {
+    let warn = |what: String| eprintln!("blit: warning: this run's job is not kept: {what}");
+    let spec = match job_spec(verb, args, &machine.id) {
+        Ok(spec) => spec,
+        Err(what) => {
+            warn(what);
+            return None;
+        }
+    };
+    let store = RunStore::new(runs_dir(&machine.config_dir));
+    let record = RunRecord::starting(run_id, &spec);
+    match store.begin(&spec, &record) {
+        Ok(live) => Some(Recorded {
+            store,
+            record,
+            keep: machine.keep,
+            _live: live,
+        }),
+        Err(error) => {
+            warn(format!("{error}"));
+            None
+        }
+    }
+}
+
+/// The run's record as the command ended, then pruning. Blocking.
+fn finish_record(
+    mut recorded: Recorded,
+    ending: Option<Ending>,
+    outcome: Outcome,
+    detail: Option<String>,
+    totals: Option<RunTotals>,
+    source_removed: bool,
+) {
+    let record = &mut recorded.record;
+    record.ended_ms = Some(now_ms());
+    record.state = match ending {
+        Some(Ending::Detached { daemon, job_id }) => RunState::Waiting { daemon, job_id },
+        Some(Ending::Interrupted(_)) => RunState::Interrupted,
+        None => RunState::Finished,
+    };
+    record.outcome = match record.state {
+        RunState::Waiting { .. } => None,
+        _ => Some(outcome),
+    };
+    record.detail = detail;
+    record.source_removed = source_removed;
+    if let Some(totals) = totals {
+        record.files_copied = totals.files_copied;
+        record.files_deleted = totals.files_deleted;
+        record.files_failed = totals.files_failed;
+        record.bytes_copied = totals.bytes_copied;
+        let reasons: std::collections::HashMap<&str, &str> = totals
+            .failures
+            .iter()
+            .map(|(path, reason)| (path.as_str(), reason.as_str()))
+            .collect();
+        let mut names: Vec<&str> = totals.failed_paths.iter().map(String::as_str).collect();
+        for (path, _) in &totals.failures {
+            if !names.contains(&path.as_str()) {
+                names.push(path);
+            }
+        }
+        record.failures = names
+            .into_iter()
+            .map(|path| Failure {
+                path: path.to_string(),
+                reason: reasons.get(path).copied().unwrap_or_default().to_string(),
+                raw: None,
+            })
+            .collect();
+        record.failures_truncated =
+            totals.failed_paths_truncated || (record.failures.len() as u64) < totals.files_failed;
+    }
+    if let Err(error) = recorded.store.update(&recorded.record) {
+        eprintln!("blit: warning: could not finish this run's job record: {error}");
+    }
+    let (store, keep) = (recorded.store.clone(), recorded.keep);
+    // Let go of the run before pruning, so it counts as ended.
+    drop(recorded);
+    if let Err(error) = store.prune(keep) {
+        log::warn!(
+            "job records: pruning {} failed: {error}",
+            store.dir().display()
+        );
+    }
+}
+
+/// The run's job: what to run again. An error, in words, when the command
+/// line cannot be kept exactly (a folder or list name that is not UTF-8, an
+/// unreadable `--files-from` list — the command reports those itself).
+fn job_spec(verb: &str, args: &TransferArgs, machine: &str) -> Result<JobSpec, String> {
+    let cwd = std::env::current_dir().map_err(|error| format!("the current folder: {error}"))?;
+    let cwd_text = cwd
+        .to_str()
+        .ok_or("the current folder's name is not UTF-8")?
+        .to_string();
+    let endpoint = |text: &str| -> Result<SpecEndpoint, String> {
+        match parse_transfer_endpoint(text).map_err(|error| format!("{error:#}"))? {
+            Endpoint::Remote(remote) => {
+                let (module, path) = match &remote.path {
+                    RemotePath::Module { module, rel_path } => (
+                        Some(module.clone()),
+                        rel_path.to_string_lossy().into_owned(),
+                    ),
+                    RemotePath::Root { rel_path } => {
+                        (None, rel_path.to_string_lossy().into_owned())
+                    }
+                    RemotePath::Discovery => (None, String::new()),
+                };
+                Ok(SpecEndpoint::Remote {
+                    locator: text.to_string(),
+                    host: remote.host.clone(),
+                    port: remote.port,
+                    module,
+                    path,
+                })
+            }
+            Endpoint::Local(_) => job_record::absolute_local(&cwd, text)
+                .map(|path| SpecEndpoint::Local { path })
+                .ok_or_else(|| format!("{text}: its full name is not UTF-8")),
+        }
+    };
+    let files_from = match &args.files_from {
+        Some(list) => {
+            let text = std::fs::read_to_string(cwd.join(list))
+                .map_err(|error| format!("{}: {error}", list.display()))?;
+            Some(text.lines().map(str::to_string).collect())
+        }
+        None => None,
+    };
+    Ok(JobSpec::new(
+        machine,
+        verb,
+        cwd_text,
+        endpoint(&args.source)?,
+        endpoint(&args.destination)?,
+        spec_options(args),
+        files_from,
+    ))
+}
+
+/// Every option of `args` that changes what the transfer does.
+fn spec_options(args: &TransferArgs) -> SpecOptions {
+    SpecOptions {
+        dry_run: args.dry_run,
+        checksum: args.checksum,
+        size_only: args.size_only,
+        ignore_times: args.ignore_times,
+        ignore_existing: args.ignore_existing,
+        force: args.force,
+        delete_scope: args.delete_scope.clone(),
+        resume: args.resume,
+        drop_windows_metadata: args.drop_windows_metadata,
+        retries: args.retries,
+        retry_wait: args.retry_wait,
+        retry: args.retry,
+        wait: args.wait,
+        exclude: args.exclude.clone(),
+        include: args.include.clone(),
+        min_size: args.min_size.clone(),
+        max_size: args.max_size.clone(),
+        min_age: args.min_age.clone(),
+        max_age: args.max_age.clone(),
+        force_grpc: args.force_grpc,
+        detach: args.detach,
+        null: args.null,
+        yes: args.yes,
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// This machine's log folder in the per-user folder `config_dir`, after

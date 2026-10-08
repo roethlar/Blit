@@ -2,7 +2,8 @@ use crate::cli::{JobsCancelArgs, JobsCommand, JobsListArgs, JobsLogArgs, JobsWat
 use blit_core::admin::jobs;
 use blit_core::admin::jobs::{CancelJobOutcome, WatchSnapshot};
 use blit_core::generated::{daemon_event, DaemonState, JobLogHeader};
-use blit_core::job_log::{self, FoundLog, LogLine, LogLines, LogOverview, Role};
+use blit_core::job_log::{self, LogLine, LogLines, Outcome, Role};
+use blit_core::job_record::{self, DaemonAnswer, RunRecord, RunState, RunStore, StoredRun};
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
 use std::io::{BufRead, Write};
@@ -49,13 +50,21 @@ async fn run_jobs_log(args: JobsLogArgs) -> Result<()> {
     let json = args.json;
     let Some(job_id) = args.job_id else {
         let target = args.target;
-        return tokio::task::spawn_blocking(move || {
-            let stdout = std::io::stdout();
-            let mut out = stdout.lock();
-            write_local_log(&mut out, &target, role, json)
-        })
-        .await
-        .context("reading the log")?;
+        let went_on = detached_ending(&target).await;
+        let shown = {
+            let target = target.clone();
+            tokio::task::spawn_blocking(move || {
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                write_local_log(&mut out, &target, role, json)
+            })
+            .await
+            .context("reading the log")?
+        };
+        if let Some(went_on) = went_on {
+            eprintln!("blit: {went_on}");
+        }
+        return shown;
     };
     let remote = RemoteEndpoint::parse(&args.target)
         .with_context(|| format!("parsing remote endpoint '{}'", args.target))?;
@@ -76,6 +85,44 @@ async fn run_jobs_log(args: JobsLogArgs) -> Result<()> {
         Ok(())
     })
     .await
+}
+
+/// For a job run here that went on on a daemon (`--detach`): how it ended
+/// there, once the daemon is asked (its record is updated), or why that is
+/// not known yet. `None` for any other job, or a file.
+async fn detached_ending(target: &str) -> Option<String> {
+    if Path::new(target).is_file() || !job_log::valid_id(target) {
+        return None;
+    }
+    let store = RunStore::new(crate::run_log::runs_dir(
+        &blit_core::config::config_dir().ok()?,
+    ));
+    let loaded = {
+        let (store, run_id) = (store.clone(), target.to_string());
+        tokio::task::spawn_blocking(move || store.load(&run_id))
+            .await
+            .ok()?
+            .ok()?
+    };
+    let RunState::Waiting { daemon, job_id } = loaded.1.state.clone() else {
+        return None;
+    };
+    let (record, note) = settle_detached(&store, loaded.1).await;
+    let there = format!("`blit jobs log {daemon} {job_id}` shows its log there");
+    Some(match (note, record.outcome) {
+        (Some(note), _) => format!("job {target} went on on {daemon} as job {job_id}: {note}"),
+        (None, Some(outcome)) => {
+            let detail = record
+                .detail
+                .map(|detail| format!(": {detail}"))
+                .unwrap_or_default();
+            format!(
+                "job {target} went on on {daemon} as job {job_id} and ended {}{detail}; {there}",
+                outcome.as_str()
+            )
+        }
+        (None, None) => format!("job {target} went on on {daemon} as job {job_id}; {there}"),
+    })
 }
 
 /// What `blit jobs log` prints above a log's text.
@@ -230,15 +277,7 @@ fn write_json_log(out: &mut impl Write, mut lines: Box<dyn BufRead + Send>) -> R
 
 async fn run_jobs_list(args: JobsListArgs) -> Result<()> {
     let Some(remote) = args.remote else {
-        let (limit, json) = (args.recent_limit, args.json);
-        return tokio::task::spawn_blocking(move || {
-            let dir = crate::run_log::logs_dir(&blit_core::config::config_dir()?);
-            let stdout = std::io::stdout();
-            let mut out = stdout.lock();
-            write_local_list(&mut out, &dir, limit, json)
-        })
-        .await
-        .context("listing the jobs")?;
+        return local_jobs_list(args.recent_limit, args.json).await;
     };
     let remote = RemoteEndpoint::parse(&remote)
         .with_context(|| format!("parsing remote endpoint '{remote}'"))?;
@@ -252,54 +291,106 @@ async fn run_jobs_list(args: JobsListArgs) -> Result<()> {
     Ok(())
 }
 
-/// `blit jobs list` with no host (jl-2): the jobs whose logs this machine
-/// keeps, newest first — `limit` of them, or all when 0.
-fn write_local_list(out: &mut impl Write, dir: &Path, limit: u32, json: bool) -> Result<()> {
-    let mut logs = job_log::logs_in(dir).with_context(|| format!("reading {}", dir.display()))?;
-    if limit > 0 {
-        logs.truncate(limit as usize);
+/// `blit jobs list` with no host (jl-2, jl-3): the jobs run on this
+/// machine, newest first — `limit` of them, or all when 0 — from their run
+/// records, each run still going on a daemon (`--detach`) asked how it
+/// ended first.
+async fn local_jobs_list(limit: u32, json: bool) -> Result<()> {
+    let config_dir = blit_core::config::config_dir()?;
+    let store = RunStore::new(crate::run_log::runs_dir(&config_dir));
+    let logs = config_dir.join("jobs").join("logs");
+    let listed = {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || store.list())
+            .await
+            .context("listing the jobs")?
     }
-    let rows: Vec<(FoundLog, std::io::Result<LogOverview>)> = logs
-        .into_iter()
-        .map(|log| {
-            let overview = job_log::overview(&log.path);
-            (log, overview)
-        })
-        .collect();
+    .with_context(|| format!("reading {}", store.dir().display()))?;
+    let mut runs: Vec<(StoredRun, Option<String>)> = Vec::new();
+    for run in listed.into_iter().take(if limit == 0 {
+        usize::MAX
+    } else {
+        limit as usize
+    }) {
+        let (record, note) = settle_detached(&store, run.record.clone()).await;
+        runs.push((StoredRun { record, ..run }, note));
+    }
+    tokio::task::spawn_blocking(move || {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        write_local_list(&mut out, &store, &logs, &runs, json)
+    })
+    .await
+    .context("listing the jobs")?
+}
+
+/// A run's record once the daemon a `--detach` run went on has said how it
+/// ended (plan "Detached jobs"): updated here, so the daemon is not asked
+/// again. While it goes on, or when the daemon cannot be asked, the record
+/// as it was, with a note saying so.
+pub(crate) async fn settle_detached(
+    store: &RunStore,
+    record: RunRecord,
+) -> (RunRecord, Option<String>) {
+    let RunState::Waiting { daemon, .. } = &record.state else {
+        return (record, None);
+    };
+    let daemon = daemon.clone();
+    match job_record::ask_daemon(&record).await {
+        Ok(DaemonAnswer::Ended(ended)) => {
+            let ended = *ended;
+            let saved = {
+                let (store, ended) = (store.clone(), ended.clone());
+                tokio::task::spawn_blocking(move || store.update(&ended)).await
+            };
+            match saved {
+                Ok(Ok(())) => (ended, None),
+                Ok(Err(error)) => (ended, Some(format!("could not update its record: {error}"))),
+                Err(error) => (ended, Some(format!("could not update its record: {error}"))),
+            }
+        }
+        Ok(DaemonAnswer::Going) => (record, Some(format!("still going on {daemon}"))),
+        Err(error) => (record, Some(format!("could not ask {daemon}: {error:#}"))),
+    }
+}
+
+fn write_local_list(
+    out: &mut impl Write,
+    store: &RunStore,
+    logs: &Path,
+    runs: &[(StoredRun, Option<String>)],
+    json: bool,
+) -> Result<()> {
     if json {
-        let jobs: Vec<serde_json::Value> = rows
+        let jobs: Vec<serde_json::Value> = runs
             .iter()
-            .map(|(log, overview)| {
-                let mut row = match overview {
-                    Ok(overview) => serde_json::to_value(overview)?,
-                    Err(error) => serde_json::json!({
-                        "run_id": log.key.run_id(),
-                        "error": error.to_string(),
-                    }),
-                };
-                row["log"] = log.path.display().to_string().into();
-                row["finished"] = log.finished.into();
+            .map(|(run, note)| {
+                let mut row = serde_json::to_value(&run.record)?;
+                row["spec_file"] = run.spec_path.display().to_string().into();
+                row["record_file"] = run.record_path.display().to_string().into();
+                if let Some(log) = initiator_log(logs, &run.record.run_id) {
+                    row["log"] = log.display().to_string().into();
+                }
+                if let Some(note) = note {
+                    row["note"] = note.clone().into();
+                }
                 Ok(row)
             })
             .collect::<Result<_, serde_json::Error>>()?;
         let listing = serde_json::json!({
-            "logs_dir": dir.display().to_string(),
+            "runs_dir": store.dir().display().to_string(),
             "jobs": jobs,
         });
         writeln!(out, "{}", serde_json::to_string_pretty(&listing)?)?;
-    } else if rows.is_empty() {
+    } else if runs.is_empty() {
         writeln!(out, "Jobs on this machine: (none)")?;
     } else {
-        writeln!(
-            out,
-            "Jobs on this machine ({}), newest first — logs in {}:",
-            rows.len(),
-            dir.display()
-        )?;
-        for (log, overview) in &rows {
-            match overview {
-                Ok(overview) => writeln!(out, "  {}", local_row(log, overview))?,
-                Err(error) => writeln!(out, "  {}  (log unreadable: {error})", log.key.run_id())?,
+        writeln!(out, "Jobs on this machine ({}), newest first:", runs.len())?;
+        for (run, note) in runs {
+            write!(out, "  {}", local_row(&run.record))?;
+            match note {
+                Some(note) => writeln!(out, " — {note}")?,
+                None => writeln!(out)?,
             }
         }
     }
@@ -307,12 +398,20 @@ fn write_local_list(out: &mut impl Write, dir: &Path, limit: u32, json: bool) ->
     Ok(())
 }
 
+/// This machine's own log of the run, if it kept one.
+fn initiator_log(logs: &Path, run_id: &str) -> Option<PathBuf> {
+    job_log::logs_for_run(logs, run_id, Some(Role::Initiator))
+        .ok()?
+        .into_iter()
+        .next()
+        .map(|log| log.path)
+}
+
 /// One job's line in `blit jobs list` (no host): its ID, when it started,
-/// what it did, and how it ended.
-fn local_row(log: &FoundLog, overview: &LogOverview) -> String {
-    let started = overview
-        .started_ms
-        .and_then(|ms| i64::try_from(ms).ok())
+/// what it did, and where it is or how it ended.
+fn local_row(record: &RunRecord) -> String {
+    let started = i64::try_from(record.started_ms)
+        .ok()
         .and_then(chrono::DateTime::from_timestamp_millis)
         .map(|time| {
             time.with_timezone(&chrono::Local)
@@ -320,27 +419,28 @@ fn local_row(log: &FoundLog, overview: &LogOverview) -> String {
                 .to_string()
         })
         .unwrap_or_else(|| "-".into());
-    let run = &overview.run;
-    let mut status = match (overview.outcome, log.finished) {
-        (Some(outcome), _) => outcome.as_str().to_string(),
-        (None, false) => "running".into(),
-        (None, true) => "log cut short".into(),
+    let mut status = match &record.state {
+        RunState::Running => "running".to_string(),
+        RunState::Waiting { daemon, job_id } => format!("waiting on {daemon} (job {job_id})"),
+        RunState::Interrupted | RunState::Finished => record
+            .outcome
+            .map_or(record.state.as_str(), Outcome::as_str)
+            .to_string(),
     };
-    if let Some(detail) = &overview.detail {
-        status.push_str(&format!(": {detail}"));
+    if !matches!(record.state, RunState::Running | RunState::Waiting { .. }) {
+        if let Some(detail) = &record.detail {
+            status.push_str(&format!(": {detail}"));
+        }
     }
-    if let Some(summary) = &overview.summary {
+    if record.state == RunState::Finished {
         status.push_str(&format!(
             " ({} copied, {} deleted, {} failed)",
-            summary.files_copied, summary.files_deleted, summary.files_failed
+            record.files_copied, record.files_deleted, record.files_failed
         ));
     }
     format!(
         "{}  {started}  {}  {} -> {}  {status}",
-        log.key.run_id(),
-        run.verb,
-        run.source,
-        run.destination
+        record.run_id, record.verb, record.source, record.destination
     )
 }
 

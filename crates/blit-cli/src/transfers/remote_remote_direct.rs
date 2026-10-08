@@ -180,9 +180,7 @@ async fn run_remote_to_remote_direct_inner(
         // JOB_LOGS jl-2: the run goes on on the daemon; this command's log
         // says where, and the daemon's own log has the rest.
         if let Some(run) = &args.run {
-            run.note_detached(format!(
-                "runs on {dst_host_hint} as job {transfer_id} (`blit jobs log {dst_host_hint} {transfer_id}`)"
-            ));
+            run.note_detached(&dst_host_hint, &transfer_id);
         }
         let summary = DelegatedPullSummary {
             files_transferred: 0,

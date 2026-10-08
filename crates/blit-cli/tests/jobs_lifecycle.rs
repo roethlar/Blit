@@ -296,7 +296,6 @@ fn a_detached_job_with_a_failed_file_is_not_reported_as_success() {
 
     let transfer_id = detach_copy(&ctx);
     let dest_host = ctx.dest_host();
-    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
 
     let watch = ctx.run_blit(&[
         "jobs",
@@ -354,6 +353,20 @@ stderr:
         "{}",
         text(&log.stdout)
     );
+    // JOB_LOGS jl-3, acceptance "Detached": this machine's record of the
+    // run, settled from the daemon, names the file that failed.
+    let job = settled_local_job(&ctx);
+    assert_eq!(job["outcome"], "failed", "{job}");
+    assert_eq!(job["files_failed"], 1, "{job}");
+    assert_eq!(job["failures"][0]["path"], "blocked.txt", "{job}");
+    assert!(
+        !job["failures"][0]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "{job}"
+    );
+    assert_eq!(job["failures_truncated"], false, "{job}");
 }
 
 #[test]
@@ -522,10 +535,12 @@ impl blit_core::generated::blit_server::Blit for StallingTransferBlit {
     }
 }
 
-/// JOB_LOGS jl-2: a `--detach` command's own log ends `detached`, naming
-/// the daemon and the job the run went on as.
+/// JOB_LOGS jl-2, jl-3: a `--detach` command's own log ends `detached`,
+/// naming the daemon and the job the run went on as; its record here waits
+/// on that daemon, and `blit jobs list` here asks it and keeps how the run
+/// ended.
 #[test]
-fn a_detached_runs_own_log_says_where_it_went_on() {
+fn a_detached_run_is_recorded_here_and_settled_from_its_daemon() {
     let ctx = DelegationContext::with_real_source();
     fs::write(
         ctx.module_src_dir
@@ -537,19 +552,54 @@ fn a_detached_runs_own_log_says_where_it_went_on() {
     .expect("write src file");
 
     let transfer_id = detach_copy(&ctx);
+    let job = settled_local_job(&ctx);
+    let run_id = job["run_id"].as_str().expect("run ID").to_string();
+    assert_eq!(job["outcome"], "ok", "{job}");
+    assert_eq!(job["files_copied"], 1, "{job}");
+    // Kept here: the daemon is not asked again.
+    let on_disk: serde_json::Value = serde_json::from_slice(
+        &fs::read(job["record_file"].as_str().expect("record file")).expect("the record"),
+    )
+    .expect("record JSON");
+    assert_eq!(on_disk["state"], "finished", "{on_disk}");
 
-    let listed = ctx.run_blit(&["jobs", "list", "--json"]);
+    let log = ctx.run_blit(&["jobs", "log", &run_id]);
+    assert!(log.status.success(), "{}", text(&log.stderr));
+    let own = text(&log.stdout);
     assert!(
-        listed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&listed.stderr)
+        own.contains(&format!(
+            "end      detached: runs on {} as job {transfer_id}",
+            ctx.dest_host()
+        )),
+        "{own}"
     );
-    let listing: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("JSON");
-    let job = &listing["jobs"][0];
-    assert_eq!(job["outcome"], "detached", "{listing}");
-    let detail = job["detail"].as_str().unwrap_or_default();
-    assert!(
-        detail.contains(&ctx.dest_host()) && detail.contains(&format!("as job {transfer_id}")),
-        "{detail}"
-    );
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// The one job this machine ran, once `blit jobs list` reports it settled
+/// (a detached run is asked of its daemon until it has ended there).
+fn settled_local_job(ctx: &DelegationContext) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let listed = ctx.run_blit(&["jobs", "list", "--json"]);
+        assert!(listed.status.success(), "{}", text(&listed.stderr));
+        let listing: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("JSON");
+        let jobs = listing["jobs"].as_array().expect("jobs");
+        assert_eq!(jobs.len(), 1, "{listing}");
+        if jobs[0]["state"] == "finished" {
+            return jobs[0].clone();
+        }
+        assert!(
+            jobs[0]["state"]["waiting"]["job_id"].is_string(),
+            "a detached run waits on its daemon: {listing}"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never settled: {listing}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }

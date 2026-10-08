@@ -177,11 +177,23 @@ fn a_local_copy_keeps_its_log_on_this_machine() {
     assert_eq!(jobs.len(), 1, "{listing}");
     let job = &jobs[0];
     assert_eq!(job["run_id"], id.as_str(), "{job}");
-    assert_eq!(job["role"], "initiator", "{job}");
-    assert_eq!(job["run"]["verb"], "copy", "{job}");
+    assert_eq!(job["verb"], "copy", "{job}");
+    assert_eq!(job["state"], "finished", "{job}");
     assert_eq!(job["outcome"], "ok", "{job}");
-    assert_eq!(job["finished"], true, "{job}");
-    assert_eq!(job["summary"]["files_copied"], 2, "{job}");
+    assert_eq!(job["files_copied"], 2, "{job}");
+    // JOB_LOGS jl-3: the job, kept here — its spec names the source as an
+    // absolute path, contents-of (trailing separator kept).
+    let spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(job["spec_file"].as_str().expect("spec file")).unwrap())
+            .unwrap();
+    assert_eq!(spec["format"], "blit-job-spec", "{spec}");
+    assert_eq!(spec["verb"], "copy", "{spec}");
+    assert_eq!(spec["source"]["kind"], "local", "{spec}");
+    let source = spec["source"]["path"].as_str().unwrap();
+    assert!(
+        std::path::Path::new(source).is_absolute() && source.ends_with(['/', '\\']),
+        "{spec}"
+    );
     let log_file = job["log"].as_str().expect("log path").to_string();
 
     let human = text(&run(&ctx, &["jobs", "list"]).stdout);
@@ -564,4 +576,73 @@ fn a_run_that_writes_nothing_logs_no_copies() {
         mirrored.contains("summary  0 copied (0 B), 0 deleted, 0 failed"),
         "{mirrored}"
     );
+}
+
+/// JOB_LOGS jl-3, "Detached jobs": a run waiting on a daemon that cannot
+/// be reached stays waiting, and the listing says why.
+#[test]
+fn a_detached_run_whose_daemon_is_unreachable_stays_waiting() {
+    let ctx = TestContext::new();
+    // A port nothing listens on: bind one, then let it go.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let runs = ctx.config_dir.join("jobs").join("runs");
+    fs::create_dir_all(&runs).unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    let record = serde_json::json!({
+        "format": "blit-run-record", "version": 1, "run_id": id, "machine": "m1",
+        "attempt": 1, "verb": "copy", "source": "a:/m/", "destination": "b:/m/",
+        "started_ms": 1, "ended_ms": 2,
+        "state": {"waiting": {"daemon": format!("127.0.0.1:{port}"), "job_id": "t1-0"}},
+        "detail": "runs elsewhere",
+    });
+    fs::write(
+        runs.join(format!("{id}.run.json")),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+
+    let listed = run(&ctx, &["jobs", "list"]);
+    assert!(listed.status.success(), "{}", text(&listed.stderr));
+    let out = text(&listed.stdout);
+    assert!(
+        out.contains(&format!(
+            "waiting on 127.0.0.1:{port} (job t1-0) — could not ask"
+        )),
+        "{out}"
+    );
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(runs.join(format!("{id}.run.json"))).unwrap()).unwrap();
+    assert!(on_disk["state"]["waiting"].is_object(), "{on_disk}");
+}
+
+/// JOB_LOGS jl-3 with review cr-jl2-1: a dry run's record, like its log,
+/// counts nothing copied and says nothing was written.
+#[test]
+fn a_dry_runs_record_counts_nothing_copied() {
+    let ctx = TestContext::new();
+    let src = ctx.workspace.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("planned.txt"), b"alpha").unwrap();
+    let ran = run(
+        &ctx,
+        &[
+            "copy",
+            "--dry-run",
+            &format!("{}/", src.display()),
+            &format!("{}/", ctx.workspace.join("dst").display()),
+        ],
+    );
+    assert!(ran.status.success(), "{}", text(&ran.stderr));
+    let listed = run(&ctx, &["jobs", "list", "--json"]);
+    let listing: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let job = &listing["jobs"][0];
+    assert_eq!(job["state"], "finished", "{job}");
+    assert_eq!(job["outcome"], "ok", "{job}");
+    assert_eq!(job["files_copied"], 0, "{job}");
+    assert_eq!(job["bytes_copied"], 0, "{job}");
+    assert_eq!(job["detail"], "dry run: nothing was written", "{job}");
 }

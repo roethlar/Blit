@@ -446,6 +446,57 @@ Small first, per R1; each slice is one coherent, testable change.
    (versioned, with migrations); machine ID; detached reconciliation for
    every local `jobs` operation; `--save`, `--export`, `blit jobs
    save|export|run|delete`.
+   Cut in two at implementation (agent's call, as jl-1 was): **jl-3a** the
+   records — every run's JobSpec and RunRecord, detached reconciliation,
+   `jobs list` from the records — and **jl-3b** the saved-job surface —
+   `--save`, `--export`, `jobs save|export|run|delete`.
+   **jl-3a landed 2026-10-08** (commit recorded in `docs/STATE.md`):
+   - *`blit_core::job_record`*: `JobSpec` (`blit-job-spec` v1: machine,
+     verb, the folder the command was typed in, endpoints — local made
+     absolute against that folder with the trailing separator kept,
+     remote as typed plus host/port/module/path — every
+     transfer-affecting option, including `--yes`, and a `--files-from`
+     list's lines) and `RunRecord` (`blit-run-record` v1: run ID,
+     machine, attempt, parent, saved job, verb/source/destination in
+     words, start/end, state `running|finished|interrupted|waiting
+     {daemon, job_id}`, outcome and detail, counts, each failure's exact
+     path and reason — and escaped bytes when not UTF-8 — a truncation
+     flag, and whether a move removed its source). Both refuse another
+     format, a newer version, and (`deny_unknown_fields`) anything this
+     build does not know — a spec naming an unknown option is not run
+     without it.
+   - *Store*: `<per-user folder>/jobs/runs/<run>.spec.json`,
+     `<run>.run.json` (written whole: temp, sync, rename) and `<run>.lock`,
+     held by the command while it runs. A `running` record whose lock is
+     free belongs to a command that died and settles as `interrupted`, on
+     disk. Pruning keeps the newest `[jobs] keep` (the same setting as the
+     logs), under a folder lock, never a running or waiting run.
+   - *The CLI*: each copy/mirror/move writes its spec and a `running`
+     record at start and finishes it at the end (finished with the
+     outcome; `interrupted` on Ctrl-C; `waiting` on the daemon for
+     `--detach`); a dry run or `--null` run counts nothing copied
+     (cr-jl2-1). A spec that cannot be kept exactly (a non-UTF-8 folder,
+     an unreadable list) skips the record with a warning; the command
+     runs regardless.
+   - *Detached reconciliation* (`job_record::ask_daemon`): `jobs list` and
+     `jobs log <id>` here first ask the daemon a waiting run went on —
+     its destination log of the run, by run ID (how it ended, counts,
+     every failed file), else its job record (counts only, names marked
+     truncated) — and keep the answer, so it is not asked again;
+     unreachable or still going, the run shows as waiting with the reason.
+     `jobs log <id>` says how a detached run ended there.
+   - *`jobs list` here* now lists the run records, newest first;
+     `--json` gives each record plus its spec, record and log files.
+   - *Tests*: core store (round trip, live vs dead command, version and
+     unknown-option refusal, pruning, absolute paths); CLI end to end —
+     the spec of a local copy; a detached run waiting then settled from
+     its daemon and kept on disk; a detached run's failed file named in
+     its record; an unreachable daemon; Ctrl-C leaves an `interrupted`
+     record naming the failed file; `[jobs] keep` prunes records; a dry
+     run's record counts nothing. Seven guard mutations red.
+   - *Known gaps*: `jobs save|export|retry` are jl-3b/jl-4 (their own
+     reconciliation hooks then); a failure's raw bytes come only from a
+     daemon's log (a local summary names text only).
 6. **jl-4 — retry.** `blit jobs retry <job-id|file>`: a child run (next
    attempt, parent recorded) re-sending only the failed paths with the
    original JobSpec, through the existing retry-pass machinery; refuse on

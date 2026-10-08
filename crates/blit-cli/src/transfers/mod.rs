@@ -1227,7 +1227,7 @@ fn log_run_end(args: &TransferArgs, totals: blit_core::run_log::RunTotals, inter
 /// JOB_LOGS jl-2: a move removed its source, for the run's log.
 fn note_source_removed(args: &TransferArgs, source: &str) {
     if let Some(run) = &args.run {
-        run.note(format!("move: removed the source {source}"));
+        run.note_source_removed(source);
     }
 }
 
