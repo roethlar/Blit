@@ -152,9 +152,44 @@ pub fn escape_raw(raw: &[u8]) -> String {
     out
 }
 
+/// The bytes [`escape_raw`] rendered, back: `\xNN` is that byte, any
+/// other character itself. `None` for text `escape_raw` cannot have made
+/// (a stray `\`, a short or non-hex escape, a non-ASCII character).
+pub fn unescape_raw(escaped: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(escaped.len());
+    let mut bytes = escaped.bytes();
+    while let Some(b) = bytes.next() {
+        match b {
+            b'\\' => {
+                if bytes.next()? != b'x' {
+                    return None;
+                }
+                let hex = [bytes.next()?, bytes.next()?];
+                let hex = std::str::from_utf8(&hex).ok()?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+            }
+            0x20..=0x7e => out.push(b),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// JOB_LOGS review cr-jl4-2: a record's escaped bytes name the file
+    /// again, exactly.
+    #[test]
+    fn escaped_bytes_read_back_exactly() {
+        for raw in [&b"plain.txt"[..], b"bad\xff.txt", b"dir/\x00\\x\x7f\x80"] {
+            assert_eq!(unescape_raw(&escape_raw(raw)).as_deref(), Some(raw));
+        }
+        for bad in ["\\", "\\y41", "\\x4", "\\xzz", "caf\u{e9}"] {
+            assert_eq!(unescape_raw(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn representable_names_carry_no_raw_bytes() {

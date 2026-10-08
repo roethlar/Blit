@@ -534,6 +534,10 @@ message FilterSpec {
   // Currently inline; may move to a streamed manifest if list sizes
   // become a concern.
   repeated string files_from = 7;
+  // Contract 7 (JOB_LOGS review cr-jl4-2): listed relative paths whose
+  // names are not UTF-8, as their exact bytes (`/`-separated); they pass
+  // like `files_from` entries, on an origin that can hold such names.
+  repeated bytes files_from_raw = 8;
 }
 
 // How the origin decides which files need transfer when both sides

@@ -355,8 +355,22 @@ fn failed_paths(config_dir: &Path, record: &RunRecord) -> Result<HashSet<PathBuf
     }
     Ok(known
         .into_iter()
-        .map(|(path, _)| PathBuf::from(path))
+        .map(|(path, raw)| retry_path(&path, raw.as_deref()))
         .collect())
+}
+
+/// The path a retry names a failed file by (review cr-jl4-2): its exact
+/// bytes when the record kept them — the text of a name that is not UTF-8
+/// names no file — else its text. Raw names exist only on Unix sources;
+/// elsewhere the text is the name.
+fn retry_path(path: &str, raw: Option<&str>) -> PathBuf {
+    #[cfg(unix)]
+    if let Some(bytes) = raw.and_then(blit_core::raw_name::unescape_raw) {
+        return blit_core::raw_name::path_from_raw(&bytes);
+    }
+    #[cfg(not(unix))]
+    let _ = raw;
+    PathBuf::from(path)
 }
 
 /// R4: a job runs only on the machine it was made on; refused, naming
@@ -1773,6 +1787,38 @@ fn age_ms_since(start_unix_ms: u64) -> u64 {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     now_ms.saturating_sub(start_unix_ms)
+}
+
+#[cfg(test)]
+mod retry_path_tests {
+    use super::*;
+
+    /// Review cr-jl4-2: a failed non-UTF-8 name is retried by its own
+    /// bytes, and on the wire travels as them — never as its lossy text.
+    #[cfg(unix)]
+    #[test]
+    fn a_raw_named_failure_is_retried_by_its_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = retry_path("dir/bad\u{FFFD}.txt", Some("dir/bad\\xff.txt"));
+        assert_eq!(path.as_os_str().as_bytes(), b"dir/bad\xff.txt");
+        assert_eq!(retry_path("plain.txt", None), PathBuf::from("plain.txt"));
+
+        let set: HashSet<PathBuf> = [path, PathBuf::from("plain.txt")].into();
+        let spec =
+            blit_core::transfers::filter::build_spec(&blit_core::transfers::filter::FilterInputs {
+                include: &[],
+                exclude: &[],
+                files_from: None,
+                retry_only: Some(&set),
+                min_size: None,
+                max_size: None,
+                min_age: None,
+                max_age: None,
+            })
+            .unwrap();
+        assert_eq!(spec.files_from, ["plain.txt"]);
+        assert_eq!(spec.files_from_raw, [b"dir/bad\xff.txt".to_vec()]);
+    }
 }
 
 #[cfg(test)]

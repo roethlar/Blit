@@ -203,10 +203,25 @@ pub(crate) fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
     if filter.min_age.is_some() || filter.max_age.is_some() {
         filter.reference_time = Some(SystemTime::now());
     }
-    if !spec.files_from.is_empty() {
-        filter.files_from = Some(spec.files_from.into_iter().map(Into::into).collect());
+    if !spec.files_from.is_empty() || !spec.files_from_raw.is_empty() {
+        let mut listed: std::collections::HashSet<std::path::PathBuf> =
+            spec.files_from.into_iter().map(Into::into).collect();
+        listed.extend(raw_listed(
+            &spec.files_from_raw,
+            crate::raw_name::destination_can_store_raw_names(),
+        ));
+        filter.files_from = Some(listed);
     }
     Ok(filter)
+}
+
+/// JOB_LOGS review cr-jl4-2: the listed paths a spec names by their exact
+/// bytes, as this host's paths — none where this host cannot hold such
+/// names (`storable`), since no file of its own can carry one.
+fn raw_listed(raw: &[Vec<u8>], storable: bool) -> Vec<std::path::PathBuf> {
+    raw.iter()
+        .filter_map(|raw| crate::raw_name::path_from_received_raw(raw, storable))
+        .collect()
 }
 
 /// Options for building a delegated remote→remote trigger spec —
@@ -486,6 +501,39 @@ mod delegated_spec_tests {
 mod tests {
     use super::*;
 
+    /// JOB_LOGS review cr-jl4-2: a retry's file named by its exact bytes
+    /// is listed by them on an origin that can hold such names, and on
+    /// one that cannot, names nothing.
+    #[cfg(unix)]
+    #[test]
+    fn raw_listed_paths_name_files_by_their_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = vec![b"dir/bad\xff.txt".to_vec()];
+        let listed = raw_listed(&raw, true);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].as_os_str().as_bytes(), b"dir/bad\xff.txt");
+        assert!(raw_listed(&raw, false).is_empty());
+    }
+
+    /// ...and a spec's raw list reaches the filter, beside its text list,
+    /// on an origin that can hold such names (Linux: runs in CI).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_specs_raw_list_reaches_the_filter() {
+        use std::os::unix::ffi::OsStrExt;
+        let filter = filter_from_spec(ProtoFilterSpec {
+            files_from: vec!["plain.txt".into()],
+            files_from_raw: vec![b"bad\xff.txt".to_vec()],
+            ..ProtoFilterSpec::default()
+        })
+        .unwrap();
+        let listed = filter.files_from.expect("a list");
+        assert!(listed.contains(std::path::Path::new("plain.txt")));
+        assert!(listed
+            .iter()
+            .any(|path| path.as_os_str().as_bytes() == b"bad\xff.txt"));
+    }
+
     fn empty_spec() -> TransferOperationSpec {
         TransferOperationSpec {
             spec_version: SUPPORTED_SPEC_VERSION,
@@ -576,6 +624,7 @@ mod tests {
             min_age_secs: None,
             max_age_secs: None,
             files_from: vec![],
+            files_from_raw: Vec::new(),
         });
         let err = NormalizedTransferOperation::from_spec(spec).unwrap_err();
         let msg = format!("{err:#}");
@@ -596,6 +645,7 @@ mod tests {
             min_age_secs: None,
             max_age_secs: None,
             files_from: vec![],
+            files_from_raw: Vec::new(),
         });
         let err = NormalizedTransferOperation::from_spec(spec).unwrap_err();
         let msg = format!("{err:#}");
@@ -624,6 +674,7 @@ mod tests {
             min_age_secs: None,
             max_age_secs: None,
             files_from: vec![],
+            files_from_raw: Vec::new(),
         });
         let normalized = NormalizedTransferOperation::from_spec(spec).unwrap();
         let filter = normalized.filter.expect("filter should pass through");

@@ -96,6 +96,7 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
         min_age_secs: None,
         max_age_secs: None,
         files_from: Vec::new(),
+        files_from_raw: Vec::new(),
     };
     if let Some(s) = inputs.min_size {
         spec.min_size = Some(parse_size(s).with_context(|| format!("--min-size {s}"))?);
@@ -125,12 +126,20 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
             .collect();
     }
     if let Some(set) = inputs.retry_only {
-        let mut entries: Vec<String> = set
-            .iter()
-            .map(|p| crate::path_posix::relative_path_to_posix(p))
-            .collect();
+        // JOB_LOGS review cr-jl4-2: a name that is not UTF-8 travels as its
+        // exact bytes; its lossy text would name no file at the origin.
+        let mut entries: Vec<String> = Vec::new();
+        let mut raw_entries: Vec<Vec<u8>> = Vec::new();
+        for path in set {
+            match crate::raw_name::raw_relative_bytes(path) {
+                Some(raw) => raw_entries.push(raw),
+                None => entries.push(crate::path_posix::relative_path_to_posix(path)),
+            }
+        }
         entries.sort();
+        raw_entries.sort();
         spec.files_from = entries;
+        spec.files_from_raw = raw_entries;
     }
     // review otp-10a F8: validate the globs at construction time, like
     // `build` does (R58-F12) — a malformed `--include`/`--exclude`
