@@ -1,0 +1,38 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "2dab5d21ada6a3b78996efac5cb2d6bfb8daec1f",
+ "base_sha": "3913ab70935fb7d355a42a758b0de46cddddc88c",
+ "goal": "Let an operator start a linked run from a local run record or exported job that safely retries exactly the files still failed, using the original options and appropriate copy, mirror, or move semantics.",
+ "recommended_approach": "Keep the new jobs subcommand and shared run_command path, but persist a versioned terminal RetryState containing exact path identities, raw filename bytes, left-in-place and removed-incomplete classifications, and truncation flags; feed that state through the same split logic used by in-command retry passes, converting mirrors to scoped copies, rerunning moves whole, and refusing whenever the exact terminal set cannot be reconstructed.",
+ "comparison": "The command surface, parent/attempt lineage, shared execution path, mirror-to-copy conversion, whole-move handling, and refusal checks are directionally sound. The submitted six job-retry integration tests and eight related unit tests pass, but the implementation does not preserve enough terminal state to guarantee its central promise of retrying exactly the failed files. An independent guard failed at the submitted head because a persisted --ignore-existing retry skipped its own incomplete destination and exited successfully; a diagnostic mutation passed the guard, and the worktree was restored cleanly to the reviewed SHA.",
+ "material_changes": [
+  "Persist left_in_place, removed_incomplete, and their truncation state in each run record, then apply the existing --ignore-existing split logic to the first persisted retry pass.",
+  "Preserve exact raw filename identities through records, reconstruction, local filters, and wire filters instead of converting them back from only their lossy display path.",
+  "Recover truncated failures from terminal retry state rather than unioning every historical FileFailed event from the command log."
+ ],
+ "findings": [
+  {
+   "title": "Persisted retries can silently skip their own incomplete files",
+   "evidence": "crates/blit-cli/src/jobs.rs:280 \u2014 job_to_retry restores the original options and installs only retry_only, while crates/blit-cli/src/transfers/retry.rs:451 documents and implements the required left_in_place split for --ignore-existing.",
+   "predicted_failure": "If a failed write leaves Blit's own incomplete destination and the original job used --ignore-existing, jobs retry treats that partial file as pre-existing, skips it, exits successfully, and records an apparently clean child run while the damaged file remains. The required red/green guard reproduced this behavior.",
+   "severity": "HIGH",
+   "better_approach": "Persist the exact left-in-place set and truncation flag in RunRecord; retry those paths with ignore_existing disabled, retry the remaining failed paths with the original flag, and refuse unclassifiable paths."
+  },
+  {
+   "title": "Retry reconstruction discards raw filename identity",
+   "evidence": "crates/blit-cli/src/jobs.rs:345 \u2014 failed_paths distinguishes failures by (path, raw) while collecting them, then discards raw and constructs every retry PathBuf from the lossy text alone.",
+   "predicted_failure": "A failed non-UTF-8 filename on a Unix source will not match the source enumeration's exact OS path, so the retry can transfer nothing and report success; two raw names that collapse to the same display text can also be merged or both selected instead of retrying exactly one.",
+   "severity": "HIGH",
+   "better_approach": "Use a typed retry identity carrying display text plus reversible raw bytes, preserve it in the versioned record, and teach both local and remote retry filters to compare that exact identity."
+  },
+  {
+   "title": "Truncated recovery includes failures that later succeeded",
+   "evidence": "crates/blit-cli/src/jobs.rs:323 \u2014 supplementation inserts every FileFailed event from the entire command log and never removes failures resolved by later retry-pass FileCopied or successful terminal events.",
+   "predicted_failure": "When the final failed list is truncated and an earlier in-command retry already fixed some paths, a later jobs retry includes those historical failures again, potentially overwriting files changed since they succeeded and violating the exactly-failed-files contract.",
+   "severity": "MEDIUM",
+   "better_approach": "Store the exact terminal failed set in the run record or a dedicated retry-state artifact; if log reconstruction remains necessary, reconstruct terminal per-identity state rather than taking a union of failure events."
+  }
+ ]
+}
