@@ -1,0 +1,22 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "1acc17b0e1b8e9444c00fe19d17d0c81d94a9a65",
+ "base_sha": "348be30964bc321a89d421e9eb703515b2a58060",
+ "goal": "Make `blit jobs run` and local `jobs log` resolve bare saved-job names and run IDs consistently regardless of current-directory files, while requiring explicit paths for job or log files and preventing saved names from colliding with generated run IDs.",
+ "recommended_approach": "Classify every jobs target before filesystem lookup using one shared rule\u2014separator-bearing values are paths and bare values belong to the command's identifier namespace\u2014reserve the generated run-ID shape, centralize detailed name-validation errors, and test both name/file shadowing directions.",
+ "comparison": "The change correctly centralizes path classification, reserves 32-character lowercase hexadecimal names, updates documentation, and adds effective integration coverage. My independent guard passed at head, failed after restoring file-existence-based classification, and passed again after restoring the exact head. The remaining weakness is that the new reserved-name rule is absent from user-facing validation errors.",
+ "material_changes": [
+  "Update every saved-job-name validation error to explain that 32-character lowercase hexadecimal names are reserved for run IDs, preferably by centralizing validation and its diagnostic."
+ ],
+ "findings": [
+  {
+   "title": "Reserved run-ID names are rejected with contradictory guidance",
+   "evidence": "crates/blit-cli/src/cli.rs:169 \u2014 `parse_job_name` rejects a 32-character lowercase hexadecimal name through `valid_job_name`, but its error lists only conditions that such a name satisfies; crates/blit-core/src/job_record.rs:378 repeats the incomplete rule.",
+   "predicted_failure": "A user supplying such a name through `--save` or `jobs save` is told it must meet rules it already meets, with no indication that the run-ID namespace is reserved or how to correct the name.",
+   "severity": "LOW",
+   "better_approach": "Have the shared validator return a specific failure reason and reuse it in both Clap parsing and `SavedJobs::path`, explicitly naming the reserved 32-lowercase-hex run-ID shape."
+  }
+ ]
+}
