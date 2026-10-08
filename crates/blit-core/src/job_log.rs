@@ -1397,13 +1397,28 @@ fn check_header(line: &[u8]) -> io::Result<()> {
     if format != FORMAT {
         return invalid(format!("not a blit job log (format {format:?})"));
     }
+    // Review cr-jlfix2-1: only versions this build knows, each parsed whole
+    // as that version's `run-start`. Version 1 is the only one so far; when
+    // VERSION moves past it, each older version gets its own arm (and its
+    // migration).
     match header.get("version").and_then(Value::as_u64) {
-        // Every version this build knows reads as the current one; when
-        // VERSION moves past 1, an older version's migration goes here.
-        Some(version) if version <= u64::from(VERSION) => Ok(()),
-        Some(version) => invalid(format!(
+        Some(1) => match serde_json::from_slice::<Event>(line) {
+            Ok(Event {
+                body: EventBody::RunStart(_),
+                ..
+            }) => Ok(()),
+            _ => invalid(
+                "the job log's run-start is incomplete or damaged \
+                 (`blit jobs log --json` shows its lines as stored)"
+                    .into(),
+            ),
+        },
+        Some(version) if version > u64::from(VERSION) => invalid(format!(
             "this job log is version {version}; this blit reads versions up to {VERSION} \
              (`blit jobs log --json` shows it as stored)"
+        )),
+        Some(version) => invalid(format!(
+            "this job log names version {version}, which no blit writes"
         )),
         None => invalid("the job log's run-start names no version".into()),
     }
@@ -1740,6 +1755,18 @@ mod tests {
                 "{headless}: {error}"
             );
         }
+        // Review cr-jlfix2-1: a current-version header must be whole, and
+        // version 0 never existed.
+        let incomplete = read_all(
+            r#"{"ts_ms":1,"seq":0,"kind":"run-start","format":"blit-job-log","version":1}"#,
+        )
+        .unwrap_err();
+        assert!(
+            incomplete.to_string().contains("incomplete or damaged"),
+            "{incomplete}"
+        );
+        let zero = read_all(&current.replace(r#""version":1"#, r#""version":0"#)).unwrap_err();
+        assert!(zero.to_string().contains("version 0"), "{zero}");
     }
 
     #[test]
