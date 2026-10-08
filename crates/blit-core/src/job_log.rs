@@ -1186,12 +1186,16 @@ pub fn text_line(event: &Event) -> String {
 }
 
 /// A name as text: its escaped exact bytes when it is not valid UTF-8.
-/// A file event's name as text: a name that is not valid UTF-8 shows its
-/// escaped exact bytes after `raw:`, so it never reads like a UTF-8 name
-/// whose characters happen to look like an escape (review cr-jlfix1-2).
+/// A file event's name as text, so that no two files ever read the same
+/// (reviews cr-jlfix1-2, cr-jlfix2-3): a name that is not valid UTF-8 shows
+/// its escaped exact bytes after `raw:`; a UTF-8 name that itself begins
+/// with `raw:` or `utf8:` gets `utf8:` in front; every other name shows as
+/// itself. Reading it back: `raw:` means raw bytes follow, `utf8:` means
+/// the rest is the name as written.
 pub fn shown_name(path: &str, raw: Option<&str>) -> String {
     match raw {
         Some(raw) => format!("raw:{raw}"),
+        None if path.starts_with("raw:") || path.starts_with("utf8:") => format!("utf8:{path}"),
         None => path.to_string(),
     }
 }
@@ -2478,6 +2482,12 @@ mod tests {
             "end      interrupted: why"
         );
         assert!(text_line(&event(0, EventBody::Unknown)).contains("newer blit"));
+        // Review cr-jlfix2-3: a UTF-8 name that reads like a label is told
+        // apart from the raw name it mimics.
+        assert_eq!(shown_name("raw:caf\\xe9", None), "utf8:raw:caf\\xe9");
+        assert_eq!(shown_name("utf8:x", None), "utf8:utf8:x");
+        assert_eq!(shown_name("caf\u{fffd}", Some("caf\\xe9")), "raw:caf\\xe9");
+        assert_eq!(shown_name("plain", None), "plain");
     }
 
     #[test]

@@ -1053,7 +1053,7 @@ mod tests {
             [
                 ("raw:caf\\xe9".to_string(), "a".to_string()),
                 ("caf\\xe9".to_string(), "b".to_string()),
-                ("raw:caf\\xe9".to_string(), "c".to_string()),
+                ("utf8:raw:caf\\xe9".to_string(), "c".to_string()),
             ]
         );
     }
