@@ -2,6 +2,7 @@ use crate::cli::{
     JobsCancelArgs, JobsCommand, JobsDeleteArgs, JobsExportArgs, JobsListArgs, JobsLogArgs,
     JobsSaveArgs, JobsWatchArgs, LogRole,
 };
+use crate::run_log::RunOrigin;
 use blit_core::admin::jobs;
 use blit_core::admin::jobs::{CancelJobOutcome, WatchSnapshot};
 use blit_core::generated::{daemon_event, DaemonState, JobLogHeader};
@@ -11,6 +12,7 @@ use blit_core::job_record::{
 };
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
+use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -52,8 +54,11 @@ pub async fn run_jobs(command: JobsCommand) -> Result<ExitCode> {
             run_jobs_delete(args).await?;
             Ok(ExitCode::SUCCESS)
         }
-        // A saved job runs as the transfer command it is (`main`).
-        JobsCommand::Run(_) => eyre::bail!("`blit jobs run` is dispatched with the transfer verbs"),
+        // A saved job, or a retry, runs as the transfer command it is
+        // (`main`).
+        JobsCommand::Run(_) | JobsCommand::Retry(_) => {
+            eyre::bail!("`blit jobs run` and `retry` are dispatched with the transfer verbs")
+        }
     }
 }
 
@@ -164,7 +169,7 @@ async fn run_jobs_delete(args: JobsDeleteArgs) -> Result<()> {
 pub(crate) struct JobToRun {
     pub verb: String,
     pub args: crate::cli::TransferArgs,
-    pub saved: Option<String>,
+    pub origin: RunOrigin,
     /// Removes the written list when the run is done.
     pub _list: Option<ListFile>,
 }
@@ -207,9 +212,147 @@ fn job_to_run_blocking(target: &str) -> Result<JobToRun> {
     } else {
         eyre::bail!("{target} is not a saved job's name; give a job file as a path (./{target})");
     };
-    let machine = job_log::machine_id(&config_dir)
+    check_machine(&config_dir, &job.spec)?;
+    let (args, list) = spec_args(&config_dir, &job.spec)?;
+    Ok(JobToRun {
+        verb: job.spec.verb.clone(),
+        args,
+        origin: RunOrigin {
+            saved_job: job.name.clone(),
+            parent: None,
+        },
+        _list: list,
+    })
+}
+
+/// `blit jobs retry <job-id|file>` (JOB_LOGS jl-4): a run's failed files
+/// sent again, as a new run — that run's next attempt, its parent
+/// recorded — on the machine the job belongs to. `None`, said, when the
+/// run failed nothing. Refused while the run goes on (here, or on the
+/// daemon a `--detach` run went on), and when its failures are not all
+/// known by name.
+///
+/// A copy's or a mirror's retry is a copy of exactly the failed files,
+/// through the retry passes' own `retry_only` set: a mirror's deletions
+/// ran in its first run, and a mirror limited to a few files could delete
+/// the rest under `--delete-scope all`. A move's retry is the move again:
+/// its compare re-sends only what did not land, and its source is removed
+/// only once everything has — sending only the failed files and then
+/// removing the source would lose whatever changed there since.
+pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
+    let (config_dir, runs, _) = local_stores()?;
+    // Review cr-jl3b-1: a path is a job file, a bare word a run ID.
+    let (spec, record) = if job_record::names_a_path(target) {
+        let bytes = std::fs::read(target).with_context(|| format!("reading {target}"))?;
+        let file =
+            job_record::read_job_file(&bytes).with_context(|| format!("reading {target}"))?;
+        let run = file.run.ok_or_else(|| {
+            eyre::eyre!("{target} holds a job but no run of it to retry; `blit jobs run` runs it")
+        })?;
+        // A run in a file that waited on its daemon: ask it now.
+        let run = match job_record::ask_daemon(&run).await {
+            Ok(DaemonAnswer::Ended(ended)) => *ended,
+            _ => run,
+        };
+        (file.spec, run)
+    } else {
+        local_run(&runs, target)
+            .await?
+            .ok_or_else(|| no_such_run(target))?
+    };
+    check_machine(&config_dir, &spec)?;
+    match &record.state {
+        RunState::Running => eyre::bail!(
+            "job {} is still running; retry it once it has ended",
+            record.run_id
+        ),
+        RunState::Waiting { daemon, job_id } => eyre::bail!(
+            "job {} went on on {daemon} as job {job_id}, and how it ended is not known \
+             yet; retry it once `blit jobs list` shows it ended",
+            record.run_id
+        ),
+        RunState::Finished | RunState::Interrupted => {}
+    }
+    if record.files_failed == 0 && record.failures.is_empty() {
+        println!("Job {} failed no files; nothing to retry.", record.run_id);
+        return Ok(None);
+    }
+    let (mut args, list) = spec_args(&config_dir, &spec)?;
+    let verb = if spec.verb == "move" {
+        "move"
+    } else {
+        args.retry_only = Some(failed_paths(&config_dir, &record)?);
+        "copy"
+    };
+    Ok(Some(JobToRun {
+        verb: verb.to_string(),
+        args,
+        origin: RunOrigin {
+            saved_job: record.saved_job.clone(),
+            parent: Some((record.run_id.clone(), record.attempt)),
+        },
+        _list: list,
+    }))
+}
+
+/// Every file a run failed, by name: its record's, completed from this
+/// machine's log of the run when the record's list was cut short. An
+/// error when they are still not all known — a retry would leave the rest.
+fn failed_paths(config_dir: &Path, record: &RunRecord) -> Result<HashSet<PathBuf>> {
+    use crate::transfers::retry::UNRETRIED_PATH;
+    let mut known: HashSet<(String, Option<String>)> = record
+        .failures
+        .iter()
+        .filter(|failure| failure.path != UNRETRIED_PATH)
+        .map(|failure| (failure.path.clone(), failure.raw.clone()))
+        .collect();
+    let short = |known: &HashSet<(String, Option<String>)>| {
+        record.failures_truncated
+            || record
+                .failures
+                .iter()
+                .any(|failure| failure.path == UNRETRIED_PATH)
+            || (known.len() as u64) < record.files_failed
+    };
+    if short(&known) {
+        let logs = config_dir.join("jobs").join("logs");
+        for log in job_log::logs_for_run(&logs, &record.run_id, None).unwrap_or_default() {
+            let Ok(lines) = job_log::open_log(&log.path) else {
+                continue;
+            };
+            for line in lines.flatten() {
+                if let LogLine::Event(job_log::Event {
+                    body: job_log::EventBody::FileFailed { path, raw, .. },
+                    ..
+                }) = line
+                {
+                    known.insert((path, raw));
+                }
+            }
+        }
+        if (known.len() as u64) < record.files_failed {
+            eyre::bail!(
+                "job {} names only {} of the {} files it failed, so a retry would leave the \
+                 rest; run the whole job again instead (`blit jobs save {} <name>`, then \
+                 `blit jobs run <name>`)",
+                record.run_id,
+                known.len(),
+                record.files_failed,
+                record.run_id
+            );
+        }
+    }
+    Ok(known
+        .into_iter()
+        .map(|(path, _)| PathBuf::from(path))
+        .collect())
+}
+
+/// R4: a job runs only on the machine it was made on; refused, naming
+/// that machine (by ID, and by host name when it has one), anywhere else.
+fn check_machine(config_dir: &Path, spec: &JobSpec) -> Result<()> {
+    let machine = job_log::machine_id(config_dir)
         .map_err(|error| eyre::eyre!("this machine's ID: {error}"))?;
-    let spec = &job.spec;
     if spec.machine != machine {
         let host = if spec.host.is_empty() {
             String::new()
@@ -221,6 +364,15 @@ fn job_to_run_blocking(target: &str) -> Result<JobToRun> {
             spec.machine
         );
     }
+    Ok(())
+}
+
+/// The command line a job's spec stands for, and its `--files-from` list
+/// written out for the run (removed when the returned guard drops).
+fn spec_args(
+    config_dir: &Path,
+    spec: &JobSpec,
+) -> Result<(crate::cli::TransferArgs, Option<ListFile>)> {
     let list = match &spec.files_from {
         Some(lines) => {
             let dir = config_dir.join("jobs");
@@ -264,12 +416,7 @@ fn job_to_run_blocking(target: &str) -> Result<JobToRun> {
         yes: o.yes,
         ..Default::default()
     };
-    Ok(JobToRun {
-        verb: spec.verb.clone(),
-        args,
-        saved: job.name.clone(),
-        _list: list,
-    })
+    Ok((args, list))
 }
 
 /// `blit jobs log` (JOB_LOGS jl-1b, jl-2): each log kept for the job — by

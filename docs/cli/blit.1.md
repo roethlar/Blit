@@ -112,7 +112,10 @@ path, then push it.
   saved job to a file; `jobs run <name|file>` runs a saved job or a job
   file again, only on the machine it was made on (a job file is given as
   a path, `./job.json`; a bare word is a saved job's name); `jobs delete <name>`
-  deletes a saved job. `copy`, `mirror` and `move` take `--save <name>`
+  deletes a saved job. `jobs retry <job-id|file>` sends again only the
+  files a job run here failed to send, with its own options, as a new
+  run (a move's retry runs the move again, so its source goes only once
+  everything has landed). `copy`, `mirror` and `move` take `--save <name>`
   (keep this command as a saved job) and `--export <file>` (write its job
   and how the run went).
 - `jobs watch <host> <job-id>` follows a daemon's job to its end;

@@ -21,6 +21,7 @@ use crate::cli::{Cli, Commands, DiagnosticsCommand, JobsCommand, TransferArgs};
 use crate::context::AppContext;
 use crate::diagnostics::{run_diagnostics_dump, run_diagnostics_perf};
 use crate::jobs::run_jobs;
+use crate::run_log::RunOrigin;
 use crate::transfers::{run_move, run_transfer};
 use blit_core::config;
 use blit_core::remote::transfer::{
@@ -92,13 +93,34 @@ async fn run_cli(lifecycle_trace: &TransferLifecycleTrace) -> Result<ExitCode> {
         // / `run_move` box their route dispatch, so this frame holds
         // pointers rather than sessions.
         Commands::Copy(args) => {
-            Box::pin(run_command(&ctx, Verb::Copy, args, lifecycle_trace, None)).await?
+            Box::pin(run_command(
+                &ctx,
+                Verb::Copy,
+                args,
+                lifecycle_trace,
+                RunOrigin::default(),
+            ))
+            .await?
         }
         Commands::Mirror(args) => {
-            Box::pin(run_command(&ctx, Verb::Mirror, args, lifecycle_trace, None)).await?
+            Box::pin(run_command(
+                &ctx,
+                Verb::Mirror,
+                args,
+                lifecycle_trace,
+                RunOrigin::default(),
+            ))
+            .await?
         }
         Commands::Move(args) => {
-            Box::pin(run_command(&ctx, Verb::Move, args, lifecycle_trace, None)).await?
+            Box::pin(run_command(
+                &ctx,
+                Verb::Move,
+                args,
+                lifecycle_trace,
+                RunOrigin::default(),
+            ))
+            .await?
         }
         Commands::Scan(args) => {
             scan::run_scan(args).await?;
@@ -164,10 +186,31 @@ async fn run_cli(lifecycle_trace: &TransferLifecycleTrace) -> Result<ExitCode> {
             let verb = Verb::from_word(&job.verb)
                 .ok_or_else(|| eyre::eyre!("a job of an unknown kind ({})", job.verb))?;
             let jobs::JobToRun {
-                args, saved, _list, ..
+                args,
+                origin,
+                _list,
+                ..
             } = job;
-            Box::pin(run_command(&ctx, verb, args, lifecycle_trace, saved)).await?
+            Box::pin(run_command(&ctx, verb, args, lifecycle_trace, origin)).await?
         }
+        // JOB_LOGS jl-4: a retry runs as the command that re-sends what
+        // failed — or, with nothing failed, says so.
+        Commands::Jobs {
+            command: JobsCommand::Retry(args),
+        } => match jobs::job_to_retry(&args.job).await? {
+            None => ExitCode::SUCCESS,
+            Some(job) => {
+                let verb = Verb::from_word(&job.verb)
+                    .ok_or_else(|| eyre::eyre!("a job of an unknown kind ({})", job.verb))?;
+                let jobs::JobToRun {
+                    args,
+                    origin,
+                    _list,
+                    ..
+                } = job;
+                Box::pin(run_command(&ctx, verb, args, lifecycle_trace, origin)).await?
+            }
+        },
         Commands::Jobs { command } => run_jobs(command).await?,
     };
 
@@ -213,9 +256,9 @@ async fn run_command(
     verb: Verb,
     mut args: TransferArgs,
     lifecycle_trace: &TransferLifecycleTrace,
-    saved_job: Option<String>,
+    origin: RunOrigin,
 ) -> Result<ExitCode> {
-    args.run = crate::run_log::CommandRun::start(verb.word(), &args, saved_job).await;
+    args.run = crate::run_log::CommandRun::start(verb.word(), &args, origin).await;
     let run = args.run.clone();
     if let Some(name) = &args.save {
         let run = run.as_ref().ok_or_else(|| {

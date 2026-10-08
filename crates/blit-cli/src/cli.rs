@@ -127,6 +127,17 @@ pub enum JobsCommand {
     Run(JobsRunArgs),
     /// Delete a saved job
     Delete(JobsDeleteArgs),
+    /// Send again only the files a job run on this machine failed to send
+    Retry(JobsRetryArgs),
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct JobsRetryArgs {
+    /// A job run on this machine, as `blit jobs list` shows it, or a job
+    /// file written with its run, given as a path (`./job.json`; written by
+    /// `--export` or `blit jobs export <job-id>`)
+    #[arg(value_name = "JOB|FILE")]
+    pub job: String,
 }
 
 #[derive(Args, Clone, Debug)]

@@ -49,6 +49,16 @@ struct Inner {
     disposition: Disposition,
 }
 
+/// Where a run comes from, for its record (JOB_LOGS jl-3b, jl-4).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunOrigin {
+    /// The saved job it runs (`blit jobs run <name>`).
+    pub saved_job: Option<String>,
+    /// The run it retries and that run's attempt (`blit jobs retry`): this
+    /// run is the next attempt.
+    pub parent: Option<(String, u32)>,
+}
+
 /// How a route said the run ended.
 enum Ending {
     Interrupted(String),
@@ -90,8 +100,8 @@ impl CommandRun {
     /// record that cannot be kept is skipped with a warning — neither ever
     /// stops a command.
     ///
-    /// `saved_job` names the saved job this run runs (`blit jobs run`).
-    pub async fn start(verb: &str, args: &TransferArgs, saved_job: Option<String>) -> Option<Self> {
+    /// `origin` says what the run runs: a saved job, a retry of a run.
+    pub async fn start(verb: &str, args: &TransferArgs, origin: RunOrigin) -> Option<Self> {
         let run_id = job_log::new_run_id().ok()?;
         let machine = tokio::task::spawn_blocking(this_machine)
             .await
@@ -136,7 +146,7 @@ impl CommandRun {
             Some(machine) => {
                 let (verb, args, run_id) = (verb.to_string(), args.clone(), run_id.clone());
                 tokio::task::spawn_blocking(move || {
-                    begin_record(&machine, &verb, &args, &run_id, saved_job)
+                    begin_record(&machine, &verb, &args, &run_id, origin)
                 })
                 .await
                 .unwrap_or_else(|error| (None, Some(format!("{error}"))))
@@ -448,7 +458,7 @@ fn begin_record(
     verb: &str,
     args: &TransferArgs,
     run_id: &str,
-    saved_job: Option<String>,
+    origin: RunOrigin,
 ) -> (Option<Recorded>, Option<String>) {
     let unkept = |what: String| {
         eprintln!("blit: warning: this run's job is not kept: {what}");
@@ -460,7 +470,11 @@ fn begin_record(
     };
     let store = RunStore::new(runs_dir(&machine.config_dir));
     let mut record = RunRecord::starting(run_id, &spec);
-    record.saved_job = saved_job;
+    record.saved_job = origin.saved_job;
+    if let Some((parent, attempt)) = origin.parent {
+        record.parent = Some(parent);
+        record.attempt = attempt.saturating_add(1);
+    }
     match store.begin(&spec, &record) {
         Ok(live) => (
             Some(Recorded {

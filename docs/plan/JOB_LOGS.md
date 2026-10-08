@@ -545,6 +545,39 @@ Small first, per R1; each slice is one coherent, testable change.
    attempt, parent recorded) re-sending only the failed paths with the
    original JobSpec, through the existing retry-pass machinery; refuse on
    another machine; refuse a detached run until its outcome is known.
+   **Landed 2026-10-08** (commit recorded in `docs/STATE.md`):
+   - *A new run*: its own run ID, the parent's next attempt
+     (`RunRecord.attempt`), the parent's ID (`RunRecord.parent`) and its
+     saved job's name carried over (`run_log::RunOrigin`); run through the
+     same `run_command` as every transfer verb, with the job's own options
+     (its `--retries` passes included).
+   - *What it sends* (agent's calls within the rulings): a copy's or a
+     mirror's retry is a **copy** of exactly the failed paths, through the
+     retry passes' own `retry_only` set — a mirror's deletions ran in its
+     first run, and a mirror limited to a few files could delete the rest
+     under `--delete-scope all`. A **move's** retry is the move again: its
+     compare re-sends only what did not land, and its source is removed
+     only once everything has — sending only the failed files and then
+     removing the whole source would lose whatever changed there since.
+   - *What it refuses*: another machine's job (by machine ID and host); a
+     run still running here, or still waiting on the daemon a `--detach`
+     run went on (asked first, as every `jobs` operation does); a run whose
+     failures are not all known by name — its record's list, completed
+     from this machine's log of the run when the list was cut short — with
+     what to do instead. A run that failed nothing has nothing to retry
+     (exit 0, said). A job file is given as a path (cr-jl3b-1); it must
+     hold its run.
+   - *Tests* (blit-cli `job_retry`, `jobs_lifecycle`): a copy's retry
+     sends only the failed file though the landed one changed at the
+     source, recorded as attempt 2 with its parent, and a second retry has
+     nothing to do; a mirror's retry deletes nothing (`--delete-scope
+     all`, a destination-only file added after); a move's retry finishes
+     the move and removes its source; a job file retries on its own
+     machine only, naming the other; a run still waiting, or whose
+     failures are not all known, is refused; the acceptance case — a
+     detached run's failed file, freed, retried detached again: exactly
+     that file sent, the retry settled ok from its daemon. Nine guard
+     mutations red (each failing at runtime).
 
 ## Review history
 

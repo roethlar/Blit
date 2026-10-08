@@ -355,7 +355,7 @@ stderr:
     );
     // JOB_LOGS jl-3, acceptance "Detached": this machine's record of the
     // run, settled from the daemon, names the file that failed.
-    let job = settled_local_job(&ctx);
+    let job = settled_local_job(&ctx, 1);
     assert_eq!(job["outcome"], "failed", "{job}");
     assert_eq!(job["files_failed"], 1, "{job}");
     assert_eq!(job["failures"][0]["path"], "blocked.txt", "{job}");
@@ -367,6 +367,30 @@ stderr:
         "{job}"
     );
     assert_eq!(job["failures_truncated"], false, "{job}");
+
+    // JOB_LOGS jl-4, acceptance "Detached": with the folder out of the
+    // way, `blit jobs retry` sends exactly the file that failed — not the
+    // one that landed, though it has changed at the source since — and the
+    // retry, detached again, settles from its daemon.
+    fs::remove_dir_all(ctx.module_dst_dir.join("blocked.txt")).expect("free the path");
+    fs::write(src_dir.join("fine.txt"), b"changed since").expect("change the landed file");
+    let run_id = job["run_id"].as_str().expect("run ID").to_string();
+    let retried = ctx.run_blit(&["jobs", "retry", &run_id]);
+    assert!(retried.status.success(), "{}", text(&retried.stderr));
+    let retry = settled_local_job(&ctx, 2);
+    assert_eq!(retry["parent"], run_id.as_str(), "{retry}");
+    assert_eq!(retry["attempt"], 2, "{retry}");
+    assert_eq!(retry["outcome"], "ok", "{retry}");
+    assert_eq!(retry["files_copied"], 1, "{retry}");
+    assert_eq!(
+        fs::read(ctx.module_dst_dir.join("blocked.txt")).expect("landed on retry"),
+        b"never lands"
+    );
+    assert_eq!(
+        fs::read(ctx.module_dst_dir.join("fine.txt")).expect("the landed file"),
+        b"lands",
+        "the retry sent only the failed file"
+    );
 }
 
 #[test]
@@ -552,7 +576,7 @@ fn a_detached_run_is_recorded_here_and_settled_from_its_daemon() {
     .expect("write src file");
 
     let transfer_id = detach_copy(&ctx);
-    let job = settled_local_job(&ctx);
+    let job = settled_local_job(&ctx, 1);
     let run_id = job["run_id"].as_str().expect("run ID").to_string();
     assert_eq!(job["outcome"], "ok", "{job}");
     assert_eq!(job["files_copied"], 1, "{job}");
@@ -579,16 +603,17 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// The one job this machine ran, once `blit jobs list` reports it settled
-/// (a detached run is asked of its daemon until it has ended there).
-fn settled_local_job(ctx: &DelegationContext) -> serde_json::Value {
+/// The newest of the `count` jobs this machine ran, once `blit jobs list`
+/// reports it settled (a detached run is asked of its daemon until it has
+/// ended there).
+fn settled_local_job(ctx: &DelegationContext, count: usize) -> serde_json::Value {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         let listed = ctx.run_blit(&["jobs", "list", "--json"]);
         assert!(listed.status.success(), "{}", text(&listed.stderr));
         let listing: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("JSON");
         let jobs = listing["jobs"].as_array().expect("jobs");
-        assert_eq!(jobs.len(), 1, "{listing}");
+        assert_eq!(jobs.len(), count, "{listing}");
         if jobs[0]["state"] == "finished" {
             return jobs[0].clone();
         }
