@@ -1,0 +1,22 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "2bc595e02bdf2d1703ebf3fad281208e31ee3ecf",
+ "base_sha": "744c370876b14f65cf0a30b93b8c63bb073173b2",
+ "goal": "Make every copy, mirror, or move command a durable job whose single run ID follows every session and participating daemon and whose per-machine logs can be listed and read locally or remotely.",
+ "recommended_approach": "Generate the run ID once at command start, propagate a typed RunTag through every session and delegation request, feed a shared blit-core RunLog adapter from bounded progress lanes, persist crash-safe retained JSONL logs per participant, role, and attempt, and expose symmetric local and daemon jobs commands while explicitly modeling simulated or discarded transfers.",
+ "comparison": "The central architecture is sound: the run-ID guard passed, failed when SessionOpen.run_id forwarding was temporarily removed, and passed again after restoration; all seven existing job-log CLI tests pass. However, the local adapter lacks an execution disposition, so dry-run and null-sink activity can be recorded as real copies. A focused dry-run guard reproduced this at head and passed with a temporary suppression and zero-count fix; the worktree was restored to the reviewed SHA.",
+ "material_changes": [
+  "Add truthful dry-run and null-sink log semantics, including explicit planned/discarded events or suppressed copied events and counts, complete option recording, and regression coverage for both modes."
+ ],
+ "findings": [
+  {
+   "title": "Simulated local transfers are recorded as real copies",
+   "evidence": "crates/blit-cli/src/transfers/local.rs:166 \u2014 every local transfer attaches the audit lane; crates/blit-core/src/run_log.rs:280 maps every FileComplete to FileCopied; crates/blit-cli/src/run_log.rs:253 reports copied_files unchanged, while crates/blit-core/src/remote/transfer/sink.rs:3304 also counts null-sink payloads as written.",
+   "predicted_failure": "A successful `blit copy --dry-run` leaves the destination untouched but `blit jobs log` reports `copied planned.txt` and `summary 1 copied`; `--null` similarly claims copies while discarding writes and is not identified in the recorded options.",
+   "severity": "MEDIUM",
+   "better_approach": "Thread a real/dry-run/null-sink disposition into RunLog, emit compatible planned or discarded events\u2014or suppress copied events and counts\u2014for non-real runs, record the disposition in RunInfo, and test that untouched destinations never produce copied claims."
+  }
+ ]
+}
