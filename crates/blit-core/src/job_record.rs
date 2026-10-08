@@ -331,19 +331,36 @@ pub fn read_job_file(bytes: &[u8]) -> io::Result<JobFile> {
     Ok(file)
 }
 
-/// Whether `name` can name a saved job: 1 to 64 letters, digits, `-`, `_`
-/// or `.`, not starting with `.`, and not shaped like a run ID (32
-/// lowercase hex digits), so a bare word names one job only (review
-/// cr-jl3b-1).
+/// Whether `name` can name a saved job; see [`job_name_problem`].
 pub fn valid_job_name(name: &str) -> bool {
-    let run_id_shaped =
-        name.len() == 32 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-    (1..=64).contains(&name.len())
-        && !name.starts_with('.')
-        && !run_id_shaped
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    job_name_problem(name).is_none()
+}
+
+/// Why `name` cannot name a saved job, in words, or `None` when it can: 1
+/// to 64 letters, digits, `-`, `_` or `.`, not starting with `.`, and not
+/// shaped like a run ID (32 lowercase hex digits), so a bare word names
+/// one job only (reviews cr-jl3b-1, cr-jl3bfix1-1: every refusal says its
+/// own reason).
+pub fn job_name_problem(name: &str) -> Option<&'static str> {
+    if !(1..=64).contains(&name.len()) {
+        return Some("a job name is 1 to 64 characters long");
+    }
+    if name.starts_with('.') {
+        return Some("a job name may not start with `.`");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Some("a job name is made of letters, digits, `-`, `_` and `.`");
+    }
+    if name.len() == 32 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Some(
+            "32 lowercase hex digits are a run ID's shape, kept for run IDs; choose \
+             another name",
+        );
+    }
+    None
 }
 
 /// Whether a `blit jobs` target names a file: it is a path — it holds a
@@ -371,13 +388,10 @@ impl SavedJobs {
     }
 
     fn path(&self, name: &str) -> io::Result<PathBuf> {
-        if !valid_job_name(name) {
+        if let Some(problem) = job_name_problem(name) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "{name:?} cannot name a saved job (1 to 64 letters, digits, `-`, `_` or \
-                     `.`, not starting with `.`)"
-                ),
+                format!("{name:?} cannot name a saved job: {problem}"),
             ));
         }
         Ok(self.dir.join(format!("{name}.json")))
@@ -1329,10 +1343,22 @@ mod tests {
             "{error}"
         );
         assert!(saved.delete("nightly").is_err());
-        let run_id_shaped = "0123456789abcdef0123456789abcdef";
-        for bad in ["", ".hidden", "a/b", "a b", &"x".repeat(65), run_id_shaped] {
-            assert!(saved.save(bad, &job).is_err(), "{bad:?}");
+        // Each refusal names its own reason (review cr-jl3bfix1-1).
+        let long = "x".repeat(65);
+        for (bad, reason) in [
+            ("", "1 to 64 characters"),
+            (long.as_str(), "1 to 64 characters"),
+            (".hidden", "may not start with `.`"),
+            ("a/b", "letters, digits"),
+            ("a b", "letters, digits"),
+            ("0123456789abcdef0123456789abcdef", "kept for run IDs"),
+        ] {
+            let error = saved.save(bad, &job).unwrap_err().to_string();
+            assert!(error.contains(reason), "{bad:?}: {error}");
         }
+        // Upper-case hex, or another length, is a name like any other.
+        assert!(valid_job_name("0123456789ABCDEF0123456789ABCDEF"));
+        assert!(valid_job_name("0123456789abcdef"));
     }
 
     #[test]

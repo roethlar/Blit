@@ -202,7 +202,7 @@ fn a_job_name_must_be_a_plain_name_and_every_sub_verb_has_help() {
     );
     assert!(!bad.status.success());
     assert!(
-        text(&bad.stderr).contains("a job name is 1 to 64 letters"),
+        text(&bad.stderr).contains("a job name may not start with `.`"),
         "{}",
         text(&bad.stderr)
     );
@@ -277,4 +277,10 @@ fn a_saved_jobs_name_means_the_saved_job_wherever_it_is_typed() {
         ],
     );
     assert!(!shaped.status.success());
+    // ...and the refusal says why (review cr-jl3bfix1-1).
+    assert!(
+        text(&shaped.stderr).contains("a run ID's shape, kept for run IDs"),
+        "{}",
+        text(&shaped.stderr)
+    );
 }

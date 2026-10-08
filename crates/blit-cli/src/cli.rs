@@ -163,10 +163,9 @@ pub struct JobsDeleteArgs {
 
 /// A saved job's name, checked as the command line reads it.
 fn parse_job_name(name: &str) -> Result<String, String> {
-    if blit_core::job_record::valid_job_name(name) {
-        Ok(name.to_string())
-    } else {
-        Err("a job name is 1 to 64 letters, digits, `-`, `_` or `.`, not starting with `.`".into())
+    match blit_core::job_record::job_name_problem(name) {
+        None => Ok(name.to_string()),
+        Some(problem) => Err(problem.to_string()),
     }
 }
 
