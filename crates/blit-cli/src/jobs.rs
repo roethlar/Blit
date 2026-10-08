@@ -315,20 +315,31 @@ fn failed_paths(config_dir: &Path, record: &RunRecord) -> Result<HashSet<PathBuf
             || (known.len() as u64) < record.files_failed
     };
     if short(&known) {
+        // Review cr-jl4-3: the run's terminal state, read from its log in
+        // order — a file that failed, and was not landed by a later pass —
+        // not every failure the run ever met.
         let logs = config_dir.join("jobs").join("logs");
         for log in job_log::logs_for_run(&logs, &record.run_id, None).unwrap_or_default() {
             let Ok(lines) = job_log::open_log(&log.path) else {
                 continue;
             };
+            let mut still_failed: HashSet<(String, Option<String>)> = HashSet::new();
             for line in lines.flatten() {
-                if let LogLine::Event(job_log::Event {
-                    body: job_log::EventBody::FileFailed { path, raw, .. },
-                    ..
-                }) = line
-                {
-                    known.insert((path, raw));
+                let LogLine::Event(event) = line else {
+                    continue;
+                };
+                match event.body {
+                    job_log::EventBody::FileFailed { path, raw, .. } => {
+                        still_failed.insert((path, raw));
+                    }
+                    job_log::EventBody::FileCopied { path, raw, .. }
+                    | job_log::EventBody::FileSent { path, raw } => {
+                        still_failed.remove(&(path, raw));
+                    }
+                    _ => {}
                 }
             }
+            known.extend(still_failed);
         }
         if (known.len() as u64) < record.files_failed {
             eyre::bail!(

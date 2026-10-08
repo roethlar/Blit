@@ -271,3 +271,77 @@ fn a_run_whose_failures_are_not_all_known_is_not_retried() {
         text(&refused.stderr)
     );
 }
+
+/// Review cr-jl4-3: when a record's failure list was cut short, its log
+/// completes it with the run's terminal state — a file a later retry pass
+/// landed is not retried again.
+#[test]
+fn a_retry_skips_what_a_later_pass_already_landed() {
+    use std::process::Stdio;
+    use std::time::Instant;
+    let ctx = TestContext::new();
+    let src = ctx.workspace.join("src");
+    let dst = ctx.workspace.join("dst");
+    fs::create_dir_all(&src).unwrap();
+    for name in ["freed.txt", "stuck.txt"] {
+        fs::write(src.join(name), name.as_bytes()).unwrap();
+        fs::create_dir_all(dst.join(name)).unwrap();
+    }
+    let counters = ctx.workspace.join("counters.txt");
+    // One retry pass: `freed.txt` is freed during its wait and lands on it;
+    // `stuck.txt` stays failed.
+    let child = Command::new(cli_bin())
+        .current_dir(&ctx.workspace)
+        .arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("--diagnostics-counter-file")
+        .arg(&counters)
+        .args(["copy", "--retries", "1", "--retry-wait", "4"])
+        .arg(arg(&src))
+        .arg(arg(&dst))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    while !fs::read_to_string(&counters)
+        .unwrap_or_default()
+        .contains("retry_wait_seconds")
+    {
+        assert!(start.elapsed() < Duration::from_secs(60), "no retry wait");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    fs::remove_dir_all(dst.join("freed.txt")).unwrap();
+    let first = child.wait_with_output().unwrap();
+    assert_eq!(
+        first.status.code(),
+        Some(EXIT_PARTIAL_FAILURE),
+        "{}",
+        text(&first.stderr)
+    );
+    assert_eq!(fs::read(dst.join("freed.txt")).unwrap(), b"freed.txt");
+
+    // As a record whose list was cut short: the log must complete it.
+    let job = &jobs(&ctx)[0];
+    let run_id = job["run_id"].as_str().unwrap().to_string();
+    let record_file = PathBuf::from(job["record_file"].as_str().unwrap());
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_file).unwrap()).unwrap();
+    assert_eq!(record["files_failed"], 1, "{record}");
+    record["failures"] = serde_json::json!([]);
+    record["failures_truncated"] = true.into();
+    fs::write(&record_file, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    // `freed.txt` changes at the source; a retry must not send it again.
+    fs::write(src.join("freed.txt"), b"changed since").unwrap();
+    fs::remove_dir_all(dst.join("stuck.txt")).unwrap();
+    let retried = blit(&ctx, &["jobs", "retry", &run_id]);
+    assert!(retried.status.success(), "{}", text(&retried.stderr));
+    assert_eq!(fs::read(dst.join("stuck.txt")).unwrap(), b"stuck.txt");
+    assert_eq!(
+        fs::read(dst.join("freed.txt")).unwrap(),
+        b"freed.txt",
+        "the file a pass landed was not retried"
+    );
+    assert_eq!(jobs(&ctx)[0]["files_copied"], 1);
+}
