@@ -1219,11 +1219,18 @@ pub fn decode(reader: impl Read + Send + 'static) -> io::Result<Box<dyn BufRead 
 }
 
 /// The lines of a log; see [`open_log`].
+///
+/// The first line is the log's `run-start` header; a log that is not a blit
+/// job log, or is a newer version than this build reads, yields an
+/// `InvalidData` error instead of being misread (review cr-jl1a-2).
+/// [`decode`] stays the way to see any log's lines as stored.
 pub struct LogLines {
     reader: Box<dyn BufRead + Send>,
     buf: Vec<u8>,
     line: u64,
     done: bool,
+    /// Whether the first line has been checked as the header.
+    checked: bool,
 }
 
 impl LogLines {
@@ -1234,7 +1241,38 @@ impl LogLines {
             buf: Vec::new(),
             line: 0,
             done: false,
+            checked: false,
         }
+    }
+}
+
+/// Check a log's first line, when it is the `run-start` header, for the
+/// format and a version this build reads. Read as untyped JSON, so a newer
+/// header's fields are never forced into this version's shape. A log whose
+/// first line is not a header (its head was damaged) reads as the current
+/// version.
+fn check_header(line: &[u8]) -> io::Result<()> {
+    use serde_json::Value;
+    let Ok(Value::Object(header)) = serde_json::from_slice::<Value>(line) else {
+        return Ok(());
+    };
+    if header.get("kind").and_then(Value::as_str) != Some("run-start") {
+        return Ok(());
+    }
+    let invalid = |message: String| Err(io::Error::new(io::ErrorKind::InvalidData, message));
+    let format = header.get("format").and_then(Value::as_str).unwrap_or("");
+    if format != FORMAT {
+        return invalid(format!("not a blit job log (format {format:?})"));
+    }
+    match header.get("version").and_then(Value::as_u64) {
+        // Every version this build knows reads as the current one; when
+        // VERSION moves past 1, an older version's migration goes here.
+        Some(version) if version <= u64::from(VERSION) => Ok(()),
+        Some(version) => invalid(format!(
+            "this job log is version {version}; this blit reads versions up to {VERSION} \
+             (`blit jobs log --json` shows it as stored)"
+        )),
+        None => invalid("the job log's run-start names no version".into()),
     }
 }
 
@@ -1252,6 +1290,13 @@ impl Iterator for LogLines {
                     let text = self.buf.trim_ascii();
                     if text.is_empty() {
                         continue;
+                    }
+                    if !self.checked {
+                        self.checked = true;
+                        if let Err(error) = check_header(text) {
+                            self.done = true;
+                            return Some(Err(error));
+                        }
                     }
                     return Some(Ok(match serde_json::from_slice::<Event>(text) {
                         Ok(event) => LogLine::Event(event),
@@ -1488,6 +1533,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(extra.body, EventBody::FileDeleted { path: "p".into() });
+    }
+
+    #[test]
+    fn a_newer_or_foreign_log_is_refused_not_misread() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let read_all = |header: &str| {
+            fs::write(
+                &path,
+                format!(
+                    "{header}\n{}\n",
+                    serde_json::to_string(&event(1, copied("a"))).unwrap()
+                ),
+            )
+            .unwrap();
+            open_log(&path)
+                .unwrap()
+                .collect::<io::Result<Vec<LogLine>>>()
+        };
+        let newer = read_all(r#"{"ts_ms":1,"seq":0,"kind":"run-start","format":"blit-job-log","version":2,"shape":"new"}"#)
+            .unwrap_err();
+        assert_eq!(newer.kind(), io::ErrorKind::InvalidData);
+        assert!(newer.to_string().contains("version 2"), "{newer}");
+        let foreign =
+            read_all(r#"{"ts_ms":1,"seq":0,"kind":"run-start","format":"other","version":1}"#)
+                .unwrap_err();
+        assert!(
+            foreign.to_string().contains("not a blit job log"),
+            "{foreign}"
+        );
+        // The current version, and a log whose header was lost, read.
+        let current = serde_json::to_string(&Event {
+            ts_ms: 1,
+            seq: 0,
+            body: EventBody::RunStart(Box::new(RunStart {
+                format: FORMAT.into(),
+                version: VERSION,
+                run_id: "r1".into(),
+                participant: "m1".into(),
+                role: Role::Source,
+                attempt: 1,
+                host: String::new(),
+                build: String::new(),
+                run: info(),
+            })),
+        })
+        .unwrap();
+        assert_eq!(read_all(&current).unwrap().len(), 2);
+        assert_eq!(read_all(r#"{"ts_ms":1,"seq":0,"ki"#).unwrap().len(), 2);
     }
 
     #[test]

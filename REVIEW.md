@@ -376,7 +376,7 @@ Owner goal (2026-10-07): "complete all parts. review with codex each slice. comm
 
 Finding rows: `[ ]` open → `[x]` fixed with its commit, one finding per commit (`Fix <id>: …`).
 
-- [ ] cr-jl1a-1 · [ ] cr-jl1a-2 · [ ] cr-jl1b-1 · [ ] cr-jl1b-2 · [ ] cr-jl1c-1
+- [ ] cr-jl1a-1 · [x] cr-jl1a-2 (fix commit below) · [ ] cr-jl1b-1 · [ ] cr-jl1b-2 · [ ] cr-jl1c-1
 
 ## Reconciled legacy finding groups
 
