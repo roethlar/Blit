@@ -1,0 +1,12 @@
+{
+ "verdict": "best_approach",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "744c370876b14f65cf0a30b93b8c63bb073173b2",
+ "base_sha": "2c844375e931beec137ba54cc43d1073a2cd6d98",
+ "goal": "Make job-log reading, crash recovery, and filename rendering trustworthy by rejecting malformed or unsupported headers, preserving event order after an empty-log crash, and preventing raw/UTF-8 name collisions.",
+ "recommended_approach": "Fully deserialize headers for each explicitly supported schema version, reserve sequence zero for a synthesized recovery header, and use disjoint raw and UTF-8 display prefixes with focused regression tests.",
+ "comparison": "The change follows that approach directly and narrowly: it validates the complete version-1 header, assigns the recovered run-end sequence one, and makes filename rendering injective. Reintroducing permissive header acceptance made the focused guard fail; restoring the head made it pass, and the recovery, core rendering, CLI identity, and formatting checks also passed.",
+ "material_changes": [],
+ "findings": []
+}
