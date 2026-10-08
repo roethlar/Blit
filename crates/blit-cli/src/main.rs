@@ -17,7 +17,7 @@ mod style;
 mod transfers;
 
 use crate::check::run_check;
-use crate::cli::{Cli, Commands, DiagnosticsCommand};
+use crate::cli::{Cli, Commands, DiagnosticsCommand, JobsCommand, TransferArgs};
 use crate::context::AppContext;
 use crate::diagnostics::{run_diagnostics_dump, run_diagnostics_perf};
 use crate::jobs::run_jobs;
@@ -30,6 +30,8 @@ use blit_core::transfers::dispatch::TransferKind;
 use blit_core::transfers::retry::run_with_retries;
 use clap::Parser;
 use eyre::Result;
+use std::future::Future;
+use std::pin::Pin;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -89,50 +91,14 @@ async fn run_cli(lifecycle_trace: &TransferLifecycleTrace) -> Result<ExitCode> {
         // win-1: `run_with_retries` boxes each attempt, and `run_transfer`
         // / `run_move` box their route dispatch, so this frame holds
         // pointers rather than sessions.
-        Commands::Copy(mut args) => {
-            // JOB_LOGS jl-2: one run per command, shared by every pass and
-            // rerun, with its own log.
-            args.run = crate::run_log::CommandRun::start("copy", &args).await;
-            let run = args.run.clone();
-            let wait = Duration::from_secs(args.wait);
-            let result = run_with_retries(args.retry, wait, |_n| {
-                run_transfer(&ctx, &args, TransferKind::Copy, lifecycle_trace)
-            })
-            .await;
-            if let Some(run) = &run {
-                run.finish(&result).await;
-            }
-            result?
+        Commands::Copy(args) => {
+            Box::pin(run_command(&ctx, Verb::Copy, args, lifecycle_trace, None)).await?
         }
-        Commands::Mirror(mut args) => {
-            // JOB_LOGS jl-2: one run per command, shared by every pass and
-            // rerun, with its own log.
-            args.run = crate::run_log::CommandRun::start("mirror", &args).await;
-            let run = args.run.clone();
-            let wait = Duration::from_secs(args.wait);
-            let result = run_with_retries(args.retry, wait, |_n| {
-                run_transfer(&ctx, &args, TransferKind::Mirror, lifecycle_trace)
-            })
-            .await;
-            if let Some(run) = &run {
-                run.finish(&result).await;
-            }
-            result?
+        Commands::Mirror(args) => {
+            Box::pin(run_command(&ctx, Verb::Mirror, args, lifecycle_trace, None)).await?
         }
-        Commands::Move(mut args) => {
-            // JOB_LOGS jl-2: one run per command, shared by every pass and
-            // rerun, with its own log.
-            args.run = crate::run_log::CommandRun::start("move", &args).await;
-            let run = args.run.clone();
-            let wait = Duration::from_secs(args.wait);
-            let result = run_with_retries(args.retry, wait, |_n| {
-                run_move(&ctx, &args, lifecycle_trace)
-            })
-            .await;
-            if let Some(run) = &run {
-                run.finish(&result).await;
-            }
-            result?
+        Commands::Move(args) => {
+            Box::pin(run_command(&ctx, Verb::Move, args, lifecycle_trace, None)).await?
         }
         Commands::Scan(args) => {
             scan::run_scan(args).await?;
@@ -190,10 +156,114 @@ async fn run_cli(lifecycle_trace: &TransferLifecycleTrace) -> Result<ExitCode> {
         // always exits 0. The runner returns the right
         // `ExitCode` for both; propagate it directly like
         // `check`.
+        // JOB_LOGS jl-3b: a saved job runs as the command it was.
+        Commands::Jobs {
+            command: JobsCommand::Run(args),
+        } => {
+            let job = jobs::job_to_run(&args.job).await?;
+            let verb = Verb::from_word(&job.verb)
+                .ok_or_else(|| eyre::eyre!("a job of an unknown kind ({})", job.verb))?;
+            let jobs::JobToRun {
+                args, saved, _list, ..
+            } = job;
+            Box::pin(run_command(&ctx, verb, args, lifecycle_trace, saved)).await?
+        }
         Commands::Jobs { command } => run_jobs(command).await?,
     };
 
     Ok(exit_code)
+}
+
+/// The transfer verbs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verb {
+    Copy,
+    Mirror,
+    Move,
+}
+
+impl Verb {
+    fn word(self) -> &'static str {
+        match self {
+            Verb::Copy => "copy",
+            Verb::Mirror => "mirror",
+            Verb::Move => "move",
+        }
+    }
+
+    fn from_word(word: &str) -> Option<Self> {
+        [Verb::Copy, Verb::Mirror, Verb::Move]
+            .into_iter()
+            .find(|verb| verb.word() == word)
+    }
+}
+
+/// One copy, mirror or move command — or a saved job run again — as one run
+/// (JOB_LOGS jl-2, jl-3): one ID, its own log and job record, around every
+/// pass and `--retry` rerun; `--save` keeps the job first, `--export`
+/// writes it, with how the run went, after.
+///
+/// pfc-5: the status carries the destination's per-file failure verdict —
+/// 0 when every file landed, 2 when the operation completed with files
+/// that did not. win-1: `run_with_retries` boxes each attempt, and
+/// `run_transfer` / `run_move` box their route dispatch, so this frame
+/// holds pointers rather than sessions.
+async fn run_command(
+    ctx: &AppContext,
+    verb: Verb,
+    mut args: TransferArgs,
+    lifecycle_trace: &TransferLifecycleTrace,
+    saved_job: Option<String>,
+) -> Result<ExitCode> {
+    args.run = crate::run_log::CommandRun::start(verb.word(), &args, saved_job).await;
+    let run = args.run.clone();
+    if let Some(name) = &args.save {
+        let run = run.as_ref().ok_or_else(|| {
+            eyre::eyre!("this command cannot be saved as a job: it has no run ID")
+        })?;
+        if let Err(error) = run.save_as(name, args.json).await {
+            run.finish(&Err(eyre::eyre!("{error:#}"))).await;
+            return Err(error);
+        }
+    }
+    let wait = Duration::from_secs(args.wait);
+    let result = run_with_retries(
+        args.retry,
+        wait,
+        |_n| -> Pin<Box<dyn Future<Output = Result<ExitCode>> + '_>> {
+            match verb {
+                Verb::Copy => Box::pin(run_transfer(
+                    ctx,
+                    &args,
+                    TransferKind::Copy,
+                    lifecycle_trace,
+                )),
+                Verb::Mirror => Box::pin(run_transfer(
+                    ctx,
+                    &args,
+                    TransferKind::Mirror,
+                    lifecycle_trace,
+                )),
+                Verb::Move => Box::pin(run_move(ctx, &args, lifecycle_trace)),
+            }
+        },
+    )
+    .await;
+    if let Some(run) = &run {
+        run.finish(&result).await;
+        if let Some(file) = &args.export {
+            if let Err(error) = run.export_to(file, args.json).await {
+                // The transfer's own error comes first; this one is said.
+                match &result {
+                    Ok(_) => return Err(error),
+                    Err(_) => eprintln!("blit: {error:#}"),
+                }
+            }
+        }
+    } else if args.export.is_some() {
+        eyre::bail!("this command's job cannot be exported: it has no run ID");
+    }
+    result
 }
 
 fn lifecycle_result_outcome<T>(result: &Result<T>) -> TransferLifecycleOutcome {

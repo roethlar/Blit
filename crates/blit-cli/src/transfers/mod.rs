@@ -1370,6 +1370,8 @@ mod tests {
             max_age: None,
             delete_scope: "subset".into(),
             run: None,
+            save: None,
+            export: None,
         };
 
         runtime().block_on(local::run_local_transfer_quiet(
@@ -1433,6 +1435,8 @@ mod tests {
             max_age: None,
             delete_scope: "subset".into(),
             run: None,
+            save: None,
+            export: None,
         };
 
         runtime().block_on(local::run_local_transfer_quiet(
@@ -1502,6 +1506,8 @@ mod tests {
             max_age: None,
             delete_scope: "subset".into(),
             run: None,
+            save: None,
+            export: None,
         }
     }
 

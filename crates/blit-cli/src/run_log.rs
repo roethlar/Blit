@@ -10,7 +10,8 @@ use blit_core::config;
 use blit_core::endpoints::{parse_transfer_endpoint, Endpoint};
 use blit_core::job_log::{self, EventBody, Outcome, Role, RunInfo, RunTag};
 use blit_core::job_record::{
-    self, Failure, JobSpec, LiveRun, RunRecord, RunState, RunStore, SpecEndpoint, SpecOptions,
+    self, Failure, JobFile, JobSpec, LiveRun, RunRecord, RunState, RunStore, SavedJobs,
+    SpecEndpoint, SpecOptions,
 };
 use blit_core::remote::transfer::RemoteTransferProgress;
 use blit_core::remote::RemotePath;
@@ -36,6 +37,11 @@ struct Inner {
     ending: Mutex<Option<Ending>>,
     /// The run's job record, when one could be kept.
     record: Mutex<Option<Recorded>>,
+    /// Why it could not, when it could not.
+    unkept: Option<String>,
+    /// The per-user folder and the run store, for `--save`/`--export`.
+    config_dir: Option<PathBuf>,
+    store: Option<RunStore>,
     /// The run's final account, for its record.
     totals: Mutex<Option<RunTotals>>,
     source_removed: AtomicBool,
@@ -56,6 +62,7 @@ enum Ending {
 /// A run's record in the store, its command going.
 struct Recorded {
     store: RunStore,
+    spec: JobSpec,
     record: RunRecord,
     keep: usize,
     /// Held while the command goes.
@@ -82,7 +89,9 @@ impl CommandRun {
     /// there. `None` only when the system cannot make a random ID; a log or
     /// record that cannot be kept is skipped with a warning — neither ever
     /// stops a command.
-    pub async fn start(verb: &str, args: &TransferArgs) -> Option<Self> {
+    ///
+    /// `saved_job` names the saved job this run runs (`blit jobs run`).
+    pub async fn start(verb: &str, args: &TransferArgs, saved_job: Option<String>) -> Option<Self> {
         let run_id = job_log::new_run_id().ok()?;
         let machine = tokio::task::spawn_blocking(this_machine)
             .await
@@ -119,15 +128,23 @@ impl CommandRun {
                 attempt: 1,
             }),
         );
-        let recorded = match machine {
+        let config_dir = machine.as_ref().map(|machine| machine.config_dir.clone());
+        let store = config_dir
+            .as_deref()
+            .map(|dir| RunStore::new(runs_dir(dir)));
+        let (recorded, unkept) = match machine {
             Some(machine) => {
                 let (verb, args, run_id) = (verb.to_string(), args.clone(), run_id.clone());
-                tokio::task::spawn_blocking(move || begin_record(&machine, &verb, &args, &run_id))
-                    .await
-                    .ok()
-                    .flatten()
+                tokio::task::spawn_blocking(move || {
+                    begin_record(&machine, &verb, &args, &run_id, saved_job)
+                })
+                .await
+                .unwrap_or_else(|error| (None, Some(format!("{error}"))))
             }
-            None => None,
+            None => (
+                None,
+                Some("this machine's folder or ID cannot be had".into()),
+            ),
         };
         if args.verbose && !args.json {
             eprintln!("blit: job {run_id} (`blit jobs log {run_id}` shows its log)");
@@ -139,6 +156,9 @@ impl CommandRun {
                 log,
                 ending: Mutex::new(None),
                 record: Mutex::new(recorded),
+                unkept,
+                config_dir,
+                store,
                 totals: Mutex::new(None),
                 source_removed: AtomicBool::new(false),
                 disposition,
@@ -162,11 +182,81 @@ impl CommandRun {
                 sessions: AtomicU32::new(0),
                 ending: Mutex::new(None),
                 record: Mutex::new(None),
+                unkept: None,
+                config_dir: None,
+                store: None,
                 totals: Mutex::new(None),
                 source_removed: AtomicBool::new(false),
                 disposition: Disposition::Written,
             }),
         }
+    }
+
+    /// `--save NAME` (JOB_LOGS jl-3b): keep this command's job as the
+    /// saved job `name`, before it runs. An error when the job cannot be
+    /// kept — the person asked for it.
+    pub async fn save_as(&self, name: &str, quiet: bool) -> eyre::Result<()> {
+        let spec = {
+            let mut record = lock(&self.inner.record);
+            let recorded = record.as_mut().ok_or_else(|| {
+                eyre::eyre!(
+                    "this command cannot be saved as a job: {}",
+                    self.inner
+                        .unkept
+                        .as_deref()
+                        .unwrap_or("its job is not kept")
+                )
+            })?;
+            recorded.record.saved_job = Some(name.to_string());
+            recorded.spec.clone()
+        };
+        let config_dir = self
+            .inner
+            .config_dir
+            .clone()
+            .ok_or_else(|| eyre::eyre!("this machine's folder cannot be had"))?;
+        let name_owned = name.to_string();
+        let replaced = tokio::task::spawn_blocking(move || {
+            SavedJobs::new(saved_dir(&config_dir)).save(&name_owned, &spec)
+        })
+        .await??;
+        if !quiet {
+            let note = if replaced {
+                " (replacing the job saved under that name before)"
+            } else {
+                ""
+            };
+            eprintln!("blit: saved job {name}{note}; `blit jobs run {name}` runs it again");
+        }
+        Ok(())
+    }
+
+    /// `--export FILE` (JOB_LOGS jl-3b): write this command's job, and how
+    /// its run went, to `file` — after [`finish`](Self::finish).
+    pub async fn export_to(&self, file: &Path, quiet: bool) -> eyre::Result<()> {
+        let store = self.inner.store.clone().ok_or_else(|| {
+            eyre::eyre!(
+                "this command's job cannot be exported: {}",
+                self.inner
+                    .unkept
+                    .as_deref()
+                    .unwrap_or("its job is not kept")
+            )
+        })?;
+        let (run_id, file_owned) = (self.inner.run_id.clone(), file.to_path_buf());
+        tokio::task::spawn_blocking(move || -> eyre::Result<()> {
+            let (spec, record) = store
+                .load(&run_id)
+                .map_err(|error| eyre::eyre!("this command's job cannot be exported: {error}"))?;
+            let job = JobFile::new(record.saved_job.clone(), spec, Some(record));
+            job_record::write_document(&file_owned, &job)
+                .map_err(|error| eyre::eyre!("writing {}: {error}", file_owned.display()))
+        })
+        .await??;
+        if !quiet {
+            eprintln!("blit: wrote this job to {}", file.display());
+        }
+        Ok(())
     }
 
     /// The tag for the next session this run opens: its number counts every
@@ -345,35 +435,44 @@ pub fn runs_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("jobs").join("runs")
 }
 
-/// Write the run's spec and its `running` record. `None`, with a warning,
-/// when either cannot be kept — the command runs regardless. Blocking.
+/// This machine's saved jobs: `<per-user folder>/jobs/saved`.
+pub fn saved_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("jobs").join("saved")
+}
+
+/// Write the run's spec and its `running` record. `None`, with a warning
+/// and why, when either cannot be kept — the command runs regardless.
+/// Blocking.
 fn begin_record(
     machine: &Machine,
     verb: &str,
     args: &TransferArgs,
     run_id: &str,
-) -> Option<Recorded> {
-    let warn = |what: String| eprintln!("blit: warning: this run's job is not kept: {what}");
+    saved_job: Option<String>,
+) -> (Option<Recorded>, Option<String>) {
+    let unkept = |what: String| {
+        eprintln!("blit: warning: this run's job is not kept: {what}");
+        (None, Some(what))
+    };
     let spec = match job_spec(verb, args, &machine.id) {
         Ok(spec) => spec,
-        Err(what) => {
-            warn(what);
-            return None;
-        }
+        Err(what) => return unkept(what),
     };
     let store = RunStore::new(runs_dir(&machine.config_dir));
-    let record = RunRecord::starting(run_id, &spec);
+    let mut record = RunRecord::starting(run_id, &spec);
+    record.saved_job = saved_job;
     match store.begin(&spec, &record) {
-        Ok(live) => Some(Recorded {
-            store,
-            record,
-            keep: machine.keep,
-            _live: live,
-        }),
-        Err(error) => {
-            warn(format!("{error}"));
-            None
-        }
+        Ok(live) => (
+            Some(Recorded {
+                store,
+                spec,
+                record,
+                keep: machine.keep,
+                _live: live,
+            }),
+            None,
+        ),
+        Err(error) => unkept(format!("{error}")),
     }
 }
 
@@ -681,6 +780,7 @@ mod tests {
         let live = store.begin(&spec, &record).unwrap();
         let recorded = Recorded {
             store: store.clone(),
+            spec,
             record,
             keep: 50,
             _live: live,

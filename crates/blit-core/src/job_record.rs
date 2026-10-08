@@ -22,6 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const SPEC_FORMAT: &str = "blit-job-spec";
 pub const RECORD_FORMAT: &str = "blit-run-record";
+pub const FILE_FORMAT: &str = "blit-job";
 /// The version this build writes, and the newest it reads.
 pub const VERSION: u32 = 1;
 
@@ -44,6 +45,10 @@ pub struct JobSpec {
     pub version: u32,
     /// The machine the job belongs to; only it runs the job again (R4).
     pub machine: String,
+    /// That machine's host name when the job was made — for people; the
+    /// machine ID is the identity (host names change).
+    #[serde(default)]
+    pub host: String,
     pub created_ms: u64,
     /// `copy`, `mirror` or `move`.
     pub verb: String,
@@ -253,6 +258,7 @@ impl JobSpec {
             format: SPEC_FORMAT.into(),
             version: VERSION,
             machine: machine.into(),
+            host: host_name(),
             created_ms: now_ms(),
             verb: verb.into(),
             cwd,
@@ -261,6 +267,167 @@ impl JobSpec {
             options,
             files_from,
         }
+    }
+}
+
+/// This machine's host name, or empty when it has none to give.
+pub fn host_name() -> String {
+    hostname::get()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// A job as a file of its own (jl-3b): a saved job (`--save`, `blit jobs
+/// save`) or an exported one (`--export`, `blit jobs export`) — what to
+/// run, under a name when it has one, and the run it was taken from when
+/// it was a run's (which `blit jobs retry` needs).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobFile {
+    pub format: String,
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub spec: JobSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunRecord>,
+}
+
+impl JobFile {
+    pub fn new(name: Option<String>, spec: JobSpec, run: Option<RunRecord>) -> Self {
+        Self {
+            format: FILE_FORMAT.into(),
+            version: VERSION,
+            name,
+            spec,
+            run,
+        }
+    }
+}
+
+/// A job file from a document's bytes: refused unless it and the documents
+/// inside it are formats and versions this build reads.
+pub fn read_job_file(bytes: &[u8]) -> io::Result<JobFile> {
+    let file: JobFile = read_versioned(bytes, FILE_FORMAT)?;
+    let inner = |format: &str, version: u32, expected: &str| {
+        if format != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("its {expected} is not one (format {format:?})"),
+            ));
+        }
+        if version != VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("its {expected} is version {version}; this blit reads {VERSION}"),
+            ));
+        }
+        Ok(())
+    };
+    inner(&file.spec.format, file.spec.version, SPEC_FORMAT)?;
+    if let Some(run) = &file.run {
+        inner(&run.format, run.version, RECORD_FORMAT)?;
+    }
+    Ok(file)
+}
+
+/// Whether `name` can name a saved job: 1 to 64 letters, digits, `-`, `_`
+/// or `.`, not starting with `.`.
+pub fn valid_job_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// A machine's saved jobs: `<per-user folder>/jobs/saved/<name>.json`, kept
+/// until deleted (never pruned).
+#[derive(Clone, Debug)]
+pub struct SavedJobs {
+    dir: PathBuf,
+}
+
+impl SavedJobs {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn path(&self, name: &str) -> io::Result<PathBuf> {
+        if !valid_job_name(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{name:?} cannot name a saved job (1 to 64 letters, digits, `-`, `_` or \
+                     `.`, not starting with `.`)"
+                ),
+            ));
+        }
+        Ok(self.dir.join(format!("{name}.json")))
+    }
+
+    /// Keep `spec` as the saved job `name`, replacing one of that name;
+    /// returns whether one was replaced.
+    pub fn save(&self, name: &str, spec: &JobSpec) -> io::Result<bool> {
+        let path = self.path(name)?;
+        fs::create_dir_all(&self.dir)?;
+        let replaced = path.exists();
+        write_document(&path, &JobFile::new(Some(name.into()), spec.clone(), None))?;
+        Ok(replaced)
+    }
+
+    /// The saved job `name`.
+    pub fn load(&self, name: &str) -> io::Result<JobFile> {
+        let path = self.path(name)?;
+        match fs::read(&path) {
+            Ok(bytes) => read_job_file(&bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no saved job named {name}"),
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Remove the saved job `name`.
+    pub fn delete(&self, name: &str) -> io::Result<()> {
+        match fs::remove_file(self.path(name)?) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no saved job named {name}"),
+            )),
+            other => other,
+        }
+    }
+
+    /// Every saved job, by name; one this build cannot read is listed with
+    /// why. A missing folder holds none.
+    pub fn list(&self) -> io::Result<Vec<(String, io::Result<JobFile>)>> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut jobs: Vec<(String, io::Result<JobFile>)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry
+                    .file_name()
+                    .to_str()?
+                    .strip_suffix(".json")?
+                    .to_string();
+                valid_job_name(&name).then(|| {
+                    let job = fs::read(entry.path()).and_then(|bytes| read_job_file(&bytes));
+                    (name, job)
+                })
+            })
+            .collect();
+        jobs.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(jobs)
     }
 }
 
@@ -1129,6 +1296,43 @@ mod tests {
             torn: true,
         });
         assert!(!torn.complete());
+    }
+
+    #[test]
+    fn saved_jobs_keep_a_spec_by_name_until_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = SavedJobs::new(dir.path().join("saved"));
+        let job = spec();
+        assert!(!saved.save("nightly", &job).unwrap());
+        assert!(saved.save("nightly", &job).unwrap(), "replaced");
+        let file = saved.load("nightly").unwrap();
+        assert_eq!((file.name.as_deref(), &file.spec), (Some("nightly"), &job));
+        let listed: Vec<String> = saved.list().unwrap().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(listed, ["nightly"]);
+        saved.delete("nightly").unwrap();
+        let error = saved.load("nightly").unwrap_err();
+        assert!(
+            error.to_string().contains("no saved job named nightly"),
+            "{error}"
+        );
+        assert!(saved.delete("nightly").is_err());
+        for bad in ["", ".hidden", "a/b", "a b", &"x".repeat(65)] {
+            assert!(saved.save(bad, &job).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_job_file_refuses_documents_inside_it_it_cannot_read() {
+        let file = JobFile::new(None, spec(), None);
+        let bytes = serde_json::to_vec(&file).unwrap();
+        assert_eq!(read_job_file(&bytes).unwrap(), file);
+        let mut value = serde_json::to_value(&file).unwrap();
+        value["spec"]["version"] = 2.into();
+        let error = read_job_file(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("version 2"), "{error}");
+        let mut value = serde_json::to_value(&file).unwrap();
+        value["format"] = "blit-job-spec".into();
+        assert!(read_job_file(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]

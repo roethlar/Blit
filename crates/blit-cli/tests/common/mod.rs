@@ -616,21 +616,38 @@ impl TestContext {
 pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::process::Output {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("spawn command");
+    // Both pipes are drained while the command runs: one whose output
+    // outgrows the pipe buffer (`blit completions shell bash` passed 64 KiB
+    // with JOB_LOGS jl-3b's sub-verbs) would otherwise block writing and
+    // never exit.
+    fn drain<R: std::io::Read + Send + 'static>(
+        pipe: Option<R>,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
 
     match child.wait_timeout(timeout).expect("wait for process") {
-        Some(_status) => child
-            .wait_with_output()
-            .expect("collect command output after completion"),
+        Some(status) => std::process::Output {
+            status,
+            stdout: stdout.join().expect("read stdout"),
+            stderr: stderr.join().expect("read stderr"),
+        },
         None => {
             let _ = child.kill();
-            let output = child
-                .wait_with_output()
-                .expect("collect output after killing command");
+            let _ = child.wait();
             panic!(
                 "command timed out after {:?}\nstdout:\n{}\nstderr:\n{}",
                 timeout,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                String::from_utf8_lossy(&stdout.join().unwrap_or_default()),
+                String::from_utf8_lossy(&stderr.join().unwrap_or_default())
             );
         }
     }

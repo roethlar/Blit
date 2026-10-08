@@ -504,6 +504,38 @@ Small first, per R1; each slice is one coherent, testable change.
      made, through the summaries (contract 7: `FileFailure.raw_relative_path`)
      into the log and the record, so two names that collapse to one text
      stay two files (cr-jl3afix1-1).
+   **jl-3b landed 2026-10-08** (commit recorded in `docs/STATE.md`):
+   - *One file format for a job on its own*, `JobFile` (`blit-job` v1): a
+     spec, under a name when it has one, with the run it came from when
+     it was a run's (what `jobs retry <file>` needs); refused unless it and
+     the documents inside it are versions this build reads. Saved jobs
+     are `<per-user folder>/jobs/saved/<name>.json`, kept until deleted,
+     never pruned; a name is 1–64 letters, digits, `-`, `_`, `.`, not
+     starting with `.` (checked as the command line is read).
+   - *`--save <name>`* keeps the command's job before it runs (replacing a
+     job of that name, and saying so) and records the run as that saved
+     job's; when the job cannot be kept the command stops, since the
+     person asked for it. *`--export <file>`* writes the job and how the
+     run went after it ends; a failed transfer's own error comes first.
+   - *`blit jobs save <job-id> <name>`*, *`export <job-id|name> <file>`*
+     (a run with its record; a saved job without), *`delete <name>`*;
+     `save` and `export` settle a detached run from its daemon first.
+   - *`blit jobs run <name|file>`* runs the job as the command it was —
+     the same path as `copy`/`mirror`/`move` (`main::run_command`), as a
+     new run recorded with the saved job's name — after refusing a job
+     whose machine is not this one, naming that machine and its host
+     name (R4; the spec now records the host name, for people only). A
+     `--files-from` list runs from the spec's lines, written to a file in
+     the per-user folder for the run and removed after.
+   - *`blit jobs list` here* adds the saved jobs (`--json`: `saved`).
+   - *Tests* (blit-cli `saved_jobs`): the acceptance case — a job saved
+     with relative paths and a `--files-from` list, its list then changed,
+     run again from another folder: exactly the original file lands; a
+     job exported with its run, run from its file, saved from its run ID,
+     exported by name and ID, deleted; a job from another machine refused
+     by machine and host; a bad name refused; each new sub-verb's
+     `--help`. Core: saved jobs, job-file version checks. Seven guard
+     mutations red.
 6. **jl-4 — retry.** `blit jobs retry <job-id|file>`: a child run (next
    attempt, parent recorded) re-sending only the failed paths with the
    original JobSpec, through the existing retry-pass machinery; refuse on

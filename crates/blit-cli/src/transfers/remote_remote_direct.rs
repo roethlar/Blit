@@ -368,6 +368,8 @@ mod delegated_options_tests {
             max_age: None,
             delete_scope: "subset".into(),
             run: None,
+            save: None,
+            export: None,
         }
     }
 

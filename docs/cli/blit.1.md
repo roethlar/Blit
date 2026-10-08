@@ -107,6 +107,13 @@ path, then push it.
   sent, deleted and failed, with phase times. Without a host it reads
   this machine's log of the job; `jobs log <file>` reads a log file.
   `--json` prints the raw events; `--role` picks one of a daemon's logs.
+- `jobs save <job-id> <name>` keeps a job run here as a saved job;
+  `jobs export <job-id|name> <file>` writes a run (with how it went) or a
+  saved job to a file; `jobs run <name|file>` runs a saved job or a job
+  file again, only on the machine it was made on; `jobs delete <name>`
+  deletes a saved job. `copy`, `mirror` and `move` take `--save <name>`
+  (keep this command as a saved job) and `--export <file>` (write its job
+  and how the run went).
 - `jobs watch <host> <job-id>` follows a daemon's job to its end;
   `jobs cancel <host> <job-id>` stops it.
 
@@ -197,6 +204,7 @@ on macOS, `${XDG_CONFIG_HOME:-$HOME/.config}/blit` on Linux, and
 - `config.toml` – `[jobs] keep = N` keeps the newest N job logs (default 50).
 - `jobs/logs/` – this machine's job logs, one compressed JSON-lines file
   per run; every copy, mirror and move writes one.
+- `jobs/saved/` – saved jobs, `<name>.json`, kept until deleted.
 - `jobs/runs/` – this machine's jobs: for each run, what was run
   (`<id>.spec.json`) and how it went (`<id>.run.json`); `[jobs] keep`
   applies here too.

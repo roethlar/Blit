@@ -1,9 +1,14 @@
-use crate::cli::{JobsCancelArgs, JobsCommand, JobsListArgs, JobsLogArgs, JobsWatchArgs, LogRole};
+use crate::cli::{
+    JobsCancelArgs, JobsCommand, JobsDeleteArgs, JobsExportArgs, JobsListArgs, JobsLogArgs,
+    JobsSaveArgs, JobsWatchArgs, LogRole,
+};
 use blit_core::admin::jobs;
 use blit_core::admin::jobs::{CancelJobOutcome, WatchSnapshot};
 use blit_core::generated::{daemon_event, DaemonState, JobLogHeader};
 use blit_core::job_log::{self, LogLine, LogLines, Outcome, Role};
-use blit_core::job_record::{self, DaemonAnswer, RunRecord, RunState, RunStore, StoredRun};
+use blit_core::job_record::{
+    self, DaemonAnswer, JobFile, JobSpec, RunRecord, RunState, RunStore, SavedJobs, StoredRun,
+};
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
 use std::io::{BufRead, Write};
@@ -35,7 +40,227 @@ pub async fn run_jobs(command: JobsCommand) -> Result<ExitCode> {
             run_jobs_log(args).await?;
             Ok(ExitCode::SUCCESS)
         }
+        JobsCommand::Save(args) => {
+            run_jobs_save(args).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        JobsCommand::Export(args) => {
+            run_jobs_export(args).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        JobsCommand::Delete(args) => {
+            run_jobs_delete(args).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        // A saved job runs as the transfer command it is (`main`).
+        JobsCommand::Run(_) => eyre::bail!("`blit jobs run` is dispatched with the transfer verbs"),
     }
+}
+
+/// This machine's run records and saved jobs.
+fn local_stores() -> Result<(PathBuf, RunStore, SavedJobs)> {
+    let config_dir = blit_core::config::config_dir()?;
+    let runs = RunStore::new(crate::run_log::runs_dir(&config_dir));
+    let saved = SavedJobs::new(crate::run_log::saved_dir(&config_dir));
+    Ok((config_dir, runs, saved))
+}
+
+/// A run on this machine, its record settled — a `--detach` run asked of
+/// its daemon first (plan "Detached jobs"). `None` when no run has that
+/// ID here.
+async fn local_run(runs: &RunStore, run_id: &str) -> Result<Option<(JobSpec, RunRecord)>> {
+    if !job_log::valid_id(run_id) {
+        return Ok(None);
+    }
+    let loaded = {
+        let (runs, run_id) = (runs.clone(), run_id.to_string());
+        tokio::task::spawn_blocking(move || runs.load(&run_id))
+            .await
+            .context("reading the job")?
+    };
+    let (spec, record) = match loaded {
+        Ok(found) => found,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(eyre::eyre!("reading job {run_id}: {error}")),
+    };
+    let (record, note) = settle_detached(runs, record).await;
+    if let Some(note) = note {
+        eprintln!("blit: job {run_id}: {note}");
+    }
+    Ok(Some((spec, record)))
+}
+
+/// `blit jobs save <job-id> <name>` (JOB_LOGS jl-3b): keep a run's job as
+/// a saved job.
+async fn run_jobs_save(args: JobsSaveArgs) -> Result<()> {
+    let (_, runs, saved) = local_stores()?;
+    let (spec, _) = local_run(&runs, &args.job_id)
+        .await?
+        .ok_or_else(|| no_such_run(&args.job_id))?;
+    let name = args.name.clone();
+    let replaced = tokio::task::spawn_blocking(move || saved.save(&name, &spec))
+        .await
+        .context("saving the job")??;
+    let note = if replaced {
+        " (replacing the job saved under that name before)"
+    } else {
+        ""
+    };
+    println!(
+        "Saved job {} from run {}{note}; `blit jobs run {}` runs it again.",
+        args.name, args.job_id, args.name
+    );
+    Ok(())
+}
+
+fn no_such_run(run_id: &str) -> eyre::Report {
+    eyre::eyre!("no job {run_id} on this machine (`blit jobs list` shows the jobs kept here)")
+}
+
+/// `blit jobs export <job-id|name> <file>` (JOB_LOGS jl-3b): a run's job
+/// and how it went, or a saved job, as a file of its own.
+async fn run_jobs_export(args: JobsExportArgs) -> Result<()> {
+    let (_, runs, saved) = local_stores()?;
+    let job = match local_run(&runs, &args.job).await? {
+        Some((spec, record)) => JobFile::new(record.saved_job.clone(), spec, Some(record)),
+        None if job_record::valid_job_name(&args.job) => {
+            let name = args.job.clone();
+            tokio::task::spawn_blocking(move || saved.load(&name))
+                .await
+                .context("reading the saved job")?
+                .map_err(|error| match error.kind() {
+                    std::io::ErrorKind::NotFound => eyre::eyre!(
+                        "no job or saved job named {} on this machine \
+                         (`blit jobs list` shows both)",
+                        args.job
+                    ),
+                    _ => eyre::eyre!("{error}"),
+                })?
+        }
+        None => return Err(no_such_run(&args.job)),
+    };
+    let file = args.file.clone();
+    tokio::task::spawn_blocking(move || job_record::write_document(&file, &job))
+        .await
+        .context("writing the job")?
+        .with_context(|| format!("writing {}", args.file.display()))?;
+    println!("Wrote job {} to {}.", args.job, args.file.display());
+    Ok(())
+}
+
+/// `blit jobs delete <name>` (JOB_LOGS jl-3b).
+async fn run_jobs_delete(args: JobsDeleteArgs) -> Result<()> {
+    let (_, _, saved) = local_stores()?;
+    let name = args.name.clone();
+    tokio::task::spawn_blocking(move || saved.delete(&name))
+        .await
+        .context("deleting the job")??;
+    println!("Deleted saved job {}.", args.name);
+    Ok(())
+}
+
+/// A job to run again (`blit jobs run`): the transfer command it is, the
+/// saved job's name, and its `--files-from` list written out for the run.
+pub(crate) struct JobToRun {
+    pub verb: String,
+    pub args: crate::cli::TransferArgs,
+    pub saved: Option<String>,
+    /// Removes the written list when the run is done.
+    pub _list: Option<ListFile>,
+}
+
+/// A job's `--files-from` lines, written out for its run; removed on drop.
+pub(crate) struct ListFile(PathBuf);
+
+impl Drop for ListFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// `blit jobs run <name|file>` (JOB_LOGS jl-3b): a saved job, or a job file,
+/// as the command to run — refused unless it belongs to this machine (R4).
+/// A name that is a file is read as one.
+pub(crate) async fn job_to_run(target: &str) -> Result<JobToRun> {
+    let target = target.to_string();
+    tokio::task::spawn_blocking(move || job_to_run_blocking(&target))
+        .await
+        .context("reading the job")?
+}
+
+fn job_to_run_blocking(target: &str) -> Result<JobToRun> {
+    let (config_dir, _, saved) = local_stores()?;
+    let job = if Path::new(target).is_file() {
+        let bytes = std::fs::read(target).with_context(|| format!("reading {target}"))?;
+        job_record::read_job_file(&bytes).with_context(|| format!("reading {target}"))?
+    } else if job_record::valid_job_name(target) {
+        saved.load(target).map_err(|error| eyre::eyre!("{error}"))?
+    } else {
+        eyre::bail!("{target} is not a saved job's name or a job file");
+    };
+    let machine = job_log::machine_id(&config_dir)
+        .map_err(|error| eyre::eyre!("this machine's ID: {error}"))?;
+    let spec = &job.spec;
+    if spec.machine != machine {
+        let host = if spec.host.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", spec.host)
+        };
+        eyre::bail!(
+            "this job belongs to machine {}{host}; a job runs only on the machine it was made on",
+            spec.machine
+        );
+    }
+    let list = match &spec.files_from {
+        Some(lines) => {
+            let dir = config_dir.join("jobs");
+            std::fs::create_dir_all(&dir)?;
+            let name = job_log::new_run_id().map_err(|error| eyre::eyre!("{error}"))?;
+            let path = dir.join(format!("files-from-{name}.txt"));
+            let mut text = lines.join("\n");
+            text.push('\n');
+            std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+            Some(ListFile(path))
+        }
+        None => None,
+    };
+    let o = &spec.options;
+    let args = crate::cli::TransferArgs {
+        source: spec.source.as_arg().to_string(),
+        destination: spec.destination.as_arg().to_string(),
+        dry_run: o.dry_run,
+        checksum: o.checksum,
+        size_only: o.size_only,
+        ignore_times: o.ignore_times,
+        ignore_existing: o.ignore_existing,
+        force: o.force,
+        delete_scope: o.delete_scope.clone(),
+        resume: o.resume,
+        drop_windows_metadata: o.drop_windows_metadata,
+        retries: o.retries,
+        retry_wait: o.retry_wait,
+        retry: o.retry,
+        wait: o.wait,
+        exclude: o.exclude.clone(),
+        include: o.include.clone(),
+        files_from: list.as_ref().map(|list| list.0.clone()),
+        min_size: o.min_size.clone(),
+        max_size: o.max_size.clone(),
+        min_age: o.min_age.clone(),
+        max_age: o.max_age.clone(),
+        force_grpc: o.force_grpc,
+        detach: o.detach,
+        null: o.null,
+        yes: o.yes,
+        ..Default::default()
+    };
+    Ok(JobToRun {
+        verb: spec.verb.clone(),
+        args,
+        saved: job.name.clone(),
+        _list: list,
+    })
 }
 
 /// `blit jobs log` (JOB_LOGS jl-1b, jl-2): each log kept for the job — by
@@ -315,10 +540,14 @@ async fn local_jobs_list(limit: u32, json: bool) -> Result<()> {
         let (record, note) = settle_detached(&store, run.record.clone()).await;
         runs.push((StoredRun { record, ..run }, note));
     }
+    let saved = SavedJobs::new(crate::run_log::saved_dir(&config_dir));
     tokio::task::spawn_blocking(move || {
+        let saved_jobs = saved
+            .list()
+            .with_context(|| format!("reading {}", saved.dir().display()))?;
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-        write_local_list(&mut out, &store, &logs, &runs, json)
+        write_local_list(&mut out, &store, &logs, &runs, &saved, &saved_jobs, json)
     })
     .await
     .context("listing the jobs")?
@@ -359,8 +588,20 @@ fn write_local_list(
     store: &RunStore,
     logs: &Path,
     runs: &[(StoredRun, Option<String>)],
+    saved: &SavedJobs,
+    saved_jobs: &[(String, std::io::Result<JobFile>)],
     json: bool,
 ) -> Result<()> {
+    let saved_rows = saved_jobs.iter().map(|(name, job)| match job {
+        Ok(job) => serde_json::json!({
+            "name": name,
+            "verb": job.spec.verb,
+            "source": job.spec.source.as_arg(),
+            "destination": job.spec.destination.as_arg(),
+            "file": saved.dir().join(format!("{name}.json")).display().to_string(),
+        }),
+        Err(error) => serde_json::json!({ "name": name, "error": error.to_string() }),
+    });
     if json {
         let jobs: Vec<serde_json::Value> = runs
             .iter()
@@ -380,17 +621,37 @@ fn write_local_list(
         let listing = serde_json::json!({
             "runs_dir": store.dir().display().to_string(),
             "jobs": jobs,
+            "saved_dir": saved.dir().display().to_string(),
+            "saved": saved_rows.collect::<Vec<_>>(),
         });
         writeln!(out, "{}", serde_json::to_string_pretty(&listing)?)?;
-    } else if runs.is_empty() {
-        writeln!(out, "Jobs on this machine: (none)")?;
     } else {
-        writeln!(out, "Jobs on this machine ({}), newest first:", runs.len())?;
-        for (run, note) in runs {
-            write!(out, "  {}", local_row(&run.record))?;
-            match note {
-                Some(note) => writeln!(out, " — {note}")?,
-                None => writeln!(out)?,
+        if runs.is_empty() {
+            writeln!(out, "Jobs on this machine: (none)")?;
+        } else {
+            writeln!(out, "Jobs on this machine ({}), newest first:", runs.len())?;
+            for (run, note) in runs {
+                write!(out, "  {}", local_row(&run.record))?;
+                match note {
+                    Some(note) => writeln!(out, " — {note}")?,
+                    None => writeln!(out)?,
+                }
+            }
+        }
+        if !saved_jobs.is_empty() {
+            writeln!(out)?;
+            writeln!(out, "Saved jobs ({}):", saved_jobs.len())?;
+            for (name, job) in saved_jobs {
+                match job {
+                    Ok(job) => writeln!(
+                        out,
+                        "  {name}  {}  {} -> {}",
+                        job.spec.verb,
+                        job.spec.source.as_arg(),
+                        job.spec.destination.as_arg()
+                    )?,
+                    Err(error) => writeln!(out, "  {name}  (unreadable: {error})")?,
+                }
             }
         }
     }

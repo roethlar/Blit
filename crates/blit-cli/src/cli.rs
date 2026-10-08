@@ -119,6 +119,54 @@ pub enum JobsCommand {
     /// Show a job's log — every file copied, deleted and failed, with phase
     /// times — from this machine, a log file, or a daemon
     Log(JobsLogArgs),
+    /// Keep a job run on this machine as a saved job
+    Save(JobsSaveArgs),
+    /// Write a job run on this machine, or a saved job, to a file
+    Export(JobsExportArgs),
+    /// Run a saved job, or a job file, again
+    Run(JobsRunArgs),
+    /// Delete a saved job
+    Delete(JobsDeleteArgs),
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct JobsSaveArgs {
+    /// A job run on this machine, as `blit jobs list` shows it
+    pub job_id: String,
+    /// The name to keep it under
+    #[arg(value_parser = parse_job_name)]
+    pub name: String,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct JobsExportArgs {
+    /// A job run on this machine, or a saved job's name
+    #[arg(value_name = "JOB|NAME")]
+    pub job: String,
+    /// The file to write it to
+    pub file: PathBuf,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct JobsRunArgs {
+    /// A saved job's name, or a job file (`--export`, `blit jobs export`)
+    #[arg(value_name = "NAME|FILE")]
+    pub job: String,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct JobsDeleteArgs {
+    /// The saved job to delete
+    pub name: String,
+}
+
+/// A saved job's name, checked as the command line reads it.
+fn parse_job_name(name: &str) -> Result<String, String> {
+    if blit_core::job_record::valid_job_name(name) {
+        Ok(name.to_string())
+    } else {
+        Err("a job name is 1 to 64 letters, digits, `-`, `_` or `.`, not starting with `.`".into())
+    }
 }
 
 #[derive(Args, Clone, Debug)]
@@ -398,6 +446,13 @@ pub struct TransferArgs {
 
     // -- Performance / debug knobs — niche, kept at the bottom so new
     // users aren't distracted by them.
+    /// Keep this command as a saved job NAME; `blit jobs run NAME` runs it
+    /// again
+    #[arg(long, value_name = "NAME", value_parser = parse_job_name, help_heading = "Jobs")]
+    pub save: Option<String>,
+    /// Also write this command's job, and how this run went, to FILE
+    #[arg(long, value_name = "FILE", help_heading = "Jobs")]
+    pub export: Option<PathBuf>,
     /// Force gRPC control-plane data path instead of hybrid TCP
     #[arg(long, help_heading = "Performance / debug")]
     pub force_grpc: bool,
