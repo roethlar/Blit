@@ -3,7 +3,7 @@
 **Severity**: HIGH (reviewer: HIGH)
 **Status**: Fixed — awaiting re-review
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: —
+**Commit**: `91c97e61`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / frontier (fallback grade), codex-cli 0.159.3; openreview jl1b-r1 (record `.review/results/jl1b-r1.codex.json`); dispatched under the owner's goal of 2026-10-07 ("review with codex each slice")
 
 ## Evidence
