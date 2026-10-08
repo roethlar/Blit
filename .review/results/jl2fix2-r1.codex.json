@@ -1,0 +1,12 @@
+{
+ "verdict": "best_approach",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "78cf84d31ebee3b609f0722d781dbf99f92203c4",
+ "base_sha": "d5f4fa6354cbd9f53f82b8208c9b6ef8659ba246",
+ "goal": "Ensure dry-run job logs report the files and bytes the run planned to copy rather than the zero bytes actually written.",
+ "recommended_approach": "Use the audit lane's authoritative planned file and byte totals when formatting a dry-run projection, retain actual transfer totals for written and --null runs, and pin the exact projection with an end-to-end CLI test.",
+ "comparison": "The change follows that approach directly and minimally: it reuses the already-available planned totals without altering accounting semantics elsewhere, while the strengthened CLI test detects regression; reverting the production fix made the focused test fail with a 0 B projection, and restoring it made the test pass with the worktree clean at the reviewed SHA.",
+ "material_changes": [],
+ "findings": []
+}
