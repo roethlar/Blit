@@ -69,6 +69,10 @@ const UNCLOSED_NOTE: &str = "the run ended without closing its log";
 /// `run-end`'s detail when [`recover`] finishes a log its process left behind.
 const RECOVERED_NOTE: &str =
     "the process ended before the log was finished; recovered at the next start";
+/// Added to [`RECOVERED_NOTE`] when the log's start was lost too, so the
+/// header recovery gives it names only what its file name says.
+const LOST_START_NOTE: &str =
+    "; its first line was lost, so its run-start was rebuilt from the log's name";
 
 /// The part a participant played in a run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -660,7 +664,7 @@ impl Writer {
         let Some(lock) = self.lock.take() else {
             return self.report;
         };
-        match compress_into_place(&self.dir, &self.stem) {
+        match compress_into_place(&self.dir, &self.stem, None) {
             Ok(finished) => self.report.path = Some(finished),
             Err(error) => {
                 self.report.problem.get_or_insert_with(|| {
@@ -777,11 +781,11 @@ fn path_of(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
 /// rename, so a reader or a crash sees either no finished log or a whole
 /// one — then remove the partial. The finished log keeps the partial's
 /// modified time, so pruning orders a recovered log by when its run wrote.
-fn compress_into_place(dir: &Path, stem: &str) -> io::Result<PathBuf> {
+fn compress_into_place(dir: &Path, stem: &str, header: Option<&[u8]>) -> io::Result<PathBuf> {
     let partial = path_of(dir, stem, PARTIAL_SUFFIX);
     let temp = path_of(dir, stem, TEMP_SUFFIX);
     let finished = path_of(dir, stem, FINISHED_SUFFIX);
-    if let Err(error) = write_compressed(&partial, &temp, &finished) {
+    if let Err(error) = write_compressed(&partial, &temp, &finished, header) {
         let _ = fs::remove_file(&temp);
         return Err(error);
     }
@@ -797,10 +801,20 @@ fn compress_into_place(dir: &Path, stem: &str) -> io::Result<PathBuf> {
     Ok(finished)
 }
 
-fn write_compressed(partial: &Path, temp: &Path, finished: &Path) -> io::Result<()> {
+/// `header`, when given, goes first: a rebuilt `run-start` for a log whose
+/// own was lost.
+fn write_compressed(
+    partial: &Path,
+    temp: &Path,
+    finished: &Path,
+    header: Option<&[u8]>,
+) -> io::Result<()> {
     let mut input = File::open(partial)?;
     let modified = input.metadata()?.modified()?;
     let mut encoder = GzEncoder::new(BufWriter::new(File::create(temp)?), Compression::fast());
+    if let Some(header) = header {
+        encoder.write_all(header)?;
+    }
     io::copy(&mut input, &mut encoder)?;
     let output = encoder
         .finish()?
@@ -905,8 +919,15 @@ fn recover_one(dir: &Path, stem: &str) -> io::Result<Recovered> {
         remove_if_present(&path_of(dir, stem, TEMP_SUFFIX))?;
         Recovered::Tidied
     } else {
-        close_interrupted(&partial)?;
-        Recovered::Finished(compress_into_place(dir, stem)?)
+        let lost_start = close_interrupted(&partial)?;
+        // Review cr-jlfix1-1: typed reading needs the header, so a log whose
+        // start was lost (a crash before its first sync) gets one rebuilt
+        // from its name, at the front of the finished file.
+        let header = match (lost_start, LogKey::from_file_stem(stem)) {
+            (true, Some(key)) => Some(rebuilt_header(&key, &partial)?),
+            _ => None,
+        };
+        Recovered::Finished(compress_into_place(dir, stem, header.as_deref())?)
     };
     drop(lock);
     let _ = fs::remove_file(&lock_path);
@@ -921,11 +942,29 @@ fn remove_if_present(path: &Path) -> io::Result<()> {
 }
 
 /// Append `run-end` (interrupted) to a partial that lacks one, keeping the
-/// partial's modified time.
-fn close_interrupted(partial: &Path) -> io::Result<()> {
+/// partial's modified time. Returns whether the partial's start — its
+/// `run-start` header — was lost. Reads the partial line by line without
+/// the header check, since recovering a damaged log is the point.
+fn close_interrupted(partial: &Path) -> io::Result<bool> {
     let mut last = None;
-    for line in open_log(partial)? {
-        if let LogLine::Event(event) = line? {
+    let mut lost_start = true;
+    let mut first = true;
+    let mut lines = decode(File::open(partial)?)?;
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        if lines.read_until(b'\n', &mut buf)? == 0 {
+            break;
+        }
+        let text = buf.trim_ascii();
+        if text.is_empty() {
+            continue;
+        }
+        if first {
+            first = false;
+            lost_start = check_header(text).is_err();
+        }
+        if let Ok(event) = serde_json::from_slice::<Event>(text) {
             last = Some(event);
         }
     }
@@ -934,7 +973,7 @@ fn close_interrupted(partial: &Path) -> io::Result<()> {
         ..
     }) = last
     {
-        return Ok(());
+        return Ok(lost_start);
     }
     let mut file = OpenOptions::new().read(true).append(true).open(partial)?;
     let modified = file.metadata()?.modified()?;
@@ -955,7 +994,11 @@ fn close_interrupted(partial: &Path) -> io::Result<()> {
             seq: last.map_or(0, |event| event.seq + 1),
             body: EventBody::RunEnd {
                 outcome: Outcome::Interrupted,
-                detail: Some(RECOVERED_NOTE.into()),
+                detail: Some(if lost_start {
+                    format!("{RECOVERED_NOTE}{LOST_START_NOTE}")
+                } else {
+                    RECOVERED_NOTE.into()
+                }),
             },
         },
     )?;
@@ -963,7 +1006,39 @@ fn close_interrupted(partial: &Path) -> io::Result<()> {
     file.write_all(&line)?;
     file.sync_data()?;
     drop(file);
-    filetime::set_file_mtime(partial, filetime::FileTime::from_system_time(modified))
+    filetime::set_file_mtime(partial, filetime::FileTime::from_system_time(modified))?;
+    Ok(lost_start)
+}
+
+/// A `run-start` line for a log whose own was lost, from what its file name
+/// says, stamped with the partial's modified time.
+fn rebuilt_header(key: &LogKey, partial: &Path) -> io::Result<Vec<u8>> {
+    let ts_ms = fs::metadata(partial)?
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        });
+    let mut line = serde_json::to_vec(&Event {
+        ts_ms,
+        seq: 0,
+        body: EventBody::RunStart(Box::new(RunStart {
+            format: FORMAT.into(),
+            version: VERSION,
+            run_id: key.run_id.clone(),
+            participant: key.participant.clone(),
+            role: key.role,
+            attempt: key.attempt,
+            host: String::new(),
+            build: String::new(),
+            run: RunInfo {
+                verb: "unknown".into(),
+                ..RunInfo::default()
+            },
+        })),
+    })?;
+    line.push(b'\n');
+    Ok(line)
 }
 
 /// Remove finished logs in `dir` beyond the newest `keep`, newest by when
@@ -1285,20 +1360,29 @@ impl LogLines {
     }
 }
 
-/// Check a log's first line, when it is the `run-start` header, for the
-/// format and a version this build reads. Read as untyped JSON, so a newer
-/// header's fields are never forced into this version's shape. A log whose
-/// first line is not a header (its head was damaged) reads as the current
-/// version.
+/// Check a log's first line: it must be the `run-start` header, of this
+/// format and a version this build reads (reviews cr-jl1a-2, cr-jlfix1-1).
+/// Read as untyped JSON, so a newer header's fields are never forced into
+/// this version's shape. Anything else — another kind, a damaged or missing
+/// first line, a file that is not a job log — is refused rather than read
+/// as the current version; [`decode`] shows such a file's lines as stored.
+/// (Recovery gives a log whose start was lost a header of its own.)
 fn check_header(line: &[u8]) -> io::Result<()> {
     use serde_json::Value;
+    let invalid = |message: String| Err(io::Error::new(io::ErrorKind::InvalidData, message));
+    let not_a_log = || {
+        invalid(
+            "not a blit job log, or its first line is damaged \
+             (`blit jobs log --json` shows its lines as stored)"
+                .into(),
+        )
+    };
     let Ok(Value::Object(header)) = serde_json::from_slice::<Value>(line) else {
-        return Ok(());
+        return not_a_log();
     };
     if header.get("kind").and_then(Value::as_str) != Some("run-start") {
-        return Ok(());
+        return not_a_log();
     }
-    let invalid = |message: String| Err(io::Error::new(io::ErrorKind::InvalidData, message));
     let format = header.get("format").and_then(Value::as_str).unwrap_or("");
     if format != FORMAT {
         return invalid(format!("not a blit job log (format {format:?})"));
@@ -1433,6 +1517,23 @@ mod tests {
         }
         text.push_str(tail);
         fs::write(path, text).unwrap();
+    }
+
+    fn start_event() -> Event {
+        event(
+            0,
+            EventBody::RunStart(Box::new(RunStart {
+                format: FORMAT.into(),
+                version: VERSION,
+                run_id: "r1".into(),
+                participant: "m1".into(),
+                role: Role::Destination,
+                attempt: 1,
+                host: String::new(),
+                build: String::new(),
+                run: info(),
+            })),
+        )
     }
 
     fn event(seq: u64, body: EventBody) -> Event {
@@ -1614,25 +1715,21 @@ mod tests {
             foreign.to_string().contains("not a blit job log"),
             "{foreign}"
         );
-        // The current version, and a log whose header was lost, read.
-        let current = serde_json::to_string(&Event {
-            ts_ms: 1,
-            seq: 0,
-            body: EventBody::RunStart(Box::new(RunStart {
-                format: FORMAT.into(),
-                version: VERSION,
-                run_id: "r1".into(),
-                participant: "m1".into(),
-                role: Role::Source,
-                attempt: 1,
-                host: String::new(),
-                build: String::new(),
-                run: info(),
-            })),
-        })
-        .unwrap();
+        // The current version reads; a log with no header — damaged, or
+        // not a job log at all — is refused too (review cr-jlfix1-1).
+        let current = serde_json::to_string(&start_event()).unwrap();
         assert_eq!(read_all(&current).unwrap().len(), 2);
-        assert_eq!(read_all(r#"{"ts_ms":1,"seq":0,"ki"#).unwrap().len(), 2);
+        for headless in [
+            r#"{"ts_ms":1,"seq":0,"ki"#,
+            r#"{"ts_ms":1,"seq":0,"kind":"file-deleted","path":"p"}"#,
+            "plain text",
+        ] {
+            let error = read_all(headless).unwrap_err();
+            assert!(
+                error.to_string().contains("not a blit job log"),
+                "{headless}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -1641,16 +1738,17 @@ mod tests {
         let path = dir.path().join("r1.m1.destination.1.partial.jsonl");
         write_lines(
             &path,
-            &[event(0, copied("a")), event(1, copied("b"))],
-            r#"{"ts_ms":1002,"seq":2,"ki"#,
+            &[start_event(), event(1, copied("a")), event(2, copied("b"))],
+            r#"{"ts_ms":1003,"seq":3,"ki"#,
         );
         assert_eq!(
             lines(&path),
             [
-                LogLine::Event(event(0, copied("a"))),
-                LogLine::Event(event(1, copied("b"))),
+                LogLine::Event(start_event()),
+                LogLine::Event(event(1, copied("a"))),
+                LogLine::Event(event(2, copied("b"))),
                 LogLine::Unreadable {
-                    line: 3,
+                    line: 4,
                     torn: true
                 },
             ]
@@ -1663,8 +1761,8 @@ mod tests {
         let partial = dir.path().join("r1.m1.destination.1.partial.jsonl");
         write_lines(
             &partial,
-            &[event(0, copied("a")), event(1, copied("b"))],
-            r#"{"ts_ms":1002,"se"#,
+            &[start_event(), event(1, copied("a")), event(2, copied("b"))],
+            r#"{"ts_ms":1003,"se"#,
         );
         set_mtime(&partial, 1_000_000);
 
@@ -1682,25 +1780,26 @@ mod tests {
         assert_eq!(names(dir.path()), ["r1.m1.destination.1.jsonl.gz"]);
         let read = lines(&finished);
         assert_eq!(
-            read[..2],
+            read[..3],
             [
-                LogLine::Event(event(0, copied("a"))),
-                LogLine::Event(event(1, copied("b"))),
+                LogLine::Event(start_event()),
+                LogLine::Event(event(1, copied("a"))),
+                LogLine::Event(event(2, copied("b"))),
             ]
         );
         // The torn fragment was ended, so it is now an unreadable line in
         // the middle rather than glued to the closing event.
         assert_eq!(
-            read[2],
+            read[3],
             LogLine::Unreadable {
-                line: 3,
+                line: 4,
                 torn: false
             }
         );
-        let LogLine::Event(end) = &read[3] else {
-            panic!("expected run-end, got {:?}", read[3]);
+        let LogLine::Event(end) = &read[4] else {
+            panic!("expected run-end, got {:?}", read[4]);
         };
-        assert_eq!(end.seq, 2);
+        assert_eq!(end.seq, 3);
         assert_eq!(
             end.body,
             EventBody::RunEnd {
@@ -1708,7 +1807,7 @@ mod tests {
                 detail: Some(RECOVERED_NOTE.into()),
             }
         );
-        assert_eq!(read.len(), 4);
+        assert_eq!(read.len(), 5);
         // Ordered for pruning by when the run wrote, not by the recovery.
         assert_eq!(
             FileTime::from_last_modification_time(&fs::metadata(&finished).unwrap()),
@@ -1722,9 +1821,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let partial = dir.path().join("r1.m1.destination.1.partial.jsonl");
         let written = [
-            event(0, copied("a")),
+            start_event(),
+            event(1, copied("a")),
             event(
-                1,
+                2,
                 EventBody::RunEnd {
                     outcome: Outcome::Ok,
                     detail: None,
@@ -1740,6 +1840,51 @@ mod tests {
         assert_eq!(recovery.finished, std::slice::from_ref(&finished));
         assert_eq!(names(dir.path()), ["r1.m1.destination.1.jsonl.gz"]);
         assert_eq!(events(&finished), written);
+    }
+
+    /// Review cr-jlfix1-1: a log whose start was lost (a crash before its
+    /// first sync) is still finished, with a `run-start` rebuilt from its
+    /// name at the front, so it reads like any other — and says so.
+    #[test]
+    fn startup_rebuilds_a_lost_start() {
+        let dir = TempDir::new().unwrap();
+        let partial = dir.path().join("r1.m1.destination.1.partial.jsonl");
+        // The header itself was torn; two events made it to disk.
+        write_lines(
+            &partial,
+            &[event(1, copied("a")), event(2, copied("b"))],
+            "",
+        );
+        set_mtime(&partial, 2_000_000);
+
+        let recovery = recover(dir.path());
+
+        let finished = dir.path().join("r1.m1.destination.1.jsonl.gz");
+        assert_eq!(recovery.finished, std::slice::from_ref(&finished));
+        let read = events(&finished);
+        let EventBody::RunStart(start) = &read[0].body else {
+            panic!("first event: {:?}", read[0]);
+        };
+        assert_eq!(
+            (
+                start.run_id.as_str(),
+                start.participant.as_str(),
+                start.role,
+                start.attempt,
+                start.run.verb.as_str()
+            ),
+            ("r1", "m1", Role::Destination, 1, "unknown")
+        );
+        assert_eq!(read[0].ts_ms, 2_000_000_000);
+        assert_eq!(bodies(&read[1..3]), [copied("a"), copied("b")]);
+        assert_eq!(
+            read[3].body,
+            EventBody::RunEnd {
+                outcome: Outcome::Interrupted,
+                detail: Some(format!("{RECOVERED_NOTE}{LOST_START_NOTE}")),
+            }
+        );
+        assert_eq!(read.len(), 4);
     }
 
     #[test]
