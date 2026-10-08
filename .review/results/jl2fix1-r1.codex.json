@@ -1,0 +1,22 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "8cf9380db70eca25569d396889c88c23c7fdf28e",
+ "base_sha": "8288d2f196638f58e3478ae2d456e04593b80d4f",
+ "goal": "Make local dry-run and --null job logs report that no data was written while preserving truthful information about planned or discarded work.",
+ "recommended_approach": "Carry an explicit execution disposition into RunLog, suppress actual-copy events and zero actual-write summaries for non-writing modes, use audit-lane planned totals for dry-run projections, retain processed totals for --null, and cover exact counts and bytes end to end.",
+ "comparison": "The change uses the right overall design and the focused guard passed at head, failed with the implementation reversed, and passed again after restoration; however, the new dry-run diagnostic sources its projected byte count from the actual-write counter, so it systematically reports the wrong volume.",
+ "material_changes": [
+  "Use planned_bytes, rather than totals.bytes_copied, in the dry-run would-have-written diagnostic and assert the exact projected byte count in the integration test."
+ ],
+ "findings": [
+  {
+   "title": "Dry-run projected bytes come from the zero actual-write counter",
+   "evidence": "crates/blit-core/src/run_log.rs:535 \u2014 the new dry-run diagnostic formats totals.bytes_copied, which crates/blit-cli/src/run_log.rs:266 obtains from LocalMirrorSummary.total_bytes; crates/blit-core/src/transfer_session/local.rs:351 defines that field as bytes actually written, while the correct planned_bytes value is already available at run_log.rs:506.",
+   "predicted_failure": "A dry run over the test's 5-byte file logs both that 5 B was planned and that it would have copied 0 B; every nonempty dry run therefore records a misleading projected volume.",
+   "severity": "MEDIUM",
+   "better_approach": "Format the dry-run projection with planned_files and planned_bytes from the audit lane, keep totals for actual or discarded work, and strengthen a_run_that_writes_nothing_logs_no_copies to require the exact 5 B projection."
+  }
+ ]
+}
