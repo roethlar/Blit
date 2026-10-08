@@ -3,7 +3,7 @@
 **Severity**: MEDIUM (reviewer: MEDIUM)
 **Status**: Fixed — awaiting re-review
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: —
+**Commit**: `a53e3d56`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / frontier (fallback grade), codex-cli 0.159.3; openreview jl3a-r1 over `00f31c59..2454462b` (record `.review/results/jl3a-r1.codex.json`); owner goal of 2026-10-07
 
 ## Evidence
