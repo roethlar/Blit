@@ -1,0 +1,38 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "2454462bf337349877048970b7b690743ee2d148",
+ "base_sha": "00f31c596377f625dffc0ed4349a9edd5b53f83f",
+ "goal": "Persist a versioned, reproducible local job specification and durable run record for every transfer so jobs can be listed, recovered after interruption, reconciled after detachment, and later saved, rerun, or retried.",
+ "recommended_approach": "Keep the separate JobSpec, RunRecord, and EventLog architecture, but use concurrency-safe atomic record replacement, make daemon job state authoritative whenever a log is incomplete, and preserve exact raw filename identities in failures.",
+ "comparison": "The overall architecture and integration are well chosen, but two durability/reconciliation defects and one filename-fidelity gap prevent this implementation from being the best approach as landed. A forced concurrent-write guard failed at the reviewed head with ENOENT, passed after using unique staging files, and the worktree was restored exactly to the head SHA. Native fmt, clippy, and workspace tests plus Linux cross-clippy passed; Windows cross-clippy was unavailable because ml64.exe was missing.",
+ "material_changes": [
+  "Use a unique sibling staging file or record-scoped lock for each document replacement, atomically replace the destination, sync its directory, and retain the forced-interleaving regression test.",
+  "When a detached run's log is partial, incomplete, or lacks terminal events, query the daemon's active/recent job state instead of treating the log as authoritative; cache only an authoritative terminal result and mark incomplete failure details as truncated.",
+  "Carry escaped raw filename bytes from the run log into RunRecord failures for local and attached runs, with a non-UTF-8 failure regression test."
+ ],
+ "findings": [
+  {
+   "title": "Incomplete logs can permanently misclassify detached jobs",
+   "evidence": "crates/blit-core/src/job_record.rs:615 \u2014 any fetched log takes precedence over the daemon job record: an unfinished partial immediately returns Going, while a finished log without run-end is synthesized as Interrupted.",
+   "predicted_failure": "If logging stops mid-run or final compression fails, a detached transfer that actually completed can remain waiting forever or be persisted as interrupted; its counts and failed-file set can also be falsely recorded as complete, undermining later retry.",
+   "severity": "HIGH",
+   "better_approach": "Parse log completeness explicitly, and when summary/run-end is absent or LogIncomplete is present, consult the daemon's active/recent job state for terminal status and counts while retaining available log details and marking the failure list incomplete."
+  },
+  {
+   "title": "The fixed staging filename breaks atomic updates under concurrency",
+   "evidence": "crates/blit-core/src/job_record.rs:323 \u2014 every writer to a record uses the same <path>.tmp staging path without record-scoped synchronization.",
+   "predicted_failure": "Concurrent local jobs operations that reconcile the same detached record can share and rename one staging file; the forced two-writer guard produced one ENOENT failure, and other interleavings can expose or persist a partially overwritten record.",
+   "severity": "MEDIUM",
+   "better_approach": "Give every write a uniquely created sibling temporary file, sync it, atomically replace the destination, sync the parent directory, and clean up only that invocation's temporary file."
+  },
+  {
+   "title": "Attached-run records discard exact non-UTF-8 failure names",
+   "evidence": "crates/blit-cli/src/run_log.rs:395 \u2014 finish_record converts string totals into Failure values and unconditionally sets raw to None, despite the event log retaining escaped raw bytes.",
+   "predicted_failure": "A failed Unix filename containing non-UTF-8 bytes is stored only under its lossy text representation, so jobs retry cannot reliably target the original file and could target a different valid name.",
+   "severity": "MEDIUM",
+   "better_approach": "Propagate the audit lane's raw-name mapping into RunRecord construction, or derive failures from the completed local EventLog, preserving escaped bytes alongside display text."
+  }
+ ]
+}
