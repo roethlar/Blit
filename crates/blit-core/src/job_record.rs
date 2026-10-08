@@ -577,77 +577,64 @@ pub enum DaemonAnswer {
     Going,
 }
 
-/// Ask the daemon a waiting run went on on how it ended (plan "Detached
-/// jobs"): from its log of the run, by run ID — how it ended, its counts,
-/// and every file that failed — or, when the daemon keeps no such log any
-/// more, from its record of the job (counts only; the names are then
-/// marked truncated). An error when the daemon cannot be reached or knows
-/// nothing of the run. A record not waiting is returned as it is.
-pub async fn ask_daemon(record: &RunRecord) -> eyre::Result<DaemonAnswer> {
-    use crate::admin::jobs;
-    use crate::job_log::{EventBody, LogLine, LogLines, Role};
-    use crate::remote::endpoint::RemoteEndpoint;
-    use eyre::WrapErr;
-    use std::sync::{Arc, Mutex};
+/// What a daemon's log of a run says, as read for the run's record.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LogRead {
+    /// Logs read (one per session of the run on that daemon).
+    pub logs: usize,
+    /// One of them is still being written, or waits for recovery.
+    pub unfinished: bool,
+    /// One says events were lost (`log-incomplete`).
+    pub incomplete: bool,
+    /// Its `run-end`: when, how, and why.
+    pub ended: Option<(u64, Outcome, Option<String>)>,
+    pub summary: Option<crate::job_log::Summary>,
+    pub failures: Vec<Failure>,
+}
 
-    let RunState::Waiting { daemon, job_id } = &record.state else {
-        return Ok(DaemonAnswer::Ended(Box::new(record.clone())));
-    };
-    let remote = RemoteEndpoint::parse(daemon)
-        .wrap_err_with(|| format!("parsing the daemon address {daemon:?}"))?;
-
-    #[derive(Default)]
-    struct Read {
-        logs: usize,
-        unfinished: bool,
-        ended: Option<(u64, Outcome, Option<String>)>,
-        summary: Option<crate::job_log::Summary>,
-        failures: Vec<Failure>,
+impl LogRead {
+    /// Review cr-jl3a-1: the log alone says how the run ended only when it
+    /// is finished, ends with its `run-end` and `summary`, and lost nothing.
+    pub fn complete(&self) -> bool {
+        self.logs > 0
+            && !self.unfinished
+            && !self.incomplete
+            && self.ended.is_some()
+            && self.summary.is_some()
     }
-    let read = Arc::new(Mutex::new(Read::default()));
-    let sink = Arc::clone(&read);
-    let fetched = jobs::read_job_logs(
-        &remote,
-        &record.run_id,
-        Some(Role::Destination),
-        false,
-        move |header, lines| {
-            let mut read = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            read.logs += 1;
-            read.unfinished |= !header.finished;
-            for line in LogLines::new(lines) {
-                let LogLine::Event(event) = line? else {
-                    continue;
-                };
-                match event.body {
-                    EventBody::FileFailed { path, reason, raw } => {
-                        if !read
-                            .failures
-                            .iter()
-                            .any(|seen| seen.path == path && seen.raw == raw)
-                        {
-                            read.failures.push(Failure { path, reason, raw });
-                        }
-                    }
-                    EventBody::Summary(summary) => read.summary = Some(summary),
-                    EventBody::RunEnd { outcome, detail } => {
-                        read.ended = Some((event.ts_ms, outcome, detail))
-                    }
-                    _ => {}
+
+    /// Take in one line of the log: its failures (each once), summary and
+    /// end, and whether anything was lost — a `log-incomplete` event or a
+    /// line that cannot be read.
+    pub fn read_line(&mut self, line: crate::job_log::LogLine) {
+        use crate::job_log::{EventBody, LogLine};
+        let LogLine::Event(event) = line else {
+            self.incomplete = true;
+            return;
+        };
+        match event.body {
+            EventBody::FileFailed { path, reason, raw } => {
+                if !self
+                    .failures
+                    .iter()
+                    .any(|seen| seen.path == path && seen.raw == raw)
+                {
+                    self.failures.push(Failure { path, reason, raw });
                 }
             }
-            Ok(())
-        },
-    )
-    .await;
-    let read = std::mem::take(&mut *read.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
-
-    let mut ended = record.clone();
-    if fetched.is_ok() && read.logs > 0 {
-        if read.unfinished {
-            return Ok(DaemonAnswer::Going);
+            EventBody::Summary(summary) => self.summary = Some(summary),
+            EventBody::RunEnd { outcome, detail } => {
+                self.ended = Some((event.ts_ms, outcome, detail))
+            }
+            EventBody::LogIncomplete { .. } => self.incomplete = true,
+            _ => {}
         }
-        let (ended_ms, outcome, detail) = read.ended.unwrap_or((
+    }
+
+    /// `record` ended as this log says, its failures `truncated` or not.
+    fn ended_record(&self, record: &RunRecord, truncated: bool) -> RunRecord {
+        let mut ended = record.clone();
+        let (ended_ms, outcome, detail) = self.ended.clone().unwrap_or((
             now_ms(),
             Outcome::Interrupted,
             Some("its log has no end".into()),
@@ -659,25 +646,45 @@ pub async fn ask_daemon(record: &RunRecord) -> eyre::Result<DaemonAnswer> {
         };
         ended.outcome = Some(outcome);
         ended.detail = detail;
-        if let Some(summary) = read.summary {
+        if let Some(summary) = &self.summary {
             ended.files_copied = summary.files_copied;
             ended.files_deleted = summary.files_deleted;
             ended.files_failed = summary.files_failed;
             ended.bytes_copied = summary.bytes_copied;
         }
-        ended.failures = read.failures;
-        ended.failures_truncated = false;
-        return Ok(DaemonAnswer::Ended(Box::new(ended)));
+        ended.failures = self.failures.clone();
+        ended.failures_truncated = truncated;
+        ended
     }
+}
 
-    // No log of the run there (pruned, or a daemon that keeps none): its
-    // record of the job, by the daemon's own ID.
-    let state = jobs::query(&remote, 0)
-        .await
-        .wrap_err_with(|| format!("asking {daemon} how job {job_id} ended"))?;
-    match jobs::watch_snapshot(&state, job_id) {
-        jobs::WatchSnapshot::Active(_) => Ok(DaemonAnswer::Going),
-        jobs::WatchSnapshot::Finished(job) => {
+/// How a waiting run ended, from what its daemon said (plan "Detached
+/// jobs", review cr-jl3a-1): its log of the run when that is
+/// [complete](LogRead::complete); otherwise the daemon's own job state —
+/// `job`, `None` when it was not asked — decides: still active, it goes on;
+/// finished, it ended as the job record says, keeping the failures the log
+/// names (marked truncated, as the log is not whole); unknown to the
+/// daemon, a finished log with its `run-end` is the best account left
+/// (truncated), and anything less an error.
+pub fn settle(
+    record: &RunRecord,
+    read: &LogRead,
+    job: Option<&crate::admin::jobs::WatchSnapshot>,
+) -> eyre::Result<DaemonAnswer> {
+    use crate::admin::jobs::WatchSnapshot;
+    if read.complete() {
+        return Ok(DaemonAnswer::Ended(Box::new(
+            read.ended_record(record, false),
+        )));
+    }
+    let (daemon, job_id) = match &record.state {
+        RunState::Waiting { daemon, job_id } => (daemon.as_str(), job_id.as_str()),
+        _ => return Ok(DaemonAnswer::Ended(Box::new(record.clone()))),
+    };
+    match job {
+        Some(WatchSnapshot::Active(_)) => Ok(DaemonAnswer::Going),
+        Some(WatchSnapshot::Finished(job)) => {
+            let mut ended = record.clone();
             ended.ended_ms = Some(job.start_unix_ms.saturating_add(job.duration_ms));
             ended.state = RunState::Finished;
             let (outcome, detail) = match (job.ok, job.files_failed) {
@@ -690,21 +697,77 @@ pub async fn ask_daemon(record: &RunRecord) -> eyre::Result<DaemonAnswer> {
             ended.files_copied = job.files;
             ended.bytes_copied = job.bytes;
             ended.files_failed = job.files_failed;
-            ended.failures = Vec::new();
+            ended.failures = read.failures.clone();
             ended.failures_truncated = job.files_failed > 0;
             Ok(DaemonAnswer::Ended(Box::new(ended)))
         }
-        jobs::WatchSnapshot::NotFound => {
-            let why = match fetched {
-                Err(error) => format!("{error:#}"),
-                Ok(()) => "no log".into(),
+        Some(WatchSnapshot::NotFound) | None => {
+            if read.logs > 0 && !read.unfinished && read.ended.is_some() {
+                return Ok(DaemonAnswer::Ended(Box::new(
+                    read.ended_record(record, true),
+                )));
+            }
+            let why = if read.logs == 0 {
+                "and no log of it"
+            } else {
+                "and its log there is unfinished"
             };
             Err(eyre::eyre!(
-                "{daemon} has no record of job {job_id} (run {}) any more ({why})",
+                "{daemon} has no record of job {job_id} (run {}) any more, {why}",
                 record.run_id
             ))
         }
     }
+}
+
+/// Ask the daemon a waiting run went on on how it ended — its log of the
+/// run, by run ID, and, unless that is complete, its job state — and
+/// [`settle`] it. An error when the daemon cannot be reached or knows
+/// nothing of the run. A record not waiting is returned as it is.
+pub async fn ask_daemon(record: &RunRecord) -> eyre::Result<DaemonAnswer> {
+    use crate::admin::jobs;
+    use crate::job_log::{LogLines, Role};
+    use crate::remote::endpoint::RemoteEndpoint;
+    use eyre::WrapErr;
+    use std::sync::{Arc, Mutex};
+
+    let RunState::Waiting { daemon, job_id } = &record.state else {
+        return Ok(DaemonAnswer::Ended(Box::new(record.clone())));
+    };
+    let remote = RemoteEndpoint::parse(daemon)
+        .wrap_err_with(|| format!("parsing the daemon address {daemon:?}"))?;
+
+    let read = Arc::new(Mutex::new(LogRead::default()));
+    let sink = Arc::clone(&read);
+    let fetched = jobs::read_job_logs(
+        &remote,
+        &record.run_id,
+        Some(Role::Destination),
+        false,
+        move |header, lines| {
+            let mut read = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            read.logs += 1;
+            read.unfinished |= !header.finished;
+            for line in LogLines::new(lines) {
+                read.read_line(line?);
+            }
+            Ok(())
+        },
+    )
+    .await;
+    let mut read =
+        std::mem::take(&mut *read.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+    if fetched.is_err() {
+        // Whatever arrived before the failure is not the whole log.
+        read.incomplete = true;
+    }
+    if read.complete() {
+        return settle(record, &read, None);
+    }
+    let state = jobs::query(&remote, 0)
+        .await
+        .wrap_err_with(|| format!("asking {daemon} how job {job_id} ended"))?;
+    settle(record, &read, Some(&jobs::watch_snapshot(&state, job_id)))
 }
 
 fn open_lock(path: &Path) -> io::Result<File> {
@@ -894,6 +957,178 @@ mod tests {
             ]
         );
         assert!(!dir.path().join(format!("{}.spec.json", ids[2])).exists());
+    }
+
+    /// Review cr-jl3a-1: a detached run is settled from its daemon's log
+    /// only when that log is whole; otherwise the daemon's job state
+    /// decides, and the log's failures are kept but marked truncated.
+    #[test]
+    fn a_detached_run_trusts_only_a_complete_log() {
+        use crate::admin::jobs::WatchSnapshot;
+        use crate::generated::{ActiveTransfer, TransferRecord};
+        use crate::job_log::Summary;
+        let mut waiting = RunRecord::starting(RUN, &spec());
+        waiting.state = RunState::Waiting {
+            daemon: "server:9031".into(),
+            job_id: "t1-0".into(),
+        };
+        let failure = Failure {
+            path: "a.txt".into(),
+            reason: "denied".into(),
+            raw: None,
+        };
+        let whole = LogRead {
+            logs: 1,
+            ended: Some((7, Outcome::Failed, Some("1 file(s) failed".into()))),
+            summary: Some(Summary {
+                files_copied: 2,
+                files_failed: 1,
+                ..Summary::default()
+            }),
+            failures: vec![failure.clone()],
+            ..LogRead::default()
+        };
+        let ended = |answer: eyre::Result<DaemonAnswer>| match answer.unwrap() {
+            DaemonAnswer::Ended(record) => *record,
+            DaemonAnswer::Going => panic!("expected an end"),
+        };
+        let done = TransferRecord {
+            transfer_id: "t1-0".into(),
+            ok: true,
+            files: 5,
+            files_failed: 1,
+            ..TransferRecord::default()
+        };
+
+        // Whole: the log decides, its failures exact.
+        let from_log = ended(settle(&waiting, &whole, None));
+        assert_eq!(
+            (
+                from_log.state.clone(),
+                from_log.outcome,
+                from_log.files_copied
+            ),
+            (RunState::Finished, Some(Outcome::Failed), 2)
+        );
+        assert_eq!(
+            (from_log.failures.clone(), from_log.failures_truncated),
+            (vec![failure.clone()], false)
+        );
+
+        // Unfinished, or missing its summary, or with a gap: the daemon's
+        // job state decides.
+        for partial in [
+            LogRead {
+                unfinished: true,
+                ..whole.clone()
+            },
+            LogRead {
+                summary: None,
+                ..whole.clone()
+            },
+            LogRead {
+                incomplete: true,
+                ..whole.clone()
+            },
+        ] {
+            assert!(!partial.complete());
+            assert_eq!(
+                settle(
+                    &waiting,
+                    &partial,
+                    Some(&WatchSnapshot::Active(ActiveTransfer::default()))
+                )
+                .unwrap(),
+                DaemonAnswer::Going
+            );
+            let from_job = ended(settle(
+                &waiting,
+                &partial,
+                Some(&WatchSnapshot::Finished(done.clone())),
+            ));
+            assert_eq!(
+                (
+                    from_job.outcome,
+                    from_job.files_copied,
+                    from_job.files_failed
+                ),
+                (Some(Outcome::Failed), 5, 1)
+            );
+            assert_eq!(
+                (from_job.failures, from_job.failures_truncated),
+                (vec![failure.clone()], true)
+            );
+        }
+
+        // Unknown to the daemon: a finished log with its end is the best
+        // account (truncated); an unfinished one, or none, is an error.
+        let recovered = LogRead {
+            summary: None,
+            ended: Some((9, Outcome::Interrupted, None)),
+            ..whole.clone()
+        };
+        let best = ended(settle(&waiting, &recovered, Some(&WatchSnapshot::NotFound)));
+        assert_eq!(
+            (best.state, best.failures_truncated),
+            (RunState::Interrupted, true)
+        );
+        for lost in [
+            LogRead {
+                unfinished: true,
+                ..whole.clone()
+            },
+            LogRead::default(),
+        ] {
+            assert!(settle(&waiting, &lost, Some(&WatchSnapshot::NotFound)).is_err());
+        }
+    }
+
+    /// Review cr-jl3a-1: reading a log notes what makes it less than whole.
+    #[test]
+    fn reading_a_log_notes_what_it_lost() {
+        use crate::job_log::{Event, EventBody, LogLine, Summary};
+        let event = |seq, body| {
+            LogLine::Event(Event {
+                ts_ms: 5,
+                seq,
+                body,
+            })
+        };
+        let failed = || EventBody::FileFailed {
+            path: "a.txt".into(),
+            reason: "denied".into(),
+            raw: None,
+        };
+        let mut read = LogRead {
+            logs: 1,
+            ..LogRead::default()
+        };
+        read.read_line(event(1, failed()));
+        read.read_line(event(2, failed()));
+        read.read_line(event(3, EventBody::Summary(Summary::default())));
+        read.read_line(event(
+            4,
+            EventBody::RunEnd {
+                outcome: Outcome::Ok,
+                detail: None,
+            },
+        ));
+        assert_eq!(read.failures.len(), 1, "each failure once");
+        assert!(read.complete());
+        let mut gap = read.clone();
+        gap.read_line(event(
+            5,
+            EventBody::LogIncomplete {
+                reason: "disk full".into(),
+            },
+        ));
+        assert!(!gap.complete());
+        let mut torn = read.clone();
+        torn.read_line(LogLine::Unreadable {
+            line: 6,
+            torn: true,
+        });
+        assert!(!torn.complete());
     }
 
     #[test]
