@@ -1,0 +1,38 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "ff27f03536f746d4bb1249206f965ec6813e1b6a",
+ "base_sha": "d06061ba3b8dd8fc89adbf63c0b6fd618e86330d",
+ "goal": "Close the JOB_LOGS review defects by rejecting invalid typed-log headers while retaining crash recovery and by preserving distinct failed-file identities in jobs watch.",
+ "recommended_approach": "Validate the untyped format/version envelope, then parse the complete RunStart schema for explicitly supported versions; synthesize headerless crash logs with monotonic sequence numbers; and render raw-byte and UTF-8 filenames with an injective tagged encoding while deduplicating by exact identity.",
+ "comparison": "The change has the right overall structure\u2014strict typed reads with a separate raw path, synthesized recovery headers, and identity-based deduplication\u2014but three edge cases leave the goal incomplete. Independent temporary guards reproduced all three failures, passed with targeted candidate fixes, and the worktree was restored exactly to the reviewed head.",
+ "material_changes": [
+  "Require a complete, parseable RunStart for each explicitly supported version instead of accepting any envelope with kind, format, and version.",
+  "Assign sequence 1 to the recovered run-end when an empty partial receives a synthesized sequence-0 header.",
+  "Use an injective text representation that distinguishes raw-byte names from every possible valid UTF-8 name."
+ ],
+ "findings": [
+  {
+   "title": "Header validation accepts malformed current-version headers",
+   "evidence": "crates/blit-core/src/job_log.rs:1403 \u2014 check_header returns success for every numeric version <= VERSION after checking only kind and format; a temporary guard showed a version-1 header missing required RunStart fields became Unreadable while subsequent events were still consumed.",
+   "predicted_failure": "A corrupt or foreign log can masquerade as the current schema, causing typed consumers to continue interpreting later events instead of rejecting the log; the nonexistent version 0 is also accepted.",
+   "severity": "MEDIUM",
+   "better_approach": "After reading format and version as untyped JSON, dispatch only explicitly supported versions and deserialize the complete header into the corresponding RunStart schema before accepting any events."
+  },
+  {
+   "title": "Recovering an empty partial duplicates sequence zero",
+   "evidence": "crates/blit-core/src/job_log.rs:994 \u2014 close_interrupted assigns sequence 0 when no event survived, while rebuilt_header also assigns sequence 0 at line 1024; the guard observed recovered sequences [0,0].",
+   "predicted_failure": "A process killed after creating the partial but before flushing its header produces a recovered log whose sequence metadata cannot uniquely order its header and run-end.",
+   "severity": "LOW",
+   "better_approach": "When the start was lost and no prior event survived, reserve sequence 0 for the synthesized header and append the interrupted run-end with sequence 1."
+  },
+  {
+   "title": "The raw filename label still collides with valid UTF-8 names",
+   "evidence": "crates/blit-cli/src/jobs.rs:1053 \u2014 the strengthened test expects both the raw-byte filename and the valid UTF-8 filename beginning with raw: to render as the identical string raw:caf\\\\xe9.",
+   "predicted_failure": "jobs watch can count both failures but print indistinguishable path labels, so the user cannot determine which reason belongs to which actual file.",
+   "severity": "LOW",
+   "better_approach": "Use a collision-free representation, such as tagging and escaping both UTF-8 and raw names, or escaping valid names that begin with reserved raw:/utf8: prefixes."
+  }
+ ]
+}

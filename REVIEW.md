@@ -374,10 +374,11 @@ Owner goal (2026-10-07): "complete all parts. review with codex each slice. comm
 | jl1b-r1 | `f6ca55c0..b613912c` (jl-1b `51da3977`) | **acceptable_with_changes**; capability_ok=true; guard_confirmed=true; SHAs pin-verified | 2 admitted: cr-jl1b-1 a served job refused at open leaves no log, cr-jl1b-2 HIGH unbounded progress queues ahead of the bounded writer (material changes = the same two) | `.review/results/jl1b-r1.codex.json` + `.events.jsonl` |
 | jl1c-r1 | `b613912c..6dd33e22` (jl-1c `f78008b7`) | **acceptable_with_changes**; capability_ok=true; guard_confirmed=true; SHAs pin-verified | 1 admitted: cr-jl1c-1 `jobs watch` re-downloads an unfinished log to name the failed files (material change = the same) | `.review/results/jl1c-r1.codex.json` + `.events.jsonl` |
 | jlfix1-r1c | `7d2bd7d3..efe53362` (the five r1 fixes) | **acceptable_with_changes**; capability_ok=true; guard_confirmed=true; SHAs pin-verified. Two earlier dispatches of this same review (`jlfix1-r1-stalled`, `jlfix1-r1b-stalled` event streams) hung mid-run on sockets bound to IPv6 addresses this machine had dropped during a network disturbance; each was stopped after 15+ minutes with no events and re-dispatched once under the owner's goal | 2 admitted: cr-jlfix1-1 typed reading accepts a log with no header, cr-jlfix1-2 `watch` de-duplicates by flattened text (material changes = the same two) | `.review/results/jlfix1-r1c.codex.json` + `.events.jsonl` |
+| jlfix2-r1 | `d06061ba..ff27f035` (Fix cr-jlfix1-1/-2) | **acceptable_with_changes**; capability_ok=true; guard_confirmed=true; SHAs pin-verified | 3 admitted: cr-jlfix2-1 a malformed current-version header passes, cr-jlfix2-2 an empty partial's header and run-end share sequence 0, cr-jlfix2-3 the `raw:` label collides with a UTF-8 name (material changes = the same three) | `.review/results/jlfix2-r1.codex.json` + `.events.jsonl` |
 
 Finding rows: `[ ]` open → `[x]` fixed with its commit, one finding per commit (`Fix <id>: …`).
 
-- [x] cr-jl1a-1 `c55a4d94` · [x] cr-jl1a-2 `07e2a3b4` · [x] cr-jl1b-1 `6e514464` · [x] cr-jl1b-2 `91c97e61` · [x] cr-jl1c-1 `86300bc5` · [x] cr-jlfix1-1 `7f7641f1` · [x] cr-jlfix1-2 `c4300a77`+`27a626a7`
+- [x] cr-jl1a-1 `c55a4d94` · [x] cr-jl1a-2 `07e2a3b4` · [x] cr-jl1b-1 `6e514464` · [x] cr-jl1b-2 `91c97e61` · [x] cr-jl1c-1 `86300bc5` · [x] cr-jlfix1-1 `7f7641f1` · [x] cr-jlfix1-2 `c4300a77`+`27a626a7` · [ ] cr-jlfix2-1 · [ ] cr-jlfix2-2 · [ ] cr-jlfix2-3
 
 ## Reconciled legacy finding groups
 
