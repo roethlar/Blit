@@ -16,6 +16,7 @@ use crate::job_log::{
     Summary,
 };
 use crate::remote::transfer::progress::{audit_lane, AuditSender, PlannedTotals, AUDIT_LANE_DEPTH};
+use crate::remote::transfer::sink::FileFailure;
 use crate::remote::transfer::ProgressEvent;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -71,8 +72,10 @@ pub struct RunTotals {
     /// The failed files by name; exact unless `failed_paths_truncated`.
     pub failed_paths: Vec<String>,
     pub failed_paths_truncated: bool,
-    /// `(path, reason)` for as many failed files as the report kept.
-    pub failures: Vec<(String, String)>,
+    /// As many failed files as the report kept, each with its reason and
+    /// — when its name is not its text — its own bytes (review
+    /// cr-jl3afix1-1).
+    pub failures: Vec<FileFailure>,
 }
 
 impl From<&TransferSummary> for RunTotals {
@@ -89,7 +92,7 @@ impl From<&TransferSummary> for RunTotals {
             failures: summary
                 .failures
                 .iter()
-                .map(|failure| (failure.relative_path.clone(), failure.reason.clone()))
+                .map(FileFailure::from_wire)
                 .collect(),
         }
     }
@@ -492,16 +495,32 @@ impl RunLog {
                 if active.failed.contains(path) {
                     continue;
                 }
-                let reason = totals
+                // Review cr-jl3afix1-1: each failure named for this text,
+                // by its own bytes when it has them — two entries whose
+                // names collapse to one text are two files.
+                let named: Vec<&FileFailure> = totals
                     .failures
                     .iter()
-                    .find(|(failed, _)| failed == path)
-                    .map_or(NO_REASON_REPORTED, |(_, reason)| reason.as_str());
-                bodies.push(EventBody::FileFailed {
-                    path: path.clone(),
-                    reason: reason.to_string(),
-                    raw: active.raw_names.get(path).cloned(),
-                });
+                    .filter(|failure| &failure.relative_path == path)
+                    .collect();
+                if named.is_empty() {
+                    bodies.push(EventBody::FileFailed {
+                        path: path.clone(),
+                        reason: NO_REASON_REPORTED.to_string(),
+                        raw: active.raw_names.get(path).cloned(),
+                    });
+                }
+                for failure in named {
+                    bodies.push(EventBody::FileFailed {
+                        path: path.clone(),
+                        reason: failure.reason.clone(),
+                        raw: failure
+                            .raw_relative_path
+                            .as_deref()
+                            .map(crate::raw_name::escape_raw)
+                            .or_else(|| active.raw_names.get(path).cloned()),
+                    });
+                }
             }
             if totals.failed_paths_truncated {
                 bodies.push(EventBody::Diagnostic {
@@ -658,5 +677,56 @@ mod tests {
             Some(crate::raw_name::escape_raw(b"bad\xff.txt"))
         );
         assert_eq!(log.raw_name("plain.txt"), None);
+    }
+    /// Review cr-jl3afix1-1: two entries whose names collapse to one text
+    /// are two files — the log names each failure by its own bytes, not
+    /// by the first entry's that its text maps to.
+    #[tokio::test]
+    async fn each_failure_is_logged_by_its_own_bytes() {
+        use crate::job_log::{open_log, LogLine};
+        let dir = tempfile::tempdir().unwrap();
+        let log = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "0123456789abcdef0123456789abcdef",
+        );
+        log.start(Role::Initiator, RunInfo::default(), None);
+        let progress = crate::remote::transfer::RemoteTransferProgress::audit_only(
+            log.audit_lane_at(End::Receiving).expect("a lane"),
+        );
+        // The first entry of the text, as the manifest reported it.
+        progress
+            .report_raw_name("dup\u{FFFD}.bin".into(), b"dup\xfe.bin".to_vec())
+            .await;
+        drop(progress);
+        let totals = RunTotals {
+            files_failed: 1,
+            failed_paths: vec!["dup\u{FFFD}.bin".into()],
+            failures: vec![FileFailure {
+                relative_path: "dup\u{FFFD}.bin".into(),
+                reason: "duplicate".into(),
+                raw_relative_path: Some(b"dup\xff.bin".to_vec()),
+            }],
+            ..RunTotals::default()
+        };
+        let report = log
+            .close(Outcome::Failed, None, Some(totals))
+            .await
+            .expect("a report");
+        let raws: Vec<Option<String>> = open_log(&report.path.expect("a log"))
+            .unwrap()
+            .filter_map(|line| match line.unwrap() {
+                LogLine::Event(event) => match event.body {
+                    EventBody::FileFailed { raw, .. } => Some(raw),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(raws, [Some(crate::raw_name::escape_raw(b"dup\xff.bin"))]);
     }
 }

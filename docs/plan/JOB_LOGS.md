@@ -495,8 +495,15 @@ Small first, per R1; each slice is one coherent, testable change.
      record naming the failed file; `[jobs] keep` prunes records; a dry
      run's record counts nothing. Seven guard mutations red.
    - *Known gaps*: `jobs save|export|retry` are jl-3b/jl-4 (their own
-     reconciliation hooks then); a failure's raw bytes come only from a
-     daemon's log (a local summary names text only).
+     reconciliation hooks then).
+   - *Review fixes* (jl3a-r1, jl3afix1-r1): a detached run trusts its
+     daemon's log only when the log is complete, else the daemon's job
+     state (cr-jl3a-1); each document write stages in a file of its own
+     (cr-jl3a-2); a record's failures keep a non-UTF-8 name's exact bytes
+     (cr-jl3a-3) — each failure carrying its own bytes from where it is
+     made, through the summaries (contract 7: `FileFailure.raw_relative_path`)
+     into the log and the record, so two names that collapse to one text
+     stay two files (cr-jl3afix1-1).
 6. **jl-4 — retry.** `blit jobs retry <job-id|file>`: a child run (next
    attempt, parent recorded) re-sending only the failed paths with the
    original JobSpec, through the existing retry-pass machinery; refuse on

@@ -300,7 +300,7 @@ fn failed_raw_names(log: &RunLog, totals: &RunTotals) -> std::collections::HashM
     totals
         .failed_paths
         .iter()
-        .chain(totals.failures.iter().map(|(path, _)| path))
+        .chain(totals.failures.iter().map(|failure| &failure.relative_path))
         .filter_map(|path| Some((path.clone(), log.raw_name(path)?)))
         .collect()
 }
@@ -405,25 +405,32 @@ fn finish_record(
         record.files_deleted = totals.files_deleted;
         record.files_failed = totals.files_failed;
         record.bytes_copied = totals.bytes_copied;
-        let reasons: std::collections::HashMap<&str, &str> = totals
+        // Each named failure as its report made it — review cr-jl3afix1-1:
+        // by its own bytes when it has them, else the bytes the log knows
+        // for its text — then each failed path no failure names.
+        let mut failures: Vec<Failure> = totals
             .failures
             .iter()
-            .map(|(path, reason)| (path.as_str(), reason.as_str()))
-            .collect();
-        let mut names: Vec<&str> = totals.failed_paths.iter().map(String::as_str).collect();
-        for (path, _) in &totals.failures {
-            if !names.contains(&path.as_str()) {
-                names.push(path);
-            }
-        }
-        record.failures = names
-            .into_iter()
-            .map(|path| Failure {
-                path: path.to_string(),
-                reason: reasons.get(path).copied().unwrap_or_default().to_string(),
-                raw: raws.get(path).cloned(),
+            .map(|failure| Failure {
+                path: failure.relative_path.clone(),
+                reason: failure.reason.clone(),
+                raw: failure
+                    .raw_relative_path
+                    .as_deref()
+                    .map(blit_core::raw_name::escape_raw)
+                    .or_else(|| raws.get(&failure.relative_path).cloned()),
             })
             .collect();
+        for path in &totals.failed_paths {
+            if !failures.iter().any(|failure| &failure.path == path) {
+                failures.push(Failure {
+                    path: path.clone(),
+                    reason: String::new(),
+                    raw: raws.get(path).cloned(),
+                });
+            }
+        }
+        record.failures = failures;
         record.failures_truncated =
             totals.failed_paths_truncated || (record.failures.len() as u64) < totals.files_failed;
     }
@@ -585,11 +592,7 @@ pub fn totals_from_local(summary: &blit_core::transfer_session::LocalMirrorSumma
         in_stream_carrier: None,
         failed_paths: summary.failed_paths.clone(),
         failed_paths_truncated: summary.failed_paths_truncated,
-        failures: summary
-            .failures
-            .iter()
-            .map(|failure| (failure.relative_path.clone(), failure.reason.clone()))
-            .collect(),
+        failures: summary.failures.clone(),
     }
 }
 
@@ -649,7 +652,7 @@ pub fn totals_from_delegated(summary: &blit_core::generated::DelegatedPullSummar
         failures: summary
             .failures
             .iter()
-            .map(|failure| (failure.relative_path.clone(), failure.reason.clone()))
+            .map(blit_core::remote::transfer::sink::FileFailure::from_wire)
             .collect(),
     }
 }
@@ -683,10 +686,24 @@ mod tests {
             _live: live,
         };
         let shown = "bad\u{FFFD}.txt".to_string();
+        // Review cr-jl3afix1-1: two entries whose names collapse to one
+        // text — the first failed on its own, the second as its duplicate,
+        // with its own bytes.
         let totals = RunTotals {
-            files_failed: 2,
+            files_failed: 3,
             failed_paths: vec![shown.clone(), "plain.txt".into()],
-            failures: vec![(shown.clone(), "denied".into())],
+            failures: vec![
+                blit_core::remote::transfer::sink::FileFailure {
+                    relative_path: shown.clone(),
+                    reason: "denied".into(),
+                    raw_relative_path: None,
+                },
+                blit_core::remote::transfer::sink::FileFailure {
+                    relative_path: shown.clone(),
+                    reason: "duplicate".into(),
+                    raw_relative_path: Some(b"bad\xfe.txt".to_vec()),
+                },
+            ],
             ..RunTotals::default()
         };
         let raws = std::collections::HashMap::from([(shown.clone(), "bad\\xff.txt".to_string())]);
@@ -704,9 +721,14 @@ mod tests {
             failures,
             [
                 Failure {
-                    path: shown,
+                    path: shown.clone(),
                     reason: "denied".into(),
                     raw: Some("bad\\xff.txt".into()),
+                },
+                Failure {
+                    path: shown,
+                    reason: "duplicate".into(),
+                    raw: Some(blit_core::raw_name::escape_raw(b"bad\xfe.txt")),
                 },
                 Failure {
                     path: "plain.txt".into(),

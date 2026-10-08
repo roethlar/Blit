@@ -170,6 +170,7 @@ impl PassFailures {
                      re-run to converge",
                     self.unretried
                 ),
+                raw_relative_path: None,
             });
         }
     }
@@ -584,6 +585,7 @@ mod tests {
         FileFailure {
             relative_path: path.to_string(),
             reason: "source: cannot open: boom".to_string(),
+            raw_relative_path: None,
         }
     }
 
@@ -1204,6 +1206,7 @@ mod cr_fix2_2_tests {
             failures: vec![FileFailure {
                 relative_path: "a".to_string(),
                 reason: "source: missing at retry".to_string(),
+                raw_relative_path: None,
             }],
             failed_paths: vec!["a".to_string()],
             failed_paths_truncated: false,

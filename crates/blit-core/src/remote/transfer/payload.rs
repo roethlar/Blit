@@ -101,6 +101,7 @@ pub async fn prepare_payload_with(
                     Err(err) => PreparedPayload::Skipped(FileFailure {
                         relative_path: header.relative_path,
                         reason: hydration_failure_reason(&err),
+                        raw_relative_path: header.raw_relative_path,
                     }),
                 }
             };
@@ -123,6 +124,7 @@ pub async fn prepare_payload_with(
                     Err(err) => skipped.push(FileFailure {
                         relative_path: header.relative_path,
                         reason: hydration_failure_reason(&err),
+                        raw_relative_path: header.raw_relative_path,
                     }),
                 }
             }
@@ -165,6 +167,7 @@ pub async fn prepare_payload_with(
                     Err(err) => PreparedPayload::Skipped(FileFailure {
                         relative_path: header.relative_path,
                         reason: hydration_failure_reason(&err),
+                        raw_relative_path: header.raw_relative_path,
                     }),
                 }
             };
@@ -493,6 +496,7 @@ pub fn build_tar_shard_with(
             skipped.push(FileFailure {
                 relative_path: header.relative_path.clone(),
                 reason,
+                raw_relative_path: header.raw_relative_path.clone(),
             });
         };
 

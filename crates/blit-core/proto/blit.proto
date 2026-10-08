@@ -1166,6 +1166,11 @@ message SourceDone {}
 message FileFailure {
   string relative_path = 1;
   string reason = 2;
+  // Contract 7 (JOB_LOGS review cr-jl3afix1-1): the failed entry's exact
+  // name bytes when they are not `relative_path`'s, so an entry whose
+  // lossy text collides with another's names its own file; empty
+  // otherwise, or when they would not fit the path bound.
+  bytes raw_relative_path = 3;
 }
 
 // DESTINATION → SOURCE at close: the end that wrote bytes and

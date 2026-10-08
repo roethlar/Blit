@@ -183,6 +183,10 @@ fn bounded_tail(value: &str, max_bytes: usize) -> String {
 pub struct FileFailure {
     pub relative_path: String,
     pub reason: String,
+    /// The failed entry's exact name bytes when they are not the text's —
+    /// set where the failure is made, so a name that collides with another
+    /// in its lossy text still names its own file (review cr-jl3afix1-1).
+    pub raw_relative_path: Option<Vec<u8>>,
 }
 
 impl FileFailure {
@@ -202,6 +206,13 @@ impl FileFailure {
         crate::generated::FileFailure {
             relative_path: bounded_tail(&self.relative_path, MAX_FAILURE_PATH_BYTES),
             reason: bounded_head(&self.reason, MAX_FAILURE_REASON_BYTES),
+            // A cut name is no identity: bytes past the bound are dropped
+            // whole, and the text stands alone.
+            raw_relative_path: self
+                .raw_relative_path
+                .clone()
+                .filter(|raw| raw.len() <= MAX_FAILURE_PATH_BYTES)
+                .unwrap_or_default(),
         }
     }
 
@@ -211,6 +222,8 @@ impl FileFailure {
         Self {
             relative_path: wire.relative_path.clone(),
             reason: wire.reason.clone(),
+            raw_relative_path: (!wire.raw_relative_path.is_empty())
+                .then(|| wire.raw_relative_path.clone()),
         }
     }
 }
@@ -311,6 +324,17 @@ impl SinkOutcome {
     /// Record one per-file failure. The reported list stops growing at
     /// [`MAX_REPORTED_FILE_FAILURES`]; the total keeps counting.
     pub fn record_failure(&mut self, relative_path: impl Into<String>, reason: impl Into<String>) {
+        self.record_named_failure(relative_path, None, reason);
+    }
+
+    /// [`record_failure`](Self::record_failure) for an entry whose exact
+    /// name bytes are not its text's (review cr-jl3afix1-1).
+    pub fn record_named_failure(
+        &mut self,
+        relative_path: impl Into<String>,
+        raw_relative_path: Option<Vec<u8>>,
+        reason: impl Into<String>,
+    ) {
         let relative_path = relative_path.into();
         let reason = reason.into();
         // Every contained failure is logged here, exactly once — the one
@@ -334,6 +358,7 @@ impl SinkOutcome {
             self.failures.push(FileFailure {
                 relative_path,
                 reason,
+                raw_relative_path,
             });
         }
     }
@@ -5369,6 +5394,7 @@ mod tests {
             .map(|index| FileFailure {
                 relative_path: format!("x{index}.bin"),
                 reason: "direct".into(),
+                raw_relative_path: None,
             })
             .collect();
         unbounded.files_failed_total = unbounded.failures.len() as u64;
@@ -5616,6 +5642,7 @@ mod tests {
         let failure = FileFailure {
             relative_path: "dir/one.bin".into(),
             reason: "write dir/one.bin: Access is denied".into(),
+            raw_relative_path: None,
         };
         assert_eq!(FileFailure::from_wire(&failure.to_wire()), failure);
     }

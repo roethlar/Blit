@@ -1400,6 +1400,7 @@ fn requested_but_unscanned(
         out.push(crate::generated::FileFailure {
             relative_path: rel,
             reason,
+            raw_relative_path: Vec::new(),
         });
     }
     (out, dropped)
@@ -2209,6 +2210,7 @@ async fn source_send_half(
                                         crate::generated::FileFailure {
                                             relative_path: failure.relative_path,
                                             reason: failure.reason,
+                                            raw_relative_path: failure.raw_relative_path.unwrap_or_default(),
                                         },
                                     )))
                                     .await?;
@@ -3185,6 +3187,7 @@ async fn send_payload_records(
                 tx.send(frame(Frame::FileSkipped(crate::generated::FileFailure {
                     relative_path: failure.relative_path,
                     reason: failure.reason,
+                    raw_relative_path: failure.raw_relative_path.unwrap_or_default(),
                 })))
                 .await?;
             }
@@ -3202,6 +3205,7 @@ async fn send_payload_records(
                         tx.send(frame(Frame::FileSkipped(crate::generated::FileFailure {
                             relative_path: header.relative_path.clone(),
                             reason: format!("source: cannot open: {err:#}"),
+                            raw_relative_path: header.raw_relative_path.clone().unwrap_or_default(),
                         })))
                         .await?;
                         continue;
@@ -3215,6 +3219,7 @@ async fn send_payload_records(
                         tx.send(frame(Frame::FileSkipped(crate::generated::FileFailure {
                             relative_path: header.relative_path.clone(),
                             reason: format!("source: cannot read metadata: {err}"),
+                            raw_relative_path: header.raw_relative_path.clone().unwrap_or_default(),
                         })))
                         .await?;
                         continue;
@@ -3227,6 +3232,7 @@ async fn send_payload_records(
                             "source: changed size during transfer (manifest {} bytes, now {now})",
                             header.size
                         ),
+                        raw_relative_path: header.raw_relative_path.clone().unwrap_or_default(),
                     })))
                     .await?;
                     continue;
@@ -3313,6 +3319,7 @@ async fn send_payload_records(
                     tx.send(frame(Frame::FileSkipped(crate::generated::FileFailure {
                         relative_path: failure.relative_path,
                         reason: failure.reason,
+                        raw_relative_path: failure.raw_relative_path.unwrap_or_default(),
                     })))
                     .await?;
                 }
@@ -3452,6 +3459,7 @@ async fn send_resume_block_records(
                 tx.send(frame(Frame::FileSkipped(crate::generated::FileFailure {
                     relative_path: header.relative_path.clone(),
                     reason: ResumeBlockDiff::skip_reason(&err),
+                    raw_relative_path: header.raw_relative_path.clone().unwrap_or_default(),
                 })))
                 .await?;
                 return Ok(());
@@ -4439,7 +4447,13 @@ async fn destination_session_inner(
                         reason.push_str(": raw bytes ");
                         reason.push_str(&crate::raw_name::escape_raw(raw));
                     }
-                    contained_failures.record_failure(&header.relative_path, reason);
+                    // Review cr-jl3afix1-1: this entry's own bytes, not the
+                    // first one's that its text names.
+                    contained_failures.record_named_failure(
+                        &header.relative_path,
+                        header.raw_relative_path.clone(),
+                        reason,
+                    );
                     continue;
                 }
                 // Review cr-jl1a-1: a job log names this entry by its exact
@@ -4453,8 +4467,9 @@ async fn destination_session_inner(
                 // diff would have said, and never granted; it stays in the
                 // mirror's kept set above so no counterpart is deleted.
                 if header.raw_relative_path.is_some() && !raw_names_storable {
-                    contained_failures.record_failure(
+                    contained_failures.record_named_failure(
                         &header.relative_path,
+                        header.raw_relative_path.clone(),
                         crate::raw_name::DESTINATION_CANNOT_STORE_REASON.to_string(),
                     );
                     continue;
@@ -4510,7 +4525,12 @@ async fn destination_session_inner(
                 // session's contained failure, recorded before the diff so
                 // the summary, the exit status and the move gate all see it.
                 for failure in &complete.scan_failures {
-                    contained_failures.record_failure(&failure.relative_path, &failure.reason);
+                    let failure = crate::remote::transfer::sink::FileFailure::from_wire(failure);
+                    contained_failures.record_named_failure(
+                        failure.relative_path,
+                        failure.raw_relative_path,
+                        failure.reason,
+                    );
                 }
                 if complete.scan_failures_dropped > 0 {
                     contained_failures.record_unnamed_failures(complete.scan_failures_dropped);
@@ -4721,7 +4741,10 @@ async fn destination_session_inner(
                     p.report_file_failed(skipped.relative_path.clone(), skipped.reason.clone())
                         .await;
                 }
-                contained_failures.record_failure(skipped.relative_path, skipped.reason);
+                // Review cr-jl3afix1-1: the skipped entry's own bytes.
+                let raw = (!skipped.raw_relative_path.is_empty())
+                    .then_some(skipped.raw_relative_path);
+                contained_failures.record_named_failure(skipped.relative_path, raw, skipped.reason);
             }
             Some(Frame::Block(block)) => {
                 // otp-7a: a resume block record opens with its first

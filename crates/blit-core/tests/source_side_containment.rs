@@ -1039,6 +1039,7 @@ async fn skip_for_an_ungranted_path_is_a_violation() {
     peer.send(wire(Frame::FileSkipped(FileFailure {
         relative_path: "evil.bin".into(),
         reason: "source: cannot open".into(),
+        raw_relative_path: Vec::new(),
     })))
     .await
     .unwrap();
@@ -1092,6 +1093,7 @@ async fn skip_for_a_granted_need_then_source_done_completes_with_the_failure_rep
     peer.send(wire(Frame::FileSkipped(FileFailure {
         relative_path: "granted.bin".into(),
         reason: "source: cannot open: locked".into(),
+        raw_relative_path: Vec::new(),
     })))
     .await
     .unwrap();
@@ -2161,9 +2163,14 @@ async fn assert_duplicate_manifest_path_is_reported_once(carrier: Carrier) {
             ("ok.bin", patterned(BIG, 8), 1_600_000_012),
         ],
     );
+    // The duplicate names other bytes than the first (review
+    // cr-jl3afix1-1: two names that collapse to one text are two files);
+    // it is never granted, so they need not exist.
     let source = rewriting_source(src_root.clone(), |header| {
         if header.relative_path == "dup.bin" {
-            vec![header.clone(), header]
+            let mut second = header.clone();
+            second.raw_relative_path = Some(b"dup\xff.bin".to_vec());
+            vec![header, second]
         } else {
             vec![header]
         }
@@ -2180,6 +2187,11 @@ async fn assert_duplicate_manifest_path_is_reported_once(carrier: Carrier) {
     assert_eq!(summary.files_failed, 1, "the duplicate is reported once");
     let failures = failures_from_wire(&summary.failures);
     assert_eq!(failures[0].relative_path, "dup.bin");
+    assert_eq!(
+        failures[0].raw_relative_path.as_deref(),
+        Some(&b"dup\xff.bin"[..]),
+        "the failure names the rejected entry by its own bytes"
+    );
     assert!(
         failures[0]
             .reason

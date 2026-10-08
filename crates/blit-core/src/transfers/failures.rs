@@ -84,6 +84,7 @@ mod tests {
         FileFailure {
             relative_path: relative_path.to_string(),
             reason: reason.to_string(),
+            raw_relative_path: None,
         }
     }
 
@@ -146,6 +147,7 @@ mod tests {
         let wire = vec![crate::generated::FileFailure {
             relative_path: "sub/blocked.bin".to_string(),
             reason: "Access is denied. (os error 5)".to_string(),
+            raw_relative_path: Vec::new(),
         }];
         let read_back = failures_from_wire(&wire);
         assert_eq!(read_back.len(), 1);
