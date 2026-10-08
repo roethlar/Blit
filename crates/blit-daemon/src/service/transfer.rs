@@ -246,10 +246,12 @@ fn with_perf_capture(
     })
 }
 
-/// Wrap an [`OpenResolver`] so a successful resolve also starts the job's
-/// log (JOB_LOGS jl-1b) in the role this resolver serves, naming the open's
-/// endpoint and options. Kept separate from the other hooks, like
-/// [`with_perf_capture`].
+/// Wrap an [`OpenResolver`] so the job's log (JOB_LOGS jl-1b) starts the
+/// moment the open names this resolver's role, naming the open's endpoint
+/// and options — before the endpoint resolves, so an open refused for an
+/// unknown module, a read-only module or a bad path is logged too (review
+/// cr-jl1b-1); the dispatcher's close records the refusal. Kept separate
+/// from the other hooks, like [`with_perf_capture`].
 fn with_log_start(
     inner: Box<OpenResolver>,
     job_log: JobLog,
@@ -282,11 +284,11 @@ fn with_log_start(
                 open.require_complete_scan,
             ),
         };
+        job_log.start(role, run);
         let fut = inner(open);
         let job_log = job_log.clone();
         Box::pin(async move {
             let resolved = fut.await?;
-            job_log.start(role, run);
             job_log.note(format!("local root: {}", resolved.root.display()));
             Ok(resolved)
         })

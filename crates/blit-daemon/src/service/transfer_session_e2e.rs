@@ -2329,3 +2329,39 @@ async fn a_raw_named_file_is_logged_with_its_exact_bytes() {
 
     daemon.stop().await;
 }
+
+/// Review cr-jl1b-1: an open refused for an unknown module still leaves the
+/// job's log — it names the job, its role and the refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_served_job_refused_at_open_is_logged() {
+    use blit_core::job_log::{EventBody, Outcome};
+    let src = tempfile::tempdir().unwrap();
+    write_tree(src.path(), &small_tree());
+    let daemon = Daemon::start(false).await;
+
+    let refused = run_push_session(
+        &daemon.endpoint_for_missing_module(),
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions::default(),
+    )
+    .await;
+    assert!(refused.is_err(), "an unknown module is refused");
+
+    let logs = daemon.job_logs().await;
+    let (role, _, events) = &logs[0];
+    assert_eq!(role, "destination");
+    let EventBody::RunStart(start) = &events[0] else {
+        panic!("first event: {:?}", events[0]);
+    };
+    assert_eq!(start.run.destination, "/nope");
+    assert!(
+        matches!(
+            events.last(),
+            Some(EventBody::RunEnd { outcome: Outcome::Failed, detail: Some(detail) })
+                if detail.contains("nope")
+        ),
+        "{events:?}"
+    );
+
+    daemon.stop().await;
+}
