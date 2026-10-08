@@ -1,0 +1,12 @@
+{
+ "verdict": "best_approach",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "778539f68010610ebd6d37ded7c30b4818518c02",
+ "base_sha": "ce04865d75741698a51888d84fc815b474da353f",
+ "goal": "Preserve every distinct failed file in the job log when multiple raw filenames collapse to the same lossy display path, without repeating a failure already recorded live.",
+ "recommended_approach": "Track recorded failures by composite display-path and raw-byte identity, reconcile each close-time summary failure independently against that set, and pin both completeness and deduplication with a focused regression test.",
+ "comparison": "The change implements that approach directly: live failures retain composite identity, summary entries are considered individually with exact raw bytes when available, and the regression test verifies both the previously hidden failure and once-only logging. A mutation restoring the old path-bucket skip failed with one event instead of two; restoring the reviewed head passed, as did all run_log tests and formatting checks.",
+ "material_changes": [],
+ "findings": []
+}
