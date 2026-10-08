@@ -388,7 +388,7 @@ Owner goal (2026-10-07): "complete all parts. review with codex each slice. comm
 
 Finding rows: `[ ]` open → `[x]` fixed with its commit, one finding per commit (`Fix <id>: …`).
 
-- [x] cr-jl1a-1 `c55a4d94` · [x] cr-jl1a-2 `07e2a3b4` · [x] cr-jl1b-1 `6e514464` · [x] cr-jl1b-2 `91c97e61` · [x] cr-jl1c-1 `86300bc5` · [x] cr-jlfix1-1 `7f7641f1` · [x] cr-jlfix1-2 `c4300a77`+`27a626a7` · [x] cr-jlfix2-1 `2e193ba9` · [x] cr-jlfix2-2 `1add8d7b` · [x] cr-jlfix2-3 `b580f0c1` · [x] cr-jl2-1 `58ac16fb` · [x] cr-jl2fix1-1 `a7365b61` · [x] cr-jl3a-1 `71155351` · [x] cr-jl3a-2 `a53e3d56` · [x] cr-jl3a-3 `31b54c99` · [x] cr-jl3afix1-1 `59439838` · [x] cr-jl3afix2-1 `9c4a9643` · [x] cr-jl3b-1 `84aa5bf5` · [ ] cr-jl3bfix1-1
+- [x] cr-jl1a-1 `c55a4d94` · [x] cr-jl1a-2 `07e2a3b4` · [x] cr-jl1b-1 `6e514464` · [x] cr-jl1b-2 `91c97e61` · [x] cr-jl1c-1 `86300bc5` · [x] cr-jlfix1-1 `7f7641f1` · [x] cr-jlfix1-2 `c4300a77`+`27a626a7` · [x] cr-jlfix2-1 `2e193ba9` · [x] cr-jlfix2-2 `1add8d7b` · [x] cr-jlfix2-3 `b580f0c1` · [x] cr-jl2-1 `58ac16fb` · [x] cr-jl2fix1-1 `a7365b61` · [x] cr-jl3a-1 `71155351` · [x] cr-jl3a-2 `a53e3d56` · [x] cr-jl3a-3 `31b54c99` · [x] cr-jl3afix1-1 `59439838` · [x] cr-jl3afix2-1 `9c4a9643` · [x] cr-jl3b-1 `84aa5bf5` · [x] cr-jl3bfix1-1 `8d62c25e`
 
 ## Reconciled legacy finding groups
 
