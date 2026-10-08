@@ -991,7 +991,9 @@ fn close_interrupted(partial: &Path) -> io::Result<bool> {
         &mut line,
         &Event {
             ts_ms: now_ms(),
-            seq: last.map_or(0, |event| event.seq + 1),
+            // Review cr-jlfix2-2: with nothing surviving, the start was
+            // lost too, and the header rebuilt for it holds 0.
+            seq: last.map_or(1, |event| event.seq + 1),
             body: EventBody::RunEnd {
                 outcome: Outcome::Interrupted,
                 detail: Some(if lost_start {
@@ -1922,6 +1924,25 @@ mod tests {
             }
         );
         assert_eq!(read.len(), 4);
+    }
+
+    /// Review cr-jlfix2-2: an empty partial (killed before its first line
+    /// reached disk) recovers as a rebuilt header and a run-end, numbered 0
+    /// and 1.
+    #[test]
+    fn startup_numbers_an_empty_logs_lines_in_order() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("r1.m1.destination.1.partial.jsonl"), b"").unwrap();
+
+        recover(dir.path());
+
+        let read = events(&dir.path().join("r1.m1.destination.1.jsonl.gz"));
+        assert!(matches!(read[0].body, EventBody::RunStart(_)));
+        assert!(matches!(read[1].body, EventBody::RunEnd { .. }));
+        assert_eq!(
+            read.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            [0, 1]
+        );
     }
 
     #[test]
