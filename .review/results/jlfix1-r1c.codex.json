@@ -1,0 +1,30 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "efe533629beeacfb197e09a9143c79a3975b6c92",
+ "base_sha": "7d2bd7d37f768eb75d7d2dc963576076e7e787a5",
+ "goal": "Close the first JOB_LOGS review defects so daemon job logs are bounded, complete, version-safe, lossless for raw paths, available for refused jobs, and fetched once after finalization.",
+ "recommended_approach": "Use a separately bounded and drained audit channel, start logging before endpoint resolution, require a valid run-start header for typed decoding while retaining raw decoding for damaged logs, preserve tagged text/raw path identity throughout, and let watch request one server-side-finalized stream.",
+ "comparison": "The change implements most of that architecture cleanly, and focused audit-lane, finalization-wait, and refused-open tests passed; however, typed decoding still accepts headerless input and watch deduplication discards structured path identity. An independent mutation guard reproduced the header defect red and passed green with strict validation, after which the worktree was restored cleanly to the reviewed SHA.",
+ "material_changes": [
+  "Require the first nonblank typed log record to be a valid supported run-start header; reserve decode for raw damaged-log forensics.",
+  "Deduplicate failed files using tagged path identity, including whether exact raw bytes are present, and render raw-byte identities distinctly from literal escaped-looking UTF-8 names."
+ ],
+ "findings": [
+  {
+   "title": "Typed log reading still accepts files without the required header",
+   "evidence": "crates/blit-core/src/job_log.rs:1295 \u2014 malformed first-line JSON returns Ok; line 1298 likewise accepts any first event whose kind is not run-start, despite the typed-reader contract at lines 1262-1265.",
+   "predicted_failure": "A foreign JSONL file, or a newer log whose header is torn or missing, is silently interpreted using the current Event schema instead of being rejected, recreating the incompatible-schema misreading this change intends to prevent.",
+   "severity": "MEDIUM",
+   "better_approach": "Require a parseable run-start object with the expected format and a supported version before yielding typed events; users needing damaged-log forensics can use the existing raw decode path."
+  },
+  {
+   "title": "Watch deduplication can merge two distinct supported filenames",
+   "evidence": "crates/blit-cli/src/jobs.rs:600 \u2014 raw.unwrap_or(path) erases whether the displayed string came from exact escaped bytes; line 601 deduplicates that flattened value in HashSet<String>.",
+   "predicted_failure": "On Unix, an invalid-byte filename whose escaped raw value is, for example, caf\\\\xe9.txt and a valid UTF-8 filename literally containing those characters receive the same key; if both fail, jobs watch names only one and reports fewer distinct failures than the authoritative count.",
+   "severity": "LOW",
+   "better_approach": "Deduplicate by a tagged key such as (path, raw), and label or otherwise render raw-byte names distinctly so the two files remain identifiable."
+  }
+ ]
+}
