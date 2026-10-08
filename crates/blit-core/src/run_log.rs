@@ -119,6 +119,9 @@ struct State {
     relay: Option<tokio::task::JoinHandle<()>>,
     planned: Option<Arc<PlannedTotals>>,
     disposition: Disposition,
+    /// The closed log's non-UTF-8 names, kept for the run's record (review
+    /// cr-jl3a-3).
+    closed_raw_names: HashMap<String, String>,
 }
 
 /// What became of what a run moved (review cr-jl2-1): written, or —
@@ -188,6 +191,7 @@ impl RunLog {
                 relay: None,
                 planned: None,
                 disposition: Disposition::Written,
+                closed_raw_names: HashMap::new(),
             })),
         }
     }
@@ -237,6 +241,18 @@ impl RunLog {
             failed: HashSet::new(),
             raw_names: HashMap::new(),
         });
+    }
+
+    /// The exact bytes, escaped, of the name `path` stands for when it is
+    /// not valid UTF-8, as the run's log knows it — after the log closes,
+    /// every name its transfer reported (review cr-jl3a-3). `None` for a
+    /// UTF-8 name.
+    pub fn raw_name(&self, path: &str) -> Option<String> {
+        let state = self.state();
+        match &state.active {
+            Some(active) => active.raw_names.get(path).cloned(),
+            None => state.closed_raw_names.get(path).cloned(),
+        }
     }
 
     /// What became of what the run moves: a dry run or a null-sink run
@@ -442,6 +458,7 @@ impl RunLog {
         let (active, notes, totals, error, run_id, planned, finished, disposition) = {
             let mut state = self.state();
             let active = state.active.take()?;
+            state.closed_raw_names = active.raw_names.clone();
             (
                 active,
                 std::mem::take(&mut state.notes),
@@ -599,5 +616,47 @@ impl RunLog {
             finished.notify_waiters();
         }
         Some(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::job_log::{RunInfo, DEFAULT_KEEP};
+
+    /// Review cr-jl3a-3: a run's record can name a failed file exactly —
+    /// the log hands out a non-UTF-8 name's bytes, after it closes too.
+    #[tokio::test]
+    async fn a_closed_log_still_names_a_raw_name_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            }),
+            "0123456789abcdef0123456789abcdef",
+        );
+        log.start(
+            Role::Initiator,
+            RunInfo {
+                verb: "copy".into(),
+                ..RunInfo::default()
+            },
+            None,
+        );
+        let lane = log.audit_lane_at(End::Receiving).expect("a lane");
+        let progress = crate::remote::transfer::RemoteTransferProgress::audit_only(lane);
+        progress
+            .report_raw_name("bad\u{FFFD}.txt".into(), b"bad\xff.txt".to_vec())
+            .await;
+        drop(progress);
+        log.close(Outcome::Ok, None, None).await.expect("a report");
+        assert_eq!(
+            log.raw_name("bad\u{FFFD}.txt"),
+            Some(crate::raw_name::escape_raw(b"bad\xff.txt"))
+        );
+        assert_eq!(log.raw_name("plain.txt"), None);
     }
 }

@@ -275,11 +275,34 @@ impl CommandRun {
             }
         }
         let source_removed = self.inner.source_removed.load(Ordering::Relaxed);
+        let raws = totals
+            .as_ref()
+            .map(|totals| failed_raw_names(&self.inner.log, totals))
+            .unwrap_or_default();
         let _ = tokio::task::spawn_blocking(move || {
-            finish_record(recorded, ending, outcome, detail, totals, source_removed)
+            finish_record(
+                recorded,
+                ending,
+                outcome,
+                detail,
+                totals,
+                &raws,
+                source_removed,
+            )
         })
         .await;
     }
+}
+
+/// Review cr-jl3a-3: each failed name that is not UTF-8, by its text, with
+/// its exact bytes escaped, as the run's closed log knows it.
+fn failed_raw_names(log: &RunLog, totals: &RunTotals) -> std::collections::HashMap<String, String> {
+    totals
+        .failed_paths
+        .iter()
+        .chain(totals.failures.iter().map(|(path, _)| path))
+        .filter_map(|path| Some((path.clone(), log.raw_name(path)?)))
+        .collect()
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -361,6 +384,7 @@ fn finish_record(
     outcome: Outcome,
     detail: Option<String>,
     totals: Option<RunTotals>,
+    raws: &std::collections::HashMap<String, String>,
     source_removed: bool,
 ) {
     let record = &mut recorded.record;
@@ -397,7 +421,7 @@ fn finish_record(
             .map(|path| Failure {
                 path: path.to_string(),
                 reason: reasons.get(path).copied().unwrap_or_default().to_string(),
-                raw: None,
+                raw: raws.get(path).cloned(),
             })
             .collect();
         record.failures_truncated =
@@ -633,6 +657,101 @@ pub fn totals_from_delegated(summary: &blit_core::generated::DelegatedPullSummar
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review cr-jl3a-3: a run's record names a failed non-UTF-8 file by
+    /// its exact bytes as well as its text.
+    #[test]
+    fn a_record_keeps_a_failed_names_exact_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunStore::new(dir.path());
+        let run_id = job_log::new_run_id().unwrap();
+        let spec = JobSpec::new(
+            "m1",
+            "copy",
+            "/".into(),
+            SpecEndpoint::Local { path: "/a/".into() },
+            SpecEndpoint::Local { path: "/b/".into() },
+            SpecOptions::default(),
+            None,
+        );
+        let record = RunRecord::starting(&run_id, &spec);
+        let live = store.begin(&spec, &record).unwrap();
+        let recorded = Recorded {
+            store: store.clone(),
+            record,
+            keep: 50,
+            _live: live,
+        };
+        let shown = "bad\u{FFFD}.txt".to_string();
+        let totals = RunTotals {
+            files_failed: 2,
+            failed_paths: vec![shown.clone(), "plain.txt".into()],
+            failures: vec![(shown.clone(), "denied".into())],
+            ..RunTotals::default()
+        };
+        let raws = std::collections::HashMap::from([(shown.clone(), "bad\\xff.txt".to_string())]);
+        finish_record(
+            recorded,
+            None,
+            Outcome::Failed,
+            None,
+            Some(totals),
+            &raws,
+            false,
+        );
+        let failures = store.load(&run_id).unwrap().1.failures;
+        assert_eq!(
+            failures,
+            [
+                Failure {
+                    path: shown,
+                    reason: "denied".into(),
+                    raw: Some("bad\\xff.txt".into()),
+                },
+                Failure {
+                    path: "plain.txt".into(),
+                    reason: String::new(),
+                    raw: None,
+                },
+            ]
+        );
+    }
+
+    /// Review cr-jl3a-3: the names a run's record keeps exactly are the
+    /// failed ones its log knows the bytes of.
+    #[tokio::test]
+    async fn a_failed_names_bytes_come_from_the_runs_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = RunLog::new(
+            Some(LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: 50,
+                finished: None,
+            }),
+            "0123456789abcdef0123456789abcdef",
+        );
+        log.start(Role::Initiator, RunInfo::default(), None);
+        let progress =
+            RemoteTransferProgress::audit_only(log.audit_lane_at(End::Receiving).unwrap());
+        for name in ["bad\u{FFFD}.txt", "fine\u{FFFD}.txt"] {
+            progress
+                .report_raw_name(name.into(), name.replace('\u{FFFD}', "\x00").into_bytes())
+                .await;
+        }
+        drop(progress);
+        log.close(Outcome::Failed, None, None).await;
+        let totals = RunTotals {
+            failed_paths: vec!["bad\u{FFFD}.txt".into(), "plain.txt".into()],
+            ..RunTotals::default()
+        };
+        let raws = failed_raw_names(&log, &totals);
+        assert_eq!(
+            raws.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["bad\u{FFFD}.txt"],
+            "only failed names, only those the log knows"
+        );
+    }
 
     #[test]
     fn every_session_of_a_run_takes_the_next_number() {
