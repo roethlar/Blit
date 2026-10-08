@@ -380,7 +380,7 @@ Owner goal (2026-10-07): "complete all parts. review with codex each slice. comm
 
 Finding rows: `[ ]` open → `[x]` fixed with its commit, one finding per commit (`Fix <id>: …`).
 
-- [x] cr-jl1a-1 `c55a4d94` · [x] cr-jl1a-2 `07e2a3b4` · [x] cr-jl1b-1 `6e514464` · [x] cr-jl1b-2 `91c97e61` · [x] cr-jl1c-1 `86300bc5` · [x] cr-jlfix1-1 `7f7641f1` · [x] cr-jlfix1-2 `c4300a77`+`27a626a7` · [x] cr-jlfix2-1 `2e193ba9` · [x] cr-jlfix2-2 `1add8d7b` · [x] cr-jlfix2-3 `b580f0c1` · [ ] cr-jl2-1
+- [x] cr-jl1a-1 `c55a4d94` · [x] cr-jl1a-2 `07e2a3b4` · [x] cr-jl1b-1 `6e514464` · [x] cr-jl1b-2 `91c97e61` · [x] cr-jl1c-1 `86300bc5` · [x] cr-jlfix1-1 `7f7641f1` · [x] cr-jlfix1-2 `c4300a77`+`27a626a7` · [x] cr-jlfix2-1 `2e193ba9` · [x] cr-jlfix2-2 `1add8d7b` · [x] cr-jlfix2-3 `b580f0c1` · [x] cr-jl2-1 `58ac16fb`
 
 ## Reconciled legacy finding groups
 
