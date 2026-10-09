@@ -296,21 +296,15 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
                     record.run_id
                 );
             }
-            let own: HashSet<PathBuf> = failed
-                .iter()
-                .filter(|(path, _)| left.contains(path))
-                .map(|(path, raw)| retry_path(path, raw.as_deref()))
-                .collect();
-            if !own.is_empty() {
+            let (own, own_raw) = retry_names(failed.iter().filter(|(path, _)| left.contains(path)));
+            if !own.is_empty() || !own_raw.is_empty() {
                 args.retry_left_in_place = Some(own);
+                args.retry_left_in_place_raw = Some(own_raw);
             }
         }
-        args.retry_only = Some(
-            failed
-                .iter()
-                .map(|(path, raw)| retry_path(path, raw.as_deref()))
-                .collect(),
-        );
+        let (names, raw_names) = retry_names(failed.iter());
+        args.retry_only = Some(names);
+        args.retry_only_raw = Some(raw_names);
         "copy"
     };
     Ok(Some(JobToRun {
@@ -396,18 +390,27 @@ fn failed_identities(
     Ok((known, left_in_place))
 }
 
-/// The path a retry names a failed file by (review cr-jl4-2): its exact
-/// bytes when the record kept them — the text of a name that is not UTF-8
-/// names no file — else its text. Raw names exist only on Unix sources;
-/// elsewhere the text is the name.
-fn retry_path(path: &str, raw: Option<&str>) -> PathBuf {
-    #[cfg(unix)]
-    if let Some(bytes) = raw.and_then(blit_core::raw_name::unescape_raw) {
-        return blit_core::raw_name::path_from_raw(&bytes);
+/// A retry's names (reviews cr-jl4-2, cr-jl4fix1-2): each failed file by
+/// its text, or — a name that is not UTF-8, whose text names no file — by
+/// its exact bytes, kept as bytes whatever this host is, so they reach a
+/// remote source as they are; only the host that enumerates them turns them
+/// into its paths. Bytes the record cannot give back fall to the text.
+fn retry_names<'a>(
+    failed: impl Iterator<Item = &'a (String, Option<String>)>,
+) -> (HashSet<PathBuf>, HashSet<Vec<u8>>) {
+    let mut names = HashSet::new();
+    let mut raw_names = HashSet::new();
+    for (path, raw) in failed {
+        match raw.as_deref().and_then(blit_core::raw_name::unescape_raw) {
+            Some(bytes) => {
+                raw_names.insert(bytes);
+            }
+            None => {
+                names.insert(PathBuf::from(path));
+            }
+        }
     }
-    #[cfg(not(unix))]
-    let _ = raw;
-    PathBuf::from(path)
+    (names, raw_names)
 }
 
 /// R4: a job runs only on the machine it was made on; refused, naming
@@ -1826,27 +1829,33 @@ fn age_ms_since(start_unix_ms: u64) -> u64 {
     now_ms.saturating_sub(start_unix_ms)
 }
 
-// Raw names exist only on Unix sources.
-#[cfg(all(test, unix))]
-mod retry_path_tests {
+#[cfg(test)]
+mod retry_name_tests {
     use super::*;
 
-    /// Review cr-jl4-2: a failed non-UTF-8 name is retried by its own
-    /// bytes, and on the wire travels as them — never as its lossy text.
+    /// Reviews cr-jl4-2, cr-jl4fix1-2: a failed non-UTF-8 name is retried
+    /// by its own bytes on every host — kept as bytes, and on the wire sent
+    /// as them, never as its lossy text.
     #[test]
-    fn a_raw_named_failure_is_retried_by_its_bytes() {
-        use std::os::unix::ffi::OsStrExt;
-        let path = retry_path("dir/bad\u{FFFD}.txt", Some("dir/bad\\xff.txt"));
-        assert_eq!(path.as_os_str().as_bytes(), b"dir/bad\xff.txt");
-        assert_eq!(retry_path("plain.txt", None), PathBuf::from("plain.txt"));
+    fn a_raw_named_failure_is_retried_by_its_bytes_on_any_host() {
+        let failed = [
+            (
+                "dir/bad\u{FFFD}.txt".to_string(),
+                Some("dir/bad\\xff.txt".to_string()),
+            ),
+            ("plain.txt".to_string(), None),
+        ];
+        let (names, raw_names) = retry_names(failed.iter());
+        assert_eq!(names, HashSet::from([PathBuf::from("plain.txt")]));
+        assert_eq!(raw_names, HashSet::from([b"dir/bad\xff.txt".to_vec()]));
 
-        let set: HashSet<PathBuf> = [path, PathBuf::from("plain.txt")].into();
         let spec =
             blit_core::transfers::filter::build_spec(&blit_core::transfers::filter::FilterInputs {
                 include: &[],
                 exclude: &[],
                 files_from: None,
-                retry_only: Some(&set),
+                retry_only: Some(&names),
+                retry_only_raw: Some(&raw_names),
                 min_size: None,
                 max_size: None,
                 min_age: None,

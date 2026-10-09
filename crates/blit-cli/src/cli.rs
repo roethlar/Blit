@@ -402,6 +402,14 @@ pub struct TransferArgs {
     /// live row can say so. Never a flag.
     #[arg(skip)]
     pub retry_pass: Option<(u32, u32, usize)>,
+    /// JOB_LOGS review cr-jl4fix1-2 internal: a `jobs retry` set's names
+    /// that are not UTF-8, as their exact bytes, beside `retry_only`'s
+    /// text names. Never a flag.
+    #[arg(skip)]
+    pub retry_only_raw: Option<std::collections::HashSet<Vec<u8>>>,
+    /// The same for `retry_left_in_place`. Never a flag.
+    #[arg(skip)]
+    pub retry_left_in_place_raw: Option<std::collections::HashSet<Vec<u8>>>,
     /// JOB_LOGS review cr-jl4-1 internal: the paths of a `jobs retry` set
     /// whose failed write left this run's own incomplete copy; under
     /// `--ignore-existing` they are retried with the flag off. Never a

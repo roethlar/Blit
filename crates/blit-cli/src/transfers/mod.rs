@@ -66,6 +66,7 @@ fn filter_inputs(args: &TransferArgs) -> FilterInputs<'_> {
         exclude: &args.exclude,
         files_from: args.files_from.as_ref(),
         retry_only: args.retry_only.as_ref(),
+        retry_only_raw: args.retry_only_raw.as_ref(),
         min_size: args.min_size.as_deref(),
         max_size: args.max_size.as_deref(),
         min_age: args.min_age.as_deref(),
@@ -1373,6 +1374,8 @@ mod tests {
             run: None,
             save: None,
             export: None,
+            retry_only_raw: None,
+            retry_left_in_place_raw: None,
         };
 
         runtime().block_on(local::run_local_transfer_quiet(
@@ -1439,6 +1442,8 @@ mod tests {
             run: None,
             save: None,
             export: None,
+            retry_only_raw: None,
+            retry_left_in_place_raw: None,
         };
 
         runtime().block_on(local::run_local_transfer_quiet(
@@ -1511,6 +1516,8 @@ mod tests {
             run: None,
             save: None,
             export: None,
+            retry_only_raw: None,
+            retry_left_in_place_raw: None,
         }
     }
 

@@ -371,6 +371,8 @@ mod delegated_options_tests {
             run: None,
             save: None,
             export: None,
+            retry_only_raw: None,
+            retry_left_in_place_raw: None,
         }
     }
 

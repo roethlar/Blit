@@ -332,24 +332,32 @@ async fn run_command(
 /// incomplete copies (review cr-jl4-1) — those paths with the flag off,
 /// then the rest with it, as the in-command retry passes split them.
 fn retry_parts(args: &TransferArgs) -> Vec<TransferArgs> {
+    use std::collections::HashSet;
     let (Some(left), Some(all)) = (&args.retry_left_in_place, &args.retry_only) else {
         return vec![args.clone()];
     };
-    if !args.ignore_existing || left.is_empty() {
+    let empty = HashSet::new();
+    let left_raw = args.retry_left_in_place_raw.as_ref().unwrap_or(&empty);
+    let all_raw = args.retry_only_raw.as_ref().unwrap_or(&empty);
+    if !args.ignore_existing || (left.is_empty() && left_raw.is_empty()) {
         return vec![args.clone()];
     }
     let mut own = args.clone();
     own.retry_only = Some(left.clone());
+    own.retry_only_raw = Some(left_raw.clone());
     own.ignore_existing = false;
     own.retry_left_in_place = None;
-    let rest: std::collections::HashSet<std::path::PathBuf> =
-        all.difference(left).cloned().collect();
-    if rest.is_empty() {
+    own.retry_left_in_place_raw = None;
+    let rest: HashSet<std::path::PathBuf> = all.difference(left).cloned().collect();
+    let rest_raw: HashSet<Vec<u8>> = all_raw.difference(left_raw).cloned().collect();
+    if rest.is_empty() && rest_raw.is_empty() {
         return vec![own];
     }
     let mut others = args.clone();
     others.retry_only = Some(rest);
+    others.retry_only_raw = Some(rest_raw);
     others.retry_left_in_place = None;
+    others.retry_left_in_place_raw = None;
     vec![own, others]
 }
 
@@ -425,5 +433,50 @@ mod lifecycle_tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].outcome, Some(TransferLifecycleOutcome::Error));
         assert_eq!(flushes, 1);
+    }
+}
+
+#[cfg(test)]
+mod retry_parts_tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    /// Reviews cr-jl4-1, cr-jl4fix1-2: an `--ignore-existing` retry splits
+    /// its text and raw names alike — the run's own leftovers with the
+    /// flag off, the rest with it on.
+    #[test]
+    fn an_ignore_existing_retry_splits_text_and_raw_names() {
+        let args = TransferArgs {
+            ignore_existing: true,
+            retry_only: Some(HashSet::from([
+                PathBuf::from("own.txt"),
+                PathBuf::from("rest.txt"),
+            ])),
+            retry_only_raw: Some(HashSet::from([b"own\xff".to_vec(), b"rest\xff".to_vec()])),
+            retry_left_in_place: Some(HashSet::from([PathBuf::from("own.txt")])),
+            retry_left_in_place_raw: Some(HashSet::from([b"own\xff".to_vec()])),
+            ..TransferArgs::default()
+        };
+        let parts = retry_parts(&args);
+        assert_eq!(parts.len(), 2);
+        assert!(!parts[0].ignore_existing);
+        assert_eq!(
+            parts[0].retry_only,
+            Some(HashSet::from([PathBuf::from("own.txt")]))
+        );
+        assert_eq!(
+            parts[0].retry_only_raw,
+            Some(HashSet::from([b"own\xff".to_vec()]))
+        );
+        assert!(parts[1].ignore_existing);
+        assert_eq!(
+            parts[1].retry_only,
+            Some(HashSet::from([PathBuf::from("rest.txt")]))
+        );
+        assert_eq!(
+            parts[1].retry_only_raw,
+            Some(HashSet::from([b"rest\xff".to_vec()]))
+        );
     }
 }

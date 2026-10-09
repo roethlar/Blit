@@ -27,6 +27,11 @@ pub struct FilterInputs<'a> {
     /// files) that overrides `files_from` for a retry pass. Never set by
     /// a CLI flag — the orchestrator threads it between passes.
     pub retry_only: Option<&'a std::collections::HashSet<PathBuf>>,
+    /// JOB_LOGS review cr-jl4fix1-2: retry entries named by their exact
+    /// bytes (`/`-separated) — names that are not UTF-8 — kept as bytes so
+    /// any host can send them; only a host that holds such names turns them
+    /// into its own paths.
+    pub retry_only_raw: Option<&'a std::collections::HashSet<Vec<u8>>>,
     pub min_size: Option<&'a str>,
     pub max_size: Option<&'a str>,
     pub min_age: Option<&'a str>,
@@ -66,6 +71,15 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
     }
     if let Some(set) = inputs.retry_only {
         filter.files_from = Some(set.clone());
+    }
+    if let Some(raw) = inputs.retry_only_raw {
+        let listed = filter.files_from.get_or_insert_with(Default::default);
+        listed.extend(raw.iter().filter_map(|raw| {
+            crate::raw_name::path_from_received_raw(
+                raw,
+                crate::raw_name::destination_can_store_raw_names(),
+            )
+        }));
     }
     // R58-F12: validate glob patterns at filter-construction
     // time. The runtime build_globset silently drops invalid
@@ -137,10 +151,14 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
             }
         }
         entries.sort();
-        raw_entries.sort();
         spec.files_from = entries;
         spec.files_from_raw = raw_entries;
     }
+    if let Some(raw) = inputs.retry_only_raw {
+        spec.files_from_raw.extend(raw.iter().cloned());
+    }
+    spec.files_from_raw.sort();
+    spec.files_from_raw.dedup();
     // review otp-10a F8: validate the globs at construction time, like
     // `build` does (R58-F12) — a malformed `--include`/`--exclude`
     // must fail before any connection is opened, not when the session
@@ -163,12 +181,41 @@ mod tests {
     //! pinning directly.
     use super::*;
 
+    /// JOB_LOGS review cr-jl4fix1-2: a retry's raw names reach a local
+    /// source's filter as its own paths where it can hold such names
+    /// (Linux: runs in CI).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_retry_raw_name_reaches_a_local_filter() {
+        use std::os::unix::ffi::OsStrExt;
+        let names: std::collections::HashSet<PathBuf> = [PathBuf::from("plain.txt")].into();
+        let raw: std::collections::HashSet<Vec<u8>> = [b"bad\xff.txt".to_vec()].into();
+        let filter = build(&FilterInputs {
+            include: &[],
+            exclude: &[],
+            files_from: None,
+            retry_only: Some(&names),
+            retry_only_raw: Some(&raw),
+            min_size: None,
+            max_size: None,
+            min_age: None,
+            max_age: None,
+        })
+        .unwrap();
+        let listed = filter.files_from.expect("a list");
+        assert!(listed.contains(&PathBuf::from("plain.txt")));
+        assert!(listed
+            .iter()
+            .any(|path| path.as_os_str().as_bytes() == b"bad\xff.txt"));
+    }
+
     fn inputs<'a>(include: &'a [String], exclude: &'a [String]) -> FilterInputs<'a> {
         FilterInputs {
             include,
             exclude,
             files_from: None,
             retry_only: None,
+            retry_only_raw: None,
             min_size: None,
             max_size: None,
             min_age: None,
