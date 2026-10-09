@@ -295,9 +295,8 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
                     record.run_id
                 );
             }
-            let (own, own_raw) = retry_names(failed.iter().filter(|(path, raw)| {
-                is_left_in_place(&record, &logged_left, path, raw.as_deref())
-            }));
+            let own_leftovers = own_leftovers(&record, &failed, &logged_left)?;
+            let (own, own_raw) = retry_names(own_leftovers.iter());
             if !own.is_empty() || !own_raw.is_empty() {
                 args.retry_left_in_place = Some(own);
                 args.retry_left_in_place_raw = Some(own_raw);
@@ -334,6 +333,42 @@ fn is_left_in_place(
         None => record.left_in_place.iter().any(|left| left == path),
     };
     in_record || logged.contains(&(path.to_string(), raw.map(str::to_string)))
+}
+
+/// The failed files that left the run's own incomplete copy, by identity.
+/// Review cr-jl4fix3-1: a record from before its lists kept identities
+/// filed a raw-named file under its text, so from such a record a
+/// raw-named failure whose text is in the text list is ambiguous — its own
+/// leftover, or a UTF-8 sibling's — and is taken as the run's own only when
+/// this machine's log names that exact identity; otherwise the retry is
+/// refused, as when the list is not whole.
+fn own_leftovers(
+    record: &RunRecord,
+    failed: &HashSet<(String, Option<String>)>,
+    logged: &HashSet<(String, Option<String>)>,
+) -> Result<HashSet<(String, Option<String>)>> {
+    let mut own = HashSet::new();
+    for identity in failed {
+        let (path, raw) = identity;
+        if is_left_in_place(record, logged, path, raw.as_deref()) {
+            own.insert(identity.clone());
+            continue;
+        }
+        let ambiguous = !record.left_in_place_exact
+            && raw.is_some()
+            && record.left_in_place.iter().any(|left| left == path);
+        if ambiguous {
+            eyre::bail!(
+                "job {} ran with --ignore-existing, and its record (from an earlier blit) \
+                 cannot say whether the failed file {} left its own incomplete copy at \
+                 the destination; a retry could skip that copy as a file to keep, so it is \
+                 not made",
+                record.run_id,
+                job_log::shown_name(path, raw.as_deref())
+            );
+        }
+    }
+    Ok(own)
 }
 
 /// Every file a run failed, by its text and bytes: its record's, completed
@@ -1855,6 +1890,52 @@ fn age_ms_since(start_unix_ms: u64) -> u64 {
 #[cfg(test)]
 mod retry_name_tests {
     use super::*;
+
+    /// Review cr-jl4fix3-1: a record from before the raw list filed a
+    /// raw-named leftover under its text; such a failure is ambiguous —
+    /// refused unless the log names its exact identity — while a record
+    /// whose lists are exact classifies it by its bytes.
+    #[test]
+    fn an_old_records_raw_named_leftover_is_ambiguous() {
+        let text = "dup\u{FFFD}".to_string();
+        let raw = Some("dup\\xff".to_string());
+        let mut record = RunRecord::starting(
+            "0123456789abcdef0123456789abcdef",
+            &JobSpec::new(
+                "m1",
+                "copy",
+                "/".into(),
+                blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+                blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+                Default::default(),
+                None,
+            ),
+        );
+        record.left_in_place = vec![text.clone()];
+        let failed: HashSet<(String, Option<String>)> =
+            [(text.clone(), raw.clone()), ("other.txt".to_string(), None)].into();
+        let none = HashSet::new();
+        // Old record, nothing in the log: refused.
+        let error = own_leftovers(&record, &failed, &none)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot say whether"), "{error}");
+        // Old record, the log names the identity: the run's own.
+        let logged: HashSet<(String, Option<String>)> = [(text.clone(), raw.clone())].into();
+        assert_eq!(
+            own_leftovers(&record, &failed, &logged).unwrap(),
+            [(text.clone(), raw.clone())].into()
+        );
+        // Old record, a raw-named failure whose text is not in the list:
+        // not the run's own, no ambiguity.
+        let other: HashSet<(String, Option<String>)> =
+            [("elsewhere".to_string(), Some("else\\xff".to_string()))].into();
+        assert!(own_leftovers(&record, &other, &none).unwrap().is_empty());
+        // An exact record keeps identities apart: the text entry is a UTF-8
+        // sibling's, and the raw-named failure is not the run's own.
+        record.left_in_place_exact = true;
+        assert!(own_leftovers(&record, &failed, &none).unwrap().is_empty());
+    }
 
     /// Review cr-jl4fix2-1: a left-in-place status is the entry's own —
     /// two names of one text, one of which left its copy and landed, the

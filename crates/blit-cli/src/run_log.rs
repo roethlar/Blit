@@ -572,6 +572,7 @@ fn finish_record(
             .iter()
             .map(|raw| blit_core::raw_name::escape_raw(raw))
             .collect();
+        record.left_in_place_exact = true;
     }
     if let Err(error) = recorded.store.update(&recorded.record) {
         eprintln!("blit: warning: could not finish this run's job record: {error}");
@@ -875,6 +876,7 @@ mod tests {
             record.left_in_place_raw,
             [blit_core::raw_name::escape_raw(b"bad\xfe.txt")]
         );
+        assert!(record.left_in_place_exact);
         let failures = record.failures;
         assert_eq!(
             failures,

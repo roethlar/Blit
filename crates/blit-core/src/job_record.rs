@@ -180,6 +180,13 @@ pub struct RunRecord {
     /// this list classifies no such file as left in place.
     #[serde(default)]
     pub left_in_place_raw: Vec<String>,
+    /// The two lists above keep each file by its own identity (review
+    /// cr-jl4fix2-1). A record from before this was so (review
+    /// cr-jl4fix3-1) filed a raw-named file under its text: read now, such a
+    /// file whose text is in `left_in_place` is ambiguous, and a retry of
+    /// it is refused unless the run's log names its exact identity.
+    #[serde(default)]
+    pub left_in_place_exact: bool,
     /// A move removed its source.
     #[serde(default)]
     pub source_removed: bool,
@@ -255,6 +262,7 @@ impl RunRecord {
             left_in_place: Vec::new(),
             left_in_place_truncated: false,
             left_in_place_raw: Vec::new(),
+            left_in_place_exact: false,
             source_removed: false,
         }
     }
@@ -875,6 +883,7 @@ impl LogRead {
         ended.failures = self.failures.clone();
         ended.failures_truncated = truncated;
         (ended.left_in_place, ended.left_in_place_raw) = self.left_in_place_lists();
+        ended.left_in_place_exact = true;
         ended.left_in_place_truncated = truncated;
         ended
     }
@@ -940,6 +949,7 @@ pub fn settle(
             ended.failures = read.failures.clone();
             ended.failures_truncated = job.files_failed > 0;
             (ended.left_in_place, ended.left_in_place_raw) = read.left_in_place_lists();
+            ended.left_in_place_exact = true;
             ended.left_in_place_truncated = job.files_failed > 0;
             Ok(DaemonAnswer::Ended(Box::new(ended)))
         }
@@ -1267,6 +1277,10 @@ mod tests {
         assert_eq!(
             (from_log.failures.clone(), from_log.failures_truncated),
             (vec![failure.clone()], false)
+        );
+        assert!(
+            from_log.left_in_place_exact,
+            "settled lists keep identities"
         );
 
         // Unfinished, or missing its summary, or with a gap: the daemon's
