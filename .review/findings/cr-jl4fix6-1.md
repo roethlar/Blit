@@ -1,7 +1,7 @@
 # cr-jl4fix6-1: a later attempt cannot clear a stale leftover of its own stream
 
 **Severity**: HIGH (reviewer: HIGH)
-**Status**: Open
+**Status**: Fixed — awaiting re-review
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: —
 **Reviewer**: codex / gpt-5.6-sol / xhigh / frontier (fallback grade), codex-cli 0.159.3; openreview jl4fix6-r1 over `9d380e61..8e2bbd74` (record `.review/results/jl4fix6-r1.codex.json`); owner goal of 2026-10-07
@@ -17,3 +17,9 @@ Group logs by participant and role, fold each group's attempts in order using on
 
 ## Intake
 Admitted. cr-jl4fix5-1 made every log fold on its own, but a run's sessions on one machine and role are one stream in attempt order (`logs_for_run` lists them so): a copy in attempt 2 must clear a leftover of attempt 1, and a failure in attempt 3 without a leftover must not revive it. The fold keeps one set per participant-and-role stream across its attempts, and unites only each stream's terminal set.
+
+## What
+`failed_identities` keeps one leftover set and one still-failed set per stream — a participant and a role — and folds that stream's attempts in the order `logs_for_run` lists them, so a later attempt's copy clears an earlier one's leftover and a later failure without one does not revive it; a `FileSent` still clears no leftover; at the end, what each stream holds is united. Another machine's log of the run, or another role's, is another stream and clears nothing of this one's.
+
+## Guard proof
+`an_old_records_ambiguity_is_settled_from_a_whole_log` (CLI, on real logs) gained the reviewer's case — attempt 1 leaves a copy, attempt 2 lands the file, attempt 3 fails it without one: no leftover, the file still failed — and a two-machine case in one role, where the other machine's copy leaves this machine's leftover standing; the earlier cross-role and in-log cases still hold. Two mutations each red alone — a set per log again (keyed by attempt), grouping by role alone — restored green.

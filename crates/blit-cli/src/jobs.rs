@@ -12,7 +12,7 @@ use blit_core::job_record::{
 };
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -427,6 +427,14 @@ fn failed_identities(
         let logs = config_dir.join("jobs").join("logs");
         let found = job_log::logs_for_run(&logs, &record.run_id, None).unwrap_or_default();
         logged.complete = !found.is_empty();
+        // Reviews cr-jl4fix5-1, cr-jl4fix6-1: a run's sessions on one
+        // machine in one role are one stream, folded in attempt order (as
+        // `logs_for_run` lists them) — a later attempt's copy clears an
+        // earlier one's leftover, a later failure without one does not
+        // revive it; one stream's events never clear another's evidence;
+        // what each stream holds at its end is united.
+        type Identities = HashSet<(String, Option<String>)>;
+        let mut streams: HashMap<(String, Role), (Identities, Identities)> = HashMap::new();
         for log in found {
             let Ok(lines) = job_log::open_log(&log.path) else {
                 logged.complete = false;
@@ -435,11 +443,9 @@ fn failed_identities(
             logged.read = true;
             let mut whole = log.finished;
             let mut ended = false;
-            // Review cr-jl4fix5-1: each log folds on its own — one role's
-            // events never clear another's evidence — and what each still
-            // holds at its end is united.
-            let mut left: HashSet<(String, Option<String>)> = HashSet::new();
-            let mut still_failed: HashSet<(String, Option<String>)> = HashSet::new();
+            let (left, still_failed) = streams
+                .entry((log.key.participant().to_string(), log.key.role()))
+                .or_default();
             for line in lines {
                 let Ok(LogLine::Event(event)) = line else {
                     whole = false;
@@ -471,6 +477,8 @@ fn failed_identities(
                 }
             }
             logged.complete &= whole && ended;
+        }
+        for (left, still_failed) in streams.into_values() {
             logged.left.extend(left);
             known.extend(still_failed);
         }
@@ -2176,6 +2184,78 @@ mod retry_name_tests {
             logged.left,
             [(text.clone(), raw.clone()), (other_text, other_raw)].into()
         );
+
+        // Review cr-jl4fix6-1: one machine's sessions in one role are one
+        // stream — attempt 1 leaves a copy, attempt 2 lands the file, a
+        // later attempt fails it without one: the stale leftover is gone,
+        // the file still failed.
+        let attempts = "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c";
+        for (attempt, body) in [
+            (
+                1,
+                EventBody::FileFailed {
+                    path: text.clone(),
+                    reason: marker.clone(),
+                    raw: raw.clone(),
+                },
+            ),
+            (
+                2,
+                EventBody::FileCopied {
+                    path: text.clone(),
+                    bytes: None,
+                    raw: raw.clone(),
+                },
+            ),
+            (
+                3,
+                EventBody::FileFailed {
+                    path: text.clone(),
+                    reason: "write failed".into(),
+                    raw: raw.clone(),
+                },
+            ),
+        ] {
+            let writer = place
+                .start(attempts, attempt, Role::Initiator, RunInfo::default())
+                .expect("a log");
+            writer.record(body);
+            assert!(writer.finish(Outcome::Failed, None).complete);
+        }
+        record.run_id = attempts.into();
+        let (failed, logged) = failed_identities(dir.path(), &record).unwrap();
+        assert!(logged.read && logged.complete);
+        assert!(logged.left.is_empty(), "{:?}", logged.left);
+        assert!(failed.contains(&(text.clone(), raw.clone())));
+
+        // ...but another machine's log in the same role is another stream:
+        // its copy clears nothing of this one's.
+        let machines = "4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b";
+        let writer = place
+            .start(machines, 1, Role::Destination, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileFailed {
+            path: text.clone(),
+            reason: marker.clone(),
+            raw: raw.clone(),
+        });
+        assert!(writer.finish(Outcome::Failed, None).complete);
+        let elsewhere = LogPlace {
+            participant: "m2".into(),
+            ..place.clone()
+        };
+        let writer = elsewhere
+            .start(machines, 1, Role::Destination, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileCopied {
+            path: text.clone(),
+            bytes: None,
+            raw: raw.clone(),
+        });
+        assert!(writer.finish(Outcome::Failed, None).complete);
+        record.run_id = machines.into();
+        let (_, logged) = failed_identities(dir.path(), &record).unwrap();
+        assert!(logged.left.contains(&(text.clone(), raw.clone())));
     }
 
     /// Review cr-jl4fix2-1: a left-in-place status is the entry's own —
