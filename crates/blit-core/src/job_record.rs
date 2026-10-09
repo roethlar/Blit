@@ -833,6 +833,15 @@ impl LogRead {
                     self.failures.push(Failure { path, reason, raw });
                 }
             }
+            // Review cr-jl4fix1-1: the run's terminal state — a file a
+            // later event landed, by the same identity, failed no more.
+            EventBody::FileCopied { path, raw, .. } | EventBody::FileSent { path, raw } => {
+                self.failures
+                    .retain(|failed| !(failed.path == path && failed.raw == raw));
+                if !self.failures.iter().any(|failed| failed.path == path) {
+                    self.left_in_place.retain(|left| left != &path);
+                }
+            }
             EventBody::Summary(summary) => self.summary = Some(summary),
             EventBody::RunEnd { outcome, detail } => {
                 self.ended = Some((event.ts_ms, outcome, detail))
@@ -886,8 +895,12 @@ pub fn settle(
 ) -> eyre::Result<DaemonAnswer> {
     use crate::admin::jobs::WatchSnapshot;
     if read.complete() {
+        // A list shorter than the summary's count is not the whole list.
+        let named_all = read
+            .summary
+            .is_some_and(|summary| read.failures.len() as u64 >= summary.files_failed);
         return Ok(DaemonAnswer::Ended(Box::new(
-            read.ended_record(record, false),
+            read.ended_record(record, !named_all),
         )));
     }
     let (daemon, job_id) = match &record.state {
@@ -1215,6 +1228,18 @@ mod tests {
             ..TransferRecord::default()
         };
 
+        // Whole, but naming fewer failures than its summary counts: the
+        // list is marked incomplete (review cr-jl4fix1-1).
+        let short = LogRead {
+            summary: Some(Summary {
+                files_copied: 2,
+                files_failed: 3,
+                ..Summary::default()
+            }),
+            ..whole.clone()
+        };
+        assert!(ended(settle(&waiting, &short, None)).failures_truncated);
+
         // Whole: the log decides, its failures exact.
         let from_log = ended(settle(&waiting, &whole, None));
         assert_eq!(
@@ -1346,6 +1371,29 @@ mod tests {
             },
         ));
         assert_eq!(own.left_in_place, ["b.txt"]);
+        // Review cr-jl4fix1-1: a later copy of the same identity lands it —
+        // failed no more, and no longer left in place.
+        own.read_line(event(
+            6,
+            EventBody::FileCopied {
+                path: "b.txt".into(),
+                bytes: None,
+                raw: None,
+            },
+        ));
+        assert!(own.failures.iter().all(|failed| failed.path != "b.txt"));
+        assert!(own.left_in_place.is_empty());
+        // ...but a copy of another identity of that text does not.
+        let mut other = read.clone();
+        other.read_line(event(
+            7,
+            EventBody::FileCopied {
+                path: "a.txt".into(),
+                bytes: None,
+                raw: Some("a\\xff.txt".into()),
+            },
+        ));
+        assert_eq!(other.failures.len(), 1);
         let mut gap = read.clone();
         gap.read_line(event(
             5,
