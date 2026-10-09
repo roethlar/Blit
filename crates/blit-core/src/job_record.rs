@@ -1575,10 +1575,15 @@ mod tests {
     fn local_paths_are_made_absolute_with_their_trailing_separator() {
         let cwd = Path::new(if cfg!(windows) { r"C:\work" } else { "/work" });
         let sep = std::path::MAIN_SEPARATOR;
+        // The separator stays as typed: either kind marks "contents of" on
+        // every platform (transfers::resolution), so the spec re-runs the
+        // same way.
         assert_eq!(
             absolute_local(cwd, "src/").unwrap(),
-            format!("{}{sep}src{sep}", cwd.display())
+            format!("{}{sep}src/", cwd.display())
         );
+        #[cfg(windows)]
+        assert_eq!(absolute_local(cwd, r"src\").unwrap(), r"C:\work\src\");
         assert_eq!(
             absolute_local(cwd, "src").unwrap(),
             format!("{}{sep}src", cwd.display())
