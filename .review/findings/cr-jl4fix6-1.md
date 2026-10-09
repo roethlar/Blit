@@ -3,7 +3,7 @@
 **Severity**: HIGH (reviewer: HIGH)
 **Status**: Fixed — awaiting re-review
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: —
+**Commit**: `23bf5724`
 **Reviewer**: codex / gpt-5.6-sol / xhigh / frontier (fallback grade), codex-cli 0.159.3; openreview jl4fix6-r1 over `9d380e61..8e2bbd74` (record `.review/results/jl4fix6-r1.codex.json`); owner goal of 2026-10-07
 
 ## Evidence
