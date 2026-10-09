@@ -395,6 +395,9 @@ pub struct LocalMirrorSummary {
     /// `TransferSummary.left_in_place`).
     pub left_in_place: Vec<String>,
     pub left_in_place_truncated: bool,
+    /// Review cr-jl4fix2-1: the same for names that are not UTF-8, by their
+    /// exact bytes (`TransferSummary.left_in_place_raw`).
+    pub left_in_place_raw: Vec<Vec<u8>>,
     /// cr-rework-3: the failed paths whose incomplete copy was removed
     /// (see `TransferSummary.removed_incomplete`).
     pub removed_incomplete: Vec<String>,
@@ -1027,6 +1030,7 @@ pub async fn run_local_session(
         failed_paths_truncated: outcome.summary.failed_paths_truncated,
         left_in_place: outcome.summary.left_in_place.clone(),
         left_in_place_truncated: outcome.summary.left_in_place_truncated,
+        left_in_place_raw: outcome.summary.left_in_place_raw.clone(),
         removed_incomplete: outcome.summary.removed_incomplete.clone(),
         removed_incomplete_truncated: outcome.summary.removed_incomplete_truncated,
         // pfc-6: destination-local, so it comes off the outcome rather
@@ -2438,6 +2442,54 @@ mod tests {
     /// that did not exist before — this run's own incomplete copy. The
     /// summary names all seventy (the retry loop's `--ignore-existing`
     /// override reads this set), though the report holds 64.
+    /// JOB_LOGS review cr-jl4fix2-1: a failed write of a file whose name is
+    /// not UTF-8 is left in place by its own bytes — the summary names it
+    /// in the raw list, not the text one (Linux only: the one platform that
+    /// holds such names; runs in CI).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[tokio::test]
+    async fn a_raw_named_write_is_left_in_place_by_its_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        let body = vec![7u8; 1_048_577];
+        let raw_name = std::ffi::OsStr::from_bytes(b"own\xff.bin");
+        std::fs::write(src_root.join(raw_name), &body).unwrap();
+        std::fs::write(src_root.join("plain.bin"), &body).unwrap();
+        crate::remote::transfer::sink::METADATA_TAIL_FAULT_PREFIXES
+            .lock()
+            .unwrap()
+            .push(dst_root.clone());
+        let summary = run_local_session(
+            &src_root,
+            &dst_root,
+            LocalMirrorOptions {
+                resume: true,
+                perf_history: false,
+                ..LocalMirrorOptions::default()
+            },
+        )
+        .await;
+        crate::remote::transfer::sink::METADATA_TAIL_FAULT_PREFIXES
+            .lock()
+            .unwrap()
+            .retain(|p| p != &dst_root);
+        let summary = summary.expect("per-file failures never fault the session");
+        assert_eq!(summary.files_failed, 2);
+        assert_eq!(summary.left_in_place, ["plain.bin"], "text-named only");
+        assert_eq!(summary.left_in_place_raw, [b"own\xff.bin".to_vec()]);
+        assert!(!summary.left_in_place_truncated);
+        let own = summary
+            .failures
+            .iter()
+            .find(|failure| failure.raw_relative_path.is_some())
+            .expect("the raw-named failure carries its bytes");
+        assert_eq!(own.raw_relative_path.as_deref(), Some(&b"own\xff.bin"[..]));
+    }
+
     #[tokio::test]
     async fn the_left_in_place_set_reaches_the_summary_past_the_report_cap() {
         let tmp = tempfile::tempdir().expect("tempdir");

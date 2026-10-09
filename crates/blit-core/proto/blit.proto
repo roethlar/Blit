@@ -741,6 +741,9 @@ message DelegatedPullSummary {
   // cr-rework-3: see TransferSummary.removed_incomplete, re-encoded verbatim.
   repeated string removed_incomplete = 13;
   bool removed_incomplete_truncated = 14;
+  // Contract 7 (cr-jl4fix2-1): see TransferSummary.left_in_place_raw,
+  // re-encoded verbatim.
+  repeated bytes left_in_place_raw = 15;
 }
 
 message DelegatedPullError {
@@ -1222,6 +1225,12 @@ message TransferSummary {
   // Bounded like `left_in_place`.
   repeated string removed_incomplete = 12;
   bool removed_incomplete_truncated = 13;
+  // Contract 7 (JOB_LOGS review cr-jl4fix2-1): the left-in-place entries
+  // whose names are not UTF-8, by their exact bytes (`/`-separated);
+  // `left_in_place` then holds only entries named by their text, so two
+  // names that collapse to one text never share the status. Bounded like
+  // `left_in_place`; `left_in_place_truncated` covers both lists.
+  repeated bytes left_in_place_raw = 14;
 }
 
 // Structured refusal/abort — an end says why before closing.

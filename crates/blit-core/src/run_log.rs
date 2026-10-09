@@ -81,6 +81,9 @@ pub struct RunTotals {
     /// an `--ignore-existing` retry must not skip them as existing).
     pub left_in_place: Vec<String>,
     pub left_in_place_truncated: bool,
+    /// The same for names that are not UTF-8, by their exact bytes (review
+    /// cr-jl4fix2-1).
+    pub left_in_place_raw: Vec<Vec<u8>>,
 }
 
 impl RunTotals {
@@ -100,6 +103,7 @@ impl RunTotals {
         self.failures.extend(other.failures);
         self.left_in_place.extend(other.left_in_place);
         self.left_in_place_truncated |= other.left_in_place_truncated;
+        self.left_in_place_raw.extend(other.left_in_place_raw);
     }
 }
 
@@ -121,6 +125,7 @@ impl From<&TransferSummary> for RunTotals {
                 .collect(),
             left_in_place: summary.left_in_place.clone(),
             left_in_place_truncated: summary.left_in_place_truncated,
+            left_in_place_raw: summary.left_in_place_raw.clone(),
         }
     }
 }

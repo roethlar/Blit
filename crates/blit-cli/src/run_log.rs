@@ -567,6 +567,11 @@ fn finish_record(
             totals.failed_paths_truncated || (record.failures.len() as u64) < totals.files_failed;
         record.left_in_place = totals.left_in_place;
         record.left_in_place_truncated = totals.left_in_place_truncated;
+        record.left_in_place_raw = totals
+            .left_in_place_raw
+            .iter()
+            .map(|raw| blit_core::raw_name::escape_raw(raw))
+            .collect();
     }
     if let Err(error) = recorded.store.update(&recorded.record) {
         eprintln!("blit: warning: could not finish this run's job record: {error}");
@@ -729,6 +734,7 @@ pub fn totals_from_local(summary: &blit_core::transfer_session::LocalMirrorSumma
         failures: summary.failures.clone(),
         left_in_place: summary.left_in_place.clone(),
         left_in_place_truncated: summary.left_in_place_truncated,
+        left_in_place_raw: summary.left_in_place_raw.clone(),
     }
 }
 
@@ -792,6 +798,7 @@ pub fn totals_from_delegated(summary: &blit_core::generated::DelegatedPullSummar
             .collect(),
         left_in_place: summary.left_in_place.clone(),
         left_in_place_truncated: summary.left_in_place_truncated,
+        left_in_place_raw: summary.left_in_place_raw.clone(),
     }
 }
 
@@ -846,6 +853,7 @@ mod tests {
             // Review cr-jl4-1: which failures left their own copy is kept.
             left_in_place: vec![shown.clone()],
             left_in_place_truncated: true,
+            left_in_place_raw: vec![b"bad\xfe.txt".to_vec()],
             ..RunTotals::default()
         };
         let raws = std::collections::HashMap::from([(shown.clone(), "bad\\xff.txt".to_string())]);
@@ -862,6 +870,10 @@ mod tests {
         assert_eq!(
             (record.left_in_place.clone(), record.left_in_place_truncated),
             (vec![shown.clone()], true)
+        );
+        assert_eq!(
+            record.left_in_place_raw,
+            [blit_core::raw_name::escape_raw(b"bad\xfe.txt")]
         );
         let failures = record.failures;
         assert_eq!(

@@ -174,6 +174,12 @@ pub struct RunRecord {
     pub left_in_place: Vec<String>,
     #[serde(default)]
     pub left_in_place_truncated: bool,
+    /// The same for failed files whose names are not UTF-8, by their exact
+    /// bytes escaped as `Failure::raw` is; `left_in_place` then names only
+    /// files named by their text (review cr-jl4fix2-1). A record from before
+    /// this list classifies no such file as left in place.
+    #[serde(default)]
+    pub left_in_place_raw: Vec<String>,
     /// A move removed its source.
     #[serde(default)]
     pub source_removed: bool,
@@ -248,6 +254,7 @@ impl RunRecord {
             failures_truncated: false,
             left_in_place: Vec::new(),
             left_in_place_truncated: false,
+            left_in_place_raw: Vec::new(),
             source_removed: false,
         }
     }
@@ -784,8 +791,9 @@ pub struct LogRead {
     pub summary: Option<crate::job_log::Summary>,
     pub failures: Vec<Failure>,
     /// The failures whose reason says the write left its own incomplete
-    /// copy (a log keeps each reason whole).
-    pub left_in_place: Vec<String>,
+    /// copy (a log keeps each reason whole), by text and escaped bytes
+    /// (review cr-jl4fix2-1: the status is the entry's, not its text's).
+    pub left_in_place: Vec<(String, Option<String>)>,
 }
 
 impl LogRead {
@@ -811,9 +819,12 @@ impl LogRead {
         match event.body {
             EventBody::FileFailed { path, reason, raw } => {
                 if reason.contains(crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE)
-                    && !self.left_in_place.contains(&path)
+                    && !self
+                        .left_in_place
+                        .iter()
+                        .any(|left| left.0 == path && left.1 == raw)
                 {
-                    self.left_in_place.push(path.clone());
+                    self.left_in_place.push((path.clone(), raw.clone()));
                 }
                 if !self
                     .failures
@@ -828,9 +839,8 @@ impl LogRead {
             EventBody::FileCopied { path, raw, .. } | EventBody::FileSent { path, raw } => {
                 self.failures
                     .retain(|failed| !(failed.path == path && failed.raw == raw));
-                if !self.failures.iter().any(|failed| failed.path == path) {
-                    self.left_in_place.retain(|left| left != &path);
-                }
+                self.left_in_place
+                    .retain(|left| !(left.0 == path && left.1 == raw));
             }
             EventBody::Summary(summary) => self.summary = Some(summary),
             EventBody::RunEnd { outcome, detail } => {
@@ -864,9 +874,23 @@ impl LogRead {
         }
         ended.failures = self.failures.clone();
         ended.failures_truncated = truncated;
-        ended.left_in_place = self.left_in_place.clone();
+        (ended.left_in_place, ended.left_in_place_raw) = self.left_in_place_lists();
         ended.left_in_place_truncated = truncated;
         ended
+    }
+
+    /// The left-in-place identities as a record keeps them: the names of
+    /// those named by their text, the escaped bytes of the rest.
+    fn left_in_place_lists(&self) -> (Vec<String>, Vec<String>) {
+        let mut text = Vec::new();
+        let mut raw = Vec::new();
+        for (path, bytes) in &self.left_in_place {
+            match bytes {
+                Some(bytes) => raw.push(bytes.clone()),
+                None => text.push(path.clone()),
+            }
+        }
+        (text, raw)
     }
 }
 
@@ -915,7 +939,7 @@ pub fn settle(
             ended.files_failed = job.files_failed;
             ended.failures = read.failures.clone();
             ended.failures_truncated = job.files_failed > 0;
-            ended.left_in_place = read.left_in_place.clone();
+            (ended.left_in_place, ended.left_in_place_raw) = read.left_in_place_lists();
             ended.left_in_place_truncated = job.files_failed > 0;
             Ok(DaemonAnswer::Ended(Box::new(ended)))
         }
@@ -1360,7 +1384,7 @@ mod tests {
                 raw: None,
             },
         ));
-        assert_eq!(own.left_in_place, ["b.txt"]);
+        assert_eq!(own.left_in_place, [("b.txt".to_string(), None)]);
         // Review cr-jl4fix1-1: a later copy of the same identity lands it —
         // failed no more, and no longer left in place.
         own.read_line(event(
@@ -1384,6 +1408,37 @@ mod tests {
             },
         ));
         assert_eq!(other.failures.len(), 1);
+        // Review cr-jl4fix2-1: the status is the entry's, by its bytes — a
+        // copy of another entry of the same text does not clear it, and the
+        // record keeps the two kinds apart.
+        let mut raw_left = read.clone();
+        raw_left.read_line(event(
+            8,
+            EventBody::FileFailed {
+                path: "dup\u{FFFD}".into(),
+                reason: format!(
+                    "write failed: {}",
+                    crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
+                ),
+                raw: Some("dup\\xff".into()),
+            },
+        ));
+        raw_left.read_line(event(
+            9,
+            EventBody::FileCopied {
+                path: "dup\u{FFFD}".into(),
+                bytes: None,
+                raw: Some("dup\\xfe".into()),
+            },
+        ));
+        assert_eq!(
+            raw_left.left_in_place,
+            [("dup\u{FFFD}".to_string(), Some("dup\\xff".to_string()))]
+        );
+        assert_eq!(
+            raw_left.left_in_place_lists(),
+            (Vec::new(), vec!["dup\\xff".to_string()])
+        );
         let mut gap = read.clone();
         gap.read_line(event(
             5,

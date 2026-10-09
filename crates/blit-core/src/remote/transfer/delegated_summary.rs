@@ -62,6 +62,7 @@ pub fn delegated_summary_from_session(
         failed_paths_truncated: summary.failed_paths_truncated,
         left_in_place: summary.left_in_place.clone(),
         left_in_place_truncated: summary.left_in_place_truncated,
+        left_in_place_raw: summary.left_in_place_raw.clone(),
         removed_incomplete: summary.removed_incomplete.clone(),
         removed_incomplete_truncated: summary.removed_incomplete_truncated,
     }
@@ -104,6 +105,7 @@ mod tests {
             failed_paths_truncated: false,
             left_in_place: Vec::new(),
             left_in_place_truncated: false,
+            left_in_place_raw: Vec::new(),
             removed_incomplete: Vec::new(),
             removed_incomplete_truncated: false,
         }
@@ -226,12 +228,14 @@ mod tests {
             failed_paths: vec!["a".into(), "b".into()],
             left_in_place: vec!["a".into()],
             left_in_place_truncated: true,
+            left_in_place_raw: vec![b"a\xff".to_vec()],
             removed_incomplete: vec!["b".into()],
             removed_incomplete_truncated: true,
             ..TransferSummary::default()
         };
         let delegated = delegated_summary_from_session(&summary, String::new());
         assert_eq!(delegated.left_in_place, vec!["a".to_string()]);
+        assert_eq!(delegated.left_in_place_raw, vec![b"a\xff".to_vec()]);
         assert!(delegated.left_in_place_truncated);
         assert_eq!(delegated.removed_incomplete, vec!["b".to_string()]);
         assert!(delegated.removed_incomplete_truncated);

@@ -277,6 +277,12 @@ pub struct SinkOutcome {
     /// point every failure passes through, so it never depends on the
     /// capped report. Merged like `failed_paths`.
     left_in_place: std::collections::HashSet<String>,
+    /// JOB_LOGS review cr-jl4fix2-1: the same for entries whose names are
+    /// not UTF-8, by their exact bytes — `left_in_place` then holds only
+    /// entries named by their text, so two names that collapse to one text
+    /// never share the status. A write site records a failure by its text;
+    /// [`named_raw`](Self::named_raw) names it from the session's manifest.
+    left_in_place_raw: std::collections::HashSet<Vec<u8>>,
     /// cr-rework-3: the exact set of failed paths whose incomplete copy
     /// this outcome's writes positively removed. The retry loop keeps a
     /// path classified as this run's leftover only while the copy is
@@ -297,6 +303,7 @@ impl SinkOutcome {
             files_failed_total: 0,
             failed_paths: std::collections::HashSet::new(),
             left_in_place: std::collections::HashSet::new(),
+            left_in_place_raw: std::collections::HashSet::new(),
             removed_incomplete: std::collections::HashSet::new(),
         }
     }
@@ -352,7 +359,14 @@ impl SinkOutcome {
         self.files_failed_total = self.files_failed_total.saturating_add(1);
         self.failed_paths.insert(relative_path.clone());
         if reason.contains(INCOMPLETE_LEFT_IN_PLACE) {
-            self.left_in_place.insert(relative_path.clone());
+            match &raw_relative_path {
+                Some(raw) => {
+                    self.left_in_place_raw.insert(raw.clone());
+                }
+                None => {
+                    self.left_in_place.insert(relative_path.clone());
+                }
+            }
         }
         if self.failures.len() < MAX_REPORTED_FILE_FAILURES {
             self.failures.push(FileFailure {
@@ -425,6 +439,8 @@ impl SinkOutcome {
         self.failed_paths.extend(other.failed_paths.iter().cloned());
         self.left_in_place
             .extend(other.left_in_place.iter().cloned());
+        self.left_in_place_raw
+            .extend(other.left_in_place_raw.iter().cloned());
         self.removed_incomplete
             .extend(other.removed_incomplete.iter().cloned());
     }
@@ -434,6 +450,48 @@ impl SinkOutcome {
     /// by [`MAX_WIRE_LEFT_IN_PLACE_ENCODED_BYTES`], `(paths, truncated)`.
     pub fn wire_left_in_place(&self) -> (Vec<String>, bool) {
         wire_path_set(&self.left_in_place)
+    }
+
+    /// JOB_LOGS review cr-jl4fix2-1: the left-in-place entries named by
+    /// their exact bytes, in wire form — sorted, bounded like the text set,
+    /// `(entries, truncated)`.
+    pub fn wire_left_in_place_raw(&self) -> (Vec<Vec<u8>>, bool) {
+        let mut entries: Vec<&Vec<u8>> = self.left_in_place_raw.iter().collect();
+        entries.sort();
+        let mut out = Vec::new();
+        let mut remaining = MAX_WIRE_LEFT_IN_PLACE_ENCODED_BYTES;
+        for entry in entries {
+            let cost = entry.len().saturating_add(4);
+            if cost > remaining {
+                return (out, true);
+            }
+            remaining -= cost;
+            out.push(entry.clone());
+        }
+        (out, false)
+    }
+
+    /// JOB_LOGS review cr-jl4fix2-1: name each failure recorded by its text
+    /// alone by its exact bytes, from `raw_of` — the session's manifest,
+    /// where a text names one granted entry — and move its left-in-place
+    /// status to the raw set, so the status belongs to the entry that
+    /// failed and not to every name of that text.
+    pub fn named_raw(mut self, raw_of: impl Fn(&str) -> Option<Vec<u8>>) -> Self {
+        for failure in &mut self.failures {
+            if failure.raw_relative_path.is_none() {
+                failure.raw_relative_path = raw_of(&failure.relative_path);
+            }
+        }
+        let moved: Vec<(String, Vec<u8>)> = self
+            .left_in_place
+            .iter()
+            .filter_map(|text| raw_of(text).map(|raw| (text.clone(), raw)))
+            .collect();
+        for (text, raw) in moved {
+            self.left_in_place.remove(&text);
+            self.left_in_place_raw.insert(raw);
+        }
+        self
     }
 
     /// cr-rework-3: [`SinkOutcome::removed_incomplete`] in wire form,
@@ -3385,6 +3443,42 @@ impl TransferSink for NullSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// JOB_LOGS review cr-jl4fix2-1: a left-in-place status belongs to the
+    /// entry that failed, by its bytes when its name is not its text.
+    #[test]
+    fn left_in_place_status_follows_the_entrys_own_bytes() {
+        let reason = format!("write failed: {INCOMPLETE_LEFT_IN_PLACE}");
+        let mut outcome = SinkOutcome::default();
+        // Recorded with its bytes: the raw set, not the text set.
+        outcome.record_named_failure("dup\u{FFFD}", Some(b"dup\xff".to_vec()), reason.clone());
+        // Recorded by text alone, as a write site does: named at the end
+        // from the manifest, which grants one entry per text.
+        outcome.record_failure("own\u{FFFD}", reason.clone());
+        outcome.record_failure("plain.txt", reason);
+        let named = outcome.named_raw(|text| match text {
+            "own\u{FFFD}" => Some(b"own\xfe".to_vec()),
+            _ => None,
+        });
+        let (text, _) = named.wire_left_in_place();
+        let (raw, truncated) = named.wire_left_in_place_raw();
+        assert_eq!(text, ["plain.txt"]);
+        assert_eq!(raw, [b"dup\xff".to_vec(), b"own\xfe".to_vec()]);
+        assert!(!truncated);
+        assert_eq!(
+            named
+                .failures
+                .iter()
+                .find(|failure| failure.relative_path == "own\u{FFFD}")
+                .and_then(|failure| failure.raw_relative_path.as_deref()),
+            Some(&b"own\xfe"[..]),
+            "the failure itself is named too"
+        );
+        // Merged like the text set.
+        let mut whole = SinkOutcome::default();
+        whole.merge_failures(&named);
+        assert_eq!(whole.wire_left_in_place_raw().0.len(), 2);
+    }
     use tempfile::tempdir;
 
     fn make_file_header(rel: &str, size: u64) -> FileHeader {
@@ -5439,6 +5533,7 @@ mod tests {
             left_in_place_truncated: false,
             removed_incomplete: Vec::new(),
             removed_incomplete_truncated: false,
+            left_in_place_raw: Vec::new(),
         }
     }
 

@@ -281,8 +281,7 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
     let verb = if spec.verb == "move" {
         "move"
     } else {
-        let (failed, mut left) = failed_identities(&config_dir, &record)?;
-        left.extend(record.left_in_place.iter().cloned());
+        let (failed, logged_left) = failed_identities(&config_dir, &record)?;
         // Review cr-jl4-1: under `--ignore-existing`, a path whose failed
         // write left this run's own incomplete copy is retried with the
         // flag off — the copy is not one the person asked to keep — as the
@@ -296,7 +295,9 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
                     record.run_id
                 );
             }
-            let (own, own_raw) = retry_names(failed.iter().filter(|(path, _)| left.contains(path)));
+            let (own, own_raw) = retry_names(failed.iter().filter(|(path, raw)| {
+                is_left_in_place(&record, &logged_left, path, raw.as_deref())
+            }));
             if !own.is_empty() || !own_raw.is_empty() {
                 args.retry_left_in_place = Some(own);
                 args.retry_left_in_place_raw = Some(own_raw);
@@ -318,6 +319,23 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
     }))
 }
 
+/// Whether a failed file's write left the run's own incomplete copy at the
+/// destination, by the file's identity — its text, or its bytes when its
+/// name is not UTF-8 (review cr-jl4fix2-1: two names of one text never
+/// share the status): the record's lists, or what this machine's log said.
+fn is_left_in_place(
+    record: &RunRecord,
+    logged: &HashSet<(String, Option<String>)>,
+    path: &str,
+    raw: Option<&str>,
+) -> bool {
+    let in_record = match raw {
+        Some(raw) => record.left_in_place_raw.iter().any(|left| left == raw),
+        None => record.left_in_place.iter().any(|left| left == path),
+    };
+    in_record || logged.contains(&(path.to_string(), raw.map(str::to_string)))
+}
+
 /// Every file a run failed, by its text and bytes: its record's, completed
 /// from this machine's log of the run when the record's list was cut
 /// short — with, from the log's whole reasons, the texts of those whose
@@ -326,7 +344,10 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
 fn failed_identities(
     config_dir: &Path,
     record: &RunRecord,
-) -> Result<(HashSet<(String, Option<String>)>, HashSet<String>)> {
+) -> Result<(
+    HashSet<(String, Option<String>)>,
+    HashSet<(String, Option<String>)>,
+)> {
     use crate::transfers::retry::UNRETRIED_PATH;
     let mut known: HashSet<(String, Option<String>)> = record
         .failures
@@ -342,7 +363,7 @@ fn failed_identities(
                 .any(|failure| failure.path == UNRETRIED_PATH)
             || (known.len() as u64) < record.files_failed
     };
-    let mut left_in_place: HashSet<String> = HashSet::new();
+    let mut left_in_place: HashSet<(String, Option<String>)> = HashSet::new();
     if short(&known) {
         // Review cr-jl4-3: the run's terminal state, read from its log in
         // order — a file that failed, and was not landed by a later pass —
@@ -362,13 +383,15 @@ fn failed_identities(
                         if reason
                             .contains(blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE)
                         {
-                            left_in_place.insert(path.clone());
+                            left_in_place.insert((path.clone(), raw.clone()));
                         }
                         still_failed.insert((path, raw));
                     }
                     job_log::EventBody::FileCopied { path, raw, .. }
                     | job_log::EventBody::FileSent { path, raw } => {
-                        still_failed.remove(&(path, raw));
+                        let identity = (path, raw);
+                        left_in_place.remove(&identity);
+                        still_failed.remove(&identity);
                     }
                     _ => {}
                 }
@@ -1832,6 +1855,40 @@ fn age_ms_since(start_unix_ms: u64) -> u64 {
 #[cfg(test)]
 mod retry_name_tests {
     use super::*;
+
+    /// Review cr-jl4fix2-1: a left-in-place status is the entry's own —
+    /// two names of one text, one of which left its copy and landed, the
+    /// other still failed: the other is not the run's leftover.
+    #[test]
+    fn left_in_place_status_is_the_entrys_own() {
+        let text = "dup\u{FFFD}".to_string();
+        let mut record = RunRecord::starting(
+            "0123456789abcdef0123456789abcdef",
+            &JobSpec::new(
+                "m1",
+                "copy",
+                "/".into(),
+                blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+                blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+                Default::default(),
+                None,
+            ),
+        );
+        // The entry that left its copy (and later landed) had other bytes.
+        record.left_in_place_raw = vec!["dup\\xfe".into()];
+        record.left_in_place = vec!["text.txt".into()];
+        let logged = HashSet::from([("logged.txt".to_string(), None)]);
+        assert!(!is_left_in_place(&record, &logged, &text, Some("dup\\xff")));
+        assert!(is_left_in_place(&record, &logged, &text, Some("dup\\xfe")));
+        assert!(is_left_in_place(&record, &logged, "text.txt", None));
+        assert!(!is_left_in_place(
+            &record,
+            &logged,
+            "text.txt",
+            Some("text\\xff")
+        ));
+        assert!(is_left_in_place(&record, &logged, "logged.txt", None));
+    }
 
     /// Reviews cr-jl4-2, cr-jl4fix1-2: a failed non-UTF-8 name is retried
     /// by its own bytes on every host — kept as bytes, and on the wire sent

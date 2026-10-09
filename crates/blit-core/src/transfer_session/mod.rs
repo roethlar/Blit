@@ -4358,6 +4358,11 @@ async fn destination_session_inner(
     // is kept here — `files_written` / `bytes_written` above stay the
     // counters each lane folds into.
     let mut contained_failures = crate::remote::transfer::SinkOutcome::default();
+    // Review cr-jl4fix2-1: the exact bytes of each granted entry whose name
+    // is not UTF-8, by its text — one per text, as a second entry of a text
+    // is refused at intake — to name the failures by at the end.
+    let mut granted_raw_names: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
     let mut need_batch_seq = 0u64;
     // pfc-6: metadata-only attribute repair at the diff. Shared by both
     // carriers because the DESTINATION owns its filesystem in every
@@ -4458,6 +4463,9 @@ async fn destination_session_inner(
                 }
                 // Review cr-jl1a-1: a job log names this entry by its exact
                 // bytes, not only the lossy text every key here uses.
+                if let Some(raw) = &header.raw_relative_path {
+                    granted_raw_names.insert(header.relative_path.clone(), raw.clone());
+                }
                 if let (Some(p), Some(raw)) = (&progress, &header.raw_relative_path) {
                     p.report_raw_name(header.relative_path.clone(), raw.clone())
                         .await;
@@ -5298,9 +5306,16 @@ async fn destination_session_inner(
                 } else {
                     0
                 };
+                // Review cr-jl4fix2-1: each failure, and its left-in-place
+                // status, by the exact bytes the manifest granted its text.
+                let contained_failures =
+                    contained_failures.named_raw(|text| granted_raw_names.get(text).cloned());
                 let (retry_paths, retry_paths_truncated) = contained_failures.wire_failed_paths();
                 let (left_in_place, left_in_place_truncated) =
                     contained_failures.wire_left_in_place();
+                let (left_in_place_raw, left_in_place_raw_truncated) =
+                    contained_failures.wire_left_in_place_raw();
+                let left_in_place_truncated = left_in_place_truncated || left_in_place_raw_truncated;
                 let (removed_incomplete, removed_incomplete_truncated) =
                     contained_failures.wire_removed_incomplete();
                 let summary = TransferSummary {
@@ -5327,6 +5342,7 @@ async fn destination_session_inner(
                     failed_paths_truncated: retry_paths_truncated,
                     left_in_place,
                     left_in_place_truncated,
+                    left_in_place_raw,
                     removed_incomplete,
                     removed_incomplete_truncated,
                 };

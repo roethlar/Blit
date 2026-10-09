@@ -578,6 +578,22 @@ Small first, per R1; each slice is one coherent, testable change.
      detached run's failed file, freed, retried detached again: exactly
      that file sent, the retry settled ok from its daemon. Nine guard
      mutations red (each failing at runtime).
+   - *Review fixes* (jl4-r1 and its re-reviews): a cut-short failure list
+     is completed from the run's terminal state (cr-jl4-3) and a detached
+     run's from its daemon log's (cr-jl4fix1-1); a retry names a non-UTF-8
+     file by its bytes, on the wire too (contract 7
+     `FilterSpec.files_from_raw`; cr-jl4-2, cr-jl4fix1-2 for any client
+     host); an `--ignore-existing` retry sends the run's own leftovers with
+     the flag off and refuses when it cannot tell which they are
+     (cr-jl4-1); and the left-in-place status is the entry's own — kept by
+     text for UTF-8 names and by bytes for the rest, from the session's
+     summary (contract 7 `TransferSummary.left_in_place_raw`, named at the
+     end from the manifest the session granted) through the record, the
+     daemon-log fold and the retry split (cr-jl4fix2-1).
+   - *Known gap (pre-existing, ssc-6)*: the in-command `--retries` passes
+     name their retry set by text, so a non-UTF-8 file is never re-sent by
+     them (its lossy text names nothing at the source; it stays reported
+     failed); `jobs retry` is the way to re-send it.
 
 ## Review history
 
