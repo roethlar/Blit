@@ -1,0 +1,22 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "47827f241c9eb23bf0ce30301b72a205d08a9904",
+ "base_sha": "e3a8bde09c875a72bb67662e27a409848b5b1a05",
+ "goal": "Ensure `blit jobs retry` selects exactly the files still failed at terminal state, preserving non-UTF-8 identities across detached logs and host boundaries.",
+ "recommended_approach": "Fold log events in attempt order by the composite identity `(display path, raw bytes)`, persist failure and left-in-place dispositions using that same identity, validate the terminal set against the summary, and carry raw bytes unchanged until the actual source host constructs its paths.",
+ "comparison": "The change correctly removes failures later landed and transports raw retry names across hosts, with its focused tests passing. However, left-in-place state remains keyed only by lossy text, breaking the composite-identity approach for colliding names. A focused guard failed at the reviewed head and passed with temporary identity-aware tracking; the worktree was then restored cleanly to the reviewed SHA.",
+ "material_changes": [
+  "Persist and match left-in-place state by `(path, raw)` rather than display path alone, and add a collision regression covering `--ignore-existing` retry partitioning."
+ ],
+ "findings": [
+  {
+   "title": "Lossy-name collisions transfer left-in-place status to the wrong file",
+   "evidence": "crates/blit-core/src/job_record.rs:824 \u2014 left-in-place membership is stored only by display path and retained while any failure has that path; crates/blit-cli/src/jobs.rs:299 \u2014 every raw identity sharing that path is consequently classified as Blit's own leftover.",
+   "predicted_failure": "If two byte-distinct names collapse to the same text, one leaves an incomplete copy and later succeeds while the other remains failed, `jobs retry` misclassifies the remaining file as Blit's leftover. For an original `--ignore-existing` job it disables that protection and can overwrite a pre-existing destination file.",
+   "severity": "HIGH",
+   "better_approach": "Store the optional raw bytes with each left-in-place entry, remove and partition entries by exact composite identity, migrate existing text-only records conservatively, and prove the collision through detached settlement and retry execution."
+  }
+ ]
+}
