@@ -1,7 +1,7 @@
 # cr-jl4fix4-2: a record from the raw-list era is read as text-only
 
 **Severity**: LOW (reviewer: LOW)
-**Status**: Open
+**Status**: Fixed — awaiting re-review
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: —
 **Reviewer**: codex / gpt-5.6-sol / xhigh / frontier (fallback grade), codex-cli 0.159.3; openreview jl4fix4-r1 over `beab73c9..e522afe8` (record `.review/results/jl4fix4-r1.codex.json`); owner goal of 2026-10-07
@@ -17,3 +17,9 @@ During v1 record loading, interpret an absent `left_in_place_exact` as true when
 
 ## Intake
 Admitted. Records written between the raw list and the marker already keep identities; read now, the absent marker makes them legacy and a collision is refused needlessly. A record whose raw-list key is present is exact; only one with neither key is text-only.
+
+## What
+`read_record` reads the record untyped as well: when the exact marker is absent but the `left_in_place_raw` key is present, the record is from between the raw list and the marker and keeps identities, so it is read as exact; a record with neither key is text-only, and a marker present is taken as written.
+
+## Guard proof
+`a_records_leftover_lists_are_exact_by_marker_or_by_the_raw_list` (core): four JSON fixtures — neither key (not exact), the raw list without the marker (exact), the marker false (not exact), the marker true (exact). Mutation — the migration dropped — makes it fail; restored, green.

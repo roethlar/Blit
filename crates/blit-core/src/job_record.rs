@@ -532,7 +532,20 @@ pub fn read_spec(bytes: &[u8]) -> io::Result<JobSpec> {
 
 /// A run record from a document's bytes.
 pub fn read_record(bytes: &[u8]) -> io::Result<RunRecord> {
-    read_versioned(bytes, RECORD_FORMAT)
+    let mut record: RunRecord = read_versioned(bytes, RECORD_FORMAT)?;
+    // Review cr-jl4fix4-2: a record from between the raw list and the
+    // exact marker keeps identities already; only one with neither key is
+    // text-only.
+    if !record.left_in_place_exact {
+        if let Ok(serde_json::Value::Object(keys)) =
+            serde_json::from_slice::<serde_json::Value>(bytes)
+        {
+            if keys.contains_key("left_in_place_raw") && !keys.contains_key("left_in_place_exact") {
+                record.left_in_place_exact = true;
+            }
+        }
+    }
+    Ok(record)
 }
 
 /// Write `value` to `path` whole: a temp file beside it, synced, then
@@ -1517,6 +1530,28 @@ mod tests {
         let mut value = serde_json::to_value(&file).unwrap();
         value["format"] = "blit-job-spec".into();
         assert!(read_job_file(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    /// Review cr-jl4fix4-2: which records keep leftover identities — by the
+    /// marker, by the raw list's presence before the marker existed, and
+    /// text-only when it has neither.
+    #[test]
+    fn a_records_leftover_lists_are_exact_by_marker_or_by_the_raw_list() {
+        let mut value = serde_json::to_value(RunRecord::starting(RUN, &spec())).unwrap();
+        let keys = value.as_object_mut().unwrap();
+        keys.remove("left_in_place_exact");
+        keys.remove("left_in_place_raw");
+        let text_only = serde_json::to_vec(&value).unwrap();
+        assert!(!read_record(&text_only).unwrap().left_in_place_exact);
+        value["left_in_place_raw"] = serde_json::json!([]);
+        let raw_list_era = serde_json::to_vec(&value).unwrap();
+        assert!(read_record(&raw_list_era).unwrap().left_in_place_exact);
+        value["left_in_place_exact"] = false.into();
+        let marked_not = serde_json::to_vec(&value).unwrap();
+        assert!(!read_record(&marked_not).unwrap().left_in_place_exact);
+        value["left_in_place_exact"] = true.into();
+        let marked = serde_json::to_vec(&value).unwrap();
+        assert!(read_record(&marked).unwrap().left_in_place_exact);
     }
 
     #[test]
