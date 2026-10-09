@@ -1,0 +1,12 @@
+{
+ "verdict": "best_approach",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "cee9104edaca3a844d031a81e58ad56f505765db",
+ "base_sha": "e942ccfef6208bf09bf6bf94e39be2ba093ffa4e",
+ "goal": "Prevent `jobs retry --ignore-existing` from treating stale incomplete-copy evidence from an earlier session as current by reconstructing each participant-and-role stream's terminal state across attempts.",
+ "recommended_approach": "Fold attempt-ordered log events into persistent state keyed by participant and role, union only the terminal states of those independent streams, and test both later-attempt clearing and cross-participant isolation.",
+ "comparison": "The change implements that approach narrowly: it relies on the documented attempt ordering from `logs_for_run`, preserves isolation between participant-and-role streams, and adds focused regression coverage. Reverting only the stream-level fold made the focused test fail; restoring the head implementation made it pass, and the worktree was restored exactly to the reviewed SHA.",
+ "material_changes": [],
+ "findings": []
+}
