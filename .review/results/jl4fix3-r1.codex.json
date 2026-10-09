@@ -1,0 +1,22 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "6b50d41f3b9b957ea421bc8eb3f7032ad30e0a55",
+ "base_sha": "1a3c4704c8feb86a32e02a3157af32ebdcd60ebb",
+ "goal": "Preserve exact non-UTF-8 file identity when deciding which failed copies may bypass --ignore-existing during job retry, while removing the macOS full-flush latency introduced by durable job logging.",
+ "recommended_approach": "Carry each left-in-place status end-to-end as a composite text/raw identity through session summaries, delegated summaries, logs, records, and retry partitioning; migrate or conservatively reject ambiguous legacy text-only records; and centralize the documented Apple fsync policy while retaining every crash-recovery flush point.",
+ "comparison": "The change largely follows the right architecture: raw identity is propagated through every current path, the Apple-specific sync wrapper removes most measured latency, the deliberate classifier mutation failed before restoration and passed afterward, and the native workspace gate, Linux cross-clippy, and docs gate passed. It is not best unchanged because backward-compatible loading of older text-only records silently loses raw left-in-place status.",
+ "material_changes": [
+  "When a loaded record predates left_in_place_raw, recover exact left-in-place identities from its log or refuse an ambiguous raw-name retry instead of treating every raw failure as not left in place."
+ ],
+ "findings": [
+  {
+   "title": "Legacy text-only records can falsely complete an incomplete raw-named file",
+   "evidence": "crates/blit-core/src/job_record.rs:179 \u2014 older records deliberately deserialize with an empty left_in_place_raw list; crates/blit-cli/src/jobs.rs:333 \u2014 a raw failure consults only that new list, while logs are consulted only when the failure list itself is short.",
+   "predicted_failure": "After upgrading from the base snapshot, an --ignore-existing run record containing a non-UTF-8 failed file can be retried with ignore-existing still enabled; Blit's own incomplete destination copy is skipped as an existing file and the retry can report success without repairing it.",
+   "severity": "MEDIUM",
+   "better_approach": "For raw failures from records lacking exact left-in-place identities, always consult the run log's composite identities; if the log is unavailable and the legacy text list matches ambiguously, refuse the retry with the existing incomplete-classification error."
+  }
+ ]
+}
