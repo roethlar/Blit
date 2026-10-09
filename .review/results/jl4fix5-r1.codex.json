@@ -1,0 +1,22 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "411b2f4b4bf683da33cfaa91b386352ae0714c40",
+ "base_sha": "5f084f877c8499f158b9c46f0b847e906230c29a",
+ "goal": "Allow `blit jobs retry` to safely resolve exact leftover-file identities for legacy `--ignore-existing` runs, including non-UTF-8 name collisions and raw-list-era records.",
+ "recommended_approach": "Migrate raw-list-era records at the read boundary based on field presence, then fold logs independently per participant and role across ordered attempts, union positive terminal leftover evidence across roles, and accept negative evidence only when every relevant log is complete; otherwise refuse the retry.",
+ "comparison": "The field-presence migration is correct: an independent fixture failed against the base implementation and passed at the restored head. The legacy-log path is close, but it folds every role into one mutable leftover set, allowing one role's non-authoritative event to erase another role's destination evidence.",
+ "material_changes": [
+  "Fold left-in-place state independently per participant and role, and add a multi-role regression proving that a source `FileSent` cannot erase a destination's incomplete-copy marker."
+ ],
+ "findings": [
+  {
+   "title": "A source log can erase destination leftover evidence",
+   "evidence": "crates/blit-cli/src/jobs.rs:428 \u2014 logs from all roles are folded into one `logged.left` set, and lines 453-457 remove an identity for either `FileCopied` or `FileSent`, although crates/blit-core/src/job_log.rs:253 explicitly says `FileSent` does not establish that the file landed.",
+   "predicted_failure": "For a legacy ambiguous raw-named failure, a complete destination log can record that its failed write left an incomplete copy while a later-folded source log records `FileSent` and a less-specific failure. The shared set becomes empty, the complete-log branch classifies the file as not left in place, and an `--ignore-existing` retry can skip the incomplete destination copy instead of replacing it.",
+   "severity": "HIGH",
+   "better_approach": "Maintain terminal leftover state per participant/role stream, folding that stream's attempts in order, then union positive leftover identities across streams. Events from one role must never remove another role's evidence; add the two-role case as a regression test."
+  }
+ ]
+}
