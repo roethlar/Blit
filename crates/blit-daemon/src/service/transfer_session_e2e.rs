@@ -1942,14 +1942,29 @@ async fn a_served_mirror_push_logs_every_copy_and_deletion() {
         ]
     );
     named.retain(|line| !line.starts_with("copied "));
+    // Stale files go in any order too; a folder goes after its contents.
+    let deleted_files: Vec<String> = {
+        let mut deleted: Vec<String> = named
+            .iter()
+            .filter(|line| line.starts_with("deleted ") && !line.ends_with('/'))
+            .cloned()
+            .collect();
+        deleted.sort();
+        deleted
+    };
+    assert_eq!(deleted_files, ["deleted gone/old.txt", "deleted stale.txt"]);
+    let at = |line: &str| named.iter().position(|seen| seen == line).unwrap();
+    assert!(
+        at("deleted gone/old.txt") < at("deleted gone/"),
+        "{named:?}"
+    );
+    named.retain(|line| !line.starts_with("deleted ") || line.ends_with('/'));
     assert_eq!(
         named,
         [
             "phase transfer start",
             "phase transfer end",
             "phase delete start",
-            "deleted gone/old.txt",
-            "deleted stale.txt",
             "deleted gone/",
             "phase delete end",
         ]
