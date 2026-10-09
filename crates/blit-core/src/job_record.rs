@@ -549,26 +549,16 @@ pub fn write_document(path: &Path, value: &impl Serialize) -> io::Result<()> {
             .open(&temp)?;
         serde_json::to_writer_pretty(&mut file, value)?;
         file.write_all(b"\n")?;
-        file.sync_all()?;
+        crate::job_log::sync_all(&file)?;
         drop(file);
         fs::rename(&temp, path)?;
-        sync_dir(dir);
+        crate::job_log::sync_dir(dir);
         Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }
     result
-}
-
-/// Make a folder's entries durable (Unix; elsewhere the rename is).
-fn sync_dir(dir: &Path) {
-    #[cfg(unix)]
-    if let Ok(handle) = File::open(dir) {
-        let _ = handle.sync_all();
-    }
-    #[cfg(not(unix))]
-    let _ = dir;
 }
 
 /// A machine's run records: `<per-user folder>/jobs/runs/`.

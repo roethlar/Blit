@@ -761,7 +761,7 @@ impl PartialFile {
 
     fn sync(&mut self) -> io::Result<()> {
         self.out.flush()?;
-        self.out.get_ref().sync_data()?;
+        sync_data(self.out.get_ref())?;
         self.unsynced = false;
         self.last_sync = Instant::now();
         Ok(())
@@ -860,20 +860,63 @@ fn write_compressed(
         .into_inner()
         .map_err(|error| error.into_error())?;
     output.set_modified(modified)?;
-    output.sync_all()?;
+    sync_all(&output)?;
     drop(output);
     fs::rename(temp, finished)
 }
 
 /// Make a rename in `dir` durable (POSIX); Windows has no directory handle
 /// to sync and needs none.
-fn sync_dir(dir: &Path) {
+pub(crate) fn sync_dir(dir: &Path) {
     #[cfg(unix)]
     if let Ok(handle) = File::open(dir) {
-        let _ = handle.sync_all();
+        let _ = sync_all(&handle);
     }
     #[cfg(not(unix))]
     let _ = dir;
+}
+
+/// Flush what was written to `file` to the device — a job log's or job
+/// record's flush (JOB_LOGS, FAST acceptance). On Apple platforms the
+/// standard library's `sync_all`/`sync_data` issue `F_FULLFSYNC`, which
+/// also empties the drive's own write cache and costs milliseconds each:
+/// about ten of them made every command ~50 ms slower (measured
+/// 2026-10-08, `docs/bench/job-logs-fast-2026-10-08/`), while blit flushes
+/// no ordinary copied file at all. Logs and records are flushed with
+/// POSIX `fsync(2)` there, as durable as on every other platform.
+pub(crate) fn sync_all(file: &File) -> io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        posix_fsync(file)
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        file.sync_all()
+    }
+}
+
+/// [`sync_all`] for a file whose data alone must reach the device.
+pub(crate) fn sync_data(file: &File) -> io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        posix_fsync(file)
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        file.sync_data()
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn posix_fsync(file: &File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `fsync` reads only the descriptor, which `file` keeps open
+    // for the call.
+    if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 /// What [`recover`] did.
@@ -1045,7 +1088,7 @@ fn close_interrupted(partial: &Path) -> io::Result<bool> {
     )?;
     line.push(b'\n');
     file.write_all(&line)?;
-    file.sync_data()?;
+    sync_data(&file)?;
     drop(file);
     filetime::set_file_mtime(partial, filetime::FileTime::from_system_time(modified))?;
     Ok(lost_start)
@@ -1482,7 +1525,7 @@ pub fn machine_id(dir: &Path) -> io::Result<String> {
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
                 file.write_all(format!("{id}\n").as_bytes())?;
-                file.sync_all()?;
+                sync_all(&file)?;
             }
             // Another process made it first; read theirs.
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
