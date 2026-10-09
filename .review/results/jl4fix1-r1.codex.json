@@ -1,0 +1,30 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "041f993e364ab29b553e88911dfab3b2d2ae8845",
+ "base_sha": "b2204f9af83fcb1a849b8baf0d41d7df5279cc6a",
+ "goal": "Make `blit jobs retry` safely re-run exactly the files still failed at the end of a prior run, preserving raw filenames and `--ignore-existing` semantics.",
+ "recommended_approach": "Persist a typed retry identity containing display text plus optional raw bytes, together with its terminal failure and incomplete-destination state, through summaries, RunRecord, log reconciliation, and FilterSpec; fold events across attempts by identity, then partition `--ignore-existing` retries without converting identities through the controller's native PathBuf.",
+ "comparison": "The change correctly handles local terminal-state reconstruction, Unix raw names, and `--ignore-existing` partitioning, and the eight job-retry tests pass. It is not the best complete implementation because detached reconciliation still retains historical failures and Windows controllers discard raw identities. An independent guard for failure-then-FileCopied was red on the reviewed head and green after terminal-state removal; the worktree was restored cleanly to the reviewed SHA.",
+ "material_changes": [
+  "Make detached LogRead reconciliation retain only terminal failures and terminal left-in-place classifications by exact identity.",
+  "Carry raw retry identities independently of the initiating host's PathBuf representation so Windows can retry non-UTF-8 files on remote Unix sources."
+ ],
+ "findings": [
+  {
+   "title": "Detached reconciliation still retries failures fixed by a later pass",
+   "evidence": "crates/blit-core/src/job_record.rs:821 \u2014 `LogRead::read_line` adds every `FileFailed` but has no `FileCopied`/`FileSent` removal; `ended_record` then copies that historical union into the settled record.",
+   "predicted_failure": "A detached job whose retry pass later lands a file still records that file as failed; `jobs retry` can resend or overwrite it, and can retry a run whose terminal failed count is zero.",
+   "severity": "MEDIUM",
+   "better_approach": "Fold daemon log events in attempt order by `(path, raw)`, remove an identity when it later lands, derive left-in-place only from identities still failed, and refuse reconciliation when the terminal set disagrees with the summary count."
+  },
+  {
+   "title": "Windows controllers lose remote non-UTF-8 retry identities",
+   "evidence": "crates/blit-cli/src/jobs.rs:403 \u2014 `retry_path` reconstructs raw bytes only under `cfg(unix)`; lines 408-410 discard `raw` on Windows and return the lossy display path used to build the remote filter.",
+   "predicted_failure": "A Windows client retrying a failed non-UTF-8 file on a remote Unix source sends the lossy text in `files_from`; the source matches no file, so the retry may copy nothing and report success.",
+   "severity": "HIGH",
+   "better_approach": "Keep retry identities as text plus raw bytes through orchestration and populate `FilterSpec.files_from_raw` directly, using PathBuf only when enumerating on the actual source host."
+  }
+ ]
+}
