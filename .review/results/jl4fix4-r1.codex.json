@@ -1,0 +1,30 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "e522afe884e2b6d8c2ad3a8138da2ace04465627",
+ "base_sha": "beab73c9e86009d1d8e3a90bdaaeb5bd2f7da278",
+ "goal": "Prevent `blit jobs retry` from silently skipping Blit's own incomplete non-UTF-8 destination file when retrying an older `--ignore-existing` run record.",
+ "recommended_approach": "Mark new records as identity-exact, migrate v1 records by recognizing the prior raw-list field, and resolve every genuinely legacy ambiguous raw failure from a complete terminal log regardless of failure-list truncation, refusing only when exact status remains unknowable.",
+ "comparison": "The change correctly adds an identity-exact marker, sets it on current writer paths, and conservatively prevents the original unsafe retry, but its log fallback is unreachable for complete failure lists and it treats exact records written by the base-era format as legacy. An independent guard created a complete legacy record with a finished exact log: head failed to recover its raw leftover, a temporary ambiguity-triggered log scan made it pass, and the worktree was restored cleanly to the reviewed SHA; the existing targeted retry and record tests then passed.",
+ "material_changes": [
+  "Read and validate the terminal log whenever a legacy record has an ambiguous raw/text identity, even when its failure list is complete, and use a complete log to resolve both positive and negative membership.",
+  "Migrate records that contain `left_in_place_raw` but lack `left_in_place_exact` as identity-exact; reserve false for genuinely text-only records."
+ ],
+ "findings": [
+  {
+   "title": "Complete legacy records bypass the exact-log fallback",
+   "evidence": "crates/blit-cli/src/jobs.rs:393 \u2014 `short` only identifies an incomplete failure list; crates/blit-cli/src/jobs.rs:402 \u2014 logs are scanned only when that predicate is true, while lines 357-369 refuse every unresolved legacy raw/text match.",
+   "predicted_failure": "A legacy record with a complete failure list is refused by `jobs retry` even when its complete local log identifies the exact raw leftover; a log proving that a UTF-8 sibling owned the text entry cannot authorize the safe retry either.",
+   "severity": "MEDIUM",
+   "better_approach": "Detect ambiguous legacy identities independently of failure-list completeness, fold a complete terminal log into an exact terminal leftover set, and refuse only if that log is absent, incomplete, or unreadable."
+  },
+  {
+   "title": "The marker misclassifies records from the immediately preceding exact format",
+   "evidence": ".review/findings/cr-jl4fix2-1.md:22 \u2014 base-era writers already stored exact identities in `left_in_place_raw`; crates/blit-core/src/job_record.rs:188 \u2014 the absent new marker defaults false, and line 516 deserializes v1 directly without a field-presence migration.",
+   "predicted_failure": "A record written by the base-era binary can be treated as text-only; if a raw-named failure shares its lossy display text with a UTF-8 leftover, the retry is unnecessarily refused despite the record already containing exact list semantics.",
+   "severity": "LOW",
+   "better_approach": "During v1 record loading, interpret an absent `left_in_place_exact` as true when the serialized `left_in_place_raw` key is present, and as false only when both the marker and raw-list key are absent; pin this with JSON fixtures from both formats."
+  }
+ ]
+}
