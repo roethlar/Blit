@@ -335,34 +335,47 @@ fn is_left_in_place(
     in_record || logged.contains(&(path.to_string(), raw.map(str::to_string)))
 }
 
+/// What this machine's log of a run says of the files whose write left
+/// the run's own incomplete copy, when it was read.
+#[derive(Default)]
+struct LoggedLeftovers {
+    /// A log of the run was found and read.
+    read: bool,
+    /// Every log of the run here is finished, ends with its `run-end` and
+    /// lost nothing: it settles a file's status both ways.
+    complete: bool,
+    left: HashSet<(String, Option<String>)>,
+}
+
 /// The failed files that left the run's own incomplete copy, by identity.
-/// Review cr-jl4fix3-1: a record from before its lists kept identities
-/// filed a raw-named file under its text, so from such a record a
-/// raw-named failure whose text is in the text list is ambiguous — its own
-/// leftover, or a UTF-8 sibling's — and is taken as the run's own only when
-/// this machine's log names that exact identity; otherwise the retry is
-/// refused, as when the list is not whole.
+/// Reviews cr-jl4fix3-1, cr-jl4fix4-1: a record from before its lists kept
+/// identities filed a raw-named file under its text, so from such a record
+/// a raw-named failure whose text is in the text list is ambiguous — its
+/// own leftover, or a UTF-8 sibling's. This machine's log settles it: a log
+/// that names the exact identity makes it the run's own; a complete log
+/// that does not makes it not; an absent or incomplete log leaves it
+/// unknowable, and the retry is refused, as when the list is not whole.
 fn own_leftovers(
     record: &RunRecord,
     failed: &HashSet<(String, Option<String>)>,
-    logged: &HashSet<(String, Option<String>)>,
+    logged: &LoggedLeftovers,
 ) -> Result<HashSet<(String, Option<String>)>> {
     let mut own = HashSet::new();
     for identity in failed {
         let (path, raw) = identity;
-        if is_left_in_place(record, logged, path, raw.as_deref()) {
+        if is_left_in_place(record, &logged.left, path, raw.as_deref()) {
             own.insert(identity.clone());
             continue;
         }
         let ambiguous = !record.left_in_place_exact
             && raw.is_some()
             && record.left_in_place.iter().any(|left| left == path);
-        if ambiguous {
+        if ambiguous && !(logged.read && logged.complete) {
             eyre::bail!(
                 "job {} ran with --ignore-existing, and its record (from an earlier blit) \
                  cannot say whether the failed file {} left its own incomplete copy at \
-                 the destination; a retry could skip that copy as a file to keep, so it is \
-                 not made",
+                 the destination, nor can this machine's log of the run; a retry could \
+                 skip that copy as a file to keep, so it is not made",
                 record.run_id,
                 job_log::shown_name(path, raw.as_deref())
             );
@@ -379,10 +392,7 @@ fn own_leftovers(
 fn failed_identities(
     config_dir: &Path,
     record: &RunRecord,
-) -> Result<(
-    HashSet<(String, Option<String>)>,
-    HashSet<(String, Option<String>)>,
-)> {
+) -> Result<(HashSet<(String, Option<String>)>, LoggedLeftovers)> {
     use crate::transfers::retry::UNRETRIED_PATH;
     let mut known: HashSet<(String, Option<String>)> = record
         .failures
@@ -398,19 +408,37 @@ fn failed_identities(
                 .any(|failure| failure.path == UNRETRIED_PATH)
             || (known.len() as u64) < record.files_failed
     };
-    let mut left_in_place: HashSet<(String, Option<String>)> = HashSet::new();
-    if short(&known) {
+    let mut logged = LoggedLeftovers::default();
+    // Review cr-jl4fix4-1: a record from before its lists kept identities,
+    // naming a raw-named failure whose text is in its text list, needs the
+    // log whether or not its failure list is whole.
+    let ambiguous_legacy = !record.left_in_place_exact
+        && record.failures.iter().any(|failure| {
+            failure.raw.is_some()
+                && record
+                    .left_in_place
+                    .iter()
+                    .any(|left| left == &failure.path)
+        });
+    if short(&known) || ambiguous_legacy {
         // Review cr-jl4-3: the run's terminal state, read from its log in
         // order — a file that failed, and was not landed by a later pass —
         // not every failure the run ever met.
         let logs = config_dir.join("jobs").join("logs");
-        for log in job_log::logs_for_run(&logs, &record.run_id, None).unwrap_or_default() {
+        let found = job_log::logs_for_run(&logs, &record.run_id, None).unwrap_or_default();
+        logged.complete = !found.is_empty();
+        for log in found {
             let Ok(lines) = job_log::open_log(&log.path) else {
+                logged.complete = false;
                 continue;
             };
+            logged.read = true;
+            let mut whole = log.finished;
+            let mut ended = false;
             let mut still_failed: HashSet<(String, Option<String>)> = HashSet::new();
-            for line in lines.flatten() {
-                let LogLine::Event(event) = line else {
+            for line in lines {
+                let Ok(LogLine::Event(event)) = line else {
+                    whole = false;
                     continue;
                 };
                 match event.body {
@@ -418,19 +446,22 @@ fn failed_identities(
                         if reason
                             .contains(blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE)
                         {
-                            left_in_place.insert((path.clone(), raw.clone()));
+                            logged.left.insert((path.clone(), raw.clone()));
                         }
                         still_failed.insert((path, raw));
                     }
                     job_log::EventBody::FileCopied { path, raw, .. }
                     | job_log::EventBody::FileSent { path, raw } => {
                         let identity = (path, raw);
-                        left_in_place.remove(&identity);
+                        logged.left.remove(&identity);
                         still_failed.remove(&identity);
                     }
+                    job_log::EventBody::RunEnd { .. } => ended = true,
+                    job_log::EventBody::LogIncomplete { .. } => whole = false,
                     _ => {}
                 }
             }
+            logged.complete &= whole && ended;
             known.extend(still_failed);
         }
         if (known.len() as u64) < record.files_failed {
@@ -445,7 +476,7 @@ fn failed_identities(
             );
         }
     }
-    Ok((known, left_in_place))
+    Ok((known, logged))
 }
 
 /// A retry's names (reviews cr-jl4-2, cr-jl4fix1-2): each failed file by
@@ -1891,10 +1922,11 @@ fn age_ms_since(start_unix_ms: u64) -> u64 {
 mod retry_name_tests {
     use super::*;
 
-    /// Review cr-jl4fix3-1: a record from before the raw list filed a
-    /// raw-named leftover under its text; such a failure is ambiguous —
-    /// refused unless the log names its exact identity — while a record
-    /// whose lists are exact classifies it by its bytes.
+    /// Reviews cr-jl4fix3-1, cr-jl4fix4-1: a record from before the raw list
+    /// filed a raw-named leftover under its text; such a failure is
+    /// ambiguous — settled by this machine's log, either way when the log
+    /// is whole, refused when the log is absent or incomplete — while a
+    /// record whose lists are exact classifies it by its bytes.
     #[test]
     fn an_old_records_raw_named_leftover_is_ambiguous() {
         let text = "dup\u{FFFD}".to_string();
@@ -1914,18 +1946,38 @@ mod retry_name_tests {
         record.left_in_place = vec![text.clone()];
         let failed: HashSet<(String, Option<String>)> =
             [(text.clone(), raw.clone()), ("other.txt".to_string(), None)].into();
-        let none = HashSet::new();
-        // Old record, nothing in the log: refused.
+        let none = LoggedLeftovers::default();
+        // Old record, no log: refused.
         let error = own_leftovers(&record, &failed, &none)
             .unwrap_err()
             .to_string();
         assert!(error.contains("cannot say whether"), "{error}");
         // Old record, the log names the identity: the run's own.
-        let logged: HashSet<(String, Option<String>)> = [(text.clone(), raw.clone())].into();
+        let names_it = LoggedLeftovers {
+            read: true,
+            complete: false,
+            left: [(text.clone(), raw.clone())].into(),
+        };
         assert_eq!(
-            own_leftovers(&record, &failed, &logged).unwrap(),
+            own_leftovers(&record, &failed, &names_it).unwrap(),
             [(text.clone(), raw.clone())].into()
         );
+        // A complete log that does not name it settles it the other way —
+        // not the run's own, no refusal; an incomplete one cannot.
+        let complete_without = LoggedLeftovers {
+            read: true,
+            complete: true,
+            left: HashSet::new(),
+        };
+        assert!(own_leftovers(&record, &failed, &complete_without)
+            .unwrap()
+            .is_empty());
+        let incomplete_without = LoggedLeftovers {
+            read: true,
+            complete: false,
+            left: HashSet::new(),
+        };
+        assert!(own_leftovers(&record, &failed, &incomplete_without).is_err());
         // Old record, a raw-named failure whose text is not in the list:
         // not the run's own, no ambiguity.
         let other: HashSet<(String, Option<String>)> =
@@ -1935,6 +1987,89 @@ mod retry_name_tests {
         // sibling's, and the raw-named failure is not the run's own.
         record.left_in_place_exact = true;
         assert!(own_leftovers(&record, &failed, &none).unwrap().is_empty());
+    }
+
+    /// Review cr-jl4fix4-1: an old record with a whole failure list still
+    /// has this machine's log read for an ambiguous raw-named failure, and
+    /// a finished log that names the identity makes the file the run's own.
+    #[test]
+    fn an_old_records_ambiguity_is_settled_from_a_whole_log() {
+        use blit_core::job_log::{EventBody, Outcome, Role, RunInfo};
+        use blit_core::run_log::LogPlace;
+        let dir = tempfile::tempdir().unwrap();
+        let run_id = "0123456789abcdef0123456789abcdef";
+        let text = "dup\u{FFFD}".to_string();
+        let raw = Some("dup\\xff".to_string());
+        let place = LogPlace {
+            dir: dir.path().join("jobs").join("logs"),
+            participant: "m1".into(),
+            keep: 50,
+            finished: None,
+        };
+        let writer = place
+            .start(run_id, 1, Role::Initiator, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileFailed {
+            path: text.clone(),
+            reason: format!(
+                "write failed: {}",
+                blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
+            ),
+            raw: raw.clone(),
+        });
+        let report = writer.finish(Outcome::Failed, None);
+        assert!(report.complete, "{report:?}");
+
+        let mut record = RunRecord::starting(
+            run_id,
+            &JobSpec::new(
+                "m1",
+                "copy",
+                "/".into(),
+                blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+                blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+                Default::default(),
+                None,
+            ),
+        );
+        // A whole list — one failure, counted once — from before identities.
+        record.files_failed = 1;
+        record.failures = vec![blit_core::job_record::Failure {
+            path: text.clone(),
+            reason: "write failed".into(),
+            raw: raw.clone(),
+        }];
+        record.left_in_place = vec![text.clone()];
+        record.left_in_place_exact = false;
+        let (failed, logged) = failed_identities(dir.path(), &record).unwrap();
+        assert!(
+            logged.read && logged.complete,
+            "the log was read, and is whole"
+        );
+        assert_eq!(
+            own_leftovers(&record, &failed, &logged).unwrap(),
+            [(text.clone(), raw.clone())].into()
+        );
+
+        // A log that lost events cannot settle it: the failure is in the
+        // log without the marker, but the log is not whole — refused.
+        let other_run = "fedcba9876543210fedcba9876543210";
+        let writer = place
+            .start(other_run, 1, Role::Initiator, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileFailed {
+            path: text.clone(),
+            reason: "write failed".into(),
+            raw: raw.clone(),
+        });
+        writer.record(EventBody::LogIncomplete {
+            reason: "disk full".into(),
+        });
+        assert!(writer.finish(Outcome::Failed, None).path.is_some());
+        record.run_id = other_run.into();
+        let (failed, logged) = failed_identities(dir.path(), &record).unwrap();
+        assert!(logged.read && !logged.complete, "read, not whole");
+        assert!(own_leftovers(&record, &failed, &logged).is_err());
     }
 
     /// Review cr-jl4fix2-1: a left-in-place status is the entry's own —
