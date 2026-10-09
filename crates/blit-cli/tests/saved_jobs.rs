@@ -209,7 +209,13 @@ fn a_job_name_must_be_a_plain_name_and_every_sub_verb_has_help() {
     for verb in ["save", "export", "run", "delete"] {
         let help = blit_in(&ctx, &ctx.workspace, &["jobs", verb, "--help"]);
         assert!(help.status.success(), "{verb}: {}", text(&help.stderr));
-        assert!(text(&help.stdout).contains("Usage: blit jobs"), "{verb}");
+        // The usage line names the binary as invoked (`blit.exe` on
+        // Windows), so look for the sub-verb, not the binary.
+        let stdout = text(&help.stdout);
+        assert!(
+            stdout.contains("Usage: ") && stdout.contains(&format!("jobs {verb}")),
+            "{verb}: {stdout}"
+        );
     }
 }
 
