@@ -857,11 +857,18 @@ impl LogRead {
             }
             // Review cr-jl4fix1-1: the run's terminal state — a file a
             // later event landed, by the same identity, failed no more.
-            EventBody::FileCopied { path, raw, .. } | EventBody::FileSent { path, raw } => {
+            // Review cr-jl4fix5-1: a send is not a landing; only a copy
+            // clears a leftover (these are destination logs, which record
+            // no sends — kept for the principle).
+            EventBody::FileCopied { path, raw, .. } => {
                 self.failures
                     .retain(|failed| !(failed.path == path && failed.raw == raw));
                 self.left_in_place
                     .retain(|left| !(left.0 == path && left.1 == raw));
+            }
+            EventBody::FileSent { path, raw } => {
+                self.failures
+                    .retain(|failed| !(failed.path == path && failed.raw == raw));
             }
             EventBody::Summary(summary) => self.summary = Some(summary),
             EventBody::RunEnd { outcome, detail } => {
@@ -1466,6 +1473,16 @@ mod tests {
             raw_left.left_in_place_lists(),
             (Vec::new(), vec!["dup\\xff".to_string()])
         );
+        // Review cr-jl4fix5-1: a send of the same identity clears no
+        // leftover — only a copy lands a file.
+        raw_left.read_line(event(
+            10,
+            EventBody::FileSent {
+                path: "dup\u{FFFD}".into(),
+                raw: Some("dup\\xff".into()),
+            },
+        ));
+        assert_eq!(raw_left.left_in_place.len(), 1);
         let mut gap = read.clone();
         gap.read_line(event(
             5,

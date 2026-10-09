@@ -435,6 +435,10 @@ fn failed_identities(
             logged.read = true;
             let mut whole = log.finished;
             let mut ended = false;
+            // Review cr-jl4fix5-1: each log folds on its own — one role's
+            // events never clear another's evidence — and what each still
+            // holds at its end is united.
+            let mut left: HashSet<(String, Option<String>)> = HashSet::new();
             let mut still_failed: HashSet<(String, Option<String>)> = HashSet::new();
             for line in lines {
                 let Ok(LogLine::Event(event)) = line else {
@@ -446,15 +450,20 @@ fn failed_identities(
                         if reason
                             .contains(blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE)
                         {
-                            logged.left.insert((path.clone(), raw.clone()));
+                            left.insert((path.clone(), raw.clone()));
                         }
                         still_failed.insert((path, raw));
                     }
-                    job_log::EventBody::FileCopied { path, raw, .. }
-                    | job_log::EventBody::FileSent { path, raw } => {
+                    // A copy landed the file; a send only sent it — whether it
+                    // landed is the destination's to say, so a send clears no
+                    // leftover.
+                    job_log::EventBody::FileCopied { path, raw, .. } => {
                         let identity = (path, raw);
-                        logged.left.remove(&identity);
+                        left.remove(&identity);
                         still_failed.remove(&identity);
+                    }
+                    job_log::EventBody::FileSent { path, raw } => {
+                        still_failed.remove(&(path, raw));
                     }
                     job_log::EventBody::RunEnd { .. } => ended = true,
                     job_log::EventBody::LogIncomplete { .. } => whole = false,
@@ -462,6 +471,7 @@ fn failed_identities(
                 }
             }
             logged.complete &= whole && ended;
+            logged.left.extend(left);
             known.extend(still_failed);
         }
         if (known.len() as u64) < record.files_failed {
@@ -2070,6 +2080,102 @@ mod retry_name_tests {
         let (failed, logged) = failed_identities(dir.path(), &record).unwrap();
         assert!(logged.read && !logged.complete, "read, not whole");
         assert!(own_leftovers(&record, &failed, &logged).is_err());
+
+        // Review cr-jl4fix5-1: a daemon sharing this folder keeps its
+        // destination log of the run here too. Its marker stands although
+        // the command's own log, folded after it, sent the file: a send is
+        // not a landing, and one log's events clear nothing of another's.
+        let two_roles = "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f";
+        let writer = place
+            .start(two_roles, 1, Role::Destination, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileFailed {
+            path: text.clone(),
+            reason: format!(
+                "write failed: {}",
+                blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
+            ),
+            raw: raw.clone(),
+        });
+        assert!(writer.finish(Outcome::Failed, None).complete);
+        let writer = place
+            .start(two_roles, 1, Role::Initiator, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileSent {
+            path: text.clone(),
+            raw: raw.clone(),
+        });
+        writer.record(EventBody::FileFailed {
+            path: text.clone(),
+            reason: "write failed".into(),
+            raw: raw.clone(),
+        });
+        assert!(writer.finish(Outcome::Failed, None).complete);
+        record.run_id = two_roles.into();
+        let (failed, logged) = failed_identities(dir.path(), &record).unwrap();
+        assert!(logged.read && logged.complete);
+        assert_eq!(
+            own_leftovers(&record, &failed, &logged).unwrap(),
+            [(text.clone(), raw.clone())].into()
+        );
+
+        // Within one log too, a send clears no leftover.
+        let sent_after = "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e";
+        let writer = place
+            .start(sent_after, 1, Role::Initiator, RunInfo::default())
+            .expect("a log");
+        writer.record(EventBody::FileFailed {
+            path: text.clone(),
+            reason: format!(
+                "write failed: {}",
+                blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
+            ),
+            raw: raw.clone(),
+        });
+        writer.record(EventBody::FileSent {
+            path: text.clone(),
+            raw: raw.clone(),
+        });
+        assert!(writer.finish(Outcome::Failed, None).complete);
+        record.run_id = sent_after.into();
+        let (_, logged) = failed_identities(dir.path(), &record).unwrap();
+        assert!(logged.left.contains(&(text.clone(), raw.clone())));
+
+        // And two logs that each landed the other's leftover keep both —
+        // whichever is folded first, one log's copy clears nothing of the
+        // other's.
+        let crossed = "2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d";
+        let other_text = "other\u{FFFD}".to_string();
+        let other_raw = Some("other\\xff".to_string());
+        let marker = format!(
+            "write failed: {}",
+            blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
+        );
+        for (role, mine, mine_raw, theirs, theirs_raw) in [
+            (Role::Destination, &text, &raw, &other_text, &other_raw),
+            (Role::Initiator, &other_text, &other_raw, &text, &raw),
+        ] {
+            let writer = place
+                .start(crossed, 1, role, RunInfo::default())
+                .expect("a log");
+            writer.record(EventBody::FileFailed {
+                path: mine.clone(),
+                reason: marker.clone(),
+                raw: mine_raw.clone(),
+            });
+            writer.record(EventBody::FileCopied {
+                path: theirs.clone(),
+                bytes: None,
+                raw: theirs_raw.clone(),
+            });
+            assert!(writer.finish(Outcome::Failed, None).complete);
+        }
+        record.run_id = crossed.into();
+        let (_, logged) = failed_identities(dir.path(), &record).unwrap();
+        assert_eq!(
+            logged.left,
+            [(text.clone(), raw.clone()), (other_text, other_raw)].into()
+        );
     }
 
     /// Review cr-jl4fix2-1: a left-in-place status is the entry's own —
