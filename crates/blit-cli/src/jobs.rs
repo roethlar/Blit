@@ -281,7 +281,36 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
     let verb = if spec.verb == "move" {
         "move"
     } else {
-        args.retry_only = Some(failed_paths(&config_dir, &record)?);
+        let (failed, mut left) = failed_identities(&config_dir, &record)?;
+        left.extend(record.left_in_place.iter().cloned());
+        // Review cr-jl4-1: under `--ignore-existing`, a path whose failed
+        // write left this run's own incomplete copy is retried with the
+        // flag off — the copy is not one the person asked to keep — as the
+        // in-command retry passes do; the rest with it on.
+        if spec.options.ignore_existing {
+            if record.left_in_place_truncated {
+                eyre::bail!(
+                    "job {} ran with --ignore-existing, and which of its failed files left \
+                     their own incomplete copy at the destination is not all known; a retry \
+                     could skip those copies as files to keep, so it is not made",
+                    record.run_id
+                );
+            }
+            let own: HashSet<PathBuf> = failed
+                .iter()
+                .filter(|(path, _)| left.contains(path))
+                .map(|(path, raw)| retry_path(path, raw.as_deref()))
+                .collect();
+            if !own.is_empty() {
+                args.retry_left_in_place = Some(own);
+            }
+        }
+        args.retry_only = Some(
+            failed
+                .iter()
+                .map(|(path, raw)| retry_path(path, raw.as_deref()))
+                .collect(),
+        );
         "copy"
     };
     Ok(Some(JobToRun {
@@ -295,10 +324,15 @@ pub(crate) async fn job_to_retry(target: &str) -> Result<Option<JobToRun>> {
     }))
 }
 
-/// Every file a run failed, by name: its record's, completed from this
-/// machine's log of the run when the record's list was cut short. An
-/// error when they are still not all known — a retry would leave the rest.
-fn failed_paths(config_dir: &Path, record: &RunRecord) -> Result<HashSet<PathBuf>> {
+/// Every file a run failed, by its text and bytes: its record's, completed
+/// from this machine's log of the run when the record's list was cut
+/// short — with, from the log's whole reasons, the texts of those whose
+/// failed write left the run's own incomplete copy. An error when they are
+/// still not all known — a retry would leave the rest.
+fn failed_identities(
+    config_dir: &Path,
+    record: &RunRecord,
+) -> Result<(HashSet<(String, Option<String>)>, HashSet<String>)> {
     use crate::transfers::retry::UNRETRIED_PATH;
     let mut known: HashSet<(String, Option<String>)> = record
         .failures
@@ -314,6 +348,7 @@ fn failed_paths(config_dir: &Path, record: &RunRecord) -> Result<HashSet<PathBuf
                 .any(|failure| failure.path == UNRETRIED_PATH)
             || (known.len() as u64) < record.files_failed
     };
+    let mut left_in_place: HashSet<String> = HashSet::new();
     if short(&known) {
         // Review cr-jl4-3: the run's terminal state, read from its log in
         // order — a file that failed, and was not landed by a later pass —
@@ -329,7 +364,12 @@ fn failed_paths(config_dir: &Path, record: &RunRecord) -> Result<HashSet<PathBuf
                     continue;
                 };
                 match event.body {
-                    job_log::EventBody::FileFailed { path, raw, .. } => {
+                    job_log::EventBody::FileFailed { path, raw, reason } => {
+                        if reason
+                            .contains(blit_core::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE)
+                        {
+                            left_in_place.insert(path.clone());
+                        }
                         still_failed.insert((path, raw));
                     }
                     job_log::EventBody::FileCopied { path, raw, .. }
@@ -353,10 +393,7 @@ fn failed_paths(config_dir: &Path, record: &RunRecord) -> Result<HashSet<PathBuf
             );
         }
     }
-    Ok(known
-        .into_iter()
-        .map(|(path, raw)| retry_path(&path, raw.as_deref()))
-        .collect())
+    Ok((known, left_in_place))
 }
 
 /// The path a retry names a failed file by (review cr-jl4-2): its exact

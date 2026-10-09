@@ -270,28 +270,46 @@ async fn run_command(
         }
     }
     let wait = Duration::from_secs(args.wait);
-    let result = run_with_retries(
-        args.retry,
-        wait,
-        |_n| -> Pin<Box<dyn Future<Output = Result<ExitCode>> + '_>> {
-            match verb {
-                Verb::Copy => Box::pin(run_transfer(
-                    ctx,
-                    &args,
-                    TransferKind::Copy,
-                    lifecycle_trace,
-                )),
-                Verb::Mirror => Box::pin(run_transfer(
-                    ctx,
-                    &args,
-                    TransferKind::Mirror,
-                    lifecycle_trace,
-                )),
-                Verb::Move => Box::pin(run_move(ctx, &args, lifecycle_trace)),
+    let parts = retry_parts(&args);
+    if parts.len() > 1 {
+        if let Some(run) = &run {
+            run.add_up_parts();
+        }
+    }
+    let mut result: Result<ExitCode> = Ok(ExitCode::SUCCESS);
+    for part in &parts {
+        let part_result = run_with_retries(
+            part.retry,
+            wait,
+            |_n| -> Pin<Box<dyn Future<Output = Result<ExitCode>> + '_>> {
+                match verb {
+                    Verb::Copy => {
+                        Box::pin(run_transfer(ctx, part, TransferKind::Copy, lifecycle_trace))
+                    }
+                    Verb::Mirror => Box::pin(run_transfer(
+                        ctx,
+                        part,
+                        TransferKind::Mirror,
+                        lifecycle_trace,
+                    )),
+                    Verb::Move => Box::pin(run_move(ctx, part, lifecycle_trace)),
+                }
+            },
+        )
+        .await;
+        // The first part that did not succeed says how the run went.
+        match part_result {
+            Err(error) => {
+                result = Err(error);
+                break;
             }
-        },
-    )
-    .await;
+            Ok(next) => {
+                if matches!(result, Ok(code) if code == ExitCode::SUCCESS) {
+                    result = Ok(next);
+                }
+            }
+        }
+    }
     if let Some(run) = &run {
         run.finish(&result).await;
         if let Some(file) = &args.export {
@@ -307,6 +325,32 @@ async fn run_command(
         eyre::bail!("this command's job cannot be exported: it has no run ID");
     }
     result
+}
+
+/// The parts a command runs as: itself, or — a `jobs retry` of an
+/// `--ignore-existing` job whose failed writes left this run's own
+/// incomplete copies (review cr-jl4-1) — those paths with the flag off,
+/// then the rest with it, as the in-command retry passes split them.
+fn retry_parts(args: &TransferArgs) -> Vec<TransferArgs> {
+    let (Some(left), Some(all)) = (&args.retry_left_in_place, &args.retry_only) else {
+        return vec![args.clone()];
+    };
+    if !args.ignore_existing || left.is_empty() {
+        return vec![args.clone()];
+    }
+    let mut own = args.clone();
+    own.retry_only = Some(left.clone());
+    own.ignore_existing = false;
+    own.retry_left_in_place = None;
+    let rest: std::collections::HashSet<std::path::PathBuf> =
+        all.difference(left).cloned().collect();
+    if rest.is_empty() {
+        return vec![own];
+    }
+    let mut others = args.clone();
+    others.retry_only = Some(rest);
+    others.retry_left_in_place = None;
+    vec![own, others]
 }
 
 fn lifecycle_result_outcome<T>(result: &Result<T>) -> TransferLifecycleOutcome {

@@ -356,6 +356,7 @@ mod delegated_options_tests {
             retry_wait: 30,
             diagnostics_no_retry_wait: false,
             retry_only: None,
+            retry_left_in_place: None,
             retry_pass: None,
             null: false,
             json: false,

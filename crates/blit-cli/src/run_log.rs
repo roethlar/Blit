@@ -45,6 +45,8 @@ struct Inner {
     /// The run's final account, for its record.
     totals: Mutex<Option<RunTotals>>,
     source_removed: AtomicBool,
+    /// The run is made of parts whose accounts add up (review cr-jl4-1).
+    parts: AtomicBool,
     /// Whether the run writes what it moves (review cr-jl2-1).
     disposition: Disposition,
 }
@@ -171,6 +173,7 @@ impl CommandRun {
                 store,
                 totals: Mutex::new(None),
                 source_removed: AtomicBool::new(false),
+                parts: AtomicBool::new(false),
                 disposition,
             }),
         })
@@ -197,6 +200,7 @@ impl CommandRun {
                 store: None,
                 totals: Mutex::new(None),
                 source_removed: AtomicBool::new(false),
+                parts: AtomicBool::new(false),
                 disposition: Disposition::Written,
             }),
         }
@@ -307,10 +311,25 @@ impl CommandRun {
         self.inner.log.note(line);
     }
 
-    /// The run's final account, across every pass.
+    /// The run's final account, across every pass — added to the parts'
+    /// before it when the run is made of parts.
     pub fn note_totals(&self, totals: RunTotals) {
-        *lock(&self.inner.totals) = Some(totals.clone());
+        let mut noted = lock(&self.inner.totals);
+        let totals = match (noted.take(), self.inner.parts.load(Ordering::Relaxed)) {
+            (Some(mut earlier), true) => {
+                earlier.merge(totals);
+                earlier
+            }
+            _ => totals,
+        };
+        *noted = Some(totals.clone());
         self.inner.log.note_totals(totals);
+    }
+
+    /// The run is made of parts, each a transfer of its own (review
+    /// cr-jl4-1); their accounts add up.
+    pub fn add_up_parts(&self) {
+        self.inner.parts.store(true, Ordering::Relaxed);
     }
 
     /// A move removed its source.
@@ -546,6 +565,8 @@ fn finish_record(
         record.failures = failures;
         record.failures_truncated =
             totals.failed_paths_truncated || (record.failures.len() as u64) < totals.files_failed;
+        record.left_in_place = totals.left_in_place;
+        record.left_in_place_truncated = totals.left_in_place_truncated;
     }
     if let Err(error) = recorded.store.update(&recorded.record) {
         eprintln!("blit: warning: could not finish this run's job record: {error}");
@@ -706,6 +727,8 @@ pub fn totals_from_local(summary: &blit_core::transfer_session::LocalMirrorSumma
         failed_paths: summary.failed_paths.clone(),
         failed_paths_truncated: summary.failed_paths_truncated,
         failures: summary.failures.clone(),
+        left_in_place: summary.left_in_place.clone(),
+        left_in_place_truncated: summary.left_in_place_truncated,
     }
 }
 
@@ -767,6 +790,8 @@ pub fn totals_from_delegated(summary: &blit_core::generated::DelegatedPullSummar
             .iter()
             .map(blit_core::remote::transfer::sink::FileFailure::from_wire)
             .collect(),
+        left_in_place: summary.left_in_place.clone(),
+        left_in_place_truncated: summary.left_in_place_truncated,
     }
 }
 
@@ -818,6 +843,9 @@ mod tests {
                     raw_relative_path: Some(b"bad\xfe.txt".to_vec()),
                 },
             ],
+            // Review cr-jl4-1: which failures left their own copy is kept.
+            left_in_place: vec![shown.clone()],
+            left_in_place_truncated: true,
             ..RunTotals::default()
         };
         let raws = std::collections::HashMap::from([(shown.clone(), "bad\\xff.txt".to_string())]);
@@ -830,7 +858,12 @@ mod tests {
             &raws,
             false,
         );
-        let failures = store.load(&run_id).unwrap().1.failures;
+        let record = store.load(&run_id).unwrap().1;
+        assert_eq!(
+            (record.left_in_place.clone(), record.left_in_place_truncated),
+            (vec![shown.clone()], true)
+        );
+        let failures = record.failures;
         assert_eq!(
             failures,
             [

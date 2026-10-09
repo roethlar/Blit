@@ -167,6 +167,13 @@ pub struct RunRecord {
     /// its list); the run's log names them all.
     #[serde(default)]
     pub failures_truncated: bool,
+    /// The failed files whose write left this run's own incomplete copy at
+    /// the destination, and whether that list is whole (review cr-jl4-1:
+    /// an `--ignore-existing` retry sends those with the flag off).
+    #[serde(default)]
+    pub left_in_place: Vec<String>,
+    #[serde(default)]
+    pub left_in_place_truncated: bool,
     /// A move removed its source.
     #[serde(default)]
     pub source_removed: bool,
@@ -239,6 +246,8 @@ impl RunRecord {
             bytes_copied: 0,
             failures: Vec::new(),
             failures_truncated: false,
+            left_in_place: Vec::new(),
+            left_in_place_truncated: false,
             source_removed: false,
         }
     }
@@ -784,6 +793,9 @@ pub struct LogRead {
     pub ended: Option<(u64, Outcome, Option<String>)>,
     pub summary: Option<crate::job_log::Summary>,
     pub failures: Vec<Failure>,
+    /// The failures whose reason says the write left its own incomplete
+    /// copy (a log keeps each reason whole).
+    pub left_in_place: Vec<String>,
 }
 
 impl LogRead {
@@ -808,6 +820,11 @@ impl LogRead {
         };
         match event.body {
             EventBody::FileFailed { path, reason, raw } => {
+                if reason.contains(crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE)
+                    && !self.left_in_place.contains(&path)
+                {
+                    self.left_in_place.push(path.clone());
+                }
                 if !self
                     .failures
                     .iter()
@@ -848,6 +865,8 @@ impl LogRead {
         }
         ended.failures = self.failures.clone();
         ended.failures_truncated = truncated;
+        ended.left_in_place = self.left_in_place.clone();
+        ended.left_in_place_truncated = truncated;
         ended
     }
 }
@@ -893,6 +912,8 @@ pub fn settle(
             ended.files_failed = job.files_failed;
             ended.failures = read.failures.clone();
             ended.failures_truncated = job.files_failed > 0;
+            ended.left_in_place = read.left_in_place.clone();
+            ended.left_in_place_truncated = job.files_failed > 0;
             Ok(DaemonAnswer::Ended(Box::new(ended)))
         }
         Some(WatchSnapshot::NotFound) | None => {
@@ -1309,6 +1330,22 @@ mod tests {
         ));
         assert_eq!(read.failures.len(), 1, "each failure once");
         assert!(read.complete());
+        // Review cr-jl4-1: a whole reason says when the write left its own
+        // incomplete copy.
+        assert!(read.left_in_place.is_empty());
+        let mut own = read.clone();
+        own.read_line(event(
+            5,
+            EventBody::FileFailed {
+                path: "b.txt".into(),
+                reason: format!(
+                    "write failed: {}: it could not be removed",
+                    crate::remote::transfer::sink::INCOMPLETE_LEFT_IN_PLACE
+                ),
+                raw: None,
+            },
+        ));
+        assert_eq!(own.left_in_place, ["b.txt"]);
         let mut gap = read.clone();
         gap.read_line(event(
             5,

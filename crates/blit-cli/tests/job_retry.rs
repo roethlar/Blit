@@ -345,3 +345,69 @@ fn a_retry_skips_what_a_later_pass_already_landed() {
     );
     assert_eq!(jobs(&ctx)[0]["files_copied"], 1);
 }
+
+/// Review cr-jl4-1: a retry of an `--ignore-existing` job sends a file
+/// whose failed write left the run's own incomplete copy with the flag off
+/// — the copy is replaced — and another failed file with it on — what the
+/// person put there since is kept. Not knowing which is which, it refuses.
+#[test]
+fn an_ignore_existing_retry_replaces_only_its_own_incomplete_copies() {
+    let ctx = TestContext::new();
+    let src = ctx.workspace.join("src");
+    let dst = ctx.workspace.join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("own.txt"), b"the whole file").unwrap();
+    fs::write(src.join("kept.txt"), b"from the source").unwrap();
+    for name in ["own.txt", "kept.txt"] {
+        fs::create_dir_all(dst.join(name)).unwrap();
+    }
+    let first = blit(
+        &ctx,
+        &[
+            "copy",
+            "--ignore-existing",
+            "--retries",
+            "0",
+            &arg(&src),
+            &arg(&dst),
+        ],
+    );
+    assert_eq!(
+        first.status.code(),
+        Some(EXIT_PARTIAL_FAILURE),
+        "{}",
+        text(&first.stderr)
+    );
+    let job = &jobs(&ctx)[0];
+    let run_id = job["run_id"].as_str().unwrap().to_string();
+    let record_file = PathBuf::from(job["record_file"].as_str().unwrap());
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_file).unwrap()).unwrap();
+    assert_eq!(record["files_failed"], 2, "{record}");
+    // As a run whose write of `own.txt` left its own incomplete copy.
+    record["left_in_place"] = serde_json::json!(["own.txt"]);
+    fs::write(&record_file, serde_json::to_vec(&record).unwrap()).unwrap();
+    fs::remove_dir_all(dst.join("own.txt")).unwrap();
+    fs::write(dst.join("own.txt"), b"the whole").unwrap();
+    fs::remove_dir_all(dst.join("kept.txt")).unwrap();
+    fs::write(dst.join("kept.txt"), b"mine").unwrap();
+
+    let retried = blit(&ctx, &["jobs", "retry", &run_id]);
+    assert!(retried.status.success(), "{}", text(&retried.stderr));
+    assert_eq!(fs::read(dst.join("own.txt")).unwrap(), b"the whole file");
+    assert_eq!(fs::read(dst.join("kept.txt")).unwrap(), b"mine");
+    let retry = &jobs(&ctx)[0];
+    assert_eq!(retry["parent"], run_id.as_str(), "{retry}");
+    assert_eq!(retry["files_copied"], 1, "the two parts add up: {retry}");
+
+    // Which failures left their own copy is not all known: refused.
+    record["left_in_place_truncated"] = true.into();
+    fs::write(&record_file, serde_json::to_vec(&record).unwrap()).unwrap();
+    let refused = blit(&ctx, &["jobs", "retry", &run_id]);
+    assert!(!refused.status.success());
+    assert!(
+        text(&refused.stderr).contains("is not all known"),
+        "{}",
+        text(&refused.stderr)
+    );
+}

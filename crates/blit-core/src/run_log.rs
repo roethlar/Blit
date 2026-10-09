@@ -76,6 +76,31 @@ pub struct RunTotals {
     /// — when its name is not its text — its own bytes (review
     /// cr-jl3afix1-1).
     pub failures: Vec<FileFailure>,
+    /// The failed files whose write left this run's own incomplete copy at
+    /// the destination, and whether that list is whole (review cr-jl4-1:
+    /// an `--ignore-existing` retry must not skip them as existing).
+    pub left_in_place: Vec<String>,
+    pub left_in_place_truncated: bool,
+}
+
+impl RunTotals {
+    /// Add `other`'s account to this one: the parts of one run.
+    pub fn merge(&mut self, other: RunTotals) {
+        self.files_copied += other.files_copied;
+        self.files_deleted += other.files_deleted;
+        self.files_failed += other.files_failed;
+        self.bytes_copied += other.bytes_copied;
+        self.files_resumed += other.files_resumed;
+        self.in_stream_carrier = match (self.in_stream_carrier, other.in_stream_carrier) {
+            (Some(a), Some(b)) => Some(a || b),
+            (a, b) => a.or(b),
+        };
+        self.failed_paths.extend(other.failed_paths);
+        self.failed_paths_truncated |= other.failed_paths_truncated;
+        self.failures.extend(other.failures);
+        self.left_in_place.extend(other.left_in_place);
+        self.left_in_place_truncated |= other.left_in_place_truncated;
+    }
 }
 
 impl From<&TransferSummary> for RunTotals {
@@ -94,6 +119,8 @@ impl From<&TransferSummary> for RunTotals {
                 .iter()
                 .map(FileFailure::from_wire)
                 .collect(),
+            left_in_place: summary.left_in_place.clone(),
+            left_in_place_truncated: summary.left_in_place_truncated,
         }
     }
 }

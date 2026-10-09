@@ -402,6 +402,12 @@ pub struct TransferArgs {
     /// live row can say so. Never a flag.
     #[arg(skip)]
     pub retry_pass: Option<(u32, u32, usize)>,
+    /// JOB_LOGS review cr-jl4-1 internal: the paths of a `jobs retry` set
+    /// whose failed write left this run's own incomplete copy; under
+    /// `--ignore-existing` they are retried with the flag off. Never a
+    /// flag.
+    #[arg(skip)]
+    pub retry_left_in_place: Option<std::collections::HashSet<PathBuf>>,
     /// JOB_LOGS jl-2 internal: this command's run, made once per command
     /// and shared by every pass and rerun. Never a flag.
     #[arg(skip)]
