@@ -1,0 +1,22 @@
+{
+ "verdict": "acceptable_with_changes",
+ "capability_ok": true,
+ "guard_confirmed": true,
+ "reviewed_sha": "8e2bbd749a32a0f30c39eb276eed709df2b8b149",
+ "base_sha": "9d380e61b9054249f2c0276bddf3e0a8a0e34f41",
+ "goal": "Prevent one participant's job log from erasing another participant's evidence that a failed write left an incomplete destination file, so `jobs retry` remains safe with `--ignore-existing`.",
+ "recommended_approach": "Fold leftover state by participant-and-role stream across attempts in attempt order, allow only a later `FileCopied` in that same stream to clear an earlier leftover, never clear it on `FileSent`, and finally union the terminal states of distinct streams.",
+ "comparison": "The change correctly stops `FileSent` and events from a different individual log from clearing leftover evidence, but it resets state for every attempt rather than every participant-and-role stream; consequently it does not implement the attempt-aware fold required by the repository's log model.",
+ "material_changes": [
+  "Preserve leftover state across ordered attempts belonging to the same participant and role, and add a regression covering failure-with-leftover, later successful copy, then a later failure without a leftover."
+ ],
+ "findings": [
+  {
+   "title": "Later attempts cannot clear stale leftover evidence from the same stream",
+   "evidence": "crates/blit-cli/src/jobs.rs:441 \u2014 a fresh leftover set is created for every log and unconditionally united at line 474, although `logs_for_run` returns attempts ordered within each role and participant and `CommandRun::next_session` creates multiple numbered sessions for one run.",
+   "predicted_failure": "If attempt 1 leaves an incomplete file, attempt 2 successfully copies it, and a later attempt fails that identity without leaving a partial, the attempt-1 marker survives the union. For an ambiguous legacy record, `jobs retry --ignore-existing` can then treat a current file as Blit's own incomplete copy and overwrite it. A temporary focused guard failed at the reviewed head, passed when state was folded across same-role/participant attempts, and the worktree was restored to the head SHA.",
+   "severity": "HIGH",
+   "better_approach": "Group logs by participant and role, fold each group's attempts in order using one persistent leftover set, then union only each group's terminal set; retain the current rule that `FileSent` never clears leftover state."
+  }
+ ]
+}
