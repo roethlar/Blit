@@ -1789,13 +1789,13 @@ fn age_ms_since(start_unix_ms: u64) -> u64 {
     now_ms.saturating_sub(start_unix_ms)
 }
 
-#[cfg(test)]
+// Raw names exist only on Unix sources.
+#[cfg(all(test, unix))]
 mod retry_path_tests {
     use super::*;
 
     /// Review cr-jl4-2: a failed non-UTF-8 name is retried by its own
     /// bytes, and on the wire travels as them — never as its lossy text.
-    #[cfg(unix)]
     #[test]
     fn a_raw_named_failure_is_retried_by_its_bytes() {
         use std::os::unix::ffi::OsStrExt;
