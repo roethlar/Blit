@@ -1,7 +1,7 @@
 # cr-jl5-1: Snapshot --files-from before the transfer can overwrite it
 
 **Severity**: MEDIUM (reviewer: MEDIUM)
-**Status**: Fixed — awaiting re-review
+**Status**: Verified
 **Branch**: — (default-branch mode; fixes land on master)
 **Commit**: `7e188159`
 **Reviewer**: codex / gpt-6-astra / xhigh / standard (inline, session-only — the owner's word `astra`), codex-cli 0.162.1 headless one-shot, `-a never exec -m gpt-6-astra -c model_reasoning_effort="xhigh" -s workspace-write --json`, stdin closed, detached worktree `review-jl5-031e0352`; codereview defect hunt jl5-r1 over `df5fd1cf..031e0352` (record `.review/results/jl5-r1.codex.json` + `.events.jsonl`); 2026-10-13 18:03–18:18Z; capability_ok=true; guard_confirmed=true; SHAs pin-verified; the local ptk hook redirected the reviewer's shell calls (a note, not an invalidation)
@@ -50,4 +50,8 @@ The run's job record now keeps the `--files-from` list as the command read it be
 - Verified on macOS (aarch64) only, plus Linux cross-clippy; the new tests sit in ungated modules and use relative endpoints, but were not executed on Linux or Windows.
 
 ## Reviewer comments
-(the re-review's verdict, when dispatched)
+Reviewer: codex / gpt-6-astra / xhigh / standard (inline, session-only — the owner's word `astra`); codex-cli 0.162.1 headless one-shot, `-a never exec -m gpt-6-astra -c model_reasoning_effort="xhigh" -s workspace-write --json`, stdin closed, detached worktree `review-jl5fix1-75864cb0`; re-review jl5fix1-r1 over `7cb47b4c..75864cb0`; 2026-10-13 20:11–20:18Z; reviewed_sha `75864cb04ba6b494e27661af26cd2c8a1fb9e5e9`, base_sha `7cb47b4cbc169bbd20d2d2c954bc7c7112926306`; capability_ok=true; guard_confirmed=true; verdict **clean**, both findings closed; record `.review/results/jl5fix1-r1.codex.json` + `.events.jsonl` (committed)
+
+Closed: Every normal, --save, --export, jobs run and jobs retry route captures the list before dispatch; deferred job_spec consumes that snapshot, preventing transfer overwrites from changing the recorded selection. Unreadable-list warnings remain intact, the read runs through spawn_blocking, and commands without a list return immediately without added I/O, allocation or task scheduling.
+
+Guard (reviewer's own): On macOS arm64, temporarily changed job_spec to reread the file: the_spec_keeps_the_list_the_run_started_with failed with ["b.txt"] instead of the captured lines. Restored with git checkout and confirmed it passed. Separately replaced starting_at with starting: the_record_starts_when_its_command_did failed with the current timestamp instead of 1000; restored with git checkout and confirmed it passed. Both restorations were checked against the original content, and the worktree is clean. Workspace fmt, native clippy and tests passed (1483 passed, 2 ignored), as did Linux cross-target clippy. Linux and Windows runtime tests were not run.
