@@ -37,6 +37,14 @@ scratch `--config-dir`, wall time around the process):
 
 (Before jl-5 the same difference was ~2.7 ms: 8.8 vs 6.1 ms, 2026-10-08.)
 
+Verification re-run by the orchestrating session, independent of the
+implementing agent (`ab-verify.{out,runs}`): the old binary's source proven
+identical to `f6ca55c0` (`git archive f6ca55c0` diffed against the build
+tree), the new rebuilt from the clean commit (`blit 0.1.3+031e03526d9d`),
+fresh config folders, the machine quiet after the full gate: huge 21 / 21 ms,
+tree 28 / 29, small 1267 / 1275, noop 27 / 27 — every cell PASS. On the 1 GiB
+cell the new binary trailed by 0, 1, 2, 0 and 1 ms over the five rounds.
+
 Files: `ab.{out,runs}` (the table), `ab-first-pass.{out,runs}`,
 `per-command.{out,runs}` (fresh folder) and `per_command.py`. The full-history
 row is from the same binary against a folder already holding 50 runs.
