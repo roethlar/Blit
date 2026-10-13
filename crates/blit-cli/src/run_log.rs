@@ -144,6 +144,9 @@ impl CommandRun {
     /// `origin` says what the run runs: a saved job, a retry of a run.
     pub fn start(verb: &str, args: &TransferArgs, origin: RunOrigin) -> Option<Self> {
         let run_id = job_log::new_run_id().ok()?;
+        // Review cr-jl5-2: the record's start is the command's, taken
+        // before the log starts, not when its thread gets to writing it.
+        let started_ms = now_ms();
         let log = RunLog::new(None, &run_id);
         // Review cr-jl2-1: a dry run or a null-sink run writes nothing, and
         // its log must not say otherwise.
@@ -170,8 +173,15 @@ impl CommandRun {
                             warnings,
                         );
                     };
-                    let (recorded, unkept) =
-                        begin_record(&machine, &verb, &args, &run_id, origin, &mut warnings);
+                    let (recorded, unkept) = begin_record(
+                        &machine,
+                        &verb,
+                        &args,
+                        &run_id,
+                        started_ms,
+                        origin,
+                        &mut warnings,
+                    );
                     Started {
                         record: Mutex::new(recorded),
                         unkept,
@@ -574,14 +584,15 @@ pub fn saved_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("jobs").join("saved")
 }
 
-/// Write the run's spec and its `running` record. `None`, with a warning
-/// added to `warnings` and why, when either cannot be kept — the command
-/// runs regardless. Blocking.
+/// Write the run's spec and its `running` record, the run started at
+/// `started_ms`. `None`, with a warning added to `warnings` and why, when
+/// either cannot be kept — the command runs regardless. Blocking.
 fn begin_record(
     machine: &Machine,
     verb: &str,
     args: &TransferArgs,
     run_id: &str,
+    started_ms: u64,
     origin: RunOrigin,
     warnings: &mut Vec<String>,
 ) -> (Option<Recorded>, Option<String>) {
@@ -594,7 +605,7 @@ fn begin_record(
         Err(what) => return unkept(what),
     };
     let store = RunStore::new(runs_dir(&machine.config_dir));
-    let mut record = RunRecord::starting(run_id, &spec);
+    let mut record = RunRecord::starting_at(run_id, &spec, started_ms);
     record.saved_job = origin.saved_job;
     if let Some((parent, attempt)) = origin.parent {
         record.parent = Some(parent);
@@ -1068,9 +1079,13 @@ mod tests {
         );
     }
 
-    /// Write the spec and record of a `copy src/ dst/` run with `args`, as
-    /// the start's thread does, and read them back from the store.
-    fn record_of(args: &TransferArgs) -> (Vec<String>, Option<(JobSpec, RunRecord)>) {
+    /// Write the spec and record of a `copy src/ dst/` run with `args`
+    /// started at `started_ms`, as the start's thread does, and read them
+    /// back from the store.
+    fn record_of(
+        args: &TransferArgs,
+        started_ms: u64,
+    ) -> (Vec<String>, Option<(JobSpec, RunRecord)>) {
         let dir = tempfile::tempdir().unwrap();
         let machine = Machine {
             config_dir: dir.path().to_path_buf(),
@@ -1084,6 +1099,7 @@ mod tests {
             "copy",
             args,
             &run_id,
+            started_ms,
             RunOrigin::default(),
             &mut warnings,
         );
@@ -1110,7 +1126,7 @@ mod tests {
         capture_files_from(&mut args).await;
         // The transfer writes the list before the record is written.
         std::fs::write(&list, "b.txt\n").unwrap();
-        let (warnings, kept) = record_of(&args);
+        let (warnings, kept) = record_of(&args, now_ms());
         assert_eq!(warnings, Vec::<String>::new());
         let (spec, _) = kept.expect("the job is kept");
         assert_eq!(
@@ -1133,7 +1149,7 @@ mod tests {
         let mut args = TransferArgs::for_tests("src/", "dst/");
         args.files_from = Some(list.clone());
         capture_files_from(&mut args).await;
-        let (warnings, kept) = record_of(&args);
+        let (warnings, kept) = record_of(&args, now_ms());
         assert!(kept.is_none());
         let prefix = format!(
             "blit: warning: this run's job is not kept: {}: ",
@@ -1143,6 +1159,17 @@ mod tests {
             warnings.len() == 1 && warnings[0].starts_with(&prefix),
             "{warnings:?}"
         );
+    }
+
+    /// Review cr-jl5-2: the record's start is the command's start, handed
+    /// to the record's thread, not the moment that thread writes it.
+    #[test]
+    fn the_record_starts_when_its_command_did() {
+        let args = TransferArgs::for_tests("src/", "dst/");
+        let (warnings, kept) = record_of(&args, 1_000);
+        assert_eq!(warnings, Vec::<String>::new());
+        let (_, record) = kept.expect("the job is kept");
+        assert_eq!(record.started_ms, 1_000);
     }
 
     #[test]

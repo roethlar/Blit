@@ -237,6 +237,13 @@ impl RunState {
 impl RunRecord {
     /// A record for a run of `spec` starting now.
     pub fn starting(run_id: &str, spec: &JobSpec) -> Self {
+        Self::starting_at(run_id, spec, now_ms())
+    }
+
+    /// A record for a run of `spec` that started at `started_ms`
+    /// (milliseconds since the Unix epoch): its command's start, when the
+    /// record is written after it (review cr-jl5-2).
+    pub fn starting_at(run_id: &str, spec: &JobSpec, started_ms: u64) -> Self {
         Self {
             format: RECORD_FORMAT.into(),
             version: VERSION,
@@ -248,7 +255,7 @@ impl RunRecord {
             verb: spec.verb.clone(),
             source: spec.source.as_arg().to_string(),
             destination: spec.destination.as_arg().to_string(),
-            started_ms: now_ms(),
+            started_ms,
             ended_ms: None,
             state: RunState::Running,
             outcome: None,
