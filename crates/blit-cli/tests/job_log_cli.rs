@@ -462,6 +462,38 @@ fn this_machines_config_says_how_many_logs_to_keep() {
     assert_eq!(jobs[0]["run_id"], newest.as_str());
 }
 
+/// JOB_LOGS jl-5: the start's checks run off the command's clock, and what
+/// they find is still said, when the command ends — here the per-user
+/// folder is a file, so the run is not logged, and the copy goes on. A log
+/// that was never kept is not called incomplete.
+#[test]
+fn a_run_that_cannot_be_logged_says_so_and_still_copies() {
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), b"alpha").unwrap();
+    let dst = work.path().join("dst");
+    let not_a_folder = work.path().join("config");
+    fs::write(&not_a_folder, b"not a folder").unwrap();
+
+    let mut cmd = Command::new(common::cli_bin());
+    cmd.arg("--config-dir").arg(&not_a_folder).args([
+        "copy",
+        &format!("{}/", src.display()),
+        &format!("{}/", dst.display()),
+    ]);
+    let copied = run_with_timeout(cmd, Duration::from_secs(60));
+
+    let stderr = text(&copied.stderr);
+    assert!(copied.status.success(), "{stderr}");
+    assert_eq!(fs::read(dst.join("a.txt")).unwrap(), b"alpha");
+    assert!(
+        stderr.contains("blit: warning: this run is not logged: "),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("log is incomplete"), "{stderr}");
+}
+
 #[test]
 fn a_move_logs_that_it_removed_its_source() {
     let ctx = TestContext::new();

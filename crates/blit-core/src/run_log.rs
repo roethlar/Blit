@@ -8,19 +8,25 @@
 //! notes; and closed with the run's summary. Closing names the failed files
 //! the summary lists that were never seen live, ends the open phase, records
 //! the diagnostics and the summary, then `run-end`, and finishes the file.
+//!
+//! JOB_LOGS jl-5 (FAST): a log can start before its place is known
+//! ([`RunLog::start_with`]) — the place is found on the log's own thread
+//! while the run goes — and closing comes in two halves
+//! ([`RunLog::prepare_close`], then [`ClosingLog::finish`]), so a caller can
+//! finish the file alongside other closing work.
 
 use crate::display::format_bytes;
 use crate::generated::TransferSummary;
 use crate::job_log::{
-    EventBody, LogKey, LogReport, LogSender, LogWriter, Outcome, PhaseState, Role, RunInfo, RunTag,
-    Summary,
+    EventBody, LogHome, LogKey, LogReport, LogSender, LogWriter, Outcome, PhaseState, Role,
+    RunInfo, RunTag, Summary,
 };
 use crate::remote::transfer::progress::{audit_lane, AuditSender, PlannedTotals, AUDIT_LANE_DEPTH};
 use crate::remote::transfer::sink::FileFailure;
 use crate::remote::transfer::ProgressEvent;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// The reason a failed file the summary names gets when the summary's capped
@@ -199,6 +205,8 @@ pub enum End {
 struct ActiveLog {
     writer: LogWriter,
     sender: LogSender,
+    /// Its place's `finished`, once the place is known.
+    finished: Arc<OnceLock<Arc<tokio::sync::Notify>>>,
     role: Role,
     started: Instant,
     deleting: bool,
@@ -247,6 +255,32 @@ impl RunLog {
     /// and session number, so every machine involved logs the run under one
     /// ID; otherwise under the own ID, as session 1.
     pub fn start(&self, role: Role, run: RunInfo, tag: Option<RunTag>) {
+        let place = self.state().place.clone();
+        self.begin(role, run, tag, place.map(|place| move || Some(place)));
+    }
+
+    /// [`start`](Self::start) a log whose place is not known yet (JOB_LOGS
+    /// jl-5): `resolve` finds it on the log's own thread — it may read
+    /// files — while what the run records waits in the log's queue. A
+    /// `None` from it means no log is kept: the log takes in and drops what
+    /// it is given, and closes as `None`, as a log with no place does.
+    pub fn start_with(
+        &self,
+        role: Role,
+        run: RunInfo,
+        tag: Option<RunTag>,
+        resolve: impl FnOnce() -> Option<LogPlace> + Send + 'static,
+    ) {
+        self.begin(role, run, tag, Some(resolve));
+    }
+
+    fn begin(
+        &self,
+        role: Role,
+        run: RunInfo,
+        tag: Option<RunTag>,
+        resolve: Option<impl FnOnce() -> Option<LogPlace> + Send + 'static>,
+    ) {
         let mut state = self.state();
         if state.active.is_some() {
             return;
@@ -257,13 +291,29 @@ impl RunLog {
         };
         // A record naming the run gets it whether or not a log is kept.
         state.run_id = run_id.clone();
-        let Some(writer) = state
-            .place
-            .as_ref()
-            .and_then(|place| place.start(&run_id, attempt, role, run))
-        else {
+        let Some(resolve) = resolve else {
             return;
         };
+        let finished = Arc::new(OnceLock::new());
+        let found = Arc::clone(&finished);
+        let writer = LogWriter::start_deferred(run, move || {
+            let place = resolve()?;
+            let key = match LogKey::new(run_id.as_str(), place.participant, role, attempt) {
+                Ok(key) => key,
+                Err(error) => {
+                    log::warn!("run {run_id}: not logged: {error:#}");
+                    return None;
+                }
+            };
+            if let Some(notify) = place.finished {
+                let _ = found.set(notify);
+            }
+            Some(LogHome {
+                dir: place.dir,
+                key,
+                keep: place.keep,
+            })
+        });
         let sender = writer.sender();
         sender.record(EventBody::Phase {
             name: "transfer".into(),
@@ -272,6 +322,7 @@ impl RunLog {
         state.active = Some(ActiveLog {
             writer,
             sender,
+            finished,
             role,
             started: Instant::now(),
             deleting: false,
@@ -307,9 +358,10 @@ impl RunLog {
     /// The bounded lane the run's transfer reports its log's facts on, and
     /// the task that drains it into the log (review cr-jl1b-2): while the
     /// log falls behind, the transfer waits. `None` when the log has no
-    /// place. Each call makes a lane of its own (a command runs one transfer
-    /// per pass); [`close`](Self::close) waits for every one to drain, which
-    /// each does once its transfer has dropped every sender.
+    /// place and was not started with one to find. Each call makes a lane
+    /// of its own (a command runs one transfer per pass);
+    /// [`close`](Self::close) waits for every one to drain, which each does
+    /// once its transfer has dropped every sender.
     ///
     /// The lane watches the end the log's role names: a source sends, a
     /// destination receives. An initiator, which is either, says which with
@@ -326,7 +378,9 @@ impl RunLog {
 
     fn lane(&self, end: Option<End>) -> Option<AuditSender> {
         let mut state = self.state();
-        state.place.as_ref()?;
+        if state.place.is_none() && state.active.is_none() {
+            return None;
+        }
         let (sender, receiver) = audit_lane(AUDIT_LANE_DEPTH);
         let planned = receiver.planned();
         let log = self.clone();
@@ -471,14 +525,33 @@ impl RunLog {
         self.state().error = Some(message);
     }
 
-    /// Close the log (see the module docs). `None` when it was never
-    /// started.
+    /// Close the log (see the module docs):
+    /// [`prepare_close`](Self::prepare_close), then [`ClosingLog::finish`].
+    /// `None` when it was never started, or had no place.
     pub async fn close(
         &self,
         outcome: Outcome,
         detail: Option<String>,
         totals: Option<RunTotals>,
     ) -> Option<LogReport> {
+        self.prepare_close(outcome, detail, totals)
+            .await?
+            .finish()
+            .await
+    }
+
+    /// The first half of [`close`](Self::close): wait for the audit lanes
+    /// to drain; record the end of the open phase, the failures only the
+    /// summary names, the diagnostics and the summary; keep the log's
+    /// non-UTF-8 names for [`raw_name`](Self::raw_name); and hand back the
+    /// log, to be finished with how the run ended. `None` when it was never
+    /// started.
+    pub async fn prepare_close(
+        &self,
+        outcome: Outcome,
+        detail: Option<String>,
+        totals: Option<RunTotals>,
+    ) -> Option<ClosingLog> {
         // Every fact the transfer reported reaches the log before it closes:
         // the relay ends once the transfer has dropped its senders.
         let relay = self.state().relay.take();
@@ -492,7 +565,7 @@ impl RunLog {
                 relay_cut = true;
             }
         }
-        let (mut active, notes, totals, error, run_id, planned, finished, disposition) = {
+        let (mut active, notes, totals, error, run_id, planned, disposition) = {
             let mut state = self.state();
             let active = state.active.take()?;
             state.closed_raw_names = active.raw_names.clone();
@@ -506,10 +579,6 @@ impl RunLog {
                     .planned
                     .as_ref()
                     .map_or((0, 0), |planned| planned.get()),
-                state
-                    .place
-                    .as_ref()
-                    .and_then(|place| place.finished.clone()),
                 state.disposition,
             )
         };
@@ -649,9 +718,40 @@ impl RunLog {
         let detail = error
             .or(detail)
             .or_else(|| disposition.nothing_written().map(str::to_string));
-        let writer = active.writer;
+        Some(ClosingLog {
+            writer: active.writer,
+            finished: active.finished,
+            outcome,
+            detail,
+            run_id,
+        })
+    }
+}
+
+/// A run's log with every event recorded, to be finished
+/// ([`RunLog::prepare_close`]).
+pub struct ClosingLog {
+    writer: LogWriter,
+    finished: Arc<OnceLock<Arc<tokio::sync::Notify>>>,
+    outcome: Outcome,
+    detail: Option<String>,
+    run_id: String,
+}
+
+impl ClosingLog {
+    /// Record `run-end`, compress the log into place and prune its folder.
+    /// `None` when the log had no place to be kept.
+    pub async fn finish(self) -> Option<LogReport> {
+        let Self {
+            writer,
+            finished,
+            outcome,
+            detail,
+            run_id,
+        } = self;
         let report = match tokio::task::spawn_blocking(move || writer.finish(outcome, detail)).await
         {
+            Ok(report) if report.no_place => return None,
             Ok(report) => {
                 if !report.complete {
                     log::warn!(
@@ -664,13 +764,12 @@ impl RunLog {
             Err(error) => {
                 log::warn!("run {run_id}: closing its log failed: {error}");
                 LogReport {
-                    path: None,
-                    complete: false,
                     problem: Some(format!("closing the log failed: {error}")),
+                    ..LogReport::default()
                 }
             }
         };
-        if let Some(finished) = finished {
+        if let Some(finished) = finished.get() {
             finished.notify_waiters();
         }
         Some(report)
@@ -681,6 +780,53 @@ impl RunLog {
 mod tests {
     use super::*;
     use crate::job_log::{RunInfo, DEFAULT_KEEP};
+
+    /// JOB_LOGS jl-5: a log started before its place is known hands out its
+    /// lane at once and keeps what the run reports through it; one whose
+    /// place cannot be found closes as a log with no place does — `None`,
+    /// nothing kept, nothing said.
+    #[tokio::test]
+    async fn a_log_started_with_a_resolver_keeps_the_run_or_closes_as_unplaced() {
+        use crate::job_log::{logs_in, open_log, LogLine};
+        let dir = tempfile::tempdir().unwrap();
+        for found in [false, true] {
+            let log = RunLog::new(None, "0123456789abcdef0123456789abcdef");
+            let place = LogPlace {
+                dir: dir.path().to_path_buf(),
+                participant: "m1".into(),
+                keep: DEFAULT_KEEP,
+                finished: None,
+            };
+            log.start_with(Role::Initiator, RunInfo::default(), None, move || {
+                found.then_some(place)
+            });
+            let progress = crate::remote::transfer::RemoteTransferProgress::audit_only(
+                log.audit_lane_at(End::Receiving)
+                    .expect("a lane before the place is known"),
+            );
+            progress.report_file_complete("a.txt".into()).await;
+            drop(progress);
+            let report = log.close(Outcome::Ok, None, None).await;
+            if !found {
+                assert_eq!(report, None, "a log with no place closes as none");
+                assert!(logs_in(dir.path()).unwrap().is_empty());
+                continue;
+            }
+            let report = report.expect("a report");
+            assert!(report.complete, "{report:?}");
+            let copied: Vec<String> = open_log(&report.path.expect("a log"))
+                .unwrap()
+                .filter_map(|line| match line.unwrap() {
+                    LogLine::Event(event) => match event.body {
+                        EventBody::FileCopied { path, .. } => Some(path),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(copied, ["a.txt"]);
+        }
+    }
 
     /// Review cr-jl3a-3: a run's record can name a failed file exactly —
     /// the log hands out a non-UTF-8 name's bytes, after it closes too.

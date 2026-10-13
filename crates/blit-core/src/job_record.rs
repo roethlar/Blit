@@ -575,8 +575,14 @@ pub fn write_document(path: &Path, value: &impl Serialize) -> io::Result<()> {
             .write(true)
             .create_new(true)
             .open(&temp)?;
-        serde_json::to_writer_pretty(&mut file, value)?;
-        file.write_all(b"\n")?;
+        // Through a buffer: written straight to the file, the serializer
+        // makes a system call per token — most of a record's cost
+        // (JOB_LOGS jl-5).
+        let mut out = io::BufWriter::new(&mut file);
+        serde_json::to_writer_pretty(&mut out, value)?;
+        out.write_all(b"\n")?;
+        out.flush()?;
+        drop(out);
         crate::job_log::sync_all(&file)?;
         drop(file);
         fs::rename(&temp, path)?;
@@ -759,6 +765,13 @@ impl RunStore {
     /// Remove the oldest runs beyond the newest `keep`, never one running
     /// or waiting on a daemon; returns the runs removed. Holds the folder's
     /// prune lock throughout, so two runs finishing at once do not race.
+    ///
+    /// JOB_LOGS jl-5 (FAST): newest by when each record was last written —
+    /// a record is replaced whole, so an ended run's time is its end and a
+    /// running one's its start; the order the log folder's
+    /// [`prune`](crate::job_log::prune) keeps — with names breaking ties.
+    /// Only the records beyond the newest `keep` are read, each settled
+    /// (see [`load`](Self::load)); one this build cannot read is left.
     pub fn prune(&self, keep: usize) -> io::Result<Vec<String>> {
         let lock = match open_lock(&self.dir.join(PRUNE_LOCK)) {
             Ok(lock) => lock,
@@ -766,19 +779,45 @@ impl RunStore {
             Err(error) => return Err(error),
         };
         lock.lock()?;
-        let mut removed = Vec::new();
-        for run in self.list()?.into_iter().skip(keep) {
-            if matches!(
-                run.record.state,
-                RunState::Running | RunState::Waiting { .. }
-            ) {
+        let mut records = Vec::new();
+        for entry in fs::read_dir(&self.dir)?.flatten() {
+            let name = entry.file_name();
+            let Some(run_id) = name.to_str().and_then(|n| n.strip_suffix(RECORD_SUFFIX)) else {
+                continue;
+            };
+            if !crate::job_log::valid_id(run_id) {
                 continue;
             }
-            let run_id = &run.record.run_id;
-            match fs::remove_file(&run.record_path) {
+            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            if meta.is_file() {
+                records.push((modified, run_id.to_string()));
+            }
+        }
+        // Newest first; names break ties so the order is the same every time.
+        records.sort_by(|a, b| b.cmp(a));
+        let mut removed = Vec::new();
+        for (_, run_id) in records.into_iter().skip(keep) {
+            let record_path = self.path(&run_id, RECORD_SUFFIX);
+            let record = match fs::read(&record_path).and_then(|bytes| read_record(&bytes)) {
+                Ok(record) => self.settled(record),
+                Err(error) => {
+                    log::warn!(
+                        "job records: not pruning {}: {error}",
+                        record_path.display()
+                    );
+                    continue;
+                }
+            };
+            if matches!(record.state, RunState::Running | RunState::Waiting { .. }) {
+                continue;
+            }
+            match fs::remove_file(&record_path) {
                 Ok(()) => {
-                    let _ = fs::remove_file(&run.spec_path);
-                    removed.push(run_id.clone());
+                    let _ = fs::remove_file(self.path(&run_id, SPEC_SUFFIX));
+                    removed.push(run_id);
                 }
                 Err(error) => {
                     log::warn!("job records: could not prune run {run_id}: {error}")
@@ -1064,6 +1103,10 @@ mod tests {
 
     const RUN: &str = "0123456789abcdef0123456789abcdef";
 
+    fn set_mtime(path: &Path, secs: i64) {
+        filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(secs, 0)).unwrap();
+    }
+
     fn spec() -> JobSpec {
         JobSpec::new(
             "m1",
@@ -1210,9 +1253,15 @@ mod tests {
                 live.push(guard);
             }
         }
+        // JOB_LOGS jl-5: newest by when each record was last written, not
+        // by start or by name — run 2 ended after run 3 (and 4), so it is
+        // the one kept over run 3.
+        for (n, secs) in [(0, 100), (1, 200), (2, 500), (3, 300), (4, 400)] {
+            set_mtime(&dir.path().join(format!("{}.run.json", ids[n])), secs);
+        }
         let removed = store.prune(2).unwrap();
-        // Newest two kept (4, 3); 2 removed; 1 is running, 0 waiting.
-        assert_eq!(removed, vec![ids[2].clone()]);
+        // Newest two kept (2, 4); 3 removed; 1 is running, 0 waiting.
+        assert_eq!(removed, vec![ids[3].clone()]);
         let left: Vec<String> = store
             .list()
             .unwrap()
@@ -1223,12 +1272,44 @@ mod tests {
             left,
             vec![
                 ids[4].clone(),
-                ids[3].clone(),
+                ids[2].clone(),
                 ids[1].clone(),
                 ids[0].clone()
             ]
         );
-        assert!(!dir.path().join(format!("{}.spec.json", ids[2])).exists());
+        assert!(!dir.path().join(format!("{}.spec.json", ids[3])).exists());
+    }
+
+    /// JOB_LOGS jl-5 (FAST): pruning reads only the records beyond the
+    /// newest `keep` — never the ones it keeps — so its cost does not grow
+    /// with the history kept.
+    #[test]
+    fn pruning_reads_only_the_records_it_may_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunStore::new(dir.path());
+        let ids: Vec<String> = (0..4).map(|n| format!("{n:032x}")).collect();
+        let record_path = |n: usize| dir.path().join(format!("{}.run.json", ids[n]));
+        for (n, id) in ids.iter().enumerate() {
+            let mut record = RunRecord::starting(id, &spec());
+            record.state = RunState::Finished;
+            drop(store.begin(&spec(), &record).unwrap());
+            set_mtime(&record_path(n), 100 + n as i64);
+        }
+        // The newest is one this build cannot read (a newer blit wrote it)…
+        fs::write(record_path(3), b"{ not a record this build reads").unwrap();
+        set_mtime(&record_path(3), 103);
+        // …and, on Unix, the next cannot be read at all.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(record_path(2), fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let removed = store.prune(2).unwrap();
+
+        assert_eq!(removed, vec![ids[1].clone(), ids[0].clone()]);
+        assert!(record_path(3).exists() && record_path(2).exists());
+        assert!(!dir.path().join(format!("{}.spec.json", ids[0])).exists());
     }
 
     /// Review cr-jl3a-1: a detached run is settled from its daemon's log

@@ -19,6 +19,9 @@
 //!   at every phase change and every few seconds. [`LogWriter::finish`]
 //!   writes `run-end`, compresses the partial to `<key>.jsonl.gz` through a
 //!   temp file and one rename, removes the partial, then prunes the folder.
+//!   [`LogWriter::start_deferred`] starts a log whose place is learned on
+//!   the writer's thread (JOB_LOGS jl-5): what is recorded meanwhile waits
+//!   in the same bounded queue, so finding the place costs the run nothing.
 //! - **Ownership.** A writer holds an exclusive lock on a sidecar
 //!   `<key>.lock` for its whole life. The lock is on a separate file because
 //!   a Windows lock on the partial itself would stop a reader from serving
@@ -405,6 +408,19 @@ pub struct LogReport {
     pub complete: bool,
     /// The first thing that went wrong, in words.
     pub problem: Option<String>,
+    /// The log had no place to be kept — a deferred writer's resolver found
+    /// none ([`LogWriter::start_deferred`]) — so none was meant to be: no
+    /// file, and nothing missing.
+    pub no_place: bool,
+}
+
+/// Where a log is kept, once known: its folder, its key, and how many
+/// finished logs the folder keeps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogHome {
+    pub dir: PathBuf,
+    pub key: LogKey,
+    pub keep: usize,
 }
 
 enum Msg {
@@ -466,16 +482,39 @@ impl LogWriter {
     /// Returns at once: the folder and files are made on the writer's
     /// thread, and a failure there leaves an incomplete log, never an error.
     pub fn start(dir: &Path, key: LogKey, run: RunInfo, keep: usize) -> Self {
-        Self::start_tuned(dir, key, run, Tuning::new(keep))
+        let home = LogHome {
+            dir: dir.to_path_buf(),
+            key,
+            keep,
+        };
+        Self::start_deferred(run, move || Some(home))
     }
 
-    fn start_tuned(dir: &Path, key: LogKey, run: RunInfo, tuning: Tuning) -> Self {
+    /// Start a log whose place is not known yet (JOB_LOGS jl-5): the queue
+    /// and its senders exist at once, and what is recorded now waits there,
+    /// as behind any slow writer. The writer's thread first calls `resolve`
+    /// — which may read files, take its time — then opens the log where it
+    /// says and writes `run-start` (stamped now) and everything waiting, in
+    /// order. When `resolve` finds no place, no file is kept and every
+    /// event is dropped at once, as after the log is finished, so no
+    /// producer waits; the report says so ([`LogReport::no_place`]).
+    pub fn start_deferred(
+        run: RunInfo,
+        resolve: impl FnOnce() -> Option<LogHome> + Send + 'static,
+    ) -> Self {
+        Self::start_tuned(run, resolve, Tuning::new())
+    }
+
+    fn start_tuned(
+        run: RunInfo,
+        resolve: impl FnOnce() -> Option<LogHome> + Send + 'static,
+        tuning: Tuning,
+    ) -> Self {
         let (tx, rx) = flume::bounded(tuning.queue_depth);
         let started_ms = now_ms();
-        let dir = dir.to_path_buf();
         let spawned = std::thread::Builder::new()
             .name("blit-job-log".into())
-            .spawn(move || write_log(dir, key, run, started_ms, rx, tuning));
+            .spawn(move || write_log(run, started_ms, resolve, rx, tuning));
         let (thread, spawn_error) = match spawned {
             Ok(thread) => (Some(thread), None),
             Err(error) => (
@@ -508,22 +547,19 @@ impl LogWriter {
     pub fn finish(mut self, outcome: Outcome, detail: Option<String>) -> LogReport {
         let Some(thread) = self.thread.take() else {
             return LogReport {
-                path: None,
-                complete: false,
                 problem: self.spawn_error.take(),
+                ..LogReport::default()
             };
         };
         let _ = self.sender.tx.send(Msg::Finish { outcome, detail });
         thread.join().unwrap_or_else(|_| LogReport {
-            path: None,
-            complete: false,
             problem: Some("the log writer stopped unexpectedly".into()),
+            ..LogReport::default()
         })
     }
 }
 
 struct Tuning {
-    keep: usize,
     queue_depth: usize,
     sync_interval: Duration,
     /// The append that would write this `seq` fails once.
@@ -535,9 +571,8 @@ struct Tuning {
 }
 
 impl Tuning {
-    fn new(keep: usize) -> Self {
+    fn new() -> Self {
         Self {
-            keep,
             queue_depth: QUEUE_DEPTH,
             sync_interval: SYNC_INTERVAL,
             #[cfg(test)]
@@ -550,10 +585,9 @@ impl Tuning {
 
 /// The writer thread.
 fn write_log(
-    dir: PathBuf,
-    key: LogKey,
     run: RunInfo,
     started_ms: u64,
+    resolve: impl FnOnce() -> Option<LogHome>,
     rx: flume::Receiver<Msg>,
     tuning: Tuning,
 ) -> LogReport {
@@ -561,6 +595,15 @@ fn write_log(
     if let Some(gate) = &tuning.start_gate {
         let _ = gate.recv();
     }
+    let Some(LogHome { dir, key, keep }) = resolve() else {
+        // No place for the log. The queue goes with this thread, so every
+        // event, waiting or still to come, is dropped at once and no
+        // producer waits on it.
+        return LogReport {
+            no_place: true,
+            ..LogReport::default()
+        };
+    };
     let mut writer = Writer::open(dir, key.file_stem(), &tuning);
     writer.append(
         started_ms,
@@ -599,7 +642,7 @@ fn write_log(
     drop(rx);
     writer.append(now_ms(), EventBody::RunEnd { outcome, detail });
     writer.sync();
-    writer.finish(tuning.keep)
+    writer.finish(keep)
 }
 
 /// The writer thread's state for one log.
@@ -1807,6 +1850,100 @@ mod tests {
         filetime::set_file_mtime(path, FileTime::from_unix_time(secs, 0)).unwrap();
     }
 
+    fn start_tuned(dir: &Path, key: LogKey, tuning: Tuning) -> LogWriter {
+        let home = LogHome {
+            dir: dir.to_path_buf(),
+            key,
+            keep: DEFAULT_KEEP,
+        };
+        LogWriter::start_tuned(info(), move || Some(home), tuning)
+    }
+
+    /// JOB_LOGS jl-5: a log started before its place is known keeps, after
+    /// its `run-start` and in order, everything recorded while the writer
+    /// was still finding the place.
+    #[test]
+    fn a_deferred_log_keeps_what_was_recorded_before_its_place_was_known() {
+        let dir = TempDir::new().unwrap();
+        let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let home = LogHome {
+            dir: dir.path().to_path_buf(),
+            key: key("r1"),
+            keep: DEFAULT_KEEP,
+        };
+        let writer = LogWriter::start_deferred(info(), move || {
+            asked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Some(home)
+        });
+        // The writer is inside its resolver: the place is not known yet.
+        asked_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let mut recorded = vec![EventBody::Phase {
+            name: "transfer".into(),
+            state: PhaseState::Start,
+        }];
+        recorded.extend((0..20).map(|n| copied(&n.to_string())));
+        for body in &recorded {
+            writer.record(body.clone());
+        }
+        assert!(
+            names(dir.path()).is_empty(),
+            "nothing is written before the place is known"
+        );
+        release_tx.send(()).unwrap();
+        // Finished on a thread of its own: a writer that lost what waited —
+        // its finish among it — fails here instead of hanging.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || done_tx.send(writer.finish(Outcome::Ok, None)));
+        let report = done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the log finishes");
+
+        assert!(report.complete, "{report:?}");
+        let events = events(&report.path.unwrap());
+        let EventBody::RunStart(start) = &events[0].body else {
+            panic!("first event is {:?}", events[0].body);
+        };
+        assert_eq!((start.run_id.as_str(), &start.run), ("r1", &info()));
+        assert_eq!(bodies(&events[1..events.len() - 1]), recorded);
+        let seqs: Vec<u64> = events.iter().map(|event| event.seq).collect();
+        assert_eq!(seqs, (0..events.len() as u64).collect::<Vec<_>>());
+        // `run-start` is stamped when the log started, not when its place
+        // was found.
+        assert!(events[0].ts_ms <= events[1].ts_ms);
+    }
+
+    /// JOB_LOGS jl-5: a log whose place cannot be found keeps nothing, says
+    /// so — not as a failure — and never holds up the run.
+    #[test]
+    fn a_deferred_log_with_no_place_keeps_nothing_and_holds_up_nothing() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let tuning = Tuning {
+                queue_depth: 4,
+                ..Tuning::new()
+            };
+            let writer = LogWriter::start_tuned(info(), || None, tuning);
+            // More events than the queue holds.
+            for n in 0..100 {
+                writer.record(copied(&n.to_string()));
+            }
+            done_tx.send(writer.finish(Outcome::Ok, None)).unwrap();
+        });
+
+        let report = done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("recording into a log with no place must not block");
+        assert_eq!(
+            report,
+            LogReport {
+                no_place: true,
+                ..LogReport::default()
+            }
+        );
+    }
+
     #[test]
     fn a_finished_log_holds_every_event_in_order_compressed() {
         let dir = TempDir::new().unwrap();
@@ -1857,6 +1994,7 @@ mod tests {
                 path: Some(finished.clone()),
                 complete: true,
                 problem: None,
+                no_place: false,
             }
         );
         assert_eq!(
@@ -2341,9 +2479,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let tuning = Tuning {
             fail_at_seq: Some(3),
-            ..Tuning::new(DEFAULT_KEEP)
+            ..Tuning::new()
         };
-        let writer = LogWriter::start_tuned(dir.path(), key("r1"), info(), tuning);
+        let writer = start_tuned(dir.path(), key("r1"), tuning);
         for n in 0..10 {
             writer.record(copied(&n.to_string()));
         }
@@ -2406,9 +2544,9 @@ mod tests {
         let tuning = Tuning {
             queue_depth: 4,
             start_gate: Some(gate_rx),
-            ..Tuning::new(DEFAULT_KEEP)
+            ..Tuning::new()
         };
-        let writer = LogWriter::start_tuned(dir.path(), key("r1"), info(), tuning);
+        let writer = start_tuned(dir.path(), key("r1"), tuning);
         let sender = writer.sender();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -2437,9 +2575,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let tuning = Tuning {
             sync_interval: IDLE_WAIT,
-            ..Tuning::new(DEFAULT_KEEP)
+            ..Tuning::new()
         };
-        let writer = LogWriter::start_tuned(dir.path(), key("r1"), info(), tuning);
+        let writer = start_tuned(dir.path(), key("r1"), tuning);
         writer.record(EventBody::Phase {
             name: "scan".into(),
             state: PhaseState::Start,
@@ -2456,9 +2594,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let tuning = Tuning {
             sync_interval: Duration::from_millis(50),
-            ..Tuning::new(DEFAULT_KEEP)
+            ..Tuning::new()
         };
-        let writer = LogWriter::start_tuned(dir.path(), key("r1"), info(), tuning);
+        let writer = start_tuned(dir.path(), key("r1"), tuning);
         writer.record(copied("quiet"));
         let partial = dir.path().join("r1.m1.destination.1.partial.jsonl");
         wait_for("the copied line", || {
@@ -2492,9 +2630,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let tuning = Tuning {
             queue_depth: 8,
-            ..Tuning::new(DEFAULT_KEEP)
+            ..Tuning::new()
         };
-        let writer = LogWriter::start_tuned(dir.path(), key("r1"), info(), tuning);
+        let writer = start_tuned(dir.path(), key("r1"), tuning);
         for n in 0..100 {
             writer.record_async(copied(&n.to_string())).await;
         }

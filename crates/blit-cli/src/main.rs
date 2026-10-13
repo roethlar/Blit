@@ -258,7 +258,7 @@ async fn run_command(
     lifecycle_trace: &TransferLifecycleTrace,
     origin: RunOrigin,
 ) -> Result<ExitCode> {
-    args.run = crate::run_log::CommandRun::start(verb.word(), &args, origin).await;
+    args.run = crate::run_log::CommandRun::start(verb.word(), &args, origin);
     let run = args.run.clone();
     if let Some(name) = &args.save {
         let run = run.as_ref().ok_or_else(|| {

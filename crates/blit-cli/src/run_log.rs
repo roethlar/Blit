@@ -4,6 +4,13 @@
 //! command's own log — the initiator's — in the per-user folder; and the
 //! run's job record there: its spec (what to run again) and its record
 //! (how this run went).
+//!
+//! JOB_LOGS jl-5 (FAST): none of it is on the command's clock. Starting
+//! touches no disk: this machine's folder and settings are read, an
+//! earlier command's log finished, and the record written on two threads
+//! of their own while the transfer goes; the log's events wait in its
+//! bounded queue meanwhile. At the end the log and the record are finished
+//! at the same time.
 
 use crate::cli::TransferArgs;
 use blit_core::config;
@@ -35,13 +42,11 @@ struct Inner {
     log: RunLog,
     /// How the run ended, when a route says so before it returns.
     ending: Mutex<Option<Ending>>,
-    /// The run's job record, when one could be kept.
-    record: Mutex<Option<Recorded>>,
-    /// Why it could not, when it could not.
-    unkept: Option<String>,
-    /// The per-user folder and the run store, for `--save`/`--export`.
-    config_dir: Option<PathBuf>,
-    store: Option<RunStore>,
+    /// The start's own thread — this machine, the run's record — until
+    /// [`CommandRun::settle_start`] joins it.
+    starting: Mutex<Option<std::thread::JoinHandle<Started>>>,
+    /// What the start found, once joined.
+    started: tokio::sync::OnceCell<Started>,
     /// The run's final account, for its record.
     totals: Mutex<Option<RunTotals>>,
     source_removed: AtomicBool,
@@ -71,6 +76,33 @@ enum Ending {
     },
 }
 
+/// What a run's start found, off the command's clock (JOB_LOGS jl-5).
+struct Started {
+    /// The run's job record, when one could be kept.
+    record: Mutex<Option<Recorded>>,
+    /// Why it could not, when it could not.
+    unkept: Option<String>,
+    /// The per-user folder and the run store, for `--save`/`--export`.
+    config_dir: Option<PathBuf>,
+    store: Option<RunStore>,
+    /// Warnings for stderr, said when the command ends: while it runs, the
+    /// live progress row may own stderr (clp-2, review cr-ls1-3).
+    warnings: Mutex<Vec<String>>,
+}
+
+impl Started {
+    /// A start that found no machine and kept no record, and why.
+    fn unkept(why: Option<String>, warnings: Vec<String>) -> Self {
+        Self {
+            record: Mutex::new(None),
+            unkept: why,
+            config_dir: None,
+            store: None,
+            warnings: Mutex::new(warnings),
+        }
+    }
+}
+
 /// A run's record in the store, its command going.
 struct Recorded {
     store: RunStore,
@@ -89,6 +121,7 @@ impl std::fmt::Debug for CommandRun {
 
 /// This machine as the CLI keeps it: the per-user folder, its ID and
 /// settings.
+#[derive(Clone)]
 struct Machine {
     config_dir: PathBuf,
     id: String,
@@ -102,20 +135,15 @@ impl CommandRun {
     /// record that cannot be kept is skipped with a warning — neither ever
     /// stops a command.
     ///
+    /// JOB_LOGS jl-5 (FAST): returns at once, touching no disk. The log's
+    /// thread finds this machine and the log's place; a thread of the
+    /// start's own, handed the machine, writes the run's spec and record.
+    /// Their warnings are said at [`finish`](Self::finish).
+    ///
     /// `origin` says what the run runs: a saved job, a retry of a run.
-    pub async fn start(verb: &str, args: &TransferArgs, origin: RunOrigin) -> Option<Self> {
+    pub fn start(verb: &str, args: &TransferArgs, origin: RunOrigin) -> Option<Self> {
         let run_id = job_log::new_run_id().ok()?;
-        let machine = tokio::task::spawn_blocking(this_machine)
-            .await
-            .ok()
-            .flatten();
-        let place = machine.as_ref().map(|machine| LogPlace {
-            dir: logs_dir(&machine.config_dir),
-            participant: machine.id.clone(),
-            keep: machine.keep,
-            finished: None,
-        });
-        let log = RunLog::new(place, &run_id);
+        let log = RunLog::new(None, &run_id);
         // Review cr-jl2-1: a dry run or a null-sink run writes nothing, and
         // its log must not say otherwise.
         let disposition = if args.dry_run {
@@ -126,7 +154,47 @@ impl CommandRun {
             Disposition::Written
         };
         log.set_disposition(disposition);
-        log.start(
+        let (machine_tx, machine_rx) = std::sync::mpsc::sync_channel(1);
+        let starting = {
+            let (verb, args, run_id) = (verb.to_string(), args.clone(), run_id.clone());
+            std::thread::Builder::new()
+                .name("blit-job-record".into())
+                .spawn(move || {
+                    // No machine comes when the log's thread could not start.
+                    let (machine, mut warnings): (Option<Machine>, Vec<String>) =
+                        machine_rx.recv().unwrap_or_default();
+                    let Some(machine) = machine else {
+                        return Started::unkept(
+                            Some("this machine's folder or ID cannot be had".into()),
+                            warnings,
+                        );
+                    };
+                    let (recorded, unkept) =
+                        begin_record(&machine, &verb, &args, &run_id, origin, &mut warnings);
+                    Started {
+                        record: Mutex::new(recorded),
+                        unkept,
+                        store: Some(RunStore::new(runs_dir(&machine.config_dir))),
+                        config_dir: Some(machine.config_dir),
+                        warnings: Mutex::new(warnings),
+                    }
+                })
+        };
+        let (starting, started) = match starting {
+            Ok(thread) => (Some(thread), tokio::sync::OnceCell::new()),
+            Err(error) => {
+                let why = format!("could not start keeping it: {error}");
+                let warning = format!("blit: warning: this run's job is not kept: {why}");
+                (
+                    None,
+                    tokio::sync::OnceCell::new_with(Some(Started::unkept(
+                        Some(why),
+                        vec![warning],
+                    ))),
+                )
+            }
+        };
+        log.start_with(
             Role::Initiator,
             RunInfo {
                 verb: verb.to_string(),
@@ -139,25 +207,20 @@ impl CommandRun {
                 run_id: run_id.clone(),
                 attempt: 1,
             }),
-        );
-        let config_dir = machine.as_ref().map(|machine| machine.config_dir.clone());
-        let store = config_dir
-            .as_deref()
-            .map(|dir| RunStore::new(runs_dir(dir)));
-        let (recorded, unkept) = match machine {
-            Some(machine) => {
-                let (verb, args, run_id) = (verb.to_string(), args.clone(), run_id.clone());
-                tokio::task::spawn_blocking(move || {
-                    begin_record(&machine, &verb, &args, &run_id, origin)
+            move || {
+                let mut warnings = Vec::new();
+                let machine = this_machine(&mut warnings);
+                // The record starts now, beside the log.
+                let _ = machine_tx.send((machine.clone(), warnings));
+                let machine = machine?;
+                Some(LogPlace {
+                    dir: logs_dir(&machine.config_dir),
+                    participant: machine.id,
+                    keep: machine.keep,
+                    finished: None,
                 })
-                .await
-                .unwrap_or_else(|error| (None, Some(format!("{error}"))))
-            }
-            None => (
-                None,
-                Some("this machine's folder or ID cannot be had".into()),
-            ),
-        };
+            },
+        );
         if args.verbose && !args.json {
             eprintln!("blit: job {run_id} (`blit jobs log {run_id}` shows its log)");
         }
@@ -167,16 +230,33 @@ impl CommandRun {
                 sessions: AtomicU32::new(0),
                 log,
                 ending: Mutex::new(None),
-                record: Mutex::new(recorded),
-                unkept,
-                config_dir,
-                store,
+                starting: Mutex::new(starting),
+                started,
                 totals: Mutex::new(None),
                 source_removed: AtomicBool::new(false),
                 parts: AtomicBool::new(false),
                 disposition,
             }),
         })
+    }
+
+    /// What the start found: its thread joined the first time, off the
+    /// async workers.
+    async fn settle_start(&self) -> &Started {
+        self.inner
+            .started
+            .get_or_init(|| async {
+                let Some(thread) = lock(&self.inner.starting).take() else {
+                    return Started::unkept(None, Vec::new());
+                };
+                match tokio::task::spawn_blocking(move || thread.join()).await {
+                    Ok(Ok(started)) => started,
+                    _ => {
+                        Started::unkept(Some("keeping it stopped unexpectedly".into()), Vec::new())
+                    }
+                }
+            })
+            .await
     }
 
     #[cfg(test)]
@@ -194,10 +274,8 @@ impl CommandRun {
                 run_id,
                 sessions: AtomicU32::new(0),
                 ending: Mutex::new(None),
-                record: Mutex::new(None),
-                unkept: None,
-                config_dir: None,
-                store: None,
+                starting: Mutex::new(None),
+                started: tokio::sync::OnceCell::new_with(Some(Started::unkept(None, Vec::new()))),
                 totals: Mutex::new(None),
                 source_removed: AtomicBool::new(false),
                 parts: AtomicBool::new(false),
@@ -210,22 +288,19 @@ impl CommandRun {
     /// saved job `name`, before it runs. An error when the job cannot be
     /// kept — the person asked for it.
     pub async fn save_as(&self, name: &str, quiet: bool) -> eyre::Result<()> {
+        let started = self.settle_start().await;
         let spec = {
-            let mut record = lock(&self.inner.record);
+            let mut record = lock(&started.record);
             let recorded = record.as_mut().ok_or_else(|| {
                 eyre::eyre!(
                     "this command cannot be saved as a job: {}",
-                    self.inner
-                        .unkept
-                        .as_deref()
-                        .unwrap_or("its job is not kept")
+                    started.unkept.as_deref().unwrap_or("its job is not kept")
                 )
             })?;
             recorded.record.saved_job = Some(name.to_string());
             recorded.spec.clone()
         };
-        let config_dir = self
-            .inner
+        let config_dir = started
             .config_dir
             .clone()
             .ok_or_else(|| eyre::eyre!("this machine's folder cannot be had"))?;
@@ -248,13 +323,11 @@ impl CommandRun {
     /// `--export FILE` (JOB_LOGS jl-3b): write this command's job, and how
     /// its run went, to `file` — after [`finish`](Self::finish).
     pub async fn export_to(&self, file: &Path, quiet: bool) -> eyre::Result<()> {
-        let store = self.inner.store.clone().ok_or_else(|| {
+        let started = self.settle_start().await;
+        let store = started.store.clone().ok_or_else(|| {
             eyre::eyre!(
                 "this command's job cannot be exported: {}",
-                self.inner
-                    .unkept
-                    .as_deref()
-                    .unwrap_or("its job is not kept")
+                started.unkept.as_deref().unwrap_or("its job is not kept")
             )
         })?;
         let (run_id, file_owned) = (self.inner.run_id.clone(), file.to_path_buf());
@@ -356,7 +429,7 @@ impl CommandRun {
     /// ended.
     pub async fn finish(&self, result: &eyre::Result<ExitCode>) {
         let ending = lock(&self.inner.ending).take();
-        let (outcome, mut detail) = match (&ending, result) {
+        let (outcome, detail) = match (&ending, result) {
             (Some(Ending::Interrupted(detail)), _) => (Outcome::Interrupted, Some(detail.clone())),
             (Some(Ending::Detached { daemon, job_id }), _) => (
                 Outcome::Detached,
@@ -370,7 +443,25 @@ impl CommandRun {
                 failed => (Outcome::Failed, Some(format!("{failed} file(s) failed"))),
             },
         };
-        if let Some(report) = self.inner.log.close(outcome, detail.clone(), None).await {
+        let closing = self
+            .inner
+            .log
+            .prepare_close(outcome, detail.clone(), None)
+            .await;
+        let started = self.settle_start().await;
+        for warning in std::mem::take(&mut *lock(&started.warnings)) {
+            eprintln!("{warning}");
+        }
+        let recorded = lock(&started.record).take();
+        // JOB_LOGS jl-5 (FAST): the log and the record finish at once.
+        let log = async {
+            match closing {
+                Some(closing) => closing.finish().await,
+                None => None,
+            }
+        };
+        let (report, ()) = tokio::join!(log, self.close_record(recorded, ending, outcome, detail));
+        if let Some(report) = report {
             if !report.complete {
                 eprintln!(
                     "blit: this run's log is incomplete: {}",
@@ -378,7 +469,17 @@ impl CommandRun {
                 );
             }
         }
-        let Some(recorded) = lock(&self.inner.record).take() else {
+    }
+
+    /// Finish the run's record, when one is kept, with how it ended.
+    async fn close_record(
+        &self,
+        recorded: Option<Recorded>,
+        ending: Option<Ending>,
+        outcome: Outcome,
+        mut detail: Option<String>,
+    ) {
+        let Some(recorded) = recorded else {
             return;
         };
         let mut totals = lock(&self.inner.totals).take();
@@ -431,24 +532,27 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// The per-user folder, this machine's ID and its settings. `None`, with a
-/// warning, when the folder or the ID cannot be had. Blocking.
-fn this_machine() -> Option<Machine> {
-    let warn = |what: String| eprintln!("blit: warning: this run is not logged: {what}");
+/// warning added to `warnings`, when the folder or the ID cannot be had.
+/// Blocking.
+fn this_machine(warnings: &mut Vec<String>) -> Option<Machine> {
+    let not_logged = |what: String| format!("blit: warning: this run is not logged: {what}");
     let config_dir = match config::config_dir() {
         Ok(dir) => dir,
         Err(error) => {
-            warn(format!("{error:#}"));
+            warnings.push(not_logged(format!("{error:#}")));
             return None;
         }
     };
     let settings = config::load_settings(&config_dir).unwrap_or_else(|error| {
-        eprintln!("blit: warning: {error:#}; using the default settings");
+        warnings.push(format!(
+            "blit: warning: {error:#}; using the default settings"
+        ));
         config::Settings::default()
     });
     let id = match job_log::machine_id(&config_dir) {
         Ok(id) => id,
         Err(error) => {
-            warn(format!("{error}"));
+            warnings.push(not_logged(format!("{error}")));
             return None;
         }
     };
@@ -470,17 +574,18 @@ pub fn saved_dir(config_dir: &Path) -> PathBuf {
 }
 
 /// Write the run's spec and its `running` record. `None`, with a warning
-/// and why, when either cannot be kept — the command runs regardless.
-/// Blocking.
+/// added to `warnings` and why, when either cannot be kept — the command
+/// runs regardless. Blocking.
 fn begin_record(
     machine: &Machine,
     verb: &str,
     args: &TransferArgs,
     run_id: &str,
     origin: RunOrigin,
+    warnings: &mut Vec<String>,
 ) -> (Option<Recorded>, Option<String>) {
-    let unkept = |what: String| {
-        eprintln!("blit: warning: this run's job is not kept: {what}");
+    let mut unkept = |what: String| {
+        warnings.push(format!("blit: warning: this run's job is not kept: {what}"));
         (None, Some(what))
     };
     let spec = match job_spec(verb, args, &machine.id) {

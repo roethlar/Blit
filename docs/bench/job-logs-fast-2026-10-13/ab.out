@@ -1,0 +1,8 @@
+fixtures ready
+
+== otp-11 local A/B (RUNS=5, workspace /private/tmp/claude-501/-Users-michael-Dev-blit/a1d34dfa-b6fa-407a-815b-9dd6d2b4dbb6/scratchpad/bench-root) ==
+huge old_median=21ms new_median=21ms verdict=PASS
+tree old_median=29ms new_median=29ms verdict=PASS
+small old_median=1260ms new_median=1259ms verdict=PASS
+noop old_median=27ms new_median=28ms verdict=PASS
+overall: PASS

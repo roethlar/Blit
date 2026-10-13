@@ -594,6 +594,71 @@ Small first, per R1; each slice is one coherent, testable change.
      name their retry set by text, so a non-UTF-8 file is never re-sent by
      them (its lossy text names nothing at the source; it stays reported
      failed); `jobs retry` is the way to re-send it.
+7. **jl-5 — FAST: logging off the command's clock.** The FAST acceptance
+   failed by a constant 2–4 ms per command (the 1 GiB clone cell 21 → 25
+   ms against the bench's +10% gate; `docs/bench/job-logs-fast-2026-10-08/`).
+   The whole start leaves the command's clock and the two closing chains
+   run at once; every flush point, format, lock, the bounded queue's
+   backpressure and recovery stay as they were.
+   - *Deferred log* (`job_log::LogWriter::start_deferred`, `LogHome`): the
+     queue and its senders exist at once; the writer's thread first asks a
+     resolver for the log's place, then writes `run-start` (stamped at the
+     start) and everything that waited, in order. No place: no file, every
+     event dropped at once (the queue goes with the thread), and the report
+     says `no_place`, which `RunLog` closes as `None` with no warning, as a
+     log with no place always closed. `LogWriter::start` is the same path
+     with a known place, so there is one writer loop; the daemon is
+     unchanged.
+   - *`RunLog`*: `start_with(role, run, tag, resolve)` (`start` is it over
+     the stored place); a lane is handed out once the log is started, its
+     place known or not; closing is `prepare_close` (lanes drained, closing
+     events recorded, raw names kept) then `ClosingLog::finish`, and
+     `close` is the two for the daemon.
+   - *CLI start* (`CommandRun::start`, now plain, not async): makes the run
+     ID and the log and returns; the log's thread reads this machine (folder,
+     settings, ID), finishes an earlier command's leftover logs and opens
+     the log, handing the machine to a `blit-job-record` thread that writes
+     the spec and the `running` record. `--save`, `--export` and the close
+     join that thread once. The start's warnings ("this run is not logged",
+     "this run's job is not kept", unreadable settings) are said at the
+     close, in the same words, since the live row may own stderr meanwhile.
+   - *CLI close*: `prepare_close`, the start joined, then the log's finish
+     and the record's at the same time.
+   - *Agent's design calls*: record pruning (`RunStore::prune`) keeps the
+     newest by last write — the record file's modified time, names breaking
+     ties, the order the log folder already prunes by — and reads only the
+     records beyond the newest `keep` (each settled, a running or waiting
+     one left), instead of reading and parsing every kept record; `jobs
+     list` still orders by start. `job_record::write_document` serializes
+     through a bounded buffer: straight to the file the serializer made a
+     system call per token, most of a record's write (output unchanged).
+     With no place found the deferred writer drops its queue rather than
+     draining it: the same for every producer, and the thread ends sooner.
+   **Landed 2026-10-13** (commit recorded in `docs/STATE.md`):
+   - *Tests*, each guard's mutation run red: `job_log`
+     `a_deferred_log_keeps_what_was_recorded_before_its_place_was_known`
+     (the writer drops what waited: its finish lost with it, caught by a
+     30 s guard instead of a hang; dropping five waiting events: the
+     content assertion) and
+     `a_deferred_log_with_no_place_keeps_nothing_and_holds_up_nothing`
+     (`no_place` not set); `run_log`
+     `a_log_started_with_a_resolver_keeps_the_run_or_closes_as_unplaced`
+     (a no-place log closing as a report); `job_record`
+     `pruning_keeps_the_newest_and_never_a_live_or_waiting_run`, now with
+     modified times set against start and name order (the old prune; no
+     running/waiting skip) and `pruning_reads_only_the_records_it_may_remove`
+     (newest record unreadable by this build, on Unix the next mode 0; the
+     old prune removes none of the old ones); CLI
+     `a_run_that_cannot_be_logged_says_so_and_still_copies` (`--config-dir`
+     a file: the warning dropped; a no-place log called incomplete).
+   - *Bench* (`docs/bench/job-logs-fast-2026-10-13/`), old `f6ca55c0`
+     (logs nothing) against jl-5, RUNS=5: huge 21 / 21 ms, tree 29 / 29,
+     small 1260 / 1259, noop 27 / 28 — every cell PASS (an earlier pass of
+     the same binary: 21 / 22, 29 / 29, 1264 / 1261, 23 / 24, all PASS).
+     Per command (30 interleaved 4 KiB copies): 5.80 → 6.56 ms with a fresh
+     folder, 5.78 → 6.64 ms with 50 runs kept (was ~2.7 ms before jl-5).
+     What remains is the two closing chains, each ~0.5–0.6 ms with every
+     flush kept.
 
 ## Review history
 
