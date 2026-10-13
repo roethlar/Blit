@@ -290,3 +290,47 @@ fn a_saved_jobs_name_means_the_saved_job_wherever_it_is_typed() {
         text(&shaped.stderr)
     );
 }
+
+/// Review cr-jl5-1: a run whose `--files-from` list lives in its own
+/// destination, and is itself listed, overwrites that list as it copies;
+/// its job still keeps the list it ran with. This passes with the fix but
+/// cannot be made to fail without it on demand — the record's thread
+/// usually reads the list before the copy writes it — so the guard is
+/// `run_log::tests::the_spec_keeps_the_list_the_run_started_with`.
+#[test]
+fn a_job_keeps_the_list_its_run_overwrote() {
+    let ctx = TestContext::new();
+    let src = ctx.workspace.join("src");
+    let dst = ctx.workspace.join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+    fs::write(src.join("a.txt"), b"alpha").unwrap();
+    fs::write(src.join("b.txt"), b"beta").unwrap();
+    fs::write(src.join("list.txt"), "b.txt\n").unwrap();
+    fs::write(dst.join("list.txt"), "a.txt\nlist.txt\n").unwrap();
+
+    let copied = blit_in(
+        &ctx,
+        &ctx.workspace,
+        &[
+            "copy",
+            "--export",
+            "job.json",
+            "--files-from",
+            "dst/list.txt",
+            "src/",
+            "dst/",
+        ],
+    );
+    assert!(copied.status.success(), "{}", text(&copied.stderr));
+    // The copy ran the original list and overwrote it.
+    assert_eq!(names(&dst), ["a.txt", "list.txt"]);
+    assert_eq!(fs::read_to_string(dst.join("list.txt")).unwrap(), "b.txt\n");
+    let job: serde_json::Value =
+        serde_json::from_slice(&fs::read(ctx.workspace.join("job.json")).unwrap()).unwrap();
+    assert_eq!(
+        job["spec"]["files_from"],
+        serde_json::json!(["a.txt", "list.txt"]),
+        "{job}"
+    );
+}

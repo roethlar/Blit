@@ -258,6 +258,8 @@ async fn run_command(
     lifecycle_trace: &TransferLifecycleTrace,
     origin: RunOrigin,
 ) -> Result<ExitCode> {
+    // Review cr-jl5-1: the record keeps the list the run starts with.
+    crate::run_log::capture_files_from(&mut args).await;
     args.run = crate::run_log::CommandRun::start(verb.word(), &args, origin);
     let run = args.run.clone();
     if let Some(name) = &args.save {

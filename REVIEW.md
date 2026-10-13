@@ -402,7 +402,7 @@ Owner: "go, then review with codex astra xhigh" (2026-10-13) — the `review` wo
 | ID | Range / title | Verdict / status | Record |
 |----|---------------|------------------|--------|
 | jl5-r1 | `df5fd1cf..031e0352` (jl-5 `031e0352`, logging off the command's clock) | **findings** (2, both admitted below); capability_ok=true; guard_confirmed=true (reviewer-chosen: the no-place report flipped → `a_deferred_log_with_no_place_keeps_nothing_and_holds_up_nothing` red, restored green; workspace fmt/clippy/tests green in its worktree); SHAs pin-verified | `.review/results/jl5-r1.codex.json` + `.events.jsonl` |
-| cr-jl5-1 | Snapshot --files-from before the transfer can overwrite it | `[ ]` MEDIUM — the record thread reads the `--files-from` file while the transfer runs; a transfer that overwrites it records another job than it ran (reviewer reproduced) | `.review/findings/cr-jl5-1.md` |
+| cr-jl5-1 | Snapshot --files-from before the transfer can overwrite it | `[~]` MEDIUM — fixed, awaiting re-review (Fix cr-jl5-1: the list is read once before `CommandRun::start` and handed to the record's thread; `job_spec` never reads the file) — the record thread reads the `--files-from` file while the transfer runs; a transfer that overwrites it records another job than it ran (reviewer reproduced) | `.review/findings/cr-jl5-1.md` |
 | cr-jl5-2 | Preserve the command's start timestamp across deferred initialization | `[ ]` LOW — `started_ms` is stamped on the deferred record thread, not at the command's start | `.review/findings/cr-jl5-2.md` |
 
 

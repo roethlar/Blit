@@ -10,7 +10,8 @@
 //! earlier command's log finished, and the record written on two threads
 //! of their own while the transfer goes; the log's events wait in its
 //! bounded queue meanwhile. At the end the log and the record are finished
-//! at the same time.
+//! at the same time. The one read left on the clock is a `--files-from`
+//! list's, taken before the transfer can write it (review cr-jl5-1).
 
 use crate::cli::TransferArgs;
 use blit_core::config;
@@ -693,9 +694,30 @@ fn finish_record(
     }
 }
 
+/// Review cr-jl5-1: read the command's `--files-from` list once, before
+/// the transfer can write anything, into `args` for the run's spec — the
+/// record is written beside the transfer, which may overwrite its own list
+/// (one kept in its destination). On the command's clock, as the list's
+/// read always was; a command with no list waits on nothing. An unreadable
+/// list is kept as why, in words; the transfer reports it itself.
+pub async fn capture_files_from(args: &mut TransferArgs) {
+    let Some(list) = args.files_from.clone() else {
+        return;
+    };
+    let shown = list.display().to_string();
+    let read = tokio::task::spawn_blocking(move || {
+        std::fs::read_to_string(&list).map_err(|error| format!("{}: {error}", list.display()))
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("{shown}: {error}")));
+    args.files_from_text = Some(Arc::new(read));
+}
+
 /// The run's job: what to run again. An error, in words, when the command
 /// line cannot be kept exactly (a folder or list name that is not UTF-8, an
 /// unreadable `--files-from` list — the command reports those itself).
+/// The list is the one [`capture_files_from`] read before the transfer
+/// started, never the file as it is now (review cr-jl5-1).
 fn job_spec(verb: &str, args: &TransferArgs, machine: &str) -> Result<JobSpec, String> {
     let cwd = std::env::current_dir().map_err(|error| format!("the current folder: {error}"))?;
     let cwd_text = cwd
@@ -728,13 +750,18 @@ fn job_spec(verb: &str, args: &TransferArgs, machine: &str) -> Result<JobSpec, S
                 .ok_or_else(|| format!("{text}: its full name is not UTF-8")),
         }
     };
-    let files_from = match &args.files_from {
-        Some(list) => {
-            let text = std::fs::read_to_string(cwd.join(list))
-                .map_err(|error| format!("{}: {error}", list.display()))?;
+    let files_from = match (&args.files_from, &args.files_from_text) {
+        (Some(_), Some(read)) => {
+            let text = read.as_ref().as_ref().map_err(String::clone)?;
             Some(text.lines().map(str::to_string).collect())
         }
-        None => None,
+        (Some(list), None) => {
+            return Err(format!(
+                "{}: the list was not read before the run",
+                list.display()
+            ))
+        }
+        (None, _) => None,
     };
     Ok(JobSpec::new(
         machine,
@@ -1038,6 +1065,83 @@ mod tests {
             raws.keys().map(String::as_str).collect::<Vec<_>>(),
             ["bad\u{FFFD}.txt"],
             "only failed names, only those the log knows"
+        );
+    }
+
+    /// Write the spec and record of a `copy src/ dst/` run with `args`, as
+    /// the start's thread does, and read them back from the store.
+    fn record_of(args: &TransferArgs) -> (Vec<String>, Option<(JobSpec, RunRecord)>) {
+        let dir = tempfile::tempdir().unwrap();
+        let machine = Machine {
+            config_dir: dir.path().to_path_buf(),
+            id: "m1".into(),
+            keep: 50,
+        };
+        let run_id = job_log::new_run_id().unwrap();
+        let mut warnings = Vec::new();
+        let (recorded, _) = begin_record(
+            &machine,
+            "copy",
+            args,
+            &run_id,
+            RunOrigin::default(),
+            &mut warnings,
+        );
+        let kept = recorded.map(|recorded| {
+            drop(recorded);
+            RunStore::new(runs_dir(&machine.config_dir))
+                .load(&run_id)
+                .unwrap()
+        });
+        (warnings, kept)
+    }
+
+    /// Review cr-jl5-1: the run's spec keeps the `--files-from` list as the
+    /// command read it before the transfer started — every line, comments
+    /// and blank ones too — not the file as the record's thread finds it:
+    /// the transfer may have overwritten its own list by then.
+    #[tokio::test]
+    async fn the_spec_keeps_the_list_the_run_started_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("list.txt");
+        std::fs::write(&list, "a.txt\n# kept\n\nlist.txt\n").unwrap();
+        let mut args = TransferArgs::for_tests("src/", "dst/");
+        args.files_from = Some(list.clone());
+        capture_files_from(&mut args).await;
+        // The transfer writes the list before the record is written.
+        std::fs::write(&list, "b.txt\n").unwrap();
+        let (warnings, kept) = record_of(&args);
+        assert_eq!(warnings, Vec::<String>::new());
+        let (spec, _) = kept.expect("the job is kept");
+        assert_eq!(
+            spec.files_from,
+            Some(vec![
+                "a.txt".to_string(),
+                "# kept".into(),
+                String::new(),
+                "list.txt".into(),
+            ])
+        );
+    }
+
+    /// Review cr-jl5-1: a list that cannot be read keeps no job and says
+    /// why, as before; the command goes on and reports the list itself.
+    #[tokio::test]
+    async fn an_unreadable_list_keeps_no_job_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("missing.txt");
+        let mut args = TransferArgs::for_tests("src/", "dst/");
+        args.files_from = Some(list.clone());
+        capture_files_from(&mut args).await;
+        let (warnings, kept) = record_of(&args);
+        assert!(kept.is_none());
+        let prefix = format!(
+            "blit: warning: this run's job is not kept: {}: ",
+            list.display()
+        );
+        assert!(
+            warnings.len() == 1 && warnings[0].starts_with(&prefix),
+            "{warnings:?}"
         );
     }
 

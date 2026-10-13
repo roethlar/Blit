@@ -420,6 +420,13 @@ pub struct TransferArgs {
     /// and shared by every pass and rerun. Never a flag.
     #[arg(skip)]
     pub run: Option<crate::run_log::CommandRun>,
+    /// JOB_LOGS review cr-jl5-1 internal: the `--files-from` list as the
+    /// command read it before the transfer started — its text, or why it
+    /// could not be read — for the run's job record, which is written
+    /// beside the transfer and so must not read a file the transfer may
+    /// overwrite. Never a flag.
+    #[arg(skip)]
+    pub files_from_text: Option<std::sync::Arc<Result<String, String>>>,
     /// Re-run the WHOLE transfer up to N times on a transient failure
     /// (network drop, stall timeout). Each retry re-runs destination
     /// comparison, so normal comparison skips files now complete; flags that

@@ -370,6 +370,7 @@ mod delegated_options_tests {
             max_age: None,
             delete_scope: "subset".into(),
             run: None,
+            files_from_text: None,
             save: None,
             export: None,
             retry_only_raw: None,
