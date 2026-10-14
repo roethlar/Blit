@@ -2,19 +2,22 @@
 
 All notable changes to Blit are documented in this file.
 
-## [Unreleased]
+## [1.0.0] - 2026-10-14
 
-**Release requirement (recorded from review finding cr-ssc2-2):** the
-next release bumps at least the minor version (`0.2.0`, or `1.0.0` under
-`docs/plan/RELEASE_1_0.md`) — `blit-core`'s public API changed:
-`PreparedPayload::TarShard` gained `skipped` and `PreparedPayload::Skipped`
-was added; `build_tar_shard` returns `TarShardBuild`;
-`TransferSource::open_file` returns `OpenedSourceFile` and
+Blit 1.0: a transfer that one bad file cannot end, on either side of the
+wire, and a log and a job for every run. Covers everything since `v0.1.3`
+(tagged 2026-08-20). User-facing notes: `docs/RELEASE_NOTES_1_0.md`.
+
+**Major version.** `blit-core`'s public API changed (review finding
+cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
+`PreparedPayload::Skipped` was added; `build_tar_shard` returns
+`TarShardBuild`; `TransferSource::open_file` returns `OpenedSourceFile` and
 `check_availability` was removed; `TransferSink` gained
 `begin_record`/`RecordWriter`, `can_store_raw_names` and `note_raw_name`;
-`TransferSummary` gained `failed_paths`/`failed_paths_truncated`. The
-wire protocol is contract 7: a peer on an older release is refused at
-session open, by design.
+`TransferSummary` gained `failed_paths`/`failed_paths_truncated`. The wire
+protocol is contract 7: a peer on any other contract version (every 0.1.x
+release) is refused at session open, by design; two 1.0.0 builds from any
+channel talk to each other.
 
 ### Reliability: a file the source cannot deliver no longer ends the run
 
