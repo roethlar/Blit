@@ -144,6 +144,10 @@ part, and a job you can list, read, re-run and retry.
   absolute path under a local source is made relative to it (naming that
   one path) on every route and in `blit check`; an absolute pattern that
   cannot match anything is named once on stderr and the run goes on.
+  An absolute path typed in another case than the disk stores it (macOS,
+  Windows) excludes the entry anyway, an absolute glob written through a
+  symlink (`/alias/*.txt`, macOS `/tmp`) is made relative too, and on
+  Windows `\` in a relative pattern is a separator (`.\cache`, `cache\`).
   Excluded directories are pruned, never read, so an unreadable one no
   longer leaves a mirror's scan incomplete. `*.log`, `**/*.log`, `dir/**`
   and exact relative paths match as before. (`blit-core`: `FilterInputs`

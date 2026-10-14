@@ -67,7 +67,11 @@ the source side too, and adds a retry pass.
   made relative to it and excludes exactly that path (`--exclude
   /home/me/.java`). An absolute pattern that cannot match anything —
   outside the source, or any absolute pattern when the source is remote —
-  is named once on stderr and the run goes on. Excluded directories are
+  is named once on stderr and the run goes on. An absolute path typed in
+  another case than the disk stores it (macOS, Windows) still excludes the
+  entry; an absolute glob written through a symlink (`/alias/*.txt`, macOS
+  `/tmp`) is made relative too; on Windows `\` in a relative pattern is a
+  separator (`.\cache`, `cache\`). Excluded directories are
   never read, so an unreadable one no longer stops a mirror's deletions.
   Before 1.0 the absolute and bare-name forms silently matched nothing.
 
