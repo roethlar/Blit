@@ -2,9 +2,10 @@
 
 **Status**: Active (contract; the session is the ONLY remote transfer
 path since cutover, otp-10c-2)
-**Contract version**: 6 (`TransferSummary` per-file failure report; v5 =
-cross-platform Windows metadata policy, v4 = Windows file attributes +
-named `$DATA` streams)
+**Contract version**: 7 (source-side per-file containment, run identity,
+exact failure and leftover sets, raw name bytes; v6 = `TransferSummary`
+per-file failure report, v5 = cross-platform Windows metadata policy,
+v4 = Windows file attributes + named `$DATA` streams)
 **Created**: 2026-07-05
 **Plan**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4)
 **Decision refs**: D-2026-07-05-1 (one path), D-2026-08-18-2
@@ -14,7 +15,7 @@ rule), D-2026-06-20-1/-2 (bounded-unilateral dial)
 This document is the authoritative contract for the single `Transfer`
 RPC — the only byte-moving RPC since cutover (`Push` and `PullSync`
 were deleted whole at otp-10c-2). Proto truth lives in
-`proto/blit.proto` under "ONE_TRANSFER_PATH unified session"; this
+`crates/blit-core/proto/blit.proto` under "ONE_TRANSFER_PATH unified session"; this
 doc explains the state machine the proto cannot.
 
 ## Invariants
@@ -37,7 +38,12 @@ doc explains the state machine the proto cannot.
    feature-capability bits — a matched contract version implies the
    same wire features, which makes the corollary load-bearing: any
    wire-shape or wire-behavior change bumps `contract_version` in the
-   same commit. `build_id` = `<crate version>+<git commit hash>`
+   same commit — once that contract has shipped in a release. An
+   unreleased contract may take further wire changes without a bump,
+   since no shipped peer can hold the earlier shape (contract 7 gained
+   `SessionOpen.run_id`/`attempt`, `FileFailure.raw_relative_path` and
+   `TransferSummary` fields 10–14 after its first commit; no release
+   carried an earlier 7). `build_id` = `<crate version>+<git commit hash>`
    composed at compile time, carried for diagnosis only: it labels the
    two ends in faults and diagnostics. A dirty tree composes
    `<sha>.dirty.<content hash>` and a build without git identity
@@ -89,7 +95,7 @@ same SOURCE-owned ADD/REMOVE controller operational in both socket layouts.
 INITIATOR                                RESPONDER
   |-- SessionHello ----------------------->|   (phase: HELLO)
   |<------------------------ SessionHello--|
-  |     both verify build_id exact match; mismatch => SessionError + close
+  |     both verify contract_version exact match; mismatch => SessionError + close
   |-- SessionOpen ------------------------>|   (phase: OPEN)
   |<---------------------- SessionAccept --|
   |     responder validates module/path/read-only/gate here;
@@ -140,8 +146,8 @@ INITIATOR                                RESPONDER
   they do not queue payload until `ManifestComplete{scan_complete=true}` has
   passed. `NeedComplete`, `SourceDone`, final outstanding-set validation, and
   mirror deletion ordering are unchanged. This is an ordering correction, not
-  a new frame or a mixed-build compatibility surface; exact build matching is
-  still mandatory.
+  a new frame or a mixed-contract compatibility surface; exact
+  contract-version matching is still mandatory.
 - **Flow control is the transport's, deliberately:** manifest, need,
   and in-stream payload frames ride gRPC/HTTP-2 stream flow control;
   each end holds only bounded internal queues (the engine's existing
@@ -200,7 +206,7 @@ Shared messages (`FileHeader`, `FileData`, `TarShard*`,
 vocabulary. Contract v4 extends `FileHeader` as specified below. New session
 messages (`SessionHello`, `SessionOpen`,
 `SessionAccept`, `DataPlaneGrant`, `NeedBatch`/`NeedEntry`,
-`NeedComplete`, `SourceDone`, `TransferSummary`, `FileFailure`,
+`NeedComplete`, `SourceDone`, `RecordEnd`, `TransferSummary`, `FileFailure`,
 `SessionError`) are defined in the proto with their field numbers.
 
 ### Source-side per-file containment (contract v7)
@@ -281,6 +287,21 @@ alone.
   and runs further sessions over them (`--retries`, `--retry-wait`;
   `TransferSummary.failed_paths` carries the exact set,
   `failed_paths_truncated` when it did not fit).
+- **Exact leftover sets (contract v7, the cr-win-1 rework):**
+  `TransferSummary.left_in_place` (10) / `left_in_place_truncated` (11)
+  name the failed paths whose failure left this run's own incomplete copy
+  at the destination; `removed_incomplete` (12) /
+  `removed_incomplete_truncated` (13) those whose incomplete copy the
+  session positively removed; `left_in_place_raw` (14) carries
+  left-in-place names that are not UTF-8 by their exact bytes. Under
+  `--ignore-existing` the initiator's retry passes re-send exactly the
+  left-in-place set with that flag off, and retry none of the paths they
+  cannot classify.
+- **Run identity (contract v7, JOB_LOGS jl-2):** `SessionOpen.run_id` (14)
+  carries the job ID made where the command was typed, so every machine
+  involved logs the run under one ID; `attempt` (15) numbers the session
+  within the run from 1 (the main pass, then each retry session). Empty
+  and 0 when the initiator made none.
 - Source-side failures reach the summary through the same
   `record_failure` chokepoint as destination-side ones: the same cap,
   the same `files_failed`, the same exit-2 semantics. A skipped or
@@ -291,7 +312,10 @@ alone.
 
 `TransferSummary` adds field 6, `uint64 files_failed`, and field 7,
 `repeated FileFailure failures`, where
-`FileFailure{string relative_path = 1; string reason = 2}`.
+`FileFailure{string relative_path = 1; string reason = 2; bytes
+raw_relative_path = 3}`; field 3 (contract v7) carries the entry's exact
+name bytes when they are not `relative_path`'s, so an entry whose lossy
+text collides with another's names its own file.
 
 - The DESTINATION records a per-file failure when a file it could not
   materialize is attributable to exactly that one file; the session
@@ -410,23 +434,32 @@ message WindowsNamedStream {
   transfer, whatever detected the need) replaces the named-stream set:
   stale destination streams are deleted, declared streams are written
   completely, then the declared attributes are applied. Any failure fails
-  the file/session; metadata errors are not best-effort warnings. On a
+  the file — a per-file failure in the failure report, the session
+  continuing (D-2026-09-28-2) — never silently; metadata errors are not
+  best-effort warnings. On a
   non-Windows DESTINATION, a present `windows_metadata` is refused rather
   than silently discarded.
 - `FileHeader.size` remains the unnamed stream's size. File and byte completion
   is published only after named streams and attributes have been applied.
   Cancellation or a metadata failure therefore cannot produce a successful
-  per-file completion or final transfer summary. Named-stream bytes count as
+  per-file completion; a metadata failure is that file's failure and the
+  final summary reports it. Named-stream bytes count as
   transferred payload bytes; manifest descriptor bytes do not.
 
 ### Cross-platform Windows metadata policy (contract v5)
 
 Strict preservation is the default. If a manifest entry contains
 `windows_metadata` and the DESTINATION platform cannot represent it, the
-destination rejects that entry during manifest comparison: after safe path
-resolution, but before filesystem comparison, `NeedBatch`, `BlockHashList`, or
-any payload grant. An existing partial file is therefore unchanged, including
-when resume was requested.
+destination refuses the whole session during manifest comparison — after
+safe path resolution, but before filesystem comparison, `NeedBatch`,
+`BlockHashList`, or any payload grant — with a fault naming the remedy:
+`this destination cannot preserve Windows file attributes and named data
+streams; rerun with --drop-windows-metadata to discard them explicitly`
+(`windows_metadata::validate_destination_support`; the diff's earliest
+error wins). Nothing has been written, so an existing partial file is
+unchanged, including when resume was requested. This is a precondition
+refusal of an unrepresentable request, not a per-file failure (see "What
+is allowed to end a session").
 
 The only downgrade is the explicit CLI flag `--drop-windows-metadata`, which
 prints a warning that Windows attributes and named data streams are permanently
@@ -441,7 +474,7 @@ carrier-independent: local, push, pull, and delegated transfers all enter the
 same SOURCE scan and DESTINATION diff chokepoints. Session contract v5 exact
 matching prevents a peer from silently ignoring the policy.
 
-Deliberately absent: `PeerCapabilities` (same build = same
+Deliberately absent: `PeerCapabilities` (same contract version = same
 features), `spec_version` negotiation (the hello's exact match
 replaces it), any delete list (mirror is destination-local), any
 push/pull-specific message.
@@ -538,7 +571,7 @@ push/pull-specific message.
   (`plan_transfer_payloads`) and applies them in-process through the
   filesystem sink (clonefile / block-clone / copy_file_range), so no
   payload byte rides any lane. Everything else is the shared state
-  machine verbatim: hello (exact-match build identity), open
+  machine verbatim: hello (exact-match contract version), open
   validation/refusals, manifest streaming + `ManifestComplete
   {scan_complete}`, the destination-owned diff (`DEST_DIFF_CHUNK`
   batching, both carriers), `NeedComplete`, the mirror guards + the
@@ -567,7 +600,11 @@ impossible for the run to continue." The session-fatal classes are
 exactly: transport death, a protocol desynchronisation (any ledger
 transition outside the contract-v7 table), the destination root being
 unavailable, a volume-level write failure (read-only or full
-destination), and a path-safety breach. A source-side per-file failure
+destination), a path-safety breach, and a precondition refusal decided
+before any payload — contract mismatch at HELLO, `CHECKSUM_DISABLED`, an
+open-time validation failure, or Windows metadata bound for a destination
+that cannot represent it without `--drop-windows-metadata` (contract v5
+above). A source-side per-file failure
 of any kind — cannot open, cannot stat, cannot read, changed size, a name
 the destination cannot store — is that file's failure (skip before the
 record, failed terminator after it) and never the session's; nor is a
@@ -590,24 +627,28 @@ ends a session is a defect.
   structurally, wherever the fault originated.
 - **Checksum compare (contract v3, otp-10b-1)**: a session opened
   with `COMPARISON_MODE_CHECKSUM` is a content compare — the SOURCE
-  fills each `ManifestEntry.checksum` (Blake3, hashed through its own
+  fills each `FileHeader.checksum` (Blake3, hashed through its own
   read path, after the filter so only in-scope files pay), and the
   DESTINATION hashes its same-size candidates during the diff, so a
   content-equal file SKIPS regardless of mtime and a content-differing
   same-size+mtime file transfers. Role-agnostic: whichever end holds
   SOURCE hashes the manifest; whichever holds DESTINATION hashes its
   candidates. A responder whose operator disabled hashing
-  (`--no-server-checksums` / `server_checksums_enabled = false`)
+  (`--no-server-checksums` / `[daemon] no_server_checksums = true`)
   refuses the open with `CHECKSUM_DISABLED` — the session never
   silently degrades a content-compare request to a weaker mode. A
   missing checksum on either side of a comparison degrades to
   transfer (conservative, never a false skip).
 - **Windows metadata failure (contract v5):** enumeration, payload hydration,
   destination comparison, validation, stream replacement, and attribute apply
-  are correctness steps, not best-effort decoration. An error names the file,
-  aborts the session, joins owned workers, and suppresses that file's completion
-  plus the final success summary. Cancellation races metadata work through the
-  existing session cancellation path and has the same no-success rule.
+  are correctness steps, not best-effort decoration. An error names the
+  file and is that file's failure: a `source:` skip when hydration fails
+  at the SOURCE, a destination-side failure when validation, stream
+  replacement or attribute apply fails — reported through the per-file
+  failure report while the session continues (D-2026-09-28-2). The
+  exception is the strict-preservation refusal above, decided before any
+  payload. Cancellation races metadata work through the existing session
+  cancellation path and never yields a per-file success.
 - `CancelJob` interop: the responder registers the session in
   `ActiveJobs` at OPEN (same transfer_id contract as today); the
   cancel token races the session exactly as w4-3 wired, and the
@@ -638,7 +679,8 @@ deleted from the proto and the tree — no bridge (D-2026-07-05-2).
 `DelegatedPull` survives as trigger + progress relay only (no payload
 bytes; proof recorded in the otp-10c-2 finding doc).
 
-Progress: otp-3 landed the role-parameterized drivers over the
+Progress (historical — otp-3..5 all landed; kept as the record of the
+ramp): otp-3 landed the role-parameterized drivers over the
 in-process transport; **otp-4a** made the daemon serve `Transfer` for
 real (runs `run_destination` as Responder; a client `run_source`s as
 SOURCE initiator over gRPC, in-stream carrier) — the RPC no longer

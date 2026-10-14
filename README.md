@@ -10,8 +10,14 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
   Async file enumeration, planner, and one unified transfer session in `blit-core` for maximum performance and extensibility.
 - **CLI and Daemon Binaries**
   Minimal, ergonomic command-line interface; full daemon/server for automation and concurrent requests.
+- **Nothing a single file does ends the run**
+  A file that fails on its own — locked, vanished, changed while being read, or not writable at the destination — is reported by name and the rest of the run lands. `--retries N` (`-R`, default 1) re-scans and retries exactly those files at the end of the run after `--retry-wait S` seconds (`-W`, default 30), robocopy-style. A run that completes with per-file failures exits `2` and names them; `--retry N`/`--wait S` re-run the whole transfer after a transient failure, re-applying the selected comparison so complete files skip.
 - **Resumable Transfers**
-  With `--resume`, eligible partial files continue through block-level Blake3 comparison across local, push, pull, and remote-to-remote transfers. Retries re-run the selected destination comparison (so normal comparison skips files now complete); partial-file continuation requires `--resume`. A file that fails on its own — locked, vanished, or changed while being read — never ends the run: it is reported, and `--retries N` (default 1) re-scans and retries exactly those files at the end of the run after `--retry-wait S` seconds (default 30), robocopy-style.
+  With `--resume`, eligible partial files continue through block-level Blake3 comparison across local, push, pull, and remote-to-remote transfers.
+- **Job logs, run records and saved jobs**
+  Every run writes a compressed JSON log and a run record on each machine involved, under one job ID. `blit jobs list|log|watch|cancel|save|export|run|retry|delete` read, re-run and retry them; `--save <name>`, `--export <file>` and `--detach` on transfers. Each machine keeps its newest 50 (`[jobs] keep`).
+- **Comparison you choose**
+  The default compare is size + modification time; `--checksum` compares content (Blake3) on both ends. Filters: `--include`/`--exclude` globs, `--files-from`, size and age bounds. Filenames that are not valid UTF-8 transfer by their exact bytes.
 - **Hybrid Transport**
   TCP data plane by default, with an in-stream gRPC carrier for diagnostics or when direct TCP is unavailable.
 - **Platform Optimization**
@@ -23,7 +29,7 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 - **Admin Utilities**
   Built into `blit`: daemon inspection and maintenance via mDNS discovery, module listing, remote `ls`/`find`/`du`/`df`/`rm`, shell completions, and performance profiling.
 - **Developer Experience**
-  Robust test suite, clear repo organization, and scripting-friendly JSON output across all tools.
+  Robust test suite, clear repo organization, scripting-friendly `--json` output on most commands, and colour that honours `NO_COLOR` and non-TTY output.
 - **Extensive Documentation**
   Agent collaboration (`AGENTS.md`), process docs, session logs (`DEVLOG.md`), and roadmap (`TODO.md`).
 
@@ -38,21 +44,20 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 │   ├── blit-cli/  # Produces `blit` (admin verbs included)
 │   └── blit-daemon/
 ├── scripts/       # Helper scripts (Windows, etc.)
-├── test/          # Test data/resources
 ├── docs/          # Workflow/process docs
 ├── AGENTS.md      # Agent and collaboration framework
 ├── DEVLOG.md      # Development log/context
-├── TODO.md        # Feature roadmap/tasks
-└── report.xsl     # Output/report formatting
+└── TODO.md        # Feature roadmap/tasks
 ```
 
 ---
 
 ## Installation
 
-Prebuilt binaries of `blit` and `blit-daemon` (macOS binaries are
-Developer ID-signed and notarized; Windows binaries carry Authenticode
-signatures):
+Prebuilt binaries of `blit` and `blit-daemon` for x86_64 Linux,
+Apple-silicon macOS and x86_64 Windows (macOS binaries are Developer
+ID-signed and notarized; Windows and Linux binaries are unsigned — verify
+the `.sha256` sidecar):
 
 **macOS — Homebrew**
 
@@ -87,20 +92,23 @@ cargo install blit-transfer   # installs the `blit` command
 cargo install blit-daemon
 ```
 
-Remote transfers require both peers to speak the same protocol
-version (the `contract` number `blit scan` shows next to each daemon —
-`7` after this release). Any two builds of the same release do, whatever
-channel installed them; a peer on an older protocol is refused at
-session open with both versions named. `BLIT_GIT_SHA` is no longer
-needed for cargo installs.
+The crates are published with each release tag from 1.0.0 on. The
+older 0.1.2 crates on crates.io predate the protocol gate and refuse
+every peer; update them. Remote transfers require both peers to speak
+the same protocol contract version (`blit scan` prints it as
+`Protocol: v7`; `--json` names it `contract_version`). Any two builds of
+the same release do, whatever channel installed them; a peer on a
+different contract is refused at session open with both versions named.
 
 **Any platform — GitHub Releases**: download the archive for your
 platform plus its `.sha256` from
 [Releases](https://github.com/roethlar/Blit/releases), verify, and
 put the two binaries on `PATH`.
 
-`blit --version` reports `<version>+<git sha>` so you can confirm
-exactly what you installed.
+`blit --version` reports `<version>+<git sha>` for release archives and
+package builds, so you can confirm exactly what you installed (a build
+from a tree without git history reports `+unknown.<nonce>`; a dirty tree
+appends `.dirty.<hash>`).
 
 ---
 
@@ -145,7 +153,19 @@ blit mirror ./source ./dest --resume
 
 # Show progress
 blit copy ./large_file.iso ./dest/ --progress
+
+# Every run leaves a log and a record: list them, read one, retry its failed files
+blit jobs list
+blit jobs log <job-id>
+blit jobs retry <job-id>
+
+# Keep a transfer as a saved job and run it again later
+blit mirror ./local server:/module/ --yes --save nightly
+blit jobs run nightly
 ```
+
+`blit move` (copy, then delete the source), `blit check` and
+`blit diagnostics` round out the verbs; `blit --help` lists them all.
 
 ### Running the Daemon
 
@@ -189,7 +209,8 @@ blit completions shell fish > ~/.config/fish/completions/blit.fish
 ```
 
 `blit completions remote <REMOTE> [--prefix <STR>] [--files] [--dirs]`
-is the daemon-backed remote-path completion the generated shell
-scripts call internally — `<REMOTE>` is the target host (e.g.
-`server:9031`) and `--prefix` narrows the returned path set. You
-don't typically run it directly.
+asks a daemon for path completions under `<REMOTE>`, a module path such
+as `server:/module/dir/` (a bare host is refused: the target must
+include a module); `--prefix` narrows the returned set. It is a helper
+for shell integrations; the generated completion scripts are static and
+do not call it.

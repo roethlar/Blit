@@ -111,10 +111,11 @@ carry such names by their exact bytes.
 
 ## Protocol and compatibility
 
-- **Wire contract 7.** A peer on an older release is refused at session
-  open with a plain message; upgrade both ends. Both executables report
-  the same `1.0.0+<commit>` build identity, and remote sessions require
-  identical build identities on both ends.
+- **Wire contract 7.** A session is refused at open, with a plain
+  message, when the two ends' protocol contract versions differ (every
+  0.1.x release is another contract); upgrade both ends. Two 1.0.0 builds
+  from any channel talk to each other. Both executables report
+  `1.0.0+<commit>` from a release archive or package.
 - **Release archives** contain `blit` and `blit-daemon` for
   `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` (signed and
   notarized) and `x86_64-pc-windows-msvc` (not Authenticode-signed), each
@@ -122,7 +123,9 @@ carry such names by their exact bytes.
 - **Install channels:** Homebrew (`roethlar/blit/blit-bin`), winget
   (`Roethlar.Blit`), Scoop, AUR (`blit`, `blit-bin`), cargo
   (`blit-transfer`, `blit-daemon`) and GitHub Releases; the bot-maintained
-  channels update on tag publish.
+  channels update on tag publish, and the 1.0.0 crates are published with
+  the tag. The 0.1.2 crates on crates.io predate the protocol gate and
+  refuse every peer; `cargo install` them no further.
 - **For embedders of `blit-core`:** the public API changed, which is why
   this is a major version. `PreparedPayload::TarShard` gained `skipped`
   and `PreparedPayload::Skipped` was added; `build_tar_shard` returns
