@@ -46,7 +46,7 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
   that answers) → tag (G6, owner) → crates.io (owner).
 - **SOURCE_SIDE_CONTAINMENT SHIPPED (D-2026-10-07-1):** six slices, win-1..5, the
   cr-win-1 rework and D8 landed and reviewed; CI green `189ae11b`; detail in the plan, `CHANGELOG.md` `[1.0.0]`, DEVLOG.
-- **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive, D-2026-07-05-4 "flip
+- **ONE_TRANSFER_PATH SHIPPED 2026-10-14 (D-2026-10-14-1; D-2026-07-05-1 directive, D-2026-07-05-4 "flip
   the plan and go").** The invariant (plan doc, verbatim): ONE block of
   transfer code; direction/initiator/verb can NEVER affect wall time by
   blit's doing — impossible by construction because the per-direction
@@ -71,7 +71,7 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
 0. **ULTRACODE 2026-08-18 (DEVLOG 23:00Z): cv-1+cv-2 LANDED `05529c19` (contract-version gate + scan surfacing; cv-3 landed 2026-09-30 with ssc-5 `6c266dd4`); sf-3d LANDED `7ffd929d` (containment cache + resume-path stamping; rig A/B still owed); clp-3 reviewed AND F1 closed `677a8ba9` (F2/F5 stay owner calls); residue triaged (2 dead, 1 dead-as-written; item 5 rate-window FIXED — its stall-silence call was owner-ruled as revised-b, landed below; item 2 perf-history scope ruled "both" by D-2026-08-20-1 and shipped, D-2026-08-20-4); sweep-prefetch parked pending one netwatch-01 SMB run; pm-5: see Blocked / waiting.** CI FULLY GREEN on `af9b48b3` (run 32195891519, 7/7 jobs — the slices are cross-platform proven). Stall-line revised-b landed after (three red-proven silence gates; mid-payload stalls visible, summary-wait/purge tails silent).
 1. **`docs/plan/INTERFACE_PLATFORM.md` (SHIPPED — owner declared 2026-08-18; all seven slices landed 2026-08-17)** — three standalone front-ends (CLI first, TUI/GUI later in BlitAdmin_UIs), all first-class consumers of `blit-core` ITSELF: `blit-app` + `blit-console-core` fold into core (no new crate, D-2026-08-17-2), `blit-core` publishes to crates.io (name available, verified; publish act owner-gated), third-party Rust apps embed via the crate, everything else via daemon gRPC. All rulings closed (D-2026-08-17-3/-4/-5: bridge, tui, gui all deleted; fresh UIs later; nothing pushes to BlitAdmin_UIs under this plan). Nothing open; execution record in the plan.
 2. **`docs/plan/SMALL_FILE_CEILING.md` — sf-3b closed (D-2026-08-14-1); sf-3c landed 2026-08-15; sf-3d landed 2026-08-18** — sf-3c stamps streamed-receive mtime/permissions through the retained write handle instead of reopening by path; sf-3d (sf-3a candidate 3, contained-path canonicalization cache + resume-path stamping, `7ffd929d`) closed the named-candidate list; proxy pins + mutation proofs in the plan's Slices section. Rig A/B for sf-3d still owed (Queue 0); no further cut selected.
-2. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (ACTIVE, D-2026-07-31-4) —
+2. **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (SHIPPED 2026-10-14, D-2026-10-14-1; was Active D-2026-07-31-4) —
    PRIORITY-1, the owner's ruling on the 2026-07-31 field check.** Local
    transfer is too slow; the owner ruled it "should have been resolved before
    this was declared release-worthy." Recorded 2026-07-13, shipped in 0.1.1
@@ -113,7 +113,7 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
    `guard_confirmed: true`** — see `REVIEW.md`. **`ls-0` LANDED**: the
    summary separates copied from repaired files and labels the rate as a
    whole-run average. NOT the closed P1 defect (D-2026-07-22-2).
-3. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4):**
+3. **`docs/plan/ONE_TRANSFER_PATH.md` (SHIPPED 2026-10-14, D-2026-10-14-1):**
    slices otp-1..13; any external review requires exact owner approval under
    D-2026-07-23-7. **otp-1 … otp-12c are all `[x]`** — closed-slice record and
    the otp-12a/b/c matrices live in `docs/history/state-archive.md`
@@ -129,7 +129,7 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
    root posture defect: a single survivable per-file error no longer aborts
    a transfer. audit-17 closed with it. 7 range reviews, 11 findings, 10
    verified-closed + 1 declined. Detail: the plan and DEVLOG 2026-07-31.
-5. **`docs/plan/CLI_LIVE_PROGRESS.md` (ACTIVE, D-2026-07-31-2): clp-1, clp-2
+5. **`docs/plan/CLI_LIVE_PROGRESS.md` (SHIPPED 2026-10-14, D-2026-10-14-1): clp-1, clp-2
    and clp-3 all `[x]` landed.** **clp-3** adds Dracula colour to the live
    row and the failure block (owner-chosen palette, scope "both"): phase word
    carries the colour, deleting is orange not red so red keeps its meaning
@@ -160,8 +160,8 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
 
 ## Authoritative docs right now
 
-- **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — D-2026-07-05-4);**
-  `docs/plan/OTP7_RESUME.md` (**Active**, D-2026-07-09-1 — otp-7 slice design).
+- **`docs/plan/ONE_TRANSFER_PATH.md` (SHIPPED 2026-10-14, D-2026-10-14-1)**, with
+  `OTP7_RESUME.md`, `OTP11_LOCAL_SESSION.md` (**Shipped**) and `OTP12_ACCEPTANCE_RUN.md` (**Historical**), same ruling.
   **`docs/plan/BLIT_CONSOLE.md` (Superseded, D-2026-08-15-1)** → `docs/plan/UI_REMOVAL.md` (**Superseded**, D-2026-08-17-1) → `docs/plan/INTERFACE_PLATFORM.md` (**Shipped** 2026-08-18, fully ruled D-2026-08-17-1..-5 — blit-core as the platform crate + out-of-repo front-ends).
   **`docs/plan/PER_FILE_ERROR_CONTAINMENT.md` (SHIPPED, D-2026-08-01-2).**
 - Shipped release record: **`docs/RELEASE_READINESS.md`** and
@@ -171,9 +171,9 @@ Rules: this file outranks every doc below it in AGENTS.md's Source of Truth orde
 - **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (SHIPPED 2026-10-07, D-2026-10-07-1 —
   all six slices landed 2026-09-30; cr-win-1 and its review findings closed 2026-10-07).**
 - Active plans: `docs/plan/SMALL_FILE_CEILING.md` (**Active**; sf-3c/sf-3d
-  landed, no further cut selected) and **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** (code-
-  complete; measurement gates remain). REV4 superseded v1/REV2/REV3
-  (history only).
+  landed, no further cut selected). **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`**
+  SHIPPED 2026-10-14 (D-2026-10-14-1; measurement criteria post-release). REV4
+  superseded v1/REV2/REV3 (history only).
 - Process: `.agents/playbooks/openreview.md` — synchronous unprimed review only
   after exact owner approval under D-2026-07-23-7 (reviews external models only,
   formal review dispatches Codex, D-2026-10-07-4; Grok advisory; landed-slice codex dispatch is standing under

@@ -138,7 +138,7 @@ reviewed to consensus.
 | --- | --- | --- |
 | G2 CI on the candidate | candidate cut `6d5d93c8` (plus this docs commit); local gate green 1483/0/2 on macOS; not pushed | push (owner go), then the run |
 | G3 dispositions | SSC shipped; audit-18 retired; **audit-19 open**; **detached recents reason open** | two owner rulings, fix-now or ship documented |
-| G4 docs truth | README + TRANSFER_SESSION corrected `6ac98801` (audit of 2026-10-14); plan-status sweep needs one ruling on 9 Active plans (below) | one owner ruling on the sweep |
+| G4 docs truth | README + TRANSFER_SESSION corrected `6ac98801` (audit of 2026-10-14); plan-status sweep DONE 2026-10-14 (D-2026-10-14-1) | — |
 | G5 version + notes | DONE `6d5d93c8`: 1.0.0, CHANGELOG `[1.0.0]`, notes re-cut († entries follow the G3 rulings) | — |
 | G5b cross-OS matrix | Mac↔Linux PASS 2026-10-14 with CI's `8844dfbd` archives (`aaa8af55`); to repeat on the candidate's archives; Windows legs blocked (no host reachable) | the candidate's CI build; a Windows host |
 | G6 tag + publish | — | owner |
@@ -157,9 +157,9 @@ flips are owner declarations (precedent D-2026-10-07-1).
 
 Ordered path to the tag:
 
-1. Owner rulings, one at a time: audit-19; the detached recents reason;
-   the plan-status sweep; the JOB_LOGS acceptance ticks (evidence per
-   criterion in `docs/plan/JOB_LOGS.md` slices).
+1. Rulings — settled by D-2026-10-14-1: audit-19 fix (ruled), the
+   recents-reason fix, the sweep applied, the JOB_LOGS acceptance ticked
+   against its evidence table.
 2. Any fix ruled lands as a slice under this plan (G3 fix-now): guard,
    gate, Codex codereview with the owner's dispatch approval.
 3. G4 edits: README/TRANSFER_SESSION corrections from the audit; STATE

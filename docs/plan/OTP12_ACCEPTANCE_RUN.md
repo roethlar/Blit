@@ -1,6 +1,6 @@
 # otp-12 — symmetric-rig acceptance run (design)
 
-**Status**: Active (owner "yes to both", 2026-07-12 — the doc's only open
+**Status**: Historical 2026-10-14 (D-2026-10-14-1; the otp-12a/b/c acceptance record, evidence `docs/bench/otp12*/`; otp-12d post-release, D-2026-07-22-1; was: Active — owner "yes to both", 2026-07-12 — the doc's only open
 question was ruled by D-2026-07-12-1; design codex round closed at
 `92e1d51`. The zoey RIG RUN still requires its own fresh owner go at run
 time — standing STATE rule.)

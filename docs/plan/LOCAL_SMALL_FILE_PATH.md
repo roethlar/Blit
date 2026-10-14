@@ -1,6 +1,6 @@
 # LOCAL_SMALL_FILE_PATH — the local carrier frames small files for a wire that isn't there
 
-**Status**: Active (D-2026-07-31-4, owner 2026-07-31 — priority-1)
+**Status**: Shipped 2026-10-14 (D-2026-10-14-1; ls-0..ls-6 shipped, review loop closed; was: Active, D-2026-07-31-4, owner 2026-07-31 — priority-1)
 **Created**: 2026-07-13
 **Activated**: 2026-07-31
 **Owner decisions required**: see §Decisions (none assumed; no code until ls-1 lands)

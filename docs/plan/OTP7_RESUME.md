@@ -1,6 +1,6 @@
 # otp-7 — resume block phase (design)
 
-**Status**: Active (owner Q1–Q3 answered + "confirmed", 2026-07-09; D-2026-07-09-1)
+**Status**: Shipped 2026-10-14 (D-2026-10-14-1; otp-7 landed under ONE_TRANSFER_PATH; was: Active — owner Q1–Q3 answered + "confirmed", 2026-07-09; D-2026-07-09-1)
 **Created**: 2026-07-07
 **Parent**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4), slice otp-7.
 **Contract**: `docs/TRANSFER_SESSION.md` (resume exception + frame table, pinned otp-1).

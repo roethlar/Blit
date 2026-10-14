@@ -1,6 +1,6 @@
 # CLI Live Progress
 
-**Status**: Active (D-2026-07-31-2, owner "flip clp")
+**Status**: Shipped 2026-10-14 (D-2026-10-14-1; clp-1..clp-3 landed, owner-confirmed on a TTY 2026-08-01, reviewed 2026-08-18; F2/F5 stay owner calls, not gates; was: Active, D-2026-07-31-2, owner "flip clp")
 **Created**: 2026-07-31
 **Supersedes**: nothing (the queued "CLI transfer output redesign"
 TODO — persistent stats block, "probably a TUI", re-confirmed in

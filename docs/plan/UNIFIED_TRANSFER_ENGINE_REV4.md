@@ -1,6 +1,6 @@
 # Unified Transfer Engine REV4 — the Active convergence plan (code-reality corrected)
 
-**Status**: Active
+**Status**: Shipped 2026-10-14 (D-2026-10-14-1; code-complete since the one-path cutover; the unticked measurement criteria are post-release, D-2026-07-22-1; was: Active)
 **Created**: 2026-06-20
 **Activated**: 2026-06-20 (owner: "rev4 replaces v1" — D-2026-06-20-5).
 Replaces `UNIFIED_TRANSFER_ENGINE.md` (v1, now Superseded) and the review

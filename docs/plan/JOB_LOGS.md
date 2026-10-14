@@ -135,41 +135,41 @@ history already follows (decided at jl-1b, 2026-10-07: under
 
 ## Acceptance criteria
 
-- [ ] A `--detach` remote-to-remote job with one file that fails on its own:
+- [x] A `--detach` remote-to-remote job with one file that fails on its own:
       `blit jobs watch` exits non-zero and names the file; `blit jobs list`
       shows a failed-file count; `blit jobs log <host> <job-id>` shows the
       file and its reason (closes defect (c) of 2026-10-07).
-- [ ] Every run — local copy, push, pull, remote-to-remote — leaves a log on
+- [x] Every run — local copy, push, pull, remote-to-remote — leaves a log on
       each machine involved, all under one job ID; `blit jobs log` reads each
       as text and, with `--json`, as the raw events.
-- [ ] A log names every file copied, deleted and failed (with reasons), holds
+- [x] A log names every file copied, deleted and failed (with reasons), holds
       what `-v` adds, phase start/end times and stall notices; it is written
       as the run goes and stored compressed.
-- [ ] Retention: with the default, the 51st run's log replaces the oldest;
+- [x] Retention: with the default, the 51st run's log replaces the oldest;
       the `config.toml` value is honored; saved jobs are never removed by it.
-- [ ] `--save <name>`, `--export <file>`, `blit jobs save|export|run|delete|list`
+- [x] `--save <name>`, `--export <file>`, `blit jobs save|export|run|delete|list`
       behave as the Design's command surface says; `blit jobs run <name>`
       re-runs the same transfer.
-- [ ] `blit jobs retry <job-id|file>` re-sends only the files that failed,
+- [x] `blit jobs retry <job-id|file>` re-sends only the files that failed,
       with the original options; on another machine it refuses with a plain
       message naming the machine the job belongs to.
-- [ ] Windows keeps settings, jobs and logs under `%LOCALAPPDATA%\Blit`; files
+- [x] Windows keeps settings, jobs and logs under `%LOCALAPPDATA%\Blit`; files
       found in the old roaming folder are moved once.
-- [ ] FAST: logging costs no measurable slowdown on the existing small-file
+- [x] FAST: logging costs no measurable slowdown on the existing small-file
       and large-file benches (within run-to-run noise).
-- [ ] Every new sub-verb answers `--help` with its own help (R12).
-- [ ] Crash: a daemon killed mid-run leaves a log that startup finalizes as
+- [x] Every new sub-verb answers `--help` with its own help (R12).
+- [x] Crash: a daemon killed mid-run leaves a log that startup finalizes as
       interrupted and `blit jobs log` reads.
-- [ ] Logging failure: with the log directory unwritable the transfer still
+- [x] Logging failure: with the log directory unwritable the transfer still
       completes, and its report says the log is incomplete.
-- [ ] Detached: after a `--detach` job finishes, `blit jobs list` on the
+- [x] Detached: after a `--detach` job finishes, `blit jobs list` on the
       initiating machine shows its outcome (fetched from the daemon) and
       `blit jobs retry` re-runs exactly its failed files.
-- [ ] Saved jobs reproduce: `blit jobs run <name>` from another working
+- [x] Saved jobs reproduce: `blit jobs run <name>` from another working
       directory, or after the `--files-from` file changed, transfers exactly
       what the original run did.
 
-**Evidence per criterion (agent, 2026-10-14; the ticks are the owner's).**
+**Evidence per criterion (agent, 2026-10-14; ticked under D-2026-10-14-1).**
 Every guard below ran green on macOS at `75864cb0` (1483/0/2) and in CI's
 Linux and Windows legs at `8844dfbd` (run 38474595246). In the order of the
 list above:
@@ -193,7 +193,7 @@ list above:
 Live proof beyond the suites: the G5b dry run of 2026-10-14
 (`docs/bench/g5b-dryrun-2026-10-14/`) shows five Mac↔Linux runs listed on
 both machines under the same job IDs.
-- [ ] Self-delegation: a daemon that is both ends of one run keeps two
+- [x] Self-delegation: a daemon that is both ends of one run keeps two
       distinct logs, labeled by role.
 
 ## Design

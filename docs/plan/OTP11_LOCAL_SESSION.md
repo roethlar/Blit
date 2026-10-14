@@ -1,6 +1,6 @@
 # otp-11 — local transfers on the session (design)
 
-**Status**: Active
+**Status**: Shipped 2026-10-14 (D-2026-10-14-1; otp-11 landed — every transfer, local included, runs the unified session; was: Active)
 **Created**: 2026-07-11
 **Parent**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4), slice otp-11.
 **Contract**: `docs/TRANSFER_SESSION.md` (unchanged — this slice adds NO wire

@@ -1,6 +1,6 @@
 # One transfer path — direction-invariant by construction
 
-**Status**: Active
+**Status**: Shipped 2026-10-14 (D-2026-10-14-1; otp-1..otp-12c landed and closed; otp-12d, otp-13 and the unticked measurement criteria are post-release, D-2026-07-22-1; was: Active)
 **Created**: 2026-07-05
 **Supersedes**: post-REV4 residue item "pull 1s-start restructuring"
 (absorbed here); pauses `docs/plan/SMALL_FILE_CEILING.md` after sf-2
