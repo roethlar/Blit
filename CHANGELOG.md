@@ -14,7 +14,8 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `TarShardBuild`; `TransferSource::open_file` returns `OpenedSourceFile` and
 `check_availability` was removed; `TransferSink` gained
 `begin_record`/`RecordWriter`, `can_store_raw_names` and `note_raw_name`;
-`TransferSummary` gained `failed_paths`/`failed_paths_truncated`. The wire
+`TransferSummary` gained `failed_paths`/`failed_paths_truncated`;
+`transfers::filter::FilterInputs` gained `source_root`. The wire
 protocol is contract 7: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
@@ -147,6 +148,13 @@ part, and a job you can list, read, re-run and retry.
   longer leaves a mirror's scan incomplete. `*.log`, `**/*.log`, `dir/**`
   and exact relative paths match as before. (`blit-core`: `FilterInputs`
   gained `source_root`.)
+- A `--detach` job that failed on the daemon showed only
+  `delegated_pull handler failed` in `jobs list`; the reason reached the
+  job's log alone. The recents record now carries the handler's own
+  error, the same text the log records, so `blit jobs list <host>` says
+  why (for example `FAILED: delegated transfer: session MODULE_UNKNOWN:
+  module 'nosuchmod' not found`); the final subscribe event carries it
+  too.
 
 ## [0.1.3] - 2026-08-20
 

@@ -3,10 +3,6 @@
 Covers everything shipped since 0.1.3 (tagged 2026-08-20). The 0.1.x
 releases are described in `CHANGELOG.md`.
 
-> Draft until the tag. Entries marked † depend on open rulings under
-> `docs/plan/RELEASE_1_0.md` gate G3 and are removed if the behavior is
-> fixed before the candidate is cut.
-
 ## Headline
 
 1.0 is the reliability release. No single file can end a transfer any
@@ -110,6 +106,9 @@ carry such names by their exact bytes.
   save|export|run|delete` manage them; `blit jobs run <name|file>` re-runs
   the same transfer from any working directory, with the `--files-from`
   list it ran with.
+- **A failed `--detach` job says why in `jobs list`.** The daemon's record
+  of the job carries the handler's own error, the same text its log
+  records, instead of the fixed `delegated_pull handler failed`.
 - **`blit jobs retry <job-id|file>`** starts a new run that sends exactly
   the files that failed, with the original options (a `move` runs whole
   again). It refuses a job from another machine, a run still going, and a
@@ -147,13 +146,11 @@ carry such names by their exact bytes.
   and `check_availability` was removed; `TransferSink` gained
   `begin_record`/`RecordWriter`, `can_store_raw_names` and
   `note_raw_name`; `TransferSummary` gained `failed_paths` and
-  `failed_paths_truncated`.
+  `failed_paths_truncated`; `transfers::filter::FilterInputs` gained
+  `source_root`.
 
 ## Known limitations shipped open
 
-- † **A failed `--detach` job's `jobs list` entry says only
-  `delegated_pull handler failed`.** The real reason is in `blit jobs log
-  <host> <job-id>`.
 - **The in-command retry passes do not re-send a file whose name is not
   valid UTF-8.** It stays reported as failed; `blit jobs retry` re-sends
   it.
