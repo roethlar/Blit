@@ -39,7 +39,7 @@ are the owner's act.
   (`.review/results/ls6-range.codex.r3.json`).
 - [ ] **G2 — CI green on the exact candidate**, both workflows (CI: fmt,
   strict clippy, Linux/macOS/Windows tests; Docs Gate).
-- [ ] **G3 — known broken behaviors dispositioned.** Fix now:
+- [x] **G3 — known broken behaviors dispositioned.** CLOSED 2026-10-14 (D-2026-10-14-1): audit-19 FIXED `fa948e01`, the detached recents reason FIXED `b7da0d81`; Codex review of the range pending the owner's dispatch. Fix now:
   **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (owner ruling D-2026-09-29-1,
   2026-09-29): a source-side per-file failure — locked, vanished, or
   size-drifted since the scan — must never end the run (D-2026-09-28-2);
@@ -64,14 +64,14 @@ are the owner's act.
   failed `--detach` job's `jobs list` entry says only `delegated_pull
   handler failed` (`crates/blit-daemon/src/service/core.rs:793`), owner
   call fix-now or ship documented (drafted †).
-- [ ] **G4 — docs truth pass.** README and `docs/TRANSFER_SESSION.md`
+- [x] **G4 — docs truth pass.** CLOSED 2026-10-14: README + TRANSFER_SESSION corrected `6ac98801`; plan-status sweep and STATE de-drift `b186e8b8` (D-2026-10-14-1). README and `docs/TRANSFER_SESSION.md`
   claims verified against current behavior — expressly the ls-6 compare
   contract (default compare does not interrogate destination streams;
   `--checksum` does) and the ls-5 sweep. Plan-status sweep: `docs/plan/*`
   Active/Draft headers reconciled with reality (greenfield_plan_v6,
   OTP7/11/12, ONE_TRANSFER_PATH, UTE_REV4, ZERO_COPY, CLI_LIVE_PROGRESS,
   LOCAL_SMALL_FILE_PATH). `docs/STATE.md` queue de-drifted (pre-ls-6 text).
-- [ ] **G5 — version + notes.** Workspace version 0.1.3 → 1.0.0 (root
+- [x] **G5 — version + notes.** CLOSED 2026-10-14: `6d5d93c8` + `262c2792`. Workspace version 0.1.3 → 1.0.0 (root
   `Cargo.toml`, the two internal `blit-core` dependency pins, `Cargo.lock`),
   as the candidate's last commit; `CHANGELOG.md` `[Unreleased]` becomes
   `[1.0.0] - <date>`. The 0.1.1 → 0.1.3 content this gate once named
@@ -136,8 +136,8 @@ reviewed to consensus.
 
 | Gate | Status | Moves on |
 | --- | --- | --- |
-| G2 CI on the candidate | candidate cut `6d5d93c8` (plus this docs commit); local gate green 1483/0/2 on macOS; not pushed | push (owner go), then the run |
-| G3 dispositions | SSC shipped; audit-18 retired; **audit-19 open**; **detached recents reason open** | two owner rulings, fix-now or ship documented |
+| G2 CI on the candidate | candidate = `master` at `262c2792` + the STATE commit after it; local gate on the whole tree 1502/0/2 (macOS); not pushed | `/git push all`, then the run |
+| G3 dispositions | DONE: SSC shipped; audit-18 retired; audit-19 FIXED `fa948e01`; detached recents reason FIXED `b7da0d81` (D-2026-10-14-1) | Codex review of `b186e8b8..b7da0d81` on the owner's `review` |
 | G4 docs truth | README + TRANSFER_SESSION corrected `6ac98801` (audit of 2026-10-14); plan-status sweep DONE 2026-10-14 (D-2026-10-14-1) | — |
 | G5 version + notes | DONE `6d5d93c8`: 1.0.0, CHANGELOG `[1.0.0]`, notes re-cut († entries follow the G3 rulings) | — |
 | G5b cross-OS matrix | Mac↔Linux PASS 2026-10-14 with CI's `8844dfbd` archives (`aaa8af55`); to repeat on the candidate's archives; Windows legs blocked (no host reachable) | the candidate's CI build; a Windows host |
@@ -160,15 +160,16 @@ Ordered path to the tag:
 1. Rulings — settled by D-2026-10-14-1: audit-19 fix (ruled), the
    recents-reason fix, the sweep applied, the JOB_LOGS acceptance ticked
    against its evidence table.
-2. Any fix ruled lands as a slice under this plan (G3 fix-now): guard,
-   gate, Codex codereview with the owner's dispatch approval.
+2. DONE: both fixes landed one per commit (`fa948e01`, `b7da0d81`), 19
+   mutation-proven guards, gate 1502/0/2. Codex codereview of the range
+   awaits the owner's dispatch word (D-2026-07-23-7).
 3. G4 edits: README/TRANSFER_SESSION corrections from the audit; STATE
    queue de-drift; plan-status flips as ruled.
 4. G5: DONE (`6d5d93c8`). Push (owner go) → G2 CI green on that SHA.
 5. G5b with the candidate's archives: Mac↔Linux now; Windows legs when a
    host answers (recorded per pair here).
-6. Optional final Codex range review of the release-prep commits (owner
-   dispatch approval).
+6. The Codex range review of the two G3 fixes is the release-prep review
+   (owner dispatch approval); findings land one per commit and re-review.
 7. G6: tag (owner) → release job → crates.io publishes (owner).
 
 ## Non-goals (post-1.0)
