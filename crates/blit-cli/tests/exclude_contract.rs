@@ -181,6 +181,54 @@ fn check_exclude_absolute_path_under_the_source_is_made_relative() {
     );
 }
 
+/// True when `dir`'s filesystem ignores case: a file made as `case-probe`
+/// opens as `CASE-PROBE`.
+fn case_insensitive(dir: &Path) -> bool {
+    let probe = dir.join("case-probe");
+    fs::write(&probe, b"").unwrap();
+    let insensitive = fs::File::open(dir.join("CASE-PROBE")).is_ok();
+    fs::remove_file(&probe).unwrap();
+    insensitive
+}
+
+/// cr-g3fix-1: on a case-insensitive filesystem (macOS and Windows by
+/// default) an absolute exclude in another case leaves out the entry on
+/// disk. Before the fix it was rewritten as typed (`./CACHE`), matched
+/// nothing — every rule compares case-sensitively — and warned about
+/// nothing. Skipped where the filesystem is case-sensitive.
+#[test]
+fn mirror_exclude_absolute_path_in_another_case_leaves_the_entry_out() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    java_tree(&src);
+    fs::create_dir_all(src.join("cache")).unwrap();
+    fs::write(src.join("cache").join("private.txt"), b"p").unwrap();
+    if !case_insensitive(&src) {
+        eprintln!("skipping: {} is case-sensitive", src.display());
+        return;
+    }
+    let pattern = format!("{}", src.join("CACHE").display());
+
+    let (ok, stdout, stderr) = blit(&[
+        "mirror",
+        "--yes",
+        &with_slash(&src),
+        &with_slash(&dst),
+        "--exclude",
+        &pattern,
+    ]);
+    assert!(ok, "mirror failed:\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !dst.join("cache").exists(),
+        "the entry named in another case must be left out"
+    );
+    assert!(dst.join("keep.txt").exists());
+    assert!(
+        !stderr.contains("cannot match anything"),
+        "a pattern under the source must not warn: {stderr}"
+    );
+}
+
 /// cr-g3fix-2: an absolute glob written through a symlink to the source
 /// is made relative. The glob path itself never exists, so only its
 /// literal part is resolved; before the fix the pattern was reported as

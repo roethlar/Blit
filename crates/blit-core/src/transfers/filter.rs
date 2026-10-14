@@ -237,9 +237,12 @@ pub fn resolve_excludes(exclude: &[String], source_root: Option<&Path>) -> Resol
                 .iter()
                 .find_map(|root| relative_to_root(form, root, windows))
         });
-        match relative {
-            Some(relative) => resolved.patterns.push(relative),
-            None => {
+        match (relative, source_root) {
+            (Some(rest), Some(root)) => {
+                let rest = stored_spelling(root, rest, windows, stored_name);
+                resolved.patterns.push(written(&rest));
+            }
+            _ => {
                 resolved.patterns.push(pattern.clone());
                 resolved.unmatchable.push(pattern.clone());
             }
@@ -343,11 +346,9 @@ fn absolute_components(path: &str, windows: bool) -> Vec<String> {
     components
 }
 
-/// `pattern` made relative to `root` when it lies strictly beneath it;
-/// `None` otherwise (the root itself names nothing a walk visits). A
-/// single remaining name is written `./name` so it stays anchored to the
-/// root instead of matching that name at every depth.
-fn relative_to_root(pattern: &str, root: &str, windows: bool) -> Option<String> {
+/// The components of `pattern` below `root` when it lies strictly beneath
+/// it; `None` otherwise (the root itself names nothing a walk visits).
+fn relative_to_root(pattern: &str, root: &str, windows: bool) -> Option<Vec<String>> {
     let pattern = absolute_components(pattern, windows);
     let root = absolute_components(root, windows);
     if pattern.len() <= root.len() {
@@ -368,11 +369,75 @@ fn relative_to_root(pattern: &str, root: &str, windows: bool) -> Option<String> 
     if rest.iter().any(|component| component == "..") {
         return None;
     }
-    Some(if rest.len() == 1 {
+    Some(rest.to_vec())
+}
+
+/// A relative pattern from its components, `/`-joined. A single name is
+/// written `./name` so it stays anchored to the root instead of matching
+/// that name at every depth.
+fn written(rest: &[String]) -> String {
+    if rest.len() == 1 {
         format!("./{}", rest[0])
     } else {
         rest.join("/")
-    })
+    }
+}
+
+/// cr-g3fix-1: `rest` — a pattern's components below `root`, as typed —
+/// with each component the filesystem holds spelled the way it stores it.
+/// Every rule compares case-sensitively, so on a case-insensitive
+/// filesystem `/src/CACHE` for an on-disk `src/cache` must become
+/// `./cache` — locally and in the wire form a push sends — or it names
+/// nothing the walk sees. The spelling stops at the first component that
+/// holds a glob metacharacter or that `stored` cannot name (missing, or a
+/// symlink); that one and the rest stay as typed.
+fn stored_spelling(
+    root: &Path,
+    rest: Vec<String>,
+    windows: bool,
+    stored: impl Fn(&Path) -> Option<String>,
+) -> Vec<String> {
+    let mut at = root.to_path_buf();
+    let mut spelled = Vec::with_capacity(rest.len());
+    let mut components = rest.into_iter();
+    for component in components.by_ref() {
+        if has_glob_meta(&component, windows) {
+            spelled.push(component);
+            break;
+        }
+        at.push(&component);
+        match stored(&at) {
+            Some(name) => {
+                at.set_file_name(&name);
+                spelled.push(name);
+            }
+            None => {
+                spelled.push(component);
+                break;
+            }
+        }
+    }
+    spelled.extend(components);
+    spelled
+}
+
+/// The name the filesystem stores for `path`'s last component (its own
+/// case, and on Windows its long name); `None` when it does not exist or
+/// is a symlink — resolving a symlink yields its target's name, and the
+/// walk sees the link.
+fn stored_name(path: &Path) -> Option<String> {
+    if std::fs::symlink_metadata(path)
+        .ok()?
+        .file_type()
+        .is_symlink()
+    {
+        return None;
+    }
+    std::fs::canonicalize(path)
+        .ok()?
+        .file_name()?
+        .to_str()
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -611,37 +676,122 @@ mod tests {
         );
     }
 
+    /// True when `dir`'s filesystem ignores case: a file made as
+    /// `case-probe` opens as `CASE-PROBE`.
+    fn case_insensitive(dir: &Path) -> bool {
+        let probe = dir.join("case-probe");
+        std::fs::write(&probe, b"").unwrap();
+        let insensitive = std::fs::File::open(dir.join("CASE-PROBE")).is_ok();
+        std::fs::remove_file(&probe).unwrap();
+        insensitive
+    }
+
+    /// cr-g3fix-1: on a case-insensitive filesystem an absolute exclude in
+    /// another case names the entry on disk, and both builders — the local
+    /// rule and the wire form — spell it the way the disk stores it (every
+    /// rule compares case-sensitively). A path that does not exist keeps
+    /// its typed case. Skipped where the filesystem is case-sensitive.
+    #[test]
+    fn an_absolute_exclude_in_another_case_takes_the_stored_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("cache").join("Sub")).unwrap();
+        if !case_insensitive(root) {
+            eprintln!("skipping: {} is case-sensitive", root.display());
+            return;
+        }
+        let exc = vec![
+            format!("{}", root.join("CACHE").display()),
+            format!("{}", root.join("CACHE").join("SUB").join("*.tmp").display()),
+            format!("{}", root.join("Missing").join("X").display()),
+        ];
+        let expected = vec!["./cache", "cache/Sub/*.tmp", "Missing/X"];
+        let mut i = inputs(&[], &exc);
+        i.source_root = Some(root);
+        assert_eq!(build(&i).unwrap().exclude_files, expected, "build");
+        assert_eq!(build_spec(&i).unwrap().exclude, expected, "build_spec");
+        assert!(resolve_excludes(&exc, Some(root)).unmatchable.is_empty());
+    }
+
+    /// cr-g3fix-1: the spelling walk on any OS, against a stand-in
+    /// case-insensitive disk holding `root/cache/Sub/x.txt`: each component
+    /// takes the stored name until one holds a glob metacharacter or cannot
+    /// be named, and that one and the rest stay as typed.
+    #[test]
+    fn the_stored_spelling_runs_until_a_component_cannot_be_named() {
+        let disk = |path: &Path| {
+            let key = path.to_string_lossy().replace('\\', "/").to_lowercase();
+            [
+                ("root/cache", "cache"),
+                ("root/cache/sub", "Sub"),
+                ("root/cache/sub/x.txt", "x.txt"),
+            ]
+            .iter()
+            .find(|(stored, _)| *stored == key)
+            .map(|(_, name)| name.to_string())
+        };
+        let spell = |rest: &[&str]| {
+            let rest = rest.iter().map(|c| c.to_string()).collect();
+            stored_spelling(Path::new("root"), rest, false, disk)
+        };
+        assert_eq!(spell(&["CACHE", "SUB", "X.TXT"]), ["cache", "Sub", "x.txt"]);
+        assert_eq!(
+            spell(&["CACHE", "*.TMP", "SUB"]),
+            ["cache", "*.TMP", "SUB"],
+            "a glob component and everything after it stay as typed"
+        );
+        assert_eq!(
+            spell(&["CACHE", "Missing", "SUB"]),
+            ["cache", "Missing", "SUB"],
+            "a component the disk cannot name ends the spelling"
+        );
+    }
+
+    /// cr-g3fix-1: the stored name is the entry's own — never a symlink's
+    /// target's, which would name another entry than the link the walk
+    /// sees — and there is none for a missing path.
+    #[cfg(unix)]
+    #[test]
+    fn the_stored_name_is_the_entrys_own_never_a_symlink_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+        assert_eq!(
+            stored_name(&dir.path().join("real")).as_deref(),
+            Some("real")
+        );
+        assert_eq!(stored_name(&dir.path().join("link")), None);
+        assert_eq!(stored_name(&dir.path().join("missing")), None);
+    }
+
     /// Windows forms: either slash, any case, verbatim and UNC prefixes.
     /// Pure string logic, so it runs (and can fail) on every OS.
     #[test]
     fn windows_absolute_excludes_compare_case_insensitively_with_either_slash() {
+        let relative = |pattern: &str, root: &str, windows: bool| {
+            relative_to_root(pattern, root, windows).map(|rest| written(&rest))
+        };
         assert!(is_absolute_pattern(r"C:\Users\me\.java", true));
         assert!(is_absolute_pattern("c:/Users/me", true));
         assert!(is_absolute_pattern(r"\\server\share\x", true));
         assert!(!is_absolute_pattern(r"C:\Users\me", false));
         assert!(!is_absolute_pattern(".java", true));
         assert_eq!(
-            relative_to_root(r"C:\Users\Me\.java", r"c:\users\me", true).as_deref(),
+            relative(r"C:\Users\Me\.java", r"c:\users\me", true).as_deref(),
             Some("./.java")
         );
         assert_eq!(
-            relative_to_root(r"C:\Users\me\a\.java", r"\\?\C:\Users\me", true).as_deref(),
+            relative(r"C:\Users\me\a\.java", r"\\?\C:\Users\me", true).as_deref(),
             Some("a/.java")
         );
         assert_eq!(
-            relative_to_root(r"\\srv\share\d\x", r"\\?\UNC\srv\share\d", true).as_deref(),
+            relative(r"\\srv\share\d\x", r"\\?\UNC\srv\share\d", true).as_deref(),
             Some("./x")
         );
+        assert_eq!(relative(r"D:\Users\me\.java", r"C:\Users\me", true), None);
+        assert_eq!(relative(r"\srv\share\d\x", r"\\srv\share\d", true), None);
         assert_eq!(
-            relative_to_root(r"D:\Users\me\.java", r"C:\Users\me", true),
-            None
-        );
-        assert_eq!(
-            relative_to_root(r"\srv\share\d\x", r"\\srv\share\d", true),
-            None
-        );
-        assert_eq!(
-            relative_to_root("/Users/Me/.java", "/Users/me", false),
+            relative("/Users/Me/.java", "/Users/me", false),
             None,
             "case matters off Windows"
         );
