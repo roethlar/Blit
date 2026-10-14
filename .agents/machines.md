@@ -57,6 +57,13 @@ ARM64 (10.0.26100), Rust `aarch64-pc-windows-msvc` via rustup (1.98.1 since 2026
 2022 Build Tools, Git, ~16 GB free. Key auth; default shell cmd.exe.
 Network: UTM "Bridged" onto nagatha's `en11` (the 10GbE port) — if `en11`
 has no carrier the VM will not come up on the LAN (2026-10-04).
+**2026-10-14 (RELEASE_1_0 G5b attempt):** `en11` reports `status: inactive`
+(no carrier), `10.1.10.222` does not answer ping or ssh, and no `UTM.app`
+or `*.utm` bundle is findable on this Mac (`mdfind`, `/Applications`,
+`~/Applications`, `~/Library/Containers/com.utmapp.UTM`) — the VM cannot
+be started or re-networked from here. netwatch-01 (`10.1.10.173`/`.177`)
+also timed out. The four Windows legs of the 1.0 cross-OS matrix wait on
+the owner bringing a Windows host up.
 **No native x86_64 Windows host:** the Ryzen 9 box the owner offered on
 2026-10-01 is no longer available (owner, 2026-10-04). CI's Windows leg is
 the only native x86_64 Windows evidence; the VM's Prism-emulated x86_64
