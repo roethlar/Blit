@@ -168,6 +168,31 @@ history already follows (decided at jl-1b, 2026-10-07: under
 - [ ] Saved jobs reproduce: `blit jobs run <name>` from another working
       directory, or after the `--files-from` file changed, transfers exactly
       what the original run did.
+
+**Evidence per criterion (agent, 2026-10-14; the ticks are the owner's).**
+Every guard below ran green on macOS at `75864cb0` (1483/0/2) and in CI's
+Linux and Windows legs at `8844dfbd` (run 38474595246). In the order of the
+list above:
+
+| # | criterion | evidence |
+| --- | --- | --- |
+| 1 | detached job, one failed file: watch exits non-zero, list counts, log names it | jl-1c `a_detached_job_with_a_failed_file_is_not_reported_as_success` (end to end) |
+| 2 | every route leaves a log on each machine under one ID; text and `--json` | jl-2 landed tests (daemon at both ends, two logs by role; local logs; `jobs log <id\|file>`, `--json`) |
+| 3 | a log names every copy/delete/failure with reasons, `-v` detail, phases, stalls; written live, compressed | jl-1a (21 writer/reader tests, `.jsonl.gz`), jl-1b engine `FileFailed`/`Deleted` events, jl-2 `-v` lines |
+| 4 | retention: 51st replaces the oldest; config honored; saved jobs never pruned | jl-1a pruning tests; jl-3a `[jobs] keep` prunes records; jl-5 `pruning_keeps_the_newest_and_never_a_live_or_waiting_run`; saved jobs live in `jobs/saved/` outside pruning (jl-3b) |
+| 5 | `--save`/`--export`, `jobs save\|export\|run\|delete\|list` as designed; `run` re-runs the same transfer | jl-3b `saved_jobs` suite (seven guards) |
+| 6 | `jobs retry` re-sends only the failed files with the original options; refuses another machine | jl-4 retry suite (nine guards: exact set, options kept, foreign machine refused, running/waiting refused) |
+| 7 | Windows folder `%LOCALAPPDATA%\Blit`; roaming files moved once | jl-2 `config.rs` migration tests; the Windows half is CI's Windows leg (green at `8844dfbd`), the Mac runs the platform-neutral half only |
+| 8 | FAST: no measurable slowdown | jl-5 bench, every cell PASS (`docs/bench/job-logs-fast-2026-10-13/`) |
+| 9 | every sub-verb answers `--help` | jl-3b `a_job_name_must_be_a_plain_name_and_every_sub_verb_has_help` |
+| 10 | crash: a killed daemon's log is finalized as interrupted at startup | jl-1a/1b recovery tests; cr-jlfix1-1 (recovery rebuilds a lost header) |
+| 11 | unwritable log directory: transfer completes, report says the log is incomplete | jl-5 `a_run_that_cannot_be_logged_says_so_and_still_copies` |
+| 12 | detached: `jobs list` shows the outcome from the daemon; `jobs retry` re-runs exactly its failed files | jl-3a detached reconciliation tests; jl-4 acceptance case (failed file freed, retried detached, exactly that file sent) |
+| 13 | saved jobs reproduce from another directory or after the list file changed | jl-3b acceptance test; cr-jl5-1 `a_job_keeps_the_list_its_run_overwrote` |
+
+Live proof beyond the suites: the G5b dry run of 2026-10-14
+(`docs/bench/g5b-dryrun-2026-10-14/`) shows five Mac↔Linux runs listed on
+both machines under the same job IDs.
 - [ ] Self-delegation: a daemon that is both ends of one run keeps two
       distinct logs, labeled by role.
 

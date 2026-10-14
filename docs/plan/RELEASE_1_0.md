@@ -136,11 +136,11 @@ reviewed to consensus.
 
 | Gate | Status | Moves on |
 | --- | --- | --- |
-| G2 CI on the candidate | pending the candidate (the version-bump commit) | push (owner go), then the run |
+| G2 CI on the candidate | candidate cut `6d5d93c8` (plus this docs commit); local gate green 1483/0/2 on macOS; not pushed | push (owner go), then the run |
 | G3 dispositions | SSC shipped; audit-18 retired; **audit-19 open**; **detached recents reason open** | two owner rulings, fix-now or ship documented |
-| G4 docs truth | README + TRANSFER_SESSION audit running 2026-10-14; plan-status sweep needs rulings on 9 Active plans (below); STATE de-drift agent's | audit result → edits; one owner ruling on the sweep |
-| G5 version + notes | CHANGELOG and notes done 2026-10-14; bump pending | agent, after the G3 rulings land |
-| G5b cross-OS matrix | Mac↔Linux ready once the candidate's CI has built; Windows legs blocked (no host reachable) | a Windows host |
+| G4 docs truth | README + TRANSFER_SESSION corrected `6ac98801` (audit of 2026-10-14); plan-status sweep needs one ruling on 9 Active plans (below) | one owner ruling on the sweep |
+| G5 version + notes | DONE `6d5d93c8`: 1.0.0, CHANGELOG `[1.0.0]`, notes re-cut († entries follow the G3 rulings) | — |
+| G5b cross-OS matrix | Mac↔Linux PASS 2026-10-14 with CI's `8844dfbd` archives (`aaa8af55`); to repeat on the candidate's archives; Windows legs blocked (no host reachable) | the candidate's CI build; a Windows host |
 | G6 tag + publish | — | owner |
 
 Plan-status sweep (G4): nine plans read `Active` while their work is
@@ -164,8 +164,7 @@ Ordered path to the tag:
    gate, Codex codereview with the owner's dispatch approval.
 3. G4 edits: README/TRANSFER_SESSION corrections from the audit; STATE
    queue de-drift; plan-status flips as ruled.
-4. G5: version bump + `[1.0.0]` + final notes as one commit → push (owner
-   go) → G2 CI green on that SHA.
+4. G5: DONE (`6d5d93c8`). Push (owner go) → G2 CI green on that SHA.
 5. G5b with the candidate's archives: Mac↔Linux now; Windows legs when a
    host answers (recorded per pair here).
 6. Optional final Codex range review of the release-prep commits (owner
