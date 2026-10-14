@@ -181,6 +181,41 @@ fn check_exclude_absolute_path_under_the_source_is_made_relative() {
     );
 }
 
+/// cr-g3fix-2: an absolute glob written through a symlink to the source
+/// is made relative. The glob path itself never exists, so only its
+/// literal part is resolved; before the fix the pattern was reported as
+/// unable to match and every `.txt` file copied.
+#[cfg(unix)]
+#[test]
+fn mirror_exclude_absolute_glob_through_a_symlinked_source() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    java_tree(&src);
+    fs::write(src.join("other.dat"), b"o").unwrap();
+    let alias = tmp.path().join("alias");
+    std::os::unix::fs::symlink(&src, &alias).unwrap();
+    let pattern = format!("{}", alias.join("*.txt").display());
+
+    let (ok, stdout, stderr) = blit(&[
+        "mirror",
+        "--yes",
+        &with_slash(&src),
+        &with_slash(&dst),
+        "--exclude",
+        &pattern,
+    ]);
+    assert!(ok, "mirror failed:\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !dst.join("keep.txt").exists(),
+        "the glob through the alias must exclude keep.txt"
+    );
+    assert!(dst.join("other.dat").exists());
+    assert!(
+        !stderr.contains("cannot match anything"),
+        "a glob under the source must not warn: {stderr}"
+    );
+}
+
 /// The excluded directory is never opened: unreadable, it would make the
 /// source scan incomplete, and an incomplete scan refuses a mirror's
 /// deletions (here: the run fails and `stale.txt` survives).

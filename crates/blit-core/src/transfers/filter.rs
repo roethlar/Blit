@@ -200,7 +200,8 @@ pub struct ResolvedExcludes {
 /// way the platform compares them (case-insensitively on Windows); a root
 /// or pattern reached through a symlink is also compared in its resolved
 /// form, so `/tmp/x/.java` and `/private/tmp/x/.java` name one path on
-/// macOS. Relative patterns pass through untouched.
+/// macOS (`through_resolved_root` says how a pattern is resolved).
+/// Relative patterns pass through untouched.
 pub fn resolve_excludes(exclude: &[String], source_root: Option<&Path>) -> ResolvedExcludes {
     let windows = cfg!(windows);
     let mut resolved = ResolvedExcludes::default();
@@ -211,26 +212,25 @@ pub fn resolve_excludes(exclude: &[String], source_root: Option<&Path>) -> Resol
         resolved.patterns = exclude.to_vec();
         return resolved;
     }
-    let roots: Vec<String> = source_root
-        .map(|root| {
-            let mut forms = Vec::new();
-            if let Ok(absolute) = std::path::absolute(root) {
-                forms.push(absolute.to_string_lossy().into_owned());
-            }
-            if let Ok(canonical) = std::fs::canonicalize(root) {
-                forms.push(canonical.to_string_lossy().into_owned());
-            }
-            forms
-        })
-        .unwrap_or_default();
+    let resolved_root = source_root.and_then(|root| std::fs::canonicalize(root).ok());
+    let mut roots: Vec<String> = Vec::new();
+    if let Some(absolute) = source_root.and_then(|root| std::path::absolute(root).ok()) {
+        roots.push(absolute.to_string_lossy().into_owned());
+    }
+    if let Some(canonical) = &resolved_root {
+        roots.push(canonical.to_string_lossy().into_owned());
+    }
     for pattern in exclude {
         if !is_absolute_pattern(pattern, windows) {
             resolved.patterns.push(pattern.clone());
             continue;
         }
         let mut pattern_forms = vec![pattern.clone()];
-        if let Ok(canonical) = std::fs::canonicalize(pattern) {
-            pattern_forms.push(canonical.to_string_lossy().into_owned());
+        if let Some(form) = resolved_root
+            .as_deref()
+            .and_then(|root| through_resolved_root(pattern, root, windows))
+        {
+            pattern_forms.push(form);
         }
         let relative = pattern_forms.iter().find_map(|form| {
             roots
@@ -246,6 +246,57 @@ pub fn resolve_excludes(exclude: &[String], source_root: Option<&Path>) -> Resol
         }
     }
     resolved
+}
+
+/// cr-g3fix-2: `pattern` written through the resolved source root when
+/// its leading literal part reaches the source through a symlink
+/// (`/alias/*.txt` with `alias` naming the source, or a directory inside
+/// it; macOS `/tmp` for `/private/tmp`). The pattern's leading ancestors
+/// up to its first component holding a glob metacharacter are resolved,
+/// shortest first; the first that exists and lands at or below
+/// `resolved_root` is written resolved, and what follows it is re-appended
+/// as typed — a glob unchanged, a path that does not exist yet as it was
+/// written, and a symlink inside the source unresolved (the walk does not
+/// follow one, so resolving it would name its target instead). `None` when
+/// no ancestor lands there.
+fn through_resolved_root(pattern: &str, resolved_root: &Path, windows: bool) -> Option<String> {
+    let path = Path::new(pattern);
+    let mut ancestors: Vec<&Path> = path.ancestors().collect();
+    ancestors.reverse();
+    for ancestor in ancestors {
+        if ancestor
+            .file_name()
+            .is_some_and(|name| has_glob_meta(&name.to_string_lossy(), windows))
+        {
+            break;
+        }
+        let Ok(resolved) = std::fs::canonicalize(ancestor) else {
+            continue;
+        };
+        if !resolved.starts_with(resolved_root) {
+            continue;
+        }
+        let Ok(rest) = path.strip_prefix(ancestor) else {
+            continue;
+        };
+        // A `..` after the landing point could climb back out; a longer
+        // ancestor folds it in its resolved form instead.
+        if rest
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+        {
+            continue;
+        }
+        return Some(resolved.join(rest).to_string_lossy().into_owned());
+    }
+    None
+}
+
+/// A component `globset` reads as glob syntax: it opens a wildcard, a
+/// class or an alternation — or, off Windows, holds `\`, the escape (on
+/// Windows `\` is a separator and never reaches a component).
+fn has_glob_meta(component: &str, windows: bool) -> bool {
+    component.contains(['*', '?', '[', '{']) || (!windows && component.contains('\\'))
 }
 
 /// An absolute path on the platform's terms: rooted on Unix; a drive
@@ -521,6 +572,43 @@ mod tests {
         let resolved = resolve_excludes(&exc, Some(&link));
         assert_eq!(resolved.patterns, vec!["./.java".to_string()]);
         assert!(resolved.unmatchable.is_empty());
+    }
+
+    /// cr-g3fix-2: an absolute glob written through a symlink to the
+    /// source, or to a directory inside it, is made relative — the glob
+    /// path itself never exists, so only its literal leading part is
+    /// resolved and the rest is kept as typed. A path not there yet stays
+    /// as written, and a symlink inside the source is not resolved: the walk
+    /// does not follow it, so the pattern still names the link, not its
+    /// target.
+    #[cfg(unix)]
+    #[test]
+    fn an_absolute_glob_through_a_symlink_becomes_relative() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("keep.txt"), "k").unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&src, &alias).unwrap();
+        let into_sub = dir.path().join("into_sub");
+        std::os::unix::fs::symlink(src.join("sub"), &into_sub).unwrap();
+        std::os::unix::fs::symlink(src.join("sub"), src.join("link")).unwrap();
+        let exc = vec![
+            format!("{}", alias.join("*.txt").display()),
+            format!("{}", into_sub.join("*.log").display()),
+            format!("{}", alias.join("new").join("*.tmp").display()),
+            format!("{}", alias.join("link").display()),
+        ];
+        let resolved = resolve_excludes(&exc, Some(&src));
+        assert_eq!(
+            resolved.patterns,
+            vec!["./*.txt", "sub/*.log", "new/*.tmp", "./link"]
+        );
+        assert!(
+            resolved.unmatchable.is_empty(),
+            "{:?}",
+            resolved.unmatchable
+        );
     }
 
     /// Windows forms: either slash, any case, verbatim and UNC prefixes.
