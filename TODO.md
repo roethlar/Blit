@@ -194,7 +194,12 @@ explicitly-deferred logging epic (F15).
       `create_dir_all` (line 605) and `write` (line 608) call sites in
       the same closure (and their mirror in the local-mirror path, per
       the note above).
-- [ ] **audit-18** Non-UTF-8 source filenames are silently corrupted
+- [x] **audit-18** CLOSED 2026-09-30 by SOURCE_SIDE_CONTAINMENT ssc-5
+      (`6c266dd4`, D-2026-09-29-3): non-UTF-8 names transfer by their
+      exact bytes, rsync-style; a destination that cannot store them
+      reports the file and continues (CHANGELOG `[Unreleased]`;
+      RELEASE_1_0 G3). Original report, kept for the record:
+      Non-UTF-8 source filenames are silently corrupted
       during enumeration, then fail to open, aborting the whole
       transfer. Reported: `blit copy /home/michael/
       /run/media/michael/USB_DRIVE/michael -ypv` (same host as

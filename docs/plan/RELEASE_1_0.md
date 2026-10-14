@@ -50,12 +50,20 @@ are the owner's act.
   audit-16's open half (sink-less heartbeat ignores `--verbose`) — CLOSED
   2026-08-02 (DEVLOG 2026-08-02 03:25Z), listed here in error until the
   2026-09-29 refresh.
-  Owner design gates (fix pre-1.0 or ship documented): audit-18
-  (non-UTF-8 filenames fail to transfer — per-file contained on LOCAL
-  transfers only; a REMOTE push can still abort wholesale at source
-  payload preparation, per ls6-range r2's nonutf8-release-claim), audit-19 (`--exclude` silently matches nothing
-  for absolute paths and bare directory names). Whichever ships open goes
-  in release notes as a known limitation, verbatim enough to be found.
+  Owner design gates (fix pre-1.0 or ship documented): **audit-18 RETIRED
+  2026-09-30** by SOURCE_SIDE_CONTAINMENT ssc-5 (`6c266dd4`,
+  D-2026-09-29-3: non-UTF-8 names transfer by raw bytes on every route;
+  `CHANGELOG.md` `[Unreleased]`); **audit-19 OPEN** (`--exclude` silently
+  matches nothing for absolute paths and bare directory names;
+  `TODO.md`). Whichever ships open goes in release notes as a known
+  limitation, verbatim enough to be found (drafted † in
+  `docs/RELEASE_NOTES_1_0.md`). Also under G3 by D-2026-10-07-3 ("ship
+  nothing until the open work is done"): the 2026-10-07 defects (a)(b)(c)
+  are FIXED (`bbc75dec`, `b097aec0`, JOB_LOGS jl-1c); JOB_LOGS jl-1a..jl-5
+  are landed and reviewed to consensus; one item found since is open — a
+  failed `--detach` job's `jobs list` entry says only `delegated_pull
+  handler failed` (`crates/blit-daemon/src/service/core.rs:793`), owner
+  call fix-now or ship documented (drafted †).
 - [ ] **G4 — docs truth pass.** README and `docs/TRANSFER_SESSION.md`
   claims verified against current behavior — expressly the ls-6 compare
   contract (default compare does not interrogate destination streams;
@@ -63,10 +71,15 @@ are the owner's act.
   Active/Draft headers reconciled with reality (greenfield_plan_v6,
   OTP7/11/12, ONE_TRANSFER_PATH, UTE_REV4, ZERO_COPY, CLI_LIVE_PROGRESS,
   LOCAL_SMALL_FILE_PATH). `docs/STATE.md` queue de-drifted (pre-ls-6 text).
-- [ ] **G5 — version + notes.** Workspace version 0.1.1 → 1.0.0; release
-  notes cover 0.1.1 → 1.0.0 (pfc containment, ls-0..6 performance ~5.1×
-  on the field mirror, colour output, compare-contract change, fixes,
-  known limitations).
+- [ ] **G5 — version + notes.** Workspace version 0.1.3 → 1.0.0 (root
+  `Cargo.toml`, the two internal `blit-core` dependency pins, `Cargo.lock`),
+  as the candidate's last commit; `CHANGELOG.md` `[Unreleased]` becomes
+  `[1.0.0] - <date>`. The 0.1.1 → 0.1.3 content this gate once named
+  shipped in 0.1.2 and 0.1.3 (`CHANGELOG.md`). Status 2026-10-14:
+  `[Unreleased]` completed (source-side containment, retry passes,
+  non-UTF-8 names, job logs/records/saved jobs, the fixes);
+  `docs/RELEASE_NOTES_1_0.md` re-cut as 0.1.3 → 1.0.0 with the known
+  limitations marked † where a G3 ruling is open. Bump not yet made.
 - [ ] **G5b — cross-OS smoke matrix (owner-raised, 2026-08-02).** CI only
   proves same-OS loopback daemon transfers; the six directed cross-OS
   pairs (win↔linux, win↔mac, mac↔linux) run with the CANDIDATE binaries
@@ -74,7 +87,16 @@ are the owner's act.
   `1.0.0+ef9a13b21afc` satisfies the same-build handshake). Each pair:
   small mixed tree with nested dirs and a content change, initial copy,
   content verify, converged re-run must report 0 changed. Recorded here
-  with results per pair.
+  with results per pair. **Facts 2026-10-14:** every pair can be driven
+  from the Mac (push to, or pull from, the other host's daemon), so
+  daemons are needed only on Linux and Windows; the candidate archives are
+  the `Build Release` artifacts of the candidate's own CI run.
+  `michael@magneto` answers (Arch, cargo 1.99). No Windows host answered:
+  netwatch-01 (`10.1.10.173`/`.177`) and the ARM64 dev VM (`10.1.10.222`,
+  which needs `en11` carrier and is emulated x86_64 — supporting evidence
+  only) all timed out. The four Windows legs wait on a Windows host; the
+  two Mac↔Linux legs can run as soon as the candidate's CI has built. `q`
+  is no longer a fleet host for this.
 - **G5c — DISSOLVED (D-2026-08-15-2): 1.0 is CLI + daemon only; no UI
   surface gates this or any release.** UIs are a separate app
   (`BlitAdmin_UIs` repo) with their own lifecycle. History: this gate was
@@ -83,7 +105,57 @@ are the owner's act.
   (Blit is CLI + daemon only). Crate deletion runs under
   `docs/plan/UI_REMOVAL.md`, independent of this release plan.
 - [ ] **G6 — OWNER GATE: tag v1.0.0 and publish.** Outward act; needs the
-  owner's explicit go on the exact candidate SHA.
+  owner's explicit go on the exact candidate SHA. The tag's CI run
+  publishes the GitHub Release and updates the bot channels (Homebrew tap,
+  Scoop, AUR, winget); homebrew-core is NOT configured (no
+  `HOMEBREW_CORE_TOKEN` secret, verified 2026-10-14), so D-2026-10-04-2's
+  pm-5 hold cannot be breached by the tag. crates.io publishes of
+  `blit-core`, `blit-transfer`, `blit-daemon` 1.0.0 are the owner's
+  (the harness blocks an agent's `cargo publish`; `--dry-run` is not).
+
+## Readiness as of 2026-10-14 (owner goal: "do everything necessary to get this ready for 1.0")
+
+Where each gate stands and who moves it. CI is fully green on `8844dfbd`
+(run 38474595246), the last code commit; every slice since `v0.1.3` is
+reviewed to consensus.
+
+| Gate | Status | Moves on |
+| --- | --- | --- |
+| G2 CI on the candidate | pending the candidate (the version-bump commit) | push (owner go), then the run |
+| G3 dispositions | SSC shipped; audit-18 retired; **audit-19 open**; **detached recents reason open** | two owner rulings, fix-now or ship documented |
+| G4 docs truth | README + TRANSFER_SESSION audit running 2026-10-14; plan-status sweep needs rulings on 9 Active plans (below); STATE de-drift agent's | audit result → edits; one owner ruling on the sweep |
+| G5 version + notes | CHANGELOG and notes done 2026-10-14; bump pending | agent, after the G3 rulings land |
+| G5b cross-OS matrix | Mac↔Linux ready once the candidate's CI has built; Windows legs blocked (no host reachable) | a Windows host |
+| G6 tag + publish | — | owner |
+
+Plan-status sweep (G4): nine plans read `Active` while their work is
+landed or deferred post-release — ONE_TRANSFER_PATH (otp-1..12c `[x]`,
+otp-12d/13 post-release by D-2026-07-22-1), OTP7_RESUME, OTP11_LOCAL_SESSION,
+OTP12_ACCEPTANCE_RUN, UNIFIED_TRANSFER_ENGINE_REV4 (code-complete;
+measurement gates post-release), CLI_LIVE_PROGRESS (clp-1..3 landed; F2/F5
+owner calls), LOCAL_SMALL_FILE_PATH (ls-0..6 shipped), SMALL_FILE_CEILING
+(sf-3d landed; rig A/B owed), PACKAGE_MANAGER_DISTRIBUTION (pm-5 held).
+Proposed: flip the first seven to Shipped (or Historical where the doc is
+a design record) with a one-line note each; keep SMALL_FILE_CEILING and
+PACKAGE_MANAGER_DISTRIBUTION Active with their open item named. Status
+flips are owner declarations (precedent D-2026-10-07-1).
+
+Ordered path to the tag:
+
+1. Owner rulings, one at a time: audit-19; the detached recents reason;
+   the plan-status sweep; the JOB_LOGS acceptance ticks (evidence per
+   criterion in `docs/plan/JOB_LOGS.md` slices).
+2. Any fix ruled lands as a slice under this plan (G3 fix-now): guard,
+   gate, Codex codereview with the owner's dispatch approval.
+3. G4 edits: README/TRANSFER_SESSION corrections from the audit; STATE
+   queue de-drift; plan-status flips as ruled.
+4. G5: version bump + `[1.0.0]` + final notes as one commit → push (owner
+   go) → G2 CI green on that SHA.
+5. G5b with the candidate's archives: Mac↔Linux now; Windows legs when a
+   host answers (recorded per pair here).
+6. Optional final Codex range review of the release-prep commits (owner
+   dispatch approval).
+7. G6: tag (owner) → release job → crates.io publishes (owner).
 
 ## Non-goals (post-1.0)
 

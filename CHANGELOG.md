@@ -37,7 +37,8 @@ entry: numeric field was not a number … cksum`).
   `0` disables) passes, `--retry-wait <SECONDS>` (`-W`, default 30) before
   each. Files that land on retry count once; survivors are reported once
   with `(retried)`. Mirror deletions run at the end of the main pass and
-  never touch the subtree under a failed path.
+  never touch the subtree under a failed path. A `--detach` job runs on
+  the daemons and has no retry passes; the command says so once.
 - **Filenames that are not valid UTF-8 transfer**, rsync-style: the exact
   bytes travel beside the text, a Linux (or other byte-keyed) destination
   creates the real name and the file converges on re-run; a destination
@@ -55,13 +56,80 @@ entry: numeric field was not a number … cksum`).
   file held open with no sharing, such as `NTUSER.DAT` or a live database
   — no longer ends the run at scan time. It is listed, reported per file
   (`source: cannot open: …`) if it still cannot be read, retried, and its
-  destination counterpart is kept under mirror. (A permission refusal at
-  scan still marks the scan incomplete, so a mirror refuses; that is an
-  open owner question.)
+  destination counterpart is kept under mirror. A permission refusal at
+  scan is handled the same way (D-2026-10-04-1), so one access-denied file
+  no longer blocks a mirror's deletions.
 - Wording: the end-of-run block now reads "N file(s) did not land at the
   destination:", and the `move` source-delete refusal says the same,
   since a failure may now be the source's.
 - Protocol contract 6 → 7 (`docs/TRANSFER_SESSION.md`).
+
+### Job logs, run records and saved jobs
+
+Every run now leaves a record of what it did, on every machine that took
+part, and a job you can list, read, re-run and retry.
+
+- **A log for every run.** Local copies, pushes, pulls and remote-to-remote
+  jobs each write a compressed JSON log (`.jsonl.gz`) as the run goes:
+  every file copied, deleted and failed with its reason, what `-v` would
+  have shown, phase start and end times, stall notices. The machine where
+  the command was typed keeps its log in the per-user folder
+  (`~/Library/Application Support/com.Blit.Blit` on macOS, `~/.config/blit`
+  on Linux, `%LOCALAPPDATA%\Blit` on Windows); each daemon involved keeps
+  its own under its state directory. One job ID, created where the command
+  was typed, names the run on every machine. A run killed mid-way leaves a
+  log that the next start finalizes as interrupted. Names that are not
+  valid UTF-8 are logged by their exact bytes.
+- **`blit jobs list [<host>]`** shows recent runs (and saved jobs) with
+  their outcome and failed-file count; **`blit jobs log [<host>] <job-id>`**
+  shows a log as text, or the raw events with `--json`. A `--detach` job's
+  outcome is fetched from the daemon that ran it; **`blit jobs watch`**
+  exits 1 and names the failed files when a detached job has any.
+- **Saved jobs.** `blit copy|mirror|move … --save <name>` keeps the run as a
+  saved job; `--export <file>` writes it to a file (both together work).
+  `blit jobs save <job-id> <name>`, `blit jobs export <job-id|name> <file>`,
+  `blit jobs run <name|file>` and `blit jobs delete <name>` manage them. A
+  saved job reproduces its run from any working directory, with the
+  `--files-from` list it ran with.
+- **`blit jobs retry <job-id|file>`** starts a new run that sends exactly
+  the files that failed, with the original options (a `move` runs whole
+  again). It refuses a job from another machine, a run still going or
+  waiting, and a run whose failures are not all named.
+- **Retention.** Each machine keeps its newest 50 logs and 50 run records;
+  `[jobs] keep` in the CLI's per-user `config.toml` and in the daemon's
+  `config.toml` changes it. Saved jobs are never pruned.
+- **Windows** keeps settings, jobs and logs under `%LOCALAPPDATA%\Blit`
+  (the local profile, not the roaming one); files found in the old roaming
+  folder are moved once.
+- Logging costs no measurable time: a command's start touches no disk and
+  the log closes alongside the run's record. If the log directory cannot
+  be written the transfer still completes and the report says the log is
+  incomplete.
+- A dry run or `--null` run is logged as what it planned, not as copies.
+- Wire protocol (contract 7): the job ID rides the session-open and
+  delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
+  finished-job record carries the failed-file count.
+
+### Fixes
+
+- A local single-file copy armed its failure cleanup before opening the
+  destination, so a destination it could not open (a read-only file, a
+  folder in the way) could be deleted without a byte written. The cleanup
+  is armed only once the destination is open for writing.
+- Ctrl-C during the retry wait or a retry pass killed the process before
+  its report: the first pass's counts and the files that did not land were
+  never printed. The retries now stop, the report prints, and the run
+  exits 130; `move` refuses its source delete and names the files.
+- A `--detach` job hid its per-file failures: `jobs list` showed no count
+  and `jobs watch` exited 0. Both report them now (see Job logs above).
+- A file whose write failed after bytes reached the destination was left
+  at the source's size with a fresh mtime, so every later compare took it
+  for a finished copy. A failed streamed record or shard member is now
+  removed (a failure before the target existed leaves the previous version
+  untouched) and an interrupted resume keeps its partial marked. Retry
+  passes therefore compare like the main pass: a file that became current
+  during the wait is not re-sent, a newer destination file is kept, and
+  `--ignore-existing` is honored except for this run's own incomplete copy.
 
 ## [0.1.3] - 2026-08-20
 

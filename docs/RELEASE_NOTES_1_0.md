@@ -1,135 +1,157 @@
 # Blit 1.0.0 Release Notes
 
-Covers everything shipped since 0.1.1 (tagged 2026-07-23).
+Covers everything shipped since 0.1.3 (tagged 2026-08-20). The 0.1.x
+releases are described in `CHANGELOG.md`.
+
+> Draft until the tag. Entries marked † depend on open rulings under
+> `docs/plan/RELEASE_1_0.md` gate G3 and are removed if the behavior is
+> fixed before the candidate is cut.
 
 ## Headline
 
-1.0 is a reliability and performance release. A single bad file can no
-longer take down an entire transfer, a real-world converged mirror check
-that used to take 283.92 seconds now takes 55.57 seconds (about 5.1x
-faster), and transfers show live, informative progress instead of a
-scrolling spinner.
+1.0 is the reliability release. No single file can end a transfer any
+more, on either side of the wire: a file that is locked, vanishes, changes
+size while it is being read, or cannot be written is reported by name and
+the rest of the run lands. Files that failed are retried automatically at
+the end of the run. Every run leaves a log on every machine involved and
+a job you can list, read, re-run and retry. Filenames that are not valid
+UTF-8 transfer.
 
-## Reliability: one bad file no longer aborts the whole transfer
+## Reliability: nothing a single file does ends the run
 
-Previously, a single file blit couldn't write — locked, permission denied,
-an attribute it couldn't apply — killed the entire transfer, including
-every file that had already been correctly copied or was still queued
-behind it.
+0.1.2 contained failures on the destination side. 1.0 contains them on
+the source side too, and adds a retry pass.
 
-- **Per-file failure containment.** A file that fails to write is recorded
-  and skipped; the rest of the transfer proceeds normally.
-- **Named failures at the end of the run.** The summary lists every failed
-  file and the reason, with a hint to re-run. The process exits with code
-  `2` for "completed with failures" — distinct from a clean success (`0`)
-  or a hard failure — so scripts can tell the three apart.
-- **Move never deletes a source file whose copy failed.** If a file
-  couldn't be written to the destination, its source copy is left in
-  place; re-running the transfer will pick it up and converge safely.
-- **Attribute-only mismatches are repaired in place, without re-sending
-  file content.** If a destination file already matches the source by
-  content but differs only in attributes (e.g. Windows flags an SMB
-  server rewrote), blit now patches just the attributes instead of
-  re-copying the whole file. This also fixes a real case: mirroring to a
-  default-configuration Samba share used to fail outright, because Samba
-  synthesizes a HIDDEN attribute on dot-files that could never converge.
-- **A related Linux/macOS-only bug is fixed:** if a file's parent path
-  component was itself an existing file (not a directory), that could
-  abort an entire batch of files instead of failing only the one affected
-  entry. Proven fixed on real Linux hardware, not just cross-compiled.
+- **Source-side failures are contained.** A file locked, vanished or
+  changed since the scan is skipped (before its record is announced) or
+  retracted (after), reported through the same per-file failure report
+  as destination failures, with a reason that starts with `source:`. A
+  file that grows inside a small-file batch can no longer corrupt its
+  neighbours: batches are packed from exactly the bytes the manifest
+  promised, and nothing is ever finalised under a header its bytes do not
+  match.
+- **End-of-run retry passes.** Files that failed are retried after the
+  main pass, re-scanned fresh. `--retries <N>` (`-R`, default 1; `0`
+  disables) sets the number of passes and `--retry-wait <SECONDS>` (`-W`,
+  default 30) the wait before each. This is a default-behavior change: a
+  run with failures now waits 30 seconds and tries those files once more
+  before it reports. Files that land on retry count once; survivors are
+  reported once, marked `(retried)`. The older `--retry`/`--wait` pair
+  still re-runs the whole transfer after a transient failure.
+- **Mirror deletions stay safe.** Deletions run at the end of the main
+  pass and never touch the subtree under a failed path. A file that
+  enumerated but could not be read keeps its destination counterpart.
+- **A failed write never leaves a finished-looking file.** A streamed
+  record or batch member whose write failed after bytes reached the
+  destination is removed (a failure before the target existed leaves the
+  previous version untouched); an interrupted resume keeps its partial
+  marked. Retry passes and later runs therefore compare normally.
+- **Windows: locked files no longer end the run.** A source file held
+  open with no sharing (`NTUSER.DAT`, a live database) is listed, reported
+  per file if it still cannot be read, and retried. A permission refusal
+  at scan is handled the same way.
+- **Ctrl-C during the retries keeps the report.** The retries stop, the
+  files that did not land are printed, and the run exits 130. A `move`
+  refuses its source delete and names the files.
+- **Exit codes:** `0` clean, `2` completed with per-file failures, `130`
+  interrupted; any other non-zero code is a hard failure. The end-of-run
+  block reads `N file(s) did not land at the destination:`.
+- A local single-file copy that could not open its destination (a
+  read-only file, a folder in the way) could delete that destination
+  without writing a byte. Fixed: the copy's cleanup is armed only once
+  the destination is open for writing.
 
-## Performance
+## Filenames that are not valid UTF-8 transfer
 
-- **SMB mirror, converged (no-op) check on a real ~46,000-file / ~8 GB
-  workload: 283.92s -> 55.57s, roughly 5.1x faster.** This came from a
-  chain of changes to how blit compares source and destination rather
-  than from any new configuration: reusing file metadata already read
-  during the directory scan instead of re-reading it per file, an
-  automatically self-tuning concurrency level for the comparison stage
-  (no configuration needed or exposed), scanning each destination
-  directory once instead of once per file, and dropping a per-file check
-  described below.
-- **Local-to-local mirror on the same workload: roughly 2x faster**
-  (17.68s -> 8.70s), from running more write workers in parallel during
-  the apply stage.
+A filename that is valid on Linux (ext4 accepts any bytes) but not valid
+UTF-8 used to fail, and on remote transfers could abort the session. Now,
+rsync-style, the exact bytes travel beside the text: a Linux or other
+byte-keyed destination creates the real name and the file converges on
+re-run; a destination that cannot store the bytes (Windows, macOS)
+reports the file as `source: filename is not valid UTF-8; the destination
+cannot store it (rename it to transfer)` and continues. Two source names
+that collapse to one text name are reported as a lossy-name collision
+instead of overwriting each other. Logs, run records and `jobs retry`
+carry such names by their exact bytes.
 
-All of the above is automatic — there is no configuration required or
-available to get these numbers; blit tunes itself at runtime.
+## Job logs, run records and saved jobs
 
-## Behavior change: default comparison no longer checks for extra data streams
+- **A log for every run.** Local copies, pushes, pulls and
+  remote-to-remote jobs each write a compressed JSON log as the run goes:
+  every file copied, deleted and failed with its reason, what `-v` would
+  have shown, phase times and stall notices. The machine where the
+  command was typed keeps its log in the per-user folder (`~/Library/
+  Application Support/com.Blit.Blit` on macOS, `~/.config/blit` on Linux,
+  `%LOCALAPPDATA%\Blit` on Windows); each daemon involved keeps its own
+  under its state directory. One job ID names the run on every machine. A
+  run killed mid-way leaves a log that the next start finalizes as
+  interrupted.
+- **`blit jobs list [<host>]`** shows recent runs and saved jobs with
+  their outcome and failed-file count. **`blit jobs log [<host>]
+  <job-id>`** shows a log as text, or the raw events with `--json`. A
+  `--detach` job's outcome is fetched from the daemon that ran it, and
+  **`blit jobs watch`** exits 1 and names the failed files when it has any.
+- **Saved jobs.** `--save <name>` on `copy`, `mirror` or `move` keeps the
+  run as a saved job; `--export <file>` writes it to a file. `blit jobs
+  save|export|run|delete` manage them; `blit jobs run <name|file>` re-runs
+  the same transfer from any working directory, with the `--files-from`
+  list it ran with.
+- **`blit jobs retry <job-id|file>`** starts a new run that sends exactly
+  the files that failed, with the original options (a `move` runs whole
+  again). It refuses a job from another machine, a run still going, and a
+  run whose failures are not all named.
+- **Retention.** Each machine keeps its newest 50 logs and 50 run records
+  (`[jobs] keep` in the CLI's per-user `config.toml` and the daemon's
+  `config.toml`). Saved jobs are never pruned.
+- **Windows** keeps settings, jobs and logs under `%LOCALAPPDATA%\Blit`;
+  files found in the old roaming folder are moved once.
+- Logging adds no measurable time to a command. If the log directory
+  cannot be written the transfer still completes and the report says the
+  log is incomplete.
 
-This is the one user-visible behavior change in 1.0 and is worth reading
-even if you skip the rest of these notes.
+## Protocol and compatibility
 
-Every run — including a no-op run that verifies an already-mirrored tree
-— used to ask the destination whether each file that already matched by
-size and modification time also had matching Windows named data streams.
-That check was expensive, and on the workload above it accounted for most
-of the 283.92-second cost. It also never protected the data: whenever it
-did find a stray or extra stream, the fix was always the same — replace
-the entire file — so the check only ever bought earlier detection of
-something that was going to be fully overwritten anyway.
-
-As of 1.0, the default comparison (size + modification time) **no longer
-performs that per-file stream check.** A stray or changed stream on an
-otherwise size/mtime-matched destination file can now go undetected until
-the next run made with `--checksum`.
-
-- Streams are still transferred correctly whenever a file's content
-  actually changes — this only affects detecting an out-of-band stream
-  change on a file blit otherwise considers unchanged.
-- Attributes are unaffected by this change and are still checked and
-  repaired in place (see Reliability above).
-- Run with `--checksum` to get the previous, exhaustive verification
-  behavior (full checksum and stream comparison on every file, every
-  run).
-
-## CLI and terminal output
-
-- **Live progress row.** Running with `-p` now shows one stable,
-  in-place status row — current phase, files and bytes so far, current
-  file — instead of a spinner that could be scrolled off-screen by other
-  output. `-v` per-file lines scroll cleanly above it.
-- **Colour.** The live row and any failure output are colour-coded
-  (phase and outcome colours). Colour is automatically disabled when
-  `NO_COLOR` is set, `TERM=dumb`, when output isn't going to an
-  interactive terminal, or for `--json` output; piped or redirected
-  output is byte-identical to before. There is no `--color` flag or
-  theming to configure — this is not a user-facing option.
-- **End-of-run failure block.** Runs with any per-file failures print a
-  capped list of failed files and reasons at the end, with a hint to
-  re-run to converge, and exit with code `2` (see Reliability above).
-
-## Platforms and compatibility
-
-- Release archives contain `blit` and `blit-daemon` for
-  `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, and
-  `x86_64-pc-windows-msvc`, each with a SHA-256 sidecar and the exact
-  source commit in `BUILD.txt`.
-- Both executables report the same `1.0.0+<commit>` build identity.
-  Remote sessions require identical build identities on both ends and
-  refuse mixed-version peers.
-- The daemon has no built-in TLS or user authentication (unchanged):
-  operate it only on a trusted network or through an SSH tunnel or VPN.
+- **Wire contract 7.** A peer on an older release is refused at session
+  open with a plain message; upgrade both ends. Both executables report
+  the same `1.0.0+<commit>` build identity, and remote sessions require
+  identical build identities on both ends.
+- **Release archives** contain `blit` and `blit-daemon` for
+  `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` (signed and
+  notarized) and `x86_64-pc-windows-msvc` (not Authenticode-signed), each
+  with a SHA-256 sidecar and the exact source commit in `BUILD.txt`.
+- **Install channels:** Homebrew (`roethlar/blit/blit-bin`), winget
+  (`Roethlar.Blit`), Scoop, AUR (`blit`, `blit-bin`), cargo
+  (`blit-transfer`, `blit-daemon`) and GitHub Releases; the bot-maintained
+  channels update on tag publish.
+- **For embedders of `blit-core`:** the public API changed, which is why
+  this is a major version. `PreparedPayload::TarShard` gained `skipped`
+  and `PreparedPayload::Skipped` was added; `build_tar_shard` returns
+  `TarShardBuild`; `TransferSource::open_file` returns `OpenedSourceFile`
+  and `check_availability` was removed; `TransferSink` gained
+  `begin_record`/`RecordWriter`, `can_store_raw_names` and
+  `note_raw_name`; `TransferSummary` gained `failed_paths` and
+  `failed_paths_truncated`.
 
 ## Known limitations shipped open
 
-Two pre-existing issues were triaged during this release and are shipping
-documented rather than fixed:
-
-- **Non-UTF-8 filenames fail to transfer.** A source filename that is
-  valid on Linux/ext4 but not valid UTF-8 gets corrupted during blit's
-  internal path handling and fails to transfer. On LOCAL transfers that
-  failure is contained to the one file (the rest of the transfer
-  proceeds and exits with code `2`, per Reliability above). On REMOTE
-  transfers it is NOT contained: the corrupted path can make payload
-  preparation fail at the source and abort the whole session. There is
-  currently no workaround beyond renaming the affected files.
-- **`--exclude` only matches paths relative to the transfer source, and
-  directory patterns don't match their contents.** An absolute path, or
-  a bare directory name intended to exclude everything under it, will
-  silently match nothing — the pattern is accepted but excludes nothing,
-  and blit does not warn that the pattern couldn't have matched. Use a
-  source-relative glob with an explicit subtree wildcard instead, e.g.
-  `--exclude '.java/**'` rather than `--exclude .java` or an absolute
-  path.
+- † **`--exclude` only matches paths relative to the transfer source, and
+  a bare directory name does not match that directory's contents.** An
+  absolute path, or a bare directory name meant to exclude everything
+  beneath it, silently matches nothing: the pattern is accepted, nothing
+  is excluded, and no warning is given. Use a source-relative glob with an
+  explicit subtree wildcard, `--exclude '.java/**'` rather than
+  `--exclude .java` or an absolute path.
+- † **A failed `--detach` job's `jobs list` entry says only
+  `delegated_pull handler failed`.** The real reason is in `blit jobs log
+  <host> <job-id>`.
+- **The in-command retry passes do not re-send a file whose name is not
+  valid UTF-8.** It stays reported as failed; `blit jobs retry` re-sends
+  it.
+- **A `--detach` job has no retry passes**; the command says so once. Use
+  `blit jobs retry` afterwards.
+- **A `move`'s source-side deletion on a daemon is not a job** and leaves
+  no log.
+- **The daemon has no built-in TLS or user authentication** (unchanged).
+  Module access controls and per-session data-plane tokens are not an
+  authentication system: run it only on a trusted network or through an
+  SSH tunnel or VPN.
