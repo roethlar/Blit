@@ -9,7 +9,7 @@
 //! struct, which is also the shape any front-end's transfer-options
 //! modal will use.
 
-use crate::fs_enum::{parse_duration, parse_size, FileFilter};
+use crate::fs_enum::{normalize_separators, parse_duration, parse_size, FileFilter};
 use eyre::{eyre, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -186,7 +186,8 @@ pub struct ResolvedExcludes {
     /// source root rewritten source-relative (`/src/a/.java` under `/src`
     /// is `a/.java`; a single remaining name is anchored as `./name`, so
     /// it still names only that top-level path), every other pattern as
-    /// typed.
+    /// typed — on Windows with `\` written `/` (cr-g3fix-3), so the wire
+    /// form reads the same on any peer.
     pub patterns: Vec<String>,
     /// The absolute patterns that cannot match anything: outside the
     /// source root, naming the root itself, or any absolute pattern when
@@ -201,15 +202,28 @@ pub struct ResolvedExcludes {
 /// or pattern reached through a symlink is also compared in its resolved
 /// form, so `/tmp/x/.java` and `/private/tmp/x/.java` name one path on
 /// macOS (`through_resolved_root` says how a pattern is resolved).
-/// Relative patterns pass through untouched.
+/// Relative patterns pass through untouched but for their separators:
+/// on Windows `\` is written `/` (cr-g3fix-3).
 pub fn resolve_excludes(exclude: &[String], source_root: Option<&Path>) -> ResolvedExcludes {
-    let windows = cfg!(windows);
+    resolve_excludes_on(exclude, source_root, cfg!(windows))
+}
+
+/// [`resolve_excludes`] under one platform's path rule (`windows`), so
+/// either rule's string handling is testable on every OS.
+fn resolve_excludes_on(
+    exclude: &[String],
+    source_root: Option<&Path>,
+    windows: bool,
+) -> ResolvedExcludes {
     let mut resolved = ResolvedExcludes::default();
     if !exclude
         .iter()
         .any(|pattern| is_absolute_pattern(pattern, windows))
     {
-        resolved.patterns = exclude.to_vec();
+        resolved.patterns = exclude
+            .iter()
+            .map(|pattern| normalize_separators(pattern, windows).into_owned())
+            .collect();
         return resolved;
     }
     let resolved_root = source_root.and_then(|root| std::fs::canonicalize(root).ok());
@@ -222,7 +236,9 @@ pub fn resolve_excludes(exclude: &[String], source_root: Option<&Path>) -> Resol
     }
     for pattern in exclude {
         if !is_absolute_pattern(pattern, windows) {
-            resolved.patterns.push(pattern.clone());
+            resolved
+                .patterns
+                .push(normalize_separators(pattern, windows).into_owned());
             continue;
         }
         let mut pattern_forms = vec![pattern.clone()];
@@ -795,6 +811,35 @@ mod tests {
             None,
             "case matters off Windows"
         );
+    }
+
+    /// cr-g3fix-3: relative patterns reach both builders — and so the wire
+    /// form — with `\` written `/` under the Windows rule, and untouched
+    /// under the Unix rule, where `\` is no separator. An absolute pattern
+    /// that cannot match stays as typed either way. Pure string logic, so
+    /// both rules run on every OS.
+    #[test]
+    fn relative_excludes_take_forward_slashes_under_the_windows_rule() {
+        let exc: Vec<String> = [r".\cache", r"cache\", r"a\.java", "*.tmp"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            resolve_excludes_on(&exc, None, true).patterns,
+            ["./cache", "cache/", "a/.java", "*.tmp"]
+        );
+        assert_eq!(resolve_excludes_on(&exc, None, false).patterns, exc);
+
+        let mut mixed = exc.clone();
+        mixed.push(r"C:\elsewhere\x".to_string());
+        let windows = resolve_excludes_on(&mixed, None, true);
+        assert_eq!(
+            windows.patterns,
+            ["./cache", "cache/", "a/.java", "*.tmp", r"C:\elsewhere\x"]
+        );
+        assert_eq!(windows.unmatchable, [r"C:\elsewhere\x"]);
+        let unix = resolve_excludes_on(&mixed, None, false);
+        assert_eq!(unix.patterns, mixed, "no absolute pattern off Windows");
+        assert!(unix.unmatchable.is_empty());
     }
 
     /// review otp-10a F8: the wire-spec builder rejects malformed globs

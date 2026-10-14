@@ -264,6 +264,43 @@ fn mirror_exclude_absolute_glob_through_a_symlinked_source() {
     );
 }
 
+/// cr-g3fix-3: on Windows `\` is a separator in a relative pattern too —
+/// `.\.java` names the top-level `.java` only, `a\.java\` the `a/.java`
+/// subtree, and `.java\` the name at any depth. Before the fix none of the
+/// three excluded anything.
+#[cfg(windows)]
+#[test]
+fn mirror_exclude_windows_backslash_forms() {
+    for (pattern, gone, kept) in [
+        (r".\.java", &[".java"][..], &["a/.java/y"][..]),
+        (r"a\.java\", &["a/.java"][..], &[".java/fonts/x"][..]),
+        (r".java\", &[".java", "a/.java"][..], &["a/keep.txt"][..]),
+    ] {
+        let tmp = tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        java_tree(&src);
+        let (ok, stdout, stderr) = blit(&[
+            "mirror",
+            "--yes",
+            &with_slash(&src),
+            &with_slash(&dst),
+            "--exclude",
+            pattern,
+        ]);
+        assert!(
+            ok,
+            "{pattern}: mirror failed:\nstdout: {stdout}\nstderr: {stderr}"
+        );
+        for rel in gone {
+            assert!(!dst.join(rel).exists(), "{pattern}: {rel} must be left out");
+        }
+        for rel in kept {
+            assert!(dst.join(rel).exists(), "{pattern}: {rel} must be copied");
+        }
+        assert!(dst.join("keep.txt").exists(), "{pattern}: keep.txt");
+    }
+}
+
 /// The excluded directory is never opened: unreadable, it would make the
 /// source scan incomplete, and an incomplete scan refuses a mirror's
 /// deletions (here: the run fails and `stale.txt` survives).

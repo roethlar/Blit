@@ -61,7 +61,8 @@ pub struct FileFilter {
 /// audit-19: the `--exclude` patterns as the any-depth and subtree rules
 /// read them. A pattern's trailing `/` is dropped (`a/.java/` names the
 /// same tree as `a/.java`) and a leading `./` anchors it to the source
-/// root (`./.java` is the top-level `.java` only).
+/// root (`./.java` is the top-level `.java` only). On Windows `\` is read
+/// as `/` first (cr-g3fix-3: `.\.java`, `a\.java\`).
 #[derive(Debug, Default)]
 struct ExcludeRules {
     /// Patterns with no separator: each matches any one component of a
@@ -75,10 +76,11 @@ struct ExcludeRules {
 }
 
 impl ExcludeRules {
-    fn compile(patterns: &[String]) -> Self {
+    fn compile(patterns: &[String], windows: bool) -> Self {
         let mut names = Vec::new();
         let mut paths = Vec::new();
         for pattern in patterns {
+            let pattern = normalize_separators(pattern, windows);
             let mut body = pattern.trim_end_matches('/');
             let mut anchored = false;
             while let Some(rest) = body.strip_prefix("./") {
@@ -133,6 +135,18 @@ impl ExcludeRules {
             }
         }
         false
+    }
+}
+
+/// cr-g3fix-3: an `--exclude` pattern with every separator written `/`.
+/// On Windows `\` separates path components too (`.\cache`, `cache\`,
+/// `a\.java`); elsewhere it is an ordinary character (globset reads it as
+/// an escape), so the pattern is kept as typed.
+pub(crate) fn normalize_separators(pattern: &str, windows: bool) -> std::borrow::Cow<'_, str> {
+    if windows && pattern.contains('\\') {
+        std::borrow::Cow::Owned(pattern.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(pattern)
     }
 }
 
@@ -272,7 +286,7 @@ impl FileFilter {
 
     fn subtree_rules(&self) -> &ExcludeRules {
         self.compiled_subtrees
-            .get_or_init(|| ExcludeRules::compile(&self.exclude_files))
+            .get_or_init(|| ExcludeRules::compile(&self.exclude_files, cfg!(windows)))
     }
 
     /// `rel_path` is the directory's path relative to the walk root;
@@ -701,6 +715,53 @@ mod tests {
         assert!(!allows(&excluding(&["logs/app.log"]), "logs/app.log"));
         assert!(!allows(&excluding(&[".java/**"]), ".java/fonts/x"));
         assert!(allows(&excluding(&["logs/app.log"]), "logs/other.log"));
+    }
+
+    /// cr-g3fix-3: under the Windows rule `\` is a separator, so `.\name`
+    /// anchors, a trailing `\` is dropped and `a\name` is a source-relative
+    /// path; under the Unix rule `\` is part of the pattern. Both rules run
+    /// on every OS.
+    #[test]
+    fn backslash_forms_follow_the_platform_rule() {
+        assert_eq!(normalize_separators(r".\cache", true), "./cache");
+        assert_eq!(normalize_separators(r"cache\", true), "cache/");
+        assert_eq!(normalize_separators(r"a\.java", true), "a/.java");
+        assert_eq!(normalize_separators(r"a\.java", false), r"a\.java");
+
+        let windows = |pattern: &str| ExcludeRules::compile(&[pattern.to_string()], true);
+        let anchored = windows(r".\.java");
+        assert!(anchored.excludes(Path::new(".java/fonts/x")));
+        assert!(
+            !anchored.excludes(Path::new("a/.java/y")),
+            "anchored to the root"
+        );
+        assert!(
+            windows(r".java\").excludes(Path::new("a/.java/y")),
+            "a trailing \\ is dropped: a name at any depth"
+        );
+        let subtree = windows(r"a\.java\");
+        assert!(subtree.excludes(Path::new("a/.java/y")));
+        assert!(
+            !subtree.excludes(Path::new(".java/fonts/x")),
+            "a source-relative path names one subtree"
+        );
+        let unix = ExcludeRules::compile(&[r"a\.java".to_string()], false);
+        assert!(
+            !unix.excludes(Path::new("a/.java/y")),
+            "off Windows a backslash is no separator"
+        );
+    }
+
+    /// cr-g3fix-3: on Windows a filter built directly — by an embedder, or
+    /// from a spec a daemon received — reads `\` as a separator as well.
+    #[cfg(windows)]
+    #[test]
+    fn backslash_forms_match_on_windows() {
+        assert!(!allows(&excluding(&[r".\.java"]), ".java/fonts/x"));
+        assert!(allows(&excluding(&[r".\.java"]), "a/.java/y"));
+        assert!(!allows(&excluding(&[r"a\.java\"]), "a/.java/y"));
+        assert!(allows(&excluding(&[r"a\.java\"]), ".java/fonts/x"));
+        assert!(!allows(&excluding(&[r".java\"]), "a/.java/y"));
     }
 
     /// The excluded directory is pruned: the walk never opens it. Made
