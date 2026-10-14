@@ -97,6 +97,21 @@ are the owner's act.
   only) all timed out. The four Windows legs wait on a Windows host; the
   two Mac↔Linux legs can run as soon as the candidate's CI has built. `q`
   is no longer a fleet host for this.
+  **Pre-candidate dry run 2026-10-14 with CI's `8844dfbd` archives**
+  (identity `0.1.3+8844dfbd8f37` on both ends; sidecars verified; a
+  modules-only daemon on magneto `10.1.10.10:9031`, mDNS off, state inside
+  its scratch dir; evidence `docs/bench/g5b-dryrun-2026-10-14/`):
+
+  | pair | initial copy | content verify | edit → re-run | converged re-run | result |
+  | --- | --- | --- | --- | --- | --- |
+  | mac → linux (push) | 12 files, 5,382,443 B | 12/12 sha256 match, no extras | 1 file, 39 B | 0 files | PASS |
+  | linux → mac (pull) | 12 files, 5,382,472 B | 12/12 sha256 match, entry lists identical | — | 0 files | PASS |
+  | win ↔ linux, win ↔ mac (4 legs) | — | — | — | — | BLOCKED: no Windows host answered |
+
+  Every command exited 0; no warning or stall notice during a transfer;
+  `blit jobs list` on the Mac and `blit jobs list magneto` show the same
+  five runs under the same job IDs. To repeat on the candidate's own
+  archives once CI has built them; the Windows legs when a host answers.
 - **G5c — DISSOLVED (D-2026-08-15-2): 1.0 is CLI + daemon only; no UI
   surface gates this or any release.** UIs are a separate app
   (`BlitAdmin_UIs` repo) with their own lifecycle. History: this gate was
