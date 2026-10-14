@@ -393,6 +393,59 @@ stderr:
     );
 }
 
+/// RELEASE_1_0 G3: a detached remote-to-remote job that fails on its
+/// daemon shows why in `blit jobs list <host>` — the job's own reason, not
+/// the marker `delegated_pull handler failed`, which used to be all the list
+/// said (the reason reached `blit jobs log` alone).
+#[test]
+fn a_failed_detached_job_shows_why_in_jobs_list() {
+    let ctx = DelegationContext::with_real_source();
+    // The source has no such module: its session refuses the open once
+    // the destination has started the job and the CLI has detached.
+    let missing = format!("127.0.0.1:{}:/nosuchmod/", ctx.src_port);
+    let detached = ctx.run_blit(&["copy", &missing, &ctx.dest_remote(), "--detach", "--json"]);
+    assert!(
+        detached.status.success(),
+        "the copy detaches before the job fails\nstdout:\n{}\nstderr:\n{}",
+        text(&detached.stdout),
+        text(&detached.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&detached.stdout).expect("detach JSON");
+    let transfer_id = json["transfer_id"]
+        .as_str()
+        .expect("transfer_id")
+        .to_string();
+    let dest_host = ctx.dest_host();
+
+    let watch = ctx.run_blit(&[
+        "jobs",
+        "watch",
+        &dest_host,
+        &transfer_id,
+        "--timeout-secs",
+        "30",
+    ]);
+    assert_eq!(
+        watch.status.code(),
+        Some(1),
+        "the job failed\nstderr:\n{}",
+        text(&watch.stderr)
+    );
+
+    let list = ctx.run_blit(&["jobs", "list", &dest_host]);
+    assert!(list.status.success(), "{}", text(&list.stderr));
+    let listed = text(&list.stdout);
+    let row = listed
+        .lines()
+        .find(|line| line.contains(&transfer_id))
+        .unwrap_or_else(|| panic!("the job is in the list:\n{listed}"));
+    assert!(
+        row.contains("FAILED: ") && row.contains("module 'nosuchmod' not found"),
+        "the row says why the job failed: {row}"
+    );
+    assert!(!row.contains("delegated_pull handler failed"), "{row}");
+}
+
 #[test]
 fn cancel_of_active_delegated_job_exits_zero() {
     // A fake source that accepts the gRPC connection but never

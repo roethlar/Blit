@@ -107,21 +107,16 @@ fn session_error_phase(err: &eyre::Report) -> blit_core::generated::delegated_pu
     }
 }
 
-/// Build a CLI-bound `DelegatedPullProgress` carrying a phased error.
-fn err_progress(phase: i32, message: impl Into<String>) -> DelegatedPullProgress {
-    DelegatedPullProgress {
-        payload: Some(ProgressPayload::Error(DelegatedPullError {
-            upstream_message: message.into(),
-            phase,
-        })),
+/// Build the phased error a failed delegated pull ends with.
+fn phased_error(phase: i32, message: impl Into<String>) -> DelegatedPullError {
+    DelegatedPullError {
+        upstream_message: message.into(),
+        phase,
     }
 }
 
-fn delegated_terminal_outcome(progress: &DelegatedPullProgress) -> TransferLifecycleOutcome {
+fn delegated_terminal_outcome(error: &DelegatedPullError) -> TransferLifecycleOutcome {
     use blit_core::generated::delegated_pull_error::Phase;
-    let Some(ProgressPayload::Error(error)) = &progress.payload else {
-        return TransferLifecycleOutcome::Error;
-    };
     match Phase::try_from(error.phase).unwrap_or(Phase::Unknown) {
         Phase::DelegationRejected | Phase::Negotiate => TransferLifecycleOutcome::Refused,
         _ => TransferLifecycleOutcome::Error,
@@ -192,12 +187,14 @@ where
 /// the gRPC layer hands us; the handler is responsible for emitting
 /// progress events and final summary/error onto it.
 ///
-/// Returns `true` if `run_delegated_pull` completed without error,
-/// `false` if it failed (and the phased error was sent on `tx`).
-/// §3.1 followup: the caller uses this to flip the `--metrics`
-/// completion line `ok` bit and increment `errors`. Pre-fix the
-/// function returned `()` so a handler failure looked identical to
-/// success on the operator-facing metric line.
+/// Returns `Ok(())` if `run_delegated_pull` completed without error, or
+/// the failure's reason — the text of the phased error sent on `tx` —
+/// if it failed. §3.1 followup: the caller uses this to flip the
+/// `--metrics` completion line `ok` bit and increment `errors`. Pre-fix
+/// the function returned `()` so a handler failure looked identical to
+/// success on the operator-facing metric line. RELEASE_1_0 G3: the
+/// caller records the reason on the job's row, so `blit jobs list`
+/// says why the job failed — it used to carry only a fixed marker.
 pub(crate) async fn handle_delegated_pull(
     req: DelegatedPullRequest,
     modules: Arc<tokio::sync::Mutex<std::collections::HashMap<String, ModuleConfig>>>,
@@ -213,7 +210,7 @@ pub(crate) async fn handle_delegated_pull(
     perf_store: Option<blit_core::perf_history::HistoryStore>,
     // jl-1b: the job's log, owned by the dispatcher.
     job_log: crate::job_logs::JobLog,
-) -> bool {
+) -> Result<(), String> {
     let resolver = StdResolver;
     let lifecycle_trace = TransferLifecycleTrace::from_env();
     lifecycle_trace.attach_initiator_role(SessionPhaseRole::Destination);
@@ -234,23 +231,26 @@ pub(crate) async fn handle_delegated_pull(
     )
     .await;
 
-    let (ok, terminal_outcome) = match result {
-        Ok(()) => (true, TransferLifecycleOutcome::Success),
-        Err(error_progress) => {
-            let terminal_outcome = delegated_terminal_outcome(&error_progress);
-            // The dispatcher only has a marker; the log keeps the reason.
-            if let Some(ProgressPayload::Error(error)) = &error_progress.payload {
-                job_log.note_error(error.upstream_message.clone());
-            }
+    let (outcome, terminal_outcome) = match result {
+        Ok(()) => (Ok(()), TransferLifecycleOutcome::Success),
+        Err(error) => {
+            let terminal_outcome = delegated_terminal_outcome(&error);
+            let reason = error.upstream_message.clone();
+            // The log keeps the job's own reason over the dispatcher's.
+            job_log.note_error(reason.clone());
             // Surface the phased error to the CLI. We use a one-shot
             // send-and-ignore here: if the CLI has already disconnected we
             // can't (and don't need to) report.
-            let _ = tx.send(Ok(error_progress)).await;
-            (false, terminal_outcome)
+            let _ = tx
+                .send(Ok(DelegatedPullProgress {
+                    payload: Some(ProgressPayload::Error(error)),
+                }))
+                .await;
+            (Err(reason), terminal_outcome)
         }
     };
     finish_delegated_lifecycle(&lifecycle_trace, terminal_outcome).await;
-    ok
+    outcome
 }
 
 /// Inner driver. Splitting the error-emit path out of the public
@@ -270,16 +270,16 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     lifecycle_trace: &TransferLifecycleTrace,
     perf_store: Option<blit_core::perf_history::HistoryStore>,
     job_log: &crate::job_logs::JobLog,
-) -> Result<(), DelegatedPullProgress> {
+) -> Result<(), DelegatedPullError> {
     use blit_core::generated::delegated_pull_error::Phase;
 
     // Step 1: parse RemoteSourceLocator.
     let src = req
         .src
         .as_ref()
-        .ok_or_else(|| err_progress(Phase::DelegationRejected as i32, "missing source locator"))?;
+        .ok_or_else(|| phased_error(Phase::DelegationRejected as i32, "missing source locator"))?;
     if src.host.trim().is_empty() {
-        return Err(err_progress(
+        return Err(phased_error(
             Phase::DelegationRejected as i32,
             "source locator host is empty",
         ));
@@ -287,7 +287,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     let port_u16: u16 = src
         .port
         .try_into()
-        .map_err(|_| err_progress(Phase::DelegationRejected as i32, "source port out of range"))?;
+        .map_err(|_| phased_error(Phase::DelegationRejected as i32, "source port out of range"))?;
     let locator = LocatorView {
         host: &src.host,
         port: port_u16,
@@ -303,16 +303,16 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     let run = blit_core::job_log::RunTag::from_wire(&req.run_id, req.attempt).unwrap_or_default();
     let spec = req
         .spec
-        .ok_or_else(|| err_progress(Phase::DelegationRejected as i32, "missing transfer spec"))?;
+        .ok_or_else(|| phased_error(Phase::DelegationRejected as i32, "missing transfer spec"))?;
     let spec =
-        validate_spec(spec).map_err(|msg| err_progress(Phase::DelegationRejected as i32, msg))?;
+        validate_spec(spec).map_err(|msg| phased_error(Phase::DelegationRejected as i32, msg))?;
 
     // Step 3: daemon-wide gate (master switch + allowlist matching +
     // DNS-rebinding mitigation by binding to the resolved IP).
     let resolved = validate_source(&delegation, &locator, resolver)
         .await
         .map_err(|denial: GateDenial| {
-            err_progress(Phase::DelegationRejected as i32, denial.reason())
+            phased_error(Phase::DelegationRejected as i32, denial.reason())
         })?;
 
     // Step 4: module metadata lookup. resolve_module honors empty-name
@@ -320,7 +320,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     let module = resolve_module(&modules, default_root.as_ref(), &req.dst_module)
         .await
         .map_err(|status| {
-            err_progress(
+            phased_error(
                 Phase::DelegationRejected as i32,
                 status.message().to_string(),
             )
@@ -328,7 +328,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
 
     // Step 5: per-module narrowing override.
     if !module.delegation_allowed {
-        return Err(err_progress(
+        return Err(phased_error(
             Phase::DelegationRejected as i32,
             format!(
                 "module '{}' opts out of being a delegation destination",
@@ -338,7 +338,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     }
 
     if module.read_only {
-        return Err(err_progress(
+        return Err(phased_error(
             Phase::DelegationRejected as i32,
             format!("module '{}' is read-only", module.name),
         ));
@@ -351,7 +351,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
         PathBuf::from(&req.dst_destination_path)
     };
     let dest_root = resolve_contained_path(&module, &dst_rel)
-        .map_err(|status| err_progress(Phase::Apply as i32, status.message().to_string()))?;
+        .map_err(|status| phased_error(Phase::Apply as i32, status.message().to_string()))?;
 
     // Step 7: metrics RAII. inc_pull because — from this daemon's
     // perspective — the body of work is a pull from src.
@@ -391,7 +391,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     let client = connect_transfer_client_with_trace(&endpoint, lifecycle_trace)
         .await
         .map_err(|err| {
-            err_progress(
+            phased_error(
                 Phase::ConnectSource as i32,
                 format!(
                     "connecting to source {}:{}: {err:#}",
@@ -526,7 +526,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     )
     .await
     .map_err(|err| {
-        err_progress(
+        phased_error(
             session_error_phase(&err) as i32,
             format!("delegated transfer: {err:#}"),
         )
@@ -856,15 +856,17 @@ mod tests {
         assert_eq!(session_error_phase(&plain), Phase::Transfer);
     }
 
-    /// R-followup: `handle_delegated_pull` must return `false` when
+    /// R-followup: `handle_delegated_pull` must return an error when
     /// the inner pipeline fails so the caller (`service/core.rs`)
     /// can `inc_error` and log `ok=false`. Pre-fix the function
     /// returned `()` and a real failure showed `ok=true` on the
-    /// `--metrics` line. Drive the failure with the cheapest path:
-    /// a request with a blank source locator host, which trips the
-    /// `DelegationRejected` phase before any DNS/connect/IO.
+    /// `--metrics` line. RELEASE_1_0 G3: the error is the failure's
+    /// own reason, which the caller records on the job's row. Drive
+    /// the failure with the cheapest path: a request with a blank
+    /// source locator host, which trips the `DelegationRejected`
+    /// phase before any DNS/connect/IO.
     #[tokio::test]
-    async fn handle_delegated_pull_returns_false_on_handler_failure() {
+    async fn handle_delegated_pull_returns_its_reason_on_handler_failure() {
         use blit_core::generated::{
             DelegatedPullRequest, RemoteSourceLocator, TransferOperationSpec,
         };
@@ -900,7 +902,7 @@ mod tests {
             String::new(),
         );
 
-        let ok = handle_delegated_pull(
+        let outcome = handle_delegated_pull(
             req,
             modules,
             None,
@@ -914,9 +916,11 @@ mod tests {
             crate::job_logs::JobLog::new(None, "t-test"),
         )
         .await;
-        assert!(
-            !ok,
-            "handler with blank source locator must return false so caller can inc_error"
+        assert_eq!(
+            outcome,
+            Err("source locator host is empty".to_string()),
+            "handler with blank source locator must return its reason so caller can inc_error \
+             and record why"
         );
     }
 }

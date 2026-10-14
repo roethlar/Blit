@@ -654,8 +654,60 @@ async fn a_delegated_pull_logs_each_file_and_the_failure() {
     dst.stop().await;
 }
 
+/// RELEASE_1_0 G3: a delegated pull that fails once it has started — the
+/// shape a `--detach` job's failure takes, the CLI long gone — keeps the
+/// handler's own reason on its jobs row, so `blit jobs list` says why it
+/// failed. The row used to carry only the marker
+/// `delegated_pull handler failed`; the reason reached the log alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_delegated_pull_keeps_its_reason_on_the_jobs_row() {
+    let src = Daemon::start("srcmod", false).await;
+    let dst = Daemon::start("dstmod", true).await;
+
+    // The source has no such module: its session refuses the open,
+    // after the destination has connected and sent Started.
+    let events = run_delegated(dst.port, src.port, "dstmod", spec("nosuchmod")).await;
+    let transfer_id = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            Some(ProgressPayload::Started(started)) => Some(started.transfer_id.clone()),
+            _ => None,
+        })
+        .expect("Started names the job");
+    let reason = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            Some(ProgressPayload::Error(error)) => Some(error.upstream_message.clone()),
+            _ => None,
+        })
+        .expect("the source refuses the open");
+    assert!(reason.contains("nosuchmod"), "{reason}");
+
+    let state = blit_core::admin::jobs::query(
+        &blit_core::remote::RemoteEndpoint {
+            host: "127.0.0.1".into(),
+            port: dst.port,
+            path: blit_core::remote::RemotePath::Discovery,
+        },
+        0,
+    )
+    .await
+    .expect("GetState");
+    let record = state
+        .recent
+        .iter()
+        .find(|record| record.transfer_id == transfer_id)
+        .expect("the job is in the recent list");
+    assert!(!record.ok);
+    assert_eq!(record.error_message, reason, "the row carries the reason");
+    assert_ne!(record.error_message, "delegated_pull handler failed");
+
+    src.stop().await;
+    dst.stop().await;
+}
+
 /// jl-1b: a delegated pull refused before it starts keeps its own reason in
-/// the log — the jobs record has only a marker.
+/// the log.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_refused_delegated_pull_logs_why() {
     use blit_core::job_log::{EventBody, Outcome};

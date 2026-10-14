@@ -152,7 +152,7 @@ impl JobLog {
         self.log.noted_files_failed()
     }
 
-    /// The job's own failure message, kept over the dispatcher's marker.
+    /// The job's own failure message, kept over the dispatcher's detail.
     pub(crate) fn note_error(&self, message: String) {
         self.log.note_error(message);
     }

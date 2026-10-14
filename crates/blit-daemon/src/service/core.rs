@@ -741,18 +741,18 @@ impl Blit for BlitService {
             //                              failure
             //
             // Outcome encoding:
-            //   None         → cancelled (client OR CancelJob)
-            //   Some(true)   → handler returned success
-            //   Some(false)  → handler returned failure (phased
-            //                  error already sent to client over
-            //                  handler_tx)
+            //   None          → cancelled (client OR CancelJob)
+            //   Some(Ok)      → handler returned success
+            //   Some(Err(r))  → handler returned failure with its
+            //                   reason `r` (phased error already
+            //                   sent to client over handler_tx)
             // audit-10: the handler branch is ordered FIRST in the
             // `biased` select inside `resolve_transfer_outcome`, so
             // a handler that has run to completion wins even if the
             // cancel token fires (or the client hangs up) at the same
             // instant. A still-running (Pending) handler still yields to
             // a hangup / `CancelJob`. See that helper for the rationale.
-            let outcome: Option<bool> = resolve_transfer_outcome(
+            let outcome: Option<Result<(), String>> = resolve_transfer_outcome(
                 super::delegated_pull::handle_delegated_pull(
                     req,
                     modules,
@@ -773,24 +773,25 @@ impl Blit for BlitService {
             .await;
             // Map the select outcome onto the ActiveJobs ring
             // shape:
-            //   Some(true)  → ok, no error
-            //   Some(false) → handler-failure; the handler
-            //                  already sent the phased error to
-            //                  the client and surfaced it via
-            //                  `metrics.inc_error` below. We
-            //                  don't have the message string at
-            //                  this level — the C milestone
-            //                  routes structured errors. Use a
-            //                  short marker.
-            //   None        → client hangup or CancelJob.
-            //                  Distinguish by inspecting the
-            //                  cancellation token: if it was
-            //                  cancelled, the cause was
-            //                  CancelJob; otherwise it was the
-            //                  client.
-            let (job_ok, job_err) = match outcome {
-                Some(true) => (true, None),
-                Some(false) => (false, Some("delegated_pull handler failed".to_string())),
+            //   Some(Ok)     → ok, no error
+            //   Some(Err(r)) → handler-failure; the handler
+            //                   already sent the phased error to
+            //                   the client, and it is surfaced via
+            //                   `metrics.inc_error` below. The row
+            //                   carries the handler's own reason —
+            //                   the text the job's log records — as
+            //                   the served path's rows do
+            //                   (RELEASE_1_0 G3: it used to carry
+            //                   only a fixed marker).
+            //   None         → client hangup or CancelJob.
+            //                   Distinguish by inspecting the
+            //                   cancellation token: if it was
+            //                   cancelled, the cause was
+            //                   CancelJob; otherwise it was the
+            //                   client.
+            let (job_ok, job_err) = match &outcome {
+                Some(Ok(())) => (true, None),
+                Some(Err(reason)) => (false, Some(reason.clone())),
                 None if cancel_token.is_cancelled() => {
                     (false, Some("cancelled via CancelJob".to_string()))
                 }
@@ -820,8 +821,8 @@ impl Blit for BlitService {
             // `run_delegated_pull` returned Err — a real failure
             // could log `delegated_pull ok … errors=N` with N
             // unchanged.
-            let ok = matches!(outcome, Some(true));
-            if matches!(outcome, Some(false)) {
+            let ok = matches!(outcome, Some(Ok(())));
+            if matches!(outcome, Some(Err(_))) {
                 metrics_for_log.inc_error();
             }
             // All bookkeeping (active row, metrics gauge,
@@ -1305,7 +1306,7 @@ fn peer_addr_string<T>(request: &Request<T>) -> String {
 /// Extracted for `delegated_pull` (R30-F2 / m-jobs-1) and generalized
 /// in w4-3 to be the single owner of the biased select every transfer
 /// RPC races through — `delegated_pull` calls it directly (handler
-/// output `bool`); the served `Transfer` session goes through
+/// output `Result<(), String>`); the served `Transfer` session goes through
 /// [`resolve_transfer_session_outcome`] (handler output
 /// `Result<(), Status>`).
 ///
@@ -1419,8 +1420,9 @@ where
 /// Translate a handler's `Result<_, Status>` into the
 /// `(ok, error_message)` pair the ActiveJobs guard expects.
 /// Used inside [`resolve_transfer_session_outcome`].
-/// `delegated_pull` has its own shape (handler returns `bool`
-/// inside a select) and inlines the equivalent mapping there.
+/// `delegated_pull` has its own shape (handler returns
+/// `Result<(), String>` inside a select) and inlines the equivalent
+/// mapping there.
 fn outcome_from_status<T>(result: &Result<T, Status>) -> (bool, Option<String>) {
     match result {
         Ok(_) => (true, None),
