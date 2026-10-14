@@ -11,7 +11,7 @@
 
 use crate::fs_enum::{parse_duration, parse_size, FileFilter};
 use eyre::{eyre, Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// Common shape of the filter inputs across commands. Both
@@ -32,6 +32,11 @@ pub struct FilterInputs<'a> {
     /// any host can send them; only a host that holds such names turns them
     /// into its own paths.
     pub retry_only_raw: Option<&'a std::collections::HashSet<Vec<u8>>>,
+    /// audit-19: the source root when the source is local. An absolute
+    /// `--exclude` under it is made source-relative before use (see
+    /// [`resolve_excludes`]); `None` for a remote source, where no
+    /// absolute pattern can match.
+    pub source_root: Option<&'a Path>,
     pub min_size: Option<&'a str>,
     pub max_size: Option<&'a str>,
     pub min_age: Option<&'a str>,
@@ -48,7 +53,7 @@ pub struct FilterInputs<'a> {
 pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
     let mut filter = FileFilter::default();
     filter.include_files = inputs.include.to_vec();
-    filter.exclude_files = inputs.exclude.to_vec();
+    filter.exclude_files = resolve_excludes(inputs.exclude, inputs.source_root).patterns;
     if let Some(s) = inputs.min_size {
         filter.min_size = Some(parse_size(s).with_context(|| format!("--min-size {s}"))?);
     }
@@ -104,7 +109,9 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
     use crate::generated::FilterSpec;
     let mut spec = FilterSpec {
         include: inputs.include.to_vec(),
-        exclude: inputs.exclude.to_vec(),
+        // audit-19: relativized HERE, before the spec leaves this host —
+        // the peer that applies it never knows this side's source root.
+        exclude: resolve_excludes(inputs.exclude, inputs.source_root).patterns,
         min_size: None,
         max_size: None,
         min_age_secs: None,
@@ -172,6 +179,151 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
     Ok(spec)
 }
 
+/// audit-19: the `--exclude` patterns once the source root is known.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ResolvedExcludes {
+    /// The patterns the filter applies: each absolute pattern under the
+    /// source root rewritten source-relative (`/src/a/.java` under `/src`
+    /// is `a/.java`; a single remaining name is anchored as `./name`, so
+    /// it still names only that top-level path), every other pattern as
+    /// typed.
+    pub patterns: Vec<String>,
+    /// The absolute patterns that cannot match anything: outside the
+    /// source root, naming the root itself, or any absolute pattern when
+    /// the source is not local. They stay in `patterns`, where they match
+    /// nothing; the caller warns about each one.
+    pub unmatchable: Vec<String>,
+}
+
+/// audit-19: make each absolute `--exclude` under `source_root` relative
+/// to it, and name the absolute ones that cannot match. Paths compare the
+/// way the platform compares them (case-insensitively on Windows); a root
+/// or pattern reached through a symlink is also compared in its resolved
+/// form, so `/tmp/x/.java` and `/private/tmp/x/.java` name one path on
+/// macOS. Relative patterns pass through untouched.
+pub fn resolve_excludes(exclude: &[String], source_root: Option<&Path>) -> ResolvedExcludes {
+    let windows = cfg!(windows);
+    let mut resolved = ResolvedExcludes::default();
+    if !exclude
+        .iter()
+        .any(|pattern| is_absolute_pattern(pattern, windows))
+    {
+        resolved.patterns = exclude.to_vec();
+        return resolved;
+    }
+    let roots: Vec<String> = source_root
+        .map(|root| {
+            let mut forms = Vec::new();
+            if let Ok(absolute) = std::path::absolute(root) {
+                forms.push(absolute.to_string_lossy().into_owned());
+            }
+            if let Ok(canonical) = std::fs::canonicalize(root) {
+                forms.push(canonical.to_string_lossy().into_owned());
+            }
+            forms
+        })
+        .unwrap_or_default();
+    for pattern in exclude {
+        if !is_absolute_pattern(pattern, windows) {
+            resolved.patterns.push(pattern.clone());
+            continue;
+        }
+        let mut pattern_forms = vec![pattern.clone()];
+        if let Ok(canonical) = std::fs::canonicalize(pattern) {
+            pattern_forms.push(canonical.to_string_lossy().into_owned());
+        }
+        let relative = pattern_forms.iter().find_map(|form| {
+            roots
+                .iter()
+                .find_map(|root| relative_to_root(form, root, windows))
+        });
+        match relative {
+            Some(relative) => resolved.patterns.push(relative),
+            None => {
+                resolved.patterns.push(pattern.clone());
+                resolved.unmatchable.push(pattern.clone());
+            }
+        }
+    }
+    resolved
+}
+
+/// An absolute path on the platform's terms: rooted on Unix; a drive
+/// (`C:\`), UNC (`\\server`) or rooted path on Windows, either slash.
+fn is_absolute_pattern(pattern: &str, windows: bool) -> bool {
+    if !windows {
+        return pattern.starts_with('/');
+    }
+    let bytes = pattern.as_bytes();
+    let is_sep = |b: u8| b == b'/' || b == b'\\';
+    bytes.first().is_some_and(|b| is_sep(*b))
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && is_sep(bytes[2]))
+}
+
+/// The components of an absolute path, `/`-split. On Windows `\` is a
+/// separator too, a verbatim prefix (`\\?\`) is dropped, and a UNC path
+/// keeps a leading marker so it never equals a rooted one.
+fn absolute_components(path: &str, windows: bool) -> Vec<String> {
+    let mut unified = if windows {
+        path.replace('\\', "/")
+    } else {
+        path.to_string()
+    };
+    if windows {
+        if let Some(rest) = unified.strip_prefix("//?/UNC/") {
+            unified = format!("//{rest}");
+        } else if let Some(rest) = unified.strip_prefix("//?/") {
+            unified = rest.to_string();
+        }
+    }
+    let mut components = Vec::new();
+    if windows && unified.starts_with("//") {
+        components.push("//".to_string());
+    }
+    components.extend(
+        unified
+            .split('/')
+            .filter(|component| !component.is_empty() && *component != ".")
+            .map(str::to_string),
+    );
+    components
+}
+
+/// `pattern` made relative to `root` when it lies strictly beneath it;
+/// `None` otherwise (the root itself names nothing a walk visits). A
+/// single remaining name is written `./name` so it stays anchored to the
+/// root instead of matching that name at every depth.
+fn relative_to_root(pattern: &str, root: &str, windows: bool) -> Option<String> {
+    let pattern = absolute_components(pattern, windows);
+    let root = absolute_components(root, windows);
+    if pattern.len() <= root.len() {
+        return None;
+    }
+    let same = |a: &String, b: &String| {
+        if windows {
+            a.to_lowercase() == b.to_lowercase()
+        } else {
+            a == b
+        }
+    };
+    if !root.iter().zip(&pattern).all(|(r, p)| same(r, p)) {
+        return None;
+    }
+    let rest = &pattern[root.len()..];
+    // `..` would climb back out: such a form names nothing reliably.
+    if rest.iter().any(|component| component == "..") {
+        return None;
+    }
+    Some(if rest.len() == 1 {
+        format!("./{}", rest[0])
+    } else {
+        rest.join("/")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     //! audit-6 item 1: transfer orchestration glue. `build` / `build_spec`
@@ -196,6 +348,7 @@ mod tests {
             files_from: None,
             retry_only: Some(&names),
             retry_only_raw: Some(&raw),
+            source_root: None,
             min_size: None,
             max_size: None,
             min_age: None,
@@ -216,6 +369,7 @@ mod tests {
             files_from: None,
             retry_only: None,
             retry_only_raw: None,
+            source_root: None,
             min_size: None,
             max_size: None,
             min_age: None,
@@ -298,6 +452,111 @@ mod tests {
             Some(parse_duration("1h").unwrap().as_secs())
         );
         assert_eq!(spec.max_age_secs, None);
+    }
+
+    /// audit-19: an absolute exclude under the source root is made
+    /// source-relative by BOTH builders — `build_spec` before the spec
+    /// leaves this host, since the peer never knows this side's root.
+    #[test]
+    fn an_absolute_exclude_under_the_source_root_becomes_relative_in_build_and_build_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let exc = vec![
+            format!("{}", root.join(".java").display()),
+            format!("{}/", root.join("a").join(".java").display()),
+            "*.tmp".to_string(),
+        ];
+        let expected = vec![
+            "./.java".to_string(),
+            "a/.java".to_string(),
+            "*.tmp".to_string(),
+        ];
+        let mut i = inputs(&[], &exc);
+        i.source_root = Some(root);
+        assert_eq!(build(&i).unwrap().exclude_files, expected, "build");
+        assert_eq!(build_spec(&i).unwrap().exclude, expected, "build_spec");
+        assert!(resolve_excludes(&exc, Some(root)).unmatchable.is_empty());
+    }
+
+    /// audit-19: an absolute exclude that names nothing under the source
+    /// root — outside it, the root itself, or any absolute pattern when the
+    /// source is remote — is reported unmatchable (the CLI warns), and is
+    /// kept as typed, where it matches nothing.
+    #[test]
+    fn an_absolute_exclude_outside_the_source_root_is_unmatchable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let outside = "/nowhere/.java".to_string();
+        let the_root = format!("{}", root.display());
+        let exc = vec![outside.clone(), the_root.clone(), ".java".to_string()];
+
+        let resolved = resolve_excludes(&exc, Some(root));
+        assert_eq!(resolved.unmatchable, vec![outside.clone(), the_root]);
+        assert_eq!(resolved.patterns, exc, "unmatchable patterns stay as typed");
+
+        let remote = resolve_excludes(&exc, None);
+        assert_eq!(
+            remote.unmatchable,
+            vec![outside, format!("{}", root.display())],
+            "no local root: every absolute pattern is unmatchable"
+        );
+        let mut i = inputs(&[], &exc);
+        i.source_root = Some(root);
+        assert_eq!(build_spec(&i).unwrap().exclude, exc);
+    }
+
+    /// A root reached through a symlink still relativizes a pattern
+    /// written through the resolved path (macOS `/tmp` is
+    /// `/private/tmp`).
+    #[cfg(unix)]
+    #[test]
+    fn an_absolute_exclude_through_a_symlinked_root_becomes_relative() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let canonical = std::fs::canonicalize(&real).unwrap();
+        let exc = vec![format!("{}", canonical.join(".java").display())];
+        let resolved = resolve_excludes(&exc, Some(&link));
+        assert_eq!(resolved.patterns, vec!["./.java".to_string()]);
+        assert!(resolved.unmatchable.is_empty());
+    }
+
+    /// Windows forms: either slash, any case, verbatim and UNC prefixes.
+    /// Pure string logic, so it runs (and can fail) on every OS.
+    #[test]
+    fn windows_absolute_excludes_compare_case_insensitively_with_either_slash() {
+        assert!(is_absolute_pattern(r"C:\Users\me\.java", true));
+        assert!(is_absolute_pattern("c:/Users/me", true));
+        assert!(is_absolute_pattern(r"\\server\share\x", true));
+        assert!(!is_absolute_pattern(r"C:\Users\me", false));
+        assert!(!is_absolute_pattern(".java", true));
+        assert_eq!(
+            relative_to_root(r"C:\Users\Me\.java", r"c:\users\me", true).as_deref(),
+            Some("./.java")
+        );
+        assert_eq!(
+            relative_to_root(r"C:\Users\me\a\.java", r"\\?\C:\Users\me", true).as_deref(),
+            Some("a/.java")
+        );
+        assert_eq!(
+            relative_to_root(r"\\srv\share\d\x", r"\\?\UNC\srv\share\d", true).as_deref(),
+            Some("./x")
+        );
+        assert_eq!(
+            relative_to_root(r"D:\Users\me\.java", r"C:\Users\me", true),
+            None
+        );
+        assert_eq!(
+            relative_to_root(r"\srv\share\d\x", r"\\srv\share\d", true),
+            None
+        );
+        assert_eq!(
+            relative_to_root("/Users/Me/.java", "/Users/me", false),
+            None,
+            "case matters off Windows"
+        );
     }
 
     /// review otp-10a F8: the wire-spec builder rejects malformed globs

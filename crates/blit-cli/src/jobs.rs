@@ -2315,6 +2315,7 @@ mod retry_name_tests {
                 files_from: None,
                 retry_only: Some(&names),
                 retry_only_raw: Some(&raw_names),
+                source_root: None,
                 min_size: None,
                 max_size: None,
                 min_age: None,

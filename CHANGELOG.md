@@ -133,6 +133,20 @@ part, and a job you can list, read, re-run and retry.
   passes therefore compare like the main pass: a file that became current
   during the wait is not re-sent, a newer destination file is kept, and
   `--ignore-existing` is honored except for this run's own incomplete copy.
+- `--exclude` silently matched nothing for the forms people type: an
+  absolute path (`--exclude /home/me/.java`) was never compared as one,
+  and a bare directory name (`--exclude .java`) dropped only an entry with
+  exactly that name, so its contents still transferred. Now a pattern
+  with no `/` matches a file or directory name at any depth, and an
+  excluded directory takes everything beneath it; a pattern with a `/` is
+  relative to the source and excludes that path and its subtree; an
+  absolute path under a local source is made relative to it (naming that
+  one path) on every route and in `blit check`; an absolute pattern that
+  cannot match anything is named once on stderr and the run goes on.
+  Excluded directories are pruned, never read, so an unreadable one no
+  longer leaves a mirror's scan incomplete. `*.log`, `**/*.log`, `dir/**`
+  and exact relative paths match as before. (`blit-core`: `FilterInputs`
+  gained `source_root`.)
 
 ## [0.1.3] - 2026-08-20
 

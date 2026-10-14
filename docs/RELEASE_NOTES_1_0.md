@@ -61,6 +61,20 @@ the source side too, and adds a retry pass.
   without writing a byte. Fixed: the copy's cleanup is armed only once
   the destination is open for writing.
 
+## Filters
+
+- **`--exclude` matches the forms people type.** A pattern with no `/`
+  matches a file or directory name at any depth, and an excluded
+  directory takes everything beneath it (`--exclude .java`); a pattern
+  with a `/` is relative to the source and excludes that path and its
+  subtree (`--exclude a/.java`); an absolute path under a local source is
+  made relative to it and excludes exactly that path (`--exclude
+  /home/me/.java`). An absolute pattern that cannot match anything —
+  outside the source, or any absolute pattern when the source is remote —
+  is named once on stderr and the run goes on. Excluded directories are
+  never read, so an unreadable one no longer stops a mirror's deletions.
+  Before 1.0 the absolute and bare-name forms silently matched nothing.
+
 ## Filenames that are not valid UTF-8 transfer
 
 A filename that is valid on Linux (ext4 accepts any bytes) but not valid
@@ -137,13 +151,6 @@ carry such names by their exact bytes.
 
 ## Known limitations shipped open
 
-- † **`--exclude` only matches paths relative to the transfer source, and
-  a bare directory name does not match that directory's contents.** An
-  absolute path, or a bare directory name meant to exclude everything
-  beneath it, silently matches nothing: the pattern is accepted, nothing
-  is excluded, and no warning is given. Use a source-relative glob with an
-  explicit subtree wildcard, `--exclude '.java/**'` rather than
-  `--exclude .java` or an absolute path.
 - † **A failed `--detach` job's `jobs list` entry says only
   `delegated_pull handler failed`.** The real reason is in `blit jobs log
   <host> <job-id>`.

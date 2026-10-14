@@ -28,6 +28,15 @@ pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         bail!("destination path does not exist: {}", dst.display());
     }
 
+    // audit-19: an absolute `--exclude` under the source is made
+    // relative; one that cannot match anything is named, once.
+    for pattern in filter::resolve_excludes(&args.exclude, Some(&src)).unmatchable {
+        eprintln!(
+            "blit: --exclude '{pattern}' cannot match anything under {}",
+            src.display()
+        );
+    }
+
     // Build filter via the same chokepoint that copy/mirror/move use, so
     // `blit check --exclude '*.tmp'` matches `blit copy --exclude '*.tmp'`.
     let filter = filter::build(&FilterInputs {
@@ -36,6 +45,7 @@ pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         files_from: args.files_from.as_ref(),
         retry_only: None,
         retry_only_raw: None,
+        source_root: Some(&src),
         min_size: args.min_size.as_deref(),
         max_size: args.max_size.as_deref(),
         min_age: args.min_age.as_deref(),

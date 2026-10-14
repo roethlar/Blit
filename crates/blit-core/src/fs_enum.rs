@@ -2,7 +2,7 @@ use eyre::{Context, Result};
 use once_cell::sync::OnceCell;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::enumeration::{EnumeratedEntry, FileEnumerator};
@@ -29,6 +29,12 @@ pub struct CopyJob {
 /// - `include_files` (whitelist): if any pattern is set, the file must
 ///   match at least one to pass. Empty list disables the whitelist.
 /// - `exclude_files` / `exclude_dirs`: matching files/dirs are blocked.
+///   An `exclude_files` pattern (`--exclude`) with no path separator
+///   matches any component of an entry's relative path, so a directory of
+///   that name is excluded with everything beneath it; a pattern with a
+///   separator is source-relative and excludes the path it names and its
+///   whole subtree. An excluded directory is pruned — never walked
+///   (audit-19).
 /// - `min_size` / `max_size`: size constraints applied after pattern checks.
 /// - `min_age` / `max_age`: age constraints relative to `reference_time`
 ///   (set by the orchestrator at filter-build time, not by the leaf code).
@@ -49,6 +55,85 @@ pub struct FileFilter {
     compiled_includes: OnceCell<globset::GlobSet>,
     compiled_files: OnceCell<globset::GlobSet>,
     compiled_dirs: OnceCell<globset::GlobSet>,
+    compiled_subtrees: OnceCell<ExcludeRules>,
+}
+
+/// audit-19: the `--exclude` patterns as the any-depth and subtree rules
+/// read them. A pattern's trailing `/` is dropped (`a/.java/` names the
+/// same tree as `a/.java`) and a leading `./` anchors it to the source
+/// root (`./.java` is the top-level `.java` only).
+#[derive(Debug, Default)]
+struct ExcludeRules {
+    /// Patterns with no separator: each matches any one component of a
+    /// relative path, at any depth.
+    names: Vec<String>,
+    name_globs: globset::GlobSet,
+    /// Source-relative patterns: each matches a leading run of a relative
+    /// path's components — the entry itself or a directory above it.
+    paths: Vec<String>,
+    path_globs: globset::GlobSet,
+}
+
+impl ExcludeRules {
+    fn compile(patterns: &[String]) -> Self {
+        let mut names = Vec::new();
+        let mut paths = Vec::new();
+        for pattern in patterns {
+            let mut body = pattern.trim_end_matches('/');
+            let mut anchored = false;
+            while let Some(rest) = body.strip_prefix("./") {
+                body = rest;
+                anchored = true;
+            }
+            if body.is_empty() || body == "." {
+                continue;
+            }
+            if anchored || body.contains('/') {
+                paths.push(body.to_string());
+            } else {
+                names.push(body.to_string());
+            }
+        }
+        Self {
+            name_globs: FileFilter::build_globset(&names),
+            path_globs: FileFilter::build_globset(&paths),
+            names,
+            paths,
+        }
+    }
+
+    /// True when a rule names `rel_path`, one of its components, or a
+    /// directory above it. Components are joined with `/` on every OS.
+    fn excludes(&self, rel_path: &Path) -> bool {
+        if self.names.is_empty() && self.paths.is_empty() {
+            return false;
+        }
+        let mut prefix = String::new();
+        for component in rel_path.components() {
+            let Component::Normal(name) = component else {
+                continue;
+            };
+            let name = name.to_string_lossy();
+            if !self.names.is_empty()
+                && (self.name_globs.is_match(name.as_ref())
+                    || self.names.iter().any(|p| glob_match(p, &name)))
+            {
+                return true;
+            }
+            if !self.paths.is_empty() {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(&name);
+                if self.path_globs.is_match(prefix.as_str())
+                    || self.paths.iter().any(|p| glob_match(p, &prefix))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 impl FileFilter {
@@ -69,7 +154,27 @@ impl FileFilter {
             compiled_includes: OnceCell::new(),
             compiled_files: OnceCell::new(),
             compiled_dirs: OnceCell::new(),
+            compiled_subtrees: OnceCell::new(),
         }
+    }
+
+    /// audit-19: the part of this filter a source's own directory walk may
+    /// apply — the exclude rules alone — so an excluded tree is pruned
+    /// where it is walked, never read. `None` when nothing could be pruned,
+    /// or when `files_from` is set (a listed path passes whatever the
+    /// excludes say, so the walk must not drop it). Every other rule still
+    /// applies wherever the full filter runs.
+    pub fn pruning_rules(&self) -> Option<FileFilter> {
+        if self.files_from.is_some()
+            || (self.exclude_files.is_empty() && self.exclude_dirs.is_empty())
+        {
+            return None;
+        }
+        Some(FileFilter {
+            exclude_files: self.exclude_files.clone(),
+            exclude_dirs: self.exclude_dirs.clone(),
+            ..FileFilter::default()
+        })
     }
 
     /// True when no rules are configured — caller can skip filter checks entirely.
@@ -165,8 +270,37 @@ impl FileFilter {
             .get_or_init(|| Self::build_globset(&self.exclude_dirs))
     }
 
-    pub(crate) fn allows_dir(&self, path: &Path) -> bool {
-        self.should_include_dir(path)
+    fn subtree_rules(&self) -> &ExcludeRules {
+        self.compiled_subtrees
+            .get_or_init(|| ExcludeRules::compile(&self.exclude_files))
+    }
+
+    /// `rel_path` is the directory's path relative to the walk root;
+    /// `abs_path` is where it lives.
+    pub(crate) fn allows_dir(&self, rel_path: &Path, abs_path: &Path) -> bool {
+        self.should_include_dir(rel_path, abs_path)
+    }
+
+    /// The `--exclude` test for one entry, file or directory. Today's
+    /// matches are kept exactly (a pattern against the bare name or the
+    /// whole relative path); audit-19 adds the any-depth name rule and the
+    /// subtree rule (see [`ExcludeRules`]).
+    fn excluded(&self, rel_path: Option<&Path>, filename: &str, path_str: &str) -> bool {
+        if self.exclude_files.is_empty() {
+            return false;
+        }
+        let gs = self.file_globs();
+        if gs.is_match(filename) || gs.is_match(path_str) {
+            return true;
+        }
+        if self
+            .exclude_files
+            .iter()
+            .any(|pattern| glob_match(pattern, filename) || glob_match(pattern, path_str))
+        {
+            return true;
+        }
+        rel_path.is_some_and(|rel| self.subtree_rules().excludes(rel))
     }
 
     /// Full filter check. `rel_path` enables `files_from` matching;
@@ -210,14 +344,8 @@ impl FileFilter {
         }
 
         // Blacklist
-        let gs = self.file_globs();
-        if gs.is_match(&filename) || gs.is_match(&path_str) {
+        if self.excluded(rel_path, &filename, &path_str) {
             return false;
-        }
-        for pattern in &self.exclude_files {
-            if glob_match(pattern, &filename) || glob_match(pattern, &path_str) {
-                return false;
-            }
         }
 
         // Size
@@ -251,8 +379,8 @@ impl FileFilter {
         true
     }
 
-    /// Check if a directory should be included
-    fn should_include_dir(&self, path: &Path) -> bool {
+    /// Check if a directory should be included (walked).
+    fn should_include_dir(&self, rel_path: &Path, abs_path: &Path) -> bool {
         // files_from doesn't restrict dir traversal — we still need to
         // descend into directories to find listed files.
         if self.files_from.is_some() {
@@ -260,11 +388,11 @@ impl FileFilter {
         }
 
         let gs = self.dir_globs();
-        if gs.is_match(path.to_string_lossy().as_ref()) {
+        if gs.is_match(abs_path.to_string_lossy().as_ref()) {
             return false;
         }
         for pattern in &self.exclude_dirs {
-            for component in path.components() {
+            for component in abs_path.components() {
                 if let Some(component_str) = component.as_os_str().to_str() {
                     if glob_match(pattern, component_str) {
                         return false;
@@ -272,7 +400,16 @@ impl FileFilter {
                 }
             }
         }
-        true
+
+        // audit-19: a directory `--exclude` names is pruned, not just
+        // filtered — the walk never opens it, so an excluded tree costs
+        // nothing to skip and nothing inside it (an unreadable file
+        // included) is ever read or reported.
+        let filename = rel_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        !self.excluded(Some(rel_path), &filename, &rel_path.to_string_lossy())
     }
 }
 
@@ -291,6 +428,7 @@ impl Default for FileFilter {
             compiled_includes: OnceCell::new(),
             compiled_files: OnceCell::new(),
             compiled_dirs: OnceCell::new(),
+            compiled_subtrees: OnceCell::new(),
         }
     }
 }
@@ -426,4 +564,177 @@ pub fn enumerate_directory_filtered(
         .into_iter()
         .filter_map(EnumeratedEntry::into_file_entry)
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    //! audit-19: the `--exclude` contract — a separator-less pattern names
+    //! a component at any depth, a source-relative path names its whole
+    //! subtree, and an excluded directory is pruned, never walked.
+    use super::*;
+    use crate::enumeration::FileEnumerator;
+
+    fn excluding(patterns: &[&str]) -> FileFilter {
+        FileFilter {
+            exclude_files: patterns.iter().map(|p| p.to_string()).collect(),
+            ..FileFilter::default()
+        }
+    }
+
+    /// The `allows_entry` verdict on one file reached by its relative path
+    /// alone — how every session source (`FilteredSource`) asks.
+    fn allows(filter: &FileFilter, rel: &str) -> bool {
+        filter.allows_entry(Some(Path::new(rel)), Path::new(rel), 1, None)
+    }
+
+    /// `.java/fonts/x`, `a/.java/y`, `a/b/.java/deep/z`, plus files that
+    /// must survive every exclude below.
+    fn tree() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (rel, body) in [
+            (".java/fonts/x", "x"),
+            ("a/.java/y", "y"),
+            ("a/b/.java/deep/z", "z"),
+            ("keep.txt", "k"),
+            ("a/keep.txt", "k"),
+            ("a/t.tmp", "t"),
+            ("a/b/u.tmp", "u"),
+            ("logs/app.log", "l"),
+        ] {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, body).expect("write");
+        }
+        dir
+    }
+
+    /// Every file and directory the walk yields, `/`-joined and sorted;
+    /// fails if the walk had to skip anything it could not read.
+    fn walk(root: &Path, filter: FileFilter) -> Vec<String> {
+        let (entries, outcome) = FileEnumerator::new(filter)
+            .enumerate_local_capturing(root)
+            .expect("enumerate");
+        assert!(
+            outcome.suppressed_errors.is_empty(),
+            "the walk opened something it could not read: {:?}",
+            outcome.suppressed_errors
+        );
+        let mut rels: Vec<String> = entries
+            .iter()
+            .map(|e| crate::path_posix::relative_path_to_posix(&e.relative_path))
+            .collect();
+        rels.sort();
+        rels
+    }
+
+    #[test]
+    fn a_bare_name_excludes_that_directory_and_its_contents_at_any_depth() {
+        let filter = excluding(&[".java"]);
+        for rel in [".java/fonts/x", "a/.java/y", "a/b/.java/deep/z", ".java"] {
+            assert!(!allows(&filter, rel), "{rel} must be excluded");
+        }
+        assert!(allows(&filter, "a/keep.txt"));
+        assert!(allows(&filter, "a/not.java"), "only the whole name matches");
+
+        let dir = tree();
+        let walked = walk(dir.path(), excluding(&[".java"]));
+        assert!(
+            walked
+                .iter()
+                .all(|rel| !rel.split('/').any(|c| c == ".java")),
+            "no .java directory, nor anything beneath one, is walked: {walked:?}"
+        );
+        assert!(walked.contains(&"keep.txt".to_string()));
+        assert!(walked.contains(&"a/keep.txt".to_string()));
+    }
+
+    #[test]
+    fn a_filename_glob_still_matches_at_any_depth() {
+        let filter = excluding(&["*.tmp"]);
+        assert!(!allows(&filter, "a/t.tmp"));
+        assert!(!allows(&filter, "a/b/u.tmp"));
+        assert!(allows(&filter, "a/keep.txt"));
+
+        let dir = tree();
+        let walked = walk(dir.path(), excluding(&["*.tmp"]));
+        assert!(
+            !walked.iter().any(|rel| rel.ends_with(".tmp")),
+            "{walked:?}"
+        );
+        assert!(walked.contains(&"a/keep.txt".to_string()));
+    }
+
+    #[test]
+    fn a_relative_directory_path_excludes_its_subtree_only() {
+        for pattern in ["a/.java", "a/.java/"] {
+            let filter = excluding(&[pattern]);
+            assert!(!allows(&filter, "a/.java/y"), "{pattern}: a/.java/y");
+            assert!(!allows(&filter, "a/.java/more/deep"), "{pattern}: deep");
+            assert!(allows(&filter, ".java/fonts/x"), "{pattern}: other tree");
+            assert!(allows(&filter, "a/b/.java/deep/z"), "{pattern}: other tree");
+
+            let dir = tree();
+            let walked = walk(dir.path(), excluding(&[pattern]));
+            assert!(
+                !walked.iter().any(|rel| rel.starts_with("a/.java")),
+                "{pattern}: {walked:?}"
+            );
+            assert!(walked.contains(&".java/fonts/x".to_string()));
+            assert!(walked.contains(&"a/b/.java/deep/z".to_string()));
+        }
+    }
+
+    /// `./name` (the form an absolute pattern naming a top-level entry is
+    /// relativized to) names that top-level path only.
+    #[test]
+    fn a_dot_slash_name_is_anchored_to_the_root() {
+        let filter = excluding(&["./.java"]);
+        assert!(!allows(&filter, ".java/fonts/x"));
+        assert!(allows(&filter, "a/.java/y"), "a nested .java is not named");
+    }
+
+    /// Forms that worked before audit-19 keep working.
+    #[test]
+    fn todays_working_forms_still_match() {
+        assert!(!allows(&excluding(&["**/*.log"]), "logs/app.log"));
+        assert!(!allows(&excluding(&["logs/**"]), "logs/app.log"));
+        assert!(!allows(&excluding(&["logs/app.log"]), "logs/app.log"));
+        assert!(!allows(&excluding(&[".java/**"]), ".java/fonts/x"));
+        assert!(allows(&excluding(&["logs/app.log"]), "logs/other.log"));
+    }
+
+    /// The excluded directory is pruned: the walk never opens it. Made
+    /// unreadable, it would otherwise be a suppressed scan error (which
+    /// refuses a mirror's deletions) — and an excluded 377k-file tree would
+    /// be enumerated for nothing.
+    #[cfg(unix)]
+    #[test]
+    fn an_excluded_directory_is_pruned_never_opened() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Restore(PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, PermissionsExt::from_mode(0o755));
+            }
+        }
+
+        let dir = tree();
+        let blocked = dir.path().join(".java");
+        std::fs::set_permissions(&blocked, PermissionsExt::from_mode(0o000)).expect("chmod");
+        let _restore = Restore(blocked.clone());
+        // Privileged runs read through mode 000; the "never opened" proof
+        // needs an unprivileged one.
+        if std::fs::read_dir(&blocked).is_ok() {
+            eprintln!("skipping the never-opened assertion: running privileged");
+            return;
+        }
+
+        // `walk` fails on any suppressed error, i.e. on any open attempt.
+        let walked = walk(dir.path(), excluding(&[".java"]));
+        assert!(
+            !walked.iter().any(|rel| rel.starts_with(".java")),
+            "{walked:?}"
+        );
+        assert!(walked.contains(&"keep.txt".to_string()));
+    }
 }

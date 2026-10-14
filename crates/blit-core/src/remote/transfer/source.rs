@@ -888,7 +888,8 @@ impl TransferSource for FilteredSource {
     fn scan(
         &self,
         // Ignored: the wrapper carries the filter that's been calculated
-        // by the orchestrator. Inner source emits unfiltered headers.
+        // by the orchestrator. The inner source walks with its exclude
+        // rules only (audit-19 pruning); the whole filter runs here.
         _filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
@@ -929,11 +930,16 @@ impl FilteredSource {
         unreadable_paths: Arc<Mutex<Vec<String>>>,
         preserve_windows_metadata: bool,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
+        // audit-19: the inner walk gets the exclude rules alone, so an
+        // excluded directory is pruned where it is walked — never read,
+        // never reported unreadable. Every rule still applies below, so a
+        // source that ignores its `scan(filter)` arg filters the same.
+        let pruning = self.filter.pruning_rules();
         let (header_rx, mut scan) = if preserve_windows_metadata {
-            self.inner.scan(None, unreadable_paths)
+            self.inner.scan(pruning, unreadable_paths)
         } else {
             self.inner
-                .scan_without_windows_metadata(None, unreadable_paths)
+                .scan_without_windows_metadata(pruning, unreadable_paths)
         };
         if self.filter.is_empty() {
             // Fast path — no filter installed, return the inner channel
@@ -1726,6 +1732,52 @@ mod filtered_source_tests {
         );
         let names = collect(rx).await;
         assert!(names.is_empty(), "baked-in filter should drop a.tmp");
+    }
+
+    /// audit-19: the decorator hands its exclude rules to the inner walk,
+    /// so an excluded directory is pruned where the real fs source walks —
+    /// never opened. Unreadable, it would otherwise land on the unreadable
+    /// list ("scan suppressed"), marking the scan incomplete and refusing
+    /// a mirror's deletions over a tree the operator excluded.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_excluded_directory_is_pruned_by_the_inner_walk() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Restore(PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, PermissionsExt::from_mode(0o755));
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("keep.txt"), b"k").expect("write");
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&blocked).expect("mkdir");
+        std::fs::write(blocked.join("inner.txt"), b"i").expect("write");
+        std::fs::set_permissions(&blocked, PermissionsExt::from_mode(0o000)).expect("chmod");
+        let _restore = Restore(blocked.clone());
+        let privileged = std::fs::read_dir(&blocked).is_ok();
+
+        let inner: Arc<dyn TransferSource> =
+            Arc::new(FsTransferSource::new(dir.path().to_path_buf()));
+        let mut filter = FileFilter::default();
+        filter.exclude_files = vec!["blocked".to_string()];
+        let unreadable: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (rx, mut scan) = FilteredSource::new(inner, filter).scan(None, Arc::clone(&unreadable));
+        let names = collect(rx).await;
+        scan.finish().await.expect("scan completes");
+
+        assert_eq!(names, vec!["keep.txt"]);
+        if privileged {
+            eprintln!("skipping the never-opened assertion: running privileged");
+            return;
+        }
+        assert!(
+            unreadable.lock().expect("unreadable list").is_empty(),
+            "an excluded directory must never be opened: {:?}",
+            unreadable.lock().expect("unreadable list")
+        );
     }
 }
 

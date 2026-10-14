@@ -231,7 +231,10 @@ impl FileEnumerator {
             }
 
             if entry.file_type().is_dir() {
-                if !filter.allows_dir(path) {
+                let rel = relative_path(root, path);
+                // audit-19: a pruned directory is skipped before walkdir
+                // reads it, so nothing beneath it is ever opened.
+                if !filter.allows_dir(&rel, path) {
                     walker.skip_current_dir();
                     continue;
                 }
@@ -242,7 +245,7 @@ impl FileEnumerator {
 
                 visit(EnumeratedEntry {
                     absolute_path: path.to_path_buf(),
-                    relative_path: relative_path(root, path),
+                    relative_path: rel,
                     metadata,
                     kind: EntryKind::Directory,
                 })?;

@@ -239,7 +239,7 @@ explicitly-deferred logging epic (F15).
       case too, but the root cause here is enumeration-side path
       corruption, not destination-fs charset rejection, so treat as
       a separate fix even if the error-handling policy ends up shared.
-- [ ] **audit-19** `--exclude` silently matches nothing for the path
+- [x] **audit-19** FIXED 2026-10-14 (RELEASE_1_0 G3, owner ruling): a pattern with no separator now matches a name at any depth (a directory with its contents), a pattern with one excludes that source-relative subtree, an absolute pattern under a local source is made relative (one that cannot match is named on stderr once), and excluded directories are pruned, never walked. Original report: `--exclude` silently matches nothing for the path
       forms users actually type (absolute paths, and bare directory
       names), so an exclude that looks correct transfers the excluded
       tree anyway. Reported: `blit mirror /home/michael/

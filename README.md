@@ -17,7 +17,7 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 - **Job logs, run records and saved jobs**
   Every run writes a compressed JSON log and a run record on each machine involved, under one job ID. `blit jobs list|log|watch|cancel|save|export|run|retry|delete` read, re-run and retry them; `--save <name>`, `--export <file>` and `--detach` on transfers. Each machine keeps its newest 50 (`[jobs] keep`).
 - **Comparison you choose**
-  The default compare is size + modification time; `--checksum` compares content (Blake3) on both ends. Filters: `--include`/`--exclude` globs, `--files-from`, size and age bounds. Filenames that are not valid UTF-8 transfer by their exact bytes.
+  The default compare is size + modification time; `--checksum` compares content (Blake3) on both ends. Filters: `--include`/`--exclude` globs (an `--exclude` name matches at any depth and takes a directory's contents, a path is relative to the source, an absolute path under the source is made relative), `--files-from`, size and age bounds. Filenames that are not valid UTF-8 transfer by their exact bytes.
 - **Hybrid Transport**
   TCP data plane by default, with an in-stream gRPC carrier for diagnostics or when direct TCP is unavailable.
 - **Platform Optimization**

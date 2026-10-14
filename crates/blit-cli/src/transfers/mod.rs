@@ -41,6 +41,7 @@ use crate::context::AppContext;
 use eyre::{bail, Context, Result};
 use std::fs;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use failures::{exit_for_failures, refuse_source_delete_on_failures};
@@ -60,13 +61,14 @@ use blit_core::transfers::resolution::resolve_destination;
 /// `FilterInputs` (the struct lives in `blit_core::transfers::filter`,
 /// `TransferArgs` stays in `blit-cli`). Inlined wrapper keeps the
 /// `build_filter` / `build_filter_spec` call sites readable.
-fn filter_inputs(args: &TransferArgs) -> FilterInputs<'_> {
+fn filter_inputs<'a>(args: &'a TransferArgs, source_root: Option<&'a Path>) -> FilterInputs<'a> {
     FilterInputs {
         include: &args.include,
         exclude: &args.exclude,
         files_from: args.files_from.as_ref(),
         retry_only: args.retry_only.as_ref(),
         retry_only_raw: args.retry_only_raw.as_ref(),
+        source_root,
         min_size: args.min_size.as_deref(),
         max_size: args.max_size.as_deref(),
         min_age: args.min_age.as_deref(),
@@ -102,16 +104,39 @@ fn collapse_slashes(s: &str) -> String {
     out
 }
 
+/// audit-19: the source root an absolute `--exclude` is made relative
+/// to — the source path when it is local, `None` when it is remote.
+fn local_source_root(args: &TransferArgs) -> Option<PathBuf> {
+    match parse_transfer_endpoint(&args.source) {
+        Ok(Endpoint::Local(path)) => Some(path),
+        _ => None,
+    }
+}
+
 /// Build a `FileFilter` from a transfer command's args. Thin
 /// clap-side wrapper around `blit_core::transfers::filter::build`.
 pub(crate) fn build_filter(args: &TransferArgs) -> Result<FileFilter> {
-    filter::build(&filter_inputs(args))
+    let source_root = local_source_root(args);
+    filter::build(&filter_inputs(args, source_root.as_deref()))
 }
 
 /// Build the wire-side `FilterSpec` proto from CLI args. Thin
-/// wrapper around `blit_core::transfers::filter::build_spec`.
+/// wrapper around `blit_core::transfers::filter::build_spec`. An
+/// absolute `--exclude` under a local source is relativized before the
+/// spec is built, so the peer receives the relative form (audit-19).
 pub(crate) fn build_filter_spec(args: &TransferArgs) -> Result<blit_core::generated::FilterSpec> {
-    filter::build_spec(&filter_inputs(args))
+    let source_root = local_source_root(args);
+    filter::build_spec(&filter_inputs(args, source_root.as_deref()))
+}
+
+/// audit-19: one line per absolute `--exclude` that cannot match anything
+/// — outside a local source, or any absolute pattern when the source is
+/// remote. The run goes on; the operator learns the pattern did nothing.
+fn warn_unmatchable_excludes(args: &TransferArgs, source_display: &str) {
+    let source_root = local_source_root(args);
+    for pattern in filter::resolve_excludes(&args.exclude, source_root.as_deref()).unmatchable {
+        eprintln!("blit: --exclude '{pattern}' cannot match anything under {source_display}");
+    }
 }
 
 /// Prompt for confirmation of a destructive operation. Returns true if the user confirms.
@@ -305,6 +330,7 @@ async fn run_transfer_inner(
     reject_unsupported_checker_pin(args, &route)?;
 
     warn_if_dropping_windows_metadata(args);
+    warn_unmatchable_excludes(args, &src_display);
 
     // For mirror operations, prompt unless --yes or --dry-run
     if mode.is_mirror() && !args.dry_run {

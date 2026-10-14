@@ -453,7 +453,7 @@ pub struct TransferArgs {
     // Filters apply identically to all source/destination combinations
     // (local-local, push, pull, remote-remote) — they live on the
     // pipeline's TransferSource so every path enforces them.
-    /// Exclude files matching this glob pattern (repeatable)
+    /// Exclude PATTERN (repeatable): a name matches at any depth, a directory excludes its contents, an absolute path under the source is made relative
     #[arg(long, action = clap::ArgAction::Append, value_name = "PATTERN", help_heading = "Filtering")]
     pub exclude: Vec<String>,
     /// Include only files matching this glob pattern (repeatable). When set,
@@ -785,6 +785,7 @@ pub struct CheckArgs {
 
     // Filter flags — same set/semantics as the transfer commands so
     // verification matches the transfer that produced the destination.
+    /// Exclude PATTERN (repeatable): a name matches at any depth, a directory excludes its contents, an absolute path under the source is made relative
     #[arg(long, action = clap::ArgAction::Append, value_name = "PATTERN", help_heading = "Filtering")]
     pub exclude: Vec<String>,
     #[arg(long, action = clap::ArgAction::Append, value_name = "PATTERN", help_heading = "Filtering")]
