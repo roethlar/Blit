@@ -1,0 +1,31 @@
+{
+  "verdict": "findings",
+  "capability_ok": true,
+  "guard_confirmed": true,
+  "reviewed_sha": "b7da0d8120ca4b40331ce80cc496dbf97bae8a06",
+  "base_sha": "b186e8b81a6589a11491c2c083da63afa6479ce3",
+  "guard": "Changed anchored = true to anchored = false in ExcludeRules::compile. fs_enum::tests::a_dot_slash_name_is_anchored_to_the_root failed with exit 101 at 'a nested .java is not named'. Restored using git checkout, verified the original blob hash, and reran: passed, exit 0. Final tracked worktree is clean. On macOS, fmt and clippy passed; cargo test --workspace reported 1502 passed, 2 ignored.",
+  "findings": [
+    {
+      "title": "Absolute excludes lose filesystem case semantics after rewriting",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:235 — the first lexical match wins before the canonical spelling is considered. relative_to_root preserves the suffix's typed case at line 315, while fs_enum.rs:213 builds case-sensitive globs. Reproduced on case-insensitive macOS: src/CACHE and src/cache identify the same directory, but excluding the absolute src/CACHE still copied cache/private.txt without warning. Windows has the same suffix-matching problem despite its case-insensitive root comparison.",
+      "predicted_failure": "A differently cased absolute exclude silently transfers the intended excluded subtree and leaves it within a mirror's deletion scope.",
+      "severity": "MEDIUM",
+      "better_approach": "Preserve filesystem case semantics in the rewritten matcher, including the wire representation, or resolve literal suffixes to their filesystem spelling. Test case differences below the source root."
+    },
+    {
+      "title": "Canonicalizing the whole pattern fails for glob paths through symlinks",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:232 — canonicalize(pattern) requires the wildcard-containing path itself to exist. Reproduced with alias pointing to src: copying src/ with an absolute exclude alias/*.txt warned that it could not match and copied keep.txt. The corresponding literal exclude alias/keep.txt worked.",
+      "predicted_failure": "An absolute glob through a symlink alias, including an alternate /tmp spelling on macOS, fails to exclude matching files even though its directory resolves under the source.",
+      "severity": "MEDIUM",
+      "better_approach": "Canonicalize the existing literal prefix, preserve the glob suffix, and then relativize against the source-root forms."
+    },
+    {
+      "title": "Windows relative anchors and trailing backslashes are not normalized",
+      "evidence": "crates/blit-core/src/fs_enum.rs:82 — compilation trims only '/', recognizes only './', and classifies separators using only '/'. resolve_excludes also passes relative patterns through unchanged. Consequently, Windows patterns such as '.\\cache' and 'cache\\' never acquire the corresponding anchored or subtree rules; the legacy whole-path checks do not match ordinary cache directory entries either. This finding is based on Windows-path code analysis, not a Windows runtime test.",
+      "predicted_failure": "On Windows, these ordinary directory-path exclusions silently copy cache and its contents instead of pruning them.",
+      "severity": "MEDIUM",
+      "better_approach": "Normalize Windows separators before anchor detection, trailing-separator removal, classification, and wire-spec construction. Preserve literal backslashes on Unix and add Windows coverage for both forms."
+    }
+  ]
+}
