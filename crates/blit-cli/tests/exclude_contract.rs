@@ -229,6 +229,52 @@ fn mirror_exclude_absolute_path_in_another_case_leaves_the_entry_out() {
     );
 }
 
+/// cr-g3fix2-1: on a case-insensitive filesystem an absolute exclude in
+/// another case that names a symlink in the source keeps the destination's
+/// entry of that name out of the mirror's reach. Before the fix the link's
+/// stored name was read through `canonicalize`, which cannot name a link
+/// without following it, so the exclude stayed `./CACHE`, matched nothing,
+/// warned about nothing, and the mirror deleted the destination's
+/// `cache/` subtree. Skipped where the filesystem is case-sensitive.
+#[cfg(unix)]
+#[test]
+fn mirror_exclude_symlink_in_another_case_keeps_the_destination_subtree() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("keep.txt"), b"k").unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("o.txt"), b"o").unwrap();
+    std::os::unix::fs::symlink(&outside, src.join("cache")).unwrap();
+    fs::create_dir_all(dst.join("cache")).unwrap();
+    fs::write(dst.join("cache").join("saved.txt"), b"s").unwrap();
+    if !case_insensitive(&src) {
+        eprintln!("skipping: {} is case-sensitive", src.display());
+        return;
+    }
+    let pattern = format!("{}", src.join("CACHE").display());
+
+    let (ok, stdout, stderr) = blit(&[
+        "mirror",
+        "--yes",
+        &with_slash(&src),
+        &with_slash(&dst),
+        "--exclude",
+        &pattern,
+    ]);
+    assert!(ok, "mirror failed:\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        dst.join("cache").join("saved.txt").exists(),
+        "the destination's cache/ is excluded and must survive the mirror:\nstdout: {stdout}"
+    );
+    assert!(dst.join("keep.txt").exists());
+    assert!(
+        !stderr.contains("cannot match anything"),
+        "a pattern under the source must not warn: {stderr}"
+    );
+}
+
 /// cr-g3fix-2: an absolute glob written through a symlink to the source
 /// is made relative. The glob path itself never exists, so only its
 /// literal part is resolved; before the fix the pattern was reported as

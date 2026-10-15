@@ -1,9 +1,9 @@
 # cr-g3fix2-1: Differently cased symlink excludes still fail to protect mirror destinations
 
 **Severity**: HIGH (reviewer: HIGH)
-**Status**: Open
+**Status**: Fixed
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: —
+**Commit**: (this commit)
 **Reviewer**: codex / gpt-6-astra / xhigh / standard (the owner's `review`, 2026-10-15), codex-cli 0.162.1 headless one-shot, `-a never exec -m gpt-6-astra -c model_reasoning_effort="xhigh" -s workspace-write --json`, stdin closed, detached worktree `review-g3fix2-r1-eddfab6c`; codereview re-review g3fix2-r1 over `2324e3cb..eddfab6c` (record `.review/results/g3fix2-r1.codex.json` + `.events.jsonl`); 2026-10-15 19:05–19:16Z; capability_ok=true; guard_confirmed=true (reviewer disabled `normalize_separators`'s Windows branch → `backslash_forms_follow_the_platform_rule` red at `fs_enum.rs:726`, restored by `git checkout`, blob hash verified, green; 1510/0/2 on its macOS gate; its Windows cross-clippy stopped on a missing `ml64.exe` for blake3 — the reviewer's environment, not the change); SHAs pin-verified; closed: cr-g3fix-2 true, cr-g3fix-3 true, cr-g3fix-1 false
 
 ## Evidence
@@ -19,19 +19,42 @@ Recover the symlink entry's own stored spelling without following its target, an
 Admitted; reproduced by the orchestrator with the release binary `blit 1.0.0+eddfab6c2c22` on macOS APFS (case-insensitive): `src/cache -> <outside>`, `blit mirror -y src/ dst/ --exclude <src>/CACHE` printed no warning, copied 1 file and reported "Deleted: 1 file(s), 1 dir(s)" — `dst/cache/saved.txt` and `dst/cache/` gone; the exact-case control `--exclude <src>/cache` kept them. cr-g3fix-1's Known gaps named this case as "one link entry, never the data behind it" and missed that under `mirror` the entry's counterpart at the destination is deletable: the gap is a data-loss path, not a cosmetic one. Root cause: `stored_name` (`filter.rs:444-457`) reads the stored spelling through `std::fs::canonicalize`, which cannot name a symlink without following it, so it returns `None` for every symlink and `stored_spelling` keeps the typed case. Fix shape: name the entry without following it — read the parent directory (`std::fs::read_dir`) and take the entry whose name equals the typed component exactly, else the single entry equal to it under case folding (the typed path exists per `symlink_metadata`, so on a case-insensitive filesystem exactly one entry answers); use that lookup for every component, symlink or not, with `canonicalize`'s file name only as the fallback for a non-symlink the directory listing cannot name (Windows short names). The respelled name must reach both `build` (the local rule) and `build_spec` (the wire form). Guards: the stored-name unit test gains a symlink that must report its own stored name (not its target's, not `None`); the case guard gains a symlink entry; a CLI `mirror` test on a case-insensitive filesystem (skipped elsewhere) proves an existing destination subtree under a differently cased symlink exclude survives, with the `--exclude` typed in the other case; all mutation-red.
 
 ## What
-(filled by the fix)
+On a case-insensitive filesystem (macOS, Windows) an absolute `--exclude` typed in another case than a symlink in the source — `--exclude <src>/CACHE` for `src/cache -> <outside dir>` — now names that link as the disk stores it (`./cache`) in both the local rule and the wire form. The link is left out of the transfer and, under `mirror`, the destination's `cache/` subtree stays outside the deletion scope; before, the exclude stayed `./CACHE`, matched nothing, warned about nothing, and the mirror deleted `dst/cache/`.
 
 ## Approach
-(filled by the fix)
+- `stored_name` now names an entry without following it: after `symlink_metadata` confirms the path exists (a dangling link included), `listed_name` (new) lists the parent directory with `std::fs::read_dir` and `paired_name` (new) takes the entry spelled exactly as typed, else the single entry equal to it under case folding (per character, `char::to_lowercase`); several such entries, or none, pair nothing. The lookup runs for every component, symlink or not. Only when the listing pairs nothing does a non-symlink fall back to `canonicalize`'s last component (Windows short names, another Unicode normalization); a symlink the listing cannot pair gets `None` and keeps its typed spelling, as before.
+- `stored_spelling` is unchanged apart from its doc: a respelled name — a link's included — becomes a `Literal` part (cr-g3fix2-2), so it is escaped by `written` and reaches both `build` (local rule) and `build_spec` (wire form) through `resolve_excludes`.
+- The walk continues past a respelled symlink, as past any respelled directory ("use that lookup for every component"): a component below the link is looked up through it, so it takes the spelling the link's target stores. Such a path names nothing the source walk visits (the walk does not follow links); it only matters to the destination's counterpart.
+- `paired_name` is separated from the directory read so the pairing rule (exact first, then the single case-fold pair, ambiguity pairs none) is unit-tested on every OS; a case-sensitive filesystem cannot produce the ambiguous case through `stored_name` on macOS.
+- Cost: each typed component of an absolute exclude lists its parent directory once, when the filter is built (the listing stops at an exact match).
+- No deviation from the admitted fix shape.
 
 ## Files changed
-(filled by the fix)
+- `crates/blit-core/src/transfers/filter.rs:477-480` — `stored_spelling` doc points at `stored_name` for what cannot be named.
+- `crates/blit-core/src/transfers/filter.rs:519-587` — `stored_name` names the entry through its parent's listing, `canonicalize` only as a non-symlink's fallback; `listed_name` and `paired_name` (new).
+- `crates/blit-core/src/transfers/filter.rs:979-995` — the case guard `an_absolute_exclude_in_another_case_takes_the_stored_spelling` gains a symlink entry (Unix): `<root>/LINK` for `root/link -> <outside>` must give `./link`.
+- `crates/blit-core/src/transfers/filter.rs:1091-1139` — `the_stored_name_is_the_entrys_own_even_for_a_symlink` (replaces `the_stored_name_is_the_entrys_own_never_a_symlink_targets`, which asserted `None` for a link) and `the_listing_pairs_the_exact_name_else_the_single_case_fold` (new).
+- `crates/blit-cli/tests/exclude_contract.rs:232-276` — `mirror_exclude_symlink_in_another_case_keeps_the_destination_subtree` (guard, CLI end to end).
 
 ## Guard proof
-(filled by the fix)
+- Guards (all ran on macOS aarch64, APFS case-insensitive; no case check skipped — confirmed with `--nocapture`, no "skipping" line):
+  - H1 `transfers::filter::tests::the_stored_name_is_the_entrys_own_even_for_a_symlink` (blit-core, Unix): `real` → `real`; `link -> real` → `link` (its own, not `real`, not none); a dangling link → its own name; missing → none; on a case-insensitive filesystem `REAL` → `real` and `LINK` → `link` (skipped with a message where case-sensitive).
+  - H2 `transfers::filter::tests::an_absolute_exclude_in_another_case_takes_the_stored_spelling` (blit-core; case-insensitive filesystems only, skipped with a message elsewhere; the symlink entry on Unix): adds `<root>/LINK` for `root/link -> <outside tempdir>`; `build` and `build_spec` must give `./cache`, `cache/Sub/*.tmp`, `Missing/X`, `./link`.
+  - H3 `transfers::filter::tests::the_listing_pairs_the_exact_name_else_the_single_case_fold` (blit-core, every OS, pure): exact wins over a fold pair; `CACHE` pairs `Cache`; `ÉTÉ` pairs `été`; two fold pairs → none; no pair → none.
+  - H4 `exclude_contract::mirror_exclude_symlink_in_another_case_keeps_the_destination_subtree` (blit-transfer, Unix, case-insensitive only, skipped with a message elsewhere): `src/cache -> outside`, pre-existing `dst/cache/saved.txt`; `blit mirror --yes src/ dst/ --exclude <src>/CACHE` must keep `dst/cache/saved.txt`, copy `keep.txt`, print no "cannot match anything".
+- N1 — `stored_name`: the pre-fix early return `if metadata.file_type().is_symlink() { return None; }` inserted before the listing. Red: H1 FAILED, "the link's own name", `left: None`, `right: Some("link")`; H2 FAILED, "build", `left: ["./cache", "cache/Sub/*.tmp", "Missing/X", "./LINK"]`, `right: [..., "./link"]`; H4 FAILED at `exclude_contract.rs:267`, "the destination's cache/ is excluded and must survive the mirror", the mirror's stdout "Deleted: 1 file(s), 1 dir(s)".
+- N2 — `paired_name`: the case-fold arm disabled (`if false && folded(&name) == typed_folded`). Red: H1 FAILED, "the link's stored spelling", `left: None`, `right: Some("link")` (`REAL` still passed: the non-symlink fallback names it); H2 FAILED, `left: [..., "./LINK"]`; H3 FAILED, `left: None`, `right: Some("Cache")`; H4 FAILED at `exclude_contract.rs:267` as in N1.
+- N3 — `stored_name`: the listing replaced by `canonicalize`'s last component (the link followed). Red: H1 FAILED, "the link's own name", `left: Some("real")`, `right: Some("link")`; H2 FAILED, `left: [..., "./.tmp3KMr6G"]` (the target tempdir's name), `right: [..., "./link"]`; `an_absolute_glob_through_a_symlink_becomes_relative` (cr-g3fix-2's guard) FAILED too, `left: [..., "./sub"]`, `right: [..., "./link"]`; H4 FAILED at `exclude_contract.rs:267`.
+- N4 — `paired_name`: `if pairs == 1` → `if pairs >= 1`. Red: H3 FAILED, "ambiguous", `left: Some("cache")`, `right: None`.
+- N5 — `paired_name`: the exact-match early return removed. Red: H3 FAILED, `left: None`, `right: Some("cache")` (`cache` among `Cache`, `cache`).
+- Restore after each: the fixed `filter.rs` copied back with `/bin/cp -f`, md5 `9de29b4a452122fcd1212f69d6b94ff3` matched the saved fixed file every time; then `cargo test -p blit-core --lib transfers::filter` 21 passed and `cargo test -p blit-transfer --test exclude_contract` 10 passed, all four guards `ok`.
 
 ## Known gaps
-(filled by the fix)
+- Case folding is per-character Unicode lowercase, not the filesystem's own table (APFS folding, NTFS upcase). A name only the filesystem pairs — another Unicode normalization (macOS: NFC typed, NFD stored), final sigma `ς`/`σ` — is not paired by the listing: a non-symlink still takes its stored name from `canonicalize`; a symlink keeps its typed spelling. That is what remains of the gap cr-g3fix-1 recorded, narrowed to such names.
+- A component below a symlink is spelled as the link's target stores it (the walk looks it up through the link). Such a path names nothing the source walk visits; for the destination's counterpart it is the best available spelling.
+- Observation, not changed here: the destination's own spelling is never consulted. Under `mirror` an entry the destination stores in a third case (`dst/Cache/` against `src/cache`) is not named by `./cache`. Pre-existing; every rule compares case-sensitively.
+- H1, H2's symlink entry and H4 are Unix-only (making a symlink on Windows needs privilege); H2 and H4 run only where the filesystem is case-insensitive (macOS here; Windows CI for H2's other entries; on Linux they print a skip line and pass). H3 runs everywhere. Windows behaviour of the listing and of the short-name fallback is by reading only.
+- Verified on macOS (aarch64) only, plus Linux and Windows cross-clippy at the final gate; Linux and Windows runtime tests were not run.
 
 ## Reviewer comments
 (filled by the re-review)
