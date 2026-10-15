@@ -1,0 +1,29 @@
+{
+  "verdict": "findings",
+  "capability_ok": true,
+  "guard_confirmed": true,
+  "reviewed_sha": "eddfab6c2c224242f8641fc481c0c6840394317f",
+  "base_sha": "2324e3cb76f1c92418104d62c79a64749ff03fe0",
+  "guard": "Temporarily disabled normalize_separators's Windows branch by adding false && to its condition. fs_enum::tests::backslash_forms_follow_the_platform_rule failed at fs_enum.rs:726, returning .\\cache instead of ./cache (exit 101). Restored with git checkout, verified the original blob hash, and reran: passed (exit 0). Final worktree is clean. On macOS, fmt, native clippy, Linux cross-clippy, and workspace tests passed (1510 passed, 2 ignored). Windows cross-clippy stopped because blake3 required unavailable ml64.exe; Windows runtime tests were not run. cr-g3fix-1 closed: false — ordinary entries acquire disk spelling, but symlinks retain the incorrect case. cr-g3fix-2 closed: true — the original whole-pattern canonicalization failure is fixed; canonicalized literal-prefix escaping introduces the separate defect below. cr-g3fix-3 closed: true — Windows separators are normalized before classification and wire construction, while Unix backslashes remain unchanged; the parameterized guard was independently mutation-proven.",
+  "closed": {
+    "cr-g3fix-1": false,
+    "cr-g3fix-2": true,
+    "cr-g3fix-3": true
+  },
+  "findings": [
+    {
+      "title": "Differently cased symlink excludes still fail to protect mirror destinations",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:444 — stored_name returns None for every symlink at line 450, so stored_spelling preserves its typed case. Reproduced on case-insensitive macOS with src/cache pointing to an outside directory: excluding absolute src/CACHE produced ./CACHE in both the local filter and wire spec, without a warning. Mirroring into a destination containing cache/saved.txt deleted that file and its directory. Repeating with absolute src/cache preserved them.",
+      "predicted_failure": "A mirror can delete pre-existing destination data inside a directory explicitly excluded through a differently cased source symlink. This leaves cr-g3fix-1 materially open; the observed consequence is data loss.",
+      "severity": "HIGH",
+      "better_approach": "Recover the symlink entry's own stored spelling without following its target, and preserve that spelling in both filter representations. Add a case-insensitive regression that verifies an existing destination subtree survives."
+    },
+    {
+      "title": "Canonicalized literal prefixes are reinterpreted as glob syntax",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:309 — resolved.join(rest) inserts canonical filesystem names into the pattern without escaping their glob metacharacters. Reproduced with alias pointing to src/data[1] and exclude alias/*.txt: both builders emitted data[1]/*.txt. The CLI copied data[1]/private.txt but omitted the unrelated data1/private.txt, exiting successfully without an unmatchable warning.",
+      "predicted_failure": "An alias resolving into a directory whose name contains glob syntax excludes the wrong files while transferring the intended excluded files. An unmatched '[' in the resolved name can instead make a previously valid pattern fail validation.",
+      "severity": "MEDIUM",
+      "better_approach": "Keep canonicalized literal components distinct from the user-written glob suffix, escape those literal components for the matcher, and append the suffix unchanged. Test aliases into directories containing brackets and Unix backslashes."
+    }
+  ]
+}
