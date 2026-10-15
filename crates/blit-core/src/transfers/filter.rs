@@ -519,19 +519,20 @@ fn stored_spelling(
 }
 
 /// The name the filesystem stores for `path`'s last component (its own
-/// case, and on Windows its long name), read without following it: a
-/// symlink is named as the link the walk sees, never as its target
-/// (cr-g3fix2-1 — resolving the link would name another entry, and
-/// leaving it unnamed kept a differently cased exclude as typed, matching
-/// nothing, so a mirror could delete the destination's entry of that
-/// name). The name comes from the parent directory's listing
-/// ([`listed_name`]); a non-symlink the listing cannot pair (a Windows
-/// short name, another Unicode normalization) falls back to the last
-/// component of `canonicalize`. `None` when the path does not exist, or
-/// is a symlink the listing cannot pair.
+/// case and Unicode normalization, and on Windows its long name), read
+/// without following it: a symlink is named as the link the walk sees,
+/// never as its target (cr-g3fix2-1 — resolving the link would name
+/// another entry, and leaving it unnamed kept a differently spelled
+/// exclude as typed, matching nothing, so a mirror could delete the
+/// destination's entry of that name). The name comes from the parent
+/// directory's listing ([`listed_name`]); a non-symlink the listing cannot
+/// pair (an unreadable listing; on Windows a short name, or a spelling
+/// only NTFS's own table pairs) falls back to the last component of
+/// `canonicalize`. `None` when the path does not exist, or is a symlink
+/// the listing cannot pair.
 fn stored_name(path: &Path) -> Option<String> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
-    if let Some(name) = listed_name(path) {
+    if let Some(name) = listed_name(path, &metadata) {
         return Some(name);
     }
     if metadata.file_type().is_symlink() {
@@ -544,47 +545,102 @@ fn stored_name(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// cr-g3fix2-1: the entry `path`'s parent directory lists for its last
-/// component ([`paired_name`]); `None` when the listing cannot be read or
-/// pairs no single entry.
-fn listed_name(path: &Path) -> Option<String> {
+/// cr-g3fix2-1, cr-g3fix3-1: the name `path`'s parent directory lists for
+/// the entry `path` denotes — `metadata`, its own `symlink_metadata` — or
+/// `None` when the listing cannot be read or pairs none. The filesystem's
+/// rule made the typed path resolve, so the filesystem decides the pairing:
+/// on Unix through the entry's identity ([`paired_name`]), which no text
+/// rule reproduces (APFS pairs final sigma `ς` with `σ`, NFC with NFD). On
+/// Windows std offers no stable file identity, so the pairing is case
+/// folding ([`paired_by_case`]). Runs once per typed component of an
+/// absolute exclude, when the filter is built.
+fn listed_name(path: &Path, metadata: &std::fs::Metadata) -> Option<String> {
     let typed = path.file_name()?.to_str()?;
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
-    let names = std::fs::read_dir(parent)
+    let names: Vec<String> = std::fs::read_dir(parent)
         .ok()?
         .flatten()
-        .filter_map(|entry| entry.file_name().into_string().ok());
-    paired_name(typed, names)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let identity = (metadata.dev(), metadata.ino());
+        // A directory has one name; anything else may be hard-linked under
+        // several in this listing.
+        let shared = !metadata.is_dir() && metadata.nlink() > 1;
+        paired_name(typed, &names, shared, |name| {
+            std::fs::symlink_metadata(parent.join(name))
+                .is_ok_and(|entry| (entry.dev(), entry.ino()) == identity)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        paired_by_case(typed, &names)
+    }
+}
+
+/// cr-g3fix3-1: the name in `names` (a directory's listing) for the entry
+/// a typed name denotes: the one spelled exactly as typed, with no further
+/// lookup; else the first `same` says is that entry (on Unix, the same
+/// `(dev, ino)` under `symlink_metadata` — the link itself, never its
+/// target). When the identity may have several names (`shared`: a
+/// hard-linked file), the whole listing is walked, and several matches
+/// pair the only one of them equal to `typed` under case folding
+/// ([`single_fold`]); none, or no single such name, pairs nothing.
+#[cfg(any(unix, test))]
+fn paired_name(
+    typed: &str,
+    names: &[String],
+    shared: bool,
+    mut same: impl FnMut(&str) -> bool,
+) -> Option<String> {
+    if let Some(exact) = names.iter().find(|name| *name == typed) {
+        return Some(exact.clone());
+    }
+    let mut matches = Vec::new();
+    for name in names {
+        if same(name) {
+            if !shared {
+                return Some(name.clone());
+            }
+            matches.push(name);
+        }
+    }
+    match matches.as_slice() {
+        [only] => Some((*only).clone()),
+        several => single_fold(typed, several.iter().copied()),
+    }
 }
 
 /// The name in `names` spelled exactly `typed`, else the only one equal
-/// to it under case folding (per character, Unicode lowercase); `None`
-/// when none or several fold to it.
-fn paired_name(typed: &str, names: impl IntoIterator<Item = String>) -> Option<String> {
+/// to it under case folding ([`single_fold`]); the pairing where std has
+/// no stable file identity (Windows).
+#[cfg(any(not(unix), test))]
+fn paired_by_case(typed: &str, names: &[String]) -> Option<String> {
+    if let Some(exact) = names.iter().find(|name| *name == typed) {
+        return Some(exact.clone());
+    }
+    single_fold(typed, names)
+}
+
+/// The only name in `names` equal to `typed` under case folding (per
+/// character, Unicode lowercase); `None` when none or several are.
+fn single_fold<'a>(typed: &str, names: impl IntoIterator<Item = &'a String>) -> Option<String> {
     let folded = |name: &str| {
         name.chars()
             .flat_map(char::to_lowercase)
             .collect::<Vec<_>>()
     };
-    let typed_folded = folded(typed);
-    let mut paired = None;
-    let mut pairs = 0;
-    for name in names {
-        if name == typed {
-            return Some(name);
-        }
-        if folded(&name) == typed_folded {
-            pairs += 1;
-            paired = Some(name);
-        }
-    }
-    if pairs == 1 {
-        paired
-    } else {
-        None
+    let typed = folded(typed);
+    let mut equal = names.into_iter().filter(|name| folded(name) == typed);
+    match (equal.next(), equal.next()) {
+        (Some(name), None) => Some(name.clone()),
+        _ => None,
     }
 }
 
@@ -987,6 +1043,23 @@ mod tests {
         insensitive
     }
 
+    /// cr-g3fix3-1: spellings only a filesystem's own rule pairs — not
+    /// per-character lowercase: final sigma `ς` for a stored `σ`, and NFC
+    /// `CAFÉ` for a stored NFD `café` (both on APFS case-insensitive).
+    #[cfg(unix)]
+    const FILESYSTEM_PAIRS: [(&str, &str); 2] = [("σ", "ς"), ("cafe\u{301}", "CAF\u{c9}")];
+
+    /// True when `dir`'s filesystem resolves `typed` to an entry made as
+    /// `stored` (probed with a file of that name, removed again).
+    #[cfg(unix)]
+    fn pairs(dir: &Path, stored: &str, typed: &str) -> bool {
+        let probe = dir.join(stored);
+        std::fs::write(&probe, b"").unwrap();
+        let paired = std::fs::symlink_metadata(dir.join(typed)).is_ok();
+        std::fs::remove_file(&probe).unwrap();
+        paired
+    }
+
     /// cr-g3fix-1: on a case-insensitive filesystem an absolute exclude in
     /// another case names the entry on disk, and both builders — the local
     /// rule and the wire form — spell it the way the disk stores it (every
@@ -1006,7 +1079,9 @@ mod tests {
             format!("{}", root.join("CACHE").join("SUB").join("*.tmp").display()),
             format!("{}", root.join("Missing").join("X").display()),
         ];
-        let mut expected = vec!["./cache", "cache/Sub/*.tmp", "Missing/X"];
+        let mut expected: Vec<String> = ["./cache", "cache/Sub/*.tmp", "Missing/X"]
+            .map(String::from)
+            .to_vec();
         // cr-g3fix2-1: a symlink to a directory outside the source is
         // spelled as stored too — named as the link, never through its
         // target. Unix only: making a symlink on Windows needs privilege.
@@ -1016,7 +1091,23 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
         if cfg!(unix) {
             exc.push(format!("{}", root.join("LINK").display()));
-            expected.push("./link");
+            expected.push("./link".to_string());
+        }
+        // cr-g3fix3-1: so is a symlink named in a spelling only the
+        // filesystem pairs (`ς` for `σ`, NFC `CAFÉ` for NFD `café`), each
+        // where the filesystem pairs it.
+        #[cfg(unix)]
+        for (stored, typed) in FILESYSTEM_PAIRS {
+            if !pairs(root, stored, typed) {
+                eprintln!(
+                    "skipping {typed:?}: {} does not pair it with {stored:?}",
+                    root.display()
+                );
+                continue;
+            }
+            std::os::unix::fs::symlink(outside.path(), root.join(stored)).unwrap();
+            exc.push(format!("{}", root.join(typed).display()));
+            expected.push(format!("./{stored}"));
         }
         let mut i = inputs(&[], &exc);
         i.source_root = Some(root);
@@ -1120,7 +1211,9 @@ mod tests {
     /// typed — a dangling one included; a missing path has none. On a
     /// case-insensitive filesystem a name typed in another case reports
     /// the stored spelling, for the link as for the directory (skipped
-    /// with a message where the filesystem is case-sensitive).
+    /// with a message where the filesystem is case-sensitive), and so
+    /// does a link typed in a spelling only the filesystem pairs
+    /// (cr-g3fix3-1; each skipped with a message where it is not paired).
     #[cfg(unix)]
     #[test]
     fn the_stored_name_is_the_entrys_own_even_for_a_symlink() {
@@ -1133,6 +1226,23 @@ mod tests {
         assert_eq!(name("link").as_deref(), Some("link"), "the link's own name");
         assert_eq!(name("dangling").as_deref(), Some("dangling"));
         assert_eq!(name("missing"), None);
+        // cr-g3fix3-1: a spelling only the filesystem pairs names the link
+        // as stored — the pairing is the entry's identity, not a text rule.
+        for (stored, typed) in FILESYSTEM_PAIRS {
+            if !pairs(dir.path(), stored, typed) {
+                eprintln!(
+                    "skipping {typed:?}: {} does not pair it with {stored:?}",
+                    dir.path().display()
+                );
+                continue;
+            }
+            std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join(stored)).unwrap();
+            assert_eq!(
+                name(typed).as_deref(),
+                Some(stored),
+                "the link's stored spelling for {typed:?}"
+            );
+        }
         if !case_insensitive(dir.path()) {
             eprintln!(
                 "skipping the case checks: {} is case-sensitive",
@@ -1148,13 +1258,78 @@ mod tests {
         );
     }
 
-    /// cr-g3fix2-1: a listing pairs the typed name with the entry spelled
-    /// exactly so, else with the only entry equal to it under case folding;
-    /// several such entries pair none. Pure, so it runs on every OS.
+    /// cr-g3fix3-1: on Unix a listing pairs the typed name by the entry's
+    /// identity, tested here against a stand-in listing on every OS. The
+    /// name spelled exactly as typed wins with no lookup; else the first
+    /// entry that is the typed path's own (the walk stops there); an
+    /// identity several names share (a hard-linked file) takes the only
+    /// one of them equal to the typed name under case folding, or none;
+    /// and no such entry pairs nothing.
+    #[test]
+    fn the_listing_pairs_the_exact_name_else_the_same_entry() {
+        let list = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let mut looked = Vec::new();
+        let exact = paired_name("cache", &list(&["Cache", "cache"]), false, |name| {
+            looked.push(name.to_string());
+            true
+        });
+        assert_eq!(exact.as_deref(), Some("cache"));
+        assert!(
+            looked.is_empty(),
+            "the exact name needs no lookup: {looked:?}"
+        );
+
+        let mut looked = Vec::new();
+        let same = paired_name("ς", &list(&["a", "σ", "b"]), false, |name| {
+            looked.push(name.to_string());
+            name == "σ"
+        });
+        assert_eq!(same.as_deref(), Some("σ"), "the filesystem's pairing");
+        assert_eq!(looked, ["a", "σ"], "the walk stops at the first match");
+        let nfd = "cafe\u{301}";
+        assert_eq!(
+            paired_name("CAF\u{c9}", &list(&["x", nfd]), false, |name| name == nfd).as_deref(),
+            Some(nfd)
+        );
+
+        let all = |_: &str| true;
+        assert_eq!(
+            paired_name("HARD", &list(&["other", "hard"]), true, all).as_deref(),
+            Some("hard"),
+            "several names of one identity: the case fold picks one"
+        );
+        assert_eq!(
+            paired_name("ς", &list(&["σ", "alias"]), true, all),
+            None,
+            "several names of one identity, none fold-equal"
+        );
+        assert_eq!(
+            paired_name("HARD", &list(&["Hard", "hard"]), true, all),
+            None,
+            "several names of one identity, two fold-equal"
+        );
+        assert_eq!(
+            paired_name("ς", &list(&["x", "σ"]), true, |name| name == "σ").as_deref(),
+            Some("σ"),
+            "a shared identity with one name in this listing"
+        );
+        assert_eq!(paired_name("ς", &list(&["σ", "x"]), false, |_| false), None);
+    }
+
+    /// cr-g3fix2-1: where std has no file identity (Windows) a listing
+    /// pairs the typed name with the entry spelled exactly so, else with
+    /// the only entry equal to it under case folding; several such entries
+    /// pair none. Pure, so it runs on every OS.
     #[test]
     fn the_listing_pairs_the_exact_name_else_the_single_case_fold() {
         let pair = |typed: &str, names: &[&str]| {
-            paired_name(typed, names.iter().map(|name| name.to_string()))
+            paired_by_case(
+                typed,
+                &names
+                    .iter()
+                    .map(|name| name.to_string())
+                    .collect::<Vec<_>>(),
+            )
         };
         assert_eq!(pair("cache", &["Cache", "cache"]).as_deref(), Some("cache"));
         assert_eq!(pair("CACHE", &["x", "Cache"]).as_deref(), Some("Cache"));
