@@ -315,7 +315,10 @@ fn mirror_exclude_absolute_glob_through_a_symlinked_source() {
 /// text, where `[1]` is a class: `data[1]/private.txt` — the file the
 /// exclude names — was copied and the unrelated `data1/private.txt` left
 /// out. Through an alias into `open[x` (an unmatched `[`) the run failed
-/// on a pattern the user wrote correctly.
+/// on a pattern the user wrote correctly. cr-g3fix3-2: the escape the
+/// name is written as (`./data[[]1[]]`) never names a directory spelled
+/// like it — `--exclude <alias>` also left out the unrelated sibling
+/// `data[[]1[]]/private.txt`, through the matcher's text comparison.
 #[cfg(unix)]
 #[test]
 fn copy_exclude_through_an_alias_into_a_directory_named_like_a_glob() {
@@ -325,6 +328,7 @@ fn copy_exclude_through_an_alias_into_a_directory_named_like_a_glob() {
         "data[1]/private.txt",
         "data[1]/keep.dat",
         "data1/private.txt",
+        "data[[]1[]]/private.txt",
         "open[x/private.txt",
         "keep.txt",
     ] {
@@ -356,7 +360,36 @@ fn copy_exclude_through_an_alias_into_a_directory_named_like_a_glob() {
         dst.join("data1/private.txt").exists(),
         "a name the exclude never named must be copied"
     );
+    assert!(
+        dst.join("data[[]1[]]/private.txt").exists(),
+        "a name the exclude never named must be copied"
+    );
     assert!(dst.join("keep.txt").exists());
+    assert!(
+        !stderr.contains("cannot match anything"),
+        "a pattern under the source must not warn: {stderr}"
+    );
+
+    let dst = tmp.path().join("dst_bare");
+    let pattern = format!("{}", into_class.display());
+    let (ok, stdout, stderr) = blit(&[
+        "copy",
+        &with_slash(&src),
+        &with_slash(&dst),
+        "--exclude",
+        &pattern,
+    ]);
+    assert!(ok, "copy failed:\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !dst.join("data[1]").exists(),
+        "the aliased directory is left out"
+    );
+    for rel in ["data[[]1[]]/private.txt", "data1/private.txt", "keep.txt"] {
+        assert!(
+            dst.join(rel).exists(),
+            "{rel}: a name the exclude never named must be copied"
+        );
+    }
     assert!(
         !stderr.contains("cannot match anything"),
         "a pattern under the source must not warn: {stderr}"

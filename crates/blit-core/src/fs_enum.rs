@@ -53,7 +53,7 @@ pub struct FileFilter {
     pub reference_time: Option<SystemTime>,
     pub files_from: Option<HashSet<PathBuf>>,
     compiled_includes: OnceCell<globset::GlobSet>,
-    compiled_files: OnceCell<globset::GlobSet>,
+    compiled_files: OnceCell<CompiledPatterns>,
     compiled_dirs: OnceCell<globset::GlobSet>,
     compiled_subtrees: OnceCell<ExcludeRules>,
 }
@@ -62,17 +62,16 @@ pub struct FileFilter {
 /// read them. A pattern's trailing `/` is dropped (`a/.java/` names the
 /// same tree as `a/.java`) and a leading `./` anchors it to the source
 /// root (`./.java` is the top-level `.java` only). On Windows `\` is read
-/// as `/` first (cr-g3fix-3: `.\.java`, `a\.java\`).
+/// as `/` first (cr-g3fix-3: `.\.java`, `a\.java\`). Each rule is matched
+/// as a glob only ([`CompiledPatterns`], cr-g3fix3-2).
 #[derive(Debug, Default)]
 struct ExcludeRules {
     /// Patterns with no separator: each matches any one component of a
     /// relative path, at any depth.
-    names: Vec<String>,
-    name_globs: globset::GlobSet,
+    names: CompiledPatterns,
     /// Source-relative patterns: each matches a leading run of a relative
     /// path's components — the entry itself or a directory above it.
-    paths: Vec<String>,
-    path_globs: globset::GlobSet,
+    paths: CompiledPatterns,
 }
 
 impl ExcludeRules {
@@ -97,10 +96,8 @@ impl ExcludeRules {
             }
         }
         Self {
-            name_globs: FileFilter::build_globset(&names),
-            path_globs: FileFilter::build_globset(&paths),
-            names,
-            paths,
+            names: CompiledPatterns::compile(&names),
+            paths: CompiledPatterns::compile(&paths),
         }
     }
 
@@ -116,10 +113,7 @@ impl ExcludeRules {
                 continue;
             };
             let name = name.to_string_lossy();
-            if !self.names.is_empty()
-                && (self.name_globs.is_match(name.as_ref())
-                    || self.names.iter().any(|p| glob_match(p, &name)))
-            {
+            if !self.names.is_empty() && self.names.is_match(&name) {
                 return true;
             }
             if !self.paths.is_empty() {
@@ -127,14 +121,58 @@ impl ExcludeRules {
                     prefix.push('/');
                 }
                 prefix.push_str(&name);
-                if self.path_globs.is_match(prefix.as_str())
-                    || self.paths.iter().any(|p| glob_match(p, &prefix))
-                {
+                if self.paths.is_match(&prefix) {
                     return true;
                 }
             }
         }
         false
+    }
+}
+
+/// cr-g3fix3-2: `--exclude` patterns compiled for matching. A pattern the
+/// glob compiler accepts is matched as a glob and nothing else; only one it
+/// refuses — reachable only past validation ([`FileFilter::validate_globs`],
+/// a daemon's spec check), e.g. a filter an embedder builds directly —
+/// falls back to [`glob_match`]'s text comparison. For a pattern that
+/// compiles, that comparison adds nothing but a misreading: it compares
+/// the pattern's text, so an escaped literal (`./data[[]1[]]`, which names
+/// `data[1]`) also matched an unrelated entry spelled like the escape.
+#[derive(Debug, Default)]
+struct CompiledPatterns {
+    globs: globset::GlobSet,
+    /// The patterns the glob compiler refused (all of them when the set as
+    /// a whole could not be built), compared as text.
+    refused: Vec<String>,
+}
+
+impl CompiledPatterns {
+    fn compile(patterns: &[String]) -> Self {
+        let mut builder = globset::GlobSetBuilder::new();
+        let mut refused = Vec::new();
+        for pattern in patterns {
+            match globset::Glob::new(pattern) {
+                Ok(glob) => {
+                    builder.add(glob);
+                }
+                Err(_) => refused.push(pattern.clone()),
+            }
+        }
+        match builder.build() {
+            Ok(globs) => Self { globs, refused },
+            Err(_) => Self {
+                globs: globset::GlobSet::empty(),
+                refused: patterns.to_vec(),
+            },
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.globs.is_empty() && self.refused.is_empty()
+    }
+
+    fn is_match(&self, text: &str) -> bool {
+        self.globs.is_match(text) || self.refused.iter().any(|p| glob_match(p, text))
     }
 }
 
@@ -274,9 +312,9 @@ impl FileFilter {
             .get_or_init(|| Self::build_globset(&self.include_files))
     }
 
-    fn file_globs(&self) -> &globset::GlobSet {
+    fn file_globs(&self) -> &CompiledPatterns {
         self.compiled_files
-            .get_or_init(|| Self::build_globset(&self.exclude_files))
+            .get_or_init(|| CompiledPatterns::compile(&self.exclude_files))
     }
 
     fn dir_globs(&self) -> &globset::GlobSet {
@@ -297,21 +335,15 @@ impl FileFilter {
 
     /// The `--exclude` test for one entry, file or directory. Today's
     /// matches are kept exactly (a pattern against the bare name or the
-    /// whole relative path); audit-19 adds the any-depth name rule and the
-    /// subtree rule (see [`ExcludeRules`]).
+    /// whole relative path, as a glob — [`CompiledPatterns`]); audit-19
+    /// adds the any-depth name rule and the subtree rule (see
+    /// [`ExcludeRules`]).
     fn excluded(&self, rel_path: Option<&Path>, filename: &str, path_str: &str) -> bool {
         if self.exclude_files.is_empty() {
             return false;
         }
-        let gs = self.file_globs();
-        if gs.is_match(filename) || gs.is_match(path_str) {
-            return true;
-        }
-        if self
-            .exclude_files
-            .iter()
-            .any(|pattern| glob_match(pattern, filename) || glob_match(pattern, path_str))
-        {
+        let patterns = self.file_globs();
+        if patterns.is_match(filename) || patterns.is_match(path_str) {
             return true;
         }
         rel_path.is_some_and(|rel| self.subtree_rules().excludes(rel))
@@ -715,6 +747,49 @@ mod tests {
         assert!(!allows(&excluding(&["logs/app.log"]), "logs/app.log"));
         assert!(!allows(&excluding(&[".java/**"]), ".java/fonts/x"));
         assert!(allows(&excluding(&["logs/app.log"]), "logs/other.log"));
+    }
+
+    /// cr-g3fix3-2: an escaped literal — the form a name read from the disk
+    /// takes (`data[1]` written `data[[]1[]]`) — matches that name only,
+    /// never an entry spelled like its escape: a compiled rule is matched as
+    /// a glob and nothing else, in the any-depth and subtree rules as in
+    /// the whole-pattern test. A pattern the glob compiler refuses still
+    /// falls back to the text comparison.
+    #[test]
+    fn an_escaped_literal_matches_its_name_and_not_its_encoded_spelling() {
+        let rules = ExcludeRules::compile(
+            &["./data[[]1[]]".to_string(), "set[[]2[]]".to_string()],
+            cfg!(windows),
+        );
+        assert!(rules.excludes(Path::new("data[1]")));
+        assert!(rules.excludes(Path::new("data[1]/x")));
+        assert!(
+            !rules.excludes(Path::new("data[[]1[]]"))
+                && !rules.excludes(Path::new("data[[]1[]]/x")),
+            "the escape's own spelling is another name"
+        );
+        assert!(!rules.excludes(Path::new("data1/x")));
+        assert!(rules.excludes(Path::new("q/set[2]/x")));
+        assert!(
+            !rules.excludes(Path::new("q/set[[]2[]]/x")),
+            "the escape's own spelling is another name"
+        );
+
+        let filter = excluding(&["a[[]b[]]/c"]);
+        assert!(!allows(&filter, "a[b]/c"));
+        assert!(
+            allows(&filter, "a[[]b[]]/c"),
+            "the whole-pattern test matches the glob only"
+        );
+
+        let refused = ExcludeRules::compile(&["*[x".to_string()], cfg!(windows));
+        assert!(
+            refused.excludes(Path::new("a/foo[x")),
+            "a pattern the glob compiler refuses is compared as text"
+        );
+        let refused = excluding(&["*[x"]);
+        assert!(!allows(&refused, "a/foo[x"), "the whole-pattern test too");
+        assert!(allows(&refused, "a/keep.txt"));
     }
 
     /// cr-g3fix-3: under the Windows rule `\` is a separator, so `.\name`

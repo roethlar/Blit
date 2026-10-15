@@ -839,7 +839,9 @@ mod tests {
     /// not the unrelated `data1/private.txt` (as glob text `[1]` is a class
     /// naming `data1`), and the typed `*.txt` stays a glob; through an alias
     /// into `set[2]` the anchored rule `./set[[]2[]]` leaves out that
-    /// subtree only.
+    /// subtree only. cr-g3fix3-2: nor does an escape match an entry spelled
+    /// like it — `data[[]1[]]`, `set[[]2[]]` are other names, which the
+    /// matcher's text comparison used to leave out too.
     #[cfg(unix)]
     #[test]
     fn a_name_read_from_the_disk_is_matched_literally() {
@@ -850,9 +852,13 @@ mod tests {
             &[
                 "data[1]/private.txt",
                 "data[1]/keep.dat",
+                "data[1]/notes/n",
                 "data1/private.txt",
+                "data[[]1[]]/private.txt",
+                "data[[]1[]]/notes/n",
                 "set[2]/x",
                 "set2/x",
+                "set[[]2[]]/x",
             ],
         );
         let into_class = dir.path().join("into_class");
@@ -862,6 +868,7 @@ mod tests {
         let exc = vec![
             format!("{}", into_class.join("*.txt").display()),
             format!("{}", into_set.display()),
+            format!("{}", into_class.join("notes").display()),
         ];
         let mut i = inputs(&[], &exc);
         i.source_root = Some(&src);
@@ -879,8 +886,24 @@ mod tests {
             "the named subtree"
         );
         assert!(allows("set2/x"), "a name the exclude never named");
+        assert!(
+            !allows("data[1]/notes") && !allows("data[1]/notes/n"),
+            "the named subtree"
+        );
+        for encoded in [
+            "data[[]1[]]/private.txt",
+            "set[[]2[]]",
+            "set[[]2[]]/x",
+            "data[[]1[]]/notes",
+            "data[[]1[]]/notes/n",
+        ] {
+            assert!(
+                allows(encoded),
+                "{encoded}: spelled like the escape, never named"
+            );
+        }
 
-        let expected = vec!["data[[]1[]]/*.txt", "./set[[]2[]]"];
+        let expected = vec!["data[[]1[]]/*.txt", "./set[[]2[]]", "data[[]1[]]/notes"];
         assert_eq!(filter.exclude_files, expected, "build");
         assert_eq!(build_spec(&i).unwrap().exclude, expected, "build_spec");
         assert!(resolve_excludes(&exc, Some(&src)).unmatchable.is_empty());
