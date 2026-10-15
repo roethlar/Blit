@@ -1,9 +1,9 @@
 # cr-g3fix2-2: Canonicalized literal prefixes are reinterpreted as glob syntax
 
 **Severity**: MEDIUM (reviewer: MEDIUM)
-**Status**: Open
+**Status**: Fixed
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: —
+**Commit**: (this commit)
 **Reviewer**: codex / gpt-6-astra / xhigh / standard (the owner's `review`, 2026-10-15), codex-cli 0.162.1 headless one-shot, `-a never exec -m gpt-6-astra -c model_reasoning_effort="xhigh" -s workspace-write --json`, stdin closed, detached worktree `review-g3fix2-r1-eddfab6c`; codereview re-review g3fix2-r1 over `2324e3cb..eddfab6c` (record `.review/results/g3fix2-r1.codex.json` + `.events.jsonl`); 2026-10-15 19:05–19:16Z; capability_ok=true; guard_confirmed=true (reviewer disabled `normalize_separators`'s Windows branch → `backslash_forms_follow_the_platform_rule` red at `fs_enum.rs:726`, restored by `git checkout`, blob hash verified, green; 1510/0/2 on its macOS gate; its Windows cross-clippy stopped on a missing `ml64.exe` for blake3 — the reviewer's environment, not the change); SHAs pin-verified; closed: cr-g3fix-2 true, cr-g3fix-3 true, cr-g3fix-1 false
 
 ## Evidence
@@ -19,19 +19,50 @@ Keep canonicalized literal components distinct from the user-written glob suffix
 Admitted; reproduced by the orchestrator with the release binary on macOS: `alias2 -> s2/data[1]`, `blit copy s2/ d2/ --exclude <alias2>/*.txt` printed no warning, copied `data[1]/private.txt` (meant to be excluded) and left out `data1/private.txt` (never named). Root cause: the components that come from the disk — the resolved prefix `through_resolved_root` writes (`filter.rs:309`) and the respelled names `stored_spelling` produces — are literal by construction but are joined into the pattern as glob text, so `[1]` becomes a character class and an unmatched `[` fails glob compilation. Fix shape: keep the literal components apart from the user-written suffix until the pattern is written, escape each literal component for the matcher (`globset::escape`, globset 0.4.20, brackets `?*[]{}`; on Unix a literal `\` must be escaped as well since globset reads `\` as an escape there — check how `has_glob_meta` and the Unix rule treat it), and append the typed suffix unchanged; a literal component must never stop the stored-spelling walk the way a typed glob component does. Keep the anchored `./name` and subtree rules in `ExcludeRules::compile` matching an escaped literal exactly as they match the plain name (check whether those rules compare literally or compile globs; both must still match `data[1]`). Guards: an alias into `data[1]` with `*.txt` excludes `data[1]/private.txt` and keeps `data1/private.txt`; an alias into a directory named with an unmatched `[` neither fails nor warns; a stored-spelling component holding `[` is escaped; on Unix a resolved name holding `\` still matches; a CLI end-to-end copy; all mutation-red.
 
 ## What
-(filled by the fix)
+An absolute `--exclude` whose leading part reaches the source through a symlink now matches the directory it resolves to by that directory's own name, even when the name holds glob syntax. With `alias -> src/data[1]`, `--exclude <alias>/*.txt` leaves out `data[1]/private.txt` and copies the unrelated `data1/private.txt`; with `alias -> src/open[x` (an unmatched `[`), `--exclude <alias>` leaves out `open[x` instead of failing the run as an invalid pattern. The names the filesystem supplies — the resolved prefix and the stored spellings of typed names — are escaped for the matcher, and the part the user typed is appended unchanged, so a typed glob is still a glob.
 
 ## Approach
-(filled by the fix)
+- `through_resolved_root` now returns the resolved prefix (a `PathBuf`, the disk's names) and the typed rest (`&Path`) separately, instead of one joined string.
+- `Part` (new): a component of a source-relative pattern, either `Literal` (read from the disk) or `Typed` (as the user wrote it). `relative_parts` (new) relativizes a pattern form exactly as `relative_to_root` does and marks the components that lie inside the form's resolved prefix as literal; the typed form has no prefix, so all of its components are typed.
+- `stored_spelling` now walks parts: a typed component is respelled as before and its stored name becomes a `Literal` (it is the disk's name); a typed glob component, or one `stored` cannot name, still ends the walk. A literal part is the disk's name already: it is pushed onto the walk path and never checked with `has_glob_meta`, so `[` in a resolved name never ends the walk.
+- `written(parts, windows)` escapes each literal part with `literal_glob` (new) and writes each typed part unchanged. `literal_glob` is `globset::escape` (brackets `?*[]{}`) plus, under the Unix rule, `\` written `[\]`: globset reads a bare `\` as an escape off Windows, and inside a class `\` is literal on every platform (`globset` 0.4.20 `parse_class` does no escape processing). Under the Windows rule `\` is a separator and never reaches a name.
+- Matcher check (`fs_enum.rs`, no change needed): `ExcludeRules::compile` puts `./name` and any pattern with `/` into the path rules, and `excludes` matches each leading run of a path by `globset` OR by `glob_match` (an exact or `*`-prefix/suffix string compare). With an escaped literal the globset arm matches the real name (`./set[[]2[]]` matches `set[2]` and `set[2]/x`, not `set2`); the literal-compare arm compares the pattern text, so it no longer fires on the escaped pattern, and before the fix it was the arm that let `./data[1]` reach `data[1]` while globset's class wrongly reached `data1`. Both arms are ORed, so for every real name the result is globset's — which is now right. The guards assert through `FileFilter::allows_entry`, i.e. both arms plus the plain file-glob arm.
+- Both builders go through `resolve_excludes`, so `build` (local rule) and `build_spec` (wire form) carry the same escaped pattern; the daemon's spec validation (`operation_spec.rs:192`) compiles it like any glob.
+- Consequence within scope: a typed component with no glob metacharacter that the walk respells (it names an on-disk entry) is now escaped too, since its stored name is disk text. For ordinary names that is a no-op; a name holding `]`, `}` (e.g. an on-disk `a}b`) now becomes `a[}]b`, which compiles and matches, where the typed `a}b` failed glob validation (unopened alternation).
+- No deviation from the admitted fix shape.
 
 ## Files changed
-(filled by the fix)
+- `crates/blit-core/src/transfers/filter.rs:186-192` — `ResolvedExcludes::patterns` doc: disk names are escaped.
+- `crates/blit-core/src/transfers/filter.rs:245-264` — `resolve_excludes_on`: each pattern form carries its resolved prefix; `relative_parts` replaces `relative_to_root`; `written` takes the platform rule.
+- `crates/blit-core/src/transfers/filter.rs:274-321` — `through_resolved_root` returns `(resolved prefix, typed rest)`.
+- `crates/blit-core/src/transfers/filter.rs:400-468` — `Part`, `relative_parts`, `written` (parts, escaping literals), `literal_glob` (new).
+- `crates/blit-core/src/transfers/filter.rs:470-516` — `stored_spelling` walks parts; stored names become literal; a literal part never ends the walk.
+- `crates/blit-core/src/transfers/filter.rs:773-901` — test helper `files`; guards `a_name_read_from_the_disk_is_matched_literally`, `a_resolved_name_with_an_unmatched_bracket_neither_fails_nor_warns`, `a_resolved_name_holding_a_backslash_matches_itself`.
+- `crates/blit-core/src/transfers/filter.rs:940-1026` — `the_stored_spelling_runs_until_a_component_cannot_be_named` asserts through `written` (same expectations); guard `a_name_read_from_the_disk_is_escaped_and_never_ends_the_spelling` (new).
+- `crates/blit-core/src/transfers/filter.rs:1049-1053` — the Windows-forms test writes `relative_to_root`'s components as typed parts (assertions unchanged).
+- `crates/blit-cli/tests/exclude_contract.rs:267-338` — `copy_exclude_through_an_alias_into_a_directory_named_like_a_glob` (guard, CLI end to end).
 
 ## Guard proof
-(filled by the fix)
+- Guards (all ran on macOS aarch64, APFS):
+  - G1 `transfers::filter::tests::a_name_read_from_the_disk_is_matched_literally` (blit-core, Unix): aliases into `data[1]` (`<alias>/*.txt`) and `set[2]` (`<alias>`); the filter must leave out `data[1]/private.txt`, `set[2]`, `set[2]/x`, keep `data[1]/keep.dat`, `data1/private.txt`, `set2/x`; both builders must give `data[[]1[]]/*.txt`, `./set[[]2[]]`; none unmatchable.
+  - G2 `transfers::filter::tests::a_resolved_name_with_an_unmatched_bracket_neither_fails_nor_warns` (blit-core, Unix): alias into `open[x`; `build` and `build_spec` must be `Ok(["./open[[]x"])`, none unmatchable, `open[x` and below left out, `open/private.txt` kept.
+  - G3 `transfers::filter::tests::a_resolved_name_holding_a_backslash_matches_itself` (blit-core, Unix): alias into `back\slash`, `<alias>/*.txt` must give `back[\]slash/*.txt` from both builders, leave out `back\slash/private.txt`, keep `backslash/private.txt`.
+  - G4 `transfers::filter::tests::a_name_read_from_the_disk_is_escaped_and_never_ends_the_spelling` (blit-core, every OS, stand-in disk, both path rules): a stored name `data[1]` (for the short name `DATA~1`) is written `data[[]1[]]`; a literal part `data[1]` does not end the walk (`SUB` still respelled `Sub`); a literal `back\slash` is `back[\]slash` under the Unix rule; only literal parts are escaped.
+  - G5 `exclude_contract::copy_exclude_through_an_alias_into_a_directory_named_like_a_glob` (blit-transfer, Unix): `blit copy src/ dst_class/ --exclude <into_class>/*.txt` must leave out `data[1]/private.txt` and copy `data1/private.txt`, `data[1]/keep.dat`, `keep.txt`, no warning; `blit copy src/ dst_open/ --exclude <into_open>` must succeed, leave out `open[x`, no warning.
+- M1 — `written`: `Part::Literal(name) => literal_glob(name, windows).into()` → `Part::Literal(name) => name.as_str().into()` (literal parts written unescaped: the pre-fix pattern text). Red: G1 FAILED at `filter.rs:819` "the file the exclude names" (`data[1]/private.txt` allowed); G2 FAILED, "build", `left: Err("invalid filter pattern: --exclude pattern \"./open[x\" is not a valid glob: error parsing glob './open[x': unclosed character class; missing ']'")`, `right: Ok(["./open[[]x"])`; G3 FAILED, "build", `left: ["back\\slash/*.txt"]`, `right: ["back[\\]slash/*.txt"]`; G4 FAILED, "a stored name is escaped (windows rule: false)", `left: "data[1]/Sub/*.txt"`, `right: "data[[]1[]]/Sub/*.txt"`; G5 FAILED at `exclude_contract.rs:304`, "the file the exclude names must be left out".
+- M2 — `literal_glob`: `escaped.replace('\\', r"[\]")` → `escaped` (no Unix backslash escape). Red: G3 FAILED, `left: ["back\\slash/*.txt"]`, `right: ["back[\\]slash/*.txt"]`; G4 FAILED, `left: "back\\slash/*.txt"`, `right: "back[\\]slash/*.txt"`.
+- M3 — `stored_spelling`: a respelled name pushed as `Part::Typed(name)` instead of `Part::Literal(name)`. Red: G4 FAILED, "a stored name is escaped (windows rule: false)", `left: "data[1]/Sub/*.txt"`, `right: "data[[]1[]]/Sub/*.txt"`.
+- M4 — `stored_spelling`: an added arm `Part::Literal(name) if has_glob_meta(&name, windows) => { spelled.push(Part::Literal(name)); break; }` (a literal ends the walk like a typed glob). Red: G4 FAILED, "a literal part holding `[` does not end the walk (windows rule: false)", `left: "data[[]1[]]/SUB/*.txt"`, `right: "data[[]1[]]/Sub/*.txt"`.
+- M5 — `relative_parts`: `.map_or(0, |below| below.len())` → `.map_or(0, |_below| 0)` (the resolved prefix treated as typed). Red: G1 FAILED at `filter.rs:819` "the file the exclude names"; G2 FAILED with the same `Err("invalid filter pattern: … './open[x': unclosed character class …")`; G3 FAILED, `left: ["back\\slash/*.txt"]`; G5 FAILED at `exclude_contract.rs:304`, "the file the exclude names must be left out".
+- Restore after each: the fixed `filter.rs` copied back with `/bin/cp -f`, md5 `cc50195b6a7b1f348eb29bb06735021e` matched the saved fixed file every time; then `cargo test -p blit-core --lib transfers::filter` 20 passed and `cargo test -p blit-transfer --test exclude_contract` 9 passed, all five guards `ok`.
 
 ## Known gaps
-(filled by the fix)
+- G1, G2, G3 and G5 need symlinks and are Unix-only (`#[cfg(unix)]`); G4 runs on every OS against a stand-in disk and both path rules. Windows behaviour of the real path (canonical `\\?\` prefixes through `relative_parts`) is by reading only.
+- A Unix name holding `\` is escaped `[\]`. If that wire form reaches a Windows daemon, its `normalize_separators` reads the `\` as a separator (`[/]`); a Windows destination cannot hold such a name, so nothing it stores is mis-named. By reading only.
+- The `glob_match` literal-compare arm of the matcher compares the pattern text, so it also matches a path spelled literally like the escaped text (a directory really named `data[[]1[]]`). Pre-existing behaviour of that fallback, not changed here.
+- A daemon job log's `exclude=` words record the wire form, so they now show the escape (`exclude=data[[]1[]]/*.txt`). The client's run log records the patterns as typed.
+- Typed components stay glob syntax by design: a typed `/src/data[1]/x` is the class `data[1]`, as the same relative pattern would be.
+- Verified on macOS (aarch64) only, plus Linux and Windows cross-clippy at the final gate; Linux and Windows runtime tests were not run.
 
 ## Reviewer comments
 (filled by the re-review)

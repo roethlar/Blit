@@ -264,6 +264,79 @@ fn mirror_exclude_absolute_glob_through_a_symlinked_source() {
     );
 }
 
+/// cr-g3fix2-2: a name read from the disk is matched as itself. Through
+/// an alias into `data[1]` the resolved name reached the matcher as glob
+/// text, where `[1]` is a class: `data[1]/private.txt` — the file the
+/// exclude names — was copied and the unrelated `data1/private.txt` left
+/// out. Through an alias into `open[x` (an unmatched `[`) the run failed
+/// on a pattern the user wrote correctly.
+#[cfg(unix)]
+#[test]
+fn copy_exclude_through_an_alias_into_a_directory_named_like_a_glob() {
+    let tmp = tempdir().unwrap();
+    let src = tmp.path().join("src");
+    for rel in [
+        "data[1]/private.txt",
+        "data[1]/keep.dat",
+        "data1/private.txt",
+        "open[x/private.txt",
+        "keep.txt",
+    ] {
+        let path = src.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"x").unwrap();
+    }
+    let into_class = tmp.path().join("into_class");
+    std::os::unix::fs::symlink(src.join("data[1]"), &into_class).unwrap();
+    let into_open = tmp.path().join("into_open");
+    std::os::unix::fs::symlink(src.join("open[x"), &into_open).unwrap();
+
+    let dst = tmp.path().join("dst_class");
+    let pattern = format!("{}", into_class.join("*.txt").display());
+    let (ok, stdout, stderr) = blit(&[
+        "copy",
+        &with_slash(&src),
+        &with_slash(&dst),
+        "--exclude",
+        &pattern,
+    ]);
+    assert!(ok, "copy failed:\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !dst.join("data[1]/private.txt").exists(),
+        "the file the exclude names must be left out"
+    );
+    assert!(dst.join("data[1]/keep.dat").exists());
+    assert!(
+        dst.join("data1/private.txt").exists(),
+        "a name the exclude never named must be copied"
+    );
+    assert!(dst.join("keep.txt").exists());
+    assert!(
+        !stderr.contains("cannot match anything"),
+        "a pattern under the source must not warn: {stderr}"
+    );
+
+    let dst = tmp.path().join("dst_open");
+    let pattern = format!("{}", into_open.display());
+    let (ok, stdout, stderr) = blit(&[
+        "copy",
+        &with_slash(&src),
+        &with_slash(&dst),
+        "--exclude",
+        &pattern,
+    ]);
+    assert!(ok, "copy failed:\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !dst.join("open[x").exists(),
+        "the aliased directory is left out"
+    );
+    assert!(dst.join("data1/private.txt").exists());
+    assert!(
+        !stderr.contains("cannot match anything"),
+        "a pattern under the source must not warn: {stderr}"
+    );
+}
+
 /// cr-g3fix-3: on Windows `\` is a separator in a relative pattern too —
 /// `.\.java` names the top-level `.java` only, `a\.java\` the `a/.java`
 /// subtree, and `.java\` the name at any depth. Before the fix none of the

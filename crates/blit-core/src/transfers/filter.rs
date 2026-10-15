@@ -187,7 +187,8 @@ pub struct ResolvedExcludes {
     /// is `a/.java`; a single remaining name is anchored as `./name`, so
     /// it still names only that top-level path), every other pattern as
     /// typed — on Windows with `\` written `/` (cr-g3fix-3), so the wire
-    /// form reads the same on any peer.
+    /// form reads the same on any peer. In a rewritten pattern a name read
+    /// from the disk is escaped, so it matches only itself (cr-g3fix2-2).
     pub patterns: Vec<String>,
     /// The absolute patterns that cannot match anything: outside the
     /// source root, naming the root itself, or any absolute pattern when
@@ -241,22 +242,25 @@ fn resolve_excludes_on(
                 .push(normalize_separators(pattern, windows).into_owned());
             continue;
         }
-        let mut pattern_forms = vec![pattern.clone()];
-        if let Some(form) = resolved_root
+        // Each form of the pattern with the part of it read from the disk:
+        // as typed, none; through the resolved root, its resolved prefix.
+        let mut pattern_forms = vec![(pattern.clone(), None)];
+        if let Some((prefix, rest)) = resolved_root
             .as_deref()
             .and_then(|root| through_resolved_root(pattern, root, windows))
         {
-            pattern_forms.push(form);
+            let form = prefix.join(rest).to_string_lossy().into_owned();
+            pattern_forms.push((form, Some(prefix.to_string_lossy().into_owned())));
         }
-        let relative = pattern_forms.iter().find_map(|form| {
+        let relative = pattern_forms.iter().find_map(|(form, prefix)| {
             roots
                 .iter()
-                .find_map(|root| relative_to_root(form, root, windows))
+                .find_map(|root| relative_parts(form, prefix.as_deref(), root, windows))
         });
         match (relative, source_root) {
             (Some(rest), Some(root)) => {
                 let rest = stored_spelling(root, rest, windows, stored_name);
-                resolved.patterns.push(written(&rest));
+                resolved.patterns.push(written(&rest, windows));
             }
             _ => {
                 resolved.patterns.push(pattern.clone());
@@ -267,18 +271,23 @@ fn resolve_excludes_on(
     resolved
 }
 
-/// cr-g3fix-2: `pattern` written through the resolved source root when
-/// its leading literal part reaches the source through a symlink
+/// cr-g3fix-2: `pattern` through the resolved source root when its
+/// leading literal part reaches the source through a symlink
 /// (`/alias/*.txt` with `alias` naming the source, or a directory inside
 /// it; macOS `/tmp` for `/private/tmp`). The pattern's leading ancestors
 /// up to its first component holding a glob metacharacter are resolved,
 /// shortest first; the first that exists and lands at or below
-/// `resolved_root` is written resolved, and what follows it is re-appended
-/// as typed — a glob unchanged, a path that does not exist yet as it was
-/// written, and a symlink inside the source unresolved (the walk does not
-/// follow one, so resolving it would name its target instead). `None` when
-/// no ancestor lands there.
-fn through_resolved_root(pattern: &str, resolved_root: &Path, windows: bool) -> Option<String> {
+/// `resolved_root` is returned resolved, with what follows it as typed —
+/// a glob unchanged, a path that does not exist yet as it was written,
+/// and a symlink inside the source unresolved (the walk does not follow
+/// one, so resolving it would name its target instead). The resolved
+/// part is the disk's own names, never glob text (cr-g3fix2-2), so it is
+/// kept apart from the typed rest. `None` when no ancestor lands there.
+fn through_resolved_root<'a>(
+    pattern: &'a str,
+    resolved_root: &Path,
+    windows: bool,
+) -> Option<(PathBuf, &'a Path)> {
     let path = Path::new(pattern);
     let mut ancestors: Vec<&Path> = path.ancestors().collect();
     ancestors.reverse();
@@ -306,7 +315,7 @@ fn through_resolved_root(pattern: &str, resolved_root: &Path, windows: bool) -> 
         {
             continue;
         }
-        return Some(resolved.join(rest).to_string_lossy().into_owned());
+        return Some((resolved, rest));
     }
     None
 }
@@ -388,52 +397,121 @@ fn relative_to_root(pattern: &str, root: &str, windows: bool) -> Option<Vec<Stri
     Some(rest.to_vec())
 }
 
-/// A relative pattern from its components, `/`-joined. A single name is
-/// written `./name` so it stays anchored to the root instead of matching
-/// that name at every depth.
-fn written(rest: &[String]) -> String {
-    if rest.len() == 1 {
-        format!("./{}", rest[0])
+/// cr-g3fix2-2: one component of a pattern made source-relative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Part {
+    /// A name read from the disk — a component of a resolved prefix, or
+    /// the stored spelling of a typed one: literal text, escaped when
+    /// written so it matches only itself.
+    Literal(String),
+    /// As the user typed it: glob syntax, written unchanged.
+    Typed(String),
+}
+
+/// `form` made relative to `root` as [`Part`]s: the components that lie
+/// within `prefix` — the part of the form read from the disk — are
+/// literal, the rest as typed. `None` as for [`relative_to_root`].
+fn relative_parts(
+    form: &str,
+    prefix: Option<&str>,
+    root: &str,
+    windows: bool,
+) -> Option<Vec<Part>> {
+    let rest = relative_to_root(form, root, windows)?;
+    let literal = prefix
+        .and_then(|prefix| relative_to_root(prefix, root, windows))
+        .map_or(0, |below| below.len());
+    Some(
+        rest.into_iter()
+            .enumerate()
+            .map(|(at, component)| {
+                if at < literal {
+                    Part::Literal(component)
+                } else {
+                    Part::Typed(component)
+                }
+            })
+            .collect(),
+    )
+}
+
+/// A relative pattern from its parts, `/`-joined: a literal part escaped
+/// ([`literal_glob`]), a typed one unchanged. A single name is written
+/// `./name` so it stays anchored to the root instead of matching that
+/// name at every depth.
+fn written(rest: &[Part], windows: bool) -> String {
+    let text: Vec<std::borrow::Cow<'_, str>> = rest
+        .iter()
+        .map(|part| match part {
+            Part::Literal(name) => literal_glob(name, windows).into(),
+            Part::Typed(component) => component.as_str().into(),
+        })
+        .collect();
+    if text.len() == 1 {
+        format!("./{}", text[0])
     } else {
-        rest.join("/")
+        text.join("/")
     }
 }
 
-/// cr-g3fix-1: `rest` — a pattern's components below `root`, as typed —
-/// with each component the filesystem holds spelled the way it stores it.
-/// Every rule compares case-sensitively, so on a case-insensitive
-/// filesystem `/src/CACHE` for an on-disk `src/cache` must become
-/// `./cache` — locally and in the wire form a push sends — or it names
-/// nothing the walk sees. The spelling stops at the first component that
+/// cr-g3fix2-2: `name` as glob text that matches exactly that name: every
+/// character `globset` reads as syntax (`?*[]{}`) bracketed, and, off
+/// Windows, `\` too — globset reads it as an escape there (on Windows it
+/// is a separator and never reaches a name).
+fn literal_glob(name: &str, windows: bool) -> String {
+    let escaped = globset::escape(name);
+    if windows {
+        escaped
+    } else {
+        escaped.replace('\\', r"[\]")
+    }
+}
+
+/// cr-g3fix-1: `rest` — a pattern's parts below `root` — with each typed
+/// component the filesystem holds spelled the way it stores it. Every
+/// rule compares case-sensitively, so on a case-insensitive filesystem
+/// `/src/CACHE` for an on-disk `src/cache` must become `./cache` — locally
+/// and in the wire form a push sends — or it names nothing the walk sees.
+/// A stored name is read from the disk, so it becomes a literal part
+/// (cr-g3fix2-2). The spelling stops at the first typed component that
 /// holds a glob metacharacter or that `stored` cannot name (missing, or a
-/// symlink); that one and the rest stay as typed.
+/// symlink); that one and the rest stay as typed. A literal part is the
+/// disk's name already and never stops it, whatever characters it holds.
 fn stored_spelling(
     root: &Path,
-    rest: Vec<String>,
+    rest: Vec<Part>,
     windows: bool,
     stored: impl Fn(&Path) -> Option<String>,
-) -> Vec<String> {
+) -> Vec<Part> {
     let mut at = root.to_path_buf();
     let mut spelled = Vec::with_capacity(rest.len());
-    let mut components = rest.into_iter();
-    for component in components.by_ref() {
+    let mut parts = rest.into_iter();
+    for part in parts.by_ref() {
+        let component = match part {
+            Part::Literal(name) => {
+                at.push(&name);
+                spelled.push(Part::Literal(name));
+                continue;
+            }
+            Part::Typed(component) => component,
+        };
         if has_glob_meta(&component, windows) {
-            spelled.push(component);
+            spelled.push(Part::Typed(component));
             break;
         }
         at.push(&component);
         match stored(&at) {
             Some(name) => {
                 at.set_file_name(&name);
-                spelled.push(name);
+                spelled.push(Part::Literal(name));
             }
             None => {
-                spelled.push(component);
+                spelled.push(Part::Typed(component));
                 break;
             }
         }
     }
-    spelled.extend(components);
+    spelled.extend(parts);
     spelled
 }
 
@@ -692,6 +770,136 @@ mod tests {
         );
     }
 
+    /// Makes each `/`-separated `rel` under `root` as a file (its
+    /// directories too).
+    #[cfg(unix)]
+    fn files(root: &Path, rels: &[&str]) {
+        for rel in rels {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+    }
+
+    /// cr-g3fix2-2: the resolved part of a pattern is the disk's own names,
+    /// so both builders write it escaped and it matches only itself. Through
+    /// an alias into `data[1]`, `*.txt` leaves out `data[1]/private.txt`,
+    /// not the unrelated `data1/private.txt` (as glob text `[1]` is a class
+    /// naming `data1`), and the typed `*.txt` stays a glob; through an alias
+    /// into `set[2]` the anchored rule `./set[[]2[]]` leaves out that
+    /// subtree only.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_read_from_the_disk_is_matched_literally() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        files(
+            &src,
+            &[
+                "data[1]/private.txt",
+                "data[1]/keep.dat",
+                "data1/private.txt",
+                "set[2]/x",
+                "set2/x",
+            ],
+        );
+        let into_class = dir.path().join("into_class");
+        std::os::unix::fs::symlink(src.join("data[1]"), &into_class).unwrap();
+        let into_set = dir.path().join("into_set");
+        std::os::unix::fs::symlink(src.join("set[2]"), &into_set).unwrap();
+        let exc = vec![
+            format!("{}", into_class.join("*.txt").display()),
+            format!("{}", into_set.display()),
+        ];
+        let mut i = inputs(&[], &exc);
+        i.source_root = Some(&src);
+
+        let filter = build(&i).unwrap();
+        let allows = |rel: &str| filter.allows_entry(Some(Path::new(rel)), &src.join(rel), 1, None);
+        assert!(!allows("data[1]/private.txt"), "the file the exclude names");
+        assert!(allows("data[1]/keep.dat"), "the typed glob is still a glob");
+        assert!(
+            allows("data1/private.txt"),
+            "a name the exclude never named"
+        );
+        assert!(
+            !allows("set[2]") && !allows("set[2]/x"),
+            "the named subtree"
+        );
+        assert!(allows("set2/x"), "a name the exclude never named");
+
+        let expected = vec!["data[[]1[]]/*.txt", "./set[[]2[]]"];
+        assert_eq!(filter.exclude_files, expected, "build");
+        assert_eq!(build_spec(&i).unwrap().exclude, expected, "build_spec");
+        assert!(resolve_excludes(&exc, Some(&src)).unmatchable.is_empty());
+    }
+
+    /// cr-g3fix2-2: an alias into a directory named with an unmatched `[`
+    /// neither fails nor warns — as glob text `open[x` does not compile, so
+    /// a pattern the user wrote correctly failed the run — and it leaves
+    /// out that directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_resolved_name_with_an_unmatched_bracket_neither_fails_nor_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        files(&src, &["open[x/private.txt", "open/private.txt"]);
+        let into_open = dir.path().join("into_open");
+        std::os::unix::fs::symlink(src.join("open[x"), &into_open).unwrap();
+        let exc = vec![format!("{}", into_open.display())];
+        let mut i = inputs(&[], &exc);
+        i.source_root = Some(&src);
+
+        let filter = build(&i).map_err(|e| format!("{e:#}"));
+        let spec = build_spec(&i).map_err(|e| format!("{e:#}"));
+        assert_eq!(
+            filter.as_ref().map(|f| f.exclude_files.clone()),
+            Ok(vec!["./open[[]x".to_string()]),
+            "build"
+        );
+        assert_eq!(
+            spec.map(|s| s.exclude),
+            Ok(vec!["./open[[]x".to_string()]),
+            "build_spec"
+        );
+        assert!(resolve_excludes(&exc, Some(&src)).unmatchable.is_empty());
+        let filter = filter.unwrap();
+        let allows = |rel: &str| filter.allows_entry(Some(Path::new(rel)), &src.join(rel), 1, None);
+        assert!(!allows("open[x") && !allows("open[x/private.txt"));
+        assert!(allows("open/private.txt"));
+    }
+
+    /// cr-g3fix2-2: off Windows `\` is an ordinary character in a name and
+    /// globset's escape in a pattern, so a resolved name holding one must
+    /// be escaped to match itself — written as typed, `back\slash` reads
+    /// as `backslash`.
+    #[cfg(unix)]
+    #[test]
+    fn a_resolved_name_holding_a_backslash_matches_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        files(&src, &[r"back\slash/private.txt", "backslash/private.txt"]);
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(src.join(r"back\slash"), &alias).unwrap();
+        let exc = vec![format!("{}", alias.join("*.txt").display())];
+        let mut i = inputs(&[], &exc);
+        i.source_root = Some(&src);
+        let expected = vec![r"back[\]slash/*.txt"];
+        assert_eq!(build(&i).unwrap().exclude_files, expected, "build");
+        assert_eq!(build_spec(&i).unwrap().exclude, expected, "build_spec");
+
+        let filter = build(&i).unwrap();
+        let allows = |rel: &str| filter.allows_entry(Some(Path::new(rel)), &src.join(rel), 1, None);
+        assert!(
+            !allows(r"back\slash/private.txt"),
+            "the file the exclude names"
+        );
+        assert!(
+            allows("backslash/private.txt"),
+            "a name the exclude never named"
+        );
+    }
+
     /// True when `dir`'s filesystem ignores case: a file made as
     /// `case-probe` opens as `CASE-PROBE`.
     fn case_insensitive(dir: &Path) -> bool {
@@ -747,19 +955,73 @@ mod tests {
             .map(|(_, name)| name.to_string())
         };
         let spell = |rest: &[&str]| {
-            let rest = rest.iter().map(|c| c.to_string()).collect();
-            stored_spelling(Path::new("root"), rest, false, disk)
+            let rest = rest.iter().map(|c| Part::Typed(c.to_string())).collect();
+            written(
+                &stored_spelling(Path::new("root"), rest, false, disk),
+                false,
+            )
         };
-        assert_eq!(spell(&["CACHE", "SUB", "X.TXT"]), ["cache", "Sub", "x.txt"]);
+        assert_eq!(spell(&["CACHE", "SUB", "X.TXT"]), "cache/Sub/x.txt");
         assert_eq!(
             spell(&["CACHE", "*.TMP", "SUB"]),
-            ["cache", "*.TMP", "SUB"],
+            "cache/*.TMP/SUB",
             "a glob component and everything after it stay as typed"
         );
         assert_eq!(
             spell(&["CACHE", "Missing", "SUB"]),
-            ["cache", "Missing", "SUB"],
+            "cache/Missing/SUB",
             "a component the disk cannot name ends the spelling"
+        );
+    }
+
+    /// cr-g3fix2-2: the spelling walk on any OS, against a stand-in disk
+    /// whose names hold glob syntax. A stored name is read from the disk,
+    /// so it is written escaped — `DATA~1`, a Windows short name whose
+    /// long name is `data[1]`, must not become the class `data[1]` — and a
+    /// literal part, which holds the disk's name already, never ends the
+    /// walk the way a typed glob component does. Off Windows a literal `\`
+    /// is escaped as well; under the Windows rule it is a separator and
+    /// never reaches a name.
+    #[test]
+    fn a_name_read_from_the_disk_is_escaped_and_never_ends_the_spelling() {
+        let disk = |path: &Path| {
+            let key = path.to_string_lossy().replace('\\', "/").to_lowercase();
+            [("root/data~1", "data[1]"), ("root/data[1]/sub", "Sub")]
+                .iter()
+                .find(|(stored, _)| *stored == key)
+                .map(|(_, name)| name.to_string())
+        };
+        let spell = |rest: Vec<Part>, windows: bool| {
+            written(
+                &stored_spelling(Path::new("root"), rest, windows, disk),
+                windows,
+            )
+        };
+        let typed = |c: &str| Part::Typed(c.to_string());
+        let literal = |c: &str| Part::Literal(c.to_string());
+        for windows in [false, true] {
+            assert_eq!(
+                spell(vec![typed("DATA~1"), typed("SUB"), typed("*.txt")], windows),
+                "data[[]1[]]/Sub/*.txt",
+                "a stored name is escaped (windows rule: {windows})"
+            );
+            assert_eq!(
+                spell(
+                    vec![literal("data[1]"), typed("SUB"), typed("*.txt")],
+                    windows
+                ),
+                "data[[]1[]]/Sub/*.txt",
+                "a literal part holding `[` does not end the walk (windows rule: {windows})"
+            );
+        }
+        assert_eq!(
+            written(&[literal(r"back\slash"), typed("*.txt")], false),
+            r"back[\]slash/*.txt"
+        );
+        assert_eq!(
+            written(&[literal("a{b}*?"), typed("[!x]")], false),
+            "a[{]b[}][*][?]/[!x]",
+            "only the literal part is escaped"
         );
     }
 
@@ -785,7 +1047,12 @@ mod tests {
     #[test]
     fn windows_absolute_excludes_compare_case_insensitively_with_either_slash() {
         let relative = |pattern: &str, root: &str, windows: bool| {
-            relative_to_root(pattern, root, windows).map(|rest| written(&rest))
+            relative_to_root(pattern, root, windows).map(|rest| {
+                written(
+                    &rest.into_iter().map(Part::Typed).collect::<Vec<_>>(),
+                    windows,
+                )
+            })
         };
         assert!(is_absolute_pattern(r"C:\Users\me\.java", true));
         assert!(is_absolute_pattern("c:/Users/me", true));
