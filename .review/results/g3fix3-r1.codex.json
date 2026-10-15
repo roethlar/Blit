@@ -1,0 +1,36 @@
+{
+  "verdict": "findings",
+  "capability_ok": true,
+  "guard_confirmed": true,
+  "reviewed_sha": "36b752b6ff1e4e930e7e892d85929abdad707240",
+  "base_sha": "e9dc99c92a83805f0d705d9ca15913cdd04e2c9a",
+  "guard": "Replaced globset::escape(name) with name.to_string() in literal_glob. The changed test transfers::filter::tests::a_name_read_from_the_disk_is_matched_literally failed at filter.rs:871 (exit 101). Restored with git checkout, verified the original blob hash, and reran: passed (exit 0). All temporary probes were removed; the worktree is clean. On macOS, fmt, native clippy, and workspace tests passed (1517 passed, 2 ignored); Linux cross-clippy passed. Windows cross-clippy failed because ml64.exe was unavailable; Linux/Windows runtime tests were not run. No CI run was found for the pinned head. cr-g3fix2-1 closed: false — ASCII spelling is repaired, but filesystem-equivalent Unicode symlink names still expose destination data to deletion. cr-g3fix-1 closed: false for the same reason. cr-g3fix2-2 closed: true for its reported underescaping failures: bracketed and unmatched-bracket names now compile and match correctly. The escaped-text fallback and wire interpretation problems below are separate defects.",
+  "closed": {
+    "cr-g3fix2-1": false,
+    "cr-g3fix2-2": true,
+    "cr-g3fix-1": false
+  },
+  "findings": [
+    {
+      "title": "Filesystem-equivalent Unicode symlink excludes still permit mirror data loss",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:565 — paired_name uses Unicode lowercase rather than filesystem equivalence; when pairing fails, stored_name returns None for symlinks at line 535. Reproduced on case-insensitive macOS with src/σ pointing outside the source and absolute exclude src/ς: both paths had the same symlink inode, but local and wire patterns remained ./ς with no warning. Mirror deleted dst/σ/saved.txt and its directory. An NFD-stored café symlink excluded using uppercase NFC CAFÉ behaved identically. Exact stored-spelling controls preserved both destination subtrees.",
+      "predicted_failure": "A valid absolute exclude naming an existing symlink through another filesystem-equivalent spelling silently fails to protect its destination counterpart; mirror deletes pre-existing data. This leaves cr-g3fix2-1 and cr-g3fix-1 materially open.",
+      "severity": "HIGH",
+      "better_approach": "Recover the entry's stored name using filesystem-aware lookup or candidate identity checked without following symlinks. Cover Unicode case equivalence and normalization with destination-survival tests."
+    },
+    {
+      "title": "Escaped literals also exclude entries named like their encoded pattern",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:446 — escaped literal components reach ExcludeRules, whose fs_enum.rs:131 fallback also compares the encoded pattern as ordinary text. Reproduced with alias pointing to src/data[1], alongside src/data[[]1[]] and src/data1. Copying with --exclude <alias> omitted both data[1]/private.txt and the unrelated data[[]1[]]/private.txt, while copying data1/private.txt. The generated ./data[[]1[]] matches the intended name through globset and the unrelated encoded name through glob_match.",
+      "predicted_failure": "Copy or backup silently omits an unrelated subtree whose name equals an escaped pattern's textual representation, despite successful completion.",
+      "severity": "MEDIUM",
+      "better_approach": "Evaluate escaped patterns consistently as globs; do not additionally interpret their encoded text through the exact/prefix fallback. Add a negative control containing the escaped representation as an actual filename."
+    },
+    {
+      "title": "Windows peers reinterpret escaped Unix backslashes as directory separators",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:466 — a resolved Unix name back\\slash is emitted as ./back[\\]slash. On Windows, fs_enum.rs:83 invokes normalize_separators, whose line 147 rewrites this to ./back[/]slash. A temporary test against the actual ExcludeRules::compile branches confirmed that the Unix rule leaves back/slash/saved.txt in scope while the Windows rule excludes it. The remote mirror consumes these rules through transfer_session/mod.rs:4181. This was verified through the parameterized compiler on macOS, not a Windows runtime.",
+      "predicted_failure": "A Unix-to-Windows mirror excluding an aliased directory containing a literal backslash also excludes the unrelated destination subtree back/slash from deletion, retaining stale files outside the requested exclusion.",
+      "severity": "MEDIUM",
+      "better_approach": "Preserve a canonical wire-pattern dialect and normalize native separators before escaping, without rewriting escaped literals on the receiving peer. Test Unix-generated wire patterns under both platform rules."
+    }
+  ]
+}
