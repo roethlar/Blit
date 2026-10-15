@@ -147,8 +147,11 @@ part, and a job you can list, read, re-run and retry.
   An absolute path typed in another case than the disk stores it (macOS,
   Windows) excludes the entry anyway, an absolute glob written through a
   symlink (`/alias/*.txt`, macOS `/tmp`) is made relative too — names
-  read from the disk match literally even when they hold `[` or `*` — and
-  on Windows `\` in a relative pattern is a separator (`.\cache`, `cache\`).
+  read from the disk match literally even when they hold `[` or `*`, a
+  spelling the filesystem itself pairs with the stored name (final sigma,
+  NFC for NFD) names that entry, and a typed pattern is glob syntax only
+  (`data[1]` is a class naming `data1`) — and on Windows `\` in a relative
+  pattern is a separator (`.\cache`, `cache\`).
   Excluded directories are pruned, never read, so an unreadable one no
   longer leaves a mirror's scan incomplete. `*.log`, `**/*.log`, `dir/**`
   and exact relative paths match as before. (`blit-core`: `FilterInputs`

@@ -3,7 +3,7 @@
 **Severity**: MEDIUM (reviewer: MEDIUM)
 **Status**: Fixed
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (this commit)
+**Commit**: `f6212938`
 **Reviewer**: codex / gpt-6-astra / xhigh / standard (the owner's `review`, 2026-10-15), codex-cli 0.162.1 headless one-shot, `-a never exec -m gpt-6-astra -c model_reasoning_effort="xhigh" -s workspace-write --json`, stdin closed, detached worktree `review-g3fix3-r1-36b752b6`; codereview re-review g3fix3-r1 over `e9dc99c9..36b752b6` (record `.review/results/g3fix3-r1.codex.json` + `.events.jsonl`); 2026-10-15 20:31–20:40Z; capability_ok=true; guard_confirmed=true (reviewer replaced `globset::escape(name)` with `name.to_string()` in `literal_glob` → `a_name_read_from_the_disk_is_matched_literally` red at `filter.rs:871`, restored by `git checkout`, blob hash verified, green; 1517/0/2 on its macOS gate; its Windows cross-clippy stopped on a missing `ml64.exe` for blake3 — the reviewer's environment, not the change); SHAs pin-verified; closed: cr-g3fix2-2 true, cr-g3fix2-1 false, cr-g3fix-1 false
 
 ## Evidence

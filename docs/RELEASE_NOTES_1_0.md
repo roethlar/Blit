@@ -68,7 +68,8 @@ the source side too, and adds a retry pass.
   /home/me/.java`). An absolute pattern that cannot match anything —
   outside the source, or any absolute pattern when the source is remote —
   is named once on stderr and the run goes on. An absolute path typed in
-  another case than the disk stores it (macOS, Windows) still excludes the
+  another case than the disk stores it (macOS, Windows), or in a spelling
+  the filesystem itself pairs with the stored name, still excludes the
   entry; an absolute glob written through a symlink (`/alias/*.txt`, macOS
   `/tmp`) is made relative too; on Windows `\` in a relative pattern is a
   separator (`.\cache`, `cache\`). Excluded directories are
