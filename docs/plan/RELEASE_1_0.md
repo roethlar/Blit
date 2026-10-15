@@ -39,7 +39,7 @@ are the owner's act.
   (`.review/results/ls6-range.codex.r3.json`).
 - [ ] **G2 — CI green on the exact candidate**, both workflows (CI: fmt,
   strict clippy, Linux/macOS/Windows tests; Docs Gate).
-- [x] **G3 — known broken behaviors dispositioned.** CLOSED 2026-10-14 (D-2026-10-14-1): audit-19 FIXED `fa948e01`, the detached recents reason FIXED `b7da0d81`; Codex g3fix-r1 over the range found 3 MEDIUM on audit-19, fixed `7d3e4eb6` `47bdfb69` `eddfab6c`; the re-review pends the owner's dispatch. Fix now:
+- [x] **G3 — known broken behaviors dispositioned.** CLOSED 2026-10-14 (D-2026-10-14-1): audit-19 FIXED `fa948e01`, the detached recents reason FIXED `b7da0d81`; Codex g3fix-r1 over the range found 3 MEDIUM on audit-19, fixed `7d3e4eb6` `47bdfb69` `eddfab6c`; g3fix2-r1 found 2 more (cr-g3fix2-1 HIGH: a cased exclude naming a symlink let `mirror` delete the destination's counterpart; cr-g3fix2-2 MEDIUM: disk names joined unescaped), fixed `f6099aa3` `36b752b6`; the re-review g3fix3-r1 pends the owner's dispatch. Fix now:
   **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (owner ruling D-2026-09-29-1,
   2026-09-29): a source-side per-file failure — locked, vanished, or
   size-drifted since the scan — must never end the run (D-2026-09-28-2);
@@ -130,14 +130,15 @@ are the owner's act.
 
 ## Readiness as of 2026-10-14 (owner goal: "do everything necessary to get this ready for 1.0")
 
-Where each gate stands and who moves it. CI is fully green on `8844dfbd`
-(run 38474595246), the last pushed commit; every slice since `v0.1.3` is
-reviewed to consensus.
+Where each gate stands and who moves it. CI is fully green on `d9adb99e`
+(run 38791000789, 2026-10-15: all three test legs, Windows included, and
+three release builds), the last pushed commit; every slice since `v0.1.3`
+is reviewed to consensus.
 
 | Gate | Status | Moves on |
 | --- | --- | --- |
-| G2 CI on the candidate | candidate = `master` at `eddfab6c` + the STATE commit after it; local gate on the whole tree 1510/0/2 (macOS; Linux + Windows cross-clippy clean); not pushed | `/git push all`, then the run |
-| G3 dispositions | DONE: SSC shipped; audit-18 retired; audit-19 FIXED `fa948e01`; detached recents reason FIXED `b7da0d81` (D-2026-10-14-1); Codex g3fix-r1 over `b186e8b8..b7da0d81`: 3 MEDIUM on audit-19, FIXED `7d3e4eb6` `47bdfb69` `eddfab6c` | Codex re-review of `2324e3cb..eddfab6c` on the owner's `review` |
+| G2 CI on the candidate | CI green on `d9adb99e` (run 38791000789); candidate moved to `master` at `36b752b6` + the STATE commit after it, local gate 1517/0/2 (macOS; Linux + Windows cross-clippy clean), four commits not pushed | `/git push all`, then the run |
+| G3 dispositions | DONE: SSC shipped; audit-18 retired; audit-19 FIXED `fa948e01`; detached recents reason FIXED `b7da0d81` (D-2026-10-14-1); Codex g3fix-r1 over `b186e8b8..b7da0d81`: 3 MEDIUM on audit-19, FIXED `7d3e4eb6` `47bdfb69` `eddfab6c`; g3fix2-r1: cr-g3fix-2/-3 closed, cr-g3fix-1 not (HIGH, cr-g3fix2-1) + cr-g3fix2-2, FIXED `f6099aa3` `36b752b6` | Codex re-review of `e9dc99c9..36b752b6` on the owner's `review` |
 | G4 docs truth | README + TRANSFER_SESSION corrected `6ac98801` (audit of 2026-10-14); plan-status sweep DONE 2026-10-14 (D-2026-10-14-1) | — |
 | G5 version + notes | DONE `6d5d93c8`: 1.0.0, CHANGELOG `[1.0.0]`, notes re-cut († entries follow the G3 rulings) | — |
 | G5b cross-OS matrix | Mac↔Linux PASS 2026-10-14 with CI's `8844dfbd` archives (`aaa8af55`); to repeat on the candidate's archives; Windows legs blocked (no host reachable) | the candidate's CI build; a Windows host |
@@ -163,8 +164,10 @@ Ordered path to the tag:
 2. DONE: both fixes landed one per commit (`fa948e01`, `b7da0d81`), 19
    mutation-proven guards. Codex codereview g3fix-r1 of the range: 3 MEDIUM
    on audit-19, fixed one per commit (`7d3e4eb6`, `47bdfb69`, `eddfab6c`),
-   gate 1510/0/2; the re-review of `2324e3cb..eddfab6c` awaits the owner's
-   dispatch word (D-2026-07-23-7).
+   gate 1510/0/2; the re-review g3fix2-r1 closed two and found two more
+   (one HIGH: a cased symlink exclude under `mirror`), fixed one per commit
+   (`f6099aa3`, `36b752b6`), gate 1517/0/2; the re-review g3fix3-r1 of
+   `e9dc99c9..36b752b6` awaits the owner's dispatch word (D-2026-07-23-7).
 3. G4 edits: README/TRANSFER_SESSION corrections from the audit; STATE
    queue de-drift; plan-status flips as ruled.
 4. G5: DONE (`6d5d93c8`). Push (owner go) → G2 CI green on that SHA.
