@@ -186,9 +186,10 @@ pub struct ResolvedExcludes {
     /// source root rewritten source-relative (`/src/a/.java` under `/src`
     /// is `a/.java`; a single remaining name is anchored as `./name`, so
     /// it still names only that top-level path), every other pattern as
-    /// typed — on Windows with `\` written `/` (cr-g3fix-3), so the wire
-    /// form reads the same on any peer. In a rewritten pattern a name read
-    /// from the disk is escaped, so it matches only itself (cr-g3fix2-2).
+    /// typed — on Windows with `\` written `/` outside a bracket class
+    /// (cr-g3fix-3, cr-g3fix3-3), so the wire form reads the same on any
+    /// peer. In a rewritten pattern a name read from the disk is escaped, so
+    /// it matches only itself (cr-g3fix2-2).
     pub patterns: Vec<String>,
     /// The absolute patterns that cannot match anything: outside the
     /// source root, naming the root itself, or any absolute pattern when
@@ -204,7 +205,8 @@ pub struct ResolvedExcludes {
 /// form, so `/tmp/x/.java` and `/private/tmp/x/.java` name one path on
 /// macOS (`through_resolved_root` says how a pattern is resolved).
 /// Relative patterns pass through untouched but for their separators:
-/// on Windows `\` is written `/` (cr-g3fix-3).
+/// on Windows `\` is written `/` outside a bracket class (cr-g3fix-3,
+/// cr-g3fix3-3).
 pub fn resolve_excludes(exclude: &[String], source_root: Option<&Path>) -> ResolvedExcludes {
     resolve_excludes_on(exclude, source_root, cfg!(windows))
 }
@@ -1226,6 +1228,18 @@ mod tests {
         let unix = resolve_excludes_on(&mixed, None, false);
         assert_eq!(unix.patterns, mixed, "no absolute pattern off Windows");
         assert!(unix.unmatchable.is_empty());
+
+        // cr-g3fix3-3: normalized where it is typed, `.\cache` reaches the
+        // filter (and the wire) as `./cache` and still anchors; a bracket
+        // class keeps its `\` there too, as globset reads it.
+        let typed: Vec<String> = [r".\cache", r"data[\]x\y"].map(String::from).to_vec();
+        let written = resolve_excludes_on(&typed, None, true).patterns;
+        assert_eq!(written, ["./cache", r"data[\]x/y"]);
+        let mut filter = FileFilter::default();
+        filter.exclude_files = written;
+        let allows = |rel: &str| filter.allows_entry(Some(Path::new(rel)), Path::new(rel), 1, None);
+        assert!(!allows("cache/x"), "anchored to the root");
+        assert!(allows("a/cache/x"), "a nested cache is not named");
     }
 
     /// review otp-10a F8: the wire-spec builder rejects malformed globs

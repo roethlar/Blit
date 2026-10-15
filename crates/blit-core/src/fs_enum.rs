@@ -62,8 +62,11 @@ pub struct FileFilter {
 /// read them. A pattern's trailing `/` is dropped (`a/.java/` names the
 /// same tree as `a/.java`) and a leading `./` anchors it to the source
 /// root (`./.java` is the top-level `.java` only). On Windows `\` is read
-/// as `/` first (cr-g3fix-3: `.\.java`, `a\.java\`). Each rule is matched
-/// as a glob only ([`CompiledPatterns`], cr-g3fix3-2).
+/// as `/` first (cr-g3fix-3: `.\.java`, `a\.java\`), as globset reads it
+/// there, but never inside a bracket class (cr-g3fix3-3: `[\]` is a Unix
+/// peer's escape for a name holding `\`, and stays one) — see
+/// [`normalize_separators`]. Each rule is matched as a glob only
+/// ([`CompiledPatterns`], cr-g3fix3-2).
 #[derive(Debug, Default)]
 struct ExcludeRules {
     /// Patterns with no separator: each matches any one component of a
@@ -178,14 +181,53 @@ impl CompiledPatterns {
 
 /// cr-g3fix-3: an `--exclude` pattern with every separator written `/`.
 /// On Windows `\` separates path components too (`.\cache`, `cache\`,
-/// `a\.java`); elsewhere it is an ordinary character (globset reads it as
-/// an escape), so the pattern is kept as typed.
+/// `a\.java`) — except inside a bracket class, which is copied as it is
+/// (cr-g3fix3-3): there globset reads `\` as a literal character on every
+/// platform, and `[\]` is how a Unix peer writes a name holding one
+/// (`transfers::filter`'s `literal_glob`); rewritten, it became `[/]`,
+/// which matches a real separator. This is the reading globset itself
+/// gives a pattern on Windows (a bare `\` is `/`, a class's `\` is
+/// literal), so the rules built from the text agree with the glob.
+/// Elsewhere `\` is an ordinary character (globset reads it as an
+/// escape), so the pattern is kept as typed.
 pub(crate) fn normalize_separators(pattern: &str, windows: bool) -> std::borrow::Cow<'_, str> {
-    if windows && pattern.contains('\\') {
-        std::borrow::Cow::Owned(pattern.replace('\\', "/"))
-    } else {
-        std::borrow::Cow::Borrowed(pattern)
+    if !windows || !pattern.contains('\\') {
+        return std::borrow::Cow::Borrowed(pattern);
     }
+    let mut written = String::with_capacity(pattern.len());
+    let mut rest = pattern;
+    while let Some(c) = rest.chars().next() {
+        let len = match c {
+            '[' => bracket_class_len(rest).unwrap_or(1),
+            _ => c.len_utf8(),
+        };
+        if c == '\\' {
+            written.push('/');
+        } else {
+            written.push_str(&rest[..len]);
+        }
+        rest = &rest[len..];
+    }
+    std::borrow::Cow::Owned(written)
+}
+
+/// cr-g3fix3-3: the byte length of the bracket class `text` opens, `[`
+/// through its closing `]`, read as globset 0.4 reads one: an optional `!`
+/// or `^`, then a `]` in first place is a member, and the class ends at
+/// the next `]`. `None` when it never closes (globset refuses the pattern,
+/// and the `[` is an ordinary character here).
+fn bracket_class_len(text: &str) -> Option<usize> {
+    let mut body = text.strip_prefix('[')?;
+    let mut len = 1;
+    if let Some(after) = body.strip_prefix(['!', '^']) {
+        body = after;
+        len += 1;
+    }
+    if let Some(after) = body.strip_prefix(']') {
+        body = after;
+        len += 1;
+    }
+    Some(len + body.find(']')? + 1)
 }
 
 impl FileFilter {
@@ -825,6 +867,61 @@ mod tests {
             !unix.excludes(Path::new("a/.java/y")),
             "off Windows a backslash is no separator"
         );
+    }
+
+    /// cr-g3fix3-3: under the Windows rule a bracket class is copied as it
+    /// is, `\` included — `[\]` is how a Unix peer writes a name holding
+    /// `\`, and globset reads a class's `\` literally on every platform — so
+    /// a Unix-generated wire pattern `./back[\]slash` compiled by a Windows
+    /// peer never becomes `./back[/]slash`, which matched the unrelated
+    /// subtree `back/slash` and kept it out of a mirror's deletion scope.
+    /// Outside a class `\` is still a separator there. Both rules run on
+    /// every OS; the wire path a daemon takes runs under this host's rule.
+    #[test]
+    fn a_bracket_class_keeps_its_backslash_under_either_rule() {
+        for (typed, windows_form) in [
+            (r"./back[\]slash", r"./back[\]slash"),
+            (r"a\[\]\b", r"a/[\]/b"),
+            (r"[]\]\x", r"[]\]/x"),
+            (r"[!]\]\x", r"[!]\]/x"),
+            (r"[^\]x\y", r"[^\]x/y"),
+            (r"data[[]1[]]\sub", "data[[]1[]]/sub"),
+            (r"open[x\y", "open[x/y"),
+        ] {
+            assert_eq!(normalize_separators(typed, true), windows_form, "{typed}");
+            assert_eq!(normalize_separators(typed, false), typed, "{typed}");
+        }
+
+        for windows in [true, false] {
+            let rules = ExcludeRules::compile(&[r"./back[\]slash".to_string()], windows);
+            for rel in ["back/slash/saved.txt", "back/slash", "backslash/x"] {
+                assert!(
+                    !rules.excludes(Path::new(rel)),
+                    "{rel} stays in scope (windows rule: {windows})"
+                );
+            }
+            if !cfg!(windows) {
+                assert!(
+                    rules.excludes(Path::new(r"back\slash/saved.txt")),
+                    "the name it was written for (windows rule: {windows})"
+                );
+            }
+        }
+
+        let received = crate::remote::transfer::operation_spec::filter_from_spec(
+            crate::generated::FilterSpec {
+                exclude: vec![r"./back[\]slash".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("a valid wire pattern");
+        for rel in ["back/slash/saved.txt", "back/slash"] {
+            assert!(allows(&received, rel), "{rel} stays in scope");
+            assert!(
+                received.allows_dir(Path::new(rel), Path::new(rel)),
+                "{rel} is walked"
+            );
+        }
     }
 
     /// cr-g3fix-3: on Windows a filter built directly — by an embedder, or
