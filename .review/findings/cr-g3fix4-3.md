@@ -31,7 +31,7 @@ Off Windows a typed `--exclude` escape no longer leaves the client as a bare `\`
 - `resolve_excludes_on` (`transfers/filter.rs`) writes each pattern through it:
   - relative patterns, on both of its paths (where `normalize_separators` was called before);
   - a resolved absolute pattern's whole written text. Its literal parts are classes already (`literal_glob`) and are copied unchanged, so in effect only the typed parts are rewritten.
-  - Rewriting the joined text rather than each typed component also covers an escaped `/` split across components: `/src/a\/b` → `a/b`, globset's own reading of `a\/b`.
+  - Rewriting the joined text rather than each typed component also covers an escaped `/` split across components: `/src/a\/b` → `a/b`, globset's own reading of `a\/b` (by reading; no guard pins this case).
 - An unmatchable absolute pattern stays exactly as typed in `patterns` and in the warning, as the intake says. It matches nothing under either rule, so its bare `\` changes nothing on any peer.
 - `build` (the local filter) and `build_spec` (the wire form) both take `resolve_excludes(...).patterns`, so both carry the class dialect. A receiving peer's `ExcludeRules::compile` is unchanged; no bare `\` reaches it from a 1.0 peer.
 - `--include` is not rewritten: it takes no part in the deletion scope (see Known gaps).
