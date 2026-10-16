@@ -332,6 +332,71 @@ fn mirror_exclude_symlink_in_a_filesystem_equivalent_spelling_keeps_the_destinat
     );
 }
 
+/// cr-g3fix4-1: the same symlink hard-linked under a second name
+/// (`src/alias`, one entry with `src/σ`): no API names which of the two
+/// the typed `ς` matched, so both are excluded, a note names them, and the
+/// destination's `σ/` survives. Before the fix the hard link sent the
+/// pairing to a case fold, which paired neither: the exclude matched
+/// nothing, warned about nothing, and the mirror deleted `dst/σ/saved.txt`
+/// with its directory. Skipped where the filesystem does not pair the
+/// spellings or the link cannot be hard-linked as a link.
+#[cfg(unix)]
+#[test]
+fn mirror_exclude_a_hard_linked_symlink_in_a_paired_spelling_keeps_the_destination_subtree() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("keep.txt"), b"k").unwrap();
+    if !filesystem_pairs(&src, "σ", "ς") {
+        eprintln!("skipping: {} does not pair ς with σ", src.display());
+        return;
+    }
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("o.txt"), b"o").unwrap();
+    std::os::unix::fs::symlink(&outside, src.join("σ")).unwrap();
+    let linked = fs::hard_link(src.join("σ"), src.join("alias")).is_ok()
+        && fs::symlink_metadata(src.join("alias")).is_ok_and(|m| m.file_type().is_symlink());
+    if !linked {
+        eprintln!("skipping: {} cannot hard-link a symlink", src.display());
+        return;
+    }
+    fs::create_dir_all(dst.join("σ")).unwrap();
+    fs::write(dst.join("σ").join("saved.txt"), b"s").unwrap();
+    let pattern = format!("{}", src.join("ς").display());
+
+    let (ok, stdout, stderr) = blit(&[
+        "mirror",
+        "--yes",
+        &with_slash(&src),
+        &with_slash(&dst),
+        "--exclude",
+        &pattern,
+    ]);
+    assert!(ok, "mirror failed:\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        dst.join("σ").join("saved.txt").exists(),
+        "the destination's σ/ is excluded and must survive the mirror:\nstdout: {stdout}"
+    );
+    assert!(
+        !dst.join("alias").exists(),
+        "the second name is excluded too"
+    );
+    assert!(dst.join("keep.txt").exists());
+    assert!(
+        !stderr.contains("cannot match anything"),
+        "a pattern under the source must not warn: {stderr}"
+    );
+    let note = format!(
+        "blit: --exclude '{pattern}': 2 names share this entry here; excluding ./alias, ./σ"
+    );
+    assert_eq!(
+        stderr.matches(&note).count(),
+        1,
+        "one note expected:\n{stderr}"
+    );
+}
+
 /// cr-g3fix-2: an absolute glob written through a symlink to the source
 /// is made relative. The glob path itself never exists, so only its
 /// literal part is resolved; before the fix the pattern was reported as

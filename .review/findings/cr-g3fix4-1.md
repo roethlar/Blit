@@ -1,9 +1,9 @@
 # cr-g3fix4-1: Unicode symlink pairing still fails for hard links and on Windows
 
 **Severity**: HIGH (reviewer: HIGH)
-**Status**: Admitted
+**Status**: Fixed
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: —
+**Commit**: (this commit)
 **Reviewer**: codex / gpt-6-astra / xhigh / standard (the owner's `review`, 2026-10-16), codex-cli 0.162.1 headless one-shot, `-a never exec -m gpt-6-astra -c model_reasoning_effort="xhigh" -s workspace-write --json`, stdin closed, detached worktree `review-g3fix4-r1-548625f5`; codereview re-review g3fix4-r1 over `2e42f849..548625f5` (record `.review/results/g3fix4-r1.codex.json` + `.events.jsonl`); 2026-10-16 15:55–16:06Z; capability_ok=true; guard_confirmed=true (reviewer made `CompiledPatterns::compile` put accepted patterns into `refused` too → `an_escaped_literal_matches_its_name_and_not_its_encoded_spelling` red, restored by `git checkout`, blob hash verified, green; 1521/0/2 on its macOS gate; its Windows cross-clippy stopped on a missing `ml64.exe` — the reviewer's environment); SHAs pin-verified; closed: cr-g3fix3-2 true, cr-g3fix3-3 true, cr-g3fix3-1 false, cr-g3fix2-1 false, cr-g3fix-1 false
 
 ## Evidence
@@ -19,19 +19,80 @@ Recover the particular directory entry's stored name through filesystem-aware, n
 Admitted; reproduced by the orchestrator with the release binary `blit 1.0.0+548625f5c7cf` on macOS APFS (`scratchpad/g3fix4/repro.out`): `src/σ -> <outside>`, `src/alias` hard-linked to that symlink with `linkat` and no follow (macOS `ln` follows the link; `os.link(follow_symlinks=False)` does not), both `nlink=2`; `blit mirror -y src/ dst/ --exclude <src>/ς` printed no warning and reported "Deleted: 1 file(s), 1 dir(s)" — `dst/σ/saved.txt` gone; the exact spelling `<src>/σ` kept it. This is cr-g3fix3-1's recorded hard-link gap plus its Windows gap, both data-loss paths under `mirror`, so neither can stay a gap. The orchestrator probed the macOS stored-name APIs the reviewer's "filesystem-aware, non-following lookup" points at: `fcntl(F_GETPATH)` on an `O_SYMLINK` descriptor and `getattrlist(ATTR_CMN_NAME, FSOPT_NOFOLLOW)` both report the vnode's cached name — `σ` even for a path typed exactly `alias` — so no macOS API names the directory entry a hard-linked lookup matched, and a text rule cannot either (the filesystem's equivalence is its own). Fix shape, in two parts: (1) **identity everywhere.** On Windows `listed_name` pairs by identity too — volume serial number plus file index from `GetFileInformationByHandle` on a handle opened with `CreateFileW(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)` (the entry itself, never a reparse target; the `windows` crate's `Win32_Storage_FileSystem` feature is already enabled in `crates/blit-core/Cargo.toml`); `nNumberOfLinks` is the Windows `nlink`. `paired_by_case` and `single_fold` are retired: no text folding anywhere in the pairing. (2) **a tie pairs every tied name.** When several listed names share the typed entry's identity and none is spelled exactly as typed, `stored_name` cannot know which one the filesystem matched, so it returns all of them and the pattern expands to one literal pattern per name (each respelled form in `build` and `build_spec`): the entry the user named is excluded whichever directory entry was matched, and the other hard links to the same entry are excluded with it — over-exclusion, the safe direction, in a case that needs a hard-linked entry typed in a spelling only the filesystem pairs. The expansion is named once on stderr the way an unmatchable pattern is (`<pattern>: 2 names share this entry here; excluding σ, alias`) — a note, not a knob. The walk is still at filter build only, once per typed component of an absolute exclude; never on the per-entry path. Guards: the pure pairing test (a tie returns every tied name; exact still wins with no lookup; a single identity match unchanged); the stored-name test with a hard-linked `σ` typed `ς` → both names (Unix, where the filesystem pairs them; make the hard link with `libc::linkat(..., 0)` — `std::fs::hard_link` follows on some platforms — and skip if it fails); the case guard: `build` and `build_spec` carry both `./σ` and `./alias`; a CLI `mirror` survival test with the hard-linked symlink (Unix); on Windows, a `cfg(windows)` test that `listed_name` pairs `CACHE` with a hard-linked `cache` file by identity (`std::fs::hard_link` needs no privilege there) and `ς` with `σ` where NTFS pairs them (probe first) — type-checked by the Windows cross-clippy, run by CI's Windows leg; every guard that runs here mutation-red.
 
 ## What
-(filled by the fix)
+An absolute `--exclude` that names an entry in a spelling only the filesystem pairs now excludes it even when the entry is hard-linked under a second name. The reproduced case: `src/σ` a symlink to a directory outside the source, `src/alias` a hard link to that symlink, `--exclude <src>/ς`. The exclude now becomes `./alias` and `./σ`, both in the local rule and in the wire form. One stderr line names them: `blit: --exclude '<src>/ς': 2 names share this entry here; excluding ./alias, ./σ`. Under `mirror` the destination's `σ/` stays outside the deletion scope. Before, the pairing fell back to a case fold among the hard link's names, which paired neither. The exclude stayed `./ς`, matched nothing, warned about nothing, and `blit mirror -y` deleted `dst/σ/saved.txt` with its directory.
+
+On Windows the pairing is now the entry's identity too (volume serial number and file index), never case folding. A spelling only NTFS's upcase table pairs, such as `ς` for `σ`, names the stored entry instead of keeping its typed spelling.
 
 ## Approach
-(filled by the fix)
+- **Identity everywhere.** `listed_name` (`transfers/filter.rs`) pairs the typed name with the parent listing's entries by `entry_identity` on every platform:
+  - Unix: `(dev, ino)` and `nlink` from `symlink_metadata`.
+  - Windows: the volume serial number, the 64-bit file index and `nNumberOfLinks`, from `GetFileInformationByHandle`. The handle is opened with `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS` and no access rights, so it is the entry itself, never a reparse target, and a directory opens too.
+  - Elsewhere: none, so nothing pairs and the `canonicalize` fallback applies.
+  - `paired_by_case` and `single_fold` are deleted: no text folding is left anywhere in the pairing.
+- **A tie pairs every tied name.** `paired_name` returns every name in the listing that shares the typed entry's identity, sorted, when that identity may have several names (`shared`: not a directory, link count above one) and none is spelled exactly as typed. An exact spelling still wins with no lookup. An entry with one name still stops the walk at the first identity match. No macOS API names the directory entry a hard-linked lookup matched; the orchestrator's probes of `F_GETPATH` on an `O_SYMLINK` descriptor and `getattrlist(ATTR_CMN_NAME, FSOPT_NOFOLLOW)` both report the vnode's cached name. So excluding every name is the only answer that always covers the entry the user named. It over-excludes the entry's other hard-link names, which is the safe direction.
+- `stored_name` returns `Vec<String>`: one name, every tied name, the `canonicalize` fallback's one name for a non-symlink, or none. It is now `pub(crate)` for cr-g3fix4-2.
+- `stored_spelling` forks at a tie. It returns one spelling per name, each walked on below its name (`spelled_below`, recursive), and exactly one spelling when there is no tie. `resolve_excludes_on` writes one pattern per spelling. `build` and `build_spec` therefore both carry `./alias` and `./σ`.
+- `ResolvedExcludes::expanded` (new) records each typed pattern that forked, with the patterns it became. The CLI's warning pass (`warn_unmatchable_excludes` for copy/mirror/move, and `check`) prints one line for each, using `filter::shared_entry_note`. The wording follows the existing "cannot match anything" line. It is a note, not a flag (SIMPLE).
+- Windows mechanism, a recorded deviation in form only: the handle comes from std's `OpenOptions` with `access_mode(0)` and `custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)`. std opens that with `CreateFileW` and those flags, which is the handle the shape asks for, and it closes the handle on drop. std's own `symlink_metadata` opens a path the same way. Only the `GetFileInformationByHandle` call is `unsafe`.
+- Cost (FAST): unchanged when an entry is spelled as typed (one directory read, no identity read). Otherwise there is one identity read per listed entry until the hit, or across the whole listing for a hard-linked entry. On Windows each identity read is an open and close. This happens once per typed component of an absolute exclude, when the filter is built, never on the transfer's per-entry path.
+- Test helpers: macOS `ln` follows a symlink, so the blit-core test hard-links one with `libc::linkat(AT_FDCWD, …, 0)`. The CLI test uses `std::fs::hard_link`, which on this macOS (std's `linkat(…, 0)`) linked the symlink itself. Both check that the new name is still a symlink and skip with a message if it is not. blit-cli has no `libc` dependency, so none was added.
+- The pure case-fold test `the_listing_pairs_the_exact_name_else_the_single_case_fold` (cr-g3fix2-1's H3) is deleted with `paired_by_case`. Its exact-name case lives on in `the_listing_pairs_the_exact_name_else_the_same_entry`. One new pure test runs on every OS, plus one on Unix and one on Windows, so each platform's count still grows by one.
 
 ## Files changed
-(filled by the fix)
+- `crates/blit-core/src/transfers/filter.rs:204-209` — `ResolvedExcludes::expanded` (new).
+- `crates/blit-core/src/transfers/filter.rs:212-221` — `shared_entry_note` (new).
+- `crates/blit-core/src/transfers/filter.rs:287-300` — `resolve_excludes_on`: one pattern per spelling; a fork recorded in `expanded`.
+- `crates/blit-core/src/transfers/filter.rs:506-562` — `stored_spelling` forks at a tie; `spelled_below` (new).
+- `crates/blit-core/src/transfers/filter.rs:564-591` — `stored_name` returns every name; `pub(crate)`.
+- `crates/blit-core/src/transfers/filter.rs:593-629` — `listed_name`: identity on every platform, exact spelling first.
+- `crates/blit-core/src/transfers/filter.rs:631-680` — `entry_identity` (new): Unix, Windows (`GetFileInformationByHandle`), others.
+- `crates/blit-core/src/transfers/filter.rs:682-712` — `paired_name`: a tie returns every name; `paired_by_case` and `single_fold` deleted.
+- `crates/blit-core/src/transfers/filter.rs:1118-1160` — test helpers: `pairs` (now on every OS), `only` and `hard_link_entry` (new).
+- `crates/blit-core/src/transfers/filter.rs:1218-1306` — the spelling tests take the one spelling (`only`), with stand-in disks returning `Vec`.
+- `crates/blit-core/src/transfers/filter.rs:1308-1356` — `the_stored_name_is_the_entrys_own_even_for_a_symlink` compares `Vec`s.
+- `crates/blit-core/src/transfers/filter.rs:1358-1438` — guard `a_hard_linked_entry_typed_in_a_paired_spelling_names_every_name` (new).
+- `crates/blit-core/src/transfers/filter.rs:1440-1496` — guard `the_listing_pairs_the_exact_name_else_the_same_entry` (tie pairs every name; replaces the fold cases). `the_listing_pairs_the_exact_name_else_the_single_case_fold` deleted.
+- `crates/blit-core/src/transfers/filter.rs:1498-1528` — guard `a_tie_forks_the_spelling_into_one_pattern_per_name` (new).
+- `crates/blit-core/src/transfers/filter.rs:1530-1562` — guard `a_windows_listing_pairs_by_identity` (new, `cfg(windows)`).
+- `crates/blit-cli/src/transfers/mod.rs:132-146` — `warn_unmatchable_excludes` prints the shared-entry note.
+- `crates/blit-cli/src/check.rs:33-43` — `check` prints it too.
+- `crates/blit-cli/tests/exclude_contract.rs:335-399` — guard `mirror_exclude_a_hard_linked_symlink_in_a_paired_spelling_keeps_the_destination_subtree` (new).
 
 ## Guard proof
-(filled by the fix)
+- Guards (ran on macOS aarch64, APFS case-insensitive; `--nocapture` printed no "skipping" line, so the tie, the pairing and the hard links all held here):
+  - T1 `transfers::filter::tests::a_hard_linked_entry_typed_in_a_paired_spelling_names_every_name` (blit-core, Unix; skipped with a message where `ς`/`σ` are not paired or a symlink cannot be hard-linked). The setup is `src/σ -> <outside>` with `src/alias` hard-linked to that symlink by `linkat(…, 0)`.
+    - `stored_name` gives `["alias", "σ"]` for `ς`, `["σ"]` for `σ` and `["alias"]` for `alias`.
+    - `build` and `build_spec` give `["./alias", "./σ"]`. `resolve_excludes(...).expanded` holds the typed pattern with both, and the exact spelling `<src>/σ` gives `["./σ"]` with no expansion.
+    - Where case is ignored, a hard-linked file `hard`/`other` typed `HARD` gives `["hard", "other"]`, and a file whose second name is in another directory, typed `SINGLE`, gives `["single"]`.
+  - T2 `transfers::filter::tests::the_listing_pairs_the_exact_name_else_the_same_entry` (blit-core, every OS, pure, stand-in listing):
+    - An exact name wins with no lookup, even for a shared identity.
+    - `ς` pairs `σ` by identity and the walk stops after it; NFC `CAFÉ` pairs NFD `café`.
+    - A shared identity under several names gives every one, sorted: `["alias", "σ"]`, and `["hard", "other"]` for `HARD` (no fold picks one).
+    - A shared identity with one name in the listing gives it, and walks the whole listing. No match gives none.
+  - T3 `transfers::filter::tests::a_tie_forks_the_spelling_into_one_pattern_per_name` (blit-core, every OS, stand-in disk, both rules): `ς` gives `./alias` and `./σ`, `ς/X/*.tmp` gives `alias/x/*.tmp` and `σ/x/*.tmp` (each fork walked below its name), and an untied or missing component gives one pattern.
+  - T4 `exclude_contract::mirror_exclude_a_hard_linked_symlink_in_a_paired_spelling_keeps_the_destination_subtree` (blit-transfer, Unix; skipped with a message where unpaired or not linkable). This is the reproduction. `blit mirror --yes src/ dst/ --exclude <src>/ς`, with `src/alias` hard-linked to the symlink `src/σ`, must keep the pre-existing `dst/σ/saved.txt`, leave out `alias`, copy `keep.txt`, warn nothing unmatchable, and print exactly one `blit: --exclude '<src>/ς': 2 names share this entry here; excluding ./alias, ./σ`.
+  - T5 `transfers::filter::tests::a_windows_listing_pairs_by_identity` (blit-core, `cfg(windows)`): `CACHE` pairs a file `cache`, `DIR` pairs `Dir`. With the file's second name in another directory it still gives `["cache"]`; with `alias` beside it, `["alias", "cache"]`. `ς` pairs `σ` where NTFS pairs them. Type-checked by the Windows cross-clippy; it runs only on CI's Windows leg.
+  - Unchanged and green: cr-g3fix3-1's I1 (`the_stored_name_is_the_entrys_own_even_for_a_symlink`, comparing `Vec`s now), I2 (`an_absolute_exclude_in_another_case_takes_the_stored_spelling`) and I4 (`mirror_exclude_symlink_in_a_filesystem_equivalent_spelling_keeps_the_destination_subtree`); cr-g3fix2-1's `mirror_exclude_symlink_in_another_case_keeps_the_destination_subtree`; the spelling-walk tests.
+- G1 — `paired_name`: a tie of several names pairs nothing (`if matches.len() > 1 { matches.clear(); }`, the pre-fix outcome of the fold for `σ`/`alias`). Red:
+  - T2 FAILED at `filter.rs:1475`, "several names of one identity: every one, sorted", `left: []`, `right: ["alias", "σ"]`.
+  - T1 FAILED at `filter.rs:1388`, "a tie names every name", `left: []`.
+  - T4 FAILED at `exclude_contract.rs:377`, "the destination's σ/ is excluded and must survive the mirror", with the mirror's stdout "• Deleted: 1 file(s), 1 dir(s)" (the reported data loss).
+- G2 — `paired_name`: the tied names left unsorted. Red: T2 FAILED at `filter.rs:1475`, `left: ["σ", "alias"]`, `right: ["alias", "σ"]`.
+- G3 — `paired_name`: the exact-name return removed. Red: T2 FAILED at `filter.rs:1455`, `left: ["Cache", "cache"]`, `right: ["cache"]`.
+- G4 — `resolve_excludes_on`: only the first spelling of a fork written (`.take(1)`). Red: T1 FAILED at `filter.rs:1395`, "build", `left: ["./alias"]`, `right: ["./alias", "./σ"]`; T4 FAILED at `exclude_contract.rs:377` ("Deleted: 1 file(s), 1 dir(s)").
+- G5 — `listed_name`: `shared` forced false (the walk stops at the first identity match even for a hard-linked entry). Red: T1 FAILED at `filter.rs:1388`, `left: ["alias"]`, `right: ["alias", "σ"]`; T4 FAILED at `exclude_contract.rs:377` ("Deleted: 1 file(s), 1 dir(s)").
+- G6 — `entry_identity` (Unix): the identity read through `std::fs::metadata` (the link followed). Red: I1 FAILED at `filter.rs:1341`, `left: ["link", "real", "σ"]`, `right: ["σ"]` (every link to the same target paired); I2 FAILED at `filter.rs:1213`, "build", with each link's name repeated three times.
+- G7 — `warn_unmatchable_excludes` (`blit-cli/src/transfers/mod.rs`): the shared-entry note not printed. Red: T4 FAILED at `exclude_contract.rs:393`, "one note expected", `left: 0`, `right: 1`.
+- Restore after each: the fixed file copied back with `/bin/cp -f`; md5 `8726091aef0b78825c6510c7525a0fe7` (`filter.rs`) and `09f646d0082393cef6440588cde9a65b` (`transfers/mod.rs`) matched the saved fixed files every time. Then `cargo test -p blit-core --lib -- transfers::filter fs_enum` passed 35 and `cargo test -p blit-transfer --test exclude_contract` passed 13, every guard `ok`. Native, Linux and Windows cross-clippy for blit-core and blit-transfer are clean.
+- Line numbers are those of the fixed files: G1 adds three lines in front of the tests, G4 one, and G2 and G3 remove one and three, so the raw reports were shifted by that many.
 
 ## Known gaps
-(filled by the fix)
+- A tie excludes every name of the entry, including hard-link names the user did not type. That is over-exclusion, and the note names each one. It needs a hard-linked entry typed in a spelling only the filesystem pairs.
+- The Windows identity code (`entry_identity` under `cfg(windows)`) and its guard `a_windows_listing_pairs_by_identity` are type-checked by the Windows cross-clippy at the final gate and run only on CI's Windows leg. Nothing here could mutate them red. The `ς`/`σ` part of that guard is skipped with a message where NTFS does not pair the two.
+- On Windows an entry whose identity cannot be read (an open refused by a sharing violation, such as a locked system file) pairs nothing. A non-symlink then falls back to `canonicalize`. On ReFS the 64-bit file index is the low half of a 128-bit id; a collision inside one directory listing is not handled.
+- A directory is still assumed to have one name in its parent's listing (cr-g3fix3-1's bind-mount gap is unchanged). macOS directory hard links (Time Machine) are treated as one name.
+- The Unix tie guards run only where the filesystem pairs `ς` with `σ` and a symlink can be hard-linked (macOS APFS here). On Linux CI (case-sensitive ext4) they print a skip line and pass, so they can go red only on such a filesystem. The pure guards run everywhere.
+- Verified on macOS aarch64 (APFS, case-insensitive) only, plus the Linux and Windows cross-clippy at the final gate; the Linux and Windows runtime tests were not run here.
 
 ## Reviewer comments
 (filled by the re-review)

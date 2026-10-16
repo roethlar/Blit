@@ -132,10 +132,16 @@ pub(crate) fn build_filter_spec(args: &TransferArgs) -> Result<blit_core::genera
 /// audit-19: one line per absolute `--exclude` that cannot match anything
 /// — outside a local source, or any absolute pattern when the source is
 /// remote. The run goes on; the operator learns the pattern did nothing.
+/// cr-g3fix4-1: and one line per absolute `--exclude` naming an entry the
+/// source stores under several names (hard links), all of them excluded.
 fn warn_unmatchable_excludes(args: &TransferArgs, source_display: &str) {
     let source_root = local_source_root(args);
-    for pattern in filter::resolve_excludes(&args.exclude, source_root.as_deref()).unmatchable {
+    let resolved = filter::resolve_excludes(&args.exclude, source_root.as_deref());
+    for pattern in resolved.unmatchable {
         eprintln!("blit: --exclude '{pattern}' cannot match anything under {source_display}");
+    }
+    for (pattern, patterns) in resolved.expanded {
+        eprintln!("{}", filter::shared_entry_note(&pattern, &patterns));
     }
 }
 

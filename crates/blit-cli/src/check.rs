@@ -30,11 +30,16 @@ pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
 
     // audit-19: an absolute `--exclude` under the source is made
     // relative; one that cannot match anything is named, once.
-    for pattern in filter::resolve_excludes(&args.exclude, Some(&src)).unmatchable {
+    // cr-g3fix4-1: so is one naming an entry stored under several names.
+    let resolved = filter::resolve_excludes(&args.exclude, Some(&src));
+    for pattern in resolved.unmatchable {
         eprintln!(
             "blit: --exclude '{pattern}' cannot match anything under {}",
             src.display()
         );
+    }
+    for (pattern, patterns) in resolved.expanded {
+        eprintln!("{}", filter::shared_entry_note(&pattern, &patterns));
     }
 
     // Build filter via the same chokepoint that copy/mirror/move use, so
