@@ -345,14 +345,13 @@ fn is_absolute_pattern(pattern: &str, windows: bool) -> bool {
 }
 
 /// The components of an absolute path, `/`-split. On Windows `\` is a
-/// separator too, a verbatim prefix (`\\?\`) is dropped, and a UNC path
-/// keeps a leading marker so it never equals a rooted one.
+/// separator too, outside a bracket class ([`normalize_separators`]:
+/// cr-g3fix4-4 — `C:\src\back[s\]lash` names `back[s\]lash`, a class
+/// holding `s` and `\`, not `back[s` and `]lash`), a verbatim prefix
+/// (`\\?\`) is dropped, and a UNC path keeps a leading marker so it never
+/// equals a rooted one (a prefix holds no class, so it reads as before).
 fn absolute_components(path: &str, windows: bool) -> Vec<String> {
-    let mut unified = if windows {
-        path.replace('\\', "/")
-    } else {
-        path.to_string()
-    };
+    let mut unified = normalize_separators(path, windows).into_owned();
     if windows {
         if let Some(rest) = unified.strip_prefix("//?/UNC/") {
             unified = format!("//{rest}");
@@ -1374,6 +1373,54 @@ mod tests {
             None,
             "case matters off Windows"
         );
+    }
+
+    /// cr-g3fix4-4: under the Windows rule an absolute exclude keeps a
+    /// bracket class's `\` — `back[s\]lash` is one component, a class
+    /// holding `s` and `\`, as globset reads it there. Before, every `\`
+    /// of an absolute pattern was a separator, so it became
+    /// `back[s/]lash`, whose class matches a real separator: the filter
+    /// left out the unrelated `back/lash` too. The prefixes still read as
+    /// before. String handling and a filter over the output, so it runs on
+    /// every OS (the `build`/`build_spec` part under this host's rule).
+    #[test]
+    fn a_windows_absolute_exclude_keeps_a_bracket_class_backslash() {
+        let relative = |pattern: &str, root: &str| {
+            relative_to_root(pattern, root, true)
+                .map(|rest| written(&rest.into_iter().map(Part::Typed).collect::<Vec<_>>(), true))
+        };
+        assert_eq!(
+            relative(r"C:\src\back[s\]lash", r"C:\src").as_deref(),
+            Some(r"./back[s\]lash")
+        );
+        assert_eq!(
+            relative(r"C:\src\a\back[s\]lash\x", r"\\?\C:\src").as_deref(),
+            Some(r"a/back[s\]lash/x")
+        );
+        assert_eq!(
+            relative(r"\\srv\share\d\[\]x", r"\\?\UNC\srv\share\d").as_deref(),
+            Some(r"./[\]x")
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let exc = vec![format!(r"{}/back[s\]lash", root.display())];
+        let resolved = resolve_excludes_on(&exc, Some(root), true);
+        assert_eq!(resolved.patterns, [r"./back[s\]lash"]);
+        assert!(resolved.unmatchable.is_empty());
+        let mut filter = FileFilter::default();
+        filter.exclude_files = resolved.patterns;
+        let allows = |rel: &str| filter.allows_entry(Some(Path::new(rel)), Path::new(rel), 1, None);
+        assert!(!allows("backslash/saved.txt"), "the class names `s`");
+        assert!(
+            allows("back/lash/saved.txt"),
+            "a separator is no member of the class"
+        );
+
+        let mut i = inputs(&[], &exc);
+        i.source_root = Some(root);
+        assert_eq!(build(&i).unwrap().exclude_files, [r"./back[s\]lash"]);
+        assert_eq!(build_spec(&i).unwrap().exclude, [r"./back[s\]lash"]);
     }
 
     /// cr-g3fix-3: relative patterns reach both builders — and so the wire
