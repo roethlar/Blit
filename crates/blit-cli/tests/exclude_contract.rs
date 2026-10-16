@@ -397,6 +397,95 @@ fn mirror_exclude_a_hard_linked_symlink_in_a_paired_spelling_keeps_the_destinati
     );
 }
 
+/// cr-g3fix4-2: an excluded entry the destination stores in another case
+/// than the source survives a mirror. The exclude is spelled as the source
+/// stores it (or as typed); at the destination the deletion scope also
+/// names the destination's own spelling, and an any-depth name matches
+/// there case-insensitively when the destination ignores case. Before, each
+/// case below deleted the destination's `saved.txt` with its directory.
+/// Cases: a directory `src/cache` excluded as stored, against `dst/Cache`;
+/// a symlink `src/cache` excluded as `CACHE` (Unix); a nested `src/a/b`
+/// against `dst/A/B`; and the any-depth `--exclude cache` against
+/// `dst/x/Cache`. Skipped where the filesystem is case-sensitive.
+#[test]
+fn mirror_exclude_keeps_a_destination_entry_stored_in_another_case() {
+    let tmp = tempdir().unwrap();
+    if !case_insensitive(tmp.path()) {
+        eprintln!("skipping: {} is case-sensitive", tmp.path().display());
+        return;
+    }
+    let mut cases: Vec<(&str, &[&str], &str, &str)> = vec![
+        ("directory", &["cache/c.txt"], "/cache", "Cache/saved.txt"),
+        (
+            "nested",
+            &["a/b/c.txt", "a/keep.txt"],
+            "/a/b",
+            "A/B/saved.txt",
+        ),
+        (
+            "any depth",
+            &["x/cache/c.txt", "x/keep.txt"],
+            "cache",
+            "x/Cache/saved.txt",
+        ),
+    ];
+    if cfg!(unix) {
+        cases.push(("symlink", &[], "/CACHE", "Cache/saved.txt"));
+    }
+    // Every case runs; the ones that lost the excluded entry are named
+    // together at the end.
+    let mut lost = Vec::new();
+    for (case, files, exclude, saved) in cases {
+        let root = tmp.path().join(case.replace(' ', "_"));
+        let (src, dst) = (root.join("src"), root.join("dst"));
+        for rel in files.iter().chain(&["keep.txt"]) {
+            let path = src.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"x").unwrap();
+        }
+        #[cfg(unix)]
+        if case == "symlink" {
+            let outside = root.join("outside");
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(outside.join("o.txt"), b"o").unwrap();
+            std::os::unix::fs::symlink(&outside, src.join("cache")).unwrap();
+        }
+        let saved = dst.join(saved);
+        fs::create_dir_all(saved.parent().unwrap()).unwrap();
+        fs::write(&saved, b"s").unwrap();
+        let pattern = match exclude.strip_prefix('/') {
+            Some(rel) => format!("{}", src.join(rel).display()),
+            None => exclude.to_string(),
+        };
+
+        let (ok, stdout, stderr) = blit(&[
+            "mirror",
+            "--yes",
+            &with_slash(&src),
+            &with_slash(&dst),
+            "--exclude",
+            &pattern,
+        ]);
+        assert!(
+            ok,
+            "{case}: mirror failed:\nstdout: {stdout}\nstderr: {stderr}"
+        );
+        if !saved.exists() {
+            lost.push(format!("{case}: {}", stdout.trim().replace('\n', " | ")));
+        }
+        assert!(dst.join("keep.txt").exists(), "{case}: keep.txt");
+        assert!(
+            !stderr.contains("cannot match anything"),
+            "{case}: a pattern under the source must not warn: {stderr}"
+        );
+    }
+    assert!(
+        lost.is_empty(),
+        "the destination's excluded entry must survive the mirror:\n{}",
+        lost.join("\n")
+    );
+}
+
 /// cr-g3fix-2: an absolute glob written through a symlink to the source
 /// is made relative. The glob path itself never exists, so only its
 /// literal part is resolved; before the fix the pattern was reported as
@@ -684,5 +773,56 @@ fn push_mirror_relativizes_an_absolute_exclude_and_prunes_it() {
     assert!(
         ctx.module_dir.join(".java/old").exists(),
         "the daemon's mirror scope must exclude the relativized path"
+    );
+}
+
+/// cr-g3fix4-2: the same on a destination daemon — its deletion scope is
+/// built by the same session code from the wire spec: a push of `src/`
+/// with `--exclude <src>/cache` leaves the module's `Cache/saved.txt` in
+/// place while the extraneous `extra.txt` is deleted. Skipped where the
+/// filesystem is case-sensitive.
+#[cfg(unix)]
+#[test]
+fn push_mirror_keeps_a_destination_entry_stored_in_another_case() {
+    let ctx = common::TestContext::new();
+    let src = ctx.workspace.join("src");
+    for rel in ["cache/c.txt", "keep.txt"] {
+        let path = src.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"x").unwrap();
+    }
+    if !case_insensitive(&ctx.module_dir) {
+        eprintln!("skipping: {} is case-sensitive", ctx.module_dir.display());
+        return;
+    }
+    fs::create_dir_all(ctx.module_dir.join("Cache")).unwrap();
+    fs::write(ctx.module_dir.join("Cache/saved.txt"), b"s").unwrap();
+    fs::write(ctx.module_dir.join("extra.txt"), b"extraneous").unwrap();
+    let pattern = format!("{}", src.join("cache").display());
+
+    let mut cmd = std::process::Command::new(&ctx.cli_bin);
+    cmd.arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("mirror")
+        .arg("--yes")
+        .arg(with_slash(&src))
+        .arg(format!("127.0.0.1:{}:/test/", ctx.daemon_port))
+        .arg("--exclude")
+        .arg(&pattern);
+    let output = run_with_timeout(cmd, Duration::from_secs(60));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "push mirror failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        ctx.module_dir.join("Cache/saved.txt").exists(),
+        "the daemon's deletion scope must name the destination's own spelling:\nstdout: {stdout}"
+    );
+    assert!(ctx.module_dir.join("keep.txt").exists());
+    assert!(
+        !ctx.module_dir.join("extra.txt").exists(),
+        "a complete source scan lets the mirror delete the extraneous file"
     );
 }

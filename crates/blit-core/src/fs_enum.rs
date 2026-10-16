@@ -52,6 +52,13 @@ pub struct FileFilter {
     /// Set by orchestrator when building the filter (calculated, not hardcoded).
     pub reference_time: Option<SystemTime>,
     pub files_from: Option<HashSet<PathBuf>>,
+    /// cr-g3fix4-2: the any-depth name rules (an `--exclude` with no `/`)
+    /// match case-insensitively. Set only for a mirror's deletion scope at
+    /// a destination that ignores case (`transfers::filter`'s
+    /// `destination_scope`), where a name cannot be respelled per
+    /// directory; every other rule, and every other filter, compares
+    /// case-sensitively.
+    pub(crate) case_insensitive_names: bool,
     compiled_includes: OnceCell<globset::GlobSet>,
     compiled_files: OnceCell<CompiledPatterns>,
     compiled_dirs: OnceCell<globset::GlobSet>,
@@ -77,30 +84,62 @@ struct ExcludeRules {
     paths: CompiledPatterns,
 }
 
+/// How [`ExcludeRules`] reads one `--exclude` pattern (cr-g3fix4-2: a
+/// mirror's deletion scope reads it the same way to respell it at the
+/// destination).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExcludeRule {
+    /// The pattern with its separators normalized ([`normalize_separators`]),
+    /// its trailing `/` dropped and its leading `./` stripped.
+    pub(crate) body: String,
+    /// A leading `./` anchored it to the root.
+    pub(crate) anchored: bool,
+    /// A path rule — anchored, or holding `/` — matched against a leading
+    /// run of a relative path's components; otherwise a name, matched
+    /// against any one component.
+    pub(crate) path: bool,
+}
+
+/// [`ExcludeRule`] for `pattern` under one platform's path rule; `None`
+/// for a pattern that names nothing (empty, `.`).
+pub(crate) fn exclude_rule(pattern: &str, windows: bool) -> Option<ExcludeRule> {
+    let pattern = normalize_separators(pattern, windows);
+    let mut body = pattern.trim_end_matches('/');
+    let mut anchored = false;
+    while let Some(rest) = body.strip_prefix("./") {
+        body = rest;
+        anchored = true;
+    }
+    if body.is_empty() || body == "." {
+        return None;
+    }
+    Some(ExcludeRule {
+        body: body.to_string(),
+        anchored,
+        path: anchored || body.contains('/'),
+    })
+}
+
 impl ExcludeRules {
-    fn compile(patterns: &[String], windows: bool) -> Self {
+    /// The rules `patterns` make under one platform's path rule
+    /// (`windows`); the name rules match case-insensitively when
+    /// `case_insensitive_names` (cr-g3fix4-2).
+    fn compile(patterns: &[String], windows: bool, case_insensitive_names: bool) -> Self {
         let mut names = Vec::new();
         let mut paths = Vec::new();
-        for pattern in patterns {
-            let pattern = normalize_separators(pattern, windows);
-            let mut body = pattern.trim_end_matches('/');
-            let mut anchored = false;
-            while let Some(rest) = body.strip_prefix("./") {
-                body = rest;
-                anchored = true;
-            }
-            if body.is_empty() || body == "." {
-                continue;
-            }
-            if anchored || body.contains('/') {
-                paths.push(body.to_string());
+        for rule in patterns
+            .iter()
+            .filter_map(|pattern| exclude_rule(pattern, windows))
+        {
+            if rule.path {
+                paths.push(rule.body);
             } else {
-                names.push(body.to_string());
+                names.push(rule.body);
             }
         }
         Self {
-            names: CompiledPatterns::compile(&names),
-            paths: CompiledPatterns::compile(&paths),
+            names: CompiledPatterns::compile(&names, case_insensitive_names),
+            paths: CompiledPatterns::compile(&paths, false),
         }
     }
 
@@ -138,7 +177,7 @@ impl ExcludeRules {
 /// rule's reading of a pattern is testable on every OS.
 #[cfg(test)]
 pub(crate) fn excluded_under_rule(patterns: &[String], windows: bool, rel_path: &Path) -> bool {
-    ExcludeRules::compile(patterns, windows).excludes(rel_path)
+    ExcludeRules::compile(patterns, windows, false).excludes(rel_path)
 }
 
 /// cr-g3fix3-2: `--exclude` patterns compiled for matching. A pattern the
@@ -158,11 +197,14 @@ struct CompiledPatterns {
 }
 
 impl CompiledPatterns {
-    fn compile(patterns: &[String]) -> Self {
+    fn compile(patterns: &[String], case_insensitive: bool) -> Self {
         let mut builder = globset::GlobSetBuilder::new();
         let mut refused = Vec::new();
         for pattern in patterns {
-            match globset::Glob::new(pattern) {
+            match globset::GlobBuilder::new(pattern)
+                .case_insensitive(case_insensitive)
+                .build()
+            {
                 Ok(glob) => {
                     builder.add(glob);
                 }
@@ -311,6 +353,7 @@ impl FileFilter {
             max_age: self.max_age,
             reference_time: self.reference_time,
             files_from: self.files_from.clone(),
+            case_insensitive_names: self.case_insensitive_names,
             compiled_includes: OnceCell::new(),
             compiled_files: OnceCell::new(),
             compiled_dirs: OnceCell::new(),
@@ -333,6 +376,7 @@ impl FileFilter {
         Some(FileFilter {
             exclude_files: self.exclude_files.clone(),
             exclude_dirs: self.exclude_dirs.clone(),
+            case_insensitive_names: self.case_insensitive_names,
             ..FileFilter::default()
         })
     }
@@ -422,7 +466,7 @@ impl FileFilter {
 
     fn file_globs(&self) -> &CompiledPatterns {
         self.compiled_files
-            .get_or_init(|| CompiledPatterns::compile(&self.exclude_files))
+            .get_or_init(|| CompiledPatterns::compile(&self.exclude_files, false))
     }
 
     fn dir_globs(&self) -> &globset::GlobSet {
@@ -431,8 +475,13 @@ impl FileFilter {
     }
 
     fn subtree_rules(&self) -> &ExcludeRules {
-        self.compiled_subtrees
-            .get_or_init(|| ExcludeRules::compile(&self.exclude_files, cfg!(windows)))
+        self.compiled_subtrees.get_or_init(|| {
+            ExcludeRules::compile(
+                &self.exclude_files,
+                cfg!(windows),
+                self.case_insensitive_names,
+            )
+        })
     }
 
     /// `rel_path` is the directory's path relative to the walk root;
@@ -579,6 +628,7 @@ impl Default for FileFilter {
             max_age: None,
             reference_time: None,
             files_from: None,
+            case_insensitive_names: false,
             compiled_includes: OnceCell::new(),
             compiled_files: OnceCell::new(),
             compiled_dirs: OnceCell::new(),
@@ -868,6 +918,7 @@ mod tests {
         let rules = ExcludeRules::compile(
             &["./data[[]1[]]".to_string(), "set[[]2[]]".to_string()],
             cfg!(windows),
+            false,
         );
         assert!(rules.excludes(Path::new("data[1]")));
         assert!(rules.excludes(Path::new("data[1]/x")));
@@ -890,7 +941,7 @@ mod tests {
             "the whole-pattern test matches the glob only"
         );
 
-        let refused = ExcludeRules::compile(&["*[x".to_string()], cfg!(windows));
+        let refused = ExcludeRules::compile(&["*[x".to_string()], cfg!(windows), false);
         assert!(
             refused.excludes(Path::new("a/foo[x")),
             "a pattern the glob compiler refuses is compared as text"
@@ -911,7 +962,7 @@ mod tests {
         assert_eq!(normalize_separators(r"a\.java", true), "a/.java");
         assert_eq!(normalize_separators(r"a\.java", false), r"a\.java");
 
-        let windows = |pattern: &str| ExcludeRules::compile(&[pattern.to_string()], true);
+        let windows = |pattern: &str| ExcludeRules::compile(&[pattern.to_string()], true, false);
         let anchored = windows(r".\.java");
         assert!(anchored.excludes(Path::new(".java/fonts/x")));
         assert!(
@@ -928,7 +979,7 @@ mod tests {
             !subtree.excludes(Path::new(".java/fonts/x")),
             "a source-relative path names one subtree"
         );
-        let unix = ExcludeRules::compile(&[r"a\.java".to_string()], false);
+        let unix = ExcludeRules::compile(&[r"a\.java".to_string()], false, false);
         assert!(
             !unix.excludes(Path::new("a/.java/y")),
             "off Windows a backslash is no separator"
@@ -959,7 +1010,7 @@ mod tests {
         }
 
         for windows in [true, false] {
-            let rules = ExcludeRules::compile(&[r"./back[\]slash".to_string()], windows);
+            let rules = ExcludeRules::compile(&[r"./back[\]slash".to_string()], windows, false);
             for rel in ["back/slash/saved.txt", "back/slash", "backslash/x"] {
                 assert!(
                     !rules.excludes(Path::new(rel)),

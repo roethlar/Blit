@@ -4024,6 +4024,16 @@ fn tag_path(report: eyre::Report, path: &str) -> eyre::Report {
 /// files fails with ENOTEMPTY and is left alone; under `All` the tree was
 /// enumerated unfiltered, so a dir reaching here is empty and a non-empty one
 /// is a genuine error.
+///
+/// cr-g3fix4-2: `filter`'s excludes came from the source side — spelled as
+/// the source stores its names, or as typed — so the destination walk is
+/// scoped by `destination_scope`, which also names the destination's own
+/// spelling of each excluded entry (`dst/Cache` for an excluded
+/// `src/cache`) and, where the destination ignores case, matches the
+/// any-depth name rules case-insensitively. This is the one place every
+/// destination's deletions are planned — the local carrier, a pull's
+/// client, a destination daemon — and it runs on the blocking pool, after
+/// every payload landed, so the destination is read once, as it stands.
 fn mirror_delete_pass(
     dst_root: &Path,
     source_files: &HashSet<String>,
@@ -4036,13 +4046,14 @@ fn mirror_delete_pass(
     execute: bool,
     removed: &mut dyn FnMut(&Path, bool),
 ) -> Result<(u64, u64)> {
+    let filter = crate::transfers::filter::destination_scope(filter, dst_root);
     let plan = crate::mirror_planner::MirrorPlanner::new(false).plan_session_deletions(
         dst_root,
         source_files,
         raw_entries,
         shielded,
         crate::raw_name::destination_can_store_raw_names(),
-        filter,
+        &filter,
     )?;
     // review otp-9b F2: a dropped session future (client disconnect,
     // CancelJob) cannot abort a running blocking task — the shared executor
@@ -8952,6 +8963,61 @@ mod tests {
         .expect("pass");
         assert_eq!(counts, (2, 2));
         assert!(!tmp.path().join("d1").exists());
+    }
+
+    /// cr-g3fix4-2: the mirror delete pass — the one place every
+    /// destination's deletions are planned, the local carrier's and a
+    /// destination daemon's alike — scopes the destination walk with the
+    /// destination's own spelling: an excluded `./cache`, `a/b` and `name`
+    /// keep `Cache/`, `A/B/` and `x/NAME/` out of the deletion scope where
+    /// the destination ignores case, while the extraneous `stale.txt` is
+    /// still deleted. Before, the source-spelled patterns named none of
+    /// them and all three were deleted. Skipped with a message where the
+    /// filesystem is case-sensitive.
+    #[test]
+    fn mirror_delete_pass_keeps_an_excluded_entry_stored_in_another_spelling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        for rel in [
+            "Cache/saved.txt",
+            "A/B/saved.txt",
+            "x/NAME/saved.txt",
+            "stale.txt",
+        ] {
+            let path = dst.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"s").unwrap();
+        }
+        std::fs::write(dst.join("case-probe"), b"").unwrap();
+        let insensitive = dst.join("CASE-PROBE").exists();
+        std::fs::remove_file(dst.join("case-probe")).unwrap();
+        if !insensitive {
+            eprintln!("skipping: {} is case-sensitive", dst.display());
+            return;
+        }
+        let mut filter = crate::fs_enum::FileFilter::default();
+        filter.exclude_files = ["./cache", "a/b", "name"].map(String::from).to_vec();
+        let abort = AtomicBool::new(false);
+        mirror_delete_pass(
+            &dst,
+            &HashSet::new(),
+            &[],
+            &HashSet::new(),
+            &filter,
+            true,
+            None,
+            &abort,
+            true,
+            &mut |_, _| {},
+        )
+        .expect("pass");
+        for rel in ["Cache/saved.txt", "A/B/saved.txt", "x/NAME/saved.txt"] {
+            assert!(dst.join(rel).exists(), "{rel} is excluded and must survive");
+        }
+        assert!(
+            !dst.join("stale.txt").exists(),
+            "the extraneous file is deleted"
+        );
     }
 
     #[test]

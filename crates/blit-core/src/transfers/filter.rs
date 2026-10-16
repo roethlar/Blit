@@ -10,7 +10,8 @@
 //! modal will use.
 
 use crate::fs_enum::{
-    normalize_separators, parse_duration, parse_size, typed_exclude_dialect, FileFilter,
+    exclude_rule, normalize_separators, parse_duration, parse_size, typed_exclude_dialect,
+    FileFilter,
 };
 use eyre::{eyre, Context, Result};
 use std::path::{Path, PathBuf};
@@ -708,6 +709,199 @@ fn paired_name(
     }
     matches.sort();
     matches
+}
+
+/// cr-g3fix4-2: the mirror's deletion scope at a destination — `filter`,
+/// read where the destination is walked, with each exclude also spelled
+/// the way the destination stores it. The patterns came from the source
+/// side (spelled as the source stores its names, or as typed), and every
+/// rule compares case-sensitively, so on a case- or
+/// normalization-insensitive destination an excluded entry stored in
+/// another spelling (`dst/Cache` for an excluded `src/cache`) was not
+/// named, stayed in the deletion scope, and was deleted. Two parts, both
+/// read once here, never per entry:
+/// - a path rule (anchored `./a/b`, or `a/b`) is respelled component by
+///   component from `dst_root` with [`stored_name`] ([`respelled_at`]),
+///   and the respelled pattern is ADDED beside the original: the original
+///   still names a destination spelled like the source, the respelled one
+///   names the destination's own spelling, and adding a pattern can only
+///   shrink the deletion scope. A tie adds every name.
+/// - the any-depth name rules (a pattern with no `/`) cannot be respelled
+///   per directory, so they match case-insensitively when the destination
+///   ignores case ([`case_insensitive_at`]).
+///
+/// Runs where the destination's deletion pass runs — the session's own
+/// destination walk, on the local carrier and on a destination daemon
+/// alike. Nothing changes when `files_from` is set (it bypasses the
+/// excludes) or no exclude is given.
+pub(crate) fn destination_scope(filter: &FileFilter, dst_root: &Path) -> FileFilter {
+    let mut scoped = filter.clone_without_cache();
+    if filter.files_from.is_some() || filter.exclude_files.is_empty() {
+        return scoped;
+    }
+    let windows = cfg!(windows);
+    for pattern in &filter.exclude_files {
+        for respelled in respelled_at(pattern, dst_root, windows, stored_name) {
+            if !scoped.exclude_files.contains(&respelled) {
+                scoped.exclude_files.push(respelled);
+            }
+        }
+    }
+    let names = filter
+        .exclude_files
+        .iter()
+        .any(|pattern| exclude_rule(pattern, windows).is_some_and(|rule| !rule.path));
+    if names && case_insensitive_at(dst_root) {
+        scoped.case_insensitive_names = true;
+    }
+    scoped
+}
+
+/// cr-g3fix4-2: `pattern`, a path rule as [`exclude_rule`] reads it, with
+/// its leading plain components ([`plain_name`]) spelled as `root` stores
+/// them (`stored`, [`stored_name`] on the disk): the walk stops at the
+/// first component holding real glob syntax or naming nothing there, and
+/// the rest is kept as written. One pattern per spelling (a tie forks),
+/// each escaped ([`literal_glob`]) and anchored as the original was; none
+/// when the pattern is a name rule or every spelling equals it.
+fn respelled_at(
+    pattern: &str,
+    root: &Path,
+    windows: bool,
+    stored: impl Fn(&Path) -> Vec<String>,
+) -> Vec<String> {
+    let Some(rule) = exclude_rule(pattern, windows) else {
+        return Vec::new();
+    };
+    if !rule.path {
+        return Vec::new();
+    }
+    let components: Vec<&str> = rule.body.split('/').collect();
+    respelled_below(root, &components, windows, &stored)
+        .into_iter()
+        .filter(|spelled| {
+            !spelled
+                .iter()
+                .map(String::as_str)
+                .eq(components.iter().copied())
+        })
+        .map(|spelled| {
+            let body = spelled.join("/");
+            if rule.anchored {
+                format!("./{body}")
+            } else {
+                body
+            }
+        })
+        .collect()
+}
+
+/// [`respelled_at`]'s walk of `components` below `at`.
+fn respelled_below(
+    at: &Path,
+    components: &[&str],
+    windows: bool,
+    stored: &impl Fn(&Path) -> Vec<String>,
+) -> Vec<Vec<String>> {
+    let Some((first, below)) = components.split_first() else {
+        return vec![Vec::new()];
+    };
+    let as_written = || vec![components.iter().map(|c| c.to_string()).collect()];
+    let Some(name) = plain_name(first, windows) else {
+        return as_written();
+    };
+    let names = stored(&at.join(&name));
+    if names.is_empty() {
+        return as_written();
+    }
+    let mut spelled = Vec::new();
+    for name in names {
+        let escaped = literal_glob(&name, windows);
+        for tail in respelled_below(&at.join(&name), below, windows, stored) {
+            let mut parts = Vec::with_capacity(components.len());
+            parts.push(escaped.clone());
+            parts.extend(tail);
+            spelled.push(parts);
+        }
+    }
+    spelled
+}
+
+/// cr-g3fix4-2: the name a pattern component spells when it holds no glob
+/// syntax but one-member classes — the escapes `literal_glob` and the
+/// typed-escape rewrite write (`[*]`, `[?]`, `[[]`, `[]]`, `[{]`, `[}]`,
+/// `[,]`, `[\]`, or any `[c]`) — each read as its character; `None` for a
+/// component with real glob syntax (a wildcard, a class of several
+/// members or negated, an alternation, a bare `\`), or naming no entry
+/// (empty, `.`, `..`).
+fn plain_name(component: &str, windows: bool) -> Option<String> {
+    let mut name = String::with_capacity(component.len());
+    let mut rest = component;
+    while let Some(c) = rest.chars().next() {
+        match c {
+            '[' => {
+                let mut chars = rest[1..].chars();
+                let member = chars.next()?;
+                if matches!(member, '!' | '^') || chars.next()? != ']' {
+                    return None;
+                }
+                // No Windows name holds `\`, the separator there.
+                if windows && member == '\\' {
+                    return None;
+                }
+                name.push(member);
+                rest = &rest[1 + member.len_utf8() + 1..];
+            }
+            '*' | '?' | '{' | '}' | '\\' => return None,
+            c => {
+                name.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+    }
+    (!name.is_empty() && name != "." && name != "..").then_some(name)
+}
+
+/// cr-g3fix4-2: whether the filesystem holding `root`'s entries ignores
+/// case, read without writing anything: an entry `root` lists (else
+/// `root` itself, or its nearest ancestor) whose name holds an ASCII
+/// letter, looked up with every ASCII letter's case swapped, resolves to
+/// that same entry ([`entry_identity`]). An entry of the root is asked
+/// first because its lookup is the destination filesystem's own, even
+/// when `root` is a mount point on a parent of another kind. No name to
+/// swap: false (assumed case-sensitive).
+fn case_insensitive_at(root: &Path) -> bool {
+    let probe = |path: &Path| -> Option<bool> {
+        let name = path.file_name()?.to_str()?;
+        let swapped: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_lowercase() {
+                    c.to_ascii_uppercase()
+                } else {
+                    c.to_ascii_lowercase()
+                }
+            })
+            .collect();
+        if swapped == name {
+            return None;
+        }
+        let (identity, _) = entry_identity(path)?;
+        Some(
+            entry_identity(&path.with_file_name(swapped))
+                .is_some_and(|(other, _)| other == identity),
+        )
+    };
+    if let Ok(listing) = std::fs::read_dir(root) {
+        if let Some(answer) = listing
+            .flatten()
+            .take(64)
+            .find_map(|entry| probe(&entry.path()))
+        {
+            return answer;
+        }
+    }
+    root.ancestors().find_map(probe).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1748,6 +1942,161 @@ mod tests {
                 ["./ab", "sub/x[*]y"]
             );
         }
+    }
+
+    /// cr-g3fix4-2: a path rule of the mirror's deletion scope is spelled
+    /// as the destination stores it — tested against a stand-in
+    /// destination on every OS. Each plain component (a one-member class
+    /// read as its character) takes the stored name, escaped, until one
+    /// holds real glob syntax or names nothing there; a tie adds every
+    /// name; the anchor is kept. A name rule, or a spelling equal to the
+    /// original, adds nothing.
+    #[test]
+    fn a_deletion_scope_path_rule_takes_the_destinations_spelling() {
+        let disk = |path: &Path| -> Vec<String> {
+            match path.to_string_lossy().replace('\\', "/").as_str() {
+                "dst/cache" => vec!["Cache".into()],
+                "dst/Cache/sub" => vec!["SUB".into()],
+                "dst/data[1]" => vec!["DATA[1]".into()],
+                "dst/ς" => vec!["alias".into(), "σ".into()],
+                "dst/same" => vec!["same".into()],
+                _ => Vec::new(),
+            }
+        };
+        let respell = |pattern: &str| respelled_at(pattern, Path::new("dst"), false, disk);
+        assert_eq!(respell("./cache"), ["./Cache"]);
+        assert_eq!(
+            respell("./cache/"),
+            ["./Cache"],
+            "a trailing / reads the same"
+        );
+        assert_eq!(respell("cache/sub/*.tmp"), ["Cache/SUB/*.tmp"]);
+        assert_eq!(
+            respell("cache/s*b/x"),
+            ["Cache/s*b/x"],
+            "a glob component ends the walk"
+        );
+        assert_eq!(
+            respell("./cache/missing/x"),
+            ["./Cache/missing/x"],
+            "so does a component the destination does not hold"
+        );
+        assert_eq!(
+            respell("./data[[]1[]]"),
+            ["./DATA[[]1[]]"],
+            "a one-member class is its character, and the stored name is escaped"
+        );
+        assert_eq!(respell("./ς"), ["./alias", "./σ"], "a tie adds every name");
+        assert!(respell("cache").is_empty(), "a name rule is not respelled");
+        assert!(
+            respell("./same").is_empty(),
+            "the same spelling adds nothing"
+        );
+        assert!(respell("./missing").is_empty());
+        assert!(respell("ca*/x").is_empty());
+        assert_eq!(
+            respelled_at(r".\cache", Path::new("dst"), true, disk),
+            ["./Cache"],
+            "the Windows rule reads `\\` as a separator"
+        );
+        for (component, name) in [
+            ("[*]x[?]", Some("*x?")),
+            ("a[]]b[[]", Some("a]b[")),
+            (r"[\]", Some(r"\")),
+            ("a,b-!^]", Some("a,b-!^]")),
+            ("[ab]", None),
+            ("[!a]", None),
+            ("[^]", None),
+            ("a*", None),
+            ("{a,b}", None),
+            (r"a\b", None),
+            ("[x", None),
+            (".", None),
+            ("..", None),
+            ("", None),
+        ] {
+            assert_eq!(plain_name(component, false).as_deref(), name, "{component}");
+        }
+        assert_eq!(plain_name(r"[\]", true), None, "no Windows name holds `\\`");
+    }
+
+    /// cr-g3fix4-2: at a real destination the deletion scope also names the
+    /// destination's own spelling of an excluded entry — `./cache` adds
+    /// `./Cache`, `a/b` adds `A/B` — and the any-depth name `name` matches
+    /// `NAME` when the destination ignores case. The filter as the source
+    /// spelled it named none of them (the reported deletion). Skipped with
+    /// a message where the filesystem is case-sensitive.
+    #[test]
+    fn the_deletion_scope_names_the_destinations_own_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path();
+        for rel in [
+            "Cache/saved.txt",
+            "A/B/saved.txt",
+            "x/NAME/saved.txt",
+            "other/x",
+        ] {
+            let path = dst.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"s").unwrap();
+        }
+        if !case_insensitive(dst) {
+            eprintln!("skipping: {} is case-sensitive", dst.display());
+            return;
+        }
+        let mut filter = FileFilter::default();
+        filter.exclude_files = ["./cache", "a/b", "name"].map(String::from).to_vec();
+        let allows = |filter: &FileFilter, rel: &str| {
+            filter.allows_entry(Some(Path::new(rel)), &dst.join(rel), 1, None)
+        };
+        assert!(
+            allows(&filter, "Cache/saved.txt"),
+            "as the source spelled it, the filter names none of them"
+        );
+        let scoped = destination_scope(&filter, dst);
+        assert_eq!(
+            scoped.exclude_files,
+            ["./cache", "a/b", "name", "./Cache", "A/B"]
+        );
+        for rel in ["Cache/saved.txt", "A/B/saved.txt", "x/NAME/saved.txt"] {
+            assert!(!allows(&scoped, rel), "{rel}: out of the deletion scope");
+        }
+        assert!(allows(&scoped, "other/x"), "other/x is still in scope");
+        assert!(
+            allows(&scoped, "A/keep.txt"),
+            "A/keep.txt is still in scope"
+        );
+    }
+
+    /// cr-g3fix4-2: the destination's case rule is read without writing
+    /// anything — an entry of the root looked up with its ASCII letters'
+    /// case swapped, else the root's own name — and agrees with a probe
+    /// that writes a file. Runs on every OS.
+    #[test]
+    fn the_destinations_case_rule_is_read_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let listing = |path: &Path| {
+            let mut names: Vec<_> = std::fs::read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let empty = case_insensitive_at(&root);
+        assert!(listing(&root).is_empty(), "nothing written");
+        std::fs::write(root.join("123"), b"n").unwrap();
+        let numeric = case_insensitive_at(&root);
+        std::fs::write(root.join("Entry.txt"), b"e").unwrap();
+        let before = listing(&root);
+        let lettered = case_insensitive_at(&root);
+        assert_eq!(listing(&root), before, "nothing written");
+        let written = case_insensitive(&root);
+        assert_eq!(lettered, written, "an entry of the root");
+        assert_eq!(empty, written, "the root's own name");
+        assert_eq!(numeric, written, "past an entry with no letter");
     }
 
     /// review otp-10a F8: the wire-spec builder rejects malformed globs
