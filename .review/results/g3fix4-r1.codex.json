@@ -1,0 +1,45 @@
+{
+  "verdict": "findings",
+  "capability_ok": true,
+  "guard_confirmed": true,
+  "reviewed_sha": "548625f5c7cf4e2dca506e947ad184a5668c642a",
+  "base_sha": "2e42f849ac3acd4dd494083f641a5633acdbb2f9",
+  "guard": "In this worktree, mutated CompiledPatterns::compile to also put accepted patterns into refused. fs_enum::tests::an_escaped_literal_matches_its_name_and_not_its_encoded_spelling failed with exit 101 at the encoded-spelling assertion. Restored with git checkout, verified the original blob hash, and reran: passed, exit 0. All temporary probes were removed; tracked files match HEAD. macOS verification: fmt, native clippy, and workspace tests passed (1521 passed, 2 ignored). Linux cross-clippy passed. Windows cross-clippy failed because ml64.exe was unavailable; Windows/Linux runtime suites were not run. No CI run was found for the pinned head. cr-g3fix3-1 closed: false — ordinary Unix Unicode symlinks are repaired, but hard-linked symlinks and the Windows folding branch retain the failure. cr-g3fix3-2 closed: true — accepted patterns are evaluated only as globs; refused-pattern fallback remains, and the mutation guard bites. cr-g3fix3-3 closed: true for its recorded Unix-generated ./back[\\]slash receive-path reproduction; the typed-input defects below are separate remaining failures. cr-g3fix2-1 closed: false — excluded symlink counterparts remain deletable under the conditions below. cr-g3fix-1 closed: false — filesystem-equivalent source and destination spellings still escape exclusion.",
+  "closed": {
+    "cr-g3fix3-1": false,
+    "cr-g3fix3-2": true,
+    "cr-g3fix3-3": true,
+    "cr-g3fix2-1": false,
+    "cr-g3fix-1": false
+  },
+  "findings": [
+    {
+      "title": "Unicode symlink pairing still fails for hard links and on Windows",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:616 — multiple identity matches fall back to single_fold; stored_name then returns None for an unpaired symlink at line 539. Reproduced on macOS: src/σ points outside the source, src/alias is a hard link to that symlink, and absolute src/ς resolves to the same inode with nlink=2. Mirror deleted dst/σ/saved.txt and its directory, exited 0, and issued no exclusion warning. The exact-spelling control preserved them. Separately, line 583 retains paired_by_case on Windows; a pure probe confirmed that it cannot pair ς with σ.",
+      "predicted_failure": "A valid filesystem-equivalent absolute exclude silently loses protection when the symlink has another hard-link name. Mirror deletes explicitly excluded destination data. Windows retains the same failure wherever filesystem equivalence succeeds but Unicode lowercase comparison does not.",
+      "severity": "HIGH",
+      "better_approach": "Recover the particular directory entry's stored name through filesystem-aware, non-following lookup on each platform. Do not substitute lowercase comparison when identities have multiple names. Add hard-linked symlink survival coverage and Windows filesystem-equivalence coverage."
+    },
+    {
+      "title": "Destination spelling differences still expose excluded subtrees to mirror deletion",
+      "evidence": "crates/blit-core/src/fs_enum.rs:127 — subtree matching compares the destination's spelling against the source-derived case-sensitive pattern. transfer_session/mod.rs:4177 reuses that filter for destination enumeration. Reproduced on case-insensitive macOS with src/cache pointing outside, absolute exclude src/CACHE, and existing dst/Cache/saved.txt: mirror deleted the saved file and directory. The identical run with destination spelling dst/cache preserved them.",
+      "predicted_failure": "Even after source-name resolution succeeds, mirror deletes an excluded destination counterpart whose stored spelling differs from the source's. This leaves the earlier filesystem-case contract materially open.",
+      "severity": "HIGH",
+      "better_approach": "Resolve literal exclusions against the destination filesystem when constructing deletion scope, preserving glob semantics and protecting equivalent destination spellings. Add a survival test where source, typed exclude, and destination use different spellings."
+    },
+    {
+      "title": "Typed Unix escapes still change deletion scope on a Windows peer",
+      "evidence": "crates/blit-core/src/fs_enum.rs:204 — a bare backslash becomes '/', including in received patterns. transfers/filter.rs:228 leaves Unix relative escapes unchanged before serialization. A parameterized compiler probe confirmed that wire pattern ./a\\b excludes ab/saved.txt under the Unix rule but allows it under the Windows rule; Windows instead excludes a/b/saved.txt. Both destination paths are valid Windows names. This was tested through the actual rule compiler on macOS, not a Windows runtime.",
+      "predicted_failure": "A Unix-to-Windows mirror using --exclude './a\\b' omits source ab while leaving destination ab inside deletion scope, allowing existing excluded data to be deleted. It also incorrectly protects a/b.",
+      "severity": "HIGH",
+      "better_approach": "Translate typed Unix escapes into a portable wire representation before serialization and compile received patterns consistently. Preserve native Windows separator handling for locally supplied patterns, including .\\cache."
+    },
+    {
+      "title": "Windows absolute patterns still rewrite backslashes inside bracket classes",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:352 — absolute_components still replaces every backslash, bypassing the new bracket-aware normalizer. A probe of resolve_excludes_on with the Windows rule converted <root>/back[s\\]lash into back[s/]lash without warning. The original glob matches backslash but not back/lash; the resulting filter excluded both backslash/saved.txt and back/lash/saved.txt. On Windows, C:\\src\\back[s\\]lash follows this same absolute-pattern branch.",
+      "predicted_failure": "A valid Windows absolute exclude silently omits an unrelated subtree from copy or backup and incorrectly removes it from mirror deletion scope. build_spec also sends the corrupted pattern to peers.",
+      "severity": "MEDIUM",
+      "better_approach": "Make absolute-pattern tokenization preserve bracket-class contents as well as relative-pattern normalization. Test absolute Windows patterns containing classes with both a backslash and an ordinary member."
+    }
+  ]
+}
