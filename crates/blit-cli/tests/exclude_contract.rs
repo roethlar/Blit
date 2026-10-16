@@ -473,6 +473,38 @@ fn copy_exclude_through_an_alias_into_a_directory_named_like_a_glob() {
     );
 }
 
+/// cr-g3fix4-3: off Windows a typed `\` is globset's escape, so
+/// `--exclude './a\b'` names the top-level `ab` and not `a/b`. The pattern
+/// now leaves this host written `./ab` (a Windows peer read the bare `\`
+/// as a separator and kept `ab` in its mirror's deletion scope); here it
+/// still leaves out `ab` and copies `a/b`, with no warning.
+#[cfg(unix)]
+#[test]
+fn copy_exclude_a_typed_unix_escape_names_the_escaped_character() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    for rel in ["ab/saved.txt", "a/b/saved.txt", "keep.txt"] {
+        let path = src.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"x").unwrap();
+    }
+    let (ok, stdout, stderr) = blit(&[
+        "copy",
+        &with_slash(&src),
+        &with_slash(&dst),
+        "--exclude",
+        r"./a\b",
+    ]);
+    assert!(ok, "copy failed:\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(!dst.join("ab").exists(), "`a\\b` names `ab`");
+    assert!(dst.join("a/b/saved.txt").exists(), "`a/b` was never named");
+    assert!(dst.join("keep.txt").exists());
+    assert!(
+        stderr.is_empty() || !stderr.contains("--exclude"),
+        "{stderr}"
+    );
+}
+
 /// cr-g3fix-3: on Windows `\` is a separator in a relative pattern too —
 /// `.\.java` names the top-level `.java` only, `a\.java\` the `a/.java`
 /// subtree, and `.java\` the name at any depth. Before the fix none of the

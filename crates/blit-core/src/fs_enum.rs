@@ -133,6 +133,14 @@ impl ExcludeRules {
     }
 }
 
+/// Whether `patterns`, read as the any-depth and subtree rules under one
+/// platform's path rule (`windows`), exclude `rel_path` — so either
+/// rule's reading of a pattern is testable on every OS.
+#[cfg(test)]
+pub(crate) fn excluded_under_rule(patterns: &[String], windows: bool, rel_path: &Path) -> bool {
+    ExcludeRules::compile(patterns, windows).excludes(rel_path)
+}
+
 /// cr-g3fix3-2: `--exclude` patterns compiled for matching. A pattern the
 /// glob compiler accepts is matched as a glob and nothing else; only one it
 /// refuses — reachable only past validation ([`FileFilter::validate_globs`],
@@ -209,6 +217,64 @@ pub(crate) fn normalize_separators(pattern: &str, windows: bool) -> std::borrow:
         rest = &rest[len..];
     }
     std::borrow::Cow::Owned(written)
+}
+
+/// cr-g3fix4-3: a typed `--exclude` pattern in the dialect every peer
+/// reads alike: `/`-separated, holding no bare `\`. Under the Windows
+/// rule that is [`normalize_separators`]. Under the Unix rule a bare `\`
+/// is globset's escape, while a Windows peer reads it as a separator
+/// (globset's own reading there, and `normalize_separators`), so a typed
+/// Unix escape named another path on a Windows peer — `./a\b` is `ab`
+/// here and `a/b` there, and under `mirror` the peer's deletion scope
+/// kept `ab` while shielding `a/b`. Each escape `\c` outside a bracket
+/// class is therefore written in the class dialect ([`escape_as_class`]),
+/// which reads the same on every platform, and a class is copied as it is
+/// (its `\` is a member everywhere). A pattern globset refuses under the
+/// Unix rule — a trailing lone `\`, an unclosed class — is returned as
+/// typed, so validation still refuses it.
+pub(crate) fn typed_exclude_dialect(pattern: &str, windows: bool) -> std::borrow::Cow<'_, str> {
+    if windows {
+        return normalize_separators(pattern, true);
+    }
+    if !pattern.contains('\\') {
+        return std::borrow::Cow::Borrowed(pattern);
+    }
+    let mut written = String::with_capacity(pattern.len() + 8);
+    let mut rest = pattern;
+    while let Some(c) = rest.chars().next() {
+        match c {
+            '[' => {
+                let Some(len) = bracket_class_len(rest) else {
+                    return std::borrow::Cow::Borrowed(pattern);
+                };
+                written.push_str(&rest[..len]);
+                rest = &rest[len..];
+            }
+            '\\' => {
+                let Some(escaped) = rest[1..].chars().next() else {
+                    return std::borrow::Cow::Borrowed(pattern);
+                };
+                written.push_str(&escape_as_class(escaped));
+                rest = &rest[1 + escaped.len_utf8()..];
+            }
+            c => {
+                written.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+    }
+    std::borrow::Cow::Owned(written)
+}
+
+/// cr-g3fix4-3: the class-dialect spelling of the escaped character `c`:
+/// `[c]` for a character globset reads as syntax somewhere outside a
+/// class (`?*[]{}` as `globset::escape` brackets them, `,` — an
+/// alternation's separator — and `\`), `c` itself otherwise.
+fn escape_as_class(c: char) -> String {
+    match c {
+        '?' | '*' | '[' | ']' | '{' | '}' | ',' | '\\' => format!("[{c}]"),
+        c => c.to_string(),
+    }
 }
 
 /// cr-g3fix3-3: the byte length of the bracket class `text` opens, `[`
@@ -922,6 +988,88 @@ mod tests {
                 "{rel} is walked"
             );
         }
+    }
+
+    /// cr-g3fix4-3: under the Unix rule a typed escape `\c` outside a
+    /// bracket class is written in the class dialect — `[c]` for a
+    /// character globset reads as syntax outside a class, `c` itself
+    /// otherwise — and a class is copied as it is, so the written pattern
+    /// holds no bare `\` (a Windows peer reads a bare one as a separator)
+    /// and matches exactly what the typed one matched here. A pattern
+    /// globset refuses (a trailing `\`, an unclosed class) comes back as
+    /// typed, so validation still refuses it; the Windows rule is the
+    /// separator rewrite. Pure, so it runs on every OS.
+    #[test]
+    fn a_typed_unix_escape_is_written_in_the_class_dialect() {
+        for (typed, written) in [
+            (r"./a\b", "./ab"),
+            (r"x\*y", "x[*]y"),
+            (r"[\]z", r"[\]z"),
+            (r"p\\q", r"p[\]q"),
+            (r"\[ab]", "[[]ab]"),
+            (r"{a\,b,c}", "{a[,]b,c}"),
+            (r"{a\}b,c}", "{a[}]b,c}"),
+            (r"q\{x\}\?", "q[{]x[}][?]"),
+            (r"\!x\-", "!x-"),
+            (r"dir\/f", "dir/f"),
+            (r"[!\]]x\*", r"[!\]]x[*]"),
+            (r"caf\é", "café"),
+            ("plain/*.tmp", "plain/*.tmp"),
+        ] {
+            assert_eq!(typed_exclude_dialect(typed, false), written, "{typed}");
+            let mut rest = written;
+            while let Some(c) = rest.chars().next() {
+                let len = match c {
+                    '[' => bracket_class_len(rest).unwrap(),
+                    _ => c.len_utf8(),
+                };
+                assert_ne!(c, '\\', "{written}: no bare backslash");
+                rest = &rest[len..];
+            }
+            let unix = |pattern: &str| {
+                globset::GlobBuilder::new(pattern)
+                    .backslash_escape(true)
+                    .build()
+                    .unwrap()
+                    .compile_matcher()
+            };
+            let (before, after) = (unix(typed), unix(written));
+            for name in [
+                "ab",
+                r"a\b",
+                "a/b",
+                "x*y",
+                "xzy",
+                r"\z",
+                "z",
+                r"p\q",
+                "[ab]",
+                "a",
+                "a,b",
+                "b",
+                "c",
+                "a}b",
+                "q{x}?",
+                "q{x}x",
+                "!x-",
+                "dir/f",
+                r"\x*",
+                "]x*",
+                "]x*x",
+                "café",
+                "plain/a.tmp",
+            ] {
+                assert_eq!(
+                    before.is_match(name),
+                    after.is_match(name),
+                    "{typed} and {written} on {name:?}"
+                );
+            }
+        }
+        for refused in [r"a\", r"a[\*", r"x\*[y"] {
+            assert_eq!(typed_exclude_dialect(refused, false), refused, "{refused}");
+        }
+        assert_eq!(typed_exclude_dialect(r".\a\[\]x", true), r"./a/[\]x");
     }
 
     /// cr-g3fix-3: on Windows a filter built directly — by an embedder, or

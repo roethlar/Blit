@@ -9,7 +9,9 @@
 //! struct, which is also the shape any front-end's transfer-options
 //! modal will use.
 
-use crate::fs_enum::{normalize_separators, parse_duration, parse_size, FileFilter};
+use crate::fs_enum::{
+    normalize_separators, parse_duration, parse_size, typed_exclude_dialect, FileFilter,
+};
 use eyre::{eyre, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -187,9 +189,12 @@ pub struct ResolvedExcludes {
     /// is `a/.java`; a single remaining name is anchored as `./name`, so
     /// it still names only that top-level path), every other pattern as
     /// typed — on Windows with `\` written `/` outside a bracket class
-    /// (cr-g3fix-3, cr-g3fix3-3), so the wire form reads the same on any
-    /// peer. In a rewritten pattern a name read from the disk is escaped, so
-    /// it matches only itself (cr-g3fix2-2).
+    /// (cr-g3fix-3, cr-g3fix3-3), and off Windows with each escape `\c`
+    /// written in the class dialect (`./a\b` as `./ab`, `x\*y` as `x[*]y`;
+    /// cr-g3fix4-3), so the wire form holds no bare `\` and reads the same
+    /// on any peer ([`typed_exclude_dialect`]). In a rewritten pattern a
+    /// name read from the disk is escaped, so it matches only itself
+    /// (cr-g3fix2-2). An unmatchable pattern stays exactly as typed.
     pub patterns: Vec<String>,
     /// The absolute patterns that cannot match anything: outside the
     /// source root, naming the root itself, or any absolute pattern when
@@ -204,9 +209,11 @@ pub struct ResolvedExcludes {
 /// or pattern reached through a symlink is also compared in its resolved
 /// form, so `/tmp/x/.java` and `/private/tmp/x/.java` name one path on
 /// macOS (`through_resolved_root` says how a pattern is resolved).
-/// Relative patterns pass through untouched but for their separators:
-/// on Windows `\` is written `/` outside a bracket class (cr-g3fix-3,
-/// cr-g3fix3-3).
+/// Relative patterns pass through untouched but for their separators and
+/// escapes: on Windows `\` is written `/` outside a bracket class
+/// (cr-g3fix-3, cr-g3fix3-3); off Windows an escape `\c` outside a class
+/// is written in the class dialect (cr-g3fix4-3). `--include` patterns
+/// are not rewritten.
 pub fn resolve_excludes(exclude: &[String], source_root: Option<&Path>) -> ResolvedExcludes {
     resolve_excludes_on(exclude, source_root, cfg!(windows))
 }
@@ -225,7 +232,7 @@ fn resolve_excludes_on(
     {
         resolved.patterns = exclude
             .iter()
-            .map(|pattern| normalize_separators(pattern, windows).into_owned())
+            .map(|pattern| typed_exclude_dialect(pattern, windows).into_owned())
             .collect();
         return resolved;
     }
@@ -241,7 +248,7 @@ fn resolve_excludes_on(
         if !is_absolute_pattern(pattern, windows) {
             resolved
                 .patterns
-                .push(normalize_separators(pattern, windows).into_owned());
+                .push(typed_exclude_dialect(pattern, windows).into_owned());
             continue;
         }
         // Each form of the pattern with the part of it read from the disk:
@@ -262,7 +269,12 @@ fn resolve_excludes_on(
         match (relative, source_root) {
             (Some(rest), Some(root)) => {
                 let rest = stored_spelling(root, rest, windows, stored_name);
-                resolved.patterns.push(written(&rest, windows));
+                // cr-g3fix4-3: the typed parts in the dialect every peer
+                // reads alike (a literal part is classes already).
+                let pattern = written(&rest, windows);
+                resolved
+                    .patterns
+                    .push(typed_exclude_dialect(&pattern, windows).into_owned());
             }
             _ => {
                 resolved.patterns.push(pattern.clone());
@@ -1424,8 +1436,11 @@ mod tests {
     }
 
     /// cr-g3fix-3: relative patterns reach both builders — and so the wire
-    /// form — with `\` written `/` under the Windows rule, and untouched
-    /// under the Unix rule, where `\` is no separator. An absolute pattern
+    /// form — with `\` written `/` under the Windows rule. Under the Unix
+    /// rule `\` is no separator but globset's escape, and each escape is
+    /// written in the class dialect with the same meaning (cr-g3fix4-3:
+    /// `.\cache` is the name `.cache` there, so it is written `.cache`); a
+    /// trailing lone `\` stays for validation to refuse. An absolute pattern
     /// that cannot match stays as typed either way. Pure string logic, so
     /// both rules run on every OS.
     #[test]
@@ -1437,7 +1452,10 @@ mod tests {
             resolve_excludes_on(&exc, None, true).patterns,
             ["./cache", "cache/", "a/.java", "*.tmp"]
         );
-        assert_eq!(resolve_excludes_on(&exc, None, false).patterns, exc);
+        assert_eq!(
+            resolve_excludes_on(&exc, None, false).patterns,
+            [".cache", r"cache\", "a.java", "*.tmp"]
+        );
 
         let mut mixed = exc.clone();
         mixed.push(r"C:\elsewhere\x".to_string());
@@ -1448,7 +1466,11 @@ mod tests {
         );
         assert_eq!(windows.unmatchable, [r"C:\elsewhere\x"]);
         let unix = resolve_excludes_on(&mixed, None, false);
-        assert_eq!(unix.patterns, mixed, "no absolute pattern off Windows");
+        assert_eq!(
+            unix.patterns,
+            [".cache", r"cache\", "a.java", "*.tmp", "C:elsewherex"],
+            "no absolute pattern off Windows"
+        );
         assert!(unix.unmatchable.is_empty());
 
         // cr-g3fix3-3: normalized where it is typed, `.\cache` reaches the
@@ -1462,6 +1484,58 @@ mod tests {
         let allows = |rel: &str| filter.allows_entry(Some(Path::new(rel)), Path::new(rel), 1, None);
         assert!(!allows("cache/x"), "anchored to the root");
         assert!(allows("a/cache/x"), "a nested cache is not named");
+    }
+
+    /// cr-g3fix4-3: a Unix user's typed escape never leaves this host as a
+    /// bare `\`, which a Windows peer reads as a separator: `./a\b` (the
+    /// name `ab` here) is written `./ab`, so a Windows peer's deletion
+    /// scope leaves out `ab` — not `a/b` — exactly as this side's walk
+    /// does. A class keeps its `\`; an absolute pattern's typed parts are
+    /// written the same way. Both rules run on every OS (the absolute part
+    /// on Unix, where a tempdir is an absolute path under the Unix rule).
+    #[test]
+    fn a_typed_unix_escape_names_the_same_path_under_either_rule() {
+        let exc: Vec<String> = [r"./a\b", r"x\*y", r"[\]z", r"p\\q", "./cache"]
+            .map(String::from)
+            .to_vec();
+        let written = resolve_excludes_on(&exc, None, false).patterns;
+        assert_eq!(written, ["./ab", "x[*]y", r"[\]z", r"p[\]q", "./cache"]);
+        for windows in [false, true] {
+            let excluded =
+                |rel: &str| crate::fs_enum::excluded_under_rule(&written, windows, Path::new(rel));
+            assert!(
+                excluded("ab/saved.txt"),
+                "the name typed as a\\b (windows rule: {windows})"
+            );
+            assert!(
+                !excluded("a/b/saved.txt"),
+                "a/b was never named (windows rule: {windows})"
+            );
+            assert!(excluded("x*y"), "x*y (windows rule: {windows})");
+            assert!(!excluded("x/zy"), "x/zy (windows rule: {windows})");
+        }
+        let host = resolve_excludes_on(&exc, None, cfg!(windows)).patterns;
+        assert_eq!(build(&inputs(&[], &exc)).unwrap().exclude_files, host);
+        assert_eq!(build_spec(&inputs(&[], &exc)).unwrap().exclude, host);
+        let include = [r"a\*b".to_string()];
+        assert_eq!(
+            build_spec(&inputs(&include, &[])).unwrap().include,
+            include,
+            "--include is passed as typed"
+        );
+
+        if cfg!(unix) {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let absolute = vec![
+                format!(r"{}/a\b", root.display()),
+                format!(r"{}/sub/x\*y", root.display()),
+            ];
+            assert_eq!(
+                resolve_excludes_on(&absolute, Some(root), false).patterns,
+                ["./ab", "sub/x[*]y"]
+            );
+        }
     }
 
     /// review otp-10a F8: the wire-spec builder rejects malformed globs
