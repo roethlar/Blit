@@ -137,7 +137,7 @@ is reviewed to consensus.
 
 | Gate | Status | Moves on |
 | --- | --- | --- |
-| G2 CI on the candidate | CI green on `d9adb99e` (run 38791000789); candidate moved to `master` at `e67c225c` + the record commits after it, local gate 1533/0/2 (macOS; Linux + Windows cross-clippy clean), nineteen commits not pushed | `/git push all`, then the run |
+| G2 CI on the candidate | CI green on `d9adb99e` (run 38791000789); candidate moved to `master` at `e67c225c` + the record commits after it, local gate 1533/0/2 (macOS; Linux + Windows cross-clippy clean), `d9adb99e..HEAD` not pushed (nineteen commits through the record `f6c617a5`) | `/git push all`, then the run |
 | G3 dispositions | DONE: SSC shipped; audit-18 retired; audit-19 FIXED `fa948e01`; detached recents reason FIXED `b7da0d81` (D-2026-10-14-1); Codex g3fix-r1 over `b186e8b8..b7da0d81`: 3 MEDIUM on audit-19, FIXED `7d3e4eb6` `47bdfb69` `eddfab6c`; g3fix2-r1: cr-g3fix-2/-3 closed, cr-g3fix-1 not (HIGH, cr-g3fix2-1) + cr-g3fix2-2, FIXED `f6099aa3` `36b752b6`; g3fix3-r1: cr-g3fix2-2 closed, cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix3-1) + cr-g3fix3-2/-3, FIXED `a67087fd` `f6212938` `548625f5`; g3fix4-r1: cr-g3fix3-2/-3 closed, cr-g3fix3-1/cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix4-1) + cr-g3fix4-2 (HIGH) + cr-g3fix4-3 (HIGH) + cr-g3fix4-4, FIXED `e7be4970` `b304e6ff` `5624fd43` `e67c225c` | Codex re-review of `89575776..de9a333f` on the owner's `review` |
 | G4 docs truth | README + TRANSFER_SESSION corrected `6ac98801` (audit of 2026-10-14); plan-status sweep DONE 2026-10-14 (D-2026-10-14-1) | — |
 | G5 version + notes | DONE `6d5d93c8`: 1.0.0, CHANGELOG `[1.0.0]`, notes re-cut († entries follow the G3 rulings) | — |
