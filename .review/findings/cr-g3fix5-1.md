@@ -1,9 +1,9 @@
 # cr-g3fix5-1: Unicode-equivalent destination names remain inside mirror deletion scope
 
 **Severity**: HIGH (reviewer: HIGH)
-**Status**: Admitted
+**Status**: Fixed
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: —
+**Commit**: (this commit)
 **Reviewer**: codex / gpt-6-astra / xhigh / standard (the owner's `review`, 2026-10-17), codex-cli 0.162.1 headless one-shot, `-a never exec -m gpt-6-astra -c model_reasoning_effort="xhigh" -s workspace-write --json`, stdin closed, detached worktree `review-g3fix5-r1-de9a333f`; codereview re-review g3fix5-r1 over `89575776..de9a333f` (record `.review/results/g3fix5-r1.codex.json` + `.events.jsonl`); 2026-10-17 16:18–16:29Z; capability_ok=true; guard_confirmed=true (reviewer made `mirror_delete_pass` plan with the unscoped filter → `mirror_delete_pass_keeps_an_excluded_entry_stored_in_another_spelling` red, exit 101, `Cache/saved.txt` deleted; restored by `git checkout`, blob hashes verified, green; 1533/0/2 on its macOS gate, Linux cross-clippy clean); SHAs pin-verified; closed: cr-g3fix4-1 true, cr-g3fix4-3 true, cr-g3fix4-4 true, cr-g3fix3-1 true, cr-g3fix2-1 true, cr-g3fix4-2 false, cr-g3fix-1 false
 
 ## Evidence
@@ -28,16 +28,71 @@ Fix shape, admitted (one mechanism with cr-g3fix5-2; `transfers::filter::destina
 - The source-side copy filter is untouched; no new user-visible option (SIMPLE); the wire form is unchanged.
 
 ## Approach
-(filled by the fix)
+- **Why `dst/x` went too.** The source walk prunes the excluded `src/x/σ`, so `src/x` sends no file, and the session manifest lists files only: `x` is not in the kept set and `dst/x` is planned as extraneous. The destination walk prunes the excluded entry the same way, so the plan never sees it. With `dst/x/ς` in scope (the bug), `saved.txt`, then `ς`, then the emptied `x` were removed: "1 file(s), 2 dir(s)". With only the exact spelling excluded, `x` was still planned and survived only because `remove_dir` failed with "not empty" (tolerated under a filter), while a dry run counted it as deleted.
+- **The destination's own names, per visited directory** (`transfers::filter::DestinationNames`, new). `destination_scope` (where `mirror_delete_pass` plans every destination's deletions: local carrier, pull client, destination daemon, delegated pull) now hangs a `DestinationNames` on the scoped filter (`FileFilter::destination`, `pub(crate)`), and `FileFilter::excluded` asks it for each entry the deletion walk visits, after the rules as written. For the any-depth name rules (a pattern with no `/`):
+  - A literal name (`plain_name`: no glob syntax but one-member classes) is resolved in each visited directory by the destination filesystem: `stored_name(dir/name)` (cr-g3fix4-1's identity pairing; the link itself, never its target; every name of a tie). Each name it returns, and the exact spelling, is out of scope. The lookup is memoized per directory, so it runs once per name per visited directory, never per entry; a lookup that finds nothing costs one failed `lstat`.
+  - The walk is depth first, so the memo is kept for the chain of directories above the entry asked about only (`Level`, a `parking_lot::Mutex<Vec<Level>>`), not for the whole destination. A directory found out of scope marks everything below it.
+  - FAST, recorded: on a destination that compares case (`case_insensitive_at`), an ASCII name is not looked up. No normalization applies to ASCII, so only its own spelling can pair with it, which the rules as written name already. A non-ASCII name is looked up there too (APFS case-sensitive still pairs NFC with NFD).
+  - A glob name, where the destination ignores case, is also matched under `fold` (new): NFC (`unicode-normalization`, new dependency), then each character's uppercase form where that is a single character. `ς` and `σ` both fold to `Σ`, NFD `café` to `CAFÉ`. A character whose uppercase is two (`ß`) is kept, so a class or `?` still spans one character. The fold is applied to the pattern and to the entry's path, and the folded patterns are matched by an ordinary filter (the any-depth and subtree rules and the whole-pattern test), so globset's own reading is kept. A folded pattern globset refuses (an inverted range) is left out.
+- **The ASCII-only flag is gone.** cr-g3fix4-2's `case_insensitive_names` (globset's `case_insensitive(true)`, which folds ASCII only, per the reviewer) is replaced by the above. `ExcludeRules::compile` and `CompiledPatterns::compile` lose their case parameter. Over-protection is the safe direction: the fold may keep an entry NTFS would tell apart (NFC and NFD), never the reverse for a literal, which the filesystem itself decides.
+- **A protected entry protects its ancestors** (`mirror_planner::keep_dirs_holding_left_out_entries`, new, called by `plan_session_deletions` when the filter has any rule). For each directory the plan would remove, the directory is listed once. If it holds an entry the walk did not visit and the scoped filter leaves out (`allows_dir` for a directory, `allows_entry` with its own size and time for anything else), the directory and every directory above it, up to the root, are dropped from the plan. A child the walk visited is in the plan or in the source already. A child the filter lets through but the walk does not list (a symlink) leaves the directory as it was. One listing per planned directory, never per entry; nothing runs for `MirrorMode::All`, whose filter is empty.
+- Path rules keep cr-g3fix4-2's respelling from the root in this commit; the continuation past glob components is cr-g3fix5-2's.
+- Unchanged: the source-side copy filter, the wire form, and the CLI (no new option, SIMPLE).
+- Dependency: `unicode-normalization 0.1.26` (with `tinyvec 1.13.3`) added to blit-core. `Cargo.lock` gains only those two packages and the dependency line: cargo's own re-resolution also rewrote unrelated `windows-sys 0.60.2` entries to 0.61.2, so those three hunks were applied by hand, and `cargo metadata --locked --offline` accepts the file.
 
 ## Files changed
-(filled by the fix)
+- `crates/blit-core/Cargo.toml:17-20`, `Cargo.lock` (three hunks: the dependency line, `tinyvec`, `unicode-normalization`) — `unicode-normalization` added.
+- `crates/blit-core/src/fs_enum.rs:9, 56-64` — `FileFilter::destination` (new, `pub(crate)`) in place of `case_insensitive_names`.
+- `crates/blit-core/src/fs_enum.rs:128-144, 182, 202-206, 402, 425, 515, 524, 547-554, 679` — `ExcludeRules::compile` and `CompiledPatterns::compile` without the case parameter; `clone_without_cache`, `pruning_rules` and `Default` carry `destination`; `FileFilter::excluded` asks it after the rules as written.
+- `crates/blit-core/src/fs_enum.rs:968-1060` — the test call sites of `ExcludeRules::compile` drop the case argument.
+- `crates/blit-core/src/transfers/filter.rs:786-829` — `destination_scope` doc and body: hangs `DestinationNames` on the scoped filter.
+- `crates/blit-core/src/transfers/filter.rs:831-1069` — `DestinationNames`, `StoredNames`, `Level` and `fold` (new).
+- `crates/blit-core/src/transfers/filter.rs:2486-2665` — guards `the_deletion_scope_reads_a_literal_name_once_per_visited_directory`, `a_glob_name_is_matched_under_the_destinations_fold`, `the_deletion_scope_names_a_spelling_only_the_destination_pairs` (new).
+- `crates/blit-core/src/mirror_planner.rs:294-298, 331-335, 456-520` — `plan_session_deletions` keeps the walked set and calls `keep_dirs_holding_left_out_entries` (new).
+- `crates/blit-core/src/transfer_session/mod.rs:9023-9137` — guards `mirror_delete_pass_keeps_an_excluded_name_stored_in_a_unicode_equivalent_spelling` and `mirror_delete_pass_keeps_a_directory_holding_an_excluded_entry` (new).
+- `crates/blit-cli/tests/exclude_contract.rs:279` — `filesystem_pairs` no longer `cfg(unix)` (the new local test runs on every OS).
+- `crates/blit-cli/tests/exclude_contract.rs:488-604` — guards `mirror_exclude_keeps_a_destination_name_in_a_unicode_equivalent_spelling` (every OS) and `push_mirror_keeps_a_destination_name_in_a_unicode_equivalent_spelling` (Unix) (new).
 
 ## Guard proof
-(filled by the fix)
+- Guards (ran on macOS aarch64, APFS case-insensitive; `--nocapture` printed no "skipping" line):
+  - L1 `transfers::filter::tests::the_deletion_scope_reads_a_literal_name_once_per_visited_directory` (blit-core, every OS, a stand-in destination; can go red on every OS). The stand-in pairs `σ` with a stored `ς` under `x`, and with two names of one entry under `t` (a tie).
+    - Out of scope: `σ`, `x/ς`, `x/ς/deep/file.txt`, `t/alias`, `t/Σ/saved.txt`. In scope: `x`, `x/a.txt`, `x/σx`, `x/zz`, `t`, `t/keep`, `ς` at the root, and `x/Cache/saved.txt` (the destination compares case here).
+    - Asked in walk order, `σ` is looked up 4 times, once per visited directory (`dst`, `dst/x`, `dst/x/Cache`, `dst/t`), and the ASCII `cache` never.
+    - Where the destination ignores case, `x/Cache/saved.txt` is out of scope too, with 4 lookups (`σ` and `cache` in `dst` and `dst/x`).
+    - A path rule alone is not read here, and the case rule is not asked then.
+  - L2 `transfers::filter::tests::a_glob_name_is_matched_under_the_destinations_fold` (blit-core, every OS, pure; can go red on every OS).
+    - `fold`: `ς` and `σ` → `Σ`, NFD and NFC `café` → `CAFÉ`, `ß` kept, `[a-z]*.tmp` → `[A-Z]*.TMP`.
+    - Where the destination ignores case, `c?ché` names `x/CACHÉ/saved.txt`, the NFD `x/caché` and `x/caché`, not `x/cachx`; `*σ` names `x/xς` and `x/XΣ/deep`, not `x/x`. Where it compares case, nothing is read.
+  - L3 `transfers::filter::tests::the_deletion_scope_names_a_spelling_only_the_destination_pairs` (blit-core, real filesystem; each pair runs only where the filesystem pairs it, so it can go red on APFS and, for `σ`/`ς` and `é`/`É`, on NTFS; Linux ext4 skips all three). Excluded `σ`, NFC `café` and `é` against a destination holding `x/ς/`, NFD `x/café/` and `x/É/`: the source-spelled filter allows each `saved.txt` (the bug), the scoped one leaves each out, and `x/keep.txt` stays in scope.
+  - L4 `transfer_session::tests::mirror_delete_pass_keeps_an_excluded_name_stored_in_a_unicode_equivalent_spelling` (blit-core; the same pairs, the same platforms). `mirror_delete_pass` keeps the three `saved.txt` files and deletes `stale.txt`; counts `(1, 0)`.
+  - L5 `transfer_session::tests::mirror_delete_pass_keeps_a_directory_holding_an_excluded_entry` (blit-core, exact spellings, every OS; can go red on every OS). With `--exclude cache`, an empty source, and a destination holding `x/cache/saved.txt`, `y/z/cache/saved.txt` and `gone/stale.txt`: the dry run counts `(1, 1)` (`gone/stale.txt` and `gone/`), the real pass the same, both `saved.txt` survive with `x`, `y` and `y/z`, and `gone/` is deleted.
+  - L6 `exclude_contract::mirror_exclude_keeps_a_destination_name_in_a_unicode_equivalent_spelling` (blit-transfer, every OS; each case only where the filesystem pairs it). The local carrier end to end, the reported runs: `--exclude σ` over `src/x/σ/` against `dst/x/ς/saved.txt`, NFC `café` against NFD `dst/x/café/`, `é` against `dst/x/É/`. Each keeps `saved.txt` and `dst/x`, copies `keep.txt`, and does not copy the excluded source entry. The cases that lose the entry are named together.
+  - L7 `exclude_contract::push_mirror_keeps_a_destination_name_in_a_unicode_equivalent_spelling` (blit-transfer, Unix, only where the filesystem pairs `ς` with `σ`). The destination daemon: a push mirror with `--exclude σ` keeps the module's `x/ς/saved.txt` and deletes `extra.txt`.
+  - Unchanged and green: cr-g3fix4-2's `the_deletion_scope_names_the_destinations_own_spelling`, `mirror_delete_pass_keeps_an_excluded_entry_stored_in_another_spelling` and `mirror_exclude_keeps_a_destination_entry_stored_in_another_case`. Their any-depth `name`/`cache` case against `NAME`/`Cache` is now carried by the lookup in place of the removed ASCII-only flag. Also green: every `fs_enum` rule test and `push_mirror_keeps_a_destination_entry_stored_in_another_case`.
+- U1 — `destination_scope`: no `DestinationNames` hung on the scoped filter. Red:
+  - L4 FAILED at `transfer_session/mod.rs:9078`, "x/ς/saved.txt is excluded and must survive".
+  - L3 FAILED at `filter.rs:2661`, "x/ς/saved.txt: out of the deletion scope".
+  - L6 FAILED at `exclude_contract.rs:546`, naming all three cases with the reported "• Deleted: 1 file(s), 2 dir(s)" (final sigma, nfd, case).
+  - L7 FAILED at `exclude_contract.rs:594`, "the daemon's deletion scope must name the destination's own spelling".
+  - cr-g3fix4-2's guards for the any-depth case: `mod.rs:9015`, `filter.rs:2478` ("x/NAME/saved.txt …"), and `exclude_contract.rs:481` ("any depth: … • Deleted: 1 file(s), 1 dir(s)").
+- U2 — `names_here`: the destination never asked (every lookup empty). Red: L1 FAILED at `filter.rs:2539`, "σ", `left: false`, `right: true`; L3, L4 and the cr-g3fix4-2 guards as for U1; L6 at `exclude_contract.rs:546` (all three cases, "Deleted: 1 file(s), 2 dir(s)"); L7 at `exclude_contract.rs:594`.
+- U3 — the ASCII skip removed (an ASCII name looked up where the destination compares case too). Red: L1 FAILED at `filter.rs:2539`, "x/Cache/saved.txt", `left: true`, `right: false` (the stand-in pairs `Cache`, which a case-sensitive destination never would). This pins the FAST rule: removed, every exclude costs a lookup per directory on every case-sensitive destination.
+- U4 — no per-directory memo (each entry looks the name up again). Red: L1 FAILED at `filter.rs:2541`, `left: 16`, `right: 4`.
+- U5 — a directory found out of scope not marking the directories below it. Red: L1 FAILED at `filter.rs:2539`, "x/ς/deep/file.txt", `left: false`, `right: true`.
+- U6 — `fold` without NFC. Red: L2 FAILED at `filter.rs:2588`, `left: "CAFE\u{301}"`, `right: "CAFÉ"`.
+- U7 — `fold` without the uppercase. Red: L2 FAILED at `filter.rs:2586`, `left: "ς"`, `right: "Σ"`.
+- U8 — `plan_session_deletions` without `keep_dirs_holding_left_out_entries`. Red: L5 FAILED at `transfer_session/mod.rs:9123`, "the dry run counts gone/stale.txt and gone/ only", `left: (1, 4)`, `right: (1, 1)` (`x`, `y`, `y/z` counted as deleted). L6 and L7 stayed green under U8: in a real pass the directory survives by the tolerated "not empty" failure, so only the plan (and a dry run's count) shows it.
+- Restore after each: the fixed files copied back with `/bin/cp -f`; md5 `134311f8fdaec47cd1ea844102bfdbe4` (`filter.rs`) and `63a99029dac75bcc7afe45a14fec1098` (`mirror_planner.rs`) matched the saved fixed files every time. Then `cargo test -p blit-core --lib -- transfers::filter mirror_delete_pass fs_enum` passed 51 and the six case and Unicode guards of `exclude_contract` passed. `cargo clippy -p blit-core -p blit-transfer --all-targets -- -D warnings` is clean.
+- Line numbers are those of the fixed files. U1, U2 and U4 add one line and U3 removes two in front of the `filter.rs` guards, so their raw reports were shifted by that many; `transfer_session/mod.rs` and `exclude_contract.rs` were not mutated.
 
 ## Known gaps
-(filled by the fix)
+- The fold for glob names is an approximation: NFC and per-character uppercase. A filesystem pairing beyond it (APFS's full case folding of `ß` and `SS`, NTFS's own upcase table where it differs from Unicode's) is not applied to a glob; a literal name is always resolved by the filesystem itself. Where the fold pairs more than the filesystem (NFC and NFD on NTFS), an entry is kept that could have been deleted.
+- On a destination that compares case, a glob name is not folded, so a case-sensitive but normalization-insensitive filesystem (APFS case-sensitive, ZFS `normalization=formD`) does not pair a glob's NFC text with an NFD name. A literal name is looked up there and pairs.
+- The case rule is still probed once at the root (`case_insensitive_at`). A subtree with its own rule (a mount point below the root, an ext4 `casefold` or a Windows case-sensitive directory) is read with the root's rule; in particular, an ASCII name is not looked up inside a case-insensitive subtree of a case-sensitive root.
+- Path rules: this commit keeps cr-g3fix4-2's respelling from the root, which stops at the first glob component; the continuation is cr-g3fix5-2.
+- The ancestor protection lists each directory the plan would remove once. A child the scope leaves out by a rule other than an exclude (an include, a size or age limit) protects its directory the same way. A child the walk does not list but the scope lets through (a symlink) leaves the directory as before.
+- The Unicode guards run only where the filesystem pairs the spellings: here APFS pairs all three. On Linux CI (ext4) they skip with a message, so they can go red only on a pairing filesystem. On Windows CI (NTFS), L3, L4 and L6 run their `σ`/`ς` and `é`/`É` cases if NTFS pairs them (not verified here) and skip NFD; L7 is Unix-only like the other daemon tests. L1, L2 and L5 run and can go red everywhere.
+- Verified on macOS aarch64 (APFS, case-insensitive) only, plus the Linux and Windows cross-clippy at the gate; the Linux and Windows runtime tests were not run here.
 
 ## Reviewer comments
 (filled by the re-review)

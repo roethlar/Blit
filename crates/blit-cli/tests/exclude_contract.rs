@@ -277,7 +277,6 @@ fn mirror_exclude_symlink_in_another_case_keeps_the_destination_subtree() {
 
 /// True when `dir`'s filesystem resolves `typed` to an entry made as
 /// `stored` (probed with a file of that name, removed again).
-#[cfg(unix)]
 fn filesystem_pairs(dir: &Path, stored: &str, typed: &str) -> bool {
     let probe = dir.join(stored);
     fs::write(&probe, b"").unwrap();
@@ -483,6 +482,123 @@ fn mirror_exclude_keeps_a_destination_entry_stored_in_another_case() {
         lost.is_empty(),
         "the destination's excluded entry must survive the mirror:\n{}",
         lost.join("\n")
+    );
+}
+
+/// cr-g3fix5-1: an excluded any-depth name keeps the destination's entry
+/// stored in a spelling only the destination filesystem pairs with it, and
+/// the directory holding it, out of the mirror's reach. The reported runs:
+/// `--exclude σ` over `src/x/σ/` against a pre-existing `dst/x/ς/saved.txt`
+/// printed "Deleted: 1 file(s), 2 dir(s)" and `dst/x` was gone; so with an
+/// NFC `café` against an NFD `dst/x/café/` (and `é` against `É`). Every
+/// case runs, and the ones that lost the entry are named together; each is
+/// skipped with a message where the filesystem does not pair the spellings
+/// (APFS pairs all three).
+#[test]
+fn mirror_exclude_keeps_a_destination_name_in_a_unicode_equivalent_spelling() {
+    let tmp = tempdir().unwrap();
+    let mut lost = Vec::new();
+    for (case, typed, stored) in [
+        ("final sigma", "σ", "ς"),
+        ("nfd", "caf\u{e9}", "cafe\u{301}"),
+        ("case", "\u{e9}", "\u{c9}"),
+    ] {
+        let root = tmp.path().join(case.replace(' ', "_"));
+        let (src, dst) = (root.join("src"), root.join("dst"));
+        fs::create_dir_all(&dst).unwrap();
+        if !filesystem_pairs(&dst, stored, typed) {
+            eprintln!(
+                "skipping {case}: {} does not pair {typed:?} with {stored:?}",
+                dst.display()
+            );
+            continue;
+        }
+        for rel in [format!("x/{typed}/private.txt"), "keep.txt".to_string()] {
+            let path = src.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"x").unwrap();
+        }
+        let saved = dst.join("x").join(stored).join("saved.txt");
+        fs::create_dir_all(saved.parent().unwrap()).unwrap();
+        fs::write(&saved, b"s").unwrap();
+
+        let (ok, stdout, stderr) = blit(&[
+            "mirror",
+            "--yes",
+            &with_slash(&src),
+            &with_slash(&dst),
+            "--exclude",
+            typed,
+        ]);
+        assert!(
+            ok,
+            "{case}: mirror failed:\nstdout: {stdout}\nstderr: {stderr}"
+        );
+        if !saved.exists() || !dst.join("x").is_dir() {
+            lost.push(format!("{case}: {}", stdout.trim().replace('\n', " | ")));
+        }
+        assert!(dst.join("keep.txt").exists(), "{case}: keep.txt");
+        assert!(
+            !dst.join("x").join(stored).join("private.txt").exists(),
+            "{case}: the excluded source entry is not copied"
+        );
+    }
+    assert!(
+        lost.is_empty(),
+        "the destination's excluded entry and its directory must survive the mirror:\n{}",
+        lost.join("\n")
+    );
+}
+
+/// cr-g3fix5-1: the same on a destination daemon, whose deletion scope is
+/// built by the same session code from the wire spec: a push mirror with
+/// `--exclude σ` keeps the module's `x/ς/saved.txt` and deletes
+/// `extra.txt`. Skipped where the filesystem does not pair `ς` with `σ`.
+#[cfg(unix)]
+#[test]
+fn push_mirror_keeps_a_destination_name_in_a_unicode_equivalent_spelling() {
+    let ctx = common::TestContext::new();
+    let src = ctx.workspace.join("src");
+    for rel in ["x/σ/private.txt", "keep.txt"] {
+        let path = src.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"x").unwrap();
+    }
+    if !filesystem_pairs(&ctx.module_dir, "ς", "σ") {
+        eprintln!(
+            "skipping: {} does not pair σ with ς",
+            ctx.module_dir.display()
+        );
+        return;
+    }
+    fs::create_dir_all(ctx.module_dir.join("x/ς")).unwrap();
+    fs::write(ctx.module_dir.join("x/ς/saved.txt"), b"s").unwrap();
+    fs::write(ctx.module_dir.join("extra.txt"), b"extraneous").unwrap();
+
+    let mut cmd = std::process::Command::new(&ctx.cli_bin);
+    cmd.arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("mirror")
+        .arg("--yes")
+        .arg(with_slash(&src))
+        .arg(format!("127.0.0.1:{}:/test/", ctx.daemon_port))
+        .arg("--exclude")
+        .arg("σ");
+    let output = run_with_timeout(cmd, Duration::from_secs(60));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "push mirror failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        ctx.module_dir.join("x/ς/saved.txt").exists(),
+        "the daemon's deletion scope must name the destination's own spelling:\nstdout: {stdout}"
+    );
+    assert!(ctx.module_dir.join("keep.txt").exists());
+    assert!(
+        !ctx.module_dir.join("extra.txt").exists(),
+        "a complete source scan lets the mirror delete the extraneous file"
     );
 }
 

@@ -14,6 +14,10 @@ eyre = "0.6"
 log = "0.4"
 walkdir = "2.5"
 globset = "0.4.18"
+# cr-g3fix5-1: NFC for the case- and normalization-insensitive fold a
+# mirror's deletion scope matches glob excludes under at a destination
+# that ignores case.
+unicode-normalization = "0.1"
 filetime = "0.2"
 once_cell = "1.21"
 rayon = "1.12"

@@ -783,22 +783,23 @@ fn paired_name(
 }
 
 /// cr-g3fix4-2: the mirror's deletion scope at a destination — `filter`,
-/// read where the destination is walked, with each exclude also spelled
-/// the way the destination stores it. The patterns came from the source
+/// read where the destination is walked, with each exclude also read in
+/// the names the destination stores. The patterns came from the source
 /// side (spelled as the source stores its names, or as typed), and every
-/// rule compares case-sensitively, so on a case- or
-/// normalization-insensitive destination an excluded entry stored in
-/// another spelling (`dst/Cache` for an excluded `src/cache`) was not
-/// named, stayed in the deletion scope, and was deleted. Two parts, both
-/// read once here, never per entry:
+/// rule compares as written, so on a case- or normalization-insensitive
+/// destination an excluded entry stored in another spelling (`dst/Cache`
+/// for an excluded `src/cache`, `dst/x/ς` for an excluded `σ`) was not
+/// named, stayed in the deletion scope, and was deleted. Two parts:
 /// - a path rule (anchored `./a/b`, or `a/b`) is respelled component by
 ///   component from `dst_root` with [`stored_name`] ([`respelled_at`]),
 ///   and the respelled pattern is ADDED beside the original: the original
 ///   still names a destination spelled like the source, the respelled one
 ///   names the destination's own spelling, and adding a pattern can only
-///   shrink the deletion scope. A tie adds every name.
-/// - the any-depth name rules (a pattern with no `/`) cannot be respelled
-///   per directory, so they match case-insensitively when the destination
+///   shrink the deletion scope. A tie adds every name. Read once here.
+/// - cr-g3fix5-1: the any-depth name rules (a pattern with no `/`) are
+///   read per directory the walk visits ([`DestinationNames`]): a literal
+///   name through the destination filesystem itself ([`stored_name`]),
+///   a glob under a case and normalization fold where the destination
 ///   ignores case ([`case_insensitive_at`]).
 ///
 /// Runs where the destination's deletion pass runs — the session's own
@@ -818,14 +819,252 @@ pub(crate) fn destination_scope(filter: &FileFilter, dst_root: &Path) -> FileFil
             }
         }
     }
-    let names = filter
-        .exclude_files
-        .iter()
-        .any(|pattern| exclude_rule(pattern, windows).is_some_and(|rule| !rule.path));
-    if names && case_insensitive_at(dst_root) {
-        scoped.case_insensitive_names = true;
-    }
+    scoped.destination = DestinationNames::new(
+        dst_root,
+        &filter.exclude_files,
+        windows,
+        || case_insensitive_at(dst_root),
+        Box::new(stored_name),
+    )
+    .map(std::sync::Arc::new);
     scoped
+}
+
+/// cr-g3fix5-1: the destination's own names for a mirror's excludes, read
+/// as the deletion walk visits the destination — so an entry it stores in
+/// another spelling of an excluded name (another case, another Unicode
+/// normalization, final sigma `ς` for `σ`, or another name of the same
+/// hard-linked entry) is out of the deletion scope, as the excluded
+/// spelling itself is:
+/// - a literal any-depth name (`σ`, `cache`, `data[[]1[]]` — no glob
+///   syntax but one-member classes, [`plain_name`]) is resolved in each
+///   directory the walk visits by the destination filesystem itself:
+///   [`stored_name`] of `dir/name` gives the names that directory lists
+///   for the entry the filesystem pairs with that spelling (the link
+///   itself, never its target; every name of a tie), and each of them is
+///   out of scope. One lookup per name per visited directory, never per
+///   entry; a lookup that finds nothing costs one failed `lstat`. On a
+///   destination that compares case, an ASCII name pairs with nothing but
+///   its own spelling (no normalization applies to ASCII), so it is not
+///   looked up at all.
+/// - a glob any-depth name, where the destination ignores case, is also
+///   matched under [`fold`] (NFC, then each character's single uppercase
+///   form), applied to the pattern and the entry's path alike. The fold
+///   approximates the filesystem's own equivalence; where it pairs more
+///   than the filesystem does (NFD and NFC on NTFS), an entry is kept that
+///   could have been deleted — the safe direction.
+///
+/// The walk is depth first, so the directories looked up are kept for the
+/// chain of the entry asked about only ([`Level`]), not for the whole
+/// destination.
+pub(crate) struct DestinationNames {
+    root: PathBuf,
+    /// The literal any-depth names.
+    names: Vec<String>,
+    /// The glob any-depth names, folded; `None` where the destination
+    /// compares case, or no such name was given.
+    folded: Option<FileFilter>,
+    /// Whether the destination ignores case.
+    case_insensitive: bool,
+    /// [`stored_name`] on the destination (a stand-in in tests).
+    stored: Box<StoredNames>,
+    /// The directories from the root down to the last entry asked about.
+    chain: parking_lot::Mutex<Vec<Level>>,
+}
+
+/// How [`DestinationNames`] asks the destination for its names.
+type StoredNames = dyn Fn(&Path) -> Vec<String> + Send + Sync;
+
+/// One directory of [`DestinationNames`]' chain.
+struct Level {
+    /// Its own name in its parent (empty for the root).
+    name: std::ffi::OsString,
+    /// Where it is.
+    path: PathBuf,
+    /// It, or a directory above it, is out of the deletion scope.
+    protected: bool,
+    /// What [`DestinationNames::names`] each name's lookup found here,
+    /// by index, filled as the walk asks.
+    found: std::collections::HashMap<usize, Vec<String>>,
+}
+
+impl Level {
+    fn new(name: std::ffi::OsString, path: PathBuf, protected: bool) -> Self {
+        Self {
+            name,
+            path,
+            protected,
+            found: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for DestinationNames {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DestinationNames")
+            .field("root", &self.root)
+            .field("names", &self.names)
+            .field(
+                "folded",
+                &self.folded.as_ref().map(|folded| &folded.exclude_files),
+            )
+            .field("case_insensitive", &self.case_insensitive)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DestinationNames {
+    /// The destination names for `patterns` (`--exclude` patterns, read
+    /// under one platform's path rule) at `root`: `case_insensitive` is
+    /// asked once, only when a name rule needs it; `stored` names an entry
+    /// as the destination lists it. `None` when no pattern is read here.
+    pub(crate) fn new(
+        root: &Path,
+        patterns: &[String],
+        windows: bool,
+        case_insensitive: impl FnOnce() -> bool,
+        stored: Box<StoredNames>,
+    ) -> Option<Self> {
+        let mut names = Vec::new();
+        let mut globs = Vec::new();
+        for rule in patterns
+            .iter()
+            .filter_map(|pattern| exclude_rule(pattern, windows))
+            .filter(|rule| !rule.path)
+        {
+            match plain_name(&rule.body, windows) {
+                Some(name) => {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                None => globs.push(rule.body),
+            }
+        }
+        if names.is_empty() && globs.is_empty() {
+            return None;
+        }
+        let case_insensitive = case_insensitive();
+        let folded: Vec<String> = if case_insensitive {
+            globs
+                .iter()
+                .map(|glob| fold(glob))
+                .filter(|folded| globset::Glob::new(folded).is_ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let folded = (!folded.is_empty()).then(|| {
+            let mut filter = FileFilter::default();
+            filter.exclude_files = folded;
+            filter
+        });
+        if names.is_empty() && folded.is_none() {
+            return None;
+        }
+        Some(Self {
+            root: root.to_path_buf(),
+            names,
+            folded,
+            case_insensitive,
+            stored,
+            chain: parking_lot::Mutex::new(vec![Level::new(
+                Default::default(),
+                root.to_path_buf(),
+                false,
+            )]),
+        })
+    }
+
+    /// Whether `rel` — an entry's path below the root — or a directory
+    /// above it is out of the deletion scope in the destination's own
+    /// names.
+    pub(crate) fn protects(&self, rel: &Path) -> bool {
+        if let Some(folded) = &self.folded {
+            let text: Vec<String> = rel
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(name) => Some(fold(&name.to_string_lossy())),
+                    _ => None,
+                })
+                .collect();
+            let folded_rel = PathBuf::from(text.join("/"));
+            if !text.is_empty() && !folded.allows_entry(Some(&folded_rel), &folded_rel, 0, None) {
+                return true;
+            }
+        }
+        if self.names.is_empty() {
+            return false;
+        }
+        let components: Vec<&std::ffi::OsStr> = rel
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        let Some((entry, parents)) = components.split_last() else {
+            return false;
+        };
+        let mut chain = self.chain.lock();
+        // Keep the directories of the chain that lie above `rel`.
+        let mut kept = 1;
+        while kept < chain.len()
+            && kept <= parents.len()
+            && chain[kept].name.as_os_str() == parents[kept - 1]
+        {
+            kept += 1;
+        }
+        chain.truncate(kept);
+        for name in &parents[kept - 1..] {
+            let parent = chain.last_mut().expect("the root stays in the chain");
+            let protected = parent.protected || self.names_here(parent, name);
+            let path = parent.path.join(name);
+            chain.push(Level::new(name.to_os_string(), path, protected));
+        }
+        let parent = chain.last_mut().expect("the root stays in the chain");
+        parent.protected || self.names_here(parent, entry)
+    }
+
+    /// Whether `entry`, an entry of the directory `at`, is the
+    /// destination's spelling of a literal name: each name looked up in
+    /// `at` once.
+    fn names_here(&self, at: &mut Level, entry: &std::ffi::OsStr) -> bool {
+        let Some(entry) = entry.to_str() else {
+            return false;
+        };
+        let (path, found) = (&at.path, &mut at.found);
+        self.names.iter().enumerate().any(|(index, name)| {
+            found
+                .entry(index)
+                .or_insert_with(|| {
+                    if !self.case_insensitive && name.is_ascii() {
+                        return Vec::new();
+                    }
+                    (self.stored)(&path.join(name))
+                })
+                .iter()
+                .any(|stored| stored == entry)
+        })
+    }
+}
+
+/// cr-g3fix5-1: `text` under the fold [`DestinationNames`] matches a glob
+/// in: NFC, then each character as its uppercase form where that is one
+/// character (`ς` and `σ` both `Σ`, `é` `É`; `ß`, whose uppercase is two,
+/// stays), so a class or `?` still spans one character.
+fn fold(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    text.nfc()
+        .map(|c| {
+            let mut upper = c.to_uppercase();
+            match (upper.next(), upper.next()) {
+                (Some(single), None) => single,
+                _ => c,
+            }
+        })
+        .collect()
 }
 
 /// cr-g3fix4-2: `pattern`, a path rule as [`exclude_rule`] reads it, with
@@ -2243,6 +2482,185 @@ mod tests {
             allows(&scoped, "A/keep.txt"),
             "A/keep.txt is still in scope"
         );
+    }
+
+    /// cr-g3fix5-1: a literal any-depth name is read in each directory the
+    /// walk visits through the destination's own lookup — tested against a
+    /// stand-in destination on every OS that pairs `σ` with a stored `ς`
+    /// under `x`, and with two names of one hard-linked entry under `t` (a
+    /// tie: both are out of scope). The entry the destination pairs, and
+    /// everything below it, is out of the deletion scope; other entries
+    /// are not. Asked in walk order (depth first), each name is looked up
+    /// once per directory, never per entry; an ASCII name is not looked up
+    /// at a destination that compares case (nothing but its own spelling,
+    /// which the filter names already, can pair with it), and is at one
+    /// that ignores case.
+    #[test]
+    fn the_deletion_scope_reads_a_literal_name_once_per_visited_directory() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let stand_in = |lookups: Arc<AtomicUsize>| -> Box<StoredNames> {
+            Box::new(move |path: &Path| {
+                lookups.fetch_add(1, Ordering::SeqCst);
+                match path.to_string_lossy().replace('\\', "/").as_str() {
+                    "dst/σ" => vec!["σ".into()],
+                    "dst/x/σ" => vec!["ς".into()],
+                    "dst/t/σ" => vec!["alias".into(), "Σ".into()],
+                    "dst/x/cache" => vec!["Cache".into()],
+                    _ => Vec::new(),
+                }
+            })
+        };
+        let patterns = ["σ", "cache", "./a/b"].map(String::from).to_vec();
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let names = DestinationNames::new(
+            Path::new("dst"),
+            &patterns,
+            false,
+            || false,
+            stand_in(lookups.clone()),
+        )
+        .expect("a literal name is read at the destination");
+        for (rel, protected) in [
+            ("σ", true),
+            ("x", false),
+            ("x/a.txt", false),
+            ("x/ς", true),
+            ("x/ς/deep/file.txt", true),
+            ("x/σx", false),
+            ("x/Cache/saved.txt", false),
+            ("x/zz", false),
+            ("t", false),
+            ("t/alias", true),
+            ("t/Σ/saved.txt", true),
+            ("t/keep", false),
+            ("ς", false),
+        ] {
+            assert_eq!(names.protects(Path::new(rel)), protected, "{rel}");
+        }
+        assert_eq!(
+            lookups.load(Ordering::SeqCst),
+            4,
+            "σ once in each visited directory (dst, dst/x, dst/x/Cache, dst/t); cache never"
+        );
+
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let names = DestinationNames::new(
+            Path::new("dst"),
+            &patterns,
+            false,
+            || true,
+            stand_in(lookups.clone()),
+        )
+        .expect("names to read");
+        assert!(names.protects(Path::new("x/Cache/saved.txt")));
+        assert!(names.protects(Path::new("x/ς")));
+        assert!(!names.protects(Path::new("x/other")));
+        assert_eq!(
+            lookups.load(Ordering::SeqCst),
+            4,
+            "σ and cache once in each of dst and dst/x"
+        );
+        assert!(
+            DestinationNames::new(
+                Path::new("dst"),
+                &["./a/b".to_string()],
+                false,
+                || panic!("no name rule: the case rule is not asked"),
+                stand_in(Arc::default()),
+            )
+            .is_none(),
+            "a path rule alone is not read here"
+        );
+    }
+
+    /// cr-g3fix5-1: where the destination ignores case, a glob any-depth
+    /// name is matched under the fold — NFC, then each character's single
+    /// uppercase form — applied to the pattern and the entry alike: `c?ché`
+    /// names `CACHÉ` and an NFD `caché`, `*σ` names `xς`. Not where the
+    /// destination compares case. The fold keeps a character whose
+    /// uppercase is two (`ß`), so a class or `?` still spans one. Pure,
+    /// so it runs on every OS.
+    #[test]
+    fn a_glob_name_is_matched_under_the_destinations_fold() {
+        assert_eq!(fold("ς"), "Σ");
+        assert_eq!(fold("σ"), "Σ");
+        assert_eq!(fold("cafe\u{301}"), "CAF\u{c9}");
+        assert_eq!(fold("caf\u{e9}"), "CAF\u{c9}");
+        assert_eq!(fold("ß"), "ß");
+        assert_eq!(fold("[a-z]*.tmp"), "[A-Z]*.TMP");
+        let none: Box<StoredNames> = Box::new(|_: &Path| Vec::new());
+        let patterns = ["c?ch\u{e9}", "*σ"].map(String::from).to_vec();
+        let names = DestinationNames::new(Path::new("dst"), &patterns, false, || true, none)
+            .expect("globs to fold");
+        for (rel, protected) in [
+            ("x/CACH\u{c9}/saved.txt", true),
+            ("x/cache\u{301}", true),
+            ("x/cach\u{e9}", true),
+            ("x/cachx", false),
+            ("x/xς", true),
+            ("x/XΣ/deep", true),
+            ("x/x", false),
+        ] {
+            assert_eq!(names.protects(Path::new(rel)), protected, "{rel}");
+        }
+        let none: Box<StoredNames> = Box::new(|_: &Path| Vec::new());
+        assert!(
+            DestinationNames::new(Path::new("dst"), &patterns, false, || false, none).is_none(),
+            "a destination that compares case folds nothing"
+        );
+    }
+
+    /// cr-g3fix5-1: at a real destination an excluded any-depth name also
+    /// leaves out the entry the destination stores in a spelling only its
+    /// filesystem pairs with it — final sigma `ς` for `σ`, NFD `café` for
+    /// an NFC `café`, `É` for `é` — with everything below it, while the
+    /// filter as the source spelled it names none of them (the reported
+    /// deletion). Each pair is skipped with a message where the filesystem
+    /// does not pair it (Linux ext4 pairs none; APFS pairs all three).
+    #[test]
+    fn the_deletion_scope_names_a_spelling_only_the_destination_pairs() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path();
+        let mut excludes = Vec::new();
+        let mut saved = Vec::new();
+        for (typed, stored) in [
+            ("σ", "ς"),
+            ("caf\u{e9}", "cafe\u{301}"),
+            ("\u{e9}", "\u{c9}"),
+        ] {
+            if !pairs(dst, stored, typed) {
+                eprintln!(
+                    "skipping {typed:?}: {} does not pair it with {stored:?}",
+                    dst.display()
+                );
+                continue;
+            }
+            excludes.push(typed.to_string());
+            saved.push(format!("x/{stored}/saved.txt"));
+        }
+        if saved.is_empty() {
+            return;
+        }
+        for rel in saved.iter().map(String::as_str).chain(["x/keep.txt"]) {
+            let path = dst.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"s").unwrap();
+        }
+        let mut filter = FileFilter::default();
+        filter.exclude_files = excludes;
+        let allows = |filter: &FileFilter, rel: &str| {
+            filter.allows_entry(Some(Path::new(rel)), &dst.join(rel), 1, None)
+        };
+        let scoped = destination_scope(&filter, dst);
+        for rel in &saved {
+            assert!(
+                allows(&filter, rel),
+                "{rel}: as the source spelled it, the filter names it not"
+            );
+            assert!(!allows(&scoped, rel), "{rel}: out of the deletion scope");
+        }
+        assert!(allows(&scoped, "x/keep.txt"), "x/keep.txt is in scope");
     }
 
     /// cr-g3fix4-2: the destination's case rule is read without writing

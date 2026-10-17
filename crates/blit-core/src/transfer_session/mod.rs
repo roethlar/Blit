@@ -9020,6 +9020,121 @@ mod tests {
         );
     }
 
+    /// cr-g3fix5-1: the mirror delete pass keeps an excluded any-depth
+    /// name the destination stores in a spelling only its filesystem pairs
+    /// with the exclude — final sigma `ς` for `σ`, NFD `café` for an NFC
+    /// `café`, `É` for `é` — with the directory holding it, while the
+    /// extraneous `stale.txt` is deleted. Before, the source-spelled name
+    /// (globset's case-insensitive mode folds ASCII only) named none of
+    /// them and each was deleted with `x`. Each pair is skipped with a
+    /// message where the filesystem does not pair it.
+    #[test]
+    fn mirror_delete_pass_keeps_an_excluded_name_stored_in_a_unicode_equivalent_spelling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let mut excludes = Vec::new();
+        let mut saved = Vec::new();
+        for (typed, stored) in [
+            ("σ", "ς"),
+            ("caf\u{e9}", "cafe\u{301}"),
+            ("\u{e9}", "\u{c9}"),
+        ] {
+            std::fs::write(dst.join(stored), b"").unwrap();
+            let paired = std::fs::symlink_metadata(dst.join(typed)).is_ok();
+            std::fs::remove_file(dst.join(stored)).unwrap();
+            if !paired {
+                eprintln!("skipping {typed:?}: the filesystem does not pair it with {stored:?}");
+                continue;
+            }
+            excludes.push(typed.to_string());
+            saved.push(format!("x/{stored}/saved.txt"));
+        }
+        if saved.is_empty() {
+            return;
+        }
+        for rel in saved.iter().map(String::as_str).chain(["stale.txt"]) {
+            let path = dst.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"s").unwrap();
+        }
+        let mut filter = crate::fs_enum::FileFilter::default();
+        filter.exclude_files = excludes;
+        let abort = AtomicBool::new(false);
+        let counts = mirror_delete_pass(
+            &dst,
+            &HashSet::new(),
+            &[],
+            &HashSet::new(),
+            &filter,
+            true,
+            None,
+            &abort,
+            true,
+            &mut |_, _| {},
+        )
+        .expect("pass");
+        for rel in &saved {
+            assert!(dst.join(rel).exists(), "{rel} is excluded and must survive");
+        }
+        assert!(
+            !dst.join("stale.txt").exists(),
+            "the extraneous file is deleted"
+        );
+        assert_eq!(counts, (1, 0), "stale.txt alone is deleted");
+    }
+
+    /// cr-g3fix5-1: a directory holding an excluded entry is never planned
+    /// for deletion, nor is a directory above it, though the source has
+    /// neither (the source walk prunes the excluded entry, so its parent
+    /// sends no file, and the session manifest lists files only). Before,
+    /// `x` and `y/z` were planned and survived only because removing a
+    /// directory that is not empty fails (tolerated under a filter), while
+    /// a dry run counted them as deleted. An extraneous directory beside
+    /// them is still deleted. Exact spellings, so it runs (and can fail) on
+    /// every OS.
+    #[test]
+    fn mirror_delete_pass_keeps_a_directory_holding_an_excluded_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        for rel in ["x/cache/saved.txt", "y/z/cache/saved.txt", "gone/stale.txt"] {
+            let path = dst.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"s").unwrap();
+        }
+        let mut filter = crate::fs_enum::FileFilter::default();
+        filter.exclude_files = vec!["cache".to_string()];
+        let abort = AtomicBool::new(false);
+        let pass = |execute: bool| {
+            mirror_delete_pass(
+                &dst,
+                &HashSet::new(),
+                &[],
+                &HashSet::new(),
+                &filter,
+                true,
+                None,
+                &abort,
+                execute,
+                &mut |_, _| {},
+            )
+            .expect("pass")
+        };
+        assert_eq!(
+            pass(false),
+            (1, 1),
+            "the dry run counts gone/stale.txt and gone/ only"
+        );
+        assert_eq!(pass(true), (1, 1));
+        for rel in ["x/cache/saved.txt", "y/z/cache/saved.txt"] {
+            assert!(dst.join(rel).exists(), "{rel} is excluded and must survive");
+        }
+        assert!(
+            !dst.join("gone").exists(),
+            "the extraneous directory is deleted"
+        );
+    }
+
     #[test]
     fn build_id_has_version_and_git_components() {
         let id = session_build_id();

@@ -291,6 +291,11 @@ impl MirrorPlanner {
             .into_iter()
             .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
             .collect::<Vec<_>>();
+        let walked: HashSet<PathBuf> = if filter.is_empty() {
+            HashSet::new()
+        } else {
+            dest_set.iter().map(|(rel, _)| rel.clone()).collect()
+        };
         // cr-ssc5-4: a failed entry shields its destination subtree under the
         // identity it actually has here — a raw-named entry's exact bytes
         // where storable (its text names nothing of its own there), its text
@@ -323,7 +328,11 @@ impl MirrorPlanner {
             }
         }
 
-        Ok(plan_from_sets(dest_root, source_set, shield_set, dest_set))
+        let mut plan = plan_from_sets(dest_root, source_set, shield_set, dest_set);
+        if !filter.is_empty() {
+            keep_dirs_holding_left_out_entries(&mut plan.dirs, dest_root, &walked, filter);
+        }
+        Ok(plan)
     }
 
     pub fn should_copy_remote_entry(
@@ -444,6 +453,71 @@ fn plan_from_sets(
     dirs.reverse();
 
     MirrorDeletionPlan { files, dirs }
+}
+
+/// cr-g3fix5-1: drop from `dirs` (a deletion plan's directories, under
+/// `dest_root`) every directory that holds an entry `filter` — the
+/// deletion scope — leaves out, and every directory above one: an
+/// excluded entry, in any spelling the destination pairs with it, is never
+/// removed, so neither is the directory it lives in, whether or not the
+/// source still has that directory. The source walk prunes an excluded
+/// entry, so a source directory that held only excluded entries sends no
+/// file and its destination counterpart is planned as extraneous (the
+/// session manifest lists files only); the walk of the destination prunes
+/// the excluded entry too, so the plan never saw it. Before, such a
+/// directory was planned and survived only because removing it failed
+/// with "not empty" (tolerated), while a dry run counted it as deleted;
+/// with the destination's own spelling out of scope as well
+/// (cr-g3fix5-1), the plan must not count on that. A child the walk
+/// visited is in the plan or in the source, and a child the filter lets
+/// through but the walk does not list (a symlink) leaves the directory
+/// as it was. One listing per planned directory, never per entry.
+fn keep_dirs_holding_left_out_entries(
+    dirs: &mut Vec<PathBuf>,
+    dest_root: &Path,
+    walked: &HashSet<PathBuf>,
+    filter: &FileFilter,
+) {
+    let mut kept: HashSet<PathBuf> = HashSet::new();
+    for dir in dirs.iter() {
+        if kept.contains(dir) {
+            continue;
+        }
+        let (Ok(rel), Ok(listing)) = (dir.strip_prefix(dest_root), std::fs::read_dir(dir)) else {
+            continue;
+        };
+        let holds = listing.flatten().any(|entry| {
+            let child = rel.join(entry.file_name());
+            if walked.contains(&child) {
+                return false;
+            }
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                return !filter.allows_dir(&child, &path);
+            }
+            std::fs::symlink_metadata(&path).is_ok_and(|metadata| {
+                !filter.allows_entry(
+                    Some(&child),
+                    &path,
+                    metadata.len(),
+                    metadata.modified().ok(),
+                )
+            })
+        });
+        if holds {
+            let mut current = Some(dir.as_path());
+            while let Some(path) = current {
+                if path == dest_root || !path.starts_with(dest_root) {
+                    break;
+                }
+                if !kept.insert(path.to_path_buf()) {
+                    break;
+                }
+                current = path.parent();
+            }
+        }
+    }
+    dirs.retain(|dir| !kept.contains(dir));
 }
 
 /// Whether `rel` or any of its ancestors is in `shield_set`.
