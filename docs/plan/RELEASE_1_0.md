@@ -83,8 +83,8 @@ are the owner's act.
 - [ ] **G5b — cross-OS smoke matrix (owner-raised, 2026-08-02).** CI only
   proves same-OS loopback daemon transfers; the six directed cross-OS
   pairs (win↔linux, win↔mac, mac↔linux) run with the CANDIDATE binaries
-  on the real fleet (netwatch-01, magneto, q — identical build identity
-  `1.0.0+ef9a13b21afc` satisfies the same-build handshake). Each pair:
+  on the real fleet (netwatch-01, magneto, q — an identical build identity,
+  `1.0.0+<commit>`, satisfies the same-build handshake). Each pair:
   small mixed tree with nested dirs and a content change, initial copy,
   content verify, converged re-run must report 0 changed. Recorded here
   with results per pair. **Facts 2026-10-14:** every pair can be driven
@@ -154,12 +154,12 @@ is reviewed to consensus.
 
 | Gate | Status | Moves on |
 | --- | --- | --- |
-| G2 CI on the candidate | **CI FULLY GREEN on `de9a333f` (run 38960754619 + Docs Gate 38960754584, 2026-10-16): Check & Format; Linux 1542/0/2, Windows 1487/0/2, macOS 1533/0/2; three release builds** — the candidate's code (`e67c225c` + record corrections); pushed 2026-10-16 20:14Z from this clone, not by the session; the record commits after it are docs only, not pushed | a re-review finding moves the candidate and re-runs this |
+| G2 CI on the candidate | **CI FULLY GREEN on `de9a333f` (run 38960754619 + Docs Gate 38960754584, 2026-10-16): Check & Format; Linux 1542/0/2, Windows 1487/0/2, macOS 1533/0/2; three release builds** — the candidate's code (`e67c225c` + record corrections); pushed 2026-10-16 20:14Z from this clone, not by the session; the record commits after it are docs only, not pushed. **The lockfile bump `3f15f835` (h2 0.4.15 → 0.4.20 for RUSTSEC-2026-0258; yanked chacha20 0.10.1 → 0.10.2; gate: fmt, clippy native and Linux cross clean on macOS; the test step was still running at commit time and CI on the push is the evidence; `cargo audit` clean) moves the candidate to it** | `/git push all`, then CI on HEAD |
 | G3 dispositions | DONE: SSC shipped; audit-18 retired; audit-19 FIXED `fa948e01`; detached recents reason FIXED `b7da0d81` (D-2026-10-14-1); Codex g3fix-r1 over `b186e8b8..b7da0d81`: 3 MEDIUM on audit-19, FIXED `7d3e4eb6` `47bdfb69` `eddfab6c`; g3fix2-r1: cr-g3fix-2/-3 closed, cr-g3fix-1 not (HIGH, cr-g3fix2-1) + cr-g3fix2-2, FIXED `f6099aa3` `36b752b6`; g3fix3-r1: cr-g3fix2-2 closed, cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix3-1) + cr-g3fix3-2/-3, FIXED `a67087fd` `f6212938` `548625f5`; g3fix4-r1: cr-g3fix3-2/-3 closed, cr-g3fix3-1/cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix4-1) + cr-g3fix4-2 (HIGH) + cr-g3fix4-3 (HIGH) + cr-g3fix4-4, FIXED `e7be4970` `b304e6ff` `5624fd43` `e67c225c` | Codex re-review of `89575776..de9a333f` on the owner's `review` |
 | G4 docs truth | README + TRANSFER_SESSION corrected `6ac98801` (audit of 2026-10-14); plan-status sweep DONE 2026-10-14 (D-2026-10-14-1) | — |
 | G5 version + notes | DONE `6d5d93c8`: 1.0.0, CHANGELOG `[1.0.0]`, notes re-cut († entries follow the G3 rulings) | — |
-| G5b cross-OS matrix | Mac↔Linux PASS 2026-10-17 on run 38960754619's `de9a333f` archives (identity `1.0.0+de9a333f5027` on both ends; evidence `docs/bench/g5b-2026-10-17/`); Windows legs blocked (no host reachable) | a Windows host |
-| G6 tag + publish | — | owner |
+| G5b cross-OS matrix | Mac↔Linux PASS 2026-10-17 on run 38960754619's `de9a333f` archives (identity `1.0.0+de9a333f5027` on both ends; evidence `docs/bench/g5b-2026-10-17/`); to repeat on the lockfile-bump candidate's archives; Windows legs blocked (no host reachable) | the candidate's CI build; a Windows host |
+| G6 tag + publish | `cargo publish --dry-run -p blit-core` packages and verifies 1.0.0 (2026-10-17); `cargo audit` clean after `3f15f835` | owner: the tag on the final candidate |
 
 Plan-status sweep (G4): nine plans read `Active` while their work is
 landed or deferred post-release — ONE_TRANSFER_PATH (otp-1..12c `[x]`,
@@ -196,9 +196,12 @@ Ordered path to the tag:
    queue de-drift; plan-status flips as ruled.
 4. G5: DONE (`6d5d93c8`). Pushed through `de9a333f` 2026-10-16 (from this
    clone, not by the session); G2 CI fully green on that SHA (run
-   38960754619: Linux 1542, Windows 1487, macOS 1533, 0 failed).
-5. G5b with the candidate's archives: Mac↔Linux now; Windows legs when a
-   host answers (recorded per pair here).
+   38960754619: Linux 1542, Windows 1487, macOS 1533, 0 failed). The
+   lockfile bump `3f15f835` (RUSTSEC-2026-0258 h2; yanked chacha20) moves the
+   candidate; CI on it after the push.
+5. G5b: Mac↔Linux PASS on `de9a333f`'s archives (`50e4d5fc`); to repeat on
+   the final candidate's archives; Windows legs when a host answers
+   (recorded per pair here).
 6. The Codex range review of the two G3 fixes is the release-prep review
    (owner dispatch approval); its findings landed one per commit; the
    re-review of the fix range closes it.
