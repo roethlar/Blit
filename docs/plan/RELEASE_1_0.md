@@ -39,7 +39,7 @@ are the owner's act.
   (`.review/results/ls6-range.codex.r3.json`).
 - [ ] **G2 — CI green on the exact candidate**, both workflows (CI: fmt,
   strict clippy, Linux/macOS/Windows tests; Docs Gate).
-- [x] **G3 — known broken behaviors dispositioned.** CLOSED 2026-10-14 (D-2026-10-14-1): audit-19 FIXED `fa948e01`, the detached recents reason FIXED `b7da0d81`; Codex g3fix-r1 over the range found 3 MEDIUM on audit-19, fixed `7d3e4eb6` `47bdfb69` `eddfab6c`; g3fix2-r1 found 2 more (cr-g3fix2-1 HIGH: a cased exclude naming a symlink let `mirror` delete the destination's counterpart; cr-g3fix2-2 MEDIUM: disk names joined unescaped), fixed `f6099aa3` `36b752b6`; g3fix3-r1 found 3 more (cr-g3fix3-1 HIGH: Unicode-equivalent symlink spellings — final sigma, NFC/NFD — still let `mirror` delete; cr-g3fix3-2 MEDIUM: the escaped text also matched a real name spelled like it; cr-g3fix3-3 MEDIUM: a Windows peer rewrote `[\]` into `[/]`), fixed `a67087fd` `f6212938` `548625f5`; g3fix4-r1 found 4 more (cr-g3fix4-1 HIGH: a hard-linked symlink and the Windows case fold still let `mirror` delete; cr-g3fix4-2 HIGH: the destination's own spelling was never consulted, so `dst/Cache` for an excluded `src/cache` was deleted; cr-g3fix4-3 HIGH: a typed Unix escape changed a Windows peer's deletion scope; cr-g3fix4-4 MEDIUM: the absolute split rewrote a class's `\`), fixed `e7be4970` `b304e6ff` `5624fd43` `e67c225c`; the re-review g3fix5-r1 pends the owner's dispatch. Fix now:
+- [x] **G3 — known broken behaviors dispositioned.** CLOSED 2026-10-14 (D-2026-10-14-1): audit-19 FIXED `fa948e01`, the detached recents reason FIXED `b7da0d81`; Codex g3fix-r1 over the range found 3 MEDIUM on audit-19, fixed `7d3e4eb6` `47bdfb69` `eddfab6c`; g3fix2-r1 found 2 more (cr-g3fix2-1 HIGH: a cased exclude naming a symlink let `mirror` delete the destination's counterpart; cr-g3fix2-2 MEDIUM: disk names joined unescaped), fixed `f6099aa3` `36b752b6`; g3fix3-r1 found 3 more (cr-g3fix3-1 HIGH: Unicode-equivalent symlink spellings — final sigma, NFC/NFD — still let `mirror` delete; cr-g3fix3-2 MEDIUM: the escaped text also matched a real name spelled like it; cr-g3fix3-3 MEDIUM: a Windows peer rewrote `[\]` into `[/]`), fixed `a67087fd` `f6212938` `548625f5`; g3fix4-r1 found 4 more (cr-g3fix4-1 HIGH: a hard-linked symlink and the Windows case fold still let `mirror` delete; cr-g3fix4-2 HIGH: the destination's own spelling was never consulted, so `dst/Cache` for an excluded `src/cache` was deleted; cr-g3fix4-3 HIGH: a typed Unix escape changed a Windows peer's deletion scope; cr-g3fix4-4 MEDIUM: the absolute split rewrote a class's `\`), fixed `e7be4970` `b304e6ff` `5624fd43` `e67c225c`; g3fix5-r1 found 4 more (cr-g3fix5-1 HIGH: a Unicode-equivalent destination name — σ/ς, NFC/NFD — still deleted under `mirror`; cr-g3fix5-2 HIGH: a glob component left the differently spelled destination subtree in the deletion scope; cr-g3fix5-3 MEDIUM: `**\/cache` rewritten to `**/cache`; cr-g3fix5-4 MEDIUM: the bracket-aware split applied to a literal Windows root), fixed `80c6072e` `1435d7c7` `7f4e2116` `df61b1d6`; the re-review g3fix6-r1 pends the owner's dispatch. Fix now:
   **`docs/plan/SOURCE_SIDE_CONTAINMENT.md` (owner ruling D-2026-09-29-1,
   2026-09-29): a source-side per-file failure — locked, vanished, or
   size-drifted since the scan — must never end the run (D-2026-09-28-2);
@@ -154,11 +154,11 @@ is reviewed to consensus.
 
 | Gate | Status | Moves on |
 | --- | --- | --- |
-| G2 CI on the candidate | **CI FULLY GREEN on `de9a333f` (run 38960754619 + Docs Gate 38960754584, 2026-10-16): Check & Format; Linux 1542/0/2, Windows 1487/0/2, macOS 1533/0/2; three release builds** — the candidate's code (`e67c225c` + record corrections); pushed 2026-10-16 20:14Z from this clone, not by the session; the record commits after it are docs only, not pushed. **The lockfile bump `3f15f835` (h2 0.4.15 → 0.4.20 for RUSTSEC-2026-0258; yanked chacha20 0.10.1 → 0.10.2; gate: fmt, clippy native and Linux cross clean, tests 1533/0/2 over 47 binaries on macOS, release build `1.0.0+cf3405f65366`; `cargo audit` clean) moves the candidate to it** | `/git push all`, then CI on HEAD |
-| G3 dispositions | DONE: SSC shipped; audit-18 retired; audit-19 FIXED `fa948e01`; detached recents reason FIXED `b7da0d81` (D-2026-10-14-1); Codex g3fix-r1 over `b186e8b8..b7da0d81`: 3 MEDIUM on audit-19, FIXED `7d3e4eb6` `47bdfb69` `eddfab6c`; g3fix2-r1: cr-g3fix-2/-3 closed, cr-g3fix-1 not (HIGH, cr-g3fix2-1) + cr-g3fix2-2, FIXED `f6099aa3` `36b752b6`; g3fix3-r1: cr-g3fix2-2 closed, cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix3-1) + cr-g3fix3-2/-3, FIXED `a67087fd` `f6212938` `548625f5`; g3fix4-r1: cr-g3fix3-2/-3 closed, cr-g3fix3-1/cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix4-1) + cr-g3fix4-2 (HIGH) + cr-g3fix4-3 (HIGH) + cr-g3fix4-4, FIXED `e7be4970` `b304e6ff` `5624fd43` `e67c225c` | Codex re-review of `89575776..de9a333f` on the owner's `review` |
+| G2 CI on the candidate | **CI FULLY GREEN on `de9a333f` (run 38960754619 + Docs Gate 38960754584, 2026-10-16): Check & Format; Linux 1542/0/2, Windows 1487/0/2, macOS 1533/0/2; three release builds** — the candidate's code (`e67c225c` + record corrections); pushed 2026-10-16 20:14Z from this clone, not by the session; the record commits after it are docs only, not pushed. **The lockfile bump `3f15f835` (h2 0.4.15 → 0.4.20 for RUSTSEC-2026-0258; yanked chacha20 0.10.1 → 0.10.2; gate: fmt, clippy native and Linux cross clean, tests 1533/0/2 over 47 binaries on macOS, release build `1.0.0+cf3405f65366`; `cargo audit` clean) moves the candidate to it**; CI FULLY GREEN on `6b334db6` (run 39048156579, attempt 2 after a Linux scheduling flake) and on `d1037c73` (run 39049372551, the paced test); the g3fix5-r1 fixes `80c6072e`..`df61b1d6` (gate 1548/0/2 on macOS; Linux + Windows cross-clippy clean) move the candidate to `df61b1d6`, not yet pushed | `/git push all`, then CI on HEAD |
+| G3 dispositions | DONE: SSC shipped; audit-18 retired; audit-19 FIXED `fa948e01`; detached recents reason FIXED `b7da0d81` (D-2026-10-14-1); Codex g3fix-r1 over `b186e8b8..b7da0d81`: 3 MEDIUM on audit-19, FIXED `7d3e4eb6` `47bdfb69` `eddfab6c`; g3fix2-r1: cr-g3fix-2/-3 closed, cr-g3fix-1 not (HIGH, cr-g3fix2-1) + cr-g3fix2-2, FIXED `f6099aa3` `36b752b6`; g3fix3-r1: cr-g3fix2-2 closed, cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix3-1) + cr-g3fix3-2/-3, FIXED `a67087fd` `f6212938` `548625f5`; g3fix4-r1: cr-g3fix3-2/-3 closed, cr-g3fix3-1/cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix4-1) + cr-g3fix4-2 (HIGH) + cr-g3fix4-3 (HIGH) + cr-g3fix4-4, FIXED `e7be4970` `b304e6ff` `5624fd43` `e67c225c`; g3fix5-r1: cr-g3fix4-1/-3/-4, cr-g3fix3-1, cr-g3fix2-1 closed, cr-g3fix4-2/cr-g3fix-1 not (HIGH, cr-g3fix5-1) + cr-g3fix5-2 (HIGH) + cr-g3fix5-3 + cr-g3fix5-4, FIXED `80c6072e` `1435d7c7` `7f4e2116` `df61b1d6` | Codex re-review of `a157ae00..df61b1d6` on the owner's `review` |
 | G4 docs truth | README + TRANSFER_SESSION corrected `6ac98801` (audit of 2026-10-14); plan-status sweep DONE 2026-10-14 (D-2026-10-14-1) | — |
 | G5 version + notes | DONE `6d5d93c8`: 1.0.0, CHANGELOG `[1.0.0]`, notes re-cut († entries follow the G3 rulings) | — |
-| G5b cross-OS matrix | Mac↔Linux PASS 2026-10-17 on run 38960754619's `de9a333f` archives (identity `1.0.0+de9a333f5027` on both ends; evidence `docs/bench/g5b-2026-10-17/`); to repeat on the lockfile-bump candidate's archives; Windows legs blocked (no host reachable) | the candidate's CI build; a Windows host |
+| G5b cross-OS matrix | Mac↔Linux PASS 2026-10-17 on run 38960754619's `de9a333f` archives (identity `1.0.0+de9a333f5027` on both ends; evidence `docs/bench/g5b-2026-10-17/`); stands as the evidence — the owner declined a repeat on later archives (2026-10-17, "testing theater"); Windows legs blocked (no host reachable) | a Windows host |
 | G6 tag + publish | `cargo publish --dry-run -p blit-core` packages and verifies 1.0.0 (2026-10-17); `cargo audit` clean after `3f15f835` | owner: the tag on the final candidate |
 
 Plan-status sweep (G4): nine plans read `Active` while their work is
@@ -190,8 +190,11 @@ Ordered path to the tag:
    HIGH: a hard-linked symlink and the Windows fold, the destination's own
    spelling, a typed Unix escape on a Windows peer — all under `mirror`),
    fixed one per commit (`e7be4970`, `b304e6ff`, `5624fd43`, `e67c225c`),
-   gate 1533/0/2; the re-review g3fix5-r1 of `89575776..de9a333f` awaits the
-   owner's dispatch word (D-2026-07-23-7).
+   gate 1533/0/2; the re-review g3fix5-r1 closed five and found four more (two
+   HIGH: Unicode-equivalent destination names and glob components under
+   `mirror`), fixed one per commit (`80c6072e`, `1435d7c7`, `7f4e2116`,
+   `df61b1d6`), gate 1548/0/2; the re-review g3fix6-r1 of `a157ae00..df61b1d6`
+   awaits the owner's dispatch word (D-2026-07-23-7).
 3. G4 edits: README/TRANSFER_SESSION corrections from the audit; STATE
    queue de-drift; plan-status flips as ruled.
 4. G5: DONE (`6d5d93c8`). Pushed through `de9a333f` 2026-10-16 (from this
@@ -199,8 +202,8 @@ Ordered path to the tag:
    38960754619: Linux 1542, Windows 1487, macOS 1533, 0 failed). The
    lockfile bump `3f15f835` (RUSTSEC-2026-0258 h2; yanked chacha20) moves the
    candidate; CI on it after the push.
-5. G5b: Mac↔Linux PASS on `de9a333f`'s archives (`50e4d5fc`); to repeat on
-   the final candidate's archives; Windows legs when a host answers
+5. G5b: Mac↔Linux PASS on `de9a333f`'s archives (`50e4d5fc`) stands; the
+   owner declined a repeat on later archives; Windows legs when a host answers
    (recorded per pair here).
 6. The Codex range review of the two G3 fixes is the release-prep review
    (owner dispatch approval); its findings landed one per commit; the

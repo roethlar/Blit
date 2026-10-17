@@ -77,7 +77,9 @@ the source side too, and adds a retry pass.
   source stores under several names (a hard link) excludes every one of
   them and says so once on stderr. Under `mirror`, an excluded entry the
   destination stores in another spelling (`dst/Cache` for an excluded
-  `src/cache`) is out of the deletion scope too. Excluded directories are
+  `src/cache`, a Unicode-equivalent name, the match of a glob) is out of
+  the deletion scope too, and so is the directory holding it. Excluded
+  directories are
   never read, so an unreadable one no longer stops a mirror's deletions.
   Before 1.0 the absolute and bare-name forms silently matched nothing.
 

@@ -156,8 +156,9 @@ part, and a job you can list, read, re-run and retry.
   path naming an entry the source stores under several names (a hard
   link) excludes every one of them and says so once on stderr. Under
   `mirror`, an excluded entry the destination stores in another spelling
-  (`dst/Cache` for an excluded `src/cache`) is out of the deletion scope
-  too.
+  (`dst/Cache` for an excluded `src/cache`, `dst/x/ς` for an excluded `σ`,
+  `dst/x/Cache` for `**/cache`) is out of the deletion scope too, and so
+  is the directory holding it.
   Excluded directories are pruned, never read, so an unreadable one no
   longer leaves a mirror's scan incomplete. `*.log`, `**/*.log`, `dir/**`
   and exact relative paths match as before. (`blit-core`: `FilterInputs`
