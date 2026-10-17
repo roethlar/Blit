@@ -2702,10 +2702,30 @@ mod tests {
         // preempt sync code); production naturally interleaves
         // because emit sites live on different async tasks
         // (RPC handlers, the progress ticker).
+        //
+        // The burst is paced to the forwarder's drain: before each
+        // send the emitter waits until the slowest receiver (the
+        // forwarder is the only one) has at most half the ring
+        // queued. Without pacing the test measured the OS, not
+        // the design: on a loaded Linux CI runner (2026-10-17,
+        // run 39048156579) the forwarder's worker thread got no
+        // CPU for the whole 306-event burst and a correct
+        // forwarder reported Lagged(50). A forwarder that does
+        // not drain filtered events still fails here, in the
+        // pacing wait, within its deadline.
         let overflow_count = SUBSCRIBE_BROADCAST_CAPACITY + 50;
         let events_tx = svc.events_tx.clone();
         let emit_task = tokio::spawn(async move {
             for _ in 0..overflow_count {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                while events_tx.len() > SUBSCRIBE_BROADCAST_CAPACITY / 2 {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "the forwarder is not draining filtered events: {} queued",
+                        events_tx.len()
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
                 let event = DaemonEvent {
                     payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
                         transfer_id: id_b.clone(),
