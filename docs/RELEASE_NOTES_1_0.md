@@ -72,7 +72,12 @@ the source side too, and adds a retry pass.
   the filesystem itself pairs with the stored name, still excludes the
   entry; an absolute glob written through a symlink (`/alias/*.txt`, macOS
   `/tmp`) is made relative too; on Windows `\` in a relative pattern is a
-  separator (`.\cache`, `cache\`). Excluded directories are
+  separator (`.\cache`, `cache\`), and elsewhere a typed escape is sent
+  in a form every peer reads alike. An absolute path naming an entry the
+  source stores under several names (a hard link) excludes every one of
+  them and says so once on stderr. Under `mirror`, an excluded entry the
+  destination stores in another spelling (`dst/Cache` for an excluded
+  `src/cache`) is out of the deletion scope too. Excluded directories are
   never read, so an unreadable one no longer stops a mirror's deletions.
   Before 1.0 the absolute and bare-name forms silently matched nothing.
 

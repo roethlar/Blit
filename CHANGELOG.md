@@ -151,7 +151,13 @@ part, and a job you can list, read, re-run and retry.
   spelling the filesystem itself pairs with the stored name (final sigma,
   NFC for NFD) names that entry, and a typed pattern is glob syntax only
   (`data[1]` is a class naming `data1`) — and on Windows `\` in a relative
-  pattern is a separator (`.\cache`, `cache\`).
+  pattern is a separator (`.\cache`, `cache\`), while elsewhere a typed
+  escape (`a\*b`) is sent in a form every peer reads alike. An absolute
+  path naming an entry the source stores under several names (a hard
+  link) excludes every one of them and says so once on stderr. Under
+  `mirror`, an excluded entry the destination stores in another spelling
+  (`dst/Cache` for an excluded `src/cache`) is out of the deletion scope
+  too.
   Excluded directories are pruned, never read, so an unreadable one no
   longer leaves a mirror's scan incomplete. `*.log`, `**/*.log`, `dir/**`
   and exact relative paths match as before. (`blit-core`: `FilterInputs`
