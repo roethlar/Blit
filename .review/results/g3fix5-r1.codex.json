@@ -1,0 +1,47 @@
+{
+  "verdict": "findings",
+  "capability_ok": true,
+  "guard_confirmed": true,
+  "reviewed_sha": "de9a333f50277e0f01913cd49ab2a8c4d27af9f4",
+  "base_sha": "89575776d9b790c930e7acf685d0a842be10cf21",
+  "guard": "On macOS, replaced mirror_delete_pass's destination_scope call with clone_without_cache. The new mirror_delete_pass_keeps_an_excluded_entry_stored_in_another_spelling test failed, exit 101: Cache/saved.txt was deleted. Restored with git checkout, verified identical blob hashes, and reran successfully, exit 0. Temporary probes were removed; the worktree is clean. Native fmt, clippy, and workspace tests passed: 1533 passed, 2 ignored. Linux cross-clippy passed. Pinned-head CI run 38960754619 reports successful Linux, Windows, and macOS test legs; Windows/Linux runtimes were not executed locally. Closure reasoning: cr-g3fix4-1 closed:true — non-following identities and tie expansion repair the recorded hard-linked symlink cases in local and wire forms. cr-g3fix4-2 closed:false — literal paths are repaired, but Unicode name rules and glob paths still permit excluded destination data to be deleted. cr-g3fix4-3 closed:true — the recorded Unix-to-Windows escape disagreement is repaired; a separate local matching regression is reported below. cr-g3fix4-4 closed:true — the recorded bracket-class corruption is repaired; a separate root-tokenization regression is reported below. cr-g3fix3-1 closed:true — recorded Unicode symlink pairing failures are repaired. cr-g3fix2-1 closed:true — recorded literal symlink exclusions now protect their destination counterparts. cr-g3fix-1 closed:false — absolute glob exclusions still lose destination filesystem-case semantics.",
+  "closed": {
+    "cr-g3fix4-1": true,
+    "cr-g3fix4-2": false,
+    "cr-g3fix4-3": true,
+    "cr-g3fix4-4": true,
+    "cr-g3fix3-1": true,
+    "cr-g3fix2-1": true,
+    "cr-g3fix-1": false
+  },
+  "findings": [
+    {
+      "title": "Unicode-equivalent destination names remain inside mirror deletion scope",
+      "evidence": "crates/blit-core/src/fs_enum.rs:205 — GlobBuilder::case_insensitive(true) uses globset's byte-regex mode, which folds ASCII, not Unicode. On case-insensitive macOS, mirror --exclude 'σ' with src/x/σ and dst/x/ς/saved.txt deleted saved.txt and exited 0. The filesystem identified both destination spellings as the same inode. The same failure reproduced for é versus É and NFC café versus NFD café. The ASCII cache/Cache control preserved saved.txt.",
+      "predicted_failure": "A mirror deletes pre-existing data inside an excluded destination subtree when its stored name differs by Unicode case or normalization. The shared destination deletion pass exposes local and daemon destinations to this failure.",
+      "severity": "HIGH",
+      "better_approach": "Match destination name rules using the destination's supported case and normalization equivalence. Do not rely on globset's case-insensitive flag for Unicode folding. Add Unicode destination-survival tests."
+    },
+    {
+      "title": "A glob component prevents protection of differently spelled destination descendants",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:810 — respelled_below stops at the first glob component; crates/blit-core/src/fs_enum.rs:142 keeps path rules case-sensitive. Reproduced on macOS with src/x/cache and dst/x/Cache/saved.txt: both --exclude '**/cache' and the absolute --exclude '<src>/*/cache' omitted the source subtree but deleted saved.txt, exiting 0. The literal './x/cache' and bare 'cache' controls preserved it.",
+      "predicted_failure": "Valid relative and absolute glob exclusions still allow mirror to delete their excluded destination counterparts when stored spelling differs. This leaves cr-g3fix4-2 and the broader cr-g3fix-1 filesystem-case contract incomplete.",
+      "severity": "HIGH",
+      "better_approach": "Preserve destination filesystem equivalence throughout path-rule matching, including components after globs, without expanding or rewriting wildcard syntax. Add survival coverage for '**/cache' and absolute wildcard paths."
+    },
+    {
+      "title": "Rewriting an escaped separator changes recursive-glob semantics",
+      "evidence": "crates/blit-core/src/fs_enum.rs:300 and :326 — escaped '/' is emitted as a bare '/', turning '**\\/cache' into '**/cache'. Globset parses the latter as a recursive prefix that also matches top-level cache; the original requires a preceding separator. A direct FileFilter comparison confirmed that cache/needed.txt changes from allowed to excluded. The built CLI's copy --exclude '**\\/cache' omitted that file and exited 0.",
+      "predicted_failure": "Previously valid Unix exclusions acquire broader matching behavior, silently omitting additional files from copies or backups and incorrectly protecting additional paths from mirror deletion.",
+      "severity": "MEDIUM",
+      "better_approach": "Translate escapes while preserving parsed glob semantics and rule anchoring, including the context-sensitive interpretation of '**'. Add equivalence tests for escaped separators adjacent to recursive wildcards."
+    },
+    {
+      "title": "Bracket-aware pattern parsing is incorrectly applied to literal Windows roots",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:390 and :415 — absolute_components applies the bracket-aware normalizer to the source root as well as the pattern. A parameterized Windows-rule probe on macOS used root 'C:\\data[1\\test]\\src' and pattern 'C:/data[1/test]/src/cache'; relative_to_root returned None instead of ['cache']. The backslash between the root's two literal directory names was treated as a bracket-class member. through_resolved_root also stops at the bracket-bearing ancestor at line 335.",
+      "predicted_failure": "On Windows, an absolute exclude using forward slashes fails to relativize against an equivalent backslash-spelled source root whose directory components contain brackets spanning a separator. The command reports the exclude as unmatchable and proceeds without excluding the requested subtree.",
+      "severity": "MEDIUM",
+      "better_approach": "Tokenize filesystem roots and resolved prefixes as literal paths, normalizing every native separator. Reserve bracket-aware tokenization for user pattern text, and test mixed separators with bracket-bearing root components."
+    }
+  ]
+}
