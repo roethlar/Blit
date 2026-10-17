@@ -324,7 +324,7 @@ fn escape_as_class(c: char) -> String {
 /// or `^`, then a `]` in first place is a member, and the class ends at
 /// the next `]`. `None` when it never closes (globset refuses the pattern,
 /// and the `[` is an ordinary character here).
-fn bracket_class_len(text: &str) -> Option<usize> {
+pub(crate) fn bracket_class_len(text: &str) -> Option<usize> {
     let mut body = text.strip_prefix('[')?;
     let mut len = 1;
     if let Some(after) = body.strip_prefix(['!', '^']) {

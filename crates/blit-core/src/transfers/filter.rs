@@ -10,8 +10,8 @@
 //! modal will use.
 
 use crate::fs_enum::{
-    exclude_rule, normalize_separators, parse_duration, parse_size, typed_exclude_dialect,
-    FileFilter,
+    bracket_class_len, exclude_rule, normalize_separators, parse_duration, parse_size,
+    typed_exclude_dialect, FileFilter,
 };
 use eyre::{eyre, Context, Result};
 use std::path::{Path, PathBuf};
@@ -269,21 +269,20 @@ fn resolve_excludes_on(
                 .push(typed_exclude_dialect(pattern, windows).into_owned());
             continue;
         }
-        // Each form of the pattern with the part of it read from the disk:
-        // as typed, none; through the resolved root, its resolved prefix.
-        let mut pattern_forms = vec![(pattern.clone(), None)];
-        if let Some((prefix, rest)) = resolved_root
-            .as_deref()
-            .and_then(|root| through_resolved_root(pattern, root, windows))
-        {
-            let form = prefix.join(rest).to_string_lossy().into_owned();
-            pattern_forms.push((form, Some(prefix.to_string_lossy().into_owned())));
-        }
-        let relative = pattern_forms.iter().find_map(|(form, prefix)| {
-            roots
-                .iter()
-                .find_map(|root| relative_parts(form, prefix.as_deref(), root, windows))
-        });
+        // The pattern as typed, else through the resolved root: its
+        // resolved prefix (read from the disk, a literal path) and the
+        // typed rest kept apart (cr-g3fix5-4).
+        let relative = roots
+            .iter()
+            .find_map(|root| relative_to_root(pattern, root, windows))
+            .map(|rest| rest.into_iter().map(Part::Typed).collect())
+            .or_else(|| {
+                let (prefix, rest) =
+                    through_resolved_root(pattern, resolved_root.as_deref()?, windows)?;
+                roots
+                    .iter()
+                    .find_map(|root| resolved_parts(&prefix, rest, root, windows))
+            });
         match (relative, source_root) {
             (Some(rest), Some(root)) => {
                 // cr-g3fix4-3: the typed parts in the dialect every peer
@@ -313,49 +312,76 @@ fn resolve_excludes_on(
 /// leading literal part reaches the source through a symlink
 /// (`/alias/*.txt` with `alias` naming the source, or a directory inside
 /// it; macOS `/tmp` for `/private/tmp`). The pattern's leading ancestors
-/// up to its first component holding a glob metacharacter are resolved,
-/// shortest first; the first that exists and lands at or below
-/// `resolved_root` is returned resolved, with what follows it as typed —
-/// a glob unchanged, a path that does not exist yet as it was written,
-/// and a symlink inside the source unresolved (the walk does not follow
-/// one, so resolving it would name its target instead). The resolved
-/// part is the disk's own names, never glob text (cr-g3fix2-2), so it is
-/// kept apart from the typed rest. `None` when no ancestor lands there.
+/// up to its first component holding glob syntax are resolved, shortest
+/// first; the first that exists and lands at or below `resolved_root` is
+/// returned resolved, with the text that follows it as typed — a glob
+/// unchanged, a path that does not exist yet as it was written, and a
+/// symlink inside the source unresolved (the walk does not follow one, so
+/// resolving it would name its target instead). The resolved part is the
+/// disk's own names, never glob text (cr-g3fix2-2), so it is kept apart
+/// from the typed rest. cr-g3fix5-4: the ancestors are the pattern's
+/// leading text read as a literal path, split at every separator the
+/// platform has ([`literal_components_at`]), as the platform resolves
+/// them, and a component stops the walk only when it holds glob syntax
+/// on its own ([`holds_glob_syntax`]: a `[` that never closes inside it,
+/// as in a directory `data[1` beside `test]`, is its own character).
+/// `None` when no ancestor lands there.
 fn through_resolved_root<'a>(
     pattern: &'a str,
     resolved_root: &Path,
     windows: bool,
-) -> Option<(PathBuf, &'a Path)> {
-    let path = Path::new(pattern);
-    let mut ancestors: Vec<&Path> = path.ancestors().collect();
-    ancestors.reverse();
-    for ancestor in ancestors {
-        if ancestor
-            .file_name()
-            .is_some_and(|name| has_glob_meta(&name.to_string_lossy(), windows))
-        {
+) -> Option<(PathBuf, &'a str)> {
+    for (component, end) in literal_components_at(pattern, windows) {
+        if component == "//" {
+            continue;
+        }
+        if holds_glob_syntax(&component, windows) {
             break;
         }
-        let Ok(resolved) = std::fs::canonicalize(ancestor) else {
+        // A bare drive is resolved with its separator (`C:\`), never as
+        // that drive's current directory.
+        let end = if windows && is_drive(&component) {
+            (end + 1).min(pattern.len())
+        } else {
+            end
+        };
+        let Ok(resolved) = std::fs::canonicalize(&pattern[..end]) else {
             continue;
         };
         if !resolved.starts_with(resolved_root) {
             continue;
         }
-        let Ok(rest) = path.strip_prefix(ancestor) else {
-            continue;
-        };
+        let rest = &pattern[end..];
         // A `..` after the landing point could climb back out; a longer
         // ancestor folds it in its resolved form instead.
         if rest
-            .components()
-            .any(|component| component == std::path::Component::ParentDir)
+            .split(|c| c == '/' || (windows && c == '\\'))
+            .any(|component| component == "..")
         {
             continue;
         }
         return Some((resolved, rest));
     }
     None
+}
+
+/// `C:` — a drive, the first component of a Windows drive path.
+fn is_drive(component: &str) -> bool {
+    let bytes = component.as_bytes();
+    bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+/// cr-g3fix5-4: whether one component of an absolute pattern's literal
+/// reading holds glob syntax on its own: a wildcard, an alternation, a
+/// bracket class that closes inside it, or, off Windows, `\` (the escape;
+/// on Windows a separator, never part of a component). A `[` that never
+/// closes inside the component opens no class there.
+fn holds_glob_syntax(component: &str, windows: bool) -> bool {
+    component.contains(['*', '?', '{'])
+        || (!windows && component.contains('\\'))
+        || component
+            .char_indices()
+            .any(|(at, c)| c == '[' && bracket_class_len(&component[at..]).is_some())
 }
 
 /// A component `globset` reads as glob syntax: it opens a wildcard, a
@@ -380,58 +406,101 @@ fn is_absolute_pattern(pattern: &str, windows: bool) -> bool {
             && is_sep(bytes[2]))
 }
 
-/// The components of an absolute path, `/`-split. On Windows `\` is a
-/// separator too, outside a bracket class ([`normalize_separators`]:
-/// cr-g3fix4-4 — `C:\src\back[s\]lash` names `back[s\]lash`, a class
-/// holding `s` and `\`, not `back[s` and `]lash`), a verbatim prefix
-/// (`\\?\`) is dropped, and a UNC path keeps a leading marker so it never
-/// equals a rooted one (a prefix holds no class, so it reads as before).
-fn absolute_components(path: &str, windows: bool) -> Vec<String> {
-    let mut unified = normalize_separators(path, windows).into_owned();
-    if windows {
-        if let Some(rest) = unified.strip_prefix("//?/UNC/") {
-            unified = format!("//{rest}");
-        } else if let Some(rest) = unified.strip_prefix("//?/") {
-            unified = rest.to_string();
-        }
-    }
+/// cr-g3fix5-4: the components of an absolute path read as a literal
+/// path — a source root, a resolved root or prefix, or the leading part of
+/// a pattern compared with one — each with the byte offset where it ends.
+/// Every separator the platform has splits it (on Windows `\` and `/`
+/// alike: a literal path holds no bracket class, so a root
+/// `C:\data[1\test]\src` names `data[1` and `test]`); a verbatim prefix
+/// (`\\?\`) is dropped, and a UNC path keeps a leading marker `//` so it
+/// never equals a rooted one.
+fn literal_components_at(path: &str, windows: bool) -> Vec<(String, usize)> {
+    let plain: std::borrow::Cow<'_, str> = if windows {
+        path.replace('\\', "/").into()
+    } else {
+        path.into()
+    };
+    let (unc, start) = if !windows {
+        (false, 0)
+    } else if plain.starts_with("//?/UNC/") {
+        (true, "//?/UNC/".len())
+    } else if plain.starts_with("//?/") {
+        (false, "//?/".len())
+    } else if plain.starts_with("//") {
+        (true, "//".len())
+    } else {
+        (false, 0)
+    };
     let mut components = Vec::new();
-    if windows && unified.starts_with("//") {
-        components.push("//".to_string());
+    if unc {
+        components.push(("//".to_string(), start));
     }
-    components.extend(
-        unified
-            .split('/')
-            .filter(|component| !component.is_empty() && *component != ".")
-            .map(str::to_string),
-    );
+    let mut offset = start;
+    for component in plain[start..].split('/') {
+        let end = offset + component.len();
+        if !component.is_empty() && component != "." {
+            components.push((component.to_string(), end));
+        }
+        offset = end + 1;
+    }
     components
+}
+
+/// [`literal_components_at`] without the offsets.
+fn literal_components(path: &str, windows: bool) -> Vec<String> {
+    literal_components_at(path, windows)
+        .into_iter()
+        .map(|(component, _)| component)
+        .collect()
+}
+
+/// The components of typed pattern text, `/`-split. On Windows `\` is a
+/// separator too, outside a bracket class ([`normalize_separators`]:
+/// cr-g3fix4-4 — `back[s\]lash` names one component, a class holding `s`
+/// and `\`, not `back[s` and `]lash`).
+fn typed_components(text: &str, windows: bool) -> Vec<String> {
+    normalize_separators(text, windows)
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .map(str::to_string)
+        .collect()
+}
+
+/// Two path components the platform names alike: case-insensitively on
+/// Windows.
+fn same_component(a: &str, b: &str, windows: bool) -> bool {
+    if windows {
+        a.to_lowercase() == b.to_lowercase()
+    } else {
+        a == b
+    }
 }
 
 /// The components of `pattern` below `root` when it lies strictly beneath
 /// it; `None` otherwise (the root itself names nothing a walk visits).
+/// cr-g3fix5-4: the root is a literal path and the pattern's leading part
+/// is compared with it as one ([`literal_components_at`]), so
+/// `C:/data[1/test]/src/cache` and `C:\data[1\test]\src\cache` both lie
+/// below `C:\data[1\test]\src`; only the typed text below the root is
+/// split as pattern text ([`typed_components`]).
 fn relative_to_root(pattern: &str, root: &str, windows: bool) -> Option<Vec<String>> {
-    let pattern = absolute_components(pattern, windows);
-    let root = absolute_components(root, windows);
-    if pattern.len() <= root.len() {
+    let root = literal_components(root, windows);
+    let leading = literal_components_at(pattern, windows);
+    if leading.len() < root.len()
+        || !root
+            .iter()
+            .zip(&leading)
+            .all(|(r, (p, _))| same_component(r, p, windows))
+    {
         return None;
     }
-    let same = |a: &String, b: &String| {
-        if windows {
-            a.to_lowercase() == b.to_lowercase()
-        } else {
-            a == b
-        }
-    };
-    if !root.iter().zip(&pattern).all(|(r, p)| same(r, p)) {
-        return None;
-    }
-    let rest = &pattern[root.len()..];
+    let below = root.len().checked_sub(1).map_or(0, |last| leading[last].1);
+    let rest = typed_components(&pattern[below..], windows);
     // `..` would climb back out: such a form names nothing reliably.
-    if rest.iter().any(|component| component == "..") {
+    if rest.is_empty() || rest.iter().any(|component| component == "..") {
         return None;
     }
-    Some(rest.to_vec())
+    Some(rest)
 }
 
 /// cr-g3fix2-2: one component of a pattern made source-relative.
@@ -445,31 +514,33 @@ enum Part {
     Typed(String),
 }
 
-/// `form` made relative to `root` as [`Part`]s: the components that lie
-/// within `prefix` — the part of the form read from the disk — are
-/// literal, the rest as typed. `None` as for [`relative_to_root`].
-fn relative_parts(
-    form: &str,
-    prefix: Option<&str>,
-    root: &str,
-    windows: bool,
-) -> Option<Vec<Part>> {
-    let rest = relative_to_root(form, root, windows)?;
-    let literal = prefix
-        .and_then(|prefix| relative_to_root(prefix, root, windows))
-        .map_or(0, |below| below.len());
-    Some(
-        rest.into_iter()
-            .enumerate()
-            .map(|(at, component)| {
-                if at < literal {
-                    Part::Literal(component)
-                } else {
-                    Part::Typed(component)
-                }
-            })
-            .collect(),
-    )
+/// The pattern through the resolved root — `prefix`, read from the disk,
+/// and the `rest` of the pattern as typed — made relative to `root` as
+/// [`Part`]s: the prefix's components below the root are literal, the
+/// rest's as typed. cr-g3fix5-4: the prefix is a literal path
+/// ([`literal_components`]), only the rest is pattern text
+/// ([`typed_components`]). `None` as for [`relative_to_root`].
+fn resolved_parts(prefix: &Path, rest: &str, root: &str, windows: bool) -> Option<Vec<Part>> {
+    let root = literal_components(root, windows);
+    let prefix = literal_components(&prefix.to_string_lossy(), windows);
+    if prefix.len() < root.len()
+        || !root
+            .iter()
+            .zip(&prefix)
+            .all(|(r, p)| same_component(r, p, windows))
+    {
+        return None;
+    }
+    let parts: Vec<Part> = prefix[root.len()..]
+        .iter()
+        .cloned()
+        .map(Part::Literal)
+        .chain(typed_components(rest, windows).into_iter().map(Part::Typed))
+        .collect();
+    let climbs = parts.iter().any(|part| match part {
+        Part::Literal(component) | Part::Typed(component) => component == "..",
+    });
+    (!parts.is_empty() && !climbs).then_some(parts)
 }
 
 /// A relative pattern from its parts, `/`-joined: a literal part escaped
@@ -1839,6 +1910,112 @@ mod tests {
         i.source_root = Some(root);
         assert_eq!(build(&i).unwrap().exclude_files, [r"./back[s\]lash"]);
         assert_eq!(build_spec(&i).unwrap().exclude, [r"./back[s\]lash"]);
+    }
+
+    /// cr-g3fix5-4: under the Windows rule a source root, a resolved root
+    /// and a verbatim or UNC prefix are literal paths, split at every `\`
+    /// and `/` — the root `C:\data[1\test]\src` names the directories
+    /// `data[1` and `test]` — and so is the leading part of a pattern
+    /// compared with one, typed with either slash; only the typed text
+    /// below the root keeps a bracket class's `\` (cr-g3fix4-4). Before, a
+    /// root was split bracket-aware too, its `[1\test]` read as one class,
+    /// and a pattern spelling the root with `/` relativized to nothing (the
+    /// exclude reported unmatchable and dropped). Pure string logic, so it
+    /// runs (and can fail) on every OS.
+    #[test]
+    fn a_windows_literal_root_is_split_at_every_separator() {
+        let relative = |pattern: &str, root: &str| {
+            relative_to_root(pattern, root, true)
+                .map(|rest| written(&rest.into_iter().map(Part::Typed).collect::<Vec<_>>(), true))
+        };
+        let root = r"C:\data[1\test]\src";
+        for pattern in [
+            r"C:/data[1/test]/src/cache",
+            r"C:\data[1\test]\src\cache",
+            r"c:\DATA[1/Test]\src/cache",
+        ] {
+            assert_eq!(
+                relative(pattern, root).as_deref(),
+                Some("./cache"),
+                "{pattern}"
+            );
+            assert_eq!(
+                relative(pattern, r"\\?\C:\data[1\test]\src").as_deref(),
+                Some("./cache"),
+                "{pattern} under the verbatim root"
+            );
+        }
+        assert_eq!(
+            relative(r"C:/data[1/test]/src/a/back[s\]lash", root).as_deref(),
+            Some(r"a/back[s\]lash"),
+            "below the root a class keeps its `\\`"
+        );
+        assert_eq!(
+            relative(r"\\srv\share\d[1\x]\y\z", r"\\?\UNC\srv\share\d[1\x]").as_deref(),
+            Some("y/z")
+        );
+        assert_eq!(relative(r"C:\data[1\test]\other\x", root), None);
+        assert_eq!(relative(root, root), None, "the root itself names nothing");
+
+        // Through the resolved root: the resolved prefix is a literal path,
+        // the rest typed pattern text.
+        assert_eq!(
+            resolved_parts(
+                Path::new(r"\\?\C:\data[1\test]\src\sub"),
+                r"\back[s\]lash",
+                root,
+                true
+            ),
+            Some(vec![
+                Part::Literal("sub".into()),
+                Part::Typed(r"back[s\]lash".into())
+            ])
+        );
+        assert_eq!(
+            resolved_parts(Path::new(root), "/cache", r"\\?\C:\data[1\test]\src", true),
+            Some(vec![Part::Typed("cache".into())])
+        );
+        assert_eq!(resolved_parts(Path::new(root), "", root, true), None);
+
+        // One component of the literal reading holds glob syntax only on
+        // its own: a `[` that never closes inside it is a name's character.
+        for (component, windows, glob) in [
+            ("data[1", true, false),
+            ("test]", true, false),
+            ("data[1", false, false),
+            ("data[1]", true, true),
+            ("a*", true, true),
+            ("{a,b}", true, true),
+            (r"a\b", false, true),
+        ] {
+            assert_eq!(
+                holds_glob_syntax(component, windows),
+                glob,
+                "{component} (windows rule: {windows})"
+            );
+        }
+    }
+
+    /// cr-g3fix5-4: a pattern that reaches the source through a symlink
+    /// whose path holds a directory named with an unclosed `[` (`a[1`,
+    /// with `b]` inside it) is resolved through it: such a `[` opens no
+    /// class in its component, so the walk of the pattern's leading
+    /// ancestors goes on past it. Before, the walk stopped at `a[1` and
+    /// the exclude was reported unmatchable. Unix: making a symlink on
+    /// Windows needs privilege.
+    #[cfg(unix)]
+    #[test]
+    fn a_pattern_through_an_alias_named_with_an_unclosed_bracket_is_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("src");
+        std::fs::create_dir_all(root.join("cache")).unwrap();
+        let alias = dir.path().join("a[1").join("b]");
+        std::fs::create_dir_all(&alias).unwrap();
+        std::os::unix::fs::symlink(&root, alias.join("link")).unwrap();
+        let exc = vec![format!("{}/link/cache", alias.display())];
+        let resolved = resolve_excludes_on(&exc, Some(&root), false);
+        assert_eq!(resolved.patterns, ["./cache"]);
+        assert!(resolved.unmatchable.is_empty());
     }
 
     /// cr-g3fix-3: relative patterns reach both builders — and so the wire
