@@ -137,11 +137,11 @@ is reviewed to consensus.
 
 | Gate | Status | Moves on |
 | --- | --- | --- |
-| G2 CI on the candidate | CI green on `d9adb99e` (run 38791000789); candidate moved to `master` at `e67c225c` + the record commits after it, local gate 1533/0/2 (macOS; Linux + Windows cross-clippy clean), `d9adb99e..HEAD` not pushed (nineteen commits through the record `f6c617a5`) | `/git push all`, then the run |
+| G2 CI on the candidate | **CI FULLY GREEN on `de9a333f` (run 38960754619 + Docs Gate 38960754584, 2026-10-16): Check & Format; Linux 1542/0/2, Windows 1487/0/2, macOS 1533/0/2; three release builds** — the candidate's code (`e67c225c` + record corrections); pushed 2026-10-16 20:14Z from this clone, not by the session; the record commits after it are docs only, not pushed | a re-review finding moves the candidate and re-runs this |
 | G3 dispositions | DONE: SSC shipped; audit-18 retired; audit-19 FIXED `fa948e01`; detached recents reason FIXED `b7da0d81` (D-2026-10-14-1); Codex g3fix-r1 over `b186e8b8..b7da0d81`: 3 MEDIUM on audit-19, FIXED `7d3e4eb6` `47bdfb69` `eddfab6c`; g3fix2-r1: cr-g3fix-2/-3 closed, cr-g3fix-1 not (HIGH, cr-g3fix2-1) + cr-g3fix2-2, FIXED `f6099aa3` `36b752b6`; g3fix3-r1: cr-g3fix2-2 closed, cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix3-1) + cr-g3fix3-2/-3, FIXED `a67087fd` `f6212938` `548625f5`; g3fix4-r1: cr-g3fix3-2/-3 closed, cr-g3fix3-1/cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix4-1) + cr-g3fix4-2 (HIGH) + cr-g3fix4-3 (HIGH) + cr-g3fix4-4, FIXED `e7be4970` `b304e6ff` `5624fd43` `e67c225c` | Codex re-review of `89575776..de9a333f` on the owner's `review` |
 | G4 docs truth | README + TRANSFER_SESSION corrected `6ac98801` (audit of 2026-10-14); plan-status sweep DONE 2026-10-14 (D-2026-10-14-1) | — |
 | G5 version + notes | DONE `6d5d93c8`: 1.0.0, CHANGELOG `[1.0.0]`, notes re-cut († entries follow the G3 rulings) | — |
-| G5b cross-OS matrix | Mac↔Linux PASS 2026-10-14 with CI's `8844dfbd` archives (`aaa8af55`); to repeat on the candidate's archives; Windows legs blocked (no host reachable) | the candidate's CI build; a Windows host |
+| G5b cross-OS matrix | Mac↔Linux PASS 2026-10-14 with CI's `8844dfbd` archives (`aaa8af55`); to repeat on run 38960754619's archives (`de9a333f`) once the re-review is clean; Windows legs blocked (no host reachable) | the re-review verdict; a Windows host |
 | G6 tag + publish | — | owner |
 
 Plan-status sweep (G4): nine plans read `Active` while their work is
@@ -177,7 +177,9 @@ Ordered path to the tag:
    owner's dispatch word (D-2026-07-23-7).
 3. G4 edits: README/TRANSFER_SESSION corrections from the audit; STATE
    queue de-drift; plan-status flips as ruled.
-4. G5: DONE (`6d5d93c8`). Push (owner go) → G2 CI green on that SHA.
+4. G5: DONE (`6d5d93c8`). Pushed through `de9a333f` 2026-10-16 (from this
+   clone, not by the session); G2 CI fully green on that SHA (run
+   38960754619: Linux 1542, Windows 1487, macOS 1533, 0 failed).
 5. G5b with the candidate's archives: Mac↔Linux now; Windows legs when a
    host answers (recorded per pair here).
 6. The Codex range review of the two G3 fixes is the release-prep review
