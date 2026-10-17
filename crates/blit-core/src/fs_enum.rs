@@ -1252,6 +1252,18 @@ mod tests {
         ] {
             assert_eq!(typed_exclude_dialect(typed, false), written, "{typed}");
             let (before, after) = (unix(typed), unix(written));
+            // globset's oracle for the typed form reads the Unix rule only
+            // off Windows: its `**` tokenizer (0.4.18 `parse_star`) asks
+            // `is_separator` of the raw character after `**`, and on
+            // Windows `\` is a separator whatever `backslash_escape` says,
+            // so `**\/cache` tokenizes there as a recursive `**` and a
+            // separator — not the Unix reading this test is about (CI's
+            // Windows leg, run 39076188400). A Windows client never holds a
+            // typed Unix escape (its rule writes `\` as `/`), so the string
+            // rewrite above is the whole claim there.
+            if !cfg!(unix) {
+                continue;
+            }
             for name in names {
                 assert_eq!(
                     before.is_match(name),
