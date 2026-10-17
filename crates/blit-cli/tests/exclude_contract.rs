@@ -659,6 +659,38 @@ fn copy_exclude_a_typed_unix_escape_names_the_escaped_character() {
     );
 }
 
+/// cr-g3fix5-3: off Windows `**\/cache` is two `*` and a literal `/cache`
+/// — a component before `cache` is required — so it leaves out
+/// `a/cache/x` and copies the top-level `cache/needed.txt`. Before the fix
+/// the pattern was written `**/cache`, globset's recursive form, which
+/// also names the top-level `cache`: the copy left out `needed.txt` and
+/// exited 0.
+#[cfg(unix)]
+#[test]
+fn copy_exclude_an_escaped_separator_after_a_recursive_wildcard_keeps_its_meaning() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    for rel in ["cache/needed.txt", "a/cache/x", "keep.txt"] {
+        let path = src.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"x").unwrap();
+    }
+    let (ok, stdout, stderr) = blit(&[
+        "copy",
+        &with_slash(&src),
+        &with_slash(&dst),
+        "--exclude",
+        r"**\/cache",
+    ]);
+    assert!(ok, "copy failed:\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        dst.join("cache/needed.txt").exists(),
+        "a top-level cache is not named"
+    );
+    assert!(!dst.join("a/cache").exists(), "a/cache is named");
+    assert!(dst.join("keep.txt").exists());
+}
+
 /// cr-g3fix-3: on Windows `\` is a separator in a relative pattern too —
 /// `.\.java` names the top-level `.java` only, `a\.java\` the `a/.java`
 /// subtree, and `.java\` the name at any depth. Before the fix none of the

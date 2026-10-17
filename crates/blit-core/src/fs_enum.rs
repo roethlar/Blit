@@ -296,8 +296,15 @@ pub(crate) fn typed_exclude_dialect(pattern: &str, windows: bool) -> std::borrow
                 let Some(escaped) = rest[1..].chars().next() else {
                     return std::borrow::Cow::Borrowed(pattern);
                 };
-                written.push_str(&escape_as_class(escaped));
-                rest = &rest[1 + escaped.len_utf8()..];
+                let after = &rest[1 + escaped.len_utf8()..];
+                if escaped == '/' {
+                    if !escaped_separator(&mut written, after) {
+                        return std::borrow::Cow::Borrowed(pattern);
+                    }
+                } else {
+                    written.push_str(&escape_as_class(escaped));
+                }
+                rest = after;
             }
             c => {
                 written.push(c);
@@ -306,6 +313,46 @@ pub(crate) fn typed_exclude_dialect(pattern: &str, windows: bool) -> std::borrow
         }
     }
     std::borrow::Cow::Owned(written)
+}
+
+/// cr-g3fix5-3: an escaped `/` written onto `written` (the pattern so far,
+/// in the class dialect; `after` is the typed text that follows it) with
+/// the meaning globset and the rule reading give `\/` under the Unix rule:
+/// a literal separator. A bare `/` reads the same everywhere but in three
+/// places, each written otherwise:
+/// - after a run of `*`: globset reads `**` as the recursive `**/` only
+///   when a bare `/` follows it, so `**\/x` is two `*` (any text, `/`
+///   included) then `/x` — it needs a component before `x`. The run is
+///   written as one `*`, the same any text, so `**\/x` becomes `*/x`.
+/// - after a leading `.` (or `./.`, …): `./` would anchor the pattern to
+///   the root, which `.\/x` never was; that `.` is written `[.]`.
+/// - at the end, with nothing but `/` after it: the rule reading drops a
+///   pattern's trailing bare `/`s and leaves a dangling escape, a reading
+///   no spelling without `\` gives — false, and the pattern stays as typed.
+///
+/// An escaped `/` before `**` needs nothing: globset reads the separator
+/// before `**` from the character itself, escaped or not.
+fn escaped_separator(written: &mut String, after: &str) -> bool {
+    if after.chars().all(|c| c == '/') {
+        return false;
+    }
+    if written.ends_with('*') {
+        while written.ends_with('*') {
+            written.pop();
+        }
+        written.push('*');
+    } else if written.strip_suffix('.').is_some_and(|before| {
+        let mut anchors = before;
+        while let Some(rest) = anchors.strip_prefix("./") {
+            anchors = rest;
+        }
+        anchors.is_empty()
+    }) {
+        written.pop();
+        written.push_str("[.]");
+    }
+    written.push('/');
+    true
 }
 
 /// cr-g3fix4-3: the class-dialect spelling of the escaped character `c`:
@@ -1121,6 +1168,118 @@ mod tests {
             assert_eq!(typed_exclude_dialect(refused, false), refused, "{refused}");
         }
         assert_eq!(typed_exclude_dialect(r".\a\[\]x", true), r"./a/[\]x");
+    }
+
+    /// cr-g3fix5-3: an escaped `/` keeps its Unix meaning in the class
+    /// dialect — a literal separator, which takes no part in `**`'s
+    /// recursive reading — next to `**`, at the start, at the end, and in
+    /// and out of alternations. Before, every `\/` was written `/`, so
+    /// `**\/cache` (a component before `cache` required) became
+    /// `**/cache`, which also names a top-level `cache`: the filter left out
+    /// `cache/needed.txt` too. Each typed and written form is compared as
+    /// globset reads it (the Unix reading, forced on every OS) and as the
+    /// whole filter reads it — the any-depth and subtree rules plus the
+    /// whole-pattern test — under the Unix rule for the typed form and
+    /// under both rules for the written one (the wire form a Windows peer
+    /// reads). Pure, so it runs (and can fail) on every OS.
+    #[test]
+    fn an_escaped_separator_keeps_its_meaning_in_the_class_dialect() {
+        let unix = |pattern: &str| {
+            globset::GlobBuilder::new(pattern)
+                .backslash_escape(true)
+                .build()
+                .unwrap()
+                .compile_matcher()
+        };
+        // The whole filter's reading under one platform rule: the rules,
+        // and the pattern against the bare name and the whole path.
+        let excludes = |pattern: &str, windows: bool, rel: &str| {
+            let glob = globset::GlobBuilder::new(&normalize_separators(pattern, windows))
+                .backslash_escape(!windows)
+                .build()
+                .unwrap()
+                .compile_matcher();
+            let name = rel.rsplit('/').next().unwrap();
+            excluded_under_rule(&[pattern.to_string()], windows, Path::new(rel))
+                || glob.is_match(name)
+                || glob.is_match(rel)
+        };
+        let names = [
+            "cache",
+            "cache/needed.txt",
+            "a/cache",
+            "a/cache/x",
+            "a/b/cache",
+            "acache",
+            "x",
+            "a/x",
+            "a/b/x",
+            "a/b",
+            "a/b/c",
+            "b",
+            "c",
+            "z",
+            "a",
+            "./x",
+            "/x",
+            "/cache",
+            "[/]x",
+            "x/",
+            r"x\",
+            r"x\/y",
+            "*/x",
+        ];
+        for (typed, written) in [
+            (r"**\/cache", "*/cache"),
+            (r"a/**\/cache", "a/*/cache"),
+            (r"***\/cache", "*/cache"),
+            (r"\**\/x", "[*]*/x"),
+            (r"{**\/cache,z}", "{*/cache,z}"),
+            (r"{z,**\/cache}", "{z,*/cache}"),
+            (r"**\/**", "*/**"),
+            (r"a\/**", "a/**"),
+            (r"a\/b", "a/b"),
+            (r"{a\/b,c}", "{a/b,c}"),
+            (r"\/x", "/x"),
+            (r".\/x", "[.]/x"),
+            (r"./.\/x", "./[.]/x"),
+            (r"\.\/x", "[.]/x"),
+            (r"{.\/x,c}", "{./x,c}"),
+            (r"[\/]x", r"[\/]x"),
+            (r"x\/", r"x\/"),
+            (r"x\//", r"x\//"),
+            (r"a\/b\/c", "a/b/c"),
+        ] {
+            assert_eq!(typed_exclude_dialect(typed, false), written, "{typed}");
+            let (before, after) = (unix(typed), unix(written));
+            for name in names {
+                assert_eq!(
+                    before.is_match(name),
+                    after.is_match(name),
+                    "globset: {typed} and {written} on {name:?}"
+                );
+                let reading = excludes(typed, false, name);
+                assert_eq!(
+                    reading,
+                    excludes(written, false, name),
+                    "the filter, Unix rule: {typed} and {written} on {name:?}"
+                );
+                // A pattern left as typed keeps its bare `\`, which a
+                // Windows peer reads as a separator (a recorded gap).
+                if written != typed {
+                    assert_eq!(
+                        reading,
+                        excludes(written, true, name),
+                        "the filter, Windows rule: {typed} and {written} on {name:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            !excludes("*/cache", false, "cache/needed.txt"),
+            "a top-level cache is not named"
+        );
+        assert!(excludes("*/cache", false, "a/cache/x"));
     }
 
     /// cr-g3fix-3: on Windows a filter built directly — by an embedder, or
