@@ -112,6 +112,23 @@ are the owner's act.
   `blit jobs list` on the Mac and `blit jobs list magneto` show the same
   five runs under the same job IDs. To repeat on the candidate's own
   archives once CI has built them; the Windows legs when a host answers.
+
+  **Candidate run 2026-10-17 with run 38960754619's `de9a333f` archives**
+  (identity `1.0.0+de9a333f5027` on both ends; sidecars verified; the same
+  modules-only daemon setup on magneto `10.1.10.10:9031`, mDNS off, state
+  inside its scratch dir; the Mac client-only; evidence
+  `docs/bench/g5b-2026-10-17/`):
+
+  | pair | initial copy | content verify | edit → re-run | converged re-run | result |
+  | --- | --- | --- | --- | --- | --- |
+  | mac → linux (push) | 12 files, 5,382,443 B | 12/12 sha256 match, no extras | 1 file, 39 B | 0 files | PASS |
+  | linux → mac (pull) | 12 files, 5,382,472 B | 12/12 sha256 match, entry lists identical | — | 0 files | PASS |
+  | win ↔ linux, win ↔ mac (4 legs) | — | — | — | — | BLOCKED: no Windows host (not re-probed this run) |
+
+  Every command exited 0; no warning or stall notice during a transfer;
+  `blit jobs list` on the Mac and `blit jobs list magneto` show the same
+  five runs under the same job IDs; magneto cleaned up (daemon gone, port
+  free, work dir removed). The Windows legs remain open.
 - **G5c — DISSOLVED (D-2026-08-15-2): 1.0 is CLI + daemon only; no UI
   surface gates this or any release.** UIs are a separate app
   (`BlitAdmin_UIs` repo) with their own lifecycle. History: this gate was
@@ -141,7 +158,7 @@ is reviewed to consensus.
 | G3 dispositions | DONE: SSC shipped; audit-18 retired; audit-19 FIXED `fa948e01`; detached recents reason FIXED `b7da0d81` (D-2026-10-14-1); Codex g3fix-r1 over `b186e8b8..b7da0d81`: 3 MEDIUM on audit-19, FIXED `7d3e4eb6` `47bdfb69` `eddfab6c`; g3fix2-r1: cr-g3fix-2/-3 closed, cr-g3fix-1 not (HIGH, cr-g3fix2-1) + cr-g3fix2-2, FIXED `f6099aa3` `36b752b6`; g3fix3-r1: cr-g3fix2-2 closed, cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix3-1) + cr-g3fix3-2/-3, FIXED `a67087fd` `f6212938` `548625f5`; g3fix4-r1: cr-g3fix3-2/-3 closed, cr-g3fix3-1/cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix4-1) + cr-g3fix4-2 (HIGH) + cr-g3fix4-3 (HIGH) + cr-g3fix4-4, FIXED `e7be4970` `b304e6ff` `5624fd43` `e67c225c` | Codex re-review of `89575776..de9a333f` on the owner's `review` |
 | G4 docs truth | README + TRANSFER_SESSION corrected `6ac98801` (audit of 2026-10-14); plan-status sweep DONE 2026-10-14 (D-2026-10-14-1) | — |
 | G5 version + notes | DONE `6d5d93c8`: 1.0.0, CHANGELOG `[1.0.0]`, notes re-cut († entries follow the G3 rulings) | — |
-| G5b cross-OS matrix | Mac↔Linux PASS 2026-10-14 with CI's `8844dfbd` archives (`aaa8af55`); to repeat on run 38960754619's archives (`de9a333f`) once the re-review is clean; Windows legs blocked (no host reachable) | the re-review verdict; a Windows host |
+| G5b cross-OS matrix | Mac↔Linux PASS 2026-10-17 on run 38960754619's `de9a333f` archives (identity `1.0.0+de9a333f5027` on both ends; evidence `docs/bench/g5b-2026-10-17/`); Windows legs blocked (no host reachable) | a Windows host |
 | G6 tag + publish | — | owner |
 
 Plan-status sweep (G4): nine plans read `Active` while their work is
