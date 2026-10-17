@@ -9135,6 +9135,63 @@ mod tests {
         );
     }
 
+    /// cr-g3fix5-2: the mirror delete pass keeps the destination's own
+    /// spelling of a literal component after a glob component — `**/cache`
+    /// and `*/cache` keep `x/Cache/saved.txt`, `*/cache` keeps
+    /// `a/b/CACHE/saved.txt` (its `*` spans `a/b`) — with the directories
+    /// holding it, while the extraneous `stale.txt` is deleted. Before, the
+    /// respelling stopped at the first glob component and each was
+    /// deleted. Skipped with a message where the filesystem is
+    /// case-sensitive.
+    #[test]
+    fn mirror_delete_pass_keeps_a_destination_spelling_after_a_glob_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("case-probe"), b"").unwrap();
+        let insensitive = tmp.path().join("CASE-PROBE").exists();
+        std::fs::remove_file(tmp.path().join("case-probe")).unwrap();
+        if !insensitive {
+            eprintln!("skipping: {} is case-sensitive", tmp.path().display());
+            return;
+        }
+        for (case, pattern, saved) in [
+            ("double_star", "**/cache", "x/Cache/saved.txt"),
+            ("star", "*/cache", "x/Cache/saved.txt"),
+            ("star_spanning", "*/cache", "a/b/CACHE/saved.txt"),
+        ] {
+            let dst = tmp.path().join(case);
+            for rel in [saved, "stale.txt"] {
+                let path = dst.join(rel);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"s").unwrap();
+            }
+            let mut filter = crate::fs_enum::FileFilter::default();
+            filter.exclude_files = vec![pattern.to_string()];
+            let abort = AtomicBool::new(false);
+            let counts = mirror_delete_pass(
+                &dst,
+                &HashSet::new(),
+                &[],
+                &HashSet::new(),
+                &filter,
+                true,
+                None,
+                &abort,
+                true,
+                &mut |_, _| {},
+            )
+            .expect("pass");
+            assert!(
+                dst.join(saved).exists(),
+                "{pattern}: {saved} is excluded and must survive"
+            );
+            assert!(
+                !dst.join("stale.txt").exists(),
+                "{pattern}: the extraneous file is deleted"
+            );
+            assert_eq!(counts, (1, 0), "{pattern}: stale.txt alone is deleted");
+        }
+    }
+
     #[test]
     fn build_id_has_version_and_git_components() {
         let id = session_build_id();

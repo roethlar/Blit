@@ -789,18 +789,15 @@ fn paired_name(
 /// rule compares as written, so on a case- or normalization-insensitive
 /// destination an excluded entry stored in another spelling (`dst/Cache`
 /// for an excluded `src/cache`, `dst/x/ς` for an excluded `σ`) was not
-/// named, stayed in the deletion scope, and was deleted. Two parts:
-/// - a path rule (anchored `./a/b`, or `a/b`) is respelled component by
-///   component from `dst_root` with [`stored_name`] ([`respelled_at`]),
-///   and the respelled pattern is ADDED beside the original: the original
-///   still names a destination spelled like the source, the respelled one
-///   names the destination's own spelling, and adding a pattern can only
-///   shrink the deletion scope. A tie adds every name. Read once here.
-/// - cr-g3fix5-1: the any-depth name rules (a pattern with no `/`) are
-///   read per directory the walk visits ([`DestinationNames`]): a literal
-///   name through the destination filesystem itself ([`stored_name`]),
-///   a glob under a case and normalization fold where the destination
-///   ignores case ([`case_insensitive_at`]).
+/// named, stayed in the deletion scope, and was deleted. cr-g3fix5-1,
+/// cr-g3fix5-2: each exclude is read per directory the walk visits
+/// ([`DestinationNames`]) — a literal name, alone or as a component of a
+/// path rule before or after a glob component, through the destination
+/// filesystem itself ([`stored_name`]), and a glob under a case and
+/// normalization fold where the destination ignores case
+/// ([`case_insensitive_at`]). This replaces cr-g3fix4-2's respelling of
+/// a path rule's leading literal components from the root, which stopped
+/// at the first glob component.
 ///
 /// Runs where the destination's deletion pass runs — the session's own
 /// destination walk, on the local carrier and on a destination daemon
@@ -811,18 +808,10 @@ pub(crate) fn destination_scope(filter: &FileFilter, dst_root: &Path) -> FileFil
     if filter.files_from.is_some() || filter.exclude_files.is_empty() {
         return scoped;
     }
-    let windows = cfg!(windows);
-    for pattern in &filter.exclude_files {
-        for respelled in respelled_at(pattern, dst_root, windows, stored_name) {
-            if !scoped.exclude_files.contains(&respelled) {
-                scoped.exclude_files.push(respelled);
-            }
-        }
-    }
     scoped.destination = DestinationNames::new(
         dst_root,
         &filter.exclude_files,
-        windows,
+        cfg!(windows),
         || case_insensitive_at(dst_root),
         Box::new(stored_name),
     )
@@ -830,39 +819,53 @@ pub(crate) fn destination_scope(filter: &FileFilter, dst_root: &Path) -> FileFil
     scoped
 }
 
-/// cr-g3fix5-1: the destination's own names for a mirror's excludes, read
-/// as the deletion walk visits the destination — so an entry it stores in
-/// another spelling of an excluded name (another case, another Unicode
-/// normalization, final sigma `ς` for `σ`, or another name of the same
-/// hard-linked entry) is out of the deletion scope, as the excluded
-/// spelling itself is:
-/// - a literal any-depth name (`σ`, `cache`, `data[[]1[]]` — no glob
-///   syntax but one-member classes, [`plain_name`]) is resolved in each
-///   directory the walk visits by the destination filesystem itself:
-///   [`stored_name`] of `dir/name` gives the names that directory lists
-///   for the entry the filesystem pairs with that spelling (the link
-///   itself, never its target; every name of a tie), and each of them is
-///   out of scope. One lookup per name per visited directory, never per
-///   entry; a lookup that finds nothing costs one failed `lstat`. On a
-///   destination that compares case, an ASCII name pairs with nothing but
-///   its own spelling (no normalization applies to ASCII), so it is not
-///   looked up at all.
-/// - a glob any-depth name, where the destination ignores case, is also
-///   matched under [`fold`] (NFC, then each character's single uppercase
-///   form), applied to the pattern and the entry's path alike. The fold
-///   approximates the filesystem's own equivalence; where it pairs more
-///   than the filesystem does (NFD and NFC on NTFS), an entry is kept that
-///   could have been deleted — the safe direction.
+/// cr-g3fix5-1, cr-g3fix5-2: the destination's own names for a mirror's
+/// excludes, read as the deletion walk visits the destination — so an
+/// entry it stores in another spelling of an excluded name (another case,
+/// another Unicode normalization, final sigma `ς` for `σ`, or another name
+/// of the same hard-linked entry) is out of the deletion scope, as the
+/// excluded spelling itself is:
+/// - a literal name (`σ`, `cache`, `data[[]1[]]` — no glob syntax but
+///   one-member classes, [`plain_name`]), an any-depth name rule or a
+///   component of a path rule, before or after a glob component, is
+///   resolved in each directory the walk visits by the destination
+///   filesystem itself: [`stored_name`] of `dir/name` gives the names that
+///   directory lists for the entry the filesystem pairs with that spelling
+///   (the link itself, never its target; every name of a tie), and each of
+///   them, like the spelling itself, matches. One lookup per name per
+///   visited directory, never per entry; a lookup that finds nothing costs
+///   one failed `lstat`. On a destination that compares case, an ASCII
+///   name pairs with nothing but its own spelling (no normalization
+///   applies to ASCII), so it is not looked up at all.
+/// - a path rule holding a literal component is read component by
+///   component from the root, as the subtree rule reads it ([`Step`]): a
+///   name as above, `**` as any number of components (at least one when
+///   last, as globset reads a trailing `/**`), and any other glob component
+///   as globset text matched against one component — or, holding `*` or
+///   `?`, which match `/` in this filter, several joined with `/` — under
+///   [`fold`] where the destination ignores case.
+/// - a glob rule with no literal component (or one whose `/` lies inside
+///   a class or an alternation), where the destination ignores case, is
+///   also matched whole under [`fold`], applied to the pattern and the
+///   entry's path alike.
 ///
-/// The walk is depth first, so the directories looked up are kept for the
-/// chain of the entry asked about only ([`Level`]), not for the whole
-/// destination.
+/// The fold (NFC, then each character's single uppercase form)
+/// approximates the filesystem's own equivalence; where it pairs more
+/// than the filesystem does (NFD and NFC on NTFS), an entry is kept that
+/// could have been deleted — the safe direction. The walk is depth first,
+/// so the lookups and each path rule's progress are kept for the chain of
+/// directories above the entry asked about only ([`Level`]), not for the
+/// whole destination.
 pub(crate) struct DestinationNames {
     root: PathBuf,
-    /// The literal any-depth names.
-    names: Vec<String>,
-    /// The glob any-depth names, folded; `None` where the destination
-    /// compares case, or no such name was given.
+    /// Every literal name the rules hold, looked up by index.
+    literals: Vec<String>,
+    /// The literal any-depth names, as indexes into `literals`.
+    names: Vec<usize>,
+    /// The path rules holding a literal component, as steps.
+    paths: Vec<Vec<Step>>,
+    /// The glob rules with no literal component, folded; `None` where the
+    /// destination compares case, or no such rule was given.
     folded: Option<FileFilter>,
     /// Whether the destination ignores case.
     case_insensitive: bool,
@@ -875,6 +878,31 @@ pub(crate) struct DestinationNames {
 /// How [`DestinationNames`] asks the destination for its names.
 type StoredNames = dyn Fn(&Path) -> Vec<String> + Send + Sync;
 
+/// cr-g3fix5-2: one component of a path rule, as [`DestinationNames`]
+/// reads it.
+enum Step {
+    /// A literal name (an index into `literals`): its own spelling, or one
+    /// the destination pairs with it in that directory.
+    Name(usize),
+    /// Glob text, matched against one component — or, when it `crosses`
+    /// (holds `*` or `?`, which match `/` in this filter as in globset),
+    /// against several joined with `/` — under the fold where the
+    /// destination ignores case.
+    Glob {
+        glob: globset::GlobMatcher,
+        crosses: bool,
+    },
+    /// `**` before another component: any number of components, none
+    /// included.
+    AnyDepth,
+    /// `**` last: one or more components.
+    Rest,
+}
+
+/// How far a path rule has read: the next [`Step`], and where a crossing
+/// glob component under way began (the index of its first component).
+type State = (usize, Option<usize>);
+
 /// One directory of [`DestinationNames`]' chain.
 struct Level {
     /// Its own name in its parent (empty for the root).
@@ -883,17 +911,25 @@ struct Level {
     path: PathBuf,
     /// It, or a directory above it, is out of the deletion scope.
     protected: bool,
-    /// What [`DestinationNames::names`] each name's lookup found here,
-    /// by index, filled as the walk asks.
+    /// How far each path rule has read on the way down to it.
+    states: Vec<Vec<State>>,
+    /// What each literal's lookup found here, by index, filled as the walk
+    /// asks.
     found: std::collections::HashMap<usize, Vec<String>>,
 }
 
 impl Level {
-    fn new(name: std::ffi::OsString, path: PathBuf, protected: bool) -> Self {
+    fn new(
+        name: std::ffi::OsString,
+        path: PathBuf,
+        protected: bool,
+        states: Vec<Vec<State>>,
+    ) -> Self {
         Self {
             name,
             path,
             protected,
+            states,
             found: std::collections::HashMap::new(),
         }
     }
@@ -904,7 +940,9 @@ impl std::fmt::Debug for DestinationNames {
         formatter
             .debug_struct("DestinationNames")
             .field("root", &self.root)
+            .field("literals", &self.literals)
             .field("names", &self.names)
+            .field("paths", &self.paths.len())
             .field(
                 "folded",
                 &self.folded.as_ref().map(|folded| &folded.exclude_files),
@@ -917,7 +955,7 @@ impl std::fmt::Debug for DestinationNames {
 impl DestinationNames {
     /// The destination names for `patterns` (`--exclude` patterns, read
     /// under one platform's path rule) at `root`: `case_insensitive` is
-    /// asked once, only when a name rule needs it; `stored` names an entry
+    /// asked once, only when a rule is read here; `stored` names an entry
     /// as the destination lists it. `None` when no pattern is read here.
     pub(crate) fn new(
         root: &Path,
@@ -926,26 +964,51 @@ impl DestinationNames {
         case_insensitive: impl FnOnce() -> bool,
         stored: Box<StoredNames>,
     ) -> Option<Self> {
+        let mut literals: Vec<String> = Vec::new();
+        let mut index_of = |name: String| match literals.iter().position(|known| *known == name) {
+            Some(index) => index,
+            None => {
+                literals.push(name);
+                literals.len() - 1
+            }
+        };
         let mut names = Vec::new();
+        let mut components = Vec::new();
         let mut globs = Vec::new();
-        for rule in patterns
+        for (pattern, rule) in patterns
             .iter()
-            .filter_map(|pattern| exclude_rule(pattern, windows))
-            .filter(|rule| !rule.path)
+            .filter_map(|pattern| Some((pattern, exclude_rule(pattern, windows)?)))
         {
-            match plain_name(&rule.body, windows) {
-                Some(name) => {
-                    if !names.contains(&name) {
-                        names.push(name);
+            if !rule.path {
+                match plain_name(&rule.body, windows) {
+                    Some(name) => {
+                        let index = index_of(name);
+                        if !names.contains(&index) {
+                            names.push(index);
+                        }
                     }
+                    None => globs.push(pattern.clone()),
                 }
-                None => globs.push(rule.body),
+                continue;
+            }
+            match path_components(&rule.body, windows) {
+                Some(parts) if parts.iter().any(|part| plain_name(part, windows).is_some()) => {
+                    components.push((pattern, parts))
+                }
+                _ => globs.push(pattern.clone()),
             }
         }
-        if names.is_empty() && globs.is_empty() {
+        if names.is_empty() && components.is_empty() && globs.is_empty() {
             return None;
         }
         let case_insensitive = case_insensitive();
+        let mut paths = Vec::new();
+        for (pattern, parts) in components {
+            match path_steps(&parts, windows, case_insensitive, &mut index_of) {
+                Some(steps) => paths.push(steps),
+                None => globs.push(pattern.clone()),
+            }
+        }
         let folded: Vec<String> = if case_insensitive {
             globs
                 .iter()
@@ -960,12 +1023,22 @@ impl DestinationNames {
             filter.exclude_files = folded;
             filter
         });
-        if names.is_empty() && folded.is_none() {
+        if names.is_empty() && paths.is_empty() && folded.is_none() {
             return None;
         }
+        let states = paths
+            .iter()
+            .map(|steps| {
+                let mut states = vec![(0, None)];
+                closure(steps, &mut states);
+                states
+            })
+            .collect();
         Some(Self {
             root: root.to_path_buf(),
+            literals,
             names,
+            paths,
             folded,
             case_insensitive,
             stored,
@@ -973,6 +1046,7 @@ impl DestinationNames {
                 Default::default(),
                 root.to_path_buf(),
                 false,
+                states,
             )]),
         })
     }
@@ -981,22 +1055,6 @@ impl DestinationNames {
     /// above it is out of the deletion scope in the destination's own
     /// names.
     pub(crate) fn protects(&self, rel: &Path) -> bool {
-        if let Some(folded) = &self.folded {
-            let text: Vec<String> = rel
-                .components()
-                .filter_map(|component| match component {
-                    std::path::Component::Normal(name) => Some(fold(&name.to_string_lossy())),
-                    _ => None,
-                })
-                .collect();
-            let folded_rel = PathBuf::from(text.join("/"));
-            if !text.is_empty() && !folded.allows_entry(Some(&folded_rel), &folded_rel, 0, None) {
-                return true;
-            }
-        }
-        if self.names.is_empty() {
-            return false;
-        }
         let components: Vec<&std::ffi::OsStr> = rel
             .components()
             .filter_map(|component| match component {
@@ -1004,50 +1062,234 @@ impl DestinationNames {
                 _ => None,
             })
             .collect();
-        let Some((entry, parents)) = components.split_last() else {
+        if components.is_empty() {
             return false;
-        };
+        }
+        let texts: Vec<String> = components
+            .iter()
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        if let Some(folded) = &self.folded {
+            let folded_rel = PathBuf::from(fold(&texts.join("/")));
+            if !folded.allows_entry(Some(&folded_rel), &folded_rel, 0, None) {
+                return true;
+            }
+        }
+        if self.names.is_empty() && self.paths.is_empty() {
+            return false;
+        }
+        let last = components.len() - 1;
         let mut chain = self.chain.lock();
         // Keep the directories of the chain that lie above `rel`.
         let mut kept = 1;
         while kept < chain.len()
-            && kept <= parents.len()
-            && chain[kept].name.as_os_str() == parents[kept - 1]
+            && kept <= last
+            && chain[kept].name.as_os_str() == components[kept - 1]
         {
             kept += 1;
         }
         chain.truncate(kept);
-        for name in &parents[kept - 1..] {
+        for (at, name) in components.iter().enumerate().take(last).skip(kept - 1) {
             let parent = chain.last_mut().expect("the root stays in the chain");
-            let protected = parent.protected || self.names_here(parent, name);
+            let (protected, states) = if parent.protected {
+                (true, Vec::new())
+            } else {
+                self.step(parent, &texts, at)
+            };
             let path = parent.path.join(name);
-            chain.push(Level::new(name.to_os_string(), path, protected));
+            chain.push(Level::new(name.to_os_string(), path, protected, states));
         }
         let parent = chain.last_mut().expect("the root stays in the chain");
-        parent.protected || self.names_here(parent, entry)
+        parent.protected || self.step(parent, &texts, last).0
     }
 
-    /// Whether `entry`, an entry of the directory `at`, is the
-    /// destination's spelling of a literal name: each name looked up in
-    /// `at` once.
-    fn names_here(&self, at: &mut Level, entry: &std::ffi::OsStr) -> bool {
-        let Some(entry) = entry.to_str() else {
-            return false;
+    /// The component `texts[at]`, an entry of the directory `parent`:
+    /// whether it is out of the deletion scope, and how far each path rule
+    /// has read once it is taken.
+    fn step(&self, parent: &mut Level, texts: &[String], at: usize) -> (bool, Vec<Vec<State>>) {
+        let Level {
+            path,
+            states,
+            found,
+            ..
+        } = parent;
+        let entry = texts[at].as_str();
+        let mut matches = |index: usize| {
+            let name = &self.literals[index];
+            entry == name
+                || found
+                    .entry(index)
+                    .or_insert_with(|| self.lookup(path, name))
+                    .iter()
+                    .any(|stored| stored == entry)
         };
-        let (path, found) = (&at.path, &mut at.found);
-        self.names.iter().enumerate().any(|(index, name)| {
-            found
-                .entry(index)
-                .or_insert_with(|| {
-                    if !self.case_insensitive && name.is_ascii() {
-                        return Vec::new();
-                    }
-                    (self.stored)(&path.join(name))
-                })
-                .iter()
-                .any(|stored| stored == entry)
-        })
+        let mut protected = self.names.iter().any(|&index| matches(index));
+        let next = self
+            .paths
+            .iter()
+            .zip(states.iter())
+            .map(|(steps, from)| {
+                let (next, accepted) =
+                    advance(steps, from, texts, at, &mut matches, self.case_insensitive);
+                protected |= accepted;
+                next
+            })
+            .collect();
+        (protected, next)
     }
+
+    /// The names the directory `dir` lists for the entry the destination
+    /// pairs with `name` — none looked up for an ASCII name where the
+    /// destination compares case.
+    fn lookup(&self, dir: &Path, name: &str) -> Vec<String> {
+        if !self.case_insensitive && name.is_ascii() {
+            return Vec::new();
+        }
+        (self.stored)(&dir.join(name))
+    }
+}
+
+/// cr-g3fix5-2: a path rule's body split into its components at each `/`
+/// that separates components — not one inside a class or an alternation,
+/// nor an escaped one (`None` then: the rule is read whole), and no empty
+/// component.
+fn path_components(body: &str, windows: bool) -> Option<Vec<String>> {
+    let mut components = vec![String::new()];
+    let mut depth = 0usize;
+    let mut rest = body;
+    while let Some(c) = rest.chars().next() {
+        let len = match c {
+            '[' => bracket_class_len(rest).unwrap_or(1),
+            '\\' if !windows => 1 + rest[1..].chars().next().map_or(0, char::len_utf8),
+            c => c.len_utf8(),
+        };
+        let text = &rest[..len];
+        match c {
+            '/' if depth == 0 => {
+                components.push(String::new());
+                rest = &rest[1..];
+                continue;
+            }
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if text.contains('/') {
+            return None;
+        }
+        components
+            .last_mut()
+            .expect("one component at least")
+            .push_str(text);
+        rest = &rest[len..];
+    }
+    components
+        .iter()
+        .all(|component| !component.is_empty())
+        .then_some(components)
+}
+
+/// cr-g3fix5-2: the [`Step`]s of a path rule's components; a literal's
+/// index from `index_of`. `None` when globset refuses a glob component on
+/// its own (the rule is read whole).
+fn path_steps(
+    components: &[String],
+    windows: bool,
+    case_insensitive: bool,
+    index_of: &mut impl FnMut(String) -> usize,
+) -> Option<Vec<Step>> {
+    let last = components.len() - 1;
+    components
+        .iter()
+        .enumerate()
+        .map(|(at, component)| {
+            if component == "**" {
+                return Some(if at == last {
+                    Step::Rest
+                } else {
+                    Step::AnyDepth
+                });
+            }
+            if let Some(name) = plain_name(component, windows) {
+                return Some(Step::Name(index_of(name)));
+            }
+            let text = if case_insensitive {
+                fold(component)
+            } else {
+                component.clone()
+            };
+            Some(Step::Glob {
+                glob: globset::Glob::new(&text).ok()?.compile_matcher(),
+                crosses: component.contains(['*', '?']),
+            })
+        })
+        .collect()
+}
+
+/// cr-g3fix5-2: `states` with every `**` that may match no component
+/// passed over.
+fn closure(steps: &[Step], states: &mut Vec<State>) {
+    let mut at = 0;
+    while at < states.len() {
+        let (step, open) = states[at];
+        if open.is_none()
+            && matches!(steps.get(step), Some(Step::AnyDepth))
+            && !states.contains(&(step + 1, None))
+        {
+            states.push((step + 1, None));
+        }
+        at += 1;
+    }
+}
+
+/// cr-g3fix5-2: one path rule's `steps` read on from `from` (its states at
+/// the parent directory) through the component `texts[at]`: the states
+/// after it, and whether the rule now names it. `matches` says whether the
+/// component is a literal's own spelling or one the destination pairs with
+/// it there; a glob is matched folded where the destination ignores case.
+fn advance(
+    steps: &[Step],
+    from: &[State],
+    texts: &[String],
+    at: usize,
+    matches: &mut impl FnMut(usize) -> bool,
+    case_insensitive: bool,
+) -> (Vec<State>, bool) {
+    let mut next: Vec<State> = Vec::new();
+    let push = |state: State, next: &mut Vec<State>| {
+        if !next.contains(&state) {
+            next.push(state);
+        }
+    };
+    for &(step, open) in from {
+        match steps.get(step) {
+            None => {}
+            Some(Step::Name(index)) => {
+                if open.is_none() && matches(*index) {
+                    push((step + 1, None), &mut next);
+                }
+            }
+            Some(Step::Glob { glob, crosses }) => {
+                let start = open.unwrap_or(at);
+                let text = texts[start..=at].join("/");
+                let text = if case_insensitive { fold(&text) } else { text };
+                if glob.is_match(&text) {
+                    push((step + 1, None), &mut next);
+                }
+                if *crosses {
+                    push((step, Some(start)), &mut next);
+                }
+            }
+            Some(Step::AnyDepth) => push((step, None), &mut next),
+            Some(Step::Rest) => {
+                push((step + 1, None), &mut next);
+                push((step, None), &mut next);
+            }
+        }
+    }
+    closure(steps, &mut next);
+    let accepted = next.iter().any(|&(step, _)| step == steps.len());
+    (next, accepted)
 }
 
 /// cr-g3fix5-1: `text` under the fold [`DestinationNames`] matches a glob
@@ -1065,76 +1307,6 @@ fn fold(text: &str) -> String {
             }
         })
         .collect()
-}
-
-/// cr-g3fix4-2: `pattern`, a path rule as [`exclude_rule`] reads it, with
-/// its leading plain components ([`plain_name`]) spelled as `root` stores
-/// them (`stored`, [`stored_name`] on the disk): the walk stops at the
-/// first component holding real glob syntax or naming nothing there, and
-/// the rest is kept as written. One pattern per spelling (a tie forks),
-/// each escaped ([`literal_glob`]) and anchored as the original was; none
-/// when the pattern is a name rule or every spelling equals it.
-fn respelled_at(
-    pattern: &str,
-    root: &Path,
-    windows: bool,
-    stored: impl Fn(&Path) -> Vec<String>,
-) -> Vec<String> {
-    let Some(rule) = exclude_rule(pattern, windows) else {
-        return Vec::new();
-    };
-    if !rule.path {
-        return Vec::new();
-    }
-    let components: Vec<&str> = rule.body.split('/').collect();
-    respelled_below(root, &components, windows, &stored)
-        .into_iter()
-        .filter(|spelled| {
-            !spelled
-                .iter()
-                .map(String::as_str)
-                .eq(components.iter().copied())
-        })
-        .map(|spelled| {
-            let body = spelled.join("/");
-            if rule.anchored {
-                format!("./{body}")
-            } else {
-                body
-            }
-        })
-        .collect()
-}
-
-/// [`respelled_at`]'s walk of `components` below `at`.
-fn respelled_below(
-    at: &Path,
-    components: &[&str],
-    windows: bool,
-    stored: &impl Fn(&Path) -> Vec<String>,
-) -> Vec<Vec<String>> {
-    let Some((first, below)) = components.split_first() else {
-        return vec![Vec::new()];
-    };
-    let as_written = || vec![components.iter().map(|c| c.to_string()).collect()];
-    let Some(name) = plain_name(first, windows) else {
-        return as_written();
-    };
-    let names = stored(&at.join(&name));
-    if names.is_empty() {
-        return as_written();
-    }
-    let mut spelled = Vec::new();
-    for name in names {
-        let escaped = literal_glob(&name, windows);
-        for tail in respelled_below(&at.join(&name), below, windows, stored) {
-            let mut parts = Vec::with_capacity(components.len());
-            parts.push(escaped.clone());
-            parts.extend(tail);
-            spelled.push(parts);
-        }
-    }
-    spelled
 }
 
 /// cr-g3fix4-2: the name a pattern component spells when it holds no glob
@@ -2360,59 +2532,100 @@ mod tests {
         }
     }
 
-    /// cr-g3fix4-2: a path rule of the mirror's deletion scope is spelled
-    /// as the destination stores it — tested against a stand-in
-    /// destination on every OS. Each plain component (a one-member class
-    /// read as its character) takes the stored name, escaped, until one
-    /// holds real glob syntax or names nothing there; a tie adds every
-    /// name; the anchor is kept. A name rule, or a spelling equal to the
-    /// original, adds nothing.
+    /// cr-g3fix4-2, cr-g3fix5-2: a path rule of the mirror's deletion
+    /// scope is read component by component at the destination — tested
+    /// against a stand-in destination on every OS that ignores case. A
+    /// literal component (a one-member class read as its character) matches
+    /// its own spelling and each name the destination pairs with it in that
+    /// directory (a tie: every name), before or after a glob component;
+    /// `**` spans any number of components (at least one when last); any
+    /// other glob component is matched under the fold, across `/` when it
+    /// holds `*` or `?` (as globset reads it in this filter); the anchor
+    /// is kept. cr-g3fix4-2's respelling stopped at the first glob
+    /// component, so `**/cache`, `*/cache`, `cache/s*b/x` and `*/ς` named
+    /// none of the destination's own spellings past it. A path rule with
+    /// no literal component is read whole, under the fold.
     #[test]
-    fn a_deletion_scope_path_rule_takes_the_destinations_spelling() {
+    fn a_deletion_scope_path_rule_is_read_component_by_component() {
         let disk = |path: &Path| -> Vec<String> {
             match path.to_string_lossy().replace('\\', "/").as_str() {
                 "dst/cache" => vec!["Cache".into()],
                 "dst/Cache/sub" => vec!["SUB".into()],
+                "dst/Cache/s1b/x" => vec!["X".into()],
                 "dst/data[1]" => vec!["DATA[1]".into()],
                 "dst/ς" => vec!["alias".into(), "σ".into()],
-                "dst/same" => vec!["same".into()],
+                "dst/q/ς" => vec!["alias".into()],
+                "dst/x/cache" | "dst/xa/cache" => vec!["Cache".into()],
+                "dst/a/b/cache" => vec!["CACHE".into()],
                 _ => Vec::new(),
             }
         };
-        let respell = |pattern: &str| respelled_at(pattern, Path::new("dst"), false, disk);
-        assert_eq!(respell("./cache"), ["./Cache"]);
-        assert_eq!(
-            respell("./cache/"),
-            ["./Cache"],
-            "a trailing / reads the same"
-        );
-        assert_eq!(respell("cache/sub/*.tmp"), ["Cache/SUB/*.tmp"]);
-        assert_eq!(
-            respell("cache/s*b/x"),
-            ["Cache/s*b/x"],
-            "a glob component ends the walk"
-        );
-        assert_eq!(
-            respell("./cache/missing/x"),
-            ["./Cache/missing/x"],
-            "so does a component the destination does not hold"
-        );
-        assert_eq!(
-            respell("./data[[]1[]]"),
-            ["./DATA[[]1[]]"],
-            "a one-member class is its character, and the stored name is escaped"
-        );
-        assert_eq!(respell("./ς"), ["./alias", "./σ"], "a tie adds every name");
-        assert!(respell("cache").is_empty(), "a name rule is not respelled");
+        let reads = |pattern: &str, windows: bool| {
+            DestinationNames::new(
+                Path::new("dst"),
+                &[pattern.to_string()],
+                windows,
+                || true,
+                Box::new(disk),
+            )
+            .unwrap_or_else(|| panic!("{pattern} is read at the destination"))
+        };
+        let cases: [(&str, &[&str], &[&str]); 13] = [
+            (
+                "./cache",
+                &["Cache", "Cache/saved.txt"],
+                &["x/Cache", "Cachex"],
+            ),
+            ("./cache/", &["Cache/saved.txt"], &["x/Cache"]),
+            (
+                "cache/sub/*.tmp",
+                &["Cache/SUB/a.tmp", "Cache/SUB/A.TMP"],
+                &["Cache/SUB/a.txt", "Cache/a.tmp"],
+            ),
+            (
+                "cache/s*b/x",
+                &["Cache/s1b/X/saved.txt", "Cache/sub/x", "Cache/s/b/x"],
+                &["Cache/s1b/y"],
+            ),
+            (
+                "./cache/missing/x",
+                &["Cache/missing/x"],
+                &["Cache/Missing/x"],
+            ),
+            ("./data[[]1[]]", &["DATA[1]/f"], &["data1/f"]),
+            ("./ς", &["alias", "σ/f"], &["other"]),
+            (
+                "**/cache",
+                &["Cache/f", "x/Cache/saved.txt", "a/b/CACHE/saved.txt"],
+                &["x/other", "a/b/other/cache2"],
+            ),
+            (
+                "*/cache",
+                &["x/Cache/saved.txt", "a/b/CACHE"],
+                &["Cache/f", "x/other"],
+            ),
+            ("X*/cache", &["xa/Cache/saved.txt"], &["ya/Cache"]),
+            ("*/ς", &["q/alias/f"], &["q/other", "alias"]),
+            ("./cache/**", &["Cache/f", "Cache/d/f"], &["Cache"]),
+            ("*/*.TMP", &["x/a.tmp"], &["a.tmp"]),
+        ];
+        for (pattern, out, kept) in cases {
+            let names = reads(pattern, false);
+            for rel in out {
+                assert!(
+                    names.protects(Path::new(rel)),
+                    "{pattern}: {rel} is out of the deletion scope"
+                );
+            }
+            for rel in kept {
+                assert!(
+                    !names.protects(Path::new(rel)),
+                    "{pattern}: {rel} stays in the deletion scope"
+                );
+            }
+        }
         assert!(
-            respell("./same").is_empty(),
-            "the same spelling adds nothing"
-        );
-        assert!(respell("./missing").is_empty());
-        assert!(respell("ca*/x").is_empty());
-        assert_eq!(
-            respelled_at(r".\cache", Path::new("dst"), true, disk),
-            ["./Cache"],
+            reads(r".\cache", true).protects(Path::new("Cache")),
             "the Windows rule reads `\\` as a separator"
         );
         for (component, name) in [
@@ -2434,14 +2647,29 @@ mod tests {
             assert_eq!(plain_name(component, false).as_deref(), name, "{component}");
         }
         assert_eq!(plain_name(r"[\]", true), None, "no Windows name holds `\\`");
+        for (body, components) in [
+            ("a/b*/c", Some(vec!["a", "b*", "c"])),
+            ("{a/b,c}/d", None),
+            ("a[/]b/c", None),
+            (r"a\/b/c", None),
+            ("a//b", None),
+        ] {
+            assert_eq!(
+                path_components(body, false),
+                components.map(|parts| parts.into_iter().map(String::from).collect::<Vec<_>>()),
+                "{body}"
+            );
+        }
     }
 
     /// cr-g3fix4-2: at a real destination the deletion scope also names the
-    /// destination's own spelling of an excluded entry — `./cache` adds
-    /// `./Cache`, `a/b` adds `A/B` — and the any-depth name `name` matches
+    /// destination's own spelling of an excluded entry — `./cache` names
+    /// `Cache`, `a/b` names `A/B`, and the any-depth name `name` names
     /// `NAME` when the destination ignores case. The filter as the source
-    /// spelled it named none of them (the reported deletion). Skipped with
-    /// a message where the filesystem is case-sensitive.
+    /// spelled it named none of them (the reported deletion). cr-g3fix5-2:
+    /// the destination is read as the walk visits it, so the patterns
+    /// themselves stay as given. Skipped with a message where the
+    /// filesystem is case-sensitive.
     #[test]
     fn the_deletion_scope_names_the_destinations_own_spelling() {
         let dir = tempfile::tempdir().unwrap();
@@ -2470,10 +2698,7 @@ mod tests {
             "as the source spelled it, the filter names none of them"
         );
         let scoped = destination_scope(&filter, dst);
-        assert_eq!(
-            scoped.exclude_files,
-            ["./cache", "a/b", "name", "./Cache", "A/B"]
-        );
+        assert_eq!(scoped.exclude_files, ["./cache", "a/b", "name"]);
         for rel in ["Cache/saved.txt", "A/B/saved.txt", "x/NAME/saved.txt"] {
             assert!(!allows(&scoped, rel), "{rel}: out of the deletion scope");
         }
@@ -2482,6 +2707,66 @@ mod tests {
             allows(&scoped, "A/keep.txt"),
             "A/keep.txt is still in scope"
         );
+    }
+
+    /// cr-g3fix5-2: at a real destination that ignores case, an exclude
+    /// with a glob component also names the destination's own spelling of
+    /// the literal components after it — `**/cache` names `x/Cache`,
+    /// `a/b/CACHE` and a top-level `Cache`; `*/cache` names the first two
+    /// (a component before `cache` required) — while the filter as the
+    /// source spelled it names none of them (the reported deletion).
+    /// Skipped with a message where the filesystem is case-sensitive.
+    #[test]
+    fn the_deletion_scope_names_the_destinations_spelling_after_a_glob_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path();
+        for rel in [
+            "x/Cache/saved.txt",
+            "a/b/CACHE/saved.txt",
+            "Cache/top.txt",
+            "x/other.txt",
+        ] {
+            let path = dst.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"s").unwrap();
+        }
+        if !case_insensitive(dst) {
+            eprintln!("skipping: {} is case-sensitive", dst.display());
+            return;
+        }
+        let allows = |filter: &FileFilter, rel: &str| {
+            filter.allows_entry(Some(Path::new(rel)), &dst.join(rel), 1, None)
+        };
+        let cases: [(&str, &[&str], &[&str]); 2] = [
+            (
+                "**/cache",
+                &["x/Cache/saved.txt", "a/b/CACHE/saved.txt", "Cache/top.txt"],
+                &["x/other.txt"],
+            ),
+            (
+                "*/cache",
+                &["x/Cache/saved.txt", "a/b/CACHE/saved.txt"],
+                &["Cache/top.txt", "x/other.txt"],
+            ),
+        ];
+        for (pattern, out, kept) in cases {
+            let mut filter = FileFilter::default();
+            filter.exclude_files = vec![pattern.to_string()];
+            let scoped = destination_scope(&filter, dst);
+            for rel in out {
+                assert!(
+                    allows(&filter, rel),
+                    "{pattern}: {rel}: as the source spelled it, the filter names it not"
+                );
+                assert!(
+                    !allows(&scoped, rel),
+                    "{pattern}: {rel}: out of the deletion scope"
+                );
+            }
+            for rel in kept {
+                assert!(allows(&scoped, rel), "{pattern}: {rel}: still in scope");
+            }
+        }
     }
 
     /// cr-g3fix5-1: a literal any-depth name is read in each directory the
@@ -2558,19 +2843,19 @@ mod tests {
         assert!(!names.protects(Path::new("x/other")));
         assert_eq!(
             lookups.load(Ordering::SeqCst),
-            4,
-            "σ and cache once in each of dst and dst/x"
+            5,
+            "σ and cache once in each of dst and dst/x; the path rule's `a` once, in dst"
         );
         assert!(
             DestinationNames::new(
                 Path::new("dst"),
-                &["./a/b".to_string()],
+                &[],
                 false,
-                || panic!("no name rule: the case rule is not asked"),
+                || panic!("no rule: the case rule is not asked"),
                 stand_in(Arc::default()),
             )
             .is_none(),
-            "a path rule alone is not read here"
+            "no exclude, nothing read"
         );
     }
 
