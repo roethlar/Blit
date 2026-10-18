@@ -82,7 +82,10 @@ ARM64 results are OS evidence, not a substitute for CI.
 - Run the suite with a FOREGROUND ssh command (`cargo test --workspace
   --no-fail-fast`, streamed to a log on the Mac from a background shell);
   processes started with `Start-Process` inside an ssh session are killed
-  when the session ends. Use `--no-fail-fast`: plain `cargo test` stops at
+  when the session ends — **not always: on the 2026-10-17 reinstall a
+  `blit-daemon.exe` run in the foreground of an ssh session outlived that
+  session's end and had to be `Stop-Process`ed (G5b Windows legs,
+  2026-10-18); always kill by PID at cleanup and verify.** Use `--no-fail-fast`: plain `cargo test` stops at
   the first failing binary, which is how CI hid 17 failing Windows test
   binaries on 2026-09-30.
 - The ssh session token is High integrity with SeBackup/SeRestore/
