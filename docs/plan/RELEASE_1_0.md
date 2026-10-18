@@ -224,8 +224,12 @@ Ordered path to the tag:
    gate 1533/0/2; the re-review g3fix5-r1 closed five and found four more (two
    HIGH: Unicode-equivalent destination names and glob components under
    `mirror`), fixed one per commit (`80c6072e`, `1435d7c7`, `7f4e2116`,
-   `df61b1d6`), gate 1548/0/2; the re-review g3fix6-r1 of `a157ae00..df61b1d6`
-   awaits the owner's dispatch word (D-2026-07-23-7).
+   `df61b1d6`), gate 1548/0/2; the re-review g3fix6-r1 closed two and found
+   three more (two HIGH: a folded class loses members, Unicode pairs a fold
+   misses — the glob-folding half of round 5), admitted `bdb90194`; fix round
+   7 in flight with no text folding at all (pruned source paths protected by
+   exact filesystem pairing; contract 7 → 8); then the re-review g3fix7-r1 on
+   the owner's dispatch word (D-2026-07-23-7).
 3. G4 edits: README/TRANSFER_SESSION corrections from the audit; STATE
    queue de-drift; plan-status flips as ruled.
 4. G5: DONE (`6d5d93c8`). Pushed through `de9a333f` 2026-10-16 (from this
@@ -233,9 +237,10 @@ Ordered path to the tag:
    38960754619: Linux 1542, Windows 1487, macOS 1533, 0 failed). The
    lockfile bump `3f15f835` (RUSTSEC-2026-0258 h2; yanked chacha20) moves the
    candidate; CI on it after the push.
-5. G5b: Mac↔Linux PASS on `de9a333f`'s archives (`50e4d5fc`) stands; the
-   owner declined a repeat on later archives; Windows legs when a host answers
-   (recorded per pair here).
+5. G5b: CLOSED 2026-10-18 — Mac↔Linux PASS on `de9a333f`'s archives
+   (`50e4d5fc`) and the four Windows legs PASS on netwatch-01 with the
+   `19ace1ac` archives (`b2541bb9`); the firewall recipe finding it surfaced
+   is fixed in docs (`d0a9a7a8`, `215de5e2`).
 6. The Codex range review of the two G3 fixes is the release-prep review
    (owner dispatch approval); its findings landed one per commit; the
    re-review of the fix range closes it.
