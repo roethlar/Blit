@@ -341,7 +341,7 @@ retraction: a cost billed to one arm and not the other.)
     (older invocations in the DEVLOG say 10.1.10.91). **Not current NIC
     identity:** the Aquantia later moved to `q` — see the `q` section.
 - **netwatch-01 REINSTALLED 2026-10-17 (owner): new NIC, new MAC, new IP
-  `michael@10.1.10.98`** — Windows 11 build 26100, NTFS, 10 Gbps link,
+  `michael@10.1.10.98`** — Windows 11 Pro build 26300 (the G5b run read it; an earlier probe said 26100), NTFS, 10 Gbps link,
   `michael` is an administrator; sshd's default shell is Windows PowerShell
   5.1 (a remote command is PowerShell text; `ssh-copy-id` fails for want of
   `sh`). The Mac's key was installed with `~/netwatch-key.sh` into
