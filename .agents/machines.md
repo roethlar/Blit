@@ -340,6 +340,19 @@ retraction: a cost billed to one arm and not the other.)
   * Harnesses take the Mac IP via `MAC_HOST=` — pass **10.1.10.54**
     (older invocations in the DEVLOG say 10.1.10.91). **Not current NIC
     identity:** the Aquantia later moved to `q` — see the `q` section.
+- **netwatch-01 REINSTALLED 2026-10-17 (owner): new NIC, new MAC, new IP
+  `michael@10.1.10.98`** — Windows 11 build 26100, NTFS, 10 Gbps link,
+  `michael` is an administrator; sshd's default shell is Windows PowerShell
+  5.1 (a remote command is PowerShell text; `ssh-copy-id` fails for want of
+  `sh`). The Mac's key was installed with `~/netwatch-key.sh` into
+  `C:\ProgramData\ssh\administrators_authorized_keys` (ACL reset to
+  Administrators + SYSTEM). The host key changed with the reinstall: the
+  stale `known_hosts` entries for `netwatch-01`, `.173` and `.177` were
+  removed and the new ED25519 key accepted under `netwatch-01` and
+  `10.1.10.98`. From the Mac the bare name still resolved to the stale
+  `10.1.10.173` on 2026-10-17 — use the IP. No Rust toolchain on it; for
+  G5b it runs CI's Windows archive only. Everything below this line about
+  netwatch-01's addressing is history.
 - Windows box = **`michael@netwatch-01`**. IP **10.1.10.177 as of
   2026-07-12** (then treated as replacing 10.1.10.173). **Superseded
   2026-07-21 (D-2026-07-21-1 / `q` section):** DHCP moved back to
