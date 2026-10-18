@@ -943,6 +943,160 @@ fn pull_mirror_keeps_the_destinations_spelling_of_an_entry_a_glob_left_out() {
     );
 }
 
+/// cr-g3fix6-1: a glob component's class keeps every member typed at the
+/// destination. The reported run: `--exclude '[A-z]*/cache'` over
+/// `src/_x/cache/` with a pre-existing `dst/_x/Cache/saved.txt` printed
+/// "Deleted: 1 file(s), 2 dir(s)" and the file was gone — the deletion
+/// scope folded the class to `[A-Z]`, which lost `_`; the absolute
+/// `<src>/[A-z]*/cache` the same. Both forms now keep `dst/_x/Cache` (what
+/// the source excluded) and the destination-only `dst/_y/Cache` (which the
+/// class as typed names, with `cache` in the destination's own spelling),
+/// and delete `extra.txt`. Skipped where the filesystem is case-sensitive.
+#[test]
+fn mirror_exclude_keeps_a_class_glob_component_as_typed() {
+    let tmp = tempdir().unwrap();
+    if !case_insensitive(tmp.path()) {
+        eprintln!("skipping: {} is case-sensitive", tmp.path().display());
+        return;
+    }
+    let mut lost = Vec::new();
+    for (case, absolute) in [("relative", false), ("absolute", true)] {
+        let root = tmp.path().join(case);
+        let (src, dst) = (root.join("src"), root.join("dst"));
+        for rel in ["_x/cache/private.txt", "keep.txt"] {
+            let path = src.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"x").unwrap();
+        }
+        let saved = ["_x/Cache/saved.txt", "_y/Cache/saved.txt"];
+        for rel in saved.iter().chain(&["extra.txt"]) {
+            let path = dst.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"s").unwrap();
+        }
+        let pattern = if absolute {
+            format!("{}", src.join("[A-z]*").join("cache").display())
+        } else {
+            "[A-z]*/cache".to_string()
+        };
+
+        let (ok, stdout, stderr) = blit(&[
+            "mirror",
+            "--yes",
+            &with_slash(&src),
+            &with_slash(&dst),
+            "--exclude",
+            &pattern,
+        ]);
+        assert!(
+            ok,
+            "{case}: mirror failed:\nstdout: {stdout}\nstderr: {stderr}"
+        );
+        for rel in saved {
+            if !dst.join(rel).exists() {
+                lost.push(format!(
+                    "{case}: {rel}: {}",
+                    stdout.trim().replace('\n', " | ")
+                ));
+            }
+        }
+        assert!(dst.join("keep.txt").exists(), "{case}: keep.txt");
+        assert!(
+            !dst.join("extra.txt").exists(),
+            "{case}: extra.txt is deleted"
+        );
+        assert!(
+            !dst.join("_x/Cache/private.txt").exists(),
+            "{case}: the excluded source entry is not copied"
+        );
+        assert!(
+            !stderr.contains("cannot match anything"),
+            "{case}: a pattern under the source must not warn: {stderr}"
+        );
+    }
+    assert!(
+        lost.is_empty(),
+        "an entry the class glob names as typed must survive the mirror:\n{}",
+        lost.join("\n")
+    );
+}
+
+/// cr-g3fix6-1: the same on a destination daemon — a push mirror with
+/// `--exclude '[A-z]*/cache'`, then with the absolute
+/// `<src>/[A-z]*/cache`, keeps the module's `_x/Cache/saved.txt` and the
+/// module-only `_y/Cache/saved.txt`, and deletes `extra.txt`. Skipped
+/// where the filesystem is case-sensitive.
+#[cfg(unix)]
+#[test]
+fn push_mirror_keeps_a_class_glob_component_as_typed() {
+    let ctx = common::TestContext::new();
+    let src = ctx.workspace.join("src");
+    for rel in ["_x/cache/private.txt", "keep.txt"] {
+        let path = src.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"x").unwrap();
+    }
+    if !case_insensitive(&ctx.module_dir) {
+        eprintln!("skipping: {} is case-sensitive", ctx.module_dir.display());
+        return;
+    }
+    let saved = ["_x/Cache/saved.txt", "_y/Cache/saved.txt"];
+    let mut lost = Vec::new();
+    for pattern in [
+        "[A-z]*/cache".to_string(),
+        format!("{}", src.join("[A-z]*").join("cache").display()),
+    ] {
+        for entry in fs::read_dir(&ctx.module_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                fs::remove_dir_all(&path).unwrap();
+            } else {
+                fs::remove_file(&path).unwrap();
+            }
+        }
+        for rel in saved.iter().chain(&["extra.txt"]) {
+            let path = ctx.module_dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"s").unwrap();
+        }
+
+        let mut cmd = std::process::Command::new(&ctx.cli_bin);
+        cmd.arg("--config-dir")
+            .arg(&ctx.config_dir)
+            .arg("mirror")
+            .arg("--yes")
+            .arg(with_slash(&src))
+            .arg(format!("127.0.0.1:{}:/test/", ctx.daemon_port))
+            .arg("--exclude")
+            .arg(&pattern);
+        let output = run_with_timeout(cmd, Duration::from_secs(60));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{pattern}: push mirror failed:\nstdout: {stdout}\nstderr: {stderr}"
+        );
+        for rel in saved {
+            if !ctx.module_dir.join(rel).exists() {
+                lost.push(format!(
+                    "{pattern}: {rel}: {}",
+                    stdout.trim().replace('\n', " | ")
+                ));
+            }
+        }
+        assert!(ctx.module_dir.join("keep.txt").exists(), "{pattern}");
+        assert!(
+            !ctx.module_dir.join("extra.txt").exists(),
+            "{pattern}: a complete source scan lets the mirror delete the extraneous file"
+        );
+    }
+    assert!(
+        lost.is_empty(),
+        "the daemon's deletion scope must read the class glob as typed:\n{}",
+        lost.join("\n")
+    );
+}
+
 /// cr-g3fix-2: an absolute glob written through a symlink to the source
 /// is made relative. The glob path itself never exists, so only its
 /// literal part is resolved; before the fix the pattern was reported as

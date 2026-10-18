@@ -4083,8 +4083,9 @@ fn tag_path(report: eyre::Report, path: &str) -> eyre::Report {
 /// the source stores its names, or as typed — so the destination walk is
 /// scoped by `destination_scope`, which also names the destination's own
 /// spelling of each excluded entry (`dst/Cache` for an excluded
-/// `src/cache`) and, where the destination ignores case, matches the
-/// any-depth name rules case-insensitively. This is the one place every
+/// `src/cache`): a literal through the destination's own names, a glob as
+/// written (cr-g3fix6-1), and each entry the source's walk pruned through
+/// the destination's own names (cr-g3fix6-2). This is the one place every
 /// destination's deletions are planned — the local carrier, a pull's
 /// client, a destination daemon — and it runs on the blocking pool, after
 /// every payload landed, so the destination is read once, as it stands.

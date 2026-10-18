@@ -1,9 +1,9 @@
 # cr-g3fix6-1: Folding character-class text changes its membership and exposes excluded data
 
 **Severity**: HIGH (reviewer: HIGH)
-**Status**: Admitted
+**Status**: Fixed
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: —
+**Commit**: (this commit)
 **Reviewer**: codex / gpt-6-astra / xhigh / standard (the owner's `review`, 2026-10-18), codex-cli 0.162.1 headless one-shot, `-a never exec -m gpt-6-astra -c model_reasoning_effort="xhigh" -s workspace-write --json`, stdin closed, detached worktree `review-g3fix6-r1-19ace1ac`; codereview re-review g3fix6-r1 over `a157ae00..19ace1ac` (record `.review/results/g3fix6-r1.codex.json` + `.events.jsonl`); 2026-10-18 00:12–00:22Z; capability_ok=true; guard_confirmed=true (reviewer disabled `escaped_separator`'s star-run collapse → `an_escaped_separator_keeps_its_meaning_in_the_class_dialect` red, exit 101; restored by `git checkout`, blob hash verified, green; 1548/0/2 on its macOS gate, Linux cross-clippy clean, Windows cross-clippy stopped on a missing `ml64.exe` — its environment; it cites CI run 39080085302 green on all three OSes); SHAs pin-verified; closed: cr-g3fix5-3 true, cr-g3fix5-4 true, cr-g3fix5-1 false, cr-g3fix5-2 false, cr-g3fix4-2 false, cr-g3fix-1 false
 
 ## Evidence
@@ -27,16 +27,21 @@ Fix shape, admitted (with cr-g3fix6-2; `transfers::filter::DestinationNames` and
 - Guards: survival of `dst/_x/Cache/saved.txt` under `--exclude '[A-z]*/cache'` and the absolute `<src>/[A-z]*/cache` (local carrier and destination daemon), and a pure test that a class component is compiled from its typed text; mutation: fold the text again → red.
 
 ## Approach
-(filled by the fix)
+- Removed the destination's NFC/uppercase glob-text fold and its dependency. `DestinationNames` now compiles a glob component from its typed text; pure glob rules remain under the filter's as-written reading. Literal components still resolve through the destination filesystem, and the source's pruned paths added by cr-g3fix6-2 protect paired destination entries.
+- Added local and push-to-daemon mirror guards for the relative and absolute `[A-z]*/cache` forms. They check both a pruned source entry and a destination-only class member, plus deletion of an unrelated entry. A unit guard checks the compiled component text and membership.
 
 ## Files changed
-(filled by the fix)
+- `crates/blit-core/src/transfers/filter.rs` — remove folding and compile glob components as written; replace folded-rule tests with class-membership guards.
+- `crates/blit-core/src/transfer_session/mod.rs` — update the deletion-scope contract comment.
+- `crates/blit-core/Cargo.toml`, `Cargo.lock` — remove the unused `unicode-normalization` dependency.
+- `crates/blit-cli/tests/exclude_contract.rs` — local and daemon mirror guards.
 
 ## Guard proof
-(filled by the fix)
+- macOS APFS case-insensitive: `cargo test -p blit-core a_glob_is_matched_as_written_at_the_destination --lib` passed (1/1); `cargo test -p blit-transfer --test exclude_contract class_glob_component_as_typed -- --nocapture` passed (2/2, no skip line).
+- Mutation: compiling the component after `to_ascii_uppercase()` changed `[A-z]*` to `[A-Z]*`; the unit guard failed at the typed-text assertion. The mutation was removed. Full gate and post-restore focused results are recorded with the round's completion.
 
 ## Known gaps
-(filled by the fix)
+- A destination-only entry that a pure glob matches only through the destination filesystem's case or Unicode equivalence can still be deleted; see cr-g3fix6-2 and the 1.0 release limitation. The source has no pruned counterpart to send for it.
 
 ## Reviewer comments
 (filled by the re-review)

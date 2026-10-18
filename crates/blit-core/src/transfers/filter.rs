@@ -793,11 +793,12 @@ fn paired_name(
 /// cr-g3fix5-2: each exclude is read per directory the walk visits
 /// ([`DestinationNames`]) — a literal name, alone or as a component of a
 /// path rule before or after a glob component, through the destination
-/// filesystem itself ([`stored_name`]), and a glob under a case and
-/// normalization fold where the destination ignores case
-/// ([`case_insensitive_at`]). This replaces cr-g3fix4-2's respelling of
-/// a path rule's leading literal components from the root, which stopped
-/// at the first glob component.
+/// filesystem itself ([`stored_name`]). This replaces cr-g3fix4-2's
+/// respelling of a path rule's leading literal components from the root,
+/// which stopped at the first glob component. cr-g3fix6-1: glob text is
+/// matched as written, never under a fold of its text — a fold changed a
+/// class's members (`[A-z]` folded to `[A-Z]` lost `_`) and so named less
+/// than the exclude did.
 ///
 /// cr-g3fix6-2: `pruned` is every entry the source's walk pruned because an
 /// exclude named it, as the source spells it (`ManifestPruned`). Each is
@@ -1014,24 +1015,20 @@ impl Listings {
 ///   component from the root, as the subtree rule reads it ([`Step`]): a
 ///   name as above, `**` as any number of components (at least one when
 ///   last, as globset reads a trailing `/**`), and any other glob component
-///   as globset text matched against one component — or, holding `*` or
-///   `?`, which match `/` in this filter, several joined with `/` — under
-///   [`fold`] where the destination ignores case.
+///   as written (cr-g3fix6-1) — globset text matched against one component,
+///   or, holding `*` or `?`, which match `/` in this filter, several joined
+///   with `/`.
 /// - a glob rule with no literal component (or one whose `/` lies inside
-///   a class or an alternation), where the destination ignores case, is
-///   also matched whole under [`fold`], applied to the pattern and the
-///   entry's path alike.
+///   a class or an alternation) is not read here: the filter matches it as
+///   written, and what it excluded at the source is out of scope through
+///   the pruned paths below (cr-g3fix6-1).
 /// - cr-g3fix6-2: an entry the source's walk pruned, resolved here through
 ///   the destination's own names ([`resolve_pruned`]), is out of scope with
 ///   everything below it.
 ///
-/// The fold (NFC, then each character's single uppercase form)
-/// approximates the filesystem's own equivalence; where it pairs more
-/// than the filesystem does (NFD and NFC on NTFS), an entry is kept that
-/// could have been deleted — the safe direction. The walk is depth first,
-/// so the lookups and each path rule's progress are kept for the chain of
-/// directories above the entry asked about only ([`Level`]), not for the
-/// whole destination.
+/// The walk is depth first, so the lookups and each path rule's progress
+/// are kept for the chain of directories above the entry asked about only
+/// ([`Level`]), not for the whole destination.
 pub(crate) struct DestinationNames {
     root: PathBuf,
     /// Every literal name the rules hold, looked up by index.
@@ -1040,9 +1037,6 @@ pub(crate) struct DestinationNames {
     names: Vec<usize>,
     /// The path rules holding a literal component, as steps.
     paths: Vec<Vec<Step>>,
-    /// The glob rules with no literal component, folded; `None` where the
-    /// destination compares case, or no such rule was given.
-    folded: Option<FileFilter>,
     /// Whether the destination ignores case.
     case_insensitive: bool,
     /// [`stored_name`] on the destination (a stand-in in tests).
@@ -1063,10 +1057,9 @@ enum Step {
     /// A literal name (an index into `literals`): its own spelling, or one
     /// the destination pairs with it in that directory.
     Name(usize),
-    /// Glob text, matched against one component — or, when it `crosses`
-    /// (holds `*` or `?`, which match `/` in this filter as in globset),
-    /// against several joined with `/` — under the fold where the
-    /// destination ignores case.
+    /// Glob text as written (cr-g3fix6-1), matched against one component —
+    /// or, when it `crosses` (holds `*` or `?`, which match `/` in this
+    /// filter as in globset), against several joined with `/`.
     Glob {
         glob: globset::GlobMatcher,
         crosses: bool,
@@ -1122,10 +1115,6 @@ impl std::fmt::Debug for DestinationNames {
             .field("literals", &self.literals)
             .field("names", &self.names)
             .field("paths", &self.paths.len())
-            .field(
-                "folded",
-                &self.folded.as_ref().map(|folded| &folded.exclude_files),
-            )
             .field("case_insensitive", &self.case_insensitive)
             .field("pruned", &self.pruned.len())
             .finish_non_exhaustive()
@@ -1156,59 +1145,35 @@ impl DestinationNames {
             }
         };
         let mut names = Vec::new();
-        let mut components = Vec::new();
-        let mut globs = Vec::new();
-        for (pattern, rule) in patterns
+        let mut paths = Vec::new();
+        // cr-g3fix6-1: a glob name, and a path rule with no literal
+        // component (or read whole), have nothing for the destination to
+        // resolve: the filter matches them as written.
+        for rule in patterns
             .iter()
-            .filter_map(|pattern| Some((pattern, exclude_rule(pattern, windows)?)))
+            .filter_map(|pattern| exclude_rule(pattern, windows))
         {
             if !rule.path {
-                match plain_name(&rule.body, windows) {
-                    Some(name) => {
-                        let index = index_of(name);
-                        if !names.contains(&index) {
-                            names.push(index);
-                        }
+                if let Some(name) = plain_name(&rule.body, windows) {
+                    let index = index_of(name);
+                    if !names.contains(&index) {
+                        names.push(index);
                     }
-                    None => globs.push(pattern.clone()),
                 }
                 continue;
             }
-            match path_components(&rule.body, windows) {
-                Some(parts) if parts.iter().any(|part| plain_name(part, windows).is_some()) => {
-                    components.push((pattern, parts))
+            if let Some(parts) = path_components(&rule.body, windows) {
+                if parts.iter().any(|part| plain_name(part, windows).is_some()) {
+                    if let Some(steps) = path_steps(&parts, windows, &mut index_of) {
+                        paths.push(steps);
+                    }
                 }
-                _ => globs.push(pattern.clone()),
             }
         }
-        if names.is_empty() && components.is_empty() && globs.is_empty() && pruned.is_empty() {
+        if names.is_empty() && paths.is_empty() && pruned.is_empty() {
             return None;
         }
         let case_insensitive = case_insensitive();
-        let mut paths = Vec::new();
-        for (pattern, parts) in components {
-            match path_steps(&parts, windows, case_insensitive, &mut index_of) {
-                Some(steps) => paths.push(steps),
-                None => globs.push(pattern.clone()),
-            }
-        }
-        let folded: Vec<String> = if case_insensitive {
-            globs
-                .iter()
-                .map(|glob| fold(glob))
-                .filter(|folded| globset::Glob::new(folded).is_ok())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let folded = (!folded.is_empty()).then(|| {
-            let mut filter = FileFilter::default();
-            filter.exclude_files = folded;
-            filter
-        });
-        if names.is_empty() && paths.is_empty() && folded.is_none() && pruned.is_empty() {
-            return None;
-        }
         let states = paths
             .iter()
             .map(|steps| {
@@ -1222,7 +1187,6 @@ impl DestinationNames {
             literals,
             names,
             paths,
-            folded,
             case_insensitive,
             stored,
             pruned,
@@ -1253,12 +1217,6 @@ impl DestinationNames {
             .iter()
             .map(|name| name.to_string_lossy().into_owned())
             .collect();
-        if let Some(folded) = &self.folded {
-            let folded_rel = PathBuf::from(fold(&texts.join("/")));
-            if !folded.allows_entry(Some(&folded_rel), &folded_rel, 0, None) {
-                return true;
-            }
-        }
         if self.names.is_empty() && self.paths.is_empty() && self.pruned.is_empty() {
             return false;
         }
@@ -1316,8 +1274,7 @@ impl DestinationNames {
             .iter()
             .zip(states.iter())
             .map(|(steps, from)| {
-                let (next, accepted) =
-                    advance(steps, from, texts, at, &mut matches, self.case_insensitive);
+                let (next, accepted) = advance(steps, from, texts, at, &mut matches);
                 protected |= accepted;
                 next
             })
@@ -1377,12 +1334,12 @@ fn path_components(body: &str, windows: bool) -> Option<Vec<String>> {
 }
 
 /// cr-g3fix5-2: the [`Step`]s of a path rule's components; a literal's
-/// index from `index_of`. `None` when globset refuses a glob component on
-/// its own (the rule is read whole).
+/// index from `index_of`. A glob component is compiled from its text as
+/// written (cr-g3fix6-1). `None` when globset refuses a glob component on
+/// its own (the rule is then left to the filter as written).
 fn path_steps(
     components: &[String],
     windows: bool,
-    case_insensitive: bool,
     index_of: &mut impl FnMut(String) -> usize,
 ) -> Option<Vec<Step>> {
     let last = components.len() - 1;
@@ -1400,13 +1357,8 @@ fn path_steps(
             if let Some(name) = plain_name(component, windows) {
                 return Some(Step::Name(index_of(name)));
             }
-            let text = if case_insensitive {
-                fold(component)
-            } else {
-                component.clone()
-            };
             Some(Step::Glob {
-                glob: globset::Glob::new(&text).ok()?.compile_matcher(),
+                glob: globset::Glob::new(component).ok()?.compile_matcher(),
                 crosses: component.contains(['*', '?']),
             })
         })
@@ -1433,14 +1385,13 @@ fn closure(steps: &[Step], states: &mut Vec<State>) {
 /// the parent directory) through the component `texts[at]`: the states
 /// after it, and whether the rule now names it. `matches` says whether the
 /// component is a literal's own spelling or one the destination pairs with
-/// it there; a glob is matched folded where the destination ignores case.
+/// it there; a glob is matched as written.
 fn advance(
     steps: &[Step],
     from: &[State],
     texts: &[String],
     at: usize,
     matches: &mut impl FnMut(usize) -> bool,
-    case_insensitive: bool,
 ) -> (Vec<State>, bool) {
     let mut next: Vec<State> = Vec::new();
     let push = |state: State, next: &mut Vec<State>| {
@@ -1459,7 +1410,6 @@ fn advance(
             Some(Step::Glob { glob, crosses }) => {
                 let start = open.unwrap_or(at);
                 let text = texts[start..=at].join("/");
-                let text = if case_insensitive { fold(&text) } else { text };
                 if glob.is_match(&text) {
                     push((step + 1, None), &mut next);
                 }
@@ -1477,23 +1427,6 @@ fn advance(
     closure(steps, &mut next);
     let accepted = next.iter().any(|&(step, _)| step == steps.len());
     (next, accepted)
-}
-
-/// cr-g3fix5-1: `text` under the fold [`DestinationNames`] matches a glob
-/// in: NFC, then each character as its uppercase form where that is one
-/// character (`ς` and `σ` both `Σ`, `é` `É`; `ß`, whose uppercase is two,
-/// stays), so a class or `?` still spans one character.
-fn fold(text: &str) -> String {
-    use unicode_normalization::UnicodeNormalization;
-    text.nfc()
-        .map(|c| {
-            let mut upper = c.to_uppercase();
-            match (upper.next(), upper.next()) {
-                (Some(single), None) => single,
-                _ => c,
-            }
-        })
-        .collect()
 }
 
 /// cr-g3fix4-2: the name a pattern component spells when it holds no glob
@@ -2726,12 +2659,13 @@ mod tests {
     /// its own spelling and each name the destination pairs with it in that
     /// directory (a tie: every name), before or after a glob component;
     /// `**` spans any number of components (at least one when last); any
-    /// other glob component is matched under the fold, across `/` when it
-    /// holds `*` or `?` (as globset reads it in this filter); the anchor
-    /// is kept. cr-g3fix4-2's respelling stopped at the first glob
+    /// other glob component is matched as written (cr-g3fix6-1), across `/`
+    /// when it holds `*` or `?` (as globset reads it in this filter); the
+    /// anchor is kept. cr-g3fix4-2's respelling stopped at the first glob
     /// component, so `**/cache`, `*/cache`, `cache/s*b/x` and `*/ς` named
     /// none of the destination's own spellings past it. A path rule with
-    /// no literal component is read whole, under the fold.
+    /// no literal component is not read here (the filter matches it as
+    /// written).
     #[test]
     fn a_deletion_scope_path_rule_is_read_component_by_component() {
         let disk = |path: &Path| -> Vec<String> {
@@ -2742,7 +2676,7 @@ mod tests {
                 "dst/data[1]" => vec!["DATA[1]".into()],
                 "dst/ς" => vec!["alias".into(), "σ".into()],
                 "dst/q/ς" => vec!["alias".into()],
-                "dst/x/cache" | "dst/xa/cache" => vec!["Cache".into()],
+                "dst/x/cache" | "dst/xa/cache" | "dst/Xa/cache" => vec!["Cache".into()],
                 "dst/a/b/cache" => vec!["CACHE".into()],
                 _ => Vec::new(),
             }
@@ -2758,7 +2692,7 @@ mod tests {
             )
             .unwrap_or_else(|| panic!("{pattern} is read at the destination"))
         };
-        let cases: [(&str, &[&str], &[&str]); 13] = [
+        let cases: [(&str, &[&str], &[&str]); 12] = [
             (
                 "./cache",
                 &["Cache", "Cache/saved.txt"],
@@ -2767,8 +2701,8 @@ mod tests {
             ("./cache/", &["Cache/saved.txt"], &["x/Cache"]),
             (
                 "cache/sub/*.tmp",
-                &["Cache/SUB/a.tmp", "Cache/SUB/A.TMP"],
-                &["Cache/SUB/a.txt", "Cache/a.tmp"],
+                &["Cache/SUB/a.tmp"],
+                &["Cache/SUB/A.TMP", "Cache/SUB/a.txt", "Cache/a.tmp"],
             ),
             (
                 "cache/s*b/x",
@@ -2792,10 +2726,13 @@ mod tests {
                 &["x/Cache/saved.txt", "a/b/CACHE"],
                 &["Cache/f", "x/other"],
             ),
-            ("X*/cache", &["xa/Cache/saved.txt"], &["ya/Cache"]),
+            (
+                "X*/cache",
+                &["Xa/Cache/saved.txt"],
+                &["xa/Cache", "ya/Cache"],
+            ),
             ("*/ς", &["q/alias/f"], &["q/other", "alias"]),
             ("./cache/**", &["Cache/f", "Cache/d/f"], &["Cache"]),
-            ("*/*.TMP", &["x/a.tmp"], &["a.tmp"]),
         ];
         for (pattern, out, kept) in cases {
             let names = reads(pattern, false);
@@ -2815,6 +2752,18 @@ mod tests {
         assert!(
             reads(r".\cache", true).protects(Path::new("Cache")),
             "the Windows rule reads `\\` as a separator"
+        );
+        assert!(
+            DestinationNames::new(
+                Path::new("dst"),
+                &["*/*.TMP".to_string()],
+                false,
+                || true,
+                Box::new(disk),
+                Default::default(),
+            )
+            .is_none(),
+            "a path rule with no literal component is not read at the destination"
         );
         for (component, name) in [
             ("[*]x[?]", Some("*x?")),
@@ -3050,56 +2999,90 @@ mod tests {
         );
     }
 
-    /// cr-g3fix5-1: where the destination ignores case, a glob any-depth
-    /// name is matched under the fold — NFC, then each character's single
-    /// uppercase form — applied to the pattern and the entry alike: `c?ché`
-    /// names `CACHÉ` and an NFD `caché`, `*σ` names `xς`. Not where the
-    /// destination compares case. The fold keeps a character whose
-    /// uppercase is two (`ß`), so a class or `?` still spans one. Pure,
-    /// so it runs on every OS.
+    /// cr-g3fix6-1: glob text is read at the destination exactly as written
+    /// — a class keeps every member typed — never under a fold of its text,
+    /// which changed a class's membership: `[A-z]` folded to `[A-Z]` lost
+    /// `_` and the other punctuation between `Z` and `a`, and NFC composed
+    /// the two members of an NFD class `[é]` into one. Tested against a
+    /// stand-in destination that ignores case and pairs `cache` with a
+    /// stored `Cache` under `_y`, `ex`, `Xa` and `xa`: `[A-z]*/cache` names
+    /// `_y/Cache` (not `0y/Cache`: `0` is below `A`), the NFD class
+    /// `[é]*/cache` names `ex/Cache` (its `e` is a member), `X*/cache`
+    /// names `Xa/Cache` but not `xa/Cache`. A glob component is compiled
+    /// from its typed text. A glob name and a glob rule with no literal
+    /// component are not read here at all: the filter matches them as
+    /// written. Pure, so it runs (and can fail) on every OS.
     #[test]
-    fn a_glob_name_is_matched_under_the_destinations_fold() {
-        assert_eq!(fold("ς"), "Σ");
-        assert_eq!(fold("σ"), "Σ");
-        assert_eq!(fold("cafe\u{301}"), "CAF\u{c9}");
-        assert_eq!(fold("caf\u{e9}"), "CAF\u{c9}");
-        assert_eq!(fold("ß"), "ß");
-        assert_eq!(fold("[a-z]*.tmp"), "[A-Z]*.TMP");
-        let none: Box<StoredNames> = Box::new(|_: &Path| Vec::new());
-        let patterns = ["c?ch\u{e9}", "*σ"].map(String::from).to_vec();
-        let names = DestinationNames::new(
-            Path::new("dst"),
-            &patterns,
-            false,
-            || true,
-            none,
-            Default::default(),
-        )
-        .expect("globs to fold");
-        for (rel, protected) in [
-            ("x/CACH\u{c9}/saved.txt", true),
-            ("x/cache\u{301}", true),
-            ("x/cach\u{e9}", true),
-            ("x/cachx", false),
-            ("x/xς", true),
-            ("x/XΣ/deep", true),
-            ("x/x", false),
-        ] {
-            assert_eq!(names.protects(Path::new(rel)), protected, "{rel}");
-        }
-        let none: Box<StoredNames> = Box::new(|_: &Path| Vec::new());
-        assert!(
+    fn a_glob_is_matched_as_written_at_the_destination() {
+        let disk = |path: &Path| -> Vec<String> {
+            match path.to_string_lossy().replace('\\', "/").as_str() {
+                "dst/_y/cache" | "dst/0y/cache" | "dst/ex/cache" | "dst/Xa/cache"
+                | "dst/xa/cache" => vec!["Cache".into()],
+                _ => Vec::new(),
+            }
+        };
+        let reads = |pattern: &str| {
             DestinationNames::new(
                 Path::new("dst"),
-                &patterns,
+                &[pattern.to_string()],
                 false,
-                || false,
-                none,
-                Default::default()
+                || true,
+                Box::new(disk),
+                Default::default(),
             )
-            .is_none(),
-            "a destination that compares case folds nothing"
-        );
+        };
+        let cases: [(&str, &str, &[&str], &[&str]); 3] = [
+            (
+                "[A-z]*/cache",
+                "[A-z]*",
+                &["_y/Cache/saved.txt"],
+                &["0y/Cache/saved.txt"],
+            ),
+            (
+                "[e\u{301}]*/cache",
+                "[e\u{301}]*",
+                &["ex/Cache/saved.txt"],
+                &[],
+            ),
+            (
+                "X*/cache",
+                "X*",
+                &["Xa/Cache/saved.txt"],
+                &["xa/Cache/saved.txt"],
+            ),
+        ];
+        for (pattern, typed, out, kept) in cases {
+            let names = reads(pattern).unwrap_or_else(|| panic!("{pattern} is read"));
+            match names.paths.as_slice() {
+                [steps] => match steps.first() {
+                    Some(Step::Glob { glob, .. }) => assert_eq!(
+                        glob.glob().glob(),
+                        typed,
+                        "{pattern}: the glob component is compiled from its typed text"
+                    ),
+                    _ => panic!("{pattern}: a glob component first"),
+                },
+                _ => panic!("{pattern}: one path rule"),
+            }
+            for rel in out {
+                assert!(
+                    names.protects(Path::new(rel)),
+                    "{pattern}: {rel} is out of the deletion scope"
+                );
+            }
+            for rel in kept {
+                assert!(
+                    !names.protects(Path::new(rel)),
+                    "{pattern}: {rel} stays in the deletion scope"
+                );
+            }
+        }
+        for pattern in ["c?ch\u{e9}", "*\u{3c3}", "[a-z]*.tmp", "*/*.TMP"] {
+            assert!(
+                reads(pattern).is_none(),
+                "{pattern}: no literal component, matched as written by the filter"
+            );
+        }
     }
 
     /// cr-g3fix5-1: at a real destination an excluded any-depth name also
