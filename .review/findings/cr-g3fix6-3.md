@@ -32,7 +32,7 @@ Fix shape, admitted: with the fold gone, a path rule's components are matched ag
 
 ## Guard proof
 - Mutation: disabled the combined matcher. At depth 20 the guard failed with 23 retained states (limit two). The mutation was removed.
-- macOS: the post-restore guard passed (1/1), the filter suite passed (37/37), and the CLI exclude-contract suite passed (25/25). `cargo fmt --all -- --check` and native strict workspace clippy passed. Linux cross-target strict workspace clippy passed. Windows MSVC cross-clippy stopped in `blake3`'s build script because this Mac has no `ml64.exe`; the GNU target is not installed. The round's full workspace test gate remains to run with a longer session limit.
+- macOS: the post-restore guard passed (1/1), the filter suite passed (37/37), and the CLI exclude-contract suite passed (25/25). `cargo fmt --all -- --check` and native strict workspace clippy passed. Linux cross-target strict workspace clippy passed. The completed round's full workspace suite passed 1560/0/2 over 47 binaries (cargo exit 0). Windows MSVC cross-clippy stopped in `blake3`'s build script because this Mac has no `ml64.exe`; the GNU target is not installed.
 
 ## Known gaps
 - This removes the per-entry state growth for `**` immediately followed by a crossing glob. Other glob layouts were not benchmarked in this finding.

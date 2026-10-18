@@ -38,7 +38,7 @@ Fix shape, admitted (with cr-g3fix6-2; `transfers::filter::DestinationNames` and
 
 ## Guard proof
 - macOS APFS case-insensitive: `cargo test -p blit-core a_glob_is_matched_as_written_at_the_destination --lib` passed (1/1); `cargo test -p blit-transfer --test exclude_contract class_glob_component_as_typed -- --nocapture` passed (2/2, no skip line).
-- Mutation: compiling the component after `to_ascii_uppercase()` changed `[A-z]*` to `[A-Z]*`; the unit guard failed at the typed-text assertion. The mutation was removed. Full gate and post-restore focused results are recorded with the round's completion.
+- Mutation: compiling the component after `to_ascii_uppercase()` changed `[A-z]*` to `[A-Z]*`; the unit guard failed at the typed-text assertion. The mutation was removed; the post-restore unit guard (1/1) and local/daemon CLI guards (2/2) passed. The full macOS workspace gate on the completed round passed 1560/0/2 over 47 binaries; native and Linux cross-clippy passed.
 
 ## Known gaps
 - A destination-only entry that a pure glob matches only through the destination filesystem's case or Unicode equivalence can still be deleted; see cr-g3fix6-2 and the 1.0 release limitation. The source has no pruned counterpart to send for it.
