@@ -80,7 +80,10 @@ are the owner's act.
   non-UTF-8 names, job logs/records/saved jobs, the fixes);
   `docs/RELEASE_NOTES_1_0.md` re-cut as 0.1.3 → 1.0.0 with the known
   limitations marked † where a G3 ruling is open. Bump not yet made.
-- [ ] **G5b — cross-OS smoke matrix (owner-raised, 2026-08-02).** CI only
+- [x] **G5b — cross-OS smoke matrix (owner-raised, 2026-08-02).** CLOSED
+  2026-10-18: all six directed pairs PASS — Mac↔Linux on `de9a333f`'s
+  archives (2026-10-17), the four Windows legs on `19ace1ac`'s
+  (2026-10-18; tables below). CI only
   proves same-OS loopback daemon transfers; the six directed cross-OS
   pairs (win↔linux, win↔mac, mac↔linux) run with the CANDIDATE binaries
   on the real fleet (netwatch-01, magneto, q — an identical build identity,
@@ -129,6 +132,34 @@ are the owner's act.
   `blit jobs list` on the Mac and `blit jobs list magneto` show the same
   five runs under the same job IDs; magneto cleaned up (daemon gone, port
   free, work dir removed). The Windows legs remain open.
+
+  **Windows legs 2026-10-18 on netwatch-01 (`michael@10.1.10.98`,
+  reinstalled 2026-10-17) with run 39080085302's `19ace1ac` archives**
+  (identity `1.0.0+19ace1acf170` on all three platforms; archives
+  verified; a modules-only daemon on netwatch-01 `10.1.10.98:9031`, mDNS
+  off, state inside its work dir, held in the foreground of an ssh session
+  behind a program-scoped firewall rule; the same magneto daemon setup as
+  before; the Mac client-only; evidence
+  `docs/bench/g5b-windows-2026-10-18/`):
+
+  | pair | initial copy | content verify | edit → re-run | converged re-run | result |
+  | --- | --- | --- | --- | --- | --- |
+  | mac → win (push) | 12 files, 5,382,443 B | 12/12 sha256 match, no extras or reparse points | 1 file, 39 B | 0 files | PASS |
+  | win → mac (pull, `--drop-windows-metadata`) | 12 files, 5,382,472 B | 12/12 sha256 match, entry lists identical | — | 0 files | PASS |
+  | win → linux (push, `--drop-windows-metadata`) | 12 files, 5,382,443 B | 12/12 sha256 match, no extras | 1 file, 39 B | 0 files | PASS |
+  | linux → win (pull) | 12 files, 5,382,472 B | 12/12 sha256 match, entry lists identical | — | 0 files | PASS |
+
+  Every leg command exited 0. The only warnings were the flag's own and
+  the daemons' expected startup line, and the clients' and daemons' job
+  records agree. Two first attempts are recorded as observations, not
+  results. Without the flag, the win → linux push refused as contract v5
+  specifies (exit 1, nothing written). Under a 9031-only firewall rule —
+  the `DAEMON_CONFIG.md` Windows recipe at the candidate, corrected since
+  in `d0a9a7a8` — the mac → win push failed `DATA_PLANE_FAILED` (nothing
+  written). Both hosts were cleaned up. The owner's roaming
+  `perf_local.jsonl`, moved by the daemon's first-start migration, was
+  restored (hash, size, times, owner; one inherited ACE differs, see the
+  README).
 - **G5c — DISSOLVED (D-2026-08-15-2): 1.0 is CLI + daemon only; no UI
   surface gates this or any release.** UIs are a separate app
   (`BlitAdmin_UIs` repo) with their own lifecycle. History: this gate was
@@ -158,7 +189,7 @@ is reviewed to consensus.
 | G3 dispositions | DONE: SSC shipped; audit-18 retired; audit-19 FIXED `fa948e01`; detached recents reason FIXED `b7da0d81` (D-2026-10-14-1); Codex g3fix-r1 over `b186e8b8..b7da0d81`: 3 MEDIUM on audit-19, FIXED `7d3e4eb6` `47bdfb69` `eddfab6c`; g3fix2-r1: cr-g3fix-2/-3 closed, cr-g3fix-1 not (HIGH, cr-g3fix2-1) + cr-g3fix2-2, FIXED `f6099aa3` `36b752b6`; g3fix3-r1: cr-g3fix2-2 closed, cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix3-1) + cr-g3fix3-2/-3, FIXED `a67087fd` `f6212938` `548625f5`; g3fix4-r1: cr-g3fix3-2/-3 closed, cr-g3fix3-1/cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix4-1) + cr-g3fix4-2 (HIGH) + cr-g3fix4-3 (HIGH) + cr-g3fix4-4, FIXED `e7be4970` `b304e6ff` `5624fd43` `e67c225c`; g3fix5-r1: cr-g3fix4-1/-3/-4, cr-g3fix3-1, cr-g3fix2-1 closed, cr-g3fix4-2/cr-g3fix-1 not (HIGH, cr-g3fix5-1) + cr-g3fix5-2 (HIGH) + cr-g3fix5-3 + cr-g3fix5-4, FIXED `80c6072e` `1435d7c7` `7f4e2116` `df61b1d6` | Codex re-review of `a157ae00..df61b1d6` on the owner's `review` |
 | G4 docs truth | README + TRANSFER_SESSION corrected `6ac98801` (audit of 2026-10-14); plan-status sweep DONE 2026-10-14 (D-2026-10-14-1) | — |
 | G5 version + notes | DONE `6d5d93c8`: 1.0.0, CHANGELOG `[1.0.0]`, notes re-cut († entries follow the G3 rulings) | — |
-| G5b cross-OS matrix | Mac↔Linux PASS 2026-10-17 on run 38960754619's `de9a333f` archives (identity `1.0.0+de9a333f5027` on both ends; evidence `docs/bench/g5b-2026-10-17/`); stands as the evidence — the owner declined a repeat on later archives (2026-10-17, "testing theater"); Windows legs: netwatch-01 reinstalled 2026-10-17, ssh being set up, to run with run 39080085302's archives | netwatch-01's ssh |
+| G5b cross-OS matrix | All six legs PASS: mac → linux and linux → mac 2026-10-17 on run 38960754619's `de9a333f` archives (identity `1.0.0+de9a333f5027`, kept as the evidence by the owner 2026-10-17; `docs/bench/g5b-2026-10-17/`), and mac → win, win → mac, win → linux and linux → win 2026-10-18 on netwatch-01 with run 39080085302's `19ace1ac` archives (identity `1.0.0+19ace1acf170`; the two Windows-source legs with `--drop-windows-metadata`; `docs/bench/g5b-windows-2026-10-18/`) | — |
 | G6 tag + publish | `cargo publish --dry-run -p blit-core` packages and verifies 1.0.0 (2026-10-17); `cargo audit` clean after `3f15f835` | owner: the tag on the final candidate |
 
 Plan-status sweep (G4): nine plans read `Active` while their work is
