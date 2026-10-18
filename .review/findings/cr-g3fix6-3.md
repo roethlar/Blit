@@ -3,7 +3,7 @@
 **Severity**: MEDIUM (reviewer: MEDIUM)
 **Status**: Fixed
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: (this commit)
+**Commit**: `0767b17e`
 **Reviewer**: codex / gpt-6-astra / xhigh / standard (the owner's `review`, 2026-10-18), codex-cli 0.162.1 headless one-shot, `-a never exec -m gpt-6-astra -c model_reasoning_effort="xhigh" -s workspace-write --json`, stdin closed, detached worktree `review-g3fix6-r1-19ace1ac`; codereview re-review g3fix6-r1 over `a157ae00..19ace1ac` (record `.review/results/g3fix6-r1.codex.json` + `.events.jsonl`); 2026-10-18 00:12–00:22Z; capability_ok=true; guard_confirmed=true (reviewer disabled `escaped_separator`'s star-run collapse → `an_escaped_separator_keeps_its_meaning_in_the_class_dialect` red, exit 101; restored by `git checkout`, blob hash verified, green; 1548/0/2 on its macOS gate, Linux cross-clippy clean, Windows cross-clippy stopped on a missing `ml64.exe` — its environment; it cites CI run 39080085302 green on all three OSes); SHAs pin-verified; closed: cr-g3fix5-3 true, cr-g3fix5-4 true, cr-g3fix5-1 false, cr-g3fix5-2 false, cr-g3fix4-2 false, cr-g3fix-1 false
 
 ## Evidence

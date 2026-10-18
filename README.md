@@ -96,7 +96,7 @@ The crates are published with each release tag from 1.0.0 on. The
 older 0.1.2 crates on crates.io predate the protocol gate and refuse
 every peer; update them. Remote transfers require both peers to speak
 the same protocol contract version (`blit scan` prints it as
-`Protocol: v7`; `--json` names it `contract_version`). Any two builds of
+`Protocol: v8`; `--json` names it `contract_version`). Any two builds of
 the same release do, whatever channel installed them; a peer on a
 different contract is refused at session open with both versions named.
 

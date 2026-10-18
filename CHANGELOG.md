@@ -16,7 +16,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `begin_record`/`RecordWriter`, `can_store_raw_names` and `note_raw_name`;
 `TransferSummary` gained `failed_paths`/`failed_paths_truncated`;
 `transfers::filter::FilterInputs` gained `source_root`. The wire
-protocol is contract 7: a peer on any other contract version (every 0.1.x
+protocol is contract 8: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -110,9 +110,11 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 7): the job ID rides the session-open and
+- Wire protocol (contract 8): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
-  finished-job record carries the failed-file count.
+  finished-job record carries the failed-file count. In a filtered mirror,
+  `ManifestPruned` tells the destination which source paths were excluded,
+  so it protects their counterparts in the destination's own spelling.
 
 ### Fixes
 
@@ -158,7 +160,10 @@ part, and a job you can list, read, re-run and retry.
   `mirror`, an excluded entry the destination stores in another spelling
   (`dst/Cache` for an excluded `src/cache`, `dst/x/ς` for an excluded `σ`,
   `dst/x/Cache` for `**/cache`) is out of the deletion scope too, and so
-  is the directory holding it.
+  is the directory holding it. The source also sends paths its glob
+  excludes pruned; the destination protects its own spellings of those
+  entries. Glob text keeps its typed class members, and `**` followed by
+  a crossing glob keeps bounded matcher state in deep trees.
   Excluded directories are pruned, never read, so an unreadable one no
   longer leaves a mirror's scan incomplete. `*.log`, `**/*.log`, `dir/**`
   and exact relative paths match as before. (`blit-core`: `FilterInputs`

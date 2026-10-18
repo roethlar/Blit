@@ -105,7 +105,8 @@ INITIATOR                                RESPONDER
   |  (whichever end holds SOURCE sends source-lane frames,          |
   |   regardless of which end opened the RPC)                       |
   |                                                                 |
-  |  SOURCE streams:  ManifestEntry* ... ManifestComplete          |
+  |  SOURCE streams:  ManifestEntry* ManifestPruned*               |
+  |                   ManifestComplete                             |
   |  DEST streams:    NeedBatch* ... NeedComplete                  |
   |  SOURCE TCP data-plane payload may overlap the still-open      |
   |  manifest after its matching NeedBatch; in-stream payload      |
@@ -168,6 +169,15 @@ list with `scan_failures_dropped` counting the overflow. The DESTINATION
 records each through `record_failure` before the diff, so a retry pass can
 never silently drop a file it was asked to re-land.
 
+In contract v8, a SOURCE mirroring a filtered subset sends
+`ManifestPruned` frames after enumeration and before `ManifestComplete`.
+Each frame carries paths its excludes pruned, batched below 1 MiB per
+frame. The DESTINATION resolves each path through its own filesystem
+names and keeps that entry, its subtree and its ancestors out of mirror
+deletions. A frame after `ManifestComplete`, or in a session other than a
+filtered-subset mirror, is a protocol violation. No delete list crosses
+the wire; these paths identify entries to keep.
+
 ## Frame set and field numbers
 
 `rpc Transfer(stream TransferFrame) returns (stream TransferFrame)`
@@ -198,6 +208,7 @@ never silently drop a file it was asked to re-land.
 | 20 | `SessionError error` | both | any |
 | 21 | `FileFailure file_skipped` | SOURCE | payload phase (contract v7) |
 | 22 | `RecordEnd file_end` | SOURCE | in-stream carrier, closes every file record (contract v7) |
+| 23 | `ManifestPruned manifest_pruned` | SOURCE | streaming, before `ManifestComplete`; filtered-subset mirror only (contract v8) |
 
 Shared messages (`FileHeader`, `FileData`, `TarShard*`,
 `BlockTransfer*`, `BlockHashList`, `ManifestComplete`,
@@ -206,7 +217,8 @@ Shared messages (`FileHeader`, `FileData`, `TarShard*`,
 vocabulary. Contract v4 extends `FileHeader` as specified below. New session
 messages (`SessionHello`, `SessionOpen`,
 `SessionAccept`, `DataPlaneGrant`, `NeedBatch`/`NeedEntry`,
-`NeedComplete`, `SourceDone`, `RecordEnd`, `TransferSummary`, `FileFailure`,
+`NeedComplete`, `SourceDone`, `RecordEnd`, `ManifestPruned`,
+`TransferSummary`, `FileFailure`,
 `SessionError`) are defined in the proto with their field numbers.
 
 ### Source-side per-file containment (contract v7)

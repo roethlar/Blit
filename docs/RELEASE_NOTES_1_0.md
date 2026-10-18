@@ -77,9 +77,10 @@ the source side too, and adds a retry pass.
   source stores under several names (a hard link) excludes every one of
   them and says so once on stderr. Under `mirror`, an excluded entry the
   destination stores in another spelling (`dst/Cache` for an excluded
-  `src/cache`, a Unicode-equivalent name, the match of a glob) is out of
-  the deletion scope too, and so is the directory holding it. Excluded
-  directories are
+  `src/cache`, a Unicode-equivalent name, or an entry a glob pruned at the
+  source) is out of the deletion scope too, and so is the directory
+  holding it. Glob text is matched as written, including character
+  classes. Excluded directories are
   never read, so an unreadable one no longer stops a mirror's deletions.
   Before 1.0 the absolute and bare-name forms silently matched nothing.
 
@@ -136,7 +137,7 @@ carry such names by their exact bytes.
 
 ## Protocol and compatibility
 
-- **Wire contract 7.** A session is refused at open, with a plain
+- **Wire contract 8.** A session is refused at open, with a plain
   message, when the two ends' protocol contract versions differ (every
   0.1.x release is another contract); upgrade both ends. Two 1.0.0 builds
   from any channel talk to each other. Both executables report
@@ -163,6 +164,13 @@ carry such names by their exact bytes.
 
 ## Known limitations shipped open
 
+- **A `mirror` exclude written as a pure glob keeps a destination-only
+  entry only when the glob matches its spelling as written.** An entry
+  pruned at the source is kept in the destination's own spelling (for
+  example, `aSS` for excluded source `aß` on macOS). With no source
+  counterpart, a destination-only `bSS` under `--exclude '*ß'` can be
+  deleted. Literal exclude names and literal path components use the
+  destination's own spelling even for destination-only entries.
 - **The in-command retry passes do not re-send a file whose name is not
   valid UTF-8.** It stays reported as failed; `blit jobs retry` re-sends
   it.
