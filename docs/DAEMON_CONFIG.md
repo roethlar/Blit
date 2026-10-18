@@ -431,19 +431,33 @@ read_only = true
 
 ### Firewall Configuration
 
+The control plane is gRPC on the configured port (9031 by default). The
+default data plane is a separate TCP connection: for every transfer the
+daemon listens on a fresh ephemeral port and the client dials it. A rule
+that opens only 9031 therefore lets the session open and then fails
+every transfer with `DATA_PLANE_FAILED … connecting data plane
+<host>:<port>: Operation timed out` (found on a Windows daemon during the
+1.0 release checks, 2026-10-18). Allow the program where the firewall can
+(macOS, Windows); on a port-based firewall either open the ephemeral
+range as well or run the daemon with `--force-grpc-data`, which carries
+the data over the control port (slower; see Performance Tuning).
+
 ```bash
-# Linux (firewalld)
+# Linux (firewalld): the control port, plus the data plane one way or the other
 firewall-cmd --add-port=9031/tcp --permanent
+firewall-cmd --add-port=32768-60999/tcp --permanent   # the kernel's default ephemeral range
 firewall-cmd --reload
+#   …or keep only 9031 open and start the daemon with --force-grpc-data
 
 # Linux (ufw)
 ufw allow 9031/tcp
+ufw allow 32768:60999/tcp                               # or --force-grpc-data instead
 
-# macOS
+# macOS (program-scoped: covers the data plane)
 sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /usr/local/bin/blit-daemon
 
-# Windows PowerShell
-New-NetFirewallRule -DisplayName "Blit Daemon" -Direction Inbound -Port 9031 -Protocol TCP -Action Allow
+# Windows PowerShell (program-scoped: covers the data plane)
+New-NetFirewallRule -DisplayName "Blit Daemon" -Direction Inbound -Protocol TCP -Program "C:\Program Files\Blit\blit-daemon.exe" -Action Allow
 ```
 
 ## Service Installation
