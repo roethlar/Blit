@@ -1,0 +1,39 @@
+{
+  "verdict": "findings",
+  "capability_ok": true,
+  "guard_confirmed": true,
+  "reviewed_sha": "19ace1acf170a1c93b759e5881859019755c226f",
+  "base_sha": "a157ae008da2abd1579d27c1bec6ea48d99e276c",
+  "guard": "On macOS, disabled escaped_separator's star-run collapse in fs_enum.rs. The changed test an_escaped_separator_keeps_its_meaning_in_the_class_dialect failed, exit 101: '**/cache' instead of '*/cache'. Restored with git checkout, confirmed the file's blob hash equals HEAD, and reran successfully, exit 0. The worktree is clean. Native fmt, clippy, and workspace tests passed: 1548 passed, 2 ignored. Linux cross-clippy passed. Windows cross-clippy could not complete because ml64.exe is unavailable; pinned-head CI run 39080085302 reports successful macOS, Linux, and Windows tests. Closure reasoning: cr-g3fix5-1 closed:false — the recorded literal Unicode examples are repaired, but equivalent Unicode names still escape glob exclusions. cr-g3fix5-2 closed:false — ordinary literals after globs are repaired, but folding character classes still leaves excluded destination descendants deletable. cr-g3fix5-3 closed:true — the escaped-separator regression is repaired; the mutation guard and 4194 additional local equivalence comparisons passed after restoration. cr-g3fix5-4 closed:true — literal roots and resolved prefixes are separated from typed pattern parsing, and the mixed-separator and bracket-bearing alias guards pass. cr-g3fix4-2 closed:false — destination-equivalent exclusions still permit the deletions described below. cr-g3fix-1 closed:false — the absolute '[A-z]*/cache' reproduction still deletes its excluded destination counterpart.",
+  "closed": {
+    "cr-g3fix5-1": false,
+    "cr-g3fix5-2": false,
+    "cr-g3fix5-3": true,
+    "cr-g3fix5-4": true,
+    "cr-g3fix4-2": false,
+    "cr-g3fix-1": false
+  },
+  "findings": [
+    {
+      "title": "Folding character-class text changes its membership and exposes excluded data",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:1217 — path_steps folds the entire glob component before compiling it; fold at line 1301 normalizes and uppercases class syntax too. '[A-z]*' becomes '[A-Z]*', losing punctuation members including '_'. Reproduced on case-insensitive macOS with src/_x/cache/source.txt and dst/_x/Cache/saved.txt: mirror --exclude '[A-z]*/cache' omitted source.txt but deleted saved.txt and both destination directories, exiting 0. The absolute '<src>/[A-z]*/cache' form behaved identically. '[é]*/cache' also failed because NFC composes two independent class members.",
+      "predicted_failure": "A valid glob exclusion silently permits mirror to delete pre-existing data in its destination counterpart. The shared deletion matcher exposes local and daemon destinations to this failure.",
+      "severity": "HIGH",
+      "better_approach": "Parse glob syntax before applying equivalence. Preserve class membership by transforming members and ranges semantically, and never normalize across independent class members. Add survival tests for these relative and absolute exclusions."
+    },
+    {
+      "title": "Unicode glob matching still misses names the destination filesystem pairs",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:1299 — fold retains characters with multi-character uppercase mappings and changes candidate byte lengths through NFC and uppercase conversion. The folded matcher assembled at line 1015 therefore does not preserve globset's byte-width wildcard semantics or all filesystem equivalences. On macOS APFS, mirror --exclude '*ß' excluded src/aß but deleted dst/aSS/saved.txt. Separately, --exclude '???' excluded an NFD src/é directory but deleted dst/É/saved.txt; --exclude '??' excluded src/ſ but deleted dst/s/saved.txt. Before each run, looking up the destination through the source spelling returned the same inode. Every run exited 0.",
+      "predicted_failure": "Mirror deletes excluded Unicode-equivalent destination subtrees despite the filesystem identifying the spellings as the same entry. Both any-depth glob rules and path glob components remain affected, leaving cr-g3fix5-1 incomplete.",
+      "severity": "HIGH",
+      "better_approach": "Preserve the original glob's matching semantics while applying destination equivalence, including normalization, byte-width wildcards, and multi-character mappings. Add deletion-survival coverage for these filesystem-verified pairs."
+    },
+    {
+      "title": "A recursive prefix followed by a crossing glob adds quadratic work per entry",
+      "evidence": "crates/blit-core/src/transfers/filter.rs:1274 — advance joins and folds the complete suffix for every retained crossing-glob start; line 1280 retains each start separately. With '**/*/missing', the preceding '**' creates another start at every depth, producing quadratic work per entry. On the head's debug binary, a dry-run mirror with 250 destination files took approximately 47, 133, 463, and 2010 ms at depths 20, 40, 80, and 160. The '**/missing' control took approximately 14, 26, 52, and 137 ms and produced identical deletion counts.",
+      "predicted_failure": "Deep mirror trees become disproportionately slow under recursive exclusions containing a spanning glob. The repeated suffix processing is paid for every unexcluded destination file even when the exclusion matches nothing.",
+      "severity": "MEDIUM",
+      "better_approach": "Carry incremental matcher state or merge equivalent crossing states instead of rebuilding and refolding every suffix for each entry. Verify bounded depth scaling with a representative recursive-exclusion benchmark."
+    }
+  ]
+}
