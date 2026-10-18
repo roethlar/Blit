@@ -799,24 +799,197 @@ fn paired_name(
 /// a path rule's leading literal components from the root, which stopped
 /// at the first glob component.
 ///
+/// cr-g3fix6-2: `pruned` is every entry the source's walk pruned because an
+/// exclude named it, as the source spells it (`ManifestPruned`). Each is
+/// resolved at the destination through its filesystem's own names
+/// ([`resolve_pruned`]) and the entry found, with everything below it, is
+/// out of the scope too — `aSS` for an excluded `aß`, `s` for `ſ`, NFC `É`
+/// for an NFD `é`, wherever the filesystem pairs them, which no reading of
+/// a glob's text under an equivalence can reproduce (`?` counts bytes,
+/// `ß` is two letters in uppercase).
+///
 /// Runs where the destination's deletion pass runs — the session's own
 /// destination walk, on the local carrier and on a destination daemon
 /// alike. Nothing changes when `files_from` is set (it bypasses the
-/// excludes) or no exclude is given.
-pub(crate) fn destination_scope(filter: &FileFilter, dst_root: &Path) -> FileFilter {
+/// excludes) or neither an exclude nor a pruned path is given.
+pub(crate) fn destination_scope(
+    filter: &FileFilter,
+    dst_root: &Path,
+    pruned: &[String],
+) -> FileFilter {
     let mut scoped = filter.clone_without_cache();
-    if filter.files_from.is_some() || filter.exclude_files.is_empty() {
+    if filter.files_from.is_some() || (filter.exclude_files.is_empty() && pruned.is_empty()) {
         return scoped;
     }
+    let pruned = resolve_pruned_on_disk(dst_root, pruned, cfg!(windows));
     scoped.destination = DestinationNames::new(
         dst_root,
         &filter.exclude_files,
         cfg!(windows),
         || case_insensitive_at(dst_root),
         Box::new(stored_name),
+        pruned,
     )
     .map(std::sync::Arc::new);
     scoped
+}
+
+/// cr-g3fix6-2: the paths under `root` of the destination's own entries for
+/// `pruned` (paths the source's walk pruned, POSIX form, as the source
+/// spells them), each read component by component: `names_in(dir, name)`
+/// gives the names `dir` lists for the entry the destination pairs with
+/// `name` — [`stored_name`]'s pairing: the exact name, else the entry of
+/// the same identity (the link itself, never its target), every name of a
+/// tie. A path with no counterpart there, or holding a component that names
+/// no single entry (empty, `.`, `..`, a root or a drive, or a separator of
+/// the destination's platform: `windows`), resolves to nothing.
+fn resolve_pruned(
+    root: &Path,
+    pruned: &[String],
+    windows: bool,
+    names_in: &mut dyn FnMut(&Path, &str) -> Vec<String>,
+) -> std::collections::HashSet<PathBuf> {
+    let mut resolved = std::collections::HashSet::new();
+    for path in pruned {
+        let components: Vec<&str> = path.split('/').collect();
+        if !components
+            .iter()
+            .all(|component| one_name(component, windows))
+        {
+            continue;
+        }
+        let mut found = vec![root.to_path_buf()];
+        for component in components {
+            found = found
+                .iter()
+                .flat_map(|dir| {
+                    names_in(dir, component)
+                        .into_iter()
+                        .map(move |name| dir.join(name))
+                })
+                .collect();
+            if found.is_empty() {
+                break;
+            }
+        }
+        resolved.extend(found);
+    }
+    resolved
+}
+
+/// Whether `component` (of a wire path) names exactly one entry in a
+/// directory: one normal path component, holding no separator.
+fn one_name(component: &str, windows: bool) -> bool {
+    if component.is_empty() || (windows && component.contains(['\\', ':'])) {
+        return false;
+    }
+    let mut parts = Path::new(component).components();
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    )
+}
+
+/// cr-g3fix6-2: [`resolve_pruned`] against the destination filesystem. A
+/// path that does not resolve as the source spells it (one `lstat`) has no
+/// counterpart and costs nothing more; the others are paired through
+/// [`Listings`], so each directory involved is listed once, however many
+/// pruned entries it holds.
+fn resolve_pruned_on_disk(
+    root: &Path,
+    pruned: &[String],
+    windows: bool,
+) -> std::collections::HashSet<PathBuf> {
+    let present: Vec<String> = pruned
+        .iter()
+        .filter(|path| std::fs::symlink_metadata(root.join(path)).is_ok())
+        .cloned()
+        .collect();
+    if present.is_empty() {
+        return std::collections::HashSet::new();
+    }
+    let mut listings = Listings::default();
+    resolve_pruned(root, &present, windows, &mut |dir, name| {
+        listings.names_in(dir, name)
+    })
+}
+
+/// cr-g3fix6-2: [`stored_name`]'s pairing for many names, each directory
+/// listed — and its entries' identities read — at most once, so resolving
+/// every pruned entry of a large directory costs one listing, not one per
+/// entry. Kept for one resolution, then dropped.
+#[derive(Default)]
+struct Listings {
+    dirs: std::collections::HashMap<PathBuf, Listing>,
+}
+
+/// One directory's names, and (read when first needed) its entries' names
+/// by identity, in listing order.
+struct Listing {
+    names: Vec<String>,
+    exact: std::collections::HashSet<String>,
+    by_identity: Option<std::collections::HashMap<(u64, u64), Vec<String>>>,
+}
+
+impl Listings {
+    /// The names `dir` lists for the entry the destination pairs with
+    /// `name`, as [`stored_name`] gives them for `dir/name`.
+    fn names_in(&mut self, dir: &Path, name: &str) -> Vec<String> {
+        let path = dir.join(name);
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            return Vec::new();
+        };
+        let listing = self.dirs.entry(dir.to_path_buf()).or_insert_with(|| {
+            let names: Vec<String> = std::fs::read_dir(dir)
+                .map(|listing| {
+                    listing
+                        .flatten()
+                        .filter_map(|entry| entry.file_name().into_string().ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            Listing {
+                exact: names.iter().cloned().collect(),
+                names,
+                by_identity: None,
+            }
+        });
+        if listing.exact.contains(name) {
+            return vec![name.to_string()];
+        }
+        let mut paired = Vec::new();
+        if let Some((identity, links)) = entry_identity(&path) {
+            let names = &listing.names;
+            let by_identity = listing.by_identity.get_or_insert_with(|| {
+                let mut by_identity: std::collections::HashMap<(u64, u64), Vec<String>> =
+                    std::collections::HashMap::new();
+                for listed in names {
+                    if let Some((entry, _)) = entry_identity(&dir.join(listed)) {
+                        by_identity.entry(entry).or_default().push(listed.clone());
+                    }
+                }
+                by_identity
+            });
+            if let Some(same) = by_identity.get(&identity) {
+                // A directory has one name; anything else may be
+                // hard-linked under several in this listing.
+                if !metadata.is_dir() && links > 1 {
+                    paired = same.clone();
+                    paired.sort();
+                } else {
+                    paired.push(same[0].clone());
+                }
+            }
+        }
+        if !paired.is_empty() || metadata.file_type().is_symlink() {
+            return paired;
+        }
+        std::fs::canonicalize(&path)
+            .ok()
+            .and_then(|resolved| resolved.file_name()?.to_str().map(str::to_string))
+            .into_iter()
+            .collect()
+    }
 }
 
 /// cr-g3fix5-1, cr-g3fix5-2: the destination's own names for a mirror's
@@ -848,6 +1021,9 @@ pub(crate) fn destination_scope(filter: &FileFilter, dst_root: &Path) -> FileFil
 ///   a class or an alternation), where the destination ignores case, is
 ///   also matched whole under [`fold`], applied to the pattern and the
 ///   entry's path alike.
+/// - cr-g3fix6-2: an entry the source's walk pruned, resolved here through
+///   the destination's own names ([`resolve_pruned`]), is out of scope with
+///   everything below it.
 ///
 /// The fold (NFC, then each character's single uppercase form)
 /// approximates the filesystem's own equivalence; where it pairs more
@@ -871,6 +1047,9 @@ pub(crate) struct DestinationNames {
     case_insensitive: bool,
     /// [`stored_name`] on the destination (a stand-in in tests).
     stored: Box<StoredNames>,
+    /// cr-g3fix6-2: the destination's own entries for what the source's
+    /// walk pruned, as paths under `root`.
+    pruned: std::collections::HashSet<PathBuf>,
     /// The directories from the root down to the last entry asked about.
     chain: parking_lot::Mutex<Vec<Level>>,
 }
@@ -948,6 +1127,7 @@ impl std::fmt::Debug for DestinationNames {
                 &self.folded.as_ref().map(|folded| &folded.exclude_files),
             )
             .field("case_insensitive", &self.case_insensitive)
+            .field("pruned", &self.pruned.len())
             .finish_non_exhaustive()
     }
 }
@@ -956,13 +1136,16 @@ impl DestinationNames {
     /// The destination names for `patterns` (`--exclude` patterns, read
     /// under one platform's path rule) at `root`: `case_insensitive` is
     /// asked once, only when a rule is read here; `stored` names an entry
-    /// as the destination lists it. `None` when no pattern is read here.
+    /// as the destination lists it; `pruned` holds the destination's
+    /// entries, under `root`, for what the source's walk pruned
+    /// ([`resolve_pruned`]). `None` when nothing is read here.
     pub(crate) fn new(
         root: &Path,
         patterns: &[String],
         windows: bool,
         case_insensitive: impl FnOnce() -> bool,
         stored: Box<StoredNames>,
+        pruned: std::collections::HashSet<PathBuf>,
     ) -> Option<Self> {
         let mut literals: Vec<String> = Vec::new();
         let mut index_of = |name: String| match literals.iter().position(|known| *known == name) {
@@ -998,7 +1181,7 @@ impl DestinationNames {
                 _ => globs.push(pattern.clone()),
             }
         }
-        if names.is_empty() && components.is_empty() && globs.is_empty() {
+        if names.is_empty() && components.is_empty() && globs.is_empty() && pruned.is_empty() {
             return None;
         }
         let case_insensitive = case_insensitive();
@@ -1023,7 +1206,7 @@ impl DestinationNames {
             filter.exclude_files = folded;
             filter
         });
-        if names.is_empty() && paths.is_empty() && folded.is_none() {
+        if names.is_empty() && paths.is_empty() && folded.is_none() && pruned.is_empty() {
             return None;
         }
         let states = paths
@@ -1042,6 +1225,7 @@ impl DestinationNames {
             folded,
             case_insensitive,
             stored,
+            pruned,
             chain: parking_lot::Mutex::new(vec![Level::new(
                 Default::default(),
                 root.to_path_buf(),
@@ -1075,7 +1259,7 @@ impl DestinationNames {
                 return true;
             }
         }
-        if self.names.is_empty() && self.paths.is_empty() {
+        if self.names.is_empty() && self.paths.is_empty() && self.pruned.is_empty() {
             return false;
         }
         let last = components.len() - 1;
@@ -1091,16 +1275,19 @@ impl DestinationNames {
         chain.truncate(kept);
         for (at, name) in components.iter().enumerate().take(last).skip(kept - 1) {
             let parent = chain.last_mut().expect("the root stays in the chain");
-            let (protected, states) = if parent.protected {
+            let path = parent.path.join(name);
+            let (protected, states) = if parent.protected || self.pruned.contains(&path) {
                 (true, Vec::new())
             } else {
                 self.step(parent, &texts, at)
             };
-            let path = parent.path.join(name);
             chain.push(Level::new(name.to_os_string(), path, protected, states));
         }
         let parent = chain.last_mut().expect("the root stays in the chain");
-        parent.protected || self.step(parent, &texts, last).0
+        parent.protected
+            || (!self.pruned.is_empty()
+                && self.pruned.contains(&parent.path.join(components[last])))
+            || self.step(parent, &texts, last).0
     }
 
     /// The component `texts[at]`, an entry of the directory `parent`:
@@ -2567,6 +2754,7 @@ mod tests {
                 windows,
                 || true,
                 Box::new(disk),
+                Default::default(),
             )
             .unwrap_or_else(|| panic!("{pattern} is read at the destination"))
         };
@@ -2697,7 +2885,7 @@ mod tests {
             allows(&filter, "Cache/saved.txt"),
             "as the source spelled it, the filter names none of them"
         );
-        let scoped = destination_scope(&filter, dst);
+        let scoped = destination_scope(&filter, dst, &[]);
         assert_eq!(scoped.exclude_files, ["./cache", "a/b", "name"]);
         for rel in ["Cache/saved.txt", "A/B/saved.txt", "x/NAME/saved.txt"] {
             assert!(!allows(&scoped, rel), "{rel}: out of the deletion scope");
@@ -2752,7 +2940,7 @@ mod tests {
         for (pattern, out, kept) in cases {
             let mut filter = FileFilter::default();
             filter.exclude_files = vec![pattern.to_string()];
-            let scoped = destination_scope(&filter, dst);
+            let scoped = destination_scope(&filter, dst, &[]);
             for rel in out {
                 assert!(
                     allows(&filter, rel),
@@ -2804,6 +2992,7 @@ mod tests {
             false,
             || false,
             stand_in(lookups.clone()),
+            Default::default(),
         )
         .expect("a literal name is read at the destination");
         for (rel, protected) in [
@@ -2836,6 +3025,7 @@ mod tests {
             false,
             || true,
             stand_in(lookups.clone()),
+            Default::default(),
         )
         .expect("names to read");
         assert!(names.protects(Path::new("x/Cache/saved.txt")));
@@ -2853,6 +3043,7 @@ mod tests {
                 false,
                 || panic!("no rule: the case rule is not asked"),
                 stand_in(Arc::default()),
+                Default::default(),
             )
             .is_none(),
             "no exclude, nothing read"
@@ -2876,8 +3067,15 @@ mod tests {
         assert_eq!(fold("[a-z]*.tmp"), "[A-Z]*.TMP");
         let none: Box<StoredNames> = Box::new(|_: &Path| Vec::new());
         let patterns = ["c?ch\u{e9}", "*σ"].map(String::from).to_vec();
-        let names = DestinationNames::new(Path::new("dst"), &patterns, false, || true, none)
-            .expect("globs to fold");
+        let names = DestinationNames::new(
+            Path::new("dst"),
+            &patterns,
+            false,
+            || true,
+            none,
+            Default::default(),
+        )
+        .expect("globs to fold");
         for (rel, protected) in [
             ("x/CACH\u{c9}/saved.txt", true),
             ("x/cache\u{301}", true),
@@ -2891,7 +3089,15 @@ mod tests {
         }
         let none: Box<StoredNames> = Box::new(|_: &Path| Vec::new());
         assert!(
-            DestinationNames::new(Path::new("dst"), &patterns, false, || false, none).is_none(),
+            DestinationNames::new(
+                Path::new("dst"),
+                &patterns,
+                false,
+                || false,
+                none,
+                Default::default()
+            )
+            .is_none(),
             "a destination that compares case folds nothing"
         );
     }
@@ -2937,7 +3143,7 @@ mod tests {
         let allows = |filter: &FileFilter, rel: &str| {
             filter.allows_entry(Some(Path::new(rel)), &dst.join(rel), 1, None)
         };
-        let scoped = destination_scope(&filter, dst);
+        let scoped = destination_scope(&filter, dst, &[]);
         for rel in &saved {
             assert!(
                 allows(&filter, rel),
@@ -2946,6 +3152,146 @@ mod tests {
             assert!(!allows(&scoped, rel), "{rel}: out of the deletion scope");
         }
         assert!(allows(&scoped, "x/keep.txt"), "x/keep.txt is in scope");
+    }
+
+    /// cr-g3fix6-2: each path the source's walk pruned is resolved at the
+    /// destination component by component through the destination's own
+    /// names — tested against a stand-in on every OS that stores `x/aß` as
+    /// `x/aSS`, `t` as `T` and `T/σ` under the two names of one hard-linked
+    /// entry (a tie: both). The entries found, and everything below them,
+    /// are out of the deletion scope with no exclude pattern at all; their
+    /// directories, the source's own spelling and other entries are not.
+    /// A path with no counterpart stops at its first missing component; a
+    /// path holding an empty, `.` or `..` component is never looked up.
+    #[test]
+    fn a_pruned_path_is_resolved_through_the_destinations_own_names() {
+        let mut asked: Vec<String> = Vec::new();
+        let mut names_in = |dir: &Path, name: &str| -> Vec<String> {
+            let key = format!("{}/{name}", dir.to_string_lossy().replace('\\', "/"));
+            asked.push(key.clone());
+            match key.as_str() {
+                "dst/x" => vec!["x".into()],
+                "dst/x/a\u{df}" => vec!["aSS".into()],
+                "dst/t" => vec!["T".into()],
+                "dst/T/\u{3c3}" => vec!["alias".into(), "\u{3a3}".into()],
+                _ => Vec::new(),
+            }
+        };
+        let pruned = [
+            "x/a\u{df}",
+            "t/\u{3c3}",
+            "gone/f",
+            "../up",
+            "a//b",
+            "./a",
+            "a/..",
+            "",
+        ]
+        .map(String::from);
+        let resolved = resolve_pruned(Path::new("dst"), &pruned, false, &mut names_in);
+        let expected: std::collections::HashSet<PathBuf> = [
+            Path::new("dst").join("x").join("aSS"),
+            Path::new("dst").join("T").join("alias"),
+            Path::new("dst").join("T").join("\u{3a3}"),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(resolved, expected);
+        assert_eq!(
+            asked,
+            [
+                "dst/x",
+                "dst/x/a\u{df}",
+                "dst/t",
+                "dst/T/\u{3c3}",
+                "dst/gone"
+            ],
+            "one lookup per component, stopping where nothing pairs"
+        );
+        assert!(!one_name("a\\b", true), "`\\` separates names on Windows");
+        assert!(!one_name("c:", true), "a drive names no entry");
+        if !cfg!(windows) {
+            assert!(one_name("a\\b", false), "a Unix name may hold `\\`");
+        }
+
+        let none: Box<StoredNames> = Box::new(|_: &Path| Vec::new());
+        let names = DestinationNames::new(Path::new("dst"), &[], false, || false, none, resolved)
+            .expect("pruned paths are read at the destination");
+        for (rel, protected) in [
+            ("x/aSS", true),
+            ("x/aSS/deep/saved.txt", true),
+            ("T/alias", true),
+            ("T/\u{3a3}/saved.txt", true),
+            ("x", false),
+            ("x/a\u{df}", false),
+            ("x/other", false),
+            ("T", false),
+            ("T/keep", false),
+            ("gone/f", false),
+        ] {
+            assert_eq!(names.protects(Path::new(rel)), protected, "{rel}");
+        }
+    }
+
+    /// cr-g3fix6-2: at a real destination a pruned path is paired as
+    /// [`stored_name`] pairs each component — its exact name, else the entry
+    /// of the same identity (the link itself; every name of a tie) — with
+    /// each directory listed once ([`Listings`]): the two agree on an exact
+    /// name, a missing one, a name in another case, a hard-linked tie and a
+    /// symlink. Then `cache/saved.txt`, `ties/ONE` and `missing/x`, pruned
+    /// at the source, resolve to `Cache/saved.txt` and both names of the
+    /// tie where the filesystem ignores case, and to nothing where it does
+    /// not (the source spelling is not there). The case-dependent results
+    /// can go red only where the filesystem ignores case (APFS, NTFS); the
+    /// tie and the symlink are made on Unix only.
+    #[test]
+    fn the_pruned_paths_resolve_as_stored_name_pairs_each_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path();
+        for rel in ["Cache/saved.txt", "plain/f.txt", "ties/one"] {
+            let path = dst.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"s").unwrap();
+        }
+        #[cfg(unix)]
+        let tied = {
+            std::os::unix::fs::symlink("../plain", dst.join("ties").join("link")).unwrap();
+            hard_link_entry(&dst.join("ties").join("one"), &dst.join("ties").join("two"))
+        };
+        #[cfg(not(unix))]
+        let tied = false;
+        let insensitive = case_insensitive(dst);
+        let mut listings = Listings::default();
+        for (parent, name) in [
+            ("", "Cache"),
+            ("", "cache"),
+            ("", "missing"),
+            ("Cache", "SAVED.TXT"),
+            ("plain", "f.txt"),
+            ("ties", "one"),
+            ("ties", "ONE"),
+            ("ties", "LINK"),
+        ] {
+            let at = dst.join(parent);
+            assert_eq!(
+                listings.names_in(&at, name),
+                stored_name(&at.join(name)),
+                "{parent}/{name}"
+            );
+        }
+        let pruned = ["cache/saved.txt", "ties/ONE", "missing/x"].map(String::from);
+        let resolved = resolve_pruned_on_disk(dst, &pruned, cfg!(windows));
+        let mut expected = std::collections::HashSet::new();
+        if insensitive {
+            expected.insert(dst.join("Cache").join("saved.txt"));
+            expected.insert(dst.join("ties").join("one"));
+            if tied {
+                expected.insert(dst.join("ties").join("two"));
+            }
+        } else {
+            eprintln!("skipping the pairing: {} is case-sensitive", dst.display());
+        }
+        assert_eq!(resolved, expected);
     }
 
     /// cr-g3fix4-2: the destination's case rule is read without writing

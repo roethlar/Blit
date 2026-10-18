@@ -26,9 +26,9 @@ use std::time::Duration;
 
 use blit_core::generated::transfer_frame::Frame;
 use blit_core::generated::{
-    session_error, FileData, FileFailure, FileHeader, FilterSpec, ManifestComplete, MirrorMode,
-    RecordEnd, ResumeSettings, SessionHello, SessionOpen, SourceDone, TransferFrame, TransferRole,
-    TransferSummary,
+    session_error, FileData, FileFailure, FileHeader, FilterSpec, ManifestComplete, ManifestPruned,
+    MirrorMode, RecordEnd, ResumeSettings, SessionHello, SessionOpen, SourceDone, TransferFrame,
+    TransferRole, TransferSummary,
 };
 use blit_core::remote::transfer::source::{
     FsTransferSource, OpenedSourceFile, SourceScan, TransferSource,
@@ -1016,6 +1016,66 @@ async fn expect_violation(
         "expected {needle:?} in: {}",
         fault.message
     );
+}
+
+/// cr-g3fix6-2 (contract 8): `ManifestPruned` — what the source's walk
+/// pruned, for a mirror's deletion scope — is accepted only on a session
+/// that mirrors a filtered subset, and only before `ManifestComplete`;
+/// anywhere else it is a protocol violation, never absorbed.
+#[tokio::test]
+async fn manifest_pruned_is_refused_outside_a_filtered_mirror_or_after_the_manifest() {
+    for (mirror, after_complete, needle) in [
+        (false, false, "does not mirror a filtered subset"),
+        (true, true, "ManifestPruned after ManifestComplete"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst_root).unwrap();
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::Responder,
+            data_plane_host: None,
+            receiver_capacity: None,
+            instruments: Default::default(),
+            local_apply: None,
+        };
+        let (mut peer, dest_transport) = in_process_pair();
+        let dest = tokio::spawn(run_destination(
+            dest_cfg,
+            dest_transport,
+            DestinationTarget::Fixed(dst_root),
+        ));
+        peer.send(hello_frame()).await.unwrap();
+        assert!(matches!(recv_or_panic(&mut peer).await, Frame::Hello(_)));
+        let mut open = open_for(TransferRole::Source, Carrier::InStream);
+        if mirror {
+            open.mirror_enabled = true;
+            open.mirror_kind = MirrorMode::FilteredSubset as i32;
+        }
+        peer.send(wire(Frame::Open(open))).await.unwrap();
+        assert!(matches!(recv_or_panic(&mut peer).await, Frame::Accept(_)));
+        if after_complete {
+            peer.send(wire(Frame::ManifestComplete(ManifestComplete {
+                scan_complete: true,
+                ..Default::default()
+            })))
+            .await
+            .unwrap();
+            loop {
+                match recv_or_panic(&mut peer).await {
+                    Frame::NeedComplete(_) => break,
+                    Frame::NeedBatch(_) => {}
+                    other => panic!("expected need choreography, got {other:?}"),
+                }
+            }
+        }
+        peer.send(wire(Frame::ManifestPruned(ManifestPruned {
+            paths: vec!["x".into()],
+        })))
+        .await
+        .unwrap();
+        expect_violation(&mut peer, dest, needle).await;
+    }
 }
 
 #[tokio::test]

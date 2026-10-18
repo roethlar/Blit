@@ -57,6 +57,9 @@ pub struct SourceScan {
     /// the preceding stage's receiver. Error cleanup reaps this stack in
     /// reverse so downstream receivers close before upstream producers.
     tasks: Vec<SourceScanTask>,
+    /// cr-g3fix6-2: what the walk pruned, when a [`FilteredSource`] that
+    /// records it ran this scan; complete once [`Self::finish`] returns.
+    pruned: Option<Arc<crate::enumeration::PrunedPaths>>,
 }
 
 impl SourceScan {
@@ -66,7 +69,19 @@ impl SourceScan {
                 task: AbortOnDrop::new(primary),
                 reported: true,
             }],
+            pruned: None,
         }
+    }
+
+    /// cr-g3fix6-2: the relative paths (POSIX form, as the source spells
+    /// them) of every entry this scan's walk pruned because an exclude
+    /// named them — empty unless a recording [`FilteredSource`] ran it.
+    /// Complete after [`Self::finish`]; taken, so a second call is empty.
+    pub fn take_pruned(&self) -> Vec<String> {
+        self.pruned
+            .as_ref()
+            .map(|pruned| pruned.take())
+            .unwrap_or_default()
     }
 
     pub fn add_auxiliary(&mut self, task: tokio::task::JoinHandle<()>) {
@@ -834,6 +849,9 @@ fn record_unreadable_entry(list: &Arc<Mutex<Vec<String>>>, rel: &str, reason: &s
 pub struct FilteredSource {
     inner: Arc<dyn TransferSource>,
     filter: FileFilter,
+    /// cr-g3fix6-2: record what each scan's walk prunes
+    /// ([`Self::recording_pruned`]).
+    record_pruned: bool,
 }
 
 /// Explicit lossy-policy decorator. It removes Windows attributes and named
@@ -879,7 +897,21 @@ impl TransferSource for WindowsMetadataDroppingSource {
 
 impl FilteredSource {
     pub fn new(inner: Arc<dyn TransferSource>, filter: FileFilter) -> Self {
-        Self { inner, filter }
+        Self {
+            inner,
+            filter,
+            record_pruned: false,
+        }
+    }
+
+    /// cr-g3fix6-2: when `record` is set, each scan records every entry
+    /// its walk prunes because an exclude names it, for
+    /// [`SourceScan::take_pruned`]. Set by a mirror that deletes only
+    /// within its filter's scope: its destination keeps its own spelling
+    /// of each one. Off, nothing is recorded (the default).
+    pub fn recording_pruned(mut self, record: bool) -> Self {
+        self.record_pruned = record;
+        self
     }
 }
 
@@ -934,13 +966,26 @@ impl FilteredSource {
         // excluded directory is pruned where it is walked — never read,
         // never reported unreadable. Every rule still applies below, so a
         // source that ignores its `scan(filter)` arg filters the same.
-        let pruning = self.filter.pruning_rules();
+        let mut pruning = self.filter.pruning_rules();
+        // cr-g3fix6-2: the recorder rides the exclude rules alone, so every
+        // entry the walk records is one an exclude left out.
+        let recorder = match pruning.as_mut() {
+            Some(rules) if self.record_pruned => {
+                let recorder = Arc::new(crate::enumeration::PrunedPaths::default());
+                rules.pruned = Some(Arc::clone(&recorder));
+                Some(recorder)
+            }
+            _ => None,
+        };
         let (header_rx, mut scan) = if preserve_windows_metadata {
             self.inner.scan(pruning, unreadable_paths)
         } else {
             self.inner
                 .scan_without_windows_metadata(pruning, unreadable_paths)
         };
+        if recorder.is_some() {
+            scan.pruned = recorder;
+        }
         if self.filter.is_empty() {
             // Fast path — no filter installed, return the inner channel
             // directly so we don't add a per-header forwarding hop.
@@ -1777,6 +1822,58 @@ mod filtered_source_tests {
             unreadable.lock().expect("unreadable list").is_empty(),
             "an excluded directory must never be opened: {:?}",
             unreadable.lock().expect("unreadable list")
+        );
+    }
+
+    /// cr-g3fix6-2: a recording `FilteredSource` names every entry its
+    /// walk pruned because an exclude named it — a pruned directory once
+    /// (nothing below it is listed: it is never opened), a pruned file once
+    /// — as the source spells it, for a mirror's destination; an entry
+    /// another rule leaves out (here a size limit) is not among them, and a
+    /// source that does not record names nothing. Real walk, every OS.
+    #[tokio::test]
+    async fn a_recording_filtered_source_names_what_its_walk_pruned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (rel, body) in [
+            ("keep.txt", "kk"),
+            ("small.txt", "s"),
+            ("x/cache/a.txt", "aa"),
+            ("x/cache/sub/b.txt", "bb"),
+            ("y/n.tmp", "nn"),
+            ("y/k.txt", "kk"),
+            ("z/q.tmp", "qq"),
+        ] {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
+            std::fs::write(path, body).expect("write");
+        }
+        let scan = |record: bool| {
+            let inner: Arc<dyn TransferSource> =
+                Arc::new(FsTransferSource::new(dir.path().to_path_buf()));
+            let mut filter = FileFilter::default();
+            filter.exclude_files = vec!["cache".to_string(), "*.tmp".to_string()];
+            filter.min_size = Some(2);
+            FilteredSource::new(inner, filter)
+                .recording_pruned(record)
+                .scan(None, Arc::default())
+        };
+
+        let (rx, mut recorded) = scan(true);
+        let mut names = collect(rx).await;
+        recorded.finish().await.expect("scan completes");
+        names.sort();
+        assert_eq!(names, vec!["keep.txt", "y/k.txt"]);
+        let mut pruned = recorded.take_pruned();
+        pruned.sort();
+        assert_eq!(pruned, vec!["x/cache", "y/n.tmp", "z/q.tmp"]);
+        assert!(recorded.take_pruned().is_empty(), "taken once");
+
+        let (rx, mut unrecorded) = scan(false);
+        collect(rx).await;
+        unrecorded.finish().await.expect("scan completes");
+        assert!(
+            unrecorded.take_pruned().is_empty(),
+            "a source that does not record names nothing"
         );
     }
 }

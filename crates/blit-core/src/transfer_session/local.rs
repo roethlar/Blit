@@ -819,10 +819,13 @@ pub async fn run_local_session(
             // as the only liveness signal and predates this gate).
             .with_verbose(options.verbose || options.progress),
     );
-    let filtered: Arc<dyn TransferSource> = Arc::new(FilteredSource::new(
-        Arc::clone(&fs_source),
-        options.filter.clone_without_cache(),
-    ));
+    // cr-g3fix6-2: a mirror that deletes only within the filter's scope
+    // records what the walk prunes; the session's source half sends it to
+    // the destination's deletion pass (`ManifestPruned`).
+    let filtered: Arc<dyn TransferSource> = Arc::new(
+        FilteredSource::new(Arc::clone(&fs_source), options.filter.clone_without_cache())
+            .recording_pruned(mirror_kind == MirrorMode::FilteredSubset),
+    );
     let scan_source: Arc<dyn TransferSource> = match dest_subtree_rel(src_root, dst_root) {
         Some(exclude_rel) => Arc::new(DestSubtreeExcludedSource {
             inner: filtered,

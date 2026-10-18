@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::enumeration::{EnumeratedEntry, FileEnumerator};
+use crate::enumeration::{EnumeratedEntry, FileEnumerator, PrunedPaths};
 use crate::transfers::filter::DestinationNames;
 // Filesystem enumeration and categorization (Unix focus)
 
@@ -62,6 +62,12 @@ pub struct FileFilter {
     /// written. It replaces cr-g3fix4-2's case-insensitive name rules,
     /// which folded ASCII only.
     pub(crate) destination: Option<std::sync::Arc<DestinationNames>>,
+    /// cr-g3fix6-2: where a walk under this filter records each entry it
+    /// prunes ([`PrunedPaths`]) — set only on the exclude rules a mirror's
+    /// source walks with (`FilteredSource::recording_pruned`), so the
+    /// destination can keep its own spelling of every entry an exclude
+    /// left out. `None` everywhere else: nothing is recorded.
+    pub(crate) pruned: Option<std::sync::Arc<PrunedPaths>>,
     compiled_includes: OnceCell<globset::GlobSet>,
     compiled_files: OnceCell<CompiledPatterns>,
     compiled_dirs: OnceCell<globset::GlobSet>,
@@ -400,6 +406,7 @@ impl FileFilter {
             reference_time: self.reference_time,
             files_from: self.files_from.clone(),
             destination: self.destination.clone(),
+            pruned: self.pruned.clone(),
             compiled_includes: OnceCell::new(),
             compiled_files: OnceCell::new(),
             compiled_dirs: OnceCell::new(),
@@ -525,6 +532,14 @@ impl FileFilter {
             .get_or_init(|| ExcludeRules::compile(&self.exclude_files, cfg!(windows)))
     }
 
+    /// cr-g3fix6-2: a walk under this filter left `rel` out — recorded
+    /// when the filter carries a recorder ([`Self::pruned`]).
+    pub(crate) fn note_pruned(&self, rel: &Path) {
+        if let Some(pruned) = &self.pruned {
+            pruned.record(rel);
+        }
+    }
+
     /// `rel_path` is the directory's path relative to the walk root;
     /// `abs_path` is where it lives.
     pub(crate) fn allows_dir(&self, rel_path: &Path, abs_path: &Path) -> bool {
@@ -537,21 +552,23 @@ impl FileFilter {
     /// adds the any-depth name rule and the subtree rule (see
     /// [`ExcludeRules`]).
     fn excluded(&self, rel_path: Option<&Path>, filename: &str, path_str: &str) -> bool {
-        if self.exclude_files.is_empty() {
-            return false;
+        if !self.exclude_files.is_empty() {
+            let patterns = self.file_globs();
+            if patterns.is_match(filename) || patterns.is_match(path_str) {
+                return true;
+            }
+            if rel_path.is_some_and(|rel| self.subtree_rules().excludes(rel)) {
+                return true;
+            }
         }
-        let patterns = self.file_globs();
-        if patterns.is_match(filename) || patterns.is_match(path_str) {
-            return true;
-        }
-        let Some(rel) = rel_path else {
-            return false;
-        };
-        self.subtree_rules().excludes(rel)
-            || self
-                .destination
+        // cr-g3fix6-2: a destination scope also leaves out the entries the
+        // source walk pruned, in the destination's own names — asked even
+        // with no `--exclude` pattern, as an `exclude_dirs` rule prunes too.
+        rel_path.is_some_and(|rel| {
+            self.destination
                 .as_deref()
                 .is_some_and(|names| names.protects(rel))
+        })
     }
 
     /// Full filter check. `rel_path` enables `files_from` matching;
@@ -677,6 +694,7 @@ impl Default for FileFilter {
             reference_time: None,
             files_from: None,
             destination: None,
+            pruned: None,
             compiled_includes: OnceCell::new(),
             compiled_files: OnceCell::new(),
             compiled_dirs: OnceCell::new(),

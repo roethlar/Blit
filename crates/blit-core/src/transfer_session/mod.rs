@@ -46,9 +46,9 @@ use crate::generated::transfer_frame::Frame;
 use crate::generated::{
     session_error, BlockHashList, BlockTransfer, BlockTransferComplete, CapacityProfile,
     ComparisonMode, DataPlaneResize, DataPlaneResizeAck, DataPlaneResizeOp, FileData, FileHeader,
-    FilterSpec, ManifestComplete, MirrorMode, NeedBatch, NeedComplete, NeedEntry, SessionAccept,
-    SessionError, SessionHello, SessionOpen, SourceDone, TarShardComplete, TarShardHeader,
-    TransferFrame, TransferRole, TransferSummary,
+    FilterSpec, ManifestComplete, ManifestPruned, MirrorMode, NeedBatch, NeedComplete, NeedEntry,
+    SessionAccept, SessionError, SessionHello, SessionOpen, SourceDone, TarShardComplete,
+    TarShardHeader, TransferFrame, TransferRole, TransferSummary,
 };
 use crate::manifest::{header_transfer_status, CompareMode, CompareOptions, FileStatus};
 use crate::remote::transfer::diff_planner;
@@ -105,7 +105,18 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// a status on BLOCK_COMPLETE. The destination tracks every granted need
 /// through one ledger (Granted → Active(lane) → Completed | Failed) and
 /// a record is never inferred complete from a byte count alone.
-pub const CONTRACT_VERSION: u32 = 7;
+/// v8: `TransferFrame.manifest_pruned` (23, `ManifestPruned{paths}`,
+/// cr-g3fix6-2): on a mirror of a filtered subset the SOURCE names every
+/// entry its walk pruned because an exclude named it, before
+/// `ManifestComplete`, and the DESTINATION keeps the entry its own
+/// filesystem pairs with each spelling out of the deletions.
+pub const CONTRACT_VERSION: u32 = 8;
+
+/// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
+/// pruned set scales with the excluded entries, so it rides as many frames
+/// as it needs, each bounded far below tonic's 4 MiB frame decode limit
+/// (the `MAX_WIRE_FAILED_PATHS_ENCODED_BYTES` discipline).
+const MAX_PRUNED_FRAME_BYTES: usize = 1024 * 1024;
 
 /// Payload chunk size on the in-stream carrier. Same unit the gRPC
 /// control plane uses today; the data plane (otp-4) has its own.
@@ -657,6 +668,7 @@ fn frame_name(f: &Option<Frame>) -> &'static str {
         Some(Frame::Error(_)) => "SessionError",
         Some(Frame::FileSkipped(_)) => "FileSkipped",
         Some(Frame::FileEnd(_)) => "FileEnd",
+        Some(Frame::ManifestPruned(_)) => "ManifestPruned",
         None => "empty frame",
     }
 }
@@ -1406,6 +1418,36 @@ fn requested_but_unscanned(
     (out, dropped)
 }
 
+/// cr-g3fix6-2: whether `open` mirrors a filtered subset — the one session
+/// whose deletion scope is the filter, so the only one whose source records
+/// what its walk prunes (`ManifestPruned`).
+fn mirrors_filtered_subset(open: &SessionOpen) -> bool {
+    open.mirror_enabled && open.mirror_kind == MirrorMode::FilteredSubset as i32
+}
+
+/// cr-g3fix6-2: `paths` split into `ManifestPruned` frames of at most
+/// [`MAX_PRUNED_FRAME_BYTES`] encoded paths each (a path longer than that
+/// rides alone), in order; none for no path.
+fn pruned_frames(paths: Vec<String>) -> Vec<Vec<String>> {
+    let mut frames = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    let mut bytes = 0usize;
+    for path in paths {
+        // The field tag and a length prefix of at most three bytes.
+        let cost = path.len() + 4;
+        if !current.is_empty() && bytes + cost > MAX_PRUNED_FRAME_BYTES {
+            frames.push(std::mem::take(&mut current));
+            bytes = 0;
+        }
+        bytes += cost;
+        current.push(path);
+    }
+    if !current.is_empty() {
+        frames.push(current);
+    }
+    frames
+}
+
 async fn drive_source(
     plan_options: PlanOptions,
     data_plane_host: Option<String>,
@@ -1852,10 +1894,15 @@ async fn source_send_half(
                                 "invalid filter: {e:#}"
                             )))
                         })?;
-                Arc::new(crate::remote::transfer::source::FilteredSource::new(
-                    Arc::clone(&source),
-                    filter,
-                ))
+                // cr-g3fix6-2: a mirror that deletes only within the filter's
+                // scope records what the walk prunes, for its destination.
+                Arc::new(
+                    crate::remote::transfer::source::FilteredSource::new(
+                        Arc::clone(&source),
+                        filter,
+                    )
+                    .recording_pruned(mirrors_filtered_subset(&negotiated.open)),
+                )
             }
             _ => Arc::clone(&source),
         };
@@ -2056,6 +2103,13 @@ async fn source_send_half(
             &sent.lock().expect("sent-manifest lock poisoned"),
             &unreadable.lock().expect("unreadable list lock poisoned"),
         );
+        // cr-g3fix6-2: what the walk pruned, complete now that it finished,
+        // reaches the destination before the manifest's end — only a
+        // mirror of a filtered subset records any.
+        for paths in pruned_frames(scan.take_pruned()) {
+            tx.send(frame(Frame::ManifestPruned(ManifestPruned { paths })))
+                .await?;
+        }
         manifest_sent.store(true, Ordering::Release);
         tx.send(frame(Frame::ManifestComplete(ManifestComplete {
             scan_complete,
@@ -4034,19 +4088,25 @@ fn tag_path(report: eyre::Report, path: &str) -> eyre::Report {
 /// destination's deletions are planned — the local carrier, a pull's
 /// client, a destination daemon — and it runs on the blocking pool, after
 /// every payload landed, so the destination is read once, as it stands.
+///
+/// cr-g3fix6-2: `pruned` is every entry the source's walk pruned because an
+/// exclude named it, as the source spells it (`ManifestPruned`); the scope
+/// also leaves out the entry the destination's filesystem pairs with each
+/// one, whatever the exclude's text reads as here.
 fn mirror_delete_pass(
     dst_root: &Path,
     source_files: &HashSet<String>,
     raw_entries: &[crate::mirror_planner::RawNamedEntry],
     shielded: &HashSet<String>,
     filter: &crate::fs_enum::FileFilter,
+    pruned: &[String],
     tolerate_nonempty_dirs: bool,
     canonical_dst_root: Option<&Path>,
     abort: &AtomicBool,
     execute: bool,
     removed: &mut dyn FnMut(&Path, bool),
 ) -> Result<(u64, u64)> {
-    let filter = crate::transfers::filter::destination_scope(filter, dst_root);
+    let filter = crate::transfers::filter::destination_scope(filter, dst_root, pruned);
     let plan = crate::mirror_planner::MirrorPlanner::new(false).plan_session_deletions(
         dst_root,
         source_files,
@@ -4203,6 +4263,9 @@ async fn destination_session_inner(
             crate::fs_enum::FileFilter::default()
         };
     let mut source_files: HashSet<String> = HashSet::new();
+    // Contract 8 (cr-g3fix6-2): every entry the source's walk pruned because
+    // an exclude named it, as the source spells it, for the deletion scope.
+    let mut pruned_paths: Vec<String> = Vec::new();
     // Contract v7 (D-F): every manifest text path seen, so a second header
     // that collapses to the same text is reported instead of overwriting;
     // and the raw bytes of every kept non-UTF-8 name, for the mirror pass.
@@ -4531,6 +4594,18 @@ async fn destination_session_inner(
                         .await?;
                     }
                 }
+            }
+            Some(Frame::ManifestPruned(pruned)) => {
+                if manifest_complete {
+                    return Err(violation("ManifestPruned after ManifestComplete".into()));
+                }
+                if !mirrors_filtered_subset(&negotiated.open) {
+                    return Err(violation(
+                        "ManifestPruned on a session that does not mirror a filtered subset"
+                            .into(),
+                    ));
+                }
+                pruned_paths.extend(pruned.paths);
             }
             Some(Frame::ManifestComplete(complete)) => {
                 if let Some(trace) = &phase_trace {
@@ -5192,6 +5267,7 @@ async fn destination_session_inner(
                     // containment — shields its destination subtree from
                     // the delete pass; the set is exact and uncapped.
                     let shielded = contained_failures.failed_paths().clone();
+                    let pruned = std::mem::take(&mut pruned_paths);
                     let filter = mirror_filter.clone_without_cache();
                     let tolerate_nonempty = mirror_kind == MirrorMode::FilteredSubset;
                     // otp-11: `--dry-run` (local carrier only) plans the
@@ -5247,6 +5323,7 @@ async fn destination_session_inner(
                                 &raw_files,
                                 &shielded,
                                 &filter,
+                                &pruned,
                                 tolerate_nonempty,
                                 canonical.as_deref(),
                                 &abort,
@@ -8873,6 +8950,7 @@ mod tests {
             &[],
             &HashSet::new(),
             &filter,
+            &[],
             false,
             Some(&elsewhere),
             &abort,
@@ -8897,6 +8975,7 @@ mod tests {
             &[],
             &HashSet::new(),
             &filter,
+            &[],
             false,
             Some(&real_root),
             &abort,
@@ -8925,6 +9004,7 @@ mod tests {
             &[],
             &HashSet::new(),
             &filter,
+            &[],
             false,
             None,
             &abort,
@@ -8954,6 +9034,7 @@ mod tests {
             &[],
             &HashSet::new(),
             &filter,
+            &[],
             false,
             None,
             &abort,
@@ -9004,6 +9085,7 @@ mod tests {
             &[],
             &HashSet::new(),
             &filter,
+            &[],
             true,
             None,
             &abort,
@@ -9067,6 +9149,7 @@ mod tests {
             &[],
             &HashSet::new(),
             &filter,
+            &[],
             true,
             None,
             &abort,
@@ -9112,6 +9195,7 @@ mod tests {
                 &[],
                 &HashSet::new(),
                 &filter,
+                &[],
                 true,
                 None,
                 &abort,
@@ -9173,6 +9257,7 @@ mod tests {
                 &[],
                 &HashSet::new(),
                 &filter,
+                &[],
                 true,
                 None,
                 &abort,
@@ -9190,6 +9275,120 @@ mod tests {
             );
             assert_eq!(counts, (1, 0), "{pattern}: stale.txt alone is deleted");
         }
+    }
+
+    /// cr-g3fix6-2: the mirror delete pass keeps the destination's entry
+    /// for a path the source's walk pruned, in the spelling the
+    /// destination's filesystem pairs with the source's — `aSS` for `aß`
+    /// under `--exclude '*ß'`, `s` for `ſ` under `??`, NFC `É` for NFD `é`
+    /// under `???` — with the directory holding it, though the exclude's
+    /// text as written names none of them (`?` counts bytes, and `ß` is
+    /// two letters in uppercase). The dry run without the pruned path is
+    /// the reported deletion: it counts `saved.txt` with its directories.
+    /// Each case runs only where the filesystem pairs the spellings (APFS
+    /// pairs all three; Linux ext4 none, and skips with a message).
+    #[test]
+    fn mirror_delete_pass_keeps_the_destinations_entry_for_a_pruned_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ran = 0;
+        for (case, pattern, typed, stored) in [
+            ("sharp s", "*\u{df}", "a\u{df}", "aSS"),
+            ("long s", "??", "\u{17f}", "s"),
+            ("nfd", "???", "e\u{301}", "\u{c9}"),
+        ] {
+            let dst = tmp.path().join(case.replace(' ', "_"));
+            std::fs::create_dir_all(&dst).unwrap();
+            std::fs::write(dst.join(stored), b"").unwrap();
+            let paired = std::fs::symlink_metadata(dst.join(typed)).is_ok();
+            std::fs::remove_file(dst.join(stored)).unwrap();
+            if !paired {
+                eprintln!(
+                    "skipping {case}: the filesystem does not pair {typed:?} with {stored:?}"
+                );
+                continue;
+            }
+            ran += 1;
+            let saved = format!("x/{stored}/saved.txt");
+            for rel in [saved.as_str(), "stale.txt"] {
+                let path = dst.join(rel);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"s").unwrap();
+            }
+            let mut filter = crate::fs_enum::FileFilter::default();
+            filter.exclude_files = vec![pattern.to_string()];
+            let pruned = [format!("x/{typed}")];
+            let abort = AtomicBool::new(false);
+            let pass = |pruned: &[String], execute: bool| {
+                mirror_delete_pass(
+                    &dst,
+                    &HashSet::new(),
+                    &[],
+                    &HashSet::new(),
+                    &filter,
+                    pruned,
+                    true,
+                    None,
+                    &abort,
+                    execute,
+                    &mut |_, _| {},
+                )
+                .expect("pass")
+            };
+            assert_eq!(
+                pass(&[], false),
+                (2, 2),
+                "{case}: as written, {pattern} names none of {saved}, x/{stored}, x"
+            );
+            assert_eq!(
+                pass(&pruned, true),
+                (1, 0),
+                "{case}: stale.txt alone is deleted"
+            );
+            assert!(dst.join(&saved).exists(), "{case}: {saved} must survive");
+            assert!(
+                !dst.join("stale.txt").exists(),
+                "{case}: stale.txt is deleted"
+            );
+        }
+        if ran == 0 {
+            eprintln!("skipping: no case pairs on this filesystem");
+        }
+    }
+
+    /// cr-g3fix6-2: what a source's walk pruned rides as many
+    /// `ManifestPruned` frames as it needs, each far below tonic's 4 MiB
+    /// frame decode limit, in order and whole; a path longer than one
+    /// frame's budget rides alone; nothing pruned sends no frame. Pure.
+    #[test]
+    fn pruned_paths_ride_frames_bounded_far_below_the_frame_limit() {
+        use prost::Message;
+        let paths: Vec<String> = (0..40_000).map(|i| format!("{i:0>96}")).collect();
+        let frames = pruned_frames(paths.clone());
+        assert!(
+            frames.len() >= 4,
+            "{} frames for ~4 MB of paths",
+            frames.len()
+        );
+        for frame in &frames {
+            let encoded = TransferFrame {
+                frame: Some(Frame::ManifestPruned(ManifestPruned {
+                    paths: frame.clone(),
+                })),
+            }
+            .encoded_len();
+            assert!(
+                encoded <= MAX_PRUNED_FRAME_BYTES + 16,
+                "a frame of {encoded} bytes"
+            );
+        }
+        assert_eq!(frames.concat(), paths, "in order and whole");
+        let long = "x".repeat(MAX_PRUNED_FRAME_BYTES + 1);
+        let frames = pruned_frames(vec!["a".into(), long.clone(), "b".into()]);
+        assert_eq!(
+            frames,
+            vec![vec!["a".to_string()], vec![long], vec!["b".to_string()]]
+        );
+        assert!(pruned_frames(Vec::new()).is_empty());
     }
 
     #[test]
@@ -9420,6 +9619,7 @@ mod tests {
             &[],
             &HashSet::new(),
             &filter,
+            &[],
             false,
             None,
             &abort,
@@ -9440,6 +9640,7 @@ mod tests {
             &[],
             &HashSet::new(),
             &filter,
+            &[],
             false,
             None,
             &abort,

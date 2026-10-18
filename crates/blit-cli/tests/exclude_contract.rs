@@ -733,6 +733,216 @@ fn push_mirror_keeps_a_destination_spelling_after_a_glob_component() {
     );
 }
 
+/// cr-g3fix6-2: spellings a filesystem pairs that no reading of a glob's
+/// text can: (case, the exclude, the source's spelling of the entry it
+/// excludes, the destination's spelling of that entry). `?` counts bytes
+/// (`??` names the two-byte `ſ`, not `s`; `???` the three-byte NFD `é`,
+/// not the two-byte NFC `É`), and `ß` is `SS` in uppercase.
+const GLOB_PAIRED: [(&str, &str, &str, &str); 3] = [
+    ("sharp s", "*\u{df}", "a\u{df}", "aSS"),
+    ("long s", "??", "\u{17f}", "s"),
+    ("nfd", "???", "e\u{301}", "\u{c9}"),
+];
+
+/// cr-g3fix6-2: an entry a glob exclude left out of the source keeps the
+/// destination's own spelling of it, and its directory, out of the
+/// mirror's reach. The reported runs (APFS): `--exclude '*ß'` over
+/// `src/aß/` deleted a pre-existing `dst/aSS/saved.txt`; `--exclude '??'`
+/// over `src/ſ/` deleted `dst/s/saved.txt`; `--exclude '???'` over an NFD
+/// `src/é/` deleted the NFC `dst/É/saved.txt` — each "Deleted: 1 file(s),
+/// 1 dir(s)", exit 0. Every case runs where the filesystem pairs its
+/// spellings (APFS pairs all three; ext4 none, each skipping with a
+/// message), and the ones that lost the entry are named together.
+#[test]
+fn mirror_exclude_keeps_the_destinations_spelling_of_an_entry_a_glob_left_out() {
+    let tmp = tempdir().unwrap();
+    let mut lost = Vec::new();
+    for (case, exclude, typed, stored) in GLOB_PAIRED {
+        let root = tmp.path().join(case.replace(' ', "_"));
+        let (src, dst) = (root.join("src"), root.join("dst"));
+        fs::create_dir_all(&dst).unwrap();
+        if !filesystem_pairs(&dst, stored, typed) {
+            eprintln!(
+                "skipping {case}: {} does not pair {typed:?} with {stored:?}",
+                dst.display()
+            );
+            continue;
+        }
+        for rel in [format!("x/{typed}/private.txt"), "keep.txt".to_string()] {
+            let path = src.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"x").unwrap();
+        }
+        let saved = dst.join("x").join(stored).join("saved.txt");
+        fs::create_dir_all(saved.parent().unwrap()).unwrap();
+        fs::write(&saved, b"s").unwrap();
+
+        let (ok, stdout, stderr) = blit(&[
+            "mirror",
+            "--yes",
+            &with_slash(&src),
+            &with_slash(&dst),
+            "--exclude",
+            exclude,
+        ]);
+        assert!(
+            ok,
+            "{case}: mirror failed:\nstdout: {stdout}\nstderr: {stderr}"
+        );
+        if !saved.exists() || !dst.join("x").is_dir() {
+            lost.push(format!("{case}: {}", stdout.trim().replace('\n', " | ")));
+        }
+        assert!(dst.join("keep.txt").exists(), "{case}: keep.txt");
+        assert!(
+            !dst.join("x").join(stored).join("private.txt").exists(),
+            "{case}: the excluded source entry is not copied"
+        );
+    }
+    assert!(
+        lost.is_empty(),
+        "the destination's spelling of an excluded entry must survive the mirror:\n{}",
+        lost.join("\n")
+    );
+}
+
+/// cr-g3fix6-2: the same on a destination daemon, which learns what the
+/// source's walk pruned over the wire (`ManifestPruned`, contract 8): a
+/// push mirror keeps the module's own spelling of each excluded entry and
+/// deletes `extra.txt`. Each case runs where the module's filesystem pairs
+/// its spellings.
+#[cfg(unix)]
+#[test]
+fn push_mirror_keeps_the_destinations_spelling_of_an_entry_a_glob_left_out() {
+    let ctx = common::TestContext::new();
+    let mut lost = Vec::new();
+    for (case, exclude, typed, stored) in GLOB_PAIRED {
+        if !filesystem_pairs(&ctx.module_dir, stored, typed) {
+            eprintln!(
+                "skipping {case}: {} does not pair {typed:?} with {stored:?}",
+                ctx.module_dir.display()
+            );
+            continue;
+        }
+        let src = ctx.workspace.join(case.replace(' ', "_"));
+        for rel in [format!("x/{typed}/private.txt"), "keep.txt".to_string()] {
+            let path = src.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"x").unwrap();
+        }
+        for entry in fs::read_dir(&ctx.module_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                fs::remove_dir_all(&path).unwrap();
+            } else {
+                fs::remove_file(&path).unwrap();
+            }
+        }
+        let saved = ctx.module_dir.join("x").join(stored).join("saved.txt");
+        fs::create_dir_all(saved.parent().unwrap()).unwrap();
+        fs::write(&saved, b"s").unwrap();
+        fs::write(ctx.module_dir.join("extra.txt"), b"extraneous").unwrap();
+
+        let mut cmd = std::process::Command::new(&ctx.cli_bin);
+        cmd.arg("--config-dir")
+            .arg(&ctx.config_dir)
+            .arg("mirror")
+            .arg("--yes")
+            .arg(with_slash(&src))
+            .arg(format!("127.0.0.1:{}:/test/", ctx.daemon_port))
+            .arg("--exclude")
+            .arg(exclude);
+        let output = run_with_timeout(cmd, Duration::from_secs(60));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{case}: push mirror failed:\nstdout: {stdout}\nstderr: {stderr}"
+        );
+        if !saved.exists() {
+            lost.push(format!("{case}: {}", stdout.trim().replace('\n', " | ")));
+        }
+        assert!(ctx.module_dir.join("keep.txt").exists(), "{case}: keep.txt");
+        assert!(
+            !ctx.module_dir.join("extra.txt").exists(),
+            "{case}: a complete source scan lets the mirror delete the extraneous file"
+        );
+    }
+    assert!(
+        lost.is_empty(),
+        "the daemon's deletion scope must keep its own spelling of an excluded entry:\n{}",
+        lost.join("\n")
+    );
+}
+
+/// cr-g3fix6-2: and on a pull, where the daemon is the source whose walk
+/// prunes and the client's destination keeps its own spelling of each
+/// excluded entry, deleting `extra.txt`. Each case runs where the local
+/// filesystem pairs its spellings.
+#[cfg(unix)]
+#[test]
+fn pull_mirror_keeps_the_destinations_spelling_of_an_entry_a_glob_left_out() {
+    let ctx = common::TestContext::new();
+    let mut lost = Vec::new();
+    for (case, exclude, typed, stored) in GLOB_PAIRED {
+        let dst = ctx.workspace.join(case.replace(' ', "_"));
+        fs::create_dir_all(&dst).unwrap();
+        if !filesystem_pairs(&dst, stored, typed) {
+            eprintln!(
+                "skipping {case}: {} does not pair {typed:?} with {stored:?}",
+                dst.display()
+            );
+            continue;
+        }
+        for entry in fs::read_dir(&ctx.module_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                fs::remove_dir_all(&path).unwrap();
+            } else {
+                fs::remove_file(&path).unwrap();
+            }
+        }
+        for rel in [format!("x/{typed}/private.txt"), "keep.txt".to_string()] {
+            let path = ctx.module_dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"x").unwrap();
+        }
+        let saved = dst.join("x").join(stored).join("saved.txt");
+        fs::create_dir_all(saved.parent().unwrap()).unwrap();
+        fs::write(&saved, b"s").unwrap();
+        fs::write(dst.join("extra.txt"), b"extraneous").unwrap();
+
+        let mut cmd = std::process::Command::new(&ctx.cli_bin);
+        cmd.arg("--config-dir")
+            .arg(&ctx.config_dir)
+            .arg("mirror")
+            .arg("--yes")
+            .arg(format!("127.0.0.1:{}:/test/", ctx.daemon_port))
+            .arg(with_slash(&dst))
+            .arg("--exclude")
+            .arg(exclude);
+        let output = run_with_timeout(cmd, Duration::from_secs(60));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{case}: pull mirror failed:\nstdout: {stdout}\nstderr: {stderr}"
+        );
+        if !saved.exists() {
+            lost.push(format!("{case}: {}", stdout.trim().replace('\n', " | ")));
+        }
+        assert!(dst.join("keep.txt").exists(), "{case}: keep.txt");
+        assert!(
+            !dst.join("extra.txt").exists(),
+            "{case}: a complete source scan lets the mirror delete the extraneous file"
+        );
+    }
+    assert!(
+        lost.is_empty(),
+        "the pull client's deletion scope must keep its own spelling of an excluded entry:\n{}",
+        lost.join("\n")
+    );
+}
+
 /// cr-g3fix-2: an absolute glob written through a symlink to the source
 /// is made relative. The glob path itself never exists, so only its
 /// literal part is resolved; before the fix the pattern was reported as

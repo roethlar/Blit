@@ -297,6 +297,21 @@ message ManifestComplete {
   repeated FileFailure scan_failures = 2;
   uint64 scan_failures_dropped = 3;
 }
+
+// Contract 8 (cr-g3fix6-2): entries the SOURCE's walk pruned because an
+// exclude named them, as the source spells them — one relative path (POSIX
+// form) per pruned directory and per pruned file. Sent only on a session
+// that mirrors a filtered subset (`MIRROR_MODE_FILTERED_SUBSET`), after the
+// last manifest entry and before `ManifestComplete`, in as many frames as
+// the set needs: it scales with the pruned entries, and each frame stays
+// far below the 4 MiB frame limit. The DESTINATION resolves each path
+// through its own filesystem's names and keeps the entry it pairs with
+// that spelling (`aSS` for `aß` where the filesystem pairs them), with
+// everything below it and every directory above it, out of the mirror's
+// deletions. Rejected after `ManifestComplete` or on any other session.
+message ManifestPruned {
+  repeated string paths = 1;
+}
 // Progress: enumeration discovered X files (reused by
 // DelegatedPullProgress and TransferProgress).
 message ManifestBatch {
@@ -1301,6 +1316,9 @@ message TransferFrame {
     FileFailure file_skipped = 21;
     // Contract v7: the terminator of one single-file record.
     RecordEnd file_end = 22;
+    // Contract 8 (cr-g3fix6-2): what the SOURCE's walk pruned, for a
+    // mirror's deletion scope; SOURCE, before ManifestComplete.
+    ManifestPruned manifest_pruned = 23;
   }
 }
 

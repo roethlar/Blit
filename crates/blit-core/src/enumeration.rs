@@ -42,6 +42,38 @@ pub struct EnumerationOutcome {
     pub suppressed_errors: Vec<SuppressedScanError>,
 }
 
+/// cr-g3fix6-2: the entries a source walk pruned because an exclude named
+/// them — one relative path per pruned directory (never opened, so nothing
+/// below it is listed) and one per pruned file or symlink, in POSIX form,
+/// spelled as the source stores it. A mirror that deletes only within its
+/// filter's scope sends them to its destination, whose deletion pass keeps
+/// the entry its own filesystem pairs with each spelling (`aSS` for `aß`
+/// on APFS, NFC `É` for an NFD `é`) — a pairing no reading of the
+/// exclude's text can reproduce. Recorded by a walk whose filter carries
+/// it ([`FileFilter`]'s `pruned`); the session attaches one to the exclude
+/// rules alone (`FilteredSource::recording_pruned`), so every path in it
+/// is one an exclude left out. A name that is not valid UTF-8 is not
+/// recorded: the destination resolves a path by its text.
+#[derive(Debug, Default)]
+pub struct PrunedPaths(parking_lot::Mutex<Vec<String>>);
+
+impl PrunedPaths {
+    /// Record `rel`, a path below the walk's root.
+    pub(crate) fn record(&self, rel: &Path) {
+        if rel.as_os_str().is_empty() || crate::raw_name::raw_relative_bytes(rel).is_some() {
+            return;
+        }
+        self.0
+            .lock()
+            .push(crate::path_posix::relative_path_to_posix(rel));
+    }
+
+    /// Every path recorded so far, leaving none behind.
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock())
+    }
+}
+
 /// Result of filesystem enumeration. `absolute_path` is the full path on disk,
 /// `relative_path` is the path relative to the enumeration root, and
 /// `metadata` always refers to the filesystem object (captured via
@@ -235,6 +267,7 @@ impl FileEnumerator {
                 // audit-19: a pruned directory is skipped before walkdir
                 // reads it, so nothing beneath it is ever opened.
                 if !filter.allows_dir(&rel, path) {
+                    filter.note_pruned(&rel);
                     walker.skip_current_dir();
                     continue;
                 }
@@ -258,6 +291,7 @@ impl FileEnumerator {
                 let rel = relative_path(root, path);
 
                 if !filter.allows_entry(Some(&rel), path, size, mtime) {
+                    filter.note_pruned(&rel);
                     continue;
                 }
 
@@ -278,6 +312,7 @@ impl FileEnumerator {
                 let rel = relative_path(root, path);
 
                 if !filter.allows_entry(Some(&rel), path, 0, mtime) {
+                    filter.note_pruned(&rel);
                     continue;
                 }
 
