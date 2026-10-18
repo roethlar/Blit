@@ -1065,14 +1065,19 @@ enum Step {
         crosses: bool,
     },
     /// `**` before another component: any number of components, none
-    /// included.
-    AnyDepth,
+    /// included. When the next component's glob can cross `/`, match the
+    /// two together from the first possible start. A later start cannot
+    /// add a match: `**/` can consume the intervening components.
+    AnyDepth {
+        crossing: Option<globset::GlobMatcher>,
+    },
     /// `**` last: one or more components.
     Rest,
 }
 
 /// How far a path rule has read: the next [`Step`], and where a crossing
-/// glob component under way began (the index of its first component).
+/// glob or a combined `**/` + crossing glob began (the index of its first
+/// component).
 type State = (usize, Option<usize>);
 
 /// One directory of [`DestinationNames`]' chain.
@@ -1351,7 +1356,15 @@ fn path_steps(
                 return Some(if at == last {
                     Step::Rest
                 } else {
-                    Step::AnyDepth
+                    let next = &components[at + 1];
+                    let crossing = (next != "**"
+                        && plain_name(next, windows).is_none()
+                        && next.contains(['*', '?']))
+                    .then(|| globset::Glob::new(&format!("**/{next}")))
+                    .transpose()
+                    .ok()?
+                    .map(|glob| glob.compile_matcher());
+                    Step::AnyDepth { crossing }
                 });
             }
             if let Some(name) = plain_name(component, windows) {
@@ -1371,13 +1384,32 @@ fn closure(steps: &[Step], states: &mut Vec<State>) {
     let mut at = 0;
     while at < states.len() {
         let (step, open) = states[at];
-        if open.is_none()
-            && matches!(steps.get(step), Some(Step::AnyDepth))
-            && !states.contains(&(step + 1, None))
-        {
-            states.push((step + 1, None));
+        if open.is_none() && matches!(steps.get(step), Some(Step::AnyDepth { crossing: None })) {
+            push_state(steps, states, (step + 1, None));
         }
         at += 1;
+    }
+}
+
+/// The earliest start of `**/glob` includes every later start. Keep one
+/// state for that pair even when another path through the rule reaches it.
+fn push_state(steps: &[Step], states: &mut Vec<State>, state: State) {
+    if matches!(
+        steps.get(state.0),
+        Some(Step::AnyDepth { crossing: Some(_) })
+    ) {
+        if let Some(known) = states.iter_mut().find(|known| known.0 == state.0) {
+            known.1 = match (known.1, state.1) {
+                (Some(left), Some(right)) => Some(left.min(right)),
+                (Some(left), None) => Some(left),
+                (None, Some(right)) => Some(right),
+                (None, None) => None,
+            };
+            return;
+        }
+    }
+    if !states.contains(&state) {
+        states.push(state);
     }
 }
 
@@ -1394,11 +1426,7 @@ fn advance(
     matches: &mut impl FnMut(usize) -> bool,
 ) -> (Vec<State>, bool) {
     let mut next: Vec<State> = Vec::new();
-    let push = |state: State, next: &mut Vec<State>| {
-        if !next.contains(&state) {
-            next.push(state);
-        }
-    };
+    let push = |state: State, next: &mut Vec<State>| push_state(steps, next, state);
     for &(step, open) in from {
         match steps.get(step) {
             None => {}
@@ -1417,7 +1445,16 @@ fn advance(
                     push((step, Some(start)), &mut next);
                 }
             }
-            Some(Step::AnyDepth) => push((step, None), &mut next),
+            Some(Step::AnyDepth {
+                crossing: Some(glob),
+            }) => {
+                let start = open.unwrap_or(at);
+                if glob.is_match(texts[start..=at].join("/")) {
+                    push((step + 2, None), &mut next);
+                }
+                push((step, Some(start)), &mut next);
+            }
+            Some(Step::AnyDepth { crossing: None }) => push((step, None), &mut next),
             Some(Step::Rest) => {
                 push((step + 1, None), &mut next);
                 push((step, None), &mut next);
@@ -3082,6 +3119,52 @@ mod tests {
                 reads(pattern).is_none(),
                 "{pattern}: no literal component, matched as written by the filter"
             );
+        }
+    }
+
+    /// cr-g3fix6-3: `**/*/missing` used to retain a crossing-glob start
+    /// at every depth. Each destination entry then rejoined and matched
+    /// every suffix. The combined `**/` matcher has at most one open start
+    /// and one state after the glob, so work for each entry grows with its
+    /// depth. The prefix case exercises a `**` reached after a literal.
+    #[test]
+    fn recursive_prefix_before_a_crossing_glob_keeps_bounded_states() {
+        for (pattern, prefix) in [("**/*/missing", ""), ("prefix/**/a*b/missing", "prefix/")] {
+            let names = DestinationNames::new(
+                Path::new("dst"),
+                &[pattern.to_string()],
+                false,
+                || false,
+                Box::new(|_| Vec::new()),
+                Default::default(),
+            )
+            .expect("a literal after the crossing glob");
+            for depth in [1, 20, 160] {
+                let branch = format!("{prefix}{}", vec!["ab"; depth].join("/"));
+                assert!(
+                    !names.protects(Path::new(&format!("{branch}/other"))),
+                    "{pattern}: an unrelated entry remains in scope"
+                );
+                let chain = names.chain.lock();
+                let states = &chain.last().expect("parent of other").states[0];
+                assert!(
+                    states.len() <= 2,
+                    "{pattern}: {depth} levels retained {} states",
+                    states.len()
+                );
+                drop(chain);
+                assert!(
+                    names.protects(Path::new(&format!("{branch}/missing"))),
+                    "{pattern}: the literal after the glob is still protected"
+                );
+            }
+            if pattern.starts_with("prefix/") {
+                assert!(
+                    names.protects(Path::new("prefix/a/long/b/missing")),
+                    "a crossing glob still spans separators after the recursive prefix"
+                );
+                assert!(!names.protects(Path::new("prefix/a/long/b/other")));
+            }
         }
     }
 
