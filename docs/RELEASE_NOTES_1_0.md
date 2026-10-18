@@ -170,6 +170,14 @@ carry such names by their exact bytes.
   `blit jobs retry` afterwards.
 - **A `move`'s source-side deletion on a daemon is not a job** and leaves
   no log.
+- **A firewall must admit the daemon's data plane, not only its port.**
+  For every transfer the daemon listens on a fresh ephemeral TCP port and
+  the client dials it; a rule that opens only the control port (9031)
+  lets a session open and then fails every transfer with
+  `DATA_PLANE_FAILED`. Allow the program (macOS, Windows), open the
+  ephemeral range, or run the daemon with `--force-grpc-data`
+  (`docs/DAEMON_CONFIG.md`, Firewall Configuration). Found on a Windows
+  daemon during the release checks; the recipes there were corrected.
 - **The daemon has no built-in TLS or user authentication** (unchanged).
   Module access controls and per-session data-plane tokens are not an
   authentication system: run it only on a trusted network or through an
