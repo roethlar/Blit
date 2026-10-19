@@ -943,3 +943,8 @@ Format:
 - Why: the owner wants the release readied without per-item rulings; each item was recommended in the plan before the ruling, and none of them publishes anything.
 - Unchanged by this ruling: the push (Earned Practices: list refs, then the owner's go), each Codex dispatch (D-2026-07-23-7), the tag `v1.0.0`, the GitHub release and the crates.io publishes (G6) keep their standing gates.
 - Supersedes: the "Owner design gates" wording of RELEASE_1_0 G3 for audit-19 and the recents reason (both now fix-now), and the per-plan "owner declares Shipped" step for the seven plans named.
+
+## D-2026-10-19-1 — Finish 1.0 without further review dispatches
+- Decision: owner directed the agent to finish the release work and said "FUCK THE REVIEWS." Do not dispatch g3fix7-r1 or another review for this 1.0 candidate; carry fix round 7 as unreviewed and proceed through the remaining verification and release gates.
+- Why: no eligible independent model is available for the mixed Claude/Codex fix range, and the owner wants progress toward the release rather than another review loop or wait.
+- Supersedes: the g3fix7-r1 dispatch step in `docs/plan/RELEASE_1_0.md` and `docs/STATE.md`; the prior refusal of a one-time review waiver is superseded by this explicit direction to skip reviews. D-2026-10-07-4 and D-2026-07-23-7 continue to govern any future review dispatch.

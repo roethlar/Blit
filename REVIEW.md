@@ -437,6 +437,7 @@ Owner: `review` (2026-10-14, after D-2026-10-14-1) — the codereview playbook's
 | cr-g3fix6-1 | Folding character-class text changes its membership and exposes excluded data | `[x]` HIGH — fixed `9bec0bf3`: glob text is matched as written; relative and absolute `[A-z]*/cache` local/daemon guards and a typed-text unit guard pass; folding mutation red | `.review/findings/cr-g3fix6-1.md` |
 | cr-g3fix6-2 | Unicode glob matching still misses names the destination filesystem pairs | `[x]` HIGH — fixed `882daa41`: the source records paths its excludes pruned, contract 8 streams them to a destination daemon, and the destination protects their own filesystem spellings; mutation-proven guards in the finding. Residual pure-glob destination-only case is in the release notes | `.review/findings/cr-g3fix6-2.md` |
 | cr-g3fix6-3 | A recursive prefix followed by a crossing glob adds quadratic work per entry | `[x]` MEDIUM — fixed `0767b17e`: combine `**/` with the following crossing glob; at most two states at depths 1, 20 and 160; disabling the combination left 23 states at depth 20 and failed the guard | `.review/findings/cr-g3fix6-3.md` |
+| g3fix7-r1 | `bdb90194..0767b17e` (fix round 7) | **NOT RUN** — owner cancelled further review dispatches for the 1.0 candidate (D-2026-10-19-1). The three fixes have local mutation-red guards and a macOS gate; no independent acceptance verdict is claimed. | `docs/DECISIONS.md` D-2026-10-19-1 |
 
 
 Finding rows: `[ ]` open → `[x]` fixed with its commit, one finding per commit (`Fix <id>: …`).
