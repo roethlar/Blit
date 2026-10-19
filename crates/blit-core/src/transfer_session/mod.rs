@@ -9280,19 +9280,21 @@ mod tests {
 
     /// cr-g3fix6-2: the mirror delete pass keeps the destination's entry
     /// for a path the source's walk pruned, in the spelling the
-    /// destination's filesystem pairs with the source's — `aSS` for `aß`
+    /// destination's filesystem pairs with the source's — `aCache` for
+    /// `acache` on NTFS, `aSS` for `aß`
     /// under `--exclude '*ß'`, `s` for `ſ` under `??`, NFC `É` for NFD `é`
     /// under `???` — with the directory holding it, though the exclude's
     /// text as written names none of them (`?` counts bytes, and `ß` is
     /// two letters in uppercase). The dry run without the pruned path is
     /// the reported deletion: it counts `saved.txt` with its directories.
-    /// Each case runs only where the filesystem pairs the spellings (APFS
-    /// pairs all three; Linux ext4 none, and skips with a message).
+    /// Each case runs only where the filesystem pairs the spellings (NTFS
+    /// pairs the ASCII case; APFS pairs all four; Linux ext4 none).
     #[test]
     fn mirror_delete_pass_keeps_the_destinations_entry_for_a_pruned_path() {
         let tmp = tempfile::tempdir().unwrap();
         let mut ran = 0;
         for (case, pattern, typed, stored) in [
+            ("ascii case", "*cache", "acache", "aCache"),
             ("sharp s", "*\u{df}", "a\u{df}", "aSS"),
             ("long s", "??", "\u{17f}", "s"),
             ("nfd", "???", "e\u{301}", "\u{c9}"),
@@ -9351,7 +9353,9 @@ mod tests {
                 "{case}: stale.txt is deleted"
             );
         }
-        if ran == 0 {
+        if cfg!(windows) {
+            assert!(ran > 0, "Windows pairing guard skipped every case");
+        } else if ran == 0 {
             eprintln!("skipping: no case pairs on this filesystem");
         }
     }

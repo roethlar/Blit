@@ -733,12 +733,14 @@ fn push_mirror_keeps_a_destination_spelling_after_a_glob_component() {
     );
 }
 
-/// cr-g3fix6-2: spellings a filesystem pairs that no reading of a glob's
-/// text can: (case, the exclude, the source's spelling of the entry it
-/// excludes, the destination's spelling of that entry). `?` counts bytes
+/// cr-g3fix6-2: spellings a filesystem pairs that the glob as written
+/// does not: (case, the exclude, the source's spelling of the entry it
+/// excludes, the destination's spelling of that entry). The ASCII case
+/// exercises the end-to-end guard on Windows/NTFS; `?` counts bytes
 /// (`??` names the two-byte `ſ`, not `s`; `???` the three-byte NFD `é`,
 /// not the two-byte NFC `É`), and `ß` is `SS` in uppercase.
-const GLOB_PAIRED: [(&str, &str, &str, &str); 3] = [
+const GLOB_PAIRED: [(&str, &str, &str, &str); 4] = [
+    ("ascii case", "*cache", "acache", "aCache"),
     ("sharp s", "*\u{df}", "a\u{df}", "aSS"),
     ("long s", "??", "\u{17f}", "s"),
     ("nfd", "???", "e\u{301}", "\u{c9}"),
@@ -751,12 +753,13 @@ const GLOB_PAIRED: [(&str, &str, &str, &str); 3] = [
 /// over `src/ſ/` deleted `dst/s/saved.txt`; `--exclude '???'` over an NFD
 /// `src/é/` deleted the NFC `dst/É/saved.txt` — each "Deleted: 1 file(s),
 /// 1 dir(s)", exit 0. Every case runs where the filesystem pairs its
-/// spellings (APFS pairs all three; ext4 none, each skipping with a
-/// message), and the ones that lost the entry are named together.
+/// spellings (APFS pairs all four; NTFS pairs the ASCII case; ext4 none,
+/// with a skip message), and the ones that lost the entry are named together.
 #[test]
 fn mirror_exclude_keeps_the_destinations_spelling_of_an_entry_a_glob_left_out() {
     let tmp = tempdir().unwrap();
     let mut lost = Vec::new();
+    let mut ran = 0;
     for (case, exclude, typed, stored) in GLOB_PAIRED {
         let root = tmp.path().join(case.replace(' ', "_"));
         let (src, dst) = (root.join("src"), root.join("dst"));
@@ -768,6 +771,7 @@ fn mirror_exclude_keeps_the_destinations_spelling_of_an_entry_a_glob_left_out() 
             );
             continue;
         }
+        ran += 1;
         for rel in [format!("x/{typed}/private.txt"), "keep.txt".to_string()] {
             let path = src.join(rel);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -803,6 +807,9 @@ fn mirror_exclude_keeps_the_destinations_spelling_of_an_entry_a_glob_left_out() 
         "the destination's spelling of an excluded entry must survive the mirror:\n{}",
         lost.join("\n")
     );
+    if cfg!(windows) {
+        assert!(ran > 0, "Windows pairing guard skipped every case");
+    }
 }
 
 /// cr-g3fix6-2: the same on a destination daemon, which learns what the
