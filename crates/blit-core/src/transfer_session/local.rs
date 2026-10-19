@@ -824,7 +824,7 @@ pub async fn run_local_session(
     // the destination's deletion pass (`ManifestPruned`).
     let filtered: Arc<dyn TransferSource> = Arc::new(
         FilteredSource::new(Arc::clone(&fs_source), options.filter.clone_without_cache())
-            .recording_pruned(mirror_kind == MirrorMode::FilteredSubset),
+            .recording_pruned(super::mirrors_filtered_subset(&open)),
     );
     let scan_source: Arc<dyn TransferSource> = match dest_subtree_rel(src_root, dst_root) {
         Some(exclude_rel) => Arc::new(DestSubtreeExcludedSource {

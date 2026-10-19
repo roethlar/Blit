@@ -78,6 +78,8 @@ agent work; the tag and publish are the owner's act.
   open" and the identified release questions against the owner's rule.
   Each remaining item needs a verified resolution before G6; CI and Docs
   Gate must pass on the final SHA.
+  O4's predicate is unified and its macOS gate passed 2026-10-19;
+  cross-platform CI remains to be observed after the push.
 - [x] **G4 — docs truth pass.** CLOSED 2026-10-14: README + TRANSFER_SESSION corrected `6ac98801`; plan-status sweep and STATE de-drift `b186e8b8` (D-2026-10-14-1). README and `docs/TRANSFER_SESSION.md`
   claims verified against current behavior — expressly the ls-6 compare
   contract (default compare does not interrogate destination streams;
