@@ -149,9 +149,9 @@ carry such names by their exact bytes.
 - **Install channels:** Homebrew (`roethlar/blit/blit-bin`), winget
   (`Roethlar.Blit`), Scoop, AUR (`blit`, `blit-bin`), cargo
   (`blit-transfer`, `blit-daemon`) and GitHub Releases; the bot-maintained
-  channels update on tag publish, and the 1.0.0 crates are published with
-  the tag. The 0.1.2 crates on crates.io predate the protocol gate and
-  refuse every peer; `cargo install` them no further.
+  channels update on tag publish; the 1.0.0 crates.io packages are published
+  separately after the tag. The 0.1.2 crates on crates.io predate the
+  protocol gate and refuse every peer; `cargo install` them no further.
 - **For embedders of `blit-core`:** the public API changed, which is why
   this is a major version. `PreparedPayload::TarShard` gained `skipped`
   and `PreparedPayload::Skipped` was added; `build_tar_shard` returns
