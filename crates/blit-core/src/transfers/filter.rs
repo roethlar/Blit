@@ -1063,6 +1063,11 @@ enum Step {
     Glob {
         glob: globset::GlobMatcher,
         crosses: bool,
+        /// A streaming form of the same glob regex. Equal DFA states have
+        /// identical possible futures, so suffixes can be merged without
+        /// losing a match. Keep the glob matcher as a fallback if the DFA
+        /// cannot be built for a particular pattern.
+        automaton: Option<Box<regex_automata::dfa::dense::DFA<Vec<u32>>>>,
     },
     /// `**` before another component: any number of components, none
     /// included. When the next component's glob can cross `/`, match the
@@ -1075,10 +1080,23 @@ enum Step {
     Rest,
 }
 
+/// A user glob can make DFA determinization much larger than its text.
+/// Falling back to the original matcher preserves deletion-scope semantics.
+const MAX_CROSSING_GLOB_DFA_BYTES: usize = 1 << 20;
+
 /// How far a path rule has read: the next [`Step`], and where a crossing
 /// glob or a combined `**/` + crossing glob began (the index of its first
 /// component).
-type State = (usize, Option<usize>);
+type State = (usize, Option<OpenState>);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenState {
+    /// Start of a combined `**/glob`, or of a crossing glob whose DFA
+    /// could not be built.
+    Start(usize),
+    /// DFA state after reading the open glob through the parent entry.
+    Automaton(regex_automata::util::primitives::StateID),
+}
 
 /// One directory of [`DestinationNames`]' chain.
 struct Level {
@@ -1370,9 +1388,29 @@ fn path_steps(
             if let Some(name) = plain_name(component, windows) {
                 return Some(Step::Name(index_of(name)));
             }
+            let glob = globset::Glob::new(component).ok()?;
+            let crosses = component.contains(['*', '?']);
+            let automaton = crosses
+                .then(|| {
+                    let syntax = regex_automata::util::syntax::Config::new()
+                        .utf8(false)
+                        .dot_matches_new_line(true);
+                    regex_automata::dfa::dense::Builder::new()
+                        .syntax(syntax)
+                        .configure(
+                            regex_automata::dfa::dense::Config::new()
+                                .dfa_size_limit(Some(MAX_CROSSING_GLOB_DFA_BYTES))
+                                .determinize_size_limit(Some(MAX_CROSSING_GLOB_DFA_BYTES)),
+                        )
+                        .build(glob.regex())
+                        .ok()
+                        .map(Box::new)
+                })
+                .flatten();
             Some(Step::Glob {
-                glob: globset::Glob::new(component).ok()?.compile_matcher(),
-                crosses: component.contains(['*', '?']),
+                glob: glob.compile_matcher(),
+                crosses,
+                automaton,
             })
         })
         .collect()
@@ -1400,10 +1438,13 @@ fn push_state(steps: &[Step], states: &mut Vec<State>, state: State) {
     ) {
         if let Some(known) = states.iter_mut().find(|known| known.0 == state.0) {
             known.1 = match (known.1, state.1) {
-                (Some(left), Some(right)) => Some(left.min(right)),
+                (Some(OpenState::Start(left)), Some(OpenState::Start(right))) => {
+                    Some(OpenState::Start(left.min(right)))
+                }
                 (Some(left), None) => Some(left),
                 (None, Some(right)) => Some(right),
                 (None, None) => None,
+                _ => unreachable!("a combined recursive step has only start states"),
             };
             return;
         }
@@ -1435,24 +1476,56 @@ fn advance(
                     push((step + 1, None), &mut next);
                 }
             }
-            Some(Step::Glob { glob, crosses }) => {
-                let start = open.unwrap_or(at);
-                let text = texts[start..=at].join("/");
-                if glob.is_match(&text) {
-                    push((step + 1, None), &mut next);
-                }
-                if *crosses {
-                    push((step, Some(start)), &mut next);
+            Some(Step::Glob {
+                glob,
+                crosses,
+                automaton,
+            }) => {
+                if let Some(dfa) = automaton {
+                    use regex_automata::dfa::Automaton;
+                    let mut state = match open {
+                        Some(OpenState::Automaton(state)) => dfa.next_state(state, b'/'),
+                        None => dfa
+                            .start_state_forward(&regex_automata::Input::new(""))
+                            .expect("a glob DFA has a start state"),
+                        _ => unreachable!("a streamed glob has only DFA states"),
+                    };
+                    for &byte in texts[at].as_bytes() {
+                        state = dfa.next_state(state, byte);
+                    }
+                    if dfa.is_match_state(dfa.next_eoi_state(state)) {
+                        push((step + 1, None), &mut next);
+                    }
+                    if !dfa.is_dead_state(state) {
+                        push((step, Some(OpenState::Automaton(state))), &mut next);
+                    }
+                } else {
+                    let start = match open {
+                        Some(OpenState::Start(start)) => start,
+                        None => at,
+                        _ => unreachable!("an unstreamed glob has only start states"),
+                    };
+                    let text = texts[start..=at].join("/");
+                    if glob.is_match(&text) {
+                        push((step + 1, None), &mut next);
+                    }
+                    if *crosses {
+                        push((step, Some(OpenState::Start(start))), &mut next);
+                    }
                 }
             }
             Some(Step::AnyDepth {
                 crossing: Some(glob),
             }) => {
-                let start = open.unwrap_or(at);
+                let start = match open {
+                    Some(OpenState::Start(start)) => start,
+                    None => at,
+                    _ => unreachable!("a combined recursive step has only start states"),
+                };
                 if glob.is_match(texts[start..=at].join("/")) {
                     push((step + 2, None), &mut next);
                 }
-                push((step, Some(start)), &mut next);
+                push((step, Some(OpenState::Start(start))), &mut next);
             }
             Some(Step::AnyDepth { crossing: None }) => push((step, None), &mut next),
             Some(Step::Rest) => {
@@ -3164,6 +3237,93 @@ mod tests {
                     "a crossing glob still spans separators after the recursive prefix"
                 );
                 assert!(!names.protects(Path::new("prefix/a/long/b/other")));
+            }
+        }
+    }
+
+    /// G3b O2: a crossing glob after a combined `**/glob` must not keep
+    /// one open suffix for every ancestor. `*y` can absorb separators,
+    /// `a*y` has a fixed prefix, and `??y` has a bounded width. All three
+    /// used to retain a state per level although no `missing` entry exists.
+    #[test]
+    fn crossing_glob_after_recursive_prefix_keeps_bounded_states() {
+        for pattern in ["**/*x/*y/missing", "**/*x/a*y/missing", "**/*x/??y/missing"] {
+            let names = DestinationNames::new(
+                Path::new("dst"),
+                &[pattern.to_string()],
+                false,
+                || false,
+                Box::new(|_| Vec::new()),
+                Default::default(),
+            )
+            .expect("a literal after the crossing globs");
+            for depth in [20, 80, 160] {
+                let branch = vec!["ax"; depth].join("/");
+                assert!(!names.protects(Path::new(&format!("{branch}/other"))));
+                let chain = names.chain.lock();
+                let states = &chain.last().expect("parent of other").states[0];
+                assert!(
+                    states.len() <= 8,
+                    "{pattern}: {depth} levels retained {} states",
+                    states.len()
+                );
+            }
+            assert!(names.protects(Path::new("ax/aby/missing")), "{pattern}");
+            assert!(!names.protects(Path::new("ax/aby/other")), "{pattern}");
+            if pattern == "**/*x/*y/missing" {
+                assert!(names.protects(Path::new("ax/foo/aby/missing")));
+            }
+        }
+    }
+
+    /// The streamed crossing-glob states must make the same accept/reject
+    /// decision as globset's complete path matcher when no spelling lookup
+    /// is involved. Exercise competing starts, separators and wildcard
+    /// forms; a merged DFA state must never lose a possible later match.
+    #[test]
+    fn crossing_glob_states_agree_with_the_complete_glob() {
+        for pattern in [
+            "**/*x/*y/missing",
+            "**/*x/a*y/missing",
+            "**/*x/??y/missing",
+            "**/*x/[a-z]*y/missing",
+            "**/*x/{a,b}*y/missing",
+        ] {
+            let names = DestinationNames::new(
+                Path::new("dst"),
+                &[pattern.to_string()],
+                false,
+                || false,
+                Box::new(|_| Vec::new()),
+                Default::default(),
+            )
+            .expect("a literal after the crossing globs");
+            let complete = globset::Glob::new(pattern).unwrap().compile_matcher();
+            let mut paths = vec![String::new()];
+            for _ in 0..4 {
+                paths = paths
+                    .into_iter()
+                    .flat_map(|prefix| {
+                        ["ax", "ay", "aby", "foo", "éx", "a\ny"]
+                            .map(|component| {
+                                if prefix.is_empty() {
+                                    component.to_string()
+                                } else {
+                                    format!("{prefix}/{component}")
+                                }
+                            })
+                            .into_iter()
+                    })
+                    .collect();
+                for prefix in &paths {
+                    let rel = format!("{prefix}/missing");
+                    assert_eq!(
+                        names.protects(Path::new(&rel)),
+                        complete.is_match(&rel),
+                        "{pattern}: {rel}"
+                    );
+                    assert!(!names.protects(Path::new(&format!("{prefix}/other"))));
+                }
             }
         }
     }

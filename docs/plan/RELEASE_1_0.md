@@ -79,12 +79,21 @@ agent work; the tag and publish are the owner's act.
   Each remaining item needs a verified resolution before G6; CI and Docs
   Gate must pass on the final SHA.
   O4's predicate is unified; CI and Docs Gate passed on `5386b391`
-  (runs 39326487040 and 39326487037). O3's paired-spelling guards now
-  include an ASCII case that NTFS pairs, and fail on Windows if every case
-  skips. The macOS CLI guard failed with pruned recording disabled and
-  passed when restored; fmt, native and Linux cross-target strict Clippy,
-  and the full macOS workspace suite (1560/0/2, 47 binaries) passed.
-  Windows CI on the O3 commit remains to be observed after the push.
+  (runs 39326487040 and 39326487037). O3's ASCII paired-spelling guard
+  passed on Windows (both core and CLI tests in run 39331093262), and the
+  entire O3 CI and Docs Gate passed on `860e1eee` (runs 39331093262 and
+  39331093264). O2's `**/*x/*y/missing` layout retained 21 states at depth
+  20 before the fix; streaming DFA states now keep it and related `a*y` /
+  `??y` layouts within eight states through depth 160. A globset oracle
+  checks the deletion decisions, including Unicode and newline names. On
+  the 280-deep APFS fixture, the reviewed layout measured about 299 ms
+  before and 271 ms after, versus about 243–244 ms for the shorter control.
+  DFA construction is capped at 1 MiB and falls back to the old exact
+  matcher if the cap is exceeded; that rare path can still grow with depth,
+  so O2 remains open under the zero-imperfections rule. The macOS final
+  tree passed fmt, native and Linux cross-target strict Clippy, and the
+  full workspace suite (1562/0/2, 47 binaries). Cross-platform CI on O2
+  remains to be observed after its push.
 - [x] **G4 — docs truth pass.** CLOSED 2026-10-14: README + TRANSFER_SESSION corrected `6ac98801`; plan-status sweep and STATE de-drift `b186e8b8` (D-2026-10-14-1). README and `docs/TRANSFER_SESSION.md`
   claims verified against current behavior — expressly the ls-6 compare
   contract (default compare does not interrogate destination streams;
