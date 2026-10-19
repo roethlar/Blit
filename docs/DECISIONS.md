@@ -948,3 +948,8 @@ Format:
 - Decision: owner directed the agent to finish the release work and said "FUCK THE REVIEWS." Do not dispatch g3fix7-r1 or another review for this 1.0 candidate; carry fix round 7 as unreviewed and proceed through the remaining verification and release gates.
 - Why: no eligible independent model is available for the mixed Claude/Codex fix range, and the owner wants progress toward the release rather than another review loop or wait.
 - Supersedes: the g3fix7-r1 dispatch step in `docs/plan/RELEASE_1_0.md` and `docs/STATE.md`; the prior refusal of a one-time review waiver is superseded by this explicit direction to skip reviews. D-2026-10-07-4 and D-2026-07-23-7 continue to govern any future review dispatch.
+
+## D-2026-10-19-2 — Every known imperfection blocks the 1.0 release
+- Decision: owner ruled "no release until perfect. everything imperfect is a release blocker." The four observations O1–O4 in `docs/reviews/1.0.0-claude-manual-result.md` now block v1.0.0; do not tag or publish while any remains unresolved. Re-audit the existing "Known limitations shipped open" list and other identified release limitations under the same rule before seeking the tag go.
+- Why: the owner rejected the distinction between "no release-blocking defect" and actionable imperfections. FAST, safety and verification gaps must be addressed before release, not merely recorded.
+- Supersedes: `docs/plan/RELEASE_1_0.md`'s allowance to ship known limitations open and `docs/STATE.md`'s next action of tagging after CI. D-2026-10-19-1's instruction not to dispatch more reviews still stands.

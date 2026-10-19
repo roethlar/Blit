@@ -26,8 +26,9 @@ docs, packaging/startup sanity — with the release act itself owner-gated.
 
 Cut v1.0.0 from an exact CI-green commit, with documentation
 that tells the truth about current behavior (including the 2026-08-01
-compare-contract change, D-2026-08-01-4) and release notes that name every
-known limitation shipped open. The owner cancelled further review dispatches
+compare-contract change, D-2026-08-01-4). Per D-2026-10-19-2, every known
+imperfection blocks release; the earlier allowance to ship a documented
+limitation open is superseded. The owner cancelled further review dispatches
 for this candidate (D-2026-10-19-1); fix round 7 is unreviewed. "Ready" is
 agent work; the tag and publish are the owner's act.
 
@@ -64,7 +65,19 @@ agent work; the tag and publish are the owner's act.
   are landed and reviewed to consensus; one item found since is open — a
   failed `--detach` job's `jobs list` entry says only `delegated_pull
   handler failed` (`crates/blit-daemon/src/service/core.rs:793`), owner
-  call fix-now or ship documented (drafted †).
+  call fix-now or ship documented (drafted †). That historical disposition
+  allowance is superseded by D-2026-10-19-2.
+- [ ] **G3b — zero known imperfections (D-2026-10-19-2).** The manual
+  review's O1–O4 now block the tag: measure and eliminate the pruned-set
+  memory/lstat scaling (O1), measure and bound the remaining crossing-glob
+  layout `**/*x/*y/missing` (O2), make an end-to-end Windows pairing guard
+  execute and prove it can fail (O3), and use the shared filtered-subset
+  predicate on the local route (O4). Preserve mirror deletion safety and
+  avoid a silent cap that drops protected paths. After those fixes, audit
+  every entry under `docs/RELEASE_NOTES_1_0.md` "Known limitations shipped
+  open" and the identified release questions against the owner's rule.
+  Each remaining item needs a verified resolution before G6; CI and Docs
+  Gate must pass on the final SHA.
 - [x] **G4 — docs truth pass.** CLOSED 2026-10-14: README + TRANSFER_SESSION corrected `6ac98801`; plan-status sweep and STATE de-drift `b186e8b8` (D-2026-10-14-1). README and `docs/TRANSFER_SESSION.md`
   claims verified against current behavior — expressly the ls-6 compare
   contract (default compare does not interrogate destination streams;
@@ -186,6 +199,7 @@ unreviewed by the owner's direction (D-2026-10-19-1).
 
 | Gate | Status | Moves on |
 | --- | --- | --- |
+| G3b zero known imperfections | **OPEN, D-2026-10-19-2:** O1–O4 from the manual Claude review block release, followed by an audit of every item currently listed as a known limitation. No tag or publish while any item remains unresolved. | reproduce, fix, verify, owner ruling |
 | G2 CI on the candidate | **CI FULLY GREEN on `de9a333f` (run 38960754619 + Docs Gate 38960754584, 2026-10-16): Check & Format; Linux 1542/0/2, Windows 1487/0/2, macOS 1533/0/2; three release builds** — the candidate's code (`e67c225c` + record corrections); pushed 2026-10-16 20:14Z from this clone, not by the session; the record commits after it are docs only, not pushed. **The lockfile bump `3f15f835` (h2 0.4.15 → 0.4.20 for RUSTSEC-2026-0258; yanked chacha20 0.10.1 → 0.10.2; gate: fmt, clippy native and Linux cross clean, tests 1533/0/2 over 47 binaries on macOS, release build `1.0.0+cf3405f65366`; `cargo audit` clean) moves the candidate to it**; CI FULLY GREEN on `6b334db6` (run 39048156579, attempt 2 after a Linux scheduling flake) and on `d1037c73` (run 39049372551, the paced test); the g3fix5-r1 fixes `80c6072e`..`df61b1d6` (gate 1548/0/2 on macOS; Linux + Windows cross-clippy clean) moved the candidate to `df61b1d6`; **CI FULLY GREEN on `19ace1ac` (run 39080085302 + Docs Gate 39080085435, 2026-10-17: all three test legs, three release builds)** after one Windows-only red on `2c51ccdd` (the new equivalence guard's globset oracle; test-only fix `19ace1ac`) — fix round 7 is the new candidate code `0767b17e` locally; CI must validate it after push | CI on the push |
 | G3 dispositions | DONE: SSC shipped; audit-18 retired; audit-19 FIXED `fa948e01`; detached recents reason FIXED `b7da0d81` (D-2026-10-14-1); Codex g3fix-r1 over `b186e8b8..b7da0d81`: 3 MEDIUM on audit-19, FIXED `7d3e4eb6` `47bdfb69` `eddfab6c`; g3fix2-r1: cr-g3fix-2/-3 closed, cr-g3fix-1 not (HIGH, cr-g3fix2-1) + cr-g3fix2-2, FIXED `f6099aa3` `36b752b6`; g3fix3-r1: cr-g3fix2-2 closed, cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix3-1) + cr-g3fix3-2/-3, FIXED `a67087fd` `f6212938` `548625f5`; g3fix4-r1: cr-g3fix3-2/-3 closed, cr-g3fix3-1/cr-g3fix2-1/cr-g3fix-1 not (HIGH, cr-g3fix4-1) + cr-g3fix4-2 (HIGH) + cr-g3fix4-3 (HIGH) + cr-g3fix4-4, FIXED `e7be4970` `b304e6ff` `5624fd43` `e67c225c`; g3fix5-r1: cr-g3fix4-1/-3/-4, cr-g3fix3-1, cr-g3fix2-1 closed, cr-g3fix4-2/cr-g3fix-1 not (HIGH, cr-g3fix5-1) + cr-g3fix5-2 (HIGH) + cr-g3fix5-3 + cr-g3fix5-4, FIXED `80c6072e` `1435d7c7` `7f4e2116` `df61b1d6`; g3fix6-r1: cr-g3fix5-3/-4 closed, cr-g3fix5-1/-2, cr-g3fix4-2, cr-g3fix-1 not (HIGH cr-g3fix6-1 folded class membership, HIGH cr-g3fix6-2 Unicode pairs a fold misses) + cr-g3fix6-3 (quadratic), admitted `bdb90194`, fix round 7 fixed locally, one commit per finding: 882daa41, 9bec0bf3, 0767b17e (contract 8, as-written globs, bounded crossing states; macOS gate 1560/0/2 over 47 binaries); the firewall recipe finding from G5b fixed in docs `d0a9a7a8` `215de5e2` | CI on the pushed candidate |
 | G4 docs truth | README + TRANSFER_SESSION corrected `6ac98801` (audit of 2026-10-14); plan-status sweep DONE 2026-10-14 (D-2026-10-14-1) | — |
@@ -246,9 +260,12 @@ Ordered path to the tag:
    (`50e4d5fc`) and the four Windows legs PASS on netwatch-01 with the
    `19ace1ac` archives (`b2541bb9`); the firewall recipe finding it surfaced
    is fixed in docs (`d0a9a7a8`, `215de5e2`).
-6. No further review for this candidate (D-2026-10-19-1). Push the fix
-   round and prove G2 on the exact candidate through CI and Docs Gate.
-7. G6: tag (owner) → release job → crates.io publishes (owner).
+6. D-2026-10-19-2 supersedes the former path to G6: resolve G3b's known
+   imperfections and re-audit the release limitations. No tag or publish
+   until the owner rules that work complete. D-2026-10-19-1 still rules out
+   further review dispatches; verification guards and CI remain required.
+7. Then prove G2 on the new exact candidate and seek the G6 owner go:
+   tag → release job → crates.io publishes.
 
 ## Non-goals (post-1.0)
 
