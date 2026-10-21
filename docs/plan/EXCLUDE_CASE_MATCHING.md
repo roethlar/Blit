@@ -36,13 +36,13 @@ A user who gives a pattern to a command that can delete is told, in one line and
 - **FAST**: `--match-case` changes nothing. `--ignore-case` costs a case-insensitive glob compile (the glob library supports it natively) and a case-insensitive match per entry; no table, no probe, no extra I/O. No cost at all when the option is absent.
 - **RELIABLE / consistent**: one mode per run, carried to the peer at session open so the source walk and the destination's deletion scope read every pattern identically; `--ignore-case` applies to `--exclude` and `--include` patterns (Q2 below asks whether it also applies to the literal lists).
 - **Same build only**: the mode is a new wire field; `CONTRACT_VERSION` bumps (8 → 9) and the strict same-build refusal (D-2026-07-05-2) keeps an older peer from reading the field as absent.
-- **Letters**: "ignore case" means Unicode simple case mapping — one code point to its other-case code point (`a`/`A`, `ü`/`Ü`, `σ`/`Σ`). `ß` has no single-letter uppercase and maps to itself; `ς` and `σ` are distinct letters and stay distinct. (Q1 asks the owner to confirm this reading of "letter" versus ASCII-only.)
+- **Letters (Q1, owner "yes" 2026-10-21)**: "ignore case" means **Unicode simple case folding** — one letter to the same letter in another case, across all alphabets, exactly what GNU `grep -i` (UTF-8 locale), ripgrep and Python's regex do. Covers `a`/`A`, `ü`/`Ü`, Cyrillic, Greek `σ`/`Σ`; includes the standard one-to-one oddities `ς`/`σ`, `ſ`/`s`, Kelvin `K`/`k`, `ẞ`/`ß`; NEVER `ß`/`ss` or `ﬁ`/`fi` (one letter to several — "full folding", which no grep, glob or shell does). Windows' own name rule is a frozen subset of this (measured 2026-10-21: `Ü`/`ü` pairs; `ς`/`σ`, `ſ`/`s`, `ẞ`/`ß` do not), so Windows users see a superset of what Windows does — the safe direction. Rejected: the glob library's own case-insensitive mode, which compiles in byte mode and folds `A`–`Z` only (verified in globset 0.4.20 `to_regex_with`: `(?-u)` then `(?i)`); the Amero-centric answer.
 - **Platform truth**: guards for matching run on every OS (the mode is independent of the disk); the end-to-end mirror guards of `exclude_contract.rs` gain the `--ignore-case` destination-only case and run everywhere, no skips.
 
 ## Acceptance criteria
 
 - [ ] **AC-1 (default)**: with no option, every pattern matches exactly as typed on every machine, exactly as today (no behavior change; existing guards stay green).
-- [ ] **AC-2 (`--ignore-case`)**: `blit mirror --ignore-case --exclude '*cache' src/ dst/` skips `src/aCache/` on the source walk and keeps a destination-only `dst/aCache/` with its contents, on Linux, Windows and macOS alike; an unrelated extraneous entry is still deleted; `--exclude 'Übung'` keeps `übung`. `ß` does not match `SS`; `ς` does not match `σ`.
+- [ ] **AC-2 (`--ignore-case`)**: `blit mirror --ignore-case --exclude '*cache' src/ dst/` skips `src/aCache/` on the source walk and keeps a destination-only `dst/aCache/` with its contents, on Linux, Windows and macOS alike; an unrelated extraneous entry is still deleted; `--exclude 'Übung'` keeps `übung`; `--exclude 'σ*'` keeps `ς.txt` (simple folding pairs the sigmas). `ß` does not match `SS`.
 - [ ] **AC-3 (prompt line, default mode)**: `blit mirror --exclude '*Cache' src/ dst/` without `-y` prints, as part of the existing confirmation, exactly one line of the form `"*Cache" matches Cache only; capital letters matter (--ignore-case would also match cache, CACHE).` echoing the user's pattern as typed, before any delete; answering no deletes nothing.
 - [ ] **AC-4 (prompt, `--ignore-case`)**: the same command with `--ignore-case` and no `-y` prints the normal delete warning ONLY — no matching line.
 - [ ] **AC-5 (friction)**: several patterns → one line (the first pattern containing a letter, then `and N more patterns`); a pattern with no letters (`??`, `*.1`) → no line; `-y` → no prompt and no line; `--ignore-case` → no line; `copy` with patterns and no delete option → no line.
@@ -53,9 +53,9 @@ A user who gives a pattern to a command that can delete is told, in one line and
 
 ### Matching
 
-- `crates/blit-core/src/fs_enum.rs`: `FileFilter` gains `ignore_case: bool`. `CompiledPatterns` and the audit-19 `ExcludeRules` compile each glob with `globset::GlobBuilder::case_insensitive(ignore_case)`; literal-name and subtree rules compare under the same mode (simple case fold of both sides when set). `--include` patterns follow the same bit.
+- `crates/blit-core/src/fs_enum.rs`: `FileFilter` gains `ignore_case: bool`. Under `--ignore-case` both sides are folded BEFORE matching — every literal character of each pattern (wildcards and class syntax untouched) and every name or path compared against it — with Unicode simple case folding, and the glob set is then compiled and matched exactly as today (byte mode), so `?`, `*`, `**` and classes behave identically in both modes. NOT globset's `case_insensitive` (ASCII-only). The folding table is the regex engine's own (`regex-syntax`'s simple case folding data, already a dependency through `regex-automata`); no table is written or vendored here. Literal-name and subtree rules (`ExcludeRules`, audit-19) fold the same way. `--include` patterns follow the same bit.
 - `crates/blit-core/src/transfers/filter.rs`: `DestinationNames` (the deletion scope) reads pure-glob rules through the same compiled set, so with `--ignore-case` a destination-only `aCache` is in the scope of `*cache`; literal-name lookups through `stored_name` stay as they are (they already use the destination's own pairing for literal names — unchanged by this plan).
-- Simple case mapping only: globset's case-insensitive mode uses Unicode simple case folding on the regex side; a guard pins `ß`/`SS` and `ς`/`σ` as NON-matches.
+- A guard pins the extent of the fold: `Ü`/`ü`, `σ`/`Σ`/`ς`, `ſ`/`s` match; `ß`/`SS` and `ﬁ`/`fi` do not; `?` still counts one byte under both modes.
 
 ### CLI and prompt
 
@@ -92,7 +92,7 @@ One coherent, testable change per slice — sized for the `.review/` loop.
 
 ## Open questions
 
-- **Q1 — what is a letter**: Unicode simple case mapping (`ü`/`Ü`, `σ`/`Σ` fold; `ß`, `ς`/`σ` do not) [recommended], or ASCII `a-z`/`A-Z` only. — owner
+- ~~**Q1 — what is a letter**~~ — **settled 2026-10-21 (owner "yes")**: Unicode simple case folding, the `grep -i`/ripgrep rule; see Constraints §Letters. Prior-art survey behind it: exact (rsync filters; git ignore rules, believed ASCII-fold only in case-insensitive repos); ASCII-only (globset's own mode, SQLite `NOCASE`); simple folding (GNU grep, ripgrep, Python, Java; NTFS a frozen subset; ZFS, Samba per-letter upcasing); full folding (collation libraries; APFS per this repo's tests, unverified by this session).
 - **Q2 — scope of `--ignore-case`**: `--exclude` and `--include` patterns only [recommended], or also the literal lists (`--files-from`). — owner
 - **Q3 — `copy`**: `copy` never deletes at the destination, so no prompt line there [recommended]; or show it anyway when patterns are present. — owner
 - **Q4 — the 2026-10-19 cases**: confirm they are closed as expected behavior under `--match-case` (documented, not fixed), so the G3b blocker entry is retired on activation. — owner
