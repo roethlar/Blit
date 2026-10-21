@@ -706,13 +706,15 @@ impl DestSubtreeExcludedSource {
 }
 
 /// The destination's POSIX relative path under the source root, when
-/// (and only when) it nests inside it. Same lexical check the old
-/// engine used.
+/// (and only when) it nests inside it, resolved through canonical
+/// deepest-existing-ancestor comparison so `./src` vs `src/backup` and
+/// symlinked ancestors are detected.
+#[cfg(test)]
 fn dest_subtree_rel(src_root: &Path, dst_root: &Path) -> Option<String> {
-    match dst_root.strip_prefix(src_root) {
-        Ok(rel) if !rel.as_os_str().is_empty() => Some(relative_path_to_posix(rel)),
-        _ => None,
-    }
+    crate::transfers::resolution::validate_local_transfer_roots(src_root, dst_root, false)
+        .ok()
+        .flatten()
+        .map(|rel| relative_path_to_posix(&rel))
 }
 
 /// Run one LOCAL transfer as a full session: both role drivers joined
@@ -755,7 +757,8 @@ pub async fn run_local_session(
     if !src_root.exists() {
         return Err(eyre!("source path does not exist: {}", src_root.display()));
     }
-    crate::transfers::resolution::validate_local_transfer_roots(src_root, dst_root, false)?;
+    let nested_dest_rel =
+        crate::transfers::resolution::validate_local_transfer_roots(src_root, dst_root, false)?;
     if !options.dry_run {
         if let Some(parent) = dst_root.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
@@ -803,6 +806,7 @@ pub async fn run_local_session(
     // there.
     let fs_source: Arc<dyn TransferSource> = Arc::new(
         FsTransferSource::new(src_root.to_path_buf())
+            .with_excluded_subtree(nested_dest_rel.clone())
             // A handle that only feeds a job log draws nothing, so the
             // source keeps its plain heartbeat (JOB_LOGS jl-2).
             .with_progress(
@@ -827,10 +831,10 @@ pub async fn run_local_session(
         FilteredSource::new(Arc::clone(&fs_source), options.filter.clone_without_cache())
             .recording_pruned(super::mirrors_filtered_subset(&open)),
     );
-    let scan_source: Arc<dyn TransferSource> = match dest_subtree_rel(src_root, dst_root) {
-        Some(exclude_rel) => Arc::new(DestSubtreeExcludedSource {
+    let scan_source: Arc<dyn TransferSource> = match nested_dest_rel {
+        Some(rel) => Arc::new(DestSubtreeExcludedSource {
             inner: filtered,
-            exclude_rel,
+            exclude_rel: relative_path_to_posix(&rel),
         }),
         None => filtered,
     };
@@ -2799,6 +2803,43 @@ mod tests {
         assert_eq!(
             dest_subtree_rel(Path::new("/a/src"), Path::new("/a/src")),
             None
+        );
+
+        // Mixed `./` prefix (`./src` vs `src/backup`) is detected via canonical_target_path.
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let dot_src = tmp.path().join(".").join("src");
+        let nested_backup = src_dir.join("backup");
+        assert_eq!(
+            dest_subtree_rel(&dot_src, &nested_backup),
+            Some("backup".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn run_local_session_excludes_nested_dest_with_mixed_dot_slash_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        let backup_dir = src_dir.join("backup");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        std::fs::write(src_dir.join("hello.txt"), b"hello").unwrap();
+        std::fs::write(backup_dir.join("existing.txt"), b"existing").unwrap();
+
+        // Pass `src` via `src/backup/..` so lexical `dst_root.strip_prefix(src_root)` fails.
+        let dotdot_src = backup_dir.join("..");
+        let summary = run_local_session(&dotdot_src, &backup_dir, LocalMirrorOptions::default())
+            .await
+            .expect("nested copy must succeed");
+
+        assert_eq!(summary.scanned_files, 1);
+        assert_eq!(
+            std::fs::read(backup_dir.join("hello.txt")).unwrap(),
+            b"hello"
+        );
+        assert!(
+            !backup_dir.join("backup").exists(),
+            "nested destination must not copy itself into backup/backup"
         );
     }
 

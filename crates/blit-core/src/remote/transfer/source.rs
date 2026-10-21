@@ -371,6 +371,7 @@ pub struct FsTransferSource {
     /// failing hydrator through [`Self::with_hydrator`] to prove that a
     /// per-file hydration failure is a skip, never a session fault.
     hydrator: crate::remote::transfer::payload::Hydrator,
+    excluded_subtree: Option<PathBuf>,
 }
 
 impl FsTransferSource {
@@ -381,7 +382,15 @@ impl FsTransferSource {
             phase_probe: LocalPhaseProbe::disabled(),
             verbose: false,
             hydrator: crate::remote::transfer::payload::default_hydrator(),
+            excluded_subtree: None,
         }
+    }
+
+    /// Exclude a relative subtree (such as a nested local destination) from
+    /// `FileEnumerator` traversal before descending into it.
+    pub fn with_excluded_subtree(mut self, excluded_subtree: Option<PathBuf>) -> Self {
+        self.excluded_subtree = excluded_subtree;
+        self
     }
 
     /// Test hook (ssc-4, A11): replace the Windows-metadata hydrator this
@@ -424,13 +433,15 @@ impl TransferSource for FsTransferSource {
         filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-        let (headers, task) = spawn_manifest_task(
+        let (headers, task) = spawn_manifest_task_with(
             self.root.clone(),
             filter.unwrap_or_default(),
             unreadable_paths,
             true,
             EnumerationHeartbeat::new(self.progress.clone(), self.verbose),
             self.phase_probe.clone(),
+            open_for_scan,
+            self.excluded_subtree.clone(),
         );
         (headers, SourceScan::new(task))
     }
@@ -440,13 +451,15 @@ impl TransferSource for FsTransferSource {
         filter: Option<FileFilter>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
     ) -> (mpsc::Receiver<FileHeader>, SourceScan) {
-        let (headers, task) = spawn_manifest_task(
+        let (headers, task) = spawn_manifest_task_with(
             self.root.clone(),
             filter.unwrap_or_default(),
             unreadable_paths,
             false,
             EnumerationHeartbeat::new(self.progress.clone(), self.verbose),
             self.phase_probe.clone(),
+            open_for_scan,
+            self.excluded_subtree.clone(),
         );
         (headers, SourceScan::new(task))
     }
@@ -607,6 +620,7 @@ impl EnumerationHeartbeat {
 /// R46-F2: suppressed walk errors and unreadable files land in
 /// `unreadable` so a downstream mirror-deletion gate sees "scan was
 /// incomplete" via a single check.
+#[cfg(test)]
 fn spawn_manifest_task(
     root: PathBuf,
     filter: FileFilter,
@@ -626,6 +640,7 @@ fn spawn_manifest_task(
         heartbeat,
         phase_probe,
         open_for_scan,
+        None,
     )
 }
 
@@ -636,6 +651,7 @@ fn open_for_scan(path: &Path) -> std::io::Result<()> {
 
 /// [`spawn_manifest_task`] with the per-file open probe injected, so a
 /// unit test can make an enumerated file fail to open with any error.
+#[allow(clippy::too_many_arguments)]
 fn spawn_manifest_task_with(
     root: PathBuf,
     filter: FileFilter,
@@ -644,6 +660,7 @@ fn spawn_manifest_task_with(
     mut heartbeat: EnumerationHeartbeat,
     phase_probe: LocalPhaseProbe,
     scan_open: fn(&Path) -> std::io::Result<()>,
+    excluded_subtree: Option<PathBuf>,
 ) -> (
     mpsc::Receiver<FileHeader>,
     tokio::task::JoinHandle<Result<u64>>,
@@ -654,7 +671,7 @@ fn spawn_manifest_task_with(
 
     let (manifest_tx, manifest_rx) = mpsc::channel::<FileHeader>(64);
     let handle = tokio::task::spawn_blocking(move || -> Result<u64> {
-        let enumerator = FileEnumerator::new(filter);
+        let enumerator = FileEnumerator::new(filter).with_excluded_subtree(excluded_subtree);
         heartbeat.begin();
         let mut enumerated: u64 = 0;
         let unreadable = unreadable;
@@ -1357,6 +1374,7 @@ mod scan_open_tests {
             EnumerationHeartbeat::new(None, false),
             LocalPhaseProbe::disabled(),
             scan_open,
+            None,
         );
         let mut listed = Vec::new();
         while let Some(header) = headers.recv().await {

@@ -94,6 +94,7 @@ pub struct FileEnumerator {
     filter: FileFilter,
     follow_symlinks: bool,
     include_symlinks: bool,
+    excluded_subtree: Option<PathBuf>,
 }
 
 impl FileEnumerator {
@@ -102,7 +103,16 @@ impl FileEnumerator {
             filter,
             follow_symlinks: false,
             include_symlinks: false,
+            excluded_subtree: None,
         }
+    }
+
+    /// Exclude a relative subtree (such as a nested destination directory)
+    /// from traversal without recording it as a user `--exclude` in
+    /// `pruned_paths`.
+    pub fn with_excluded_subtree(mut self, excluded_subtree: Option<PathBuf>) -> Self {
+        self.excluded_subtree = excluded_subtree.filter(|p| !p.as_os_str().is_empty());
+        self
     }
 
     /// Configure whether symlinks should be followed during traversal.
@@ -262,8 +272,17 @@ impl FileEnumerator {
                 continue;
             }
 
+            let rel = relative_path(root, path);
+            if let Some(excluded) = &self.excluded_subtree {
+                if rel_starts_with_excluded(&rel, excluded) {
+                    if entry.file_type().is_dir() {
+                        walker.skip_current_dir();
+                    }
+                    continue;
+                }
+            }
+
             if entry.file_type().is_dir() {
-                let rel = relative_path(root, path);
                 // audit-19: a pruned directory is skipped before walkdir
                 // reads it, so nothing beneath it is ever opened.
                 if !filter.allows_dir(&rel, path) {
@@ -288,7 +307,6 @@ impl FileEnumerator {
                     .with_context(|| format!("stat file {}", path.display()))?;
                 let size = metadata.len();
                 let mtime = metadata.modified().ok();
-                let rel = relative_path(root, path);
 
                 if !filter.allows_entry(Some(&rel), path, size, mtime) {
                     filter.note_pruned(&rel);
@@ -309,7 +327,6 @@ impl FileEnumerator {
                 let metadata = fs::symlink_metadata(path)
                     .with_context(|| format!("symlink metadata {}", path.display()))?;
                 let mtime = metadata.modified().ok();
-                let rel = relative_path(root, path);
 
                 if !filter.allows_entry(Some(&rel), path, 0, mtime) {
                     filter.note_pruned(&rel);
@@ -329,6 +346,28 @@ impl FileEnumerator {
 
         Ok(outcome)
     }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn rel_starts_with_excluded(rel: &Path, excluded: &Path) -> bool {
+    let mut rel_comps = rel.components();
+    for ex_comp in excluded.components() {
+        let Some(r_comp) = rel_comps.next() else {
+            return false;
+        };
+        if r_comp != ex_comp
+            && r_comp.as_os_str().to_string_lossy().to_lowercase()
+                != ex_comp.as_os_str().to_string_lossy().to_lowercase()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn rel_starts_with_excluded(rel: &Path, excluded: &Path) -> bool {
+    rel.starts_with(excluded)
 }
 
 fn relative_path(root: &Path, path: &Path) -> PathBuf {
@@ -427,5 +466,31 @@ mod tests {
             entries.is_empty(),
             "excluded file at root should be skipped"
         );
+    }
+
+    #[test]
+    fn excluded_subtree_prunes_directory_without_recording_in_pruned_paths() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("keep.txt"), b"keep").unwrap();
+        std::fs::write(tmp.path().join("ignored.log"), b"log").unwrap();
+        let backup_sub = tmp.path().join("backup").join("sub");
+        std::fs::create_dir_all(&backup_sub).unwrap();
+        std::fs::write(tmp.path().join("backup").join("old.txt"), b"old").unwrap();
+        std::fs::write(backup_sub.join("deep.log"), b"deep").unwrap();
+
+        let pruned = std::sync::Arc::new(PrunedPaths::default());
+        let mut filter = FileFilter::default();
+        filter.exclude_files.push("*.log".to_string());
+        filter.pruned = Some(std::sync::Arc::clone(&pruned));
+
+        let enumerator =
+            FileEnumerator::new(filter).with_excluded_subtree(Some(PathBuf::from("backup")));
+        let entries = enumerator.enumerate_local(tmp.path()).unwrap();
+
+        let rels: Vec<PathBuf> = entries.into_iter().map(|e| e.relative_path).collect();
+        assert_eq!(rels, vec![PathBuf::from("keep.txt")]);
+        // Only the top-level `ignored.log` is recorded in `pruned_paths`;
+        // `backup` and `backup/sub/deep.log` were skipped before filter/pruned tracking.
+        assert_eq!(pruned.take(), vec!["ignored.log".to_string()]);
     }
 }
