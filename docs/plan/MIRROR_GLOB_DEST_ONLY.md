@@ -27,6 +27,26 @@ Forms, as the filesystem pairs them. `?` counts bytes in this filter (globset is
 
 Measured 2026-10-21 on this repo's Windows host (NTFS): the filesystem pairs simple case mappings only (`Übung` ↔ `übung`), and does NOT pair `ς` ↔ `σ`, NFD ↔ NFC, `ẞ` ↔ `ß`, `ſ` ↔ `s`, `µ` ↔ `μ`, or any Greek symbol letter to its base letter. The APFS rows are therefore macOS-only in practice; the ASCII row is the Windows-visible one.
 
+## Prior art (owner question 2026-10-21: "how does robocopy do it? how does rsync do it?")
+
+**Robocopy** (`robocopy.exe` on this repo's Windows Server 2022 host, measured 2026-10-21 with `/MIR` and a destination-only entry plus an unrelated extra file under a three-character parent):
+
+| Exclude | Destination-only entry | Survived | Unrelated extra deleted |
+| --- | --- | --- | --- |
+| `/XD *cache` | `aCache\` | yes | yes |
+| `/XF *CACHE.TXT` | `aCache.txt` | yes | yes |
+| `/XD *ß` | `bSS\` | **no** | yes |
+| `/XD ??` | `ab\`, `s\`, `ſ\` | yes, yes, yes | yes |
+| `/XD ??` | `abc\` | no | yes |
+| `/XF ???` | NFC `É`, NFD `é` | yes, yes | yes |
+| `/XF ???` | `abcd` | no | yes |
+
+What that shows: (1) robocopy PROTECTS excluded extras under `/MIR` — an `/XD`/`/XF` match on the destination side keeps the entry out of the deletion; (2) its wildcard engine is Windows' own: case-insensitive by the OS upcase table, UTF-16 code units, and `?` matches zero or one character (DOS semantics — `??` keeps every one- and two-character name, so the earlier run with a one-character parent `x` excluded the parent itself); (3) it therefore agrees with NTFS by construction and knows nothing NTFS does not: `*ß` does not keep `bSS` because NTFS does not pair them. Robocopy has no notion of NFC/NFD or `ß`/`SS` pairing because its platform has none.
+
+**rsync** (not run — rsync is not installed on this host and WSL is absent; from the documented semantics of rsync 3.x): filter rules are applied on the receiving side to the receiver's own file list, and an excluded receiver-side file is protected from `--delete` unless `--delete-excluded` is given. Matching is byte-oriented and case-sensitive with no awareness of the filesystem's pairing; `--iconv` converts names in transit and does not change how rules match the receiver's names. On APFS, `rsync --delete --exclude '*ß'` would therefore delete a destination-only `bSS` exactly as blit does today. **Assumption from documentation; a macOS run would settle it.**
+
+Implication: both tools protect excluded extras; robocopy is exact only because its pattern semantics ARE its platform's name semantics, and rsync does not try. Blit can have robocopy's property on Windows by letting the filesystem match the pattern (option (E) below); APFS exposes no such API, so on macOS the Unicode tables (option (A)) are the only route to the same consistency.
+
 ## Non-goals
 
 - Changing what a glob EXCLUDES at the source (its byte-oriented, as-written reading, cr-g3fix6-1). This plan changes only what the destination's deletion scope PROTECTS.
@@ -67,6 +87,10 @@ cr-g3fix6-1 removed a fold of the glob's TEXT because it changed what the glob E
 
 **(D) Refuse** a `mirror` whose excludes include a pure glob when the destination pairs spellings. Safe and simple to state; removes a working feature for every macOS and Windows user. Not recommended.
 
+**(E) Let the filesystem match the pattern, where it can — Windows only.** `FindFirstFileW(dir\pattern)` has NTFS apply a wildcard under its own upcase table (robocopy's property, by construction). Its dialect is `*` and `?` only, with `?` matching zero or one UTF-16 unit; a globset component holding only `*`, `?` and literals translates (the lenient `?` only widens protection), classes and alternations do not and fall back to (A) or (C). Adds a platform-specific path for a platform where the Unicode tables already over-approximate safely; worth it only if the owner wants Windows to behave exactly as robocopy does rather than slightly more conservatively.
+
+**(B′) Widening fold with robocopy's lenient `?`.** (B) plus NFC/NFD forms and a destination reading of `?` as zero or one character. Covers all four reproduced forms (`??` keeps `s` as it keeps every one-character name) at (B)'s cost, with robocopy-style over-protection of short names. A pragmatic middle if (A)'s table and automaton walk are judged too heavy; still needs full case folding for `ß`/`SS`.
+
 ### Where the change lives
 
 - `crates/blit-core/src/transfers/filter.rs`: `DestinationNames::new` compiles the pure-glob rules it currently skips (`:1173`) into a new step kind read only on pairing destinations (`case_insensitive` already carried, `:1041`); `protects` consults it for entries the walk visits that no source path, pruned path, or literal rule already protects. Any-depth pure globs apply in every directory; path-shaped pure globs (`a*/b?`) follow the existing `Step` machinery with each glob component read by the equivalence walk.
@@ -91,7 +115,7 @@ One coherent, testable change per slice — sized for the `.review/` loop.
 
 ## Open questions
 
-- **Q1 — guarantee level**: (A) exact under the Unicode tables with keep-when-undecidable [recommended], (B) widening fold only (misses byte-length forms such as `??`/`s`), (C) keep every destination-only entry in a pure glob's scope on pairing destinations, (D) refuse. — owner
+- **Q1 — guarantee level**: (A) exact under the Unicode tables with keep-when-undecidable [recommended], (B) widening fold only (misses byte-length forms such as `??`/`s`), (B′) widening fold with robocopy's lenient `?`, (C) keep every destination-only entry in a pure glob's scope on pairing destinations, (D) refuse, (E) filesystem-matched patterns on Windows as an addition to (A) or (B′). — owner
 - **Q2 — full case folding source**: `icu_casemap` as a new direct dependency, or a generated, checked-in CaseFolding table with no new crate. — owner (asked after Q1 if (A) or (B) is chosen)
 - **Q3 — AC-4 surfacing**: one summary sentence plus a job-log note when a rule was kept conservatively, or job log only. — owner
 - **Q4 — the ASCII row**: if slice 1 shows `*cache`/`aCache` is deleted on NTFS today, it is covered by the same mechanism; confirm it is in scope rather than a separate finding. — owner
