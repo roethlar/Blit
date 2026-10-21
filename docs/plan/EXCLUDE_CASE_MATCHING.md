@@ -7,7 +7,7 @@
 
 ## Goal
 
-A user who gives a pattern to a command that can delete is told, in one line and in their own words, how that pattern will match on this run, and chooses. Patterns match exactly as typed by default (`--match-case`, the rsync rule, the same on every machine). `--ignore-case` makes every pattern in the command ignore capital letters, on the source walk and in the destination's deletion scope alike, on every machine. When a delete option is in effect and `-y` is absent, the existing confirmation prompt gains one line that echoes the user's actual pattern and the spellings it will and will not match under the mode in force; `-y` bypasses it as it bypasses the rest of the prompt. Nothing depends on which filesystem the destination has.
+A user who gives a pattern to a command that can delete is told, in one line and in their own words, how that pattern will match on this run, and chooses. Patterns match exactly as typed by default (`--match-case`, the rsync rule, the same on every machine). `--ignore-case` makes every pattern in the command ignore capital letters, on the source walk and in the destination's deletion scope alike, on every machine. When a delete option is in effect, `-y` is absent, and the user has NOT chosen a mode (no `--ignore-case`), the existing confirmation prompt gains one line that echoes the user's actual pattern and the spellings it will and will not match; with `--ignore-case` the user has already chosen, so only the normal delete warning prints. `-y` bypasses the prompt as today. Nothing depends on which filesystem the destination has.
 
 ## Owner requirements (2026-10-21, verbatim where quoted)
 
@@ -20,6 +20,7 @@ A user who gives a pattern to a command that can delete is told, in one line and
 - "we have a prompt whenever a delete option is specified without -y, so if -y is not included and a CLI option with a pattern is included, there should be a short, 1 line blurb about the matching issue … with -y bypassing it. --match-case is the default, and --ignore-case does extra work on case sensitive filesystems."
 - "that requires us to know what the remote target's filesystem is, so that's a daemon change" — the line therefore states blit's own rule, which is identical everywhere, and needs no probe of the destination's disk.
 - "the example needs to be the actual string the user entered."
+- "if the user specifies --ignore-case and not -y then the message should not print, just the normal delete warning" — the line exists to present a choice not yet made; once made, it is silent.
 
 ## Non-goals
 
@@ -43,8 +44,8 @@ A user who gives a pattern to a command that can delete is told, in one line and
 - [ ] **AC-1 (default)**: with no option, every pattern matches exactly as typed on every machine, exactly as today (no behavior change; existing guards stay green).
 - [ ] **AC-2 (`--ignore-case`)**: `blit mirror --ignore-case --exclude '*cache' src/ dst/` skips `src/aCache/` on the source walk and keeps a destination-only `dst/aCache/` with its contents, on Linux, Windows and macOS alike; an unrelated extraneous entry is still deleted; `--exclude 'Übung'` keeps `übung`. `ß` does not match `SS`; `ς` does not match `σ`.
 - [ ] **AC-3 (prompt line, default mode)**: `blit mirror --exclude '*Cache' src/ dst/` without `-y` prints, as part of the existing confirmation, exactly one line of the form `"*Cache" matches Cache only; capital letters matter (--ignore-case would also match cache, CACHE).` echoing the user's pattern as typed, before any delete; answering no deletes nothing.
-- [ ] **AC-4 (prompt line, `--ignore-case`)**: the same command with `--ignore-case` prints `"*Cache" matches Cache, cache, CACHE; capital letters are ignored.`
-- [ ] **AC-5 (friction)**: several patterns → one line (the first pattern containing a letter, then `and N more patterns`); a pattern with no letters (`??`, `*.1`) → no line; `-y` → no prompt and no line; `copy` with patterns and no delete option → no line.
+- [ ] **AC-4 (prompt, `--ignore-case`)**: the same command with `--ignore-case` and no `-y` prints the normal delete warning ONLY — no matching line.
+- [ ] **AC-5 (friction)**: several patterns → one line (the first pattern containing a letter, then `and N more patterns`); a pattern with no letters (`??`, `*.1`) → no line; `-y` → no prompt and no line; `--ignore-case` → no line; `copy` with patterns and no delete option → no line.
 - [ ] **AC-6 (peer)**: the mode reaches the source daemon and the destination daemon at session open; a `mirror` to a daemon with `--ignore-case` keeps the destination-only `aCache` there too; contract 9 is refused by a contract-8 peer with the existing refusal.
 - [ ] **AC-7 (records)**: `--ignore-case` is recorded in the saved job / run record and replayed by `blit jobs run` and `jobs retry`; `--help` documents both options in one sentence each; `docs/RELEASE_NOTES_1_0.md` replaces the pure-glob limitation with the rule and the prompt line; `README.md` and `docs/TRANSFER_SESSION.md` state the rule.
 
@@ -59,7 +60,7 @@ A user who gives a pattern to a command that can delete is told, in one line and
 ### CLI and prompt
 
 - `crates/blit-cli/src/cli.rs`: `--match-case` (default, `conflicts_with = "ignore_case"`) and `--ignore-case` on `copy`, `mirror`, `move` (the pattern-bearing transfer verbs), one sentence of help each.
-- `crates/blit-cli/src/transfers/mod.rs` `confirm_destructive_operation` (the existing `mirror`/`move` prompt, `:347`, `:802`): when any `--exclude`/`--include` pattern is present, add one line built from the first pattern containing a letter: the pattern as typed in quotes, then the spellings — under `--match-case`: `matches <as typed> only; capital letters matter (--ignore-case would also match <lower>, <UPPER>)`; under `--ignore-case`: `matches <as typed>, <lower>, <UPPER>; capital letters are ignored`. `<lower>`/`<UPPER>` are the pattern's literal text with its letters lowered/uppered (wildcards unchanged); whichever equals the typed form is omitted. Further patterns: `and N more patterns`. No line when no pattern holds a letter. `-y` skips the whole prompt as today.
+- `crates/blit-cli/src/transfers/mod.rs` `confirm_destructive_operation` (the existing `mirror`/`move` prompt, `:347`, `:802`): when any `--exclude`/`--include` pattern is present AND `--ignore-case` is absent, add one line built from the first pattern containing a letter: the pattern as typed in quotes, then `matches <as typed> only; capital letters matter (--ignore-case would also match <lower>, <UPPER>)`. `<lower>`/`<UPPER>` are the pattern's literal text with its letters lowered/uppered (wildcards unchanged); whichever equals the typed form is omitted. Further patterns: `and N more patterns`. No line when no pattern holds a letter. With `--ignore-case` the prompt is the normal delete warning only. `-y` skips the whole prompt as today.
 - No probe of any disk anywhere in this path.
 
 ### Wire
