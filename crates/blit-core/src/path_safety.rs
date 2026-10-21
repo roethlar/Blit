@@ -59,7 +59,7 @@ use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use eyre::{bail, Result};
+use eyre::{bail, Context, Result};
 
 /// Validate a wire-supplied relative path. Returns the normalized
 /// relative form (with `.` components stripped) or an error describing
@@ -344,6 +344,98 @@ pub fn verify_contained(canonical_module_root: &Path, target: &Path) -> Result<(
 /// filesystem root without finding a canonicalizable path
 /// (extremely unusual — typically means the entire path was
 /// invalid or the FS is in a weird state).
+pub(crate) fn canonical_ancestor_and_tail(
+    path: &Path,
+) -> Result<(PathBuf, Vec<std::ffi::OsString>)> {
+    if path.as_os_str().is_empty() {
+        bail!("path is empty");
+    }
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .with_context(|| format!("resolve current_dir for '{}'", path.display()))?
+            .join(path)
+    };
+
+    let mut resolved = PathBuf::new();
+    for comp in abs.components() {
+        match comp {
+            Component::Prefix(p) => resolved.push(p.as_os_str()),
+            Component::RootDir => resolved.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(name) => resolved.push(name),
+            Component::ParentDir => {
+                let canon_prefix = std::fs::canonicalize(&resolved).map_err(|e| {
+                    eyre::eyre!(
+                        "path '{}' contains '..' component over non-canonicalizable prefix '{}': {}",
+                        path.display(),
+                        resolved.display(),
+                        e
+                    )
+                })?;
+                resolved = canon_prefix;
+                if !resolved.pop() {
+                    bail!(
+                        "path '{}' traverses above filesystem root via '..'",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    let mut probe = resolved;
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let canonical_ancestor = loop {
+        match std::fs::canonicalize(&probe) {
+            Ok(c) => break c,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                let Some(Component::Normal(name)) = probe.components().next_back() else {
+                    bail!(
+                        "destination root '{}' has no canonicalizable \
+                         ancestor — filesystem root unreachable",
+                        path.display()
+                    );
+                };
+                tail.push(name.to_os_string());
+                if !probe.pop() {
+                    bail!(
+                        "destination root '{}' has no canonicalizable \
+                         ancestor — filesystem root unreachable",
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => {
+                bail!(
+                    "canonicalize '{}' for destination-root capture: {}",
+                    probe.display(),
+                    e
+                );
+            }
+        }
+    };
+    tail.reverse();
+    Ok((canonical_ancestor, tail))
+}
+
+/// Resolve `path` to its canonical deepest-existing ancestor plus any
+/// non-existent trailing components, resolving `.` and `..` over existing
+/// prefixes and rejecting `..` over non-existent prefixes.
+pub fn canonical_target_path(path: &Path) -> Result<PathBuf> {
+    let (mut out, tail) = canonical_ancestor_and_tail(path)?;
+    for comp in tail {
+        out.push(comp);
+    }
+    Ok(out)
+}
+
 pub fn canonical_dest_root(dest_root: &Path) -> Result<PathBuf> {
     let mut probe: PathBuf = dest_root.to_path_buf();
     loop {

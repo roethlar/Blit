@@ -21,8 +21,11 @@
 //! resolve path.
 
 use crate::endpoints::Endpoint;
+use crate::remote::RemoteEndpoint;
 use crate::remote::RemotePath;
+use eyre::{bail, Result};
 use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 
 /// Returns true if the raw CLI source string specifies "copy
 /// contents" mode, matching rsync's DOTDIR_NAME classification
@@ -169,6 +172,144 @@ pub fn resolve_destination(
             Endpoint::Remote(r)
         }
     }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn components_eq(a: Component<'_>, b: Component<'_>) -> bool {
+    if a == b {
+        return true;
+    }
+    a.as_os_str().to_string_lossy().to_lowercase() == b.as_os_str().to_string_lossy().to_lowercase()
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn components_eq(a: Component<'_>, b: Component<'_>) -> bool {
+    a == b
+}
+
+/// Validate that `src_root` and `dst_root` do not resolve to the same path or
+/// an invalid overlapping pair.
+///
+/// - Identical canonical roots always bail (`copy`, `mirror`, and `move`).
+/// - `dst_root` containing `src_root` (`canon_src` is a strict descendant of
+///   `canon_dst`) always bails.
+/// - `src_root` containing `dst_root` (`canon_dst` is a strict descendant of
+///   `canon_src`) bails when `is_move` is `true` (`blit move /a/dir /a/dir/sub`
+///   would delete `/a/dir` and the newly moved destination with it), and
+///   returns `Ok(Some(rel))` when `is_move` is `false` so `copy` can exclude
+///   the nested destination subtree from source enumeration.
+pub fn validate_local_transfer_roots(
+    src_root: &Path,
+    dst_root: &Path,
+    is_move: bool,
+) -> Result<Option<PathBuf>> {
+    let canon_src = crate::path_safety::canonical_target_path(src_root)?;
+    let canon_dst = crate::path_safety::canonical_target_path(dst_root)?;
+
+    let src_comps: Vec<Component<'_>> = canon_src.components().collect();
+    let dst_comps: Vec<Component<'_>> = canon_dst.components().collect();
+    let common = src_comps
+        .iter()
+        .zip(dst_comps.iter())
+        .take_while(|(a, b)| components_eq(**a, **b))
+        .count();
+
+    if common == src_comps.len() && common == dst_comps.len() {
+        bail!(
+            "source and destination resolve to the same path: '{}'",
+            src_root.display()
+        );
+    }
+    if common == dst_comps.len() && src_comps.len() > dst_comps.len() {
+        bail!(
+            "destination '{}' contains source '{}'",
+            dst_root.display(),
+            src_root.display()
+        );
+    }
+    if common == src_comps.len() && dst_comps.len() > src_comps.len() {
+        if is_move {
+            bail!(
+                "cannot move '{}' into a subdirectory of itself, '{}'",
+                src_root.display(),
+                dst_root.display()
+            );
+        }
+        let rel: PathBuf = dst_comps[common..].iter().map(|c| c.as_os_str()).collect();
+        return Ok(Some(rel));
+    }
+    Ok(None)
+}
+
+fn normalize_remote_rel_components(rel: &Path) -> Option<Vec<OsString>> {
+    let mut comps = Vec::new();
+    for comp in rel.components() {
+        match comp {
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::Normal(name) => comps.push(name.to_os_string()),
+            Component::ParentDir => {
+                comps.pop()?;
+            }
+        }
+    }
+    Some(comps)
+}
+
+/// Reject remote-to-remote delegated `move` when source and destination
+/// target the same host, port, and module with equal or overlapping relative
+/// paths.
+pub fn validate_remote_move_endpoints(src: &RemoteEndpoint, dst: &RemoteEndpoint) -> Result<()> {
+    if !src.host.eq_ignore_ascii_case(&dst.host) || src.port != dst.port {
+        return Ok(());
+    }
+    let (src_rel, dst_rel) = match (&src.path, &dst.path) {
+        (
+            RemotePath::Module {
+                module: src_mod,
+                rel_path: src_rel,
+            },
+            RemotePath::Module {
+                module: dst_mod,
+                rel_path: dst_rel,
+            },
+        ) if src_mod == dst_mod => (src_rel.as_path(), dst_rel.as_path()),
+        (RemotePath::Root { rel_path: src_rel }, RemotePath::Root { rel_path: dst_rel }) => {
+            (src_rel.as_path(), dst_rel.as_path())
+        }
+        _ => return Ok(()),
+    };
+    let (Some(src_comps), Some(dst_comps)) = (
+        normalize_remote_rel_components(src_rel),
+        normalize_remote_rel_components(dst_rel),
+    ) else {
+        return Ok(());
+    };
+    let common = src_comps
+        .iter()
+        .zip(dst_comps.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if common == src_comps.len() && common == dst_comps.len() {
+        bail!(
+            "source and destination resolve to the same remote path: '{}'",
+            crate::endpoints::format_remote_endpoint(src)
+        );
+    }
+    if common == dst_comps.len() && src_comps.len() > dst_comps.len() {
+        bail!(
+            "destination '{}' contains source '{}'",
+            crate::endpoints::format_remote_endpoint(dst),
+            crate::endpoints::format_remote_endpoint(src)
+        );
+    }
+    if common == src_comps.len() && dst_comps.len() > src_comps.len() {
+        bail!(
+            "cannot move '{}' into a subdirectory of itself, '{}'",
+            crate::endpoints::format_remote_endpoint(src),
+            crate::endpoints::format_remote_endpoint(dst)
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -393,5 +534,94 @@ mod tests {
             Endpoint::Local(p) => assert_eq!(p, tmp.path().join("DOOM")),
             _ => panic!("expected local endpoint"),
         }
+    }
+
+    #[test]
+    fn validate_local_transfer_roots_rejects_same_ancestor_and_nested_move() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("dir");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // Identical path (including via ./.) rejected for copy and move.
+        for is_move in [false, true] {
+            let err = validate_local_transfer_roots(&dir, &dir.join("."), is_move)
+                .expect_err("same path must be rejected");
+            assert!(
+                err.to_string().contains("same path"),
+                "unexpected error: {err:#}"
+            );
+
+            // Destination containing source (dst is ancestor of src) rejected.
+            let err = validate_local_transfer_roots(&sub, &dir, is_move)
+                .expect_err("ancestor destination must be rejected");
+            assert!(
+                err.to_string().contains("contains source"),
+                "unexpected error: {err:#}"
+            );
+        }
+
+        // Source containing destination (dst is descendant of src):
+        // allowed for copy (returning relative tail), rejected for move.
+        let nested_new = dir.join("backup").join("2026");
+        let rel = validate_local_transfer_roots(&dir, &nested_new, false)
+            .expect("copy into nested subdir is allowed")
+            .expect("must return relative subtree path");
+        assert_eq!(rel, PathBuf::from("backup").join("2026"));
+
+        let err = validate_local_transfer_roots(&dir, &nested_new, true)
+            .expect_err("move into nested subdir must be rejected");
+        assert!(
+            err.to_string().contains("into a subdirectory of itself"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn validate_remote_move_endpoints_rejects_same_and_overlapping_paths() {
+        let ep = |host: &str, module: &str, rel: &str| RemoteEndpoint {
+            host: host.into(),
+            port: 9031,
+            path: RemotePath::Module {
+                module: module.into(),
+                rel_path: PathBuf::from(rel),
+            },
+        };
+
+        // Same path (case-insensitive host, `./` normalization)
+        let err = validate_remote_move_endpoints(
+            &ep("Host-A", "mod", "dir/sub"),
+            &ep("host-a", "mod", "./dir/sub"),
+        )
+        .expect_err("same remote path must fail");
+        assert!(err.to_string().contains("same remote path"));
+
+        // Nested destination
+        let err = validate_remote_move_endpoints(
+            &ep("host-a", "mod", "dir"),
+            &ep("host-a", "mod", "dir/sub"),
+        )
+        .expect_err("nested remote move must fail");
+        assert!(err.to_string().contains("into a subdirectory of itself"));
+
+        // Ancestor destination
+        let err = validate_remote_move_endpoints(
+            &ep("host-a", "mod", "dir/sub"),
+            &ep("host-a", "mod", "dir"),
+        )
+        .expect_err("ancestor remote move must fail");
+        assert!(err.to_string().contains("contains source"));
+
+        // Disjoint path or different module succeeds
+        validate_remote_move_endpoints(
+            &ep("host-a", "mod", "dir/a"),
+            &ep("host-a", "mod", "dir/b"),
+        )
+        .expect("sibling remote paths are allowed");
+        validate_remote_move_endpoints(
+            &ep("host-a", "mod-a", "dir"),
+            &ep("host-a", "mod-b", "dir"),
+        )
+        .expect("different modules are allowed");
     }
 }

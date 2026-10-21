@@ -170,6 +170,7 @@ struct PreparedTransferRoute {
 fn prepare_transfer_route(
     args: &TransferArgs,
     mode: TransferKind,
+    is_move: bool,
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<PreparedTransferRoute> {
     lifecycle_trace.record("transfer_route_select_begin", None);
@@ -182,6 +183,15 @@ fn prepare_transfer_route(
         let src_display = display_endpoint(&src_endpoint);
         let dst_display = display_endpoint(&dst_endpoint);
         let route = select_transfer_route(src_endpoint, dst_endpoint, mode);
+        match &route {
+            TransferRoute::LocalToLocal { src, dst, .. } => {
+                blit_core::transfers::resolution::validate_local_transfer_roots(src, dst, is_move)?;
+            }
+            TransferRoute::RemoteToRemoteDelegated { src, dst, .. } if is_move => {
+                blit_core::transfers::resolution::validate_remote_move_endpoints(src, dst)?;
+            }
+            _ => {}
+        }
         Ok(PreparedTransferRoute {
             route,
             pre_resolve_display,
@@ -261,7 +271,7 @@ async fn run_transfer_inner(
         pre_resolve_display,
         src_display,
         dst_display,
-    } = prepare_transfer_route(args, mode, lifecycle_trace)?;
+    } = prepare_transfer_route(args, mode, false, lifecycle_trace)?;
 
     let operation = match mode {
         TransferKind::Copy => "copy",
@@ -656,7 +666,7 @@ async fn run_move_inner(
         pre_resolve_display,
         src_display,
         dst_display,
-    } = prepare_transfer_route(args, TransferKind::Copy, lifecycle_trace)?;
+    } = prepare_transfer_route(args, TransferKind::Copy, true, lifecycle_trace)?;
     if args.dry_run {
         bail!("move does not support --dry-run");
     }
@@ -1622,7 +1632,8 @@ mod tests {
         ] {
             let (trace, events) = captured_trace();
             let args = gate_args(source, destination, false, true);
-            prepare_transfer_route(&args, TransferKind::Copy, &trace).expect("route resolves");
+            prepare_transfer_route(&args, TransferKind::Copy, false, &trace)
+                .expect("route resolves");
 
             let events = events.lock().unwrap();
             assert_eq!(events.len(), 2);
@@ -1645,5 +1656,85 @@ mod tests {
         assert_eq!(events[0].event, "result_render_begin");
         assert_eq!(events[1].event, "result_render_end");
         assert_eq!(events[1].outcome, Some(TransferLifecycleOutcome::Error));
+    }
+
+    #[test]
+    fn dispatch_refuses_identical_and_overlapping_roots_before_prompt_or_delete() {
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path().join("a");
+        let dir = parent.join("dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let payload = dir.join("keep.txt");
+        std::fs::write(&payload, b"precious").unwrap();
+
+        let runtime = runtime();
+        let ctx = ctx();
+        let trace = TransferLifecycleTrace::disabled();
+
+        let dir_str = dir.to_str().unwrap();
+        let parent_str = parent.to_str().unwrap();
+        let nested_str = dir.join("sub").to_str().unwrap().to_owned();
+
+        // 1. `blit move /a/dir /a` (where `/a` is an existing container dir, so
+        // `resolve_destination` yields `/a/dir`) and `blit move /a/dir /a/dir/sub`
+        // must refuse inside `prepare_transfer_route` BEFORE
+        // `confirm_destructive_operation`. Run `yes: true` first so a missing
+        // gate fails immediately with `Ok(ExitCode::SUCCESS)` instead of
+        // blocking on stdin, then `yes: false` so a present gate proves it
+        // returned before the stdin prompt.
+        for yes in [true, false] {
+            let move_nested = gate_args(dir_str, &nested_str, false, yes);
+            let err = runtime
+                .block_on(run_move_inner(&ctx, &move_nested, &trace))
+                .expect_err("move /a/dir /a/dir/sub must refuse");
+            assert!(
+                format!("{err:#}").contains("into a subdirectory of itself"),
+                "unexpected error for move into self (yes={yes}): {err:#}"
+            );
+            assert_eq!(std::fs::read(&payload).unwrap(), b"precious");
+
+            let move_same = gate_args(dir_str, parent_str, false, yes);
+            let err = runtime
+                .block_on(run_move_inner(&ctx, &move_same, &trace))
+                .expect_err("move /a/dir /a must refuse before prompt or transfer");
+            assert!(
+                format!("{err:#}").contains("same path"),
+                "unexpected error for move /a/dir /a (yes={yes}): {err:#}"
+            );
+            assert_eq!(std::fs::read(&payload).unwrap(), b"precious");
+
+            // 3. `blit copy` and `blit mirror` also refuse same-path and
+            // destination-contains-source before prompting (`yes: false`).
+            for mode in [TransferKind::Copy, TransferKind::Mirror] {
+                let same_args = gate_args(dir_str, parent_str, false, yes);
+                let err = runtime
+                    .block_on(run_transfer_inner(&ctx, &same_args, mode, &trace))
+                    .expect_err("copy/mirror same path must refuse");
+                assert!(
+                    format!("{err:#}").contains("same path"),
+                    "unexpected error for {mode:?} same path: {err:#}"
+                );
+            }
+
+            // 4. Remote-to-remote delegated `move` refuses same-endpoint / nested paths.
+            let remote_move = gate_args("host-a:/mod/dir", "host-a:/mod/dir/sub", false, yes);
+            let err = runtime
+                .block_on(run_move_inner(&ctx, &remote_move, &trace))
+                .expect_err("delegated move into self must refuse");
+            assert!(
+                format!("{err:#}").contains("into a subdirectory of itself"),
+                "unexpected error for remote move into self: {err:#}"
+            );
+        }
+
+        // 5. Direct library caller backstop in `run_local_session`.
+        let err = runtime
+            .block_on(blit_core::transfer_session::local::run_local_session(
+                &dir,
+                &dir,
+                blit_core::transfer_session::local::LocalMirrorOptions::default(),
+            ))
+            .expect_err("run_local_session must refuse identical roots");
+        assert!(format!("{err:#}").contains("same path"));
     }
 }

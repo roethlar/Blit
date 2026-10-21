@@ -755,6 +755,7 @@ pub async fn run_local_session(
     if !src_root.exists() {
         return Err(eyre!("source path does not exist: {}", src_root.display()));
     }
+    crate::transfers::resolution::validate_local_transfer_roots(src_root, dst_root, false)?;
     if !options.dry_run {
         if let Some(parent) = dst_root.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
