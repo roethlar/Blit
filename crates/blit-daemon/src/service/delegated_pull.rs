@@ -307,6 +307,19 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     let spec =
         validate_spec(spec).map_err(|msg| phased_error(Phase::DelegationRejected as i32, msg))?;
 
+    // Step 2b (af-4): the destination path's syntax, held to the rules
+    // every other wire path is held to (no `..`, no absolute or
+    // Windows-absolute form, no NUL; `""`/`.` mean the module root) —
+    // before DNS, the gate, or any connection. The canonical containment
+    // check at Step 6 stays; this is the lexical half it assumed upstream.
+    let dst_rel =
+        super::util::resolve_relative_path(&req.dst_destination_path).map_err(|status| {
+            phased_error(
+                Phase::DelegationRejected as i32,
+                status.message().to_string(),
+            )
+        })?;
+
     // Step 3: daemon-wide gate (master switch + allowlist matching +
     // DNS-rebinding mitigation by binding to the resolved IP).
     let resolved = validate_source(&delegation, &locator, resolver)
@@ -344,12 +357,8 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
         ));
     }
 
-    // Step 6: F2 canonical-path containment on dst_destination_path.
-    let dst_rel = if req.dst_destination_path.trim().is_empty() {
-        PathBuf::from(".")
-    } else {
-        PathBuf::from(&req.dst_destination_path)
-    };
+    // Step 6: F2 canonical-path containment on dst_destination_path
+    // (validated lexically at Step 2b).
     let dest_root = resolve_contained_path(&module, &dst_rel)
         .map_err(|status| phased_error(Phase::Apply as i32, status.message().to_string()))?;
 
@@ -922,5 +931,69 @@ mod tests {
             "handler with blank source locator must return its reason so caller can inc_error \
              and record why"
         );
+    }
+
+    /// af-4 (AC-4): an unsafe `dst_destination_path` — `..`, an absolute
+    /// or Windows-absolute form, a NUL byte — is refused with its own
+    /// reason at the DelegationRejected phase, before the daemon-wide
+    /// gate runs (the default gate would otherwise refuse this request
+    /// for a different reason) and before any DNS or connection.
+    #[tokio::test]
+    async fn handle_delegated_pull_refuses_unsafe_destination_paths_before_the_gate() {
+        use blit_core::generated::{DelegatedPullRequest, RemoteSourceLocator};
+
+        for unsafe_path in [
+            "../outside",
+            "sub/../../outside",
+            "/abs/outside",
+            "C:\\outside",
+            "sub/nul\0byte",
+        ] {
+            let req = DelegatedPullRequest {
+                dst_module: String::new(),
+                dst_destination_path: unsafe_path.to_string(),
+                src: Some(RemoteSourceLocator {
+                    host: "127.0.0.1".to_string(),
+                    port: 1,
+                }),
+                spec: Some(wire_spec()),
+                trace_data_plane: false,
+                detach: false,
+                run_id: String::new(),
+                attempt: 0,
+            };
+            let modules = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<
+                String,
+                ModuleConfig,
+            >::new()));
+            let delegation = Arc::new(crate::delegation_gate::DelegationConfig::default());
+            let (tx, _rx) = mpsc::channel(8);
+            let jobs = crate::active_jobs::ActiveJobs::new();
+            let guard = jobs.register(
+                crate::active_jobs::ActiveJobKind::DelegatedPull,
+                "peer".into(),
+                "module".into(),
+                String::new(),
+            );
+            let outcome = handle_delegated_pull(
+                req,
+                modules,
+                None,
+                delegation,
+                TransferMetrics::disabled(),
+                tx,
+                "t-test".to_string(),
+                guard.bytes_counter(),
+                guard.progress(),
+                None,
+                crate::job_logs::JobLog::new(None, "t-test"),
+            )
+            .await;
+            let reason = outcome.expect_err("an unsafe destination path is refused");
+            assert!(
+                reason.contains("path not allowed"),
+                "{unsafe_path:?} must be refused for its path, not by the gate: {reason}"
+            );
+        }
     }
 }

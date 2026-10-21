@@ -270,8 +270,30 @@ pub fn contained_join(canonical_module_root: &Path, wire_path: &str) -> Result<P
 /// want the F2 containment check without redoing the wire-path
 /// validation. Same semantics as `contained_join` but takes the
 /// already-resolved `target` directly.
+///
+/// af-4: a `..` component the walk has to pop — one beyond the deepest
+/// existing ancestor — is refused. `canonicalize` cannot resolve it (its
+/// prefix does not exist), the walk would drop it and judge the ancestor
+/// alone, and at write time the OS would honour it: a target
+/// `root/nonexistent/../../outside` passed as `root` and wrote above it.
+/// A `..` inside the existing prefix is resolved by `canonicalize`
+/// against the filesystem exactly as the OS will resolve it, and stays
+/// accepted — a destination root typed as `../dst` reaches here on every
+/// file.
+///
+/// A relative `target` is taken against the current directory, as the OS
+/// will take it. Before af-4 a relative destination root never reached
+/// this check at all: `canonical_dest_root` failed on it, the sink kept
+/// no canonical root, and containment was silently skipped; now that the
+/// root is captured, the target has to resolve the same way.
 pub fn verify_contained(canonical_module_root: &Path, target: &Path) -> Result<()> {
-    let mut probe: PathBuf = target.to_path_buf();
+    let mut probe: PathBuf = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .with_context(|| format!("resolve current_dir for '{}'", target.display()))?
+            .join(target)
+    };
     let canonical_ancestor = loop {
         match std::fs::canonicalize(&probe) {
             Ok(c) => break c,
@@ -295,6 +317,13 @@ pub fn verify_contained(canonical_module_root: &Path, target: &Path) -> Result<(
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
                 ) =>
             {
+                if matches!(probe.components().next_back(), Some(Component::ParentDir)) {
+                    bail!(
+                        "path '{}' has a '..' component beyond its deepest existing \
+                         ancestor; it cannot be resolved for containment",
+                        target.display()
+                    );
+                }
                 if !probe.pop() {
                     bail!(
                         "path '{}' has no canonicalizable ancestor (root '{}' missing?)",
@@ -436,29 +465,15 @@ pub fn canonical_target_path(path: &Path) -> Result<PathBuf> {
     Ok(out)
 }
 
+/// The canonical deepest-existing ancestor of `dest_root` (see
+/// `canonical_ancestor_and_tail`). af-4: a `..` over a non-existent
+/// prefix (`dest/nonexistent/../../outside`) is refused rather than
+/// popped past — the old lexical pop made the ancestor ABOVE `dest` the
+/// containment frame on Windows, where `canonicalize` collapses `..`
+/// before touching the filesystem.
 pub fn canonical_dest_root(dest_root: &Path) -> Result<PathBuf> {
-    let mut probe: PathBuf = dest_root.to_path_buf();
-    loop {
-        match std::fs::canonicalize(&probe) {
-            Ok(c) => return Ok(c),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                if !probe.pop() {
-                    bail!(
-                        "destination root '{}' has no canonicalizable \
-                         ancestor — filesystem root unreachable",
-                        dest_root.display()
-                    );
-                }
-            }
-            Err(e) => {
-                bail!(
-                    "canonicalize '{}' for destination-root capture: {}",
-                    probe.display(),
-                    e
-                );
-            }
-        }
-    }
+    let (canonical_ancestor, _tail) = canonical_ancestor_and_tail(dest_root)?;
+    Ok(canonical_ancestor)
 }
 
 /// One-stop "lexically resolve a wire path against a destination
@@ -880,6 +895,95 @@ mod raw_byte_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// af-4 (AC-4): `root/nonexistent/../../outside` never passes
+    /// `verify_contained`, on any platform. On Unix `canonicalize` stops
+    /// at the missing component, so the walk meets the `..` it would
+    /// otherwise drop and refuses it; on Windows the OS collapses `..`
+    /// lexically before touching the filesystem, so the walk sees the
+    /// ancestor above `root` and refuses the escape. A `..` that stays
+    /// inside the root is refused on Unix (unresolvable) and resolves on
+    /// Windows (lexical, to `root/escape`) — both contained. A target
+    /// under a not-yet-created directory, and a `..` the filesystem
+    /// resolves over an existing prefix, are accepted everywhere.
+    #[test]
+    fn verify_contained_refuses_parent_dir_beyond_deepest_existing_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+
+        let err = verify_contained(&root, &root.join("nonexistent/../../outside")).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("'..'") || text.contains("escapes module root"),
+            "refused, for its '..' or as an escape: {err:#}"
+        );
+
+        let inside = verify_contained(&root, &root.join("nonexistent/../escape"));
+        if cfg!(windows) {
+            inside.expect("Windows collapses the '..' lexically to root/escape");
+        } else {
+            let err = inside.expect_err("Unix cannot resolve the '..' past a missing component");
+            assert!(err.to_string().contains("'..'"), "{err:#}");
+        }
+
+        verify_contained(&root, &root.join("nonexistent/new.txt"))
+            .expect("a new file under a new directory is contained");
+        verify_contained(&root, &root.join("sub/../ok.txt"))
+            .expect("a '..' over an existing prefix resolves through the filesystem");
+    }
+
+    /// af-4: a RELATIVE destination root (`blit copy src/ dst/`, typed in
+    /// the folder) now has a canonical root — the current directory's —
+    /// so its relative targets must verify under it, not fail for lacking
+    /// a canonicalizable ancestor. Pins the `saved_jobs` integration
+    /// failures the first af-4 cut caused. Reads the current directory
+    /// without changing it.
+    #[test]
+    fn relative_targets_verify_under_the_current_directorys_canonical_root() {
+        let cwd = std::env::current_dir().unwrap();
+        let canonical_cwd = std::fs::canonicalize(&cwd).unwrap();
+        let fresh = format!("af4-relative-{}", std::process::id());
+        let root = Path::new(&fresh).join("dst");
+        assert!(
+            !cwd.join(&root).exists(),
+            "the relative root must not exist yet"
+        );
+
+        assert_eq!(canonical_dest_root(&root).unwrap(), canonical_cwd);
+        verify_contained(&canonical_cwd, &root.join("a.txt"))
+            .expect("a relative target under a not-yet-created relative root is contained");
+        let err = verify_contained(&canonical_cwd, &root.join("../../../escape")).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("'..'") || text.contains("escapes module root"),
+            "{err:#}"
+        );
+    }
+
+    /// af-4 (AC-4): `canonical_dest_root` refuses a `..` over a
+    /// non-existent prefix instead of popping past it into an ancestor
+    /// above the destination, and still resolves a `..` over an existing
+    /// prefix and a not-yet-created tail to the right frame.
+    #[test]
+    fn canonical_dest_root_refuses_parent_dir_over_nonexistent_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical_tmp = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(tmp.path().join("existing")).unwrap();
+
+        let err = canonical_dest_root(&tmp.path().join("nonexistent/../../outside")).unwrap_err();
+        assert!(err.to_string().contains("'..'"), "{err:#}");
+
+        assert_eq!(
+            canonical_dest_root(&tmp.path().join("existing/../new_root")).unwrap(),
+            canonical_tmp,
+            "a '..' over an existing prefix resolves; the new tail is not yet a frame"
+        );
+        assert_eq!(
+            canonical_dest_root(&tmp.path().join("existing")).unwrap(),
+            canonical_tmp.join("existing")
+        );
+    }
 
     #[test]
     fn empty_passes_as_empty() {
