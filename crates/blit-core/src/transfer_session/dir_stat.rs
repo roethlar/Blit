@@ -125,6 +125,15 @@ enum DirSnapshot {
         /// folding together is harmless — exact matches still resolve
         /// each — so a set suffices.
         folded: HashSet<String>,
+        /// af-5: whether any listed name holds a non-ASCII byte. On a
+        /// Unix destination a non-ASCII name can miss both `exact` and
+        /// `folded` yet still resolve — APFS pairs NFC with NFD, `ς`
+        /// with `σ` — so such a miss in such a directory is the stat's to
+        /// judge. ASCII-only directories keep the trusted absent. Windows
+        /// already falls back on every miss beside listed entries
+        /// (cr-ls5-1), so the flag is not kept there.
+        #[cfg(not(windows))]
+        has_non_ascii: bool,
     },
     /// The directory itself does not exist (or its parent chain is not a
     /// directory): every child is absent, exactly as the per-file stat
@@ -218,7 +227,7 @@ impl DirStatCache {
         // absence answer is about to go stale.
         let write_pending = self.write_pending.load(Ordering::Acquire);
         let looked = match snapshot {
-            DirSnapshot::Swept { exact, folded } => match exact.get(name) {
+            DirSnapshot::Swept { exact, folded, .. } => match exact.get(name) {
                 Some(SweptEntry::NeedsStat) => DirStatLookup::Fallback,
                 Some(entry) => DirStatLookup::Entry(*entry),
                 None if folded.contains(&fold_name(name)) => DirStatLookup::Fallback,
@@ -239,6 +248,18 @@ impl DirStatCache {
                 // resolves aliases.
                 #[cfg(windows)]
                 None => DirStatLookup::Fallback,
+                // af-5: on Unix a NON-ASCII name can miss the sweep and
+                // its case fold yet resolve to a listed entry through a
+                // pairing no text rule reproduces (APFS: NFC with NFD, `ς`
+                // with `σ`); judging it absent re-copied the file under
+                // --ignore-existing and SizeMtime never converged. Where
+                // the directory holds a non-ASCII name and the lookup is
+                // one, only the stat can say. ASCII lookups, and
+                // ASCII-only directories, keep the trusted absent.
+                #[cfg(not(windows))]
+                None if swept_holds_non_ascii(snapshot) && !name.as_encoded_bytes().is_ascii() => {
+                    DirStatLookup::Fallback
+                }
                 #[cfg(not(windows))]
                 None => DirStatLookup::Absent,
             },
@@ -347,6 +368,8 @@ fn sweep_directory(dir: &Path) -> DirSnapshot {
     };
     let mut exact: HashMap<OsString, SweptEntry> = HashMap::new();
     let mut folded: HashSet<String> = HashSet::new();
+    #[cfg(not(windows))]
+    let mut has_non_ascii = false;
     for entry in entries {
         let Ok(entry) = entry else {
             // A partial listing cannot distinguish "absent" from
@@ -354,10 +377,31 @@ fn sweep_directory(dir: &Path) -> DirSnapshot {
             return DirSnapshot::Unsweepable;
         };
         let name = entry.file_name();
+        #[cfg(not(windows))]
+        {
+            has_non_ascii |= !name.as_encoded_bytes().is_ascii();
+        }
         folded.insert(fold_name(&name));
         exact.insert(name, judge_entry(&entry));
     }
-    DirSnapshot::Swept { exact, folded }
+    DirSnapshot::Swept {
+        exact,
+        folded,
+        #[cfg(not(windows))]
+        has_non_ascii,
+    }
+}
+
+/// af-5: whether a swept directory lists any non-ASCII name.
+#[cfg(not(windows))]
+fn swept_holds_non_ascii(snapshot: &DirSnapshot) -> bool {
+    matches!(
+        snapshot,
+        DirSnapshot::Swept {
+            has_non_ascii: true,
+            ..
+        }
+    )
 }
 
 fn judge_entry(entry: &std::fs::DirEntry) -> SweptEntry {
@@ -487,6 +531,49 @@ mod tests {
             DirStatLookup::Absent
         );
         assert_eq!(cache.fallbacks(), 0);
+    }
+
+    /// af-5 (AC-5): a non-ASCII lookup that misses the sweep and its case
+    /// fold, in a directory listing a non-ASCII name, is the stat's to
+    /// judge on every platform — on Unix because the filesystem may pair
+    /// the two spellings (APFS NFC/NFD), on Windows by cr-ls5-1 already.
+    /// An ASCII miss beside it, and a non-ASCII miss in an ASCII-only
+    /// directory, keep the trusted absent on Unix. The exact non-ASCII
+    /// name still hits. The Unix-only arm this pins is compiled out on
+    /// Windows, so this guard's red can be shown only on Unix.
+    #[test]
+    fn a_non_ascii_miss_beside_a_non_ascii_entry_is_the_stats_to_judge() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("cafe\u{301}.txt"), b"nfd").expect("write");
+        std::fs::write(dir.path().join("plain.txt"), b"x").expect("write");
+        #[cfg(windows)]
+        let platform_miss = DirStatLookup::Fallback;
+        #[cfg(not(windows))]
+        let platform_miss = DirStatLookup::Absent;
+
+        let cache = DirStatCache::default();
+        assert_eq!(
+            cache.lookup(dir.path(), OsStr::new("caf\u{e9}.txt"), &probe()),
+            DirStatLookup::Fallback,
+            "the NFC spelling of a listed NFD name is never a trusted absent"
+        );
+        assert_eq!(
+            cache.lookup(dir.path(), OsStr::new("other.txt"), &probe()),
+            platform_miss,
+            "an ASCII miss follows the platform rule"
+        );
+        assert!(matches!(
+            cache.lookup(dir.path(), OsStr::new("cafe\u{301}.txt"), &probe()),
+            DirStatLookup::Entry(SweptEntry::File { .. })
+        ));
+
+        let ascii_only = tempfile::tempdir().expect("tempdir");
+        std::fs::write(ascii_only.path().join("plain.txt"), b"x").expect("write");
+        assert_eq!(
+            cache.lookup(ascii_only.path(), OsStr::new("caf\u{e9}.txt"), &probe()),
+            platform_miss,
+            "an ASCII-only directory cannot pair a non-ASCII name; the platform rule holds"
+        );
     }
 
     #[test]
