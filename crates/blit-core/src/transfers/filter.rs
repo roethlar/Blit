@@ -704,7 +704,7 @@ fn listed_name(path: &Path, metadata: &std::fs::Metadata) -> Vec<String> {
 /// never a symlink's target — and how many names it has. On Unix
 /// `(dev, ino)` and `nlink` from `symlink_metadata`.
 #[cfg(unix)]
-fn entry_identity(path: &Path) -> Option<((u64, u64), u64)> {
+pub(crate) fn entry_identity(path: &Path) -> Option<((u64, u64), u64)> {
     use std::os::unix::fs::MetadataExt;
     let metadata = std::fs::symlink_metadata(path).ok()?;
     Some(((metadata.dev(), metadata.ino()), metadata.nlink()))
@@ -720,7 +720,7 @@ fn entry_identity(path: &Path) -> Option<((u64, u64), u64)> {
 /// way. std offers no stable identity there (`MetadataExt::file_index` is
 /// unstable).
 #[cfg(windows)]
-fn entry_identity(path: &Path) -> Option<((u64, u64), u64)> {
+pub(crate) fn entry_identity(path: &Path) -> Option<((u64, u64), u64)> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
@@ -747,7 +747,7 @@ fn entry_identity(path: &Path) -> Option<((u64, u64), u64)> {
 /// No file identity on this platform: nothing pairs, and a non-symlink
 /// takes its stored name from `canonicalize`.
 #[cfg(not(any(unix, windows)))]
-fn entry_identity(_path: &Path) -> Option<((u64, u64), u64)> {
+pub(crate) fn entry_identity(_path: &Path) -> Option<((u64, u64), u64)> {
     None
 }
 

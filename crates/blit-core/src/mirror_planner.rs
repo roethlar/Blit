@@ -1,5 +1,5 @@
 use eyre::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -41,15 +41,17 @@ pub struct RawNamedEntry {
 // Case-sensitivity is a property of the platform's default filesystem, and
 // this key exists to model it so a mirror never deletes a file the source
 // kept under a different case. Windows (NTFS) and macOS (APFS) are
-// case-insensitive by default → fold (posix-normalize + ASCII-lowercase);
+// case-insensitive by default → fold (posix-normalize + Unicode lowercase);
 // Linux (ext4/xfs) is case-sensitive → exact. This matters most for the
 // unified session, the first mirror path that diffs a WIRE source set (the
 // source's on-disk case) against the DEST filesystem: on a case-insensitive
 // dest the two cases can diverge, and an exact key would delete the
 // just-written file (review otp-6b F1). Case-insensitive Linux mounts and
 // case-sensitive macOS volumes are rare misconfigurations a compile-time cfg
-// cannot detect; ASCII-only folding leaves Unicode case variants approximate
-// (a known gap, same as the pre-existing Windows behavior).
+// cannot detect. af-3: the fold is Unicode lowercase (`Übung`/`übung`), and
+// what a filesystem pairs beyond that — APFS NFC with NFD, `ς` with `σ`,
+// `ß` with `SS`; NTFS both sigmas — is asked of the filesystem itself in
+// `pair_unmatched_by_identity`, never approximated by a text rule.
 #[cfg(any(windows, target_os = "macos"))]
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 struct CasefoldKey(String);
@@ -57,7 +59,7 @@ struct CasefoldKey(String);
 #[cfg(any(windows, target_os = "macos"))]
 impl CasefoldKey {
     fn new(path: &Path) -> Self {
-        let normalized = crate::path_posix::relative_path_to_posix(path).to_ascii_lowercase();
+        let normalized = crate::path_posix::relative_path_to_posix(path).to_lowercase();
         CasefoldKey(normalized)
     }
 }
@@ -252,22 +254,48 @@ impl MirrorPlanner {
         raw_names_storable: bool,
         filter: &FileFilter,
     ) -> Result<MirrorDeletionPlan> {
+        self.plan_session_deletions_with_probe(
+            dest_root,
+            source_files,
+            raw_entries,
+            shielded,
+            raw_names_storable,
+            filter,
+            &mut |path| {
+                crate::transfers::filter::entry_identity(path).map(|(identity, _)| identity)
+            },
+        )
+    }
+
+    /// `plan_session_deletions` with the destination filesystem's identity
+    /// lookup (`pair_unmatched_by_identity`'s `probe`) injected, so tests
+    /// count the probes and model a filesystem's pairing on any platform.
+    fn plan_session_deletions_with_probe<F>(
+        &self,
+        dest_root: &Path,
+        source_files: &HashSet<String>,
+        raw_entries: &[RawNamedEntry],
+        shielded: &HashSet<String>,
+        raw_names_storable: bool,
+        filter: &FileFilter,
+        probe: &mut F,
+    ) -> Result<MirrorDeletionPlan>
+    where
+        F: FnMut(&Path) -> Option<(u64, u64)>,
+    {
         let enumerator = FileEnumerator::new(filter.clone_without_cache());
         let dest_entries = enumerator.enumerate_local(dest_root)?;
 
         // Kept set = every source file plus each of its ancestor dirs, so a
         // directory holding a kept file is itself kept (never deleted).
+        // `kept_paths` records each path as the source spells it, for the
+        // identity pairing below.
         let mut source_set: HashSet<CasefoldKey> = HashSet::new();
+        let mut kept_paths: Vec<PathBuf> = Vec::new();
         let mut keep = |path: &Path| {
-            source_set.insert(CasefoldKey::new(path));
-            let mut current = path.parent();
-            while let Some(parent) = current {
-                if parent.as_os_str().is_empty() {
-                    break;
-                }
-                source_set.insert(CasefoldKey::new(parent));
-                current = parent.parent();
-            }
+            keep_with_ancestors(&mut source_set, path, |kept| {
+                kept_paths.push(kept.to_path_buf())
+            });
         };
         for rel in source_files {
             keep(Path::new(rel));
@@ -313,6 +341,12 @@ impl MirrorPlanner {
         // distinct, unrelated destination path (see the keep set above),
         // and shielding it would pin stale data forever.
         let mut shield_set: HashSet<CasefoldKey> = HashSet::new();
+        let mut shield_paths: Vec<PathBuf> = Vec::new();
+        let mut add_shield = |path: &Path| {
+            if shield_set.insert(CasefoldKey::new(path)) {
+                shield_paths.push(path.to_path_buf());
+            }
+        };
         for rel in shielded {
             let mut claimed_by_raw = false;
             for entry in raw_entries.iter().filter(|entry| &entry.text == rel) {
@@ -320,13 +354,23 @@ impl MirrorPlanner {
                 if let Some(path) =
                     crate::raw_name::path_from_received_raw(&entry.raw, raw_names_storable)
                 {
-                    shield_set.insert(CasefoldKey::new(&path));
+                    add_shield(&path);
                 }
             }
             if !raw_names_storable || !claimed_by_raw || source_files.contains(rel) {
-                shield_set.insert(CasefoldKey::new(Path::new(rel)));
+                add_shield(Path::new(rel));
             }
         }
+
+        pair_unmatched_by_identity(
+            dest_root,
+            &mut source_set,
+            &mut shield_set,
+            &kept_paths,
+            &shield_paths,
+            &dest_set,
+            probe,
+        );
 
         let mut plan = plan_from_sets(dest_root, source_set, shield_set, dest_set);
         if !filter.is_empty() {
@@ -518,6 +562,168 @@ fn keep_dirs_holding_left_out_entries(
         }
     }
     dirs.retain(|dir| !kept.contains(dir));
+}
+
+/// Insert `path` and each of its non-empty ancestors into `set`, calling
+/// `on_new` for every key that was not there before.
+fn keep_with_ancestors(set: &mut HashSet<CasefoldKey>, path: &Path, mut on_new: impl FnMut(&Path)) {
+    if set.insert(CasefoldKey::new(path)) {
+        on_new(path);
+    }
+    let mut current = path.parent();
+    while let Some(parent) = current {
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        if set.insert(CasefoldKey::new(parent)) {
+            on_new(parent);
+        }
+        current = parent.parent();
+    }
+}
+
+/// af-3: pair, through the destination filesystem itself, the destination
+/// entries no key matched with the kept and shielded paths no destination
+/// key matched. `CasefoldKey` folds what Unicode lowercase folds; a
+/// filesystem may pair more (APFS: NFC with NFD, `ς` with `σ`, `ß` with
+/// `SS`; NTFS: both sigmas), and a mirror trusting the key alone would
+/// delete the destination's spelling of a file the source kept, or of a
+/// file that failed to land. `probe` is the identity of the entry a path
+/// names (`entry_identity`, the link itself and never its target), `None`
+/// when it names nothing. No text rule reproduces every filesystem's
+/// table, so none is attempted.
+///
+/// FAST: probes are confined to candidate directories — a directory
+/// holding, at one depth, both an unmatched destination entry and an
+/// unmatched kept or shielded path, at least one of them spelled with a
+/// non-ASCII byte (two ASCII paths pair only by case, which the key
+/// already folds where the platform does). A pure-ASCII tree, a synced tree and an empty
+/// destination (a first sync, dry run or not) probe nothing; within a
+/// candidate directory the destination side is probed only once a source
+/// path there resolved. Depth by depth, top down: a destination directory
+/// paired with a kept directory aliases its children's grouping to the
+/// kept directory's, so `bSS/a.txt` meets `bß/a.txt`.
+///
+/// A destination entry whose identity is a kept path's is kept with its
+/// ancestors; one whose identity is a shielded path's is shielded with
+/// its descendants. A hard link to a kept file counts as kept — the safe
+/// direction, as `listed_name`'s over-exclusion is.
+fn pair_unmatched_by_identity<F>(
+    dest_root: &Path,
+    source_set: &mut HashSet<CasefoldKey>,
+    shield_set: &mut HashSet<CasefoldKey>,
+    kept_paths: &[PathBuf],
+    shield_paths: &[PathBuf],
+    dest_entries: &[(PathBuf, bool)],
+    probe: &mut F,
+) where
+    F: FnMut(&Path) -> Option<(u64, u64)>,
+{
+    let depth = |path: &Path| path.components().count();
+    let dest_keys: HashSet<CasefoldKey> = dest_entries
+        .iter()
+        .map(|(rel, _)| CasefoldKey::new(rel))
+        .collect();
+    // Unmatched kept (`false`) and shielded (`true`) paths, bucketed by depth.
+    let mut src_by_depth: Vec<Vec<(&Path, bool)>> = Vec::new();
+    let unmatched_src = kept_paths
+        .iter()
+        .map(|path| (path.as_path(), false))
+        .chain(shield_paths.iter().map(|path| (path.as_path(), true)))
+        .filter(|(path, _)| {
+            !path.as_os_str().is_empty() && !dest_keys.contains(&CasefoldKey::new(path))
+        });
+    for (path, is_shield) in unmatched_src {
+        let level = depth(path);
+        if src_by_depth.len() <= level {
+            src_by_depth.resize_with(level + 1, Vec::new);
+        }
+        src_by_depth[level].push((path, is_shield));
+    }
+    if src_by_depth.iter().all(Vec::is_empty) {
+        return;
+    }
+    // Unmatched destination entries (deletion candidates), bucketed by depth.
+    let mut dest_by_depth: Vec<Vec<(&Path, bool)>> = vec![Vec::new(); src_by_depth.len()];
+    for (rel, is_dir) in dest_entries {
+        let level = depth(rel);
+        if rel.as_os_str().is_empty()
+            || level >= dest_by_depth.len()
+            || source_set.contains(&CasefoldKey::new(rel))
+            || (!shield_set.is_empty() && is_shielded(rel, shield_set))
+        {
+            continue;
+        }
+        dest_by_depth[level].push((rel.as_path(), *is_dir));
+    }
+
+    let parent_key = |path: &Path| CasefoldKey::new(path.parent().unwrap_or(Path::new("")));
+    // The whole relative path, not the name alone: a child of a paired
+    // directory (`bSS/a.txt` for `bß/a.txt`) has an ASCII name of its own.
+    let non_ascii = |path: &Path| !path.as_os_str().as_encoded_bytes().is_ascii();
+    #[derive(Default)]
+    struct Group<'a> {
+        src: Vec<(&'a Path, bool)>,
+        dest: Vec<(&'a Path, bool)>,
+        non_ascii: bool,
+    }
+    // A paired destination directory's key → its kept directory's key, so
+    // the children of the one are grouped with the children of the other.
+    let mut alias: HashMap<CasefoldKey, CasefoldKey> = HashMap::new();
+    for (src_level, dest_level) in src_by_depth.iter().zip(&dest_by_depth) {
+        if src_level.is_empty() || dest_level.is_empty() {
+            continue;
+        }
+        let mut groups: HashMap<CasefoldKey, Group> = HashMap::new();
+        for &(path, is_shield) in src_level {
+            let group = groups.entry(parent_key(path)).or_default();
+            group.non_ascii |= non_ascii(path);
+            group.src.push((path, is_shield));
+        }
+        for &(rel, is_dir) in dest_level {
+            let key = parent_key(rel);
+            let key = alias.get(&key).cloned().unwrap_or(key);
+            let Some(group) = groups.get_mut(&key) else {
+                continue;
+            };
+            group.non_ascii |= non_ascii(rel);
+            group.dest.push((rel, is_dir));
+        }
+        for group in groups.into_values() {
+            if group.dest.is_empty() || !group.non_ascii {
+                continue;
+            }
+            let mut kept: HashMap<(u64, u64), &Path> = HashMap::new();
+            let mut shielded: HashSet<(u64, u64)> = HashSet::new();
+            for (path, is_shield) in group.src {
+                let Some(identity) = probe(&dest_root.join(path)) else {
+                    continue;
+                };
+                if is_shield {
+                    shielded.insert(identity);
+                } else {
+                    kept.entry(identity).or_insert(path);
+                }
+            }
+            if kept.is_empty() && shielded.is_empty() {
+                continue;
+            }
+            for (rel, is_dir) in group.dest {
+                let Some(identity) = probe(&dest_root.join(rel)) else {
+                    continue;
+                };
+                if shielded.contains(&identity) {
+                    shield_set.insert(CasefoldKey::new(rel));
+                }
+                if let Some(paired) = kept.get(&identity) {
+                    keep_with_ancestors(source_set, rel, |_| {});
+                    if is_dir {
+                        alias.insert(CasefoldKey::new(rel), CasefoldKey::new(paired));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Whether `rel` or any of its ancestors is in `shield_set`.
@@ -793,9 +999,272 @@ mod shield_tests {
 }
 
 #[cfg(test)]
+mod identity_pairing_tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::ffi::OsString;
+    use std::hash::{Hash, Hasher};
+
+    /// af-3: a destination filesystem whose pairing rule is a table — each
+    /// `(spelling, on_disk)` row says the filesystem resolves `spelling`
+    /// to the entry stored as `on_disk` — so the planner's identity pass
+    /// is exercised on every platform, with the probes counted. A path
+    /// exists when its on-disk spelling does; its identity is that
+    /// spelling's hash.
+    struct PairingFs {
+        root: PathBuf,
+        pairs: Vec<(&'static str, &'static str)>,
+    }
+
+    impl PairingFs {
+        fn on_disk(&self, rel: &Path) -> PathBuf {
+            rel.components()
+                .map(|component| {
+                    let typed = component.as_os_str().to_string_lossy();
+                    self.pairs
+                        .iter()
+                        .find(|(spelling, _)| *spelling == typed)
+                        .map(|(_, on_disk)| OsString::from(on_disk))
+                        .unwrap_or_else(|| component.as_os_str().to_os_string())
+                })
+                .collect()
+        }
+
+        fn probe(&self, path: &Path) -> Option<(u64, u64)> {
+            let rel = path.strip_prefix(&self.root).ok()?;
+            let on_disk = self.on_disk(rel);
+            std::fs::symlink_metadata(self.root.join(&on_disk)).ok()?;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            on_disk.hash(&mut hasher);
+            Some((1, hasher.finish()))
+        }
+    }
+
+    fn plan_with(
+        fs: &PairingFs,
+        source_files: &[&str],
+        shielded: &[&str],
+    ) -> (MirrorDeletionPlan, usize) {
+        let source_files: HashSet<String> = source_files.iter().map(|s| s.to_string()).collect();
+        let shielded: HashSet<String> = shielded.iter().map(|s| s.to_string()).collect();
+        let filter = crate::fs_enum::FileFilter::default();
+        let mut probes = 0usize;
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions_with_probe(
+                &fs.root,
+                &source_files,
+                &[],
+                &shielded,
+                true,
+                &filter,
+                &mut |path| {
+                    probes += 1;
+                    fs.probe(path)
+                },
+            )
+            .unwrap();
+        (plan, probes)
+    }
+
+    fn sorted(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        paths.sort();
+        paths
+    }
+
+    /// FAST: a pure-ASCII tree with stale destination entries and new
+    /// source entries in the same directories, an empty destination (a
+    /// first sync) and a synced non-ASCII tree all plan without one
+    /// identity probe.
+    #[test]
+    fn ascii_first_sync_and_synced_trees_probe_no_identities() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(dst.join("dir")).unwrap();
+        std::fs::write(dst.join("keep.txt"), b"k").unwrap();
+        std::fs::write(dst.join("stale.txt"), b"s").unwrap();
+        std::fs::write(dst.join("dir/stale.txt"), b"s").unwrap();
+        let fs = PairingFs {
+            root: dst.clone(),
+            pairs: vec![],
+        };
+        let (plan, probes) = plan_with(&fs, &["keep.txt", "dir/new.txt", "other/new.txt"], &[]);
+        assert_eq!(probes, 0, "a pure-ASCII tree is never probed");
+        assert_eq!(
+            sorted(plan.files.clone()),
+            sorted(vec![dst.join("stale.txt"), dst.join("dir/stale.txt")]),
+        );
+        assert!(plan.dirs.is_empty(), "{plan:?}");
+
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let fs = PairingFs {
+            root: empty,
+            pairs: vec![],
+        };
+        let (plan, probes) = plan_with(&fs, &["\u{fc}bung/notes.txt", "caf\u{e9}.txt"], &[]);
+        assert_eq!(
+            probes, 0,
+            "a first sync has no destination candidate to pair"
+        );
+        assert!(plan.files.is_empty() && plan.dirs.is_empty(), "{plan:?}");
+
+        let synced = tmp.path().join("synced");
+        std::fs::create_dir_all(synced.join("\u{fc}bung")).unwrap();
+        std::fs::write(synced.join("\u{fc}bung/notes.txt"), b"n").unwrap();
+        let fs = PairingFs {
+            root: synced,
+            pairs: vec![],
+        };
+        let (plan, probes) = plan_with(&fs, &["\u{fc}bung/notes.txt"], &[]);
+        assert_eq!(
+            probes, 0,
+            "a synced tree has nothing unmatched on either side"
+        );
+        assert!(plan.files.is_empty() && plan.dirs.is_empty(), "{plan:?}");
+    }
+
+    /// AC-3: the destination stores the kept source directory `bß` as the
+    /// ASCII spelling `bSS` (APFS folds `ß` to `SS`). The directory and
+    /// the kept file inside it are kept — the child meets its source
+    /// spelling through the paired directory — while a stale child of the
+    /// same directory and an unrelated entry are still planned.
+    #[test]
+    fn an_ascii_destination_spelling_of_a_kept_non_ascii_directory_is_kept_with_its_children() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(dst.join("bSS")).unwrap();
+        std::fs::write(dst.join("bSS/a.txt"), b"kept").unwrap();
+        std::fs::write(dst.join("bSS/stale.txt"), b"stale").unwrap();
+        std::fs::write(dst.join("other.txt"), b"x").unwrap();
+        let fs = PairingFs {
+            root: dst.clone(),
+            pairs: vec![("b\u{df}", "bSS")],
+        };
+        let (plan, probes) = plan_with(&fs, &["b\u{df}/a.txt"], &[]);
+        assert!(probes > 0, "the candidate directory is probed");
+        assert_eq!(
+            sorted(plan.files.clone()),
+            sorted(vec![dst.join("bSS/stale.txt"), dst.join("other.txt")]),
+        );
+        assert!(
+            plan.dirs.is_empty(),
+            "the paired directory is kept: {plan:?}"
+        );
+    }
+
+    /// AC-3: a failed source path `ς` is stored at the destination as
+    /// `σ` (APFS and NTFS pair the sigmas). The directory under that
+    /// spelling is shielded with everything in it; an unrelated entry is
+    /// still planned. Control: with nothing failed and nothing kept, the
+    /// same directory is extraneous.
+    #[test]
+    fn a_destination_spelling_the_filesystem_pairs_with_a_failed_path_is_shielded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(dst.join("\u{3c3}")).unwrap();
+        std::fs::write(dst.join("\u{3c3}/child.bin"), b"keep me").unwrap();
+        std::fs::write(dst.join("extraneous.bin"), b"x").unwrap();
+        let fs = PairingFs {
+            root: dst.clone(),
+            pairs: vec![("\u{3c2}", "\u{3c3}")],
+        };
+        let (plan, probes) = plan_with(&fs, &[], &["\u{3c2}"]);
+        assert!(probes > 0);
+        assert_eq!(plan.files, vec![dst.join("extraneous.bin")], "{plan:?}");
+        assert!(plan.dirs.is_empty(), "{plan:?}");
+
+        let (plan, _) = plan_with(&fs, &[], &[]);
+        assert_eq!(
+            sorted(plan.files.clone()),
+            sorted(vec![
+                dst.join("extraneous.bin"),
+                dst.join("\u{3c3}/child.bin")
+            ]),
+            "control: unshielded, the directory is extraneous: {plan:?}"
+        );
+        assert_eq!(plan.dirs, vec![dst.join("\u{3c3}")]);
+    }
+
+    /// AC-3: the source's NFC `café.txt` is stored at the destination in
+    /// NFD (APFS pairs the two); the file is kept and a stale neighbour
+    /// is planned.
+    #[test]
+    fn nfc_and_nfd_spellings_pair_through_the_filesystem() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("cafe\u{301}.txt"), b"kept").unwrap();
+        std::fs::write(dst.join("stale.txt"), b"stale").unwrap();
+        let fs = PairingFs {
+            root: dst.clone(),
+            pairs: vec![("caf\u{e9}.txt", "cafe\u{301}.txt")],
+        };
+        let (plan, _) = plan_with(&fs, &["caf\u{e9}.txt"], &[]);
+        assert_eq!(plan.files, vec![dst.join("stale.txt")], "{plan:?}");
+        assert!(plan.dirs.is_empty(), "{plan:?}");
+    }
+
+    /// AC-3 on the real filesystem: NTFS and APFS pair `Übung` with
+    /// `übung`, which the key folds in memory. Runs on the
+    /// case-insensitive-default platforms only. (NTFS pairs simple case
+    /// mappings only — measured 2026-10-21 on this repo's Windows host, it
+    /// resolves neither `ς` to `σ`, NFD to NFC, nor `ẞ` to `ß` — so no
+    /// plain name reaches the identity pass there; see the APFS test.)
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn unicode_case_spellings_are_kept_on_case_insensitive_platforms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(dst.join("\u{dc}bung")).unwrap();
+        std::fs::write(dst.join("\u{dc}bung/notes.txt"), b"kept").unwrap();
+        std::fs::write(dst.join("stale.txt"), b"stale").unwrap();
+        let source_files: HashSet<String> = HashSet::from(["\u{fc}bung/notes.txt".to_string()]);
+        let filter = crate::fs_enum::FileFilter::default();
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions(&dst, &source_files, &[], &HashSet::new(), true, &filter)
+            .unwrap();
+        assert_eq!(plan.files, vec![dst.join("stale.txt")], "{plan:?}");
+        assert!(plan.dirs.is_empty(), "{plan:?}");
+    }
+
+    /// AC-3 on APFS, through the filesystem's own pairing rather than the
+    /// key: the source's final sigma `ς` is kept under the destination's
+    /// `σ`, and its NFC `café` under the destination's NFD spelling.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sigma_and_nfd_spellings_are_kept_on_apfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("\u{3c3}.txt"), b"kept").unwrap();
+        std::fs::write(dst.join("cafe\u{301}.txt"), b"kept").unwrap();
+        std::fs::write(dst.join("stale.txt"), b"stale").unwrap();
+        let source_files: HashSet<String> =
+            HashSet::from(["\u{3c2}.txt".to_string(), "caf\u{e9}.txt".to_string()]);
+        let filter = crate::fs_enum::FileFilter::default();
+        let plan = MirrorPlanner::new(false)
+            .plan_session_deletions(&dst, &source_files, &[], &HashSet::new(), true, &filter)
+            .unwrap();
+        assert_eq!(plan.files, vec![dst.join("stale.txt")], "{plan:?}");
+        assert!(plan.dirs.is_empty(), "{plan:?}");
+    }
+}
+
+#[cfg(test)]
 mod casefold_tests {
     use super::CasefoldKey;
     use std::path::Path;
+
+    // af-3: the fold is Unicode lowercase, not ASCII — `Übung` and `übung`
+    // are one entry on NTFS and APFS.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn casefold_folds_unicode_case_on_case_insensitive_platforms() {
+        assert_eq!(
+            CasefoldKey::new(Path::new("\u{dc}bung/\u{3a3}.TXT")),
+            CasefoldKey::new(Path::new("\u{fc}bung/\u{3c3}.txt"))
+        );
+    }
 
     // On NTFS/APFS the mirror keep-set must treat `Foo.txt` and `foo.txt` as
     // the same file, or the session mirror deletes a just-written file whose
