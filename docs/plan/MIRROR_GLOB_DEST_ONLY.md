@@ -1,6 +1,6 @@
 # Mirror pure-glob excludes and destination-only entries on pairing filesystems
 
-**Status**: Draft (r1, 2026-10-21 — owner interview in progress; decisions land here as they are made)
+**Status**: Superseded (2026-10-21) by `docs/plan/EXCLUDE_CASE_MATCHING.md` — every mechanism option here (A–E, B′) was withdrawn by the owner as violating SIMPLE and RELIABLE; the §Prior art measurements of robocopy and rsync remain the record and are referenced from the successor.
 **Created**: 2026-10-21
 **Supersedes**: the first bullet of `docs/RELEASE_NOTES_1_0.md` "Known limitations shipped open" (the pure-glob destination-only limitation), once this plan ships; extends `docs/plan/RELEASE_1_0.md` G3b under D-2026-10-19-2
 **Decision ref**: pending (activation needs a `docs/DECISIONS.md` entry)
