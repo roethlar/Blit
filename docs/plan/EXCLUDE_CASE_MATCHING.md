@@ -21,6 +21,7 @@ A user who gives a pattern to a command that can delete is told, in one line and
 - "that requires us to know what the remote target's filesystem is, so that's a daemon change" — the line therefore states blit's own rule, which is identical everywhere, and needs no probe of the destination's disk.
 - "the example needs to be the actual string the user entered."
 - "if the user specifies --ignore-case and not -y then the message should not print, just the normal delete warning" — the line exists to present a choice not yet made; once made, it is silent.
+- "if we have an include from, we need an exclude from. so --files-from needs an exclusion analog. every entry in either needs to be exact or a [pattern], so users with a 50 line file won't miss something and delete all their .Jpg files" — hence `--exclude-from FILE` and `--include-from FILE` (rsync's shape: one pattern per line, blank lines and `#` comments ignored), each line treated exactly as one more command-line pattern under the run's one case mode; `--files-from` stays the literal name list it is today. (Owner wrote "regex"; blit's patterns are globs — `*.jpg` — and a file line is an exact name or a glob, the same syntax as the option. Reading confirmed with the owner: pending.)
 
 ## Non-goals
 
@@ -47,6 +48,7 @@ A user who gives a pattern to a command that can delete is told, in one line and
 - [ ] **AC-4 (prompt, `--ignore-case`)**: the same command with `--ignore-case` and no `-y` prints the normal delete warning ONLY — no matching line.
 - [ ] **AC-5 (friction)**: several patterns → one line (the first pattern containing a letter, then `and N more patterns`); a pattern with no letters (`??`, `*.1`) → no line; `-y` → no prompt and no line; `--ignore-case` → no line; `copy` with patterns and no delete option → no line.
 - [ ] **AC-6 (peer)**: the mode reaches the source daemon and the destination daemon at session open; a `mirror` to a daemon with `--ignore-case` keeps the destination-only `aCache` there too; contract 9 is refused by a contract-8 peer with the existing refusal.
+- [ ] **AC-8 (pattern files)**: `--exclude-from FILE` and `--include-from FILE` read one pattern per line (UTF-8; blank lines and lines starting with `#` ignored; surrounding whitespace kept as rsync keeps it — Q5), each behaving exactly as the same pattern given on the command line, under the run's case mode; both repeatable and combinable with `--exclude`/`--include`; a missing or unreadable FILE refuses the run before any transfer or prompt; the prompt line's count reads `and N more patterns (from FILE)` when the first letter-bearing pattern came from the command line and others from a file. `--files-from` is unchanged: exact names, no patterns, no case folding.
 - [ ] **AC-7 (records)**: `--ignore-case` is recorded in the saved job / run record and replayed by `blit jobs run` and `jobs retry`; `--help` documents both options in one sentence each; `docs/RELEASE_NOTES_1_0.md` replaces the pure-glob limitation with the rule and the prompt line; `README.md` and `docs/TRANSFER_SESSION.md` state the rule.
 
 ## Design
@@ -62,6 +64,11 @@ A user who gives a pattern to a command that can delete is told, in one line and
 - `crates/blit-cli/src/cli.rs`: `--match-case` (default, `conflicts_with = "ignore_case"`) and `--ignore-case` on `copy`, `mirror`, `move` (the pattern-bearing transfer verbs), one sentence of help each.
 - `crates/blit-cli/src/transfers/mod.rs` `confirm_destructive_operation` (the existing `mirror`/`move` prompt, `:347`, `:802`): when any `--exclude`/`--include` pattern is present AND `--ignore-case` is absent, add one line built from the first pattern containing a letter: the pattern as typed in quotes, then `matches <as typed> only; capital letters matter (--ignore-case would also match <lower>, <UPPER>)`. `<lower>`/`<UPPER>` are the pattern's literal text with its letters lowered/uppered (wildcards unchanged); whichever equals the typed form is omitted. Further patterns: `and N more patterns`. No line when no pattern holds a letter. With `--ignore-case` the prompt is the normal delete warning only. `-y` skips the whole prompt as today.
 - No probe of any disk anywhere in this path.
+
+### Pattern files
+
+- `crates/blit-cli/src/cli.rs`: `--exclude-from FILE` and `--include-from FILE` on `copy`, `mirror`, `move`, repeatable. Read in the CLI (the daemon never sees a file, only the patterns, exactly as with `--exclude` today), appended to the pattern lists before validation, so every downstream path — `FilterSpec` on the wire, `FileFilter`, the deletion scope, the saved job record — sees patterns only and needs no change for the file. One-line help each, naming rsync's convention.
+- The saved job records the PATTERNS read, not the file path, so a replay does not depend on a file that may have changed (Q6 asks the owner to confirm).
 
 ### Wire
 
@@ -88,11 +95,14 @@ One coherent, testable change per slice — sized for the `.review/` loop.
 1. **Matching + option, local**: `FileFilter.ignore_case`, compiled patterns, deletion scope, `--match-case`/`--ignore-case` on the CLI (local transfers only), unit guards for AC-1/AC-2 on every OS plus the `ß`/`ς` non-match guard, `exclude_contract.rs` end-to-end guard for the destination-only `aCache` kept under `--ignore-case` on every OS.
 2. **Prompt line**: `confirm_destructive_operation` gains the line; guards for AC-3/AC-4/AC-5 through the CLI's dispatch tests (prompt text captured; no-letter and multi-pattern cases; `-y` and `copy` suppress).
 3. **Wire**: `FilterSpec.ignore_case`, contract 9, daemon source walk and destination scope honor it; daemon end-to-end guard (AC-6).
+3b. **Pattern files**: `--exclude-from` / `--include-from` in the CLI, read before validation; guards for AC-8 (file lines equal command-line patterns; comments and blanks; missing file refuses; count wording); CLI only, no core or wire change.
 4. **Records + docs**: job spec field and replay (AC-7), `--help`, release notes, README, TRANSFER_SESSION, CHANGELOG; `MIRROR_GLOB_DEST_ONLY.md` marked Superseded; STATE/RELEASE_1_0 G3b updated: the pure-glob item is closed by this rule, not by pairing.
 
 ## Open questions
 
 - ~~**Q1 — what is a letter**~~ — **settled 2026-10-21 (owner "yes")**: Unicode simple case folding, the `grep -i`/ripgrep rule; see Constraints §Letters. Prior-art survey behind it: exact (rsync filters; git ignore rules, believed ASCII-fold only in case-insensitive repos); ASCII-only (globset's own mode, SQLite `NOCASE`); simple folding (GNU grep, ripgrep, Python, Java; NTFS a frozen subset; ZFS, Samba per-letter upcasing); full folding (collation libraries; APFS per this repo's tests, unverified by this session).
-- **Q2 — scope of `--ignore-case`**: `--exclude` and `--include` patterns only [recommended], or also the literal lists (`--files-from`). — owner
+- **Q2 — scope of `--ignore-case`**: every pattern in the run — `--exclude`, `--include`, and every line of `--exclude-from`/`--include-from` — and never the literal `--files-from` list [recommended reading of the owner's 2026-10-21 statement; awaiting confirmation]. — owner
+- **Q5 — pattern-file line handling**: rsync's rule (blank lines and `#` comments ignored, whitespace kept, no quoting) [recommended], or trim surrounding whitespace. — owner
+- **Q6 — saved jobs**: record the patterns read from the file (replay independent of the file) [recommended], or record the file path and re-read it at replay. — owner
 - **Q3 — `copy`**: `copy` never deletes at the destination, so no prompt line there [recommended]; or show it anyway when patterns are present. — owner
 - **Q4 — the 2026-10-19 cases**: confirm they are closed as expected behavior under `--match-case` (documented, not fixed), so the G3b blocker entry is retired on activation. — owner
