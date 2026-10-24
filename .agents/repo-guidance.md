@@ -196,25 +196,30 @@ cargo test --workspace
 
 ## Remotes & Sync
 
-- `origin` — `http://magneto:3001/michael/blit_v2.git` (**LAN gitea** on
-  magneto; re-verified against `git remote -v` 2026-09-25, and
-  `git ls-remote origin` answers). Earlier recorded values —
-  `http://q:3000/michael/blit_v2.git`, then
-  `http://127.0.0.1:3000/michael/Blit_v2.git` (2026-08-18) — are stale;
-  neither host answers on port 3000 as of 2026-09-25. This is what a bare
-  `git push` / `git ls-remote origin` talks to.
-- `github` — `https://github.com/roethlar/Blit.git` (**GitHub**; owner
-  re-pointed the remote 2026-08-18 from the old lowercase
-  `roethlar/blit.git`, which GitHub redirects).
-- **`git push` does NOT update GitHub.** The two remotes are independent
-  and nothing auto-syncs them: pushing `origin` moves the LAN gitea only,
-  and GitHub needs its own explicit `git push github`. Either can lag the
-  other by many commits. A ref-listing before a push must therefore name
-  the remote's **URL**, not just "origin" — the name alone does not say
-  which host is being published to.
+- `origin` — `http://magneto:3001/michael/blit_v2.git` (**the canonical
+  Gitea**, on magneto; re-verified against `git remote -v` 2026-09-25 and
+  2026-10-24). This is what a bare `git push` / `git ls-remote origin`
+  talks to.
+- `github` — `https://github.com/roethlar/Blit` (**GitHub**, the second
+  remote, kept in sync with `origin`; owner re-pointed it 2026-08-18 from
+  the old lowercase `roethlar/blit.git`, which GitHub redirects).
+- **Retired 2026-10-24 (owner: "q is gone, so anything that references it
+  is out of date"):** host `q` and its Gitea, `http://q:3000/michael/blit_v2.git`,
+  the original `origin`. The interim
+  `http://127.0.0.1:3000/michael/Blit_v2.git` (2026-08-18) is stale too.
+  Neither is a remote, a clone source or a push target.
+- **Push practice: publish to BOTH remotes.** Once a push is approved,
+  push the same branch fast-forward to `origin` and then to `github`
+  (`git push origin master && git push github master`); confirm afterwards
+  that both remote refs equal the local ref. Nothing auto-syncs them:
+  `git push` alone moves the Gitea only, and a skipped `git push github`
+  leaves GitHub lagging (it was dozens of commits stale before 2026-07-13).
+  A ref-listing before a push must name each remote's **URL**, not just
+  "origin" — the name alone does not say which host is being published to.
 - **CORRECTED 2026-07-13** against `git remote -v` (evidence in the
   session's push output: a bare `git push` printed
-  `To http://q:3000/michael/blit_v2.git`, while `git push github` printed
+  `To http://q:3000/michael/blit_v2.git` — `origin`'s host then, retired
+  2026-10-24 — while `git push github` printed
   `To https://github.com/roethlar/Blit.git` and fast-forwarded GitHub
   `6d37a22..be1989d` — i.e. GitHub had been dozens of commits stale while
   every agent push went to the mirror). The prior text had the two names
