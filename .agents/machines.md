@@ -7,6 +7,12 @@
 - NOPASSWD sudoers rule for the zoey pool-drain/purge helper.
 - zig + cargo-zigbuild toolchain (aarch64-musl static daemon builds).
 - ssh ControlMaster sockets configured for the rigs.
+- 10GbE (moved here 2026-10-24 from the retired `q` section): `en11`
+  (Thunderbolt Ethernet Slot 1) at 10.1.10.104, MTU 9000 on 2026-09-25;
+  on 2026-10-04 it lost carrier, then the owner restored it the same day:
+  10Gbase-T, 10.1.10.104, **MTU 1500** (not 9000) — re-check live before
+  any bench use. The Windows dev VM bridges onto `en11` (UTM "Bridged", see
+  the VM section): with `en11` down the VM cannot start or is unreachable.
 - As of 2026-07-23 (re-verified present 2026-10-04 with a read-only
   `socketfilterfw --listapps`), macOS Application Firewall inventory contains the stale
   prior-test path
@@ -45,8 +51,9 @@ Unix reports `ENOTDIR`, so the guard cannot go red there. It was proven on
   2026-08-01. Not usable for this without a toolchain first.
 
 Method that worked: clone from the LAN gitea
-(`http://magneto:3001/michael/blit_v2.git`, `origin` per `git remote -v`
-since 2026-09-25; the older `q:3000` URL no longer answers), which the hosts
+(`http://magneto:3001/michael/blit_v2.git`, the canonical Gitea and
+`origin` per `git remote -v` since 2026-09-25; the old `q:3000` Gitea is
+retired with host `q`, 2026-10-24), which the hosts
 can reach, so the exact pushed commit is under test rather than an rsync of
 a dirty tree.
 
@@ -129,7 +136,9 @@ every Linux target in play).
 
 ## Network / MTU (rig-critical — read before touching MTU)
 
-- **Direct Mac-to-Mac Thunderbolt pair (observed 2026-07-22):** Nagatha
+- **RETIRED 2026-10-24 — `q` is gone, so this pair no longer exists;**
+  kept as the record behind the certified results it cites.
+  **Direct Mac-to-Mac Thunderbolt pair (observed 2026-07-22):** Nagatha
   (`Mac16,5`, 48 GiB) and Q (`Mac16,10`, 16 GiB) negotiate 40 Gb/s. Their
   `Thunderbolt Bridge` services use persistent isolated addresses
   `172.31.254.1/30` and `172.31.254.2/30`, respectively, with no router or DNS; <!-- lint: allow (owner ruled leave-it, 2026-07-25: IPv4 CIDR addresses, not repo paths) -->
@@ -201,7 +210,30 @@ every Linux target in play).
 - Local VM on the Mac — Ubuntu ARM (aarch64), per owner. Build-only
   fallback likewise.
 
-## `q` — THE DEDICATED BENCH MAC (new 2026-07-13; use this, not nagatha)
+## `q` — RETIRED 2026-10-24 (was THE DEDICATED BENCH MAC, 2026-07-13 to retirement)
+
+**RETIRED 2026-10-24 (owner: "q is gone, so anything that references it is
+out of date").** Do not ssh to, stage on, clone from, push to or bench on
+`q`, `Q.local` or `q:3000`. Everything in this section below this note is
+history, kept because dated bench records (`docs/bench/`, `DEVLOG.md`, the
+ldt-4 and otp-12 plans) cite it; the general macOS lessons in it (routing
+by network-service order, the host-route black hole, ssh throughput below
+the gigabit ceiling, directional MSS) still apply to any Mac bench end.
+
+- **Bench work that used `q` needs a new venue, and none is chosen.** `q`
+  was the rig-W (Mac↔Windows) Mac end, one end of the Mac↔Mac Thunderbolt
+  pair, and the `Q_SSH=michael@q` default of the rig-W bench scripts under
+  `scripts/`. Picking its replacement is an owner decision. Bench hosts
+  this file still lists: **nagatha** (this Mac — the rig-W Mac end before
+  `q`, under the quiet-Mac rules in "THE MAC IS A BENCH END" below; its
+  `en11` was last recorded at MTU 1500), **netwatch-01** (the Windows end,
+  reinstalled 2026-10-17 as `michael@10.1.10.98`), and **magneto** ↔
+  **skippy** (the same-OS Linux pair). Not bench ends: altiera (2.5 GbE),
+  zoey as a skippy partner (CPU too slow), gabrielle and the VMs (test or
+  build only).
+- **Its Gitea is replaced:** the canonical Gitea is
+  `http://magneto:3001/michael/<repo>.git` (`origin`), with GitHub kept in
+  sync as the second remote — `.agents/repo-guidance.md` Remotes & Sync.
 
 `ssh michael@q` — Apple **M4 Mac mini**, 16 GB, macOS 26.5.2, arm64. It is now
 the rig-W Mac end: **quiet, dedicated, and faster than nagatha** (1 GiB in
@@ -240,12 +272,8 @@ review loop from rig-W benchmarking** — the contention that destroyed a
 
 - **10GbE**: `en8` = **10.1.10.54**, MTU **9000**, media 10Gbase-T. This is the
   **Aquantia adapter physically moved off nagatha**; any doc naming
-  "Aquantia @ .54 on nagatha" is stale. nagatha's own 10GbE was `en11` at
-  10.1.10.104, MTU 9000 on 2026-09-25; on 2026-10-04 `en11` (Thunderbolt
-  Ethernet Slot 1) lost carrier, then the owner restored it the same day:
-  10Gbase-T, 10.1.10.104, **MTU 1500** (not 9000) — re-check live before any
-  bench use. The Windows dev VM bridges onto `en11` (UTM "Bridged", see the
-  VM section): with `en11` down the VM cannot start or is unreachable.
+  "Aquantia @ .54 on nagatha" is stale. nagatha's own 10GbE (`en11`) is
+  recorded in the "This Mac" section (moved there 2026-10-24).
 - **⚠ THE MULTI-NIC ROUTING TRAP (cost ~1h).** `q` has THREE IPs on
   10.1.10.0/24 — `en0` (1GbE, .221), `en1` (Wi-Fi, .108), `en8` (10GbE, .54) —
   and macOS routes the subnet via the highest-ranked **network service**, not by
@@ -288,13 +316,13 @@ review loop from rig-W benchmarking** — the contention that destroyed a
   has the expected 1,930-commit target history. q's native Bash 3.2 no-SSH
   harness self-test passes all 96 arms. This stages no new product binary; the
   registered accepted `406a7e5` artifacts remain the run payload.
-- **`q` RAN GITEA** (it was `origin`, `http://q:3000`). **Stale as of
-  2026-09-25:** `origin` is `http://magneto:3001/michael/blit_v2.git` and
-  `q:3000` does not answer (re-checked 2026-10-04); `BlitAdmin_UIs` answers
-  at `http://magneto:3001/michael/BlitAdmin_UIs.git` (`git ls-remote`,
-  2026-10-04). Whether q still runs gitea at all is unverified. The
-  quiet-bench rule stands: **do not push to `origin` during a benchmark
-  session** (magneto is a bench end too).
+- **`q` RAN GITEA** (it was `origin`, `http://q:3000`). **Retired
+  2026-10-24 with the host** (stale since 2026-09-25, when `origin` moved to
+  `http://magneto:3001/michael/blit_v2.git`; `q:3000` stopped answering).
+  `BlitAdmin_UIs` is at `http://magneto:3001/michael/BlitAdmin_UIs.git`
+  (`git ls-remote`, 2026-10-04). The quiet-bench rule stands for the magneto
+  Gitea: **do not push to `origin` during a benchmark session** (magneto is
+  a bench end too).
 
 ## THE MAC IS A BENCH END — keep it quiet (recorded 2026-07-13, learned the hard way)
 
@@ -342,7 +370,8 @@ retraction: a cost billed to one arm and not the other.)
     asymmetry; only the delta is suspect.
   * Harnesses take the Mac IP via `MAC_HOST=` — pass **10.1.10.54**
     (older invocations in the DEVLOG say 10.1.10.91). **Not current NIC
-    identity:** the Aquantia later moved to `q` — see the `q` section.
+    identity:** the Aquantia later moved to `q` (retired 2026-10-24) — see
+    the `q` section.
 - **netwatch-01 REINSTALLED 2026-10-17 (owner): new NIC, new MAC, new IP
   `michael@10.1.10.98`** — Windows 11 Pro build 26300 (the G5b run read it; an earlier probe said 26100), NTFS, 10 Gbps link,
   `michael` is an administrator; sshd's default shell is Windows PowerShell
@@ -358,7 +387,7 @@ retraction: a cost billed to one arm and not the other.)
   netwatch-01's addressing is history.
 - Windows box = **`michael@netwatch-01`**. IP **10.1.10.177 as of
   2026-07-12** (then treated as replacing 10.1.10.173). **Superseded
-  2026-07-21 (D-2026-07-21-1 / `q` section):** DHCP moved back to
+  2026-07-21 (D-2026-07-21-1 / the retired `q` section):** DHCP moved back to
   **10.1.10.173**; this residue is not current addressing. ssh
   by hostname; if the bare name stops resolving, `netwatch-01.local` or
   the live IP both work — the host key is filed under both. **MTU raised
