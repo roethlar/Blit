@@ -222,8 +222,18 @@ the gigabit ceiling, directional MSS) still apply to any Mac bench end.
 
 - **Bench work that used `q` needs a new venue, and none is chosen.** `q`
   was the rig-W (Mac↔Windows) Mac end, one end of the Mac↔Mac Thunderbolt
-  pair, and the `Q_SSH=michael@q` default of the rig-W bench scripts under
-  `scripts/`. Picking its replacement is an owner decision. Bench hosts
+  pair, and the hard-coded `Q_SSH=michael@q` remote end of the Mac↔Mac
+  harness `scripts/bench_otp12pf_mac.sh`. **That script now takes the
+  remote Mac's ssh endpoint from `Q_SSH` (user@host), required, no default
+  (D-2026-10-24-1):** `Q_SSH=<user@host> SELFTEST=1 bash scripts/bench_otp12pf_mac.sh`;
+  unset or empty, it exits 1 naming `Q_SSH`. Its registered NIC/IP/MAC pins
+  are still q's, so its topology gate refuses any other Mac until the
+  pre-registration is amended. The rig-W harnesses
+  `scripts/bench_otp12pf_rigw.sh` and `scripts/bench_ldt4_rigw.sh` run ON
+  the Mac rather than reaching it, so they take no endpoint; their identity
+  gates (hostname `q.lan` / `LocalHostName Q`, `en8` 10.1.10.54, q's MAC)
+  are unchanged and refuse every host but q.
+  Picking q's replacement is an owner decision. Bench hosts
   this file still lists: **nagatha** (this Mac — the rig-W Mac end before
   `q`, under the quiet-Mac rules in "THE MAC IS A BENCH END" below; its
   `en11` was last recorded at MTU 1500), **netwatch-01** (the Windows end,

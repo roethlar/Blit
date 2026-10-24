@@ -77,10 +77,10 @@
 # ssh. Each timed window is self-timed ON the initiating host (locally, or INSIDE
 # one ssh), so dispatch is outside the window by construction.
 #
-# Usage:
-#   SELFTEST=1       bash scripts/bench_otp12pf_mac.sh   # exercise every gate, no data
-#   PREFLIGHT_ONLY=1 EXPECT_SHA=f35702a bash scripts/bench_otp12pf_mac.sh
-#   EXPECT_SHA=f35702a bash scripts/bench_otp12pf_mac.sh # the run (needs review clearance)
+# Usage (Q_SSH is REQUIRED, no default: the remote Mac's ssh endpoint, user@host):
+#   Q_SSH=<user@host> SELFTEST=1       bash scripts/bench_otp12pf_mac.sh   # exercise every gate, no data
+#   Q_SSH=<user@host> PREFLIGHT_ONLY=1 EXPECT_SHA=f35702a bash scripts/bench_otp12pf_mac.sh
+#   Q_SSH=<user@host> EXPECT_SHA=f35702a bash scripts/bench_otp12pf_mac.sh # the run (needs review clearance)
 # =============================================================================
 set -euo pipefail
 
@@ -151,7 +151,7 @@ Q_MODULE="${Q_MODULE:-/Users/michael/blit-bench-work}"
 # =============================================================================
 _overrides=""
 for _v in SETTLE_MS LOAD_MAX DRAIN_ITERS DRAIN_QUIET DRAIN_MBPS DELTA_REF_MS TIMER_TOLERANCE_MS \
-          N_IP N_NIC N_MAC Q_IP Q_NIC Q_MAC Q_SSH REGISTERED_MTU REGISTERED_MEDIA REGISTERED_MSS \
+          N_IP N_NIC N_MAC Q_IP Q_NIC Q_MAC REGISTERED_MTU REGISTERED_MEDIA REGISTERED_MSS \
           RUNS PORT; do
   [[ -n "${!_v+set}" ]] && _overrides="$_overrides $_v=${!_v}"
 done
@@ -199,8 +199,11 @@ TIMER_TOLERANCE_MS=120     # the timer self-test's allowed error on a 1000 ms sl
 N_IP=10.1.10.92                       # nagatha, 10GbE en11
 N_NIC=en11
 N_MAC=00:e0:4d:01:4c:a3               # nagatha's OWN en11 MAC (measured)
-Q_SSH=michael@q
-Q_IP=10.1.10.54                       # q, 10GbE en8
+# Q_SSH is the ssh endpoint of the remote Mac, NOT a registered constant (D-2026-10-24-1:
+# the host it named, q, is retired). It is REQUIRED and has NO default. The NIC/IP/MAC
+# below stay registered: topology_gate() still has to prove the fabric on the wire.
+Q_SSH="${Q_SSH:?set Q_SSH to the remote Mac ssh endpoint (user@host); there is no default host}"
+Q_IP=10.1.10.54                      # q, 10GbE en8
 Q_NIC=en8
 Q_MAC=00:01:d2:19:04:a3               # q's OWN en8 MAC (measured)
 

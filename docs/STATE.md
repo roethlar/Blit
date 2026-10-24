@@ -13,7 +13,7 @@ CI `build-release` signs the shipped binaries when the signing secrets are prese
   live controller resized, but fixed order confounds the Windows→q ADD/REMOVE
   split with source warmth. Session ledger and write cost:
   `docs/bench/ldt4-evidence-audit-2026-07-22/`.
-- **RIG-W HOST AND QUIETNESS RULES:** `.agents/machines.md` is canonical. `q`, the rig-W Mac end, is retired (owner, 2026-10-24: "q is gone"); its replacement is an owner choice not yet made. Any rig-W run must establish quietness live on both ends; recorded readiness is never substituted for the run gate.
+- **RIG-W HOST AND QUIETNESS RULES:** `.agents/machines.md` is canonical. `q`, the rig-W Mac end, is retired (owner, 2026-10-24: "q is gone"); its replacement is an owner choice not yet made. The Mac↔Mac harness takes the remote Mac's ssh endpoint from `Q_SSH`, required with no default (D-2026-10-24-1); the q-bound identity gates in the rig-W harnesses are unchanged (`.agents/machines.md`). Any rig-W run must establish quietness live on both ends; recorded readiness is never substituted for the run gate.
 - **P1 IS CLOSED WITHOUT ANOTHER TRANSFER (D-2026-07-22-2).** The failing
   builds used the old-red worker path: its deterministic guard settled SOURCE
   initiation at 3 workers and DESTINATION initiation at 2, while a second
