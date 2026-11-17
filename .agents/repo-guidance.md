@@ -202,7 +202,7 @@ cargo test --workspace
   talks to.
 - `github` — `https://github.com/roethlar/Blit` (**GitHub**, the second
   remote, kept in sync with `origin`; owner re-pointed it 2026-08-18 from
-  the old lowercase `roethlar/blit.git`, which GitHub redirects).
+  the old lowercase `https://github.com/roethlar/blit.git`, which GitHub redirects).
 - **Retired 2026-10-24 (owner: "q is gone, so anything that references it
   is out of date"):** host `q` and its Gitea, `http://q:3000/michael/blit_v2.git`,
   the original `origin`. The interim
@@ -271,7 +271,7 @@ consent (`docs/DECISIONS.md` D-2026-06-07-1).
   (`transfer_session`, `SessionFault`, `CONTRACT_VERSION`).
 - No blocking calls inside async contexts (use async send APIs in Tokio).
 - Prefer async-aware tests (`#[tokio::test]`) for planner/engine work; keep
-  tests deterministic; capture long logs under `logs/`.
+  tests deterministic; capture long logs under `logs/`. <!-- lint: allow (owner ruled leave-it, 2026-11-17: gitignored test-log dir in .gitignore, not tracked) -->
 
 ## Project Map
 
