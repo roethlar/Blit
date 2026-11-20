@@ -1322,9 +1322,10 @@ impl DestinationNames {
         if components.is_empty() {
             return false;
         }
-        let texts: Vec<String> = components
+        // cr-ecm2-2: each component's own bytes, never a lossy copy.
+        let texts: Vec<std::borrow::Cow<'_, [u8]>> = components
             .iter()
-            .map(|name| name.to_string_lossy().into_owned())
+            .map(|name| crate::fs_enum::match_bytes(name))
             .collect();
         if self.names.is_empty() && self.paths.is_empty() && self.pruned.is_empty() {
             return false;
@@ -1360,26 +1361,30 @@ impl DestinationNames {
     /// The component `texts[at]`, an entry of the directory `parent`:
     /// whether it is out of the deletion scope, and how far each path rule
     /// has read once it is taken.
-    fn step(&self, parent: &mut Level, texts: &[String], at: usize) -> (bool, Vec<Vec<State>>) {
+    fn step(
+        &self,
+        parent: &mut Level,
+        texts: &[std::borrow::Cow<'_, [u8]>],
+        at: usize,
+    ) -> (bool, Vec<Vec<State>>) {
         let Level {
             path,
             states,
             found,
             ..
         } = parent;
-        let entry = texts[at].as_str();
+        let entry: &[u8] = &texts[at];
         let mut matches = |index: usize| {
             let name = &self.literals[index];
-            entry == name
-                || self
-                    .any_case
-                    .get(index)
-                    .is_some_and(|any_case| any_case.is_match(entry))
+            entry == name.as_bytes()
+                || self.any_case.get(index).is_some_and(|any_case| {
+                    any_case.is_match_candidate(&globset::Candidate::from_bytes(entry))
+                })
                 || found
                     .entry(index)
                     .or_insert_with(|| self.lookup(path, name))
                     .iter()
-                    .any(|stored| stored == entry)
+                    .any(|stored| stored.as_bytes() == entry)
         };
         let mut protected = self.names.iter().any(|&index| matches(index));
         let next = self
@@ -1564,7 +1569,7 @@ fn push_state(steps: &[Step], states: &mut Vec<State>, state: State) {
 fn advance(
     steps: &[Step],
     from: &[State],
-    texts: &[String],
+    texts: &[std::borrow::Cow<'_, [u8]>],
     at: usize,
     matches: &mut impl FnMut(usize) -> bool,
 ) -> (Vec<State>, bool) {
@@ -1592,7 +1597,7 @@ fn advance(
                             .expect("a glob DFA has a start state"),
                         _ => unreachable!("a streamed glob has only DFA states"),
                     };
-                    for &byte in texts[at].as_bytes() {
+                    for &byte in texts[at].iter() {
                         state = dfa.next_state(state, byte);
                     }
                     if dfa.is_match_state(dfa.next_eoi_state(state)) {
@@ -1607,8 +1612,8 @@ fn advance(
                         None => at,
                         _ => unreachable!("an unstreamed glob has only start states"),
                     };
-                    let text = texts[start..=at].join("/");
-                    if glob.is_match(&text) {
+                    let text = texts[start..=at].join(&b'/');
+                    if glob.is_match_candidate(&globset::Candidate::from_bytes(&text)) {
                         push((step + 1, None), &mut next);
                     }
                     if *crosses {
@@ -1624,7 +1629,8 @@ fn advance(
                     None => at,
                     _ => unreachable!("a combined recursive step has only start states"),
                 };
-                if glob.is_match(texts[start..=at].join("/")) {
+                let text = texts[start..=at].join(&b'/');
+                if glob.is_match_candidate(&globset::Candidate::from_bytes(&text)) {
                     push((step + 2, None), &mut next);
                 }
                 push((step, Some(OpenState::Start(start))), &mut next);
@@ -4027,5 +4033,42 @@ mod tests {
             plain_name_in("saved", false, true).as_deref(),
             Some("saved")
         );
+    }
+
+    /// cr-ecm2-2: the deletion scope's own steps read a name's own bytes
+    /// too — the bounded automaton of a component that crosses (`?.txt`),
+    /// a glob component without one (`[!a].txt`), and the glob after a
+    /// recursive `**`. Each once read a lossy copy in which one bad byte
+    /// is three, so three wildcards named the entry and one did not.
+    #[cfg(unix)]
+    #[test]
+    fn the_deletion_scope_matches_a_name_that_is_not_utf8_by_its_bytes() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let named = |pattern: &str, entry: &[u8]| {
+            let mut filter = FileFilter::default();
+            filter.exclude_files = vec![pattern.to_string()];
+            destination_scope(&filter, dir.path(), &[])
+                .destination
+                .expect("a rule with a literal component is read at the destination")
+                .protects(Path::new(std::ffi::OsStr::from_bytes(entry)))
+        };
+        for (pattern, entry, names) in [
+            ("one/?.txt", &b"one/\xff.txt"[..], true),
+            ("one/???.txt", b"one/\xff.txt", false),
+            ("one/[!a].txt", b"one/\xff.txt", true),
+            ("one/[!a][!a][!a].txt", b"one/\xff.txt", false),
+            ("one/**/?.txt", b"one/deep/\xff.txt", true),
+            ("one/**/???.txt", b"one/deep/\xff.txt", false),
+            ("one/?/x", b"one/\xff/x", true),
+            ("one/???/x", b"one/\xff/x", false),
+        ] {
+            assert_eq!(
+                named(pattern, entry),
+                names,
+                "{pattern} against {}",
+                String::from_utf8_lossy(entry)
+            );
+        }
     }
 }

@@ -1180,7 +1180,13 @@ async fn filter_headers(
 ) {
     use std::time::{Duration, UNIX_EPOCH};
     while let Some(header) = rx.recv().await {
-        let rel = PathBuf::from(&header.relative_path);
+        // cr-ecm2-2: a name that is not valid UTF-8 is filtered by its own
+        // bytes (the scan carries them beside the lossy text), so `?` and
+        // a class count one byte of it, as on a walk of the disk.
+        let rel = match header.raw_relative_path.as_deref() {
+            Some(raw) => crate::raw_name::path_from_raw(raw),
+            None => PathBuf::from(&header.relative_path),
+        };
         let mtime = if header.mtime_seconds > 0 {
             UNIX_EPOCH.checked_add(Duration::from_secs(header.mtime_seconds as u64))
         } else {
@@ -1997,6 +2003,63 @@ mod checksumming_source_tests {
         assert!(
             got["unhashable.txt"].is_empty(),
             "unhashable files carry the empty checksum (conservative transfer)"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod raw_name_filter_tests {
+    use super::*;
+
+    /// The relative paths `filter_headers` lets through for `exclude`.
+    async fn kept(exclude: &[&str], headers: Vec<FileHeader>) -> Vec<String> {
+        let mut filter = FileFilter::default();
+        filter.exclude_files = exclude.iter().map(|p| p.to_string()).collect();
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let task = tokio::spawn(filter_headers(in_rx, out_tx, filter, PathBuf::from("/src")));
+        for header in headers {
+            in_tx.send(header).await.unwrap();
+        }
+        drop(in_tx);
+        let mut kept = Vec::new();
+        while let Some(header) = out_rx.recv().await {
+            kept.push(header.relative_path);
+        }
+        task.await.unwrap();
+        kept
+    }
+
+    /// cr-ecm2-2: a scanned header whose name is not valid UTF-8 is
+    /// filtered by the name's own bytes, which the scan carries beside the
+    /// lossy text. `?` counts one byte of it: the file named `0xFF` then
+    /// `.txt` is left out by `?.txt` and passes `???.txt`. Filtered by its
+    /// text — where the bad byte is the three bytes of U+FFFD — it was the
+    /// other way round.
+    #[tokio::test]
+    async fn a_header_is_filtered_by_its_names_own_bytes() {
+        let headers = || {
+            let header = |text: &str, raw: Option<&[u8]>| FileHeader {
+                relative_path: text.to_string(),
+                raw_relative_path: raw.map(<[u8]>::to_vec),
+                size: 1,
+                ..FileHeader::default()
+            };
+            vec![
+                header("\u{fffd}.txt", Some(b"\xff.txt")),
+                header("a.txt", None),
+                header("abc.txt", None),
+                header("dir/\u{fffd}.txt", Some(b"dir/\xff.txt")),
+            ]
+        };
+        assert_eq!(kept(&["?.txt"], headers()).await, ["abc.txt"]);
+        assert_eq!(
+            kept(&["???.txt"], headers()).await,
+            ["\u{fffd}.txt", "a.txt", "dir/\u{fffd}.txt"]
+        );
+        assert_eq!(
+            kept(&["dir/?.txt"], headers()).await,
+            ["\u{fffd}.txt", "a.txt", "abc.txt"]
         );
     }
 }

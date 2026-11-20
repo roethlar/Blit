@@ -185,20 +185,20 @@ impl ExcludeRules {
         if self.names.is_empty() && self.paths.is_empty() {
             return false;
         }
-        let mut prefix = String::new();
+        let mut prefix: Vec<u8> = Vec::new();
         for component in rel_path.components() {
             let Component::Normal(name) = component else {
                 continue;
             };
-            let name = name.to_string_lossy();
+            let name = match_bytes(name);
             if !self.names.is_empty() && self.names.is_match(&name) {
                 return true;
             }
             if !self.paths.is_empty() {
                 if !prefix.is_empty() {
-                    prefix.push('/');
+                    prefix.push(b'/');
                 }
-                prefix.push_str(&name);
+                prefix.extend_from_slice(&name);
                 if self.paths.is_match(&prefix) {
                     return true;
                 }
@@ -274,8 +274,40 @@ impl CompiledPatterns {
         self.globs.is_empty() && self.refused.is_empty()
     }
 
-    fn is_match(&self, text: &str) -> bool {
-        self.globs.is_match(text) || self.refused.iter().any(|p| glob_match(p, text))
+    /// Whether a pattern names `name` — its bytes as [`match_bytes`] gives
+    /// them. Only a pattern the compiler refused is compared as text.
+    fn is_match(&self, name: &[u8]) -> bool {
+        self.globs
+            .is_match_candidate(&globset::Candidate::from_bytes(name))
+            || (!self.refused.is_empty() && {
+                let text = String::from_utf8_lossy(name);
+                self.refused.iter().any(|p| glob_match(p, &text))
+            })
+    }
+}
+
+/// cr-ecm2-2: the bytes a pattern is matched against for `name` — a file
+/// name, or a relative path. On Unix they are the name's OWN bytes, valid
+/// UTF-8 or not: `?` and a class match one byte (Q10), so `?.txt` names a
+/// file whose name is the single byte `0xFF` and then `.txt`. Matching
+/// used to go through `to_string_lossy`, which writes each bad byte as the
+/// three bytes of U+FFFD: that file was named by `???.txt` and not by
+/// `?.txt`, and a mirror deleted it from under an exclude that named it.
+/// On Windows a name is UTF-16 and has no bytes of its own; it is read as
+/// text, ill-formed UTF-16 replaced, exactly as the glob engine itself
+/// reads a Windows path.
+pub(crate) fn match_bytes(name: &std::ffi::OsStr) -> std::borrow::Cow<'_, [u8]> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        std::borrow::Cow::Borrowed(name.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        match name.to_string_lossy() {
+            std::borrow::Cow::Borrowed(text) => std::borrow::Cow::Borrowed(text.as_bytes()),
+            std::borrow::Cow::Owned(text) => std::borrow::Cow::Owned(text.into_bytes()),
+        }
     }
 }
 
@@ -743,10 +775,10 @@ impl FileFilter {
     /// whole relative path, as a glob — [`CompiledPatterns`]); audit-19
     /// adds the any-depth name rule and the subtree rule (see
     /// [`ExcludeRules`]).
-    fn excluded(&self, rel_path: Option<&Path>, filename: &str, path_str: &str) -> bool {
+    fn excluded(&self, rel_path: Option<&Path>, filename: &[u8], path: &[u8]) -> bool {
         if !self.exclude_files.is_empty() {
             let patterns = self.file_globs();
-            if patterns.is_match(filename) || patterns.is_match(path_str) {
+            if patterns.is_match(filename) || patterns.is_match(path) {
                 return true;
             }
             if rel_path.is_some_and(|rel| self.subtree_rules().excludes(rel)) {
@@ -779,13 +811,9 @@ impl FileFilter {
             return rel_path.map(|p| allowed.contains(p)).unwrap_or(false);
         }
 
-        let filename = abs_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let path_str = rel_path
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| abs_path.to_string_lossy().into_owned());
+        // cr-ecm2-2: the name's own bytes, never a lossy copy of them.
+        let filename = abs_path.file_name().map(match_bytes).unwrap_or_default();
+        let path_bytes = match_bytes(rel_path.unwrap_or(abs_path).as_os_str());
 
         // Whitelist: when include_files is non-empty, file must match one.
         // Match against both the relative path and the bare filename so
@@ -798,13 +826,13 @@ impl FileFilter {
         // typed case only.
         if !self.include_files.is_empty() {
             let patterns = self.include_globs();
-            if !(patterns.is_match(&filename) || patterns.is_match(&path_str)) {
+            if !(patterns.is_match(&filename) || patterns.is_match(&path_bytes)) {
                 return false;
             }
         }
 
         // Blacklist
-        if self.excluded(rel_path, &filename, &path_str) {
+        if self.excluded(rel_path, &filename, &path_bytes) {
             return false;
         }
 
@@ -848,7 +876,7 @@ impl FileFilter {
         }
 
         let gs = self.dir_globs();
-        if gs.is_match(abs_path.to_string_lossy().as_ref()) {
+        if gs.is_match(abs_path) {
             return false;
         }
         for pattern in &self.exclude_dirs {
@@ -865,11 +893,12 @@ impl FileFilter {
         // filtered — the walk never opens it, so an excluded tree costs
         // nothing to skip and nothing inside it (an unreadable file
         // included) is ever read or reported.
-        let filename = rel_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        !self.excluded(Some(rel_path), &filename, &rel_path.to_string_lossy())
+        let filename = rel_path.file_name().map(match_bytes).unwrap_or_default();
+        !self.excluded(
+            Some(rel_path),
+            &filename,
+            &match_bytes(rel_path.as_os_str()),
+        )
     }
 }
 
@@ -1999,5 +2028,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// cr-ecm2-2: a name that is not valid UTF-8 is matched by its OWN
+    /// bytes. `?` and a class match one byte (Q10), so the file whose name
+    /// is the byte `0xFF` and then `.txt` is named by `?.txt` — by the
+    /// whole-path glob, the any-depth name rule and the path rule alike,
+    /// as an exclude and as an include, for a file and for a directory to
+    /// prune, in either case mode. Matching once went through a lossy copy
+    /// that writes a bad byte as three: `???.txt` named that file and
+    /// `?.txt` did not. Unix only: a Windows name has no bytes of its own.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_utf8_is_matched_by_its_own_bytes() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let path = |bytes: &[u8]| PathBuf::from(std::ffi::OsStr::from_bytes(bytes));
+        let named = |filter: &FileFilter, rel: &[u8]| {
+            let rel = path(rel);
+            !filter.allows_entry(Some(&rel), &Path::new("/src").join(&rel), 1, None)
+        };
+        let accent = "é.txt".as_bytes();
+        for (pattern, rel, names) in [
+            ("?.txt", &b"\xff.txt"[..], true),
+            ("???.txt", b"\xff.txt", false),
+            ("[!a].txt", b"\xff.txt", true),
+            ("*.txt", b"\xff.txt", true),
+            ("??.txt", b"\xff\xfe.txt", true),
+            // The name rule at any depth, and the path rule.
+            ("?.txt", b"dir/\xff.txt", true),
+            ("dir/?.txt", b"dir/\xff.txt", true),
+            ("dir/???.txt", b"dir/\xff.txt", false),
+            ("?/a.txt", b"\xff/a.txt", true),
+            ("???/a.txt", b"\xff/a.txt", false),
+            // A directory only the name rule or the subtree rule can name.
+            ("?", b"\xff/a.txt", true),
+            ("???", b"\xff/a.txt", false),
+            ("dir/?", b"dir/\xff/a.txt", true),
+            ("dir/???", b"dir/\xff/a.txt", false),
+            // A name that IS valid text reads as it always has: `é` is two.
+            ("??.txt", accent, true),
+            ("?.txt", accent, false),
+        ] {
+            assert_eq!(
+                named(&excluding(&[pattern]), rel),
+                names,
+                "{pattern} against {}",
+                String::from_utf8_lossy(rel)
+            );
+        }
+        // The reviewer's case: ignoring case, `?.txt` names both.
+        let any_case = excluding_any_case(&["?.txt"]);
+        assert!(named(&any_case, b"\xff.TXT") && named(&any_case, b"X.TXT"));
+        // An include reads the same bytes.
+        let including = |pattern: &str| FileFilter {
+            include_files: vec![pattern.to_string()],
+            ..FileFilter::default()
+        };
+        assert!(!named(&including("?.txt"), b"\xff.txt"));
+        assert!(named(&including("???.txt"), b"\xff.txt"));
+        // And so does the pruning of a directory.
+        let dir = path(b"\xff");
+        let abs = Path::new("/src").join(&dir);
+        assert!(!excluding(&["?"]).should_include_dir(&dir, &abs));
+        assert!(excluding(&["???"]).should_include_dir(&dir, &abs));
     }
 }

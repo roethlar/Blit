@@ -1646,3 +1646,71 @@ fn a_filter_that_cannot_be_used_is_refused_before_the_mirror_question() {
         assert!(dst.join("extra.txt").exists() && !dst.join("keep.txt").exists());
     }
 }
+
+/// cr-ecm2-2: an exclude names a file whose name is not valid UTF-8 by the
+/// name's own bytes. `?` matches one byte, so `?.TXT` names the file
+/// called `0xFF` then `.TXT` — on the source walk (it is left out of the
+/// copy) and in the deletion scope (a destination-only one is kept), in
+/// either case mode — and `???.TXT` does not. It was the other way round:
+/// names were matched through a lossy copy in which a bad byte is three,
+/// and this mirror deleted the destination's file from under the exclude.
+/// Linux and the BSDs only: no other filesystem here holds such a name.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn mirror_exclude_matches_a_name_that_is_not_utf8_by_its_bytes() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let name = |bytes: &[u8]| std::ffi::OsStr::from_bytes(bytes).to_os_string();
+    let fixture = || {
+        let tmp = tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("keep.dat"), "k").unwrap();
+        fs::write(dst.join("X.TXT"), "x").unwrap();
+        fs::write(dst.join("extra.dat"), "x").unwrap();
+        let stored = fs::write(src.join(name(b"\xfe.TXT")), "in the source")
+            .and_then(|()| fs::write(dst.join(name(b"\xff.TXT")), "destination only"));
+        (tmp, src, dst, stored)
+    };
+    for (mode, pattern) in [("--match-case", "?.TXT"), ("--ignore-case", "?.txt")] {
+        let (_tmp, src, dst, stored) = fixture();
+        if let Err(error) = stored {
+            eprintln!("skipping: this filesystem refuses a name that is not UTF-8 ({error})");
+            return;
+        }
+        let (ok, out, err) = blit(&[
+            "mirror",
+            "--yes",
+            mode,
+            "--exclude",
+            pattern,
+            &with_slash(&src),
+            &with_slash(&dst),
+        ]);
+        assert!(ok, "{mode}\n{out}{err}");
+        assert!(
+            dst.join(name(b"\xff.TXT")).exists(),
+            "{mode}: the destination's file is named by {pattern} and kept"
+        );
+        assert!(
+            !dst.join(name(b"\xfe.TXT")).exists(),
+            "{mode}: the source's file is named by {pattern} and left out"
+        );
+        assert!(dst.join("X.TXT").exists(), "{mode}: X.TXT is named too");
+        assert!(dst.join("keep.dat").exists() && !dst.join("extra.dat").exists());
+    }
+
+    // Three wildcards are three bytes: they do not name a one-byte name.
+    let (_tmp, src, dst, _) = fixture();
+    let (ok, out, err) = blit(&[
+        "mirror",
+        "--yes",
+        "--exclude",
+        "???.TXT",
+        &with_slash(&src),
+        &with_slash(&dst),
+    ]);
+    assert!(ok, "{out}{err}");
+    assert!(!dst.join(name(b"\xff.TXT")).exists(), "not named: deleted");
+    assert!(dst.join(name(b"\xfe.TXT")).exists(), "not named: copied");
+}
