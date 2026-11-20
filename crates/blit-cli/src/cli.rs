@@ -16,6 +16,17 @@ A trailing slash on SRC means \"copy the contents\". Without one, the basename i
 appended when DEST is (or ends in) a directory; otherwise DEST is the exact
 target path. See blit(1) for the full table.";
 
+/// EXCLUDE_CASE_MATCHING slice 4 (AC-7, AC-10): how a pattern is read, in
+/// the `--help` of the verbs that take patterns — `copy`, `mirror` and
+/// `check`; `move` takes none and is not shown it.
+const PATTERN_HELP: &str = "\
+PATTERNS (--exclude, --include, and the files of --exclude-from / --include-from):
+  A pattern matches exactly as typed: *cache names cache and not Cache, on
+  every machine. --ignore-case ignores capital letters in every pattern of the
+  run. ? and a [class] match one byte, with or without it: ?.txt does not name
+  \u{e9}.txt, and a class cannot hold such a letter - write {a,\u{e9}}.txt, not
+  [a\u{e9}].txt.";
+
 /// Appended to `blit check --help` so the equivalence model is
 /// discoverable. F12 of docs/reviews/codebase_review_2026-05-01.md.
 const CHECK_SEMANTICS_HELP: &str = "\
@@ -69,8 +80,10 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Copy files between local and/or remote locations (rsync-style slash semantics)
+    #[command(after_long_help = format!("{PATH_SEMANTICS_HELP}\n\n{PATTERN_HELP}"))]
     Copy(TransferArgs),
     /// Mirror a directory, deleting extraneous files at destination (rsync-style slash semantics)
+    #[command(after_long_help = format!("{PATH_SEMANTICS_HELP}\n\n{PATTERN_HELP}"))]
     Mirror(TransferArgs),
     /// Move files (copy + remove source, rsync-style slash semantics)
     // cr-ecm2-5: `move` takes no pattern, so it refuses both case modes by
@@ -794,7 +807,7 @@ pub struct ProfileArgs {
 /// produced an equivalent destination, not as a general-purpose
 /// `diff -r`. F12 of `docs/reviews/codebase_review_2026-05-01.md`.
 #[derive(Args, Clone, Debug)]
-#[command(after_long_help = CHECK_SEMANTICS_HELP)]
+#[command(after_long_help = format!("{CHECK_SEMANTICS_HELP}\n\n{PATTERN_HELP}"))]
 pub struct CheckArgs {
     /// Source tree to compare from
     pub source: String,

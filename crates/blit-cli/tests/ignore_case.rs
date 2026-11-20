@@ -561,6 +561,21 @@ fn help_offers_the_case_modes_only_where_they_are_taken() {
                     "{verb} {flag} and {option}:\n{out}"
                 );
             }
+            // Slice 4 (AC-7, AC-10): the long help of a verb that takes
+            // patterns says how one is read — exactly as typed, and `?` and
+            // a class one byte — and `move`'s says nothing of patterns.
+            let long = flag == "--help";
+            for words in [
+                "A pattern matches exactly as typed",
+                "? and a [class] match one byte",
+                "write {a,\u{e9}}.txt, not",
+            ] {
+                assert_eq!(
+                    out.contains(words),
+                    offered && long,
+                    "{verb} {flag} and {words:?}:\n{out}"
+                );
+            }
         }
     }
 }

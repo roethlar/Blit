@@ -83,6 +83,45 @@ the source side too, and adds a retry pass.
   classes. Excluded directories are
   never read, so an unreadable one no longer stops a mirror's deletions.
   Before 1.0 the absolute and bare-name forms silently matched nothing.
+- **A pattern matches exactly as typed; `--ignore-case` ignores capital
+  letters.** `--exclude '*cache'` names `cache` and not `Cache`, on every
+  machine and whatever the disk does with case — the rule rsync follows.
+  With `--ignore-case`, every `--exclude` and `--include` pattern of the
+  run ignores capital letters, on the source and in what a `mirror`
+  deletes alike, and on a daemon at either end. Letters of any alphabet
+  pair one to one (`Übung` names `übung`; `ß` is not `SS`). `blit check`
+  takes the same options, so it reads a tree as the transfer did.
+- **`mirror` shows how your pattern will match before it asks.** When a
+  `mirror` is about to ask before deleting and you gave patterns without
+  saying how to read them, the question starts with one line:
+  `"*Cache" matches Cache only; capital letters matter (--ignore-case
+  would also match cache, CACHE).` `copy`, which asks nothing, prints the
+  same line once as a note and goes on. Saying it yourself —
+  `--match-case` (the default, stated) or `--ignore-case` — or `-y`
+  leaves the line out.
+- **`?` and a bracket class match one byte**, with or without
+  `--ignore-case`, as in rsync and git: `?.txt` does not name `é.txt`. A
+  class that holds a letter beyond ASCII (`[aé].txt`) could never match
+  that letter, so it is refused with the spelling that works
+  (`{a,é}.txt`). A name that is not valid UTF-8 is matched by its own
+  bytes.
+- **Pattern files.** `--exclude-from FILE` and `--include-from FILE`
+  (repeatable; `copy`, `mirror` and `check`) read one pattern per line.
+  Spaces at both ends of a line are dropped, blank lines and lines
+  starting with `#` are skipped, and a space wanted at an edge is written
+  `[ ]`; each line is then exactly the pattern it would be on the command
+  line. A line that is an rsync rule (`- pattern`, `+ pattern`, `!`)
+  refuses the run and names the line — a blit pattern file holds patterns
+  and nothing else. A saved job keeps the patterns it read, not the file.
+- **A filter that cannot be used is refused before anything is asked.**
+  A pattern that is no glob, a size or an age that cannot be read, a
+  pattern file that is missing: each now stops the command before
+  `mirror`'s question. Before, the question came first.
+- **A glob names an entry by its spelling.** Under `mirror`,
+  `--exclude '*ß'` keeps a destination's `aß`; a destination-only `bSS`
+  is not named by it and is deleted, on every disk, as rsync does. (A
+  literal name, and an entry the source's walk left out, are still kept
+  in the destination's own spelling.)
 
 ## Filenames that are not valid UTF-8 transfer
 
@@ -164,13 +203,6 @@ carry such names by their exact bytes.
 
 ## Known limitations shipped open
 
-- **A `mirror` exclude written as a pure glob keeps a destination-only
-  entry only when the glob matches its spelling as written.** An entry
-  pruned at the source is kept in the destination's own spelling (for
-  example, `aSS` for excluded source `aß` on macOS). With no source
-  counterpart, a destination-only `bSS` under `--exclude '*ß'` can be
-  deleted. Literal exclude names and literal path components use the
-  destination's own spelling even for destination-only entries.
 - **The in-command retry passes do not re-send a file whose name is not
   valid UTF-8.** It stays reported as failed; `blit jobs retry` re-sends
   it.

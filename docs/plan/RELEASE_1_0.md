@@ -83,6 +83,12 @@ agent work; the tag and publish are the owner's act.
   `docs/plan/EXCLUDE_CASE_MATCHING.md` shipping (Active, D-2026-11-20-1);
   `docs/plan/UTILITY_VERBS_LOCAL_PARITY.md` (Active, D-2026-11-20-2), all
   six slices, also lands before the tag (owner "b").
+  **2026-11-20, later:** every slice of `EXCLUDE_CASE_MATCHING.md` has
+  landed (1, 1b, 2, 3, 3b, 4) and the pure-glob bullet is gone from the
+  release notes' known limitations, restated there as the rule. The item
+  is closed by that rule, not by pairing. Still open on it: a review of
+  slices 2–4, any run on Windows or macOS (every result is Linux only; no
+  CI since 2026-10-24), and the owner's word on the acceptance criteria.
   O4's predicate is unified; CI and Docs Gate passed on `5386b391`
   (runs 39326487040 and 39326487037). O3's ASCII paired-spelling guard
   passed on Windows (both core and CLI tests in run 39331093262), and the

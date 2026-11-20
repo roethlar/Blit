@@ -15,7 +15,8 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `check_availability` was removed; `TransferSink` gained
 `begin_record`/`RecordWriter`, `can_store_raw_names` and `note_raw_name`;
 `TransferSummary` gained `failed_paths`/`failed_paths_truncated`;
-`transfers::filter::FilterInputs` gained `source_root`. The wire
+`transfers::filter::FilterInputs` gained `source_root` and `ignore_case`,
+and `fs_enum::FileFilter` gained `ignore_case`. The wire
 protocol is contract 9: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
@@ -117,6 +118,50 @@ part, and a job you can list, read, re-run and retry.
   so it protects their counterparts in the destination's own spelling. The
   filter at session open carries the run's case mode (`--ignore-case`), so
   a daemon at either end reads every pattern as the command did.
+
+### Patterns: exact by default, `--ignore-case`, pattern files
+
+- A pattern matches exactly as typed on every machine: `--exclude
+  '*cache'` names `cache`, not `Cache`. `--match-case` states the default;
+  `--ignore-case` ignores capital letters in every `--exclude` and
+  `--include` pattern of the run — on the source walk, in a `mirror`'s
+  deletion scope, and on a daemon at either end. Letters pair by Unicode
+  simple case folding (`Übung`/`übung`, the sigmas; never `ß` with `SS`).
+  `copy`, `mirror` and `check` take both options; a saved job keeps the
+  one typed.
+- When a `mirror` asks before deleting and no mode was typed, the question
+  starts with one line built from your pattern: `"*Cache" matches Cache
+  only; capital letters matter (--ignore-case would also match cache,
+  CACHE).` `copy` prints it once on stderr and goes on. No line with
+  either mode typed, with `-y`, or when no pattern holds a letter.
+- `?` and a bracket class match one byte in both modes. A class holding a
+  letter beyond ASCII (`[aé].txt`) is refused with the spelling that works
+  (`{a,é}.txt`), on the command line, in a pattern file, from a saved job
+  and by a daemon at session open. A name that is not valid UTF-8 is now
+  matched by its own bytes; it used to be matched through a lossy copy in
+  which one bad byte counted as three, so `?.txt` did not name it and a
+  `mirror` could delete it from under an exclude.
+- `--exclude-from FILE` and `--include-from FILE` (repeatable) read one
+  pattern per line: both ends of a line are stripped, blank lines and `#`
+  comments skipped, a space wanted at an edge written `[ ]`. An rsync rule
+  line (`- pattern`, `+ pattern`, `!`), a missing file, or text that is not
+  UTF-8 refuses the run, naming the file and the line. A saved job keeps
+  the patterns read, not the file.
+- A filter that cannot be used — a pattern that is no glob or cannot be
+  compiled, an unreadable size or age, a pattern file that cannot be read —
+  is refused before `mirror` asks its question; the question used to come
+  first. A daemon applies the same validation at session open.
+- An `--include` is matched as a glob and nothing else: `--include
+  '[a].txt'` no longer also names a file spelled `[a].txt`.
+- A job file edited to hold two options no command takes together
+  (`--match-case` with `--ignore-case`, `--checksum` with `--size-only`, …)
+  is refused instead of run.
+- Each distinct set of patterns is compiled once per process and shared: a
+  command with 250 excludes starts in about half the time it took before.
+- Under `mirror`, a glob names an entry by its spelling: `--exclude '*ß'`
+  does not keep a destination-only `bSS`. This was listed as a known
+  limitation; it is the rule, the same on every disk and the one rsync
+  follows.
 
 ### Fixes
 
