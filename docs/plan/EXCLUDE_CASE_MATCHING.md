@@ -1,6 +1,6 @@
 # Exclude case matching: `--match-case` default, `--ignore-case`, and the one-line prompt
 
-**Status**: Draft (r7, 2026-11-20 — owner requirements stated in chat on 2026-10-21 land here; owner interview resumed 2026-11-20 and continues)
+**Status**: Draft (r8, 2026-11-20 — owner requirements stated in chat on 2026-10-21 land here; owner interview resumed 2026-11-20 and continues)
 **Created**: 2026-10-21
 **Supersedes**: `docs/plan/MIRROR_GLOB_DEST_ONLY.md` (Draft r3, same day — its mechanism options are all withdrawn; its prior-art measurements of robocopy and rsync stand and are referenced below); the first bullet of `docs/RELEASE_NOTES_1_0.md` "Known limitations shipped open", once this ships
 **Decision ref**: pending (activation needs a `docs/DECISIONS.md` entry)
@@ -47,6 +47,7 @@ Measured 2026-11-20 on the Linux host `continuum` with rsync 3.5.2 (build `41bbd
   - **Robocopy's matcher itself does not trim; the job-file reader does.** On the command line a quoted `/XF "*.jpg "` DELETED `a.jpg`, and a quoted leading space protected only the name that begins with a space.
   - Microsoft's naming rules say a file or directory name must not end with a space or a period (the shell and user interface do not support such names), so on Windows a trailing space in a pattern can never be meant.
 - **Blit's own list file already trims:** `FileFilter::load_files_from` (`crates/blit-core/src/fs_enum.rs`) strips both ends of every line and skips blank and `#` lines.
+- **A deliberate edge space already has two spellings in blit** (owner question 2026-11-20; measured that day on Linux with blit 1.0.0 built at `863dfcf0`, a local `mirror --yes` over three destination-only names: `a.jpg`, the same with a trailing space, the same after a leading space). The class `[ ]` names the space: `*.jpg[ ]` protected only the trailing-space name and `[ ]*.jpg` only the leading-space name, for exact names as for globs. A space typed inside quotes on the command line is kept as typed: `--exclude '*.jpg '` protected only the trailing-space name. A backslash before the space also worked there; by code read (`backslash_escape(!windows)`) it is not available on Windows, where the backslash separates. Not measured on Windows or macOS.
 
 ## Non-goals
 
