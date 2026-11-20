@@ -76,18 +76,22 @@ pub struct DelegationSection {
 // Binary discovery + the once-per-binary daemon build.
 // ---------------------------------------------------------------
 
+/// Where cargo puts this package's finished binaries: the directory of the
+/// path cargo hands an integration test for its own package's binary
+/// (`CARGO_BIN_EXE_blit`). It was once walked up from the test executable
+/// (`<profile>/deps/<test>`), but cargo 1.100 moved test executables to
+/// `<profile>/build/<package>/<hash>/out/`: the walk then named a folder
+/// holding no binaries, and that folder's name, read below as a
+/// cross-target triple, broke the nested daemon build as well.
 fn bin_dir() -> PathBuf {
-    let exe_path = std::env::current_exe().expect("current_exe");
-    exe_path
+    cli_bin()
         .parent()
-        .expect("test binary directory")
-        .parent()
-        .expect("deps parent directory")
+        .expect("the blit binary's directory")
         .to_path_buf()
 }
 
 pub fn cli_bin() -> PathBuf {
-    bin_dir().join(if cfg!(windows) { "blit.exe" } else { "blit" })
+    PathBuf::from(env!("CARGO_BIN_EXE_blit"))
 }
 
 /// The per-user folder for a CLI run whose test names none: one under the
