@@ -200,6 +200,44 @@ pub(crate) async fn absorb_pattern_files(args: &mut TransferArgs) -> Result<()> 
     Ok(())
 }
 
+/// R49-F1 (data-loss): reject `--exclude` / `--include` / `--min-size` /
+/// `--max-size` / `--min-age` / `--max-age` / `--files-from` — and the
+/// pattern files, `--exclude-from` / `--include-from` — on `blit move`.
+/// Move means "transfer the source, then delete it." With a filter, files
+/// that match the exclude rule (or that fail the include rule) are skipped
+/// during the transfer — but the source-delete step would still remove
+/// them, losing data the user explicitly didn't want copied.
+///
+/// cr-ecm3-2: asked FIRST, by `run_command`, before a job is saved or a
+/// record started, as well as where the move is dispatched. A job's record
+/// holds patterns and never a pattern file, so a `move --exclude-from F
+/// --save NAME` that was refused only at dispatch had already saved a job
+/// with no filter in it — and `jobs run NAME` moved everything, the file
+/// the user meant to leave included.
+pub(crate) fn reject_move_filters(args: &TransferArgs) -> Result<()> {
+    let filters_set = !args.exclude.is_empty()
+        || !args.include.is_empty()
+        || args.min_size.is_some()
+        || args.max_size.is_some()
+        || args.min_age.is_some()
+        || args.max_age.is_some()
+        || args.files_from.is_some()
+        || !args.exclude_from.is_empty()
+        || !args.include_from.is_empty();
+    if filters_set {
+        bail!(
+            "move does not support filters (--exclude / --include / \
+             --exclude-from / --include-from / \
+             --min-size / --max-size / --min-age / --max-age / \
+             --files-from): the source-delete step would silently \
+             remove files that were filtered out of the transfer. \
+             Run `blit copy` with filters first, then `blit rm` the \
+             remaining source manually if needed."
+        );
+    }
+    Ok(())
+}
+
 /// EXCLUDE_CASE_MATCHING slice 2 (AC-3, AC-4, AC-5, AC-9): the line about
 /// capital letters this run shows, if any. None when a case mode was typed
 /// — `--ignore-case`, or `--match-case`, which changes no matching and
@@ -790,34 +828,7 @@ async fn run_move_inner(
         );
     }
 
-    // R49-F1 (data-loss): reject `--exclude` / `--include` /
-    // `--min-size` / `--max-size` / `--min-age` / `--max-age` /
-    // `--files-from` on `blit move`. Move means "transfer the
-    // source, then delete it." With a filter, files that match
-    // the exclude rule (or that fail the include rule) are
-    // skipped during the transfer — but the source-delete step
-    // would still remove them, losing data the user explicitly
-    // didn't want copied.
-    let filters_set = !args.exclude.is_empty()
-        || !args.include.is_empty()
-        || args.min_size.is_some()
-        || args.max_size.is_some()
-        || args.min_age.is_some()
-        || args.max_age.is_some()
-        || args.files_from.is_some()
-        || !args.exclude_from.is_empty()
-        || !args.include_from.is_empty();
-    if filters_set {
-        bail!(
-            "move does not support filters (--exclude / --include / \
-             --exclude-from / --include-from / \
-             --min-size / --max-size / --min-age / --max-age / \
-             --files-from): the source-delete step would silently \
-             remove files that were filtered out of the transfer. \
-             Run `blit copy` with filters first, then `blit rm` the \
-             remaining source manually if needed."
-        );
-    }
+    reject_move_filters(args)?;
 
     // EXCLUDE_CASE_MATCHING slice 1: the case mode says how `--exclude`
     // and `--include` patterns are read, and `move` takes none (above).

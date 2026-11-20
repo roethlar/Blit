@@ -257,6 +257,64 @@ fn a_job_file_holding_two_options_no_command_takes_together_is_refused() {
     assert_eq!(names(&dst), ["ONLY.CFG", "keep.cfg"]);
 }
 
+/// cr-ecm3-2: a `move` that is refused for a filter saves no job. A job
+/// keeps patterns, never a pattern file, so `move --exclude-from F --save
+/// NAME` — refused, but only after the job was saved — left a job with no
+/// filter in it, and `jobs run NAME` moved the whole tree, the file the
+/// user meant to leave included. Every filter option is refused before
+/// anything is kept: nothing saved, nothing exported, nothing moved.
+#[test]
+fn a_move_refused_for_a_filter_saves_no_job() {
+    let ctx = TestContext::new();
+    let (src, dst) = (ctx.workspace.join("src"), ctx.workspace.join("dst"));
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("keep.txt"), b"moved").unwrap();
+    fs::write(src.join("stay.tmp"), b"left behind").unwrap();
+    fs::write(ctx.workspace.join("skip.txt"), "*.tmp\n").unwrap();
+
+    for (at, filter) in [
+        &["--exclude-from", "skip.txt"][..],
+        &["--include-from", "skip.txt"],
+        &["--exclude", "*.tmp"],
+        &["--files-from", "skip.txt"],
+        &["--min-size", "1K"],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let name = format!("sample{at}");
+        let export = format!("job{at}.json");
+        let mut args = vec!["move", "-y"];
+        args.extend(filter);
+        args.extend(["--save", &name, "--export", &export, "src/", "dst/"]);
+        let refused = blit_in(&ctx, &ctx.workspace, &args);
+        let stderr = text(&refused.stderr);
+        assert!(!refused.status.success(), "{filter:?}: {stderr}");
+        assert!(
+            stderr.contains("move does not support filters"),
+            "{filter:?}: {stderr}"
+        );
+        assert!(
+            !ctx.workspace.join(&export).exists(),
+            "{filter:?}: no job is exported"
+        );
+        let again = blit_in(&ctx, &ctx.workspace, &["jobs", "run", &name]);
+        assert!(
+            !again.status.success(),
+            "{filter:?}: no job was saved to run again\n{}{}",
+            text(&again.stdout),
+            text(&again.stderr)
+        );
+        assert_eq!(
+            names(&src),
+            ["keep.txt", "stay.tmp"],
+            "{filter:?}: nothing moved"
+        );
+        assert!(!dst.exists(), "{filter:?}: nothing moved");
+    }
+    assert_eq!(listing(&ctx)["saved"].as_array().map(Vec::len), Some(0));
+}
+
 #[test]
 fn a_job_name_must_be_a_plain_name_and_every_sub_verb_has_help() {
     let ctx = TestContext::new();

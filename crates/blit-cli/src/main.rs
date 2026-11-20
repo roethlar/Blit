@@ -260,8 +260,13 @@ async fn run_command(
 ) -> Result<ExitCode> {
     // EXCLUDE_CASE_MATCHING slice 3b: a pattern file becomes patterns
     // before anything else reads the command — its record included.
-    // `move` takes none and refuses the options itself, files unread.
-    if !matches!(verb, Verb::Move) {
+    // `move` takes no filter and no pattern file: refused here, files
+    // unread and BEFORE a job is saved (cr-ecm3-2 — a saved job holds
+    // patterns, never a file, so one saved from a refused `move
+    // --exclude-from` ran again with no filter at all).
+    if matches!(verb, Verb::Move) {
+        crate::transfers::reject_move_filters(&args)?;
+    } else {
         crate::transfers::absorb_pattern_files(&mut args).await?;
     }
     // Review cr-jl5-1: the record keeps the list the run starts with.
