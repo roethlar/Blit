@@ -1,6 +1,6 @@
 # Utility verbs: behave like the local commands, run on the daemon
 
-**Status**: Draft (r2, 2026-11-20 — written under the owner's open-ended mandate of that day; every design choice below is the drafting agent's and is ratified, changed or struck when the owner activates the plan)
+**Status**: Draft (r3, 2026-11-20 — written under the owner's open-ended mandate of that day; every design choice below is the drafting agent's and is ratified, changed or struck when the owner activates the plan)
 **Created**: 2026-11-20
 **Supersedes**: on activation, the command matrix and UX principles of `docs/plan/BLIT_UTILS_PLAN.md` (Historical) as the design intent for `rm`, `find`, `du`, `df` and `ls`
 **Decision ref**: pending (activation needs a `docs/DECISIONS.md` entry)
@@ -112,6 +112,17 @@ Depth is counted from the start path. The daemon sends only the rows that will b
 ### `ls` (`crates/blit-cli/src/ls.rs`)
 
 Printing only; `FileInfo` already carries name, kind, size and time.
+
+### Alternative considered: have the daemon run the native commands
+
+Owner, 2026-11-20: "unless it's simpler to just call the native equivalent commands. windows doesn't have analogs to find, du, df, etc., but delete does. or we could call powershell. that doesn't sound simpler, but if it is, it's an option." The drafting agent's answer is that it is not simpler, for these reasons; the owner has not ruled.
+
+- **It adds backends instead of removing one.** Windows has no `find`, `du` or `df`, so the daemon's own implementation is needed there whatever Unix does. Calling native tools would mean that implementation plus a GNU caller, a BSD caller for macOS (different defaults and option spellings) and whatever a NAS ships, each with its own output to parse — and the same `blit find` would answer differently from one daemon to the next.
+- **`find` runs programs.** `-exec`, `-ok` and the `-f…` actions execute commands and write files, so a user's expression could not be passed through: the daemon would have to parse and allow-list it first, which is the parser this plan already needs, and one gap in that list would be command execution on the daemon's machine. No password or token check was found in the daemon's source (its authorization is by host address).
+- **Deletion would leave the reviewed engine.** `rm` goes through `blit_core::deletion` and its per-entry containment today; a spawned `rm` or `Remove-Item` would not.
+- **PowerShell is slower, measured** (2026-11-20, PowerShell 7.6.3 on Linux, the same 200,000-file tree; Windows itself not measured): starting it costs 51 ms against 1 ms for `find`; listing took 2,216 ms (`Get-ChildItem -Recurse`) against 55 ms for `find` and 361 ms for blit today; deleting took 728 ms (`Remove-Item -Recurse`) against 257 ms for `rm -rf` and 254 ms for blit.
+- **A service's locale changes the answers.** The measurements above show GNU find pairing `Ü` with `ü` and counting characters only in a UTF-8 locale; a daemon started by the system often runs in the plain one.
+- **What the instinct gets right is already the design.** Where the operating system has the answer, ask it: `df` becomes one `statvfs` / `GetDiskFreeSpaceExW` call, and deletion already uses the system's own delete calls at local speed. The rest is a walk blit already has (`FileEnumerator`) plus option parsing and printing, which a native caller would need too.
 
 ### Risks
 
