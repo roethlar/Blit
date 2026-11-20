@@ -1,6 +1,6 @@
 # Exclude case matching: `--match-case` default, `--ignore-case`, and the one-line prompt
 
-**Status**: Draft (r5, 2026-11-20 — owner requirements stated in chat on 2026-10-21 land here; owner interview resumed 2026-11-20 and continues)
+**Status**: Draft (r6, 2026-11-20 — owner requirements stated in chat on 2026-10-21 land here; owner interview resumed 2026-11-20 and continues)
 **Created**: 2026-10-21
 **Supersedes**: `docs/plan/MIRROR_GLOB_DEST_ONLY.md` (Draft r3, same day — its mechanism options are all withdrawn; its prior-art measurements of robocopy and rsync stand and are referenced below); the first bullet of `docs/RELEASE_NOTES_1_0.md` "Known limitations shipped open", once this ships
 **Decision ref**: pending (activation needs a `docs/DECISIONS.md` entry)
@@ -22,6 +22,26 @@ A user who gives a pattern to a command that can delete is told, in one line and
 - "the example needs to be the actual string the user entered."
 - "if the user specifies --ignore-case and not -y then the message should not print, just the normal delete warning" — the line exists to present a choice not yet made; once made, it is silent.
 - "if we have an include from, we need an exclude from. so --files-from needs an exclusion analog. every entry in either needs to be exact or a [pattern], so users with a 50 line file won't miss something and delete all their .Jpg files" — hence `--exclude-from FILE` and `--include-from FILE` (rsync's shape: one pattern per line, blank lines and `#` comments ignored), each line treated exactly as one more command-line pattern under the run's one case mode; `--files-from` stays the literal name list it is today. (Owner wrote "regex"; blit's patterns are globs — `*.jpg` — and a file line is an exact name or a glob, the same syntax as the option. Reading confirmed with the owner: pending.)
+
+## Prior art: how established tools read a pattern file (owner question 2026-11-20: "do you need to see the rsync source? how does robocopy do it?")
+
+Measured 2026-11-20 on the Linux host `continuum` with rsync 3.5.2 (build `41bbd895`), git 2.56.1 and GNU tar 1.35. Each case wrote a one-pattern file byte-exact and offered a name with and without the whitespace in question: for rsync a real `rsync -a --delete --exclude-from` run over a destination-only entry, for git `check-ignore` against an ignore file, for tar an archive made with its exclude-file option.
+
+| Line in the file | rsync | git | GNU tar | blit `--files-from` today (code read, not run) |
+|---|---|---|---|---|
+| trailing space | kept, part of the pattern | stripped | stripped | stripped |
+| trailing tab | kept | kept | stripped | stripped |
+| leading space | kept | kept | kept | stripped |
+| Windows line ending (CR LF) | CR stripped | CR stripped | CR stripped | CR stripped |
+| line starting `#` | comment | comment | a pattern | comment |
+| line starting `;` | comment | a pattern | a pattern | a name |
+| spaces-only line | a pattern (it kept a file named three spaces) | blank | blank | blank |
+
+- **The rsync result that matters:** a file holding `*.jpg` followed by one space made `rsync --delete` DELETE the destination-only `a.jpg`; only a file literally named `a.jpg` plus a space was kept. The same happened with a trailing tab and with a leading space.
+- **rsync source agrees** (rsync's `parse_filter_file`, read at tag v3.5.2, byte-identical at `41bbd895`): a line ends at LF or CR, every other byte is copied into the rule, and a line is skipped only when it is empty or begins with `;` or `#`. Nothing trims.
+- **rsync reads more than patterns from such a file:** a line beginning `- ` or `+ ` names its own rule type and a line holding only `!` clears every rule before it (its manual; measured: `+ *.jpg` did not protect `a.jpg`, and `*.jpg` then `!` then `*.png` protected only the `.png`). Blit's pattern files have no such syntax — Q8.
+- **Robocopy has no pattern-file option.** Microsoft's reference gives `/XF` and `/XD` names on the command line only; the one file-borne route is a job file (`/SAVE`, `/JOB`), whose line parsing the reference does not describe. **NOT measured:** neither Windows host answered from `continuum` on 2026-11-20 (`10.1.10.98` and `10.1.10.222`, no route to host). Microsoft's naming rules say a file or directory name must not end with a space or a period (the shell and user interface do not support such names), so on Windows a trailing space in a pattern can never be meant.
+- **Blit's own list file already trims:** `FileFilter::load_files_from` (`crates/blit-core/src/fs_enum.rs`) strips both ends of every line and skips blank and `#` lines.
 
 ## Non-goals
 
@@ -102,7 +122,8 @@ One coherent, testable change per slice — sized for the `.review/` loop.
 
 - ~~**Q1 — what is a letter**~~ — **settled 2026-10-21 (owner "yes")**: Unicode simple case folding, the `grep -i`/ripgrep rule; see Constraints §Letters. Prior-art survey behind it: exact (rsync filters; git ignore rules, believed ASCII-fold only in case-insensitive repos); ASCII-only (globset's own mode, SQLite `NOCASE`); simple folding (GNU grep, ripgrep, Python, Java; NTFS a frozen subset; ZFS, Samba per-letter upcasing); full folding (collation libraries; APFS per this repo's tests, unverified by this session).
 - ~~**Q2 — scope of `--ignore-case`**~~ — **settled 2026-11-20 (owner "a")**: every pattern in the run — `--exclude`, `--include`, and every line of `--exclude-from`/`--include-from` — and never the literal `--files-from` list, which stays exact names in both modes. `blit jobs retry` limits its session to exactly the failed paths through that list (`crates/blit-cli/src/transfers/retry.rs`), so it is unaffected. Rejected: folding the `--files-from` list too (one list line could select several files on a case-sensitive source).
-- **Q5 — pattern-file line handling**: rsync's rule (blank lines and `#` comments ignored, whitespace kept, no quoting) [recommended], or trim surrounding whitespace. — owner
+- **Q5 — pattern-file line handling** (evidence: §Prior art above; the recommendation changed 2026-11-20 once rsync's rule was measured deleting): (a) blit's own list-file rule — strip both ends and the line ending, skip blank and `#` lines, a real edge space written `[ ]` [recommended; its trailing half matches git and GNU tar, its leading half matches no measured tool and rests on consistency with `--files-from` and on an indented line being a likelier accident than a name that begins with a space]; (b) rsync's rule — whitespace kept, `;` and `#` comments (measured: a trailing space deletes what the line was meant to protect); (c) GNU tar's rule — strip trailing whitespace, keep leading. — owner
+- **Q8 — rsync rule syntax in a pattern file**: an rsync user's file may hold `- pattern`, `+ pattern` or `!` lines. Read literally, each becomes a pattern that matches only a name beginning with those characters — in practice nothing — and says so nowhere; the alternative is to refuse the run naming the line [recommended, unruled]. — owner
 - **Q6 — saved jobs**: record the patterns read from the file (replay independent of the file) [recommended], or record the file path and re-read it at replay. — owner
 - **Q3 — `copy`**: `copy` never deletes at the destination, so no prompt line there [recommended]; or show it anyway when patterns are present. — owner
 - **Q4 — the 2026-10-19 cases**: confirm they are closed as expected behavior under `--match-case` (documented, not fixed), so the G3b blocker entry is retired on activation. — owner
