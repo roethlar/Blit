@@ -462,6 +462,32 @@ fn mirror_ignore_case_keeps_a_class_one_byte_wide() {
     }
 }
 
+/// cr-ecm2-5: help offers the case modes on the verbs that take them —
+/// `copy`, `mirror`, `check` — and not on `move`, which refuses both on
+/// every invocation. `move` still parses them: the refusal that says why
+/// is the next test's.
+#[test]
+fn help_offers_the_case_modes_only_where_they_are_taken() {
+    for (verb, offered) in [
+        ("copy", true),
+        ("mirror", true),
+        ("check", true),
+        ("move", false),
+    ] {
+        for flag in ["--help", "-h"] {
+            let (code, out, err) = blit(&[verb, flag]);
+            assert_eq!(code, Some(0), "{verb} {flag}\n{err}");
+            for option in ["--match-case", "--ignore-case"] {
+                assert_eq!(
+                    out.contains(option),
+                    offered,
+                    "{verb} {flag} and {option}:\n{out}"
+                );
+            }
+        }
+    }
+}
+
 /// `move` takes no `--exclude` or `--include` pattern (it refuses every
 /// filter: the source-delete step would remove what a filter left behind),
 /// so a case mode has nothing to act on there. It is refused by name, with

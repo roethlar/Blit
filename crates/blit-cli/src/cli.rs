@@ -73,6 +73,11 @@ pub enum Commands {
     /// Mirror a directory, deleting extraneous files at destination (rsync-style slash semantics)
     Mirror(TransferArgs),
     /// Move files (copy + remove source, rsync-style slash semantics)
+    // cr-ecm2-5: `move` takes no pattern, so it refuses both case modes by
+    // name (`transfers::run_move_inner`); its help does not offer them.
+    // They still parse, which is what lets the refusal say why.
+    #[command(mut_arg("match_case", |arg| arg.hide(true)))]
+    #[command(mut_arg("ignore_case", |arg| arg.hide(true)))]
     Move(TransferArgs),
     /// Discover daemons advertising via mDNS
     Scan(ScanArgs),
