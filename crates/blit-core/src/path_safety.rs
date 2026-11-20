@@ -798,10 +798,7 @@ fn looks_like_windows_absolute(s: &str) -> bool {
     // Drive-letter forms: at least 2 chars where chars[0] is ASCII alpha
     // and chars[1] is ':'.
     let bytes = s.as_bytes();
-    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-        return true;
-    }
-    false
+    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
 }
 
 #[cfg(test)]
