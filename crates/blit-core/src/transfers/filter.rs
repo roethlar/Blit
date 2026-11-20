@@ -112,26 +112,68 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
 /// end shows when a run's patterns are read exactly as typed and nobody
 /// said so — `"*Cache" matches Cache only; capital letters matter
 /// (--ignore-case would also match cache, CACHE).` — or `None` when no
-/// pattern holds a letter. Built from the first such pattern, excludes
-/// before includes, as typed; the others are counted. WHEN to show it is
+/// pattern's reading depends on case. Built from the first such pattern,
+/// excludes before includes; the others are counted. WHEN to show it is
 /// the front end's: not with a case mode stated, and not when the operator
 /// has waived the question.
-pub fn case_note(exclude: &[String], include: &[String]) -> Option<String> {
-    let patterns: Vec<(&str, Option<&str>)> = exclude
-        .iter()
-        .chain(include)
-        .map(|pattern| (pattern.as_str(), None))
-        .collect();
-    crate::case_fold::case_note(&patterns, cfg!(windows))
+///
+/// Slice 3b (AC-8): each pattern comes with the pattern file it was read
+/// from, `None` for one typed on the command line, and the line says
+/// which the operator did not type: `and 2 more patterns (from skip.txt)
+/// match only as typed`.
+///
+/// cr-ecm4-3: the line is derived from the EFFECTIVE filter — `resolved`,
+/// what [`resolve_excludes`] made of these same excludes:
+/// - an exclude it reported as unable to match anything is passed over,
+///   neither shown nor counted (the run has just said it matches nothing;
+///   the line then said it "matches … only");
+/// - an absolute exclude is echoed as typed and described as the pattern
+///   it became below the source, so the source's own path is never shown
+///   in another case (`/srv/Data` under `/srv` matches `Data`, and the
+///   option would also match `data`, `DATA` — never `/SRV/DATA`).
+pub fn case_note(
+    exclude: &[(&str, Option<&str>)],
+    include: &[(&str, Option<&str>)],
+    resolved: &ResolvedExcludes,
+) -> Option<String> {
+    case_note_on(exclude, include, resolved, cfg!(windows))
 }
 
-/// [`case_note`] for patterns of which some were read from pattern files
-/// (slice 3b, AC-8): each pattern with the file it came from, `None` for
-/// one typed on the command line, in the order they are read — excludes
-/// before includes. The line then says which patterns the operator did
-/// not type: `and 2 more patterns (from skip.txt) match only as typed`.
-pub fn case_note_from(patterns: &[(&str, Option<&str>)]) -> Option<String> {
-    crate::case_fold::case_note(patterns, cfg!(windows))
+/// [`case_note`] under one platform's path rule (`windows`).
+fn case_note_on(
+    exclude: &[(&str, Option<&str>)],
+    include: &[(&str, Option<&str>)],
+    resolved: &ResolvedExcludes,
+    windows: bool,
+) -> Option<String> {
+    use crate::case_fold::Noted;
+    let mut noted: Vec<Noted> = Vec::with_capacity(exclude.len() + include.len());
+    for (at, &(typed, file)) in exclude.iter().enumerate() {
+        if resolved.unmatchable.iter().any(|pattern| pattern == typed) {
+            continue;
+        }
+        // What an absolute exclude became (the first of them, when the
+        // entry it names is stored under several names), without the
+        // `./` that anchors it at the source: that is how it is written
+        // for the matcher, not part of what it names.
+        let became = resolved
+            .became
+            .get(at)
+            .and_then(|span| resolved.patterns.get(span.start))
+            .filter(|_| is_absolute_pattern(typed, windows))
+            .map(|pattern| pattern.strip_prefix("./").unwrap_or(pattern));
+        noted.push(Noted {
+            typed,
+            read_as: became.unwrap_or(typed),
+            file,
+        });
+    }
+    noted.extend(include.iter().map(|&(typed, file)| Noted {
+        typed,
+        read_as: typed,
+        file,
+    }));
+    crate::case_fold::case_note_of(&noted, windows)
 }
 
 /// Everything about a filter that can be refused from the command's own
@@ -284,6 +326,11 @@ pub struct ResolvedExcludes {
     /// `patterns`: the filesystem matched one of them and nothing names
     /// which, so all are excluded. The caller notes each one.
     pub expanded: Vec<(String, Vec<String>)>,
+    /// cr-ecm4-3: for each exclude as typed, in order, where what it
+    /// became sits in `patterns` — one pattern, or several for an entry in
+    /// `expanded`. What is said about a pattern ([`case_note`]) is said of
+    /// these.
+    pub became: Vec<std::ops::Range<usize>>,
 }
 
 /// cr-g3fix4-1: the one-line note for an absolute `--exclude` that names
@@ -345,6 +392,7 @@ fn resolve_excludes_on(
             .iter()
             .map(|pattern| typed_exclude_dialect(pattern, windows).into_owned())
             .collect();
+        resolved.became = (0..exclude.len()).map(|at| at..at + 1).collect();
         return resolved;
     }
     let resolved_root = source_root.and_then(|root| std::fs::canonicalize(root).ok());
@@ -356,10 +404,12 @@ fn resolve_excludes_on(
         roots.push(canonical.to_string_lossy().into_owned());
     }
     for pattern in exclude {
+        let first = resolved.patterns.len();
         if !is_absolute_pattern(pattern, windows) {
             resolved
                 .patterns
                 .push(typed_exclude_dialect(pattern, windows).into_owned());
+            resolved.became.push(first..first + 1);
             continue;
         }
         // The pattern as typed, else through the resolved root: its
@@ -397,6 +447,7 @@ fn resolve_excludes_on(
                 resolved.unmatchable.push(pattern.clone());
             }
         }
+        resolved.became.push(first..resolved.patterns.len());
     }
     resolved
 }
@@ -4246,5 +4297,79 @@ mod tests {
         assert!(spec.files_from_set);
         let received = filter_from_spec(spec).unwrap();
         assert!(passes(&received, "a.jpg") && !passes(&received, "b.jpg"));
+    }
+
+    /// cr-ecm4-3: the line about capital letters is derived from the
+    /// effective filter. An exclude reported as unable to match anything is
+    /// neither shown nor counted — the same outside-root pattern was said
+    /// to match nothing and, a line later, to "match … only" — and an
+    /// absolute exclude is described as the pattern it became below the
+    /// source.
+    #[test]
+    fn the_case_note_is_derived_from_the_effective_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("Data")).unwrap();
+        let inside = format!("{}/Data", root.display());
+        let outside = "/nowhere-under-the-source/Thing".to_string();
+        let typed = |patterns: &[&String]| -> Vec<String> {
+            patterns.iter().map(|pattern| pattern.to_string()).collect()
+        };
+        let note = |exclude: &[String], include: &[&str], root: Option<&Path>| {
+            let resolved = resolve_excludes(exclude, root);
+            let exclude: Vec<(&str, Option<&str>)> = exclude
+                .iter()
+                .map(|pattern| (pattern.as_str(), None))
+                .collect();
+            let include: Vec<(&str, Option<&str>)> =
+                include.iter().map(|pattern| (*pattern, None)).collect();
+            case_note(&exclude, &include, &resolved)
+        };
+
+        // Each typed exclude with what it became.
+        let tmp = "*.tmp".to_string();
+        let mixed = typed(&[&outside, &inside, &tmp]);
+        let resolved = resolve_excludes(&mixed, Some(&root));
+        assert_eq!(resolved.unmatchable, std::slice::from_ref(&outside));
+        assert_eq!(resolved.became, [0..1, 1..2, 2..3]);
+        assert_eq!(resolved.patterns[1], "./Data");
+
+        // The unmatchable one is passed over; the absolute one is echoed
+        // as typed and described as what the matcher is given.
+        assert_eq!(
+            note(&mixed, &[], Some(&root)),
+            Some(format!(
+                "\"{inside}\" matches Data only, and 1 more pattern matches only as typed; \
+                 capital letters matter (--ignore-case would also match data, DATA)."
+            ))
+        );
+        // Nothing but a pattern that cannot match: no line at all.
+        assert_eq!(note(&typed(&[&outside]), &[], Some(&root)), None);
+        // An include is read as typed, and still spoken of.
+        assert_eq!(
+            note(&typed(&[&outside]), &["*.Jpg"], Some(&root)).as_deref(),
+            Some(
+                "\"*.Jpg\" matches .Jpg only; capital letters matter (--ignore-case would also \
+                 match .jpg, .JPG)."
+            )
+        );
+        // A source that is not local: every absolute exclude is
+        // unmatchable there, and none is spoken of.
+        assert_eq!(note(&typed(&[&inside, &outside]), &[], None), None);
+        assert_eq!(
+            note(&typed(&[&inside, &tmp]), &[], None).as_deref(),
+            Some(
+                "\"*.tmp\" matches .tmp only; capital letters matter (--ignore-case would also \
+                 match .TMP)."
+            )
+        );
+        // Relative patterns alone: as before.
+        assert_eq!(
+            note(&typed(&[&"*Cache".to_string()]), &[], Some(&root)).as_deref(),
+            Some(
+                "\"*Cache\" matches Cache only; capital letters matter (--ignore-case would also \
+                 match cache, CACHE)."
+            )
+        );
     }
 }

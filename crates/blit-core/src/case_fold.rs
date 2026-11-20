@@ -64,10 +64,58 @@ pub(crate) fn case_variants(c: char) -> Vec<char> {
 /// from, if any, and the line says so — `"*Cache" (from skip.txt) matches
 /// …` for the pattern shown, `and 2 more patterns (from skip.txt)` for the
 /// ones counted: the operator did not type those on the command line.
+///
+/// cr-ecm4-3: this is [`case_note_of`] for patterns that are read as they
+/// are typed (a relative pattern, an include) — the form this module's
+/// guards drive it in.
+#[cfg(test)]
 pub(crate) fn case_note(patterns: &[(&str, Option<&str>)], windows: bool) -> Option<String> {
-    let mut noted = patterns
+    let noted: Vec<Noted> = patterns
         .iter()
-        .filter_map(|(pattern, file)| Some((*pattern, *file, Spellings::of(pattern, windows)?)));
+        .map(|&(pattern, file)| Noted {
+            typed: pattern,
+            read_as: pattern,
+            file,
+        })
+        .collect();
+    case_note_of(&noted, windows)
+}
+
+/// One pattern for [`case_note_of`]: as the operator typed it, as the
+/// filter reads it, and the pattern file it came from, if any.
+pub(crate) struct Noted<'a> {
+    /// Echoed in quotes, so the operator knows which pattern is meant.
+    pub typed: &'a str,
+    /// What the matcher is given, and so what the line describes: the
+    /// same text for a relative pattern; for an absolute `--exclude`, the
+    /// pattern below the source it became (`Data` for `/srv/Data` under
+    /// `/srv`).
+    pub read_as: &'a str,
+    pub file: Option<&'a str>,
+}
+
+/// cr-ecm4-3: [`case_note`] built from the EFFECTIVE patterns. What the
+/// line says a pattern matches, and what `--ignore-case` would do to it,
+/// is said of the pattern the matcher is given ([`Noted::read_as`]) —
+/// the source's own path is no part of that, and its letters are never
+/// shown in another case (`/SRV/DATA` is no entry under `/srv`). A caller
+/// leaves out a pattern that can match nothing.
+///
+/// A pattern in which the option would make a negated class take LESS
+/// (`photo[!x].jpg`: `[!x]` matches `X` as typed, and would not) is shown
+/// with no other spelling at all — `PHOTO[!x].JPG` reads as a glob that
+/// admits `PHOTOX.JPG`, which the option does not match — and the line
+/// says what the class would stop matching:
+///
+/// `"photo[!x].jpg" matches exactly as typed; capital letters matter (--ignore-case changes what it matches: [!x] would stop matching X).`
+pub(crate) fn case_note_of(patterns: &[Noted], windows: bool) -> Option<String> {
+    let mut noted = patterns.iter().filter_map(|noted| {
+        Some((
+            noted.typed,
+            noted.file,
+            Spellings::of(noted.read_as, windows)?,
+        ))
+    });
     let (pattern, file, spellings) = noted.next()?;
     let shown_from = file.map_or(String::new(), |file| format!(" (from {file})"));
     let others: Vec<Option<&str>> = noted.map(|(_, file, _)| file).collect();
@@ -88,9 +136,21 @@ pub(crate) fn case_note(patterns: &[(&str, Option<&str>)], windows: bool) -> Opt
             n => format!(", and {n} more patterns{from} match only as typed"),
         }
     };
-    let line = if spellings.others.is_empty() {
+    let line = if let Some((class, lost)) = &spellings.narrowed {
+        // cr-ecm4-3: ignoring case makes this class take less, so the
+        // option does not simply match more — and no spelling shows that.
+        let they = if others.is_empty() {
+            "it matches"
+        } else {
+            "they match"
+        };
+        format!(
+            "\"{pattern}\"{shown_from} matches exactly as typed{more}; capital letters matter \
+             (--ignore-case changes what {they}: {class} would stop matching {lost})."
+        )
+    } else if spellings.others.is_empty() {
         // Ignoring case would change what the pattern names, and no other
-        // spelling says how (a negated class, a range across both cases).
+        // spelling says how (a range across both cases).
         let them = if others.is_empty() { "it" } else { "them" };
         format!(
             "\"{pattern}\"{shown_from} matches exactly as typed{more}; capital letters matter \
@@ -127,6 +187,11 @@ fn one_line(text: &str) -> String {
 struct Spellings<'a> {
     typed: &'a str,
     others: Vec<String>,
+    /// cr-ecm4-3: the first negated class `--ignore-case` would make take
+    /// less, with the letters it would stop matching (`[!x]`, `X`). When
+    /// there is one, `others` is empty: no spelling of the pattern says
+    /// what the option does to it.
+    narrowed: Option<(&'a str, String)>,
 }
 
 impl<'a> Spellings<'a> {
@@ -140,15 +205,21 @@ impl<'a> Spellings<'a> {
     /// The other spellings are the pattern all lower and all upper: each
     /// letter changed for the one `--ignore-case` pairs it with, and a
     /// class for the class of its letters' other case (`[a-z]` for
-    /// `[A-Z]`). A negated class, and a class whose ranges mix cases, are
-    /// copied — ignoring case changes what they take, in no way another
-    /// spelling shows — and when nothing else differs there is no other
-    /// spelling to show at all.
+    /// `[A-Z]`). A class whose ranges mix cases is copied — ignoring case
+    /// changes what it takes, in no way another spelling shows — and when
+    /// nothing else differs there is no other spelling to show at all.
+    ///
+    /// cr-ecm4-3: nor is there one when the option would make a negated
+    /// class take less ([`narrowed_class`]). Such a class was copied too,
+    /// beside letters in their other case, and `photo[!x].jpg` was shown
+    /// as `PHOTO[!x].JPG` — which reads as a glob admitting `PHOTOX.JPG`,
+    /// a name the option does not match (a mirror deleted it).
     fn of(pattern: &'a str, windows: bool) -> Option<Self> {
         if widen_case(pattern, windows) == pattern {
             return None;
         }
         let typed = without_end_wildcards(pattern, windows);
+        let mut narrowed: Option<(&'a str, String)> = None;
         let (mut lower, mut upper) = (String::new(), String::new());
         let mut rest = typed;
         while let Some(c) = rest.chars().next() {
@@ -159,6 +230,9 @@ impl<'a> Spellings<'a> {
             };
             let len = match class {
                 Some(len) => {
+                    if narrowed.is_none() {
+                        narrowed = narrowed_class(&rest[..len]).map(|lost| (&rest[..len], lost));
+                    }
                     lower.push_str(&class_in_case(&rest[..len], false));
                     upper.push_str(&class_in_case(&rest[..len], true));
                     len
@@ -184,13 +258,57 @@ impl<'a> Spellings<'a> {
             rest = &rest[len..];
         }
         let mut others = Vec::new();
-        for other in [lower, upper] {
-            if other != typed && !others.contains(&other) {
-                others.push(other);
+        if narrowed.is_none() {
+            for other in [lower, upper] {
+                if other != typed && !others.contains(&other) {
+                    others.push(other);
+                }
             }
         }
-        Some(Self { typed, others })
+        Some(Self {
+            typed,
+            others,
+            narrowed,
+        })
     }
+}
+
+/// cr-ecm4-3: for a negated class that `--ignore-case` would make take
+/// LESS, the letters it would stop matching, as the class itself would
+/// write them (`X` for `[!x]`; `A-C, X` for `[!a-cx]`; `B-C` for
+/// `[!a-cA]`, which refuses `A` already). `None` for any other class —
+/// one that is not negated, or holds both cases already (`[!xX]`), or no
+/// letter (`[!0-9]`), or that the option leaves as typed because it
+/// cannot be rewritten with certainty ([`negated_class`]).
+fn narrowed_class(class: &str) -> Option<String> {
+    let (negated, ranges) = parse_class(class)?;
+    if !negated || widen_class(class) == class {
+        return None;
+    }
+    let holds = |c: char| ranges.iter().any(|&(lo, hi)| lo <= c && c <= hi);
+    // The letters the class does not name yet, each run of neighbours as
+    // one range.
+    let mut lost: Vec<(char, char)> = Vec::new();
+    for (lo, hi) in other_cases(&ranges) {
+        for c in (lo..=hi).filter(|&c| !holds(c)) {
+            if lost.iter().any(|&(lo, hi)| lo <= c && c <= hi) {
+                continue;
+            }
+            match lost.last_mut() {
+                Some(run) if run.1 as u32 + 1 == c as u32 => run.1 = c,
+                _ => lost.push((c, c)),
+            }
+        }
+    }
+    let written: Vec<String> = lost
+        .into_iter()
+        .map(|(lo, hi)| {
+            let mut range = String::new();
+            push_range(&mut range, lo, hi);
+            range
+        })
+        .collect();
+    (!written.is_empty()).then(|| written.join(", "))
 }
 
 /// `c` in lower or upper case, among the letters `--ignore-case` pairs it
@@ -373,22 +491,7 @@ fn widen_class(class: &str) -> String {
     let Some((negated, ranges)) = parse_class(class) else {
         return class.to_string();
     };
-    let holds = |c: char| ranges.iter().any(|&(lo, hi)| lo <= c && c <= hi);
-    // The other case of each run of ASCII letters the class holds.
-    let mut added: Vec<(char, char)> = Vec::new();
-    for &(lo, hi) in &ranges {
-        for (from, to, other) in [('a', 'z', 'A'), ('A', 'Z', 'a')] {
-            let (start, end) = (lo.max(from), hi.min(to));
-            if start > end {
-                continue;
-            }
-            let shift = |c: char| char::from(other as u8 + (c as u8 - from as u8));
-            let run = (shift(start), shift(end));
-            if !(run.0..=run.1).all(holds) && !added.contains(&run) {
-                added.push(run);
-            }
-        }
-    }
+    let added = other_cases(&ranges);
     if negated {
         if added.is_empty() {
             return class.to_string();
@@ -409,6 +512,28 @@ fn widen_class(class: &str) -> String {
     }
     out.push_str("]}");
     out
+}
+
+/// The other case of each run of ASCII letters a class of `ranges` holds,
+/// where the class does not hold that run already: what [`widen_class`]
+/// adds to it.
+fn other_cases(ranges: &[(char, char)]) -> Vec<(char, char)> {
+    let holds = |c: char| ranges.iter().any(|&(lo, hi)| lo <= c && c <= hi);
+    let mut added: Vec<(char, char)> = Vec::new();
+    for &(lo, hi) in ranges {
+        for (from, to, other) in [('a', 'z', 'A'), ('A', 'Z', 'a')] {
+            let (start, end) = (lo.max(from), hi.min(to));
+            if start > end {
+                continue;
+            }
+            let shift = |c: char| char::from(other as u8 + (c as u8 - from as u8));
+            let run = (shift(start), shift(end));
+            if !(run.0..=run.1).all(holds) && !added.contains(&run) {
+                added.push(run);
+            }
+        }
+    }
+    added
 }
 
 fn push_range(out: &mut String, lo: char, hi: char) {
@@ -885,12 +1010,8 @@ mod tests {
             )
         );
         assert_eq!(
-            note(&["/srv/Data"]),
-            line(
-                "\"/srv/Data\" matches /srv/Data",
-                "",
-                "/srv/data, /SRV/DATA"
-            )
+            note(&["srv/Data"]),
+            line("\"srv/Data\" matches srv/Data", "", "srv/data, SRV/DATA")
         );
         // AC-5: no letter whose case could matter, no line.
         for patterns in [
@@ -1047,20 +1168,30 @@ mod tests {
                  match ẞ)."
             )
         );
-        // Ignoring case changes what a negated class takes, and no other
-        // spelling says how: the line says so without one.
+        // Ignoring case makes a negated class take LESS, and no other
+        // spelling says so: the line does, without one (cr-ecm4-3).
         assert_eq!(
             note("*[!a]").as_deref(),
             Some(
                 "\"*[!a]\" matches exactly as typed; capital letters matter (--ignore-case \
-                 reads it otherwise)."
+                 changes what it matches: [!a] would stop matching A)."
             )
         );
         assert_eq!(
             case_note(&[("[!a]", None), ("b", None)], false).as_deref(),
             Some(
                 "\"[!a]\" matches exactly as typed, and 1 more pattern matches only as typed; \
-                 capital letters matter (--ignore-case reads them otherwise)."
+                 capital letters matter (--ignore-case changes what they match: [!a] would stop \
+                 matching A)."
+            )
+        );
+        // A class across both cases that the option still widens: no
+        // spelling shows how, and nothing is lost.
+        assert_eq!(
+            note("[A-c]1").as_deref(),
+            Some(
+                "\"[A-c]1\" matches exactly as typed; capital letters matter (--ignore-case \
+                 reads it otherwise)."
             )
         );
         // Noted exactly when widening changes the pattern, never otherwise.
@@ -1069,6 +1200,7 @@ mod tests {
             ("*ß", true),
             ("[!a]x1", true),
             ("[A-z]1", false),
+            ("[A-c]1", true),
             ("[Aa]1", false),
             ("[0-9_]*", false),
             ("??", false),
@@ -1146,5 +1278,129 @@ mod tests {
             r#"first\nSecond\tthird only, and 1 more pattern matches only as typed;"#
         );
         assert!(line.starts_with(start), "{line}");
+    }
+
+    /// cr-ecm4-3: `--ignore-case` makes a negated class take LESS, and the
+    /// line says exactly that instead of showing a spelling. For
+    /// `photo[!x].jpg` it showed `PHOTO[!x].JPG` as something the option
+    /// would also match: a glob that admits `PHOTOX.JPG`, which the option
+    /// does not match — the mirror deleted it — while `photoX.jpg` lost
+    /// the protection it had as typed.
+    #[test]
+    fn the_case_note_says_what_a_negated_class_would_stop_matching() {
+        let note = |pattern: &str| case_note(&[(pattern, None)], false).unwrap();
+        assert_eq!(
+            note("photo[!x].jpg"),
+            "\"photo[!x].jpg\" matches exactly as typed; capital letters matter (--ignore-case \
+             changes what it matches: [!x] would stop matching X)."
+        );
+        // The matcher, which the line follows: as typed `[!x]` takes `X`;
+        // with the option it takes neither case.
+        assert!(as_typed("photo[!x].jpg").is_match("photoX.jpg"));
+        assert!(!ignoring_case("photo[!x].jpg").is_match("photoX.jpg"));
+        assert!(!ignoring_case("photo[!x].jpg").is_match("PHOTOX.JPG"));
+        assert!(ignoring_case("photo[!x].jpg").is_match("PHOTOY.JPG"));
+
+        for (pattern, class, lost) in [
+            ("photo[!x].jpg", "[!x]", "X"),
+            ("*[^Q]", "[^Q]", "q"),
+            ("[!a-cx]1", "[!a-cx]", "A-C, X"),
+            ("[!a-cA]1", "[!a-cA]", "B-C"),
+            ("a[!0-9][!b]", "[!b]", "B"),
+        ] {
+            let shown = Spellings::of(pattern, false).expect("noted");
+            assert!(shown.others.is_empty(), "{pattern}: {:?}", shown.others);
+            assert_eq!(shown.narrowed, Some((class, lost.to_string())), "{pattern}");
+            assert!(
+                note(pattern).ends_with(&format!("{class} would stop matching {lost})."))
+                    && !note(pattern).contains("also match"),
+                "{}",
+                note(pattern)
+            );
+        }
+        // A negated class the option leaves alone is no reason for it: the
+        // spelling shown says what is true.
+        for (pattern, others) in [
+            ("photo[!0-9].jpg", &["PHOTO[!0-9].JPG"][..]),
+            ("Photo[!xX]", &["photo[!xX]", "PHOTO[!xX]"]),
+        ] {
+            let shown = Spellings::of(pattern, false).expect("noted");
+            assert_eq!(shown.narrowed, None, "{pattern}");
+            assert_eq!(shown.others, others, "{pattern}");
+        }
+
+        // Whatever is shown as another spelling, READ AS A GLOB, admits
+        // only names the option matches — a class standing for any of
+        // these characters, a wildcard for one letter.
+        let pool = ['x', 'X', 'a', 'A', 'b', 'q', 'Q', '1', '_'];
+        for pattern in [
+            "photo[!x].jpg",
+            "photo[!0-9].jpg",
+            "Photo[!xX]",
+            "*[a-z]",
+            "[abc]x",
+            "[A-C_]x",
+            "IMG_*.[jJ]pg",
+            "a[!0-9][!b]",
+            "[!a]x1",
+        ] {
+            let widened = ignoring_case(pattern);
+            let Some(shown) = Spellings::of(pattern, false) else {
+                continue;
+            };
+            for other in &shown.others {
+                let glob = as_typed(other);
+                // Every name made by putting a pool character where the
+                // spelling has a class, the spelling's own text elsewhere.
+                let mut names = vec![String::new()];
+                let mut rest = other.as_str();
+                while let Some(c) = rest.chars().next() {
+                    let (choices, len): (Vec<char>, usize) = match c {
+                        '[' => (pool.to_vec(), bracket_class_len(rest).expect("a class")),
+                        '*' => (vec!['x'], 1),
+                        c => (vec![c], c.len_utf8()),
+                    };
+                    names = names
+                        .iter()
+                        .flat_map(|name| choices.iter().map(move |c| format!("{name}{c}")))
+                        .collect();
+                    rest = &rest[len..];
+                }
+                for name in names.iter().filter(|name| glob.is_match(name.as_str())) {
+                    assert!(
+                        widened.is_match(name),
+                        "{pattern} shows {other}, which admits {name}; --ignore-case does not \
+                         match it"
+                    );
+                }
+            }
+        }
+    }
+
+    /// cr-ecm4-3: the line describes the pattern the matcher is given. An
+    /// absolute exclude is echoed as typed, and what it matches is said of
+    /// the pattern it became below the source — the source's own letters
+    /// are never shown in another case.
+    #[test]
+    fn the_case_note_describes_the_pattern_as_the_filter_reads_it() {
+        let absolute = Noted {
+            typed: "/srv/Data",
+            read_as: "Data",
+            file: None,
+        };
+        assert_eq!(
+            case_note_of(&[absolute], false).as_deref(),
+            Some(
+                "\"/srv/Data\" matches Data only; capital letters matter (--ignore-case would \
+                 also match data, DATA)."
+            )
+        );
+        // Whether a pattern is spoken of at all is asked of that pattern too.
+        let digits = Noted {
+            typed: "/srv/Data/2024",
+            read_as: "2024",
+            file: Some("skip.txt"),
+        };
+        assert_eq!(case_note_of(&[digits], false), None);
     }
 }

@@ -466,6 +466,128 @@ fn the_line_speaks_of_every_pattern_whose_reading_depends_on_case() {
     }
 }
 
+/// cr-ecm4-3: the line is said of the filter the run uses.
+///
+/// A negated class: `--ignore-case` makes `[!x]` take less, and the line
+/// says so instead of showing `PHOTO[!x].JPG` as something the option
+/// "would also match" — a glob admitting names the option does not match.
+/// What it says is what happens: as typed `photoX.jpg` is named and kept;
+/// with the option it is not, and is deleted.
+///
+/// An exclude the run has just reported as unable to match anything is not
+/// then described as matching, nor counted; and an absolute exclude under
+/// the source is described as what it names there, the source's own path
+/// never shown in another case.
+#[test]
+fn the_line_is_said_of_the_filter_the_run_uses() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    write(&src, "keep.1");
+    let (from, to) = (with_slash(&src), with_slash(&dst));
+    let fill = || {
+        write(&dst, "photoX.jpg");
+        write(&dst, "PHOTOY.JPG");
+    };
+
+    fill();
+    let asked = blit(
+        tmp.path(),
+        &["mirror", "--exclude", "photo[!x].jpg", &from, &to],
+        Some("y\n"),
+    );
+    assert_eq!(asked.code, Some(0), "{}", asked.all());
+    let line = "\"photo[!x].jpg\" matches exactly as typed; capital letters matter \
+                (--ignore-case changes what it matches: [!x] would stop matching X).";
+    assert!(
+        asked.stdout.contains(&format!("{line}\n{QUESTION}")),
+        "{}",
+        asked.all()
+    );
+    assert!(!asked.all().contains("also match"), "{}", asked.all());
+    assert!(dst.join("photoX.jpg").exists(), "as typed, [!x] takes X");
+    assert!(
+        !dst.join("PHOTOY.JPG").exists(),
+        "as typed, capitals matter"
+    );
+
+    fill();
+    let ignoring = blit(
+        tmp.path(),
+        &[
+            "mirror",
+            "-y",
+            "--ignore-case",
+            "--exclude",
+            "photo[!x].jpg",
+            &from,
+            &to,
+        ],
+        None,
+    );
+    assert_eq!(ignoring.code, Some(0), "{}", ignoring.all());
+    assert!(
+        !dst.join("photoX.jpg").exists(),
+        "with the option [!x] stops matching X, as the line said"
+    );
+    assert!(dst.join("PHOTOY.JPG").exists(), "and other capitals match");
+
+    // An exclude that cannot match anything: said once, and no line about
+    // capital letters is made from it.
+    let outside = tmp.path().join("elsewhere").join("Thing");
+    let outside = outside.to_str().unwrap();
+    let alone = blit(
+        tmp.path(),
+        &["mirror", "--exclude", outside, &from, &to],
+        Some("n\n"),
+    );
+    assert!(
+        alone.stderr.contains(&format!(
+            "--exclude '{outside}' cannot match anything under"
+        )),
+        "{}",
+        alone.all()
+    );
+    assert!(!alone.all().contains(MARK), "{}", alone.all());
+    assert!(alone.stdout.contains(QUESTION), "{}", alone.all());
+    let beside = blit(
+        tmp.path(),
+        &[
+            "mirror",
+            "--exclude",
+            outside,
+            "--exclude",
+            "*Cache",
+            &from,
+            &to,
+        ],
+        Some("n\n"),
+    );
+    assert!(
+        beside.stdout.contains(&format!("{CACHE_LINE}\n{QUESTION}")),
+        "the pattern that can match, and no count of the other:\n{}",
+        beside.all()
+    );
+
+    // An absolute exclude under the source: echoed as typed, described as
+    // what it names there.
+    write(&src, "Data/in.txt");
+    let inside = src.join("Data");
+    let inside = inside.to_str().unwrap();
+    let absolute = blit(
+        tmp.path(),
+        &["mirror", "--exclude", inside, &from, &to],
+        Some("n\n"),
+    );
+    assert!(
+        absolute.stdout.contains(&format!(
+            "\"{inside}\" matches Data only; capital letters matter (--ignore-case would also \
+             match data, DATA).\n{QUESTION}"
+        )),
+        "{}",
+        absolute.all()
+    );
+}
+
 /// cr-ecm3-5: no line when a list of names overrides the patterns. With
 /// `--files-from`, what is copied is what is listed, whatever a pattern
 /// says — the note described a `*.cfg` exclusion while the listed

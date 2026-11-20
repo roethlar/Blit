@@ -144,15 +144,22 @@ fn reject_unusable_filter(args: &TransferArgs) -> Result<()> {
 /// remote. The run goes on; the operator learns the pattern did nothing.
 /// cr-g3fix4-1: and one line per absolute `--exclude` naming an entry the
 /// source stores under several names (hard links), all of them excluded.
-fn warn_unmatchable_excludes(args: &TransferArgs, source_display: &str) {
+///
+/// Returns what the excludes resolved to, for the line about capital
+/// letters (cr-ecm4-3): that line is said of the same effective patterns.
+fn warn_unmatchable_excludes(
+    args: &TransferArgs,
+    source_display: &str,
+) -> filter::ResolvedExcludes {
     let source_root = local_source_root(args);
     let resolved = filter::resolve_excludes(&args.exclude, source_root.as_deref());
-    for pattern in resolved.unmatchable {
+    for pattern in &resolved.unmatchable {
         eprintln!("blit: --exclude '{pattern}' cannot match anything under {source_display}");
     }
-    for (pattern, patterns) in resolved.expanded {
-        eprintln!("{}", filter::shared_entry_note(&pattern, &patterns));
+    for (pattern, patterns) in &resolved.expanded {
+        eprintln!("{}", filter::shared_entry_note(pattern, patterns));
     }
+    resolved
 }
 
 /// EXCLUDE_CASE_MATCHING slice 3b (AC-8, AC-11): the patterns of each
@@ -244,7 +251,11 @@ pub(crate) fn reject_move_filters(args: &TransferArgs) -> Result<()> {
 /// says the operator knows (Q9) — none with `-y`, and none when no pattern
 /// holds a letter. `mirror` shows it in its question; a run that asks
 /// nothing prints it as a note.
-fn case_note(args: &TransferArgs) -> Option<String> {
+///
+/// cr-ecm4-3: `resolved` is what this run's excludes resolved to; the line
+/// is derived from it, so an exclude just reported as unable to match
+/// anything is not then described as matching.
+fn case_note(args: &TransferArgs, resolved: &filter::ResolvedExcludes) -> Option<String> {
     if args.ignore_case || args.match_case || args.yes {
         return None;
     }
@@ -261,18 +272,26 @@ fn case_note(args: &TransferArgs) -> Option<String> {
             .and_then(Option::as_ref)
             .map(|file| file.display().to_string())
     };
-    let files: Vec<Option<String>> = (0..args.exclude.len())
-        .map(|at| origin(&args.exclude_origin, at))
-        .chain((0..args.include.len()).map(|at| origin(&args.include_origin, at)))
-        .collect();
-    let patterns: Vec<(&str, Option<&str>)> = args
-        .exclude
-        .iter()
-        .chain(&args.include)
-        .map(String::as_str)
-        .zip(files.iter().map(Option::as_deref))
-        .collect();
-    filter::case_note_from(&patterns)
+    let with_origins = |patterns: &[String], origins: &[Option<PathBuf>]| -> Vec<Option<String>> {
+        (0..patterns.len()).map(|at| origin(origins, at)).collect()
+    };
+    let exclude_files = with_origins(&args.exclude, &args.exclude_origin);
+    let include_files = with_origins(&args.include, &args.include_origin);
+    fn paired<'a>(
+        patterns: &'a [String],
+        files: &'a [Option<String>],
+    ) -> Vec<(&'a str, Option<&'a str>)> {
+        patterns
+            .iter()
+            .map(String::as_str)
+            .zip(files.iter().map(Option::as_deref))
+            .collect()
+    }
+    filter::case_note(
+        &paired(&args.exclude, &exclude_files),
+        &paired(&args.include, &include_files),
+        resolved,
+    )
 }
 
 /// Prompt for confirmation of a destructive operation. Returns true if the user confirms.
@@ -487,12 +506,12 @@ async fn run_transfer_inner(
     reject_unusable_filter(args)?;
 
     warn_if_dropping_windows_metadata(args);
-    warn_unmatchable_excludes(args, &src_display);
+    let resolved_excludes = warn_unmatchable_excludes(args, &src_display);
 
     // For mirror operations, prompt unless --yes or --dry-run. The line
     // about capital letters is part of the question when one is asked,
     // and a note on stderr when none is (`copy`, a dry run): AC-3, AC-9.
-    let case_note = case_note(args);
+    let case_note = case_note(args, &resolved_excludes);
     if mode.is_mirror() && !args.dry_run {
         let prompt = format!(
             "Mirror will delete extraneous files at destination '{}'. Continue?",
