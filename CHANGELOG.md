@@ -95,7 +95,10 @@ part, and a job you can list, read, re-run and retry.
   `blit jobs save <job-id> <name>`, `blit jobs export <job-id|name> <file>`,
   `blit jobs run <name|file>` and `blit jobs delete <name>` manage them. A
   saved job reproduces its run from any working directory, with the
-  `--files-from` list it ran with.
+  `--files-from` list it ran with. A command refused for what it says —
+  an option the verb does not take, a filter that cannot be used, a source
+  and destination that are one path — saves and exports nothing, so a job
+  already saved under that name stays as it was.
 - **`blit jobs retry <job-id|file>`** starts a new run that sends exactly
   the files that failed, with the original options (a `move` runs whole
   again). It refuses a job from another machine, a run still going or
@@ -133,7 +136,13 @@ part, and a job you can list, read, re-run and retry.
   starts with one line built from your pattern: `"*Cache" matches Cache
   only; capital letters matter (--ignore-case would also match cache,
   CACHE).` `copy` prints it once on stderr and goes on. No line with
-  either mode typed, with `-y`, or when no pattern holds a letter.
+  either mode typed, with `-y`, or when no pattern holds a letter. The
+  line describes the patterns the run uses: an exclude that cannot match
+  anything is not spoken of, and an absolute exclude is described as what
+  it names under the source. Where the option would make a pattern match
+  LESS — a negated class such as `[!x]`, which then refuses `X` too — the
+  line says so instead of showing a spelling: `(--ignore-case changes
+  what it matches: [!x] would stop matching X).`
 - `?` and a bracket class match one byte in both modes. A class holding a
   letter beyond ASCII (`[aé].txt`) is refused with the spelling that works
   (`{a,é}.txt`), on the command line, in a pattern file, from a saved job
@@ -147,6 +156,9 @@ part, and a job you can list, read, re-run and retry.
   line (`- pattern`, `+ pattern`, `!`), a missing file, or text that is not
   UTF-8 refuses the run, naming the file and the line. A saved job keeps
   the patterns read, not the file.
+- A `--files-from` list that holds no name (a file of comments) selects
+  nothing at a daemon, as it does locally. It used to reach the daemon as
+  no list at all, and the daemon applied the patterns the list overrides.
 - A filter that cannot be used — a pattern that is no glob or cannot be
   compiled, an unreadable size or age, a pattern file that cannot be read —
   is refused before `mirror` asks its question; the question used to come

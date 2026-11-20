@@ -194,6 +194,12 @@ deleted. The bump is what keeps an older peer out: it would ignore the
 field, read the patterns exactly and, on a mirror, delete what the
 initiator was told to keep.
 
+Also in v9, `FilterSpec.files_from_set` says a list of exact names is in
+force whatever it holds. `files_from` and `files_from_raw` cannot say so
+for a list with no name in it — empty and absent are one encoding — and a
+peer that read "no list" applied the patterns the list overrides. With the
+field set and both lists empty, nothing passes.
+
 ## Frame set and field numbers
 
 `rpc Transfer(stream TransferFrame) returns (stream TransferFrame)`

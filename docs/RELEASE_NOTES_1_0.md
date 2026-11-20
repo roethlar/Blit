@@ -98,7 +98,10 @@ the source side too, and adds a retry pass.
   would also match cache, CACHE).` `copy`, which asks nothing, prints the
   same line once as a note and goes on. Saying it yourself —
   `--match-case` (the default, stated) or `--ignore-case` — or `-y`
-  leaves the line out.
+  leaves the line out. Where `--ignore-case` would make a pattern match
+  less — a negated class such as `[!x]`, which then refuses `X` as well —
+  the line says that instead: `(--ignore-case changes what it matches:
+  [!x] would stop matching X).`
 - **`?` and a bracket class match one byte**, with or without
   `--ignore-case`, as in rsync and git: `?.txt` does not name `é.txt`. A
   class that holds a letter beyond ASCII (`[aé].txt`) could never match
@@ -157,7 +160,8 @@ carry such names by their exact bytes.
   run as a saved job; `--export <file>` writes it to a file. `blit jobs
   save|export|run|delete` manage them; `blit jobs run <name|file>` re-runs
   the same transfer from any working directory, with the `--files-from`
-  list it ran with.
+  list it ran with. A command that is refused for its own words saves
+  nothing, so a job already saved under that name stays as it was.
 - **A failed `--detach` job says why in `jobs list`.** The daemon's record
   of the job carries the handler's own error, the same text its log
   records, instead of the fixed `delegated_pull handler failed`.

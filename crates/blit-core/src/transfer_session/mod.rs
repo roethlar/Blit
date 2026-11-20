@@ -115,7 +115,9 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// the SOURCE's walk and the DESTINATION's deletion scope read every
 /// pattern as the initiator did. An older peer would read the patterns
 /// exactly and, on a mirror, delete what this side was told to keep — it
-/// is refused at HELLO like any other version mismatch.
+/// is refused at HELLO like any other version mismatch. Also v9 (before
+/// any release carried it): `FilterSpec.files_from_set` (10; cr-ecm4-2),
+/// a list of exact names in force even when it holds no name.
 pub const CONTRACT_VERSION: u32 = 9;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
