@@ -1575,16 +1575,40 @@ pub fn machine_id(dir: &Path) -> io::Result<String> {
             Err(error) => return Err(error),
         }
     }
-    let text = fs::read_to_string(&path)?;
-    let id = text.trim();
-    if check_id("machine ID", id).is_err() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{} does not hold a machine ID", path.display()),
-        ));
+    // cr-ecm3-6: another process may have made the file a moment ago and
+    // not written it yet. Two commands first using one settings folder at
+    // the same time did just that: one created the file, the other read
+    // it empty, took it for a file that "does not hold a machine ID" and
+    // ran unlogged, its job unsaved. A file that is empty, or whose one
+    // line is not finished, is that moment — read again shortly. The line
+    // is finished when it ends, or holds the 32 characters this function
+    // writes; what a finished line holds is judged at once.
+    let mut waited = 0;
+    loop {
+        let text = fs::read_to_string(&path)?;
+        let id = text.trim();
+        let finished = text.ends_with('\n') || id.len() == MACHINE_ID_LEN;
+        if finished || waited >= MACHINE_ID_READS {
+            return match check_id("machine ID", id) {
+                Ok(()) => Ok(id.to_string()),
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} does not hold a machine ID", path.display()),
+                )),
+            };
+        }
+        waited += 1;
+        std::thread::sleep(MACHINE_ID_WAIT);
     }
-    Ok(id.to_string())
 }
+
+/// The length of the ID [`machine_id`] writes: 128 bits as hex.
+const MACHINE_ID_LEN: usize = 32;
+
+/// How long [`machine_id`] gives another process to finish writing the
+/// file it has just created: 100 reads, 10 ms apart.
+const MACHINE_ID_READS: u32 = 100;
+const MACHINE_ID_WAIT: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// One line of a log, as read back.
 #[derive(Clone, Debug, PartialEq)]
@@ -2877,6 +2901,82 @@ mod tests {
         fs::write(dir.path().join("cfg").join("machine-id"), "../evil\n").unwrap();
         let error = machine_id(&dir.path().join("cfg")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// cr-ecm3-6: the machine ID read while another process is still
+    /// writing it. Two commands first using one settings folder at the
+    /// same moment: one creates the file, the other reads it before the
+    /// ID is in it. An empty file, or one whose line is not finished, is
+    /// read again until the ID is there; it used to be refused as a file
+    /// that "does not hold a machine ID", and that command ran unlogged.
+    #[test]
+    fn a_machine_id_still_being_written_is_waited_for() {
+        let id = "0123456789abcdef0123456789abcdef";
+        for first_write in ["", "0123456789abcdef"] {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("machine-id");
+            fs::write(&path, first_write).unwrap();
+            let writer = {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(MACHINE_ID_WAIT * 5);
+                    fs::write(&path, format!("{id}\n")).unwrap();
+                })
+            };
+            assert_eq!(
+                machine_id(dir.path()).unwrap(),
+                id,
+                "read while it held {first_write:?}"
+            );
+            writer.join().unwrap();
+        }
+        // A finished line that is no ID is refused at once, not waited on.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("machine-id"), "not an id\n").unwrap();
+        let asked = std::time::Instant::now();
+        assert_eq!(
+            machine_id(dir.path()).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(asked.elapsed() < MACHINE_ID_WAIT * MACHINE_ID_READS / 2);
+        // A whole ID with no line ending is read at once.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("machine-id"), id).unwrap();
+        let asked = std::time::Instant::now();
+        assert_eq!(machine_id(dir.path()).unwrap(), id);
+        assert!(asked.elapsed() < MACHINE_ID_WAIT * MACHINE_ID_READS / 2);
+        // A file left empty for good is refused, after the wait.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("machine-id"), "").unwrap();
+        assert_eq!(
+            machine_id(dir.path()).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    /// cr-ecm3-6: many first users of one settings folder at once all get
+    /// the one ID the first of them made.
+    #[test]
+    fn first_users_of_one_folder_at_once_all_read_the_same_machine_id() {
+        for _ in 0..20 {
+            let dir = TempDir::new().unwrap();
+            let folder = dir.path().join("cfg");
+            let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let readers: Vec<_> = (0..8)
+                .map(|_| {
+                    let (folder, start) = (folder.clone(), start.clone());
+                    std::thread::spawn(move || {
+                        start.wait();
+                        machine_id(&folder)
+                    })
+                })
+                .collect();
+            let ids: Vec<String> = readers
+                .into_iter()
+                .map(|reader| reader.join().unwrap().expect("a machine ID"))
+                .collect();
+            assert!(ids.iter().all(|id| *id == ids[0]), "{ids:?}");
+        }
     }
 
     #[test]

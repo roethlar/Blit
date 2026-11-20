@@ -13,7 +13,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 mod common;
-use common::{cli_command, run_with_timeout};
+use common::{cli_bin, run_with_timeout};
 
 /// AC-3's line, to the letter, for `--exclude '*Cache'`.
 const CACHE_LINE: &str = "\"*Cache\" matches Cache only; capital letters matter \
@@ -34,9 +34,13 @@ impl Ran {
 }
 
 /// `blit <args>` with `answer` on standard input; `None` is nobody there.
+/// The settings folder is the test's own, under `scratch` (cr-ecm3-6): a
+/// folder shared by every test is first used by several at once.
 fn blit(scratch: &Path, args: &[&str], answer: Option<&str>) -> Ran {
-    let mut cmd = cli_command();
-    cmd.args(args);
+    let mut cmd = std::process::Command::new(cli_bin());
+    cmd.arg("--config-dir")
+        .arg(scratch.join("settings"))
+        .args(args);
     match answer {
         Some(text) => {
             let path = scratch.join("answer.txt");

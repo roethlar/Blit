@@ -15,7 +15,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 mod common;
-use common::{cli_command, run_with_timeout};
+use common::{cli_bin, run_with_timeout};
 
 struct Ran {
     code: Option<i32>,
@@ -29,9 +29,18 @@ impl Ran {
     }
 }
 
+thread_local! {
+    /// The settings folder of the test running on this thread (cr-ecm3-6):
+    /// its own, so that no two tests first use one folder at once, and the
+    /// same for every command of the test, so that a job it exports is one
+    /// it can run again.
+    static SETTINGS: tempfile::TempDir = tempdir().unwrap();
+}
+
 /// `blit <args>` with nobody at the terminal.
 fn blit(args: &[&str]) -> Ran {
-    let mut cmd = cli_command();
+    let mut cmd = std::process::Command::new(cli_bin());
+    SETTINGS.with(|settings| cmd.arg("--config-dir").arg(settings.path()));
     cmd.args(args).stdin(Stdio::null());
     let output = run_with_timeout(cmd, Duration::from_secs(60));
     Ran {
