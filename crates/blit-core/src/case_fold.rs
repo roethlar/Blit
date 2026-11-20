@@ -115,13 +115,15 @@ fn push_letter(out: &mut String, variants: &[char]) {
 }
 
 /// A bracket class (`[` through its `]`) widened to ignore case: each ASCII
-/// letter it holds, alone or inside a range, gains its other case. A class
-/// matches one byte, so:
-/// - a letter's fold-mates beyond ASCII (`ſ` for `s`, the Kelvin sign for
-///   `k`) are added beside a positive class as alternatives;
-/// - a non-ASCII member is left as it is (in byte mode it never matched
-///   its own letter; a later slice refuses such a class outright);
-/// - a negated class gains the ASCII cases only.
+/// letter it holds, alone or inside a range, gains its other case — and
+/// nothing else. A class matches ONE BYTE, with the option and without it
+/// (the plan's rule, Q10), so a letter's fold-mates beyond ASCII (`ſ` for
+/// `s`, two bytes; the Kelvin sign for `k`, three) are NOT added: the bare
+/// letter `s` names `ſ` when case is ignored, the class `[s]` does not.
+/// cr-ecm2-1: they once were, as alternatives beside the class, and
+/// `--include '[sk].txt'` then put `ſ.txt` in a mirror's deletion scope,
+/// which the same pattern as typed never did. A non-ASCII member is left
+/// as it is (validation refuses such a class before it is ever read).
 ///
 /// The class is returned unchanged when nothing is to be added, or when it
 /// cannot be rewritten with certainty (see [`negated_class`]).
@@ -151,35 +153,19 @@ fn widen_class(class: &str) -> String {
         }
         return negated_class(&ranges, &added).unwrap_or_else(|| class.to_string());
     }
-    // The fold-mates beyond ASCII of the ASCII letters the class matches.
-    let mut beyond: Vec<char> = Vec::new();
-    for letter in 'a'..='z' {
-        if holds(letter) || holds(letter.to_ascii_uppercase()) {
-            for variant in case_variants(letter) {
-                if !variant.is_ascii() && !holds(variant) && !beyond.contains(&variant) {
-                    beyond.push(variant);
-                }
-            }
-        }
-    }
-    if added.is_empty() && beyond.is_empty() {
+    if added.is_empty() {
         return class.to_string();
     }
+    // The class as typed, or a second class of the other cases: one byte
+    // either way.
     let mut out = String::with_capacity(class.len() * 2 + 8);
     out.push('{');
     out.push_str(class);
-    if !added.is_empty() {
-        out.push_str(",[");
-        for &(lo, hi) in &added {
-            push_range(&mut out, lo, hi);
-        }
-        out.push(']');
+    out.push_str(",[");
+    for &(lo, hi) in &added {
+        push_range(&mut out, lo, hi);
     }
-    for variant in beyond {
-        out.push(',');
-        out.push(variant);
-    }
-    out.push('}');
+    out.push_str("]}");
     out
 }
 
@@ -409,16 +395,16 @@ mod tests {
     }
 
     /// A class gains the other case of its ASCII letters — alone, in a
-    /// range, and negated — and a positive class holding `s` or `k` also
-    /// names their fold-mates beyond ASCII. Every other member stays.
+    /// range, and negated — and nothing beyond ASCII (cr-ecm2-1: a class
+    /// is one byte). Every other member stays.
     #[test]
     fn a_class_gains_the_other_case_of_its_letters() {
         for (pattern, names, others) in [
             ("[abc]x", &["Ax", "bx", "CX"][..], &["dx", "_x"][..]),
             ("[a-c]x", &["Bx", "ax"], &["Dx", "dx"]),
             ("[A-C0-9_]x", &["bx", "7x", "_x"], &["dx", "-x"]),
-            ("[st]x", &["Sx", "Tx", "ſx"], &["ux"]),
-            ("[j-l]x", &["Kx", "\u{212a}x"], &["mx"]),
+            ("[st]x", &["Sx", "Tx"], &["ux", "ſx"]),
+            ("[j-l]x", &["Kx"], &["mx", "\u{212a}x"]),
             ("[]a]x", &["]x", "Ax"], &["bx"]),
             ("[a-]x", &["-x", "Ax"], &["bx"]),
             ("[-a]x", &["-x", "Ax"], &["bx"]),
@@ -441,12 +427,14 @@ mod tests {
             }
         }
         // cr-g3fix6-1's case: a range across both cases keeps what lies
-        // between them (`[A-z]` holds `_`) and gains no ASCII letter, only
-        // the two fold-mates beyond ASCII.
-        assert_eq!(widen_case("[A-z]", false), "{[A-z],\u{212a},ſ}");
-        for name in ["_x", "ax", "Zx", "ſx"] {
+        // between them (`[A-z]` holds `_`) and gains nothing: it already
+        // holds both cases of every ASCII letter.
+        assert_eq!(widen_case("[A-z]", false), "[A-z]");
+        for name in ["_x", "ax", "Zx"] {
             assert!(ignoring_case("[A-z]x").is_match(name), "{name}");
         }
+        assert!(!ignoring_case("[A-z]x").is_match("ſx"));
+        assert_eq!(widen_case("[sk]", false), "{[sk],[SK]}");
         // Nothing to add: the class is copied byte for byte.
         for unchanged in ["[0-9]", "[aA]", "[!0-9]", "[_.]", "[é]"] {
             assert_eq!(widen_case(unchanged, false), unchanged);
@@ -566,5 +554,47 @@ mod tests {
         ] {
             assert_eq!(widen_case(typed, false), widened, "{typed}");
         }
+    }
+
+    /// cr-ecm2-1: a class matches one byte with `--ignore-case` as without
+    /// it. `ſ` (two bytes) and the Kelvin sign (three) are fold-mates of
+    /// `s` and `k`: the BARE letters name them once case is ignored, a
+    /// class holding those letters never does — positive, negated, a range
+    /// or a single member — and never matches more bytes than one.
+    #[test]
+    fn a_class_stays_one_byte_wide_when_case_is_ignored() {
+        let (long_s, kelvin) = ("ſ", "\u{212a}");
+        for class in [
+            "[s]", "[k]", "[sk]", "[a-z]", "[A-Z]", "[S]", "[rst]", "[j-l0-9]",
+        ] {
+            let pattern = format!("{class}.txt");
+            for (mode, matcher) in [
+                ("as typed", as_typed(&pattern)),
+                ("ignoring case", ignoring_case(&pattern)),
+            ] {
+                for letter in [long_s, kelvin] {
+                    assert!(
+                        !matcher.is_match(format!("{letter}.txt")),
+                        "{pattern} {mode} does not name {letter}.txt"
+                    );
+                }
+            }
+            assert!(
+                !widen_case(&pattern, false).contains(['ſ', '\u{212a}']),
+                "{pattern} widened holds no letter beyond ASCII"
+            );
+        }
+        // The class still gains its ASCII partners...
+        assert!(ignoring_case("[sk].txt").is_match("S.txt"));
+        assert!(ignoring_case("[sk].txt").is_match("K.txt"));
+        // ...a negated class, which matches any ONE byte but its members,
+        // still matches no letter of several bytes...
+        for mode in [as_typed("[!x].txt"), ignoring_case("[!x].txt")] {
+            assert!(mode.is_match("y.txt"));
+            assert!(!mode.is_match("ſ.txt"));
+        }
+        // ...and the bare letters do name their fold-mates.
+        assert!(ignoring_case("s.txt").is_match("ſ.txt"));
+        assert!(ignoring_case("k.txt").is_match("\u{212a}.txt"));
     }
 }

@@ -1981,9 +1981,10 @@ mod tests {
     }
 
     /// AC-10: widening a pattern for `--ignore-case` never writes a class
-    /// beyond ASCII either. A letter's partners beyond ASCII (`ſ` for `s`,
-    /// the Kelvin sign for `k`) go beside the class as alternatives, never
-    /// into it, where they could not match.
+    /// beyond ASCII either. A bare letter's partners beyond ASCII (`ſ` for
+    /// `s`, the Kelvin sign for `k`) are written as alternatives, never as
+    /// class members, where they could not match; a class gains ASCII
+    /// partners only (cr-ecm2-1).
     #[test]
     fn widening_never_writes_a_class_beyond_ascii() {
         for pattern in [

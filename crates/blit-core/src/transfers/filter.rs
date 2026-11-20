@@ -1235,7 +1235,7 @@ impl DestinationNames {
             .filter_map(|pattern| exclude_rule(pattern, windows))
         {
             if !rule.path {
-                if let Some(name) = plain_name(&rule.body, windows) {
+                if let Some(name) = plain_name_in(&rule.body, windows, ignore_case) {
                     let index = index_of(name);
                     if !names.contains(&index) {
                         names.push(index);
@@ -1244,7 +1244,10 @@ impl DestinationNames {
                 continue;
             }
             if let Some(parts) = path_components(&rule.body, windows) {
-                if parts.iter().any(|part| plain_name(part, windows).is_some()) {
+                if parts
+                    .iter()
+                    .any(|part| plain_name_in(part, windows, ignore_case).is_some())
+                {
                     if let Some(steps) = path_steps(&parts, windows, ignore_case, &mut index_of) {
                         paths.push(steps);
                     }
@@ -1475,7 +1478,7 @@ fn path_steps(
                 } else {
                     let next = &components[at + 1];
                     let crossing = (next != "**"
-                        && plain_name(next, windows).is_none()
+                        && plain_name_in(next, windows, ignore_case).is_none()
                         && next.contains(['*', '?']))
                     .then(|| globset::Glob::new(&format!("**/{}", read(next))))
                     .transpose()
@@ -1484,7 +1487,7 @@ fn path_steps(
                     Step::AnyDepth { crossing }
                 });
             }
-            if let Some(name) = plain_name(component, windows) {
+            if let Some(name) = plain_name_in(component, windows, ignore_case) {
                 return Some(Step::Name(index_of(name)));
             }
             let glob = globset::Glob::new(&read(component)).ok()?;
@@ -1671,6 +1674,46 @@ fn plain_name(component: &str, windows: bool) -> Option<String> {
         }
     }
     (!name.is_empty() && name != "." && name != "..").then_some(name)
+}
+
+/// cr-ecm2-1: [`plain_name`] for a rule read under one case mode. A
+/// one-member class is how escaped SYNTAX is written (`[*]`, `[[]`), and
+/// `plain_name` reads `[c]` as `c` whatever `c` is. Read ignoring case,
+/// that loses something for a LETTER: a class matches one byte, so `[s]`
+/// takes `s` and `S`, while the bare letter `s` also takes `ſ`, which is
+/// two. A component that puts an ASCII letter in a class is therefore a
+/// glob under `ignore_case` — matched as written, by the same class-aware
+/// widening the filter uses on the source walk — and not a name to
+/// resolve here, where it would be widened as a bare letter and the two
+/// ends would read one pattern two ways.
+fn plain_name_in(component: &str, windows: bool, ignore_case: bool) -> Option<String> {
+    if ignore_case && class_holds_a_letter(component) {
+        return None;
+    }
+    plain_name(component, windows)
+}
+
+/// Whether a bracket class of `component` holds an ASCII letter.
+fn class_holds_a_letter(component: &str) -> bool {
+    let mut rest = component;
+    while let Some(c) = rest.chars().next() {
+        let len = match c {
+            '[' => match bracket_class_len(rest) {
+                Some(len)
+                    if rest[..len]
+                        .chars()
+                        .any(|member| member.is_ascii_alphabetic()) =>
+                {
+                    return true
+                }
+                Some(len) => len,
+                None => 1,
+            },
+            c => c.len_utf8(),
+        };
+        rest = &rest[len..];
+    }
+    false
 }
 
 /// cr-g3fix4-2: whether the filesystem holding `root`'s entries ignores
@@ -3916,5 +3959,73 @@ mod tests {
             "--ignore-case: out of the deletion scope"
         );
         assert!(allows(&scoped, "other/x"));
+    }
+
+    /// cr-ecm2-1: the deletion scope reads a class as the source walk does
+    /// — one byte — when case is ignored. `[s]aved` is how a class spells
+    /// `saved`/`Saved`; it never names `ſaved`, whose first letter is two
+    /// bytes, at either end. The bare `saved` does. Before, the scope read
+    /// the one-member class as the bare letter and widened that, so the
+    /// destination kept an entry the source walk would have copied.
+    #[test]
+    fn the_deletion_scope_reads_a_letter_class_as_one_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path();
+        files(dst, &["one/x", "two/x"]);
+        let allows = |filter: &FileFilter, rel: &str| {
+            filter.allows_entry(Some(Path::new(rel)), &dst.join(rel), 1, None)
+        };
+        let scope = |patterns: &[&str], ignore_case: bool| {
+            let mut filter = FileFilter::default();
+            filter.exclude_files = patterns.iter().map(|p| p.to_string()).collect();
+            filter.ignore_case = ignore_case;
+            destination_scope(&filter, dst, &[])
+        };
+        // A name rule and a path rule, each with the letter in a class.
+        for patterns in [&["[s]aved"][..], &["one/[s]aved"], &["one/[s]av[e]d"]] {
+            let source = {
+                let mut filter = FileFilter::default();
+                filter.exclude_files = patterns.iter().map(|p| p.to_string()).collect();
+                filter.ignore_case = true;
+                filter
+            };
+            let scoped = scope(patterns, true);
+            for (rel, named) in [
+                ("one/saved", true),
+                ("one/Saved", true),
+                ("one/SAVED", true),
+                ("one/ſaved", false),
+                ("one/\u{212a}eep", false),
+            ] {
+                assert_eq!(
+                    !allows(&scoped, rel),
+                    named,
+                    "{patterns:?} at the destination, {rel}"
+                );
+                assert_eq!(
+                    !allows(&source, rel),
+                    named,
+                    "{patterns:?} on the source walk, {rel}"
+                );
+            }
+            // As typed, only the typed spelling.
+            let typed = scope(patterns, false);
+            assert!(!allows(&typed, "one/saved") && allows(&typed, "one/Saved"));
+            assert!(allows(&typed, "one/ſaved"));
+        }
+        // The bare letter does name its fold-mate at both ends.
+        let bare = scope(&["saved"], true);
+        assert!(!allows(&bare, "one/ſaved") && !allows(&bare, "one/SAVED"));
+        // Escaped SYNTAX in a one-member class is still a plain name.
+        assert_eq!(plain_name_in("a[*]b", false, true).as_deref(), Some("a*b"));
+        assert_eq!(
+            plain_name_in("[s]aved", false, false).as_deref(),
+            Some("saved")
+        );
+        assert_eq!(plain_name_in("[s]aved", false, true), None);
+        assert_eq!(
+            plain_name_in("saved", false, true).as_deref(),
+            Some("saved")
+        );
     }
 }

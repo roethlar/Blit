@@ -385,6 +385,83 @@ fn an_include_class_does_not_name_a_file_spelled_like_the_pattern() {
     }
 }
 
+/// cr-ecm2-1: a bracket class matches one byte with `--ignore-case` as
+/// without it. `ſ` (two bytes) and the Kelvin sign (three) are fold-mates
+/// of `s` and `k`, and the class `[sk]` once named them when case was
+/// ignored: `mirror --ignore-case --include '[sk].txt'` put a
+/// destination-only `ſ.txt` in the deletion scope and deleted it, which
+/// the same command as typed never did. The class gains its ASCII
+/// partners and nothing more, for an include and for an exclude, at the
+/// source and at the destination alike. (The entries sit in separate
+/// folders so that a filesystem which itself pairs `ſ` with `S` holds
+/// them all.)
+#[test]
+fn mirror_ignore_case_keeps_a_class_one_byte_wide() {
+    let (long_s, kelvin) = ("ſ.txt", "\u{212a}.txt");
+    for (mode, ignores) in [("--match-case", false), ("--ignore-case", true)] {
+        // An include: what it names is the deletion scope.
+        let tmp = tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        write(&src, "other.dat");
+        write(&dst, long_s);
+        write(&dst, kelvin);
+        write(&dst, "sub/S.txt");
+        let (code, out, err) = blit(&[
+            "mirror",
+            "--yes",
+            mode,
+            "--include",
+            "[sk].txt",
+            &with_slash(&src),
+            &with_slash(&dst),
+        ]);
+        assert_eq!(code, Some(0), "{mode}\n{out}{err}");
+        assert!(dst.join(long_s).exists(), "{mode}: the class never names ſ");
+        assert!(dst.join(kelvin).exists(), "{mode}: nor the Kelvin sign");
+        assert_eq!(
+            !dst.join("sub/S.txt").exists(),
+            ignores,
+            "{mode}: the ASCII partner is in scope only when case is ignored"
+        );
+
+        // An exclude: what it names is protected, here and there.
+        let tmp = tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        write(&src, "keep.txt");
+        write(&src, "from/ſaved/in-source.txt");
+        write(&dst, "one/ſaved/x.txt");
+        write(&dst, "two/Saved/x.txt");
+        write(&dst, "three/saved/x.txt");
+        let (code, out, err) = blit(&[
+            "mirror",
+            "--yes",
+            mode,
+            "--exclude",
+            "[s]aved",
+            &with_slash(&src),
+            &with_slash(&dst),
+        ]);
+        assert_eq!(code, Some(0), "{mode}\n{out}{err}");
+        assert!(
+            dst.join("from/ſaved/in-source.txt").exists(),
+            "{mode}: the source walk does not leave ſaved out"
+        );
+        assert!(
+            !dst.join("one/ſaved").exists(),
+            "{mode}: nor does the destination keep it"
+        );
+        assert!(
+            dst.join("three/saved/x.txt").exists(),
+            "{mode}: named as typed"
+        );
+        assert_eq!(
+            dst.join("two/Saved/x.txt").exists(),
+            ignores,
+            "{mode}: the ASCII partner is kept only when case is ignored"
+        );
+    }
+}
+
 /// `move` takes no `--exclude` or `--include` pattern (it refuses every
 /// filter: the source-delete step would remove what a filter left behind),
 /// so a case mode has nothing to act on there. It is refused by name, with
