@@ -545,6 +545,11 @@ fn spec_args(
     config_dir: &Path,
     spec: &JobSpec,
 ) -> Result<(crate::cli::TransferArgs, Option<ListFile>)> {
+    // cr-ecm1-4: the arguments below never pass the command line's parser,
+    // which is what refuses two options that cannot be taken together.
+    if let Some((one, other)) = spec.options.conflict() {
+        eyre::bail!("this job asks for both {one} and {other}; a transfer takes only one of them");
+    }
     let list = match &spec.files_from {
         Some(lines) => {
             let dir = config_dir.join("jobs");
@@ -1969,6 +1974,77 @@ mod retry_name_tests {
                 (match_case, ignore_case)
             );
             assert_eq!(args.exclude, ["*cache"]);
+        }
+    }
+
+    /// cr-ecm1-4: every pair of options the command line refuses together
+    /// is refused in a job's spec too, in the same words, and before the
+    /// run's `--files-from` list is written. The pairs are READ from the
+    /// command line's own declaration, so a pair added there and not to
+    /// `SpecOptions::conflict` turns this red.
+    #[test]
+    fn a_spec_holding_two_options_the_command_line_refuses_together_is_refused() {
+        use clap::Args as _;
+        let command = crate::cli::TransferArgs::augment_args(clap::Command::new("transfer"));
+        let mut pairs = std::collections::BTreeSet::new();
+        for arg in command.get_arguments() {
+            for other in command.get_arg_conflicts_with(arg) {
+                let (one, other) = (arg.get_id().to_string(), other.get_id().to_string());
+                pairs.insert(if one < other {
+                    (one, other)
+                } else {
+                    (other, one)
+                });
+            }
+        }
+        for (one, other) in [("ignore_case", "match_case"), ("checksum", "size_only")] {
+            assert!(
+                pairs.contains(&(one.to_string(), other.to_string())),
+                "the command line declares {one} against {other}: {pairs:?}"
+            );
+        }
+
+        let spec_with = |set: &[&str]| {
+            let fields: serde_json::Map<String, serde_json::Value> = set
+                .iter()
+                .map(|name| (name.to_string(), serde_json::Value::Bool(true)))
+                .collect();
+            let mut options: blit_core::job_record::SpecOptions =
+                serde_json::from_value(serde_json::Value::Object(fields)).unwrap_or_else(|error| {
+                    panic!("{set:?} are options a job's spec holds: {error}")
+                });
+            options.exclude = vec!["*cache".to_string()];
+            JobSpec::new(
+                "m1",
+                "mirror",
+                "/".into(),
+                blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+                blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+                options,
+                Some(vec!["a.txt".to_string()]),
+            )
+        };
+        let typed = |id: &str| format!("--{}", id.replace('_', "-"));
+        for (one, other) in &pairs {
+            let dir = tempfile::tempdir().unwrap();
+            let error = match spec_args(dir.path(), &spec_with(&[one, other])) {
+                Ok(_) => panic!("a spec holding {one} and {other} is refused"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains(&typed(one)) && error.contains(&typed(other)),
+                "{error}"
+            );
+            assert!(
+                !dir.path().join("jobs").exists(),
+                "refused before the list is written"
+            );
+            for alone in [one, other] {
+                assert!(
+                    spec_args(dir.path(), &spec_with(&[alone])).is_ok(),
+                    "{alone} alone runs"
+                );
+            }
         }
     }
 

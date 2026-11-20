@@ -192,6 +192,71 @@ fn a_job_from_another_machine_is_refused() {
     assert!(!ctx.workspace.join("dst").exists(), "nothing ran");
 }
 
+/// cr-ecm1-4: a job file holding BOTH case modes — which no command line
+/// can write — is refused, not run under whichever of them the code reads.
+/// Before, `jobs run` read `ignore_case`, and this mirror deleted
+/// `ONLY.CFG`, which the job as made (`--match-case --include '*.cfg'`)
+/// never named. A pair from before the case modes existed is refused too.
+#[test]
+fn a_job_file_holding_two_options_no_command_takes_together_is_refused() {
+    let ctx = TestContext::new();
+    let (src, dst) = (ctx.workspace.join("src"), ctx.workspace.join("dst"));
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+    fs::write(src.join("keep.cfg"), b"kept").unwrap();
+    fs::write(dst.join("ONLY.CFG"), b"only here").unwrap();
+    let made = blit_in(
+        &ctx,
+        &ctx.workspace,
+        &[
+            "mirror",
+            "--yes",
+            "--match-case",
+            "--include",
+            "*.cfg",
+            "--export",
+            "job.json",
+            "src/",
+            "dst/",
+        ],
+    );
+    assert!(made.status.success(), "{}", text(&made.stderr));
+    assert_eq!(names(&dst), ["ONLY.CFG", "keep.cfg"], "as typed");
+    let path = ctx.workspace.join("job.json");
+    let exported = fs::read(&path).unwrap();
+
+    for (one, other, typed) in [
+        (
+            "match_case",
+            "ignore_case",
+            ["--match-case", "--ignore-case"],
+        ),
+        ("checksum", "size_only", ["--checksum", "--size-only"]),
+    ] {
+        let mut job: serde_json::Value = serde_json::from_slice(&exported).unwrap();
+        job["spec"]["options"][one] = true.into();
+        job["spec"]["options"][other] = true.into();
+        fs::write(&path, serde_json::to_vec(&job).unwrap()).unwrap();
+        fs::remove_file(dst.join("keep.cfg")).unwrap();
+
+        let refused = blit_in(&ctx, &ctx.workspace, &["jobs", "run", "./job.json"]);
+        let stderr = text(&refused.stderr);
+        assert!(!refused.status.success(), "{one} with {other}: {stderr}");
+        assert!(
+            typed.iter().all(|option| stderr.contains(option)),
+            "{stderr}"
+        );
+        assert_eq!(names(&dst), ["ONLY.CFG"], "{one} with {other}: nothing ran");
+        fs::write(dst.join("keep.cfg"), b"kept").unwrap();
+    }
+
+    // The job as it was exported still runs.
+    fs::write(&path, &exported).unwrap();
+    let ran = blit_in(&ctx, &ctx.workspace, &["jobs", "run", "./job.json"]);
+    assert!(ran.status.success(), "{}", text(&ran.stderr));
+    assert_eq!(names(&dst), ["ONLY.CFG", "keep.cfg"]);
+}
+
 #[test]
 fn a_job_name_must_be_a_plain_name_and_every_sub_verb_has_help() {
     let ctx = TestContext::new();

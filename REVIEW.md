@@ -458,6 +458,7 @@ Owner goal 2026-11-20: "continue all work until 100% complete. review with codex
 | cr-ecm1-1 | Two slice-1 guards do not compile on Windows (they call a `#[cfg(unix)]` fixture) | `[~]` HIGH; fixed, awaiting re-review | `.review/findings/cr-ecm1-1.md` |
 | cr-ecm1-2 | A pattern that no longer compiles once widened drops every exclude to its text; `mirror --ignore-case` then deletes what the excludes name | `[~]` HIGH; fixed (validation compiles, not only parses), awaiting re-review | `.review/findings/cr-ecm1-2.md` |
 | cr-ecm1-3 | An include also named a file spelled like the pattern (`[a].txt`), in the typed case only; a mirror deleted it | `[~]` MEDIUM; fixed (an include is a glob only), awaiting re-review | `.review/findings/cr-ecm1-3.md` |
+| cr-ecm1-4 | A job file edited to hold both case modes — or any other pair the command line refuses — was run; with both case modes a mirror deleted a file the job never named | `[~]` MEDIUM; fixed (a spec holding such a pair is refused, all five pairs), awaiting re-review | `.review/findings/cr-ecm1-4.md` |
 
 ## Reconciled legacy finding groups
 

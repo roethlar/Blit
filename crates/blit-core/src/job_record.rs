@@ -133,6 +133,40 @@ pub struct SpecOptions {
     pub yes: bool,
 }
 
+impl SpecOptions {
+    /// cr-ecm1-4: two options this spec holds that no transfer takes
+    /// together, as they are typed. The command line refuses each of these
+    /// pairs before a spec is ever written; a job file is text anyone can
+    /// edit, and one holding a pair must be refused the same way rather
+    /// than run under whichever of the two the code happens to read.
+    pub fn conflict(&self) -> Option<(&'static str, &'static str)> {
+        [
+            (
+                self.match_case && self.ignore_case,
+                ("--match-case", "--ignore-case"),
+            ),
+            (
+                self.checksum && self.size_only,
+                ("--checksum", "--size-only"),
+            ),
+            (
+                self.checksum && self.ignore_times,
+                ("--checksum", "--ignore-times"),
+            ),
+            (
+                self.size_only && self.ignore_times,
+                ("--size-only", "--ignore-times"),
+            ),
+            (
+                self.ignore_existing && self.force,
+                ("--ignore-existing", "--force"),
+            ),
+        ]
+        .into_iter()
+        .find_map(|(both, pair)| both.then_some(pair))
+    }
+}
+
 /// One run of a job.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1692,6 +1726,46 @@ mod tests {
 
     /// EXCLUDE_CASE_MATCHING: options written before the case mode existed
     /// read as "no mode typed", and a typed mode reads back as written.
+    /// cr-ecm1-4: each pair of options no transfer takes together is named,
+    /// in the words typed; either option alone, and options of two
+    /// different pairs, are no conflict.
+    #[test]
+    fn a_spec_names_two_options_no_transfer_takes_together() {
+        let with = |set: &[&str]| -> SpecOptions {
+            let fields: serde_json::Map<String, serde_json::Value> = set
+                .iter()
+                .map(|name| (name.to_string(), serde_json::Value::Bool(true)))
+                .collect();
+            serde_json::from_value(serde_json::Value::Object(fields)).unwrap()
+        };
+        let typed = |field: &str| format!("--{}", field.replace('_', "-"));
+        let pairs = [
+            ("match_case", "ignore_case"),
+            ("checksum", "size_only"),
+            ("checksum", "ignore_times"),
+            ("size_only", "ignore_times"),
+            ("ignore_existing", "force"),
+        ];
+        assert_eq!(SpecOptions::default().conflict(), None);
+        for (one, other) in pairs {
+            let (first, second) = with(&[one, other])
+                .conflict()
+                .unwrap_or_else(|| panic!("{one} with {other} is a conflict"));
+            assert_eq!(
+                (first.to_string(), second.to_string()),
+                (typed(one), typed(other))
+            );
+            for alone in [one, other] {
+                assert_eq!(with(&[alone]).conflict(), None, "{alone} alone");
+            }
+        }
+        assert_eq!(
+            with(&["ignore_case", "checksum", "force"]).conflict(),
+            None,
+            "one option of each of three pairs"
+        );
+    }
+
     #[test]
     fn options_without_a_case_mode_read_as_none_typed() {
         let old: SpecOptions = serde_json::from_str(r#"{"exclude":["*cache"]}"#).unwrap();
