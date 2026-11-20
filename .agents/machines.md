@@ -237,7 +237,8 @@ the gigabit ceiling, directional MSS) still apply to any Mac bench end.
   this file still lists: **nagatha** (this Mac — the rig-W Mac end before
   `q`, under the quiet-Mac rules in "THE MAC IS A BENCH END" below; its
   `en11` was last recorded at MTU 1500), **netwatch-01** (the Windows end,
-  reinstalled 2026-10-17 as `michael@10.1.10.98`), and **magneto** ↔
+  reinstalled 2026-10-17; at `michael@10.1.10.77` since 2026-11-20, see Rig
+  residue), and **magneto** ↔
   **skippy** (the same-OS Linux pair). Not bench ends: altiera (2.5 GbE),
   zoey as a skippy partner (CPU too slow), gabrielle and the VMs (test or
   build only).
@@ -382,6 +383,18 @@ retraction: a cost billed to one arm and not the other.)
     (older invocations in the DEVLOG say 10.1.10.91). **Not current NIC
     identity:** the Aquantia later moved to `q` (retired 2026-10-24) — see
     the `q` section.
+- **netwatch-01 is at `michael@10.1.10.77` since 2026-11-20 (owner: "that's
+  the windows host's current IP").** Observed that day from the Linux
+  workstation `continuum`: `hostname` answers NETWATCH-01, Windows version
+  10.0.26100.33822, key auth from `continuum` works, the ssh session's
+  default shell is `cmd.exe` (a remote command is cmd text; wrap PowerShell
+  as `powershell -NoProfile -Command`, or copy a script over and run it with
+  `-File`), `%TEMP%` is `C:\Temp`. The ED25519 host key is unchanged — the
+  key `continuum` already held under the name `netwatch-01`, fingerprint
+  beginning `SHA256:ihAoJBx3IQZa`. The address had belonged to another
+  machine; the owner removed that machine's four stale `known_hosts` entries
+  with `ssh-keygen -R` and accepted the matching key. `10.1.10.98` in the
+  next entry is history.
 - **netwatch-01 REINSTALLED 2026-10-17 (owner): new NIC, new MAC, new IP
   `michael@10.1.10.98`** — Windows 11 Pro build 26300 (the G5b run read it; an earlier probe said 26100), NTFS, 10 Gbps link,
   `michael` is an administrator; sshd's default shell is Windows PowerShell
