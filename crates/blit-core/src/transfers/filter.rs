@@ -192,6 +192,10 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
         // EXCLUDE_CASE_MATCHING slice 3 (contract 9): the case mode goes
         // with the patterns, so the peer reads them as this side does.
         ignore_case: inputs.ignore_case,
+        // cr-ecm4-2: a list is in force even when it holds no name.
+        files_from_set: inputs.files_from.is_some()
+            || inputs.retry_only.is_some()
+            || inputs.retry_only_raw.is_some(),
     };
     if let Some(s) = inputs.min_size {
         spec.min_size = Some(parse_size(s).with_context(|| format!("--min-size {s}"))?);
@@ -4183,5 +4187,64 @@ mod tests {
             build(&inputs(&include, &[])).unwrap().include_files,
             [typed]
         );
+    }
+
+    /// cr-ecm4-2: a list of names that was GIVEN is in force on the wire
+    /// too, even when it holds no name. A `--files-from` file of comments
+    /// lets nothing pass here; sent to a peer it once read as "no list",
+    /// the peer applied the include it overrides, selected `new.JPG` and
+    /// put a destination-only `only.JPG` in the deletion plan.
+    #[test]
+    fn a_list_that_holds_no_name_is_still_a_list_on_the_wire() {
+        use crate::remote::transfer::operation_spec::filter_from_spec;
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("list.txt");
+        std::fs::write(&list, "# nothing is listed\n\n").unwrap();
+        let include = ["*.jpg".to_string()];
+        let mut given = inputs(&include, &[]);
+        given.ignore_case = true;
+        let passes = |filter: &FileFilter, rel: &str| {
+            filter.allows_entry(Some(Path::new(rel)), Path::new(rel), 1, None)
+        };
+
+        // No list: the include decides, here and at a peer.
+        let spec = build_spec(&given).unwrap();
+        assert!(!spec.files_from_set);
+        let received = filter_from_spec(spec).unwrap();
+        assert!(received.files_from.is_none());
+        assert!(passes(&build(&given).unwrap(), "new.JPG") && passes(&received, "new.JPG"));
+
+        // The empty list: nothing passes, here and at a peer.
+        given.files_from = Some(&list);
+        let local = build(&given).unwrap();
+        assert_eq!(
+            local.files_from.as_ref().map(|listed| listed.len()),
+            Some(0)
+        );
+        let spec = build_spec(&given).unwrap();
+        assert!(spec.files_from_set, "the list goes with the spec");
+        assert!(spec.files_from.is_empty() && spec.files_from_raw.is_empty());
+        let received = filter_from_spec(spec).unwrap();
+        assert_eq!(
+            received.files_from.as_ref().map(|listed| listed.len()),
+            Some(0)
+        );
+        for rel in ["new.JPG", "only.JPG", "a.jpg", "other.txt"] {
+            assert!(!passes(&local, rel), "here, {rel}");
+            assert!(!passes(&received, rel), "at the peer, {rel}");
+        }
+        assert!(
+            !received.is_empty(),
+            "a filter that lets nothing pass is a filter"
+        );
+
+        // A retry's list is a list too, and a list of names still names them.
+        let retry: std::collections::HashSet<PathBuf> = [PathBuf::from("a.jpg")].into();
+        let mut retried = inputs(&include, &[]);
+        retried.retry_only = Some(&retry);
+        let spec = build_spec(&retried).unwrap();
+        assert!(spec.files_from_set);
+        let received = filter_from_spec(spec).unwrap();
+        assert!(passes(&received, "a.jpg") && !passes(&received, "b.jpg"));
     }
 }

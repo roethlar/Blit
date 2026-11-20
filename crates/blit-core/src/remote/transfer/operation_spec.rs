@@ -221,7 +221,10 @@ pub(crate) fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
     if filter.min_age.is_some() || filter.max_age.is_some() {
         filter.reference_time = Some(SystemTime::now());
     }
-    if !spec.files_from.is_empty() || !spec.files_from_raw.is_empty() {
+    // cr-ecm4-2: a list that was given is a list, however many names it
+    // holds — an empty one lets nothing pass, exactly as it does where it
+    // was read. (The two lists alone cannot tell "empty" from "none".)
+    if spec.files_from_set || !spec.files_from.is_empty() || !spec.files_from_raw.is_empty() {
         let mut listed: std::collections::HashSet<std::path::PathBuf> =
             spec.files_from.into_iter().map(Into::into).collect();
         listed.extend(raw_listed(
@@ -647,6 +650,7 @@ mod tests {
             files_from: vec![],
             files_from_raw: Vec::new(),
             ignore_case: false,
+            files_from_set: false,
         });
         let err = NormalizedTransferOperation::from_spec(spec).unwrap_err();
         let msg = format!("{err:#}");
@@ -669,6 +673,7 @@ mod tests {
             files_from: vec![],
             files_from_raw: Vec::new(),
             ignore_case: false,
+            files_from_set: false,
         });
         let err = NormalizedTransferOperation::from_spec(spec).unwrap_err();
         let msg = format!("{err:#}");
@@ -817,6 +822,7 @@ mod tests {
             files_from: vec![],
             files_from_raw: Vec::new(),
             ignore_case: false,
+            files_from_set: false,
         });
         let normalized = NormalizedTransferOperation::from_spec(spec).unwrap();
         let filter = normalized.filter.expect("filter should pass through");

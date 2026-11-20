@@ -301,6 +301,57 @@ fn mirror_ignore_case_reaches_a_daemon_at_either_end() {
     }
 }
 
+/// cr-ecm4-2: a `--files-from` list that holds no name overrides the
+/// patterns at a daemon as it does here: nothing is copied and nothing is
+/// in the deletion scope. Sent as it once was, the list read as "no list"
+/// at the peer, which then applied the include — pushed, the daemon took
+/// `new.JPG` and deleted its own `only.JPG`; pulled, it sent `new.JPG`.
+#[test]
+fn a_list_that_holds_no_name_overrides_the_patterns_at_a_daemon_too() {
+    let ctx = common::TestContext::new();
+    let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let local = ctx.workspace.join("local");
+    fs::create_dir_all(&local).unwrap();
+    let list = ctx.workspace.join("list.txt");
+    fs::write(&list, "# nothing is listed\n").unwrap();
+    let here = with_slash(&local);
+    for (route, from, to) in [
+        ("push", here.as_str(), remote.as_str()),
+        ("pull", remote.as_str(), here.as_str()),
+    ] {
+        let (source, destination): (&Path, &Path) = if route == "push" {
+            (&local, &ctx.module_dir)
+        } else {
+            (&ctx.module_dir, &local)
+        };
+        refill(source, &["new.JPG", "other.txt"]);
+        refill(destination, &["only.JPG", "kept.txt"]);
+        let (ok, said) = daemon_run(
+            &ctx,
+            &[
+                "mirror",
+                "--yes",
+                "--ignore-case",
+                "--include",
+                "*.jpg",
+                "--files-from",
+                list.to_str().unwrap(),
+                from,
+                to,
+            ],
+        );
+        assert!(ok, "{route}\n{said}");
+        assert!(
+            !destination.join("new.JPG").exists(),
+            "{route}: nothing is listed\n{said}"
+        );
+        assert!(
+            destination.join("only.JPG").exists() && destination.join("kept.txt").exists(),
+            "{route}: nothing is in the deletion scope\n{said}"
+        );
+    }
+}
+
 /// AC-6: daemon to daemon. The asking machine only hands the destination
 /// daemon the request; that daemon opens the session to the source daemon
 /// itself. The mode rides the whole way: the source daemon leaves

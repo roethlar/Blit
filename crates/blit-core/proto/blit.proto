@@ -560,6 +560,13 @@ message FilterSpec {
   // a bracket class still match one byte. Unset: patterns match exactly
   // as written. Never applies to `files_from`, a list of exact names.
   bool ignore_case = 9;
+  // Contract 9 (cr-ecm4-2): a list of exact names was GIVEN, whatever it
+  // holds. `files_from` and `files_from_raw` cannot say so when the list
+  // holds no name (a file of comments): empty and absent are one encoding,
+  // and a peer that read "no list" applied the patterns the list
+  // overrides. Set whenever a list is in force; with it set and both
+  // lists empty, nothing passes.
+  bool files_from_set = 10;
 }
 
 // How the origin decides which files need transfer when both sides
