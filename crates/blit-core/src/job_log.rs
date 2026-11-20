@@ -1565,15 +1565,7 @@ pub fn machine_id(dir: &Path) -> io::Result<String> {
     if !path.exists() {
         let id = random_id()?;
         fs::create_dir_all(dir)?;
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                file.write_all(format!("{id}\n").as_bytes())?;
-                sync_all(&file)?;
-            }
-            // Another process made it first; read theirs.
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
+        publish_machine_id(dir, &path, &id)?;
     }
     // cr-ecm3-6: another process may have made the file a moment ago and
     // not written it yet. Two commands first using one settings folder at
@@ -1583,12 +1575,20 @@ pub fn machine_id(dir: &Path) -> io::Result<String> {
     // line is not finished, is that moment — read again shortly. The line
     // is finished when it ends, or holds the 32 characters this function
     // writes; what a finished line holds is judged at once.
+    //
+    // cr-ecm4-5: this function no longer leaves such a moment itself
+    // ([`publish_machine_id`]); the wait is for a file written in place —
+    // by a build before that, or where the folder's filesystem has no
+    // hard links. And a line STILL unfinished when the wait runs out is
+    // never taken for the ID: 16 of the 32 digits passed [`check_id`], a
+    // job was saved under them, and once the writer finished, the same
+    // machine refused that job as another machine's.
     let mut waited = 0;
     loop {
         let text = fs::read_to_string(&path)?;
         let id = text.trim();
         let finished = text.ends_with('\n') || id.len() == MACHINE_ID_LEN;
-        if finished || waited >= MACHINE_ID_READS {
+        if finished {
             return match check_id("machine ID", id) {
                 Ok(()) => Ok(id.to_string()),
                 Err(_) => Err(io::Error::new(
@@ -1597,9 +1597,58 @@ pub fn machine_id(dir: &Path) -> io::Result<String> {
                 )),
             };
         }
+        if waited >= MACHINE_ID_READS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} holds a machine ID that was never finished being written; delete the \
+                     file and blit makes a new one",
+                    path.display()
+                ),
+            ));
+        }
         waited += 1;
         std::thread::sleep(MACHINE_ID_WAIT);
     }
+}
+
+/// cr-ecm4-5: make `path` hold `id`, WHOLE from the first moment the name
+/// exists, unless another process has made it already (then theirs
+/// stands). The ID is written to a draft beside it, and the draft is
+/// given the name with a hard link — one operation, which fails if the
+/// name is taken and never replaces it. The file used to be created under
+/// its own name and written after, so a reader could find it empty or
+/// half written.
+///
+/// Where the draft cannot be made or linked (a filesystem with no hard
+/// links), the ID is written in place as before; a reader waits for it,
+/// and takes nothing unfinished for an ID.
+fn publish_machine_id(dir: &Path, path: &Path, id: &str) -> io::Result<()> {
+    let line = format!("{id}\n");
+    let draft = dir.join(format!("{MACHINE_ID_FILE}.{}.{id}.tmp", std::process::id()));
+    let published = write_new(&draft, &line).and_then(|()| match fs::hard_link(&draft, path) {
+        // Another process made it first; read theirs.
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        linked => linked,
+    });
+    let _ = fs::remove_file(&draft);
+    if published.is_ok() {
+        return Ok(());
+    }
+    match write_new(path, &line) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        written => written,
+    }
+}
+
+/// `line` as the whole content of a new file at `path`, on disk before
+/// this returns. `AlreadyExists` when the name is taken.
+fn write_new(path: &Path, line: &str) -> io::Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    #[cfg(test)]
+    tests::a_new_file_exists_and_is_empty();
+    file.write_all(line.as_bytes())?;
+    sync_all(&file)
 }
 
 /// The length of the ID [`machine_id`] writes: 128 bits as hex.
@@ -2952,6 +3001,93 @@ mod tests {
             machine_id(dir.path()).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+        // cr-ecm4-5: and so is one left UNFINISHED for good. Half an ID
+        // passes for an ID by its characters; it was returned when the
+        // wait ran out, a job was saved under it, and when the writer
+        // finished, the same machine refused that job as another's.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("machine-id"), "0123456789abcdef").unwrap();
+        let asked = std::time::Instant::now();
+        let error = machine_id(dir.path()).unwrap_err();
+        assert!(asked.elapsed() >= MACHINE_ID_WAIT * MACHINE_ID_READS);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("never finished being written"),
+            "{error}"
+        );
+    }
+
+    thread_local! {
+        /// What [`a_new_file_exists_and_is_empty`] does on this thread.
+        static AT_THAT_MOMENT: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The moment a file `write_new` has created holds nothing yet.
+    pub(super) fn a_new_file_exists_and_is_empty() {
+        AT_THAT_MOMENT.with(|hook| {
+            if let Some(hook) = hook.borrow().as_ref() {
+                hook();
+            }
+        });
+    }
+
+    /// cr-ecm4-5: the machine ID is published WHOLE. At the moment the
+    /// file being written exists and is still empty, the name `machine-id`
+    /// does not exist — only a draft beside it — so no reader, however it
+    /// is timed, finds the ID missing or half there. Afterwards the name
+    /// holds the whole line and the draft is gone. A name another process
+    /// took first is left as it is.
+    #[test]
+    fn the_machine_id_file_never_exists_without_the_whole_id() {
+        let dir = TempDir::new().unwrap();
+        let folder = dir.path().join("cfg");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        {
+            let (folder, seen) = (folder.clone(), seen.clone());
+            AT_THAT_MOMENT.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    let mut names: Vec<String> = fs::read_dir(&folder)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                        .collect();
+                    names.sort();
+                    seen.borrow_mut().push(names);
+                }));
+            });
+        }
+        let id = machine_id(&folder);
+        AT_THAT_MOMENT.with(|hook| *hook.borrow_mut() = None);
+        let id = id.unwrap();
+
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 1, "one file is written: {seen:?}");
+        assert_eq!(seen[0].len(), 1, "{seen:?}");
+        assert!(
+            seen[0][0].starts_with("machine-id.") && seen[0][0].ends_with(".tmp"),
+            "while the ID is not yet written, only a draft exists: {seen:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(folder.join("machine-id")).unwrap(),
+            format!("{id}\n")
+        );
+        let left: Vec<_> = fs::read_dir(&folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["machine-id"], "the draft is gone");
+
+        // Published by another process first: theirs stands, untouched.
+        let theirs = "ffffffffffffffffffffffffffffffff";
+        let taken = dir.path().join("taken");
+        fs::create_dir_all(&taken).unwrap();
+        fs::write(taken.join("machine-id"), format!("{theirs}\n")).unwrap();
+        publish_machine_id(&taken, &taken.join("machine-id"), &id).unwrap();
+        assert_eq!(
+            fs::read_to_string(taken.join("machine-id")).unwrap(),
+            format!("{theirs}\n")
+        );
+        assert_eq!(fs::read_dir(&taken).unwrap().count(), 1, "no draft left");
     }
 
     /// cr-ecm3-6: many first users of one settings folder at once all get
