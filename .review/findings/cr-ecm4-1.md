@@ -1,9 +1,9 @@
 # cr-ecm4-1: The pattern-file refusal advised a spelling that names other entries
 
 **Severity**: HIGH — a user who follows the message has a mirror delete the very entry the message said how to keep
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r5` (Codex openreview, 2026-11-20) reviewed `3bc3ee47..585d3599`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm4-1: …")
+**Commit**: `004ac102`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r4` over `3bc3ee47..0669279f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r4.codex.md`.
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm4-2: A `--files-from` list that holds no name was "no list" at a peer
 
 **Severity**: HIGH — the peer applied the patterns the list overrides: it selected a file the user's list did not name and put a destination-only file in a mirror's deletion plan
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r5` (Codex openreview, 2026-11-20) reviewed `3bc3ee47..585d3599`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding (it found builds of contract 9 made before the fix accepting the request and discarding the marker — cr-ecm5-1 — and an empty list still letting empty directories into the deletion plan — cr-ecm5-5)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm4-2: …")
+**Commit**: `697eefce`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r4` over `3bc3ee47..0669279f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r4.codex.md`.
 
 ## Evidence

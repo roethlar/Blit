@@ -1,9 +1,9 @@
 # cr-ecm4-3: The line about capital letters was not said of the filter the run uses
 
 **Severity**: HIGH — the line showed, as something `--ignore-case` "would also match", a spelling the option does not match; an operator who acted on it had a mirror delete the file
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r5` (Codex openreview, 2026-11-20) reviewed `3bc3ee47..585d3599`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding (it found the line's example dropping a directory the pattern requires, `*/Cache` — cr-ecm5-4 — and the excludes resolved again after the question — cr-ecm5-3)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm4-3: …")
+**Commit**: `0688611c`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r4` over `3bc3ee47..0669279f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r4.codex.md`.
 
 ## Evidence
