@@ -138,7 +138,7 @@ Owner, 2026-11-20: "unless it's simpler to just call the native equivalent comma
 One coherent, testable change per slice — sized for the `.review/` loop. Each ships alone. Slices 1 to 3 fix what is wrong today; 4 to 6 are the rest of the parity. All six land before the 1.0 tag (Q4, owner "b").
 
 1. **`df` and `du` say the right thing** (AC-1, AC-2, AC-7 for `du`): the two wrong answers measured above, their output shape and options. Wire change, contract bump.
-2. **`rm`** (AC-3): `-r`, `-f`, several operands, no prompt, the local exit status. Wire change, contract bump.
+2. **`rm`** (AC-3): `-r`, `-f`, several operands, the one question before deleting that `-y` or `-f` skips (D-2026-11-20-3), the local exit status. Wire change, contract bump.
 3. **`find`, tests and output** (AC-4, AC-7 for `find`): the expression parser, the matcher, path-per-line output, the old options refused. Wire change, contract bump.
 4. **`find` acts** (AC-5): `-mtime`, `-size`, `-delete`.
 5. **`ls`** (AC-6).
