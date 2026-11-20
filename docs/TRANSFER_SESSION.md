@@ -2,7 +2,9 @@
 
 **Status**: Active (contract; the session is the ONLY remote transfer
 path since cutover, otp-10c-2)
-**Contract version**: 7 (source-side per-file containment, run identity,
+**Contract version**: 9 (the case mode in the open's filter,
+`FilterSpec.ignore_case`; v8 = `ManifestPruned`, the paths a filtered
+mirror's source pruned; v7 = source-side per-file containment, run identity,
 exact failure and leftover sets, raw name bytes; v6 = `TransferSummary`
 per-file failure report, v5 = cross-platform Windows metadata policy,
 v4 = Windows file attributes + named `$DATA` streams)
@@ -177,6 +179,20 @@ names and keeps that entry, its subtree and its ancestors out of mirror
 deletions. A frame after `ManifestComplete`, or in a session other than a
 filtered-subset mirror, is a protocol violation. No delete list crosses
 the wire; these paths identify entries to keep.
+
+In contract v9, the open's `FilterSpec` carries the run's case mode,
+`ignore_case`. Unset, every `include` and `exclude` pattern matches
+exactly as written. Set, each literal letter of a pattern matches the
+letters that share its Unicode simple case fold, on the SOURCE's walk and
+in the DESTINATION's deletion scope alike; `?` and a bracket class match
+one byte in both modes, and the `files_from` list is never read this way.
+The patterns travel as typed; each end widens them itself. Both ends
+validate the filter at OPEN in the mode it carries — a pattern that
+cannot be compiled so, or a bracket class holding a character beyond
+ASCII, is a protocol violation there, before a file is read or a name
+deleted. The bump is what keeps an older peer out: it would ignore the
+field, read the patterns exactly and, on a mirror, delete what the
+initiator was told to keep.
 
 ## Frame set and field numbers
 

@@ -110,7 +110,13 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// entry its walk pruned because an exclude named it, before
 /// `ManifestComplete`, and the DESTINATION keeps the entry its own
 /// filesystem pairs with each spelling out of the deletions.
-pub const CONTRACT_VERSION: u32 = 8;
+/// v9: `FilterSpec.ignore_case` (9; EXCLUDE_CASE_MATCHING slice 3,
+/// D-2026-11-20-1): the run's case mode travels in the open's filter, so
+/// the SOURCE's walk and the DESTINATION's deletion scope read every
+/// pattern as the initiator did. An older peer would read the patterns
+/// exactly and, on a mirror, delete what this side was told to keep — it
+/// is refused at HELLO like any other version mismatch.
+pub const CONTRACT_VERSION: u32 = 9;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames
@@ -6771,6 +6777,72 @@ mod tests {
             }
             validate(&open_with(&["{a,é}.txt"], &["é*"])).expect("the advised spelling");
             validate(&SessionOpen::default()).expect("no filter");
+        }
+    }
+
+    /// EXCLUDE_CASE_MATCHING slice 3: the case mode is a field an older
+    /// peer would not know and so would ignore — reading every pattern
+    /// exactly and, on a mirror, deleting what the initiator was told to
+    /// keep. The contract number is what keeps that peer out, so the field
+    /// and a contract of 9 or later go together.
+    #[test]
+    fn the_case_mode_travels_only_under_contract_9_or_later() {
+        use prost::Message as _;
+        let sent = FilterSpec {
+            exclude: vec!["*cache".to_string()],
+            ignore_case: true,
+            ..FilterSpec::default()
+        };
+        let received = FilterSpec::decode(sent.encode_to_vec().as_slice()).unwrap();
+        assert!(received.ignore_case, "the mode is on the wire");
+        assert_eq!(received, sent);
+        // Read at run time: the number is what a peer is told at HELLO.
+        let contract = std::hint::black_box(CONTRACT_VERSION);
+        assert!(
+            contract >= 9,
+            "a wire that carries the case mode is contract 9 or later, not {contract}"
+        );
+    }
+
+    /// EXCLUDE_CASE_MATCHING slice 3 (contract 9): an open's filter is
+    /// validated in the case mode it carries, on either role. A pattern
+    /// nested as deep as the compiler takes as written is one level too
+    /// deep once widened: the same open is accepted without the mode and
+    /// refused with it, at OPEN — before a file is read or a name deleted.
+    #[test]
+    fn an_open_is_validated_in_the_case_mode_it_carries() {
+        let nested = |depth: usize| format!("{}s{}", "{".repeat(depth), "}".repeat(depth));
+        let open_with = |pattern: String, ignore_case: bool| SessionOpen {
+            filter: Some(FilterSpec {
+                exclude: vec!["*.cfg".to_string(), pattern],
+                ignore_case,
+                ..FilterSpec::default()
+            }),
+            ..SessionOpen::default()
+        };
+        let deepest = (1..2000)
+            .take_while(|&depth| source_open_validator(&open_with(nested(depth), false)).is_ok())
+            .last()
+            .expect("one level compiles");
+        type Validator = fn(&SessionOpen) -> std::result::Result<(), SessionFault>;
+        let validators: [(&str, Validator); 2] = [
+            ("source", source_open_validator),
+            ("destination", destination_open_validator),
+        ];
+        for (role, validate) in validators {
+            validate(&open_with(nested(deepest), false))
+                .unwrap_or_else(|fault| panic!("{role}, as written: {}", fault.message));
+            let fault = validate(&open_with(nested(deepest), true)).expect_err("widened");
+            assert_eq!(fault.code, session_error::Code::ProtocolViolation, "{role}");
+            assert!(
+                fault
+                    .message
+                    .contains("cannot be compiled with --ignore-case"),
+                "{role}: {}",
+                fault.message
+            );
+            // An ordinary pattern passes in either mode.
+            validate(&open_with("*cache".to_string(), true)).expect("an ordinary pattern");
         }
     }
 

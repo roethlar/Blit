@@ -375,7 +375,6 @@ async fn run_transfer_inner(
     // asked the operator to confirm deleting extraneous files, and only then
     // failed on the flag.
     reject_unsupported_checker_pin(args, &route)?;
-    reject_unsupported_ignore_case(args, &route)?;
     // EXCLUDE_CASE_MATCHING slice 1b (AC-10): and so does a filter that
     // cannot be used. It is built at dispatch, after the question below.
     reject_unusable_filter(args)?;
@@ -1308,26 +1307,6 @@ pub(crate) fn reject_unsupported_checker_pin(
             "--checkers is a local-route diagnostic and is not implemented for remote transfers; \
              remove it, or run the measurement against a local destination"
         );
-    }
-    Ok(())
-}
-
-/// EXCLUDE_CASE_MATCHING slice 1: refuse `--ignore-case` on a route with a
-/// remote end.
-///
-/// The wire carries no case mode until contract 9 (slice 3), so a daemon
-/// would read every pattern exactly while this side ignored case: on a
-/// mirror, the destination would delete what the command was told to keep.
-/// Refused beside the other route gates — before any banner, warning or
-/// destructive prompt (cr-ls1-12) — and never run with the option dropped.
-/// `copy` and `mirror` only: `move` takes no pattern and refuses the option
-/// on every route before it gets here.
-pub(crate) fn reject_unsupported_ignore_case(
-    args: &TransferArgs,
-    route: &TransferRoute,
-) -> Result<()> {
-    if args.ignore_case && !matches!(route, TransferRoute::LocalToLocal { .. }) {
-        bail!("--ignore-case is not yet carried to a daemon; it works between two local paths");
     }
     Ok(())
 }

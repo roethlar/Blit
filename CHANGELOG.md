@@ -16,7 +16,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `begin_record`/`RecordWriter`, `can_store_raw_names` and `note_raw_name`;
 `TransferSummary` gained `failed_paths`/`failed_paths_truncated`;
 `transfers::filter::FilterInputs` gained `source_root`. The wire
-protocol is contract 8: a peer on any other contract version (every 0.1.x
+protocol is contract 9: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -110,11 +110,13 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 8): the job ID rides the session-open and
+- Wire protocol (contract 9): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
-  so it protects their counterparts in the destination's own spelling.
+  so it protects their counterparts in the destination's own spelling. The
+  filter at session open carries the run's case mode (`--ignore-case`), so
+  a daemon at either end reads every pattern as the command did.
 
 ### Fixes
 

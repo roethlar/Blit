@@ -198,59 +198,136 @@ fn check_ignore_case_reads_the_patterns_as_the_transfer_did() {
     }
 }
 
-/// Slice 1 carries no case mode on the wire (contract 9, slice 3), so a
-/// route with a remote end is REFUSED — before any banner or destructive
-/// prompt — never run with the option dropped. Fixture as in
-/// `checker_pin_gate.rs`: a missing local source and a remote destination
-/// select a remote route and cannot reach the network whatever the gate
-/// does; "source path does not exist" would mean the run got past it.
-#[test]
-fn ignore_case_to_a_daemon_is_refused_before_any_banner_or_prompt() {
-    for verb in ["copy", "mirror"] {
-        let tmp = tempdir().unwrap();
-        let missing = with_slash(&tmp.path().join("does-not-exist"));
-        let (code, out, err) = blit(&[
-            verb,
-            "--ignore-case",
-            "--exclude",
-            "*cache",
-            &missing,
-            "blit-test-host:/dst/",
-        ]);
-        let combined = format!("{out}{err}");
-        assert_ne!(code, Some(0), "{verb}\n{combined}");
-        assert!(
-            combined.contains("--ignore-case is not yet carried to a daemon"),
-            "{verb}: the refusal names the option\n{combined}"
-        );
-        for never in [
-            "source path does not exist",
-            "Continue?",
-            "will delete",
-            &format!("starting {verb}"),
-        ] {
-            assert!(
-                !combined.contains(never),
-                "{verb}: refused before {never:?}\n{combined}"
-            );
+/// What a run of `blit <args>` against the test's daemons said, and
+/// whether it succeeded.
+fn daemon_run(ctx: &common::TestContext, args: &[&str]) -> (bool, String) {
+    let mut cmd = std::process::Command::new(&ctx.cli_bin);
+    cmd.arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .args(args)
+        .stdin(std::process::Stdio::null());
+    let output = run_with_timeout(cmd, Duration::from_secs(90));
+    (
+        output.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
+/// Empty `dir` and give it `rels`.
+fn refill(dir: &Path, rels: &[&str]) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
         }
     }
-    // Exact matching needs nothing from the wire: `--match-case` passes the
-    // gate on the same route and reaches the dispatch.
-    let tmp = tempdir().unwrap();
-    let missing = with_slash(&tmp.path().join("does-not-exist"));
-    let (_, out, err) = blit(&[
-        "copy",
-        "--match-case",
-        "--exclude",
-        "*cache",
-        &missing,
-        "blit-test-host:/dst/",
-    ]);
+    for rel in rels {
+        write(dir, rel);
+    }
+}
+
+/// The source side of every case below: `aCache/` is named by `*cache`
+/// only when case is ignored.
+const AT_SOURCE: [&str; 2] = ["keep.txt", "aCache/from-source.txt"];
+/// The destination side: `bCACHE/` likewise, and `extra.txt` by nothing.
+const AT_DESTINATION: [&str; 2] = ["bCACHE/deep/saved.txt", "extra.txt"];
+
+/// After a mirror with `--exclude '*cache'`: under `--ignore-case` the
+/// source's `aCache/` was left out and the destination's `bCACHE/` kept;
+/// as typed, neither. The unrelated extra is deleted either way.
+fn assert_mirrored(dst: &Path, ignores: bool, route: &str, said: &str) {
+    assert!(dst.join("keep.txt").exists(), "{route}: keep.txt\n{said}");
     assert!(
-        format!("{out}{err}").contains("source path does not exist"),
-        "{out}{err}"
+        !dst.join("extra.txt").exists(),
+        "{route}: extra.txt\n{said}"
     );
+    assert_eq!(
+        !dst.join("aCache").exists(),
+        ignores,
+        "{route}, ignoring case {ignores}: the SOURCE end reads the pattern so\n{said}"
+    );
+    assert_eq!(
+        dst.join("bCACHE/deep/saved.txt").exists(),
+        ignores,
+        "{route}, ignoring case {ignores}: the DESTINATION end reads the pattern so\n{said}"
+    );
+}
+
+/// AC-6 (slice 3, contract 9): the case mode reaches a daemon at session
+/// open, whichever end it is. Pushed to a daemon, the DESTINATION daemon
+/// keeps its own `bCACHE/`; pulled from one, the SOURCE daemon leaves its
+/// `aCache/` out of what it sends. As typed, and with `--match-case`, the
+/// same pattern names neither there. Before contract 9 the wire had no
+/// field for the mode and these routes were refused outright.
+#[test]
+fn mirror_ignore_case_reaches_a_daemon_at_either_end() {
+    let ctx = common::TestContext::new();
+    let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let local = ctx.workspace.join("local");
+    fs::create_dir_all(&local).unwrap();
+
+    for (mode, ignores) in [
+        (None, false),
+        (Some("--match-case"), false),
+        (Some("--ignore-case"), true),
+    ] {
+        // Push: this machine is the source, the daemon the destination.
+        refill(&local, &AT_SOURCE);
+        refill(&ctx.module_dir, &AT_DESTINATION);
+        let mut args = vec!["mirror", "--yes"];
+        args.extend(mode);
+        let from = with_slash(&local);
+        args.extend(["--exclude", "*cache", from.as_str(), remote.as_str()]);
+        let (ok, said) = daemon_run(&ctx, &args);
+        assert!(ok, "push {mode:?}\n{said}");
+        assert_mirrored(&ctx.module_dir, ignores, "push", &said);
+
+        // Pull: the daemon is the source, this machine the destination.
+        refill(&ctx.module_dir, &AT_SOURCE);
+        refill(&local, &AT_DESTINATION);
+        let mut args = vec!["mirror", "--yes"];
+        args.extend(mode);
+        let to = with_slash(&local);
+        args.extend(["--exclude", "*cache", remote.as_str(), to.as_str()]);
+        let (ok, said) = daemon_run(&ctx, &args);
+        assert!(ok, "pull {mode:?}\n{said}");
+        assert_mirrored(&local, ignores, "pull", &said);
+    }
+}
+
+/// AC-6: daemon to daemon. The asking machine only hands the destination
+/// daemon the request; that daemon opens the session to the source daemon
+/// itself. The mode rides the whole way: the source daemon leaves
+/// `aCache/` out and the destination daemon keeps `bCACHE/`.
+#[test]
+fn mirror_ignore_case_reaches_both_daemons_of_a_delegated_transfer() {
+    let ctx = common::TestContext::new();
+    let second = ctx.spawn_second_daemon(
+        "daemon_dst",
+        &common::DaemonOptions {
+            delegation: true,
+            ..Default::default()
+        },
+    );
+    let from = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let to = format!("127.0.0.1:{}:/test/", second.port);
+    for (mode, ignores) in [(None, false), (Some("--ignore-case"), true)] {
+        refill(&ctx.module_dir, &AT_SOURCE);
+        fs::create_dir_all(&second.module_dir).unwrap();
+        refill(&second.module_dir, &AT_DESTINATION);
+        let mut args = vec!["mirror", "--yes"];
+        args.extend(mode);
+        args.extend(["--exclude", "*cache", from.as_str(), to.as_str()]);
+        let (ok, said) = daemon_run(&ctx, &args);
+        assert!(ok, "daemon to daemon {mode:?}\n{said}");
+        assert_mirrored(&second.module_dir, ignores, "daemon to daemon", &said);
+    }
 }
 
 /// cr-ecm1-2: a pattern that compiles as typed and not once widened is

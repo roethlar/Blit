@@ -815,6 +815,7 @@ mod tests {
             max_age_secs: None,
             files_from: vec![],
             files_from_raw: Vec::new(),
+            ignore_case: false,
         });
         // We deliberately do not depend on a specific message here —
         // the contract is "from_spec rejects malformed globs", and

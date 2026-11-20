@@ -202,6 +202,8 @@ pub(crate) fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
     let mut filter = FileFilter::default();
     filter.include_files = spec.include;
     filter.exclude_files = spec.exclude;
+    // EXCLUDE_CASE_MATCHING slice 3 (contract 9): the peer's case mode.
+    filter.ignore_case = spec.ignore_case;
     filter.min_size = spec.min_size;
     filter.max_size = spec.max_size;
     filter.min_age = spec.min_age_secs.map(std::time::Duration::from_secs);
@@ -634,6 +636,7 @@ mod tests {
             max_age_secs: None,
             files_from: vec![],
             files_from_raw: Vec::new(),
+            ignore_case: false,
         });
         let err = NormalizedTransferOperation::from_spec(spec).unwrap_err();
         let msg = format!("{err:#}");
@@ -655,6 +658,7 @@ mod tests {
             max_age_secs: None,
             files_from: vec![],
             files_from_raw: Vec::new(),
+            ignore_case: false,
         });
         let err = NormalizedTransferOperation::from_spec(spec).unwrap_err();
         let msg = format!("{err:#}");
@@ -722,6 +726,40 @@ mod tests {
         assert!(msg.contains("cannot be compiled"), "{msg}");
     }
 
+    /// EXCLUDE_CASE_MATCHING slice 3 (AC-6): a peer's case mode reaches the
+    /// filter its patterns are matched with. A spec that carries the mode
+    /// and no pattern is still no filter: there is nothing for it to read.
+    #[test]
+    fn a_peers_case_mode_reaches_the_filter() {
+        let named = |ignore_case: bool| {
+            let mut spec = empty_spec();
+            spec.filter = Some(ProtoFilterSpec {
+                exclude: vec!["*cache".to_string()],
+                ignore_case,
+                ..ProtoFilterSpec::default()
+            });
+            let filter = NormalizedTransferOperation::from_spec(spec)
+                .unwrap()
+                .filter
+                .expect("a filter with a pattern");
+            assert_eq!(filter.ignore_case, ignore_case);
+            let rel = std::path::Path::new("aCache");
+            !filter.allows_entry(Some(rel), rel, 1, None)
+        };
+        assert!(!named(false), "as written, *cache does not name aCache");
+        assert!(named(true), "the peer's mode is the filter's mode");
+
+        let mut spec = empty_spec();
+        spec.filter = Some(ProtoFilterSpec {
+            ignore_case: true,
+            ..ProtoFilterSpec::default()
+        });
+        assert!(NormalizedTransferOperation::from_spec(spec)
+            .unwrap()
+            .filter
+            .is_none());
+    }
+
     #[test]
     fn empty_filter_normalized_to_none() {
         let mut spec = empty_spec();
@@ -742,6 +780,7 @@ mod tests {
             max_age_secs: None,
             files_from: vec![],
             files_from_raw: Vec::new(),
+            ignore_case: false,
         });
         let normalized = NormalizedTransferOperation::from_spec(spec).unwrap();
         let filter = normalized.filter.expect("filter should pass through");

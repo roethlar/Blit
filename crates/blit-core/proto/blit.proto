@@ -553,6 +553,13 @@ message FilterSpec {
   // names are not UTF-8, as their exact bytes (`/`-separated); they pass
   // like `files_from` entries, on an origin that can hold such names.
   repeated bytes files_from_raw = 8;
+  // Contract 9 (EXCLUDE_CASE_MATCHING, D-2026-11-20-1): read every
+  // `include` and `exclude` pattern ignoring case, on the source walk and
+  // in a mirror's deletion scope alike. Each literal letter of a pattern
+  // matches the letters that share its Unicode simple case fold; `?` and
+  // a bracket class still match one byte. Unset: patterns match exactly
+  // as written. Never applies to `files_from`, a list of exact names.
+  bool ignore_case = 9;
 }
 
 // How the origin decides which files need transfer when both sides

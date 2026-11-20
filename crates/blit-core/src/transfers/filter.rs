@@ -163,16 +163,6 @@ pub fn validate(inputs: &FilterInputs<'_>) -> Result<()> {
 /// doesn't have to reach back into the client's filesystem.
 pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterSpec> {
     use crate::generated::FilterSpec;
-    // EXCLUDE_CASE_MATCHING slice 1: the wire carries no case mode yet (it
-    // arrives with contract 9, slice 3). A spec built without it would have
-    // the peer read every pattern exactly — on a mirror, deleting what this
-    // side was told to keep. Refused here, where every wire spec is built,
-    // so no caller can drop the option in silence.
-    if inputs.ignore_case {
-        return Err(eyre!(
-            "--ignore-case is not yet carried to a daemon; it works between two local paths"
-        ));
-    }
     let mut spec = FilterSpec {
         include: inputs.include.to_vec(),
         // audit-19: relativized HERE, before the spec leaves this host —
@@ -184,6 +174,9 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
         max_age_secs: None,
         files_from: Vec::new(),
         files_from_raw: Vec::new(),
+        // EXCLUDE_CASE_MATCHING slice 3 (contract 9): the case mode goes
+        // with the patterns, so the peer reads them as this side does.
+        ignore_case: inputs.ignore_case,
     };
     if let Some(s) = inputs.min_size {
         spec.min_size = Some(parse_size(s).with_context(|| format!("--min-size {s}"))?);
@@ -239,6 +232,7 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterS
     let mut probe = FileFilter::default();
     probe.include_files = spec.include.clone();
     probe.exclude_files = spec.exclude.clone();
+    probe.ignore_case = spec.ignore_case;
     probe
         .validate_globs()
         .map_err(|msg| eyre!("invalid filter pattern: {msg}"))?;
@@ -3813,26 +3807,52 @@ mod tests {
     // ----- EXCLUDE_CASE_MATCHING slice 1 (D-2026-11-20-1, -4) -----
 
     /// `build` carries `--ignore-case` onto the filter every local verb
-    /// (and `check`) matches with. The wire spec has no field for it until
-    /// contract 9, so `build_spec` refuses the option outright — a spec
-    /// that dropped it would have the peer read every pattern exactly, and
-    /// a mirror would delete there what this side was told to keep.
+    /// (and `check`) matches with, and `build_spec` carries it onto the
+    /// wire (contract 9, slice 3): a spec that dropped it would have the
+    /// peer read every pattern exactly, and a mirror would delete there
+    /// what this side was told to keep. What the peer builds from the spec
+    /// reads the pattern as this side's filter does, and the spec is
+    /// validated in the mode it carries.
     #[test]
-    fn ignore_case_reaches_the_filter_and_is_refused_for_the_wire() {
+    fn ignore_case_reaches_the_filter_and_the_wire() {
+        use crate::remote::transfer::operation_spec::filter_from_spec;
         let exclude = vec!["*cache".to_string()];
+        let named = |filter: &FileFilter| {
+            !filter.allows_entry(Some(Path::new("aCache")), Path::new("aCache"), 1, None)
+        };
         let mut given = inputs(&[], &exclude);
         let typed = build(&given).unwrap();
-        assert!(!typed.ignore_case);
-        assert!(typed.allows_entry(Some(Path::new("aCache")), Path::new("aCache"), 1, None));
-        build_spec(&given).expect("as typed, the spec is built as before");
+        assert!(!typed.ignore_case && !named(&typed));
+        let typed_spec = build_spec(&given).unwrap();
+        assert!(!typed_spec.ignore_case);
+        let received = filter_from_spec(typed_spec).unwrap();
+        assert!(!received.ignore_case && !named(&received));
 
         given.ignore_case = true;
         let filter = build(&given).unwrap();
-        assert!(filter.ignore_case);
-        assert!(!filter.allows_entry(Some(Path::new("aCache")), Path::new("aCache"), 1, None));
-        let error = build_spec(&given).expect_err("the wire carries no case mode yet");
+        assert!(filter.ignore_case && named(&filter));
+        let spec = build_spec(&given).unwrap();
+        assert!(spec.ignore_case, "the mode goes with the patterns");
+        assert_eq!(
+            spec.exclude, exclude,
+            "the patterns go as typed, not widened"
+        );
+        let received = filter_from_spec(spec).unwrap();
+        assert!(received.ignore_case && named(&received));
+
+        // Validated in the mode it carries: a pattern nested as deep as
+        // the compiler takes as typed is one level too deep once widened.
+        let nested = |depth: usize| vec![format!("{}s{}", "{".repeat(depth), "}".repeat(depth))];
+        let deepest = (1..2000)
+            .take_while(|&depth| build_spec(&inputs(&[], &nested(depth))).is_ok())
+            .last()
+            .expect("one level compiles");
+        let deep = nested(deepest);
+        let mut wide = inputs(&[], &deep);
+        wide.ignore_case = true;
+        let error = build_spec(&wide).expect_err("refused before any connection");
         assert!(
-            format!("{error:#}").contains("--ignore-case is not yet carried to a daemon"),
+            format!("{error:#}").contains("cannot be compiled with --ignore-case"),
             "{error:#}"
         );
     }
