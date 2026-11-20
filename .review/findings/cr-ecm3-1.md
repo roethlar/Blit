@@ -1,9 +1,9 @@
 # cr-ecm3-1: A daemon-to-daemon request with `--ignore-case` was not refused by daemons of the earlier contract
 
 **Severity**: HIGH — a `mirror --ignore-case` between two older daemons copied what it was told to leave out and deleted what it was told to keep, exit 0
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r4` (Codex openreview, 2026-11-20) reviewed `3bc3ee47..0669279f`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm3-1: …")
+**Commit**: `f45ea7b1`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r3` over `3bc3ee47..467773b4` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r3.codex.md`.
 
 ## Evidence

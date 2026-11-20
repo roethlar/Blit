@@ -1,9 +1,9 @@
 # cr-ecm3-6: A machine ID read while another process was still writing it
 
 **Severity**: MEDIUM — a test flake on a fresh settings folder, and behind it a race in the product: of two commands first using one settings folder at the same moment, one ran unlogged and could not save or export its job
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r4` (Codex openreview, 2026-11-20) reviewed `3bc3ee47..0669279f`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding (it found the wait's timeout accepting an unfinished ID — cr-ecm4-5)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm3-6: …")
+**Commit**: `5ff0c967`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r3` over `3bc3ee47..467773b4` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r3.codex.md`.
 
 ## Evidence
