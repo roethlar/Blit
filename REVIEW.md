@@ -486,6 +486,12 @@ Owner goal 2026-11-20: "continue all work until 100% complete. review with codex
 | cr-ecm5-5 | An exact-name list that holds no name still lets directories into a mirror's deletion plan: a daemon removed two unlisted empty directories, and a local mirror removed an empty directory present on both sides | `[ ]` MEDIUM; admitted | `.review/findings/cr-ecm5-5.md` |
 | cr-ecm5-6 | `--delete-scope all` deletes destination entries an exclude names, and neither the question nor the README says so: the usual line about capital letters appeared and the mirror deleted the matching destination-only `caseCache` | `[ ]` MEDIUM; admitted | `.review/findings/cr-ecm5-6.md` |
 
+## Found outside a review
+
+| ID | Finding | Status | Record |
+|---|---|---|---|
+| h2-small-frames | Since the `h2` 0.4.20 update (`3f15f835`, 2026-10-17) a stream of small frames closes its own connection when the receiver is slower than the sender: a push of 200,000 empty files to a daemon failed after 35 ms with 768 written; `blit find` read through a pager ended part way. In no release | `[~]` HIGH; fixed (the HTTP/2 connection window at its maximum on both ends, so the library's small-frame budget outlasts a stream window; three guards, four mutations); found by the working agent 2026-11-20, not yet reviewed | `.review/findings/h2-small-frames.md`, `docs/bench/h2-small-frames-2026-11-20/` |
+
 ## Reconciled legacy finding groups
 
 The former unversioned “Open findings” rollup was stale. Its B/M-Jobs/C/A.1/D/E

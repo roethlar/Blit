@@ -177,6 +177,14 @@ part, and a job you can list, read, re-run and retry.
 
 ### Fixes
 
+- A transfer of very many small or empty files through a daemon, and a
+  listing (`blit find`, `blit du`) read slower than it arrives — through a
+  pager, on a slow terminal — no longer ends with "transfer transport peer
+  closed" or "h2 protocol error". The HTTP/2 library closes a connection
+  that holds too many small frames unread, and every blit stream is made
+  of small frames; the connection window, from which the library derives
+  that limit, is now the largest HTTP/2 allows on both ends. Present on
+  the development branch since 2026-10-17 and in no release.
 - A local single-file copy armed its failure cleanup before opening the
   destination, so a destination it could not open (a read-only file, a
   folder in the way) could be deleted without a byte written. The cleanup

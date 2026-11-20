@@ -23,6 +23,19 @@ use tonic::transport::{Channel, Endpoint};
 /// DNS) fail predictably rather than hanging for the OS timeout.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The [`Endpoint`] every Blit gRPC client connects through: `uri` with
+/// the HTTP/2 window policy of [`crate::remote::grpc_server`]
+/// (h2-small-frames). A client built from a bare `Endpoint` keeps the
+/// library's 5 MiB connection window, and with it a limit on unread small
+/// frames that a listing read slowly, or a pull of many small files,
+/// runs into — the connection is closed under it.
+pub fn endpoint(uri: String) -> std::result::Result<Endpoint, tonic::transport::Error> {
+    use crate::remote::grpc_server::{HTTP2_CLIENT_STREAM_WINDOW, HTTP2_CONNECTION_WINDOW};
+    Ok(Endpoint::from_shared(uri)?
+        .initial_stream_window_size(HTTP2_CLIENT_STREAM_WINDOW)
+        .initial_connection_window_size(HTTP2_CONNECTION_WINDOW))
+}
+
 /// Connect a [`BlitClient`] to `uri` with a bounded connect deadline.
 /// Drop-in replacement for `BlitClient::connect(uri)` (which connects
 /// with no deadline). Errors carry the URI for context.
@@ -35,7 +48,7 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// `tokio::time::timeout`. `connect_timeout` is kept as the inner,
 /// TCP-phase bound.
 pub async fn connect_with_timeout(uri: String) -> Result<BlitClient<Channel>> {
-    let endpoint = Endpoint::from_shared(uri.clone())
+    let endpoint = endpoint(uri.clone())
         .with_context(|| format!("invalid daemon endpoint {uri}"))?
         .connect_timeout(CONNECT_TIMEOUT);
     let channel = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect())

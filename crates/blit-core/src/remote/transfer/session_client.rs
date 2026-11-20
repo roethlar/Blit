@@ -25,7 +25,7 @@ use std::time::Duration;
 use eyre::{eyre, Result};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Channel;
 
 use crate::generated::blit_client::BlitClient;
 use crate::generated::{
@@ -923,7 +923,9 @@ pub async fn connect_transfer_client_with_trace(
 ) -> Result<BlitClient<Channel>> {
     let uri = endpoint.control_plane_uri();
     lifecycle_trace.record("control_connect_begin", None);
-    let conn = match Endpoint::from_shared(uri.clone()) {
+    // h2-small-frames: through the one client endpoint, for its HTTP/2
+    // windows — a transfer's stream is made of small frames.
+    let conn = match crate::client::endpoint(uri.clone()) {
         Ok(endpoint) => endpoint.connect_timeout(Duration::from_secs(30)),
         Err(err) => {
             lifecycle_trace.record("control_connect_end", Some(TransferLifecycleOutcome::Error));
