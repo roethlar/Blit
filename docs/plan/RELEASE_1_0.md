@@ -78,6 +78,11 @@ agent work; the tag and publish are the owner's act.
   open" and the identified release questions against the owner's rule.
   Each remaining item needs a verified resolution before G6; CI and Docs
   Gate must pass on the final SHA.
+  **2026-11-20:** the pure-glob destination-only deletion is ruled
+  expected behavior and its item is replaced by
+  `docs/plan/EXCLUDE_CASE_MATCHING.md` shipping (Active, D-2026-11-20-1);
+  `docs/plan/UTILITY_VERBS_LOCAL_PARITY.md` (Active, D-2026-11-20-2), all
+  six slices, also lands before the tag (owner "b").
   O4's predicate is unified; CI and Docs Gate passed on `5386b391`
   (runs 39326487040 and 39326487037). O3's ASCII paired-spelling guard
   passed on Windows (both core and CLI tests in run 39331093262), and the

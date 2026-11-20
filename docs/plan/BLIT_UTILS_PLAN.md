@@ -15,6 +15,13 @@
 > principles below are the design rationale** for those
 > subcommands. Read it as design intent, but treat any reference to
 > `blit-utils <verb>` as historical wording for `blit <verb>`.
+>
+> **Superseded as design intent 2026-11-20 (D-2026-11-20-2)** for `rm`,
+> `find`, `du`, `df` and `ls` by
+> [`UTILITY_VERBS_LOCAL_PARITY.md`](UTILITY_VERBS_LOCAL_PARITY.md): those
+> verbs exist to avoid a network filesystem's per-file cost and behave
+> like the local commands they are named after. The matrix below records
+> what was built, not what is intended.
 
 ## Overview
 

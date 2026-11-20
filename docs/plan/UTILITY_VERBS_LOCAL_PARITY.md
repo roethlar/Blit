@@ -1,9 +1,9 @@
 # Utility verbs: behave like the local commands, run on the daemon
 
-**Status**: Draft (r3, 2026-11-20 — written under the owner's open-ended mandate of that day; every design choice below is the drafting agent's and is ratified, changed or struck when the owner activates the plan)
+**Status**: Active — owner: "activate" (2026-11-20, D-2026-11-20-2), on the draft written that day under the owner's open-ended mandate; Q1 (whether `rm` asks) is still open and slice 2 waits on it
 **Created**: 2026-11-20
-**Supersedes**: on activation, the command matrix and UX principles of `docs/plan/BLIT_UTILS_PLAN.md` (Historical) as the design intent for `rm`, `find`, `du`, `df` and `ls`
-**Decision ref**: pending (activation needs a `docs/DECISIONS.md` entry)
+**Supersedes**: the command matrix and UX principles of `docs/plan/BLIT_UTILS_PLAN.md` (Historical) as the design intent for `rm`, `find`, `du`, `df` and `ls`
+**Decision ref**: D-2026-11-20-2
 
 ## Goal
 
@@ -14,6 +14,7 @@ Each of `rm`, `find`, `du`, `df` and `ls` does its job on the daemon's own disk 
 - 2026-11-20: "find should work identically to the unix find command. I don't know what check is."
 - 2026-11-20: "the point to all of the utility commands that blit supports is to avoid the speed issues with running checks over nfs/smb. find, rm, etc. used to be part of blit-utils, and they need to behave like the local versions, just run directly from the daemon. that way deleting thousands of files doesn't pay the network fs tax. find should likewise work the same way. look at the old plans for blit-utils to make sure its understood and we're building the correct thing."
 - 2026-11-20: "okay, sanity check and improve the utils scope. I don't want to make this a whole side project, I just need blit to do what I stated last message. do local fs ops via daemon to avoid speed issues with network filesystems. take that as a general "plan this" task. that old plan was written months ago and you're far more capable than the models then were, so you have an open-ended mandate."
+- 2026-11-20, on the draft's open points: Q1 — "mirror has a prompt, so why wouldn't rm?"; Q2 — "a"; Q3 — "a"; Q4 — "b"; and "activate".
 
 ## Sanity check (2026-11-20)
 
@@ -76,7 +77,7 @@ All three finish in under a second where a network filesystem would be paying a 
 
 - [ ] **AC-1 (`df`)**: `blit df HOST:/module/` reports the filesystem that holds the module's path — on Linux, the numbers `df -k` prints for that path — as `Filesystem 1K-blocks Used Available Use% Mounted on` with the operand in the first column and the last column omitted; `-h` prints human-readable sizes. A module on a filesystem other than the root one reports its own numbers (the run above reported another disk's).
 - [ ] **AC-2 (`du`)**: `blit du HOST:/module/path` prints one line per directory, deepest first, the operand last, each `SIZE<TAB>PATH` with the path beginning with the operand as typed; `-a` adds files; `-s` prints the operand's line only; `-d N` (and `--max-depth=N`) limits lines to N levels BELOW THE OPERAND; `-h` prints human-readable sizes. Sizes are allocated space in 1K blocks where the daemon's OS reports allocation (Unix), the file's length rounded up to 1K elsewhere. A file with several hard links is counted once, as `du` counts it — a backup tree of hard-linked snapshots is exactly where counting each name would mislead. On Linux the output equals the system `du`'s for the same tree and options, hard links included. No duplicate line for the operand.
-- [ ] **AC-3 (`rm`)**: `blit rm [-r] [-f] TARGET...`. A directory without `-r` (`-R`, `--recursive`) is refused with "is a directory", deletes nothing and makes the exit status 1; a missing operand is an error and exit 1 unless `-f`; the other operands are still processed; nothing is asked; exit 0 only when every operand was removed (or absent under `-f`). A whole module and a read-only module are refused as today. `-y` is accepted and does nothing, so 0.1.x commands keep working.
+- [ ] **AC-3 (`rm`)**: `blit rm [-r] [-f] TARGET...`. A directory without `-r` (`-R`, `--recursive`) is refused with "is a directory", deletes nothing and makes the exit status 1; a missing operand is an error and exit 1 unless `-f`; the other operands are still processed; whether it asks first is Q1; exit 0 only when every operand was removed (or absent under `-f`). A whole module and a read-only module are refused as today. `-y` is accepted and does nothing, so 0.1.x commands keep working.
 - [ ] **AC-4 (`find`, tests)**: `blit find TARGET [-name PAT] [-iname PAT] [-type f|d] [-maxdepth N]`, tests ANDed. Output is one path per line, each beginning with the operand as typed, nothing else. `-name` matches the base name with `*` (any run of characters, a leading dot included), `?` (one character), `[...]` and `\`; `-iname` ignores case by the fold `--ignore-case` uses (Unicode simple case folding, `docs/plan/EXCLUDE_CASE_MATCHING.md` Q1), so `-iname 'übung*'` finds `ÜBUNG.txt`; `?.dat` finds the composed `é.dat` and `??.dat` does not. Any other test, action or operator (`-o`, `!`, parentheses, `-exec`, …) is refused by name before the walk starts. On Linux the lines equal the system `find`'s for the same tree and expression, as sets. `--pattern`, `--case-insensitive`, `--files`, `--dirs` and `--limit` are refused with the spelling that replaces each.
 - [ ] **AC-5 (`find`, acting)**: `-mtime [+|-]N` and `-size [+|-]N[ckMG]` with the reference's rounding; `-delete` removes each match, contents before their directory, prints nothing, leaves a matched directory that is not empty with an error and exit 1, never removes the module's root, and is refused on a read-only module. Running the same expression without `-delete` prints exactly what `-delete` would remove.
 - [ ] **AC-6 (`ls`)**: `blit ls TARGET` prints names one per line, sorted by code point (`A`, `a`, `b`), hiding names that begin with `.`; `-a` shows them, with `.` and `..` as `ls` prints them; `-l` prints type letter, size, modification time and name (no permission or owner columns — a listing does not carry them, and the manual says so); `-h` with `-l` prints human-readable sizes. A file operand prints that file's line.
@@ -100,7 +101,7 @@ Depth is counted from the start path. The daemon sends only the rows that will b
 
 ### `rm` (`crates/blit-cli/src/rm.rs`, `crates/blit-core/src/admin/rm.rs`, the daemon's purge)
 
-`PurgeRequest` gains `recursive` and `force`; the daemon — which is the side that knows what each path is — refuses a directory without `recursive` and reports each operand's outcome, so the CLI can print the local command's message per operand and set the exit status. `PurgeResponse` gains per-path results. Operands are grouped by daemon and module, one request each. The prompt is removed; `-y` stays as an accepted no-op.
+`PurgeRequest` gains `recursive` and `force`; the daemon — which is the side that knows what each path is — refuses a directory without `recursive` and reports each operand's outcome, so the CLI can print the local command's message per operand and set the exit status. `PurgeResponse` gains per-path results. Operands are grouped by daemon and module, one request each. The prompt's fate is Q1.
 
 ### `find` (`crates/blit-cli/src/find.rs`, the daemon's `find`)
 
@@ -115,7 +116,7 @@ Printing only; `FileInfo` already carries name, kind, size and time.
 
 ### Alternative considered: have the daemon run the native commands
 
-Owner, 2026-11-20: "unless it's simpler to just call the native equivalent commands. windows doesn't have analogs to find, du, df, etc., but delete does. or we could call powershell. that doesn't sound simpler, but if it is, it's an option." The drafting agent's answer is that it is not simpler, for these reasons; the owner has not ruled.
+Owner, 2026-11-20: "unless it's simpler to just call the native equivalent commands. windows doesn't have analogs to find, du, df, etc., but delete does. or we could call powershell. that doesn't sound simpler, but if it is, it's an option." The drafting agent answered that it is not simpler, for the reasons below, and told the owner that activating the plan would accept that answer; the owner activated without objection.
 
 - **It adds backends instead of removing one.** Windows has no `find`, `du` or `df`, so the daemon's own implementation is needed there whatever Unix does. Calling native tools would mean that implementation plus a GNU caller, a BSD caller for macOS (different defaults and option spellings) and whatever a NAS ships, each with its own output to parse — and the same `blit find` would answer differently from one daemon to the next.
 - **`find` runs programs.** `-exec`, `-ok` and the `-f…` actions execute commands and write files, so a user's expression could not be passed through: the daemon would have to parse and allow-list it first, which is the parser this plan already needs, and one gap in that list would be command execution on the daemon's machine. No password or token check was found in the daemon's source (its authorization is by host address).
@@ -126,14 +127,14 @@ Owner, 2026-11-20: "unless it's simpler to just call the native equivalent comma
 
 ### Risks
 
-- **`rm` stops asking** (Q1). Today's prompt is the only thing between a typo and a deleted tree; after this, `-r` is, exactly as with the local command.
+- **Whether `rm` asks** (Q1, open). Today's prompt is the only thing between a typo and a deleted tree.
 - **A second pattern matcher.** It is small and compared against the system `find` on Linux, but it is one more thing that decides what gets deleted once `-delete` exists.
 - **0.1.x scripts break** on `find`'s old options and on `rm` of a directory without `-r` — loudly, with the replacement named (Q2).
 - **The Linux-only comparison guards prove Linux.** macOS and Windows daemons are covered by the pure guards and by their own end-to-end runs; this is stated wherever a result is reported.
 
 ## Slices
 
-One coherent, testable change per slice — sized for the `.review/` loop. Each ships alone; the plan can stop after any of them. Slices 1 to 3 fix what is wrong today; 4 to 6 are the rest of the parity.
+One coherent, testable change per slice — sized for the `.review/` loop. Each ships alone. Slices 1 to 3 fix what is wrong today; 4 to 6 are the rest of the parity. All six land before the 1.0 tag (Q4, owner "b").
 
 1. **`df` and `du` say the right thing** (AC-1, AC-2, AC-7 for `du`): the two wrong answers measured above, their output shape and options. Wire change, contract bump.
 2. **`rm`** (AC-3): `-r`, `-f`, several operands, no prompt, the local exit status. Wire change, contract bump.
@@ -146,7 +147,7 @@ AC-8 is met verb by verb as its slice lands.
 
 ## Open questions
 
-- **Q1 — `rm` stops asking.** The old plan's "Safety First" prompt is replaced by the local command's rule (`-r` for a directory, no question). Activating the plan ratifies this; say so if the prompt must stay. — owner
-- **Q2 — the old `find` options are refused, not kept working**, and `rm` of a directory without `-r` becomes an error: 0.1.x commands break with a message naming the replacement. The alternative is to keep the old spellings working, hidden. — owner
-- **Q3 — comparing a local tree with a daemon's tree.** Not possible today without transferring (see "Found beside the verbs"). The drafting agent's recommendation: make `--dry-run` work for a transfer to or from a daemon, as a plan of its own, and decide `check`'s fate there; `docs/plan/EXCLUDE_CASE_MATCHING.md` Q11 separately asks whether `check` takes the transfer verbs' pattern options. — owner
-- **Q4 — before or after the 1.0 tag.** Rows 1 and 2 of "What is wrong" are wrong answers from shipped commands, and D-2026-10-19-2 blocks 1.0 on every known imperfection; slices 2 and 3 change the behavior of shipped commands, which belongs in a major version. The drafting agent's recommendation: slices 1 to 3 before the tag, 4 to 6 after. — owner
+- **Q1 — does `rm` ask before deleting?** The draft removed the prompt to match the local command. Owner, 2026-11-20: "mirror has a prompt, so why wouldn't rm?" — blit's own rule is that a command that deletes asks unless `-y` (`mirror`, `move`), and the draft set that aside for `rm` alone. The drafting agent's revised recommendation: keep the prompt, on the same footing as `mirror`'s; `-y` skips it as today, and so does `-f`, which means "never ask" in the local command — so `blit rm -rf` behaves exactly as `rm -rf` does, and a bare `blit rm -r` asks. Not yet ruled; slice 2 waits. — owner
+- ~~**Q2 — the old spellings**~~ — **settled 2026-11-20 (owner "a")**: `find`'s old options and `rm` of a directory without `-r` are refused with a message naming the replacement; nothing is kept working hidden.
+- ~~**Q3 — comparing a local tree with a daemon's tree**~~ — **settled 2026-11-20 (owner "a")**: not in this plan; making `--dry-run` work for a transfer to or from a daemon gets a plan of its own, which also decides what `check` is for. That plan is owed and not yet drafted. (`check` takes the transfer verbs' pattern options meanwhile: `docs/plan/EXCLUDE_CASE_MATCHING.md` Q11.)
+- ~~**Q4 — before or after the 1.0 tag**~~ — **settled 2026-11-20 (owner "b")**: all six slices before the tag. The drafting agent had recommended 1 to 3 before and 4 to 6 after.
