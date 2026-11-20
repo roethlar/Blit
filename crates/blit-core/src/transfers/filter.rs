@@ -1920,7 +1920,6 @@ mod tests {
 
     /// Makes each `/`-separated `rel` under `root` as a file (its
     /// directories too).
-    #[cfg(unix)]
     fn files(root: &Path, rels: &[&str]) {
         for rel in rels {
             let path = root.join(rel);

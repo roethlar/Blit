@@ -448,6 +448,15 @@ Finding rows: `[ ]` open → `[x]` fixed with its commit, one finding per commit
 
 - [x] cr-jl1a-1 `c55a4d94` · [x] cr-jl1a-2 `07e2a3b4` · [x] cr-jl1b-1 `6e514464` · [x] cr-jl1b-2 `91c97e61` · [x] cr-jl1c-1 `86300bc5` · [x] cr-jlfix1-1 `7f7641f1` · [x] cr-jlfix1-2 `c4300a77`+`27a626a7` · [x] cr-jlfix2-1 `2e193ba9` · [x] cr-jlfix2-2 `1add8d7b` · [x] cr-jlfix2-3 `b580f0c1` · [x] cr-jl2-1 `58ac16fb` · [x] cr-jl2fix1-1 `a7365b61` · [x] cr-jl3a-1 `71155351` · [x] cr-jl3a-2 `a53e3d56` · [x] cr-jl3a-3 `31b54c99` · [x] cr-jl3afix1-1 `59439838` · [x] cr-jl3afix2-1 `9c4a9643` · [x] cr-jl3b-1 `84aa5bf5` · [x] cr-jl3bfix1-1 `8d62c25e` · [x] cr-jl4-1 `7e935b64` · [x] cr-jl4-2 `e05188f8` · [x] cr-jl4-3 `0d8f43dc` · [x] cr-jl4fix1-1 `6ecc86c2` · [x] cr-jl4fix1-2 `27aff7d2` · [x] cr-jl4fix2-1 `83a24929` · [x] cr-jl4fix3-1 `edf19ffc` · [x] cr-jl4fix4-1 `03d878a9` · [x] cr-jl4fix4-2 `2f2cd1ad` · [x] cr-jl4fix5-1 `3ac1f5b1` · [x] cr-jl4fix6-1 `23bf5724`
 
+## EXCLUDE_CASE_MATCHING slice reviews (openreview, owner goal 2026-11-20)
+
+Owner goal 2026-11-20: "continue all work until 100% complete. review with codex as needed. push when major sections are complete." Dispatch: codex / gpt-6.2-astra (as dispatched; the event stream carries no resolved model id) / max / frontier (the one pair the owner has named on this machine, "gpt-6.2-astra max"; grade not declared), codex-cli 0.171.0 headless one-shot, stdin closed, JSON event stream kept; the neutral openreview question with mechanical coordinates only (`.review/results/<id>.codex.prompt.md`). The reviewer's commands run through the user-level ptk MCP server, outside the Codex sandbox, so the tree, refs and worktrees are checked after each run.
+
+| ID | Range / title | Verdict / status | Record |
+|----|---------------|------------------|--------|
+| exclude-slice1-r1 | `3bc3ee47..66d1338a` (slice 1 `f527c079`, the lint line `839d0fa8`, two unused dependencies `c472a853`) | **FAILED — no verdict.** Started 2026-11-20T19:56:39Z; at 20:12:54Z the provider answered 503 after five reconnects (`turn.failed`), after the reviewer had finished its probes and removed its export, and before it wrote its result. No `capability_ok` or `guard_confirmed` was reported, so nothing is accepted from it as a verdict. Its event stream is usable evidence (codereview "Verdict handling": a failed call's data counts): four findings read from the reviewer's own command output and admitted below. Tree, refs and worktrees unchanged after the run; its empty export directory under `target/` remains. | `.review/results/exclude-slice1-r1.codex.events.jsonl`, `.review/results/exclude-slice1-r1.codex.prompt.md` |
+| cr-ecm1-1 | Two slice-1 guards do not compile on Windows (they call a `#[cfg(unix)]` fixture) | `[~]` HIGH; fixed, awaiting re-review | `.review/findings/cr-ecm1-1.md` |
+
 ## Reconciled legacy finding groups
 
 The former unversioned “Open findings” rollup was stale. Its B/M-Jobs/C/A.1/D/E
