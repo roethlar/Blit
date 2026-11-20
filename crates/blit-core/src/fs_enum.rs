@@ -440,6 +440,75 @@ fn escape_as_class(c: char) -> String {
     }
 }
 
+/// EXCLUDE_CASE_MATCHING AC-10 (Q10, D-2026-11-20-1): the first bracket
+/// class of `pattern` that holds a character beyond ASCII — where it
+/// starts, and its text (`[aé]`) — or `None`. A class matches ONE BYTE in
+/// this filter, as in rsync and git, so such a class can never match the
+/// letter it shows: `[aé].txt` does not name `é.txt`. The pattern does
+/// less than it reads, and that is known the moment it is read, so it is
+/// refused ([`class_beyond_ascii_refusal`]) rather than run. Read under
+/// one platform's rule: off Windows a `\` makes the next character
+/// literal, a `[` included; on Windows it separates components and
+/// escapes nothing. Negated classes and ranges are classes like any other.
+pub(crate) fn class_beyond_ascii(pattern: &str, windows: bool) -> Option<(usize, &str)> {
+    let mut at = 0;
+    while let Some(c) = pattern[at..].chars().next() {
+        let rest = &pattern[at..];
+        at += match c {
+            '\\' if !windows => 1 + rest[1..].chars().next().map_or(0, char::len_utf8),
+            '[' => match bracket_class_len(rest) {
+                Some(len) if !rest[..len].is_ascii() => return Some((at, &rest[..len])),
+                Some(len) => len,
+                None => 1,
+            },
+            c => c.len_utf8(),
+        };
+    }
+    None
+}
+
+/// The refusal for `pattern`, whose `class` at byte `at` holds a character
+/// beyond ASCII ([`class_beyond_ascii`]): what is wrong, in the user's own
+/// pattern, and the spelling that works. A class of plain single
+/// characters is rewritten for them as alternatives (`[aé].txt` as
+/// `{a,é}.txt`, which matches each letter whole); a range or a negated
+/// class has no such spelling, and the message says what to write instead.
+pub(crate) fn class_beyond_ascii_refusal(
+    label: &str,
+    pattern: &str,
+    at: usize,
+    class: &str,
+) -> String {
+    let inner = &class[1..class.len() - 1];
+    let letter = inner.chars().find(|c| !c.is_ascii()).unwrap_or('é');
+    let plain = !inner.starts_with(['!', '^'])
+        && !inner.contains(['-', '{', '}', ',', '*', '?', '[', ']', '\\', '/']);
+    let advice = if plain {
+        let members: Vec<String> = inner.chars().map(String::from).collect();
+        let written = match members.as_slice() {
+            [one] => one.clone(),
+            many => format!("{{{}}}", many.join(",")),
+        };
+        format!(
+            "Write {:?} instead",
+            format!(
+                "{}{written}{}",
+                &pattern[..at],
+                &pattern[at + class.len()..]
+            )
+        )
+    } else {
+        format!(
+            "A range or a negated class cannot hold such a letter; list the letters wanted \
+             as alternatives instead, like {{a,{letter}}}"
+        )
+    };
+    format!(
+        "{label} pattern {pattern:?} cannot work: a class like {class} matches one byte, \
+         and {letter} is more than one byte, so the class can never match it. {advice}."
+    )
+}
+
 /// cr-g3fix3-3: the byte length of the bracket class `text` opens, `[`
 /// through its closing `]`, read as globset 0.4 reads one: an optional `!`
 /// or `^`, then a `]` in first place is a member, and the class ends at
@@ -566,6 +635,10 @@ impl FileFilter {
             ("--exclude", &self.exclude_files),
         ] {
             for pat in patterns {
+                // AC-10: a class that can never match the letter it shows.
+                if let Some((at, class)) = class_beyond_ascii(pat, cfg!(windows)) {
+                    return Err(class_beyond_ascii_refusal(label, pat, at, class));
+                }
                 if let Err(err) = globset::Glob::new(pat) {
                     return Err(format!(
                         "{label} pattern {pat:?} is not a valid glob: {err}"
@@ -1749,6 +1822,181 @@ mod tests {
                 allows(&including(pattern, false), rel),
                 "{pattern} includes {rel}"
             );
+        }
+    }
+
+    /// AC-10 (slice 1b): a class holding a character beyond ASCII is
+    /// refused where a filter is validated — for an exclude and an include,
+    /// in either case mode — naming the pattern, the class, and the
+    /// spelling that works. A class matches one byte, so `[aé].txt` never
+    /// named `é.txt`: the pattern did less than it read.
+    #[test]
+    fn a_class_holding_a_letter_beyond_ascii_is_refused() {
+        for (pattern, class, advice) in [
+            ("[aé].txt", "[aé]", r#"Write "{a,é}.txt" instead."#),
+            ("x[é]", "[é]", r#"Write "xé" instead."#),
+            ("*/[€a]b/**", "[€a]", r#"Write "*/{€,a}b/**" instead."#),
+            ("[ab]*[cü]", "[cü]", r#"Write "[ab]*{c,ü}" instead."#),
+            ("é[é]é", "[é]", r#"Write "ééé" instead."#),
+            ("[!é]x", "[!é]", "like {a,é}."),
+            ("[^é]x", "[^é]", "like {a,é}."),
+            ("[a-é]", "[a-é]", "like {a,é}."),
+            ("[]ü]", "[]ü]", "like {a,ü}."),
+        ] {
+            for ignore_case in [false, true] {
+                for (label, include) in [("--exclude", false), ("--include", true)] {
+                    let patterns = vec![pattern.to_string()];
+                    let filter = FileFilter {
+                        include_files: if include {
+                            patterns.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        exclude_files: if include { Vec::new() } else { patterns },
+                        ignore_case,
+                        ..FileFilter::default()
+                    };
+                    let error = filter
+                        .validate_globs()
+                        .expect_err("a class beyond ASCII is refused");
+                    assert!(
+                        error.starts_with(&format!("{label} pattern {pattern:?} cannot work:")),
+                        "{error}"
+                    );
+                    assert!(
+                        error.contains(&format!("a class like {class} matches one byte")),
+                        "{error}"
+                    );
+                    assert!(error.ends_with(advice), "{pattern}: {error}");
+                }
+            }
+        }
+    }
+
+    /// AC-10: what the refusal leaves alone — alternatives, a bare letter,
+    /// every ASCII class — is accepted in both modes and matches as it
+    /// always has; and the spelling the refusal advises does what the
+    /// refused class read as.
+    #[test]
+    fn letters_beyond_ascii_outside_a_class_are_accepted_as_before() {
+        for pattern in [
+            "{a,é}.txt",
+            "é.txt",
+            "é",
+            "*é*",
+            "[ab].txt",
+            "[!a-c]x",
+            "[]a]",
+            "caf[e]",
+            "[[]é[]]",
+            "é[ab]ü",
+        ] {
+            excluding(&[pattern])
+                .validate_globs()
+                .unwrap_or_else(|error| panic!("{pattern} as typed: {error}"));
+            excluding_any_case(&[pattern])
+                .validate_globs()
+                .unwrap_or_else(|error| panic!("{pattern} in any case: {error}"));
+        }
+        let advised = excluding(&["{a,é}.txt"]);
+        assert!(!allows(&advised, "a.txt") && !allows(&advised, "é.txt"));
+        assert!(allows(&advised, "b.txt") && allows(&advised, "É.txt"));
+        let any_case = excluding_any_case(&["{a,é}.txt"]);
+        assert!(!allows(&any_case, "A.txt") && !allows(&any_case, "É.txt"));
+        // The class `[[]é[]]` is three ASCII classes around a bare letter:
+        // it names the file spelled `[é]`.
+        assert!(!allows(&excluding(&["[[]é[]]"]), "[é]"));
+    }
+
+    /// AC-10: the check reads a pattern under ONE platform's rule, like the
+    /// rest of the filter. Off Windows `\[` is a literal bracket and opens
+    /// no class; on Windows `\` separates and the bracket opens one. An
+    /// unclosed bracket is no class (the glob compiler refuses it), a `]`
+    /// in first place is a member, and the place reported is in bytes.
+    #[test]
+    fn the_class_check_reads_a_backslash_by_one_platforms_rule() {
+        assert_eq!(class_beyond_ascii(r"\[é]", false), None);
+        assert_eq!(class_beyond_ascii(r"\[é]", true), Some((1, "[é]")));
+        assert_eq!(class_beyond_ascii(r"caf\é", false), None);
+        assert_eq!(class_beyond_ascii(r"caf\é", true), None);
+        assert_eq!(class_beyond_ascii(r"\\[é]", false), Some((2, "[é]")));
+        assert_eq!(class_beyond_ascii("[é", false), None);
+        assert_eq!(class_beyond_ascii("a[b]é[c]", false), None);
+        assert_eq!(class_beyond_ascii("[]é]", false), Some((0, "[]é]")));
+        assert_eq!(class_beyond_ascii("é[é]", false), Some((2, "[é]")));
+        assert_eq!(class_beyond_ascii("[a][bé]", true), Some((3, "[bé]")));
+        assert_eq!(class_beyond_ascii(r"a\", false), None);
+
+        // The advice rewrites the class where it is, not the first text
+        // spelled like it: under the Unix rule the first `[é]` here is an
+        // escaped bracket and two ordinary characters.
+        let pattern = r"\[é][é]";
+        let (at, class) = class_beyond_ascii(pattern, false).expect("the second is a class");
+        assert_eq!((at, class), (5, "[é]"));
+        let refusal = class_beyond_ascii_refusal("--exclude", pattern, at, class);
+        assert!(
+            refusal.ends_with(&format!("Write {:?} instead.", r"\[é]é")),
+            "{refusal}"
+        );
+    }
+
+    /// AC-10 (plan, Design §Class refusal): the escape dialect and the
+    /// class check cannot disagree. The dialect writes an escaped syntax
+    /// character as a one-character class; an escaped letter beyond ASCII
+    /// it writes BARE, never as a class, so a pattern the check accepts as
+    /// typed is accepted as written for a peer, under either rule — and a
+    /// refused class is copied as it is, so it stays refused.
+    #[test]
+    fn the_escape_dialect_never_writes_a_class_beyond_ascii() {
+        for typed in [
+            r"caf\é",
+            r"\é",
+            r"a\€b\*",
+            r"\[é\]",
+            r"x\é[ab]",
+            r"\ü\?",
+            r"dir\/é\{\}",
+        ] {
+            assert_eq!(class_beyond_ascii(typed, false), None, "{typed}");
+            let written = typed_exclude_dialect(typed, false);
+            assert_ne!(written, typed, "{typed} is rewritten for a peer");
+            for windows in [false, true] {
+                assert_eq!(
+                    class_beyond_ascii(&written, windows),
+                    None,
+                    "{typed} written {written}"
+                );
+            }
+        }
+        for typed in ["[aé]", r"x\*[é]", "[!é]", r"\é[é]"] {
+            assert!(class_beyond_ascii(typed, false).is_some(), "{typed}");
+            let written = typed_exclude_dialect(typed, false);
+            for windows in [false, true] {
+                assert!(
+                    class_beyond_ascii(&written, windows).is_some(),
+                    "{typed} written {written}"
+                );
+            }
+        }
+    }
+
+    /// AC-10: widening a pattern for `--ignore-case` never writes a class
+    /// beyond ASCII either. A letter's partners beyond ASCII (`ſ` for `s`,
+    /// the Kelvin sign for `k`) go beside the class as alternatives, never
+    /// into it, where they could not match.
+    #[test]
+    fn widening_never_writes_a_class_beyond_ascii() {
+        for pattern in [
+            "[ks]", "[!ks]", "[a-z]x", "[K]elvin", "k[s]", "*[sS]*", "[!a-z]", "[]k]", "s", "ſ",
+        ] {
+            for windows in [false, true] {
+                let widened = crate::case_fold::widen_case(pattern, windows);
+                assert_eq!(
+                    class_beyond_ascii(&widened, windows),
+                    None,
+                    "{pattern} widened {widened}"
+                );
+            }
         }
     }
 }

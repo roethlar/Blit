@@ -108,6 +108,41 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
     Ok(filter)
 }
 
+/// Everything about a filter that can be refused from the command's own
+/// words, checked without building it: the patterns, exactly as [`build`]
+/// and [`build_spec`] validate them (the same resolved excludes, the same
+/// case mode), and the sizes and ages. It reads no list file.
+///
+/// EXCLUDE_CASE_MATCHING slice 1b (AC-10): a front end calls this BEFORE
+/// it warns, asks or announces anything. The filter itself is built when
+/// the route is dispatched, which is after a mirror's question — so a
+/// pattern that could not be used was refused only once the operator had
+/// agreed to the deletion, or, with nobody to answer, never: the run said
+/// "Aborted." and exited 0.
+pub fn validate(inputs: &FilterInputs<'_>) -> Result<()> {
+    let mut probe = FileFilter::default();
+    probe.include_files = inputs.include.to_vec();
+    probe.exclude_files = resolve_excludes(inputs.exclude, inputs.source_root).patterns;
+    probe.ignore_case = inputs.ignore_case;
+    probe
+        .validate_globs()
+        .map_err(|msg| eyre!("invalid filter pattern: {msg}"))?;
+    for (flag, size) in [
+        ("--min-size", inputs.min_size),
+        ("--max-size", inputs.max_size),
+    ] {
+        if let Some(s) = size {
+            parse_size(s).with_context(|| format!("{flag} {s}"))?;
+        }
+    }
+    for (flag, age) in [("--min-age", inputs.min_age), ("--max-age", inputs.max_age)] {
+        if let Some(s) = age {
+            parse_duration(s).with_context(|| format!("{flag} {s}"))?;
+        }
+    }
+    Ok(())
+}
+
 /// Build the wire-side `FilterSpec` proto message from the same
 /// filter inputs. Used by the remote push path so the daemon
 /// enforces the same filter the CLI would have applied locally.
@@ -1785,6 +1820,73 @@ mod tests {
             format!("{err:#}").contains("invalid filter pattern"),
             "expected a glob-pattern pointer, got: {err:#}"
         );
+    }
+
+    /// EXCLUDE_CASE_MATCHING slice 1b: `validate` refuses, from the
+    /// command's words alone, everything `build` refuses about patterns,
+    /// sizes and ages — in `build`'s own words — and reads no list file
+    /// (the list named here does not exist; `build` fails on it, `validate`
+    /// does not look).
+    #[test]
+    fn validate_refuses_what_build_refuses_without_reading_a_list() {
+        let missing = PathBuf::from("no-such-list-for-validate.txt");
+        let (include, exclude) = (["*.txt".to_string()], ["{a,é}.tmp".to_string()]);
+        let mut good = inputs(&include, &exclude);
+        good.files_from = Some(&missing);
+        good.ignore_case = true;
+        good.min_size = Some("1K");
+        good.max_age = Some("7d");
+        validate(&good).expect("nothing to refuse, and the list is not read");
+        assert!(build(&good).is_err(), "build does read the list");
+
+        let class = ["[aé].txt".to_string()];
+        let unclosed = ["[abc".to_string()];
+        let mut cases: Vec<(FilterInputs<'_>, &str)> = vec![
+            (inputs(&[], &class), "cannot work"),
+            (inputs(&class, &[]), "cannot work"),
+            (inputs(&[], &unclosed), "is not a valid glob"),
+            (inputs(&unclosed, &[]), "is not a valid glob"),
+        ];
+        let mut any_case = inputs(&[], &class);
+        any_case.ignore_case = true;
+        cases.push((any_case, "cannot work"));
+        // cr-ecm1-2: the case mode is part of what is validated. A pattern
+        // nested as deep as the compiler takes as typed is one level too
+        // deep once widened.
+        let nested = |depth: usize| vec![format!("{}s{}", "{".repeat(depth), "}".repeat(depth))];
+        let deepest = (1..2000)
+            .take_while(|&depth| validate(&inputs(&[], &nested(depth))).is_ok())
+            .last()
+            .expect("one level compiles");
+        let deep = nested(deepest);
+        validate(&inputs(&[], &deep)).expect("as typed, it compiles");
+        let mut widened = inputs(&[], &deep);
+        widened.ignore_case = true;
+        cases.push((widened, "cannot be compiled with --ignore-case"));
+        for (flag, words) in [
+            ("min_size", "--min-size bogus"),
+            ("max_size", "--max-size bogus"),
+            ("min_age", "--min-age bogus"),
+            ("max_age", "--max-age bogus"),
+        ] {
+            let mut bad = inputs(&[], &[]);
+            match flag {
+                "min_size" => bad.min_size = Some("bogus"),
+                "max_size" => bad.max_size = Some("bogus"),
+                "min_age" => bad.min_age = Some("bogus"),
+                _ => bad.max_age = Some("bogus"),
+            }
+            cases.push((bad, words));
+        }
+        for (inputs, words) in cases {
+            let early = format!("{:#}", validate(&inputs).expect_err(words));
+            let late = match build(&inputs) {
+                Ok(_) => panic!("build refuses {words} too"),
+                Err(error) => format!("{error:#}"),
+            };
+            assert!(early.contains(words), "{early}");
+            assert_eq!(early, late, "one refusal, wherever it is raised");
+        }
     }
 
     #[test]

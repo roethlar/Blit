@@ -6736,6 +6736,44 @@ async fn receive_tar_record(
 mod tests {
     use super::*;
 
+    /// EXCLUDE_CASE_MATCHING AC-10 (slice 1b): "a daemon handed such a
+    /// pattern refuses at session open" — on either role. The open's
+    /// filter goes through the one validation a command line's does, so a
+    /// class holding a character beyond ASCII is a protocol violation at
+    /// OPEN, in the words the command line uses; the advised spelling, and
+    /// an open with no filter, pass.
+    #[test]
+    fn an_open_whose_filter_holds_a_class_beyond_ascii_is_refused_on_either_role() {
+        let open_with = |exclude: &[&str], include: &[&str]| SessionOpen {
+            filter: Some(FilterSpec {
+                exclude: exclude.iter().map(|p| p.to_string()).collect(),
+                include: include.iter().map(|p| p.to_string()).collect(),
+                ..FilterSpec::default()
+            }),
+            ..SessionOpen::default()
+        };
+        type Validator = fn(&SessionOpen) -> std::result::Result<(), SessionFault>;
+        let validators: [(&str, Validator); 2] = [
+            ("source", source_open_validator),
+            ("destination", destination_open_validator),
+        ];
+        for (role, validate) in validators {
+            for open in [open_with(&["[aé].txt"], &[]), open_with(&[], &["[!é]x"])] {
+                let fault = validate(&open).expect_err("refused at open");
+                assert_eq!(fault.code, session_error::Code::ProtocolViolation, "{role}");
+                assert!(
+                    fault.message.contains("invalid filter")
+                        && fault.message.contains("cannot work")
+                        && fault.message.contains("matches one byte"),
+                    "{role}: {}",
+                    fault.message
+                );
+            }
+            validate(&open_with(&["{a,é}.txt"], &["é*"])).expect("the advised spelling");
+            validate(&SessionOpen::default()).expect("no filter");
+        }
+    }
+
     #[cfg(not(windows))]
     struct WindowsMetadataInjectingSource {
         inner: FsTransferSource,

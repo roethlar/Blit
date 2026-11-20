@@ -1476,3 +1476,173 @@ fn push_mirror_keeps_a_destination_entry_stored_in_another_case() {
         "a complete source scan lets the mirror delete the extraneous file"
     );
 }
+
+/// EXCLUDE_CASE_MATCHING AC-10 (slice 1b): a pattern whose bracket class
+/// holds a letter beyond ASCII refuses the run — typed on `copy`, on
+/// `mirror` (before its question: nobody answers here) and on `check`, as
+/// an exclude or an include, in either case mode, and replayed from a job
+/// file — naming the pattern and the spelling that works. Nothing is
+/// copied and nothing is deleted. A class matches one byte, so `[aé].txt`
+/// never named `é.txt`; before the refusal this mirror deleted it. The
+/// spelling the refusal advises is accepted and names each letter whole.
+#[test]
+fn a_class_holding_a_letter_beyond_ascii_refuses_the_run() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+    fs::write(src.join("keep.txt"), "k").unwrap();
+    for name in ["a.txt", "é.txt", "b.txt"] {
+        fs::write(dst.join(name), name).unwrap();
+    }
+    let names = |dir: &Path| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let config = tmp.path().join("settings");
+    let run = |args: &[&str]| -> (Option<i32>, String) {
+        let mut cmd = std::process::Command::new(common::cli_bin());
+        cmd.arg("--config-dir")
+            .arg(&config)
+            .args(args)
+            .stdin(std::process::Stdio::null());
+        let output = run_with_timeout(cmd, Duration::from_secs(60));
+        (
+            output.status.code(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
+    };
+    let (from, to) = (with_slash(&src), with_slash(&dst));
+    let untouched = ["a.txt", "b.txt", "é.txt"];
+
+    for verb in [
+        &["copy"][..],
+        &["mirror"],
+        &["mirror", "--yes"],
+        &["mirror", "--yes", "--ignore-case"],
+        &["check"],
+    ] {
+        for option in ["--exclude", "--include"] {
+            let mut args = verb.to_vec();
+            args.extend([option, "[aé].txt", &from, &to]);
+            let (code, said) = run(&args);
+            assert_ne!(code, Some(0), "{args:?}\n{said}");
+            assert!(
+                said.contains(&format!(r#"{option} pattern "[aé].txt" cannot work"#))
+                    && said.contains("matches one byte")
+                    && said.contains(r#"Write "{a,é}.txt" instead"#),
+                "{args:?}\n{said}"
+            );
+            assert!(
+                !said.contains("Continue?"),
+                "refused before the question: {said}"
+            );
+            assert_eq!(
+                names(&dst),
+                untouched,
+                "{args:?}: nothing copied or deleted"
+            );
+        }
+    }
+
+    // A negated class and a range have no spelling to offer; the message
+    // says what to write instead.
+    for pattern in ["[!é]x", "[a-é]*"] {
+        let (code, said) = run(&["mirror", "--yes", "--exclude", pattern, &from, &to]);
+        assert_ne!(code, Some(0), "{pattern}\n{said}");
+        assert!(
+            said.contains("cannot work") && said.contains("as alternatives instead, like {a,é}"),
+            "{pattern}\n{said}"
+        );
+        assert_eq!(names(&dst), untouched, "{pattern}");
+    }
+
+    // The advised spelling: accepted, and each letter is named whole.
+    let job = tmp.path().join("job.json");
+    let (code, said) = run(&[
+        "mirror",
+        "--yes",
+        "--exclude",
+        "{a,é}.txt",
+        "--export",
+        job.to_str().unwrap(),
+        &from,
+        &to,
+    ]);
+    assert_eq!(code, Some(0), "{said}");
+    assert_eq!(names(&dst), ["a.txt", "keep.txt", "é.txt"]);
+
+    // Replayed from a job file that holds the class: refused the same way.
+    let mut exported: serde_json::Value = serde_json::from_slice(&fs::read(&job).unwrap()).unwrap();
+    assert_eq!(
+        exported["spec"]["options"]["exclude"],
+        serde_json::json!(["{a,é}.txt"])
+    );
+    exported["spec"]["options"]["exclude"] = serde_json::json!(["[aé].txt"]);
+    fs::write(&job, serde_json::to_vec(&exported).unwrap()).unwrap();
+    fs::write(dst.join("b.txt"), "b").unwrap();
+    let (code, said) = run(&["jobs", "run", job.to_str().unwrap()]);
+    assert_ne!(code, Some(0), "{said}");
+    assert!(
+        said.contains(r#"--exclude pattern "[aé].txt" cannot work"#)
+            && said.contains(r#"Write "{a,é}.txt" instead"#),
+        "{said}"
+    );
+    assert_eq!(
+        names(&dst),
+        ["a.txt", "b.txt", "keep.txt", "é.txt"],
+        "the replay ran nothing"
+    );
+}
+
+/// EXCLUDE_CASE_MATCHING slice 1b: a filter that cannot be used is refused
+/// BEFORE `mirror` asks its question, whatever is wrong with it. The
+/// filter is built when the transfer is dispatched, which is after the
+/// question, so each of these once asked "Continue?" first — and with
+/// nobody to answer, said "Aborted." and exited 0 with the mistake
+/// unreported.
+#[test]
+fn a_filter_that_cannot_be_used_is_refused_before_the_mirror_question() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+    fs::write(src.join("keep.txt"), "k").unwrap();
+    fs::write(dst.join("extra.txt"), "x").unwrap();
+    let (from, to) = (with_slash(&src), with_slash(&dst));
+
+    for (options, words) in [
+        (&["--exclude", "[abc"][..], "is not a valid glob"),
+        (&["--include", "[abc"], "is not a valid glob"),
+        (&["--exclude", "[aé]"], "cannot work"),
+        (&["--min-size", "bogus"], "--min-size bogus"),
+        (&["--max-age", "bogus"], "--max-age bogus"),
+    ] {
+        let mut cmd = cli_command();
+        cmd.arg("mirror")
+            .args(options)
+            .args([&from, &to])
+            .stdin(std::process::Stdio::null());
+        let output = run_with_timeout(cmd, Duration::from_secs(60));
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.status.success(), "{options:?}\n{said}");
+        assert!(said.contains(words), "{options:?}\n{said}");
+        assert!(
+            !said.contains("Continue?") && !said.contains("Aborted"),
+            "{options:?}: refused before the question\n{said}"
+        );
+        assert!(dst.join("extra.txt").exists() && !dst.join("keep.txt").exists());
+    }
+}

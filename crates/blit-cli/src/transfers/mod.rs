@@ -130,6 +130,15 @@ pub(crate) fn build_filter_spec(args: &TransferArgs) -> Result<blit_core::genera
     filter::build_spec(&filter_inputs(args, source_root.as_deref()))
 }
 
+/// EXCLUDE_CASE_MATCHING slice 1b (AC-10): refuse a filter that cannot be
+/// used — a pattern that is no glob, cannot be compiled, or holds a class
+/// that can never match; a size or an age that cannot be read — from the
+/// command's words alone, before any warning, question or banner.
+fn reject_unusable_filter(args: &TransferArgs) -> Result<()> {
+    let source_root = local_source_root(args);
+    filter::validate(&filter_inputs(args, source_root.as_deref()))
+}
+
 /// audit-19: one line per absolute `--exclude` that cannot match anything
 /// — outside a local source, or any absolute pattern when the source is
 /// remote. The run goes on; the operator learns the pattern did nothing.
@@ -346,6 +355,9 @@ async fn run_transfer_inner(
     // failed on the flag.
     reject_unsupported_checker_pin(args, &route)?;
     reject_unsupported_ignore_case(args, &route)?;
+    // EXCLUDE_CASE_MATCHING slice 1b (AC-10): and so does a filter that
+    // cannot be used. It is built at dispatch, after the question below.
+    reject_unusable_filter(args)?;
 
     warn_if_dropping_windows_metadata(args);
     warn_unmatchable_excludes(args, &src_display);

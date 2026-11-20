@@ -185,6 +185,12 @@ fn mirror_mode_from_proto(raw: i32) -> Result<MirrorMode> {
 /// hostile or buggy peer is a hard error here rather than silently
 /// dropped by `FileFilter::build_globset` later (R5-F4 of
 /// `docs/reviews/followup_review_2026-05-02.md`).
+///
+/// EXCLUDE_CASE_MATCHING slice 1b (AC-10) and cr-ecm1-2: the filter is
+/// then held to the SAME validation a command line's is
+/// ([`FileFilter::validate_globs`]) — a class holding a character beyond
+/// ASCII, and a pattern that parses but cannot be compiled, are refused
+/// here in the same words, which is at session open on either role.
 pub(crate) fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
     for pat in &spec.include {
         globset::Glob::new(pat).with_context(|| format!("invalid include glob '{pat}'"))?;
@@ -212,6 +218,9 @@ pub(crate) fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
         ));
         filter.files_from = Some(listed);
     }
+    filter
+        .validate_globs()
+        .map_err(|refusal| eyre::eyre!(refusal))?;
     Ok(filter)
 }
 
@@ -653,6 +662,64 @@ mod tests {
             msg.contains("invalid exclude glob"),
             "expected exclude-glob rejection, got: {msg}"
         );
+    }
+
+    /// EXCLUDE_CASE_MATCHING AC-10 (slice 1b): a peer's filter is held to
+    /// the validation a command line's is. A class holding a character
+    /// beyond ASCII is refused in the same words, for an include and an
+    /// exclude; the spelling it advises is accepted.
+    #[test]
+    fn a_peers_class_beyond_ascii_is_refused_like_a_typed_one() {
+        for include in [false, true] {
+            let patterns = vec!["[aé].txt".to_string()];
+            let error = filter_from_spec(ProtoFilterSpec {
+                include: if include {
+                    patterns.clone()
+                } else {
+                    Vec::new()
+                },
+                exclude: if include { Vec::new() } else { patterns },
+                ..ProtoFilterSpec::default()
+            })
+            .expect_err("a class beyond ASCII");
+            let msg = format!("{error:#}");
+            assert!(
+                msg.contains("cannot work") && msg.contains(r#"Write "{a,é}.txt" instead"#),
+                "{msg}"
+            );
+        }
+        let filter = filter_from_spec(ProtoFilterSpec {
+            exclude: vec!["{a,é}.txt".to_string()],
+            ..ProtoFilterSpec::default()
+        })
+        .expect("the advised spelling");
+        assert_eq!(filter.exclude_files, ["{a,é}.txt"]);
+    }
+
+    /// cr-ecm1-2, its known gap closed: a peer's pattern that PARSES and
+    /// cannot be compiled is refused here too. Before, the receiving end
+    /// only parsed, and a set that cannot be built is compared as text.
+    #[test]
+    fn a_peers_pattern_that_cannot_be_compiled_is_refused() {
+        let nested = |depth: usize| format!("{}s{}", "{".repeat(depth), "}".repeat(depth));
+        let accepted = |depth: usize| {
+            filter_from_spec(ProtoFilterSpec {
+                exclude: vec!["*.cfg".to_string(), nested(depth)],
+                ..ProtoFilterSpec::default()
+            })
+        };
+        let deepest = (1..2000)
+            .take_while(|&depth| accepted(depth).is_ok())
+            .last()
+            .expect("one level compiles");
+        assert!(deepest < 1999, "the compiler has a nesting limit");
+        let too_deep = nested(deepest + 1);
+        globset::Glob::new(&too_deep).expect("one level deeper still parses");
+        let msg = format!(
+            "{:#}",
+            accepted(deepest + 1).expect_err("too deep to compile")
+        );
+        assert!(msg.contains("cannot be compiled"), "{msg}");
     }
 
     #[test]
