@@ -248,6 +248,12 @@ fn case_note(args: &TransferArgs) -> Option<String> {
     if args.ignore_case || args.match_case || args.yes {
         return None;
     }
+    // cr-ecm3-5: a list of names overrides every pattern (`--files-from`,
+    // and the list of files a retry sends again): the patterns then name
+    // nothing in this run, and a line about them would mislead.
+    if args.files_from.is_some() || args.retry_only.is_some() || args.retry_only_raw.is_some() {
+        return None;
+    }
     // Slice 3b: each pattern with the pattern file it was read from.
     let origin = |origins: &[Option<PathBuf>], at: usize| {
         origins

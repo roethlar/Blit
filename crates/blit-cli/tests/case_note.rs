@@ -398,3 +398,136 @@ fn a_job_run_again_shows_the_line_as_its_first_run_did() {
         );
     }
 }
+
+/// cr-ecm3-5: the line follows what the matcher does. A pattern whose only
+/// letters sit in a class (`*[a-z]`), and one whose letter has no single
+/// upper form in the standard tables (`*ß`), are spoken of like any other —
+/// as typed, this mirror deletes `TEST` and `CAPẞ`, which `--ignore-case`
+/// would keep, and the line was silent about both.
+#[test]
+fn the_line_speaks_of_every_pattern_whose_reading_depends_on_case() {
+    for (pattern, line, kept_only_ignoring_case) in [
+        (
+            "*[a-z]",
+            "\"*[a-z]\" matches [a-z] only; capital letters matter (--ignore-case would also \
+             match [A-Z]).",
+            "TEST",
+        ),
+        (
+            "*ß",
+            "\"*ß\" matches ß only; capital letters matter (--ignore-case would also match ẞ).",
+            "CAPẞ",
+        ),
+    ] {
+        let tmp = tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        write(&src, "keep.1");
+        write(&dst, kept_only_ignoring_case);
+        let (from, to) = (with_slash(&src), with_slash(&dst));
+        let asked = blit(
+            tmp.path(),
+            &["mirror", "--exclude", pattern, &from, &to],
+            Some("y\n"),
+        );
+        assert_eq!(asked.code, Some(0), "{}", asked.all());
+        assert!(
+            asked.stdout.contains(&format!("{line}\n{QUESTION}")),
+            "{pattern}: {}",
+            asked.all()
+        );
+        assert!(
+            !dst.join(kept_only_ignoring_case).exists(),
+            "{pattern}: as typed it is not named, as the line said"
+        );
+
+        write(&dst, kept_only_ignoring_case);
+        let ignoring = blit(
+            tmp.path(),
+            &[
+                "mirror",
+                "-y",
+                "--ignore-case",
+                "--exclude",
+                pattern,
+                &from,
+                &to,
+            ],
+            None,
+        );
+        assert_eq!(ignoring.code, Some(0), "{}", ignoring.all());
+        assert!(
+            dst.join(kept_only_ignoring_case).exists(),
+            "{pattern}: with --ignore-case it is named and kept"
+        );
+    }
+}
+
+/// cr-ecm3-5: no line when a list of names overrides the patterns. With
+/// `--files-from`, what is copied is what is listed, whatever a pattern
+/// says — the note described a `*.cfg` exclusion while the listed
+/// `picked.cfg` was copied.
+#[test]
+fn no_line_when_a_list_of_names_overrides_the_patterns() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    write(&src, "picked.cfg");
+    write(&src, "other.txt");
+    fs::create_dir_all(&dst).unwrap();
+    let list = tmp.path().join("list.txt");
+    fs::write(&list, "picked.cfg\n").unwrap();
+    let ran = blit(
+        tmp.path(),
+        &[
+            "copy",
+            "--exclude",
+            "*.cfg",
+            "--files-from",
+            list.to_str().unwrap(),
+            &with_slash(&src),
+            &with_slash(&dst),
+        ],
+        None,
+    );
+    assert_eq!(ran.code, Some(0), "{}", ran.all());
+    assert!(
+        dst.join("picked.cfg").exists(),
+        "the list decides: {}",
+        ran.all()
+    );
+    assert!(!dst.join("other.txt").exists());
+    assert!(!ran.all().contains(MARK), "{}", ran.all());
+}
+
+/// cr-ecm3-5: one line, whatever is typed. A pattern holding a line break
+/// is echoed with the break written as its escape.
+#[test]
+fn a_pattern_holding_a_line_break_still_makes_one_line() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    write(&src, "keep.txt");
+    fs::create_dir_all(&dst).unwrap();
+    let ran = blit(
+        tmp.path(),
+        &[
+            "copy",
+            "--exclude",
+            "first\nSecond",
+            &with_slash(&src),
+            &with_slash(&dst),
+        ],
+        None,
+    );
+    assert_eq!(ran.code, Some(0), "{}", ran.all());
+    let noted: Vec<&str> = ran.stderr.lines().filter(|l| l.contains(MARK)).collect();
+    assert_eq!(noted.len(), 1, "{}", ran.stderr);
+    assert!(
+        noted[0].starts_with(r#"blit: "first\nSecond" matches first\nSecond only;"#),
+        "{}",
+        noted[0]
+    );
+    assert!(
+        !ran.stderr.lines().any(|l| l.starts_with("Second")),
+        "nothing spills onto a second line: {}",
+        ran.stderr
+    );
+}
