@@ -2,8 +2,9 @@
 
 **Status**: Active (contract; the session is the ONLY remote transfer
 path since cutover, otp-10c-2)
-**Contract version**: 9 (the case mode in the open's filter,
-`FilterSpec.ignore_case`; v8 = `ManifestPruned`, the paths a filtered
+**Contract version**: 10 (a list of exact names in force though it
+holds no name, `FilterSpec.files_from_set`; v9 = the case mode in the
+open's filter, `FilterSpec.ignore_case`; v8 = `ManifestPruned`, the paths a filtered
 mirror's source pruned; v7 = source-side per-file containment, run identity,
 exact failure and leftover sets, raw name bytes; v6 = `TransferSummary`
 per-file failure report, v5 = cross-platform Windows metadata policy,
@@ -194,11 +195,14 @@ deleted. The bump is what keeps an older peer out: it would ignore the
 field, read the patterns exactly and, on a mirror, delete what the
 initiator was told to keep.
 
-Also in v9, `FilterSpec.files_from_set` says a list of exact names is in
-force whatever it holds. `files_from` and `files_from_raw` cannot say so
+In contract v10, `FilterSpec.files_from_set` says a list of exact names is
+in force whatever it holds. `files_from` and `files_from_raw` cannot say so
 for a list with no name in it — empty and absent are one encoding — and a
 peer that read "no list" applied the patterns the list overrides. With the
-field set and both lists empty, nothing passes.
+field set and both lists empty, nothing passes. The field has a contract
+of its own because a contract-9 peer discards it: the request that names a
+daemon-to-daemon transfer carries it under spec version 5 for the same
+reason.
 
 ## Frame set and field numbers
 

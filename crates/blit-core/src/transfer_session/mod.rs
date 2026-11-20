@@ -115,10 +115,16 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// the SOURCE's walk and the DESTINATION's deletion scope read every
 /// pattern as the initiator did. An older peer would read the patterns
 /// exactly and, on a mirror, delete what this side was told to keep — it
-/// is refused at HELLO like any other version mismatch. Also v9 (before
-/// any release carried it): `FilterSpec.files_from_set` (10; cr-ecm4-2),
-/// a list of exact names in force even when it holds no name.
-pub const CONTRACT_VERSION: u32 = 9;
+/// is refused at HELLO like any other version mismatch.
+/// v10: `FilterSpec.files_from_set` (10; cr-ecm4-2, cr-ecm5-1): a list of
+/// exact names is in force even when it holds no name. A contract-9 peer
+/// discards the field, reads an empty list as no list, applies the
+/// patterns the list overrides and, on a mirror, deletes what the list
+/// kept out of scope. The field first joined contract 9 unversioned, on
+/// the reasoning that no release carried that contract; a daemon built
+/// from a contract-9 revision already published on the development branch
+/// accepted this side and deleted a destination-only file.
+pub const CONTRACT_VERSION: u32 = 10;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames
@@ -6803,6 +6809,38 @@ mod tests {
         assert!(
             contract >= 9,
             "a wire that carries the case mode is contract 9 or later, not {contract}"
+        );
+    }
+
+    /// cr-ecm5-1: the marker that a list of exact names was given — even
+    /// one holding no name — is on the wire, and the wire that carries it
+    /// is contract 10 or later. A contract-9 peer discards the field and
+    /// reads an empty list as none; it must be refused at HELLO, not
+    /// handed the request.
+    #[test]
+    fn the_empty_list_marker_travels_only_under_contract_10_or_later() {
+        use prost::Message as _;
+        let sent = FilterSpec {
+            include: vec!["*.jpg".to_string()],
+            files_from_set: true,
+            ..FilterSpec::default()
+        };
+        let bytes = sent.encode_to_vec();
+        let received = FilterSpec::decode(bytes.as_slice()).unwrap();
+        assert!(received.files_from_set, "the marker is on the wire");
+        assert!(received.files_from.is_empty() && received.files_from_raw.is_empty());
+        // Without the marker the same filter is another message: nothing
+        // else in it says a list was given.
+        let unmarked = FilterSpec {
+            files_from_set: false,
+            ..sent.clone()
+        };
+        assert_ne!(unmarked.encode_to_vec(), bytes);
+        // Read at run time: the number is what a peer is told at HELLO.
+        let contract = std::hint::black_box(CONTRACT_VERSION);
+        assert!(
+            contract >= 10,
+            "a wire that carries the empty-list marker is contract 10 or later, not {contract}"
         );
     }
 

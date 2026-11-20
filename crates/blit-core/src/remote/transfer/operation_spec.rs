@@ -56,7 +56,12 @@ use crate::generated::{
 ///     was told to leave and deleted what it was told to keep, exit 0.
 ///     A spec that carries a field an older daemon does not know must
 ///     carry a version that daemon refuses.
-pub const SUPPORTED_SPEC_VERSION: u32 = 4;
+///   - 5: `FilterSpec.files_from_set` (cr-ecm4-2, cr-ecm5-1), by that
+///     same rule — which cr-ecm4-2 did not follow: it added the field
+///     under version 4. A version-4 daemon discards it, reads a list
+///     that holds no name as no list, and its mirror deletes what the
+///     list kept out of scope.
+pub const SUPPORTED_SPEC_VERSION: u32 = 5;
 
 /// Normalized, internal-friendly view of a transfer operation. Folds
 /// proto-`Unspecified` into concrete defaults, converts `FilterSpec`
@@ -764,6 +769,34 @@ mod tests {
         assert!(
             version >= 4,
             "a spec that carries the case mode is version 4 or later, not {version}"
+        );
+    }
+
+    /// cr-ecm5-1: a request that says a list of exact names was given
+    /// carries a version a daemon of spec version 4 refuses — that daemon
+    /// would discard the marker and delete what the list kept out of
+    /// scope — and this build refuses a version-4 request in turn.
+    #[test]
+    fn a_request_with_the_empty_list_marker_is_version_5_or_later() {
+        let mut spec = empty_spec();
+        spec.filter = Some(ProtoFilterSpec {
+            include: vec!["*.jpg".to_string()],
+            files_from_set: true,
+            ..ProtoFilterSpec::default()
+        });
+        let accepted =
+            NormalizedTransferOperation::from_spec(spec.clone()).expect("this build's own version");
+        let filter = accepted.filter.as_ref().expect("a filter");
+        let listed = filter.files_from.as_ref().expect("a list is in force");
+        assert!(listed.is_empty(), "and it holds no name");
+        spec.spec_version = 4;
+        let error = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+        assert!(error.to_string().contains("spec_version 4"), "{error:#}");
+        // Read at run time: the number is what a daemon is told.
+        let version = std::hint::black_box(SUPPORTED_SPEC_VERSION);
+        assert!(
+            version >= 5,
+            "a spec that carries the empty-list marker is version 5 or later, not {version}"
         );
     }
 
