@@ -1565,6 +1565,14 @@ fn a_class_holding_a_letter_beyond_ascii_refuses_the_run() {
         assert_eq!(names(&dst), untouched, "{pattern}");
     }
 
+    // cr-ecm2-4: with two such classes the advice rewrites both, and the
+    // pattern advised is one the next run takes.
+    let (code, said) = run(&["check", "--exclude", "[aé][bß].txt", &from, &to]);
+    assert_ne!(code, Some(0), "{said}");
+    assert!(said.contains(r#"Write "{a,é}{b,ß}.txt" instead"#), "{said}");
+    let (_, said) = run(&["check", "--exclude", "{a,é}{b,ß}.txt", &from, &to]);
+    assert!(!said.contains("cannot work"), "the advised pattern: {said}");
+
     // The advised spelling: accepted, and each letter is named whole.
     let job = tmp.path().join("job.json");
     let (code, said) = run(&[

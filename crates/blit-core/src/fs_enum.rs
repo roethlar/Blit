@@ -591,46 +591,76 @@ pub(crate) fn class_beyond_ascii(pattern: &str, windows: bool) -> Option<(usize,
     None
 }
 
-/// The refusal for `pattern`, whose `class` at byte `at` holds a character
-/// beyond ASCII ([`class_beyond_ascii`]): what is wrong, in the user's own
-/// pattern, and the spelling that works. A class of plain single
-/// characters is rewritten for them as alternatives (`[aé].txt` as
-/// `{a,é}.txt`, which matches each letter whole); a range or a negated
-/// class has no such spelling, and the message says what to write instead.
+/// The refusal for `pattern` when a bracket class of it holds a character
+/// beyond ASCII ([`class_beyond_ascii`]; `None` when none does): what is
+/// wrong, in the user's own pattern, and the spelling that works. EVERY
+/// such class is rewritten — a class of plain single characters becomes
+/// alternatives (`[aé].txt` is `{a,é}.txt`, which matches each letter
+/// whole) — so that the pattern advised is one the next run accepts
+/// (cr-ecm2-4: only the first was, and `[aé][bß].txt` was told to write
+/// `{a,é}[bß].txt`, which is refused in turn). A range or a negated class
+/// has no such spelling; the message then names that class and says what
+/// to write instead.
 pub(crate) fn class_beyond_ascii_refusal(
     label: &str,
     pattern: &str,
-    at: usize,
-    class: &str,
-) -> String {
-    let inner = &class[1..class.len() - 1];
-    let letter = inner.chars().find(|c| !c.is_ascii()).unwrap_or('é');
-    let plain = !inner.starts_with(['!', '^'])
-        && !inner.contains(['-', '{', '}', ',', '*', '?', '[', ']', '\\', '/']);
-    let advice = if plain {
-        let members: Vec<String> = inner.chars().map(String::from).collect();
-        let written = match members.as_slice() {
-            [one] => one.clone(),
-            many => format!("{{{}}}", many.join(",")),
+    windows: bool,
+) -> Option<String> {
+    let (_, first) = class_beyond_ascii(pattern, windows)?;
+    // The whole pattern with each such class rewritten, or the first class
+    // that has no rewrite.
+    let mut rewritten = String::with_capacity(pattern.len() + 8);
+    let mut stuck: Option<&str> = None;
+    let mut rest = pattern;
+    while let Some(c) = rest.chars().next() {
+        let len = match c {
+            '\\' if !windows => 1 + rest[1..].chars().next().map_or(0, char::len_utf8),
+            '[' => bracket_class_len(rest).unwrap_or(1),
+            c => c.len_utf8(),
         };
-        format!(
-            "Write {:?} instead",
-            format!(
-                "{}{written}{}",
-                &pattern[..at],
-                &pattern[at + class.len()..]
-            )
-        )
-    } else {
-        format!(
+        let piece = &rest[..len];
+        let rewrite = c == '[' && len > 1 && !piece.is_ascii();
+        if rewrite {
+            let inner = &piece[1..len - 1];
+            let plain = !inner.starts_with(['!', '^'])
+                && !inner.contains(['-', '{', '}', ',', '*', '?', '[', ']', '\\', '/']);
+            if !plain {
+                stuck = Some(piece);
+                break;
+            }
+            let members: Vec<String> = inner.chars().map(String::from).collect();
+            match members.as_slice() {
+                [one] => rewritten.push_str(one),
+                many => {
+                    rewritten.push('{');
+                    rewritten.push_str(&many.join(","));
+                    rewritten.push('}');
+                }
+            }
+        } else {
+            rewritten.push_str(piece);
+        }
+        rest = &rest[len..];
+    }
+    let class = stuck.unwrap_or(first);
+    let letter = class.chars().find(|c| !c.is_ascii()).unwrap_or('é');
+    let advice = match stuck {
+        // Advised only when it is itself a pattern the filter accepts.
+        None if class_beyond_ascii(&rewritten, windows).is_none()
+            && globset::Glob::new(&rewritten).is_ok() =>
+        {
+            format!("Write {rewritten:?} instead")
+        }
+        None => format!("List the letters wanted as alternatives instead, like {{a,{letter}}}"),
+        Some(_) => format!(
             "A range or a negated class cannot hold such a letter; list the letters wanted \
              as alternatives instead, like {{a,{letter}}}"
-        )
+        ),
     };
-    format!(
+    Some(format!(
         "{label} pattern {pattern:?} cannot work: a class like {class} matches one byte, \
          and {letter} is more than one byte, so the class can never match it. {advice}."
-    )
+    ))
 }
 
 /// cr-g3fix3-3: the byte length of the bracket class `text` opens, `[`
@@ -760,8 +790,8 @@ impl FileFilter {
         ] {
             for pat in patterns {
                 // AC-10: a class that can never match the letter it shows.
-                if let Some((at, class)) = class_beyond_ascii(pat, cfg!(windows)) {
-                    return Err(class_beyond_ascii_refusal(label, pat, at, class));
+                if let Some(refusal) = class_beyond_ascii_refusal(label, pat, cfg!(windows)) {
+                    return Err(refusal);
                 }
                 if let Err(err) = globset::Glob::new(pat) {
                     return Err(format!(
@@ -1966,6 +1996,12 @@ mod tests {
             ("*/[€a]b/**", "[€a]", r#"Write "*/{€,a}b/**" instead."#),
             ("[ab]*[cü]", "[cü]", r#"Write "[ab]*{c,ü}" instead."#),
             ("é[é]é", "[é]", r#"Write "ééé" instead."#),
+            // cr-ecm2-4: every such class is rewritten, not the first only.
+            ("[aé][bß].txt", "[aé]", r#"Write "{a,é}{b,ß}.txt" instead."#),
+            ("[é]x[ü]y[ab][ñ]", "[é]", r#"Write "éxüy[ab]ñ" instead."#),
+            // One that has no rewrite is the one named.
+            ("[aé][!ß]", "[!ß]", "like {a,ß}."),
+            ("[a-é]x[bü]", "[a-é]", "like {a,é}."),
             ("[!é]x", "[!é]", "like {a,é}."),
             ("[^é]x", "[^é]", "like {a,é}."),
             ("[a-é]", "[a-é]", "like {a,é}."),
@@ -1996,6 +2032,17 @@ mod tests {
                         "{error}"
                     );
                     assert!(error.ends_with(advice), "{pattern}: {error}");
+                }
+            }
+            // cr-ecm2-4: a spelling that is advised is one the filter takes.
+            if let Some(advised) = advice
+                .strip_prefix("Write \"")
+                .and_then(|rest| rest.strip_suffix("\" instead."))
+            {
+                for filter in [excluding(&[advised]), excluding_any_case(&[advised])] {
+                    filter
+                        .validate_globs()
+                        .unwrap_or_else(|error| panic!("{pattern} advised {advised}: {error}"));
                 }
             }
         }
@@ -2061,7 +2108,8 @@ mod tests {
         let pattern = r"\[é][é]";
         let (at, class) = class_beyond_ascii(pattern, false).expect("the second is a class");
         assert_eq!((at, class), (5, "[é]"));
-        let refusal = class_beyond_ascii_refusal("--exclude", pattern, at, class);
+        let refusal =
+            class_beyond_ascii_refusal("--exclude", pattern, false).expect("a class beyond ASCII");
         assert!(
             refusal.ends_with(&format!("Write {:?} instead.", r"\[é]é")),
             "{refusal}"
