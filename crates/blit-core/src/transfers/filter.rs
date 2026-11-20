@@ -108,6 +108,19 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
     Ok(filter)
 }
 
+/// EXCLUDE_CASE_MATCHING slice 2 (AC-3, AC-5, AC-9): the one line a front
+/// end shows when a run's patterns are read exactly as typed and nobody
+/// said so — `"*Cache" matches Cache only; capital letters matter
+/// (--ignore-case would also match cache, CACHE).` — or `None` when no
+/// pattern holds a letter. Built from the first such pattern, excludes
+/// before includes, as typed; the others are counted. WHEN to show it is
+/// the front end's: not with a case mode stated, and not when the operator
+/// has waived the question.
+pub fn case_note(exclude: &[String], include: &[String]) -> Option<String> {
+    let patterns: Vec<&str> = exclude.iter().chain(include).map(String::as_str).collect();
+    crate::case_fold::case_note(&patterns, cfg!(windows))
+}
+
 /// Everything about a filter that can be refused from the command's own
 /// words, checked without building it: the patterns, exactly as [`build`]
 /// and [`build_spec`] validate them (the same resolved excludes, the same

@@ -40,6 +40,126 @@ pub(crate) fn case_variants(c: char) -> Vec<char> {
     variants
 }
 
+/// EXCLUDE_CASE_MATCHING slice 2 (AC-3, AC-5): the one line that tells an
+/// operator their patterns are read exactly as typed, built from the first
+/// pattern in which a letter's case matters:
+///
+/// `"*Cache" matches Cache only; capital letters matter (--ignore-case would also match cache, CACHE).`
+///
+/// The pattern is echoed as typed. What follows is its text without the
+/// wildcards at its ends, then that text all lower and all upper —
+/// whichever differs from the typed one — each letter changed for the
+/// single letter `--ignore-case` pairs it with, so every spelling shown is
+/// one the option really matches (`straße` is shown `STRAßE`, never
+/// `STRASSE`). A bracket class is copied as it is: it already says which
+/// letters it takes.
+///
+/// `None` when no pattern holds a letter with another case (`??`, `*.1`):
+/// no case mode would change what such patterns match. Further patterns
+/// that do hold one are counted, never listed — the line is one line
+/// however many patterns there are.
+pub(crate) fn case_note(patterns: &[&str], windows: bool) -> Option<String> {
+    let mut noted = patterns
+        .iter()
+        .filter_map(|pattern| Some((*pattern, Spellings::of(pattern, windows)?)));
+    let (pattern, spellings) = noted.next()?;
+    let more = match noted.count() {
+        0 => String::new(),
+        1 => ", and 1 more pattern matches only as typed".to_string(),
+        n => format!(", and {n} more patterns match only as typed"),
+    };
+    Some(format!(
+        "\"{pattern}\" matches {} only{more}; capital letters matter (--ignore-case would also \
+         match {}).",
+        spellings.typed,
+        spellings.others.join(", ")
+    ))
+}
+
+/// A pattern's text as [`case_note`] shows it, and the other spellings of
+/// it that `--ignore-case` would match.
+struct Spellings<'a> {
+    typed: &'a str,
+    others: Vec<String>,
+}
+
+impl<'a> Spellings<'a> {
+    /// `None` when no letter of `pattern` outside a class has another case.
+    fn of(pattern: &'a str, windows: bool) -> Option<Self> {
+        let typed = without_end_wildcards(pattern, windows);
+        let (mut lower, mut upper) = (String::new(), String::new());
+        let mut rest = typed;
+        while let Some(c) = rest.chars().next() {
+            let class = if c == '[' {
+                bracket_class_len(rest)
+            } else {
+                None
+            };
+            let len = match class {
+                Some(len) => {
+                    lower.push_str(&rest[..len]);
+                    upper.push_str(&rest[..len]);
+                    len
+                }
+                // globset's escape under the Unix rule: the next character
+                // is itself — a `[` after it opens no class.
+                None if c == '\\' && !windows => {
+                    let escaped = rest[1..].chars().next();
+                    lower.push(c);
+                    upper.push(c);
+                    if let Some(escaped) = escaped {
+                        lower.push(paired(escaped, escaped.to_lowercase()));
+                        upper.push(paired(escaped, escaped.to_uppercase()));
+                    }
+                    1 + escaped.map_or(0, char::len_utf8)
+                }
+                None => {
+                    lower.push(paired(c, c.to_lowercase()));
+                    upper.push(paired(c, c.to_uppercase()));
+                    c.len_utf8()
+                }
+            };
+            rest = &rest[len..];
+        }
+        let mut others = Vec::new();
+        for other in [lower, upper] {
+            if other != typed && !others.contains(&other) {
+                others.push(other);
+            }
+        }
+        (!others.is_empty()).then_some(Self { typed, others })
+    }
+}
+
+/// `c` in another case — `mapped`, the standard library's lower or upper
+/// form of it — when that is ONE letter and one `--ignore-case` pairs with
+/// `c` ([`case_variants`]); `c` itself otherwise (`ß`, whose upper form is
+/// two letters the option never matches).
+fn paired(c: char, mut mapped: impl Iterator<Item = char>) -> char {
+    match (mapped.next(), mapped.next()) {
+        (Some(one), None) if case_variants(c).contains(&one) => one,
+        _ => c,
+    }
+}
+
+/// `pattern` without the wildcards at its ends, for showing: `*Cache`,
+/// `Cache*` and `**/Cache/**` are all shown `Cache`. A wildcard inside the
+/// pattern stays (`IMG_*.jpg`), and so does an escaped `*`, which is a
+/// star and no wildcard.
+fn without_end_wildcards(pattern: &str, windows: bool) -> &str {
+    let separator = |c: char| c == '/' || (windows && c == '\\');
+    let mut text = pattern;
+    let start = text.trim_start_matches('*');
+    if start.len() < text.len() {
+        text = start.trim_start_matches(separator);
+    }
+    let end = text.trim_end_matches('*');
+    if end.len() < text.len() && (windows || !end.ends_with('\\')) {
+        text = end.trim_end_matches(separator);
+    }
+    text
+}
+
 /// `pattern` — a glob as globset reads it under one platform's rule
 /// (`windows`: `\` separates components and escapes nothing) — widened so
 /// that it ignores case: see the module documentation. Wildcards,
@@ -596,5 +716,137 @@ mod tests {
         // ...and the bare letters do name their fold-mates.
         assert!(ignoring_case("s.txt").is_match("ſ.txt"));
         assert!(ignoring_case("k.txt").is_match("\u{212a}.txt"));
+    }
+
+    /// EXCLUDE_CASE_MATCHING slice 2 (AC-3, AC-5): the line, to the letter.
+    #[test]
+    fn the_case_note_says_what_the_first_lettered_pattern_matches() {
+        let note = |patterns: &[&str]| case_note(patterns, false);
+        let line = |shown: &str, more: &str, others: &str| {
+            Some(format!(
+                "{shown} only{more}; capital letters matter (--ignore-case would also match \
+                 {others})."
+            ))
+        };
+        // AC-3, as the plan writes it.
+        assert_eq!(
+            note(&["*Cache"]).as_deref(),
+            Some(
+                "\"*Cache\" matches Cache only; capital letters matter (--ignore-case would \
+                 also match cache, CACHE)."
+            )
+        );
+        // Whichever spelling equals the typed one is left out.
+        assert_eq!(
+            note(&["*cache"]),
+            line("\"*cache\" matches cache", "", "CACHE")
+        );
+        assert_eq!(note(&["*.CFG"]), line("\"*.CFG\" matches .CFG", "", ".cfg"));
+        // The wildcards at the ends are not part of what is shown; one
+        // inside the pattern is.
+        for pattern in ["Cache*", "*Cache*", "**/Cache/**", "**/Cache", "Cache/**"] {
+            assert_eq!(
+                note(&[pattern]),
+                line(&format!("\"{pattern}\" matches Cache"), "", "cache, CACHE"),
+                "{pattern}"
+            );
+        }
+        assert_eq!(
+            note(&["IMG_*.jpg"]),
+            line(
+                "\"IMG_*.jpg\" matches IMG_*.jpg",
+                "",
+                "img_*.jpg, IMG_*.JPG"
+            )
+        );
+        assert_eq!(
+            note(&["/srv/Data"]),
+            line(
+                "\"/srv/Data\" matches /srv/Data",
+                "",
+                "/srv/data, /SRV/DATA"
+            )
+        );
+        // AC-5: no letter, no line.
+        for patterns in [
+            &["??"][..],
+            &["*.1"],
+            &["??", "*.1", "*", "**", "[abc]", "{1,2}"],
+            &[],
+        ] {
+            assert_eq!(note(patterns), None, "{patterns:?}");
+        }
+        // AC-5: several patterns, one line — the first that holds a letter,
+        // and a count of the others that do.
+        assert_eq!(
+            note(&["??", "*.1", "Thumbs.db", "*"]),
+            line(
+                "\"Thumbs.db\" matches Thumbs.db",
+                "",
+                "thumbs.db, THUMBS.DB"
+            )
+        );
+        assert_eq!(
+            note(&["??", "Thumbs.db", "*.1", "*.tmp"]),
+            line(
+                "\"Thumbs.db\" matches Thumbs.db",
+                ", and 1 more pattern matches only as typed",
+                "thumbs.db, THUMBS.DB"
+            )
+        );
+        assert_eq!(
+            note(&["*.o", "*.tmp", "??", "Build"]),
+            line(
+                "\"*.o\" matches .o",
+                ", and 2 more patterns match only as typed",
+                ".O"
+            )
+        );
+    }
+
+    /// Every other spelling the note shows is one `--ignore-case` really
+    /// matches, and the note never shows one it does not: each letter is
+    /// changed only for the single letter the option pairs it with.
+    #[test]
+    fn the_case_note_shows_only_spellings_ignore_case_matches() {
+        let others = |pattern: &str| {
+            Spellings::of(pattern, false)
+                .map(|spellings| spellings.others)
+                .unwrap_or_default()
+        };
+        // `ß` has no single upper letter: it stays, and `SS` is never shown.
+        assert_eq!(others("straße"), ["STRAßE"]);
+        // The sigmas pair one to one; the final sigma lowers to itself.
+        assert_eq!(others("σ*"), ["Σ"]);
+        assert_eq!(others("Σ"), ["σ"]);
+        assert_eq!(others("Übung"), ["übung", "ÜBUNG"]);
+        // A class is copied as it is; a pattern whose only letters are in
+        // one gets no note.
+        assert_eq!(others("[Cc]ache"), ["[Cc]ACHE"]);
+        assert!(others("[abc]").is_empty());
+        // An escaped character under the Unix rule is itself: an escaped
+        // star at the end is no wildcard, an escaped bracket opens no class.
+        assert_eq!(others(r"Cache\*"), [r"cache\*", r"CACHE\*"]);
+        assert_eq!(others(r"\[Ab]"), [r"\[ab]", r"\[AB]"]);
+        // On Windows `\` separates; the wildcard ends are trimmed with it.
+        assert_eq!(
+            Spellings::of(r"**\Cache\**", true).map(|s| s.typed),
+            Some("Cache")
+        );
+
+        for pattern in ["*Cache", "straße", "σx", "Übung", "IMG_*.jpg", "ſ", "K"] {
+            let widened = globset::Glob::new(&widen_case(pattern, false))
+                .unwrap()
+                .compile_matcher();
+            let shown = Spellings::of(pattern, false);
+            for other in shown.map(|s| s.others).unwrap_or_default() {
+                // A wildcard kept inside the spelling stands for itself here.
+                let name = other.replace('*', "x");
+                assert!(
+                    widened.is_match(&name),
+                    "{pattern} shows {other}, which --ignore-case must match"
+                );
+            }
+        }
     }
 }

@@ -155,13 +155,34 @@ fn warn_unmatchable_excludes(args: &TransferArgs, source_display: &str) {
     }
 }
 
+/// EXCLUDE_CASE_MATCHING slice 2 (AC-3, AC-4, AC-5, AC-9): the line about
+/// capital letters this run shows, if any. None when a case mode was typed
+/// — `--ignore-case`, or `--match-case`, which changes no matching and
+/// says the operator knows (Q9) — none with `-y`, and none when no pattern
+/// holds a letter. `mirror` shows it in its question; a run that asks
+/// nothing prints it as a note.
+fn case_note(args: &TransferArgs) -> Option<String> {
+    if args.ignore_case || args.match_case || args.yes {
+        return None;
+    }
+    filter::case_note(&args.exclude, &args.include)
+}
+
 /// Prompt for confirmation of a destructive operation. Returns true if the user confirms.
-/// Always returns true if `skip_prompt` is true.
-fn confirm_destructive_operation(message: &str, skip_prompt: bool) -> Result<bool> {
+/// Always returns true if `skip_prompt` is true. `note` is printed on its
+/// own line just before the question.
+fn confirm_destructive_operation(
+    note: Option<&str>,
+    message: &str,
+    skip_prompt: bool,
+) -> Result<bool> {
     if skip_prompt {
         return Ok(true);
     }
 
+    if let Some(note) = note {
+        println!("{note}");
+    }
     print!("{} [y/N]: ", message);
     io::stdout().flush()?;
     let mut input = String::new();
@@ -362,16 +383,21 @@ async fn run_transfer_inner(
     warn_if_dropping_windows_metadata(args);
     warn_unmatchable_excludes(args, &src_display);
 
-    // For mirror operations, prompt unless --yes or --dry-run
+    // For mirror operations, prompt unless --yes or --dry-run. The line
+    // about capital letters is part of the question when one is asked,
+    // and a note on stderr when none is (`copy`, a dry run): AC-3, AC-9.
+    let case_note = case_note(args);
     if mode.is_mirror() && !args.dry_run {
         let prompt = format!(
             "Mirror will delete extraneous files at destination '{}'. Continue?",
             dst_display
         );
-        if !confirm_destructive_operation(&prompt, args.yes)? {
+        if !confirm_destructive_operation(case_note.as_deref(), &prompt, args.yes)? {
             println!("Aborted.");
             return Ok(ExitCode::SUCCESS);
         }
+    } else if let Some(note) = &case_note {
+        eprintln!("blit: {note}");
     }
 
     // Banner goes to stderr so stdout stays reserved for the summary /
@@ -839,7 +865,7 @@ async fn run_move_inner(
         "Move will transfer '{}' to '{}' and delete the source. Continue?",
         src_display, dst_display
     );
-    if !confirm_destructive_operation(&prompt, args.yes)? {
+    if !confirm_destructive_operation(None, &prompt, args.yes)? {
         println!("Aborted.");
         return Ok(ExitCode::SUCCESS);
     }
