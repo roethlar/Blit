@@ -253,6 +253,105 @@ fn ignore_case_to_a_daemon_is_refused_before_any_banner_or_prompt() {
     );
 }
 
+/// cr-ecm1-2: a pattern that compiles as typed and not once widened is
+/// REFUSED under `--ignore-case`, with nothing copied or deleted. Before,
+/// the exclude set could not be built and every pattern in it was compared
+/// as text exactly as written, so `--ignore-case` named LESS than typing
+/// nothing: this mirror deleted `SAVED.CFG` and `s`. The pattern is one
+/// letter inside as many alternations as the compiler takes as typed
+/// (found by asking the binary), which is one too many once the letter is
+/// widened.
+#[test]
+fn a_pattern_that_cannot_be_compiled_widened_is_refused_before_anything_is_deleted() {
+    let nested = |depth: usize| format!("{}s{}", "{".repeat(depth), "}".repeat(depth));
+    let accepted_as_typed = |depth: usize| {
+        let tmp = tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        let (code, _, _) = blit(&[
+            "copy",
+            "--exclude",
+            &nested(depth),
+            &with_slash(&src),
+            &with_slash(&dst),
+        ]);
+        code == Some(0)
+    };
+    // The deepest nesting the binary takes as typed, by bisection.
+    let (mut takes, mut refuses) = (1usize, 4096usize);
+    assert!(accepted_as_typed(takes) && !accepted_as_typed(refuses));
+    while refuses - takes > 1 {
+        let middle = takes + (refuses - takes) / 2;
+        if accepted_as_typed(middle) {
+            takes = middle;
+        } else {
+            refuses = middle;
+        }
+    }
+    let deep = nested(takes);
+
+    let fixture = || {
+        let tmp = tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        write(&src, "shared");
+        for name in ["s", "SAVED.CFG", "saved.cfg"] {
+            write(&dst, name);
+        }
+        (tmp, src, dst)
+    };
+    let present = |dst: &Path| -> Vec<&'static str> {
+        ["s", "SAVED.CFG", "saved.cfg"]
+            .into_iter()
+            .filter(|name| dst.join(name).exists())
+            .collect()
+    };
+
+    // As typed, both patterns work: `SAVED.CFG` is named by neither.
+    let (_tmp, src, dst) = fixture();
+    let (code, out, err) = blit(&[
+        "mirror",
+        "--yes",
+        "--match-case",
+        "--exclude",
+        "*.cfg",
+        "--exclude",
+        &deep,
+        &with_slash(&src),
+        &with_slash(&dst),
+    ]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert_eq!(present(&dst), ["s", "saved.cfg"]);
+
+    let (_tmp, src, dst) = fixture();
+    let (code, out, err) = blit(&[
+        "mirror",
+        "--yes",
+        "--ignore-case",
+        "--exclude",
+        "*.cfg",
+        "--exclude",
+        &deep,
+        &with_slash(&src),
+        &with_slash(&dst),
+    ]);
+    let combined = format!("{out}{err}");
+    assert_ne!(code, Some(0), "{combined}");
+    assert!(
+        combined.contains("cannot be compiled with --ignore-case"),
+        "{combined}"
+    );
+    assert_eq!(
+        present(&dst),
+        ["s", "SAVED.CFG", "saved.cfg"],
+        "refused before anything was deleted"
+    );
+    assert!(
+        !dst.join("shared").exists(),
+        "refused before anything was copied"
+    );
+}
+
 /// `move` takes no `--exclude` or `--include` pattern (it refuses every
 /// filter: the source-delete step would remove what a filter left behind),
 /// so a case mode has nothing to act on there. It is refused by name, with

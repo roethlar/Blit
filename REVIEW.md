@@ -456,6 +456,7 @@ Owner goal 2026-11-20: "continue all work until 100% complete. review with codex
 |----|---------------|------------------|--------|
 | exclude-slice1-r1 | `3bc3ee47..66d1338a` (slice 1 `f527c079`, the lint line `839d0fa8`, two unused dependencies `c472a853`) | **FAILED — no verdict.** Started 2026-11-20T19:56:39Z; at 20:12:54Z the provider answered 503 after five reconnects (`turn.failed`), after the reviewer had finished its probes and removed its export, and before it wrote its result. No `capability_ok` or `guard_confirmed` was reported, so nothing is accepted from it as a verdict. Its event stream is usable evidence (codereview "Verdict handling": a failed call's data counts): four findings read from the reviewer's own command output and admitted below. Tree, refs and worktrees unchanged after the run; its empty export directory under `target/` remains. | `.review/results/exclude-slice1-r1.codex.events.jsonl`, `.review/results/exclude-slice1-r1.codex.prompt.md` |
 | cr-ecm1-1 | Two slice-1 guards do not compile on Windows (they call a `#[cfg(unix)]` fixture) | `[~]` HIGH; fixed, awaiting re-review | `.review/findings/cr-ecm1-1.md` |
+| cr-ecm1-2 | A pattern that no longer compiles once widened drops every exclude to its text; `mirror --ignore-case` then deletes what the excludes name | `[~]` HIGH; fixed (validation compiles, not only parses), awaiting re-review | `.review/findings/cr-ecm1-2.md` |
 
 ## Reconciled legacy finding groups
 

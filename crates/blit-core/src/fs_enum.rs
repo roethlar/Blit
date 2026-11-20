@@ -140,6 +140,16 @@ impl ExcludeRules {
     /// The rules `patterns` make under one platform's path rule
     /// (`windows`), each read ignoring case when `ignore_case`.
     fn compile(patterns: &[String], windows: bool, ignore_case: bool) -> Self {
+        let (names, paths) = Self::bodies(patterns, windows);
+        let widen = ignore_case.then_some(windows);
+        Self {
+            names: CompiledPatterns::compile(&names, widen),
+            paths: CompiledPatterns::compile(&paths, widen),
+        }
+    }
+
+    /// The name rules and the path rules `patterns` make, as text.
+    fn bodies(patterns: &[String], windows: bool) -> (Vec<String>, Vec<String>) {
         let mut names = Vec::new();
         let mut paths = Vec::new();
         for rule in patterns
@@ -152,11 +162,21 @@ impl ExcludeRules {
                 names.push(rule.body);
             }
         }
+        (names, paths)
+    }
+
+    /// cr-ecm1-2: the error, if any, in building these rules' sets as
+    /// [`Self::compile`] will.
+    fn build_error(
+        patterns: &[String],
+        windows: bool,
+        ignore_case: bool,
+    ) -> Option<globset::Error> {
+        let (names, paths) = Self::bodies(patterns, windows);
         let widen = ignore_case.then_some(windows);
-        Self {
-            names: CompiledPatterns::compile(&names, widen),
-            paths: CompiledPatterns::compile(&paths, widen),
-        }
+        CompiledPatterns::build(&names, widen)
+            .and_then(|_| CompiledPatterns::build(&paths, widen))
+            .err()
     }
 
     /// True when a rule names `rel_path`, one of its components, or a
@@ -219,29 +239,35 @@ impl CompiledPatterns {
     /// pattern the compiler refuses is kept, and compared, as written
     /// either way.
     fn compile(patterns: &[String], widen: Option<bool>) -> Self {
+        Self::build(patterns, widen).unwrap_or_else(|_| Self {
+            globs: globset::GlobSet::empty(),
+            refused: patterns.to_vec(),
+        })
+    }
+
+    /// [`Self::compile`], or the error when the set as a whole cannot be
+    /// built. cr-ecm1-2: `compile` answers that failure by comparing EVERY
+    /// pattern as text, which names far less than the globs did — so
+    /// [`FileFilter::validate_globs`] asks here first and refuses the
+    /// filter, and no validated filter reaches that fallback.
+    fn build(
+        patterns: &[String],
+        widen: Option<bool>,
+    ) -> std::result::Result<Self, globset::Error> {
         let mut builder = globset::GlobSetBuilder::new();
         let mut refused = Vec::new();
         for pattern in patterns {
-            let read = match widen {
-                Some(windows) => {
-                    std::borrow::Cow::Owned(crate::case_fold::widen_case(pattern, windows))
-                }
-                None => std::borrow::Cow::Borrowed(pattern.as_str()),
-            };
-            match globset::Glob::new(&read) {
+            match globset::Glob::new(&read_pattern(pattern, widen)) {
                 Ok(glob) => {
                     builder.add(glob);
                 }
                 Err(_) => refused.push(pattern.clone()),
             }
         }
-        match builder.build() {
-            Ok(globs) => Self { globs, refused },
-            Err(_) => Self {
-                globs: globset::GlobSet::empty(),
-                refused: patterns.to_vec(),
-            },
-        }
+        Ok(Self {
+            globs: builder.build()?,
+            refused,
+        })
     }
 
     fn is_empty(&self) -> bool {
@@ -251,6 +277,30 @@ impl CompiledPatterns {
     fn is_match(&self, text: &str) -> bool {
         self.globs.is_match(text) || self.refused.iter().any(|p| glob_match(p, text))
     }
+}
+
+/// `pattern` as a filter reads it: widened under one platform's rule when
+/// it ignores case (`widen`: `Some(windows)`), as written otherwise.
+fn read_pattern(pattern: &str, widen: Option<bool>) -> std::borrow::Cow<'_, str> {
+    match widen {
+        Some(windows) => std::borrow::Cow::Owned(crate::case_fold::widen_case(pattern, windows)),
+        None => std::borrow::Cow::Borrowed(pattern),
+    }
+}
+
+/// cr-ecm1-2: the error, if any, in compiling `pattern` alone exactly as a
+/// filter will use it — parsed AND built into a matcher. Parsing is not
+/// enough: a pattern can parse and still be more than the compiler takes
+/// (alternations nested too deep), and a widened pattern is one level
+/// deeper than the one typed.
+fn compile_error(pattern: &str, widen: Option<bool>) -> Option<globset::Error> {
+    let glob = match globset::Glob::new(&read_pattern(pattern, widen)) {
+        Ok(glob) => glob,
+        Err(error) => return Some(error),
+    };
+    let mut builder = globset::GlobSetBuilder::new();
+    builder.add(glob);
+    builder.build().err()
 }
 
 /// cr-g3fix-3: an `--exclude` pattern with every separator written `/`.
@@ -530,23 +580,44 @@ impl FileFilter {
                 ));
             }
         }
-        // A pattern that is a glob as typed stays one once widened; this
-        // holds the widening to that, so a pattern it could not widen is
-        // refused here and never silently read as written.
-        if self.ignore_case {
-            for (label, patterns) in [
-                ("--include", &self.include_files),
-                ("--exclude", &self.exclude_files),
-            ] {
-                for pat in patterns {
-                    let widened = crate::case_fold::widen_case(pat, cfg!(windows));
-                    if let Err(err) = globset::Glob::new(&widened) {
-                        return Err(format!(
-                            "{label} pattern {pat:?} cannot be read with --ignore-case: {err}"
-                        ));
-                    }
+        // cr-ecm1-2: each pattern is validated as the filter will COMPILE
+        // it, not only as it parses — alone, to name it, and then the sets
+        // as they are built. A set that cannot be built would otherwise be
+        // matched as text (`CompiledPatterns::compile`), silently naming
+        // less than the patterns say; under a mirror that is a deletion. A
+        // pattern widened for `--ignore-case` nests one level deeper than
+        // the one typed, so a pattern can compile as typed and not widened.
+        let widen = self.ignore_case.then_some(cfg!(windows));
+        let how = if self.ignore_case {
+            " with --ignore-case"
+        } else {
+            ""
+        };
+        for (label, patterns) in [
+            ("--include", &self.include_files),
+            ("--exclude", &self.exclude_files),
+        ] {
+            for pat in patterns {
+                if let Some(err) = compile_error(pat, widen) {
+                    return Err(format!(
+                        "{label} pattern {pat:?} cannot be compiled{how}: {err}"
+                    ));
                 }
             }
+        }
+        let together = |label: &str, error: globset::Error| {
+            format!("the {label} patterns cannot be compiled together{how}: {error}")
+        };
+        if let Err(error) = CompiledPatterns::build(&self.include_files, widen) {
+            return Err(together("--include", error));
+        }
+        if let Err(error) = CompiledPatterns::build(&self.exclude_files, widen) {
+            return Err(together("--exclude", error));
+        }
+        if let Some(error) =
+            ExcludeRules::build_error(&self.exclude_files, cfg!(windows), self.ignore_case)
+        {
+            return Err(together("--exclude", error));
         }
         Ok(())
     }
@@ -1576,5 +1647,71 @@ mod tests {
             let error = bad.validate_globs().expect_err("an unclosed class");
             assert!(error.contains("--exclude pattern \"a[\""), "{error}");
         }
+    }
+
+    /// A pattern nested as deep as the glob compiler takes as typed: one
+    /// letter inside `depth` alternations. Widened for `--ignore-case`, the
+    /// letter becomes one alternation more.
+    fn nested(depth: usize) -> String {
+        format!("{}s{}", "{".repeat(depth), "}".repeat(depth))
+    }
+
+    fn deepest_that_compiles_as_typed() -> usize {
+        let deepest = (1..2000)
+            .take_while(|&depth| excluding(&[&nested(depth)]).validate_globs().is_ok())
+            .last()
+            .expect("one level compiles");
+        assert!(
+            deepest < 1999,
+            "the compiler has a nesting limit to test against"
+        );
+        deepest
+    }
+
+    /// cr-ecm1-2: a pattern is refused unless it compiles as the filter
+    /// will use it. This one parses in both modes and compiles as typed,
+    /// but widened it is one level deeper than the compiler takes. Left to
+    /// run, the whole exclude set could not be built and every pattern in
+    /// it — `*.cfg` too — was compared as text exactly as written: with
+    /// `--ignore-case`, `SAVED.CFG` and `s` both fell out of the excludes,
+    /// and a mirror deleted them.
+    #[test]
+    fn a_pattern_that_cannot_be_compiled_as_it_will_be_read_is_refused() {
+        let deep = nested(deepest_that_compiles_as_typed());
+        let typed = excluding(&["*.cfg", &deep]);
+        typed.validate_globs().expect("as typed, it compiles");
+        assert!(!allows(&typed, "s") && !allows(&typed, "saved.cfg"));
+
+        let widened = excluding_any_case(&["*.cfg", &deep]);
+        let error = widened
+            .validate_globs()
+            .expect_err("widened, it is past what the compiler takes");
+        assert!(
+            error.contains("--exclude pattern") && error.contains("with --ignore-case"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("*.cfg"),
+            "the pattern named is the one at fault: {error}"
+        );
+
+        // The same holds for an include, and for a pattern past the limit
+        // as typed (no mode named in that refusal).
+        let included = FileFilter {
+            include_files: vec![deep.clone()],
+            ignore_case: true,
+            ..FileFilter::default()
+        };
+        let error = included
+            .validate_globs()
+            .expect_err("an include is compiled too");
+        assert!(error.contains("--include pattern"), "{error}");
+        let error = excluding(&[&nested(deepest_that_compiles_as_typed() + 1)])
+            .validate_globs()
+            .expect_err("too deep as typed");
+        assert!(
+            error.contains("cannot be compiled:") && !error.contains("--ignore-case"),
+            "{error}"
+        );
     }
 }
