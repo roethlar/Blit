@@ -1,9 +1,9 @@
 # cr-ecm2-2: A name that is not valid UTF-8 was matched through a lossy copy
 
 **Severity**: HIGH — a mirror deleted a destination-only file from under an exclude that names it
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r3` (Codex openreview, 2026-11-20) reviewed `3bc3ee47..467773b4`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm2-2: …")
+**Commit**: `ca96e5cb`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-slice1-r2` over `3bc3ee47..a1fd6bae` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-slice1-r2.codex.md`.
 
 ## Evidence

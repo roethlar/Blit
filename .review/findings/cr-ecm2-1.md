@@ -1,9 +1,9 @@
 # cr-ecm2-1: Under `--ignore-case` a bracket class matched letters of two and three bytes
 
 **Severity**: HIGH — `mirror --ignore-case --include '[sk].txt'` deleted destination-only `ſ.txt` and the Kelvin-sign `K.txt`; the same command as typed kept both
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r3` (Codex openreview, 2026-11-20) reviewed `3bc3ee47..467773b4`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm2-1: …")
+**Commit**: `bbc50303`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-slice1-r2` over `3bc3ee47..a1fd6bae` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-slice1-r2.codex.md`.
 
 ## Evidence
