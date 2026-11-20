@@ -272,6 +272,46 @@ fn an_rsync_rule_line_refuses_the_run_and_a_class_names_the_real_entry() {
     assert_eq!(ran.code, Some(0), "{}", ran.all());
     assert_eq!(names(&dst), ["- old.jpg", "keep.txt"]);
 
+    // cr-ecm4-1: the advice for a rule line names the entry really called
+    // that, and following it keeps that entry and no look-alike. For
+    // `- [1].jpg` it once said `[-] [1].jpg`, which is a class: the mirror
+    // that followed it kept `- 1.jpg` and deleted `- [1].jpg`.
+    let tmp = tempdir().unwrap();
+    let (src, dst) = trees(tmp.path(), &["- [1].jpg", "- 1.jpg"]);
+    let list = tmp.path().join("rule.txt");
+    fs::write(&list, "- [1].jpg\n").unwrap();
+    let (from, to) = (with_slash(&src), with_slash(&dst));
+    let refused = blit(&[
+        "mirror",
+        "--yes",
+        "--exclude-from",
+        list.to_str().unwrap(),
+        &from,
+        &to,
+    ]);
+    assert_ne!(refused.code, Some(0));
+    let advised = "[-] [[]1[]].jpg";
+    assert!(
+        refused.all().contains(&format!("write {advised:?}")),
+        "{}",
+        refused.all()
+    );
+    fs::write(&list, format!("{advised}\n")).unwrap();
+    let followed = blit(&[
+        "mirror",
+        "--yes",
+        "--exclude-from",
+        list.to_str().unwrap(),
+        &from,
+        &to,
+    ]);
+    assert_eq!(followed.code, Some(0), "{}", followed.all());
+    assert_eq!(
+        names(&dst),
+        ["- [1].jpg", "keep.txt"],
+        "the entry named, and only it"
+    );
+
     // `--files-from` holds names: `- name` there is a name.
     let tmp = tempdir().unwrap();
     let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));

@@ -308,18 +308,37 @@ pub(crate) fn list_line(line: &str) -> Option<&str> {
 }
 
 /// AC-11 (Q8): for a pattern-file line that is an rsync filter rule — it
-/// begins `- ` or `+ `, or is `!` alone — the spelling that names an entry
-/// really called that (`[-] name`, `{!}`); `None` for any other line. The
+/// begins `- ` or `+ `, or is `!` alone — the spelling that names the
+/// entry really called that, and no other; `None` for any other line. The
 /// check sits above [`list_line`], never in it: the `--files-from` list
 /// holds names, and a name that begins `- ` stays a name there.
-fn rsync_rule(pattern: &str) -> Option<String> {
+///
+/// cr-ecm4-1: the WHOLE name is written literally ([`literal_pattern`]),
+/// not only its first character. The advice once kept the rest of the
+/// line as it was, so for `- [1].jpg` it said to write `[-] [1].jpg` — a
+/// class, naming `- 1.jpg` — and a mirror that followed it deleted the
+/// entry it had been told how to keep.
+fn rsync_rule(pattern: &str, windows: bool) -> Option<String> {
     if pattern == "!" {
         return Some("{!}".to_string());
     }
     let sign = pattern.chars().next().filter(|c| matches!(c, '-' | '+'))?;
     pattern[1..]
         .starts_with(' ')
-        .then(|| format!("[{sign}]{}", &pattern[1..]))
+        .then(|| format!("[{sign}]{}", literal_pattern(&pattern[1..], windows)))
+}
+
+/// cr-g3fix2-2: `name` as glob text that matches exactly that name: every
+/// character `globset` reads as syntax (`?*[]{}`) bracketed, and, off
+/// Windows, `\` too — globset reads it as an escape there (on Windows it
+/// is a separator and never reaches a name).
+pub(crate) fn literal_pattern(name: &str, windows: bool) -> String {
+    let escaped = globset::escape(name);
+    if windows {
+        escaped
+    } else {
+        escaped.replace('\\', r"[\]")
+    }
 }
 
 /// cr-ecm2-3: the compiled pattern sets this process holds, oldest first.
@@ -826,7 +845,7 @@ impl FileFilter {
                      (is it saved as UTF-16?)"
                 );
             }
-            if let Some(real) = rsync_rule(pattern) {
+            if let Some(real) = rsync_rule(pattern, cfg!(windows)) {
                 eyre::bail!(
                     "{at}: {pattern:?} is an rsync filter rule; a blit pattern file holds one \
                      pattern per line and nothing else. To name an entry really called \
@@ -2476,8 +2495,12 @@ mod tests {
     #[test]
     fn an_rsync_rule_in_a_pattern_file_is_refused_with_its_line() {
         for (text, line, rule, real) in [
-            ("*.tmp\n- *.jpg\n", 2, "- *.jpg", "[-] *.jpg"),
-            ("+ *.jpg\n", 1, "+ *.jpg", "[+] *.jpg"),
+            ("*.tmp\n- *.jpg\n", 2, "- *.jpg", "[-] [*].jpg"),
+            ("+ *.jpg\n", 1, "+ *.jpg", "[+] [*].jpg"),
+            // cr-ecm4-1, the reviewer's line: the brackets are part of the
+            // NAME, and the advice must not turn them into a class.
+            ("- [1].jpg\n", 1, "- [1].jpg", "[-] [[]1[]].jpg"),
+            ("+ a?{b,c}\n", 1, "+ a?{b,c}", "[+] a[?][{]b,c[}]"),
             (
                 "# c\n\n   - name with spaces  \n",
                 3,
@@ -2498,10 +2521,18 @@ mod tests {
                     && error.contains(&format!("write {real:?}")),
                 "{error}"
             );
-            // The spelling advised is a pattern, and names that entry.
+            // The spelling advised is a pattern, and names that entry —
+            // and no other: not the name with a wildcard filled in, nor a
+            // class read as one of its members.
             let advised = excluding(&[real]);
             advised.validate_globs().expect("the advised spelling");
             assert!(!allows(&advised, rule), "{real} names {rule}");
+            for other in ["- x.jpg", "+ x.jpg", "- 1.jpg", "+ axb", "+ a?b", "x"] {
+                assert!(
+                    other == rule || allows(&advised, other),
+                    "{real} names only {rule}, not {other}"
+                );
+            }
         }
         let (_dir, path) = list_file(b"[-] name\n-x\n+x\n-\n+\n!x\n!!\na - b\n{!}\n");
         assert_eq!(

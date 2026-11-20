@@ -651,17 +651,10 @@ fn written(rest: &[Part], windows: bool) -> String {
     }
 }
 
-/// cr-g3fix2-2: `name` as glob text that matches exactly that name: every
-/// character `globset` reads as syntax (`?*[]{}`) bracketed, and, off
-/// Windows, `\` too — globset reads it as an escape there (on Windows it
-/// is a separator and never reaches a name).
+/// cr-g3fix2-2: `name` as glob text that matches exactly that name
+/// ([`crate::fs_enum::literal_pattern`], the one encoder).
 fn literal_glob(name: &str, windows: bool) -> String {
-    let escaped = globset::escape(name);
-    if windows {
-        escaped
-    } else {
-        escaped.replace('\\', r"[\]")
-    }
+    crate::fs_enum::literal_pattern(name, windows)
 }
 
 /// cr-g3fix-1: `rest` — a pattern's parts below `root` — with each typed
