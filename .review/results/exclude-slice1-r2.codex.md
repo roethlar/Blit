@@ -1,0 +1,22 @@
+The goal is to give local `copy`, `mirror`, and `check` one predictable reading of a pattern, including when a mirror decides which destination-only files to delete. I would compile the patterns before confirmation and reuse those matchers on both walks. Exact matching would remain the default. Under `--ignore-case`, literal letters would use Unicode simple case folding, while `?` and bracket classes would each consume one original filename byte. `--files-from` would stay literal. [Matching contract](/home/michael/dev/gitea_repos/blit_v2/docs/plan/EXCLUDE_CASE_MATCHING.md:65)
+
+**Verdict `acceptable_with_changes`**. The change uses the regex engine’s folding table, preserves the chosen mode on job replay, and refuses `--ignore-case` on daemon routes until the wire can carry it. I would keep those decisions. Two observed mirror deletions and a measurable default-mode slowdown require corrections.
+
+| Severity | Required change |
+|---|---|
+| High | **Keep bracket classes one byte wide.** `mirror --yes --ignore-case --include '[sk].txt'` deleted destination-only `ſ.txt` and `K.txt`. Their initial letters occupy two and three bytes respectively. Exact mode kept both. Widen ASCII class members only to their ASCII case partners, including when the destination interprets a single-member class such as `[s]`. [Class widening](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/case_fold.rs:158) · [Destination literal matching](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/transfers/filter.rs:1265) |
+| High | **Match original Unix filename bytes.** `mirror --ignore-case --exclude '?.txt'` protected `X.TXT` and deleted a destination-only file named byte `0xFF` followed by `.TXT`. The lossy string conversion turns that single byte into a three-byte replacement character. I confirmed the underlying defect also exists at base in exact mode. Preserve native bytes through enumeration, header filtering, and deletion-scope matching. [Filename conversion](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/fs_enum.rs:784) · [Header filtering](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/remote/transfer/source.rs:1183) |
+| Medium | **Reuse the compiled filter.** With no case flag, a one-file `copy --dry-run` with 50 excludes went from **27.6 ms at base to 46.4 ms at head**. With 250 excludes it went from **66.1 ms to 167.5 ms**. These are medians of nine release-build runs per revision. Pre-prompt validation compiles individual patterns and combined sets, discards them, and dispatch builds them again. Retain the validated sets for execution. [Pre-prompt validation](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/transfers/filter.rs:122) · [Matcher compilation](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/fs_enum.rs:674) |
+| Low | **Validate the suggested replacement.** For `[aé][bß].txt`, the error recommends `{a,é}[bß].txt`, which the next invocation also refuses. `{a,é}{b,ß}.txt` passes. Repair every simple class before printing a complete replacement pattern. [Refusal message](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/fs_enum.rs:492) |
+| Low | **Advertise the switches on the verbs that accept them.** `blit move --help` lists both case switches, and every `move` invocation using either switch is rejected. Keep the specific refusal and limit the help entries to `copy`, `mirror`, and `check`. [CLI options](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/cli.rs:463) · [Move refusal](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/transfers/mod.rs:742) |
+
+**Verification.** Reading `AGENTS.md` and resolving the requested head both succeeded. Disabling pattern widening made the mirror guard fail because it copied `aCache/`. Restoring the original bytes and rebuilding made the same test pass. Linux formatting, strict Clippy, and workspace tests passed, with **1,628 passed and 2 ignored**. Windows GNU cross-target Clippy also passed. GitHub Actions listed no run for this head. [Mirror guard](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/tests/ignore_case.rs:61)
+
+During setup I briefly created `source.tar` at the shared checkout root. I moved it into the disposable export and removed both. Final Git status showed only this review’s records.
+
+```yaml
+base: 3bc3ee47612a8d485bafa18101946882b02e85a0
+head: a1fd6bae8bd351241022aac55e90285c3020a125
+capability_ok: true
+guard_confirmed: true
+```

@@ -1,9 +1,9 @@
 # cr-ecm1-1: Two slice-1 guards do not compile on Windows
 
 **Severity**: HIGH — `cargo test` cannot build `blit-core`'s tests on Windows, so the whole Windows leg fails; found before any push reached CI
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-slice1-r2` (Codex openreview, 2026-11-20) reviewed `3bc3ee47..a1fd6bae`, which holds this fix, with `guard_confirmed: true`, and required nothing further on it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm1-1: …")
+**Commit**: `3a6fdb51`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, review `exclude-slice1-r1` over `3bc3ee47..66d1338a`. That run FAILED before a verdict (provider 503 at 2026-11-20T20:12Z); this finding is read from its event stream, where the reviewer's own commands and their output are recorded (`.review/results/exclude-slice1-r1.codex.events.jsonl`, events 102, 112, 143).
 
 ## Evidence

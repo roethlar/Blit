@@ -1,9 +1,9 @@
 # cr-ecm1-2: A pattern that no longer compiles once widened drops every exclude to its text
 
 **Severity**: HIGH — under `mirror --ignore-case`, destination entries the excludes name are deleted; the option names LESS than not giving it
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-slice1-r2` (Codex openreview, 2026-11-20) reviewed `3bc3ee47..a1fd6bae`, which holds this fix, with `guard_confirmed: true`, and required nothing further on it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm1-2: …")
+**Commit**: `6a813b92`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, review `exclude-slice1-r1` over `3bc3ee47..66d1338a`. That run FAILED before a verdict (provider 503); this finding is read from its event stream (`.review/results/exclude-slice1-r1.codex.events.jsonl`, event 147: the reviewer's probe and its output).
 
 ## Evidence

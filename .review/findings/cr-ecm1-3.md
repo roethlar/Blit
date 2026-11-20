@@ -1,9 +1,9 @@
 # cr-ecm1-3: An include also named a file spelled like the pattern, in the typed case only
 
 **Severity**: MEDIUM — a mirror's deletion scope is what the includes name, so a destination-only file merely spelled like an include pattern was in scope and deleted; under `--ignore-case` the two cases of one such name were treated differently
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-slice1-r2` (Codex openreview, 2026-11-20) reviewed `3bc3ee47..a1fd6bae`, which holds this fix, with `guard_confirmed: true`, and required nothing further on it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm1-3: …")
+**Commit**: `64b1eca5`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, review `exclude-slice1-r1` over `3bc3ee47..66d1338a`. That run FAILED before a verdict (provider 503); this finding is read from its event stream (`.review/results/exclude-slice1-r1.codex.events.jsonl`, event 136, second probe).
 
 ## Evidence
