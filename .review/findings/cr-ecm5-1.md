@@ -12,7 +12,7 @@ The pinned CLI accepted a daemon built from `c35e43d4`, an earlier revision push
 Cause: cr-ecm4-2 added `FilterSpec.files_from_set` inside session contract 9 and delegated spec version 4, and recorded as a known gap that builds made between slice 3 and that commit "speak the same versions and do not read the field", on the reasoning that no RELEASE carries contract 9. Such builds exist all the same — every revision from slice 3 to cr-ecm4-2 was published on the development branch — and the rule this plan had already paid for once (cr-ecm3-1, and the constant's own history since R51-F3) is that a field an older peer would ignore to destructive effect gets a version that peer refuses.
 
 ## Predicted observable failure
-A CLI at or after `697eefce` against a daemon built from `1d0…`–`d81e63b1` range revisions that carry contract 9 without the field: `mirror --files-from EMPTY --include PATTERN` selects nothing here, and the daemon applies the include, copies and deletes.
+A CLI at or after `697eefce` (cr-ecm4-2) against a daemon built from any earlier revision that carries contract 9 — slice 3's landing through `004ac102`; the reviewer used `c35e43d4`: `mirror --files-from EMPTY --include PATTERN` selects nothing here, and the daemon applies the include, copies and deletes.
 
 ## Intake
 Admitted. The known gap was a wrong call.
