@@ -218,7 +218,6 @@ dependencies = [
  "base64",
  "blake3",
  "chrono",
- "crossbeam-channel",
  "directories",
  "eyre",
  "filetime",
@@ -234,7 +233,6 @@ dependencies = [
  "normpath",
  "num_cpus",
  "once_cell",
- "owo-colors",
  "parking_lot",
  "prost",
  "protoc-bin-vendored",
@@ -497,15 +495,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "crossbeam-channel"
-version = "0.5.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d85363c37faeca707aef026efa9f3b34d077bce547e48f770770625c6013679e"
-dependencies = [
- "crossbeam-utils",
 ]
 
 [[package]]

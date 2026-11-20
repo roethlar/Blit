@@ -25,7 +25,6 @@ rayon = "1.12"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 sysinfo = { version = "0.38", default-features = false, features = ["disk", "system"] }
 parking_lot = "0.12"
-crossbeam-channel = "0.5"
 async-trait = "0.1"
 tar = "0.4"
 # JOB_LOGS jl-1a: finished job logs are stored gzip-compressed
@@ -42,7 +41,6 @@ base64 = "0.22"
 mdns-sd = "0.19"
 hostname = "0.4"
 flume = "0.11"
-owo-colors = "4"
 # ue-r2-2: data-plane resize sub-token generation (same crate/version
 # the daemon already uses for the one-time token).
 rand = "0.10"
