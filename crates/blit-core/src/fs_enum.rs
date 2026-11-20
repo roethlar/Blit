@@ -75,8 +75,8 @@ pub struct FileFilter {
     /// destination can keep its own spelling of every entry an exclude
     /// left out. `None` everywhere else: nothing is recorded.
     pub(crate) pruned: Option<std::sync::Arc<PrunedPaths>>,
-    compiled_includes: OnceCell<CompiledPatterns>,
-    compiled_files: OnceCell<CompiledPatterns>,
+    compiled_includes: OnceCell<std::sync::Arc<CompiledPatterns>>,
+    compiled_files: OnceCell<std::sync::Arc<CompiledPatterns>>,
     compiled_dirs: OnceCell<globset::GlobSet>,
     compiled_subtrees: OnceCell<ExcludeRules>,
 }
@@ -94,10 +94,10 @@ pub struct FileFilter {
 struct ExcludeRules {
     /// Patterns with no separator: each matches any one component of a
     /// relative path, at any depth.
-    names: CompiledPatterns,
+    names: std::sync::Arc<CompiledPatterns>,
     /// Source-relative patterns: each matches a leading run of a relative
     /// path's components — the entry itself or a directory above it.
-    paths: CompiledPatterns,
+    paths: std::sync::Arc<CompiledPatterns>,
 }
 
 /// How [`ExcludeRules`] reads one `--exclude` pattern (cr-g3fix4-2: a
@@ -148,6 +148,22 @@ impl ExcludeRules {
         }
     }
 
+    /// [`Self::compile`], or the error when a set cannot be built
+    /// (cr-ecm1-2). What it builds is kept ([`compiled`]), so the filter
+    /// that is validated this way compiles nothing again.
+    fn build(
+        patterns: &[String],
+        windows: bool,
+        ignore_case: bool,
+    ) -> std::result::Result<Self, globset::Error> {
+        let (names, paths) = Self::bodies(patterns, windows);
+        let widen = ignore_case.then_some(windows);
+        Ok(Self {
+            names: compiled(&names, widen)?,
+            paths: compiled(&paths, widen)?,
+        })
+    }
+
     /// The name rules and the path rules `patterns` make, as text.
     fn bodies(patterns: &[String], windows: bool) -> (Vec<String>, Vec<String>) {
         let mut names = Vec::new();
@@ -163,20 +179,6 @@ impl ExcludeRules {
             }
         }
         (names, paths)
-    }
-
-    /// cr-ecm1-2: the error, if any, in building these rules' sets as
-    /// [`Self::compile`] will.
-    fn build_error(
-        patterns: &[String],
-        windows: bool,
-        ignore_case: bool,
-    ) -> Option<globset::Error> {
-        let (names, paths) = Self::bodies(patterns, windows);
-        let widen = ignore_case.then_some(windows);
-        CompiledPatterns::build(&names, widen)
-            .and_then(|_| CompiledPatterns::build(&paths, widen))
-            .err()
     }
 
     /// True when a rule names `rel_path`, one of its components, or a
@@ -238,10 +240,12 @@ impl CompiledPatterns {
     /// ([`crate::case_fold::widen_case`]); `None` to read it as written. A
     /// pattern the compiler refuses is kept, and compared, as written
     /// either way.
-    fn compile(patterns: &[String], widen: Option<bool>) -> Self {
-        Self::build(patterns, widen).unwrap_or_else(|_| Self {
-            globs: globset::GlobSet::empty(),
-            refused: patterns.to_vec(),
+    fn compile(patterns: &[String], widen: Option<bool>) -> std::sync::Arc<Self> {
+        compiled(patterns, widen).unwrap_or_else(|_| {
+            std::sync::Arc::new(Self {
+                globs: globset::GlobSet::empty(),
+                refused: patterns.to_vec(),
+            })
         })
     }
 
@@ -254,6 +258,8 @@ impl CompiledPatterns {
         patterns: &[String],
         widen: Option<bool>,
     ) -> std::result::Result<Self, globset::Error> {
+        #[cfg(test)]
+        COMPILATIONS.lock().push((patterns.to_vec(), widen));
         let mut builder = globset::GlobSetBuilder::new();
         let mut refused = Vec::new();
         for pattern in patterns {
@@ -284,6 +290,92 @@ impl CompiledPatterns {
                 self.refused.iter().any(|p| glob_match(p, &text))
             })
     }
+}
+
+/// cr-ecm2-3: the compiled pattern sets this process holds, oldest first.
+/// One set is compiled per distinct list of patterns and case mode, and
+/// everything that reads those patterns shares it: the validation a
+/// command runs before it asks anything, the filter built at dispatch, and
+/// every filter derived from that one (the walk's pruning rules, a
+/// mirror's deletion scope). Compiling is the cost of a filter — a set of
+/// 250 patterns takes tens of milliseconds — and each of those readers
+/// used to pay it again; validating before the question, which cr-ecm1-2
+/// and slice 1b added, had roughly tripled a pattern-heavy command.
+struct CompiledCache {
+    kept: usize,
+    sets: Vec<(Vec<String>, Option<bool>, std::sync::Arc<CompiledPatterns>)>,
+}
+
+impl CompiledCache {
+    const fn new(kept: usize) -> Self {
+        Self {
+            kept,
+            sets: Vec::new(),
+        }
+    }
+
+    fn get(
+        &self,
+        patterns: &[String],
+        widen: Option<bool>,
+    ) -> Option<std::sync::Arc<CompiledPatterns>> {
+        self.sets
+            .iter()
+            .find(|(held, mode, _)| *mode == widen && held.as_slice() == patterns)
+            .map(|(_, _, set)| set.clone())
+    }
+
+    /// Keep `built` for `patterns`, dropping the oldest set when full —
+    /// unless another thread kept one first, which is then the one shared.
+    fn keep(
+        &mut self,
+        patterns: &[String],
+        widen: Option<bool>,
+        built: std::sync::Arc<CompiledPatterns>,
+    ) -> std::sync::Arc<CompiledPatterns> {
+        if let Some(held) = self.get(patterns, widen) {
+            return held;
+        }
+        if self.sets.len() >= self.kept {
+            self.sets.remove(0);
+        }
+        self.sets.push((patterns.to_vec(), widen, built.clone()));
+        built
+    }
+}
+
+/// How many sets a process keeps: a command holds a handful (its includes,
+/// its excludes as whole-path globs, as names and as subtrees), a daemon
+/// that many per distinct filter in use. A test process keeps every set,
+/// so that a guard counting compilations cannot be disturbed by the tests
+/// running beside it.
+const COMPILED_SETS_KEPT: usize = if cfg!(test) { usize::MAX } else { 16 };
+
+static COMPILED: parking_lot::Mutex<CompiledCache> =
+    parking_lot::Mutex::new(CompiledCache::new(COMPILED_SETS_KEPT));
+
+/// Every set this test process really compiled — its patterns and case
+/// mode — in order ([`CompiledPatterns::build`]).
+#[cfg(test)]
+static COMPILATIONS: parking_lot::Mutex<Vec<(Vec<String>, Option<bool>)>> =
+    parking_lot::Mutex::new(Vec::new());
+
+/// cr-ecm2-3: `patterns` compiled under one case mode — built at most once
+/// per process while kept ([`CompiledCache`]). The error when the set
+/// cannot be built; a failure is not kept.
+fn compiled(
+    patterns: &[String],
+    widen: Option<bool>,
+) -> std::result::Result<std::sync::Arc<CompiledPatterns>, globset::Error> {
+    if patterns.is_empty() {
+        return Ok(std::sync::Arc::new(CompiledPatterns::default()));
+    }
+    if let Some(held) = COMPILED.lock().get(patterns, widen) {
+        return Ok(held);
+    }
+    // Compiled outside the lock: it is the slow part.
+    let built = std::sync::Arc::new(CompiledPatterns::build(patterns, widen)?);
+    Ok(COMPILED.lock().keep(patterns, widen, built))
 }
 
 /// cr-ecm2-2: the bytes a pattern is matched against for `name` — a file
@@ -698,31 +790,38 @@ impl FileFilter {
         } else {
             ""
         };
-        for (label, patterns) in [
-            ("--include", &self.include_files),
-            ("--exclude", &self.exclude_files),
-        ] {
-            for pat in patterns {
-                if let Some(err) = compile_error(pat, widen) {
-                    return Err(format!(
-                        "{label} pattern {pat:?} cannot be compiled{how}: {err}"
-                    ));
-                }
-            }
-        }
-        let together = |label: &str, error: globset::Error| {
-            format!("the {label} patterns cannot be compiled together{how}: {error}")
-        };
-        if let Err(error) = CompiledPatterns::build(&self.include_files, widen) {
-            return Err(together("--include", error));
-        }
-        if let Err(error) = CompiledPatterns::build(&self.exclude_files, widen) {
-            return Err(together("--exclude", error));
-        }
-        if let Some(error) =
-            ExcludeRules::build_error(&self.exclude_files, cfg!(windows), self.ignore_case)
+        // cr-ecm2-3: the sets are compiled ONCE, here, and kept: this
+        // filter's cells take them, and so does any filter with the same
+        // patterns ([`compiled`]). Only when a set cannot be built is each
+        // pattern compiled alone, to name the one at fault.
+        let refusal = |label: &str, patterns: &[String], error: globset::Error| match patterns
+            .iter()
+            .find_map(|pat| Some((pat, compile_error(pat, widen)?)))
         {
-            return Err(together("--exclude", error));
+            Some((pat, err)) => {
+                format!("{label} pattern {pat:?} cannot be compiled{how}: {err}")
+            }
+            None => {
+                format!("the {label} patterns cannot be compiled together{how}: {error}")
+            }
+        };
+        match compiled(&self.include_files, widen) {
+            Ok(set) => {
+                let _ = self.compiled_includes.set(set);
+            }
+            Err(error) => return Err(refusal("--include", &self.include_files, error)),
+        }
+        match compiled(&self.exclude_files, widen) {
+            Ok(set) => {
+                let _ = self.compiled_files.set(set);
+            }
+            Err(error) => return Err(refusal("--exclude", &self.exclude_files, error)),
+        }
+        match ExcludeRules::build(&self.exclude_files, cfg!(windows), self.ignore_case) {
+            Ok(rules) => {
+                let _ = self.compiled_subtrees.set(rules);
+            }
+            Err(error) => return Err(refusal("--exclude", &self.exclude_files, error)),
         }
         Ok(())
     }
@@ -2091,5 +2190,114 @@ mod tests {
         let abs = Path::new("/src").join(&dir);
         assert!(!excluding(&["?"]).should_include_dir(&dir, &abs));
         assert!(excluding(&["???"]).should_include_dir(&dir, &abs));
+    }
+
+    /// cr-ecm2-3: a list of patterns is compiled ONCE per case mode, and
+    /// everything that reads it shares the result — the validation, the
+    /// filter's own use, a clone, the walk's pruning rules, and a second
+    /// filter built from the same patterns (which is what a command does:
+    /// it validates before it asks anything and builds at dispatch).
+    /// Compiling is the cost of a filter; paying it per reader had roughly
+    /// tripled a command with many patterns. Counted in real compilations
+    /// of this test's own patterns, which no other test uses.
+    #[test]
+    fn a_pattern_set_is_compiled_once_whoever_reads_it() {
+        let include = vec!["ecm23-marker-*.txt".to_string()];
+        let exclude = vec![
+            "ecm23-marker-name".to_string(),
+            "ecm23-marker/dir/*.o".to_string(),
+        ];
+        let mine = || -> Vec<(Vec<String>, Option<bool>)> {
+            COMPILATIONS
+                .lock()
+                .iter()
+                .filter(|(patterns, _)| patterns.iter().any(|p| p.contains("ecm23-marker")))
+                .cloned()
+                .collect()
+        };
+        let read = |filter: &FileFilter| {
+            let rel = Path::new("ecm23-marker/dir/a.o");
+            assert!(!filter.allows_entry(Some(rel), &Path::new("/src").join(rel), 1, None));
+            assert!(!filter.allows_dir(
+                Path::new("ecm23-marker-name"),
+                Path::new("/src/ecm23-marker-name")
+            ));
+        };
+        for ignore_case in [false, true] {
+            let widen = ignore_case.then_some(cfg!(windows));
+            let build = || FileFilter {
+                include_files: include.clone(),
+                exclude_files: exclude.clone(),
+                ignore_case,
+                ..FileFilter::default()
+            };
+            // The command's early validation, on a filter it throws away...
+            build().validate_globs().unwrap();
+            // ...the filter built at dispatch, validated and used...
+            let filter = build();
+            filter.validate_globs().unwrap();
+            read(&filter);
+            // ...and the filters derived from it.
+            read(&filter.clone_without_cache());
+            read(&filter.pruning_rules().expect("excludes to prune with"));
+            // A filter that was never validated reads the same sets.
+            read(&build());
+
+            let compiled: Vec<Vec<String>> = mine()
+                .into_iter()
+                .filter(|(_, mode)| *mode == widen)
+                .map(|(patterns, _)| patterns)
+                .collect();
+            let mut expected = vec![
+                include.clone(),
+                exclude.clone(),
+                vec!["ecm23-marker-name".to_string()],
+                vec!["ecm23-marker/dir/*.o".to_string()],
+            ];
+            let mut seen = compiled.clone();
+            seen.sort();
+            expected.sort();
+            assert_eq!(
+                seen, expected,
+                "ignore_case {ignore_case}: the includes, the excludes as whole paths, as \
+                 names and as subtrees — each compiled once"
+            );
+        }
+    }
+
+    /// cr-ecm2-3: the cache itself — a hit is the very set that was kept,
+    /// the case mode is part of the key, two builders racing share the
+    /// first one kept, and when full the OLDEST set makes room.
+    #[test]
+    fn the_compiled_cache_shares_keys_and_drops_the_oldest() {
+        let list = |name: &str| vec![name.to_string()];
+        let set = || std::sync::Arc::new(CompiledPatterns::default());
+        let mut cache = CompiledCache::new(2);
+        assert!(cache.get(&list("a"), None).is_none());
+        let a = cache.keep(&list("a"), None, set());
+        assert!(std::sync::Arc::ptr_eq(
+            &cache.get(&list("a"), None).unwrap(),
+            &a
+        ));
+        // Another case mode is another set, whichever was kept first.
+        assert!(cache.get(&list("a"), Some(false)).is_none());
+        assert!(cache.get(&list("a"), Some(true)).is_none());
+        let mut by_mode = CompiledCache::new(4);
+        let widened = by_mode.keep(&list("a"), Some(false), set());
+        assert!(by_mode.get(&list("a"), None).is_none());
+        assert!(by_mode.get(&list("a"), Some(true)).is_none());
+        let typed = by_mode.keep(&list("a"), None, set());
+        assert!(!std::sync::Arc::ptr_eq(&typed, &widened));
+        assert_eq!(by_mode.sets.len(), 2);
+        // A second builder of the same key is handed the first set.
+        let raced = cache.keep(&list("a"), None, set());
+        assert!(std::sync::Arc::ptr_eq(&raced, &a));
+        assert_eq!(cache.sets.len(), 1);
+        // Full: the oldest goes, the newest two stay.
+        cache.keep(&list("b"), None, set());
+        cache.keep(&list("c"), None, set());
+        assert!(cache.get(&list("a"), None).is_none());
+        assert!(cache.get(&list("b"), None).is_some() && cache.get(&list("c"), None).is_some());
+        assert_eq!(cache.sets.len(), 2);
     }
 }
