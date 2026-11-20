@@ -58,19 +58,38 @@ pub(crate) fn case_variants(c: char) -> Vec<char> {
 /// no case mode would change what such patterns match. Further patterns
 /// that do hold one are counted, never listed — the line is one line
 /// however many patterns there are.
-pub(crate) fn case_note(patterns: &[&str], windows: bool) -> Option<String> {
+///
+/// Slice 3b (AC-8): each pattern comes with the pattern file it was read
+/// from, if any, and the line says so — `"*Cache" (from skip.txt) matches
+/// …` for the pattern shown, `and 2 more patterns (from skip.txt)` for the
+/// ones counted: the operator did not type those on the command line.
+pub(crate) fn case_note(patterns: &[(&str, Option<&str>)], windows: bool) -> Option<String> {
     let mut noted = patterns
         .iter()
-        .filter_map(|pattern| Some((*pattern, Spellings::of(pattern, windows)?)));
-    let (pattern, spellings) = noted.next()?;
-    let more = match noted.count() {
-        0 => String::new(),
-        1 => ", and 1 more pattern matches only as typed".to_string(),
-        n => format!(", and {n} more patterns match only as typed"),
+        .filter_map(|(pattern, file)| Some((*pattern, *file, Spellings::of(pattern, windows)?)));
+    let (pattern, file, spellings) = noted.next()?;
+    let shown_from = file.map_or(String::new(), |file| format!(" (from {file})"));
+    let others: Vec<Option<&str>> = noted.map(|(_, file, _)| file).collect();
+    let more = if others.is_empty() {
+        String::new()
+    } else {
+        let files: Vec<&str> = others.iter().flatten().copied().collect();
+        let from = match files.first() {
+            None => String::new(),
+            Some(first) if files.len() == others.len() && files.iter().all(|f| f == first) => {
+                format!(" (from {first})")
+            }
+            Some(_) if files.len() == others.len() => " (from pattern files)".to_string(),
+            Some(_) => " (some from pattern files)".to_string(),
+        };
+        match others.len() {
+            1 => format!(", and 1 more pattern{from} matches only as typed"),
+            n => format!(", and {n} more patterns{from} match only as typed"),
+        }
     };
     Some(format!(
-        "\"{pattern}\" matches {} only{more}; capital letters matter (--ignore-case would also \
-         match {}).",
+        "\"{pattern}\"{shown_from} matches {} only{more}; capital letters matter \
+         (--ignore-case would also match {}).",
         spellings.typed,
         spellings.others.join(", ")
     ))
@@ -721,7 +740,10 @@ mod tests {
     /// EXCLUDE_CASE_MATCHING slice 2 (AC-3, AC-5): the line, to the letter.
     #[test]
     fn the_case_note_says_what_the_first_lettered_pattern_matches() {
-        let note = |patterns: &[&str]| case_note(patterns, false);
+        let note = |patterns: &[&str]| {
+            let typed: Vec<(&str, Option<&str>)> = patterns.iter().map(|p| (*p, None)).collect();
+            case_note(&typed, false)
+        };
         let line = |shown: &str, more: &str, others: &str| {
             Some(format!(
                 "{shown} only{more}; capital letters matter (--ignore-case would also match \
@@ -848,5 +870,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Slice 3b (AC-8): the line says which patterns the operator did not
+    /// type on the command line — the one shown, and the ones counted.
+    #[test]
+    fn the_case_note_says_which_patterns_came_from_a_file() {
+        let note = |patterns: &[(&str, Option<&str>)]| case_note(patterns, false).unwrap();
+        // AC-8's case: the first from the command line, the rest from a file.
+        assert_eq!(
+            note(&[
+                ("Thumbs.db", None),
+                ("*.tmp", Some("skip.txt")),
+                ("??", Some("skip.txt")),
+                ("*.bak", Some("skip.txt")),
+            ]),
+            "\"Thumbs.db\" matches Thumbs.db only, and 2 more patterns (from skip.txt) match only \
+             as typed; capital letters matter (--ignore-case would also match thumbs.db, \
+             THUMBS.DB)."
+        );
+        // The pattern shown came from a file itself.
+        assert_eq!(
+            note(&[("??", None), ("*Cache", Some("skip.txt"))]),
+            "\"*Cache\" (from skip.txt) matches Cache only; capital letters matter (--ignore-case \
+             would also match cache, CACHE)."
+        );
+        // Counted from two files; from a file and the command line; typed only.
+        let counted = |others: &[Option<&str>]| {
+            let mut patterns = vec![("a", None)];
+            patterns.extend(others.iter().map(|file| ("b", *file)));
+            let line = note(&patterns);
+            let (_, rest) = line.split_once(", and ").expect("a count");
+            rest.split_once(" match")
+                .expect("the count's words")
+                .0
+                .to_string()
+        };
+        assert_eq!(counted(&[Some("x.txt")]), "1 more pattern (from x.txt)");
+        assert_eq!(
+            counted(&[Some("x.txt"), Some("y.txt")]),
+            "2 more patterns (from pattern files)"
+        );
+        assert_eq!(
+            counted(&[Some("x.txt"), None]),
+            "2 more patterns (some from pattern files)"
+        );
+        assert_eq!(counted(&[None, None]), "2 more patterns");
     }
 }

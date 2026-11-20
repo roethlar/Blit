@@ -292,6 +292,32 @@ impl CompiledPatterns {
     }
 }
 
+/// EXCLUDE_CASE_MATCHING slice 3b (Q5): one line of a list file — the
+/// `--files-from` list or a pattern file — as both are read, so the two
+/// cannot drift apart: whitespace stripped at both ends (and with it the
+/// CR of a CR LF line ending), and `None` for a blank line or one that
+/// starts with `#`. Stripping is `str::trim`: every Unicode whitespace
+/// character, at the ends only.
+pub(crate) fn list_line(line: &str) -> Option<&str> {
+    let entry = line.trim();
+    (!entry.is_empty() && !entry.starts_with('#')).then_some(entry)
+}
+
+/// AC-11 (Q8): for a pattern-file line that is an rsync filter rule — it
+/// begins `- ` or `+ `, or is `!` alone — the spelling that names an entry
+/// really called that (`[-] name`, `{!}`); `None` for any other line. The
+/// check sits above [`list_line`], never in it: the `--files-from` list
+/// holds names, and a name that begins `- ` stays a name there.
+fn rsync_rule(pattern: &str) -> Option<String> {
+    if pattern == "!" {
+        return Some("{!}".to_string());
+    }
+    let sign = pattern.chars().next().filter(|c| matches!(c, '-' | '+'))?;
+    pattern[1..]
+        .starts_with(' ')
+        .then(|| format!("[{sign}]{}", &pattern[1..]))
+}
+
 /// cr-ecm2-3: the compiled pattern sets this process holds, oldest first.
 /// One set is compiled per distinct list of patterns and case mode, and
 /// everything that reads those patterns shares it: the validation a
@@ -749,13 +775,63 @@ impl FileFilter {
         let mut set = HashSet::new();
         for line in BufReader::new(file).lines() {
             let line = line?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
+            let Some(entry) = list_line(&line) else {
                 continue;
-            }
-            set.insert(PathBuf::from(trimmed));
+            };
+            set.insert(PathBuf::from(entry));
         }
         Ok(set)
+    }
+
+    /// EXCLUDE_CASE_MATCHING slice 3b (AC-8, AC-11): the patterns a
+    /// pattern file holds, in order — what `--exclude-from FILE` and
+    /// `--include-from FILE` read. One pattern per line, each line read by
+    /// the rule the `--files-from` list follows ([`list_line`]: whitespace
+    /// stripped at both ends, blank lines and `#` comments skipped), and
+    /// each pattern then exactly what the same text is on a command line.
+    /// A space wanted at an edge is written `[ ]`.
+    ///
+    /// Refused, naming the file and the line:
+    /// - an rsync filter rule (`- pattern`, `+ pattern`, `!`): this file
+    ///   holds bare patterns, and read as one such a line would name an
+    ///   entry called `- pattern` and protect nothing the user meant;
+    /// - text that is not UTF-8, or holds a NUL (a UTF-16 file reads so):
+    ///   such a pattern would silently match nothing.
+    ///
+    /// A UTF-8 byte-order mark at the start of the file is not part of the
+    /// first pattern. Used by a front end; a daemon never sees a file,
+    /// only patterns.
+    pub fn load_pattern_file(path: &Path) -> Result<Vec<String>> {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("opening pattern file {}", path.display()))?;
+        let mut patterns = Vec::new();
+        for (index, line) in BufReader::new(file).lines().enumerate() {
+            let at = format!("pattern file {}, line {}", path.display(), index + 1);
+            let line = line.with_context(|| format!("{at}: the file must be UTF-8 text"))?;
+            let line = if index == 0 {
+                line.strip_prefix('\u{feff}').unwrap_or(&line)
+            } else {
+                line.as_str()
+            };
+            let Some(pattern) = list_line(line) else {
+                continue;
+            };
+            if pattern.contains('\0') {
+                eyre::bail!(
+                    "{at}: the line holds a NUL character; the file must be UTF-8 text \
+                     (is it saved as UTF-16?)"
+                );
+            }
+            if let Some(real) = rsync_rule(pattern) {
+                eyre::bail!(
+                    "{at}: {pattern:?} is an rsync filter rule; a blit pattern file holds one \
+                     pattern per line and nothing else. To name an entry really called \
+                     {pattern:?}, write {real:?}"
+                );
+            }
+            patterns.push(pattern.to_string());
+        }
+        Ok(patterns)
     }
 
     fn build_globset(patterns: &[String]) -> globset::GlobSet {
@@ -2347,5 +2423,166 @@ mod tests {
         assert!(cache.get(&list("a"), None).is_none());
         assert!(cache.get(&list("b"), None).is_some() && cache.get(&list("c"), None).is_some());
         assert_eq!(cache.sets.len(), 2);
+    }
+
+    /// Write `bytes` as a list file in a fresh directory.
+    fn list_file(bytes: &[u8]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("list.txt");
+        std::fs::write(&path, bytes).unwrap();
+        (dir, path)
+    }
+
+    /// AC-8 (slice 3b): a pattern file holds one pattern per line. Both
+    /// ends of a line are stripped — spaces, tabs, a CR before the LF —
+    /// blank lines and `#` comments are skipped, and what is left is the
+    /// pattern exactly as it would be typed. A space wanted at an edge is
+    /// written `[ ]`. A byte-order mark is not part of the first pattern.
+    #[test]
+    fn a_pattern_file_holds_one_pattern_per_line() {
+        let text = "\u{feff}*.tmp\r\n# a comment\r\n\r\n   *.bak   \n\t*.jpg \n*.png[ ]\n  # indented comment\n[ ]lead*\nno newline at the end";
+        let (_dir, path) = list_file(text.as_bytes());
+        assert_eq!(
+            FileFilter::load_pattern_file(&path).unwrap(),
+            [
+                "*.tmp",
+                "*.bak",
+                "*.jpg",
+                "*.png[ ]",
+                "[ ]lead*",
+                "no newline at the end"
+            ]
+        );
+        // What a stripped line and a class-written space each name.
+        let trailing = excluding(&["*.jpg"]);
+        assert!(!allows(&trailing, "a.jpg") && allows(&trailing, "a.jpg "));
+        let kept = excluding(&["*.png[ ]"]);
+        assert!(!allows(&kept, "a.png ") && allows(&kept, "a.png"));
+        // An empty file, and one of comments alone, hold no pattern.
+        for empty in ["", "\n\n", "# only\n   # comments\n"] {
+            let (_dir, path) = list_file(empty.as_bytes());
+            assert!(FileFilter::load_pattern_file(&path).unwrap().is_empty());
+        }
+    }
+
+    /// AC-11 (Q8): an rsync filter rule in a pattern file refuses the run,
+    /// naming the file, the line and the spelling for an entry really
+    /// called that. Read as a pattern such a line would name an entry
+    /// called `- *.jpg` and protect nothing the user meant. A line that
+    /// only looks like one is a pattern like any other.
+    #[test]
+    fn an_rsync_rule_in_a_pattern_file_is_refused_with_its_line() {
+        for (text, line, rule, real) in [
+            ("*.tmp\n- *.jpg\n", 2, "- *.jpg", "[-] *.jpg"),
+            ("+ *.jpg\n", 1, "+ *.jpg", "[+] *.jpg"),
+            (
+                "# c\n\n   - name with spaces  \n",
+                3,
+                "- name with spaces",
+                "[-] name with spaces",
+            ),
+            ("a\nb\n!\n", 3, "!", "{!}"),
+            ("  !  \r\n", 1, "!", "{!}"),
+        ] {
+            let (_dir, path) = list_file(text.as_bytes());
+            let error = format!("{:#}", FileFilter::load_pattern_file(&path).unwrap_err());
+            assert!(
+                error.contains(&format!("pattern file {}, line {line}: ", path.display())),
+                "{error}"
+            );
+            assert!(
+                error.contains(&format!("{rule:?} is an rsync filter rule"))
+                    && error.contains(&format!("write {real:?}")),
+                "{error}"
+            );
+            // The spelling advised is a pattern, and names that entry.
+            let advised = excluding(&[real]);
+            advised.validate_globs().expect("the advised spelling");
+            assert!(!allows(&advised, rule), "{real} names {rule}");
+        }
+        let (_dir, path) = list_file(b"[-] name\n-x\n+x\n-\n+\n!x\n!!\na - b\n{!}\n");
+        assert_eq!(
+            FileFilter::load_pattern_file(&path).unwrap(),
+            ["[-] name", "-x", "+x", "-", "+", "!x", "!!", "a - b", "{!}"]
+        );
+    }
+
+    /// Q5: the `--files-from` list and a pattern file read a LINE by one
+    /// rule, so the two cannot drift apart — and the list is not a pattern
+    /// file: a name that begins `- ` stays a name there.
+    #[test]
+    fn the_files_from_list_and_a_pattern_file_read_a_line_alike() {
+        let text = "  a.txt  \r\n\n# comment\n\tdir/b.txt\t\n   # indented\nc d.txt \n";
+        let (_dir, path) = list_file(text.as_bytes());
+        let patterns = FileFilter::load_pattern_file(&path).unwrap();
+        let listed = FileFilter::load_files_from(&path).unwrap();
+        assert_eq!(patterns, ["a.txt", "dir/b.txt", "c d.txt"]);
+        assert_eq!(
+            listed,
+            patterns.iter().map(PathBuf::from).collect::<HashSet<_>>()
+        );
+        for line in [
+            "x",
+            "  x  ",
+            "",
+            "   ",
+            "#x",
+            "  # x",
+            "x # y",
+            "\u{a0}x\u{a0}",
+        ] {
+            let expected = match line.trim() {
+                "" => None,
+                entry if entry.starts_with('#') => None,
+                entry => Some(entry),
+            };
+            assert_eq!(list_line(line), expected, "{line:?}");
+        }
+        assert_eq!(list_line("\u{a0}x\u{a0}"), Some("x"), "every Unicode space");
+
+        let (_dir, path) = list_file(b"- name\n+ other\n!\n");
+        assert!(FileFilter::load_pattern_file(&path).is_err());
+        assert_eq!(
+            FileFilter::load_files_from(&path).unwrap(),
+            ["- name", "+ other", "!"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect::<HashSet<_>>()
+        );
+    }
+
+    /// A pattern file that cannot be read as patterns refuses the run and
+    /// says which file: one that is missing, one that is not UTF-8, one
+    /// holding a NUL (what a UTF-16 file of plain letters reads as). Each
+    /// would otherwise be a pattern that silently matches nothing.
+    #[test]
+    fn a_pattern_file_that_is_not_utf8_text_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-file.txt");
+        let error = format!("{:#}", FileFilter::load_pattern_file(&missing).unwrap_err());
+        assert!(
+            error.contains(&format!("opening pattern file {}", missing.display())),
+            "{error}"
+        );
+
+        let (_dir, path) = list_file(b"*.tmp\n\xff\xfe*.jpg\n");
+        let error = format!("{:#}", FileFilter::load_pattern_file(&path).unwrap_err());
+        assert!(
+            error.contains(&format!("pattern file {}, line 2", path.display()))
+                && error.contains("must be UTF-8 text"),
+            "{error}"
+        );
+
+        // `*.jpg` as UTF-16LE without a byte-order mark is valid UTF-8.
+        let utf16: Vec<u8> = "*.jpg\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let (_dir, path) = list_file(&utf16);
+        let error = format!("{:#}", FileFilter::load_pattern_file(&path).unwrap_err());
+        assert!(
+            error.contains("line 1") && error.contains("NUL") && error.contains("UTF-16"),
+            "{error}"
+        );
     }
 }

@@ -78,6 +78,8 @@ pub enum Commands {
     // They still parse, which is what lets the refusal say why.
     #[command(mut_arg("match_case", |arg| arg.hide(true)))]
     #[command(mut_arg("ignore_case", |arg| arg.hide(true)))]
+    #[command(mut_arg("exclude_from", |arg| arg.hide(true)))]
+    #[command(mut_arg("include_from", |arg| arg.hide(true)))]
     Move(TransferArgs),
     /// Discover daemons advertising via mDNS
     Scan(ScanArgs),
@@ -471,6 +473,20 @@ pub struct TransferArgs {
     /// Ignore capital letters in every --exclude and --include pattern
     #[arg(long, help_heading = "Filtering")]
     pub ignore_case: bool,
+    /// Read --exclude patterns from FILE, one per line (repeatable); # starts a comment, [ ] writes a space at an edge
+    #[arg(long, action = clap::ArgAction::Append, value_name = "FILE", help_heading = "Filtering")]
+    pub exclude_from: Vec<PathBuf>,
+    /// Read --include patterns from FILE, one per line (repeatable); # starts a comment, [ ] writes a space at an edge
+    #[arg(long, action = clap::ArgAction::Append, value_name = "FILE", help_heading = "Filtering")]
+    pub include_from: Vec<PathBuf>,
+    /// EXCLUDE_CASE_MATCHING slice 3b: for each `exclude` pattern, the
+    /// pattern file it was read from (`None`: typed) — filled when the
+    /// files are read into `exclude`, empty otherwise. Never a flag.
+    #[arg(skip)]
+    pub exclude_origin: Vec<Option<PathBuf>>,
+    /// The same for `include`.
+    #[arg(skip)]
+    pub include_origin: Vec<Option<PathBuf>>,
     /// Only transfer files listed in FILE (one relative path per line, # comments allowed)
     #[arg(long, value_name = "FILE", help_heading = "Filtering")]
     pub files_from: Option<PathBuf>,
@@ -807,6 +823,12 @@ pub struct CheckArgs {
     /// Ignore capital letters in every --exclude and --include pattern
     #[arg(long, help_heading = "Filtering")]
     pub ignore_case: bool,
+    /// Read --exclude patterns from FILE, one per line (repeatable); # starts a comment, [ ] writes a space at an edge
+    #[arg(long, action = clap::ArgAction::Append, value_name = "FILE", help_heading = "Filtering")]
+    pub exclude_from: Vec<PathBuf>,
+    /// Read --include patterns from FILE, one per line (repeatable); # starts a comment, [ ] writes a space at an edge
+    #[arg(long, action = clap::ArgAction::Append, value_name = "FILE", help_heading = "Filtering")]
+    pub include_from: Vec<PathBuf>,
     #[arg(long, value_name = "FILE", help_heading = "Filtering")]
     pub files_from: Option<PathBuf>,
     #[arg(long, value_name = "SIZE", help_heading = "Filtering")]

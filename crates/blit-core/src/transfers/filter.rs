@@ -117,8 +117,21 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
 /// the front end's: not with a case mode stated, and not when the operator
 /// has waived the question.
 pub fn case_note(exclude: &[String], include: &[String]) -> Option<String> {
-    let patterns: Vec<&str> = exclude.iter().chain(include).map(String::as_str).collect();
+    let patterns: Vec<(&str, Option<&str>)> = exclude
+        .iter()
+        .chain(include)
+        .map(|pattern| (pattern.as_str(), None))
+        .collect();
     crate::case_fold::case_note(&patterns, cfg!(windows))
+}
+
+/// [`case_note`] for patterns of which some were read from pattern files
+/// (slice 3b, AC-8): each pattern with the file it came from, `None` for
+/// one typed on the command line, in the order they are read — excludes
+/// before includes. The line then says which patterns the operator did
+/// not type: `and 2 more patterns (from skip.txt) match only as typed`.
+pub fn case_note_from(patterns: &[(&str, Option<&str>)]) -> Option<String> {
+    crate::case_fold::case_note(patterns, cfg!(windows))
 }
 
 /// Everything about a filter that can be refused from the command's own

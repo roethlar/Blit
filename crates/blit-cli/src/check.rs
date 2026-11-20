@@ -28,10 +28,22 @@ pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         bail!("destination path does not exist: {}", dst.display());
     }
 
+    // EXCLUDE_CASE_MATCHING slice 3b (AC-12): pattern files, read as the
+    // transfer verbs read them, into the same lists as the typed patterns.
+    let mut exclude = args.exclude.clone();
+    let mut include = args.include.clone();
+    let from_files = |read: Vec<(String, PathBuf)>| read.into_iter().map(|(pattern, _)| pattern);
+    exclude.extend(from_files(
+        crate::transfers::read_pattern_files(&args.exclude_from).await?,
+    ));
+    include.extend(from_files(
+        crate::transfers::read_pattern_files(&args.include_from).await?,
+    ));
+
     // audit-19: an absolute `--exclude` under the source is made
     // relative; one that cannot match anything is named, once.
     // cr-g3fix4-1: so is one naming an entry stored under several names.
-    let resolved = filter::resolve_excludes(&args.exclude, Some(&src));
+    let resolved = filter::resolve_excludes(&exclude, Some(&src));
     for pattern in resolved.unmatchable {
         eprintln!(
             "blit: --exclude '{pattern}' cannot match anything under {}",
@@ -45,8 +57,8 @@ pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
     // Build filter via the same chokepoint that copy/mirror/move use, so
     // `blit check --exclude '*.tmp'` matches `blit copy --exclude '*.tmp'`.
     let filter = filter::build(&FilterInputs {
-        include: &args.include,
-        exclude: &args.exclude,
+        include: &include,
+        exclude: &exclude,
         files_from: args.files_from.as_ref(),
         retry_only: None,
         retry_only_raw: None,

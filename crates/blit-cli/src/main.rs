@@ -258,6 +258,12 @@ async fn run_command(
     lifecycle_trace: &TransferLifecycleTrace,
     origin: RunOrigin,
 ) -> Result<ExitCode> {
+    // EXCLUDE_CASE_MATCHING slice 3b: a pattern file becomes patterns
+    // before anything else reads the command — its record included.
+    // `move` takes none and refuses the options itself, files unread.
+    if !matches!(verb, Verb::Move) {
+        crate::transfers::absorb_pattern_files(&mut args).await?;
+    }
     // Review cr-jl5-1: the record keeps the list the run starts with.
     crate::run_log::capture_files_from(&mut args).await;
     args.run = crate::run_log::CommandRun::start(verb.word(), &args, origin);

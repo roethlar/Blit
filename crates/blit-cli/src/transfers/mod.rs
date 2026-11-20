@@ -155,6 +155,51 @@ fn warn_unmatchable_excludes(args: &TransferArgs, source_display: &str) {
     }
 }
 
+/// EXCLUDE_CASE_MATCHING slice 3b (AC-8, AC-11): the patterns of each
+/// pattern file in `files`, in order, each with the file it came from.
+/// Read off the async runtime's workers. The first file that cannot be
+/// read, or holds an rsync rule line, refuses the command.
+pub(crate) async fn read_pattern_files(files: &[PathBuf]) -> Result<Vec<(String, PathBuf)>> {
+    let mut read = Vec::new();
+    for file in files {
+        let path = file.clone();
+        let patterns = tokio::task::spawn_blocking(move || FileFilter::load_pattern_file(&path))
+            .await
+            .context("reading a pattern file")??;
+        read.extend(patterns.into_iter().map(|pattern| (pattern, file.clone())));
+    }
+    Ok(read)
+}
+
+/// EXCLUDE_CASE_MATCHING slice 3b: read the command's `--exclude-from` and
+/// `--include-from` files INTO its pattern lists, once, before anything
+/// else looks at them — so the validation, the filter, the wire, the
+/// deletion scope and the job record all see patterns and never a file
+/// (Q6: a job keeps the patterns read, and runs again with the file
+/// gone). Each pattern's origin is kept for the line about capital
+/// letters. `move` takes no pattern: its files are left unread and it
+/// refuses the options by name.
+pub(crate) async fn absorb_pattern_files(args: &mut TransferArgs) -> Result<()> {
+    if args.exclude_from.is_empty() && args.include_from.is_empty() {
+        return Ok(());
+    }
+    let excludes = read_pattern_files(&args.exclude_from).await?;
+    let includes = read_pattern_files(&args.include_from).await?;
+    args.exclude_origin = vec![None; args.exclude.len()];
+    args.include_origin = vec![None; args.include.len()];
+    for (pattern, file) in excludes {
+        args.exclude.push(pattern);
+        args.exclude_origin.push(Some(file));
+    }
+    for (pattern, file) in includes {
+        args.include.push(pattern);
+        args.include_origin.push(Some(file));
+    }
+    args.exclude_from.clear();
+    args.include_from.clear();
+    Ok(())
+}
+
 /// EXCLUDE_CASE_MATCHING slice 2 (AC-3, AC-4, AC-5, AC-9): the line about
 /// capital letters this run shows, if any. None when a case mode was typed
 /// — `--ignore-case`, or `--match-case`, which changes no matching and
@@ -165,7 +210,25 @@ fn case_note(args: &TransferArgs) -> Option<String> {
     if args.ignore_case || args.match_case || args.yes {
         return None;
     }
-    filter::case_note(&args.exclude, &args.include)
+    // Slice 3b: each pattern with the pattern file it was read from.
+    let origin = |origins: &[Option<PathBuf>], at: usize| {
+        origins
+            .get(at)
+            .and_then(Option::as_ref)
+            .map(|file| file.display().to_string())
+    };
+    let files: Vec<Option<String>> = (0..args.exclude.len())
+        .map(|at| origin(&args.exclude_origin, at))
+        .chain((0..args.include.len()).map(|at| origin(&args.include_origin, at)))
+        .collect();
+    let patterns: Vec<(&str, Option<&str>)> = args
+        .exclude
+        .iter()
+        .chain(&args.include)
+        .map(String::as_str)
+        .zip(files.iter().map(Option::as_deref))
+        .collect();
+    filter::case_note_from(&patterns)
 }
 
 /// Prompt for confirmation of a destructive operation. Returns true if the user confirms.
@@ -741,10 +804,13 @@ async fn run_move_inner(
         || args.max_size.is_some()
         || args.min_age.is_some()
         || args.max_age.is_some()
-        || args.files_from.is_some();
+        || args.files_from.is_some()
+        || !args.exclude_from.is_empty()
+        || !args.include_from.is_empty();
     if filters_set {
         bail!(
             "move does not support filters (--exclude / --include / \
+             --exclude-from / --include-from / \
              --min-size / --max-size / --min-age / --max-age / \
              --files-from): the source-delete step would silently \
              remove files that were filtered out of the transfer. \
@@ -1472,6 +1538,10 @@ mod tests {
             delete_scope: "subset".into(),
             run: None,
             files_from_text: None,
+            exclude_from: Vec::new(),
+            include_from: Vec::new(),
+            exclude_origin: Vec::new(),
+            include_origin: Vec::new(),
             save: None,
             export: None,
             retry_only_raw: None,
@@ -1543,6 +1613,10 @@ mod tests {
             delete_scope: "subset".into(),
             run: None,
             files_from_text: None,
+            exclude_from: Vec::new(),
+            include_from: Vec::new(),
+            exclude_origin: Vec::new(),
+            include_origin: Vec::new(),
             save: None,
             export: None,
             retry_only_raw: None,
@@ -1620,6 +1694,10 @@ mod tests {
             delete_scope: "subset".into(),
             run: None,
             files_from_text: None,
+            exclude_from: Vec::new(),
+            include_from: Vec::new(),
+            exclude_origin: Vec::new(),
+            include_origin: Vec::new(),
             save: None,
             export: None,
             retry_only_raw: None,
