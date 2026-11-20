@@ -75,6 +75,10 @@ pub struct FileFilter {
     /// destination can keep its own spelling of every entry an exclude
     /// left out. `None` everywhere else: nothing is recorded.
     pub(crate) pruned: Option<std::sync::Arc<PrunedPaths>>,
+    /// The compiled patterns, taken at this filter's FIRST match and kept:
+    /// the pattern fields are read once. To match other patterns, build
+    /// another filter ([`Self::clone_without_cache`], then set them).
+    /// Validating a filter does not fill these (cr-ecm3-4).
     compiled_includes: OnceCell<std::sync::Arc<CompiledPatterns>>,
     compiled_files: OnceCell<std::sync::Arc<CompiledPatterns>>,
     compiled_dirs: OnceCell<globset::GlobSet>,
@@ -896,10 +900,16 @@ impl FileFilter {
         } else {
             ""
         };
-        // cr-ecm2-3: the sets are compiled ONCE, here, and kept: this
-        // filter's cells take them, and so does any filter with the same
-        // patterns ([`compiled`]). Only when a set cannot be built is each
-        // pattern compiled alone, to name the one at fault.
+        // cr-ecm2-3: the sets are compiled ONCE, here, and kept for the
+        // process ([`compiled`]): this filter finds them at its first
+        // match, and so does any filter with the same patterns. Only when
+        // a set cannot be built is each pattern compiled alone, to name
+        // the one at fault.
+        //
+        // cr-ecm3-4: validation changes nothing IN the filter. It once put
+        // the sets it had built into the filter's own cells, and a filter
+        // validated, given other patterns and validated again then matched
+        // with the first patterns' sets — the cells take a value once.
         let refusal = |label: &str, patterns: &[String], error: globset::Error| match patterns
             .iter()
             .find_map(|pat| Some((pat, compile_error(pat, widen)?)))
@@ -911,23 +921,16 @@ impl FileFilter {
                 format!("the {label} patterns cannot be compiled together{how}: {error}")
             }
         };
-        match compiled(&self.include_files, widen) {
-            Ok(set) => {
-                let _ = self.compiled_includes.set(set);
-            }
-            Err(error) => return Err(refusal("--include", &self.include_files, error)),
+        if let Err(error) = compiled(&self.include_files, widen) {
+            return Err(refusal("--include", &self.include_files, error));
         }
-        match compiled(&self.exclude_files, widen) {
-            Ok(set) => {
-                let _ = self.compiled_files.set(set);
-            }
-            Err(error) => return Err(refusal("--exclude", &self.exclude_files, error)),
+        if let Err(error) = compiled(&self.exclude_files, widen) {
+            return Err(refusal("--exclude", &self.exclude_files, error));
         }
-        match ExcludeRules::build(&self.exclude_files, cfg!(windows), self.ignore_case) {
-            Ok(rules) => {
-                let _ = self.compiled_subtrees.set(rules);
-            }
-            Err(error) => return Err(refusal("--exclude", &self.exclude_files, error)),
+        if let Err(error) =
+            ExcludeRules::build(&self.exclude_files, cfg!(windows), self.ignore_case)
+        {
+            return Err(refusal("--exclude", &self.exclude_files, error));
         }
         Ok(())
     }
@@ -2584,5 +2587,41 @@ mod tests {
             error.contains("line 1") && error.contains("NUL") && error.contains("UTF-16"),
             "{error}"
         );
+    }
+
+    /// cr-ecm3-4: validating a filter changes nothing in it. A filter that
+    /// is validated, given other patterns (or another case mode) and
+    /// validated again matches by what it holds NOW. Validation once kept
+    /// the sets it had compiled in the filter, which takes them only once:
+    /// the second validation passed and the filter went on matching `old`,
+    /// letting `a.cfg` through.
+    #[test]
+    fn a_filter_validated_again_matches_the_patterns_it_now_holds() {
+        let mut filter = FileFilter {
+            include_files: vec!["*.old".to_string()],
+            exclude_files: vec!["old".to_string(), "dir/old".to_string()],
+            ..FileFilter::default()
+        };
+        filter.validate_globs().unwrap();
+        filter.include_files = vec!["*.cfg".to_string(), "*.txt".to_string()];
+        filter.exclude_files = vec!["a.cfg".to_string(), "dir/b.cfg".to_string()];
+        filter.validate_globs().unwrap();
+        assert!(
+            !allows(&filter, "a.cfg"),
+            "the whole-path glob and the name rule"
+        );
+        assert!(!allows(&filter, "dir/b.cfg"), "the subtree rule");
+        assert!(allows(&filter, "c.cfg") && allows(&filter, "dir/c.txt"));
+        assert!(
+            !allows(&filter, "x.old"),
+            "the includes are the new ones too"
+        );
+
+        // The case mode is part of what a filter holds.
+        let mut filter = excluding(&["*cache"]);
+        filter.validate_globs().unwrap();
+        filter.ignore_case = true;
+        filter.validate_globs().unwrap();
+        assert!(!allows(&filter, "aCache"));
     }
 }
