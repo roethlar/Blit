@@ -177,7 +177,9 @@ pub fn validate(inputs: &FilterInputs<'_>) -> Result<()> {
 pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterSpec> {
     use crate::generated::FilterSpec;
     let mut spec = FilterSpec {
-        include: inputs.include.to_vec(),
+        // cr-ecm3-3: in the dialect every peer reads alike, as the
+        // excludes below already are.
+        include: wire_includes(inputs.include, cfg!(windows)),
         // audit-19: relativized HERE, before the spec leaves this host —
         // the peer that applies it never knows this side's source root.
         exclude: resolve_excludes(inputs.exclude, inputs.source_root).patterns,
@@ -291,6 +293,23 @@ pub fn shared_entry_note(pattern: &str, patterns: &[String]) -> String {
     )
 }
 
+/// cr-ecm3-3: `--include` patterns as they go to a peer, typed under one
+/// platform's rule (`windows`): in the dialect every platform reads alike
+/// ([`typed_exclude_dialect`]), as `--exclude` patterns have gone since
+/// cr-g3fix4-3. They used to go as typed. A Windows `docs\report.txt` —
+/// a file in a folder, there — reached a Unix peer with its `\`, which
+/// that peer reads as an escape: the pattern named `docsreport.txt`, the
+/// nested file fell out of the transfer, and under `mirror` an unrelated
+/// destination-only file was in the deletion scope. A Unix escape
+/// (`a\*b`) met a Windows peer the other way round. An include is never
+/// made relative to the source, so the dialect is the whole of it.
+fn wire_includes(include: &[String], windows: bool) -> Vec<String> {
+    include
+        .iter()
+        .map(|pattern| typed_exclude_dialect(pattern, windows).into_owned())
+        .collect()
+}
+
 /// audit-19: make each absolute `--exclude` under `source_root` relative
 /// to it, and name the absolute ones that cannot match. Paths compare the
 /// way the platform compares them (case-insensitively on Windows); a root
@@ -301,7 +320,7 @@ pub fn shared_entry_note(pattern: &str, patterns: &[String]) -> String {
 /// escapes: on Windows `\` is written `/` outside a bracket class
 /// (cr-g3fix-3, cr-g3fix3-3); off Windows an escape `\c` outside a class
 /// is written in the class dialect (cr-g3fix4-3). `--include` patterns
-/// are not rewritten.
+/// are written the same way where they go to a peer ([`wire_includes`]).
 pub fn resolve_excludes(exclude: &[String], source_root: Option<&Path>) -> ResolvedExcludes {
     resolve_excludes_on(exclude, source_root, cfg!(windows))
 }
@@ -2977,11 +2996,14 @@ mod tests {
         let host = resolve_excludes_on(&exc, None, cfg!(windows)).patterns;
         assert_eq!(build(&inputs(&[], &exc)).unwrap().exclude_files, host);
         assert_eq!(build_spec(&inputs(&[], &exc)).unwrap().exclude, host);
+        // cr-ecm3-3: an include goes to a peer in the same dialect. (It was
+        // "passed as typed" — cr-g3fix4-3's known gap, on the belief that
+        // an include takes no part in a deletion scope. It defines one.)
         let include = [r"a\*b".to_string()];
         assert_eq!(
             build_spec(&inputs(&include, &[])).unwrap().include,
-            include,
-            "--include is passed as typed"
+            wire_includes(&include, cfg!(windows)),
+            "--include is written for the peer as --exclude is"
         );
 
         if cfg!(unix) {
@@ -4116,5 +4138,57 @@ mod tests {
                 String::from_utf8_lossy(entry)
             );
         }
+    }
+
+    /// cr-ecm3-3: an include goes to a peer in the dialect every platform
+    /// reads alike. Typed on Windows, `docs\report.txt` is a file in a
+    /// folder and goes as `docs/report.txt`; sent as typed, a Unix peer
+    /// read the `\` as an escape and the pattern named `docsreport.txt` —
+    /// an unrelated file, which a mirror then had in its deletion scope.
+    /// Typed elsewhere, an escape goes in the class dialect. What a peer
+    /// builds from it names the nested file, in either case mode.
+    #[test]
+    fn an_include_goes_to_a_peer_in_the_dialect_every_platform_reads() {
+        use crate::remote::transfer::operation_spec::filter_from_spec;
+        let wire = |typed: &str, windows: bool| wire_includes(&[typed.to_string()], windows);
+        assert_eq!(wire(r"docs\report.txt", true), ["docs/report.txt"]);
+        assert_eq!(wire(r"a\b\*.txt", true), ["a/b/*.txt"]);
+        assert_eq!(
+            wire(r"a[\]b", true),
+            [r"a[\]b"],
+            "a class keeps its backslash"
+        );
+        assert_eq!(wire(r"a\*b", false), ["a[*]b"]);
+        assert_eq!(wire("docs/*.txt", false), ["docs/*.txt"]);
+        assert_eq!(wire("docs/*.txt", true), ["docs/*.txt"]);
+
+        for ignore_case in [false, true] {
+            let received = filter_from_spec(crate::generated::FilterSpec {
+                include: wire(r"docs\report.txt", true),
+                ignore_case,
+                ..Default::default()
+            })
+            .unwrap();
+            let included =
+                |rel: &str| received.allows_entry(Some(Path::new(rel)), Path::new(rel), 1, None);
+            assert!(included("docs/report.txt"), "ignore_case {ignore_case}");
+            assert!(!included("docsreport.txt"), "ignore_case {ignore_case}");
+            assert_eq!(included("DOCS/REPORT.TXT"), ignore_case);
+            assert!(!included("DOCSREPORT.TXT"), "ignore_case {ignore_case}");
+        }
+
+        // `build_spec` is where it happens, under this host's own rule.
+        let (typed, sent) = if cfg!(windows) {
+            (r"docs\report.txt", "docs/report.txt")
+        } else {
+            (r"a\*b", "a[*]b")
+        };
+        let include = [typed.to_string()];
+        assert_eq!(build_spec(&inputs(&include, &[])).unwrap().include, [sent]);
+        // A local filter keeps the include as typed: this host reads it.
+        assert_eq!(
+            build(&inputs(&include, &[])).unwrap().include_files,
+            [typed]
+        );
     }
 }
