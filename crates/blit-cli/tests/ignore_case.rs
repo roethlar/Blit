@@ -352,6 +352,39 @@ fn a_pattern_that_cannot_be_compiled_widened_is_refused_before_anything_is_delet
     );
 }
 
+/// cr-ecm1-3: `--include '[a].txt'` is a class, not a file name. A mirror's
+/// deletion scope is what the includes name, so a destination-only file
+/// merely SPELLED `[a].txt` was once in scope — named by a text comparison
+/// of the pattern, in its typed case only — and deleted, while `[A].TXT`
+/// beside it was not. Neither is named now, in either mode.
+#[test]
+fn an_include_class_does_not_name_a_file_spelled_like_the_pattern() {
+    for mode in ["--match-case", "--ignore-case"] {
+        let tmp = tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        write(&src, "a.txt");
+        for name in ["[a].txt", "[A].TXT", "B.txt"] {
+            write(&dst, name);
+        }
+        let (code, out, err) = blit(&[
+            "mirror",
+            "--yes",
+            mode,
+            "--include",
+            "[a].txt",
+            &with_slash(&src),
+            &with_slash(&dst),
+        ]);
+        assert_eq!(code, Some(0), "{mode}\n{out}{err}");
+        for name in ["a.txt", "[a].txt", "[A].TXT", "B.txt"] {
+            assert!(
+                dst.join(name).exists(),
+                "{mode}: {name} is at the destination"
+            );
+        }
+    }
+}
+
 /// `move` takes no `--exclude` or `--include` pattern (it refuses every
 /// filter: the source-delete step would remove what a filter left behind),
 /// so a case mode has nothing to act on there. It is refused by name, with

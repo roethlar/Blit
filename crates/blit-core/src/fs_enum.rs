@@ -75,7 +75,7 @@ pub struct FileFilter {
     /// destination can keep its own spelling of every entry an exclude
     /// left out. `None` everywhere else: nothing is recorded.
     pub(crate) pruned: Option<std::sync::Arc<PrunedPaths>>,
-    compiled_includes: OnceCell<globset::GlobSet>,
+    compiled_includes: OnceCell<CompiledPatterns>,
     compiled_files: OnceCell<CompiledPatterns>,
     compiled_dirs: OnceCell<globset::GlobSet>,
     compiled_subtrees: OnceCell<ExcludeRules>,
@@ -622,18 +622,12 @@ impl FileFilter {
         Ok(())
     }
 
-    fn include_globs(&self) -> &globset::GlobSet {
+    fn include_globs(&self) -> &CompiledPatterns {
         self.compiled_includes.get_or_init(|| {
-            if self.ignore_case {
-                let widened: Vec<String> = self
-                    .include_files
-                    .iter()
-                    .map(|pattern| crate::case_fold::widen_case(pattern, cfg!(windows)))
-                    .collect();
-                Self::build_globset(&widened)
-            } else {
-                Self::build_globset(&self.include_files)
-            }
+            CompiledPatterns::compile(
+                &self.include_files,
+                self.ignore_case.then_some(cfg!(windows)),
+            )
         })
     }
 
@@ -723,15 +717,15 @@ impl FileFilter {
         // Whitelist: when include_files is non-empty, file must match one.
         // Match against both the relative path and the bare filename so
         // `--include '*.log'` works without users writing `**/*.log`.
+        // cr-ecm1-3: an include is matched as a glob and nothing else, as
+        // an exclude has been since cr-g3fix3-2 ([`CompiledPatterns`]; only
+        // a pattern the glob compiler refuses is compared as text). The
+        // text comparison this replaces also named an entry SPELLED like
+        // the pattern (`[a].txt` named a file called `[a].txt`), in its
+        // typed case only.
         if !self.include_files.is_empty() {
-            let gs = self.include_globs();
-            let matched = gs.is_match(&filename)
-                || gs.is_match(&path_str)
-                || self
-                    .include_files
-                    .iter()
-                    .any(|p| glob_match(p, &filename) || glob_match(p, &path_str));
-            if !matched {
+            let patterns = self.include_globs();
+            if !(patterns.is_match(&filename) || patterns.is_match(&path_str)) {
                 return false;
             }
         }
@@ -1713,5 +1707,48 @@ mod tests {
             error.contains("cannot be compiled:") && !error.contains("--ignore-case"),
             "{error}"
         );
+    }
+
+    /// cr-ecm1-3: an include is a glob and nothing else. `[a].txt` is the
+    /// class `a` followed by `.txt`: it names `a.txt`, and never a file
+    /// that is merely SPELLED like the pattern. The text comparison it used
+    /// to fall through to named `[a].txt` — in the typed case only, so
+    /// `--ignore-case` included `[a].txt` and not `[A].TXT`. The literal
+    /// name is written with its brackets escaped, and follows the mode.
+    #[test]
+    fn an_include_is_a_glob_and_never_its_own_spelling() {
+        let including = |pattern: &str, ignore_case: bool| FileFilter {
+            include_files: vec![pattern.to_string()],
+            ignore_case,
+            ..FileFilter::default()
+        };
+        for ignore_case in [false, true] {
+            let class = including("[a].txt", ignore_case);
+            assert!(allows(&class, "a.txt"));
+            assert_eq!(allows(&class, "A.TXT"), ignore_case);
+            for spelled in ["[a].txt", "[A].TXT", "sub/[a].txt"] {
+                assert!(
+                    !allows(&class, spelled),
+                    "{spelled} is not named by the class, ignore_case {ignore_case}"
+                );
+            }
+            let literal = including("[[]a[]].txt", ignore_case);
+            assert!(allows(&literal, "[a].txt"));
+            assert_eq!(allows(&literal, "[A].TXT"), ignore_case);
+            assert!(!allows(&literal, "a.txt"));
+        }
+        // Today's working forms are untouched.
+        for (pattern, rel) in [
+            ("*", "x"),
+            ("*.log", "logs/app.log"),
+            ("app*", "app.log"),
+            ("*pp*", "logs/app.log"),
+            ("keep.txt", "a/keep.txt"),
+        ] {
+            assert!(
+                allows(&including(pattern, false), rel),
+                "{pattern} includes {rel}"
+            );
+        }
     }
 }
