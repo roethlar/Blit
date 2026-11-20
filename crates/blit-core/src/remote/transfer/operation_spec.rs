@@ -46,7 +46,17 @@ use crate::generated::{
 ///     Bumping forces v1 daemons to fail closed (R51-F3).
 ///   - 3: added `drop_windows_metadata`. Exact versioning prevents a
 ///     delegated peer from silently ignoring the explicit lossy policy.
-pub const SUPPORTED_SPEC_VERSION: u32 = 3;
+///   - 4: `FilterSpec.ignore_case` (EXCLUDE_CASE_MATCHING slice 3,
+///     cr-ecm3-1). Safety-critical in the same way as 2: the session's
+///     contract version gates the two daemons of a delegated transfer
+///     against EACH OTHER, but nothing gated the machine that asks
+///     against the daemon it asks. Two daemons of the earlier contract,
+///     handed a version-3 spec holding the new field, ignored it, read
+///     every pattern exactly, and a `mirror --ignore-case` copied what it
+///     was told to leave and deleted what it was told to keep, exit 0.
+///     A spec that carries a field an older daemon does not know must
+///     carry a version that daemon refuses.
+pub const SUPPORTED_SPEC_VERSION: u32 = 4;
 
 /// Normalized, internal-friendly view of a transfer operation. Folds
 /// proto-`Unspecified` into concrete defaults, converts `FilterSpec`
@@ -724,6 +734,32 @@ mod tests {
             accepted(deepest + 1).expect_err("too deep to compile")
         );
         assert!(msg.contains("cannot be compiled"), "{msg}");
+    }
+
+    /// cr-ecm3-1: the case mode is a field of the spec a daemon is HANDED
+    /// (the delegated request), and no session stands between the machine
+    /// that asks and that daemon to compare contracts. The spec's own
+    /// version is the gate: version 3 — the last one that did not know the
+    /// field — is refused, so a daemon that knows the field refuses a
+    /// client that does not, and a daemon of version 3 refuses this one.
+    #[test]
+    fn a_spec_of_the_version_before_the_case_mode_is_refused() {
+        let mut spec = empty_spec();
+        spec.filter = Some(ProtoFilterSpec {
+            exclude: vec!["*cache".to_string()],
+            ignore_case: true,
+            ..ProtoFilterSpec::default()
+        });
+        NormalizedTransferOperation::from_spec(spec.clone()).expect("this build's own version");
+        spec.spec_version = 3;
+        let error = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+        assert!(error.to_string().contains("spec_version 3"), "{error:#}");
+        // Read at run time: the number is what a daemon is told.
+        let version = std::hint::black_box(SUPPORTED_SPEC_VERSION);
+        assert!(
+            version >= 4,
+            "a spec that carries the case mode is version 4 or later, not {version}"
+        );
     }
 
     /// EXCLUDE_CASE_MATCHING slice 3 (AC-6): a peer's case mode reaches the
