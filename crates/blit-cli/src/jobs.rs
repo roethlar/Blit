@@ -577,6 +577,8 @@ fn spec_args(
         wait: o.wait,
         exclude: o.exclude.clone(),
         include: o.include.clone(),
+        match_case: o.match_case,
+        ignore_case: o.ignore_case,
         files_from: list.as_ref().map(|list| list.0.clone()),
         min_size: o.min_size.clone(),
         max_size: o.max_size.clone(),
@@ -1940,6 +1942,36 @@ fn age_ms_since(start_unix_ms: u64) -> u64 {
 mod retry_name_tests {
     use super::*;
 
+    /// EXCLUDE_CASE_MATCHING: a job run again from its spec gets the case
+    /// mode the spec holds — `jobs run` and `jobs retry` read every pattern
+    /// as the first run did.
+    #[test]
+    fn a_spec_run_again_keeps_its_case_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        for (match_case, ignore_case) in [(false, false), (true, false), (false, true)] {
+            let spec = JobSpec::new(
+                "m1",
+                "mirror",
+                "/".into(),
+                blit_core::job_record::SpecEndpoint::Local { path: "/a/".into() },
+                blit_core::job_record::SpecEndpoint::Local { path: "/b/".into() },
+                blit_core::job_record::SpecOptions {
+                    exclude: vec!["*cache".to_string()],
+                    match_case,
+                    ignore_case,
+                    ..Default::default()
+                },
+                None,
+            );
+            let (args, _list) = spec_args(dir.path(), &spec).unwrap();
+            assert_eq!(
+                (args.match_case, args.ignore_case),
+                (match_case, ignore_case)
+            );
+            assert_eq!(args.exclude, ["*cache"]);
+        }
+    }
+
     /// Reviews cr-jl4fix3-1, cr-jl4fix4-1: a record from before the raw list
     /// filed a raw-named leftover under its text; such a failure is
     /// ambiguous — settled by this machine's log, either way when the log
@@ -2316,6 +2348,7 @@ mod retry_name_tests {
                 retry_only: Some(&names),
                 retry_only_raw: Some(&raw_names),
                 source_root: None,
+                ignore_case: false,
                 min_size: None,
                 max_size: None,
                 min_age: None,

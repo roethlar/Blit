@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod browse;
 pub mod buffer;
+pub(crate) mod case_fold;
 pub mod check;
 pub mod checksum;
 pub mod client;

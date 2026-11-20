@@ -363,6 +363,8 @@ mod delegated_options_tests {
             json: false,
             exclude: vec![],
             include: vec![],
+            match_case: false,
+            ignore_case: false,
             files_from: None,
             min_size: None,
             max_size: None,

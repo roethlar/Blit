@@ -241,6 +241,7 @@ dependencies = [
  "rand",
  "rayon",
  "regex-automata",
+ "regex-syntax",
  "serde",
  "serde_json",
  "socket2",

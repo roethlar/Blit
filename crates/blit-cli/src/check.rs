@@ -51,6 +51,7 @@ pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         retry_only: None,
         retry_only_raw: None,
         source_root: Some(&src),
+        ignore_case: args.ignore_case,
         min_size: args.min_size.as_deref(),
         max_size: args.max_size.as_deref(),
         min_age: args.min_age.as_deref(),

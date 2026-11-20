@@ -40,6 +40,10 @@ pub struct FilterInputs<'a> {
     /// [`resolve_excludes`]); `None` for a remote source, where no
     /// absolute pattern can match.
     pub source_root: Option<&'a Path>,
+    /// EXCLUDE_CASE_MATCHING (D-2026-11-20-1): `--ignore-case` — every
+    /// `include` and `exclude` pattern ignores case, on the source walk and
+    /// in a mirror's deletion scope alike. Never the `files_from` list.
+    pub ignore_case: bool,
     pub min_size: Option<&'a str>,
     pub max_size: Option<&'a str>,
     pub min_age: Option<&'a str>,
@@ -57,6 +61,7 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
     let mut filter = FileFilter::default();
     filter.include_files = inputs.include.to_vec();
     filter.exclude_files = resolve_excludes(inputs.exclude, inputs.source_root).patterns;
+    filter.ignore_case = inputs.ignore_case;
     if let Some(s) = inputs.min_size {
         filter.min_size = Some(parse_size(s).with_context(|| format!("--min-size {s}"))?);
     }
@@ -110,6 +115,16 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
 /// doesn't have to reach back into the client's filesystem.
 pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<crate::generated::FilterSpec> {
     use crate::generated::FilterSpec;
+    // EXCLUDE_CASE_MATCHING slice 1: the wire carries no case mode yet (it
+    // arrives with contract 9, slice 3). A spec built without it would have
+    // the peer read every pattern exactly — on a mirror, deleting what this
+    // side was told to keep. Refused here, where every wire spec is built,
+    // so no caller can drop the option in silence.
+    if inputs.ignore_case {
+        return Err(eyre!(
+            "--ignore-case is not yet carried to a daemon; it works between two local paths"
+        ));
+    }
     let mut spec = FilterSpec {
         include: inputs.include.to_vec(),
         // audit-19: relativized HERE, before the spec leaves this host —
@@ -827,6 +842,7 @@ pub(crate) fn destination_scope(
         dst_root,
         &filter.exclude_files,
         cfg!(windows),
+        filter.ignore_case,
         || case_insensitive_at(dst_root),
         Box::new(stored_name),
         pruned,
@@ -1033,6 +1049,11 @@ pub(crate) struct DestinationNames {
     root: PathBuf,
     /// Every literal name the rules hold, looked up by index.
     literals: Vec<String>,
+    /// EXCLUDE_CASE_MATCHING: under `--ignore-case`, each literal as a glob
+    /// that names it in any case (the literal widened, the entry's name
+    /// untouched — `crate::case_fold`), by the same index; empty otherwise,
+    /// and a literal then names its own spelling only.
+    any_case: Vec<globset::GlobMatcher>,
     /// The literal any-depth names, as indexes into `literals`.
     names: Vec<usize>,
     /// The path rules holding a literal component, as steps.
@@ -1146,15 +1167,17 @@ impl std::fmt::Debug for DestinationNames {
 
 impl DestinationNames {
     /// The destination names for `patterns` (`--exclude` patterns, read
-    /// under one platform's path rule) at `root`: `case_insensitive` is
-    /// asked once, only when a rule is read here; `stored` names an entry
-    /// as the destination lists it; `pruned` holds the destination's
-    /// entries, under `root`, for what the source's walk pruned
-    /// ([`resolve_pruned`]). `None` when nothing is read here.
+    /// under one platform's path rule) at `root`: `ignore_case` reads every
+    /// pattern ignoring case, as the filter that carries these names does;
+    /// `case_insensitive` is asked once, only when a rule is read here;
+    /// `stored` names an entry as the destination lists it; `pruned` holds
+    /// the destination's entries, under `root`, for what the source's walk
+    /// pruned ([`resolve_pruned`]). `None` when nothing is read here.
     pub(crate) fn new(
         root: &Path,
         patterns: &[String],
         windows: bool,
+        ignore_case: bool,
         case_insensitive: impl FnOnce() -> bool,
         stored: Box<StoredNames>,
         pruned: std::collections::HashSet<PathBuf>,
@@ -1187,7 +1210,7 @@ impl DestinationNames {
             }
             if let Some(parts) = path_components(&rule.body, windows) {
                 if parts.iter().any(|part| plain_name(part, windows).is_some()) {
-                    if let Some(steps) = path_steps(&parts, windows, &mut index_of) {
+                    if let Some(steps) = path_steps(&parts, windows, ignore_case, &mut index_of) {
                         paths.push(steps);
                     }
                 }
@@ -1196,6 +1219,23 @@ impl DestinationNames {
         if names.is_empty() && paths.is_empty() && pruned.is_empty() {
             return None;
         }
+        // A literal that cannot be written as a glob in every case (none is
+        // known: it is escaped syntax and letters) names nothing in another
+        // case — its own spelling still matches, as without the option.
+        let any_case = if ignore_case {
+            literals
+                .iter()
+                .map(|name| {
+                    let widened =
+                        crate::case_fold::widen_case(&literal_glob(name, windows), windows);
+                    globset::Glob::new(&widened)
+                        .unwrap_or_else(|_| globset::Glob::new("").expect("an empty glob"))
+                        .compile_matcher()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let case_insensitive = case_insensitive();
         let states = paths
             .iter()
@@ -1208,6 +1248,7 @@ impl DestinationNames {
         Some(Self {
             root: root.to_path_buf(),
             literals,
+            any_case,
             names,
             paths,
             case_insensitive,
@@ -1220,6 +1261,13 @@ impl DestinationNames {
                 states,
             )]),
         })
+    }
+
+    /// How many literal names are read ignoring case — every one of them
+    /// under `--ignore-case`, none otherwise.
+    #[cfg(test)]
+    fn literals_read_in_any_case(&self) -> usize {
+        self.any_case.len()
     }
 
     /// Whether `rel` — an entry's path below the root — or a directory
@@ -1285,6 +1333,10 @@ impl DestinationNames {
         let mut matches = |index: usize| {
             let name = &self.literals[index];
             entry == name
+                || self
+                    .any_case
+                    .get(index)
+                    .is_some_and(|any_case| any_case.is_match(entry))
                 || found
                     .entry(index)
                     .or_insert_with(|| self.lookup(path, name))
@@ -1358,14 +1410,26 @@ fn path_components(body: &str, windows: bool) -> Option<Vec<String>> {
 
 /// cr-g3fix5-2: the [`Step`]s of a path rule's components; a literal's
 /// index from `index_of`. A glob component is compiled from its text as
-/// written (cr-g3fix6-1). `None` when globset refuses a glob component on
-/// its own (the rule is then left to the filter as written).
+/// written (cr-g3fix6-1) — widened first under `ignore_case`
+/// (EXCLUDE_CASE_MATCHING: the pattern ignores case, the names it is
+/// matched against are untouched, so what a component is — a name, a glob,
+/// one that crosses `/` — is read from its text as typed). `None` when
+/// globset refuses a glob component on its own (the rule is then left to
+/// the filter as written).
 fn path_steps(
     components: &[String],
     windows: bool,
+    ignore_case: bool,
     index_of: &mut impl FnMut(String) -> usize,
 ) -> Option<Vec<Step>> {
     let last = components.len() - 1;
+    let read = |component: &str| -> String {
+        if ignore_case {
+            crate::case_fold::widen_case(component, windows)
+        } else {
+            component.to_string()
+        }
+    };
     components
         .iter()
         .enumerate()
@@ -1378,7 +1442,7 @@ fn path_steps(
                     let crossing = (next != "**"
                         && plain_name(next, windows).is_none()
                         && next.contains(['*', '?']))
-                    .then(|| globset::Glob::new(&format!("**/{next}")))
+                    .then(|| globset::Glob::new(&format!("**/{}", read(next))))
                     .transpose()
                     .ok()?
                     .map(|glob| glob.compile_matcher());
@@ -1388,7 +1452,7 @@ fn path_steps(
             if let Some(name) = plain_name(component, windows) {
                 return Some(Step::Name(index_of(name)));
             }
-            let glob = globset::Glob::new(component).ok()?;
+            let glob = globset::Glob::new(&read(component)).ok()?;
             let crosses = component.contains(['*', '?']);
             let automaton = crosses
                 .then(|| {
@@ -1641,6 +1705,7 @@ mod tests {
             retry_only: Some(&names),
             retry_only_raw: Some(&raw),
             source_root: None,
+            ignore_case: false,
             min_size: None,
             max_size: None,
             min_age: None,
@@ -1662,6 +1727,7 @@ mod tests {
             retry_only: None,
             retry_only_raw: None,
             source_root: None,
+            ignore_case: false,
             min_size: None,
             max_size: None,
             min_age: None,
@@ -2796,6 +2862,7 @@ mod tests {
                 Path::new("dst"),
                 &[pattern.to_string()],
                 windows,
+                false,
                 || true,
                 Box::new(disk),
                 Default::default(),
@@ -2867,6 +2934,7 @@ mod tests {
             DestinationNames::new(
                 Path::new("dst"),
                 &["*/*.TMP".to_string()],
+                false,
                 false,
                 || true,
                 Box::new(disk),
@@ -3049,6 +3117,7 @@ mod tests {
             Path::new("dst"),
             &patterns,
             false,
+            false,
             || false,
             stand_in(lookups.clone()),
             Default::default(),
@@ -3082,6 +3151,7 @@ mod tests {
             Path::new("dst"),
             &patterns,
             false,
+            false,
             || true,
             stand_in(lookups.clone()),
             Default::default(),
@@ -3099,6 +3169,7 @@ mod tests {
             DestinationNames::new(
                 Path::new("dst"),
                 &[],
+                false,
                 false,
                 || panic!("no rule: the case rule is not asked"),
                 stand_in(Arc::default()),
@@ -3135,6 +3206,7 @@ mod tests {
             DestinationNames::new(
                 Path::new("dst"),
                 &[pattern.to_string()],
+                false,
                 false,
                 || true,
                 Box::new(disk),
@@ -3207,6 +3279,7 @@ mod tests {
                 Path::new("dst"),
                 &[pattern.to_string()],
                 false,
+                false,
                 || false,
                 Box::new(|_| Vec::new()),
                 Default::default(),
@@ -3252,6 +3325,7 @@ mod tests {
                 Path::new("dst"),
                 &[pattern.to_string()],
                 false,
+                false,
                 || false,
                 Box::new(|_| Vec::new()),
                 Default::default(),
@@ -3292,6 +3366,7 @@ mod tests {
             let names = DestinationNames::new(
                 Path::new("dst"),
                 &[pattern.to_string()],
+                false,
                 false,
                 || false,
                 Box::new(|_| Vec::new()),
@@ -3441,8 +3516,16 @@ mod tests {
         }
 
         let none: Box<StoredNames> = Box::new(|_: &Path| Vec::new());
-        let names = DestinationNames::new(Path::new("dst"), &[], false, || false, none, resolved)
-            .expect("pruned paths are read at the destination");
+        let names = DestinationNames::new(
+            Path::new("dst"),
+            &[],
+            false,
+            false,
+            || false,
+            none,
+            resolved,
+        )
+        .expect("pruned paths are read at the destination");
         for (rel, protected) in [
             ("x/aSS", true),
             ("x/aSS/deep/saved.txt", true),
@@ -3562,5 +3645,175 @@ mod tests {
             format!("{err:#}").contains("invalid filter pattern"),
             "expected a glob-pattern pointer, got: {err:#}"
         );
+    }
+
+    // ----- EXCLUDE_CASE_MATCHING slice 1 (D-2026-11-20-1, -4) -----
+
+    /// `build` carries `--ignore-case` onto the filter every local verb
+    /// (and `check`) matches with. The wire spec has no field for it until
+    /// contract 9, so `build_spec` refuses the option outright — a spec
+    /// that dropped it would have the peer read every pattern exactly, and
+    /// a mirror would delete there what this side was told to keep.
+    #[test]
+    fn ignore_case_reaches_the_filter_and_is_refused_for_the_wire() {
+        let exclude = vec!["*cache".to_string()];
+        let mut given = inputs(&[], &exclude);
+        let typed = build(&given).unwrap();
+        assert!(!typed.ignore_case);
+        assert!(typed.allows_entry(Some(Path::new("aCache")), Path::new("aCache"), 1, None));
+        build_spec(&given).expect("as typed, the spec is built as before");
+
+        given.ignore_case = true;
+        let filter = build(&given).unwrap();
+        assert!(filter.ignore_case);
+        assert!(!filter.allows_entry(Some(Path::new("aCache")), Path::new("aCache"), 1, None));
+        let error = build_spec(&given).expect_err("the wire carries no case mode yet");
+        assert!(
+            format!("{error:#}").contains("--ignore-case is not yet carried to a daemon"),
+            "{error:#}"
+        );
+    }
+
+    /// The deletion scope reads a rule as the filter does: a rule holding a
+    /// literal component is read here step by step (`DestinationNames`),
+    /// and under `--ignore-case` its literal components and its glob
+    /// components alike ignore case — as typed, neither does. The stand-in
+    /// destination pairs nothing, so only the reading of the pattern can
+    /// name these entries.
+    #[test]
+    fn the_destination_names_ignore_case_with_the_filter() {
+        let names = |pattern: &str, ignore_case: bool| {
+            DestinationNames::new(
+                Path::new("dst"),
+                &[pattern.to_string()],
+                false,
+                ignore_case,
+                || false,
+                Box::new(|_| Vec::new()),
+                Default::default(),
+            )
+            .unwrap_or_else(|| panic!("{pattern} is read at the destination"))
+        };
+        for (pattern, rel) in [
+            ("cache", "x/Cache"),
+            ("photos/*.tmp", "PHOTOS/a.TMP"),
+            ("*/keep/saved", "x/Keep/SAVED"),
+            ("**/cache/*.db", "a/b/CACHE/x.DB"),
+            ("stra\u{df}e/x", "STRA\u{1e9e}E/X"),
+            ("data[[]1[]]/x", "DATA[1]/X"),
+        ] {
+            assert!(
+                names(pattern, true).protects(Path::new(rel)),
+                "--ignore-case: {pattern} names {rel}"
+            );
+            assert!(
+                !names(pattern, false).protects(Path::new(rel)),
+                "as typed: {pattern} does not name {rel}"
+            );
+        }
+        for (pattern, rel) in [
+            ("stra\u{df}e/x", "STRASSE/x"),
+            ("cache", "x/cachet"),
+            ("photos/*.tmp", "photos/a.tmpx"),
+        ] {
+            assert!(
+                !names(pattern, true).protects(Path::new(rel)),
+                "--ignore-case: {pattern} does not name {rel}"
+            );
+        }
+    }
+
+    /// AC-2 at the deletion scope, on a real destination of whatever kind
+    /// (no skip: the reading does not depend on the disk): under
+    /// `--ignore-case` a destination-only entry spelled in another case is
+    /// out of the deletion scope with everything below it; as typed it is
+    /// in scope; an entry no pattern names stays in scope either way.
+    #[test]
+    fn the_deletion_scope_ignores_case_on_any_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path();
+        files(dst, &["aCache/deep/saved.txt", "Media/a.TMP", "other/x"]);
+        let allows = |filter: &FileFilter, rel: &str| {
+            filter.allows_entry(Some(Path::new(rel)), &dst.join(rel), 1, None)
+        };
+        let mut filter = FileFilter::default();
+        filter.exclude_files = ["*cache", "media/*.tmp"].map(String::from).to_vec();
+        let typed = destination_scope(&filter, dst, &[]);
+        for rel in ["aCache/deep/saved.txt", "Media/a.TMP", "other/x"] {
+            assert!(
+                allows(&typed, rel),
+                "as typed, {rel} is in the deletion scope"
+            );
+        }
+        filter.ignore_case = true;
+        let scoped = destination_scope(&filter, dst, &[]);
+        assert!(scoped.ignore_case);
+        for rel in ["aCache/deep/saved.txt", "aCache", "Media/a.TMP"] {
+            assert!(
+                !allows(&scoped, rel),
+                "--ignore-case: {rel} is out of the deletion scope"
+            );
+        }
+        assert!(allows(&scoped, "other/x"), "other/x is still in scope");
+        assert!(
+            allows(&scoped, "Media/keep.txt"),
+            "Media/keep.txt is still in scope"
+        );
+    }
+
+    /// The deletion scope hands its case mode on to the destination's names
+    /// (`destination_scope` to `DestinationNames`): a scope that ignored
+    /// case in the filter and not in the names would read one rule two
+    /// ways. Observable on every OS, whatever the disk pairs.
+    #[test]
+    fn the_deletion_scope_hands_its_case_mode_to_the_destination_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut filter = FileFilter::default();
+        filter.exclude_files = ["cache", "media/*.tmp"].map(String::from).to_vec();
+        let read = |filter: &FileFilter| {
+            destination_scope(filter, dir.path(), &[])
+                .destination
+                .expect("rules with a literal are read at the destination")
+                .literals_read_in_any_case()
+        };
+        assert_eq!(read(&filter), 0, "as typed");
+        filter.ignore_case = true;
+        assert_eq!(read(&filter), 2, "--ignore-case: cache and media");
+    }
+
+    /// Where the difference shows on a real disk: a destination that pairs
+    /// two normalizations of a name (APFS) resolves the literal component
+    /// `caf\u{e9}` to an entry stored decomposed, which no reading of the
+    /// pattern's text names; the component after it is then matched by the
+    /// names, and under `--ignore-case` it must ignore case there too.
+    /// Skipped with a message where the filesystem pairs no such spelling
+    /// (it cannot go red there).
+    #[test]
+    fn the_deletion_scope_ignores_case_after_a_component_the_disk_pairs() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path();
+        let (stored, typed) = ("cafe\u{301}", "caf\u{e9}");
+        if !pairs(dst, stored, typed) {
+            eprintln!("skipping: {} pairs no normalization", dst.display());
+            return;
+        }
+        files(dst, &[&format!("{stored}/a.TMP"), "other/x"]);
+        let allows = |filter: &FileFilter, rel: &str| {
+            filter.allows_entry(Some(Path::new(rel)), &dst.join(rel), 1, None)
+        };
+        let mut filter = FileFilter::default();
+        filter.exclude_files = vec![format!("{typed}/*.tmp")];
+        let rel = format!("{stored}/a.TMP");
+        assert!(
+            allows(&destination_scope(&filter, dst, &[]), &rel),
+            "as typed, *.tmp does not name a.TMP"
+        );
+        filter.ignore_case = true;
+        let scoped = destination_scope(&filter, dst, &[]);
+        assert!(
+            !allows(&scoped, &rel),
+            "--ignore-case: out of the deletion scope"
+        );
+        assert!(allows(&scoped, "other/x"));
     }
 }

@@ -460,6 +460,12 @@ pub struct TransferArgs {
     /// any include match is required; excludes still apply on top.
     #[arg(long, action = clap::ArgAction::Append, value_name = "PATTERN", help_heading = "Filtering")]
     pub include: Vec<String>,
+    /// Match --exclude and --include patterns exactly as typed (the default)
+    #[arg(long, conflicts_with = "ignore_case", help_heading = "Filtering")]
+    pub match_case: bool,
+    /// Ignore capital letters in every --exclude and --include pattern
+    #[arg(long, help_heading = "Filtering")]
+    pub ignore_case: bool,
     /// Only transfer files listed in FILE (one relative path per line, # comments allowed)
     #[arg(long, value_name = "FILE", help_heading = "Filtering")]
     pub files_from: Option<PathBuf>,
@@ -790,6 +796,12 @@ pub struct CheckArgs {
     pub exclude: Vec<String>,
     #[arg(long, action = clap::ArgAction::Append, value_name = "PATTERN", help_heading = "Filtering")]
     pub include: Vec<String>,
+    /// Match --exclude and --include patterns exactly as typed (the default)
+    #[arg(long, conflicts_with = "ignore_case", help_heading = "Filtering")]
+    pub match_case: bool,
+    /// Ignore capital letters in every --exclude and --include pattern
+    #[arg(long, help_heading = "Filtering")]
+    pub ignore_case: bool,
     #[arg(long, value_name = "FILE", help_heading = "Filtering")]
     pub files_from: Option<PathBuf>,
     #[arg(long, value_name = "SIZE", help_heading = "Filtering")]

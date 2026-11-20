@@ -53,6 +53,13 @@ pub struct FileFilter {
     /// Set by orchestrator when building the filter (calculated, not hardcoded).
     pub reference_time: Option<SystemTime>,
     pub files_from: Option<HashSet<PathBuf>>,
+    /// EXCLUDE_CASE_MATCHING (D-2026-11-20-1): read every `include_files`
+    /// and `exclude_files` pattern ignoring case. Each pattern is widened
+    /// once, where it is compiled ([`crate::case_fold::widen_case`]); a
+    /// name is always matched as it is stored, so a wildcard counts the
+    /// same bytes in both modes. `files_from` is a list of exact names and
+    /// is never read this way.
+    pub ignore_case: bool,
     /// cr-g3fix5-1: the destination's own names for the excludes — set
     /// only for a mirror's deletion scope at a destination
     /// (`transfers::filter`'s `destination_scope`), where an entry the
@@ -131,8 +138,8 @@ pub(crate) fn exclude_rule(pattern: &str, windows: bool) -> Option<ExcludeRule> 
 
 impl ExcludeRules {
     /// The rules `patterns` make under one platform's path rule
-    /// (`windows`).
-    fn compile(patterns: &[String], windows: bool) -> Self {
+    /// (`windows`), each read ignoring case when `ignore_case`.
+    fn compile(patterns: &[String], windows: bool, ignore_case: bool) -> Self {
         let mut names = Vec::new();
         let mut paths = Vec::new();
         for rule in patterns
@@ -145,9 +152,10 @@ impl ExcludeRules {
                 names.push(rule.body);
             }
         }
+        let widen = ignore_case.then_some(windows);
         Self {
-            names: CompiledPatterns::compile(&names),
-            paths: CompiledPatterns::compile(&paths),
+            names: CompiledPatterns::compile(&names, widen),
+            paths: CompiledPatterns::compile(&paths, widen),
         }
     }
 
@@ -185,7 +193,7 @@ impl ExcludeRules {
 /// rule's reading of a pattern is testable on every OS.
 #[cfg(test)]
 pub(crate) fn excluded_under_rule(patterns: &[String], windows: bool, rel_path: &Path) -> bool {
-    ExcludeRules::compile(patterns, windows).excludes(rel_path)
+    ExcludeRules::compile(patterns, windows, false).excludes(rel_path)
 }
 
 /// cr-g3fix3-2: `--exclude` patterns compiled for matching. A pattern the
@@ -205,11 +213,22 @@ struct CompiledPatterns {
 }
 
 impl CompiledPatterns {
-    fn compile(patterns: &[String]) -> Self {
+    /// `widen`: `Some(windows)` to read each pattern ignoring case — it is
+    /// widened under that platform's rule before it is compiled
+    /// ([`crate::case_fold::widen_case`]); `None` to read it as written. A
+    /// pattern the compiler refuses is kept, and compared, as written
+    /// either way.
+    fn compile(patterns: &[String], widen: Option<bool>) -> Self {
         let mut builder = globset::GlobSetBuilder::new();
         let mut refused = Vec::new();
         for pattern in patterns {
-            match globset::Glob::new(pattern) {
+            let read = match widen {
+                Some(windows) => {
+                    std::borrow::Cow::Owned(crate::case_fold::widen_case(pattern, windows))
+                }
+                None => std::borrow::Cow::Borrowed(pattern.as_str()),
+            };
+            match globset::Glob::new(&read) {
                 Ok(glob) => {
                     builder.add(glob);
                 }
@@ -405,6 +424,7 @@ impl FileFilter {
             max_age: self.max_age,
             reference_time: self.reference_time,
             files_from: self.files_from.clone(),
+            ignore_case: self.ignore_case,
             destination: self.destination.clone(),
             pruned: self.pruned.clone(),
             compiled_includes: OnceCell::new(),
@@ -429,6 +449,7 @@ impl FileFilter {
         Some(FileFilter {
             exclude_files: self.exclude_files.clone(),
             exclude_dirs: self.exclude_dirs.clone(),
+            ignore_case: self.ignore_case,
             destination: self.destination.clone(),
             ..FileFilter::default()
         })
@@ -509,17 +530,49 @@ impl FileFilter {
                 ));
             }
         }
+        // A pattern that is a glob as typed stays one once widened; this
+        // holds the widening to that, so a pattern it could not widen is
+        // refused here and never silently read as written.
+        if self.ignore_case {
+            for (label, patterns) in [
+                ("--include", &self.include_files),
+                ("--exclude", &self.exclude_files),
+            ] {
+                for pat in patterns {
+                    let widened = crate::case_fold::widen_case(pat, cfg!(windows));
+                    if let Err(err) = globset::Glob::new(&widened) {
+                        return Err(format!(
+                            "{label} pattern {pat:?} cannot be read with --ignore-case: {err}"
+                        ));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
     fn include_globs(&self) -> &globset::GlobSet {
-        self.compiled_includes
-            .get_or_init(|| Self::build_globset(&self.include_files))
+        self.compiled_includes.get_or_init(|| {
+            if self.ignore_case {
+                let widened: Vec<String> = self
+                    .include_files
+                    .iter()
+                    .map(|pattern| crate::case_fold::widen_case(pattern, cfg!(windows)))
+                    .collect();
+                Self::build_globset(&widened)
+            } else {
+                Self::build_globset(&self.include_files)
+            }
+        })
     }
 
     fn file_globs(&self) -> &CompiledPatterns {
-        self.compiled_files
-            .get_or_init(|| CompiledPatterns::compile(&self.exclude_files))
+        self.compiled_files.get_or_init(|| {
+            CompiledPatterns::compile(
+                &self.exclude_files,
+                self.ignore_case.then_some(cfg!(windows)),
+            )
+        })
     }
 
     fn dir_globs(&self) -> &globset::GlobSet {
@@ -528,8 +581,9 @@ impl FileFilter {
     }
 
     fn subtree_rules(&self) -> &ExcludeRules {
-        self.compiled_subtrees
-            .get_or_init(|| ExcludeRules::compile(&self.exclude_files, cfg!(windows)))
+        self.compiled_subtrees.get_or_init(|| {
+            ExcludeRules::compile(&self.exclude_files, cfg!(windows), self.ignore_case)
+        })
     }
 
     /// cr-g3fix6-2: a walk under this filter left `rel` out — recorded
@@ -693,6 +747,7 @@ impl Default for FileFilter {
             max_age: None,
             reference_time: None,
             files_from: None,
+            ignore_case: false,
             destination: None,
             pruned: None,
             compiled_includes: OnceCell::new(),
@@ -984,6 +1039,7 @@ mod tests {
         let rules = ExcludeRules::compile(
             &["./data[[]1[]]".to_string(), "set[[]2[]]".to_string()],
             cfg!(windows),
+            false,
         );
         assert!(rules.excludes(Path::new("data[1]")));
         assert!(rules.excludes(Path::new("data[1]/x")));
@@ -1006,7 +1062,7 @@ mod tests {
             "the whole-pattern test matches the glob only"
         );
 
-        let refused = ExcludeRules::compile(&["*[x".to_string()], cfg!(windows));
+        let refused = ExcludeRules::compile(&["*[x".to_string()], cfg!(windows), false);
         assert!(
             refused.excludes(Path::new("a/foo[x")),
             "a pattern the glob compiler refuses is compared as text"
@@ -1027,7 +1083,7 @@ mod tests {
         assert_eq!(normalize_separators(r"a\.java", true), "a/.java");
         assert_eq!(normalize_separators(r"a\.java", false), r"a\.java");
 
-        let windows = |pattern: &str| ExcludeRules::compile(&[pattern.to_string()], true);
+        let windows = |pattern: &str| ExcludeRules::compile(&[pattern.to_string()], true, false);
         let anchored = windows(r".\.java");
         assert!(anchored.excludes(Path::new(".java/fonts/x")));
         assert!(
@@ -1044,7 +1100,7 @@ mod tests {
             !subtree.excludes(Path::new(".java/fonts/x")),
             "a source-relative path names one subtree"
         );
-        let unix = ExcludeRules::compile(&[r"a\.java".to_string()], false);
+        let unix = ExcludeRules::compile(&[r"a\.java".to_string()], false, false);
         assert!(
             !unix.excludes(Path::new("a/.java/y")),
             "off Windows a backslash is no separator"
@@ -1075,7 +1131,7 @@ mod tests {
         }
 
         for windows in [true, false] {
-            let rules = ExcludeRules::compile(&[r"./back[\]slash".to_string()], windows);
+            let rules = ExcludeRules::compile(&[r"./back[\]slash".to_string()], windows, false);
             for rel in ["back/slash/saved.txt", "back/slash", "backslash/x"] {
                 assert!(
                     !rules.excludes(Path::new(rel)),
@@ -1357,5 +1413,168 @@ mod tests {
             "{walked:?}"
         );
         assert!(walked.contains(&"keep.txt".to_string()));
+    }
+
+    // ----- EXCLUDE_CASE_MATCHING slice 1 (D-2026-11-20-1, -4) -----
+
+    fn excluding_any_case(patterns: &[&str]) -> FileFilter {
+        FileFilter {
+            ignore_case: true,
+            ..excluding(patterns)
+        }
+    }
+
+    /// AC-1 and AC-2 at the filter: with `ignore_case` every kind of
+    /// exclude rule names an entry in any case, and without it each names
+    /// its own spelling only. One row per way a pattern is read — the
+    /// whole-path glob, the any-depth name rule, the subtree rule — chosen
+    /// so that only that reading can name the entry: a reading left as
+    /// written turns its row red.
+    #[test]
+    fn ignore_case_reads_every_kind_of_exclude_rule_in_any_case() {
+        for (pattern, rel, read_by) in [
+            // `*` crosses `/` in the whole-path glob; no single component
+            // matches, and no leading run of components does.
+            ("A*TMP", "a/b/u.tmp", "the whole-path glob"),
+            // The file's own name, by the glob.
+            ("*.TMP", "a/t.tmp", "the glob on the name"),
+            // A directory above the entry, named alone.
+            ("CACHE", "x/cache/deep/saved.txt", "the any-depth name rule"),
+            (
+                "*ACHE",
+                "x/aCache/deep/saved.txt",
+                "the any-depth name rule, as a glob",
+            ),
+            // A leading run of the entry's path.
+            ("A/B", "a/b/deep/u.tmp", "the subtree rule"),
+            ("./LOGS", "logs/app.log", "the anchored subtree rule"),
+            ("X/*/SAVED", "x/y/saved/file", "the subtree rule, as a glob"),
+            // Beyond ASCII, and the one-to-one oddities of simple folding.
+            ("Übung", "übung/x", "a non-ASCII name"),
+            ("σ*", "ς.txt", "the final sigma"),
+            ("straße", "STRAẞE/x", "the capital sharp s"),
+        ] {
+            assert!(
+                !allows(&excluding_any_case(&[pattern]), rel),
+                "--ignore-case: {pattern} names {rel} through {read_by}"
+            );
+            assert!(
+                allows(&excluding(&[pattern]), rel),
+                "as typed: {pattern} does not name {rel}"
+            );
+        }
+        // Ignoring case pairs a letter with itself in another case, never
+        // with other letters, and leaves everything else in scope.
+        for (pattern, rel) in [
+            ("straße", "STRASSE/x"),
+            ("ﬁle", "file"),
+            ("cache", "cachet/x"),
+            ("*.tmp", "a/t.tmpx"),
+        ] {
+            assert!(
+                allows(&excluding_any_case(&[pattern]), rel),
+                "--ignore-case: {pattern} does not name {rel}"
+            );
+        }
+    }
+
+    /// D-2026-11-20-4: a wildcard counts the same bytes in both modes,
+    /// because the name is never folded — through the filter, on the name
+    /// and on a directory above it. `ſ` is two bytes and folds to the
+    /// one-byte `s`.
+    #[test]
+    fn a_wildcard_counts_the_same_bytes_with_and_without_ignore_case() {
+        for (pattern, rel, named) in [
+            ("??.txt", "ſ.txt", true),
+            ("?.txt", "ſ.txt", false),
+            ("??", "ſ/saved.txt", true),
+            ("?", "ſ/saved.txt", false),
+            ("?.txt", "S.txt", true),
+        ] {
+            for filter in [excluding(&[pattern]), excluding_any_case(&[pattern])] {
+                assert_eq!(
+                    !allows(&filter, rel),
+                    named,
+                    "{pattern} and {rel}, ignore_case {}",
+                    filter.ignore_case
+                );
+            }
+        }
+        assert!(!allows(&excluding_any_case(&["s.txt"]), "ſ.txt"));
+        assert!(allows(&excluding(&["s.txt"]), "ſ.txt"));
+    }
+
+    /// `--include` follows the same bit; the `--files-from` list never does
+    /// (Q2): it is a list of exact names in both modes.
+    #[test]
+    fn ignore_case_reads_includes_and_never_the_files_from_list() {
+        let including = |ignore_case: bool| FileFilter {
+            include_files: vec!["*.LOG".to_string(), "Docs/*".to_string()],
+            ignore_case,
+            ..FileFilter::default()
+        };
+        for rel in ["logs/app.log", "docs/readme"] {
+            assert!(
+                allows(&including(true), rel),
+                "--ignore-case includes {rel}"
+            );
+            assert!(
+                !allows(&including(false), rel),
+                "as typed, {rel} is not included"
+            );
+        }
+        assert!(!allows(&including(true), "keep.txt"));
+
+        let listed = |ignore_case: bool| FileFilter {
+            files_from: Some([PathBuf::from("Keep.txt")].into_iter().collect()),
+            ignore_case,
+            ..FileFilter::default()
+        };
+        for ignore_case in [false, true] {
+            assert!(allows(&listed(ignore_case), "Keep.txt"));
+            assert!(
+                !allows(&listed(ignore_case), "keep.txt"),
+                "a listed name is exact, ignore_case {ignore_case}"
+            );
+        }
+    }
+
+    /// The bit travels with the filter: a walk prunes by it (the pruning
+    /// rules a source walks with, and a clone, read the patterns the same
+    /// way), so an excluded directory in another case is never opened.
+    #[test]
+    fn ignore_case_travels_with_the_filter_onto_the_walk() {
+        let filter = excluding_any_case(&[".JAVA", "*.TMP"]);
+        let rules = filter.pruning_rules().expect("excludes prune");
+        assert!(rules.ignore_case);
+        assert!(!rules.allows_dir(Path::new("a/.java"), Path::new("a/.java")));
+        assert!(!allows(&filter.clone(), "a/.java/y"));
+        assert!(!allows(&filter.clone_without_cache(), "a/t.tmp"));
+
+        let dir = tree();
+        let walked = walk(dir.path(), filter);
+        assert_eq!(
+            walked,
+            ["a", "a/b", "a/keep.txt", "keep.txt", "logs", "logs/app.log"]
+        );
+        // As typed, the same patterns name nothing in this tree.
+        let typed = walk(dir.path(), excluding(&[".JAVA", "*.TMP"]));
+        assert!(typed.contains(&"a/.java/y".to_string()) && typed.contains(&"a/t.tmp".to_string()));
+    }
+
+    /// A pattern is validated as it will be read: one that is a glob as
+    /// typed is a glob once widened, and a malformed one is refused with
+    /// the same pointer in both modes.
+    #[test]
+    fn validation_reads_a_pattern_as_the_filter_will() {
+        let mut filter = excluding_any_case(&["*cache", "[a-c]x", "{s,k}/**", r"a\*b", "ſ?"]);
+        filter.include_files = vec!["*.LOG".to_string()];
+        filter.validate_globs().expect("valid in any case");
+        for ignore_case in [false, true] {
+            let mut bad = excluding(&["a["]);
+            bad.ignore_case = ignore_case;
+            let error = bad.validate_globs().expect_err("an unclosed class");
+            assert!(error.contains("--exclude pattern \"a[\""), "{error}");
+        }
     }
 }

@@ -803,6 +803,8 @@ fn spec_options(args: &TransferArgs) -> SpecOptions {
         wait: args.wait,
         exclude: args.exclude.clone(),
         include: args.include.clone(),
+        match_case: args.match_case,
+        ignore_case: args.ignore_case,
         min_size: args.min_size.clone(),
         max_size: args.max_size.clone(),
         min_age: args.min_age.clone(),
@@ -1138,6 +1140,30 @@ mod tests {
                 "list.txt".into(),
             ])
         );
+    }
+
+    /// EXCLUDE_CASE_MATCHING: the run's spec keeps the case mode as typed,
+    /// so the run made again reads every pattern as this one did — a spec
+    /// that dropped `--ignore-case` would replay a mirror under the exact
+    /// reading. A mode that was not typed leaves no trace in the record.
+    #[tokio::test]
+    async fn the_spec_keeps_the_case_mode_as_typed() {
+        for (match_case, ignore_case) in [(false, false), (true, false), (false, true)] {
+            let mut args = TransferArgs::for_tests("src/", "dst/");
+            args.exclude = vec!["*cache".to_string()];
+            args.match_case = match_case;
+            args.ignore_case = ignore_case;
+            let (warnings, kept) = record_of(&args, now_ms());
+            assert_eq!(warnings, Vec::<String>::new());
+            let (spec, _) = kept.expect("the job is kept");
+            assert_eq!(
+                (spec.options.match_case, spec.options.ignore_case),
+                (match_case, ignore_case)
+            );
+            let written = serde_json::to_string(&spec.options).unwrap();
+            assert_eq!(written.contains("match_case"), match_case, "{written}");
+            assert_eq!(written.contains("ignore_case"), ignore_case, "{written}");
+        }
     }
 
     /// Review cr-jl5-1: a list that cannot be read keeps no job and says

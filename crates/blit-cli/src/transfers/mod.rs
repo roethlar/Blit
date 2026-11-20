@@ -69,6 +69,7 @@ fn filter_inputs<'a>(args: &'a TransferArgs, source_root: Option<&'a Path>) -> F
         retry_only: args.retry_only.as_ref(),
         retry_only_raw: args.retry_only_raw.as_ref(),
         source_root,
+        ignore_case: args.ignore_case,
         min_size: args.min_size.as_deref(),
         max_size: args.max_size.as_deref(),
         min_age: args.min_age.as_deref(),
@@ -344,6 +345,7 @@ async fn run_transfer_inner(
     // asked the operator to confirm deleting extraneous files, and only then
     // failed on the flag.
     reject_unsupported_checker_pin(args, &route)?;
+    reject_unsupported_ignore_case(args, &route)?;
 
     warn_if_dropping_windows_metadata(args);
     warn_unmatchable_excludes(args, &src_display);
@@ -711,6 +713,22 @@ async fn run_move_inner(
              remove files that were filtered out of the transfer. \
              Run `blit copy` with filters first, then `blit rm` the \
              remaining source manually if needed."
+        );
+    }
+
+    // EXCLUDE_CASE_MATCHING slice 1: the case mode says how `--exclude`
+    // and `--include` patterns are read, and `move` takes none (above).
+    // Refused, so an option with nothing to act on is never accepted in
+    // silence.
+    if args.ignore_case || args.match_case {
+        let option = if args.ignore_case {
+            "--ignore-case"
+        } else {
+            "--match-case"
+        };
+        bail!(
+            "move does not support {option}: it takes no --exclude or --include \
+             pattern for the option to act on"
         );
     }
 
@@ -1256,6 +1274,26 @@ pub(crate) fn reject_unsupported_checker_pin(
     Ok(())
 }
 
+/// EXCLUDE_CASE_MATCHING slice 1: refuse `--ignore-case` on a route with a
+/// remote end.
+///
+/// The wire carries no case mode until contract 9 (slice 3), so a daemon
+/// would read every pattern exactly while this side ignored case: on a
+/// mirror, the destination would delete what the command was told to keep.
+/// Refused beside the other route gates — before any banner, warning or
+/// destructive prompt (cr-ls1-12) — and never run with the option dropped.
+/// `copy` and `mirror` only: `move` takes no pattern and refuses the option
+/// on every route before it gets here.
+pub(crate) fn reject_unsupported_ignore_case(
+    args: &TransferArgs,
+    route: &TransferRoute,
+) -> Result<()> {
+    if args.ignore_case && !matches!(route, TransferRoute::LocalToLocal { .. }) {
+        bail!("--ignore-case is not yet carried to a daemon; it works between two local paths");
+    }
+    Ok(())
+}
+
 /// JOB_LOGS jl-2: give the run's log its final account across every pass,
 /// and say when Ctrl-C stopped the retries.
 fn log_run_end(args: &TransferArgs, totals: blit_core::run_log::RunTotals, interrupted: bool) {
@@ -1407,6 +1445,8 @@ mod tests {
             json: false,
             exclude: vec![],
             include: vec![],
+            match_case: false,
+            ignore_case: false,
             files_from: None,
             min_size: None,
             max_size: None,
@@ -1476,6 +1516,8 @@ mod tests {
             json: false,
             exclude: vec![],
             include: vec![],
+            match_case: false,
+            ignore_case: false,
             files_from: None,
             min_size: None,
             max_size: None,
@@ -1551,6 +1593,8 @@ mod tests {
             json: false,
             exclude: vec![],
             include: vec![],
+            match_case: false,
+            ignore_case: false,
             files_from: None,
             min_size: None,
             max_size: None,

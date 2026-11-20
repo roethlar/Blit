@@ -15,6 +15,10 @@ log = "0.4"
 walkdir = "2.5"
 globset = "0.4.18"
 regex-automata = "0.4.18"
+# EXCLUDE_CASE_MATCHING: `--ignore-case` widens a pattern by Unicode simple
+# case folding, read from the regex engine's own table (already in the graph
+# through globset and regex-automata); `unicode-case` is that table.
+regex-syntax = { version = "0.8.11", default-features = false, features = ["std", "unicode-case"] }
 filetime = "0.2"
 once_cell = "1.21"
 rayon = "1.12"

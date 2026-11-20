@@ -112,6 +112,16 @@ pub struct SpecOptions {
     pub wait: u64,
     pub exclude: Vec<String>,
     pub include: Vec<String>,
+    /// EXCLUDE_CASE_MATCHING: the case mode as typed — `--match-case`,
+    /// `--ignore-case`, or neither. Kept so a run made again from its
+    /// record reads every pattern as the original did: a record that
+    /// dropped `--ignore-case` would replay a mirror under the exact
+    /// reading and delete what the original was told to keep. Absent from
+    /// a record when not typed, so earlier records read unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub match_case: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_case: bool,
     pub min_size: Option<String>,
     pub max_size: Option<String>,
     pub min_age: Option<String>,
@@ -1678,5 +1688,26 @@ mod tests {
         );
         let absolute = if cfg!(windows) { r"D:\data\" } else { "/data/" };
         assert_eq!(absolute_local(cwd, absolute).unwrap(), absolute);
+    }
+
+    /// EXCLUDE_CASE_MATCHING: options written before the case mode existed
+    /// read as "no mode typed", and a typed mode reads back as written.
+    #[test]
+    fn options_without_a_case_mode_read_as_none_typed() {
+        let old: SpecOptions = serde_json::from_str(r#"{"exclude":["*cache"]}"#).unwrap();
+        assert!(!old.match_case && !old.ignore_case);
+        for (match_case, ignore_case) in [(true, false), (false, true)] {
+            let written = serde_json::to_string(&SpecOptions {
+                match_case,
+                ignore_case,
+                ..Default::default()
+            })
+            .unwrap();
+            let read: SpecOptions = serde_json::from_str(&written).unwrap();
+            assert_eq!(
+                (read.match_case, read.ignore_case),
+                (match_case, ignore_case)
+            );
+        }
     }
 }
