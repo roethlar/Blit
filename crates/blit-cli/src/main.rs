@@ -269,6 +269,16 @@ async fn run_command(
     } else {
         crate::transfers::absorb_pattern_files(&mut args).await?;
     }
+    // cr-ecm4-4: and a command refused for what it says is refused HERE,
+    // before a run is recorded, a job saved or a job exported. Saving
+    // came first, so `move --ignore-case --save nightly`, or a mirror
+    // whose pattern file held a class no name can match, replaced a
+    // working `nightly` with a job that can never run.
+    let kind = match verb {
+        Verb::Mirror => TransferKind::Mirror,
+        Verb::Copy | Verb::Move => TransferKind::Copy,
+    };
+    crate::transfers::refuse_unrunnable(&args, kind, matches!(verb, Verb::Move))?;
     // Review cr-jl5-1: the record keeps the list the run starts with.
     crate::run_log::capture_files_from(&mut args).await;
     args.run = crate::run_log::CommandRun::start(verb.word(), &args, origin);

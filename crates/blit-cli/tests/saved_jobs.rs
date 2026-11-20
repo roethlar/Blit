@@ -315,6 +315,122 @@ fn a_move_refused_for_a_filter_saves_no_job() {
     assert_eq!(listing(&ctx)["saved"].as_array().map(Vec::len), Some(0));
 }
 
+/// cr-ecm4-4: a command refused for what it says leaves a saved job of
+/// that name as it was. A job is saved before its command runs, and the
+/// refusals came after: `move --ignore-case --save nightly`, and a mirror
+/// whose pattern file held `[aé].txt`, each REPLACED a working `nightly`
+/// with a job that can never run. Every refusal a command's own words
+/// decide — its options, its filter, its two endpoints — now comes first:
+/// nothing saved, nothing exported, nothing transferred, and `jobs run
+/// nightly` does what it did.
+#[test]
+fn a_command_refused_for_what_it_says_leaves_the_saved_job_as_it_was() {
+    let ctx = TestContext::new();
+    let (src, dst) = (ctx.workspace.join("src"), ctx.workspace.join("dst"));
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("keep.txt"), b"kept").unwrap();
+    fs::write(ctx.workspace.join("bad.txt"), "[aé].txt\n").unwrap();
+
+    let saved = blit_in(
+        &ctx,
+        &ctx.workspace,
+        &["copy", "--save", "nightly", "src/", "dst/"],
+    );
+    assert!(saved.status.success(), "{}", text(&saved.stderr));
+    assert_eq!(names(&dst), ["keep.txt"]);
+
+    for (at, (command, words)) in [
+        // The reviewer's two.
+        (
+            &["move", "-y", "--ignore-case", "src/", "other/"][..],
+            "move does not support --ignore-case",
+        ),
+        (
+            &[
+                "mirror",
+                "-y",
+                "--exclude-from",
+                "bad.txt",
+                "src/",
+                "other/",
+            ],
+            "a class like [aé] matches one byte",
+        ),
+        // Each kind of refusal there is: an option of `move`'s, a pattern
+        // that is no glob, a size that cannot be read, an option the verb
+        // or the route cannot honour, the two endpoints themselves.
+        (
+            &["move", "-y", "--dry-run", "src/", "other/"],
+            "move does not support --dry-run",
+        ),
+        (
+            &["move", "-y", "--force", "src/", "other/"],
+            "move does not support --force",
+        ),
+        (
+            &["mirror", "-y", "--exclude", "[", "src/", "other/"],
+            "is not a valid glob",
+        ),
+        (
+            &["copy", "--min-size", "tiny", "src/", "other/"],
+            "--min-size tiny",
+        ),
+        (
+            &["mirror", "-y", "--null", "src/", "other/"],
+            "--null is not supported with `blit mirror`",
+        ),
+        (
+            &["copy", "--detach", "src/", "other/"],
+            "--detach is only supported for remote",
+        ),
+        (
+            &["copy", "src/", "src/"],
+            "source and destination resolve to the same path",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let before = listing(&ctx)["saved"].clone();
+        let export = format!("job{at}.json");
+        let mut args = command.to_vec();
+        args.splice(1..1, ["--save", "nightly", "--export", export.as_str()]);
+        let refused = blit_in(&ctx, &ctx.workspace, &args);
+        let stderr = text(&refused.stderr);
+        assert!(!refused.status.success(), "{command:?}: {stderr}");
+        assert!(stderr.contains(words), "{command:?}: {stderr}");
+        assert!(
+            !stderr.contains("saved job nightly"),
+            "{command:?}: nothing is saved\n{stderr}"
+        );
+        assert!(
+            !ctx.workspace.join(&export).exists(),
+            "{command:?}: no job is exported"
+        );
+        assert!(
+            !ctx.workspace.join("other").exists(),
+            "{command:?}: nothing is transferred"
+        );
+        assert_eq!(
+            listing(&ctx)["saved"],
+            before,
+            "{command:?}: the saved job is as it was"
+        );
+
+        // And it runs as it did.
+        fs::remove_file(dst.join("keep.txt")).unwrap();
+        let again = blit_in(&ctx, &ctx.workspace, &["jobs", "run", "nightly"]);
+        assert!(
+            again.status.success(),
+            "{command:?}: the job saved before still runs\n{}{}",
+            text(&again.stdout),
+            text(&again.stderr)
+        );
+        assert_eq!(names(&dst), ["keep.txt"], "{command:?}");
+        assert_eq!(names(&src), ["keep.txt"], "{command:?}: nothing moved");
+    }
+}
+
 #[test]
 fn a_job_name_must_be_a_plain_name_and_every_sub_verb_has_help() {
     let ctx = TestContext::new();

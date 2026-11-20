@@ -245,6 +245,216 @@ pub(crate) fn reject_move_filters(args: &TransferArgs) -> Result<()> {
     Ok(())
 }
 
+/// What `copy` and `mirror` refuse before any banner, warning or question:
+/// an option the route cannot honour, and a filter that cannot be used.
+/// One function, asked where the command is dispatched and — cr-ecm4-4 —
+/// before a job is saved from it ([`refuse_unrunnable`]).
+fn reject_transfer_options(
+    args: &TransferArgs,
+    mode: TransferKind,
+    route: &TransferRoute,
+) -> Result<()> {
+    // R54-F1 (data-loss / silent bug): `--null` only works
+    // correctly for LOCAL COPY. Outside that envelope it's
+    // either destructive or silently ignored:
+    //   - `blit mirror --null`: the null sink discards writes,
+    //     but `apply_mirror_deletions` still runs (only
+    //     `options.dry_run` gates the actual remove_* calls)
+    //     and deletes destination-only files — turning a
+    //     supposedly read-only benchmark into a destructive op.
+    //   - `blit copy --null` to/from a remote endpoint: the
+    //     remote push/pull paths don't implement null
+    //     semantics, so the flag is silently ignored and a
+    //     normal write happens.
+    //
+    // The narrowest safe contract for 0.1.0: --null is local
+    // copy only. Reject the other combinations at the CLI;
+    // proper plumbing of null semantics through mirror-delete
+    // and the remote paths is a post-release item.
+    if args.null {
+        if mode.is_mirror() {
+            bail!(
+                "--null is not supported with `blit mirror`: the \
+                 null sink discards writes, but mirror's \
+                 destination-purge step would still delete \
+                 destination-only files, turning what's supposed \
+                 to be a read-only benchmark into a destructive \
+                 operation. Use `blit copy --null SRC DST` (local \
+                 only) for read-path benchmarking."
+            );
+        }
+        if !matches!(route, TransferRoute::LocalToLocal { .. }) {
+            bail!(
+                "--null is not supported with remote endpoints: \
+                 the remote push/pull paths don't implement null \
+                 semantics, so the flag would be silently \
+                 ignored and a real write would happen. Use \
+                 `blit copy --null SRC DST` between two local \
+                 paths for read-path benchmarking."
+            );
+        }
+    }
+
+    // `--detach` is only honored on daemon-to-daemon
+    // delegated transfers. The CLI gates it up-front so a
+    // misuse fails before any RPCs fire — clearer than
+    // letting the daemon emit a phased error mid-stream.
+    if args.detach {
+        match route {
+            TransferRoute::LocalToLocal { .. }
+            | TransferRoute::LocalToRemote { .. }
+            | TransferRoute::RemoteToLocal { .. } => bail!(
+                "--detach is only supported for remote→remote transfers \
+                 (the CLI is in the byte path for any local endpoint, so \
+                 disconnecting would drop the bytes)"
+            ),
+            TransferRoute::RemoteToRemoteDelegated { .. } => {
+                // Delegated remote→remote — detach is valid.
+            }
+        }
+    }
+
+    // cr-ls1-12: route-dependent validation belongs HERE, beside the other
+    // gates and before any banner, warning or destructive prompt. Rejecting
+    // later meant `blit mirror host:/a/ /b/ --checkers 4` printed "starting",
+    // asked the operator to confirm deleting extraneous files, and only then
+    // failed on the flag.
+    reject_unsupported_checker_pin(args, route)?;
+    // EXCLUDE_CASE_MATCHING slice 1b (AC-10): and so does a filter that
+    // cannot be used. It is built at dispatch, after the question below.
+    reject_unusable_filter(args)?;
+    Ok(())
+}
+
+/// What `move` refuses for its options alone, whatever its endpoints. One
+/// function, asked where the move is dispatched and — cr-ecm4-4 — before a
+/// job is saved from it ([`refuse_unrunnable`]).
+pub(crate) fn reject_move_options(args: &TransferArgs) -> Result<()> {
+    if args.dry_run {
+        bail!("move does not support --dry-run");
+    }
+
+    if args.detach {
+        // `blit move` runs a source-delete step after the
+        // transfer completes. With --detach the CLI exits as
+        // soon as the daemon's Started event arrives, so the
+        // delete step would never fire — either leaving the
+        // source around forever (silent move-becomes-copy) or
+        // racing the still-running transfer with rm. Refuse
+        // up front.
+        bail!(
+            "move does not support --detach: the source-delete step \
+             needs the CLI to await transfer completion, so detaching \
+             would silently turn a move into a copy. Use \
+             `blit copy --detach SRC DST` and `blit rm SRC` once you've \
+             confirmed the transfer completed via `blit jobs list`."
+        );
+    }
+
+    reject_move_filters(args)?;
+
+    // EXCLUDE_CASE_MATCHING slice 1: the case mode says how `--exclude`
+    // and `--include` patterns are read, and `move` takes none (above).
+    // Refused, so an option with nothing to act on is never accepted in
+    // silence.
+    if args.ignore_case || args.match_case {
+        let option = if args.ignore_case {
+            "--ignore-case"
+        } else {
+            "--match-case"
+        };
+        bail!(
+            "move does not support {option}: it takes no --exclude or --include \
+             pattern for the option to act on"
+        );
+    }
+
+    // R51-F1 (data-loss): reject `--ignore-existing` for the same
+    // reason as filters. The planner drops any source file whose
+    // destination already exists (diff_planner.rs:135), so
+    // `blit move --ignore-existing` would skip `src/foo` whenever
+    // `dst/foo` was already present and then delete `src/foo`
+    // along with the rest of the source tree — silent data loss
+    // for files that look pre-existing on the destination but
+    // diverged from the source side.
+    if args.ignore_existing {
+        bail!(
+            "move does not support --ignore-existing: the source \
+             file would be skipped during the transfer and then \
+             permanently removed by the source-delete step. Run \
+             `blit copy --ignore-existing` first, then `blit rm` \
+             the source manually if you really want that semantic."
+        );
+    }
+
+    // R52-F1 (data-loss): reject `--null`. The flag routes the
+    // local transfer into `null_sink`, which deliberately writes
+    // nothing — then move's source-delete step removes the
+    // original. Net effect: `blit move --null --yes src/ dst/`
+    // erases src without ever creating dst contents. --null is
+    // a benchmarking/diagnostics primitive; it has no meaningful
+    // semantic combined with move.
+    if args.null {
+        bail!(
+            "move does not support --null: --null writes nothing \
+             to the destination, but move would still delete the \
+             source afterward, which would erase data with no \
+             copy. Use --null only with `blit copy SRC DST` \
+             between two local paths for read-path benchmarking."
+        );
+    }
+
+    // R54-F2 (data-loss), refreshed at otp-10b-2 (and its review F3):
+    // reject `--force`, `--ignore-times`, and `--size-only` for move.
+    //
+    // Every move route — local, push, pull, delegated — now maps
+    // through the move compare rule (transfer unconditionally, or
+    // `--checksum` for the one skip that is content-proven safe;
+    // review otp-10a F1 and its otp-10b-2 mirrors). That makes
+    // `--force` / `--ignore-times` pure no-ops on move: reject them
+    // rather than silently absorb them.
+    //
+    // `--size-only` is worse than redundant: honoring it would mean a
+    // size-only skip of a changed file followed by source-delete —
+    // destroying the only copy, the exact hazard the move mapping
+    // exists to prevent. The old pull driver honored it on move; the
+    // gate closes that hole.
+    //
+    // R55 still applies: escape hatches must not have the same
+    // data-loss class. `blit move --checksum` is honored on every
+    // route (the session's Checksum compare is role-agnostic since
+    // otp-10b-1/2; the local path honors it via R58-F7).
+    if args.force {
+        bail!(
+            "move does not support --force: move already transfers \
+             every file unconditionally (a compare-mode skip before \
+             the source-delete could lose data), so the flag adds \
+             nothing. Use `blit move --checksum` to skip only files \
+             whose content is proven identical."
+        );
+    }
+    if args.ignore_times {
+        bail!(
+            "move does not support --ignore-times: move already \
+             transfers every file unconditionally (a compare-mode \
+             skip before the source-delete could lose data), so the \
+             flag adds nothing. Use `blit move --checksum` to skip \
+             only files whose content is proven identical."
+        );
+    }
+    if args.size_only {
+        bail!(
+            "move does not support --size-only: a same-size file \
+             whose content changed would be skipped during the \
+             transfer and then permanently removed by the \
+             source-delete step. Use `blit move --checksum` for a \
+             content-verified move, or plain `blit move` (which \
+             transfers every file unconditionally)."
+        );
+    }
+    Ok(())
+}
+
 /// EXCLUDE_CASE_MATCHING slice 2 (AC-3, AC-4, AC-5, AC-9): the line about
 /// capital letters this run shows, if any. None when a case mode was typed
 /// — `--ignore-case`, or `--match-case`, which changes no matching and
@@ -331,31 +541,7 @@ fn prepare_transfer_route(
     lifecycle_trace: &TransferLifecycleTrace,
 ) -> Result<PreparedTransferRoute> {
     lifecycle_trace.record("transfer_route_select_begin", None);
-    let prepared = (|| {
-        let src_endpoint = parse_transfer_endpoint(&args.source)?;
-        let raw_dst = parse_transfer_endpoint(&args.destination)?;
-        let pre_resolve_display = display_endpoint(&raw_dst);
-        let dst_endpoint =
-            resolve_destination(&args.source, &args.destination, &src_endpoint, raw_dst);
-        let src_display = display_endpoint(&src_endpoint);
-        let dst_display = display_endpoint(&dst_endpoint);
-        let route = select_transfer_route(src_endpoint, dst_endpoint, mode);
-        match &route {
-            TransferRoute::LocalToLocal { src, dst, .. } => {
-                blit_core::transfers::resolution::validate_local_transfer_roots(src, dst, is_move)?;
-            }
-            TransferRoute::RemoteToRemoteDelegated { src, dst, .. } if is_move => {
-                blit_core::transfers::resolution::validate_remote_move_endpoints(src, dst)?;
-            }
-            _ => {}
-        }
-        Ok(PreparedTransferRoute {
-            route,
-            pre_resolve_display,
-            src_display,
-            dst_display,
-        })
-    })();
+    let prepared = select_route(args, mode, is_move);
 
     match &prepared {
         Ok(prepared) => {
@@ -380,6 +566,66 @@ fn prepare_transfer_route(
         ),
     }
     prepared
+}
+
+/// The route a command's endpoints select, with the checks that belong to
+/// the pair of them. Nothing is recorded and nothing is contacted, so it
+/// can be asked before a command is allowed to run at all
+/// ([`refuse_unrunnable`]) as well as where it is dispatched.
+fn select_route(
+    args: &TransferArgs,
+    mode: TransferKind,
+    is_move: bool,
+) -> Result<PreparedTransferRoute> {
+    let src_endpoint = parse_transfer_endpoint(&args.source)?;
+    let raw_dst = parse_transfer_endpoint(&args.destination)?;
+    let pre_resolve_display = display_endpoint(&raw_dst);
+    let dst_endpoint = resolve_destination(&args.source, &args.destination, &src_endpoint, raw_dst);
+    let src_display = display_endpoint(&src_endpoint);
+    let dst_display = display_endpoint(&dst_endpoint);
+    let route = select_transfer_route(src_endpoint, dst_endpoint, mode);
+    match &route {
+        TransferRoute::LocalToLocal { src, dst, .. } => {
+            blit_core::transfers::resolution::validate_local_transfer_roots(src, dst, is_move)?;
+        }
+        TransferRoute::RemoteToRemoteDelegated { src, dst, .. } if is_move => {
+            blit_core::transfers::resolution::validate_remote_move_endpoints(src, dst)?;
+        }
+        _ => {}
+    }
+    Ok(PreparedTransferRoute {
+        route,
+        pre_resolve_display,
+        src_display,
+        dst_display,
+    })
+}
+
+/// cr-ecm4-4: refuse a command for what it SAYS — its endpoints, its
+/// options and its filter — before anything is kept of it. `run_command`
+/// asks this before a run is recorded, a job saved (`--save`) or a job
+/// exported (`--export`); the same checks stand where the command is
+/// dispatched.
+///
+/// A job is saved before its command runs, so that one which fails on the
+/// day — a host that is down, a source not mounted — can be run again.
+/// But a command refused for its own words can never run, and saving it
+/// REPLACED a working job of that name: `move --ignore-case --save
+/// nightly`, and a mirror whose pattern file held `[aé].txt`, each left
+/// `jobs run nightly` failing where it had worked (cr-ecm3-2 had closed
+/// this for `move`'s filters only).
+pub(crate) fn refuse_unrunnable(
+    args: &TransferArgs,
+    mode: TransferKind,
+    is_move: bool,
+) -> Result<()> {
+    let prepared = select_route(args, mode, is_move)?;
+    if is_move {
+        reject_move_options(args)?;
+        reject_unsupported_checker_pin(args, &prepared.route)
+    } else {
+        reject_transfer_options(args, mode, &prepared.route)
+    }
 }
 
 pub(super) fn render_result(
@@ -435,75 +681,9 @@ async fn run_transfer_inner(
         TransferKind::Mirror => "mirror",
     };
 
-    // R54-F1 (data-loss / silent bug): `--null` only works
-    // correctly for LOCAL COPY. Outside that envelope it's
-    // either destructive or silently ignored:
-    //   - `blit mirror --null`: the null sink discards writes,
-    //     but `apply_mirror_deletions` still runs (only
-    //     `options.dry_run` gates the actual remove_* calls)
-    //     and deletes destination-only files — turning a
-    //     supposedly read-only benchmark into a destructive op.
-    //   - `blit copy --null` to/from a remote endpoint: the
-    //     remote push/pull paths don't implement null
-    //     semantics, so the flag is silently ignored and a
-    //     normal write happens.
-    //
-    // The narrowest safe contract for 0.1.0: --null is local
-    // copy only. Reject the other combinations at the CLI;
-    // proper plumbing of null semantics through mirror-delete
-    // and the remote paths is a post-release item.
-    if args.null {
-        if mode.is_mirror() {
-            bail!(
-                "--null is not supported with `blit mirror`: the \
-                 null sink discards writes, but mirror's \
-                 destination-purge step would still delete \
-                 destination-only files, turning what's supposed \
-                 to be a read-only benchmark into a destructive \
-                 operation. Use `blit copy --null SRC DST` (local \
-                 only) for read-path benchmarking."
-            );
-        }
-        if !matches!(&route, TransferRoute::LocalToLocal { .. }) {
-            bail!(
-                "--null is not supported with remote endpoints: \
-                 the remote push/pull paths don't implement null \
-                 semantics, so the flag would be silently \
-                 ignored and a real write would happen. Use \
-                 `blit copy --null SRC DST` between two local \
-                 paths for read-path benchmarking."
-            );
-        }
-    }
-
-    // `--detach` is only honored on daemon-to-daemon
-    // delegated transfers. The CLI gates it up-front so a
-    // misuse fails before any RPCs fire — clearer than
-    // letting the daemon emit a phased error mid-stream.
-    if args.detach {
-        match &route {
-            TransferRoute::LocalToLocal { .. }
-            | TransferRoute::LocalToRemote { .. }
-            | TransferRoute::RemoteToLocal { .. } => bail!(
-                "--detach is only supported for remote→remote transfers \
-                 (the CLI is in the byte path for any local endpoint, so \
-                 disconnecting would drop the bytes)"
-            ),
-            TransferRoute::RemoteToRemoteDelegated { .. } => {
-                // Delegated remote→remote — detach is valid.
-            }
-        }
-    }
-
-    // cr-ls1-12: route-dependent validation belongs HERE, beside the other
-    // gates and before any banner, warning or destructive prompt. Rejecting
-    // later meant `blit mirror host:/a/ /b/ --checkers 4` printed "starting",
-    // asked the operator to confirm deleting extraneous files, and only then
-    // failed on the flag.
-    reject_unsupported_checker_pin(args, &route)?;
-    // EXCLUDE_CASE_MATCHING slice 1b (AC-10): and so does a filter that
-    // cannot be used. It is built at dispatch, after the question below.
-    reject_unusable_filter(args)?;
+    // Every refusal comes before any banner, warning or question — and,
+    // asked by `run_command` too, before a job is saved (cr-ecm4-4).
+    reject_transfer_options(args, mode, &route)?;
 
     warn_if_dropping_windows_metadata(args);
     let resolved_excludes = warn_unmatchable_excludes(args, &src_display);
@@ -832,128 +1012,9 @@ async fn run_move_inner(
         src_display,
         dst_display,
     } = prepare_transfer_route(args, TransferKind::Copy, true, lifecycle_trace)?;
-    if args.dry_run {
-        bail!("move does not support --dry-run");
-    }
-
-    if args.detach {
-        // `blit move` runs a source-delete step after the
-        // transfer completes. With --detach the CLI exits as
-        // soon as the daemon's Started event arrives, so the
-        // delete step would never fire — either leaving the
-        // source around forever (silent move-becomes-copy) or
-        // racing the still-running transfer with rm. Refuse
-        // up front.
-        bail!(
-            "move does not support --detach: the source-delete step \
-             needs the CLI to await transfer completion, so detaching \
-             would silently turn a move into a copy. Use \
-             `blit copy --detach SRC DST` and `blit rm SRC` once you've \
-             confirmed the transfer completed via `blit jobs list`."
-        );
-    }
-
-    reject_move_filters(args)?;
-
-    // EXCLUDE_CASE_MATCHING slice 1: the case mode says how `--exclude`
-    // and `--include` patterns are read, and `move` takes none (above).
-    // Refused, so an option with nothing to act on is never accepted in
-    // silence.
-    if args.ignore_case || args.match_case {
-        let option = if args.ignore_case {
-            "--ignore-case"
-        } else {
-            "--match-case"
-        };
-        bail!(
-            "move does not support {option}: it takes no --exclude or --include \
-             pattern for the option to act on"
-        );
-    }
-
-    // R51-F1 (data-loss): reject `--ignore-existing` for the same
-    // reason as filters. The planner drops any source file whose
-    // destination already exists (diff_planner.rs:135), so
-    // `blit move --ignore-existing` would skip `src/foo` whenever
-    // `dst/foo` was already present and then delete `src/foo`
-    // along with the rest of the source tree — silent data loss
-    // for files that look pre-existing on the destination but
-    // diverged from the source side.
-    if args.ignore_existing {
-        bail!(
-            "move does not support --ignore-existing: the source \
-             file would be skipped during the transfer and then \
-             permanently removed by the source-delete step. Run \
-             `blit copy --ignore-existing` first, then `blit rm` \
-             the source manually if you really want that semantic."
-        );
-    }
-
-    // R52-F1 (data-loss): reject `--null`. The flag routes the
-    // local transfer into `null_sink`, which deliberately writes
-    // nothing — then move's source-delete step removes the
-    // original. Net effect: `blit move --null --yes src/ dst/`
-    // erases src without ever creating dst contents. --null is
-    // a benchmarking/diagnostics primitive; it has no meaningful
-    // semantic combined with move.
-    if args.null {
-        bail!(
-            "move does not support --null: --null writes nothing \
-             to the destination, but move would still delete the \
-             source afterward, which would erase data with no \
-             copy. Use --null only with `blit copy SRC DST` \
-             between two local paths for read-path benchmarking."
-        );
-    }
-
-    // R54-F2 (data-loss), refreshed at otp-10b-2 (and its review F3):
-    // reject `--force`, `--ignore-times`, and `--size-only` for move.
-    //
-    // Every move route — local, push, pull, delegated — now maps
-    // through the move compare rule (transfer unconditionally, or
-    // `--checksum` for the one skip that is content-proven safe;
-    // review otp-10a F1 and its otp-10b-2 mirrors). That makes
-    // `--force` / `--ignore-times` pure no-ops on move: reject them
-    // rather than silently absorb them.
-    //
-    // `--size-only` is worse than redundant: honoring it would mean a
-    // size-only skip of a changed file followed by source-delete —
-    // destroying the only copy, the exact hazard the move mapping
-    // exists to prevent. The old pull driver honored it on move; the
-    // gate closes that hole.
-    //
-    // R55 still applies: escape hatches must not have the same
-    // data-loss class. `blit move --checksum` is honored on every
-    // route (the session's Checksum compare is role-agnostic since
-    // otp-10b-1/2; the local path honors it via R58-F7).
-    if args.force {
-        bail!(
-            "move does not support --force: move already transfers \
-             every file unconditionally (a compare-mode skip before \
-             the source-delete could lose data), so the flag adds \
-             nothing. Use `blit move --checksum` to skip only files \
-             whose content is proven identical."
-        );
-    }
-    if args.ignore_times {
-        bail!(
-            "move does not support --ignore-times: move already \
-             transfers every file unconditionally (a compare-mode \
-             skip before the source-delete could lose data), so the \
-             flag adds nothing. Use `blit move --checksum` to skip \
-             only files whose content is proven identical."
-        );
-    }
-    if args.size_only {
-        bail!(
-            "move does not support --size-only: a same-size file \
-             whose content changed would be skipped during the \
-             transfer and then permanently removed by the \
-             source-delete step. Use `blit move --checksum` for a \
-             content-verified move, or plain `blit move` (which \
-             transfers every file unconditionally)."
-        );
-    }
+    // What `move` refuses for its options alone — asked by `run_command`
+    // too, before a job is saved (cr-ecm4-4).
+    reject_move_options(args)?;
 
     // cr-ls1-12: before the warning and, critically, before the prompt that
     // asks the operator to authorise deleting the source.
