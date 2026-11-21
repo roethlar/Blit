@@ -1,9 +1,9 @@
 # cr-ecm10-6: The line's cost grew with the number of patterns
 
 **Severity**: MEDIUM — FAST: one line of a prompt took 400 ms of a command that takes 10
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r11` (Codex openreview, 2026-11-21) reviewed `d3e33acc..bfa537f9`, the six `exclude-case-r10` fixes, with `guard_confirmed: true`: "bounding the work spent on the note [is] also [a] sound choice." The bound counts patterns asked about, and one question builds the whole filter as the option would read it: 10,000 literal includes, 217 ms with the line, 64 ms with the line as it was before this round, 52 ms with `--match-case`. The remaining work is cr-ecm11-6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm10-6`)
+**Commit**: `d2f2b32d`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r10` over `df682eea..41b4bfdd` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r10.codex.md`. The last of four commits that complete cr-ecm9-2.
 
 ## Evidence

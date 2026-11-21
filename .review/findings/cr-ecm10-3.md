@@ -1,9 +1,9 @@
 # cr-ecm10-3: A single-file source's one name did not reach the in-run retry
 
 **Severity**: HIGH — a file that could be copied on the retry was reported `missing at retry`, and the command exited 2 with nothing copied
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r11` (Codex openreview, 2026-11-21) reviewed `d3e33acc..bfa537f9`, the six `exclude-case-r10` fixes, with `guard_confirmed: true`. Putting the source's name in place of the empty path is done wherever a failed path is handed on, whatever the source has become and after a saved job's leftovers were already split by the old name: a source replaced by a directory of the same name is then retried INTO (`out/Report.txt/Report.txt` overwritten, exit 0), and a `jobs retry` of a root marked incomplete looks for the empty path on one pass and skips the file on the other. The remaining work is cr-ecm11-1 and cr-ecm11-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm10-3`)
+**Commit**: `42508d08`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r10` over `df682eea..41b4bfdd` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r10.codex.md`. Completes cr-ecm9-3, which that review found incomplete.
 
 ## Evidence

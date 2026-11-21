@@ -1,9 +1,9 @@
 # cr-ecm10-2: The line judged includes and excludes apart
 
 **Severity**: HIGH — the question named a loss that does not happen, while `--ignore-case` gives up another file the line did not mention
-**Status**: Fixed, awaiting review
+**Status**: Verified — `exclude-case-r11` (Codex openreview, 2026-11-21) reviewed `d3e33acc..bfa537f9`, the six `exclude-case-r10` fixes, with `guard_confirmed: true`: "Using both pattern lists … [is] also [a] sound choice." What building the second filter costs for a long include list is cr-ecm11-6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm10-2`)
+**Commit**: `efe3321b`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r10` over `df682eea..41b4bfdd` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r10.codex.md`. The first of four commits that complete cr-ecm9-2 (with cr-ecm10-1, -5, -6).
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm10-5: The line printed a spelling it had not checked, and a count that changed with the order
 
 **Severity**: MEDIUM — the question offered as "would also match" the very glob typed beside the pattern; the count of other patterns depended on where they stood
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r11` (Codex openreview, 2026-11-21) reviewed `d3e33acc..bfa537f9`, the six `exclude-case-r10` fixes, with `guard_confirmed: true`. A spelling is now checked on the names it denotes — and the line then prints the spelling, not the name that passed: with `--include '*a' --exclude '[Aa]'` it said `would also match A`, both mirrors kept `A`, and the file the option deleted was `xA`. And the count still moves with the order once the patterns outnumber the budget (33 patterns: "1 more" or "2 more"). The remaining work is cr-ecm11-3 and cr-ecm11-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm10-5`)
+**Commit**: `b3eff1ef`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r10` over `df682eea..41b4bfdd` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r10.codex.md`. The third of four commits that complete cr-ecm9-2.
 
 ## Evidence

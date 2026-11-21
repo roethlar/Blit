@@ -1,9 +1,9 @@
 # cr-ecm10-1: The line concluded from one name what holds at every path
 
 **Severity**: HIGH — the question was asked with no line, or with a line about another pattern, and a confirmed mirror deleted what the other mode keeps
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r11` (Codex openreview, 2026-11-21) reviewed `d3e33acc..bfa537f9`, the six `exclude-case-r10` fixes, with `guard_confirmed: true`. One path still shows an example it did not check: when the pattern as the option would read it cannot be compiled at all (an `s` inside 249 nested brace pairs), the line offers an upper-case spelling, and the same command with `--ignore-case` is refused at validation. The remaining work is cr-ecm11-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm10-1`)
+**Commit**: `c77dd27d`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r10` over `df682eea..41b4bfdd` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r10.codex.md`. The second of four commits that complete cr-ecm9-2.
 
 ## Evidence

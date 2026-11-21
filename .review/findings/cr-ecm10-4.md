@@ -1,9 +1,9 @@
 # cr-ecm10-4: `check` of a single file against a destination of another name looked for the wrong name
 
 **Severity**: MEDIUM — a copy that succeeded was reported as "Missing on destination", exit 1
-**Status**: Fixed, awaiting review
+**Status**: Verified — `exclude-case-r11` (Codex openreview, 2026-11-21) reviewed `d3e33acc..bfa537f9`, the six `exclude-case-r10` fixes, with `guard_confirmed: true`: "The renamed-destination `check` fix is sound." It was the reviewer's own red/green proof: with the source's name no longer given to the destination walk, the guard reported one missing destination; restored, one match
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm10-4`)
+**Commit**: `0a1127be`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r10` over `df682eea..41b4bfdd` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r10.codex.md`. Completes cr-ecm9-3 with cr-ecm10-3.
 
 ## Evidence
