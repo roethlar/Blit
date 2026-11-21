@@ -320,6 +320,7 @@ fn reject_transfer_options(
     // asked the operator to confirm deleting extraneous files, and only then
     // failed on the flag.
     reject_unsupported_checker_pin(args, route)?;
+    reject_unsupported_for_route(args, route)?;
     // EXCLUDE_CASE_MATCHING slice 1b (AC-10): and so does a filter that
     // cannot be used. It is built at dispatch, after the question below.
     reject_unusable_filter(args)?;
@@ -622,7 +623,8 @@ pub(crate) fn refuse_unrunnable(
     let prepared = select_route(args, mode, is_move)?;
     if is_move {
         reject_move_options(args)?;
-        reject_unsupported_checker_pin(args, &prepared.route)
+        reject_unsupported_checker_pin(args, &prepared.route)?;
+        reject_unsupported_for_route(args, &prepared.route)
     } else {
         reject_transfer_options(args, mode, &prepared.route)
     }
@@ -792,8 +794,6 @@ async fn run_transfer_inner(
             if !src.exists() {
                 bail!("source path does not exist: {}", src.display());
             }
-            ensure_remote_push_supported(args)?;
-            ensure_remote_destination_supported(&dst)?;
             let mut state = remote::run_remote_push_transfer_deferred(
                 args,
                 src.clone(),
@@ -849,8 +849,6 @@ async fn run_transfer_inner(
             Ok(exit_for_failures(state.summary.files_failed))
         }
         TransferRoute::RemoteToLocal { src, dst, mirror } => {
-            ensure_remote_pull_supported(args)?;
-            ensure_remote_source_supported(&src)?;
             let mut state = remote::run_remote_pull_transfer_deferred(
                 args,
                 src.clone(),
@@ -906,9 +904,6 @@ async fn run_transfer_inner(
             Ok(exit_for_failures(state.summary.files_failed))
         }
         TransferRoute::RemoteToRemoteDelegated { src, dst, mirror } => {
-            ensure_remote_source_supported(&src)?;
-            ensure_remote_destination_supported(&dst)?;
-            ensure_remote_pull_supported(args)?;
             // ssc-6: `--detach` hands the transfer to the daemon and exits
             // before any summary exists, so there is nothing to retry; the
             // deferred run below is the attached path only.
@@ -1019,6 +1014,7 @@ async fn run_move_inner(
     // cr-ls1-12: before the warning and, critically, before the prompt that
     // asks the operator to authorise deleting the source.
     reject_unsupported_checker_pin(args, &route)?;
+    reject_unsupported_for_route(args, &route)?;
 
     warn_if_dropping_windows_metadata(args);
 
@@ -1181,8 +1177,6 @@ async fn run_move_inner(
             dst: dst_path,
             ..
         } => {
-            ensure_remote_pull_supported(args)?;
-            ensure_remote_source_supported(&remote)?;
             // move_verb=true: the session refuses partial source
             // scans (R49-F2 / otp-9b F1) before we delete the remote
             // source via delete_remote_path below, and the move
@@ -1271,8 +1265,6 @@ async fn run_move_inner(
             if !src_path.exists() {
                 bail!("source path does not exist: {}", src_path.display());
             }
-            ensure_remote_push_supported(args)?;
-            ensure_remote_destination_supported(&remote)?;
             // Push uses local-source scanning on the CLI side,
             // which routes through spawn_manifest_task's unreadable
             // accumulator and surfaces failures pre-transfer.
@@ -1352,9 +1344,6 @@ async fn run_move_inner(
             Ok(ExitCode::SUCCESS)
         }
         TransferRoute::RemoteToRemoteDelegated { src, dst, .. } => {
-            ensure_remote_source_supported(&src)?;
-            ensure_remote_destination_supported(&dst)?;
-            ensure_remote_pull_supported(args)?;
             // R49-F2: require_complete_scan=true so the source
             // daemon refuses partial scans before delete_remote_path
             // below.
@@ -1451,6 +1440,35 @@ const DROP_WINDOWS_METADATA_WARNING: &str =
 fn warn_if_dropping_windows_metadata(args: &TransferArgs) {
     if args.drop_windows_metadata {
         eprintln!("{DROP_WINDOWS_METADATA_WARNING}");
+    }
+}
+
+/// cr-ecm5-2: what a route with a daemon in it refuses — `--dry-run`, the
+/// `--workers` diagnostic, an endpoint that names no module — asked with
+/// every other refusal: before any banner, warning or question, and
+/// before a job is saved from the command ([`refuse_unrunnable`]).
+///
+/// Each route's arm used to ask these itself, after the question and
+/// after the save. A remote `mirror -y --workers 1 --save nightly`
+/// replaced a working saved copy job and was then refused; a job does not
+/// keep that diagnostic option, so `jobs run nightly` ran the mirror and
+/// deleted a destination-only file.
+fn reject_unsupported_for_route(args: &TransferArgs, route: &TransferRoute) -> Result<()> {
+    match route {
+        TransferRoute::LocalToLocal { .. } => Ok(()),
+        TransferRoute::LocalToRemote { dst, .. } => {
+            ensure_remote_push_supported(args)?;
+            ensure_remote_destination_supported(dst)
+        }
+        TransferRoute::RemoteToLocal { src, .. } => {
+            ensure_remote_pull_supported(args)?;
+            ensure_remote_source_supported(src)
+        }
+        TransferRoute::RemoteToRemoteDelegated { src, dst, .. } => {
+            ensure_remote_source_supported(src)?;
+            ensure_remote_destination_supported(dst)?;
+            ensure_remote_pull_supported(args)
+        }
     }
 }
 

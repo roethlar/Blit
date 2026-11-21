@@ -431,6 +431,103 @@ fn a_command_refused_for_what_it_says_leaves_the_saved_job_as_it_was() {
     }
 }
 
+/// cr-ecm5-2: and so does a command refused for its ROUTE — an option a
+/// transfer through a daemon does not take, an endpoint that names no
+/// module. Each route's arm asked these itself, after the job was saved:
+/// a remote `mirror -y --workers 1 --save nightly` replaced a working
+/// saved copy job and was then refused, and since a job does not keep
+/// that diagnostic option, `jobs run nightly` ran the mirror and deleted a
+/// destination-only file. Pushed to a daemon and pulled from one.
+#[test]
+fn a_command_refused_for_its_route_leaves_the_saved_job_as_it_was() {
+    let ctx = TestContext::new();
+    let (src, dst) = (ctx.workspace.join("src"), ctx.workspace.join("dst"));
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("keep.txt"), b"kept").unwrap();
+    fs::write(ctx.module_dir.join("served.txt"), b"served").unwrap();
+    let remote = format!("127.0.0.1:{}:/test/pushed/", ctx.daemon_port);
+    let served = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let no_module = format!("127.0.0.1:{}", ctx.daemon_port);
+
+    let saved = blit_in(
+        &ctx,
+        &ctx.workspace,
+        &["copy", "--save", "nightly", "src/", "dst/"],
+    );
+    assert!(saved.status.success(), "{}", text(&saved.stderr));
+    // What only the destination holds: a copy leaves it, a mirror would not.
+    fs::write(dst.join("only-here.txt"), b"kept by a copy").unwrap();
+
+    for (at, (command, words)) in [
+        // The reviewer's.
+        (
+            &["mirror", "-y", "--workers", "1", "src/", remote.as_str()][..],
+            "--workers limiter is not supported for remote transfers",
+        ),
+        (
+            &["copy", "--workers", "1", served.as_str(), "pulled/"],
+            "--workers limiter is not supported for remote transfers",
+        ),
+        (
+            &["move", "-y", "--workers", "1", "src/", remote.as_str()],
+            "--workers limiter is not supported for remote transfers",
+        ),
+        (
+            &["mirror", "--dry-run", "src/", remote.as_str()],
+            "--dry-run is not supported for remote transfers",
+        ),
+        (
+            &["copy", "src/", no_module.as_str()],
+            "remote destination must include a module or root",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let before = listing(&ctx)["saved"].clone();
+        let export = format!("job{at}.json");
+        let mut args = command.to_vec();
+        args.splice(1..1, ["--save", "nightly", "--export", export.as_str()]);
+        let refused = blit_in(&ctx, &ctx.workspace, &args);
+        let stderr = text(&refused.stderr);
+        assert!(!refused.status.success(), "{command:?}: {stderr}");
+        assert!(stderr.contains(words), "{command:?}: {stderr}");
+        assert!(
+            !stderr.contains("saved job nightly"),
+            "{command:?}: nothing is saved\n{stderr}"
+        );
+        assert!(
+            !ctx.workspace.join(&export).exists(),
+            "{command:?}: no job is exported"
+        );
+        assert!(
+            !ctx.module_dir.join("pushed").exists() && !ctx.workspace.join("pulled").exists(),
+            "{command:?}: nothing is transferred"
+        );
+        assert_eq!(
+            listing(&ctx)["saved"],
+            before,
+            "{command:?}: the saved job is as it was"
+        );
+
+        // The job is still the copy it was: it copies, and deletes nothing.
+        fs::remove_file(dst.join("keep.txt")).unwrap();
+        let again = blit_in(&ctx, &ctx.workspace, &["jobs", "run", "nightly"]);
+        assert!(
+            again.status.success(),
+            "{command:?}: the job saved before still runs\n{}{}",
+            text(&again.stdout),
+            text(&again.stderr)
+        );
+        assert_eq!(
+            names(&dst),
+            ["keep.txt", "only-here.txt"],
+            "{command:?}: a copy, as saved"
+        );
+        assert_eq!(names(&src), ["keep.txt"], "{command:?}: nothing moved");
+    }
+}
+
 #[test]
 fn a_job_name_must_be_a_plain_name_and_every_sub_verb_has_help() {
     let ctx = TestContext::new();
