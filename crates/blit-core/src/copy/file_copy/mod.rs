@@ -193,7 +193,7 @@ pub fn copy_file(
                 }
             }
         };
-        if !clone_succeeded {
+        if !clone_succeeded || !A_CLONE_CARRIES_METADATA {
             metadata::preserve_metadata(src, dst)?;
         }
 
@@ -205,6 +205,17 @@ pub fn copy_file(
 
     result
 }
+
+/// Whether a copy that reports a clone carried the file's time and mode
+/// with it (local-copy-mode). A clone does — macOS' `clonefile` and
+/// `fcopyfile`, a block clone on Windows, where the mode is no part of
+/// it. Linux's `copy_file_range` and `sendfile` are reported the same way
+/// and carry BYTES AND NOTHING ELSE: a file copied by one was left with
+/// the mode it was created with — 644 under the usual mask, whatever its
+/// source's. A private file (600) became readable by all, and a program
+/// (750) stopped being one. Small files, written from a shard, and every
+/// file to or from a daemon kept theirs; `cp` and `rsync` keep them.
+const A_CLONE_CARRIES_METADATA: bool = cfg!(not(all(unix, not(target_os = "macos"))));
 
 /// A reader whose failures name the SOURCE (ssc-4): the buffered tails
 /// below copy through `io::copy`, whose error could otherwise be either
@@ -353,7 +364,7 @@ pub fn copy_opened(
             }
         }
     };
-    if !clone_succeeded {
+    if !clone_succeeded || !A_CLONE_CARRIES_METADATA {
         metadata::preserve_metadata_from_handle(src, dst)?;
     }
     Ok(FileCopyOutcome {
@@ -414,13 +425,57 @@ pub fn copy_opened_into(
     };
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     let (total_bytes, clone_succeeded) = (buffered(src, made)?, false);
-    if !clone_succeeded {
+    if !clone_succeeded || !A_CLONE_CARRIES_METADATA {
         metadata::preserve_metadata_into(src, made)?;
     }
     Ok(FileCopyOutcome {
         bytes_copied: total_bytes,
         clone_succeeded,
     })
+}
+
+#[cfg(all(test, unix))]
+mod mode_tests {
+    //! local-copy-mode: every way a file is copied on this machine gives
+    //! the destination its source's mode — the fast paths too, which
+    //! carry bytes and nothing else.
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_copied_file_has_its_sources_mode_however_it_was_copied() {
+        let dir = tempfile::tempdir().unwrap();
+        // More than one block, so that the fast paths are the ones taken.
+        let data = vec![0x5Au8; 256 * 1024];
+        for mode in [0o600, 0o640, 0o750] {
+            let src = dir.path().join(format!("src-{mode:o}"));
+            std::fs::write(&src, &data).unwrap();
+            std::fs::set_permissions(&src, std::fs::Permissions::from_mode(mode)).unwrap();
+            let mode_of =
+                |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+            let sizer = BufferSizer::default();
+
+            let by_path = dir.path().join(format!("by-path-{mode:o}"));
+            copy_file(&src, &by_path, &sizer, false).unwrap();
+            assert_eq!(mode_of(&by_path), mode, "copy_file, {mode:o}");
+
+            let opened = File::open(&src).unwrap();
+            let by_handle = dir.path().join(format!("by-handle-{mode:o}"));
+            copy_opened(&opened, &src, &by_handle, data.len() as u64, &sizer, false).unwrap();
+            assert_eq!(mode_of(&by_handle), mode, "copy_opened, {mode:o}");
+            assert_eq!(std::fs::read(&by_handle).unwrap(), data);
+
+            let into = dir.path().join(format!("into-{mode:o}"));
+            let made = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&into)
+                .unwrap();
+            copy_opened_into(&opened, &made, data.len() as u64, &sizer).unwrap();
+            assert_eq!(mode_of(&into), mode, "copy_opened_into, {mode:o}");
+            assert_eq!(std::fs::read(&into).unwrap(), data);
+        }
+    }
 }
 
 #[cfg(test)]

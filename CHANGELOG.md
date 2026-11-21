@@ -256,6 +256,13 @@ part, and a job you can list, read, re-run and retry.
   way. (As first built on the development branch, the daemon's end was
   not told the option, and the copy on this machine made the name and
   then opened it again by name. No release has that.)
+- **A copy between two paths on this machine gives every file its
+  source's mode.** A file copied on its own — a large one, or the only
+  file of a tree — was left with mode 644 whatever its source's: a
+  private file (600) became readable by all, and a program (750)
+  stopped being one. Small files copied together, and every file to or
+  from a daemon, kept theirs, as `cp` and `rsync` keep them all. (Linux;
+  seen by measuring beside those two.)
 - `check` of a single file against a destination of another name
   compares the two. With the source named in `--files-from`, or a
   pattern naming either file, it looked for one file's name on the

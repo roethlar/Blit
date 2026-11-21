@@ -16,10 +16,6 @@ pub(crate) fn preserve_metadata(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// ssc-4 (SOURCE_SIDE_CONTAINMENT D-C): preserve mtime (and, on Unix,
-/// permissions) onto `dst` from the OPENED source handle's metadata —
-/// the inode that was copied — never from a path re-stat that could
-/// describe a replacement.
 /// [`preserve_metadata_from_handle`] onto a destination that is HELD
 /// (cr-ecm15-1): its time and mode set through `made`, never by a name.
 pub(crate) fn preserve_metadata_into(src: &std::fs::File, made: &std::fs::File) -> Result<()> {
@@ -44,6 +40,10 @@ pub(crate) fn preserve_metadata_into(src: &std::fs::File, made: &std::fs::File) 
     Ok(())
 }
 
+/// ssc-4 (SOURCE_SIDE_CONTAINMENT D-C): preserve mtime (and, on Unix,
+/// permissions) onto `dst` from the OPENED source handle's metadata —
+/// the inode that was copied — never from a path re-stat that could
+/// describe a replacement.
 pub(crate) fn preserve_metadata_from_handle(src: &std::fs::File, dst: &Path) -> Result<()> {
     use filetime::{set_file_mtime, FileTime};
     let md = src.metadata()?;
