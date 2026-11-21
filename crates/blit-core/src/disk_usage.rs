@@ -336,7 +336,12 @@ pub fn filesystem_space(path: &Path) -> io::Result<FilesystemSpace> {
         use windows::core::PCWSTR;
         use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
         // The call wants a directory; a file's filesystem is its folder's.
-        let directory = if path.is_dir() {
+        // What the path IS comes from a lookup that can fail (cr-uv1-6):
+        // `is_dir()` answers "no" for a path that is not there as it does
+        // for a file, so the folder above a missing path was asked about
+        // instead — its numbers, and success, where `df` says the path
+        // does not exist.
+        let directory = if std::fs::metadata(path)?.is_dir() {
             path
         } else {
             path.parent().unwrap_or(path)

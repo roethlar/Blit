@@ -238,6 +238,9 @@ first two, `rm` the third, `find` the fourth (`ls` follows).
   rest is still printed, and the exit status is 1. A name that is not
   valid UTF-8 is printed by its own bytes. A symbolic link is counted as
   a link and never followed.
+- On Windows, `df` of a path that is not there says so; it used to
+  answer with the numbers of the folder above it. (Fixed from the source;
+  not yet run on Windows.)
 - `-h` on these two commands is the commands' own `-h`; help is `--help`.
   An option neither command has is refused before anything is asked of a
   daemon.
