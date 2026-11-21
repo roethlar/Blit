@@ -1,9 +1,9 @@
 # cr-ecm9-3: A source that is one file was filtered under different names in different places
 
 **Severity**: HIGH — `check` reported success on two unequal files, and `copy` wrote a file and exited 2 reporting it missing
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r10` (Codex openreview, 2026-11-21) reviewed `df682eea..41b4bfdd`, the three `exclude-case-r9` fixes, with `guard_confirmed: true`. Keeping the empty path on the wire stands. The one name does not reach two more places: the in-run retry of a single-file source builds its list from the empty path, which names nothing, so a file that was blocked and then freed is reported `missing at retry`; and `check` of a single file against a destination of another name looks for the source's name on both sides. The remaining work is cr-ecm10-3 and -4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm9-3`)
+**Commit**: `1f3d1b68`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r9` over `3bc3ee47..ab7331c3` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r9.codex.md`.
 
 ## Evidence

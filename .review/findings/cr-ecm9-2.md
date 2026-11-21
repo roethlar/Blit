@@ -1,9 +1,9 @@
 # cr-ecm9-2: The line did not show a real loss first, and judged a gain against one pattern
 
 **Severity**: HIGH — the question was asked with a line about another pattern while `--ignore-case` would stop protecting a file; a confirmed mirror under that option deleted it
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r10` (Codex openreview, 2026-11-21) reviewed `df682eea..41b4bfdd`, the three `exclude-case-r9` fixes, with `guard_confirmed: true`. "The prompt still makes claims that the complete filter contradicts." Judging one list at its root is not judging the filter: `--exclude a --exclude ./A` got no line though the option keeps `sub/A`; with `Keep`, `[!a]*.txt` and `Ax.txt` the one name tried for `*` was a name another pattern keeps, so the loss of `Ay.txt` was not shown; an include and an exclude were each judged in their own list; `Q[b-~]` was offered as a new spelling beside a pattern typed exactly so, and the count of other patterns changed with their order; and with 1,000 excludes the line cost 443 ms against 31. The remaining work is cr-ecm10-1, -2, -5 and -6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm9-2`)
+**Commit**: `4492c93f`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r9` over `3bc3ee47..ab7331c3` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r9.codex.md`. Completes cr-ecm8-2, which that review found incomplete.
 
 ## Evidence

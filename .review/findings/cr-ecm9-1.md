@@ -1,9 +1,9 @@
 # cr-ecm9-1: A rule made from an exclude was not validated as it is executed
 
 **Severity**: HIGH — a confirmed `mirror --ignore-case` deleted a file the question's line had just said the option would also match
-**Status**: Fixed, awaiting review
+**Status**: Verified — `exclude-case-r10` (Codex openreview, 2026-11-21) reviewed `df682eea..41b4bfdd`, the three `exclude-case-r9` fixes, with `guard_confirmed: true`: "validating the derived exclude rule before confirmation is sound"; nothing further required on this finding
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm9-1`)
+**Commit**: `e08ffac5`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r9` over `3bc3ee47..ab7331c3` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r9.codex.md`.
 
 ## Evidence
