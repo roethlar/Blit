@@ -20,6 +20,8 @@
 //! it: a transfer's `--exclude` follows rsync's rule
 //! (`docs/plan/EXCLUDE_CASE_MATCHING.md`), `find` follows find's.
 
+mod reference_classes;
+
 /// A `-name` or `-iname` pattern, ready to be matched against base names.
 #[derive(Debug, Clone)]
 pub struct NamePattern {
@@ -92,41 +94,51 @@ impl Unit for char {
         }
         self.to_lowercase().next().unwrap_or(self)
     }
-    /// The classes of the reference's locale, `C.UTF-8` (cr-uv1-7). They
-    /// are that locale's RULES, read off the C library's own tables
-    /// (glibc 2.44, every code point, 2026-11-21) and written over this
-    /// build's Unicode data — not the standard library's predicates of
-    /// the same names, which differ: a no-break space is no `space`
-    /// there, an em space is a `blank`, a digit of another script is an
-    /// `alpha`, a title-case letter is `upper`.
+    /// The classes of the reference's locale, `C.UTF-8`, by that
+    /// locale's own tables (cr-uv2-6): [`reference_classes`], read from
+    /// the C library for every code point, the ones no character is
+    /// assigned to among them. They are not the standard library's
+    /// predicates of the same names — there a no-break space is a
+    /// `space`, an em space no `blank`, a digit of another script no
+    /// `alpha`, a title-case letter not `upper` — and they are not
+    /// written over this build's Unicode data, as cr-uv1-7 had them:
+    /// the standard library cannot say that a code point is unassigned,
+    /// so U+0378 was printable here and is not to `find`, and a compiler
+    /// with newer tables than the reference's would have moved the
+    /// classes with it.
     ///
-    /// For every code point that C library knows, each class here equals
-    /// its own (guarded on Linux against the library itself). A code
-    /// point no character is assigned to counts as printable here, the
-    /// standard library having no way to ask; the reference says no.
+    /// Four classes are tables. The other eight are those and a few
+    /// fixed code points, by identities that hold for every code point
+    /// of the reference (guarded on Linux against the library itself).
     fn is(self, class: Class) -> bool {
+        use reference_classes::{ALPHA, LOWER, PRINT, UPPER};
+        let point = self as u32;
         match class {
-            // Alphabetic, and every decimal digit but the ten of ASCII.
-            Class::Alpha => self.is_alphabetic() || is_other_decimal_digit(self),
+            Class::Alpha => within(&ALPHA, point),
             Class::Digit => self.is_ascii_digit(),
             Class::Alnum => self.is(Class::Alpha) || self.is_ascii_digit(),
-            // Title-case letters (`ǅ`, `ᾈ`) are upper case too.
-            Class::Upper => self.is_uppercase() || is_title_case(self),
-            // And the four of them that are a digraph are lower as well.
-            Class::Lower => self.is_lowercase() || matches!(self, 'ǅ' | 'ǈ' | 'ǋ' | 'ǲ'),
-            // White space but for the three that do not break a line
-            // and the C1 "next line".
-            Class::Space => {
-                self.is_whitespace()
-                    && !matches!(self, '\u{85}' | '\u{a0}' | '\u{2007}' | '\u{202f}')
-            }
+            Class::Upper => within(&UPPER, point),
+            Class::Lower => within(&LOWER, point),
+            // No no-break space among them, and not the C1 "next line".
+            Class::Space => matches!(
+                point,
+                0x9..=0xd
+                    | 0x20
+                    | 0x1680
+                    | 0x2000..=0x2006
+                    | 0x2008..=0x200a
+                    | 0x2028
+                    | 0x2029
+                    | 0x205f
+                    | 0x3000
+            ),
             // A space that is no control, and the tab.
             Class::Blank => self == '\t' || (self.is(Class::Space) && !self.is(Class::Cntrl)),
             // The two separators count as controls.
-            Class::Cntrl => self.is_control() || matches!(self, '\u{2028}' | '\u{2029}'),
+            Class::Cntrl => matches!(point, 0..=0x1f | 0x7f..=0x9f | 0x2028 | 0x2029),
             Class::Xdigit => self.is_ascii_hexdigit(),
-            Class::Print => !self.is(Class::Cntrl),
-            Class::Graph => !self.is(Class::Cntrl) && !self.is(Class::Space),
+            Class::Print => within(&PRINT, point),
+            Class::Graph => self.is(Class::Print) && !self.is(Class::Space),
             // Every graphic character that is no letter and no digit.
             Class::Punct => {
                 self.is(Class::Graph) && !self.is(Class::Alpha) && !self.is_ascii_digit()
@@ -135,108 +147,10 @@ impl Unit for char {
     }
 }
 
-/// A decimal digit of a script other than ASCII's — `٣`, `३`, `３`. The
-/// reference locale counts each as a letter (`alpha`), ISO C leaving
-/// `digit` to the ten of ASCII. The first and last of each run, as the C
-/// library has them (glibc 2.44).
-const OTHER_DECIMAL_DIGITS: [(u32, u32); 71] = [
-    (0x660, 0x669),
-    (0x6f0, 0x6f9),
-    (0x7c0, 0x7c9),
-    (0x966, 0x96f),
-    (0x9e6, 0x9ef),
-    (0xa66, 0xa6f),
-    (0xae6, 0xaef),
-    (0xb66, 0xb6f),
-    (0xbe6, 0xbef),
-    (0xc66, 0xc6f),
-    (0xce6, 0xcef),
-    (0xd66, 0xd6f),
-    (0xde6, 0xdef),
-    (0xe50, 0xe59),
-    (0xed0, 0xed9),
-    (0xf20, 0xf29),
-    (0x1040, 0x1049),
-    (0x1090, 0x1099),
-    (0x17e0, 0x17e9),
-    (0x1810, 0x1819),
-    (0x1946, 0x194f),
-    (0x19d0, 0x19d9),
-    (0x1a80, 0x1a89),
-    (0x1a90, 0x1a99),
-    (0x1b50, 0x1b59),
-    (0x1bb0, 0x1bb9),
-    (0x1c40, 0x1c49),
-    (0x1c50, 0x1c59),
-    (0xa620, 0xa629),
-    (0xa8d0, 0xa8d9),
-    (0xa900, 0xa909),
-    (0xa9d0, 0xa9d9),
-    (0xa9f0, 0xa9f9),
-    (0xaa50, 0xaa59),
-    (0xabf0, 0xabf9),
-    (0xff10, 0xff19),
-    (0x104a0, 0x104a9),
-    (0x10d30, 0x10d39),
-    (0x10d40, 0x10d49),
-    (0x11066, 0x1106f),
-    (0x110f0, 0x110f9),
-    (0x11136, 0x1113f),
-    (0x111d0, 0x111d9),
-    (0x112f0, 0x112f9),
-    (0x11450, 0x11459),
-    (0x114d0, 0x114d9),
-    (0x11650, 0x11659),
-    (0x116c0, 0x116c9),
-    (0x116d0, 0x116e3),
-    (0x11730, 0x11739),
-    (0x118e0, 0x118e9),
-    (0x11950, 0x11959),
-    (0x11bf0, 0x11bf9),
-    (0x11c50, 0x11c59),
-    (0x11d50, 0x11d59),
-    (0x11da0, 0x11da9),
-    (0x11de0, 0x11de9),
-    (0x11f50, 0x11f59),
-    (0x16130, 0x16139),
-    (0x16a60, 0x16a69),
-    (0x16ac0, 0x16ac9),
-    (0x16b50, 0x16b59),
-    (0x16d70, 0x16d79),
-    (0x1ccf0, 0x1ccf9),
-    (0x1d7ce, 0x1d7ff),
-    (0x1e140, 0x1e149),
-    (0x1e2f0, 0x1e2f9),
-    (0x1e4f0, 0x1e4f9),
-    (0x1e5f1, 0x1e5fa),
-    (0x1e950, 0x1e959),
-    (0x1fbf0, 0x1fbf9),
-];
-
-fn is_other_decimal_digit(character: char) -> bool {
-    let point = character as u32;
-    point >= 0x660
-        && OTHER_DECIMAL_DIGITS
-            .binary_search_by(|&(first, last)| {
-                if last < point {
-                    std::cmp::Ordering::Less
-                } else if first > point {
-                    std::cmp::Ordering::Greater
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .is_ok()
-}
-
-/// A title-case letter: a digraph with its first letter capital (`ǅ`), or
-/// a Greek capital with the iota beside it (`ᾈ`). All thirty-one.
-fn is_title_case(character: char) -> bool {
-    matches!(
-        character as u32,
-        0x1c5 | 0x1c8 | 0x1cb | 0x1f2 | 0x1f88..=0x1f8f | 0x1f98..=0x1f9f | 0x1fa8..=0x1faf
-            | 0x1fbc | 0x1fcc | 0x1ffc
-    )
+/// Whether `point` is in the class `edges` describes: the code points at
+/// which membership changes, in order ([`reference_classes`]).
+fn within(edges: &[u32], point: u32) -> bool {
+    edges.partition_point(|&edge| edge <= point) % 2 == 1
 }
 
 /// A POSIX character class, `[:name:]` inside a bracket expression.
@@ -592,24 +506,22 @@ mod tests {
                 character as u32
             );
         }
-        // Every run of the table is found, and nothing beside it.
-        assert!(OTHER_DECIMAL_DIGITS
-            .windows(2)
-            .all(|pair| pair[0].1 < pair[1].0));
-        for &(first, last) in &OTHER_DECIMAL_DIGITS {
-            for point in [first, last] {
-                assert!(is_other_decimal_digit(char::from_u32(point).unwrap()));
-            }
-            for point in [first - 1, last + 1] {
+        // cr-uv2-6: a code point no character is assigned to is in no
+        // class — U+0378 was printable, a graphic character and
+        // punctuation here, and is none of them to `find`. Its neighbours
+        // are letters.
+        for class in [
+            Alpha, Digit, Alnum, Upper, Lower, Space, Blank, Cntrl, Xdigit, Print, Graph, Punct,
+        ] {
+            for unassigned in ['\u{378}', '\u{379}', '\u{e0080}', '\u{10ffff}'] {
                 assert!(
-                    char::from_u32(point).is_none_or(|beside| !is_other_decimal_digit(beside))
-                        || OTHER_DECIMAL_DIGITS
-                            .iter()
-                            .any(|&(a, b)| a <= point && point <= b),
-                    "U+{point:04X}"
+                    !unassigned.is(class),
+                    "U+{:04X} {class:?}",
+                    unassigned as u32
                 );
             }
         }
+        assert!('\u{377}'.is(Print) && '\u{377}'.is(Alpha) && '\u{37a}'.is(Print));
         // And through a pattern, as the command is given it.
         let found = |pattern: &str, name: &str| {
             NamePattern::new(pattern.as_bytes(), false)
@@ -620,13 +532,54 @@ mod tests {
         assert!(!found("*[[:space:]]*", "nb\u{a0}sp"));
         assert!(found("*[[:punct:]]*", "nb\u{a0}sp"));
         assert!(found("d[[:alpha:]]", "d٣") && !found("d[[:digit:]]", "d٣"));
+        assert!(!found("[[:print:]]", "\u{378}") && found("[[:print:]]", "\u{377}"));
+        assert!(
+            found("[![:print:]]", "\u{378}"),
+            "one character, in no class"
+        );
     }
 
-    /// cr-uv1-7, where the reference is at hand: for EVERY code point the
-    /// C library's `C.UTF-8` tables know, each class here is the class
-    /// there, and `-iname`'s lowercase is its `towlower`. A code point
-    /// those tables hold no character for says nothing either way: this
-    /// build's Unicode data may be newer than the library's.
+    /// cr-uv2-6: the tables are the ones that were generated — each in
+    /// order, each holding the count of code points written beside it —
+    /// so an edit to one does not pass for the reference.
+    #[test]
+    fn the_reference_tables_are_whole() {
+        use reference_classes::*;
+        for (name, table, members) in [
+            ("alpha", &ALPHA[..], ALPHA_MEMBERS),
+            ("upper", &UPPER[..], UPPER_MEMBERS),
+            ("lower", &LOWER[..], LOWER_MEMBERS),
+            ("print", &PRINT[..], PRINT_MEMBERS),
+        ] {
+            assert!(table.len().is_multiple_of(2), "{name}");
+            assert!(table.windows(2).all(|pair| pair[0] < pair[1]), "{name}");
+            assert!(table.last().is_some_and(|&last| last <= 0x110000), "{name}");
+            let held: u32 = table.chunks(2).map(|run| run[1] - run[0]).sum();
+            assert_eq!(held, members, "{name}");
+            // `within` and the runs agree at every edge.
+            for run in table.chunks(2) {
+                assert!(within(table, run[0]) && within(table, run[1] - 1), "{name}");
+                assert!(!within(table, run[1]), "{name}");
+                assert!(run[0] == 0 || !within(table, run[0] - 1), "{name}");
+            }
+        }
+        // The counts of glibc 2.44, the reference these guards were
+        // measured against; a regenerated table changes them on purpose.
+        assert_eq!(READ_FROM, "glibc 2.44");
+        assert_eq!(
+            (ALPHA_MEMBERS, UPPER_MEMBERS, LOWER_MEMBERS, PRINT_MEMBERS),
+            (148_181, 2_037, 2_599, 297_267)
+        );
+    }
+
+    /// cr-uv1-7 and cr-uv2-6, where the reference is at hand: for EVERY
+    /// code point — the ones no character is assigned to among them —
+    /// each class here is the C library's under `C.UTF-8`. That is asked
+    /// when this machine's library is the one the tables were read from;
+    /// a library of another version is compared only where it and the
+    /// tables both hold a character, and the test says so. `-iname`'s
+    /// lowercase, which is the standard library's, is compared with
+    /// `towlower` wherever the library holds a character.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_classes_are_the_c_librarys_under_c_utf8() {
@@ -666,19 +619,39 @@ mod tests {
         // SAFETY: a scalar value, a description from this locale, and the
         // locale itself, for each call.
         let theirs = |point: u32, class: c_ulong| unsafe { iswctype_l(point, class, locale) } != 0;
-        let (mut known, mut wrong) = (0u32, Vec::new());
+        // SAFETY: the C library's own version string, static and
+        // NUL-terminated.
+        let library = format!(
+            "glibc {}",
+            unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) }.to_string_lossy()
+        );
+        let the_reference = library == reference_classes::READ_FROM;
+        if !the_reference {
+            eprintln!(
+                "this machine's C library is {library}; the tables are {}'s: compared only \
+                 where both hold a character",
+                reference_classes::READ_FROM
+            );
+        }
+        let (mut known, mut compared, mut wrong) = (0u32, 0u32, Vec::new());
         for point in 0..=0x10FFFF {
             let Some(character) = char::from_u32(point) else {
                 continue;
             };
-            if !theirs(point, print) && !theirs(point, cntrl) {
+            let held_there = theirs(point, print) || theirs(point, cntrl);
+            let held_here = character.is(Class::Print) || character.is(Class::Cntrl);
+            known += u32::from(held_there);
+            if !the_reference && !(held_there && held_here) {
                 continue;
             }
-            known += 1;
+            compared += 1;
             for &(class, description) in &classes {
                 if character.is(class) != theirs(point, description) {
                     wrong.push(format!("U+{point:04X} {class:?}"));
                 }
+            }
+            if !held_there {
+                continue;
             }
             // SAFETY: as above.
             if Unit::lower(character) as u32 != unsafe { towlower_l(point, locale) } {
@@ -688,6 +661,9 @@ mod tests {
         // SAFETY: made above, used no more.
         unsafe { libc::freelocale(locale) };
         assert!(known > 100_000, "the library knew {known} code points");
+        if the_reference {
+            assert_eq!(compared, 0x110000 - 0x800, "every code point");
+        }
         assert!(
             wrong.is_empty(),
             "{} differ from the C library, the first: {:?}",

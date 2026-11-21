@@ -1220,15 +1220,7 @@ impl Blit for BlitService {
         // path kept for the system to read.
         let typed_start = typed_bytes(&req.start_path, req.raw_start_path.as_deref());
         let start = read_start(typed_start)?;
-        // The start's own name, for the name tests: the last name of the
-        // path asked for AS TYPED — `.` for `dir/.`, as `find` reads it —
-        // and the module's when the path is the module.
-        let typed_last = blit_core::admin::operand::final_name(typed_start);
-        let start_name = match start.rel.file_name() {
-            Some(_) if typed_last == b"." => b".".to_vec(),
-            Some(name) => blit_core::find::name_bytes(name).into_owned(),
-            None => module.name.clone().into_bytes(),
-        };
+        let start_name = start_name(typed_start, &start.rel, &module.name);
         let mut options = blit_core::find::FindOptions {
             max_depth: req.max_depth,
             follow_start: req.follow_start,
@@ -1465,6 +1457,54 @@ fn outcome_from_status<T>(result: &Result<T, Status>) -> (bool, Option<String>) 
     match result {
         Ok(_) => (true, None),
         Err(status) => (false, Some(status.message().to_string())),
+    }
+}
+
+/// The start's own name, for `find`'s name tests: the last name of the
+/// path AS TYPED, which is `.` whenever the path was typed with a final
+/// `.` — `dir/.`, and the module itself as `HOST:/module/.` (cr-uv2-6:
+/// that one was given the module's name, so `-name .` left the start out
+/// and `-name module` took it, each the other way round from `find`). A
+/// path that ends in a name has that name, and the module typed as itself
+/// has the module's.
+fn start_name(typed: &[u8], rel: &std::path::Path, module: &str) -> Vec<u8> {
+    if blit_core::admin::operand::final_name(typed) == b"." {
+        return b".".to_vec();
+    }
+    match rel.file_name() {
+        Some(name) => blit_core::find::name_bytes(name).into_owned(),
+        None => module.as_bytes().to_vec(),
+    }
+}
+
+#[cfg(test)]
+mod start_name_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// cr-uv2-6: what GNU find 4.11 calls its start, for each way of
+    /// typing it (measured in a directory `m`, 2026-11-21).
+    #[test]
+    fn the_start_is_named_as_find_names_it() {
+        for (typed, rel, name) in [
+            ("", ".", "m"),
+            ("/", ".", "m"),
+            (".", ".", "."),
+            ("./", ".", "."),
+            (".//", ".", "."),
+            ("./.", ".", "."),
+            ("sub", "sub", "sub"),
+            ("sub/", "sub", "sub"),
+            ("sub/.", "sub", "."),
+            ("sub/./", "sub", "."),
+            ("./sub", "sub", "sub"),
+        ] {
+            assert_eq!(
+                start_name(typed.as_bytes(), Path::new(rel), "m"),
+                name.as_bytes(),
+                "{typed:?}"
+            );
+        }
     }
 }
 

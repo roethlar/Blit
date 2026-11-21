@@ -396,6 +396,13 @@ none of the options it had.**
   '\n' blit rm -y` removes it. `find` keeps every `/` typed after its
   path in what it prints below it (`dir//` prints `dir//sub`), as `find`
   does.
+- **`[:class:]` in a `-name` pattern is the reference locale's**, by its
+  own tables: the classes of `C.UTF-8` as the C library has them (glibc
+  2.44), for every code point. A code point no character is assigned to
+  is in no class — `[[:print:]]` matched it. And a start typed with a
+  final `.` is named `.` for `-name`, the module's root included:
+  `blit find HOST:/module/. -maxdepth 0 -name .` prints it, as `find`
+  does.
 - **`-type f|d|l`** and **`-maxdepth N`** as in `find`. A symbolic link is
   an entry of its own (`-type l`) and is never followed — except the path
   given when it is typed with a `/` after it, which names the directory

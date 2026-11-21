@@ -483,6 +483,117 @@ fn find_equals_the_system_find() {
     }
 }
 
+/// cr-uv2-6, where the system command IS the reference. Two tests chose
+/// otherwise than `find`:
+///
+/// - the module typed with a final `.` — `HOST:/module/.` — was given the
+///   module's name, so `-name .` left the start out and `-name module`
+///   took it; `find dir/.` names its start `.`;
+/// - `[[:print:]]` matched a name that is a code point no character is
+///   assigned to (U+0378), which is in no class of `find`'s.
+#[cfg(target_os = "linux")]
+#[test]
+fn find_names_its_start_and_reads_a_class_as_the_system_find_does() {
+    let ctx = TestContext::new();
+    write(&ctx.module_dir, "sub/f");
+    // The system's `find` sees the directory the module is served from,
+    // by that directory's name; the module's name stands for it here.
+    let served = ctx.module_dir.file_name().unwrap().to_str().unwrap();
+    let printed = |out: &[u8]| !out.iter().all(u8::is_ascii_whitespace);
+    for after in [
+        "", ".", "./", ".//", "./.", "sub", "sub/.", "sub/./", "./sub",
+    ] {
+        for name in [".", "OWN", "sub", "*", ".*", "?", "./"] {
+            let system = Command::new("find")
+                .arg(format!("{served}/{after}"))
+                .args(["-maxdepth", "0", "-name"])
+                .arg(name.replace("OWN", served))
+                .current_dir(ctx.module_dir.parent().unwrap())
+                .env("LC_ALL", "C.UTF-8")
+                .stdin(Stdio::null())
+                .output()
+                .expect("the system find");
+            let ours = blit(
+                &ctx,
+                &[
+                    "find",
+                    &remote(&ctx, after),
+                    "-maxdepth",
+                    "0",
+                    "-name",
+                    &name.replace("OWN", "test"),
+                ],
+            );
+            assert_eq!(
+                printed(&ours.stdout),
+                printed(&system.stdout),
+                "start '{after}' -name '{name}'\n{}",
+                ours.all()
+            );
+            assert_eq!(
+                ours.code,
+                system.status.code(),
+                "start '{after}' -name '{name}'"
+            );
+        }
+    }
+
+    // One character each: unassigned, the letter before it, the greek
+    // question mark after, a control, a space that is no `space`.
+    for name in [
+        "\u{378}",
+        "\u{377}",
+        "\u{37e}",
+        "\u{85}",
+        "\u{a0}",
+        "a",
+        "\u{e0080}",
+    ] {
+        write(&ctx.module_dir, &format!("classes/{name}"));
+    }
+    for class in [
+        "alpha", "alnum", "upper", "lower", "space", "blank", "cntrl", "print", "graph", "punct",
+    ] {
+        for pattern in [format!("[[:{class}:]]"), format!("[![:{class}:]]")] {
+            let system = Command::new("find")
+                .args(["classes", "-name", &pattern])
+                .current_dir(&ctx.module_dir)
+                .env("LC_ALL", "C.UTF-8")
+                .stdin(Stdio::null())
+                .output()
+                .expect("the system find");
+            let ours = blit(&ctx, &["find", &remote(&ctx, "classes"), "-name", &pattern]);
+            let mut theirs: Vec<String> = String::from_utf8_lossy(&system.stdout)
+                .lines()
+                .map(|line| format!("{:x?}", line.as_bytes()))
+                .collect();
+            theirs.sort();
+            let module = remote(&ctx, "");
+            let mut found: Vec<String> = String::from_utf8_lossy(&ours.stdout)
+                .lines()
+                .map(|line| {
+                    format!(
+                        "{:x?}",
+                        line.strip_prefix(&module).unwrap_or(line).as_bytes()
+                    )
+                })
+                .collect();
+            found.sort();
+            assert_eq!(found, theirs, "-name '{pattern}'\n{}", ours.all());
+        }
+    }
+    // The reviewer's: a name that is U+0378 is not printable.
+    let ours = blit(
+        &ctx,
+        &["find", &remote(&ctx, "classes"), "-name", "[[:print:]]"],
+    );
+    assert!(
+        !ours.lines().iter().any(|line| line.ends_with('\u{378}')),
+        "{}",
+        ours.all()
+    );
+}
+
 /// cr-uv1-4: what `find` prints can be given back. A name that is not
 /// text is printed by its bytes; those bytes are a start `find` takes, a
 /// literal `-name` pattern it matches, and an operand `rm` removes — each
