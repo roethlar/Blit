@@ -1,9 +1,9 @@
 # cr-ecm12-1: A retry of a child took a file of its name for it
 
 **Severity**: HIGH — a retry overwrites a file at the destination's root that was never part of the run, and exits 0
-**Status**: Fixed, awaiting review
+**Status**: Verified — `exclude-case-r13` (Codex openreview, 2026-11-21) reviewed `c99ad483..bd84649f`, the five `exclude-case-r12` fixes, with `guard_confirmed: true`: "The change correctly distinguishes a single-file source from a same-named child … and versions the new retry semantics for daemon peers. I would keep those decisions." (What a retry does with a name that is not text, in the same code, is cr-ecm13-3)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm12-1`)
+**Commit**: `07bf16c1`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r12` over `4d0f1a68..c5bab07a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r12.codex.md`. It completes cr-ecm11-1.
 
 ## Evidence

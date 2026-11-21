@@ -1,9 +1,9 @@
 # cr-ecm12-5: A pattern beside the one shown could make the advertised alternative impossible
 
 **Severity**: MEDIUM — the question offers, by example, an option that refuses the same command
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r13` (Codex openreview, 2026-11-21) reviewed `c99ad483..bd84649f`, the five `exclude-case-r12` fixes, with `guard_confirmed: true`. The filter that is validated leaves out an absolute exclude that lies outside the source, and the command validates it: `*Cache` beside such a pattern, an `s` inside 249 brace pairs, was offered `cache, CACHE`, and the command with `--ignore-case` exits 1. The remaining work is cr-ecm13-6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm12-5`)
+**Commit**: `8f1fe40e`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r12` over `4d0f1a68..c5bab07a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r12.codex.md`. It completes cr-ecm11-4.
 
 ## Evidence

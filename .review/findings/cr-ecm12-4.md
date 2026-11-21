@@ -1,9 +1,9 @@
 # cr-ecm12-4: The line still printed a text other than the name it had checked
 
 **Severity**: MEDIUM — the question names `[A]` as gained where the file the option's mirror deletes is `xA`
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r13` (Codex openreview, 2026-11-21) reviewed `c99ad483..bd84649f`, the five `exclude-case-r12` fixes, with `guard_confirmed: true`. A spelling is printed when one of its own names showed the change; with `--exclude '[Aa]' --include '{a,b}'` the line said `--ignore-case would also match {A,B}`, and only `B` is treated otherwise — `A` is kept by both runs. The remaining work is cr-ecm13-7
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm12-4`)
+**Commit**: `9ae70955`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r12` over `4d0f1a68..c5bab07a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r12.codex.md`. It completes cr-ecm11-3.
 
 ## Evidence

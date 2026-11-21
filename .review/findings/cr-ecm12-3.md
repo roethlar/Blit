@@ -1,9 +1,9 @@
 # cr-ecm12-3: A destination directory passed for a file already copied
 
 **Severity**: HIGH — `copy` reports a file copied, exit 0, where a directory stands in its place and nothing was written
-**Status**: Fixed, awaiting review
+**Status**: Verified — `exclude-case-r13` (Codex openreview, 2026-11-21) reviewed `c99ad483..bd84649f`, the five `exclude-case-r12` fixes, with `guard_confirmed: true`: the change "requires a regular destination file before declaring a copy current"; it was the reviewer's own red/green proof
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm12-3`)
+**Commit**: `59874302`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r12` over `4d0f1a68..c5bab07a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r12.codex.md`. Older than the plans under review; found through cr-ecm11-1's and -2's guards.
 
 ## Evidence

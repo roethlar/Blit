@@ -1,9 +1,9 @@
 # cr-ecm12-2: A retry under `--ignore-existing` replaced whatever stood where its incomplete copy had been
 
 **Severity**: HIGH — a retry overwrites a file someone put at the destination, under the option that promises to keep it, and exits 0
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r13` (Codex openreview, 2026-11-21) reviewed `c99ad483..bd84649f`, the five `exclude-case-r12` fixes, with `guard_confirmed: true`. The mark does not bind the repair to the file: "I replaced a real partial with a different 20-byte file that preserved its modification time. `jobs retry` overwrote it with 128 KiB and exited 0. Every run uses the same timestamp, and the check happens before the sink opens the file for writing." A copy that fails again in a retry leaves a record with no incomplete copy in it, and the retry after that exits 0 with the destination at zero bytes; so does a retry of a path this fix reported as kept. And with `--size-only` a stamped copy of the source's own length is "copied" with no bytes written — the sink compares again after the session ordered the repair. The remaining work is cr-ecm13-1, -4 and -5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm12-2`)
+**Commit**: `bd84649f`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r12` over `4d0f1a68..c5bab07a` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r12.codex.md`. Older than the plans under review (cr-jl4-1, cr-rework-1); found through cr-ecm11-2's guard.
 
 ## Evidence
