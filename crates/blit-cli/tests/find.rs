@@ -820,10 +820,12 @@ fn find_refuses_what_it_does_not_take_before_asking_anything() {
         (&["-newer", "x"][..], "-newer is not supported"),
         (&["-name", "x", "-o", "-name", "y"], "-o is not supported"),
         (&["!", "-name", "x"], "! is not supported"),
-        (&["-name", "x", "-delete"], "-delete is not supported"),
+        (&["-delete", "-name", "x"], "-delete must be the last word"),
         (&["-exec", "rm", "{}", ";"], "-exec is not supported"),
         (&["-print"], "-print is not supported"),
-        (&["-size", "+1M"], "-size is not supported"),
+        (&["-size", "+1b"], "`b' is not a unit blit find takes"),
+        (&["-mtime", "1.5"], "-mtime 1.5: expected [+|-]N"),
+        (&["-newer", "x"], "-newer is not supported"),
         (&["-type", "b"], "-type b is not supported"),
         (&["-name"], "missing argument to `-name'"),
         (&["-maxdepth", "x"], "-maxdepth x"),
@@ -959,4 +961,445 @@ fn find_stops_quietly_when_its_reader_goes() {
         Some(141),
         "as a command stopped by a closed pipe"
     );
+}
+
+/// The tree slice 4's guards walk: files of the sizes the units turn on,
+/// files of ages either side of a day's end, a directory that is not
+/// empty and a link, each named so that one pattern finds them all.
+#[cfg(unix)]
+fn sized_and_aged(root: &Path) {
+    let t = root.join("t");
+    fs::create_dir_all(t.join("sub/deep")).unwrap();
+    fs::create_dir_all(t.join("gone.tmp/inner")).unwrap();
+    for (name, bytes) in [
+        ("a.tmp", 0),
+        ("empty", 0),
+        ("one", 1),
+        ("b511", 511),
+        ("b512", 512),
+        ("b513", 513),
+        ("k1", 1024),
+        ("k1p", 1025),
+        ("k2", 2048),
+        ("m1", 1024 * 1024),
+        ("m1m", 1024 * 1024 - 1),
+        ("m1p", 1024 * 1024 + 1),
+    ] {
+        fs::write(t.join(name), vec![b'x'; bytes]).unwrap();
+    }
+    fs::write(t.join("gone.tmp/inner/f"), b"x").unwrap();
+    // A name that is not text: found, matched and removed as the name it
+    // is (AC-12).
+    {
+        use std::os::unix::ffi::OsStrExt;
+        fs::write(t.join(std::ffi::OsStr::from_bytes(b"bad\xff.tmp")), b"x").unwrap();
+    }
+    fs::write(t.join("sub/deep/x.tmp"), b"x").unwrap();
+    fs::write(t.join("sub/deep/keep.txt"), b"x").unwrap();
+    std::os::unix::fs::symlink("sub", t.join("link.tmp")).unwrap();
+    let hour = 60 * 60;
+    let now = filetime::FileTime::now().unix_seconds();
+    for (name, ago) in [
+        ("now", 0),
+        ("h23", 23 * hour),
+        ("h25", 25 * hour),
+        ("h47", 47 * hour),
+        ("h49", 49 * hour),
+        ("d10", 10 * 24 * hour + hour),
+        ("future", -hour),
+    ] {
+        let path = t.join("sub").join(name);
+        fs::write(&path, b"x").unwrap();
+        filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(now - ago, 0)).unwrap();
+    }
+}
+
+/// Every entry below `root`, as a sorted list of its paths.
+#[cfg(unix)]
+fn listed(root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            out.push(path.strip_prefix(root).unwrap().display().to_string());
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                walk(&path, root, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// The system `find`, in the reference locale, from `root`.
+#[cfg(target_os = "linux")]
+fn system_find(root: &Path, args: &[&str]) -> std::process::Output {
+    Command::new("find")
+        .args(args)
+        .current_dir(root)
+        .env("LC_ALL", "C.UTF-8")
+        .stdin(Stdio::null())
+        .output()
+        .expect("the system find")
+}
+
+/// Slice 4 (AC-5): `-size` and `-mtime` find what the system `find`
+/// finds, for each way a number can be written — the rounding to units,
+/// the whole days, a time still to come.
+#[cfg(target_os = "linux")]
+#[test]
+fn find_tests_size_and_age_as_the_system_find_does() {
+    let ctx = TestContext::new();
+    let system_root = ctx.workspace.join("system");
+    for root in [system_root.as_path(), ctx.module_dir.as_path()] {
+        sized_and_aged(root);
+    }
+    let mut expressions: Vec<Vec<&str>> = Vec::new();
+    for size in [
+        "0", "1", "2", "+1", "-1", "-2", "1c", "512c", "+512c", "-512c", "1k", "2k", "+1k", "-1k",
+        "-2k", "1M", "+1M", "-1M", "2M", "1G", "-1G", "0c", "+0",
+    ] {
+        expressions.push(vec!["-maxdepth", "1", "-type", "f", "-size", size]);
+    }
+    expressions.push(vec!["-size", "+0", "-type", "d"]);
+    expressions.push(vec!["-size", "+1k", "-size", "-2M"]);
+    expressions.push(vec!["-type", "l", "-size", "3c"]);
+    for days in ["0", "1", "2", "+0", "+1", "-1", "-2", "+9", "10"] {
+        expressions.push(vec!["-type", "f", "-name", "[dfhn]*", "-mtime", days]);
+    }
+    expressions.push(vec!["-mtime", "+0", "-size", "-2", "-type", "f"]);
+    for expression in &expressions {
+        let mut args = vec!["t"];
+        args.extend(expression);
+        let theirs = system_find(&system_root, &args);
+        let mut ours_args = vec!["find".to_string(), remote(&ctx, "t")];
+        ours_args.extend(expression.iter().map(|word| word.to_string()));
+        let ours_args: Vec<&str> = ours_args.iter().map(String::as_str).collect();
+        let ours = blit(&ctx, &ours_args);
+        let mut expected: Vec<String> = String::from_utf8_lossy(&theirs.stdout)
+            .lines()
+            .map(|line| format!("{}{}", remote(&ctx, ""), line))
+            .collect();
+        expected.sort();
+        assert_eq!(ours.lines(), expected, "{expression:?}\n{}", ours.all());
+        assert_eq!(ours.code, theirs.status.code(), "{expression:?}");
+    }
+}
+
+/// Slice 4 (AC-5, AC-12): `-delete` removes what the system `find`
+/// removes — contents before their directory, a link as the link, a
+/// directory that is not empty left with `find`'s own words and exit 1,
+/// the walk going on past it — and prints nothing else. And what the same
+/// expression lists without `-delete` is what `-delete` tries: the two
+/// differ by exactly the entries that would not go.
+#[cfg(target_os = "linux")]
+#[test]
+fn find_delete_removes_what_the_system_find_removes() {
+    let expressions: Vec<Vec<&str>> = vec![
+        vec!["-name", "*.tmp"],
+        vec!["-name", "*.tmp", "-type", "f"],
+        vec!["-maxdepth", "0"],
+        vec!["-name", "nothing"],
+        vec!["-name", "*.tmp", "-maxdepth", "1"],
+        vec!["-type", "d", "-name", "sub"],
+        vec!["-type", "d", "-name", "deep"],
+        vec![],
+        vec!["-size", "+1k"],
+        vec!["-type", "f", "-mtime", "+1"],
+        vec!["-type", "l"],
+    ];
+    for expression in &expressions {
+        let ctx = TestContext::new();
+        let system_root = ctx.workspace.join("system");
+        for root in [system_root.as_path(), ctx.module_dir.as_path()] {
+            sized_and_aged(root);
+        }
+        let mut words = vec!["find".to_string(), remote(&ctx, "t")];
+        words.extend(expression.iter().map(|word| word.to_string()));
+        let listing: Vec<&str> = words.iter().map(String::as_str).collect();
+        let would_try = blit(&ctx, &listing).lines();
+        let before = listed(&ctx.module_dir);
+
+        let mut theirs_args = vec!["t"];
+        theirs_args.extend(expression);
+        theirs_args.push("-delete");
+        let theirs = system_find(&system_root, &theirs_args);
+        let mut deleting = listing.clone();
+        deleting.extend(["-delete", "-y"]);
+        let ours = blit(&ctx, &deleting);
+
+        assert_eq!(
+            listed(&ctx.module_dir),
+            listed(&system_root),
+            "what is left, {expression:?}\n{}",
+            ours.all()
+        );
+        assert_eq!(
+            ours.code,
+            theirs.status.code(),
+            "{expression:?}\n{}",
+            ours.all()
+        );
+        assert!(ours.stdout.is_empty(), "nothing is printed: {}", ours.all());
+        let said = |text: &str, ours: bool| -> Vec<String> {
+            let mut lines: Vec<String> = text
+                .lines()
+                .map(|line| {
+                    if ours {
+                        line.replacen("blit find: ", "find: ", 1)
+                            .replace(&remote(&ctx, ""), "")
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect();
+            lines.sort();
+            lines
+        };
+        assert_eq!(
+            said(&ours.stderr, true),
+            said(&String::from_utf8_lossy(&theirs.stderr), false),
+            "{expression:?}"
+        );
+        // Listed, less what went, is what was said not to go.
+        let after = listed(&ctx.module_dir);
+        let went: Vec<String> = before
+            .iter()
+            .filter(|path| !after.contains(path))
+            .map(|path| format!("{}{}", remote(&ctx, ""), path))
+            .collect();
+        let mut stayed: Vec<String> = would_try
+            .iter()
+            .filter(|path| !went.contains(path))
+            .cloned()
+            .collect();
+        stayed.sort();
+        let mut reported: Vec<String> = ours
+            .stderr
+            .lines()
+            .filter_map(|line| {
+                let line = line.strip_prefix("blit find: cannot delete \u{2018}")?;
+                Some(line.split_once('\u{2019}')?.0.to_string())
+            })
+            .collect();
+        reported.sort();
+        assert_eq!(stayed, reported, "{expression:?}\n{}", ours.all());
+    }
+}
+
+/// Slice 4 (AC-5, AC-10): `-delete` asks once, before anything is sent.
+/// "No" stops it with nothing deleted and exit 0; nobody to answer stops
+/// it with nothing deleted, exit 1 and the option that skips the
+/// question; "yes" and `-y` go ahead.
+#[cfg(unix)]
+#[test]
+fn find_delete_asks_before_anything_is_removed() {
+    let ctx = TestContext::new();
+    sized_and_aged(&ctx.module_dir);
+    let target = remote(&ctx, "t");
+    let answered = |answer: Option<&str>, args: &[&str]| {
+        let mut cmd = Command::new(&ctx.cli_bin);
+        cmd.arg("--config-dir").arg(&ctx.config_dir).args(args);
+        match answer {
+            Some(text) => {
+                let path = ctx.workspace.join("answer.txt");
+                fs::write(&path, text).unwrap();
+                cmd.stdin(fs::File::open(&path).unwrap());
+            }
+            None => {
+                cmd.stdin(Stdio::null());
+            }
+        }
+        let output = run_with_timeout(cmd, Duration::from_secs(60));
+        (
+            output.status.code(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
+    };
+    let whole = listed(&ctx.module_dir);
+    let args = [
+        "find",
+        target.as_str(),
+        "-name",
+        "*.tmp",
+        "-type",
+        "f",
+        "-delete",
+    ];
+
+    let (code, said) = answered(None, &args);
+    assert_eq!(code, Some(1), "{said}");
+    assert!(
+        said.contains("Delete every entry this finds under"),
+        "{said}"
+    );
+    assert!(said.contains("pass -y"), "{said}");
+    assert_eq!(
+        listed(&ctx.module_dir),
+        whole,
+        "nothing was deleted\n{said}"
+    );
+
+    let (code, said) = answered(Some("n\n"), &args);
+    assert_eq!(code, Some(0), "{said}");
+    assert!(said.contains("Aborted."), "{said}");
+    assert_eq!(listed(&ctx.module_dir), whole);
+
+    let (code, said) = answered(Some("y\n"), &args);
+    assert_eq!(code, Some(0), "{said}");
+    let after_yes = listed(&ctx.module_dir);
+    assert!(
+        !after_yes.iter().any(|path| path.starts_with("t/bad")),
+        "the name that is not text went: {after_yes:?}"
+    );
+    assert!(
+        !after_yes.contains(&"t/a.tmp".to_string())
+            && !after_yes.contains(&"t/sub/deep/x.tmp".to_string())
+            && after_yes.contains(&"t/gone.tmp".to_string())
+            && after_yes.contains(&"t/link.tmp".to_string()),
+        "{after_yes:?}"
+    );
+
+    // `-y` as a word of the expression, and as the command's own option.
+    for args in [
+        vec!["find", target.as_str(), "-name", "k1", "-delete", "-y"],
+        vec!["find", "-y", target.as_str(), "-name", "k2", "-delete"],
+    ] {
+        let (code, said) = answered(None, &args);
+        assert_eq!(code, Some(0), "{args:?}: {said}");
+        assert!(!said.contains("Delete every entry"), "{args:?}: {said}");
+    }
+    let end = listed(&ctx.module_dir);
+    assert!(!end.contains(&"t/k1".to_string()) && !end.contains(&"t/k2".to_string()));
+}
+
+/// Slice 4 (AC-5): `-delete` is refused on a module nothing may change,
+/// before anything is read; and it never removes a module itself — what
+/// is in it goes, as `find . -delete` leaves `.`.
+#[cfg(unix)]
+#[test]
+fn find_delete_changes_no_read_only_module_and_removes_no_module() {
+    let read_only = TestContext::new_read_only();
+    sized_and_aged(&read_only.module_dir);
+    let whole = listed(&read_only.module_dir);
+    let ran = blit(
+        &read_only,
+        &[
+            "find",
+            &remote(&read_only, "t"),
+            "-name",
+            "*.tmp",
+            "-delete",
+            "-y",
+        ],
+    );
+    assert_ne!(ran.code, Some(0), "{}", ran.all());
+    assert!(ran.stderr.contains("read-only"), "{}", ran.all());
+    assert_eq!(listed(&read_only.module_dir), whole);
+    // It still lists.
+    let listing = blit(
+        &read_only,
+        &["find", &remote(&read_only, "t"), "-name", "a.tmp"],
+    );
+    assert_eq!(listing.code, Some(0), "{}", listing.all());
+
+    let ctx = TestContext::new();
+    sized_and_aged(&ctx.module_dir);
+    let ran = blit(&ctx, &["find", &remote(&ctx, ""), "-delete", "-y"]);
+    assert_eq!(ran.code, Some(0), "{}", ran.all());
+    assert!(ran.stderr.is_empty(), "{}", ran.all());
+    assert!(ctx.module_dir.is_dir(), "the module stays");
+    assert!(listed(&ctx.module_dir).is_empty(), "and nothing in it");
+}
+
+/// Slice 4 (AC-5): `-delete` does with its start what the system `find`
+/// does, for each way a start is typed — measured with GNU find 4.11.0,
+/// 2026-11-21. A start with a separator after it names the directory and
+/// goes as a directory or not at all; one whose last name is `.` loses
+/// what is in it and stays, `Invalid argument`; a link, a file and a
+/// directory typed plainly go as what they are; one that is not there is
+/// reported, and nothing is removed.
+///
+/// ONE difference, and it is deliberate (AC-12, and the rule `rm` has):
+/// nothing is removed THROUGH a link. `find link/ -delete` empties the
+/// directory the link points to and then says `Not a directory`; `blit
+/// find` says the same words with the same exit status, and removes
+/// nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn find_delete_starts_where_the_system_find_starts() {
+    let through_a_link = ["t/link.tmp/", "t/link.tmp/.", "t/link.tmp//"];
+    for (start, expression) in [
+        ("t/", &[][..]),
+        ("t/.", &[]),
+        ("t/sub/.", &[]),
+        ("t/sub/.", &["-name", "h*"]),
+        ("t/link.tmp", &[]),
+        ("t/link.tmp/", &[]),
+        ("t/link.tmp/.", &[]),
+        ("t/link.tmp//", &["-name", "h*"]),
+        ("t/broken", &[]),
+        ("t/broken/", &[]),
+        ("t/a.tmp", &[]),
+        ("t/a.tmp/", &[]),
+        ("t/missing", &[]),
+        ("t/sub/deep/", &[]),
+        ("t//sub", &[]),
+        ("t/gone.tmp", &["-maxdepth", "0"]),
+        ("t/gone.tmp/", &["-type", "f"]),
+    ] {
+        let ctx = TestContext::new();
+        let system_root = ctx.workspace.join("system");
+        for root in [system_root.as_path(), ctx.module_dir.as_path()] {
+            sized_and_aged(root);
+            std::os::unix::fs::symlink("nowhere", root.join("t/broken")).unwrap();
+        }
+        let before = listed(&ctx.module_dir);
+        let mut theirs_args = vec![start];
+        // Through a link, what `find` says is what it says of the start
+        // itself, whatever the tests: asked of every entry there.
+        if !through_a_link.contains(&start) {
+            theirs_args.extend(expression);
+        }
+        theirs_args.push("-delete");
+        let theirs = system_find(&system_root, &theirs_args);
+        let target = remote(&ctx, start);
+        let mut ours_args = vec!["find", target.as_str()];
+        ours_args.extend(expression);
+        ours_args.extend(["-delete", "-y"]);
+        let ours = blit(&ctx, &ours_args);
+        let what = format!("find {start} {expression:?} -delete\n{}", ours.all());
+        if through_a_link.contains(&start) {
+            assert_ne!(listed(&system_root), before, "find removes through it");
+            assert_eq!(
+                listed(&ctx.module_dir),
+                before,
+                "and here nothing goes: {what}"
+            );
+        } else {
+            assert_eq!(listed(&ctx.module_dir), listed(&system_root), "{what}");
+        }
+        assert_eq!(ours.code, theirs.status.code(), "{what}");
+        assert!(ours.stdout.is_empty(), "{what}");
+        let mut said: Vec<String> = ours
+            .stderr
+            .lines()
+            .map(|line| {
+                line.replacen("blit find: ", "find: ", 1)
+                    .replace(&remote(&ctx, ""), "")
+            })
+            .collect();
+        said.sort();
+        let mut they_said: Vec<String> = String::from_utf8_lossy(&theirs.stderr)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        they_said.sort();
+        assert_eq!(said, they_said, "{what}");
+    }
 }

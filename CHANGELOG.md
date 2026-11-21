@@ -21,7 +21,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `files_from_unnamed`; `client::connect_with_timeout` and
 `connect_transfer_client` return a `BlitClient<client::BlitChannel>`
 (the channel behind `client::BoundedResponses`). The wire
-protocol is contract 26: a peer on any other contract version (every 0.1.x
+protocol is contract 27: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -118,7 +118,7 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 26): the job ID rides the session-open and
+- Wire protocol (contract 27): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
@@ -486,20 +486,50 @@ none of the options it had.**
   an entry of its own (`-type l`) and is never followed — except the path
   given when it is typed with a `/` after it, which names the directory
   the link points to, as it does to `find`.
+- **`-size [+|-]N[c|k|M|G]`** and **`-mtime [+|-]N`**, counted as `find`
+  counts them: a size in units rounded UP — 512-byte blocks with no
+  letter, bytes with `c`, then `k`, `M`, `G` — so `-size -1k` finds only
+  what is empty and `-size 1k` anything from 1 to 1,024 bytes; an age in
+  whole 24-hour periods since the entry was last written, any part of
+  one dropped, by the daemon's clock. `+N` is more than N, `-N` less. On
+  Linux the lines equal the system `find`'s for each way of writing
+  either. Any other unit letter is refused by name.
+- **`-delete` removes what the tests hold for**, on the daemon's own
+  disk, and prints nothing but what it could not remove. What is in a
+  directory goes before the directory; a directory goes only when that
+  leaves it empty, and one that is not stays with `find`'s words
+  (`blit find: cannot delete ‘PATH’: Directory not empty`) and exit
+  status 1, the rest still removed. A symbolic link goes as the link. On
+  Linux what is left, what is said and the exit status equal the system
+  `find`'s, expression by expression and for each way a path is typed.
+  **It must be the last word**: in `find` a test written after `-delete`
+  does not limit it (`find d -delete -name '*.tmp'` removes all of `d`),
+  so anything after it is refused. **It asks once before anything is
+  removed**; `-y` skips the question, "no" removes nothing, and with
+  nobody to answer nothing is removed and the exit status is 1. A
+  read-only module refuses it, and a module itself is never removed
+  (`blit find HOST:/module/ -delete` empties it). The same expression
+  without `-delete` lists exactly what it would try to remove.
+- **One deliberate difference from `find`: nothing is removed through a
+  symbolic link.** `find link/ -delete` empties the directory the link
+  points to and then says `Not a directory`; `blit find HOST:/m/link/
+  -delete` says the same words with the same exit status and removes
+  nothing — the rule `blit rm -r HOST:/m/link/` has.
 - **The old options are refused, each with what replaces it**:
   `--pattern X` → `-name 'X'` (it was a glob against the whole path below
   the module, with `**/`; `-name` is against the entry's name, at any
   depth); `--case-insensitive` → `-iname`; `--files` → `-type f`;
   `--dirs` → `-type d`; `--limit N` → pipe through `head -n N`.
 - **Any other word of `find` is refused by name** before anything is
-  asked of a daemon — `-o`, `!`, parentheses, `-newer`, `-size`, `-exec`,
+  asked of a daemon — `-o`, `!`, parentheses, `-newer`, `-mmin`, `-exec`,
   `-print`, a `-type` other than the three. A test that was dropped in
   silence would find more than was asked for.
 - A directory the daemon cannot read is listed, reported in `find`'s
   words (`blit find: ‘PATH’: Permission denied`) and makes the exit status
   1; the walk goes on. It used to be left out without a word. A name that
   is not valid UTF-8 is printed, and matched, by its own bytes. `--json`
-  gives `paths`, `raw_paths` and `failures`.
+  gives `paths`, `raw_paths` and `failures`; a failure to delete has
+  `"deleting": true`.
 - The walk asks the filesystem nothing no test needs: an entry's kind
   comes with its directory's listing, and paths travel in batches. When
   the reader goes away (`blit find … | head -1`) the command stops
@@ -507,10 +537,13 @@ none of the options it had.**
 - The request is new on the wire (`FindPaths`) and compares the contract
   version before reading anything; the old `Find` request is gone.
 - For a program built on `blit-core`: `admin::find::stream` takes a
-  `FindQuery` (name tests, kinds, depth) and yields `FindEvent::Found`
-  paths and failures, each an `EntryPath`; `FindParams` and the
+  `FindQuery` (name tests, kinds, depth, size and age tests, `delete`)
+  and yields `FindEvent::Found` paths and failures, each an `EntryPath`,
+  a failure saying whether it was a deletion's; `FindParams` and the
   `FindEntry` row are gone. The walk and the matcher are public as
-  `blit_core::find` and `blit_core::find_name`.
+  `blit_core::find` and `blit_core::find_name`, and
+  `blit_core::deletion::Remover` removes an entry by its name in a
+  directory it holds open.
 
 ### Fixes
 

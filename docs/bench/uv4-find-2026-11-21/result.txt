@@ -1,0 +1,33 @@
+== the tree on tmpfs
+system find, every path                      best    34.1   median    41.6   (46, 43, 42, 37, 34)
+system find, -size -1 (every entry asked)    best   131.0   median   132.4   (132, 137, 132, 131, 133)
+system find, -type f -mtime -1 (files asked) best   132.2   median   133.3   (140, 133, 134, 132, 133)
+system find, -name 'f00*' -size -1 (20,000 asked) best    45.8   median    48.2   (55, 48, 46, 48, 57)
+system find -delete                          best   247.8   median   251.8   (252, 248, 255, 255, 251)
+system find -name 'f00*' -delete             best    71.2   median    73.4   (71, 72, 76, 73, 75)
+blit find (before), every path               best    68.9   median    79.4   (82, 79, 80, 71, 69)
+blit find (after), every path                best    73.2   median    76.0   (76, 77, 78, 76, 73)
+blit find (after), -size -1 (every entry asked) best   170.8   median   173.9   (178, 177, 174, 172, 171)
+blit find (after), -type f -mtime -1 (files asked) best   171.0   median   171.8   (172, 175, 173, 172, 171)
+blit find (after), -name 'f00*' -size -1 (20,000 asked) best    42.9   median    47.1   (56, 52, 47, 44, 43)
+blit find (after) -delete                    best   304.5   median   307.3   (307, 307, 307, 307, 304)
+blit find (after) -name 'f00*' -delete       best    76.8   median    77.3   (77, 77, 77, 78, 77)
+blit rm -rf (after), for scale               best   247.5   median   249.2   (250, 249, 249, 252, 247)
+the tree's filesystem: tmpfs
+
+== the tree on Btrfs
+system find, every path                      best    25.5   median    26.6   (29, 26, 27, 27, 26)
+system find, -size -1 (every entry asked)    best   140.4   median   145.3   (146, 147, 145, 143, 140)
+system find, -type f -mtime -1 (files asked) best   138.5   median   139.6   (140, 139, 141, 140, 138)
+system find, -name 'f00*' -size -1 (20,000 asked) best    40.0   median    42.0   (55, 44, 42, 40, 41)
+system find -delete                          best  1120.5   median  1144.7   (1125, 1120, 1151, 1145, 1204)
+system find -name 'f00*' -delete             best   152.6   median   152.9   (153, 153, 153, 153, 154)
+blit find (before), every path               best    57.7   median    72.1   (79, 58, 73, 72, 61)
+blit find (after), every path                best    58.7   median    72.9   (67, 73, 74, 73, 59)
+blit find (after), -size -1 (every entry asked) best   187.4   median   192.9   (198, 193, 187, 193, 190)
+blit find (after), -type f -mtime -1 (files asked) best   183.5   median   186.9   (187, 190, 186, 183, 187)
+blit find (after), -name 'f00*' -size -1 (20,000 asked) best    38.2   median    39.6   (42, 40, 40, 39, 38)
+blit find (after) -delete                    best  1176.8   median  1182.0   (1220, 1221, 1178, 1177, 1182)
+blit find (after) -name 'f00*' -delete       best   155.6   median   157.7   (158, 157, 159, 158, 156)
+blit rm -rf (after), for scale               best  1107.9   median  1126.6   (1127, 1108, 1175, 1127, 1115)
+the tree's filesystem: btrfs

@@ -499,17 +499,29 @@ fn wire_path(relative: &Path) -> String {
 /// A start that is not there is one failure for the start itself, not a
 /// failed request: the asker prints it in `find`'s words and exits 1, as
 /// for any other entry.
+///
+/// `delete` (slice 4, `-delete`): what the tests hold for is REMOVED as
+/// the walk gives it — contents before their directory — and nothing is
+/// sent but what could not be: an entry that would not go, in the
+/// system's words, the walk going on past it.
+///
+/// Nothing is removed THROUGH a link — the rule `rm` has (cr-uv1-2). A
+/// start that is a link typed with a separator after it (`find link/
+/// -delete`) is told in `find`'s words, with `find`'s exit status, and
+/// what it points to is left whole, where `find` empties it first.
 pub(crate) fn stream_find(
     module_root: PathBuf,
     start: TypedOperand,
     start_name: Vec<u8>,
     options: FindOptions,
+    delete: Option<DeleteFound>,
     sender: &FindSender,
 ) -> Result<(), Status> {
     // As typed (cr-uv1-1): `find link/` and `find link/.` start in the
     // directory the link points to, and `find doc/` of a file is
     // `Not a directory`.
     let start_abs = start.below(&module_root);
+    let start_as_directory = start.as_directory;
     // F2: containment check before any filesystem operation. The walk
     // follows no link below the start, and a start that is itself a link
     // out of the module is refused here, whether or not it would be
@@ -522,19 +534,59 @@ pub(crate) fn stream_find(
         sent: std::time::Instant::now(),
         sender,
     };
-    let failure = |relative: &Path, error: &std::io::Error| {
+    let failure = |relative: &Path, error: &std::io::Error, deleting: bool| {
         find_paths_reply::Reply::Failure(FindFailure {
             relative_path: wire_path(relative),
             raw_relative_path: blit_core::raw_name::raw_relative_bytes(relative),
             reason: os_reason(error),
+            deleting,
         })
     };
+    if let Some(asked) = &delete {
+        // The start by its name alone, with no separator or `.` after it
+        // to make the system look through a link standing there.
+        let named: PathBuf = start_abs.components().collect();
+        if start_as_directory
+            && !asked.start_is_module
+            && fs::symlink_metadata(&named).is_ok_and(|named| named.file_type().is_symlink())
+            && fs::metadata(&named).is_ok_and(|target| target.is_dir())
+        {
+            // What `find` says of such a start once it has emptied the
+            // directory: `Not a directory`, or `Invalid argument` for a
+            // start ending in `.`. Here it is said with nothing removed.
+            let reason = if asked.start_ends_in_dot {
+                "Invalid argument"
+            } else {
+                "Not a directory"
+            };
+            return found
+                .reply(failure(Path::new(""), &std::io::Error::other(reason), true))
+                .map_err(|Stopped| response_channel_closed("sending find result"));
+        }
+    }
+    let mut deleting = delete.map(|asked| Deleting {
+        // The module's root as the daemon holds it: a path with no link
+        // in it (`runtime.rs` resolves it once, when the module is read).
+        remover: blit_core::deletion::Remover::below(&module_root),
+        start_at: asked.start_is_module.then(|| module_root.clone()),
+        start: start_abs.clone(),
+        start_as_directory,
+        asked,
+    });
     let walked = {
         let mut emit = |event: FindEvent| match event {
-            FindEvent::Found(path) => found.add(&path),
+            FindEvent::Found(path, kind) => match &mut deleting {
+                None => found.add(&path),
+                Some(deleting) => {
+                    match deleting.remove(&path, kind == Some(blit_core::find::Kind::Directory)) {
+                        Ok(()) => Ok(()),
+                        Err(error) => found.reply(failure(&path, &error, true)),
+                    }
+                }
+            },
             FindEvent::Failure(failed) => {
                 found.send()?;
-                found.reply(failure(&failed.relative_path, &failed.error))
+                found.reply(failure(&failed.relative_path, &failed.error, false))
             }
         };
         find(&start_abs, &start_name, &options, &mut emit)
@@ -544,8 +596,72 @@ pub(crate) fn stream_find(
         Ok(()) => found.send().map_err(|Stopped| closed()),
         Err(FindEnd::Stopped(Stopped)) => Err(closed()),
         Err(FindEnd::Start(error)) => found
-            .reply(failure(Path::new(""), &error))
+            .reply(failure(Path::new(""), &error, false))
             .map_err(|Stopped| closed()),
+    }
+}
+
+/// What `find -delete` is told beyond the walk (slice 4).
+pub(crate) struct DeleteFound {
+    /// The start is the module itself, which is never removed.
+    pub start_is_module: bool,
+    /// The start was typed with `.` for its last name: `find t/. -delete`
+    /// removes what is in `t`, and cannot remove `t/.`.
+    pub start_ends_in_dot: bool,
+}
+
+/// `find -delete` on this daemon's disk: each entry found is removed by
+/// its name in the directory that holds it (`blit_core::deletion::Remover`).
+struct Deleting {
+    remover: blit_core::deletion::Remover,
+    /// The start, as the walk was given it.
+    start: PathBuf,
+    /// The start was typed with a separator after it.
+    start_as_directory: bool,
+    asked: DeleteFound,
+    /// Where the start is: its own name, in the directory that holds it
+    /// by a path with no link in it — found once. The start's own name is
+    /// NOT resolved: were a link put there while the walk runs, each
+    /// entry below it would fail to go, and none would go through it.
+    start_at: Option<PathBuf>,
+}
+
+impl Deleting {
+    /// Where the start is, to remove it or what is below it.
+    fn start_at(&mut self) -> std::io::Result<&Path> {
+        if self.start_at.is_none() {
+            let (Some(above), Some(name)) = (self.start.parent(), self.start.file_name()) else {
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+            };
+            self.start_at = Some(fs::canonicalize(above)?.join(name));
+        }
+        Ok(self.start_at.as_deref().expect("set just above"))
+    }
+
+    /// Remove the entry `relative` below the start (empty: the start).
+    fn remove(&mut self, relative: &Path, directory: bool) -> std::io::Result<()> {
+        if !relative.as_os_str().is_empty() {
+            let target = self.start_at()?.join(relative);
+            return self.remover.remove(&target, directory);
+        }
+        // The module itself is never removed, and is passed over without
+        // a word — as `find . -delete` passes over `.`, with everything
+        // in it gone.
+        if self.asked.start_is_module {
+            return Ok(());
+        }
+        // `find t/. -delete`: what is in `t` has gone, and `t/.` is no
+        // name a directory can be removed by — the system's own refusal,
+        // and its words for it.
+        if self.asked.start_ends_in_dot {
+            return Err(std::io::Error::other("Invalid argument"));
+        }
+        // The start itself, by its name in the directory that holds it.
+        // Typed with a separator after it, it goes as a directory or not
+        // at all.
+        let directory = directory || self.start_as_directory;
+        let target = self.start_at()?.to_path_buf();
+        self.remover.remove(&target, directory)
     }
 }
 
@@ -1405,6 +1521,7 @@ mod status_mapping_tests {
             read_start(b"entry").expect("a start"),
             b"entry".to_vec(),
             FindOptions::default(),
+            None,
             &find_sender,
         )
         .expect_err("closed find stream");
@@ -1413,5 +1530,56 @@ mod status_mapping_tests {
             find_error.message(),
             "response channel closed (peer disconnected): sending find result"
         );
+    }
+
+    /// Slice 4: nothing goes THROUGH a link. A start that is a link typed
+    /// with a separator after it is told before the walk; were a link put
+    /// where the start was while the walk runs, what was found below it
+    /// still does not go from the directory the link points to, and the
+    /// link is not removed for the directory that was typed.
+    #[cfg(unix)]
+    #[test]
+    fn find_delete_removes_nothing_through_a_link_standing_where_the_start_was() {
+        let temp = tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(temp.path()).expect("canonical tempdir");
+        std::fs::create_dir_all(root.join("t/real")).unwrap();
+        std::fs::write(root.join("t/real/f"), b"x").unwrap();
+        std::os::unix::fs::symlink("real", root.join("t/start")).unwrap();
+        let deleting = |start: PathBuf, start_as_directory: bool| Deleting {
+            remover: blit_core::deletion::Remover::below(&root),
+            start,
+            start_as_directory,
+            asked: DeleteFound {
+                start_is_module: false,
+                start_ends_in_dot: false,
+            },
+            start_at: None,
+        };
+        let mut through = deleting(root.join("t/start").join(""), true);
+        through
+            .remove(Path::new("f"), false)
+            .expect_err("nothing goes through the link");
+        assert!(root.join("t/real/f").exists());
+        // The start was typed as a directory: what stands there now goes
+        // as one, or not at all.
+        through
+            .remove(Path::new(""), false)
+            .expect_err("a link is no directory");
+        assert!(root.join("t/start").is_symlink());
+
+        // A start that IS the directory loses what was found in it, then
+        // goes itself.
+        let mut plain = deleting(root.join("t/real").join(""), true);
+        plain
+            .remove(Path::new("f"), false)
+            .expect("the entry found");
+        assert!(!root.join("t/real/f").exists());
+        plain.remove(Path::new(""), true).expect("the start");
+        assert!(!root.join("t/real").exists());
+        // And a link typed plainly goes as the link.
+        std::fs::create_dir(root.join("t/real")).unwrap();
+        let mut link = deleting(root.join("t/start"), false);
+        link.remove(Path::new(""), false).expect("the link");
+        assert!(!root.join("t/start").is_symlink() && root.join("t/real").is_dir());
     }
 }

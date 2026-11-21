@@ -221,7 +221,11 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// failed paths gives a name that is not text by its bytes. A peer of
 /// contract 25 would give its text alone, and a retry would ask for
 /// another file.
-pub const CONTRACT_VERSION: u32 = 26;
+/// v27: `FindPathsRequest.sizes`, `.mtimes` and `.delete`
+/// (UTILITY_VERBS_LOCAL_PARITY slice 4) — `find` tests an entry's size and
+/// age, and removes what it finds. A daemon of contract 26 would drop the
+/// tests, and list where it was asked to delete.
+pub const CONTRACT_VERSION: u32 = 27;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames

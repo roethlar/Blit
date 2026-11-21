@@ -8,11 +8,13 @@
 //! prints.
 
 use crate::admin::du::EntryPath;
-use crate::generated::{find_paths_reply, FindKind, FindName, FindPathsRequest};
+use crate::generated::{
+    find_paths_reply, FindAge, FindCompare, FindKind, FindName, FindPathsRequest, FindSize,
+};
 use crate::remote::RemoteEndpoint;
 use eyre::Result;
 
-pub use crate::find::Kind;
+pub use crate::find::{AgeTest, Compare, Kind, SizeTest};
 
 /// One name test: `-name`, or `-iname` when `ignore_case`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +37,12 @@ pub struct FindQuery {
     pub kinds: Vec<Kind>,
     /// `-maxdepth N`; `None` is every level.
     pub max_depth: Option<u32>,
+    /// `-size`, every one of which must hold (slice 4).
+    pub sizes: Vec<SizeTest>,
+    /// `-mtime`, every one of which must hold.
+    pub ages: Vec<AgeTest>,
+    /// `-delete`: what is found is removed, and nothing is listed.
+    pub delete: bool,
 }
 
 /// One thing the daemon reported, in order.
@@ -48,7 +56,18 @@ pub enum FindEvent {
         path: EntryPath,
         /// The operating system's words: `Permission denied`.
         reason: String,
+        /// The entry was found and could not be DELETED (`-delete`);
+        /// otherwise it could not be read.
+        deleting: bool,
     },
+}
+
+fn compare(compare: Compare) -> i32 {
+    (match compare {
+        Compare::Less => FindCompare::Less,
+        Compare::Exactly => FindCompare::Exactly,
+        Compare::More => FindCompare::More,
+    }) as i32
 }
 
 /// Run `find` on `remote`'s daemon, handing each entry found and each
@@ -88,6 +107,24 @@ where
                 })
                 .collect(),
             max_depth: query.max_depth,
+            sizes: query
+                .sizes
+                .into_iter()
+                .map(|size| FindSize {
+                    compare: compare(size.compare),
+                    count: size.count,
+                    unit_bytes: size.unit_bytes,
+                })
+                .collect(),
+            mtimes: query
+                .ages
+                .into_iter()
+                .map(|age| FindAge {
+                    compare: compare(age.compare),
+                    days: age.days,
+                })
+                .collect(),
+            delete: query.delete,
         })
         .await
         .map_err(|status| super::same_build::refusal("find", status))?
@@ -113,6 +150,7 @@ where
                     raw: failure.raw_relative_path,
                 },
                 reason: failure.reason,
+                deleting: failure.deleting,
             })?,
             // A reply of a kind this build does not know: same contract,
             // so there is none; nothing to print.

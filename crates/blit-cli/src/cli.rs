@@ -141,16 +141,28 @@ pub enum Commands {
     ///
     /// What the Unix `find` does, walked on the daemon's own disk in one
     /// request: `blit find PATH [-name PATTERN] [-iname PATTERN]
-    /// [-type f|d|l] [-maxdepth N]`. One path per line, each beginning
-    /// with PATH as typed, for every entry all the tests given hold for —
-    /// PATH itself included. -name matches an entry's own name with `*`,
-    /// `?`, `[...]` and `\` as find does (a leading dot is matched like
-    /// any character; quote the pattern from the shell); -iname ignores
-    /// case as find does. A symbolic link is listed and never followed. An
-    /// entry the daemon cannot read is reported as find reports it and
-    /// makes the exit status 1; the rest is still listed. Any other test,
-    /// action or operator of find is refused by name before anything is
-    /// asked of the daemon.
+    /// [-type f|d|l] [-maxdepth N] [-size [+|-]N[c|k|M|G]] [-mtime [+|-]N]
+    /// [-delete]`. One path per line, each beginning with PATH as typed,
+    /// for every entry all the tests given hold for — PATH itself
+    /// included. -name matches an entry's own name with `*`, `?`, `[...]`
+    /// and `\` as find does (a leading dot is matched like any character;
+    /// quote the pattern from the shell); -iname ignores case as find
+    /// does. -size counts in units rounded up — 512 bytes with no letter,
+    /// `c` bytes, `k`, `M`, `G` — and -mtime in whole days, as find counts
+    /// them; `+N` is more than N, `-N` less. A symbolic link is listed and
+    /// never followed. An entry the daemon cannot read is reported as find
+    /// reports it and makes the exit status 1; the rest is still listed.
+    ///
+    /// -delete removes what the tests hold for instead of listing it:
+    /// what is in a directory before the directory, a directory only when
+    /// that leaves it empty, and it goes on past what it cannot remove,
+    /// reporting it. It must be the LAST word — in find a test written
+    /// after it does not limit it — and it asks once before anything is
+    /// removed; -y skips the question. The same expression without it
+    /// lists what it would try to remove.
+    ///
+    /// Any other test, action or operator of find is refused by name
+    /// before anything is asked of the daemon.
     Find(FindArgs),
     /// Fetch remote path completions for interactive shells
     Completions(CompletionArgs),
@@ -801,7 +813,8 @@ pub struct FindArgs {
     /// Remote path to search (e.g., server:/module/path)
     pub target: std::ffi::OsString,
     /// The tests, every one of which must hold: -name PATTERN,
-    /// -iname PATTERN, -type f|d|l, -maxdepth N
+    /// -iname PATTERN, -type f|d|l, -maxdepth N, -size [+|-]N[c|k|M|G],
+    /// -mtime [+|-]N; and, as the last word, -delete
     #[arg(
         value_name = "EXPRESSION",
         trailing_var_arg = true,
@@ -811,6 +824,9 @@ pub struct FindArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+    /// Skip the question -delete asks before removing
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 #[derive(Args, Clone, Debug)]

@@ -16,7 +16,7 @@ blit – local and hybrid-transport file transfer CLI
 `blit du [-a] [-s] [-d <N>] [-h] [--json] <REMOTE>`
 `blit df [-h] [-k] [--json] <REMOTE>`
 `blit rm [-r] [-f] [-y] [--json] <REMOTE>...`
-`blit find [--json] <REMOTE> [-name <PATTERN>] [-iname <PATTERN>] [-type f|d|l] [-maxdepth <N>]`
+`blit find [--json] [-y] <REMOTE> [-name <PATTERN>] [-iname <PATTERN>] [-type f|d|l] [-maxdepth <N>] [-size [+|-]<N>[c|k|M|G]] [-mtime [+|-]<N>] [-delete]`
 `blit completions shell <SHELL>`
 `blit completions remote <REMOTE> [--prefix <STR>] [--files] [--dirs]`
 `blit profile [--limit <N>] [--json]`
@@ -109,9 +109,23 @@ path, then push it.
   (the path itself included). `-name` and `-iname` match an entry's own
   name with `*`, `?`, `[...]` and `\` as `find` does; `-type` takes `f`,
   `d` or `l`; `-maxdepth N` enters nothing more than N levels below the
-  path. A symbolic link is listed and never followed. Exit status 1 when
+  path. `-size [+|-]N[c|k|M|G]` holds an entry's size, in units rounded
+  up, against N — 512-byte blocks with no letter, bytes with `c`, then
+  kibi-, mebi- and gibibytes — and `-mtime [+|-]N` the whole days since
+  it was last written, by the daemon's clock; `+N` is more than N, `-N`
+  less. A symbolic link is listed and never followed. Exit status 1 when
   something could not be read. Any other test, action or operator of
   `find` is refused by name.
+  `-delete`, which must be the last word, removes every entry the tests
+  hold for instead of printing it: what is in a directory before the
+  directory, a directory only when that leaves it empty, going on past
+  what it cannot remove and reporting it (`blit find: cannot delete
+  ‘PATH’: Directory not empty`, exit status 1). It asks once before
+  anything is removed; `-y` skips the question, and with no answer to be
+  had nothing is removed and the exit status is 1. Nothing is removed
+  through a symbolic link, a read-only module refuses it, and a module
+  itself is never removed. The same expression without `-delete` lists
+  what it would try to remove.
 - `completions shell <SHELL>` writes a clap-generated shell-completion
   script to stdout (bash/zsh/fish/powershell/elvish). Source it from
   your shell's rc file or completion directory.

@@ -312,6 +312,101 @@ pub struct RmOptions {
     pub force: bool,
 }
 
+/// Entries removed ONE AT A TIME, each by its name in the directory that
+/// holds it (`find -delete`, slice 4): an empty directory, or anything
+/// else — a link as the link it is. Nothing below a directory is ever
+/// removed with it; one that still holds something stays, and says so.
+///
+/// On Unix the directory is reached from the root one name at a time,
+/// never through a link, and kept while entries of it are removed — a
+/// walk gives a directory's entries together. A directory swapped for a
+/// link after the walk listed it is an error for what was in it, not a
+/// way out of the root. Elsewhere an entry is removed by its path, which
+/// must lie in the root.
+pub struct Remover {
+    canonical_root: PathBuf,
+    #[cfg(unix)]
+    held: Option<(PathBuf, anchored::Passage)>,
+}
+
+impl Remover {
+    /// A remover for entries below `canonical_root` — a path with no link
+    /// in it.
+    pub fn below(canonical_root: &Path) -> Self {
+        Self {
+            canonical_root: canonical_root.to_path_buf(),
+            #[cfg(unix)]
+            held: None,
+        }
+    }
+
+    /// Remove the entry at `target`: an empty directory when `directory`,
+    /// anything else otherwise. `target`'s directory is a path with no
+    /// link in it, at or below the root; the root itself is never removed.
+    pub fn remove(&mut self, target: &Path, directory: bool) -> std::io::Result<()> {
+        let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
+            return Err(leaves_the_root());
+        };
+        if !parent.starts_with(&self.canonical_root) {
+            return Err(leaves_the_root());
+        }
+        #[cfg(unix)]
+        {
+            use anchored::ByName as _;
+            use std::os::unix::ffi::OsStrExt as _;
+            let name = std::ffi::CString::new(name.as_bytes())?;
+            if self.held.as_ref().is_none_or(|(held, _)| held != parent) {
+                self.held = None;
+                let passage =
+                    anchored::Passage::open_canonical(parent, Some(&self.canonical_root))?;
+                self.held = Some((parent.to_path_buf(), passage));
+            }
+            let (_, passage) = self.held.as_ref().expect("held just above");
+            passage.remove(&name, directory)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            crate::path_safety::verify_contained(&self.canonical_root, target)
+                .map_err(|_| leaves_the_root())?;
+            if directory {
+                // By itself: a directory that is not empty stays, and
+                // nothing in it is touched — its entries' read-only
+                // attributes included (AC-12).
+                std::fs::remove_dir(target)
+            } else {
+                remove_what_is_no_directory(target)
+            }
+        }
+    }
+}
+
+/// Elsewhere than Unix: remove a file or a link by its path. A file's
+/// read-only attribute is cleared first — its own, and nothing else's. A
+/// link to a directory, which Windows removes the way it removes a
+/// directory, goes as the link, and what it points to stays. A directory
+/// standing where the walk met something else stays, untouched.
+///
+/// NOT RUN where this was written (Linux): it compiles for Windows, and
+/// no more is known of it.
+#[cfg(not(unix))]
+#[allow(clippy::permissions_set_readonly_false)]
+fn remove_what_is_no_directory(target: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(target)?;
+    if metadata.file_type().is_symlink() {
+        return std::fs::remove_file(target).or_else(|_| std::fs::remove_dir(target));
+    }
+    if metadata.is_dir() {
+        return Err(std::io::Error::from(std::io::ErrorKind::IsADirectory));
+    }
+    let mut permissions = metadata.permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        let _ = std::fs::set_permissions(target, permissions);
+    }
+    std::fs::remove_file(target)
+}
+
 /// What a removal says as it goes: the count of what went, and each entry
 /// that did not, handed on at once (cr-uv1-5). Nothing is held back and
 /// nothing left out — a tree with a million entries that cannot be
@@ -2214,5 +2309,72 @@ mod tests {
         .expect_err("containment must stop deletion");
         assert!(matches!(error, DeletionError::Containment { .. }));
         assert!(file.exists());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod remover_tests {
+    use super::*;
+    use std::fs;
+
+    /// Slice 4: `find -delete` removes an entry by its name in the
+    /// directory that holds it — a file, a link as the link, a directory
+    /// only when it is empty — and nothing through a link, or outside the
+    /// root, or the root.
+    #[test]
+    fn an_entry_is_removed_by_its_name_where_it_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap().join("root");
+        fs::create_dir_all(root.join("d/full")).unwrap();
+        fs::create_dir_all(root.join("d/empty")).unwrap();
+        fs::write(root.join("d/full/f"), b"x").unwrap();
+        fs::write(root.join("d/a"), b"x").unwrap();
+        fs::write(root.join("d/b"), b"x").unwrap();
+        fs::create_dir_all(root.join("elsewhere")).unwrap();
+        fs::write(root.join("elsewhere/kept"), b"x").unwrap();
+        std::os::unix::fs::symlink("elsewhere", root.join("d/link")).unwrap();
+        let outside = root.parent().unwrap().join("outside");
+        fs::write(&outside, b"x").unwrap();
+
+        let mut remover = Remover::below(&root);
+        // Two files of one directory, the directory reached once.
+        remover.remove(&root.join("d/a"), false).unwrap();
+        remover.remove(&root.join("d/b"), false).unwrap();
+        assert!(!root.join("d/a").exists() && !root.join("d/b").exists());
+        // An entry of ANOTHER directory goes from that one — and one of
+        // its name in the directory reached before stays.
+        fs::write(root.join("d/same"), b"x").unwrap();
+        fs::write(root.join("elsewhere/same"), b"x").unwrap();
+        remover.remove(&root.join("elsewhere/same"), false).unwrap();
+        assert!(root.join("d/same").exists() && !root.join("elsewhere/same").exists());
+        remover.remove(&root.join("d/same"), false).unwrap();
+        // A link goes as the link; what it points to stays.
+        remover.remove(&root.join("d/link"), false).unwrap();
+        assert!(fs::symlink_metadata(root.join("d/link")).is_err());
+        assert!(root.join("elsewhere/kept").exists());
+        // A directory goes only when it is empty, and says why not.
+        let full = remover.remove(&root.join("d/full"), true).unwrap_err();
+        assert_eq!(full.kind(), std::io::ErrorKind::DirectoryNotEmpty);
+        assert!(root.join("d/full/f").exists());
+        remover.remove(&root.join("d/empty"), true).unwrap();
+        assert!(!root.join("d/empty").exists());
+        // A directory asked for as a file, and a file as a directory.
+        assert!(remover.remove(&root.join("d/full"), false).is_err());
+        assert!(remover.remove(&root.join("d/full/f"), true).is_err());
+        assert!(root.join("d/full/f").exists());
+
+        // Nothing outside the root, and not the root.
+        assert!(remover.remove(&outside, false).is_err());
+        assert!(remover.remove(&root, true).is_err());
+        assert!(outside.exists() && root.exists());
+
+        // A directory swapped for a link after it was listed: what was
+        // in it is not reached through the link.
+        fs::remove_file(root.join("d/full/f")).unwrap();
+        fs::remove_dir(root.join("d/full")).unwrap();
+        std::os::unix::fs::symlink("../elsewhere", root.join("d/full")).unwrap();
+        let mut remover = Remover::below(&root);
+        assert!(remover.remove(&root.join("d/full/kept"), false).is_err());
+        assert!(root.join("elsewhere/kept").exists());
     }
 }

@@ -2,7 +2,10 @@
 
 **Status**: Active (contract; the session is the ONLY remote transfer
 path since cutover, otp-10c-2)
-**Contract version**: 15 (the search request `FindPaths`, which carries
+**Contract version**: 27 (`FindPaths` carries `-size`, `-mtime` and
+`-delete`; v16 to v26 are told one by one where the number is defined,
+`CONTRACT_VERSION` in `crates/blit-core/src/transfer_session/mod.rs`, and
+this header had stopped at 15; v15 = the search request `FindPaths`, which carries
 `find`'s tests and compares the contract itself; v14 = the removal request
 `Rm`, which names a recursive removal, likewise; v13 = the utility
 requests `Du` and `Df`, likewise; v12 = a listed name travels as its components joined

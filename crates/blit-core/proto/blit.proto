@@ -491,6 +491,43 @@ message FindPathsRequest {
   optional uint32 max_depth = 7;
   // The start's exact bytes when it is not valid UTF-8 (contract 18).
   optional bytes raw_start_path = 8;
+  // Contract 27 (slice 4, AC-5): `-size`, every one of which must hold.
+  repeated FindSize sizes = 9;
+  // `-mtime`, every one of which must hold, counted from the daemon's own
+  // clock when the request arrives.
+  repeated FindAge mtimes = 10;
+  // `-delete`: every entry the tests hold for is REMOVED, and none is
+  // sent back. Contents go before their directory; a directory that is
+  // not empty stays, and that is a failure; the walk goes on past an
+  // entry that cannot be removed. A read-only module refuses the request
+  // before anything is read, and a module's root is never removed. A
+  // daemon that did not know this field would list where it was asked to
+  // delete — which is why the contract moved with it.
+  bool delete = 11;
+}
+
+// How an entry's number is held against the number typed: `-N`, `N`, `+N`.
+enum FindCompare {
+  FIND_COMPARE_UNSPECIFIED = 0;
+  FIND_COMPARE_LESS = 1;
+  FIND_COMPARE_EXACTLY = 2;
+  FIND_COMPARE_MORE = 3;
+}
+
+// `-size [+|-]N[ckMG]`: the entry's size in units of `unit_bytes`, rounded
+// UP, against `count`.
+message FindSize {
+  FindCompare compare = 1;
+  uint64 count = 2;
+  // 512 with no letter typed, 1 for `c`, 1024 for `k`, and so on. Never 0.
+  uint64 unit_bytes = 3;
+}
+
+// `-mtime [+|-]N`: whole 24-hour periods since the entry was last
+// written, any part of one dropped, against `days`.
+message FindAge {
+  FindCompare compare = 1;
+  uint64 days = 2;
 }
 
 // One name test: the pattern as typed, by its bytes.
@@ -535,6 +572,8 @@ message FindFailure {
   optional bytes raw_relative_path = 2;
   // Why, in the operating system's own words ("Permission denied").
   string reason = 3;
+  // Contract 27: the entry was found, and could not be DELETED.
+  bool deleting = 4;
 }
 
 // The utility requests (`Du`, `Df`, and the rest as their slices land) are

@@ -2,12 +2,18 @@
 //! (`docs/plan/UTILITY_VERBS_LOCAL_PARITY.md` slice 3).
 //!
 //! `blit find PATH [-name PATTERN] [-iname PATTERN] [-type f|d|l]
-//! [-maxdepth N]`: one path per line, each beginning with PATH as typed,
-//! for every entry all the tests given hold for. The walk and the tests
-//! are the Unix command's (`blit_core::find`, `blit_core::find_name`). An
-//! entry the daemon could not read is reported on stderr in `find`'s
-//! words and the exit status is 1, the rest of the answer printed all the
-//! same.
+//! [-maxdepth N] [-size [+|-]N[ckMG]] [-mtime [+|-]N] [-delete]`: one path
+//! per line, each beginning with PATH as typed, for every entry all the
+//! tests given hold for. The walk and the tests are the Unix command's
+//! (`blit_core::find`, `blit_core::find_name`). An entry the daemon could
+//! not read is reported on stderr in `find`'s words and the exit status is
+//! 1, the rest of the answer printed all the same.
+//!
+//! `-delete` (slice 4) removes what the tests hold for, contents before
+//! their directory, and prints nothing but what could not be removed. It
+//! is taken as the LAST word only: in `find` a test after it does not
+//! limit it (`find d -delete -name '*.tmp'` removes all of `d`). It asks
+//! once before anything is sent; `-y` skips the question.
 //!
 //! Anything else `find` takes — another test, an action, an operator — is
 //! refused by name before anything is asked of the daemon: a test that
@@ -18,7 +24,9 @@ use std::io::Write as _;
 use std::process::ExitCode;
 
 use crate::cli::FindArgs;
-use blit_core::admin::find::{self, FindEvent, FindQuery, Kind, NameTest};
+use blit_core::admin::find::{
+    self, AgeTest, Compare, FindEvent, FindQuery, Kind, NameTest, SizeTest,
+};
 use blit_core::admin::operand::{self, Operand};
 use blit_core::find_name::NamePattern;
 use eyre::{bail, Result};
@@ -29,11 +37,64 @@ struct Expression {
     names: Vec<NameTest>,
     kinds: Vec<Kind>,
     max_depth: Option<u32>,
+    sizes: Vec<SizeTest>,
+    ages: Vec<AgeTest>,
+    /// `-delete`, the last word.
+    delete: bool,
+    /// `-y`: the question `-delete` asks is skipped.
+    yes: bool,
     json: bool,
 }
 
 /// The tests `blit find` takes, for every refusal.
-const TAKES: &str = "blit find takes -name PATTERN, -iname PATTERN, -type f|d|l and -maxdepth N";
+const TAKES: &str = "blit find takes -name PATTERN, -iname PATTERN, -type f|d|l, -maxdepth N, \
+     -size [+|-]N[c|k|M|G], -mtime [+|-]N and, last, -delete";
+
+/// The sign before a number: `+N` is more than N, `-N` less, `N` exactly.
+fn signed(typed: &str) -> (Compare, &str) {
+    match typed.strip_prefix('+') {
+        Some(rest) => (Compare::More, rest),
+        None => match typed.strip_prefix('-') {
+            Some(rest) => (Compare::Less, rest),
+            None => (Compare::Exactly, typed),
+        },
+    }
+}
+
+/// `-size [+|-]N[c|k|M|G]`: N units, of 512 bytes where no letter says
+/// otherwise — `find`'s own default, and its letters for bytes and for
+/// kibi-, mebi- and gibibytes.
+fn size_test(typed: &str) -> Result<SizeTest> {
+    let (compare, rest) = signed(typed);
+    let digits = rest.trim_end_matches(|letter: char| !letter.is_ascii_digit());
+    let unit_bytes = match &rest[digits.len()..] {
+        "" => 512,
+        "c" => 1,
+        "k" => 1024,
+        "M" => 1024 * 1024,
+        "G" => 1024 * 1024 * 1024,
+        other => bail!(
+            "-size {typed}: `{other}' is not a unit blit find takes: write N, Nc, Nk, NM or NG"
+        ),
+    };
+    let count = digits.parse().map_err(|_| {
+        eyre::eyre!("-size {typed}: expected [+|-]N, with c, k, M or G after it for a unit")
+    })?;
+    Ok(SizeTest {
+        compare,
+        count,
+        unit_bytes,
+    })
+}
+
+/// `-mtime [+|-]N`: N whole days.
+fn age_test(typed: &str) -> Result<AgeTest> {
+    let (compare, digits) = signed(typed);
+    let days = digits
+        .parse()
+        .map_err(|_| eyre::eyre!("-mtime {typed}: expected [+|-]N, a whole number of days"))?;
+    Ok(AgeTest { compare, days })
+}
 
 /// Read the words after the path. Every word is a test this command
 /// takes, with its argument, or the command is refused: by the word's
@@ -53,6 +114,15 @@ fn parse(words: &[OsString]) -> Result<Expression> {
                 None => bail!("missing argument to `{word}': {what}"),
             }
         };
+        // `-delete` is the last word, or it is refused: in `find` a test
+        // written after it does not limit it — `find d -delete -name
+        // '*.tmp'` removes all of `d`.
+        if expression.delete && !matches!(word, "-y" | "--yes" | "--json") {
+            bail!(
+                "-delete must be the last word: `{word}' after it would not limit what is \
+                 deleted (in find it does not either)"
+            );
+        }
         match word {
             "-name" | "-iname" => {
                 let typed = argument("a pattern")?;
@@ -83,6 +153,16 @@ fn parse(words: &[OsString]) -> Result<Expression> {
                     eyre::eyre!("-maxdepth {depth}: expected a number of levels, 0 or more")
                 })?);
             }
+            "-size" => {
+                let typed = argument("a size, as [+|-]N[c|k|M|G]")?.to_string_lossy();
+                expression.sizes.push(size_test(&typed)?);
+            }
+            "-mtime" => {
+                let typed = argument("a number of days, as [+|-]N")?.to_string_lossy();
+                expression.ages.push(age_test(&typed)?);
+            }
+            "-delete" => expression.delete = true,
+            "-y" | "--yes" => expression.yes = true,
             "--json" => expression.json = true,
             "--help" | "-help" => bail!("for help: blit find --help"),
             // The options this command had before it followed `find`.
@@ -133,6 +213,23 @@ pub async fn run_find(args: FindArgs) -> Result<ExitCode> {
         );
     };
     let remote = operand.remote.clone();
+    // Slice 4 (AC-5, AC-10): `-delete` asks once, before anything is sent
+    // — as `rm`, `mirror` and `move` ask. "No" stops it; nobody to answer
+    // stops it with exit 1 and the option that skips the question.
+    if expression.delete
+        && !crate::confirm::confirm(
+            None,
+            &format!(
+                "Delete every entry this finds under {}?",
+                blit_core::admin::quote::for_shell(operand.typed(), true)
+            ),
+            args.yes || expression.yes,
+            "-y",
+        )?
+    {
+        println!("Aborted.");
+        return Ok(ExitCode::SUCCESS);
+    }
     let query = FindQuery {
         module: operand.module.clone(),
         start_path: operand.wire_path(),
@@ -141,6 +238,9 @@ pub async fn run_find(args: FindArgs) -> Result<ExitCode> {
         names: expression.names,
         kinds: expression.kinds,
         max_depth: expression.max_depth,
+        sizes: expression.sizes,
+        ages: expression.ages,
+        delete: expression.delete,
     };
     // As `find` prints an entry: every separator typed after the operand
     // kept (`dir//` prints `dir//sub`).
@@ -163,10 +263,14 @@ pub async fn run_find(args: FindArgs) -> Result<ExitCode> {
                         String::from_utf8_lossy(&printed).into_owned(),
                     ));
                 }
-                FindEvent::Failure { path, reason } => {
+                FindEvent::Failure {
+                    path,
+                    reason,
+                    deleting,
+                } => {
                     failures.push(blit_core::admin::quote::in_json(
                         &shown(&path),
-                        serde_json::json!({ "reason": reason }),
+                        serde_json::json!({ "reason": reason, "deleting": deleting }),
                     ));
                 }
             }
@@ -196,13 +300,19 @@ pub async fn run_find(args: FindArgs) -> Result<ExitCode> {
                     line.push(b'\n');
                     out.write_all(&line)
                 }
-                FindEvent::Failure { path, reason } => {
+                FindEvent::Failure {
+                    path,
+                    reason,
+                    deleting,
+                } => {
                     failed = true;
                     // What was found before it is printed before it.
                     let flushed = out.flush();
-                    // The name as `find` writes it (cr-uv2-5).
+                    // The name as `find` writes it (cr-uv2-5), and what
+                    // could not be done with it, in `find`'s words.
                     eprintln!(
-                        "blit find: {}: {reason}",
+                        "blit find: {}{}: {reason}",
+                        if deleting { "cannot delete " } else { "" },
                         blit_core::admin::quote::for_find(&shown(&path))
                     );
                     flushed
@@ -296,6 +406,7 @@ mod tests {
                 kinds: vec![Kind::File, Kind::Link],
                 max_depth: Some(2),
                 json: true,
+                ..Expression::default()
             }
         );
         assert_eq!(
@@ -315,9 +426,6 @@ mod tests {
     fn what_find_takes_and_blit_find_does_not_is_refused_by_name() {
         for word in [
             "-newer",
-            "-mtime",
-            "-size",
-            "-delete",
             "-exec",
             "-print",
             "-print0",
@@ -394,6 +502,96 @@ mod tests {
         ] {
             let refused = parse(&words(typed)).expect_err(said).to_string();
             assert!(refused.contains(said), "{typed:?}: {refused}");
+        }
+    }
+
+    /// Slice 4 (AC-5): `-size` and `-mtime` are read as `find` writes
+    /// them, and anything else is refused by what was typed.
+    #[test]
+    fn size_and_age_are_read_as_find_writes_them() {
+        let parsed = parse(&words(&[
+            "-size", "+1k", "-size", "-2M", "-size", "3", "-size", "0c", "-size", "1G", "-mtime",
+            "-1", "-mtime", "+0", "-mtime", "7",
+        ]))
+        .unwrap();
+        let size = |compare, count, unit_bytes| SizeTest {
+            compare,
+            count,
+            unit_bytes,
+        };
+        assert_eq!(
+            parsed.sizes,
+            [
+                size(Compare::More, 1, 1024),
+                size(Compare::Less, 2, 1024 * 1024),
+                size(Compare::Exactly, 3, 512),
+                size(Compare::Exactly, 0, 1),
+                size(Compare::Exactly, 1, 1024 * 1024 * 1024),
+            ]
+        );
+        let age = |compare, days| AgeTest { compare, days };
+        assert_eq!(
+            parsed.ages,
+            [
+                age(Compare::Less, 1),
+                age(Compare::More, 0),
+                age(Compare::Exactly, 7)
+            ]
+        );
+        for (typed, says) in [
+            (&["-size", "1b"][..], "`b' is not a unit blit find takes"),
+            (&["-size", "1w"], "`w' is not a unit blit find takes"),
+            (&["-size", "1K"], "`K' is not a unit blit find takes"),
+            (&["-size", "x"], "`x' is not a unit blit find takes"),
+            (&["-size", "1.5k"], "-size 1.5k: expected [+|-]N"),
+            (&["-size", "+-1k"], "-size +-1k: expected [+|-]N"),
+            (&["-size", "k"], "-size k: expected [+|-]N"),
+            (&["-size", ""], "-size : expected [+|-]N"),
+            (&["-size"], "missing argument to `-size'"),
+            (&["-mtime", "x"], "-mtime x: expected [+|-]N"),
+            (&["-mtime", "1.5"], "-mtime 1.5: expected [+|-]N"),
+            (&["-mtime", "+-1"], "-mtime +-1: expected [+|-]N"),
+            (&["-mtime"], "missing argument to `-mtime'"),
+        ] {
+            let refused = parse(&words(typed))
+                .expect_err(&typed.join(" "))
+                .to_string();
+            assert!(refused.contains(says), "{typed:?}: {refused}");
+        }
+    }
+
+    /// Slice 4 (AC-5): `-delete` is the last word, or the command is
+    /// refused — in `find` a test after it does not limit it. `-y` and
+    /// `--json` are no tests, and may stand anywhere.
+    #[test]
+    fn delete_is_taken_as_the_last_word_only() {
+        for typed in [
+            &["-name", "*.tmp", "-delete"][..],
+            &["-delete"],
+            &["-name", "*.tmp", "-delete", "-y"],
+            &["-y", "-name", "*.tmp", "-delete", "--json"],
+        ] {
+            let parsed =
+                parse(&words(typed)).unwrap_or_else(|refused| panic!("{typed:?}: {refused}"));
+            assert!(parsed.delete, "{typed:?}");
+            assert_eq!(parsed.yes, typed.contains(&"-y"), "{typed:?}");
+        }
+        assert!(!parse(&words(&["-name", "*.tmp"])).unwrap().delete);
+        for (typed, after) in [
+            (&["-delete", "-name", "*.tmp"][..], "-name"),
+            (&["-delete", "-type", "f"], "-type"),
+            (&["-name", "a", "-delete", "-maxdepth", "1"], "-maxdepth"),
+            (&["-delete", "-delete"], "-delete"),
+            (&["-delete", "-size", "+1k"], "-size"),
+        ] {
+            let refused = parse(&words(typed))
+                .expect_err(&typed.join(" "))
+                .to_string();
+            assert!(
+                refused.contains("-delete must be the last word")
+                    && refused.contains(&format!("`{after}'")),
+                "{typed:?}: {refused}"
+            );
         }
     }
 }

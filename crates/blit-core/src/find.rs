@@ -54,6 +54,65 @@ impl Kind {
     }
 }
 
+/// How a number an entry has is held against the number typed: `-N`,
+/// `N`, `+N`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compare {
+    Less,
+    Exactly,
+    More,
+}
+
+impl Compare {
+    fn holds(self, has: i128, typed: i128) -> bool {
+        match self {
+            Self::Less => has < typed,
+            Self::Exactly => has == typed,
+            Self::More => has > typed,
+        }
+    }
+}
+
+/// `-size [+|-]N[ckMG]` (slice 4, AC-5), as the reference counts it: an
+/// entry's size in UNITS, rounded UP — so `-size 1k` holds for every file
+/// of 1 to 1024 bytes, and `-size -1k` for an empty one alone (GNU find
+/// 4.11.0, run 2026-11-21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizeTest {
+    pub compare: Compare,
+    pub count: u64,
+    /// Bytes to a unit: 512 with no letter, 1 for `c`, 1024 for `k`, and
+    /// so on. Never 0.
+    pub unit_bytes: u64,
+}
+
+impl SizeTest {
+    pub fn holds(&self, bytes: u64) -> bool {
+        let units = bytes.div_ceil(self.unit_bytes.max(1));
+        self.compare
+            .holds(i128::from(units), i128::from(self.count))
+    }
+}
+
+/// `-mtime [+|-]N`, as the reference counts it: whole 24-hour periods
+/// since the entry was last written, any part of one dropped — so
+/// `-mtime 0` is "in the last 24 hours" and `-mtime +0` "more than one
+/// day ago". A time still to come is less than none (`-mtime -1` holds,
+/// `-mtime 0` does not; same run).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgeTest {
+    pub compare: Compare,
+    pub days: u64,
+}
+
+impl AgeTest {
+    pub fn holds(&self, now_seconds: i64, written_seconds: i64) -> bool {
+        let periods =
+            (i128::from(now_seconds) - i128::from(written_seconds)).div_euclid(24 * 60 * 60);
+        self.compare.holds(periods, i128::from(self.days))
+    }
+}
+
 /// What `find` was asked: the tests, every one of which must hold, and how
 /// far to walk.
 #[derive(Debug, Clone, Default)]
@@ -67,12 +126,40 @@ pub struct FindOptions {
     /// The start was typed with a separator after it: a start that is a
     /// link to a directory names that directory, and is entered.
     pub follow_start: bool,
+    /// `-size`, every one of which must hold.
+    pub sizes: Vec<SizeTest>,
+    /// `-mtime`, every one of which must hold.
+    pub ages: Vec<AgeTest>,
+    /// The moment ages are counted from, in seconds since 1970: when the
+    /// walk was asked for, on the clock of the machine that walks.
+    pub now_seconds: i64,
+    /// An entry is given after everything below it — `find`'s `-depth`,
+    /// which `-delete` turns on: what is in a directory goes before the
+    /// directory can.
+    pub contents_first: bool,
 }
 
 impl FindOptions {
+    /// The tests an entry's name and kind answer, which its directory's
+    /// listing gives for nothing.
     fn holds(&self, name: &[u8], kind: Option<Kind>) -> bool {
         self.kinds.iter().all(|wanted| Some(*wanted) == kind)
             && self.names.iter().all(|pattern| pattern.matches(name))
+    }
+
+    /// Whether any test asks what only the entry itself can say.
+    fn needs_facts(&self) -> bool {
+        !self.sizes.is_empty() || !self.ages.is_empty()
+    }
+
+    /// The tests the entry itself answers — a link as the link it is.
+    fn facts_hold(&self, metadata: &fs::Metadata) -> bool {
+        let written = crate::wire_metadata::mtime_seconds(metadata).unwrap_or(0);
+        self.sizes.iter().all(|test| test.holds(metadata.len()))
+            && self
+                .ages
+                .iter()
+                .all(|test| test.holds(self.now_seconds, written))
     }
 }
 
@@ -89,8 +176,9 @@ pub struct FindFailure {
 #[derive(Debug)]
 pub enum FindEvent {
     /// An entry every test holds for: its path below the start, empty for
-    /// the start itself.
-    Found(PathBuf),
+    /// the start itself — and what kind of entry it is, where it is one of
+    /// the three.
+    Found(PathBuf, Option<Kind>),
     Failure(FindFailure),
 }
 
@@ -147,10 +235,14 @@ pub fn find(
         metadata = look_up(start, true).map_err(FindEnd::Start)?;
     }
     let kind = Kind::of(metadata.file_type());
-    if options.holds(start_name, kind) {
-        emit(FindEvent::Found(PathBuf::new())).map_err(FindEnd::Stopped)?;
+    let start_holds = options.holds(start_name, kind) && options.facts_hold(&metadata);
+    let entered = kind == Some(Kind::Directory) && options.max_depth != Some(0);
+    // Contents first: a start that is entered is given last.
+    let start_last = start_holds && options.contents_first && entered;
+    if start_holds && !start_last {
+        emit(FindEvent::Found(PathBuf::new(), kind)).map_err(FindEnd::Stopped)?;
     }
-    if kind != Some(Kind::Directory) || options.max_depth == Some(0) {
+    if !entered {
         return Ok(());
     }
 
@@ -158,24 +250,36 @@ pub fn find(
     struct Frame {
         relative_path: PathBuf,
         entries: fs::ReadDir,
+        /// The directory is itself found, and is given once everything
+        /// in it has been (`contents_first`).
+        found_last: bool,
     }
     let mut frames: Vec<Frame> = Vec::new();
     match fs::read_dir(start) {
         Ok(entries) => frames.push(Frame {
             relative_path: PathBuf::new(),
             entries,
+            found_last: start_last,
         }),
         Err(error) => {
-            return emit(FindEvent::Failure(FindFailure {
+            emit(FindEvent::Failure(FindFailure {
                 relative_path: PathBuf::new(),
                 error,
             }))
-            .map_err(FindEnd::Stopped);
+            .map_err(FindEnd::Stopped)?;
+            if start_last {
+                emit(FindEvent::Found(PathBuf::new(), kind)).map_err(FindEnd::Stopped)?;
+            }
+            return Ok(());
         }
     }
     while let Some(frame) = frames.last_mut() {
         let Some(entry) = frame.entries.next() else {
-            frames.pop();
+            let read = frames.pop().expect("the frame just read");
+            if read.found_last {
+                emit(FindEvent::Found(read.relative_path, Some(Kind::Directory)))
+                    .map_err(FindEnd::Stopped)?;
+            }
             continue;
         };
         let entry = match entry {
@@ -205,14 +309,31 @@ pub fn find(
                 continue;
             }
         };
-        if options.holds(&name_bytes(&name), kind) {
-            emit(FindEvent::Found(relative_path.clone())).map_err(FindEnd::Stopped)?;
+        let mut holds = options.holds(&name_bytes(&name), kind);
+        // The entry itself is asked only when a test needs what only it
+        // can say, and only once its name and kind have held (AC-7).
+        if holds && options.needs_facts() {
+            match facts_of(&entry) {
+                Ok(metadata) => holds = options.facts_hold(&metadata),
+                Err(error) => {
+                    holds = false;
+                    emit(FindEvent::Failure(FindFailure {
+                        relative_path: relative_path.clone(),
+                        error,
+                    }))
+                    .map_err(FindEnd::Stopped)?;
+                }
+            }
         }
         // This entry is `frames.len()` levels below the start.
         let enter = kind == Some(Kind::Directory)
             && options
                 .max_depth
                 .is_none_or(|max| (frames.len() as u32) < max);
+        let last = holds && options.contents_first && enter;
+        if holds && !last {
+            emit(FindEvent::Found(relative_path.clone(), kind)).map_err(FindEnd::Stopped)?;
+        }
         if !enter {
             continue;
         }
@@ -220,17 +341,29 @@ pub fn find(
             Ok(entries) => frames.push(Frame {
                 relative_path,
                 entries,
+                found_last: last,
             }),
             Err(error) => {
                 emit(FindEvent::Failure(FindFailure {
-                    relative_path,
+                    relative_path: relative_path.clone(),
                     error,
                 }))
                 .map_err(FindEnd::Stopped)?;
+                if last {
+                    emit(FindEvent::Found(relative_path, kind)).map_err(FindEnd::Stopped)?;
+                }
             }
         }
     }
     Ok(())
+}
+
+/// What the entry itself says — its size, when it was written — a link as
+/// the link it is. One lookup, counted like the start's.
+fn facts_of(entry: &fs::DirEntry) -> io::Result<fs::Metadata> {
+    #[cfg(test)]
+    LOOKUPS.with(|count| count.set(count.get() + 1));
+    entry.metadata()
 }
 
 #[cfg(test)]
@@ -248,7 +381,7 @@ mod tests {
         let (mut found, mut failed) = (Vec::new(), Vec::new());
         find(start, name.as_bytes(), options, &mut |event| {
             match event {
-                FindEvent::Found(path) => found.push(path.to_string_lossy().replace('\\', "/")),
+                FindEvent::Found(path, _) => found.push(path.to_string_lossy().replace('\\', "/")),
                 FindEvent::Failure(failure) => {
                     failed.push(failure.relative_path.to_string_lossy().replace('\\', "/"))
                 }
@@ -305,7 +438,7 @@ mod tests {
         // contents.
         let mut order = Vec::new();
         find(&start, b"t", &all, &mut |event| {
-            if let FindEvent::Found(path) = event {
+            if let FindEvent::Found(path, _) = event {
                 order.push(path.to_string_lossy().replace('\\', "/"));
             }
             Ok(())
@@ -321,6 +454,7 @@ mod tests {
                 kinds,
                 max_depth,
                 follow_start: false,
+                ..FindOptions::default()
             };
         let found = |options: FindOptions| walk(&start, "t", &options).0;
         assert_eq!(
@@ -372,6 +506,163 @@ mod tests {
     /// AC-7: nothing is asked of the filesystem that no test needs. The
     /// start is looked up; no other entry is, however many there are — an
     /// entry's kind comes with its directory's listing.
+    /// Slice 4 (AC-5): `-size` and `-mtime` count as the reference does.
+    /// Each row is what GNU find 4.11.0 printed (run 2026-11-21) for files
+    /// of these sizes, and of these ages against one moment.
+    #[test]
+    fn size_and_age_are_counted_as_find_counts_them() {
+        let sizes: [(&str, u64); 12] = [
+            ("a.tmp", 0),
+            ("b511", 511),
+            ("b512", 512),
+            ("b513", 513),
+            ("empty", 0),
+            ("k1", 1024),
+            ("k1p", 1025),
+            ("k2", 2048),
+            ("m1", 1024 * 1024),
+            ("m1m", 1024 * 1024 - 1),
+            ("m1p", 1024 * 1024 + 1),
+            ("one", 1),
+        ];
+        let (b, c, k, m, g) = (512, 1, 1024, 1024 * 1024, 1024 * 1024 * 1024);
+        use Compare::{Exactly, Less, More};
+        let every = "b511 b512 b513 k1 k1p k2 m1 m1m m1p one";
+        for (compare, count, unit_bytes, found) in [
+            (Exactly, 0, b, "a.tmp empty"),
+            (Exactly, 1, b, "b511 b512 one"),
+            (Exactly, 2, b, "b513 k1"),
+            (More, 1, b, "b513 k1 k1p k2 m1 m1m m1p"),
+            (Less, 1, b, "a.tmp empty"),
+            (Less, 2, b, "a.tmp b511 b512 empty one"),
+            (Exactly, 1, c, "one"),
+            (Exactly, 512, c, "b512"),
+            (More, 512, c, "b513 k1 k1p k2 m1 m1m m1p"),
+            (Less, 512, c, "a.tmp b511 empty one"),
+            (Exactly, 1, k, "b511 b512 b513 k1 one"),
+            (Exactly, 2, k, "k1p k2"),
+            (More, 1, k, "k1p k2 m1 m1m m1p"),
+            (Less, 1, k, "a.tmp empty"),
+            (Less, 2, k, "a.tmp b511 b512 b513 empty k1 one"),
+            (Exactly, 1, m, "b511 b512 b513 k1 k1p k2 m1 m1m one"),
+            (More, 1, m, "m1p"),
+            (Less, 1, m, "a.tmp empty"),
+            (Exactly, 2, m, "m1p"),
+            (Exactly, 1, g, every),
+            (Less, 1, g, "a.tmp empty"),
+            (Exactly, 0, c, "a.tmp empty"),
+            (More, 0, b, every),
+        ] {
+            let test = SizeTest {
+                compare,
+                count,
+                unit_bytes,
+            };
+            let holds: Vec<&str> = sizes
+                .iter()
+                .filter(|(_, bytes)| test.holds(*bytes))
+                .map(|(name, _)| *name)
+                .collect();
+            assert_eq!(holds.join(" "), found, "{test:?}");
+        }
+
+        let hour = 60 * 60;
+        let now = 1_800_000_000i64;
+        let ages: [(&str, i64); 7] = [
+            ("d10", 10 * 24 * hour + hour),
+            ("future", -hour),
+            ("h23", 23 * hour),
+            ("h25", 25 * hour),
+            ("h47", 47 * hour),
+            ("h49", 49 * hour),
+            ("now", 0),
+        ];
+        for (compare, days, found) in [
+            (Exactly, 0, "h23 now"),
+            (Exactly, 1, "h25 h47"),
+            (Exactly, 2, "h49"),
+            (More, 0, "d10 h25 h47 h49"),
+            (More, 1, "d10 h49"),
+            (Less, 1, "future h23 now"),
+            (Less, 2, "future h23 h25 h47 now"),
+            (More, 9, "d10"),
+            (Exactly, 10, "d10"),
+        ] {
+            let test = AgeTest { compare, days };
+            let holds: Vec<&str> = ages
+                .iter()
+                .filter(|(_, ago)| test.holds(now, now - ago))
+                .map(|(name, _)| *name)
+                .collect();
+            assert_eq!(holds.join(" "), found, "{test:?}");
+        }
+    }
+
+    /// Slice 4: with `contents_first` an entry is given after everything
+    /// below it — what `-delete` needs — and the entries are the same
+    /// ones. And an entry is asked about itself only when a test needs
+    /// it, and only once its name and kind have held (AC-7).
+    #[test]
+    fn contents_come_first_when_asked_and_an_entry_is_asked_only_when_needed() {
+        let tmp = tree();
+        let start = tmp.path().join("t");
+        // In the order given: the helper the other guards use sorts.
+        let order = |options: &FindOptions| {
+            let mut given = Vec::new();
+            find(&start, b"t", options, &mut |event| {
+                if let FindEvent::Found(path, _) = event {
+                    given.push(path.to_string_lossy().replace('\\', "/"));
+                }
+                Ok(())
+            })
+            .expect("the walk");
+            given
+        };
+        let plain = order(&FindOptions::default());
+        let first = order(&FindOptions {
+            contents_first: true,
+            ..FindOptions::default()
+        });
+        assert_eq!(
+            plain.first().map(String::as_str),
+            Some(""),
+            "the start first"
+        );
+        assert_eq!(first.last().map(String::as_str), Some(""), "the start last");
+        let mut sorted = (plain.clone(), first.clone());
+        sorted.0.sort();
+        sorted.1.sort();
+        assert_eq!(sorted.0, sorted.1, "the same entries");
+        for (at, path) in first.iter().enumerate() {
+            let below = format!("{path}/");
+            assert!(
+                first[at..]
+                    .iter()
+                    .all(|later| path.is_empty() || !later.starts_with(&below)),
+                "{path} is given after what is in it: {first:?}"
+            );
+        }
+        // No test of the entry itself: one lookup, the start's.
+        let _ = lookups();
+        let names_only = FindOptions {
+            names: vec![named("*.dat", false)],
+            ..FindOptions::default()
+        };
+        let named_ones = order(&names_only).len();
+        assert_eq!(lookups(), 1);
+        // With one, each entry whose name held is asked, and no other.
+        let with_size = FindOptions {
+            sizes: vec![SizeTest {
+                compare: Compare::More,
+                count: 0,
+                unit_bytes: 1,
+            }],
+            ..names_only
+        };
+        let _ = order(&with_size);
+        assert_eq!(lookups(), 1 + named_ones);
+    }
+
     #[test]
     fn only_the_start_is_looked_up() {
         let dir = tempfile::tempdir().unwrap();
@@ -390,6 +681,7 @@ mod tests {
                 kinds: vec![Kind::File],
                 max_depth: None,
                 follow_start: false,
+                ..FindOptions::default()
             },
         );
         assert_eq!((found.len(), failed.len()), (20 * 11, 0));
@@ -491,7 +783,7 @@ mod tests {
             ..FindOptions::default()
         };
         find(&start, b"t", &options, &mut |event| {
-            if let FindEvent::Found(path) = event {
+            if let FindEvent::Found(path, _) = event {
                 found.push(path.into_os_string().into_vec());
             }
             Ok(())

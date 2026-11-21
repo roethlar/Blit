@@ -193,6 +193,16 @@ after. **This changes their output from 0.1.x.**
   ignores case the way `find` does. On Linux the lines equal the system
   `find`'s for the same tree and expression. Before, `--pattern` was a
   glob against the path below the module.
+- **`-size [+|-]N[c|k|M|G]` and `-mtime [+|-]N`** count as `find` counts:
+  a size in units rounded up (512-byte blocks with no letter), an age in
+  whole days.
+- **`-delete` removes what is found** — what is in a directory before
+  the directory, a directory only when that leaves it empty, going on
+  past what it cannot remove and reporting it. It must be the last word,
+  it asks once first (`-y` skips the question), and the same expression
+  without it lists what it would try to remove. Nothing is removed
+  through a symbolic link or from a read-only module, and a module
+  itself is never removed.
 - **The old options are refused with what replaces each**: `--pattern X`
   → `-name 'X'`; `--case-insensitive` → `-iname`; `--files` → `-type f`;
   `--dirs` → `-type d`; `--limit N` → pipe through `head -n N`. Any other
@@ -257,7 +267,7 @@ carry such names by their exact bytes.
 
 ## Protocol and compatibility
 
-- **Wire contract 26.** A session is refused at open, with a plain
+- **Wire contract 27.** A session is refused at open, with a plain
   message, when the two ends' protocol contract versions differ (every
   0.1.x release is another contract); upgrade both ends. Two 1.0.0 builds
   from any channel talk to each other. Both executables report

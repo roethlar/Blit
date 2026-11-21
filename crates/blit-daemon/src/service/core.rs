@@ -1242,11 +1242,60 @@ impl Blit for BlitService {
         let typed_start = typed_bytes(&req.start_path, req.raw_start_path.as_deref());
         let start = read_start(typed_start)?;
         let start_name = start_name(typed_start, &start.rel, &module.name);
+        // Slice 4: `-delete` changes the module, and is refused where
+        // nothing may — before anything is read.
+        if req.delete && module.read_only {
+            return Err(Status::permission_denied(format!(
+                "module '{}' is read-only",
+                module.name
+            )));
+        }
+        let start_is_module = blit_core::admin::operand::is_the_root(typed_start);
+        // `find t/. -delete` removes what is in `t` and cannot remove
+        // `t/.` (`Invalid argument`): the last name typed is what tells.
+        let start_ends_in_dot = typed_start
+            .split(|&byte| byte == b'/')
+            .rfind(|part| !part.is_empty())
+            == Some(&b"."[..]);
+        let delete_found = req.delete.then_some(super::admin::DeleteFound {
+            start_is_module,
+            start_ends_in_dot,
+        });
         let mut options = blit_core::find::FindOptions {
             max_depth: req.max_depth,
             follow_start: req.follow_start,
+            // Ages are counted from this machine's clock, now.
+            now_seconds: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs() as i64),
+            // What is in a directory goes before the directory can.
+            contents_first: req.delete,
             ..Default::default()
         };
+        let compare = |compare: i32| match blit_core::generated::FindCompare::try_from(compare) {
+            Ok(blit_core::generated::FindCompare::Less) => Ok(blit_core::find::Compare::Less),
+            Ok(blit_core::generated::FindCompare::Exactly) => Ok(blit_core::find::Compare::Exactly),
+            Ok(blit_core::generated::FindCompare::More) => Ok(blit_core::find::Compare::More),
+            _ => Err(Status::invalid_argument(format!(
+                "unknown comparison {compare}"
+            ))),
+        };
+        for size in &req.sizes {
+            if size.unit_bytes == 0 {
+                return Err(Status::invalid_argument("-size: a unit of no bytes"));
+            }
+            options.sizes.push(blit_core::find::SizeTest {
+                compare: compare(size.compare)?,
+                count: size.count,
+                unit_bytes: size.unit_bytes,
+            });
+        }
+        for age in &req.mtimes {
+            options.ages.push(blit_core::find::AgeTest {
+                compare: compare(age.compare)?,
+                days: age.days,
+            });
+        }
         for name in &req.names {
             options.names.push(
                 blit_core::find_name::NamePattern::new(&name.pattern, name.ignore_case)
@@ -1268,7 +1317,7 @@ impl Blit for BlitService {
         tokio::spawn(async move {
             let err_sender = tx.clone();
             let result = tokio::task::spawn_blocking(move || {
-                stream_find(module_root, start, start_name, options, &tx)
+                stream_find(module_root, start, start_name, options, delete_found, &tx)
             })
             .await;
 
