@@ -625,27 +625,14 @@ fn a_name_in_a_message_is_written_as_the_system_commands_write_it() {
     assert_eq!(written.len(), names.len() * 4);
 }
 
-/// cr-uv2-5: a name with a `\` in it — one Unix allows — is a path these
-/// commands take. `find` printed `HOST:/module/t/quarter\notes.pst`, and
-/// that line given back to `du`, `df` or `rm` was "a local path". And
-/// `df` prints the operand by its own bytes: a name that is not text was
-/// printed as the text nearest it, which is another file's name.
+/// What `find` prints for the one entry of `t` that `pattern` matches is
+/// the remote path of `name`, byte for byte, and that line is an operand
+/// `du`, `df` and `rm` take — `rm` removing that entry and no other.
 #[cfg(unix)]
-#[test]
-fn a_name_these_commands_print_is_one_they_take() {
+fn the_line_find_prints_is_taken(ctx: &TestContext, pattern: &str, name: &[u8]) {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
-    let ctx = TestContext::new();
-    write(&ctx.module_dir, "t/quarter\\notes.pst");
-    write(&ctx.module_dir, "t/plain.txt");
-    fs::write(
-        ctx.module_dir
-            .join("t")
-            .join(OsStr::from_bytes(b"bad\xff.dat")),
-        b"x",
-    )
-    .unwrap();
     let ours = |args: &[&OsStr]| {
         let mut cmd = Command::new(&ctx.cli_bin);
         cmd.arg("--config-dir")
@@ -654,55 +641,83 @@ fn a_name_these_commands_print_is_one_they_take() {
             .stdin(Stdio::null());
         run_with_timeout(cmd, Duration::from_secs(60))
     };
-    let start = remote(&ctx, "t");
-    for (pattern, name) in [
-        ("quarter*", &b"quarter\\notes.pst"[..]),
-        ("bad*", &b"bad\xff.dat"[..]),
-    ] {
-        let found = ours(&[
-            OsStr::new("find"),
-            OsStr::new(&start),
-            OsStr::new("-name"),
-            OsStr::new(pattern),
-        ]);
-        let line = found.stdout.strip_suffix(b"\n").expect("one line").to_vec();
-        let mut expected = remote(&ctx, "t/").into_bytes();
-        expected.extend_from_slice(name);
-        assert_eq!(line, expected, "what `find` prints");
-        let line = OsStr::from_bytes(&line);
+    let start = remote(ctx, "t");
+    let found = ours(&[
+        OsStr::new("find"),
+        OsStr::new(&start),
+        OsStr::new("-name"),
+        OsStr::new(pattern),
+    ]);
+    let line = found.stdout.strip_suffix(b"\n").expect("one line").to_vec();
+    let mut expected = remote(ctx, "t/").into_bytes();
+    expected.extend_from_slice(name);
+    assert_eq!(line, expected, "what `find` prints");
+    let line = OsStr::from_bytes(&line);
 
-        let usage = ours(&[OsStr::new("du"), line]);
-        assert!(
-            usage.status.success() && usage.stdout.ends_with(&[&expected[..], b"\n"].concat()),
-            "du: {}{}",
-            String::from_utf8_lossy(&usage.stdout),
-            String::from_utf8_lossy(&usage.stderr)
-        );
-        let space = ours(&[OsStr::new("df"), line]);
-        let row = space
-            .stdout
-            .split(|byte| *byte == b'\n')
-            .nth(1)
-            .unwrap_or_default();
-        assert!(
-            space.status.success() && row.starts_with(&[&expected[..], b" "].concat()),
-            "df prints the operand by its bytes: {}{}",
-            String::from_utf8_lossy(&space.stdout),
-            String::from_utf8_lossy(&space.stderr)
-        );
-        let removed = ours(&[OsStr::new("rm"), OsStr::new("-y"), line]);
-        assert!(
-            removed.status.success() && removed.stderr.is_empty(),
-            "rm: {}",
-            String::from_utf8_lossy(&removed.stderr)
-        );
-        assert!(!ctx
-            .module_dir
-            .join("t")
-            .join(OsStr::from_bytes(name))
-            .exists());
-    }
+    let usage = ours(&[OsStr::new("du"), line]);
+    assert!(
+        usage.status.success() && usage.stdout.ends_with(&[&expected[..], b"\n"].concat()),
+        "du: {}{}",
+        String::from_utf8_lossy(&usage.stdout),
+        String::from_utf8_lossy(&usage.stderr)
+    );
+    let space = ours(&[OsStr::new("df"), line]);
+    let row = space
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .nth(1)
+        .unwrap_or_default();
+    assert!(
+        space.status.success() && row.starts_with(&[&expected[..], b" "].concat()),
+        "df prints the operand by its bytes: {}{}",
+        String::from_utf8_lossy(&space.stdout),
+        String::from_utf8_lossy(&space.stderr)
+    );
+    let removed = ours(&[OsStr::new("rm"), OsStr::new("-y"), line]);
+    assert!(
+        removed.status.success() && removed.stderr.is_empty(),
+        "rm: {}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!ctx
+        .module_dir
+        .join("t")
+        .join(OsStr::from_bytes(name))
+        .exists());
     assert!(ctx.module_dir.join("t/plain.txt").exists());
+}
+
+/// cr-uv2-5: a name with a `\` in it — one Unix allows — is a path these
+/// commands take. `find` printed `HOST:/module/t/quarter\notes.pst`, and
+/// that line given back to `du`, `df` or `rm` was "a local path".
+#[cfg(unix)]
+#[test]
+fn a_name_these_commands_print_is_one_they_take() {
+    let ctx = TestContext::new();
+    write(&ctx.module_dir, "t/quarter\\notes.pst");
+    write(&ctx.module_dir, "t/plain.txt");
+    the_line_find_prints_is_taken(&ctx, "quarter*", b"quarter\\notes.pst");
+}
+
+/// cr-uv2-5: and `df` prints the operand by its own bytes: a name that is
+/// not text was printed as the text nearest it, which is another file's
+/// name. cr-uv3-8: asked apart from the name above, and only where the
+/// filesystem takes such a name — one that takes none (APFS) refused this
+/// fixture, and the `\` case, which it does take, was never asked.
+#[cfg(unix)]
+#[test]
+fn a_name_that_is_not_text_is_printed_as_one_these_commands_take() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let ctx = TestContext::new();
+    write(&ctx.module_dir, "t/plain.txt");
+    let name = b"bad\xff.dat";
+    if fs::write(ctx.module_dir.join("t").join(OsStr::from_bytes(name)), b"x").is_err() {
+        eprintln!("this filesystem refuses a name that is not text: nothing to print");
+        return;
+    }
+    the_line_find_prints_is_taken(&ctx, "bad*", name);
 }
 
 /// cr-uv3-3: a name another system would read as a PATH is a name here.

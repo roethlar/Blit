@@ -587,7 +587,12 @@ mod tests {
     /// tables both hold a character, and the test says so. `-iname`'s
     /// lowercase, which is the standard library's, is compared with
     /// `towlower` wherever the library holds a character.
-    #[cfg(target_os = "linux")]
+    ///
+    /// cr-uv3-8: for glibc only. It asks the library its version by a
+    /// call no other C library has, and on a Linux built against another
+    /// (musl) this module's tests did not compile. The tables' own guards
+    /// above run everywhere.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     #[test]
     fn the_classes_are_the_c_librarys_under_c_utf8() {
         use std::ffi::{c_char, c_int, c_ulong, CString};
