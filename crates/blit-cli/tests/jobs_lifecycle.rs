@@ -490,6 +490,9 @@ impl blit_core::generated::blit_server::Blit for StallingTransferBlit {
     type DuStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DuReply, tonic::Status>,
     >;
+    type LsStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::LsReply, tonic::Status>,
+    >;
     type RmStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::RmReply, tonic::Status>,
     >;
@@ -537,10 +540,10 @@ impl blit_core::generated::blit_server::Blit for StallingTransferBlit {
         Err(tonic::Status::unimplemented("stalling fake source"))
     }
 
-    async fn list(
+    async fn ls(
         &self,
-        _: tonic::Request<blit_core::generated::ListRequest>,
-    ) -> Result<tonic::Response<blit_core::generated::ListResponse>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::LsRequest>,
+    ) -> Result<tonic::Response<Self::LsStream>, tonic::Status> {
         Err(tonic::Status::unimplemented("stalling fake source"))
     }
 

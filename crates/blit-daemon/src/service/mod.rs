@@ -17,3 +17,4 @@ use tonic::Status;
 pub(crate) type FindSender = mpsc::Sender<Result<FindPathsReply, Status>>;
 pub(crate) type DiskUsageSender = mpsc::Sender<Result<DuReply, Status>>;
 pub(crate) type RmSender = mpsc::Sender<Result<blit_core::generated::RmReply, Status>>;
+pub(crate) type LsSender = mpsc::Sender<Result<blit_core::generated::LsReply, Status>>;

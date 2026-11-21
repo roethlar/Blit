@@ -225,7 +225,11 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// (UTILITY_VERBS_LOCAL_PARITY slice 4) — `find` tests an entry's size and
 /// age, and removes what it finds. A daemon of contract 26 would drop the
 /// tests, and list where it was asked to delete.
-pub const CONTRACT_VERSION: u32 = 27;
+/// v28: `Ls` replaces `List` (UTILITY_VERBS_LOCAL_PARITY slice 5) — the
+/// listing says what its path is, gives a link as a link with where it
+/// points, and is asked for names alone or for facts. A daemon of
+/// contract 27 does not serve the name; one of 28 does not serve `List`.
+pub const CONTRACT_VERSION: u32 = 28;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames

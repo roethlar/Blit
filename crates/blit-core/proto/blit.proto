@@ -15,8 +15,11 @@ service Blit {
   // (D-2026-08-18-2, superseding D-2026-07-05-2's same-build rule).
   rpc Transfer(stream TransferFrame) returns (stream TransferFrame);
 
-  // Lists contents of a remote directory.
-  rpc List(ListRequest) returns (ListResponse);
+  // `ls`: a path listed as the Unix command lists it
+  // (UTILITY_VERBS_LOCAL_PARITY slice 5, contract 28). It replaces `List`:
+  // a request name a daemon of an earlier contract does not serve,
+  // carrying the contract its asker speaks.
+  rpc Ls(LsRequest) returns (stream LsReply);
 
   // Deletes files/directories on the server for mirror operations.
   // `rm`, run on the daemon's own disk (UTILITY_VERBS_LOCAL_PARITY slice 2).
@@ -361,13 +364,89 @@ message BlockTransferComplete {
   string reason = 5;
 }
 
-message ListRequest { string module = 1; string path = 2; }
-message ListResponse { repeated FileInfo entries = 1; }
-message FileInfo {
+// `ls PATH` inside one module (contract 28). A directory is listed into;
+// anything else is one entry, itself — which the reply this replaces
+// could not tell from a directory holding one entry.
+message LsRequest {
+  uint32 contract_version = 1;
+  string module = 2;
+  // The path below the module, as typed; empty is the module itself.
+  // `x/` and `x/.` name what a link `x` points to, and are `Not a
+  // directory` for anything that is none.
+  string path = 3;
+  // The path's exact bytes when it is not valid UTF-8.
+  optional bytes raw_path = 4;
+  // `-a`: names that begin with `.` too, and `.` and `..`. Without it
+  // they are not sent.
+  bool all = 5;
+  // Each entry's facts are wanted (`-l`, `--json`). Without it an entry
+  // is its name, and the daemon looks none of them up.
+  bool facts = 6;
+  // `-l`: a path that is a link is listed as the link. Without it a link
+  // to a directory is listed into, as `ls` does.
+  bool link_itself = 7;
+}
+
+message LsReply {
+  oneof reply {
+    // First, one of these two: the path is one entry, itself (its name
+    // left empty: the asker prints the path as typed)...
+    LsEntry itself = 1;
+    // ...or it is a directory, and its entries follow.
+    LsDirectory directory = 2;
+    // A directory's entries, in the order the directory gives them: the
+    // asker sorts.
+    LsEntries entries = 3;
+    LsFailure failure = 4;
+  }
+}
+
+message LsDirectory {}
+
+message LsEntries { repeated LsEntry entries = 1; }
+
+message LsEntry {
   string name = 1;
-  bool is_dir = 2;
-  uint64 size = 3;
-  int64 mtime_seconds = 4;
+  // The name's exact bytes, only when it is not valid UTF-8.
+  optional bytes raw_name = 2;
+  // Only when facts were asked for, and could be read.
+  optional LsFacts facts = 3;
+}
+
+// What `ls -l` prints of an entry. A link's are the link's own.
+message LsFacts {
+  LsKind kind = 1;
+  uint64 size = 2;
+  int64 mtime_seconds = 3;
+  // The space allocated to it, for the `total` line.
+  uint64 allocated_bytes = 4;
+  // Where a link points, as the link holds it.
+  optional string link_target = 5;
+  optional bytes raw_link_target = 6;
+}
+
+enum LsKind {
+  // Something the daemon's system has no name for.
+  LS_KIND_OTHER = 0;
+  LS_KIND_FILE = 1;
+  LS_KIND_DIRECTORY = 2;
+  LS_KIND_LINK = 3;
+  LS_KIND_FIFO = 4;
+  LS_KIND_SOCKET = 5;
+  LS_KIND_CHAR_DEVICE = 6;
+  LS_KIND_BLOCK_DEVICE = 7;
+}
+
+// Something `ls` could not list. For the path itself the listing ends
+// there; for an entry it goes on, and the entry follows without facts.
+message LsFailure {
+  // "cannot access", "cannot open directory" or "reading directory".
+  string action = 1;
+  // The entry's name in the directory; empty for the path itself.
+  string name = 2;
+  optional bytes raw_name = 3;
+  // Why, in the operating system's words.
+  string reason = 4;
 }
 
 // `rm OPERAND...` inside one module, as the Unix command treats each

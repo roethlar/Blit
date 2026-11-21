@@ -12,7 +12,7 @@ blit – local and hybrid-transport file transfer CLI
 `blit scan [--wait <SECONDS>] [--json]`
 `blit list <REMOTE> [--json]`
 `blit list-modules <REMOTE> [--json]`
-`blit ls <TARGET> [--json]`
+`blit ls [-a] [-l] [-h] [--json] <TARGET>`
 `blit du [-a] [-s] [-d <N>] [-h] [--json] <REMOTE>`
 `blit df [-h] [-k] [--json] <REMOTE>`
 `blit rm [-r] [-f] [-y] [--json] <REMOTE>...`
@@ -83,7 +83,20 @@ path, then push it.
   `server:9031`) routes to `list-modules`; a target with a module
   or path (`server:/module/`) routes to `ls`.
 - `list-modules` lists modules exported by a daemon.
-- `ls` lists directory contents inside a module (or local path).
+- `ls` lists a path on a daemon as the Unix `ls` does, on the daemon's
+  own disk in one request (or a path on this machine, written as a path:
+  `./dir`): names one per line, sorted as `ls` sorts them (`A`, `a`,
+  `b`), those beginning with `.` hidden unless `-a`, which also shows
+  `.` and `..`. A path that is no directory is one line, the path as
+  typed. `-l` prints, after a `total` line, the letter of what each
+  entry is (`-` a file, `d` a directory, `l` a symbolic link), its size,
+  when it was last written and its name, a link with ` -> ` and where it
+  points; `-h` with it prints sizes in powers of 1024. There are no
+  permission, link-count, owner or group columns: a listing does not
+  carry them. A symbolic link to a directory is listed into, unless `-l`
+  is given; with a `/` after it, it is the directory either way. Exit
+  status 2 when the path could not be listed, 1 when an entry could not
+  be read. Any other option of `ls` is refused by name.
 - `du` reports disk usage for a remote path as the Unix `du` does, counted
   on the daemon's own disk in one request: one line per directory,
   deepest first and the path given last, `SIZE<TAB>PATH` in 1K blocks of

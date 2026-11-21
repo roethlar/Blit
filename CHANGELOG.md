@@ -21,7 +21,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `files_from_unnamed`; `client::connect_with_timeout` and
 `connect_transfer_client` return a `BlitClient<client::BlitChannel>`
 (the channel behind `client::BoundedResponses`). The wire
-protocol is contract 27: a peer on any other contract version (every 0.1.x
+protocol is contract 28: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -118,7 +118,7 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 27): the job ID rides the session-open and
+- Wire protocol (contract 28): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
@@ -274,7 +274,7 @@ part, and a job you can list, read, re-run and retry.
 a server's files runs on the server's own disk, in one request, instead
 of paying a network filesystem's cost per file. From 1.0.0 each also
 behaves like the Unix command it is named after; `du` and `df` are the
-first two, `rm` the third, `find` the fourth (`ls` follows).
+first two, `rm` the third, `find` the fourth, `ls` the fifth.
 
 - **`blit df HOST:/module/path`** reports the filesystem that holds THAT
   path, asked of the operating system directly, as `df -k` prints it —
@@ -544,6 +544,59 @@ none of the options it had.**
   `blit_core::find` and `blit_core::find_name`, and
   `blit_core::deletion::Remover` removes an entry by its name in a
   directory it holds open.
+
+### `ls` behaves like `ls`
+
+**Behaviour change from 0.1.x: `blit ls` prints what `ls` prints.** It
+printed a `Listing …:` header and a `FILE` or `DIR` row for each entry,
+hidden names among them, and could not tell a file from a directory
+holding one entry.
+
+- **`blit ls HOST:/module/path`** prints names, one per line and nothing
+  else, sorted as `ls` sorts them under `C.UTF-8` (`A`, `a`, `b`); names
+  beginning with `.` are hidden. **`-a`** shows them, with `.` and `..`.
+  A path that is no directory is one line: the path as typed.
+- **`-l`** prints, after `ls -l`'s `total` line, a line for each entry:
+  the letter of what it is (`-` a file, `d` a directory, `l` a symbolic
+  link; `p`, `s`, `c`, `b` as in `ls`), its size, when it was last
+  written — `Nov 20 10:43`, or `Jan  2  2025` for a time more than half
+  a year past or still to come, by this machine's clock and time zone —
+  and its name, a link with ` -> ` and where it points. **It has no
+  permission, link-count, owner or group columns**: a listing does not
+  carry them. **`-h`** with `-l` prints sizes as `ls -lh` does (`1.5K`,
+  `1.0M`).
+- A symbolic link to a directory is listed INTO, as `ls` does — unless
+  `-l` is given, when it is the link, or the path ends in `/`, when it
+  is the directory either way. A link among a directory's entries is
+  always the link.
+- What cannot be listed is reported in `ls`'s words (`blit ls: cannot
+  access 'PATH': No such file or directory`; `cannot open directory`)
+  with `ls`'s exit status: 2 when the path itself could not be listed, 1
+  when an entry could not be read.
+- On Linux what is printed, what is reported and the exit status equal
+  the system `ls`'s — the long form less those four columns — for
+  nineteen kinds of path under nine combinations of options.
+- **A path on this machine is listed by the same rules** (`blit ls
+  ./dir`). A bare word is still a host, whose modules are listed.
+- A module's `..` is the module: nothing above it is shown. A path that
+  is a link out of its module is refused.
+- **`--json` is an object**: `listed_into`, `entries` (each with `name`,
+  `kind`, `is_dir`, `size`, `mtime_seconds`, a link's `target`, and
+  `raw` for a name that is not valid UTF-8) and `failures`. It was an
+  array of `name`, `is_dir`, `size`, `mtime_seconds`.
+- Any other option of `ls` (`-R`, `-t`, `-r`, `-d`, …) is refused by
+  name before anything is asked of a daemon.
+- 200,000 names in one directory: 253 ms before, 58 ms now (the system
+  `ls`: 28 ms); with `-l`, 232 ms (the system `ls -l`: 319 ms).
+  Without `-l` the daemon looks no entry up.
+- The request is new on the wire (`Ls`, answered as a stream) and
+  compares the contract version before reading anything; `List` is gone.
+- For a program built on `blit-core`: `admin::ls::list` (a daemon) and
+  `admin::ls::list_here` (this machine) give a `Listing` — the path as
+  one `Entry`, or a directory's entries, each with its `EntryFacts` when
+  they were asked for, and the `Failure`s. `blit_core::listing` is the
+  listing itself. `list_remote`, `list_local` and `DirEntry`, which the
+  browse layer uses, keep their shape.
 
 ### Fixes
 

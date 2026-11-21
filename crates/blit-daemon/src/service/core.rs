@@ -2,9 +2,7 @@ use super::admin::{
     filesystem_space_for_path, list_completions, read_operands, read_start,
     split_completion_prefix, stream_disk_usage, stream_find, stream_removal, typed_bytes,
 };
-use super::util::{
-    internal_err, io_to_status, resolve_contained_path, resolve_module, resolve_relative_path,
-};
+use super::util::{internal_err, resolve_contained_path, resolve_module};
 use super::{DiskUsageSender, FindSender};
 use crate::active_jobs::{ActiveJobKind, ActiveJobs, CancelOutcome};
 use crate::metrics::TransferMetrics;
@@ -14,15 +12,12 @@ pub use blit_core::generated::blit_server::BlitServer;
 use blit_core::generated::{
     daemon_event, ActiveTransfer, CancelJobRequest, CancelJobResponse, ClearRecentRequest,
     ClearRecentResponse, CompletionRequest, CompletionResponse, Counters, DaemonEvent, DaemonState,
-    DelegatedPullProgress, DelegatedPullRequest, DfReply, DfRequest, DuReply, DuRequest, FileInfo,
-    FindKind, FindPathsReply, FindPathsRequest, GetStateRequest, ListModulesRequest,
-    ListModulesResponse, ListRequest, ListResponse, ModuleInfo, RmReply, RmRequest,
-    SubscribeRequest, TransferComplete, TransferError, TransferProgress, TransferRecord,
-    TransferStarted,
+    DelegatedPullProgress, DelegatedPullRequest, DfReply, DfRequest, DuReply, DuRequest, FindKind,
+    FindPathsReply, FindPathsRequest, GetStateRequest, ListModulesRequest, ListModulesResponse,
+    LsReply, LsRequest, ModuleInfo, RmReply, RmRequest, SubscribeRequest, TransferComplete,
+    TransferError, TransferProgress, TransferRecord, TransferStarted,
 };
 use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
@@ -405,6 +400,7 @@ pub(crate) fn build_transfer_finished_event(
 impl Blit for BlitService {
     type FindPathsStream = ReceiverStream<Result<FindPathsReply, Status>>;
     type DuStream = ReceiverStream<Result<DuReply, Status>>;
+    type LsStream = ReceiverStream<Result<LsReply, Status>>;
     type RmStream = ReceiverStream<Result<RmReply, Status>>;
     type DelegatedPullStream = ReceiverStream<Result<DelegatedPullProgress, Status>>;
     type SubscribeStream =
@@ -894,72 +890,46 @@ impl Blit for BlitService {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
-    async fn list(&self, request: Request<ListRequest>) -> Result<Response<ListResponse>, Status> {
+    /// `ls` (slice 5): the path listed as the Unix command lists it, on
+    /// this daemon's own disk, in one request.
+    async fn ls(&self, request: Request<LsRequest>) -> Result<Response<Self::LsStream>, Status> {
         let req = request.into_inner();
+        // AC-11: an asker of this daemon's own contract, or nothing is read.
+        blit_core::admin::same_build::check(req.contract_version)?;
         let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
-
-        let requested = if req.path.trim().is_empty() {
-            PathBuf::from(".")
-        } else {
-            resolve_relative_path(&req.path)?
+        // As typed (cr-uv1-1): nothing trimmed, and a separator after the
+        // path kept for the system to read.
+        let start = read_start(typed_bytes(&req.path, req.raw_path.as_deref()))?;
+        let options = blit_core::listing::ListOptions {
+            all: req.all,
+            facts: req.facts,
+            link_itself: req.link_itself,
         };
 
-        let target = resolve_contained_path(&module, &requested)?;
-        let response_entries =
-            tokio::task::spawn_blocking(move || -> Result<Vec<FileInfo>, Status> {
-                let metadata = fs::metadata(&target)
-                    .map_err(|err| io_to_status(format!("stat {}", target.display()), err))?;
-
-                if metadata.is_file() {
-                    let name = requested
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| ".".to_string());
-                    let info = FileInfo {
-                        name,
-                        is_dir: false,
-                        size: metadata.len(),
-                        mtime_seconds: blit_core::wire_metadata::mtime_seconds(&metadata)
-                            .unwrap_or(0),
-                    };
-                    Ok(vec![info])
-                } else if metadata.is_dir() {
-                    let mut infos = Vec::new();
-                    let entries = fs::read_dir(&target).map_err(|err| {
-                        io_to_status(format!("read_dir {}", target.display()), err)
-                    })?;
-                    for entry in entries {
-                        let entry = entry.map_err(|err| {
-                            io_to_status(format!("read_dir entry {}", target.display()), err)
-                        })?;
-                        let path = entry.path();
-                        let meta = entry.metadata().map_err(|err| {
-                            io_to_status(format!("metadata {}", path.display()), err)
-                        })?;
-                        let name = entry.file_name().to_string_lossy().into_owned();
-                        infos.push(FileInfo {
-                            name,
-                            is_dir: meta.is_dir(),
-                            size: meta.len(),
-                            mtime_seconds: blit_core::wire_metadata::mtime_seconds(&meta)
-                                .unwrap_or(0),
-                        });
-                    }
-                    infos.sort_by(|a, b| a.name.cmp(&b.name));
-                    Ok(infos)
-                } else {
-                    Err(Status::invalid_argument(format!(
-                        "unsupported path type for list: {}",
-                        target.display()
-                    )))
-                }
+        let (tx, rx): (super::LsSender, mpsc::Receiver<Result<LsReply, Status>>) =
+            mpsc::channel(64);
+        let module_root = module.path.clone();
+        tokio::spawn(async move {
+            let err_sender = tx.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                super::admin::stream_listing(module_root, start, options, &tx)
             })
-            .await
-            .map_err(|err| internal_err("list task failed", err))??;
+            .await;
 
-        Ok(Response::new(ListResponse {
-            entries: response_entries,
-        }))
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(status)) => {
+                    let _ = err_sender.send(Err(status)).await;
+                }
+                Err(join_err) => {
+                    let _ = err_sender
+                        .send(Err(internal_err("listing worker failed", join_err)))
+                        .await;
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn rm(&self, request: Request<RmRequest>) -> Result<Response<Self::RmStream>, Status> {

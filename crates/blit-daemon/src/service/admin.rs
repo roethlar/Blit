@@ -480,6 +480,136 @@ pub(crate) fn stream_disk_usage(
     }
 }
 
+/// `ls` of `start` below the module
+/// (`docs/plan/UTILITY_VERBS_LOCAL_PARITY.md` slice 5): the listing is
+/// `blit_core::listing`, on this daemon's own disk. What the path is goes
+/// first; a directory's entries follow in batches, in the directory's own
+/// order — the asker sorts.
+///
+/// A path that cannot be listed is one failure for the path itself, not a
+/// failed request: the asker prints it in `ls`'s words and exits 2.
+/// Nothing above the module is shown: its `..` is the module.
+pub(crate) fn stream_listing(
+    module_root: PathBuf,
+    start: TypedOperand,
+    options: blit_core::listing::ListOptions,
+    sender: &super::LsSender,
+) -> Result<(), Status> {
+    use blit_core::generated::{
+        ls_reply::Reply, LsDirectory, LsEntries, LsEntry, LsFacts, LsFailure, LsKind, LsReply,
+    };
+    use blit_core::listing::{list, Entry, Kind, ListEvent};
+
+    /// The most entries one message carries.
+    const MOST: usize = 512;
+
+    // As typed (cr-uv1-1): `ls link/` lists the directory the link points
+    // to, and `ls doc/` of a file is `Not a directory`.
+    let start_abs = start.below(&module_root);
+    // F2: containment check before any filesystem operation. A path that
+    // is itself a link out of the module is refused here, whether or not
+    // it would be listed into. `module_root` is the canonical root.
+    blit_core::path_safety::verify_contained(&module_root, &start_abs)
+        .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
+
+    let send = |reply: Reply| {
+        sender
+            .blocking_send(Ok(LsReply { reply: Some(reply) }))
+            .map_err(|_| Stopped)
+    };
+    let wire = |entry: Entry| {
+        let (name, raw_name) = text_and_bytes(&entry.name);
+        LsEntry {
+            name,
+            raw_name,
+            facts: entry.facts.map(|facts| {
+                let (link_target, raw_link_target) = match &facts.link_target {
+                    Some(target) => {
+                        let (text, raw) = text_and_bytes(target.as_os_str());
+                        (Some(text), raw)
+                    }
+                    None => (None, None),
+                };
+                LsFacts {
+                    kind: (match facts.kind {
+                        Kind::File => LsKind::File,
+                        Kind::Directory => LsKind::Directory,
+                        Kind::Link => LsKind::Link,
+                        Kind::Fifo => LsKind::Fifo,
+                        Kind::Socket => LsKind::Socket,
+                        Kind::CharDevice => LsKind::CharDevice,
+                        Kind::BlockDevice => LsKind::BlockDevice,
+                        Kind::Other => LsKind::Other,
+                    }) as i32,
+                    size: facts.size,
+                    mtime_seconds: facts.mtime_seconds,
+                    allocated_bytes: facts.allocated_bytes,
+                    link_target,
+                    raw_link_target,
+                }
+            }),
+        }
+    };
+    let failure = |action: &str, name: &std::ffi::OsStr, error: &std::io::Error| {
+        let (name, raw_name) = text_and_bytes(name);
+        Reply::Failure(LsFailure {
+            action: action.to_string(),
+            name,
+            raw_name,
+            reason: os_reason(error),
+        })
+    };
+    let mut batch: Vec<LsEntry> = Vec::new();
+    let listed = {
+        let mut emit = |event: ListEvent| match event {
+            ListEvent::Itself(entry) => send(Reply::Itself(wire(entry))),
+            ListEvent::Directory => send(Reply::Directory(LsDirectory {})),
+            ListEvent::Entry(entry) => {
+                batch.push(wire(entry));
+                if batch.len() < MOST {
+                    return Ok(());
+                }
+                send(Reply::Entries(LsEntries {
+                    entries: std::mem::take(&mut batch),
+                }))
+            }
+            ListEvent::Failure { name, error } => send(failure("cannot access", &name, &error)),
+        };
+        list(&start_abs, Some(&module_root), options, &mut emit)
+    };
+    let closed = || response_channel_closed("sending listing");
+    if !batch.is_empty() {
+        send(Reply::Entries(LsEntries { entries: batch })).map_err(|Stopped| closed())?;
+    }
+    match listed {
+        Ok(()) => Ok(()),
+        Err(end) => match end.told() {
+            Some((action, error)) => {
+                send(failure(action, std::ffi::OsStr::new(""), error)).map_err(|Stopped| closed())
+            }
+            None => Err(closed()),
+        },
+    }
+}
+
+/// A name as it goes to the asker: its text, and — when it is not valid
+/// UTF-8, which a name on Unix need not be — its exact bytes beside it.
+fn text_and_bytes(name: &std::ffi::OsStr) -> (String, Option<Vec<u8>>) {
+    match name.to_str() {
+        Some(text) => (text.to_string(), None),
+        None => {
+            #[cfg(unix)]
+            let raw = {
+                use std::os::unix::ffi::OsStrExt as _;
+                Some(name.as_bytes().to_vec())
+            };
+            #[cfg(not(unix))]
+            let raw = None;
+            (name.to_string_lossy().into_owned(), raw)
+        }
+    }
+}
+
 /// A path below the start as it goes to the asker: `/`-separated text,
 /// empty for the start itself.
 fn wire_path(relative: &Path) -> String {

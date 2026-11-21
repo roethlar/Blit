@@ -213,6 +213,24 @@ after. **This changes their output from 0.1.x.**
   listed and never followed. A name that is not valid UTF-8 is printed as
   the bytes it is.
 
+## `ls` on a daemon behaves like `ls`
+
+**This changes `blit ls` from 0.1.x: it prints what `ls` prints.**
+
+- **`blit ls HOST:/module/path`** prints names one per line, sorted as
+  `ls` sorts them, names beginning with `.` hidden; `-a` shows them. A
+  path that is no directory is one line, the path as typed. Before, it
+  printed a header and a `FILE` or `DIR` row for each entry.
+- **`-l`** prints what each entry is, its size, when it was last written
+  and its name — a link with where it points — after a `total` line;
+  `-h` prints the sizes as `ls -lh` does. There are no permission,
+  link-count, owner or group columns: a listing does not carry them.
+- What cannot be listed is reported as `ls` reports it, with exit status
+  2 for the path itself and 1 for an entry. On Linux the output equals
+  the system `ls`'s, the long form less those four columns.
+- `--json` is an object (`listed_into`, `entries`, `failures`) where it
+  was an array.
+
 ## Filenames that are not valid UTF-8 transfer
 
 A filename that is valid on Linux (ext4 accepts any bytes) but not valid
@@ -267,7 +285,7 @@ carry such names by their exact bytes.
 
 ## Protocol and compatibility
 
-- **Wire contract 27.** A session is refused at open, with a plain
+- **Wire contract 28.** A session is refused at open, with a plain
   message, when the two ends' protocol contract versions differ (every
   0.1.x release is another contract); upgrade both ends. Two 1.0.0 builds
   from any channel talk to each other. Both executables report

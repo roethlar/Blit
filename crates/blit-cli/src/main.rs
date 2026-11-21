@@ -131,10 +131,7 @@ async fn run_cli(lifecycle_trace: &TransferLifecycleTrace) -> Result<ExitCode> {
             list_modules::run_list_modules(args).await?;
             ExitCode::SUCCESS
         }
-        Commands::Ls(args) => {
-            ls::run_ls(args).await?;
-            ExitCode::SUCCESS
-        }
+        Commands::Ls(args) => ls::run_ls(args).await?,
         Commands::Du(args) => du::run_du(args).await?,
         Commands::Df(args) => df::run_df(args).await?,
         Commands::Rm(args) => rm::run_rm(args).await?,

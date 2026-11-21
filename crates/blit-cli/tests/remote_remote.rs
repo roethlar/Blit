@@ -367,18 +367,18 @@ fn rm_against_a_daemon_too_old_to_know_it_is_refused_as_another_build() {
 }
 
 /// UTILITY_VERBS_LOCAL_PARITY AC-11, a newer asker against a daemon of an
-/// earlier contract: that daemon does not serve `Du` or `Df` at all and
-/// answers "unimplemented". `blit du` and `blit df` report it as what it
+/// earlier contract: that daemon does not serve `Du`, `Df` or `Ls` at all
+/// and answers "unimplemented". `blit du`, `blit df` and `blit ls` report it as what it
 /// is — the two are different builds — naming the verb, and exit non-zero
 /// with nothing printed as an answer.
 #[test]
-fn du_and_df_against_a_daemon_too_old_to_know_them_are_refused_as_another_build() {
+fn du_df_and_ls_against_a_daemon_too_old_to_know_them_are_refused_as_another_build() {
     let work = tempdir().expect("tempdir");
     let config_dir = work.path().join("cli-config");
     fs::create_dir_all(&config_dir).expect("cli config");
     let stale = spawn_fake_blit_server(UnimplementedBlit, "fake daemon of an earlier contract");
     let target = format!("127.0.0.1:{}:/test/", stale.port);
-    for verb in ["du", "df"] {
+    for verb in ["du", "df", "ls"] {
         let mut cmd = Command::new(common::cli_bin());
         cmd.arg("--config-dir")
             .arg(&config_dir)
@@ -495,6 +495,9 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
     type DuStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DuReply, tonic::Status>,
     >;
+    type LsStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::LsReply, tonic::Status>,
+    >;
     type RmStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::RmReply, tonic::Status>,
     >;
@@ -540,10 +543,10 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
-    async fn list(
+    async fn ls(
         &self,
-        _: tonic::Request<blit_core::generated::ListRequest>,
-    ) -> Result<tonic::Response<blit_core::generated::ListResponse>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::LsRequest>,
+    ) -> Result<tonic::Response<Self::LsStream>, tonic::Status> {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
@@ -662,6 +665,9 @@ impl blit_core::generated::blit_server::Blit for RejectingTransferBlit {
     type DuStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DuReply, tonic::Status>,
     >;
+    type LsStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::LsReply, tonic::Status>,
+    >;
     type RmStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::RmReply, tonic::Status>,
     >;
@@ -713,10 +719,10 @@ impl blit_core::generated::blit_server::Blit for RejectingTransferBlit {
         ))
     }
 
-    async fn list(
+    async fn ls(
         &self,
-        _: tonic::Request<blit_core::generated::ListRequest>,
-    ) -> Result<tonic::Response<blit_core::generated::ListResponse>, tonic::Status> {
+        _: tonic::Request<blit_core::generated::LsRequest>,
+    ) -> Result<tonic::Response<Self::LsStream>, tonic::Status> {
         Err(tonic::Status::unimplemented(
             "test only exercises pull_sync",
         ))

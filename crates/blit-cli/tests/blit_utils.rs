@@ -197,7 +197,9 @@ fn test_utils_ls_json() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("invalid JSON: {}\noutput: {}", e, stdout));
-    let entries = parsed.as_array().expect("expected JSON array");
+    // Slice 5: an object — whether the path was listed into, its entries,
+    // and what could not be listed.
+    let entries = parsed["entries"].as_array().expect("expected entries");
     assert!(
         entries.iter().any(|e| e["name"] == "j.txt"),
         "expected j.txt in JSON ls output: {}",

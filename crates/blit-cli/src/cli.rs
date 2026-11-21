@@ -98,7 +98,20 @@ pub enum Commands {
     Scan(ScanArgs),
     /// List modules exported by a remote daemon
     ListModules(ListModulesArgs),
-    /// List directory entries (remote or local)
+    /// List a path on a daemon, as `ls` does
+    ///
+    /// What the Unix `ls` does, on the daemon's own disk in one request
+    /// (or on this machine, for a local path): names one per line, sorted
+    /// as ls sorts them (`A`, `a`, `b`), those beginning with `.` hidden.
+    /// A path that is no directory is one line, the path as typed. -l
+    /// prints, after a `total` line, the letter of what each entry is
+    /// (`-` a file, `d` a directory, `l` a link), its size, when it was
+    /// last written and its name, a link with ` -> ` and where it points;
+    /// it has no permission, link-count, owner or group columns — a
+    /// listing does not carry them. A link to a directory is listed into,
+    /// as ls does, unless -l is given or the path ends in `/`. What cannot
+    /// be listed is reported as ls reports it: exit status 2 for the path
+    /// itself, 1 for an entry. A bare host lists its modules.
     #[command(alias = "list")]
     Ls(ListArgs),
     /// Disk usage of a path on a daemon, as `du` reports it
@@ -724,12 +737,32 @@ pub struct ListModulesArgs {
     pub json: bool,
 }
 
+/// `ls`, as the Unix command, run on the daemon's own disk
+/// (UTILITY_VERBS_LOCAL_PARITY slice 5). The options are `ls`'s; any
+/// other is refused by name before anything is asked of the daemon. `-h`
+/// is `ls`'s `-h`, so help is `--help` alone.
 #[derive(Args, Clone, Debug)]
+#[command(disable_help_flag = true)]
 pub struct ListArgs {
-    /// Local path or remote endpoint (host:/module/path)
-    pub target: String,
+    /// Remote path (host:/module/path), a local path, or a bare host for
+    /// its modules
+    pub target: std::ffi::OsString,
+    /// Do not hide names that begin with `.`
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+    /// The long form: what each entry is, its size, when it was last
+    /// written, its name
+    #[arg(short = 'l')]
+    pub long: bool,
+    /// With -l, print sizes in powers of 1024 (4.0K, 12M, 1.5G)
+    #[arg(short = 'h', long = "human-readable")]
+    pub human_readable: bool,
+    /// Output as JSON
     #[arg(long)]
     pub json: bool,
+    /// Print help
+    #[arg(long, action = clap::ArgAction::Help)]
+    pub help: Option<bool>,
 }
 
 /// `du`, as the Unix command, run on the daemon's own disk

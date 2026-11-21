@@ -227,7 +227,7 @@ fn frames_depth(frame: &Frame) -> u32 {
 /// blocks on Unix (what `du` counts — a sparse file's holes are not there,
 /// a directory's own blocks are); its length where the system does not
 /// report allocation, a directory counting nothing of its own.
-fn allocated(metadata: &fs::Metadata) -> u64 {
+pub(crate) fn allocated(metadata: &fs::Metadata) -> u64 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
