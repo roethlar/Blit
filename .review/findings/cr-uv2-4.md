@@ -1,9 +1,9 @@
 # cr-uv2-4: `rm` asked to read directories it only passes through
 
 **Severity**: MEDIUM — a path `rm` removes is refused with `Permission denied` and left
-**Status**: Fixed, awaiting review
+**Status**: Verified — `utility-slices-r3` (Codex openreview, 2026-11-21) reviewed `eb0cc4d8..dd0a3179`, five of the six `utility-slices-r2` fixes, with `guard_confirmed: true`: "I would keep the Unix search-only directory handles"
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv2-4`)
+**Commit**: `cade8d6c`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r2` over `4841b2d4..3cd49e40` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r2.codex.md`. It completes cr-uv1-2 on Unix.
 
 ## Evidence

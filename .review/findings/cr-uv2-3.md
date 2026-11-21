@@ -1,9 +1,9 @@
 # cr-uv2-3: A removal went on for an asker that had gone, and a lost request was called a refusal
 
 **Severity**: HIGH — `rm` stopped with Ctrl-C keeps deleting on the daemon; and "none of these was removed" is said of a request whose outcome is not known
-**Status**: Fixed, awaiting review
+**Status**: Verified on Unix — `utility-slices-r3` (Codex openreview, 2026-11-21) reviewed `eb0cc4d8..dd0a3179`, five of the six `utility-slices-r2` fixes, with `guard_confirmed: true`: "I would keep … streamed removal results." On Windows a removal that has begun a tree cannot be called off between entries (the known gap below); that is cr-uv2-2's code and is carried by cr-uv3-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv2-3`)
+**Commit**: `089cb8cb`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r2` over `4841b2d4..3cd49e40` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r2.codex.md`. It completes cr-uv1-5.
 
 ## Evidence

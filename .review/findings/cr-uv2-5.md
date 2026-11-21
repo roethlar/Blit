@@ -1,9 +1,9 @@
 # cr-uv2-5: Some names shown could not be given back, or were another file's
 
 **Severity**: MEDIUM — a path the commands print is refused as an operand; a message, the question and `df`'s table name a file other than the one meant
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `utility-slices-r3` (Codex openreview, 2026-11-21) reviewed `eb0cc4d8..dd0a3179`, five of the six `utility-slices-r2` fixes, with `guard_confirmed: true`. The daemon's part is read on its own now; the PATH is still read by the receiving system's own path rules, on the daemon: on Linux `find` printed `\notes` and `C:receipt` and `du` refused both as Windows paths, and on Windows (from the source) `quarter\notes.pst` becomes two components, so `rm` can remove `quarter/notes.pst`. `--json` still holds a name that is not text as the text nearest it (the known gap below, now a finding). And the round-trip guard creates `bad\xff.dat` on any Unix, which APFS refuses. The remaining work is cr-uv3-3, -7 and -8
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv2-5`)
+**Commit**: `09c84a5f`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r2` over `4841b2d4..3cd49e40` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r2.codex.md`. It completes cr-uv1-4.
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-uv2-1: A remote move reported success and left its source
 
 **Severity**: HIGH — `move` exits 0 with the source in place: the user believes the data moved, and a copy was made of something that was asked for as another thing
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `utility-slices-r3` (Codex openreview, 2026-11-21) reviewed `eb0cc4d8..dd0a3179`, five of the six `utility-slices-r2` fixes, with `guard_confirmed: true`. Carrying the directory requirement to the daemon stands. Four things do not: the removal that ends a move asks for the whole path afresh, so what the transfer did NOT carry is removed with what it did — `move incoming/.`, holding a file and a link to it, now exits 0 with the tree gone and only the file at the destination (before this fix the removal failed and the link survived); the request between a CLI and a daemon for a transfer between two daemons kept its own version, so a new CLI with old daemons, and the reverse, still copy `one.txt/` as a file; a module that is itself one file, typed `HOST:/single/.`, is copied; and the daemon takes "a complete scan is required" for "the source will be removed". The remaining work is cr-uv3-1, -2, -5 and -6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv2-1`)
+**Commit**: `7e0cff32`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r2` over `4841b2d4..3cd49e40` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r2.codex.md`. It completes cr-uv1-1.
 
 ## Evidence

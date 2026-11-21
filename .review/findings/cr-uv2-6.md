@@ -1,9 +1,9 @@
 # cr-uv2-6: Two of `find`'s tests chose otherwise than `find`
 
 **Severity**: MEDIUM — `blit find` selects a different set of paths than `find` for the same expression
-**Status**: Fixed, awaiting review
+**Status**: Reviewed — `utility-slices-r3` (Codex openreview, 2026-11-21) reviewed `eb0cc4d8..dd0a3179`, five of the six `utility-slices-r2` fixes, with `guard_confirmed: true`: "I would keep … generated `C.UTF-8` character classes"; the start-name guard was the reviewer's own red/green proof, and regenerating the tables reproduced the file byte for byte. One thing is required: the comparison with the C library calls a glibc-only function and so does not compile where the C library is musl. The remaining work is cr-uv3-8
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv2-6`)
+**Commit**: `63c71034` (and `c87a9476`, the generator left out of it)
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r2` over `4841b2d4..3cd49e40` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r2.codex.md`. It completes cr-uv1-7.
 
 ## Evidence
