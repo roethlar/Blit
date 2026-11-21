@@ -284,6 +284,9 @@ pub struct Met {
     /// The entry as it stands, whole (cr-uv4-1): what a move's account
     /// must have held for it to go.
     pub version: crate::moved::Version,
+    /// How many names the file has (cr-uv5-3); 1 where the system does
+    /// not say.
+    pub links: u64,
 }
 
 /// What kind of entry [`Met`] is: the entry itself, a link being a link.
@@ -610,6 +613,7 @@ fn remove_operand(
             operation: RM_OPERATION,
         });
     }
+    let mut own = OwnChanges::default();
     // With `-f`, an operand that is not there is no failure — and neither
     // is one below something that is no directory, as for `rm -f`.
     let absent = |error: &std::io::Error| {
@@ -673,11 +677,7 @@ fn remove_operand(
             }
             return Ok(());
         }
-        if let Some(error) = stays(keep, &above, &name, Path::new("")) {
-            removal.fail(PathBuf::new(), error);
-            return Ok(());
-        }
-        match above.remove(&name, false) {
+        match remove_asking(keep, &mut own, &above, &name, Path::new("")) {
             Ok(()) => removal.removed += 1,
             Err(error) => removal.fail(PathBuf::new(), error),
         }
@@ -814,13 +814,11 @@ fn remove_operand(
                 continue;
             }
         }
-        if let Some(error) = stays(keep, &frame.dir, &name, &relative_path) {
-            frame.kept = true;
-            removal.fail(relative_path, error);
-            continue;
-        }
-        match frame.dir.remove(&name, false) {
-            Ok(()) => removal.removed += 1,
+        match remove_asking(keep, &mut own, &frame.dir, &name, &relative_path) {
+            Ok(()) => {
+                removal.removed += 1;
+                between("removed", &relative_path);
+            }
             Err(error) => {
                 frame.kept = true;
                 removal.fail(relative_path, error);
@@ -830,21 +828,66 @@ fn remove_operand(
     Ok(())
 }
 
-/// Why the entry called `name` in `within` stays, if `keep` holds it back
-/// (cr-uv3-1): asked of the entry itself, by its name in the directory
-/// that is held. An entry that cannot be looked at stays too.
+/// The files one removal has taken a name of while they had others
+/// (cr-uv5-3), by which file each is — its device and its number there:
+/// the file as it stood before the removal touched it, which is what a
+/// move's account holds every one of its names as, and as the removal's
+/// latest unlink left it.
+///
+/// Taking a name changes the file: the time it was last changed moves.
+/// Its other names then no longer matched the account, and a move of a
+/// file with two names delivered both, left the second at the source as
+/// "changed since it was read", and exited 1.
 #[cfg(unix)]
-fn stays(
+#[derive(Default)]
+struct OwnChanges {
+    files: std::collections::HashMap<(u64, u64), (crate::moved::Version, crate::moved::Version)>,
+}
+
+/// Remove the entry called `name` in `within` — one that is no directory
+/// — asking `keep` about it first when there is a `keep` (cr-uv3-1): the
+/// entry itself, by its name in the directory that is held. `Err` is why
+/// it STAYS: `keep` holds it back, it cannot be looked at, or it would
+/// not go.
+///
+/// A file this removal has already taken a name of is asked about AS IT
+/// STOOD BEFORE (cr-uv5-3) — but only while it stands exactly as this
+/// removal's own unlink left it. Written to, replaced, or changed in any
+/// way by anyone else since, it is asked about as it is, and stays.
+#[cfg(unix)]
+fn remove_asking(
     keep: Option<Keep<'_>>,
+    own: &mut OwnChanges,
     within: &dyn anchored::ByName,
     name: &std::ffi::CStr,
     relative_path: &Path,
-) -> Option<std::io::Error> {
-    let keep = keep?;
-    match within.met(name) {
-        Ok(met) => keep(relative_path, &met),
-        Err(error) => Some(error),
+) -> std::io::Result<()> {
+    let Some(keep) = keep else {
+        return within.remove(name, false);
+    };
+    let met = within.met(name)?;
+    let file = (met.version.device, met.version.inode);
+    let asked = match own.files.get(&file) {
+        Some((before, left)) if met.kind == MetKind::File && met.version == *left => Met {
+            version: *before,
+            ..met
+        },
+        _ => met,
+    };
+    if let Some(error) = keep(relative_path, &asked) {
+        return Err(error);
     }
+    if met.kind != MetKind::File || met.links <= 1 {
+        // Its last name: there is nothing left of it to know.
+        own.files.remove(&file);
+        return within.remove(name, false);
+    }
+    // Other names of it stand: how it is left goes on record for them.
+    match within.remove_one_name(name, &met.version)? {
+        Some(left) => own.files.insert(file, (asked.version, left)),
+        None => own.files.remove(&file),
+    };
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -950,6 +993,7 @@ fn met_by_path(metadata: &std::fs::Metadata) -> Met {
     Met {
         kind,
         version: crate::moved::Version::of(metadata),
+        links: 1,
     }
 }
 
@@ -1069,9 +1113,9 @@ mod anchored {
     use std::ptr::NonNull;
 
     #[cfg(not(target_os = "linux"))]
-    use libc::{fstatat, readdir, stat};
+    use libc::{fstat, fstatat, readdir, stat};
     #[cfg(target_os = "linux")]
-    use libc::{fstatat64 as fstatat, readdir64 as readdir, stat64 as stat};
+    use libc::{fstat64 as fstat, fstatat64 as fstatat, readdir64 as readdir, stat64 as stat};
 
     /// How a directory is opened to be SEARCHED and no more (cr-uv2-4):
     /// entries in it can then be opened, looked at and removed by name,
@@ -1091,6 +1135,43 @@ mod anchored {
         target_os = "freebsd"
     )))]
     const TO_SEARCH: libc::c_int = libc::O_RDONLY;
+
+    /// How a file is HELD and no more (cr-uv5-3): looked at through what
+    /// is held, whatever becomes of its name, and never read. Where the
+    /// system has no such way to open a file, it is opened to be read,
+    /// without waiting on it.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const TO_HOLD: libc::c_int = libc::O_PATH;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    const TO_HOLD: libc::c_int = libc::O_RDONLY | libc::O_NONBLOCK;
+
+    /// A file as the system's record of it says it stands — what
+    /// `moved::Version::of` reads from the standard library's record of
+    /// the same call (cr-uv4-1).
+    #[allow(clippy::useless_conversion, clippy::unnecessary_cast)]
+    fn version_of(found: &stat) -> crate::moved::Version {
+        crate::moved::Version {
+            size: u64::try_from(found.st_size).unwrap_or(0),
+            mtime_nanos: i128::from(found.st_mtime) * 1_000_000_000
+                + i128::from(found.st_mtime_nsec),
+            ctime_nanos: i128::from(found.st_ctime) * 1_000_000_000
+                + i128::from(found.st_ctime_nsec),
+            device: found.st_dev as u64,
+            inode: found.st_ino as u64,
+        }
+    }
+
+    /// The file `held` is, as it stands now.
+    fn version_held(held: &OwnedFd) -> io::Result<crate::moved::Version> {
+        let mut found = std::mem::MaybeUninit::<stat>::uninit();
+        // SAFETY: `held` is an open descriptor for the length of the call
+        // and `found` is room for one record.
+        if unsafe { fstat(held.as_raw_fd(), found.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the call succeeded, so the record is filled in.
+        Ok(version_of(&unsafe { found.assume_init() }))
+    }
 
     /// What is done IN an open directory, by a name there: the directory
     /// is found once, when it is opened, and never looked up again.
@@ -1161,19 +1242,49 @@ mod anchored {
                 libc::S_IFLNK => super::MetKind::Link,
                 _ => super::MetKind::Other,
             };
-            // The entry whole, as `moved::Version::of` reads one from
-            // the standard library's record of the same call (cr-uv4-1).
             #[allow(clippy::useless_conversion, clippy::unnecessary_cast)]
-            let version = crate::moved::Version {
-                size: u64::try_from(found.st_size).unwrap_or(0),
-                mtime_nanos: i128::from(found.st_mtime) * 1_000_000_000
-                    + i128::from(found.st_mtime_nsec),
-                ctime_nanos: i128::from(found.st_ctime) * 1_000_000_000
-                    + i128::from(found.st_ctime_nsec),
-                device: found.st_dev as u64,
-                inode: found.st_ino as u64,
+            let links = found.st_nlink as u64;
+            Ok(super::Met {
+                kind,
+                version: version_of(&found),
+                links,
+            })
+        }
+
+        /// Remove the file called `name` here — a file with other names —
+        /// and say how it stands with this name gone (cr-uv5-3).
+        ///
+        /// The file is held by `name` first, and must be `was`: the file
+        /// that was looked at and let go. Anything else there by now is
+        /// left where it is, and that is the error. `None` when the file
+        /// could not be held — a system that holds no file without
+        /// reading it, and a file that may not be read — or looked at once
+        /// its name had gone: the name is removed all the same, and the
+        /// file's other names stay, as those of any changed file do.
+        fn remove_one_name(
+            &self,
+            name: &CStr,
+            was: &crate::moved::Version,
+        ) -> io::Result<Option<crate::moved::Version>> {
+            // SAFETY: as in `open_child`.
+            let fd = unsafe {
+                libc::openat(
+                    self.descriptor(),
+                    name.as_ptr(),
+                    TO_HOLD | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
             };
-            Ok(super::Met { kind, version })
+            if fd < 0 {
+                return self.remove(name, false).map(|()| None);
+            }
+            // SAFETY: `fd` was opened just above, is valid, and nothing
+            // else owns it.
+            let held = unsafe { OwnedFd::from_raw_fd(fd) };
+            if version_held(&held)? != *was {
+                return Err(io::Error::other("it has changed since it was read"));
+            }
+            self.remove(name, false)?;
+            Ok(version_held(&held).ok())
         }
 
         /// Whether the entry called `name` here is a directory once a link
@@ -1904,6 +2015,133 @@ mod rm_tests {
         .expect("removed");
         assert_eq!(removed, left as u64 + 1);
         assert!(!root.join("many").exists());
+    }
+
+    /// The versions an account would hold `names` below `tree` as: each
+    /// as it stands.
+    #[cfg(unix)]
+    fn held_of(tree: &Path, names: &[&str]) -> Vec<(PathBuf, crate::moved::Version)> {
+        names
+            .iter()
+            .map(|name| {
+                let metadata = fs::symlink_metadata(tree.join(name)).unwrap();
+                (PathBuf::from(name), crate::moved::Version::of(&metadata))
+            })
+            .collect()
+    }
+
+    /// `operand` below `root`, removed as a move removes it when its
+    /// account holds `held`: what stayed.
+    #[cfg(unix)]
+    fn removed_for_a_move(
+        root: &Path,
+        operand: &str,
+        held: &[(PathBuf, crate::moved::Version)],
+    ) -> Vec<String> {
+        let keep = |path: &Path, met: &Met| {
+            let holds = met.kind == MetKind::File
+                && held
+                    .iter()
+                    .any(|(name, version)| name == path && *version == met.version);
+            (!holds).then(|| std::io::Error::other("not a file the move sent"))
+        };
+        let mut stayed = Vec::new();
+        remove_what_may_go(
+            &root.join(operand),
+            false,
+            Some(root),
+            RmOptions {
+                recursive: true,
+                force: false,
+            },
+            None,
+            Some(&keep),
+            &mut |failure| {
+                stayed.push(failure.relative_path.to_string_lossy().into_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+        stayed
+    }
+
+    /// cr-uv5-3: a file with several names goes by every one of them when
+    /// the account holds them all. Taking the first name changes the file
+    /// — the time it was last changed moves — and its other names were
+    /// then refused as changed since they were read: a move of a file
+    /// with two names delivered both and left one. The removal knows the
+    /// change its own unlink made, and asks about each further name as
+    /// the file stood before it — across directories, and name after
+    /// name.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_with_several_names_goes_by_each_that_was_sent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let tree = root.join("tree");
+        fs::create_dir_all(tree.join("sub")).unwrap();
+        fs::write(tree.join("a"), b"one file").unwrap();
+        fs::hard_link(tree.join("a"), tree.join("b")).unwrap();
+        fs::hard_link(tree.join("a"), tree.join("sub/c")).unwrap();
+        fs::write(tree.join("alone"), b"another").unwrap();
+        let held = held_of(&tree, &["a", "b", "sub/c", "alone"]);
+        let stayed = removed_for_a_move(&root, "tree", &held);
+        assert!(stayed.is_empty(), "{stayed:?}");
+        assert!(!tree.exists());
+
+        // A name that was NOT sent stays, and so does the file: the
+        // names that were sent go.
+        fs::create_dir_all(&tree).unwrap();
+        fs::write(tree.join("a"), b"one file").unwrap();
+        fs::hard_link(tree.join("a"), tree.join("b")).unwrap();
+        fs::hard_link(tree.join("a"), tree.join("kept")).unwrap();
+        let held = held_of(&tree, &["a", "b"]);
+        assert_eq!(removed_for_a_move(&root, "tree", &held), ["kept"]);
+        assert_eq!(fs::read(tree.join("kept")).unwrap(), b"one file");
+        assert!(!tree.join("a").exists() && !tree.join("b").exists());
+    }
+
+    /// cr-uv5-3: and only its OWN change. A file written to by anyone
+    /// else after one of its names went is no longer the file the account
+    /// holds, and its other name stays — as it would with one name.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_changed_after_one_of_its_names_went_keeps_the_other() {
+        use std::io::Write as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let tree = root.join("tree");
+        fs::create_dir_all(&tree).unwrap();
+        fs::write(tree.join("a"), b"one file").unwrap();
+        fs::hard_link(tree.join("a"), tree.join("b")).unwrap();
+        let held = held_of(&tree, &["a", "b"]);
+        let written = std::rc::Rc::new(std::cell::Cell::new(false));
+        let stayed = {
+            let (tree, written) = (tree.clone(), std::rc::Rc::clone(&written));
+            let _hook = between_each(move |stage, path| {
+                if stage == "removed" && !written.get() {
+                    // The name that is left, whichever went first.
+                    let left = if path == Path::new("a") { "b" } else { "a" };
+                    let mut file = fs::OpenOptions::new()
+                        .append(true)
+                        .open(tree.join(left))
+                        .unwrap();
+                    file.write_all(b", and more").unwrap();
+                    written.set(true);
+                }
+            });
+            removed_for_a_move(&root, "tree", &held)
+        };
+        assert!(
+            written.get(),
+            "the file was written to between its two names"
+        );
+        assert_eq!(stayed.len(), 1, "{stayed:?}");
+        assert_eq!(
+            fs::read(tree.join(&stayed[0])).unwrap(),
+            b"one file, and more"
+        );
     }
 
     /// What a test does between a check and the act it guards, on this

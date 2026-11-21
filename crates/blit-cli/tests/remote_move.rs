@@ -683,3 +683,39 @@ fn a_move_of_two_names_of_one_text_removes_both() {
         .unwrap_or_default();
     assert!(left.is_empty(), "left at the source: {left:?}\n{said}");
 }
+
+/// cr-uv5-3: a move takes every name of a file that has several. Both
+/// names of one file arrived, and the removal — which takes a file only
+/// while it is the file that was sent — refused the second: taking the
+/// first name had changed the file, as taking a name does. The reviewer
+/// saw one name left at the source, and exit 1.
+#[cfg(unix)]
+#[test]
+fn a_move_takes_every_name_of_a_file_with_several() {
+    let ctx = TestContext::new();
+    let tree = ctx.module_dir.join("tree");
+    fs::create_dir_all(tree.join("sub")).unwrap();
+    fs::write(tree.join("first.txt"), b"one file, three names").unwrap();
+    fs::hard_link(tree.join("first.txt"), tree.join("second.txt")).unwrap();
+    fs::hard_link(tree.join("first.txt"), tree.join("sub/third.txt")).unwrap();
+    fs::write(tree.join("alone.txt"), b"another").unwrap();
+    let landed = ctx.workspace.join("landed");
+    let source = format!("127.0.0.1:{}:/test/tree/", ctx.daemon_port);
+    let (code, said) = blit(
+        &ctx,
+        &["move", "-y", &source, &format!("{}/", landed.display())],
+    );
+    assert_eq!(code, Some(0), "{said}");
+    for name in ["first.txt", "second.txt", "sub/third.txt"] {
+        assert_eq!(
+            fs::read(landed.join(name)).unwrap(),
+            b"one file, three names",
+            "{name}\n{said}"
+        );
+    }
+    assert_eq!(fs::read(landed.join("alone.txt")).unwrap(), b"another");
+    let left: Vec<_> = fs::read_dir(&tree)
+        .map(|entries| entries.flatten().map(|entry| entry.file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "left at the source: {left:?}\n{said}");
+}
