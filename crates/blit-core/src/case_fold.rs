@@ -227,12 +227,13 @@ pub(crate) fn case_note_of(patterns: &[Noted], windows: bool) -> Option<String> 
              (--ignore-case changes what {they}: {class} would stop matching {lost})."
         )
     } else if spellings.others.is_empty() {
-        // Ignoring case would change what the pattern names, and no other
-        // spelling says how (a range across both cases).
-        let them = if others.is_empty() { "it" } else { "them" };
+        // cr-ecm8-2: the rule, and no more. No spelling the option would
+        // also match could be borne out, and that it would match none is
+        // not established either — so nothing is said about THIS pattern
+        // beyond how it is read, and what the option does.
         format!(
             "\"{pattern}\"{shown_from} matches exactly as typed{more}; capital letters matter \
-             (--ignore-case reads {them} otherwise)."
+             (--ignore-case ignores them)."
         )
     } else {
         format!(
@@ -307,10 +308,15 @@ impl<'a> Spellings<'a> {
     ///   name nothing the pattern does not; else the pattern is shown whole;
     /// - each other spelling must name only what the option would match,
     ///   and something the pattern as typed does NOT — else it is dropped;
-    /// - a class said to stop matching a letter must really stop;
-    /// - and a pattern left with nothing to say is spoken of only when the
-    ///   option does change what it names, `None` when it does not
-    ///   (`{a,A}` already takes both).
+    /// - a class said to stop matching a letter must really stop, where
+    ///   that class stands in the pattern ([`Asked::stops_matching`]);
+    /// - and a pattern is left out (`None`) only when it is ESTABLISHED
+    ///   that the option changes nothing it names ([`Asked::compared`]:
+    ///   `{a,A}` already takes both). cr-ecm8-2: it was left out whenever
+    ///   the names tried showed no difference, which is not the same —
+    ///   `{Σ,σ}` got no line, and `--ignore-case` also takes `ς`. When
+    ///   neither a difference nor its absence can be shown, the line
+    ///   states the rule and claims nothing more.
     ///
     /// Checked with the filter itself ([`FileFilter::probing`]), over
     /// names read off each text's own syntax ([`samples`]). Under the
@@ -341,7 +347,6 @@ impl<'a> Spellings<'a> {
             }
             _ => trimmed,
         };
-        let mut narrowed: Option<(&'a str, String)> = None;
         let (mut lower, mut upper) = (String::new(), String::new());
         let mut rest = typed;
         while let Some(c) = rest.chars().next() {
@@ -352,9 +357,6 @@ impl<'a> Spellings<'a> {
             };
             let len = match class {
                 Some(len) => {
-                    if narrowed.is_none() {
-                        narrowed = narrowed_class(&rest[..len]).map(|lost| (&rest[..len], lost));
-                    }
                     lower.push_str(&class_in_case(&rest[..len], false));
                     upper.push_str(&class_in_case(&rest[..len], true));
                     len
@@ -379,13 +381,27 @@ impl<'a> Spellings<'a> {
             };
             rest = &rest[len..];
         }
-        if let (Some(asked), Some((class, lost))) = (asked, &narrowed) {
-            if !asked.stops_matching(pattern, class, lost, windows) {
-                narrowed = None;
-            }
+        // cr-ecm8-2: every negated class of the pattern that would take
+        // less, and the first of them the filter bears out WHERE IT STANDS.
+        // The first such class was credited when any name at all stopped
+        // matching: for `{[!a].1,A.1,[!b].2}` that was `[!a]` and `A`,
+        // though `A.1` stays matched by the alternative beside it and it
+        // is `B.2` that is lost.
+        let candidates = narrowed_classes(pattern, windows);
+        // A spelling made by rule copies such a class as it is written,
+        // and so reads as admitting the letters the option would refuse
+        // there (cr-ecm4-3). None is offered for a pattern that holds one,
+        // whether or not the narrowing itself is borne out.
+        let takes_less_somewhere = !candidates.is_empty();
+        let narrowed: Option<(&'a str, String)> = match asked {
+            Some(asked) => candidates
+                .into_iter()
+                .find(|(at, class, _)| asked.stops_matching(pattern, *at, class, windows)),
+            None => candidates.into_iter().next(),
         }
+        .map(|(_, class, lost)| (class, lost));
         let mut others = Vec::new();
-        if narrowed.is_none() {
+        if !takes_less_somewhere {
             for other in [lower, upper] {
                 let shows = match asked {
                     Some(asked) => asked.matched_only_ignoring_case(&other, windows),
@@ -397,8 +413,14 @@ impl<'a> Spellings<'a> {
             }
         }
         if let Some(asked) = asked {
-            if others.is_empty() && narrowed.is_none() && !asked.reads_otherwise(pattern, windows) {
-                return None;
+            if others.is_empty() && narrowed.is_none() {
+                match asked.compared(pattern, windows) {
+                    Compared::Same => return None,
+                    // Names the option would match and the pattern does
+                    // not: asked of both filters, each of them.
+                    Compared::Differs(names) => others = names,
+                    Compared::Unknown => {}
+                }
             }
         }
         Some(Self {
@@ -409,24 +431,37 @@ impl<'a> Spellings<'a> {
     }
 }
 
-/// Whether `pattern` holds a negated class `--ignore-case` would make
-/// take less — by its text alone ([`narrowed_class`]); cheap enough to ask
-/// of every pattern.
-fn has_narrowed_class(pattern: &str, windows: bool) -> bool {
-    let mut rest = pattern;
-    while let Some(c) = rest.chars().next() {
+/// Every negated class of `pattern` that `--ignore-case` would make take
+/// less — by its text alone ([`narrowed_class`]) — each with the byte it
+/// begins at, the class as written, and the letters it would lose. A class
+/// inside braces is one of them.
+fn narrowed_classes(pattern: &str, windows: bool) -> Vec<(usize, &str, String)> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    while let Some(c) = pattern[at..].chars().next() {
+        let rest = &pattern[at..];
         let len = match c {
             '[' => match bracket_class_len(rest) {
-                Some(len) if narrowed_class(&rest[..len]).is_some() => return true,
-                Some(len) => len,
+                Some(len) => {
+                    if let Some(lost) = narrowed_class(&rest[..len]) {
+                        found.push((at, &rest[..len], lost));
+                    }
+                    len
+                }
                 None => 1,
             },
             '\\' if !windows => 1 + rest[1..].chars().next().map_or(0, char::len_utf8),
             c => c.len_utf8(),
         };
-        rest = &rest[len..];
+        at += len;
     }
-    false
+    found
+}
+
+/// Whether `pattern` holds such a class; cheap enough to ask of every
+/// pattern.
+fn has_narrowed_class(pattern: &str, windows: bool) -> bool {
+    !narrowed_classes(pattern, windows).is_empty()
 }
 
 /// How many of a run's counted patterns are asked about (the ones holding
@@ -517,100 +552,140 @@ impl Asked {
         shows_a_difference
     }
 
-    /// The pattern as typed names a name with one of `lost`'s letters
-    /// where `class` stands, and with the option it does not.
-    fn stops_matching(&self, pattern: &str, class: &str, lost: &str, windows: bool) -> bool {
-        let Some(letter) = lost.chars().next() else {
+    /// The class that begins at byte `at` of the pattern really stops
+    /// matching EVERY letter it is said to lose: for each of them, a name
+    /// with that letter where this class stands — read through the
+    /// alternative that holds the class, and no other — is named as typed
+    /// and not with the option.
+    fn stops_matching(&self, pattern: &str, at: usize, class: &str, windows: bool) -> bool {
+        let Some(letters) = lost_letters(class) else {
             return false;
         };
-        let Some(names) = samples(pattern, windows, Some((class, letter))) else {
-            return false;
-        };
-        names.iter().any(|name| {
-            let (typed, ignoring) = (
-                Self::named(self.role, &self.as_typed, name),
-                Self::named(self.role, &self.ignoring_case, name),
-            );
-            (typed.0 && !ignoring.0) || (typed.1 && !ignoring.1)
-        })
-    }
-
-    /// The option changes what the pattern names at all: some name read
-    /// off the pattern, in another case — all lower, all upper, or one
-    /// letter changed — is named with the option and not without, or the
-    /// other way round. Every name read off it, and every letter of each:
-    /// the names a pattern takes in one sequence of letters are joined by
-    /// single changes of case, so if it does not take them all, one change
-    /// away from a name it takes is a name it does not.
-    ///
-    /// What cannot be asked — more alternatives than are tried, or a
-    /// pattern no name can be read off — counts as changed: a line too
-    /// many is the safe mistake.
-    fn reads_otherwise(&self, pattern: &str, windows: bool) -> bool {
-        let Some(names) = samples(pattern, windows, None).filter(|names| !names.is_empty()) else {
-            return true;
-        };
-        let differs = |name: &String| {
-            Self::named(self.role, &self.as_typed, name)
-                != Self::named(self.role, &self.ignoring_case, name)
-        };
-        // A class that gains a letter with the option (`[A-c]` gains
-        // `d`): a name with that letter where the class stands.
-        let mut rest = pattern;
-        while let Some(c) = rest.chars().next() {
-            let len = match c {
-                '[' => match bracket_class_len(rest) {
-                    Some(len) => {
-                        let class = &rest[..len];
-                        if let Some((_, ranges)) = parse_class(class) {
-                            let holds = |c: char| ranges.iter().any(|&(lo, hi)| lo <= c && c <= hi);
-                            for (lo, hi) in other_cases(&ranges) {
-                                let Some(gained) = (lo..=hi).find(|&c| !holds(c)) else {
-                                    continue;
-                                };
-                                match samples(pattern, windows, Some((class, gained))) {
-                                    Some(with_it) if !with_it.iter().any(differs) => {}
-                                    _ => return true,
-                                }
-                            }
-                        }
-                        len
-                    }
-                    None => 1,
-                },
-                '\\' if !windows => 1 + rest[1..].chars().next().map_or(0, char::len_utf8),
-                c => c.len_utf8(),
-            };
-            rest = &rest[len..];
-        }
-        names.iter().any(|name| {
-            let letters: Vec<usize> = name
-                .char_indices()
-                .filter(|(_, c)| case_variants(*c).len() > 1)
-                .map(|(at, _)| at)
-                .collect();
-            let in_case = |upper: bool, only: Option<usize>| -> String {
-                name.char_indices()
-                    .map(|(at, c)| {
-                        if only.is_none_or(|only| only == at) {
-                            in_case(c, upper)
-                        } else {
-                            c
-                        }
-                    })
-                    .collect()
-            };
-            let mut variants = vec![in_case(false, None), in_case(true, None)];
-            for at in letters {
-                variants.push(in_case(false, Some(at)));
-                variants.push(in_case(true, Some(at)));
-            }
-            variants.iter().any(|variant| {
-                Self::named(self.role, &self.as_typed, variant)
-                    != Self::named(self.role, &self.ignoring_case, variant)
+        letters.iter().all(|&letter| {
+            samples(pattern, windows, Some((at, letter))).is_some_and(|names| {
+                names.iter().any(|name| {
+                    let (typed, ignoring) = (
+                        Self::named(self.role, &self.as_typed, name),
+                        Self::named(self.role, &self.ignoring_case, name),
+                    );
+                    (typed.0 && !ignoring.0) || (typed.1 && !ignoring.1)
+                })
             })
         })
     }
+
+    /// cr-ecm8-2: both readings of the pattern, asked about EVERY name
+    /// they could differ on — which can be done for a pattern of plain
+    /// text and alternatives, with no wildcard and no class. Such a
+    /// pattern names a finite set of names, the option adds every other
+    /// case of each of their letters and nothing else, and all of those
+    /// spellings can be put to the two filters. Then either no name is
+    /// read differently ([`Compared::Same`]: `{a,A}`), or here are names
+    /// the option would also match ([`Compared::Differs`]: `ς` for
+    /// `{Σ,σ}`, which no change to lower or upper case reaches).
+    ///
+    /// For any other pattern, and past [`MOST_SPELLINGS`], the answer is
+    /// [`Compared::Unknown`] — never "the same" on the strength of the
+    /// names that happened to be tried.
+    fn compared(&self, pattern: &str, windows: bool) -> Compared {
+        if !only_text_and_alternatives(pattern, windows) {
+            return Compared::Unknown;
+        }
+        let Some(names) = samples(pattern, windows, None).filter(|names| !names.is_empty()) else {
+            return Compared::Unknown;
+        };
+        // Each name's letters, each with every case the option pairs it
+        // with — and how many spellings that makes in all.
+        let mut spelled: Vec<Vec<Vec<char>>> = Vec::with_capacity(names.len());
+        let mut total = 0usize;
+        for name in &names {
+            let letters: Vec<Vec<char>> = name
+                .chars()
+                .map(|c| {
+                    let mut variants = case_variants(c);
+                    if !variants.contains(&c) {
+                        variants.push(c);
+                    }
+                    variants
+                })
+                .collect();
+            let spellings = letters
+                .iter()
+                .try_fold(1usize, |all, variants| all.checked_mul(variants.len()));
+            total = match spellings.and_then(|spellings| total.checked_add(spellings)) {
+                Some(total) if total <= MOST_SPELLINGS => total,
+                _ => return Compared::Unknown,
+            };
+            spelled.push(letters);
+        }
+        let mut gained: Vec<String> = Vec::new();
+        let mut differs = false;
+        for letters in &spelled {
+            let spellings: usize = letters.iter().map(Vec::len).product();
+            for mut nth in 0..spellings {
+                let name: String = letters
+                    .iter()
+                    .map(|variants| {
+                        let letter = variants[nth % variants.len()];
+                        nth /= variants.len();
+                        letter
+                    })
+                    .collect();
+                let (typed, ignoring) = (
+                    Self::named(self.role, &self.as_typed, &name),
+                    Self::named(self.role, &self.ignoring_case, &name),
+                );
+                if typed == ignoring {
+                    continue;
+                }
+                differs = true;
+                let only_ignoring = (ignoring.0 && !typed.0) || (ignoring.1 && !typed.1);
+                if only_ignoring && gained.len() < MOST_EXAMPLES && !gained.contains(&name) {
+                    gained.push(name);
+                }
+            }
+        }
+        match (differs, gained.is_empty()) {
+            (false, _) => Compared::Same,
+            (true, false) => Compared::Differs(gained),
+            (true, true) => Compared::Unknown,
+        }
+    }
+}
+
+/// What asking both readings of a pattern about every name they could
+/// differ on found ([`Asked::compared`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Compared {
+    /// No name is read differently: the option changes nothing here.
+    Same,
+    /// Names the option would match and the pattern as typed does not.
+    Differs(Vec<String>),
+    /// Not every such name could be asked about.
+    Unknown,
+}
+
+/// The most spellings [`Asked::compared`] puts to the filters for one
+/// pattern; past it the comparison is not made.
+const MOST_SPELLINGS: usize = 1024;
+
+/// The most names it gives back as examples.
+const MOST_EXAMPLES: usize = 2;
+
+/// Whether `pattern` is plain text and alternatives only: no wildcard and
+/// no bracket class, so the names it can match are the ones written in it.
+fn only_text_and_alternatives(pattern: &str, windows: bool) -> bool {
+    let mut rest = pattern;
+    while let Some(c) = rest.chars().next() {
+        let len = match c {
+            '*' | '?' => return false,
+            '[' if bracket_class_len(rest).is_some() => return false,
+            '\\' if !windows => 1 + rest[1..].chars().next().map_or(0, char::len_utf8),
+            c => c.len_utf8(),
+        };
+        rest = &rest[len..];
+    }
+    true
 }
 
 /// The most names [`samples`] reads off one text.
@@ -619,18 +694,25 @@ const MOST_SAMPLES: usize = 16;
 /// Names `text` matches, read off its own syntax — the names a claim
 /// about `text` is checked with: a wildcard run stands for `x`, a class
 /// for one of its members, an alternation for each of its alternatives in
-/// turn. `pick` puts a chosen character where the first class written
-/// exactly so stands. `None` when the text holds more alternatives than
+/// turn. `None` when the text holds more alternatives than
 /// [`MOST_SAMPLES`] names can cover, or a class no member can be read off.
+///
+/// `pick` puts a chosen character where ONE class stands — the class
+/// that begins at that byte of `text` — and then only the names that pass
+/// through that class are given: the ones read through the alternative
+/// that holds it. (cr-ecm8-2: every alternative's names were given, and a
+/// name from another alternative was taken for evidence about the class.)
 ///
 /// Only names a walk can give ([`walked`]): what a pattern says of any
 /// other text is nothing a run will ever see, and a claim resting on it
 /// would be about no file. `**//Cache` read off as `/Cache` — the text
 /// matches, and no entry is ever called that — leaves no name at all.
-fn samples(text: &str, windows: bool, pick: Option<(&str, char)>) -> Option<Vec<String>> {
-    let mut pick = pick;
+fn samples(text: &str, windows: bool, pick: Option<(usize, char)>) -> Option<Vec<String>> {
     let mut names: Vec<String> = Vec::new();
-    for name in expand(text, windows, &mut pick)? {
+    for (name, through) in expand(text, 0, windows, pick)? {
+        if pick.is_some() && !through {
+            continue;
+        }
         if let Some(name) = walked(&name) {
             if !names.iter().any(|kept| kept == name) {
                 names.push(name.to_string());
@@ -656,26 +738,34 @@ fn walked(name: &str) -> Option<&str> {
     every_component_names.then_some(name)
 }
 
-fn expand(text: &str, windows: bool, pick: &mut Option<(&str, char)>) -> Option<Vec<String>> {
-    let mut names = vec![String::new()];
+/// [`samples`] for the part of the whole text that begins at byte `base`:
+/// each name with whether it passes through the picked class.
+fn expand(
+    text: &str,
+    base: usize,
+    windows: bool,
+    pick: Option<(usize, char)>,
+) -> Option<Vec<(String, bool)>> {
+    let mut names = vec![(String::new(), false)];
     let mut rest = text;
-    let push = |names: &mut Vec<String>, c: char| names.iter_mut().for_each(|name| name.push(c));
+    let push = |names: &mut Vec<(String, bool)>, c: char| {
+        names.iter_mut().for_each(|(name, _)| name.push(c))
+    };
     while let Some(c) = rest.chars().next() {
+        let at = base + (text.len() - rest.len());
         let len = match c {
             '[' => match bracket_class_len(rest) {
                 Some(len) => {
-                    let class = &rest[..len];
-                    let members = match *pick {
-                        Some((picked, letter)) if picked == class => {
-                            *pick = None;
-                            vec![letter]
-                        }
-                        _ => class_members(class)?,
+                    let (members, picked) = match pick {
+                        Some((place, letter)) if place == at => (vec![letter], true),
+                        _ => (class_members(&rest[..len])?, false),
                     };
                     names = names
                         .iter()
-                        .flat_map(|name| {
-                            members.iter().map(move |member| format!("{name}{member}"))
+                        .flat_map(|(name, through)| {
+                            members
+                                .iter()
+                                .map(move |member| (format!("{name}{member}"), *through || picked))
                         })
                         .collect();
                     if names.len() > MOST_SAMPLES {
@@ -714,9 +804,10 @@ fn expand(text: &str, windows: bool, pick: &mut Option<(&str, char)>) -> Option<
                 Some((alternatives, len)) => {
                     let mut next = Vec::new();
                     for alternative in alternatives {
-                        for ending in expand(alternative, windows, pick)? {
-                            for name in &names {
-                                next.push(format!("{name}{ending}"));
+                        let inner = at + (alternative.as_ptr() as usize - rest.as_ptr() as usize);
+                        for (ending, picked) in expand(alternative, inner, windows, pick)? {
+                            for (name, through) in &names {
+                                next.push((format!("{name}{ending}"), *through || picked));
                             }
                         }
                         if next.len() > MOST_SAMPLES {
@@ -808,13 +899,26 @@ fn alternatives(text: &str, windows: bool) -> Option<(Vec<&str>, usize)> {
 /// letter (`[!0-9]`), or that the option leaves as typed because it
 /// cannot be rewritten with certainty ([`negated_class`]).
 fn narrowed_class(class: &str) -> Option<String> {
+    let written: Vec<String> = lost_runs(class)?
+        .into_iter()
+        .map(|(lo, hi)| {
+            let mut range = String::new();
+            push_range(&mut range, lo, hi);
+            range
+        })
+        .collect();
+    Some(written.join(", "))
+}
+
+/// The letters [`narrowed_class`] writes, each run of neighbours as one
+/// range.
+fn lost_runs(class: &str) -> Option<Vec<(char, char)>> {
     let (negated, ranges) = parse_class(class)?;
     if !negated || widen_class(class) == class {
         return None;
     }
     let holds = |c: char| ranges.iter().any(|&(lo, hi)| lo <= c && c <= hi);
-    // The letters the class does not name yet, each run of neighbours as
-    // one range.
+    // The letters the class does not name yet.
     let mut lost: Vec<(char, char)> = Vec::new();
     for (lo, hi) in other_cases(&ranges) {
         for c in (lo..=hi).filter(|&c| !holds(c)) {
@@ -827,15 +931,19 @@ fn narrowed_class(class: &str) -> Option<String> {
             }
         }
     }
-    let written: Vec<String> = lost
+    (!lost.is_empty()).then_some(lost)
+}
+
+/// Those letters one by one, for asking the filter about each; `None`
+/// when the class would lose none, or more than are asked about.
+fn lost_letters(class: &str) -> Option<Vec<char>> {
+    const MOST: usize = 64;
+    let letters: Vec<char> = lost_runs(class)?
         .into_iter()
-        .map(|(lo, hi)| {
-            let mut range = String::new();
-            push_range(&mut range, lo, hi);
-            range
-        })
+        .flat_map(|(lo, hi)| lo..=hi)
+        .take(MOST + 1)
         .collect();
-    (!written.is_empty()).then(|| written.join(", "))
+    (letters.len() <= MOST).then_some(letters)
 }
 
 /// `c` in lower or upper case, among the letters `--ignore-case` pairs it
@@ -1797,7 +1905,7 @@ mod tests {
             note("[A-c]1").as_deref(),
             Some(
                 "\"[A-c]1\" matches exactly as typed; capital letters matter (--ignore-case \
-                 reads it otherwise)."
+                 ignores them)."
             )
         );
         // Noted exactly when widening changes the pattern, never otherwise.
@@ -2161,7 +2269,7 @@ mod tests {
                 note(&[doubled]),
                 Some(format!(
                     "\"{doubled}\" matches exactly as typed; capital letters matter \
-                     (--ignore-case reads it otherwise)."
+                     (--ignore-case ignores them)."
                 )),
             );
         }
@@ -2211,15 +2319,64 @@ mod tests {
                  would also match {1,cache}, {1,CACHE})."
             )
         );
-        // The option does change it, in a way neither spelling shows
-        // (`Ab`): said in words.
+        // The option does change it, in a way neither rule-made spelling
+        // shows: the names themselves, each asked of both readings.
         assert_eq!(
             note(&["{ab,AB}"]).as_deref(),
             Some(
-                "\"{ab,AB}\" matches exactly as typed; capital letters matter (--ignore-case \
-                 reads it otherwise)."
+                "\"{ab,AB}\" matches {ab,AB} only; capital letters matter (--ignore-case would \
+                 also match aB, Ab)."
             )
         );
+        // cr-ecm8-2: a pattern is left out only when it is ESTABLISHED
+        // that the option changes nothing it names. `{Σ,σ}` got no line:
+        // lowered and raised it is itself, and the option also takes `ς`.
+        assert_eq!(
+            note(&["{Σ,σ}"]).as_deref(),
+            Some(
+                "\"{Σ,σ}\" matches {Σ,σ} only; capital letters matter (--ignore-case would also \
+                 match ς)."
+            )
+        );
+        assert_eq!(note(&["{Σ,σ,ς}"]), None, "every case of it is written");
+        // `{[a-c],A,B}` got none either, and the option also takes `C`.
+        // With a class in it not every name can be asked about, so
+        // nothing is concluded: the line states the rule.
+        assert_eq!(
+            note(&["{[a-c],A,B}"]).as_deref(),
+            Some(
+                "\"{[a-c],A,B}\" matches exactly as typed; capital letters matter (--ignore-case \
+                 ignores them)."
+            )
+        );
+        // And it is counted, where it was dropped from the count.
+        assert_eq!(
+            note(&["Keep", "{[a-c],A,B}", "{a,A}"]).as_deref(),
+            Some(
+                "\"Keep\" matches Keep only, and 1 more pattern matches only as typed; capital \
+                 letters matter (--ignore-case would also match keep, KEEP)."
+            )
+        );
+        // A narrowing is credited to the class that narrows: `A.1` stays
+        // matched by the alternative beside `[!a].1`; `B.2` is what is lost.
+        assert_eq!(
+            note(&["{[!a].1,A.1,[!b].2}"]).as_deref(),
+            Some(
+                "\"{[!a].1,A.1,[!b].2}\" matches exactly as typed; capital letters matter \
+                 (--ignore-case changes what it matches: [!b] would stop matching B)."
+            )
+        );
+        // Where no class's narrowing is borne out in full, none is
+        // claimed, and no spelling is made of a class that would take less.
+        for pattern in ["{[!a].1,A.1}", "{[!a-c].x,A.x}", "x{[!a],A}"] {
+            assert_eq!(
+                note(&[pattern]),
+                Some(format!(
+                    "\"{pattern}\" matches exactly as typed; capital letters matter \
+                     (--ignore-case ignores them)."
+                )),
+            );
+        }
     }
 
     /// Each check the line rests on, asked directly: the filter is what
@@ -2265,29 +2422,63 @@ mod tests {
                 "\"{pattern}\" offering {spelling}"
             );
         }
-        // A class is said to stop matching a letter only when it does.
-        assert!(asked("[!a].dat").stops_matching("[!a].dat", "[!a]", "A", false));
-        assert!(asked("photo[!x].jpg").stops_matching("photo[!x].jpg", "[!x]", "X", false));
-        assert!(!asked("Keep").stops_matching("Keep", "[!a]", "A", false));
-        assert!(!asked("[!0-9]a").stops_matching("[!0-9]a", "[!0-9]", "A", false));
-        // And a pattern is spoken of only when the option changes it.
-        for (pattern, changes) in [
-            ("{a,A}", false),
-            ("*.[Jj][Pp][Gg]", false),
-            ("{ab,AB}", true),
-            ("[A-c]1", true),
-            ("Keep", true),
-            // However far along the letter that changes stands.
-            ("[xX][xX][xX][xX][xX][xX][xX][xX]{ij,IJ}", true),
-            ("[xX][xX][xX][xX][xX][xX][xX][xX]{ij,IJ,iJ,Ij}", false),
-            // No name to ask with: counted as changed.
-            ("**//Cache", true),
-        ] {
-            assert_eq!(
-                asked(pattern).reads_otherwise(pattern, false),
-                changes,
-                "{pattern}"
+        // A class is said to stop matching a letter only when it does —
+        // the class that stands at that place in the pattern, by a name
+        // read through the alternative that holds it (cr-ecm8-2).
+        assert!(asked("[!a].dat").stops_matching("[!a].dat", 0, "[!a]", false));
+        assert!(asked("photo[!x].jpg").stops_matching("photo[!x].jpg", 5, "[!x]", false));
+        assert!(!asked("Keep").stops_matching("Keep", 0, "[!a]", false));
+        assert!(!asked("[!0-9]a").stops_matching("[!0-9]a", 0, "[!0-9]", false));
+        // `A.1` stays matched by the alternative beside `[!a].1`; it is
+        // `[!b]` that stops matching, `B.2`.
+        let three = "{[!a].1,A.1,[!b].2}";
+        assert!(!asked(three).stops_matching(three, 1, "[!a]", false));
+        assert!(asked(three).stops_matching(three, 12, "[!b]", false));
+        // Every letter the class is said to lose must be lost: of `A-C`,
+        // `A` stays matched here.
+        let ranged = "{[!a-c].x,A.x}";
+        assert!(!asked(ranged).stops_matching(ranged, 1, "[!a-c]", false));
+        assert!(asked("[!a-c].x").stops_matching("[!a-c].x", 0, "[!a-c]", false));
+
+        // A pattern is left out only when it is ESTABLISHED that the
+        // option changes nothing it names: both readings asked about every
+        // spelling of every name it holds. Where that cannot be done — a
+        // wildcard, a class, too many spellings — nothing is concluded.
+        let compared = |pattern: &str| asked(pattern).compared(pattern, false);
+        for same in ["{a,A}", "{ab,AB,aB,Ab}", "{x/a,x/A,X/a,X/A}", "{Σ,σ,ς}"] {
+            assert_eq!(compared(same), Compared::Same, "{same}");
+        }
+        assert_eq!(
+            compared("{Σ,σ}"),
+            Compared::Differs(vec!["ς".to_string()]),
+            "a letter that is neither the lower nor the upper case of the ones written"
+        );
+        for (differs, one) in [("{ab,AB}", "Ab"), ("Keep", "keep"), ("sub/{a,A}", "SUB/a")] {
+            match compared(differs) {
+                Compared::Differs(names) => assert!(
+                    !names.is_empty() && names.len() <= MOST_EXAMPLES,
+                    "{differs}: {names:?}"
+                ),
+                other => panic!("{differs}: {other:?}"),
+            }
+            // Whatever is given back, this one is among what differs.
+            let asked = asked(differs);
+            assert_ne!(
+                Asked::named(Role::Exclude, &asked.as_typed, one),
+                Asked::named(Role::Exclude, &asked.ignoring_case, one),
+                "{differs}: {one}"
             );
+        }
+        for unknown in [
+            "{[a-c],A,B}",
+            "*.[Jj][Pp][Gg]",
+            "[A-c]1",
+            "x?{a,A}",
+            "**//Cache",
+            "//Cache",
+            "abcdefghijk",
+        ] {
+            assert_eq!(compared(unknown), Compared::Unknown, "{unknown}");
         }
         // Names are read off a text's own syntax.
         assert_eq!(
@@ -2301,9 +2492,27 @@ mod tests {
             ["q*q", "X*q"]
         );
         assert_eq!(
-            samples("p[!x]q[!x]", false, Some(("[!x]", 'X'))).unwrap(),
+            samples("p[!x]q[!x]", false, Some((1, 'X'))).unwrap(),
             ["pXqq", "pXqX"],
-            "the chosen letter, at the first such class"
+            "the chosen letter, at the class that stands there"
+        );
+        assert_eq!(
+            samples("p[!x]q[!x]", false, Some((6, 'X'))).unwrap(),
+            ["pqqX", "pXqX"]
+        );
+        // With a place chosen, only the names read through it.
+        assert_eq!(
+            samples("{[!a].1,A.1,[!b].2}", false, Some((1, 'A'))).unwrap(),
+            ["A.1"]
+        );
+        assert_eq!(
+            samples("{[!a].1,A.1,[!b].2}", false, Some((12, 'B'))).unwrap(),
+            ["B.2"]
+        );
+        assert_eq!(
+            samples("{[!a].1,A.1,[!b].2}", false, Some((8, 'Z'))).unwrap(),
+            Vec::<String>::new(),
+            "no class stands there"
         );
         assert_eq!(
             samples("{a,b}{c,d}{e,f}{g,h}{i,j}", false, None),

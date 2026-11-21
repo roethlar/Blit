@@ -803,9 +803,9 @@ fn the_line_keeps_what_is_under_a_folder_apart_from_the_folder() {
     );
 }
 
-/// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4: commands whose line claimed
-/// something the mirror then contradicted, each shown the line it gets
-/// now and run both ways.
+/// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4, cr-ecm8-2: commands whose line claimed
+/// something the mirror then contradicted — or was absent when it had
+/// something to say — each shown the line it gets now and run both ways.
 ///
 /// - `**//Cache`: the line showed `Cache` and said the option would also
 ///   match `cache`; with the option the destination's own `cache` was
@@ -829,7 +829,7 @@ fn the_line_claims_only_what_the_mirror_then_does() {
         Case {
             excludes: &["**//Cache"],
             line: "\"**//Cache\" matches exactly as typed; capital letters matter \
-                   (--ignore-case reads it otherwise).",
+                   (--ignore-case ignores them).",
             entries: &[("cache", false, false), ("Cache", false, false)],
         },
         Case {
@@ -841,6 +841,36 @@ fn the_line_claims_only_what_the_mirror_then_does() {
                 ("A.dat", true, false),
                 ("b.dat", true, true),
                 ("keep", false, true),
+            ],
+        },
+        // cr-ecm8-2: a letter that is neither the lower nor the upper case
+        // of the ones written. The line was absent; the mirror deleted `ς`,
+        // which `--ignore-case` keeps.
+        Case {
+            excludes: &["{Σ,σ}"],
+            line: "\"{Σ,σ}\" matches {Σ,σ} only; capital letters matter (--ignore-case would \
+                   also match ς).",
+            entries: &[("ς", false, true), ("σ", true, true)],
+        },
+        // cr-ecm8-2: a class beside the letters. The line was absent; the
+        // mirror deleted `C`. Not every name can be asked about, so the
+        // line states the rule and claims no more.
+        Case {
+            excludes: &["{[a-c],A,B}"],
+            line: "\"{[a-c],A,B}\" matches exactly as typed; capital letters matter \
+                   (--ignore-case ignores them).",
+            entries: &[("C", false, true), ("B", true, true), ("c", true, true)],
+        },
+        // cr-ecm8-2: the narrowing was credited to `[!a]` and `A`; `A.1`
+        // stays kept, and `B.2` is what the option stops keeping.
+        Case {
+            excludes: &["{[!a].1,A.1,[!b].2}"],
+            line: "\"{[!a].1,A.1,[!b].2}\" matches exactly as typed; capital letters matter \
+                   (--ignore-case changes what it matches: [!b] would stop matching B).",
+            entries: &[
+                ("A.1", true, true),
+                ("B.2", true, false),
+                ("x.1", true, true),
             ],
         },
         Case {
