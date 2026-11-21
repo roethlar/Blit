@@ -1,9 +1,9 @@
 # cr-ecm5-3: The excludes were resolved for the question and again for the run
 
 **Severity**: HIGH — the mirror the operator confirmed was not the one the question described: it copied the entry shown as excluded (and could delete a destination entry shown as kept)
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r6` (Codex openreview, 2026-11-21) reviewed `3bc3ee47..a13238b6`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding (it found the `--files-from` list still read after the question — cr-ecm6-4; this record's own known gap)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm5-3: …")
+**Commit**: `c619f211`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r5` over `3bc3ee47..585d3599` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r5.codex.md`.
 
 ## Evidence

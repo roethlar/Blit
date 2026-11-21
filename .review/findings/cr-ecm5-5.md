@@ -1,9 +1,9 @@
 # cr-ecm5-5: Under a list of names, directories the list did not name were deleted
 
 **Severity**: MEDIUM — a mirror removed empty directories outside its stated scope; no file was affected
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r6` (Codex openreview, 2026-11-21) reviewed `3bc3ee47..a13238b6`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding (it required the versions bumped for the changed deletion scope — cr-ecm6-3)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm5-5: …")
+**Commit**: `83d0dc8f`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r5` over `3bc3ee47..585d3599` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r5.codex.md`.
 
 ## Evidence

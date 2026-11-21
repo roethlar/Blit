@@ -1,9 +1,9 @@
 # cr-ecm5-1: The empty-list marker travelled under versions an older peer accepts
 
 **Severity**: HIGH — a daemon of the earlier contract discarded the marker and its mirror deleted a destination-only file the list kept out of scope, exit 0
-**Status**: Fixed, awaiting re-review
+**Status**: Verified — `exclude-case-r6` (Codex openreview, 2026-11-21) reviewed `3bc3ee47..a13238b6`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix cr-ecm5-1: …")
+**Commit**: `46ee5dde`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r5` over `3bc3ee47..585d3599` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r5.codex.md`.
 
 ## Evidence

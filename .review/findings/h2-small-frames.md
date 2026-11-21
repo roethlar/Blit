@@ -1,9 +1,9 @@
 # h2-small-frames: A stream of small frames closed its own connection
 
 **Severity**: HIGH — a push of many small files to a daemon failed outright; a listing read through a pager failed part way. On the default branch since 2026-10-17; in no release
-**Status**: Fixed; found by the working agent, not yet reviewed by anyone else
+**Status**: Fixed `f72c7dd1`; found by the working agent. `exclude-case-r6` (Codex openreview, 2026-11-21) had it in its range `3bc3ee47..a13238b6` and required one change to it, from reading the code: the buffering it allows across concurrent streams is not bounded (cr-ecm6-5)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the commit carrying this record ("Fix h2-small-frames: …")
+**Commit**: `f72c7dd1`
 **Reviewer**: none. Found 2026-11-20 while measuring `du` for `docs/plan/UTILITY_VERBS_LOCAL_PARITY.md` (AC-7): the old `du` failed on its second run over 200,000 files.
 
 ## Evidence
