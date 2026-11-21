@@ -160,8 +160,12 @@ part, and a job you can list, read, re-run and retry.
   match xA).`, beside `--exclude '[Aa]'`, which leaves `A` out either
   way). A pattern that reads the same both ways, such as
   `{a,A}`, is never the one shown; the count beside it is of every other
-  pattern with a letter in it, whatever their order. The line's cost does
-  not grow with the number of patterns. Under `--delete-scope
+  pattern with a letter in it, whatever their order. Nothing concrete is
+  said of `--ignore-case` unless the command could run with it: where
+  some pattern cannot be read that way, or there are more than 64
+  patterns to check, the line states the rule (and names a class that
+  `may` stop matching a letter). The line's cost does not grow with the
+  number of patterns. Under `--delete-scope
   all`, where a filter chooses what is copied and protects nothing at the
   destination, the question says that instead.
 - `?` and a bracket class match one byte in both modes. A class holding a

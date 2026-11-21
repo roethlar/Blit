@@ -175,6 +175,34 @@ impl Complete {
             Self::filter(&self.excludes, &self.includes, true)
         }))
     }
+
+    /// Whether the run's filter can be read with the option AT ALL: every
+    /// pattern of it is still a pattern when widened (cr-ecm12-5). Where
+    /// it is not, nothing is said of what the option would do but the
+    /// rule: beside an `s` inside 249 pairs of braces, which the option
+    /// cannot widen, `*Cache` was offered `cache, CACHE`, and the command
+    /// with `--ignore-case` is refused whole. Where it cannot be told —
+    /// past the bound — nothing concrete is said either; a class that
+    /// could take less is still named, as one that MAY.
+    fn with_the_option(&self) -> WithTheOption {
+        match self.ignoring() {
+            None => WithTheOption::NotKnown,
+            Some(filter) if filter.validate_globs().is_ok() => WithTheOption::Reads,
+            Some(_) => WithTheOption::Refused,
+        }
+    }
+}
+
+/// Whether a run's filter could be read with `--ignore-case` at all
+/// ([`Complete::with_the_option`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WithTheOption {
+    /// Every pattern of it is still a pattern when widened.
+    Reads,
+    /// Some pattern is not: the option would refuse the command.
+    Refused,
+    /// It holds too many patterns to find out for one line.
+    NotKnown,
 }
 
 /// The most patterns a run's filter may hold and still be built a second
@@ -284,6 +312,18 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
         Spellings::of_role(noted.read_as, noted.role, windows, whole)
     }
     let mut shown: Option<(usize, Spellings)> = None;
+    // cr-ecm12-5: only of a run the option could make. Where the filter
+    // as the option would read it does not validate, or is too long to
+    // find out, no pattern is asked about and the line is the rule.
+    let with_the_option = if candidates.is_empty() {
+        WithTheOption::Refused
+    } else {
+        whole.with_the_option()
+    };
+    let asked_about = match with_the_option {
+        WithTheOption::Reads => MOST_PATTERNS_ASKED,
+        WithTheOption::Refused | WithTheOption::NotKnown => 0,
+    };
     // A loss first: a pattern the option would NARROW, wherever it stands
     // — borne out by a name if one can be, and said with `may` if not.
     let mut may_narrow: Option<(usize, Spellings)> = None;
@@ -291,7 +331,7 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
         .iter()
         .enumerate()
         .filter(|(_, noted)| has_narrowed_class(noted.read_as, windows))
-        .take(MOST_PATTERNS_ASKED);
+        .take(asked_about);
     for (at, noted) in narrowing {
         let Some(spellings) = read(noted, windows, &whole) else {
             continue;
@@ -309,7 +349,7 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
     // else the first the option reads otherwise, in words.
     if shown.is_none() {
         let mut in_words: Option<(usize, Spellings)> = None;
-        for (at, noted) in candidates.iter().enumerate().take(MOST_PATTERNS_ASKED) {
+        for (at, noted) in candidates.iter().enumerate().take(asked_about) {
             // A pattern whose own two readings are proved the same
             // (`{a,A}`) has nothing to show.
             let Some(spellings) = read(noted, windows, &whole) else {
@@ -323,13 +363,30 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
         }
         shown = shown.or(in_words);
     }
+    // Not known whether the option could run at all: no name is asked
+    // about, and a class that would take less BY ITS TEXT is still named,
+    // with `may` — a warning that protection may shrink is kept wherever
+    // it cannot be ruled out (cr-ecm10-1).
+    if shown.is_none() && with_the_option == WithTheOption::NotKnown {
+        shown = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, noted)| has_narrowed_class(noted.read_as, windows))
+            .take(MOST_PATTERNS_ASKED)
+            .find_map(|(at, noted)| {
+                let mut by_text = Spellings::with(noted.read_as, windows, None)?;
+                by_text.narrowed.as_ref()?;
+                by_text.narrowing_borne_out = false;
+                Some((at, by_text))
+            });
+    }
     // Past what is asked about, nothing is known of a pattern but that it
     // holds a letter: the plain rule, about the first of them.
     if shown.is_none() {
         shown = candidates
             .iter()
             .enumerate()
-            .skip(MOST_PATTERNS_ASKED)
+            .skip(asked_about)
             .map(|(at, noted)| (at, Spellings::in_words(noted.read_as)))
             .next();
     }
@@ -3085,14 +3142,22 @@ mod tests {
                  (--ignore-case ignores them)."
             ))
         );
-        // Beside a pattern that can be asked about, that one is shown.
-        assert_eq!(
-            case_note(&[(pattern.as_str(), None), ("*Cache", None)], cfg!(windows)).as_deref(),
-            Some(
-                "\"*Cache\" matches Cache only, and 1 more pattern matches only as typed; \
-                 capital letters matter (--ignore-case would also match cache, CACHE)."
-            )
-        );
+        // cr-ecm12-5: and beside it NO pattern gets an example. `*Cache`
+        // was offered `cache, CACHE` here — and the same command with
+        // `--ignore-case` is refused whole, for the pattern beside it.
+        // Whichever is typed first, the line is the rule.
+        for (first, second) in [(pattern.as_str(), "*Cache"), ("*Cache", pattern.as_str())] {
+            assert_eq!(
+                case_note(&[(first, None), (second, None)], cfg!(windows)),
+                Some(format!(
+                    "\"{first}\" matches exactly as typed, and 1 more pattern matches only as \
+                     typed; capital letters matter (--ignore-case ignores them)."
+                ))
+            );
+        }
+        // Alone, `*Cache` has its example.
+        assert!(case_note(&[("*Cache", None)], cfg!(windows))
+            .is_some_and(|line| line.ends_with("(--ignore-case would also match cache, CACHE).")));
         // Few enough levels, and both readings compile: an example, checked.
         let shallow = format!("{}s{}", "{".repeat(8), "}".repeat(8));
         assert!(
@@ -3129,7 +3194,10 @@ mod tests {
                  as typed; capital letters matter (--ignore-case ignores them)."
             )
         );
-        // And with nothing to cover them, the first is shown as ever.
+        // And with nothing to cover them: the rule too (cr-ecm12-5). A
+        // thousand patterns are more than is read a second time for one
+        // line, so it is not known that the option could run at all, and
+        // nothing concrete is said of it.
         QUESTIONS.with(|asked| asked.set(0));
         let line = case_note(&typed[..1000], cfg!(windows));
         let asked = QUESTIONS.with(|asked| asked.get());
@@ -3138,9 +3206,8 @@ mod tests {
         assert_eq!(
             line.as_deref(),
             Some(
-                "\"archive000.tmp\" matches archive000.tmp only, and 999 more patterns match \
-                 only as typed; capital letters matter (--ignore-case would also match \
-                 ARCHIVE000.TMP)."
+                "\"archive000.tmp\" matches exactly as typed, and 999 more patterns match only \
+                 as typed; capital letters matter (--ignore-case ignores them)."
             )
         );
     }
