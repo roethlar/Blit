@@ -33,6 +33,66 @@ use eyre::Result;
 
 use crate::cli::TransferArgs;
 
+/// What a pass is limited to (cr-ecm13-3): paths named by their text,
+/// and — for names that are not text — by their exact bytes, `/` between
+/// names. A name that is not text was asked for by the text nearest it,
+/// which is another name: the file that failed was never retried, the one
+/// that bears the other name was sent again, and the run ended well.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RetrySet {
+    pub text: HashSet<PathBuf>,
+    pub raw: HashSet<Vec<u8>>,
+}
+
+impl RetrySet {
+    fn len(&self) -> usize {
+        self.text.len() + self.raw.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.raw.is_empty()
+    }
+
+    fn intersection(&self, other: &RetrySet) -> RetrySet {
+        RetrySet {
+            text: self.text.intersection(&other.text).cloned().collect(),
+            raw: self.raw.intersection(&other.raw).cloned().collect(),
+        }
+    }
+
+    fn difference(&self, other: &RetrySet) -> RetrySet {
+        RetrySet {
+            text: self.text.difference(&other.text).cloned().collect(),
+            raw: self.raw.difference(&other.raw).cloned().collect(),
+        }
+    }
+
+    /// Limit a pass to this set.
+    fn limit(self, args: &mut TransferArgs) {
+        args.retry_only = Some(self.text);
+        args.retry_only_raw = (!self.raw.is_empty()).then_some(self.raw);
+    }
+}
+
+/// `raw` at the places of `paths`: itself when it has one entry for every
+/// path, and nothing at every place otherwise.
+fn at_their_places(paths: &[String], raw: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    if raw.len() == paths.len() {
+        raw.to_vec()
+    } else {
+        vec![Vec::new(); paths.len()]
+    }
+}
+
+/// The list as it goes back into a summary: none when no path has bytes.
+fn where_any(raw: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    if raw.iter().all(Vec::is_empty) {
+        Vec::new()
+    } else {
+        raw.to_vec()
+    }
+}
+
 /// The failure report of one pass, in the one shape every route
 /// produces: the exact count, the named (capped) report, and the exact
 /// path set the next pass retries.
@@ -42,6 +102,13 @@ pub(crate) struct PassFailures {
     pub failures: Vec<FileFailure>,
     pub failed_paths: Vec<String>,
     pub failed_paths_truncated: bool,
+    /// cr-ecm13-3: the exact bytes of each of `failed_paths` whose name is
+    /// not text, at its place, and nothing at the place of one that is.
+    /// Always one entry for every path.
+    pub failed_paths_raw: Vec<Vec<u8>>,
+    /// The same for `left_in_place`: the names that are not text among
+    /// those, by their bytes (a list of its own, as the wire has it).
+    pub left_in_place_raw: Vec<Vec<u8>>,
     /// cr-rework-1: the exact subset of `failed_paths` whose failure left
     /// this run's own incomplete copy at the destination, and whether the
     /// sender could carry all of it.
@@ -65,6 +132,8 @@ impl PassFailures {
             failures: super::failures::failures_from_wire(&summary.failures),
             failed_paths: summary.failed_paths.clone(),
             failed_paths_truncated: summary.failed_paths_truncated,
+            failed_paths_raw: at_their_places(&summary.failed_paths, &summary.failed_paths_raw),
+            left_in_place_raw: summary.left_in_place_raw.clone(),
             left_in_place: summary.left_in_place.clone(),
             left_in_place_truncated: summary.left_in_place_truncated,
             removed_incomplete: summary.removed_incomplete.clone(),
@@ -79,6 +148,8 @@ impl PassFailures {
             failures: summary.failures.clone(),
             failed_paths: summary.failed_paths.clone(),
             failed_paths_truncated: summary.failed_paths_truncated,
+            failed_paths_raw: at_their_places(&summary.failed_paths, &summary.failed_paths_raw),
+            left_in_place_raw: summary.left_in_place_raw.clone(),
             left_in_place: summary.left_in_place.clone(),
             left_in_place_truncated: summary.left_in_place_truncated,
             removed_incomplete: summary.removed_incomplete.clone(),
@@ -96,6 +167,8 @@ impl PassFailures {
             failures: outcome.contained_failures(),
             failed_paths: paths.to_vec(),
             failed_paths_truncated: truncated,
+            failed_paths_raw: at_their_places(paths, outcome.failed_paths_raw()),
+            left_in_place_raw: outcome.left_in_place_raw().to_vec(),
             left_in_place: left.to_vec(),
             left_in_place_truncated: left_truncated,
             removed_incomplete: removed.to_vec(),
@@ -107,7 +180,23 @@ impl PassFailures {
     /// The set the next pass is limited to. The exact set when the
     /// sender could carry it; otherwise the named report's paths, with
     /// `truncated` telling the caller to say so.
-    fn retry_set(&self) -> (HashSet<PathBuf>, bool) {
+    fn retry_set(&self) -> (RetrySet, bool) {
+        // cr-ecm13-3: each path by its text, or — where its name is not
+        // text — by its bytes and by nothing else.
+        let exact = || {
+            let mut set = RetrySet::default();
+            for (at, path) in self.failed_paths.iter().enumerate() {
+                match self.failed_paths_raw.get(at) {
+                    Some(raw) if !raw.is_empty() => {
+                        set.raw.insert(raw.clone());
+                    }
+                    _ => {
+                        set.text.insert(PathBuf::from(path));
+                    }
+                }
+            }
+            set
+        };
         // cr-fix2-2: the exact set is exact only when every counted
         // failure has a path in it (the unretried remainder is carried
         // separately). A peer that counted failures it could not name
@@ -118,27 +207,35 @@ impl PassFailures {
         let represented = (self.failed_paths.len() as u64).saturating_add(self.unretried);
         let all_represented = self.files_failed <= represented;
         if !self.failed_paths_truncated && !self.failed_paths.is_empty() && all_represented {
-            return (self.failed_paths.iter().map(PathBuf::from).collect(), false);
+            return (exact(), false);
         }
         if !self.failed_paths_truncated && !self.failed_paths.is_empty() {
-            return (self.failed_paths.iter().map(PathBuf::from).collect(), true);
+            return (exact(), true);
         }
         let truncated =
             self.failed_paths_truncated || (self.files_failed as usize) > self.failures.len();
-        (
-            self.failures
-                .iter()
-                .map(|f| PathBuf::from(&f.relative_path))
-                .collect(),
-            truncated,
-        )
+        let mut named = RetrySet::default();
+        for failure in &self.failures {
+            match &failure.raw_relative_path {
+                Some(raw) => {
+                    named.raw.insert(raw.clone());
+                }
+                None => {
+                    named.text.insert(PathBuf::from(&failure.relative_path));
+                }
+            }
+        }
+        (named, truncated)
     }
 
     /// cr-win-1 / cr-rework-1: the failed paths whose failure left this
     /// run's own incomplete copy at the destination — the exact set the
     /// destination sends beside `failed_paths`, never the capped report.
-    fn left_in_place(&self) -> HashSet<PathBuf> {
-        self.left_in_place.iter().map(PathBuf::from).collect()
+    fn left_in_place(&self) -> RetrySet {
+        RetrySet {
+            text: self.left_in_place.iter().map(PathBuf::from).collect(),
+            raw: self.left_in_place_raw.iter().cloned().collect(),
+        }
     }
 
     /// Fold a second session of the same pass into this report.
@@ -146,6 +243,8 @@ impl PassFailures {
         self.files_failed = self.files_failed.saturating_add(other.files_failed);
         self.failures.extend(other.failures);
         self.failed_paths.extend(other.failed_paths);
+        self.failed_paths_raw.extend(other.failed_paths_raw);
+        self.left_in_place_raw.extend(other.left_in_place_raw);
         self.failed_paths_truncated |= other.failed_paths_truncated;
         self.left_in_place.extend(other.left_in_place);
         self.left_in_place_truncated |= other.left_in_place_truncated;
@@ -215,10 +314,33 @@ impl PassFailures {
             .filter(|path| !removed.contains(path.as_str()))
             .filter(|path| !left.contains(*path))
             .collect();
-        let ambiguous = next.removed_incomplete_truncated && !carried.is_empty();
+        // cr-ecm13-3: the same for the names that are not text, each by
+        // its bytes. (What a pass removed is listed by text alone.)
+        let still_failing_raw: HashSet<&[u8]> = next
+            .failed_paths_raw
+            .iter()
+            .filter(|raw| !raw.is_empty())
+            .map(Vec::as_slice)
+            .collect();
+        let mut left_raw: HashSet<Vec<u8>> = std::mem::take(&mut next.left_in_place_raw)
+            .into_iter()
+            .collect();
+        let carried_raw: Vec<&Vec<u8>> = self
+            .left_in_place_raw
+            .iter()
+            .filter(|raw| still_failing_raw.contains(raw.as_slice()))
+            .filter(|raw| !removed.contains(String::from_utf8_lossy(raw).as_ref()))
+            .filter(|raw| !left_raw.contains(*raw))
+            .collect();
+        let ambiguous =
+            next.removed_incomplete_truncated && (!carried.is_empty() || !carried_raw.is_empty());
         if !ambiguous {
             left.extend(carried.into_iter().cloned());
+            left_raw.extend(carried_raw.into_iter().cloned());
         }
+        let mut left_raw: Vec<Vec<u8>> = left_raw.into_iter().collect();
+        left_raw.sort();
+        next.left_in_place_raw = left_raw;
         let mut left: Vec<String> = left.into_iter().collect();
         left.sort();
         next.left_in_place = left;
@@ -232,6 +354,8 @@ impl PassFailures {
         summary.failures = self.failures.iter().map(FileFailure::to_wire).collect();
         summary.failed_paths = self.failed_paths.clone();
         summary.failed_paths_truncated = self.failed_paths_truncated;
+        summary.failed_paths_raw = where_any(&self.failed_paths_raw);
+        summary.left_in_place_raw = self.left_in_place_raw.clone();
         summary.left_in_place = self.left_in_place.clone();
         summary.left_in_place_truncated = self.left_in_place_truncated;
         summary.removed_incomplete = self.removed_incomplete.clone();
@@ -244,6 +368,8 @@ impl PassFailures {
         summary.failures = self.failures.clone();
         summary.failed_paths = self.failed_paths.clone();
         summary.failed_paths_truncated = self.failed_paths_truncated;
+        summary.failed_paths_raw = where_any(&self.failed_paths_raw);
+        summary.left_in_place_raw = self.left_in_place_raw.clone();
         summary.left_in_place = self.left_in_place.clone();
         summary.left_in_place_truncated = self.left_in_place_truncated;
         summary.removed_incomplete = self.removed_incomplete.clone();
@@ -368,6 +494,8 @@ impl RetryOutcome {
             .collect();
         summary.failed_paths = self.final_failures.failed_paths.clone();
         summary.failed_paths_truncated = self.final_failures.failed_paths_truncated;
+        summary.failed_paths_raw = where_any(&self.final_failures.failed_paths_raw);
+        summary.left_in_place_raw = self.final_failures.left_in_place_raw.clone();
         summary.left_in_place = self.final_failures.left_in_place.clone();
         summary.left_in_place_truncated = self.final_failures.left_in_place_truncated;
         summary.removed_incomplete = self.final_failures.removed_incomplete.clone();
@@ -460,14 +588,10 @@ where
         // skipped and its failure cleared, retried without it a file the
         // user asked to keep is overwritten — so none of them is retried:
         // they stay reported as not retried.
-        let left: HashSet<PathBuf> = if args.ignore_existing {
-            current
-                .left_in_place()
-                .intersection(&set)
-                .cloned()
-                .collect()
+        let left: RetrySet = if args.ignore_existing {
+            current.left_in_place().intersection(&set)
         } else {
-            HashSet::new()
+            RetrySet::default()
         };
         let (set, truncated) = if args.ignore_existing && current.left_in_place_truncated {
             (left.clone(), true)
@@ -514,19 +638,19 @@ where
         // out of this loop's state and its caller's frame.
         let pass_run = async {
             if left.is_empty() {
-                pass_args.retry_only = Some(set);
+                set.limit(&mut pass_args);
                 Box::pin(run(pass_args)).await
             } else {
-                let rest: HashSet<PathBuf> = set.difference(&left).cloned().collect();
+                let rest = set.difference(&left);
                 let mut left_args = pass_args.clone();
-                left_args.retry_only = Some(left);
+                left.limit(&mut left_args);
                 // cr-ecm12-2: said to be this run's own copies, with the
                 // option still on. Run with it off, the pass replaced
                 // whatever stood at these paths by then.
                 left_args.retry_left = true;
                 let mut result = Box::pin(run(left_args)).await?;
                 if !rest.is_empty() {
-                    pass_args.retry_only = Some(rest);
+                    rest.limit(&mut pass_args);
                     result.merge(Box::pin(run(pass_args)).await?);
                 }
                 Ok(result)
@@ -611,6 +735,8 @@ mod tests {
             failures: paths.iter().map(|p| failure(p)).collect(),
             failed_paths: paths.iter().map(|p| p.to_string()).collect(),
             failed_paths_truncated: false,
+            failed_paths_raw: vec![Vec::new(); paths.len()],
+            left_in_place_raw: Vec::new(),
             left_in_place: Vec::new(),
             left_in_place_truncated: false,
             removed_incomplete: Vec::new(),
@@ -656,6 +782,93 @@ mod tests {
             in_stream_carrier_used: false,
             files_resumed: 0,
         }
+    }
+
+    /// cr-ecm13-3: a failed name that is not text is asked for by its
+    /// bytes, and by nothing else — the text it is held under is another
+    /// name, and asking for that sent another file. From the exact set,
+    /// from the named report where the set did not fit, and under
+    /// `--ignore-existing` in the pass its own incomplete copy belongs to.
+    #[tokio::test]
+    async fn a_name_that_is_not_text_is_retried_by_its_bytes() {
+        type Asked = Vec<(Vec<PathBuf>, Vec<Vec<u8>>, bool)>;
+        async fn passes(a: &TransferArgs, main: PassFailures) -> Asked {
+            let mut asked: Asked = Vec::new();
+            run_retry_passes(a, main, |pass_args| {
+                let mut text: Vec<PathBuf> = pass_args
+                    .retry_only
+                    .clone()
+                    .expect("retry set")
+                    .into_iter()
+                    .collect();
+                text.sort();
+                let raw: Vec<Vec<u8>> = pass_args
+                    .retry_only_raw
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                asked.push((text, raw, pass_args.retry_left));
+                async move { Ok(clean(1)) }
+            })
+            .await
+            .expect("loop");
+            asked
+        }
+        let twins = || {
+            let mut main = failures(&["plain", "dup\u{fffd}"]);
+            main.failed_paths_raw = vec![Vec::new(), b"dup\xff".to_vec()];
+            main.failures[1].raw_relative_path = Some(b"dup\xff".to_vec());
+            main
+        };
+        let both = vec![(
+            vec![PathBuf::from("plain")],
+            vec![b"dup\xff".to_vec()],
+            false,
+        )];
+
+        // The exact set.
+        assert_eq!(passes(&args(1), twins()).await, both);
+        // The named report, where the set did not fit.
+        let mut capped = twins();
+        capped.failed_paths.clear();
+        capped.failed_paths_raw.clear();
+        capped.failed_paths_truncated = true;
+        assert_eq!(passes(&args(1), capped).await, both);
+        // Its own incomplete copy, under --ignore-existing: apart, by bytes.
+        let mut keeping = args(1);
+        keeping.ignore_existing = true;
+        let mut left = twins();
+        left.left_in_place_raw = vec![b"dup\xff".to_vec()];
+        assert_eq!(
+            passes(&keeping, left).await,
+            vec![
+                (Vec::new(), vec![b"dup\xff".to_vec()], true),
+                (vec![PathBuf::from("plain")], Vec::new(), false),
+            ]
+        );
+
+        // And what a pass leaves goes back with its bytes.
+        let mut again = failures(&["dup\u{fffd}"]);
+        again.failed_paths_raw = vec![b"dup\xff".to_vec()];
+        let out = run_retry_passes(&args(1), twins(), |_| {
+            let again = again.clone();
+            async move {
+                Ok(PassResult {
+                    files_transferred: 1,
+                    bytes_transferred: 1,
+                    failures: again,
+                    in_stream_carrier_used: false,
+                    files_resumed: 0,
+                })
+            }
+        })
+        .await
+        .expect("loop");
+        let mut summary = TransferSummary::default();
+        out.final_failures.apply_to_summary(&mut summary);
+        assert_eq!(summary.failed_paths, ["dup\u{fffd}"]);
+        assert_eq!(summary.failed_paths_raw, [b"dup\xff".to_vec()]);
     }
 
     /// cr-win-1 / cr-rework-1: under --ignore-existing, a path whose
@@ -1218,6 +1431,8 @@ mod cr_fix2_2_tests {
         // counted failures, and the set NOT flagged truncated because
         // the one name fit the wire budget.
         let main = PassFailures {
+            left_in_place_raw: Vec::new(),
+            failed_paths_raw: Vec::new(),
             files_failed: 3,
             failures: vec![FileFailure {
                 relative_path: "a".to_string(),

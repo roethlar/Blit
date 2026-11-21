@@ -217,7 +217,11 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// at a listed path NOTHING that stands there is written over. A peer of
 /// contract 24 would replace a file that carries the mark that contract
 /// stamped on an incomplete copy; no mark is stamped or read any more.
-pub const CONTRACT_VERSION: u32 = 25;
+/// v26: `TransferSummary.failed_paths_raw` (cr-ecm13-3) — the exact set of
+/// failed paths gives a name that is not text by its bytes. A peer of
+/// contract 25 would give its text alone, and a retry would ask for
+/// another file.
+pub const CONTRACT_VERSION: u32 = 26;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames
@@ -1516,15 +1520,23 @@ fn requested_but_unscanned(
     let mut dropped = 0u64;
     let mut budget = crate::remote::transfer::sink::MAX_WIRE_FAILED_PATHS_ENCODED_BYTES;
     // Deterministic report order, whatever the set's iteration order.
-    let mut requested: Vec<String> = scope
+    // cr-ecm13-3: each with the exact bytes of its name where that is not
+    // text. A requested name that was not found was reported by its text
+    // alone; the retry after that asked for the text — another name.
+    let mut requested: Vec<(String, Vec<u8>)> = scope
         .iter()
-        .map(|requested| crate::path_posix::relative_path_to_posix(requested))
-        .filter(|rel| !sent.contains_key(rel) && Some(rel.as_str()) != sole_sent)
-        .chain(unnamed.iter().cloned())
+        .map(|requested| {
+            (
+                crate::path_posix::relative_path_to_posix(requested),
+                crate::raw_name::raw_relative_bytes(requested).unwrap_or_default(),
+            )
+        })
+        .filter(|(rel, _)| !sent.contains_key(rel) && Some(rel.as_str()) != sole_sent)
+        .chain(unnamed.iter().map(|text| (text.clone(), Vec::new())))
         .collect();
     requested.sort();
     requested.dedup();
-    for rel in requested {
+    for (rel, raw_relative_path) in requested {
         let prefix = format!("{rel} (");
         let reason = match unreadable.iter().find(|entry| entry.starts_with(&prefix)) {
             Some(entry) => format!(
@@ -1546,7 +1558,7 @@ fn requested_but_unscanned(
         out.push(crate::generated::FileFailure {
             relative_path: rel,
             reason,
-            raw_relative_path: Vec::new(),
+            raw_relative_path,
         });
     }
     (out, dropped)
@@ -5590,6 +5602,8 @@ async fn destination_session_inner(
                 let contained_failures =
                     contained_failures.named_raw(|text| granted_raw_names.get(text).cloned());
                 let (retry_paths, retry_paths_truncated) = contained_failures.wire_failed_paths();
+                // cr-ecm13-3: and the bytes of those that are not text.
+                let failed_paths_raw = contained_failures.wire_failed_paths_raw(&retry_paths);
                 let (left_in_place, left_in_place_truncated) =
                     contained_failures.wire_left_in_place();
                 let (left_in_place_raw, left_in_place_raw_truncated) =
@@ -5619,6 +5633,7 @@ async fn destination_session_inner(
                     failures: contained_failures.wire_failures(),
                     failed_paths: retry_paths,
                     failed_paths_truncated: retry_paths_truncated,
+                    failed_paths_raw,
                     left_in_place,
                     left_in_place_truncated,
                     left_in_place_raw,
@@ -7111,6 +7126,34 @@ mod tests {
         assert!(requested_but_unscanned(None, &unnamed, &sent, None, &[])
             .0
             .is_empty());
+    }
+
+    /// cr-ecm13-3: a requested name that is not text, and was not found,
+    /// is reported with its bytes — the retry after it asks by them.
+    #[cfg(unix)]
+    #[test]
+    fn a_requested_name_that_is_not_text_is_reported_missing_by_its_bytes() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let scope: HashSet<PathBuf> = [
+            PathBuf::from(std::ffi::OsStr::from_bytes(b"sub/dup\xff")),
+            PathBuf::from("plain.txt"),
+        ]
+        .into();
+        let (missing, dropped) =
+            requested_but_unscanned(Some(&scope), &[], &HashMap::new(), None, &[]);
+        assert_eq!(dropped, 0);
+        let by_text: HashMap<&str, &[u8]> = missing
+            .iter()
+            .map(|failure| {
+                (
+                    failure.relative_path.as_str(),
+                    failure.raw_relative_path.as_slice(),
+                )
+            })
+            .collect();
+        assert_eq!(by_text.len(), 2);
+        assert_eq!(by_text["sub/dup\u{fffd}"], b"sub/dup\xff");
+        assert_eq!(by_text["plain.txt"], b"");
     }
 
     /// cr-ecm12-1: a list of exact paths has no name for a source that is

@@ -1012,6 +1012,9 @@ message DelegatedPullSummary {
   // Contract 24 (cr-uv3-1): see TransferSummary.source_ticket, re-encoded
   // verbatim.
   bytes source_ticket = 16;
+  // Contract 26 (cr-ecm13-3): see TransferSummary.failed_paths_raw,
+  // re-encoded verbatim.
+  repeated bytes failed_paths_raw = 17;
 }
 
 message DelegatedPullError {
@@ -1509,6 +1512,13 @@ message TransferSummary {
   // Contract 24 (cr-uv3-1): the source's ticket for what it sent
   // (`ManifestComplete.sent_ticket`), as the destination received it.
   bytes source_ticket = 15;
+  // Contract 26 (cr-ecm13-3): the exact bytes of each path of
+  // `failed_paths` whose name is not valid UTF-8, at its place in that
+  // list; empty at the place of one that is text. Either no entry at all,
+  // or one for every path. `failed_paths` holds such a name as the text
+  // nearest it, which is another name: a retry that asked for it sent the
+  // file that really bears that name, and never the one that failed.
+  repeated bytes failed_paths_raw = 16;
 }
 
 // Structured refusal/abort — an end says why before closing.

@@ -283,6 +283,13 @@ pub struct SinkOutcome {
     /// never share the status. A write site records a failure by its text;
     /// [`named_raw`](Self::named_raw) names it from the session's manifest.
     left_in_place_raw: std::collections::HashSet<Vec<u8>>,
+    /// cr-ecm13-3: the exact bytes of each failed entry whose name is not
+    /// text, by the text `failed_paths` holds it under. The exact set went
+    /// to the initiator as text alone, and the text of such a name is
+    /// ANOTHER name: a retry asked for `dup` + U+FFFD where `dup` + byte
+    /// `FF` had failed, and the file that really bears that name was sent
+    /// again in its place.
+    failed_raw: std::collections::HashMap<String, Vec<u8>>,
     /// cr-rework-3: the exact set of failed paths whose incomplete copy
     /// this outcome's writes positively removed. The retry loop keeps a
     /// path classified as this run's leftover only while the copy is
@@ -304,6 +311,7 @@ impl SinkOutcome {
             failed_paths: std::collections::HashSet::new(),
             left_in_place: std::collections::HashSet::new(),
             left_in_place_raw: std::collections::HashSet::new(),
+            failed_raw: std::collections::HashMap::new(),
             removed_incomplete: std::collections::HashSet::new(),
         }
     }
@@ -358,6 +366,9 @@ impl SinkOutcome {
         log::warn!("file failed, session continues: {named} ({reason})");
         self.files_failed_total = self.files_failed_total.saturating_add(1);
         self.failed_paths.insert(relative_path.clone());
+        if let Some(raw) = &raw_relative_path {
+            self.failed_raw.insert(relative_path.clone(), raw.clone());
+        }
         if reason.contains(INCOMPLETE_LEFT_IN_PLACE) {
             match &raw_relative_path {
                 Some(raw) => {
@@ -437,6 +448,12 @@ impl SinkOutcome {
         self.failures
             .extend(other.failures.iter().take(room).cloned());
         self.failed_paths.extend(other.failed_paths.iter().cloned());
+        self.failed_raw.extend(
+            other
+                .failed_raw
+                .iter()
+                .map(|(text, raw)| (text.clone(), raw.clone())),
+        );
         self.left_in_place
             .extend(other.left_in_place.iter().cloned());
         self.left_in_place_raw
@@ -480,6 +497,12 @@ impl SinkOutcome {
         for failure in &mut self.failures {
             if failure.raw_relative_path.is_none() {
                 failure.raw_relative_path = raw_of(&failure.relative_path);
+            }
+        }
+        // cr-ecm13-3: and every failed path, for the exact set.
+        for text in &self.failed_paths {
+            if let Some(raw) = raw_of(text) {
+                self.failed_raw.entry(text.clone()).or_insert(raw);
             }
         }
         let moved: Vec<(String, Vec<u8>)> = self
@@ -565,6 +588,21 @@ impl SinkOutcome {
             out.push(path.clone());
         }
         (out, unnamed)
+    }
+
+    /// cr-ecm13-3: the exact bytes of each of `paths` — what
+    /// [`wire_failed_paths`](Self::wire_failed_paths) gave — whose name is
+    /// not text, at its place in that list, and nothing at the place of
+    /// one that is. No list at all when every name is text. (Bounded with
+    /// the paths: a name's bytes are never more than its text's.)
+    pub fn wire_failed_paths_raw(&self, paths: &[String]) -> Vec<Vec<u8>> {
+        if !paths.iter().any(|path| self.failed_raw.contains_key(path)) {
+            return Vec::new();
+        }
+        paths
+            .iter()
+            .map(|path| self.failed_raw.get(path).cloned().unwrap_or_default())
+            .collect()
     }
 
     pub fn wire_failures(&self) -> Vec<crate::generated::FileFailure> {
@@ -5575,6 +5613,7 @@ mod tests {
     /// the sender-bounded list.
     fn wire_summary(outcome: &SinkOutcome) -> crate::generated::TransferSummary {
         crate::generated::TransferSummary {
+            failed_paths_raw: Vec::new(),
             source_ticket: Vec::new(),
             files_transferred: 3,
             bytes_transferred: 4096,
@@ -6875,6 +6914,36 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(there.files_failed_total, 1, "{there:?}");
         assert_eq!(std::fs::metadata(dst.join("old.bin")).unwrap().len(), 11);
+    }
+
+    /// cr-ecm13-3: the exact set gives a failed name that is not text by
+    /// its bytes, at its place — recorded with them, or named from the
+    /// manifest afterwards — and gives no list when every name is text.
+    #[test]
+    fn the_exact_failed_set_holds_the_bytes_of_a_name_that_is_not_text() {
+        let mut outcome = SinkOutcome::default();
+        outcome.record_failure("plain.txt", "write: no room");
+        assert!(outcome
+            .wire_failed_paths_raw(&outcome.wire_failed_paths().0)
+            .is_empty());
+        outcome.record_named_failure("dup\u{fffd}", Some(b"dup\xff".to_vec()), "write: no room");
+        outcome.record_failure("later\u{fffd}", "write: no room");
+        let mut merged = SinkOutcome::default();
+        merged.merge_failures(&outcome);
+        let merged =
+            merged.named_raw(|text| (text == "later\u{fffd}").then(|| b"later\xfe".to_vec()));
+        let (paths, truncated) = merged.wire_failed_paths();
+        assert!(!truncated);
+        let raw = merged.wire_failed_paths_raw(&paths);
+        let by_text: std::collections::HashMap<&str, &[u8]> = paths
+            .iter()
+            .map(String::as_str)
+            .zip(raw.iter().map(Vec::as_slice))
+            .collect();
+        assert_eq!(by_text.len(), 3);
+        assert_eq!(by_text["plain.txt"], b"");
+        assert_eq!(by_text["dup\u{fffd}"], b"dup\xff");
+        assert_eq!(by_text["later\u{fffd}"], b"later\xfe");
     }
 
     /// cr-ecm13-4: a path kept where a copy was left is recorded as one

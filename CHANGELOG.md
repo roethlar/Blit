@@ -21,7 +21,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `files_from_unnamed`; `client::connect_with_timeout` and
 `connect_transfer_client` return a `BlitClient<client::BlitChannel>`
 (the channel behind `client::BoundedResponses`). The wire
-protocol is contract 25: a peer on any other contract version (every 0.1.x
+protocol is contract 26: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -118,7 +118,7 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 25): the job ID rides the session-open and
+- Wire protocol (contract 26): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
@@ -214,6 +214,11 @@ part, and a job you can list, read, re-run and retry.
   no other: if the directory has since become one file of the same
   name, the retry reports the path missing — it used to send that file
   over whatever stood at the destination's root.
+- A retry (`--retries`) asks for a failed file whose name is not valid
+  UTF-8 by that name's own bytes. It asked by the text the name is shown
+  as — the name of another file, where the source has one: that file
+  was sent again, the one that had failed never was, and the command
+  exited 0.
 - `blit jobs retry` writes where the run it retries wrote. `blit copy src
   backup`, with no `/` after either, makes `backup` and writes into it
   when nothing is there, and writes `backup/src/` when a directory is;

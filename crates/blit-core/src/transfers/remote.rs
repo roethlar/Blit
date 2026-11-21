@@ -507,6 +507,17 @@ impl DelegatedPullOutcome {
             self.summary.failed_paths_truncated,
         )
     }
+    /// cr-ecm13-3: the exact bytes of the failed paths whose names are not
+    /// text, at their places (see `TransferSummary.failed_paths_raw`), and
+    /// of those that left an incomplete copy.
+    pub fn failed_paths_raw(&self) -> &[Vec<u8>] {
+        &self.summary.failed_paths_raw
+    }
+
+    pub fn left_in_place_raw(&self) -> &[Vec<u8>] {
+        &self.summary.left_in_place_raw
+    }
+
     /// cr-rework-1: the failed paths that left this run's own incomplete
     /// copy at the destination (see `TransferSummary.left_in_place`).
     pub fn left_in_place(&self) -> (&[String], bool) {
@@ -1131,6 +1142,7 @@ mod tests {
             contained.record_failure(format!("dir/f{index}.bin"), format!("synthetic {index}"));
         }
         let session_summary = TransferSummary {
+            failed_paths_raw: Vec::new(),
             source_ticket: Vec::new(),
             files_transferred: 2,
             bytes_transferred: 20,

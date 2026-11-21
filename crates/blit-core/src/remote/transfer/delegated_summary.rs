@@ -67,6 +67,8 @@ pub fn delegated_summary_from_session(
         removed_incomplete_truncated: summary.removed_incomplete_truncated,
         // cr-uv3-1: the source daemon's ticket, for the CLI to present.
         source_ticket: summary.source_ticket.clone(),
+        // cr-ecm13-3: the bytes of the failed names that are not text.
+        failed_paths_raw: summary.failed_paths_raw.clone(),
     }
 }
 
@@ -96,6 +98,7 @@ mod tests {
     /// the list is its already-capped wire form.
     fn session_summary(contained: &SinkOutcome) -> TransferSummary {
         TransferSummary {
+            failed_paths_raw: Vec::new(),
             source_ticket: Vec::new(),
             files_transferred: 7,
             bytes_transferred: 4096,

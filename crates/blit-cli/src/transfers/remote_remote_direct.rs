@@ -185,6 +185,7 @@ async fn run_remote_to_remote_direct_inner(
             run.note_detached(&dst_host_hint, &transfer_id);
         }
         let summary = DelegatedPullSummary {
+            failed_paths_raw: Vec::new(),
             source_ticket: Vec::new(),
             files_transferred: 0,
             bytes_transferred: 0,

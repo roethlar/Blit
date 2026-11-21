@@ -390,6 +390,9 @@ pub struct LocalMirrorSummary {
     /// mirrors the wire flag and is always false here.
     pub failed_paths: Vec<String>,
     pub failed_paths_truncated: bool,
+    /// cr-ecm13-3: the exact bytes of each of `failed_paths` whose name is
+    /// not text, at its place (`TransferSummary.failed_paths_raw`).
+    pub failed_paths_raw: Vec<Vec<u8>>,
     /// cr-rework-1: the subset of `failed_paths` whose failure left this
     /// run's own incomplete copy at the destination (see
     /// `TransferSummary.left_in_place`).
@@ -1045,6 +1048,7 @@ pub async fn run_local_session(
             .collect(),
         failed_paths: outcome.summary.failed_paths.clone(),
         failed_paths_truncated: outcome.summary.failed_paths_truncated,
+        failed_paths_raw: outcome.summary.failed_paths_raw.clone(),
         left_in_place: outcome.summary.left_in_place.clone(),
         left_in_place_truncated: outcome.summary.left_in_place_truncated,
         left_in_place_raw: outcome.summary.left_in_place_raw.clone(),
