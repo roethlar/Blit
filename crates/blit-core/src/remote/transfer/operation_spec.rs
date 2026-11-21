@@ -72,7 +72,17 @@ use crate::generated::{
 ///     in. A version-6 daemon on Linux, handed a Windows list's
 ///     `sub\name.txt`, reads one name; a version-6 daemon on Windows,
 ///     handed a Linux name that holds a `\`, reads two.
-pub const SUPPORTED_SPEC_VERSION: u32 = 7;
+///   - 8: no new field of its own — what `source_path` says changed
+///     (cr-uv2-1): it keeps the `/` that marks a source typed as a
+///     directory, and the daemon holding the source refuses one that is
+///     none. And the filter it carries may hold `files_from_root`
+///     (cr-ecm11-1). cr-uv3-2: both went out under version 7, against the
+///     rule above. Two daemons of the earlier build, asked by a newer
+///     CLI, dropped the mark and copied `one.txt/` as the file it is; a
+///     newer pair, asked by an older CLI, were sent no mark and did the
+///     same. The contract version gates the two daemons against each
+///     other, never the machine that asks.
+pub const SUPPORTED_SPEC_VERSION: u32 = 8;
 
 /// Normalized, internal-friendly view of a transfer operation. Folds
 /// proto-`Unspecified` into concrete defaults, converts `FilterSpec`
@@ -900,6 +910,40 @@ mod tests {
         assert!(
             version >= 5,
             "a spec that carries the empty-list marker is version 5 or later, not {version}"
+        );
+    }
+
+    /// cr-uv3-2: a request whose source keeps the mark that it was typed
+    /// as a directory, or whose list names the source itself, carries a
+    /// version a daemon of spec version 7 refuses — that daemon would drop
+    /// the mark and copy `one.txt/` as the file — and this build refuses a
+    /// version-7 request in turn, whose sender sent no mark.
+    #[test]
+    fn a_request_that_says_how_its_source_was_typed_is_version_8_or_later() {
+        let mut spec = empty_spec();
+        spec.source_path = "one.txt/".to_string();
+        spec.filter = Some(ProtoFilterSpec {
+            files_from_root: true,
+            ..ProtoFilterSpec::default()
+        });
+        let accepted =
+            NormalizedTransferOperation::from_spec(spec.clone()).expect("this build's own version");
+        assert_eq!(
+            accepted.source_path, "one.txt/",
+            "the mark is kept for the source"
+        );
+        assert!(accepted
+            .filter
+            .as_ref()
+            .is_some_and(|filter| filter.lists_the_source_itself()));
+        spec.spec_version = 7;
+        let error = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+        assert!(error.to_string().contains("spec_version 7"), "{error:#}");
+        // Read at run time: the number is what a daemon is told.
+        let version = std::hint::black_box(SUPPORTED_SPEC_VERSION);
+        assert!(
+            version >= 8,
+            "a request that says how its source was typed is version 8 or later, not {version}"
         );
     }
 
