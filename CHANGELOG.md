@@ -21,7 +21,7 @@ cr-ssc2-2): `PreparedPayload::TarShard` gained `skipped` and
 `files_from_unnamed`; `client::connect_with_timeout` and
 `connect_transfer_client` return a `BlitClient<client::BlitChannel>`
 (the channel behind `client::BoundedResponses`). The wire
-protocol is contract 16: a peer on any other contract version (every 0.1.x
+protocol is contract 17: a peer on any other contract version (every 0.1.x
 release) is refused at session open, by design; two 1.0.0 builds from any
 channel talk to each other.
 
@@ -118,7 +118,7 @@ part, and a job you can list, read, re-run and retry.
   be written the transfer still completes and the report says the log is
   incomplete.
 - A dry run or `--null` run is logged as what it planned, not as copies.
-- Wire protocol (contract 16): the job ID rides the session-open and
+- Wire protocol (contract 17): the job ID rides the session-open and
   delegated-pull requests; `GetJobLog` returns a daemon's log by ID; the
   finished-job record carries the failed-file count. In a filtered mirror,
   `ManifestPruned` tells the destination which source paths were excluded,
@@ -281,9 +281,14 @@ asks before it deletes.
   for a link while it runs is removed as the link, and cannot turn the
   removal elsewhere. (On Windows the tree goes by the standard library's
   own anchored removal, which stops at the first entry it cannot remove.)
-  `--json` gives `entries_removed`, `failures` and
-  `failures_truncated`. On Linux the messages, the exit status and what
-  is left on disk equal the system `rm`'s for the same tree and paths.
+  `--json` gives `entries_removed`, `failures` and `unfinished`. On Linux
+  the messages, the exit status and what is left on disk equal the system
+  `rm`'s for the same tree and paths.
+- **Every entry that could not be removed is named**, as the daemon meets
+  it — a tree with a million of them prints a million lines, as `rm`
+  does. If a daemon's answer stops before it says it is done, what it
+  reported is printed, then `HOST: the removal did not finish: …`, and
+  the exit status is 1 (`unfinished` in `--json`).
 - **A path is taken exactly as typed**, by `rm`, `du`, `df` and `find`
   alike: a `/` after it, a `.` as its last name, a space at either end.
   `rm` refuses a path ending in `.` or `..` in `rm`'s words (`refusing to

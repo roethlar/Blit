@@ -221,6 +221,63 @@ fn find_against_a_daemon_too_old_to_know_it_is_refused_as_another_build() {
     );
 }
 
+/// cr-uv1-5: a removal's answer is complete only when the daemon says it
+/// is done. One that reports an entry and then ends — or fails — is not:
+/// what it reported is printed, the command says the removal did not
+/// finish, and it exits 1. Taken for a complete answer, it would read as
+/// "one entry could not be removed, the rest is gone".
+#[test]
+fn rm_says_so_when_the_answer_stops_before_it_is_done() {
+    let work = tempdir().expect("tempdir");
+    let config_dir = work.path().join("cli-config");
+    fs::create_dir_all(&config_dir).expect("cli config");
+    let fake = spawn_fake_blit_server(UnimplementedBlit, "a daemon whose answer stops early");
+    for (module, why) in [
+        ("cut-short", "ended before it said it was done"),
+        ("dies", "the disk went away"),
+    ] {
+        let operand = format!("127.0.0.1:{}:/{module}/tree", fake.port);
+        let mut cmd = Command::new(common::cli_bin());
+        cmd.arg("--config-dir")
+            .arg(&config_dir)
+            .args(["rm", "-r", "-y"])
+            .arg(&operand);
+        let output = run_with_timeout(cmd, Duration::from_secs(20));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{module}: {stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "blit rm: cannot remove '{operand}/sub/held': Permission denied"
+            )),
+            "{module}: what was reported is printed\n{stderr}"
+        );
+        assert!(
+            stderr.contains("the removal did not finish") && stderr.contains(why),
+            "{module}\n{stderr}"
+        );
+
+        let mut cmd = Command::new(common::cli_bin());
+        cmd.arg("--config-dir")
+            .arg(&config_dir)
+            .args(["rm", "-r", "-y", "--json"])
+            .arg(&operand);
+        let output = run_with_timeout(cmd, Duration::from_secs(20));
+        assert_eq!(output.status.code(), Some(1), "{module}");
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("JSON on stdout");
+        assert_eq!(
+            report["failures"].as_array().map(Vec::len),
+            Some(1),
+            "{report}"
+        );
+        assert_eq!(
+            report["unfinished"].as_array().map(Vec::len),
+            Some(1),
+            "{report}"
+        );
+    }
+}
+
 /// UTILITY_VERBS_LOCAL_PARITY AC-11 for removal, a newer asker against a
 /// daemon of an earlier contract: that daemon does not serve `Rm` at all
 /// and answers "unimplemented" — it knows only the old request, which
@@ -387,6 +444,9 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
     type DuStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DuReply, tonic::Status>,
     >;
+    type RmStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::RmReply, tonic::Status>,
+    >;
     type DelegatedPullStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DelegatedPullProgress, tonic::Status>,
     >;
@@ -438,9 +498,38 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
 
     async fn rm(
         &self,
-        _: tonic::Request<blit_core::generated::RmRequest>,
-    ) -> Result<tonic::Response<blit_core::generated::RmReply>, tonic::Status> {
-        Err(tonic::Status::unimplemented("stale daemon"))
+        request: tonic::Request<blit_core::generated::RmRequest>,
+    ) -> Result<tonic::Response<Self::RmStream>, tonic::Status> {
+        use blit_core::generated::{rm_reply::Reply, RmFailure, RmFailures, RmReply};
+        // cr-uv1-5: an answer that reports one entry and then stops —
+        // ending, or failing — before it says it is done.
+        let module = request.into_inner().module;
+        if module != "cut-short" && module != "dies" {
+            return Err(tonic::Status::unimplemented("stale daemon"));
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(RmReply {
+                    reply: Some(Reply::Failures(RmFailures {
+                        failures: vec![RmFailure {
+                            operand: 0,
+                            relative_path: "sub/held".into(),
+                            raw_relative_path: None,
+                            reason: "Permission denied".into(),
+                        }],
+                    })),
+                }))
+                .await;
+            if module == "dies" {
+                let _ = tx
+                    .send(Err(tonic::Status::internal("the disk went away")))
+                    .await;
+            }
+        });
+        Ok(tonic::Response::new(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
     }
 
     async fn complete_path(
@@ -517,6 +606,9 @@ impl blit_core::generated::blit_server::Blit for RejectingTransferBlit {
     type DuStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DuReply, tonic::Status>,
     >;
+    type RmStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::RmReply, tonic::Status>,
+    >;
     type DelegatedPullStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DelegatedPullProgress, tonic::Status>,
     >;
@@ -577,7 +669,7 @@ impl blit_core::generated::blit_server::Blit for RejectingTransferBlit {
     async fn rm(
         &self,
         _: tonic::Request<blit_core::generated::RmRequest>,
-    ) -> Result<tonic::Response<blit_core::generated::RmReply>, tonic::Status> {
+    ) -> Result<tonic::Response<Self::RmStream>, tonic::Status> {
         Err(tonic::Status::unimplemented(
             "test only exercises pull_sync",
         ))

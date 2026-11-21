@@ -1,6 +1,6 @@
 use super::admin::{
-    filesystem_space_for_path, list_completions, read_operands, read_start, remove_operands,
-    split_completion_prefix, stream_disk_usage, stream_find,
+    filesystem_space_for_path, list_completions, read_operands, read_start,
+    split_completion_prefix, stream_disk_usage, stream_find, stream_removal,
 };
 use super::util::{
     internal_err, io_to_status, resolve_contained_path, resolve_module, resolve_relative_path,
@@ -151,7 +151,11 @@ impl BlitService {
     /// `--metrics` completion log can wrap a single call site and
     /// branch on Result without duplicating the response shape.
     /// §3.1 followup.
-    async fn rm_inner(&self, req: RmRequest) -> Result<Response<RmReply>, Status> {
+    async fn rm_inner(
+        &self,
+        req: RmRequest,
+        started: std::time::Instant,
+    ) -> Result<Response<ReceiverStream<Result<RmReply, Status>>>, Status> {
         // AC-11: an asker of this daemon's own contract, or nothing is
         // read and nothing removed.
         blit_core::admin::same_build::check(req.contract_version)?;
@@ -163,17 +167,40 @@ impl BlitService {
             )));
         }
         let operands = read_operands(req.paths);
-        let reply = remove_operands(
-            module.path.clone(),
-            module.canonical_root.clone(),
-            operands,
-            blit_core::deletion::RmOptions {
-                recursive: req.recursive,
-                force: req.force,
-            },
-        )
-        .await?;
-        Ok(Response::new(reply))
+        let options = blit_core::deletion::RmOptions {
+            recursive: req.recursive,
+            force: req.force,
+        };
+        // The answer goes as it is made (cr-uv1-5): each entry that could
+        // not be removed, then that the removal is done.
+        let (tx, rx) = mpsc::channel::<Result<RmReply, Status>>(64);
+        let (module_path, canonical_root) = (module.path.clone(), module.canonical_root.clone());
+        let metrics = Arc::clone(&self.metrics);
+        tokio::spawn(async move {
+            let err_sender = tx.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                stream_removal(module_path, canonical_root, operands, options, &tx)
+            })
+            .await;
+            let ok = matches!(result, Ok(Ok(())));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(status)) => {
+                    let _ = err_sender.send(Err(status)).await;
+                }
+                Err(join_err) => {
+                    let _ = err_sender
+                        .send(Err(internal_err("rm worker failed", join_err)))
+                        .await;
+                }
+            }
+            if !ok {
+                metrics.inc_error();
+            }
+            // The removal's own completion line, when it has completed.
+            metrics.log_completion("purge", started.elapsed(), ok);
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     /// Send a `TransferStarted` event onto the broadcast channel.
@@ -357,6 +384,7 @@ pub(crate) fn build_transfer_finished_event(
 impl Blit for BlitService {
     type FindPathsStream = ReceiverStream<Result<FindPathsReply, Status>>;
     type DuStream = ReceiverStream<Result<DuReply, Status>>;
+    type RmStream = ReceiverStream<Result<RmReply, Status>>;
     type DelegatedPullStream = ReceiverStream<Result<DelegatedPullProgress, Status>>;
     type SubscribeStream =
         std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<DaemonEvent, Status>> + Send>>;
@@ -913,7 +941,7 @@ impl Blit for BlitService {
         }))
     }
 
-    async fn rm(&self, request: Request<RmRequest>) -> Result<Response<RmReply>, Status> {
+    async fn rm(&self, request: Request<RmRequest>) -> Result<Response<Self::RmStream>, Status> {
         let req = request.into_inner();
         // F5: counters mark dispatch attempts (matching push/pull
         // semantics). Previously inc_purge fired only after a
@@ -921,14 +949,15 @@ impl Blit for BlitService {
         self.metrics.inc_purge();
         // §3.1 followup: purge needs its own completion line.
         // Pre-fix `purge_ops` was visible only on later push/pull
-        // logs, never on the purge RPC itself.
+        // logs, never on the purge RPC itself. A request refused before
+        // it starts is logged here; one that runs, when it has run.
         let started = std::time::Instant::now();
-        let result = self.rm_inner(req).await;
-        let ok = result.is_ok();
+        let result = self.rm_inner(req, started).await;
         if result.is_err() {
             self.metrics.inc_error();
+            self.metrics
+                .log_completion("purge", started.elapsed(), false);
         }
-        self.metrics.log_completion("purge", started.elapsed(), ok);
         result
     }
 

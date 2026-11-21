@@ -22,7 +22,7 @@ service Blit {
   // `rm`, run on the daemon's own disk (UTILITY_VERBS_LOCAL_PARITY slice 2).
   // Replaces `Purge`: a request name a daemon of an earlier contract does
   // not serve, carrying the asker's contract version.
-  rpc Rm(RmRequest) returns (RmReply);
+  rpc Rm(RmRequest) returns (stream RmReply);
 
   // Provides path completion suggestions for a given remote path prefix.
   rpc CompletePath(CompletionRequest) returns (CompletionResponse);
@@ -399,15 +399,30 @@ message RmFailure {
   string reason = 4;
 }
 
+// What a removal answers, as it goes (contract 17): every entry that
+// could not be removed, in the order met and in messages bounded by their
+// size, then — last — that it is done. One reply used to carry them all,
+// at most 1,000 for an operand, and could outgrow what a message may
+// hold after the removal had happened.
 message RmReply {
-  // Every entry that could not be removed, operand by operand, in the
-  // order met. Empty: every operand is gone (or, with `force`, was never
-  // there).
+  oneof reply {
+    RmFailures failures = 1;
+    RmDone done = 2;
+  }
+}
+
+// Entries that could not be removed. None is left out: a removal with no
+// such message removed everything it was asked to (or, with `force`, what
+// was there).
+message RmFailures {
   repeated RmFailure failures = 1;
+}
+
+// Every operand has been processed. An answer that ends without this did
+// not finish, and what it removed is not known.
+message RmDone {
   // Entries removed, the operands and everything below them.
-  uint64 entries_removed = 2;
-  // More entries failed than `failures` lists.
-  bool failures_truncated = 3;
+  uint64 entries_removed = 1;
 }
 
 message CompletionRequest {

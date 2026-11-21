@@ -6,7 +6,8 @@
 //! error unless `-f`, the other operands are processed all the same, and
 //! the exit status is 0 only when every operand is gone. What it prints
 //! is `rm`'s: nothing on success, `cannot remove 'OPERAND': REASON` for
-//! each entry that could not be removed.
+//! each entry that could not be removed — every one, as the daemon
+//! reports it.
 //!
 //! The one place it follows blit and not `rm`: it asks once before
 //! anything is sent, as `mirror` and `move` do, unless `-y` — or `-f`,
@@ -15,7 +16,7 @@
 
 use crate::cli::RmArgs;
 use blit_core::admin::operand;
-use blit_core::admin::rm::{self, RmOptions};
+use blit_core::admin::rm::{self, RmError, RmOptions};
 use blit_core::endpoints::{parse_endpoint_or_local, Endpoint};
 use blit_core::remote::RemoteEndpoint;
 use eyre::{bail, Result};
@@ -86,11 +87,11 @@ pub async fn run_rm(args: RmArgs) -> Result<ExitCode> {
     // options, and goes on to the others (cr-uv1-1: `work/.` was sent as
     // `work`, and `work` removed). Such an operand is neither asked about
     // nor sent.
-    let mut failures: Vec<Failed> = Vec::new();
+    let mut refused: Vec<Failed> = Vec::new();
     let mut asked: Vec<usize> = Vec::new();
     for (at, each) in operands.iter().enumerate() {
         if operand::names_dot(&each.rel) {
-            failures.push(Failed {
+            refused.push(Failed {
                 operand: at,
                 path: each.typed.clone(),
                 reason: DOT_OR_DOT_DOT.to_string(),
@@ -133,33 +134,46 @@ pub async fn run_rm(args: RmArgs) -> Result<ExitCode> {
         recursive: args.recursive,
         force: args.force,
     };
+    // What is said, as it is learned (cr-uv1-5): each entry the daemon
+    // could not remove is printed when the daemon reports it, every one of
+    // them, in the order the operands were typed.
+    let mut said = Said {
+        json: args.json,
+        listed: Vec::new(),
+        refused: refused.into(),
+        any: false,
+    };
     let mut entries_removed = 0u64;
-    let mut truncated = false;
+    let mut unfinished: Vec<String> = Vec::new();
     for group in groups {
         let first = &operands[group[0]];
         let paths = group.iter().map(|&at| operands[at].rel.clone()).collect();
-        match rm::remove(&first.remote, first.module.clone(), paths, options).await {
-            Ok(report) => {
-                entries_removed += report.entries_removed;
-                truncated |= report.failures_truncated;
-                for failure in report.failures {
-                    let Some(&at) = group.get(failure.operand) else {
-                        continue;
-                    };
-                    let shown = crate::du::shown(&operands[at].typed, &failure.path);
-                    failures.push(Failed {
-                        operand: at,
-                        path: String::from_utf8_lossy(&shown).into_owned(),
-                        reason: failure.reason,
-                        refused: false,
-                    });
-                }
-            }
+        let answered = rm::remove(
+            &first.remote,
+            first.module.clone(),
+            paths,
+            options,
+            |failure| {
+                let Some(&at) = group.get(failure.operand) else {
+                    return;
+                };
+                let shown = crate::du::shown(&operands[at].typed, &failure.path);
+                said.failed(Failed {
+                    operand: at,
+                    path: String::from_utf8_lossy(&shown).into_owned(),
+                    reason: failure.reason,
+                    refused: false,
+                });
+            },
+        )
+        .await;
+        match answered {
+            Ok(removed) => entries_removed += removed,
             // The daemon refused the request whole (a read-only module,
             // another build, no answer): none of these operands went.
-            Err(error) => {
+            Err(RmError::Refused(error)) => {
                 for &at in &group {
-                    failures.push(Failed {
+                    said.failed(Failed {
                         operand: at,
                         path: operands[at].typed.clone(),
                         reason: format!("{error:#}"),
@@ -167,44 +181,81 @@ pub async fn run_rm(args: RmArgs) -> Result<ExitCode> {
                     });
                 }
             }
+            // The answer stopped part way: what was reported stands, and
+            // what else went is not known.
+            Err(error @ RmError::Interrupted(_)) => {
+                unfinished.push(format!("{}: {error}", first.remote.host_port_display()));
+            }
         }
     }
-    // In the order the operands were typed, as `rm` reports them.
-    failures.sort_by_key(|failed| failed.operand);
+    said.finish();
 
     if args.json {
-        let listed: Vec<serde_json::Value> = failures
-            .iter()
-            .map(|failed| serde_json::json!({ "path": failed.path, "reason": failed.reason }))
-            .collect();
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "entries_removed": entries_removed,
-                "failures": listed,
-                "failures_truncated": truncated,
+                "failures": said.listed,
+                "unfinished": unfinished,
             }))?
         );
     } else {
-        for failed in &failures {
-            if failed.refused {
-                eprintln!("blit rm: {}: skipping '{}'", failed.reason, failed.path);
-            } else {
-                eprintln!(
-                    "blit rm: cannot remove '{}': {}",
-                    failed.path, failed.reason
-                );
-            }
-        }
-        if truncated {
-            eprintln!("blit rm: more entries could not be removed than are listed");
+        for line in &unfinished {
+            eprintln!("blit rm: {line}");
         }
     }
-    Ok(if failures.is_empty() && !truncated {
-        ExitCode::SUCCESS
-    } else {
+    Ok(if said.any || !unfinished.is_empty() {
         ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     })
+}
+
+/// What `rm` says of the entries it did not remove: printed as each is
+/// learned, or collected for `--json`.
+struct Said {
+    json: bool,
+    listed: Vec<serde_json::Value>,
+    /// The operands `rm` itself refuses, waiting for their turn: each is
+    /// said before anything about an operand typed after it.
+    refused: std::collections::VecDeque<Failed>,
+    any: bool,
+}
+
+impl Said {
+    fn failed(&mut self, failed: Failed) {
+        while self
+            .refused
+            .front()
+            .is_some_and(|before| before.operand < failed.operand)
+        {
+            let before = self.refused.pop_front().expect("one is waiting");
+            self.say(before);
+        }
+        self.say(failed);
+    }
+
+    /// The command is over: whatever still waits is said.
+    fn finish(&mut self) {
+        while let Some(waiting) = self.refused.pop_front() {
+            self.say(waiting);
+        }
+    }
+
+    fn say(&mut self, failed: Failed) {
+        self.any = true;
+        if self.json {
+            self.listed
+                .push(serde_json::json!({ "path": failed.path, "reason": failed.reason }));
+        } else if failed.refused {
+            eprintln!("blit rm: {}: skipping '{}'", failed.reason, failed.path);
+        } else {
+            eprintln!(
+                "blit rm: cannot remove '{}': {}",
+                failed.path, failed.reason
+            );
+        }
+    }
 }
 
 /// What is asked before anything is removed: the operands, as typed.

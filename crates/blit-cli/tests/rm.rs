@@ -155,7 +155,9 @@ fn rm_treats_each_operand_as_the_unix_command_does() {
     assert_eq!(report["entries_removed"], 1);
     assert_eq!(report["failures"][0]["path"], dir.as_str());
     assert_eq!(report["failures"][0]["reason"], "Is a directory");
-    assert_eq!(report["failures_truncated"], false);
+    // Every failure is listed (cr-uv1-5): there is no flag for "more".
+    assert!(report.get("failures_truncated").is_none(), "{report}");
+    assert_eq!(report["unfinished"], serde_json::json!([]));
 }
 
 /// AC-3 and AC-12, where the system command IS the reference: for the
@@ -677,33 +679,125 @@ fn a_daemon_refuses_rm_from_another_contract() {
         // The module's root is refused by the daemon itself, whoever asks
         // — as that operand's failure (cr-uv1-3), with nothing removed.
         for root in ["", ".", "./"] {
-            let reply = client
-                .rm(request(CONTRACT_VERSION, root))
-                .await
-                .expect("an answer about the operand")
-                .into_inner();
-            assert_eq!(reply.entries_removed, 0, "{root:?}");
-            assert_eq!(reply.failures.len(), 1, "{root:?} {reply:?}");
+            let (failures, removed) = answered(&mut client, request(CONTRACT_VERSION, root)).await;
+            assert_eq!(
+                removed,
+                Some(0),
+                "{root:?}: an answer that ends with `done`"
+            );
+            assert_eq!(failures.len(), 1, "{root:?} {failures:?}");
             assert!(
-                reply.failures[0].operand == 0
-                    && reply.failures[0].relative_path.is_empty()
-                    && reply.failures[0].reason.contains("the module's root"),
-                "{root:?} {reply:?}"
+                failures[0].operand == 0
+                    && failures[0].relative_path.is_empty()
+                    && failures[0].reason.contains("the module's root"),
+                "{root:?} {failures:?}"
             );
             assert!(ctx.module_dir.join("t/file.txt").exists(), "{root:?}");
         }
         // The same request from this contract is answered.
-        let reply = client
-            .rm(request(CONTRACT_VERSION, "t"))
-            .await
-            .expect("rm from this contract")
-            .into_inner();
+        let (failures, removed) = answered(&mut client, request(CONTRACT_VERSION, "t")).await;
         assert!(
-            reply.failures.is_empty() && reply.entries_removed >= 8,
-            "{reply:?}"
+            failures.is_empty() && removed.is_some_and(|removed| removed >= 8),
+            "{failures:?} {removed:?}"
         );
         assert!(!ctx.module_dir.join("t").exists());
     });
+}
+
+/// A removal's whole answer, read to its end: the failures it reported,
+/// and the count it finished with — `None` if it never said it was done.
+async fn answered(
+    client: &mut blit_core::generated::blit_client::BlitClient<tonic::transport::Channel>,
+    request: blit_core::generated::RmRequest,
+) -> (Vec<blit_core::generated::RmFailure>, Option<u64>) {
+    use blit_core::generated::rm_reply::Reply;
+    let mut answer = client
+        .rm(request)
+        .await
+        .expect("an answer for the request")
+        .into_inner();
+    let (mut failures, mut removed) = (Vec::new(), None);
+    while let Some(reply) = answer.message().await.expect("a message") {
+        match reply.reply.expect("failures or done") {
+            Reply::Failures(batch) => {
+                assert!(removed.is_none(), "nothing follows `done`");
+                failures.extend(batch.failures);
+            }
+            Reply::Done(done) => removed = Some(done.entries_removed),
+        }
+    }
+    (failures, removed)
+}
+
+/// cr-uv1-5: every entry `rm` cannot remove is reported — 1,001 files in
+/// a directory that cannot be written, where the answer stopped at 1,000
+/// and said "more". The lines, the exit status and what is left equal the
+/// system `rm`'s; and `--json` lists each, with no flag in place of any.
+#[cfg(target_os = "linux")]
+#[test]
+fn rm_reports_every_entry_it_cannot_remove() {
+    use std::os::unix::fs::PermissionsExt;
+    let ctx = TestContext::new();
+    let system_root = ctx.workspace.join("system");
+    let build = |root: &Path| {
+        write(root, "t/open/a.txt");
+        fs::create_dir_all(root.join("t/many")).unwrap();
+        for at in 0..1001 {
+            fs::write(root.join(format!("t/many/f{at:04}")), b"").unwrap();
+        }
+        fs::set_permissions(root.join("t/many"), fs::Permissions::from_mode(0o555)).unwrap();
+    };
+    let unlock = |root: &Path| {
+        fs::set_permissions(root.join("t/many"), fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    build(&system_root);
+    build(&ctx.module_dir);
+    if fs::write(ctx.module_dir.join("t/many/probe"), b"x").is_ok() {
+        let _ = fs::remove_file(ctx.module_dir.join("t/many/probe"));
+        unlock(&system_root);
+        unlock(&ctx.module_dir);
+        eprintln!("skipping: running privileged, a directory that cannot be written stops nothing");
+        return;
+    }
+
+    let system = Command::new("rm")
+        .args(["-r", "t"])
+        .current_dir(&system_root)
+        .env("LC_ALL", "C.UTF-8")
+        .stdin(Stdio::null())
+        .output()
+        .expect("the system rm");
+    let ours = blit(&ctx, &["rm", "-y", "-r", &remote(&ctx, "t")], None);
+    let mut theirs: Vec<String> = String::from_utf8_lossy(&system.stderr)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let mut said: Vec<String> = ours
+        .stderr
+        .lines()
+        .map(|line| {
+            line.replacen("blit rm: ", "rm: ", 1)
+                .replace(&remote(&ctx, ""), "")
+        })
+        .collect();
+    theirs.sort();
+    said.sort();
+    assert_eq!(said.len(), 1001, "each of them is named");
+    assert_eq!(said, theirs);
+    assert_eq!(ours.code, system.status.code());
+    assert!(!ctx.module_dir.join("t/open").exists() && !system_root.join("t/open").exists());
+
+    let json = blit(
+        &ctx,
+        &["rm", "-y", "-r", "--json", &remote(&ctx, "t")],
+        None,
+    );
+    unlock(&system_root);
+    unlock(&ctx.module_dir);
+    assert_eq!(json.code, Some(1), "{}", json.stderr);
+    let report: serde_json::Value = serde_json::from_str(&json.stdout).expect("JSON");
+    assert_eq!(report["failures"].as_array().map(Vec::len), Some(1001));
+    assert_eq!(report["entries_removed"], 0);
 }
 
 /// AC-11, `move`'s source removal: a `move` from a daemon reports the

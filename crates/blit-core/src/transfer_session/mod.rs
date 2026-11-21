@@ -170,7 +170,13 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// `work` was removed, `doc/` is `Not a directory` where the file `doc` was
 /// unlinked. A daemon of contract 15 would tidy the path again and remove
 /// what the asker never named, so the two are refused each other.
-pub const CONTRACT_VERSION: u32 = 16;
+/// v17: `Rm` answers with a stream (cr-uv1-5) — each entry that could not
+/// be removed, as it happens and in messages bounded by size, then
+/// `RmDone` with the count. The one reply it replaces listed at most
+/// 1,000 failures for an operand and flagged the rest, and held them all
+/// until the end, in a message that could outgrow the transport's limit
+/// after the removal had been done.
+pub const CONTRACT_VERSION: u32 = 17;
 
 /// cr-g3fix6-2: ceiling on one `ManifestPruned` frame's encoded paths. The
 /// pruned set scales with the excluded entries, so it rides as many frames

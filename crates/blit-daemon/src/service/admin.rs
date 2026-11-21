@@ -1,13 +1,12 @@
-use super::{DiskUsageSender, FindSender};
+use super::{DiskUsageSender, FindSender, RmSender};
 use blit_core::disk_usage::{disk_usage, os_reason, Stopped, UsageEnd, UsageEvent, UsageOptions};
 use blit_core::find::{find, FindEnd, FindEvent, FindOptions};
 use blit_core::generated::{
-    du_reply, find_paths_reply, DfReply, DuFailure, DuReply, DuRow, FindBatch, FindFailure,
-    FindPath, FindPathsReply, RmFailure, RmReply,
+    du_reply, find_paths_reply, rm_reply, DfReply, DuFailure, DuReply, DuRow, FindBatch,
+    FindFailure, FindPath, FindPathsReply, RmDone, RmFailure, RmFailures, RmReply,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
-use tokio::task;
 use tonic::Status;
 
 use super::util::{internal_err, io_to_status, resolve_relative_path, response_channel_closed};
@@ -96,59 +95,143 @@ pub(crate) fn read_operands(paths: Vec<String>) -> Vec<RmOperand> {
 /// (UTILITY_VERBS_LOCAL_PARITY slice 2): one after another, an operand
 /// that fails not stopping the next, and every entry that could not be
 /// removed reported with the operand it belongs to.
-pub(crate) async fn remove_operands(
+///
+/// The answer is sent as it is made (cr-uv1-5): each failure as the
+/// removal meets it, in messages bounded by their size, then `RmDone`
+/// with the count. It used to be one reply, holding at most 1,000
+/// failures for an operand and a flag for the rest, and built whole
+/// before any of it was sent — a reply that could outgrow what a message
+/// may hold only after the removal had happened.
+pub(crate) fn stream_removal(
     module_path: PathBuf,
     canonical_root: PathBuf,
     operands: Vec<RmOperand>,
     options: blit_core::deletion::RmOptions,
-) -> Result<RmReply, Status> {
-    task::spawn_blocking(move || {
-        remove_operands_sync(&module_path, &canonical_root, &operands, options)
-    })
-    .await
-    .map_err(|err| internal_err("rm task failed", err))?
+    sender: &RmSender,
+) -> Result<(), Status> {
+    let closed = || response_channel_closed("sending removal result");
+    let mut batch = FailureBatch {
+        failures: Vec::new(),
+        bytes: 0,
+        sent: std::time::Instant::now(),
+        sender,
+    };
+    let removed = remove_each(
+        &module_path,
+        &canonical_root,
+        &operands,
+        options,
+        &mut |failure| batch.add(failure),
+    )?;
+    batch.send().map_err(|Stopped| closed())?;
+    sender
+        .blocking_send(Ok(RmReply {
+            reply: Some(rm_reply::Reply::Done(RmDone {
+                entries_removed: removed,
+            })),
+        }))
+        .map_err(|_| closed())
 }
 
-fn remove_operands_sync(
+/// Each operand removed in turn; `failed` is told of every entry that
+/// could not be, with its operand's place, as it is met. Returns the count
+/// of entries removed.
+fn remove_each(
     module_path: &Path,
     canonical_root: &Path,
     operands: &[RmOperand],
     options: blit_core::deletion::RmOptions,
-) -> Result<RmReply, Status> {
-    let mut reply = RmReply::default();
+    failed: &mut dyn FnMut(RmFailure) -> Result<(), Stopped>,
+) -> Result<u64, Status> {
+    let closed = || response_channel_closed("sending removal result");
+    let mut entries_removed = 0u64;
     for (operand, rel) in operands.iter().enumerate() {
         let rel = match rel {
             Ok(rel) => rel,
             Err(reason) => {
-                reply.failures.push(RmFailure {
+                failed(RmFailure {
                     operand: operand as u32,
                     relative_path: String::new(),
                     raw_relative_path: None,
                     reason: reason.clone(),
-                });
+                })
+                .map_err(|Stopped| closed())?;
                 continue;
             }
         };
-        let removal = blit_core::deletion::remove_as_rm(
+        let removed = blit_core::deletion::remove_as_rm_reporting(
             &module_path.join(&rel.rel),
             rel.as_directory,
             Some(canonical_root),
             options,
             None,
-        )
-        .map_err(deletion_status)?;
-        reply.entries_removed += removal.removed;
-        reply.failures_truncated |= removal.failures_truncated;
-        reply
-            .failures
-            .extend(removal.failures.into_iter().map(|failure| RmFailure {
-                operand: operand as u32,
-                relative_path: wire_path(&failure.relative_path),
-                raw_relative_path: blit_core::raw_name::raw_relative_bytes(&failure.relative_path),
-                reason: os_reason(&failure.error),
-            }));
+            &mut |failure| {
+                failed(RmFailure {
+                    operand: operand as u32,
+                    relative_path: wire_path(&failure.relative_path),
+                    raw_relative_path: blit_core::raw_name::raw_relative_bytes(
+                        &failure.relative_path,
+                    ),
+                    reason: os_reason(&failure.error),
+                })
+            },
+        );
+        match removed {
+            Ok(removed) => entries_removed += removed,
+            // The asker has gone: nobody to tell, and nothing more is
+            // removed for nobody.
+            Err(blit_core::deletion::DeletionError::Cancelled { .. }) => return Err(closed()),
+            Err(error) => return Err(deletion_status(error)),
+        }
     }
-    Ok(reply)
+    Ok(entries_removed)
+}
+
+/// Failures on their way to the asker, sent when what is held is large
+/// enough or has waited long enough.
+struct FailureBatch<'a> {
+    failures: Vec<RmFailure>,
+    /// The size of what is held, as it will be on the wire, near enough.
+    bytes: usize,
+    sent: std::time::Instant,
+    sender: &'a RmSender,
+}
+
+impl FailureBatch<'_> {
+    /// The most one message carries, by the SIZE of what is in it: a path
+    /// can be thousands of bytes, and a message's limit is in bytes. A
+    /// message is at most this and one failure more.
+    const MOST_BYTES: usize = 64 * 1024;
+    /// How long a failure may wait for the message to fill: a removal
+    /// that fails seldom says so as it does.
+    const WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+    fn add(&mut self, failure: RmFailure) -> Result<(), Stopped> {
+        self.bytes += failure.relative_path.len()
+            + failure.raw_relative_path.as_ref().map_or(0, Vec::len)
+            + failure.reason.len()
+            + 16;
+        self.failures.push(failure);
+        if self.bytes >= Self::MOST_BYTES || self.sent.elapsed() >= Self::WAIT {
+            self.send()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn send(&mut self) -> Result<(), Stopped> {
+        self.sent = std::time::Instant::now();
+        if self.failures.is_empty() {
+            return Ok(());
+        }
+        self.bytes = 0;
+        let failures = std::mem::take(&mut self.failures);
+        self.sender
+            .blocking_send(Ok(RmReply {
+                reply: Some(rm_reply::Reply::Failures(RmFailures { failures })),
+            }))
+            .map_err(|_| Stopped)
+    }
 }
 
 fn deletion_status(error: blit_core::deletion::DeletionError) -> Status {
@@ -451,21 +534,95 @@ mod rm_tests {
     use super::*;
     use std::fs;
 
-    fn removed(root: &Path, paths: &[&str], recursive: bool) -> RmReply {
+    /// A removal's answer, held whole.
+    pub(super) struct Answer {
+        pub failures: Vec<RmFailure>,
+        pub entries_removed: u64,
+    }
+
+    /// `paths` removed below `root`, every failure collected.
+    pub(super) fn answer(root: &Path, paths: &[&str], recursive: bool, force: bool) -> Answer {
         let operands = read_operands(paths.iter().map(|path| path.to_string()).collect());
-        remove_operands_sync(
+        let mut failures = Vec::new();
+        let entries_removed = remove_each(
             root,
             root,
             &operands,
-            blit_core::deletion::RmOptions {
-                recursive,
-                force: false,
+            blit_core::deletion::RmOptions { recursive, force },
+            &mut |failure| {
+                failures.push(failure);
+                Ok(())
             },
         )
-        .expect("an answer for the request")
+        .expect("an answer for the request");
+        Answer {
+            failures,
+            entries_removed,
+        }
     }
 
-    fn failures(reply: &RmReply) -> Vec<(u32, &str, &str)> {
+    /// cr-uv1-5: what `stream_removal` SENDS. Every failure, in messages
+    /// none of which outgrows the bound by more than one entry, and then
+    /// — last — that it is done, with the count. 5,000 operands that are
+    /// not there: five times the old limit of 1,000, and several
+    /// messages' worth.
+    #[test]
+    fn a_removal_is_answered_in_bounded_messages_that_end_with_done() {
+        use tokio::sync::mpsc;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        fs::write(root.join("there"), b"x").unwrap();
+        let mut paths: Vec<String> = (0..5000).map(|at| format!("missing-{at:04}")).collect();
+        paths.push("there".to_string());
+        let operands = read_operands(paths.clone());
+        let (tx, mut rx) = mpsc::channel::<Result<RmReply, Status>>(4096);
+        let module = root.clone();
+        let worker = std::thread::spawn(move || {
+            stream_removal(
+                module.clone(),
+                module,
+                operands,
+                blit_core::deletion::RmOptions::default(),
+                &tx,
+            )
+        });
+        let mut replies = Vec::new();
+        while let Some(reply) = rx.blocking_recv() {
+            replies.push(reply.expect("a reply").reply.expect("failures or done"));
+        }
+        worker.join().unwrap().expect("the stream ends well");
+
+        let Some(rm_reply::Reply::Done(done)) = replies.pop() else {
+            panic!("the last message says the removal is done");
+        };
+        assert_eq!(done.entries_removed, 1);
+        assert!(!root.join("there").exists());
+        let mut told = Vec::new();
+        for reply in &replies {
+            let rm_reply::Reply::Failures(batch) = reply else {
+                panic!("`done` comes once, and last");
+            };
+            let size: usize = batch
+                .failures
+                .iter()
+                .map(|failure| failure.relative_path.len() + failure.reason.len() + 16)
+                .sum();
+            assert!(!batch.failures.is_empty());
+            assert!(
+                size <= FailureBatch::MOST_BYTES + 4096,
+                "a message of {size} bytes"
+            );
+            told.extend(batch.failures.iter().map(|failure| failure.operand));
+        }
+        assert!(replies.len() > 1, "more than one message's worth");
+        assert_eq!(told, (0..5000).collect::<Vec<u32>>(), "every one, in order");
+    }
+
+    fn removed(root: &Path, paths: &[&str], recursive: bool) -> Answer {
+        answer(root, paths, recursive, false)
+    }
+
+    fn failures(reply: &Answer) -> Vec<(u32, &str, &str)> {
         reply
             .failures
             .iter()
@@ -582,14 +739,7 @@ mod typed_operand_tests {
         };
         let removed = |paths: &[&str], recursive: bool, force: bool| {
             build();
-            let operands = read_operands(paths.iter().map(|path| path.to_string()).collect());
-            let reply = remove_operands_sync(
-                &root,
-                &root,
-                &operands,
-                blit_core::deletion::RmOptions { recursive, force },
-            )
-            .expect("an answer for the request");
+            let reply = super::rm_tests::answer(&root, paths, recursive, force);
             let failures: Vec<(u32, String)> = reply
                 .failures
                 .iter()

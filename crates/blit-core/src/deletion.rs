@@ -4,6 +4,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::disk_usage::Stopped;
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct DeletionStats {
     pub files: u64,
@@ -263,16 +265,15 @@ pub struct RemovalFailure {
     pub error: std::io::Error,
 }
 
-/// What became of one operand of a removal.
+/// What became of one operand of a removal, held whole
+/// ([`remove_as_rm`]).
 #[derive(Debug, Default)]
 pub struct Removal {
     /// Entries removed: the operand and everything below it.
     pub removed: u64,
-    /// Each entry that could not be removed, in the order met. Empty when
-    /// the operand is gone (or, with `force`, was never there).
+    /// EVERY entry that could not be removed, in the order met. Empty
+    /// when the operand is gone (or, with `force`, was never there).
     pub failures: Vec<RemovalFailure>,
-    /// More entries failed than `failures` lists.
-    pub failures_truncated: bool,
 }
 
 /// How [`remove_as_rm`] treats one operand: `rm`'s own two options.
@@ -285,19 +286,28 @@ pub struct RmOptions {
     pub force: bool,
 }
 
-/// The most failures one operand lists; the rest are counted as truncated.
-pub const MAX_LISTED_REMOVAL_FAILURES: usize = 1000;
+/// What a removal says as it goes: the count of what went, and each entry
+/// that did not, handed on at once (cr-uv1-5). Nothing is held back and
+/// nothing left out — a tree with a million entries that cannot be
+/// removed reports a million, as `rm` does, and holds none of them here.
+struct Report<'a> {
+    removed: u64,
+    failed: &'a mut dyn FnMut(RemovalFailure) -> Result<(), Stopped>,
+    /// Whoever was being told has gone: the removal stops.
+    unheard: bool,
+}
 
-impl Removal {
-    /// Record one entry that could not be removed.
+impl Report<'_> {
+    /// One entry that could not be removed.
     fn fail(&mut self, relative_path: PathBuf, error: std::io::Error) {
-        if self.failures.len() < MAX_LISTED_REMOVAL_FAILURES {
-            self.failures.push(RemovalFailure {
+        if !self.unheard
+            && (self.failed)(RemovalFailure {
                 relative_path,
                 error,
-            });
-        } else {
-            self.failures_truncated = true;
+            })
+            .is_err()
+        {
+            self.unheard = true;
         }
     }
 }
@@ -358,16 +368,53 @@ pub fn remove_as_rm(
     options: RmOptions,
     abort: Option<&AtomicBool>,
 ) -> Result<Removal, DeletionError> {
-    let mut removal = Removal::default();
+    let mut failures = Vec::new();
+    let removed = remove_as_rm_reporting(
+        target,
+        as_directory,
+        canonical_root,
+        options,
+        abort,
+        &mut |failure| {
+            failures.push(failure);
+            Ok(())
+        },
+    )?;
+    Ok(Removal { removed, failures })
+}
+
+/// [`remove_as_rm`], telling `failed` of each entry that could not be
+/// removed AS IT IS MET (cr-uv1-5) and returning the count of what went.
+/// Every failure is told; none is counted in place of being named.
+/// `failed` answering `Err(Stopped)` — whoever was listening has gone —
+/// ends the removal where it is, as a cancelled one.
+pub fn remove_as_rm_reporting(
+    target: &Path,
+    as_directory: bool,
+    canonical_root: Option<&Path>,
+    options: RmOptions,
+    abort: Option<&AtomicBool>,
+    failed: &mut dyn FnMut(RemovalFailure) -> Result<(), Stopped>,
+) -> Result<u64, DeletionError> {
+    let mut report = Report {
+        removed: 0,
+        failed,
+        unheard: false,
+    };
     remove_operand(
         target,
         as_directory,
         canonical_root,
         options,
         abort,
-        &mut removal,
+        &mut report,
     )?;
-    Ok(removal)
+    if report.unheard {
+        return Err(DeletionError::Cancelled {
+            operation: RM_OPERATION,
+        });
+    }
+    Ok(report.removed)
 }
 
 /// The system's words for a name typed as a directory that is none.
@@ -397,7 +444,7 @@ fn remove_operand(
     canonical_root: Option<&Path>,
     options: RmOptions,
     abort: Option<&AtomicBool>,
-    removal: &mut Removal,
+    removal: &mut Report<'_>,
 ) -> Result<(), DeletionError> {
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -499,7 +546,7 @@ fn remove_operand(
         }
     }
     while let Some(frame) = frames.last_mut() {
-        if abort.is_some_and(|abort| abort.load(Ordering::Acquire)) {
+        if removal.unheard || abort.is_some_and(|abort| abort.load(Ordering::Acquire)) {
             return Err(DeletionError::Cancelled {
                 operation: RM_OPERATION,
             });
@@ -595,7 +642,7 @@ fn remove_operand(
     canonical_root: Option<&Path>,
     options: RmOptions,
     abort: Option<&AtomicBool>,
-    removal: &mut Removal,
+    removal: &mut Report<'_>,
 ) -> Result<(), DeletionError> {
     // Where the operand lies is checked by its path here, and what the
     // check finds is this operand's failure (cr-uv1-3).
@@ -1279,6 +1326,85 @@ mod rm_tests {
         .unwrap_err();
         assert!(matches!(error, DeletionError::Cancelled { .. }), "{error}");
         assert!(root.join("dir/x.txt").exists());
+    }
+
+    /// cr-uv1-5: every entry that cannot be removed is told, however
+    /// many — 1,001 here, where the list stopped at 1,000 and a flag said
+    /// "more" — each as it is met, and the count of what went is exact.
+    /// And a listener that has gone ends the removal where it is.
+    #[cfg(unix)]
+    #[test]
+    fn every_entry_that_cannot_be_removed_is_told() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_tmp, root) = tree();
+        fs::create_dir_all(root.join("dir/many")).unwrap();
+        for at in 0..1001 {
+            fs::write(root.join(format!("dir/many/f{at:04}")), b"").unwrap();
+        }
+        fs::set_permissions(root.join("dir/many"), fs::Permissions::from_mode(0o555)).unwrap();
+        let privileged = fs::write(root.join("dir/many/probe"), b"x").is_ok();
+        let _ = fs::remove_file(root.join("dir/many/probe"));
+        let unlock = || {
+            fs::set_permissions(root.join("dir/many"), fs::Permissions::from_mode(0o755)).unwrap()
+        };
+        if privileged {
+            unlock();
+            eprintln!("skipping: running privileged, mode 555 does not stop a removal");
+            return;
+        }
+        let options = RmOptions {
+            recursive: true,
+            force: false,
+        };
+
+        // Told as it goes: the first failure is heard before the last
+        // entry is met, and none is held back.
+        let mut told = Vec::new();
+        let removed = remove_as_rm_reporting(
+            &root.join("dir"),
+            false,
+            Some(&root),
+            options,
+            None,
+            &mut |failure| {
+                told.push(failure.relative_path);
+                Ok(())
+            },
+        )
+        .expect("an answer");
+        assert_eq!(told.len(), 1001, "each of them, and no flag in their place");
+        told.sort();
+        told.dedup();
+        assert_eq!(told.len(), 1001, "each once");
+        assert!(told.iter().all(|path| path.starts_with("many")));
+        // Three files and two directories went; `dir` and `dir/many` stand.
+        assert_eq!(removed, 5);
+
+        // The listener goes after the third: the removal ends there.
+        let mut heard = 0;
+        let error = remove_as_rm_reporting(
+            &root.join("dir"),
+            false,
+            Some(&root),
+            options,
+            None,
+            &mut |_| {
+                heard += 1;
+                if heard == 3 {
+                    Err(Stopped)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, DeletionError::Cancelled { .. }), "{error}");
+        assert_eq!(heard, 3, "nothing is told to nobody");
+
+        // And held whole, for a caller that wants it so.
+        let whole = rm(&root, "dir", true, false);
+        unlock();
+        assert_eq!(whole.failures.len(), 1001);
     }
 
     /// What a test does between a check and the act it guards, on this

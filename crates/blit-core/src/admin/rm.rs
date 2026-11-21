@@ -3,12 +3,13 @@
 //!
 //! One request per daemon and module carries every operand; the daemon —
 //! the side that knows what each path is — answers with each entry it
-//! could not remove. The question before deleting, the messages and the
-//! exit status are the front end's. The CLI's `move` verb uses
+//! could not remove, as it meets it, and says when it is done. The
+//! question before deleting, the messages and the exit status are the
+//! front end's. The CLI's `move` verb uses
 //! [`delete_remote_path`] for its source-side removal step.
 
 use crate::admin::du::EntryPath;
-use crate::generated::RmRequest;
+use crate::generated::{rm_reply, RmRequest};
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use eyre::{bail, Result};
 use std::path::PathBuf;
@@ -27,29 +28,53 @@ pub struct RmFailure {
     pub reason: String,
 }
 
-/// What a removal did.
-#[derive(Debug, Clone, Default)]
-pub struct RmReport {
-    /// Every entry that could not be removed, operand by operand.
-    pub failures: Vec<RmFailure>,
-    /// Entries removed, the operands and everything below them.
-    pub entries_removed: u64,
-    /// More entries failed than `failures` lists.
-    pub failures_truncated: bool,
+/// Why a removal has no complete answer.
+#[derive(Debug)]
+pub enum RmError {
+    /// The daemon could not be asked, or refused the request, before
+    /// anything was read or removed (a read-only module, another build):
+    /// none of the operands went.
+    Refused(eyre::Report),
+    /// The answer ended before the daemon said it was done. What it had
+    /// reported until then stands; what else was removed is not known.
+    Interrupted(eyre::Report),
 }
 
-/// Ask `remote` to remove `paths` (each relative to `module`), as `rm`
-/// treats its operands under `options`. The daemon answers only an asker
-/// of its own contract ([`super::same_build`]).
-pub async fn remove(
+impl std::fmt::Display for RmError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(error) => write!(formatter, "{error:#}"),
+            Self::Interrupted(error) => {
+                write!(formatter, "the removal did not finish: {error:#}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RmError {}
+
+/// Ask `remote` to remove `paths` (each below `module`, exactly as typed),
+/// as `rm` treats its operands under `options`. `on_failure` is told of
+/// each entry the daemon could not remove as the daemon reports it
+/// (cr-uv1-5): every one, in the order met. `Ok` is the count of entries
+/// removed, and is returned only when the daemon said it had finished.
+/// The daemon answers only an asker of its own contract
+/// ([`super::same_build`]).
+pub async fn remove<F>(
     remote: &RemoteEndpoint,
     module: String,
     paths: Vec<String>,
     options: RmOptions,
-) -> Result<RmReport> {
+    mut on_failure: F,
+) -> std::result::Result<u64, RmError>
+where
+    F: FnMut(RmFailure),
+{
     let uri = remote.control_plane_uri();
-    let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
-    let reply = client
+    let mut client = crate::client::connect_with_timeout(uri.clone())
+        .await
+        .map_err(RmError::Refused)?;
+    let mut answer = client
         .rm(RmRequest {
             contract_version: crate::transfer_session::CONTRACT_VERSION,
             module,
@@ -58,24 +83,34 @@ pub async fn remove(
             force: options.force,
         })
         .await
-        .map_err(|status| super::same_build::refusal("rm", status))?
+        .map_err(|status| RmError::Refused(super::same_build::refusal("rm", status)))?
         .into_inner();
-    Ok(RmReport {
-        failures: reply
-            .failures
-            .into_iter()
-            .map(|failure| RmFailure {
-                operand: failure.operand as usize,
-                path: EntryPath {
-                    text: failure.relative_path,
-                    raw: failure.raw_relative_path,
-                },
-                reason: failure.reason,
-            })
-            .collect(),
-        entries_removed: reply.entries_removed,
-        failures_truncated: reply.failures_truncated,
-    })
+    loop {
+        let reply = answer
+            .message()
+            .await
+            .map_err(|status| RmError::Interrupted(eyre::eyre!("{}", status.message())))?;
+        match reply.and_then(|reply| reply.reply) {
+            Some(rm_reply::Reply::Failures(batch)) => {
+                for failure in batch.failures {
+                    on_failure(RmFailure {
+                        operand: failure.operand as usize,
+                        path: EntryPath {
+                            text: failure.relative_path,
+                            raw: failure.raw_relative_path,
+                        },
+                        reason: failure.reason,
+                    });
+                }
+            }
+            Some(rm_reply::Reply::Done(done)) => return Ok(done.entries_removed),
+            None => {
+                return Err(RmError::Interrupted(eyre::eyre!(
+                    "the daemon's answer ended before it said it was done"
+                )))
+            }
+        }
+    }
 }
 
 /// Remove one path and everything under it, for `blit move`'s source-side
@@ -86,7 +121,9 @@ pub async fn remove(
 /// first one, and the source is not reported removed.
 pub async fn delete_remote_path(remote: &RemoteEndpoint, rel_path: &str) -> Result<u64> {
     let (module, _) = extract_module_and_path(remote)?;
-    let report = remove(
+    // The first entry left behind, and how many more: a move names one.
+    let (mut first, mut more): (Option<RmFailure>, u64) = (None, 0);
+    let removed = remove(
         remote,
         module,
         vec![rel_path.to_string()],
@@ -94,27 +131,30 @@ pub async fn delete_remote_path(remote: &RemoteEndpoint, rel_path: &str) -> Resu
             recursive: true,
             force: true,
         },
+        |failure| match first {
+            None => first = Some(failure),
+            Some(_) => more += 1,
+        },
     )
-    .await?;
-    if let Some(first) = report.failures.first() {
+    .await;
+    if let Some(first) = first {
         let below = String::from_utf8_lossy(first.path.bytes());
         let entry = if first.path.is_start() {
             rel_path.to_string()
         } else {
             format!("{}/{below}", rel_path.trim_end_matches('/'))
         };
-        let more = match report.failures.len() - 1 {
-            0 if !report.failures_truncated => String::new(),
-            0 => " (and more)".to_string(),
+        let more = match more {
+            0 => String::new(),
             n => format!(" (and {n} more)"),
         };
-        bail!(
-            "cannot remove '{entry}': {}{more}; {} entries were removed",
-            first.reason,
-            report.entries_removed
-        );
+        let removed = match removed {
+            Ok(removed) => format!("{removed} entries were removed"),
+            Err(error) => format!("{error}"),
+        };
+        bail!("cannot remove '{entry}': {}{more}; {removed}", first.reason);
     }
-    Ok(report.entries_removed)
+    Ok(removed?)
 }
 
 /// Pull the (module, rel_path) pair out of a `RemoteEndpoint`,
