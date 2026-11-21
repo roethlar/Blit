@@ -80,7 +80,9 @@ fn resolved_patterns(inputs: &FilterInputs<'_>) -> Vec<String> {
 /// malformed globs with a `--include`/`--exclude` pointer (R58-F12).
 pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
     let mut filter = FileFilter::default();
-    filter.include_files = inputs.include.to_vec();
+    // cr-ecm6-1: in the one form an include has — the form a peer is
+    // sent — so that this filter and the peer's read the same pattern.
+    filter.include_files = wire_includes(inputs.include, cfg!(windows));
     filter.exclude_files = resolved_patterns(inputs);
     filter.ignore_case = inputs.ignore_case;
     if let Some(s) = inputs.min_size {
@@ -210,7 +212,7 @@ fn case_note_on(
 /// "Aborted." and exited 0.
 pub fn validate(inputs: &FilterInputs<'_>) -> Result<()> {
     let mut probe = FileFilter::default();
-    probe.include_files = inputs.include.to_vec();
+    probe.include_files = wire_includes(inputs.include, cfg!(windows));
     probe.exclude_files = resolved_patterns(inputs);
     probe.ignore_case = inputs.ignore_case;
     probe
@@ -375,6 +377,16 @@ pub fn shared_entry_note(pattern: &str, patterns: &[String]) -> String {
 /// destination-only file was in the deletion scope. A Unix escape
 /// (`a\*b`) met a Windows peer the other way round. An include is never
 /// made relative to the source, so the dialect is the whole of it.
+// cr-ecm6-1: this is also the form a filter built for this machine's own
+// use holds ([`build`], [`validate`]) — one representation, so the two
+// ends cannot read an include differently. They did: a local filter kept
+// the include as typed, and the glob library reads typed text by its raw
+// characters. In `{a\,**/x,b}` it takes the `**` after the escaped comma
+// for the start of a new alternative and drops the comma, so the local
+// filter admitted `a/x` and refused `a,/x`, while the peer — handed
+// `{a[,]**/x,b}`, in which the comma is plainly part of the name — did
+// the reverse. A mirror through a daemon could delete a destination-only
+// `a,/x` that the same mirror between two local folders kept.
 fn wire_includes(include: &[String], windows: bool) -> Vec<String> {
     include
         .iter()
@@ -4256,11 +4268,95 @@ mod tests {
         };
         let include = [typed.to_string()];
         assert_eq!(build_spec(&inputs(&include, &[])).unwrap().include, [sent]);
-        // A local filter keeps the include as typed: this host reads it.
-        assert_eq!(
-            build(&inputs(&include, &[])).unwrap().include_files,
-            [typed]
-        );
+        // cr-ecm6-1: and a filter built for this machine's own use holds
+        // the same form — one representation at both ends.
+        assert_eq!(build(&inputs(&include, &[])).unwrap().include_files, [sent]);
+    }
+
+    /// cr-ecm6-1: an include means the same here and at a peer. The filter
+    /// this machine builds for itself and the filter a peer builds from
+    /// what it is sent give one answer for every path, in both case modes.
+    /// They are built from one representation now; the local one used to
+    /// hold the include as typed, which the glob library reads by its raw
+    /// characters — in `{a\,**/x,b}` it took the `**` after the escaped
+    /// comma for a new alternative and dropped the comma. The local filter
+    /// admitted `a/x` and refused `a,/x`; the peer's did the reverse.
+    #[test]
+    fn an_include_means_the_same_here_and_at_a_peer() {
+        use crate::remote::transfer::operation_spec::filter_from_spec;
+        let paths = [
+            "a/x", "a,/x", "a,q/x", "a,x", "a,b", "a", "b", "c", "x*y", "xzy", "x}", "y", "a{b",
+            "a]x", "ax", "{a", "b}", "{a,b}", "d/a,/x", "x", "q/x", "{/x", "{q/x", "A,/X", "B",
+        ];
+        let patterns = [
+            r"{a\,**/x,b}",
+            r"{\{**/x,b}",
+            r"{a\,*,c}",
+            r"a\,b",
+            r"{a\,b,c}",
+            r"x\*y",
+            r"{x\},y}",
+            r"a\{b",
+            r"[a\]]x",
+            r"{a,b}",
+            r"\{a,b\}",
+            "{a,**/x}",
+            "**/x",
+            "*,/x",
+            // Text that is refused, or might be: the early check and the
+            // filter that is built must agree about each of these too.
+            r"a\",
+            r"\",
+            r"{a\,",
+            "a[",
+            r"a[\]",
+            r"{a\}",
+            r"\{a}",
+        ];
+        for pattern in patterns {
+            let include = [pattern.to_string()];
+            for ignore_case in [false, true] {
+                let mut given = inputs(&include, &[]);
+                given.ignore_case = ignore_case;
+                // What is checked before anything is asked is what is built.
+                assert_eq!(
+                    validate(&given).is_ok(),
+                    build(&given).is_ok(),
+                    "{pattern} (ignore_case {ignore_case}): the early check and the filter"
+                );
+                let (Ok(local), Ok(spec)) = (build(&given), build_spec(&given)) else {
+                    // Refused here is refused before anything is sent.
+                    assert!(
+                        build(&given).is_err() && build_spec(&given).is_err(),
+                        "{pattern}"
+                    );
+                    continue;
+                };
+                assert_eq!(local.include_files, spec.include, "{pattern}: one form");
+                let peer = filter_from_spec(spec).unwrap();
+                for rel in paths {
+                    let passes = |filter: &FileFilter| {
+                        filter.allows_entry(Some(Path::new(rel)), Path::new(rel), 1, None)
+                    };
+                    assert_eq!(
+                        passes(&local),
+                        passes(&peer),
+                        "{pattern} (ignore_case {ignore_case}): {rel} here and at a peer"
+                    );
+                }
+            }
+        }
+
+        // And the meaning is the one typed, under the rule a `\` escapes
+        // by: the comma is part of the name.
+        if !cfg!(windows) {
+            let include = [r"{a\,**/x,b}".to_string()];
+            let local = build(&inputs(&include, &[])).unwrap();
+            let passes =
+                |rel: &str| local.allows_entry(Some(Path::new(rel)), Path::new(rel), 1, None);
+            assert!(passes("a,/x") && passes("b"));
+            assert!(!passes("a/x") && !passes("q/x"));
+        }
     }
 
     /// cr-ecm4-2: a list of names that was GIVEN is in force on the wire

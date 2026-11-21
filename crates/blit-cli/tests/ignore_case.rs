@@ -352,6 +352,69 @@ fn a_list_that_holds_no_name_overrides_the_patterns_at_a_daemon_too() {
     }
 }
 
+/// cr-ecm6-1: an include means the same between two local folders and
+/// through a daemon. `{a\,**/x,b}` names `b`, and `x` under a folder whose
+/// name begins `a,` — the comma is escaped, so it is part of the name. A
+/// local filter used to hold the include as typed, which the glob library
+/// reads otherwise (it drops that comma): the local mirror had `a/x` in
+/// its scope and `a,/x` out of it, and a mirror through a daemon the
+/// reverse — so the same command deleted a different destination-only
+/// file depending on where the destination was.
+///
+/// Unix: under the Windows rule a `\` is a separator and this text is
+/// another pattern. That the two ends hold one form is guarded on every OS
+/// in `blit_core::transfers::filter`.
+#[cfg(unix)]
+#[test]
+fn an_include_reads_the_same_locally_and_through_a_daemon() {
+    let ctx = common::TestContext::new();
+    let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let local = ctx.workspace.join("local");
+    let other = ctx.workspace.join("other");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&other).unwrap();
+    let (here, there) = (with_slash(&local), with_slash(&other));
+
+    for (route, from, to, source, destination) in [
+        ("local", here.as_str(), there.as_str(), &local, &other),
+        (
+            "push",
+            here.as_str(),
+            remote.as_str(),
+            &local,
+            &ctx.module_dir,
+        ),
+        (
+            "pull",
+            remote.as_str(),
+            here.as_str(),
+            &ctx.module_dir,
+            &local,
+        ),
+    ] {
+        refill(source, &["b", "other.txt"]);
+        refill(destination, &["a,/x", "a/x", "stale.txt"]);
+        let (ok, said) = daemon_run(
+            &ctx,
+            &["mirror", "--yes", "--include", r"{a\,**/x,b}", from, to],
+        );
+        assert!(ok, "{route}\n{said}");
+        assert!(
+            destination.join("b").exists(),
+            "{route}: named, and copied\n{said}"
+        );
+        assert!(!destination.join("other.txt").exists(), "{route}\n{said}");
+        assert!(
+            !destination.join("a,/x").exists(),
+            "{route}: named by the include, absent from the source: deleted\n{said}"
+        );
+        assert!(
+            destination.join("a/x").exists() && destination.join("stale.txt").exists(),
+            "{route}: not named by the include: out of scope, kept\n{said}"
+        );
+    }
+}
+
 /// cr-ecm5-5: under a list of names a mirror deletes nothing the list does
 /// not name — not even an empty directory. The walk admits every
 /// directory under a list (a listed file may lie anywhere), and each one
