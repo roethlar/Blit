@@ -20,6 +20,30 @@ pub(crate) fn preserve_metadata(src: &Path, dst: &Path) -> Result<()> {
 /// permissions) onto `dst` from the OPENED source handle's metadata —
 /// the inode that was copied — never from a path re-stat that could
 /// describe a replacement.
+/// [`preserve_metadata_from_handle`] onto a destination that is HELD
+/// (cr-ecm15-1): its time and mode set through `made`, never by a name.
+pub(crate) fn preserve_metadata_into(src: &std::fs::File, made: &std::fs::File) -> Result<()> {
+    use filetime::{set_file_handle_times, FileTime};
+    let md = src.metadata()?;
+    if let Ok(modified) = md.modified() {
+        if set_file_handle_times(made, None, Some(FileTime::from_system_time(modified))).is_err() {
+            log::debug!("Could not preserve mtime through the destination's handle");
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = md.permissions().mode();
+        if made
+            .set_permissions(std::fs::Permissions::from_mode(mode))
+            .is_err()
+        {
+            log::debug!("Could not preserve permissions through the destination's handle");
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn preserve_metadata_from_handle(src: &std::fs::File, dst: &Path) -> Result<()> {
     use filetime::{set_file_mtime, FileTime};
     let md = src.metadata()?;

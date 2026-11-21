@@ -9,7 +9,8 @@ pub use compare::{
 };
 pub use file_copy::resume::{DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE};
 pub use file_copy::{
-    copy_file, copy_opened, mmap_copy_file, resume_copy_file, resume_copy_from, ResumeCopyOutcome,
+    copy_file, copy_opened, copy_opened_into, mmap_copy_file, resume_copy_file, resume_copy_from,
+    ResumeCopyOutcome,
 };
 #[cfg(windows)]
 pub use windows::windows_copyfile;

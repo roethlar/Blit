@@ -525,6 +525,113 @@ async fn mid_transfer_cancel_surfaces_cancelled_over_the_data_plane() {
     daemon.stop().await;
 }
 
+/// cr-ecm15-1: a source that lets another hand in at the destination
+/// AFTER the destination has asked for its files and BEFORE a byte of
+/// them is sent: the first payload it is asked to make ready, it writes
+/// `theirs` under each of `names` at the destination, once.
+struct PutThereBeforeItsBytes {
+    inner: FsTransferSource,
+    at: PathBuf,
+    names: &'static [&'static str],
+    put: std::sync::atomic::AtomicBool,
+}
+
+impl PutThereBeforeItsBytes {
+    const THEIRS: &'static [u8] = b"somebody's file";
+
+    fn put(&self) {
+        if !self.put.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            for name in self.names {
+                std::fs::write(self.at.join(name), Self::THEIRS).unwrap();
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl blit_core::remote::transfer::source::TransferSource for PutThereBeforeItsBytes {
+    fn scan(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> (
+        tokio::sync::mpsc::Receiver<blit_core::generated::FileHeader>,
+        blit_core::remote::transfer::source::SourceScan,
+    ) {
+        self.inner.scan(filter, unreadable)
+    }
+
+    async fn prepare_payload(
+        &self,
+        payload: blit_core::remote::transfer::payload::TransferPayload,
+    ) -> eyre::Result<blit_core::remote::transfer::payload::PreparedPayload> {
+        self.put();
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn open_file(
+        &self,
+        header: &blit_core::generated::FileHeader,
+    ) -> eyre::Result<OpenedSourceFile> {
+        self.put();
+        self.inner.open_file(header).await
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+/// cr-ecm15-1: over the wire, a run that keeps what exists
+/// (`--ignore-existing`) writes over nothing that stands at the
+/// destination — one put there after the destination worked out what it
+/// needs as much as one that was there before. The destination's sink was
+/// told the option was off, whatever the run asked: a small file (written
+/// from a shard) and a large one (a stream) put there in between were
+/// both truncated and written over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_push_that_keeps_what_exists_writes_over_nothing_put_there_since() {
+    let daemon = Daemon::start(false).await;
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("small.txt"), b"the source's small file").unwrap();
+    std::fs::write(src.path().join("big.bin"), vec![0xABu8; 4 * 1024 * 1024]).unwrap();
+    std::fs::write(src.path().join("free.txt"), b"nobody takes this name").unwrap();
+    let source = Arc::new(PutThereBeforeItsBytes {
+        inner: FsTransferSource::new(src.path().to_path_buf()),
+        at: daemon.dest_root.clone(),
+        names: &["small.txt", "big.bin"],
+        put: std::sync::atomic::AtomicBool::new(false),
+    });
+    let pushed = run_push_session(
+        &daemon.endpoint,
+        Arc::clone(&source) as Arc<dyn blit_core::remote::transfer::source::TransferSource>,
+        PushSessionOptions {
+            ignore_existing: true,
+            ..PushSessionOptions::default()
+        },
+    )
+    .await;
+    assert!(
+        source.put.load(std::sync::atomic::Ordering::SeqCst),
+        "the files were put there while the transfer ran"
+    );
+    for name in ["small.txt", "big.bin"] {
+        assert_eq!(
+            std::fs::read(daemon.dest_root.join(name)).unwrap(),
+            PutThereBeforeItsBytes::THEIRS,
+            "{name}: the file put there is whole\n{pushed:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(daemon.dest_root.join("free.txt")).unwrap(),
+        b"nobody takes this name",
+        "{pushed:?}"
+    );
+    let summary = pushed.expect("a file that is kept fails alone");
+    assert_eq!(summary.files_failed, 2, "{summary:?}");
+    daemon.stop().await;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

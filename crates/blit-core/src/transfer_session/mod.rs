@@ -4504,10 +4504,13 @@ async fn destination_session_inner(
                     checksum: None,
                     resume: false,
                     compare_mode,
-                    // Read by the local carrier's resume copy alone, which
-                    // this sink never runs: a record that fails here is
-                    // removed whatever the option.
-                    ignore_existing: false,
+                    // cr-ecm15-1: a run that keeps what exists makes each
+                    // destination by a creation that fails if its name
+                    // is taken (cr-ecm14-2) — streams and shard members
+                    // alike, which are this sink's. It was told `false`,
+                    // so a file put at the destination after the need
+                    // was worked out was truncated and written over.
+                    ignore_existing: negotiated.open.ignore_existing,
                 },
             );
             // otp-9a: applied payload bytes report against the caller's live

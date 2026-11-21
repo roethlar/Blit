@@ -1280,15 +1280,17 @@ impl FsTransferSink {
             None => None,
         };
 
-        if let Err(error) = crate::windows_metadata::prepare_destination(dst, windows_metadata) {
+        // cr-ecm14-2: a run that keeps what exists creates, or fails —
+        // and (cr-ecm15-1) touches nothing of what stands at the name
+        // before the name is its own.
+        let new_only = self.config.ignore_existing;
+        if let Err(error) = prepare_to_write(dst, windows_metadata, new_only) {
             if let Some((parent, readiness)) = &parent_readiness {
                 self.invalidate_parent_readiness(parent, readiness);
             }
             return Err(error);
         }
 
-        // cr-ecm14-2: a run that keeps what exists creates, or fails.
-        let new_only = self.config.ignore_existing;
         let create = || async {
             let mut options = tokio::fs::OpenOptions::new();
             options.write(true);
@@ -1306,7 +1308,7 @@ impl FsTransferSink {
                     self.invalidate_parent_readiness(parent, readiness);
                     if error.kind() == std::io::ErrorKind::NotFound {
                         self.ensure_parent_ready(parent).await?;
-                        crate::windows_metadata::prepare_destination(dst, windows_metadata)?;
+                        prepare_to_write(dst, windows_metadata, new_only)?;
                         return create()
                             .await
                             .map_err(|error| creation_failed(dst, error, new_only));
@@ -2176,6 +2178,73 @@ fn create_to_write(dst: &Path, new_only: bool) -> std::io::Result<std::fs::File>
     }
 }
 
+/// Ready `dst` to be written (`windows_metadata::prepare_destination`) —
+/// but with `new_only`, touch nothing of what stands there (cr-ecm15-1):
+/// it is this run's only once the run has made it.
+fn prepare_to_write(
+    dst: &Path,
+    metadata: Option<&crate::generated::WindowsFileMetadata>,
+    new_only: bool,
+) -> Result<()> {
+    if new_only {
+        crate::windows_metadata::prepare_new_destination(dst, metadata)
+    } else {
+        crate::windows_metadata::prepare_destination(dst, metadata)
+    }
+}
+
+/// Which file a record of one describes, where the system says so in the
+/// record itself (Unix: its device and its number there); `None` elsewhere.
+fn file_identity(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Some((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
+/// Which file stands at `path` now — itself, a link being a link.
+fn identity_at(path: &Path) -> Option<(u64, u64)> {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .as_ref()
+        .and_then(file_identity)
+}
+
+/// Test seam (cr-ecm15-1): runs once a run that keeps what exists has
+/// made a destination's name and before it writes — where another hand
+/// can put its own file under that name. Prefix-keyed like the copy
+/// hooks. Production never sets it.
+#[cfg(test)]
+pub(super) static AFTER_CLAIM_HOOKS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, AfterSourceOpenHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn run_after_claim_hook(dst: &Path) {
+    let hooks: Vec<AfterSourceOpenHook> = AFTER_CLAIM_HOOKS
+        .lock()
+        .map(|g| {
+            g.iter()
+                .filter(|(prefix, _)| dst.starts_with(prefix))
+                .map(|(_, h)| Arc::clone(h))
+                .collect()
+        })
+        .unwrap_or_default();
+    for hook in hooks {
+        hook(dst);
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn run_after_claim_hook(_dst: &Path) {}
+
 /// The reason a creation failed, as a file's failure: [`THE_NAME_IS_TAKEN`]
 /// for a name taken under `new_only`, the system's own otherwise.
 fn creation_failed(dst: &Path, error: std::io::Error, new_only: bool) -> eyre::Report {
@@ -2386,6 +2455,10 @@ struct PartialTarget<'a> {
     dst: &'a Path,
     source_size: u64,
     armed: Option<OnFailure>,
+    /// cr-ecm15-1: the file this write MADE at `dst`, where the system
+    /// says which file is which. Only that file is this write's to
+    /// remove: one put under the name since is somebody's.
+    made: Option<(u64, u64)>,
 }
 
 impl<'a> PartialTarget<'a> {
@@ -2394,6 +2467,7 @@ impl<'a> PartialTarget<'a> {
             dst,
             source_size,
             armed: None,
+            made: None,
         }
     }
 
@@ -2401,11 +2475,31 @@ impl<'a> PartialTarget<'a> {
         self.armed = Some(on_failure);
     }
 
+    /// Armed to remove on failure the file this write made and holds
+    /// (cr-ecm15-1) — that file, and no other that comes to stand there.
+    fn arm_made(&mut self, made: &std::fs::File) {
+        self.made = made.metadata().ok().as_ref().and_then(file_identity);
+        self.armed = Some(OnFailure::Remove);
+    }
+
+    /// The file this write made no longer stands at its name: what does
+    /// is not this write's to touch.
+    fn no_longer_its_own(&self) -> bool {
+        self.made
+            .is_some_and(|made| identity_at(self.dst) != Some(made))
+    }
+
     fn disarm(&mut self) {
         self.armed = None;
     }
 
     fn settle(&mut self, error: eyre::Report) -> FailedWrite {
+        if self.armed.is_some() && self.no_longer_its_own() {
+            // Its copy is gone from the name: nothing of this run's is
+            // left there, and nothing there is removed.
+            self.armed = None;
+            return FailedWrite::settled(error, REMOVED);
+        }
         match self.armed.take() {
             Some(on_failure) => FailedWrite::settled(
                 error,
@@ -2419,6 +2513,9 @@ impl<'a> PartialTarget<'a> {
 impl Drop for PartialTarget<'_> {
     fn drop(&mut self) {
         if let Some(on_failure) = self.armed.take() {
+            if self.no_longer_its_own() {
+                return;
+            }
             let _ = settle_failed_target(self.dst, None, self.source_size, on_failure);
         }
     }
@@ -2496,7 +2593,11 @@ fn copy_resolved_file_payload(
 
     crate::windows_metadata::validate_payload(header.windows_metadata.as_ref())
         .with_context(|| format!("validating Windows metadata for {}", header.relative_path))?;
-    crate::windows_metadata::prepare_destination(dst, header.windows_metadata.as_ref())?;
+    prepare_to_write(
+        dst,
+        header.windows_metadata.as_ref(),
+        config.ignore_existing,
+    )?;
 
     let mut partial = PartialTarget::new(dst, header.size);
     let landed = copy_and_stamp_opened(
@@ -2544,37 +2645,43 @@ fn copy_and_stamp_opened(
     let mut did_copy = false;
     // cr-ecm14-2: a run that keeps what exists makes the name first, by
     // a creation that fails if anything has it — and what it made is its
-    // own from here: removed, should the copy fail.
-    let claimed = config.ignore_existing;
-    if claimed {
-        drop(create_to_write(dst, true).map_err(|error| creation_failed(dst, error, true))?);
-        partial.arm(OnFailure::Remove);
-    }
-    if config.resume {
+    // own from here: removed, should the copy fail (cr-ecm13-1: with
+    // `--resume` too — nothing is kept that a later pass would have to
+    // tell from somebody's file).
+    //
+    // cr-ecm15-1: and it KEEPS HOLD of what it made. The bytes, the time
+    // and the mode go through that handle, and the name is not opened
+    // again: it was made, let go, and opened by name to be written, which
+    // truncated whatever another hand had put there in between.
+    let made = if config.ignore_existing {
+        let made = create_to_write(dst, true).map_err(|error| creation_failed(dst, error, true))?;
+        partial.arm_made(&made);
+        run_after_claim_hook(dst);
+        Some(made)
+    } else {
+        None
+    };
+    if let Some(made) = &made {
+        // A file just made holds nothing to resume: one copy, whole.
+        let sizer = BufferSizer::default();
+        crate::copy::copy_opened_into(src_file, made, header.size, &sizer)?;
+        run_after_copy_fault_hook(dst).map_err(|e| eyre!("source: read error: {e}"))?;
+        did_copy = true;
+    } else if config.resume {
         // cr-win-1: the partial is kept for the next run to resume, and
         // `resume_copy_from` holds it one byte longer than the source until
         // it completes; a failure after that keeps it marked the same way.
-        let created = claimed || std::fs::symlink_metadata(dst).is_err();
-        // cr-ecm13-1: under `--ignore-existing` a file this write made is
-        // removed when the write fails, as a copy without `--resume`
-        // removes it: nothing is kept that a later pass would have to
-        // tell from somebody's file.
-        partial.arm(if created && config.ignore_existing {
-            OnFailure::Remove
-        } else {
-            OnFailure::KeepUnfinished { created }
-        });
+        let created = std::fs::symlink_metadata(dst).is_err();
+        partial.arm(OnFailure::KeepUnfinished { created });
         let outcome = crate::copy::resume_copy_from(src_file, header.size, dst, 0)
             .with_context(|| format!("resume copy {}", header.relative_path))?;
         did_copy = outcome.bytes_transferred > 0;
-    } else if claimed
-        || crate::copy::file_needs_copy_with_mode_opened(
-            src_file,
-            src_meta,
-            dst,
-            config.compare_mode,
-        )?
-    {
+    } else if crate::copy::file_needs_copy_with_mode_opened(
+        src_file,
+        src_meta,
+        dst,
+        config.compare_mode,
+    )? {
         // 2026-10-07 defect (a): arm the cleanup only for a destination this
         // copy can write. One it cannot open — a folder in the way, a file
         // the user may not write — is not this copy's: the cleanup would
@@ -2611,7 +2718,8 @@ fn copy_and_stamp_opened(
     // a read-only source makes the destination read-only again after the
     // pre-copy preparation above. Clear that bit once more before replacing
     // named streams; apply_attributes below restores the exact source mask.
-    if did_copy {
+    // (A file this write made was not copied that way, and is new.)
+    if did_copy && made.is_none() {
         crate::windows_metadata::prepare_destination(dst, header.windows_metadata.as_ref())?;
     }
 
@@ -2628,13 +2736,23 @@ fn copy_and_stamp_opened(
             .ok()
             .or(fallback);
         if let Some(ft) = ft {
-            if let Err(e) = filetime::set_file_mtime(dst, ft) {
+            let stamped = match &made {
+                Some(made) => filetime::set_file_handle_times(made, None, Some(ft)),
+                None => filetime::set_file_mtime(dst, ft),
+            };
+            if let Err(e) = stamped {
                 log::warn!("set mtime on {}: {}", dst.display(), e);
             }
         }
     }
     crate::windows_metadata::apply_attributes(dst, header.windows_metadata.as_ref())?;
 
+    // cr-ecm15-1: what was written is delivered only if it is what stands
+    // at the name. Another file put there while this one was being
+    // written is kept, and this file did not land.
+    if partial.no_longer_its_own() {
+        return Err(eyre!(THE_NAME_IS_TAKEN));
+    }
     partial.disarm();
     Ok(SinkOutcome::written(
         1,
@@ -2841,10 +2959,7 @@ fn write_tar_shard_payload(
                 }
                 let mkdir = mkdir_started.elapsed();
 
-                crate::windows_metadata::prepare_destination(
-                    &f.dest_path,
-                    f.windows_metadata.as_ref(),
-                )?;
+                prepare_to_write(&f.dest_path, f.windows_metadata.as_ref(), new_only)?;
 
                 let open_started = std::time::Instant::now();
                 let mut file = create_to_write(&f.dest_path, new_only)
@@ -2917,7 +3032,7 @@ fn write_shard_member(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create dir {}", parent.display()))?;
     }
-    crate::windows_metadata::prepare_destination(&file.dest_path, file.windows_metadata.as_ref())?;
+    prepare_to_write(&file.dest_path, file.windows_metadata.as_ref(), new_only)?;
     // cr-ecm14-2: a run that keeps what exists creates, or fails — and a
     // name it could not take is not its to settle.
     let target = create_to_write(&file.dest_path, new_only)
@@ -7080,6 +7195,93 @@ mod cr_win_1_tests {
             .unwrap();
         assert_eq!(written.files_failed_total, 0, "{written:?}");
         assert_eq!(std::fs::read(dst.join("there.bin")).unwrap(), b"0123456789");
+    }
+
+    /// cr-ecm15-1: a run that keeps what exists writes a file through
+    /// what MADE its name. It made the name, let go of it, and opened the
+    /// name again to write: a file another hand put there in between was
+    /// truncated and written over. Now that file is whole — never
+    /// written to, and not removed when this write is settled as failed —
+    /// and the write says the name is taken. A name nobody takes is
+    /// written as ever: its bytes and its time.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_name_made_by_a_run_that_keeps_what_exists_is_written_through_what_made_it() {
+        struct Hooked(PathBuf);
+        impl Drop for Hooked {
+            fn drop(&mut self) {
+                if let Ok(mut hooks) = AFTER_CLAIM_HOOKS.lock() {
+                    hooks.retain(|(prefix, _)| prefix != &self.0);
+                }
+            }
+        }
+        for resume in [false, true] {
+            let tmp = tempdir().unwrap();
+            let src = tmp.path().join("src");
+            let dst = tmp.path().join("dst");
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::create_dir_all(&dst).unwrap();
+            for name in ["taken.bin", "free.bin"] {
+                std::fs::write(src.join(name), b"0123456789").unwrap();
+                filetime::set_file_mtime(
+                    src.join(name),
+                    FileTime::from_unix_time(1_600_000_000, 0),
+                )
+                .unwrap();
+            }
+            // Another hand, once the run has made the name: its own file,
+            // moved over it.
+            let theirs = tmp.path().join("theirs");
+            std::fs::write(&theirs, b"somebody's file, longer").unwrap();
+            let taken = dst.join("taken.bin");
+            let _hooked = {
+                let (theirs, at) = (theirs.clone(), taken.clone());
+                AFTER_CLAIM_HOOKS.lock().unwrap().push((
+                    taken.clone(),
+                    Arc::new(move |_: &Path| std::fs::rename(&theirs, &at).unwrap()),
+                ));
+                Hooked(taken.clone())
+            };
+            let sink = FsTransferSink::new(
+                src.clone(),
+                dst.clone(),
+                FsSinkConfig {
+                    resume,
+                    ignore_existing: true,
+                    ..FsSinkConfig::default()
+                },
+            );
+            let outcome = sink
+                .write_payload(PreparedPayload::File(make_file_header("taken.bin", 10)))
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome.files_failed_total, 1,
+                "resume={resume}: {outcome:?}"
+            );
+            assert!(
+                outcome.failures[0].reason.contains(THE_NAME_IS_TAKEN),
+                "resume={resume}: {:?}",
+                outcome.failures
+            );
+            assert_eq!(
+                std::fs::read(&taken).unwrap(),
+                b"somebody's file, longer",
+                "resume={resume}: the file put there is whole"
+            );
+
+            let free = sink
+                .write_payload(PreparedPayload::File(make_file_header("free.bin", 10)))
+                .await
+                .unwrap();
+            assert_eq!(free.files_failed_total, 0, "resume={resume}: {free:?}");
+            let landed = std::fs::metadata(dst.join("free.bin")).unwrap();
+            assert_eq!(std::fs::read(dst.join("free.bin")).unwrap(), b"0123456789");
+            assert_eq!(
+                FileTime::from_last_modification_time(&landed),
+                FileTime::from_unix_time(1_600_000_000, 0)
+            );
+        }
     }
 
     /// cr-ecm14-2: a whole shard written by a run that keeps what exists:

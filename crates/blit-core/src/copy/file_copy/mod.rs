@@ -362,6 +362,67 @@ pub fn copy_opened(
     })
 }
 
+/// cr-ecm15-1: [`copy_opened`] INTO a destination the caller made and
+/// holds. Nothing here looks the destination up by its name: every byte,
+/// and the time and mode `copy_opened` gives a destination by its path,
+/// goes through `made`. A run that keeps what exists (`--ignore-existing`)
+/// made the name by a creation that fails if it is taken, dropped what it
+/// held, and opened the NAME again to write — truncating whatever had been
+/// put there in between.
+///
+/// On Linux the same cascade as `copy_opened`, on the descriptors; on
+/// every other system a buffered copy through what is held (their fast
+/// paths go by name, or need the destination absent).
+pub fn copy_opened_into(
+    src: &File,
+    made: &File,
+    expected_len: u64,
+    buffer_sizer: &BufferSizer,
+) -> Result<FileCopyOutcome> {
+    use std::io::{Read, Seek, SeekFrom, Write as _};
+    let buffer_size = buffer_sizer.calculate_buffer_size(expected_len, false);
+    let buffered = |src: &File, made: &File| -> Result<u64> {
+        (&*src).seek(SeekFrom::Start(0))?;
+        made.set_len(0)?;
+        (&*made).seek(SeekFrom::Start(0))?;
+        let mut reader =
+            std::io::BufReader::with_capacity(buffer_size, SourceRead(src.take(expected_len)));
+        let mut writer = std::io::BufWriter::with_capacity(buffer_size, made);
+        let n = std::io::copy(&mut reader, &mut writer)?;
+        writer.flush()?;
+        Ok(n)
+    };
+    (&*src).seek(SeekFrom::Start(0))?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let (total_bytes, clone_succeeded) = {
+        let fast_linux =
+            clone::attempt_copy_file_range_linux(src, made, expected_len).unwrap_or(false) || {
+                (&*src).seek(SeekFrom::Start(0))?;
+                made.set_len(0)?;
+                clone::attempt_sendfile_linux(src, made, expected_len).unwrap_or(false)
+            };
+        if fast_linux {
+            (expected_len, true)
+        } else {
+            (&*src).seek(SeekFrom::Start(0))?;
+            made.set_len(0)?;
+            match clone::attempt_sparse_copy_unix(src, made, expected_len)? {
+                Some(n) => (n, false),
+                None => (buffered(src, made)?, false),
+            }
+        }
+    };
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    let (total_bytes, clone_succeeded) = (buffered(src, made)?, false);
+    if !clone_succeeded {
+        metadata::preserve_metadata_into(src, made)?;
+    }
+    Ok(FileCopyOutcome {
+        bytes_copied: total_bytes,
+        clone_succeeded,
+    })
+}
+
 #[cfg(test)]
 mod fallback_tests {
     //! audit-6 item 7: copy_file's fast-path → fallback chain. A truly

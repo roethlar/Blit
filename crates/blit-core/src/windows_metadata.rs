@@ -556,6 +556,24 @@ pub fn prepare_destination(path: &Path, metadata: Option<&WindowsFileMetadata>) 
     }
 }
 
+/// [`prepare_destination`] for a destination that must be NEW (cr-ecm15-1,
+/// `--ignore-existing`): whatever stands at its name is not this write's
+/// to change, and no attribute of it is touched — the read-only bit of a
+/// file somebody else put there was cleared before the creation that then
+/// refused the name. Where the platform cannot hold such metadata at all,
+/// the refusal still comes here, before anything is made.
+pub fn prepare_new_destination(path: &Path, metadata: Option<&WindowsFileMetadata>) -> Result<()> {
+    #[cfg(not(windows))]
+    {
+        prepare_destination(path, metadata)
+    }
+    #[cfg(windows)]
+    {
+        let _ = (path, metadata);
+        Ok(())
+    }
+}
+
 #[cfg(not(windows))]
 fn replace_streams_impl(path: &Path, _metadata: &WindowsFileMetadata) -> Result<u64> {
     bail!(

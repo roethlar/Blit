@@ -246,7 +246,14 @@ part, and a job you can list, read, re-run and retry.
   such a run writes is made by a creation that fails if the name is
   taken, so that anything put there after the run looked — a file, a
   link — is kept too, and that file is reported: `something stands at
-  the destination that was not there when this run looked`.
+  the destination that was not there when this run looked`. That holds
+  for a destination on a daemon as for one on this machine, and through
+  the write: a copy on this machine writes through what made the name
+  and never opens the name again, so a file moved over it meanwhile is
+  whole, is not removed if the copy fails, and is reported the same
+  way. (As first built on the development branch, the daemon's end was
+  not told the option, and the copy on this machine made the name and
+  then opened it again by name. No release has that.)
 - `check` of a single file against a destination of another name
   compares the two. With the source named in `--files-from`, or a
   pattern naming either file, it looked for one file's name on the
