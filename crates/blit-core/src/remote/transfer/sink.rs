@@ -6946,6 +6946,33 @@ mod cr_win_1_tests {
         assert_eq!(by_text["later\u{fffd}"], b"later\xfe");
     }
 
+    /// cr-ecm13-3: a failure recorded with its bytes keeps them. An entry
+    /// refused because another has its text is recorded by its own bytes
+    /// though its name is text, and naming failures from the manifest
+    /// afterwards — which holds the OTHER entry under that text — leaves
+    /// it as it is, in the report and in the exact set.
+    #[test]
+    fn a_failure_recorded_by_its_bytes_is_not_named_again_from_the_manifest() {
+        let twin = "dup\u{fffd}";
+        let mut outcome = SinkOutcome::default();
+        outcome.record_named_failure(
+            twin,
+            Some(twin.as_bytes().to_vec()),
+            "refused: its text is taken",
+        );
+        // What the manifest holds under that text is the other file.
+        let named = outcome.named_raw(|text| (text == twin).then(|| b"dup\xff".to_vec()));
+        assert_eq!(
+            named.failures[0].raw_relative_path.as_deref(),
+            Some(twin.as_bytes())
+        );
+        let (paths, _) = named.wire_failed_paths();
+        assert_eq!(
+            named.wire_failed_paths_raw(&paths),
+            [twin.as_bytes().to_vec()]
+        );
+    }
+
     /// cr-ecm13-4: a path kept where a copy was left is recorded as one
     /// where a copy was left — by the words every record is read for, and
     /// for a name that is not text by its own bytes.

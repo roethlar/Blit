@@ -4716,9 +4716,23 @@ async fn destination_session_inner(
                     }
                     // Review cr-jl3afix1-1: this entry's own bytes, not the
                     // first one's that its text names.
+                    //
+                    // cr-ecm13-3: and ALWAYS its bytes — also where its
+                    // name is text. Two entries share this text, so the
+                    // text does not say which one failed: recorded by text
+                    // alone, the entry was named afterwards "from the
+                    // manifest, where a text names one granted entry"
+                    // (`named_raw`) — by the bytes of the OTHER one. A
+                    // retry then asked for the file that had landed, found
+                    // nothing to do, and the file that was refused here
+                    // was never sent.
+                    let own_bytes = header
+                        .raw_relative_path
+                        .clone()
+                        .unwrap_or_else(|| header.relative_path.clone().into_bytes());
                     contained_failures.record_named_failure(
                         &header.relative_path,
-                        header.raw_relative_path.clone(),
+                        Some(own_bytes),
                         reason,
                     );
                     continue;

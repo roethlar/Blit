@@ -1110,11 +1110,12 @@ fn an_interrupt_during_the_retry_wait_still_prints_the_report() {
 
 /// cr-ecm13-3: a retry asks for the file that failed, by its own name. A
 /// name that is not text — `dup` and the byte `FF` — was asked for by the
-/// text it is shown as, `dup` and U+FFFD, which is the name of ANOTHER
-/// file of this source: the retry sent that one again, found nothing
-/// wrong with it, and the command exited 0 with the file that had failed
-/// never retried. Asked for by its bytes, it fails again while its place
-/// is taken, and lands once it is free.
+/// text it is shown as, `dup` and U+FFFD, which is another name: with a
+/// file of THAT name at the source, the retry sent it, found nothing wrong
+/// with it, and the command exited 0 with the file that had failed never
+/// retried. Here the file of the other name is made during the wait, at
+/// the source and (other bytes) at the destination: the retry lands the
+/// file that failed, and leaves the other alone at both ends.
 #[cfg(unix)]
 #[test]
 fn a_failed_name_that_is_not_text_is_retried_as_itself() {
@@ -1130,9 +1131,62 @@ fn a_failed_name_that_is_not_text_is_retried_as_itself() {
         eprintln!("this filesystem refuses a name that is not text: nothing to retry");
         return;
     }
-    fs::write(src.join("dup\u{fffd}"), b"the one of that name").expect("write the other");
-    // A folder in the way of the first, and of nothing else.
+    // A folder in the way of it.
     fs::create_dir_all(dst.join(raw)).expect("block the destination path");
+    let counters = temp.path().join("counters.txt");
+    let child = spawn(
+        "copy",
+        &["--retries", "1", "--retry-wait", "4"],
+        &src,
+        &dst,
+        &counters,
+    );
+    wait_for_counter(&counters, "retry_wait_seconds", Duration::from_secs(60));
+    fs::remove_dir(dst.join(raw)).expect("free it during the wait");
+    fs::write(src.join("dup\u{fffd}"), b"another file, of the text's name").expect("the other");
+    fs::write(dst.join("dup\u{fffd}"), b"theirs").expect("and one there");
+    let output = finish(child);
+    let said = format!("{}{}", stdout_of(&output), stderr_of(&output));
+    assert!(output.status.success(), "{said}");
+    assert_eq!(counter_lines(&counters, "retry_pass"), vec![1], "{said}");
+    assert_eq!(
+        fs::read(dst.join(raw)).expect("landed"),
+        b"the one that fails",
+        "{said}"
+    );
+    assert_eq!(
+        fs::read(dst.join("dup\u{fffd}")).expect("the other"),
+        b"theirs",
+        "the retry asked for one file, and not that one\n{said}"
+    );
+}
+
+/// cr-ecm13-3: two names of one text both arrive. A source holding `dup`
+/// and the byte `FF`, and `dup` and U+FFFD, sends both under one text; the end that
+/// writes takes the first and refuses the second, whichever the listing
+/// gives first, and the retry asks for the one refused BY ITS OWN BYTES.
+/// Asked for by its text, the refused name that is not text was never
+/// sent (the other was, again); and named afterwards from the manifest,
+/// the refused name that IS text was taken for the other's bytes and
+/// never sent either. Which of the two a filesystem lists first differs:
+/// this guard holds for both orders, and each fault fails it under one.
+#[cfg(unix)]
+#[test]
+fn two_names_of_one_text_both_arrive() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let src = temp.path().join("src");
+    let dst = temp.path().join("dst");
+    fs::create_dir_all(&src).expect("mkdir src");
+    fs::create_dir_all(&dst).expect("mkdir dst");
+    let raw = OsStr::from_bytes(b"dup\xff");
+    if fs::write(src.join(raw), b"named by a byte").is_err() {
+        eprintln!("this filesystem refuses a name that is not text: one name only");
+        return;
+    }
+    fs::write(src.join("dup\u{fffd}"), b"named by the character").expect("the other");
     let counters = temp.path().join("counters.txt");
     let output = run(
         "copy",
@@ -1143,41 +1197,15 @@ fn a_failed_name_that_is_not_text_is_retried_as_itself() {
     );
     let said = format!("{}{}", stdout_of(&output), stderr_of(&output));
     assert_eq!(counter_lines(&counters, "retry_pass"), vec![1], "{said}");
-    assert_eq!(
-        output.status.code(),
-        Some(EXIT_PARTIAL_FAILURE),
-        "the file that failed has still not landed\n{said}"
-    );
-    assert!(dst.join(raw).is_dir(), "the blocker is untouched\n{said}");
-    assert_eq!(
-        fs::read(dst.join("dup\u{fffd}")).expect("the other landed"),
-        b"the one of that name"
-    );
-
-    // Freed during the wait, it lands on the retry — it, and not the
-    // other, which is changed during the same wait and stays as changed.
-    let counters = temp.path().join("again.txt");
-    let child = spawn(
-        "copy",
-        &["--retries", "1", "--retry-wait", "4"],
-        &src,
-        &dst,
-        &counters,
-    );
-    wait_for_counter(&counters, "retry_wait_seconds", Duration::from_secs(60));
-    fs::remove_dir(dst.join(raw)).expect("free it during the wait");
-    fs::write(dst.join("dup\u{fffd}"), b"changed during the wait").expect("change the other");
-    let output = finish(child);
-    let said = format!("{}{}", stdout_of(&output), stderr_of(&output));
     assert!(output.status.success(), "{said}");
     assert_eq!(
-        fs::read(dst.join(raw)).expect("landed"),
-        b"the one that fails",
+        fs::read(dst.join(raw)).expect("the one named by a byte"),
+        b"named by a byte",
         "{said}"
     );
     assert_eq!(
-        fs::read(dst.join("dup\u{fffd}")).expect("the other"),
-        b"changed during the wait",
-        "the retry asked for one file\n{said}"
+        fs::read(dst.join("dup\u{fffd}")).expect("the one named by the character"),
+        b"named by the character",
+        "{said}"
     );
 }

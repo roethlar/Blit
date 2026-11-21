@@ -218,7 +218,8 @@ part, and a job you can list, read, re-run and retry.
   UTF-8 by that name's own bytes. It asked by the text the name is shown
   as — the name of another file, where the source has one: that file
   was sent again, the one that had failed never was, and the command
-  exited 0.
+  exited 0. Of two source names that are shown as one text, the one the
+  destination refuses is retried by its own bytes, whichever it is.
 - `blit jobs retry` writes where the run it retries wrote. `blit copy src
   backup`, with no `/` after either, makes `backup` and writes into it
   when nothing is there, and writes `backup/src/` when a directory is;
