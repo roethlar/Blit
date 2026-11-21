@@ -1,9 +1,9 @@
 # cr-uv1-6: `df` on Windows answered for the folder above a path that is not there
 
 **Severity**: MEDIUM — a path that does not exist reports another path's numbers and success
-**Status**: Fixed, awaiting review — and NOT PROVEN HERE: the fault and its guard exist only on Windows, where nothing in this session ran
+**Status**: Reviewed — `utility-slices-r2` (Codex openreview, 2026-11-21) reviewed `4841b2d4..3cd49e40`, the seven `utility-slices-r1` fixes, with `guard_confirmed: true`, which required nothing further on this finding and, like this session, ran nothing on Windows. Still unproven there
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv1-6`)
+**Commit**: `278b38fc`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r1` over `b55efff7..49350572` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r1.codex.md`. Found by source inspection; the reviewer had no Windows run either.
 
 ## Evidence

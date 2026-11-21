@@ -1,9 +1,9 @@
 # cr-uv1-5: `rm` listed at most 1,000 failures an operand, all in one reply
 
 **Severity**: MEDIUM — entries that were not removed went unnamed, and a reply could outgrow what a message may hold after the removal had happened
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `utility-slices-r2` (Codex openreview, 2026-11-21) reviewed `4841b2d4..3cd49e40`, the seven `utility-slices-r1` fixes, with `guard_confirmed: true`. "Bounded failure stream with an explicit `RmDone` … worth keeping." A listener that has gone is noticed only when there is something to send: a removal with nothing to report runs to its end. And a transport failure before the answer begins is called a refusal, where nothing is known. The remaining work is cr-uv2-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv1-5`)
+**Commit**: `81510cd4`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r1` over `b55efff7..49350572` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r1.codex.md`.
 
 ## Evidence

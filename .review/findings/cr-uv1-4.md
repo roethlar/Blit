@@ -1,9 +1,9 @@
 # cr-uv1-4: What `find`, `du` and `rm` printed could not always be given back
 
 **Severity**: MEDIUM — a printed path named another thing, or was refused as an operand
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `utility-slices-r2` (Codex openreview, 2026-11-21) reviewed `4841b2d4..3cd49e40`, the seven `utility-slices-r1` fixes, with `guard_confirmed: true`. The round trip works: "I passed a non-UTF-8 path printed by `find HOST://` directly to `du` and `rm`. Both used the correct file, and its UTF-8 lookalike survived." Still not reusable or not exact: a name holding a backslash, printed by blit, is read back as a local path; and `df`'s output, `rm`'s diagnostics and the question show a name that is not text as its near-copy, which is another file's name. The remaining work is cr-uv2-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv1-4`)
+**Commit**: `a93294b0`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r1` over `b55efff7..49350572` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r1.codex.md`.
 
 ## Evidence

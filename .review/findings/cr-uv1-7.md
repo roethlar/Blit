@@ -1,9 +1,9 @@
 # cr-uv1-7: `find`'s `[:class:]` was not the reference locale's
 
 **Severity**: MEDIUM — `-name` with a POSIX class finds names `find` does not, and misses names it does
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `utility-slices-r2` (Codex openreview, 2026-11-21) reviewed `4841b2d4..3cd49e40`, the seven `utility-slices-r1` fixes, with `guard_confirmed: true`; its own guard was the reviewer's red/green proof. The gap recorded below is now a finding: a code point no character is assigned to (U+0378) is `[:print:]` here and not to `find`. And a start typed as the module's root with a final `.` is given the module's name for `-name`, where `find` sees `.`. The remaining work is cr-uv2-6
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv1-7`)
+**Commit**: `2fc6523c`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r1` over `b55efff7..49350572` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r1.codex.md`.
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-uv1-1: A utility verb's operand was tidied on the way, and another path was acted on
 
 **Severity**: HIGH — `rm -rf HOST:/m/work/.` deleted `work`; `rm HOST:/m/doc/` unlinked a regular file; of two names differing by a space at the end, the wrong one was deleted
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `utility-slices-r2` (Codex openreview, 2026-11-21) reviewed `4841b2d4..3cd49e40`, the seven `utility-slices-r1` fixes, with `guard_confirmed: true`. Keeping the operand as typed stands ("the shared operand representation … worth keeping"). One caller was left sending a tidied path beside the typed one: a remote `move` copies from the source with its trailing separator dropped and removes it with the separator kept, so `move` of a FILE typed `single.txt/` copied it, removed nothing — `Not a directory`, passed over under `-f` — and exited 0. The remaining work is cr-uv2-1
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv1-1`)
+**Commit**: `80e320a8`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r1` over `b55efff7..49350572` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r1.codex.md`.
 
 ## Evidence

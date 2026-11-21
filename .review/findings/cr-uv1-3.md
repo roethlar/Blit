@@ -1,9 +1,9 @@
 # cr-uv1-3: One `rm` operand's failure was charged to all, and what had been done was not reported
 
 **Severity**: HIGH — a file was deleted and reported as not removed; another, removable, was left
-**Status**: Fixed, awaiting review
+**Status**: Verified — `utility-slices-r2` (Codex openreview, 2026-11-21) reviewed `4841b2d4..3cd49e40`, the seven `utility-slices-r1` fixes, with `guard_confirmed: true`, and required nothing further on this finding
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv1-3`)
+**Commit**: `3b2d6b1b`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r1` over `b55efff7..49350572` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r1.codex.md`.
 
 ## Evidence

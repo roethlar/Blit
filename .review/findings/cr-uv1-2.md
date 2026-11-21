@@ -1,9 +1,9 @@
 # cr-uv1-2: The recursive removal was not anchored to the directory it was listing
 
 **Severity**: HIGH — a directory replaced by a link while `rm -r` runs could turn the deletion outside the module
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `utility-slices-r2` (Codex openreview, 2026-11-21) reviewed `4841b2d4..3cd49e40`, the seven `utility-slices-r1` fixes, with `guard_confirmed: true`. "Unix descriptor-relative deletion … worth keeping." Two things are not done: on Windows the removal still checks a path and then acts on it (the known gap below, now a finding), and on Unix every directory on the way to an operand is opened for reading, where `rm` needs only to search it (mode 0300). The remaining work is cr-uv2-2 and cr-uv2-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv1-2`)
+**Commit**: `1f2c2d09`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r1` over `b55efff7..49350572` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r1.codex.md`.
 
 ## Evidence
