@@ -964,10 +964,45 @@ impl FileFilter {
         if let Err(error) = compiled(&self.exclude_files, widen) {
             return Err(refusal("--exclude", &self.exclude_files, error));
         }
-        if let Err(error) =
-            ExcludeRules::build(&self.exclude_files, cfg!(windows), self.ignore_case)
-        {
-            return Err(refusal("--exclude", &self.exclude_files, error));
+        // cr-ecm9-1: and each RULE made from an exclude, as it is executed.
+        // The any-depth and subtree rules do not match the pattern as
+        // typed but what [`exclude_rule`] reads from it — its trailing `/`
+        // dropped, its leading `./` stripped — and that text was compiled
+        // on trust. `keep\/` is a glob (an escaped `/`); without its last
+        // character it is `keep\`, an escape of nothing, which the glob
+        // compiler refuses. A rule it refuses is compared as text, in the
+        // typed case only ([`CompiledPatterns`]): the run's question
+        // offered `KEEP\/` as a name `--ignore-case` would also match, and
+        // the mirror under that option deleted it.
+        //
+        // Read off the sets as they were just built (and kept): a rule
+        // compared as text is one the compiler refused. Nothing is
+        // compiled for this check but, when it fails, the one rule named.
+        match ExcludeRules::build(&self.exclude_files, cfg!(windows), self.ignore_case) {
+            Err(error) => return Err(refusal("--exclude", &self.exclude_files, error)),
+            Ok(rules) => {
+                if let Some(body) = rules
+                    .names
+                    .refused
+                    .iter()
+                    .chain(&rules.paths.refused)
+                    .next()
+                {
+                    let typed = self
+                        .exclude_files
+                        .iter()
+                        .find(|pat| {
+                            exclude_rule(pat, cfg!(windows)).is_some_and(|rule| &rule.body == body)
+                        })
+                        .unwrap_or(body);
+                    let why = compile_error(body, widen)
+                        .map_or(String::new(), |error| format!(": {error}"));
+                    return Err(format!(
+                        "--exclude pattern {typed:?} cannot be used{how}: the rule read from \
+                         it, {body:?}, is not a valid glob{why}"
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -2709,5 +2744,61 @@ mod tests {
         filter.ignore_case = true;
         filter.validate_globs().unwrap();
         assert!(!allows(&filter, "aCache"));
+    }
+
+    /// cr-ecm9-1: a rule MADE from an exclude is validated as it is
+    /// executed. `keep\/` is a glob as typed — an escaped `/` — and the
+    /// rule read from it, its trailing `/` dropped, is `keep\`: an escape
+    /// of nothing. Compiled on trust, that rule was refused by the glob
+    /// compiler and compared as text, in the typed case only, whatever the
+    /// case mode. Such a pattern now refuses the filter, naming it and the
+    /// rule.
+    ///
+    /// Under the Unix rule: under the Windows rule `\` is a separator, the
+    /// pattern is `keep//`, and its rule is `keep`.
+    #[test]
+    fn a_rule_that_does_not_compile_refuses_the_filter() {
+        let rule = exclude_rule(r"keep\/", false).expect("a rule");
+        assert_eq!(rule.body, r"keep\", "what the rules are compiled from");
+        assert_eq!(exclude_rule(r"keep\/", true).expect("a rule").body, "keep");
+        let excluding = |pattern: &str, ignore_case: bool| FileFilter {
+            exclude_files: vec![pattern.to_string()],
+            ignore_case,
+            ..FileFilter::default()
+        };
+        if cfg!(windows) {
+            excluding(r"keep\/", true)
+                .validate_globs()
+                .expect("a folder");
+            return;
+        }
+        for ignore_case in [false, true] {
+            for pattern in [r"keep\/", r"a/keep\/", r"./keep\/", r"keep\/\/"] {
+                let refusal = excluding(pattern, ignore_case)
+                    .validate_globs()
+                    .expect_err(pattern);
+                assert!(
+                    refusal.contains(&format!("--exclude pattern {pattern:?} cannot be used"))
+                        && refusal.contains("the rule read from it")
+                        && refusal.contains("is not a valid glob"),
+                    "{pattern}: {refusal}"
+                );
+            }
+            // An escaped backslash before the `/` is a name that ends in
+            // one; and the patterns people write are untouched.
+            for pattern in [r"keep\\/", "keep/", "./keep", r"k\ee\p/", "a/b/"] {
+                excluding(pattern, ignore_case)
+                    .validate_globs()
+                    .unwrap_or_else(|refusal| panic!("{pattern}: {refusal}"));
+            }
+        }
+        // No filter that passes validation holds a rule compared as text.
+        for pattern in [r"keep\\/", "keep/", "*.tmp", "a/**/b"] {
+            let rules = ExcludeRules::compile(&[pattern.to_string()], cfg!(windows), true);
+            assert!(
+                rules.names.refused.is_empty() && rules.paths.refused.is_empty(),
+                "{pattern}"
+            );
+        }
     }
 }

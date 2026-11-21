@@ -960,6 +960,51 @@ fn the_line_claims_only_what_the_mirror_then_does() {
     }
 }
 
+/// cr-ecm9-1: an exclude whose RULE cannot be compiled is refused before
+/// the question, like any pattern that is no glob. `keep\/` is one as
+/// typed; the rule read from it, without its trailing `/`, is `keep\`,
+/// which the compiler refuses — and which was then compared as text, in
+/// the typed case only. The question offered `KEEP\/` as a spelling
+/// `--ignore-case` would also match; that mirror deleted `KEEP\`.
+#[cfg(unix)]
+#[test]
+fn an_exclude_whose_rule_does_not_compile_is_refused_before_the_question() {
+    for case_mode in [None, Some("--ignore-case"), Some("--match-case")] {
+        let tmp = tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        write(&src, "new.txt");
+        for mine in [r"keep\", r"KEEP\", "extra.txt"] {
+            write(&dst, mine);
+        }
+        let (from, to) = (with_slash(&src), with_slash(&dst));
+        let mut args = vec!["mirror", "--exclude", r"keep\/"];
+        args.extend(case_mode);
+        args.extend([from.as_str(), to.as_str()]);
+        let ran = blit(tmp.path(), &args, Some("y\n"));
+        assert_ne!(ran.code, Some(0), "{case_mode:?}\n{}", ran.all());
+        assert!(
+            ran.stderr
+                .contains(r#"--exclude pattern "keep\\/" cannot be used"#)
+                && ran.stderr.contains("the rule read from it"),
+            "{case_mode:?}\n{}",
+            ran.all()
+        );
+        assert!(
+            !ran.stdout.contains(QUESTION),
+            "refused before it asks\n{}",
+            ran.all()
+        );
+        assert!(
+            dst.join(r"keep\").exists()
+                && dst.join(r"KEEP\").exists()
+                && dst.join("extra.txt").exists()
+                && !dst.join("new.txt").exists(),
+            "{case_mode:?}: nothing copied or deleted\n{}",
+            ran.all()
+        );
+    }
+}
+
 /// `blit <args>` with a question in it: once the question is on the
 /// screen, `meanwhile` runs (it is given everything shown so far); then
 /// the answer is "y".

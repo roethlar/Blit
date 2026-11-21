@@ -181,7 +181,11 @@ part, and a job you can list, read, re-run and retry.
 - A filter that cannot be used — a pattern that is no glob or cannot be
   compiled, an unreadable size or age, a pattern file that cannot be read —
   is refused before `mirror` asks its question; the question used to come
-  first. A daemon applies the same validation at session open.
+  first. A daemon applies the same validation at session open. So is an
+  `--exclude` whose rule cannot be compiled once its trailing `/` is
+  dropped (`keep\/` on Linux and macOS, an escaped slash): it used to be
+  matched in the typed case only, whatever the mode, and a `mirror
+  --ignore-case` deleted `KEEP\` from under it.
 - An `--include` is matched as a glob and nothing else: `--include
   '[a].txt'` no longer also names a file spelled `[a].txt`.
 - A job file edited to hold two options no command takes together
