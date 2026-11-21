@@ -433,8 +433,9 @@ fn a_listed_name_is_the_same_file_at_a_daemon() {
     }
 }
 
-/// cr-ecm7-1: a list line that is no relative path of names (`./dot.txt`,
-/// `/abs.txt`, `sub/../up.txt`) names no file, and the run says so —
+/// cr-ecm7-1, cr-ecm8-3: a list line that is no relative path of names
+/// (`./dot.txt`, `/abs.txt`, `sub/../up.txt`), or that holds a NUL, names
+/// no file, and the run says so —
 /// between two local folders, pushed to a daemon and pulled from one
 /// alike: the line is reported as a listed name that was not found, the
 /// run ends unsuccessfully, and the names beside it are copied. Such a
@@ -451,8 +452,10 @@ fn a_list_line_that_names_nothing_is_reported_on_every_route() {
     let list = ctx.workspace.join("list.txt");
     let (here, there) = (with_slash(&local), with_slash(&other));
 
-    for line in ["./dot.txt", "/abs.txt", "sub/../up.txt"] {
+    for line in ["./dot.txt", "/abs.txt", "sub/../up.txt", "nul\0name.txt"] {
         fs::write(&list, format!("{line}\nplain.txt\n")).unwrap();
+        // A NUL is not printed as itself; what follows it is.
+        let told = line.rsplit('\0').next().unwrap();
         for (route, from, to, source, destination) in [
             ("local", here.as_str(), there.as_str(), &local, &other),
             (
@@ -490,7 +493,7 @@ fn a_list_line_that_names_nothing_is_reported_on_every_route() {
             );
             assert!(
                 said.contains("1 file(s) did not land at the destination")
-                    && said.contains(&format!("{line}: source: missing")),
+                    && said.contains(&format!("{told}: source: missing")),
                 "{route}, {line}: reported, by the text it was written in\n{said}"
             );
             assert!(

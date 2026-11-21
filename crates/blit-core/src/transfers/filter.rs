@@ -101,12 +101,19 @@ fn listed_names(inputs: &FilterInputs<'_>) -> Result<Option<std::collections::Ha
 /// that no host's path parser reads it as one; and it is kept at all
 /// because the source reports each as a listed name it did not find, as
 /// it does a name whose file is gone — on every route alike.
+///
+/// cr-ecm8-3: a line holding a NUL is of that kind too. No entry's name
+/// holds one, and a receiver refuses a NAME that does — the whole list
+/// with it. Sent among the names, one such line turned a run that
+/// reports the line and copies the rest (between two local folders) into
+/// one that copies nothing (through a daemon).
 fn split_listed(listed: &std::collections::HashSet<PathBuf>) -> (Vec<&PathBuf>, Vec<String>) {
     let (mut names, mut unnamed) = (Vec::new(), Vec::new());
     for line in listed {
         let mut components = line.components().peekable();
         let names_an_entry = components.peek().is_some()
-            && components.all(|c| matches!(c, std::path::Component::Normal(_)));
+            && components.all(|c| matches!(c, std::path::Component::Normal(_)))
+            && !crate::fs_enum::match_bytes(line.as_os_str()).contains(&0);
         if names_an_entry {
             names.push(line);
         } else {
@@ -4748,5 +4755,50 @@ mod tests {
         } else {
             assert_eq!(sent, [r"sub\name.txt"]);
         }
+    }
+
+    /// cr-ecm8-3: a list line holding a NUL names no entry — no name holds
+    /// one — so it travels apart from the names, like a line that is no
+    /// relative path, and the list beside it still runs. It went among the
+    /// names; the receiver, which refuses a name holding a NUL, refused the
+    /// whole request, and a list that copied `ok.txt` between two local
+    /// folders copied nothing through a daemon.
+    #[test]
+    fn a_list_line_holding_a_nul_travels_apart_from_the_names() {
+        use crate::remote::transfer::operation_spec::filter_from_spec;
+        let mut given = inputs(&[], &[]);
+        given.files_from_read = Some(Ok("bad\0name.txt\nsub/also\0bad.txt\nok.txt\n"));
+        let spec = build_spec(&given).unwrap();
+        assert_eq!(spec.files_from, ["ok.txt"]);
+        assert_eq!(
+            spec.files_from_unnamed,
+            ["bad\0name.txt", "sub/also\0bad.txt"]
+        );
+        let passes = |filter: &FileFilter, rel: &str| {
+            filter.allows_entry(Some(Path::new(rel)), Path::new(rel), 1, None)
+        };
+        let received = filter_from_spec(spec).expect("a receiver takes what a sender writes");
+        let local = build(&given).unwrap();
+        for (place, filter) in [("here", &local), ("at the peer", &received)] {
+            assert!(passes(filter, "ok.txt"), "{place}");
+            assert_eq!(
+                filter.files_from.as_ref().map(|names| names.len()),
+                Some(1),
+                "{place}"
+            );
+            assert_eq!(
+                filter.files_from_unnamed,
+                ["bad\0name.txt", "sub/also\0bad.txt"],
+                "{place}"
+            );
+        }
+        // A retry's list too.
+        let retry: std::collections::HashSet<PathBuf> = [PathBuf::from("bad\0name.txt")].into();
+        let mut retried = inputs(&[], &[]);
+        retried.retry_only = Some(&retry);
+        let spec = build_spec(&retried).unwrap();
+        assert!(spec.files_from.is_empty() && spec.files_from_raw.is_empty());
+        assert_eq!(spec.files_from_unnamed, ["bad\0name.txt"]);
+        filter_from_spec(spec).expect("and its retry");
     }
 }
