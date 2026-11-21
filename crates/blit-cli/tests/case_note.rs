@@ -588,6 +588,60 @@ fn the_line_is_said_of_the_filter_the_run_uses() {
     );
 }
 
+/// cr-ecm5-4: what the line shows keeps a directory the pattern requires.
+/// `*/Cache` names `Cache` one level down, never at the top. The line used
+/// to drop the `*/` and say `--ignore-case` would also match `cache`; the
+/// mirror run that way deleted the top-level `cache` and kept `sub/cache`.
+/// Now it shows `*/cache`, and that is what happens.
+#[test]
+fn the_line_keeps_a_directory_level_the_pattern_requires() {
+    let tmp = tempdir().unwrap();
+    let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+    write(&src, "keep.1");
+    let (from, to) = (with_slash(&src), with_slash(&dst));
+    let fill = || {
+        write(&dst, "cache");
+        write(&dst, "sub/cache");
+    };
+
+    fill();
+    let asked = blit(
+        tmp.path(),
+        &["mirror", "--exclude", "*/Cache", &from, &to],
+        Some("n\n"),
+    );
+    let line = "\"*/Cache\" matches */Cache only; capital letters matter \
+                (--ignore-case would also match */cache, */CACHE).";
+    assert!(
+        asked.stdout.contains(&format!("{line}\n{QUESTION}")),
+        "{}",
+        asked.all()
+    );
+
+    let ignoring = blit(
+        tmp.path(),
+        &[
+            "mirror",
+            "-y",
+            "--ignore-case",
+            "--exclude",
+            "*/Cache",
+            &from,
+            &to,
+        ],
+        None,
+    );
+    assert_eq!(ignoring.code, Some(0), "{}", ignoring.all());
+    assert!(
+        dst.join("sub/cache").exists(),
+        "one level down it is named, as the line showed"
+    );
+    assert!(
+        !dst.join("cache").exists(),
+        "at the top it is not, as the line showed"
+    );
+}
+
 /// cr-ecm5-3: the filter the question showed is the filter that runs. An
 /// absolute exclude through an alias of a folder in the source is shown as
 /// what it names there, `first/Keep`. While the question waits, the alias

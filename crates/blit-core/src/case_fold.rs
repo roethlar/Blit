@@ -386,16 +386,50 @@ fn class_in_case(class: &str, upper: bool) -> String {
 /// `Cache*` and `**/Cache/**` are all shown `Cache`. A wildcard inside the
 /// pattern stays (`IMG_*.jpg`), and so does an escaped `*`, which is a
 /// star and no wildcard.
+///
+/// cr-ecm5-4: and so does a wildcard that stands for a WHOLE directory
+/// level the pattern requires. `**/Cache` names `Cache` at any depth, the
+/// top included, so `Cache` shows it; `*/Cache` names it only one level
+/// down, and `Cache/*` names what is directly inside it. Those two were
+/// trimmed like the rest: for `*/Cache` the line said `--ignore-case`
+/// would also match `cache`, and the mirror run that way deleted the
+/// top-level `cache` and kept `sub/cache`.
 fn without_end_wildcards(pattern: &str, windows: bool) -> &str {
     let separator = |c: char| c == '/' || (windows && c == '\\');
     let mut text = pattern;
-    let start = text.trim_start_matches('*');
-    if start.len() < text.len() {
-        text = start.trim_start_matches(separator);
+    loop {
+        let rest = text.trim_start_matches('*');
+        let stars = text.len() - rest.len();
+        match rest.chars().next() {
+            _ if stars == 0 => break,
+            // `**/x`: `x` at any depth.
+            Some(c) if separator(c) && stars == 2 => text = rest.trim_start_matches(separator),
+            // `*/x`: a directory above `x` is required, and stays shown.
+            Some(c) if separator(c) => break,
+            // `*x`: any text before `x`.
+            _ => {
+                text = rest;
+                break;
+            }
+        }
     }
-    let end = text.trim_end_matches('*');
-    if end.len() < text.len() && (windows || !end.ends_with('\\')) {
-        text = end.trim_end_matches(separator);
+    loop {
+        let rest = text.trim_end_matches('*');
+        let stars = text.len() - rest.len();
+        match rest.chars().next_back() {
+            _ if stars == 0 => break,
+            // Under the Unix rule the star after a `\` is itself.
+            Some('\\') if !windows => break,
+            // `x/**`: everything under `x`.
+            Some(c) if separator(c) && stars == 2 => text = rest.trim_end_matches(separator),
+            // `x/*`: what is directly inside `x`, and stays shown.
+            Some(c) if separator(c) => break,
+            // `x*`: any text after `x`.
+            _ => {
+                text = rest;
+                break;
+            }
+        }
     }
     text
 }
@@ -1082,6 +1116,21 @@ mod tests {
             Spellings::of(r"**\Cache\**", true).map(|s| s.typed),
             Some("Cache")
         );
+        // cr-ecm5-4: a wildcard that is a whole directory level the
+        // pattern REQUIRES stays in what is shown, under either rule.
+        for (pattern, windows, typed, spellings) in [
+            ("*/Cache", false, "*/Cache", &["*/cache", "*/CACHE"][..]),
+            ("Cache/*", false, "Cache/*", &["cache/*", "CACHE/*"]),
+            ("*/Cache/*", false, "*/Cache/*", &["*/cache/*", "*/CACHE/*"]),
+            ("**/*/Cache", false, "*/Cache", &["*/cache", "*/CACHE"]),
+            ("**/*Cache*/**", false, "Cache", &["cache", "CACHE"]),
+            (r"*\Cache", true, r"*\Cache", &[r"*\cache", r"*\CACHE"]),
+            (r"Cache\*", true, r"Cache\*", &[r"cache\*", r"CACHE\*"]),
+        ] {
+            let shown = Spellings::of(pattern, windows).expect("noted");
+            assert_eq!(shown.typed, typed, "{pattern}");
+            assert_eq!(shown.others, spellings, "{pattern}");
+        }
 
         for pattern in ["*Cache", "straße", "σx", "Übung", "IMG_*.jpg", "ſ", "K"] {
             let widened = globset::Glob::new(&widen_case(pattern, false))
@@ -1343,6 +1392,11 @@ mod tests {
             "IMG_*.[jJ]pg",
             "a[!0-9][!b]",
             "[!a]x1",
+            // cr-ecm5-4: a required directory level is part of the name.
+            "*/Cache",
+            "Cache/*",
+            "*/Cache/*",
+            "**/*/Cache",
         ] {
             let widened = ignoring_case(pattern);
             let Some(shown) = Spellings::of(pattern, false) else {
