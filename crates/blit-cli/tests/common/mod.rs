@@ -424,7 +424,11 @@ pub fn spawn_daemon(
 ) -> SpawnedDaemon {
     ensure_daemon_built();
 
-    fs::create_dir_all(module_dir).expect("module dir");
+    // What is already there is exported as it stands: a module may be
+    // one file (cr-uv5-5).
+    if !module_dir.exists() {
+        fs::create_dir_all(module_dir).expect("module dir");
+    }
     let config_path = workspace.join(format!("{name}.toml"));
     // The daemon canonicalizes exported roots before serving them. Matching
     // the unique temporary module path proves the RPC response came from this

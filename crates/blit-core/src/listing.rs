@@ -240,6 +240,25 @@ fn hidden(name: &std::ffi::OsStr) -> bool {
     name.as_encoded_bytes().first() == Some(&b'.')
 }
 
+/// Whether `ls` shows a link it could not follow as the link itself. It
+/// does for one that points to nothing, or leads round in a ring, and for
+/// no other reason (cr-uv5-5; measured, GNU ls 9.12 — `ENOENT` and
+/// `ELOOP`): a link to a file below a directory that cannot be searched,
+/// a link through a file, a link by a name too long is `cannot access`,
+/// exit 2 — and each was printed as if nothing were wrong.
+fn shown_as_the_link(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ELOOP)
+    }
+    // No `ls` to measure there: as it was.
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        true
+    }
+}
+
 /// List `start` as `ls` does, handing `emit` what the operand is and then
 /// each entry. `start` is written for the system as it was typed: with a
 /// separator after it, the system looks through a link standing there and
@@ -255,8 +274,14 @@ pub fn list(
     let mut directory = own.is_dir();
     if own.file_type().is_symlink() && !options.link_itself {
         // `ls link` lists the directory a link points to. A link to
-        // anything else, or to nothing, is a line of its own.
-        directory = look_up(start, true).is_ok_and(|target| target.is_dir());
+        // anything else, or to nothing, is a line of its own — and one
+        // that cannot be followed for another reason is an operand that
+        // cannot be looked up (cr-uv5-5).
+        directory = match look_up(start, true) {
+            Ok(target) => target.is_dir(),
+            Err(error) if shown_as_the_link(&error) => false,
+            Err(error) => return Err(ListEnd::Access(error)),
+        };
     }
     if !directory {
         let itself = Entry {
@@ -531,6 +556,42 @@ mod tests {
             Some(Path::new("nowhere"))
         );
         assert_eq!(entries.facts_of("a.txt").link_target, None);
+    }
+
+    /// cr-uv5-5: `ls link` of a link that cannot be followed. It is the
+    /// link's own line where the link points to nothing or leads round in
+    /// a ring, and `cannot access` for any other reason (measured, GNU ls
+    /// 9.12). With the long form it is the link, whatever it points to.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_cannot_be_followed_is_itself_only_where_ls_shows_it() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tree();
+        let t = tmp.path().join("t");
+        symlink("ring", t.join("ring")).unwrap();
+        symlink("a.txt/x", t.join("through-a-file")).unwrap();
+        symlink("n".repeat(300), t.join("too-long")).unwrap();
+        for name in ["broken", "ring"] {
+            let plain = listed(&t.join(name), None, PLAIN).unwrap();
+            assert!(!plain.directory && plain.itself.is_some(), "{name}");
+        }
+        for (name, reason) in [
+            ("through-a-file", libc::ENOTDIR),
+            ("too-long", libc::ENAMETOOLONG),
+        ] {
+            match listed(&t.join(name), None, PLAIN) {
+                Err(ListEnd::Access(error)) => {
+                    assert_eq!(error.raw_os_error(), Some(reason), "{name}")
+                }
+                Err(other) => panic!("{name}: {other:?}"),
+                Ok(_) => panic!("{name}: listed as if it could be followed"),
+            }
+            let long = listed(&t.join(name), None, LONG).unwrap();
+            assert!(!long.directory, "ls -l {name}: the link");
+            let facts = long.itself.expect("the link's line").facts.expect("facts");
+            assert_eq!(facts.kind, Kind::Link, "{name}");
+        }
     }
 
     /// With `-a` and its facts, `.` is the directory and `..` the one

@@ -82,13 +82,57 @@ impl TypedOperand {
     /// with a separator after it when it was typed as a directory. The
     /// system then resolves a link standing there and refuses what is no
     /// directory, as it does for the command run on this disk.
+    ///
+    /// The module itself is `root` as it stands (cr-uv5-5), with nothing
+    /// after it: it was `root/.`, which the system refuses for a module
+    /// that is one file — `ls`, `du` and `find` of such a module ended
+    /// in a refusal for a path out of the module.
     pub(crate) fn below(&self, root: &Path) -> PathBuf {
-        let mut path = root.join(&self.rel);
+        let mut path = if self.rel == Path::new(".") {
+            root.to_path_buf()
+        } else {
+            root.join(&self.rel)
+        };
         if self.as_directory {
             path.push("");
         }
         path
     }
+}
+
+/// F2, for where a read starts: it lies in the module, or the request is
+/// refused before anything is read.
+///
+/// cr-uv5-5: a start the system will not LOOK UP — a directory on its way
+/// cannot be searched, a link there leads round in a ring, a name is too
+/// long — is no path out of the module, and was refused as one: `ls` of a
+/// file below a directory without search permission ended the request,
+/// exit 1 and nothing in `--json`, where `ls` says `cannot access …:
+/// Permission denied` and exits 2. What is judged is the deepest part of
+/// the start the system does look up — as a start that is not there has
+/// always been judged by its deepest ancestor that is. That part in the
+/// module, the read goes on to the start, fails there as the system
+/// fails, and says so in its command's own words; nothing is read past
+/// what could not be looked up. That part out of the module, the request
+/// is refused as before.
+#[allow(clippy::result_large_err)]
+fn start_is_contained(module_root: &Path, start_abs: &Path) -> Result<(), Status> {
+    use std::io::ErrorKind::{NotADirectory, NotFound};
+    // The module itself, however it was typed, is in the module. Judged
+    // by its ancestors — as what is no directory, typed as one, is — a
+    // module that is one file would be out of itself.
+    if start_abs.components().eq(module_root.components()) {
+        return Ok(());
+    }
+    let mut looked_up = start_abs.to_path_buf();
+    while let Err(error) = fs::canonicalize(&looked_up) {
+        // Not there: `verify_contained` judges that by its ancestors.
+        if matches!(error.kind(), NotFound | NotADirectory) || !looked_up.pop() {
+            break;
+        }
+    }
+    blit_core::path_safety::verify_contained(module_root, &looked_up)
+        .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))
 }
 
 /// Read a removal's operands. One that cannot be an operand — the
@@ -471,8 +515,7 @@ pub(crate) fn stream_disk_usage(
     // never follows a link, but the start point itself can be a symlink
     // that points outside the module root. `module_root` here is the
     // canonical root — du callers don't mutate it.
-    blit_core::path_safety::verify_contained(&module_root, &start_abs)
-        .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
+    start_is_contained(&module_root, &start_abs)?;
 
     let send = |reply: du_reply::Reply| {
         sender
@@ -536,8 +579,7 @@ pub(crate) fn stream_listing(
     // F2: containment check before any filesystem operation. A path that
     // is itself a link out of the module is refused here, whether or not
     // it would be listed into. `module_root` is the canonical root.
-    blit_core::path_safety::verify_contained(&module_root, &start_abs)
-        .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
+    start_is_contained(&module_root, &start_abs)?;
 
     let send = |reply: Reply| {
         sender
@@ -686,8 +728,7 @@ pub(crate) fn stream_find(
     // follows no link below the start, and a start that is itself a link
     // out of the module is refused here, whether or not it would be
     // entered. `module_root` is the canonical root.
-    blit_core::path_safety::verify_contained(&module_root, &start_abs)
-        .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
+    start_is_contained(&module_root, &start_abs)?;
 
     let mut found = FoundBatch {
         paths: Vec::with_capacity(FoundBatch::MOST),
@@ -1487,8 +1528,9 @@ mod typed_operand_tests {
     fn a_read_starts_where_the_path_as_typed_says() {
         let root = Path::new("/srv/module");
         for (typed, rel, as_directory, asked) in [
-            ("", ".", false, "/srv/module/."),
-            (".", ".", true, "/srv/module/./"),
+            // cr-uv5-5: the module itself is its root as it stands.
+            ("", ".", false, "/srv/module"),
+            (".", ".", true, "/srv/module/"),
             ("dir", "dir", false, "/srv/module/dir"),
             ("dir/", "dir", true, "/srv/module/dir/"),
             ("dir//", "dir", true, "/srv/module/dir/"),
@@ -1507,6 +1549,53 @@ mod typed_operand_tests {
             }
         }
         assert!(read_start(b"dir/..").is_err() && read_start(b"../x").is_err());
+    }
+
+    /// cr-uv5-5: where a read starts is judged by the deepest part of it
+    /// the system looks up. The module itself is in the module however it
+    /// was typed, one file as much as a directory; a start past what
+    /// cannot be looked up — here a link that leads round in a ring — is
+    /// in the module when that is, and refused when the way to it leaves
+    /// the module.
+    #[cfg(unix)]
+    #[test]
+    fn a_start_is_judged_by_the_part_of_it_that_can_be_looked_up() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let top = tmp.path().canonicalize().unwrap();
+        let (module, outside, one) = (top.join("module"), top.join("outside"), top.join("one.txt"));
+        fs::create_dir_all(&module).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(&one, b"the whole module").unwrap();
+        symlink("ring", module.join("ring")).unwrap();
+        symlink("ring", outside.join("ring")).unwrap();
+        symlink(&outside, module.join("out")).unwrap();
+        let start = |typed: &str| read_start(typed.as_bytes()).expect(typed);
+
+        // The module itself, a directory or one file, typed either way.
+        for root in [&module, &one] {
+            for typed in ["", "."] {
+                let at = start(typed).below(root);
+                assert!(
+                    start_is_contained(root, &at).is_ok(),
+                    "{typed:?} of {root:?}"
+                );
+            }
+        }
+        // Not looked up, in the module: the read goes on, and fails there.
+        for typed in ["ring/x", "ring/x/y", "ring/", "missing/x"] {
+            let at = start(typed).below(&module);
+            assert!(start_is_contained(&module, &at).is_ok(), "{typed:?}");
+        }
+        // By a way out of the module: refused, whatever cannot be looked
+        // up beyond the link that leaves it.
+        for typed in ["out", "out/", "out/ring/x", "out/missing"] {
+            let at = start(typed).below(&module);
+            let refused = start_is_contained(&module, &at).expect_err(typed);
+            assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{typed:?}");
+            assert!(refused.message().contains("path containment"), "{typed:?}");
+        }
     }
 
     /// cr-uv1-4: a path whose bytes are not text is the name those bytes

@@ -597,10 +597,17 @@ holding one entry.
 - What cannot be listed is reported in `ls`'s words (`blit ls: cannot
   access 'PATH': No such file or directory`; `cannot open directory`)
   with `ls`'s exit status: 2 when the path itself could not be listed, 1
-  when an entry could not be read.
+  when an entry could not be read. That holds for a path the daemon's
+  system will not look up at all — a file below a directory that cannot
+  be searched is `cannot access 'PATH': Permission denied`, exit 2, and
+  is there in `--json`; `du` and `find` say it their own way. And a link
+  that cannot be followed is the link only where `ls` shows it so — one
+  to nothing, or round in a ring; any other is `cannot access`.
+- A module that is one file is read as the file it is, by `ls`, `du`
+  and `find` alike.
 - On Linux what is printed, what is reported and the exit status equal
   the system `ls`'s — the long form less those four columns — for
-  nineteen kinds of path under nine combinations of options.
+  twenty-six kinds of path under nine combinations of options.
 - **A path on this machine is listed by the same rules** (`blit ls
   ./dir`). A bare word is still a host, whose modules are listed.
 - A module's `..` is the module: nothing above it is shown. A path that

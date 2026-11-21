@@ -66,8 +66,10 @@ fn remote(ctx: &TestContext, below: &str) -> String {
 /// `t/` under `root`: names that sort apart by their bytes, a hidden one,
 /// one that is not text, sizes either side of a unit, a directory holding
 /// one entry and an empty one, links to a directory, to a file and to
-/// nothing, and a pipe — every entry's time set, so that two such trees
-/// print alike: most an hour ago, one long ago, one still to come.
+/// nothing, links that cannot be followed (cr-uv5-5: round in a ring,
+/// through a file, by a name too long), and a pipe — every entry's time
+/// set, so that two such trees print alike: most an hour ago, one long
+/// ago, one still to come.
 #[cfg(unix)]
 fn tree(root: &Path) {
     use filetime::FileTime;
@@ -104,6 +106,9 @@ fn tree(root: &Path) {
     std::os::unix::fs::symlink("sub", t.join("link")).unwrap();
     std::os::unix::fs::symlink("a.txt", t.join("flink")).unwrap();
     std::os::unix::fs::symlink("nowhere", t.join("broken")).unwrap();
+    std::os::unix::fs::symlink("ring", t.join("ring")).unwrap();
+    std::os::unix::fs::symlink("a.txt/x", t.join("through-a-file")).unwrap();
+    std::os::unix::fs::symlink("n".repeat(300), t.join("too-long")).unwrap();
     assert!(Command::new("mkfifo")
         .arg(t.join("pipe"))
         .status()
@@ -277,10 +282,20 @@ fn ls_equals_the_system_ls() {
         "t/missing",
         "t/missing/",
         "t//sub",
+        // cr-uv5-5: links `ls` cannot follow. One round in a ring is the
+        // link, as one to nothing is; the others cannot be accessed.
+        "t/ring",
+        "t/ring/x",
+        "t/through-a-file",
+        "t/too-long",
     ];
     if !is_root() {
         for root in [system_root.as_path(), ctx.module_dir.as_path()] {
             fs::create_dir(root.join("t/sub/locked")).unwrap();
+            // cr-uv5-5: a file below what cannot be searched, and a link
+            // to it.
+            fs::write(root.join("t/sub/locked/below"), b"x").unwrap();
+            std::os::unix::fs::symlink("locked/below", root.join("t/sub/to-below")).unwrap();
             fs::set_permissions(root.join("t/sub/locked"), fs::Permissions::from_mode(0o000))
                 .unwrap();
             let recent = fs::metadata(root.join("t/sub/inner"))
@@ -288,11 +303,16 @@ fn ls_equals_the_system_ls() {
                 .modified()
                 .unwrap();
             let recent = filetime::FileTime::from_system_time(recent);
-            for path in ["t/sub/locked", "t/sub"] {
+            for path in ["t/sub/to-below", "t/sub/locked", "t/sub"] {
                 filetime::set_symlink_file_times(root.join(path), recent, recent).unwrap();
             }
         }
-        operands.push("t/sub/locked");
+        operands.extend([
+            "t/sub/locked",
+            "t/sub/locked/below",
+            "t/sub/to-below",
+            "t/sub/to-below/",
+        ]);
     }
     let prefix = remote(&ctx, "");
     let mut compared = 0;
@@ -355,7 +375,7 @@ fn ls_equals_the_system_ls() {
             compared += 1;
         }
     }
-    assert!(compared >= 18 * 9, "{compared} comparisons");
+    assert!(compared >= 22 * 9, "{compared} comparisons");
     for root in [system_root.as_path(), ctx.module_dir.as_path()] {
         let _ = fs::set_permissions(root.join("t/sub/locked"), fs::Permissions::from_mode(0o755));
     }
@@ -385,6 +405,10 @@ fn ls_of_a_local_path_equals_the_system_ls() {
         "t/missing",
         "t/a.txt/",
         "t/Empty",
+        "t/ring",
+        "t/ring/x",
+        "t/through-a-file",
+        "t/too-long",
     ] {
         for options in [&[][..], &["-a"], &["-l"], &["-lah"]] {
             let long = options
@@ -586,6 +610,138 @@ fn ls_lists_nothing_through_a_link_out_of_the_module() {
         "{printed}"
     );
     assert!(!printed.contains("secret.txt"), "{printed}");
+}
+
+/// cr-uv5-5: a module may be one file, and is then read as the file it
+/// is — `ls` names it, `du` measures it, `find` finds it. The module was
+/// asked of the system as `root/.`, which the system refuses for a file,
+/// and the refusal was taken for a path out of the module. Typed as a
+/// directory it is none, in `ls`'s own words and with its exit status.
+#[cfg(unix)]
+#[test]
+fn a_module_that_is_one_file_is_read_as_the_file_it_is() {
+    let ctx = TestContext::new();
+    fs::write(ctx.workspace.join("module_one"), b"the whole module\n").unwrap();
+    let one = ctx.spawn_second_daemon("one", &common::DaemonOptions::default());
+    let module = format!("127.0.0.1:{}:/test/", one.port);
+    let printed = |ran: &Ran| String::from_utf8_lossy(&ran.stdout).into_owned();
+
+    let ran = blit(&ctx, &["ls", &module]);
+    assert_eq!(
+        (ran.code, printed(&ran)),
+        (Some(0), format!("{module}\n")),
+        "{}",
+        ran.all()
+    );
+    let ran = blit(&ctx, &["ls", "-l", &module]);
+    assert_eq!(ran.code, Some(0), "{}", ran.all());
+    assert!(
+        printed(&ran).starts_with("- 17 ") && printed(&ran).ends_with(&format!(" {module}\n")),
+        "{}",
+        ran.all()
+    );
+    let ran = blit(&ctx, &["ls", "--json", &module]);
+    assert_eq!(ran.code, Some(0), "{}", ran.all());
+    let listed: serde_json::Value = serde_json::from_slice(&ran.stdout)
+        .unwrap_or_else(|error| panic!("{error}: {}", ran.all()));
+    assert_eq!(listed["listed_into"], false);
+    assert_eq!(listed["entries"][0]["kind"], "file");
+    assert_eq!(listed["entries"][0]["size"], 17);
+    assert_eq!(listed["entries"][0]["name"], module.as_str());
+
+    // `du` and `find` start where `ls` does.
+    let ran = blit(&ctx, &["du", &module]);
+    assert_eq!(ran.code, Some(0), "{}", ran.all());
+    assert!(
+        printed(&ran).lines().count() == 1 && printed(&ran).ends_with(&format!("\t{module}\n")),
+        "{}",
+        ran.all()
+    );
+    let ran = blit(&ctx, &["find", &module]);
+    assert_eq!(
+        (ran.code, printed(&ran)),
+        (Some(0), format!("{module}\n")),
+        "{}",
+        ran.all()
+    );
+
+    // `ls file/.` — `cannot access 'file/.': Not a directory`, exit 2.
+    let dotted = format!("{module}.");
+    let ran = blit(&ctx, &["ls", &dotted]);
+    assert_eq!(ran.code, Some(2), "{}", ran.all());
+    assert_eq!(
+        ran.stderr,
+        format!("blit ls: cannot access '{dotted}': Not a directory\n")
+    );
+}
+
+/// cr-uv5-5: a start the daemon's system will not look up — a file below
+/// a directory that cannot be searched — is told as the command tells
+/// it, with the command's exit status. It ended the request as a path
+/// out of the module does: exit 1, and nothing in `--json`. And a path
+/// that IS out of the module is still refused, whatever cannot be looked
+/// up beyond the link that leaves it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_start_that_cannot_be_looked_up_is_told_and_one_out_of_the_module_refused() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if is_root() {
+        eprintln!("root searches every directory: nothing here cannot be looked up");
+        return;
+    }
+    let ctx = TestContext::new();
+    let outside = ctx.workspace.join("outside");
+    for root in [ctx.module_dir.as_path(), outside.as_path()] {
+        fs::create_dir_all(root.join("locked")).unwrap();
+        fs::write(root.join("locked/below"), b"x").unwrap();
+        fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    std::os::unix::fs::symlink(&outside, ctx.module_dir.join("out")).unwrap();
+
+    let below = remote(&ctx, "locked/below");
+    let ran = blit(&ctx, &["ls", &below]);
+    assert_eq!(ran.code, Some(2), "{}", ran.all());
+    assert_eq!(
+        ran.stderr,
+        format!("blit ls: cannot access '{below}': Permission denied\n")
+    );
+    let ran = blit(&ctx, &["ls", "--json", &below]);
+    assert_eq!(ran.code, Some(2), "{}", ran.all());
+    let listed: serde_json::Value = serde_json::from_slice(&ran.stdout)
+        .unwrap_or_else(|error| panic!("{error}: {}", ran.all()));
+    assert_eq!(listed["listed_into"], false);
+    assert_eq!(listed["failures"][0]["action"], "cannot access");
+    assert_eq!(listed["failures"][0]["path"], below.as_str());
+    assert_eq!(listed["failures"][0]["reason"], "Permission denied");
+    // `du` and `find` start at the same place, and say it their own way.
+    let ran = blit(&ctx, &["du", &below]);
+    assert_eq!(ran.code, Some(1), "{}", ran.all());
+    assert_eq!(
+        ran.stderr,
+        format!("blit du: cannot access '{below}': Permission denied\n")
+    );
+    let ran = blit(&ctx, &["find", &below]);
+    assert_eq!(ran.code, Some(1), "{}", ran.all());
+    assert_eq!(
+        ran.stderr,
+        format!("blit find: \u{2018}{below}\u{2019}: Permission denied\n")
+    );
+
+    // Out of the module: refused whole, and nothing said of what is there.
+    let out = remote(&ctx, "out/locked/below");
+    for verb in [&["ls"][..], &["ls", "--json"], &["du"], &["find"]] {
+        let mut args = verb.to_vec();
+        args.push(&out);
+        let ran = blit(&ctx, &args);
+        let what = format!("{verb:?}\n{}", ran.all());
+        assert_eq!(ran.code, Some(1), "{what}");
+        assert!(ran.stderr.contains("path containment"), "{what}");
+        assert!(ran.stdout.is_empty(), "{what}");
+    }
+    for root in [ctx.module_dir.as_path(), outside.as_path()] {
+        let _ = fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o755));
+    }
 }
 
 /// AC-8: an option `ls` has and `blit ls` does not take is refused by
