@@ -1,9 +1,9 @@
 # cr-ecm11-2: A saved job's leftovers were split under two names for one file
 
 **Severity**: HIGH — `jobs retry` of an `--ignore-existing` single-file job exits 2 and leaves the run's own partial bytes in place
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r12` (Codex openreview, 2026-11-21) reviewed `4d0f1a68..c5bab07a`, the six `exclude-case-r11` fixes, with `guard_confirmed: true`. "The shared identity used to split retry passes … [is] sound." What the split then does is not: the pass that repairs replaces whatever stands at the destination, and a file someone put there after the failed write — in place of the run's own partial copy — was overwritten. The repair is to be bound to the file the failed write left. The remaining work is cr-ecm12-2 (and the guard's fixture, cr-ecm12-3)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: the fix is `Fix cr-ecm11-1`, the commit before this one; this commit (`Fix cr-ecm11-2`) is its guard
+**Commit**: `90adbc72` (the guard; the fix is `513a7835`)
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r11` over `d3e33acc..bfa537f9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r11.codex.md`. It completes cr-ecm10-3.
 
 ## Evidence

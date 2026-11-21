@@ -1,9 +1,9 @@
 # cr-ecm11-3: The line printed a spelling other than the name it had checked
 
 **Severity**: HIGH — the question names a file `--ignore-case` would "also match" that both runs treat alike, and not the file the option's mirror deletes
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r12` (Codex openreview, 2026-11-21) reviewed `4d0f1a68..c5bab07a`, the six `exclude-case-r11` fixes, with `guard_confirmed: true`. The name is printed where the text shown reads as one name; where the text still holds a class it was kept as "a pattern", and `--include '*[a]'` beside `--exclude '[Aa]'` printed `[A]` — which, as a name, is `A`, kept by both runs — where the name checked was `xA`. The remaining work is cr-ecm12-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm11-3`)
+**Commit**: `92c28ba5`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r11` over `d3e33acc..bfa537f9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r11.codex.md`. It completes cr-ecm10-5.
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-ecm11-5: The count of other patterns still moved with their order
 
 **Severity**: MEDIUM — the same command, its patterns in another order, says "1 more pattern" or "2 more patterns"
-**Status**: Fixed, awaiting review
+**Status**: Reviewed — `exclude-case-r12` (Codex openreview, 2026-11-21) reviewed `4d0f1a68..c5bab07a`, the six `exclude-case-r11` fixes, with `guard_confirmed: true`, which required nothing further on this finding
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm11-5`)
+**Commit**: `48a14aa8`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r11` over `d3e33acc..bfa537f9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r11.codex.md`. It completes cr-ecm10-5.
 
 ## Evidence

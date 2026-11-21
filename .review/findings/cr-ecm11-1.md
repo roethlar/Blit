@@ -1,9 +1,9 @@
 # cr-ecm11-1: A retry took a directory of the file's name for the file that failed
 
 **Severity**: HIGH — a retry writes into the destination a file that was never the one being retried, and exits 0; after a `move`, that success allows the removal of the directory
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r12` (Codex openreview, 2026-11-21) reviewed `4d0f1a68..c5bab07a`, the six `exclude-case-r11` fixes, with `guard_confirmed: true`. "Contract 20's explicit root marker … [is] sound", and it was the reviewer's own red/green proof. The converse case is open: a retry's list names a CHILD by its name, and a source that has since become one file answers to that name as a `--files-from` list lets it (cr-ecm9-3) — a failed child `Report.txt` of a directory `Report.txt`, the directory replaced by a file, and `jobs retry` overwrote an unrelated `out/Report.txt`, exit 0. And this fix's two end-to-end guards do not fail their first copy on Btrfs, where the blocking directory's size and time pass for the file's (an older comparison fault). The remaining work is cr-ecm12-1 and cr-ecm12-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm11-1`)
+**Commit**: `513a7835`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r11` over `d3e33acc..bfa537f9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r11.codex.md`. It completes cr-ecm10-3.
 
 ## Evidence

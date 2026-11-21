@@ -1,0 +1,24 @@
+I would preserve the distinction between the source root and a named child from the first failure through every retry. For the case-matching prompt, I would echo the user’s pattern and print a concrete filename whose treatment changes under the complete filter. When that cannot be established within the work limit, the prompt can state the case rule alone. The goal is to retry exactly what failed and to give the user accurate information before a copy or deletion.
+
+**Verdict `acceptable_with_changes`.** Contract 20’s explicit root marker, the shared identity used to split retry passes, and the 64-pattern limit on rebuilding the alternative filter are sound. Five changes are required.
+
+1. **High — A child retry can overwrite an unrelated root file.** A copy of the directory `Report.txt` failed on its child `Report.txt`. I replaced the source directory with a regular file and placed an unrelated file at `out/Report.txt`. `jobs retry` overwrote that destination and exited 0. A retry for a child must require that child in the manifest. Preserve basename matching for an ordinary `--files-from` list, and carry the distinction through missing-file accounting. [Root-file matching](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/fs_enum.rs:1129) · [Missing-file accounting](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/transfer_session/mod.rs:1486)
+
+2. **High — A saved retry can overwrite someone else’s file under `--ignore-existing`.** A real write failure during `copy --resume --ignore-existing` left an empty file and recorded the root in `left_in_place`. I atomically replaced that partial with a different file. `jobs retry` overwrote the replacement with 128 KiB and exited 0. Bind the repair to the destination file left by the failed write and verify its identity before overwriting it. Honor `--ignore-existing` when ownership cannot be established. [Retry split](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/src/main.rs:364) · [New partial-copy test](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/tests/job_retry.rs:539)
+
+3. **High — A destination directory can count as a successful file copy.** The new retry fixtures exposed an existing comparison bug on Btrfs. The source file and blocking directory both reported a size of 20 bytes, and their timestamps satisfied the skip rule. `copy` reported one file copied, zero bytes written, and exit 0. The saved-job test therefore had no failure to retry, and the automatic-retry test timed out waiting for a retry. Requiring a regular destination file before accepting the size/mtime match made both tests pass in the disposable copy. [Copy comparison](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/copy/compare.rs:171) · [Saved-job fixture](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/tests/job_retry.rs:305) · [Automatic-retry fixture](/home/michael/dev/gitea_repos/blit_v2/crates/blit-cli/tests/retry_pass.rs:252)
+
+4. **Medium — The mirror prompt can still print a different example from the one it verified.** With `--exclude '[Aa]' --include '*[a]'`, it said `--ignore-case would also match [A]`. Both mirrors kept destination-only `A`. The folded mirror deleted `xA`, which the default mirror kept. Print the verified filename `xA` here. The presence of glob syntax in `[A]` does not establish the displayed claim. [Example selection](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/case_fold.rs:622)
+
+5. **Medium — A companion pattern can invalidate the advertised alternative.** With `*Cache` and a second exclude consisting of `s` inside 249 brace pairs, the default note offered `cache` and `CACHE`. The same command with `--ignore-case` exited 1 during filter validation. Require the complete alternative filter to validate before making a concrete claim about that run. The new test currently expects the misleading example. [Per-pattern probe](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/case_fold.rs:518) · [Mixed-pattern test](/home/michael/dev/gitea_repos/blit_v2/crates/blit-core/src/case_fold.rs:3073)
+
+**Verification.** Formatting, strict native Clippy, and Windows GNU cross-target Clippy passed. Runtime checks ran on Linux/Btrfs. `cargo test --workspace` failed. The full `--no-fail-fast` run finished with **1,829 passed, 2 failed, and 2 ignored** across 54 targets.
+
+For the independent guard, I disabled serialization of `files_from_root`. The wire round-trip test failed on the missing bit with exit 101 and passed after byte-for-byte restoration. Reading `AGENTS.md` and resolving the requested head with `git rev-parse` both succeeded. The disposable copy was removed.
+
+```text
+base: 4d0f1a68f6667e506d1e8852385cc5c8cdb9aa8b
+head: c5bab07a7c6326c977085716d624430530422ceb
+capability_ok: true
+guard_confirmed: true
+```

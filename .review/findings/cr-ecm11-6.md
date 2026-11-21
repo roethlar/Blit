@@ -1,9 +1,9 @@
 # cr-ecm11-6: One question built the run's whole filter a second time
 
 **Severity**: MEDIUM — FAST: one line of a prompt took 120 ms of a command that takes 38
-**Status**: Fixed, awaiting review
+**Status**: Verified — `exclude-case-r12` (Codex openreview, 2026-11-21) reviewed `4d0f1a68..c5bab07a`, the six `exclude-case-r11` fixes, with `guard_confirmed: true`: "the 64-pattern limit on rebuilding the alternative filter [is] sound"
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm11-6`)
+**Commit**: `c203e1ef`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r11` over `d3e33acc..bfa537f9` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r11.codex.md`. It completes cr-ecm10-6.
 
 ## Evidence
