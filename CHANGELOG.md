@@ -147,10 +147,13 @@ part, and a job you can list, read, re-run and retry.
   LESS — a negated class such as `[!x]`, which then refuses `X` too — the
   line says so instead of showing a spelling: `(--ignore-case changes
   what it matches: [!x] would stop matching X).` A loss is shown before
-  any gain, and what is said of one pattern is checked against all of
-  them: a letter another pattern still matches is not called lost, and a
-  spelling another pattern already matches is not offered (`--exclude a
-  --exclude A` has no line). Under `--delete-scope
+  any gain; where a class could take less and no file shows it, the line
+  says it `may`. An example — a spelling, a letter — is shown only when
+  one name, put to the run's whole filter in both modes, is treated
+  differently; otherwise the line states the rule and no more (`"a"
+  matches exactly as typed; capital letters matter (--ignore-case ignores
+  them).`, for `--exclude a --exclude A`). Only a pattern that reads the
+  same both ways, such as `{a,A}`, is left out of it. Under `--delete-scope
   all`, where a filter chooses what is copied and protects nothing at the
   destination, the question says that instead.
 - `?` and a bracket class match one byte in both modes. A class holding a

@@ -816,7 +816,7 @@ fn the_line_keeps_what_is_under_a_folder_apart_from_the_folder() {
     );
 }
 
-/// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4, cr-ecm8-2, cr-ecm9-2, cr-ecm10-2: commands whose line claimed
+/// cr-ecm7-2, cr-ecm7-3, cr-ecm7-4, cr-ecm8-2, cr-ecm9-2, cr-ecm10-2, cr-ecm10-1: commands whose line claimed
 /// something the mirror then contradicted — or was absent when it had
 /// something to say — each shown the line it gets now and run both ways.
 ///
@@ -914,9 +914,35 @@ fn the_line_claims_only_what_the_mirror_then_does() {
         Case {
             excludes: &["a", "A", "*.Doc"],
             includes: &[],
-            line: "\"*.Doc\" matches .Doc only; capital letters matter (--ignore-case would \
-                   also match .doc, .DOC).",
+            line: "\"*.Doc\" matches .Doc only, and 2 more patterns match only as typed; \
+                   capital letters matter (--ignore-case would also match .doc, .DOC).",
             entries: &[("A", true, true), ("a", true, true), ("x.doc", false, true)],
+        },
+        // cr-ecm10-1: beside `./A` there was no line at all — `./A` keeps
+        // `A` at the root, where the name was tried — and the mirror
+        // deleted `sub/A`, which the option keeps. The line stays, in
+        // words that claim nothing about any one name.
+        Case {
+            excludes: &["a", "./A"],
+            includes: &[],
+            line: "\"a\" matches exactly as typed, and 1 more pattern matches only as typed; \
+                   capital letters matter (--ignore-case ignores them).",
+            entries: &[("sub/A", false, true), ("A", true, true), ("a", true, true)],
+        },
+        // cr-ecm10-1: the line gave `Keep`'s spellings; the one name tried
+        // for `[!a]*.txt` was `Ax.txt`, which the third pattern keeps, and
+        // the option gave up `Ay.txt`.
+        Case {
+            excludes: &["Keep", "[!a]*.txt", "Ax.txt"],
+            includes: &[],
+            line: "\"[!a]*.txt\" matches exactly as typed, and 2 more patterns match only as \
+                   typed; capital letters matter (--ignore-case changes what they match: [!a] \
+                   would stop matching A).",
+            entries: &[
+                ("Ay.txt", true, false),
+                ("Ax.txt", true, true),
+                ("keep", false, true),
+            ],
         },
         // cr-ecm10-2: includes and excludes together. The line named the
         // loss of `A` at `[!a].bin`; no include names `A.bin`, and both

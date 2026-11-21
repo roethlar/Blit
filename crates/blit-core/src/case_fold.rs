@@ -214,6 +214,27 @@ pub(crate) struct Noted<'a> {
 ///   both matched already;
 /// - a pattern whose reading the option does not change at all is neither
 ///   shown nor counted.
+///
+/// cr-ecm10-1 — an eighth round, and what the seven before it show. Each
+/// made the line check more of what it says against the filter, and each
+/// check was sound for the cases it was written for and unsound beside
+/// them: what a set of globs matches over every path is not settled by
+/// trying names. So the line no longer CONCLUDES anything; it only shows,
+/// and what it cannot show it says in words that are true of every
+/// pattern with a letter in it:
+/// - an example — a spelling the option would also match, a letter a
+///   class would stop matching — is shown only when ONE CONCRETE NAME was
+///   put to the run's complete filter, both lists, in both modes, and the
+///   run would treat it otherwise ([`Asked::gained`], [`Asked::lost`]);
+/// - a pattern is left out of the line only when its OWN two readings are
+///   proved the same (`{a,A}`), never because another pattern seems to
+///   cover it: `--exclude a --exclude ./A` got no line, `./A` covering
+///   `A` at the root, and a mirror deleted `sub/A`, which the option keeps;
+/// - where a class could take less and no name shows it, the warning
+///   stays, and says `may`: with `Keep`, `[!a]*.txt` and `Ax.txt` the one
+///   name tried was one the third pattern keeps, the line spoke of `Keep`,
+///   and the option gave up `Ay.txt`;
+/// - anything else is the plain rule.
 pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> Option<String> {
     let whole = Complete::of(whole);
     // By the text alone, and cheaply, for every pattern: the ones the
@@ -232,20 +253,26 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
     }
     let mut unchanged: Vec<usize> = Vec::new();
     let mut shown: Option<(usize, Spellings)> = None;
-    // A loss first: a pattern the option would NARROW, wherever it stands.
+    // A loss first: a pattern the option would NARROW, wherever it stands
+    // — borne out by a name if one can be, and said with `may` if not.
+    let mut may_narrow: Option<(usize, Spellings)> = None;
     let narrowing = candidates
         .iter()
         .enumerate()
         .filter(|(_, noted)| has_narrowed_class(noted.read_as, windows));
     for (at, noted) in narrowing {
-        match read(noted, windows, &whole) {
-            Some(spellings) if spellings.narrowed.is_some() => {
-                shown = Some((at, spellings));
-                break;
-            }
-            _ => {}
+        let Some(spellings) = read(noted, windows, &whole) else {
+            continue;
+        };
+        if spellings.narrowed.is_some() && spellings.narrowing_borne_out {
+            shown = Some((at, spellings));
+            break;
+        }
+        if spellings.narrowed.is_some() {
+            may_narrow.get_or_insert((at, spellings));
         }
     }
+    shown = shown.or(may_narrow);
     // Else the first pattern with a spelling the run would also match;
     // else the first the option reads otherwise, in words.
     if shown.is_none() {
@@ -317,9 +344,16 @@ pub(crate) fn case_note_of(patterns: &[Noted], whole: Whole, windows: bool) -> O
         } else {
             "they match"
         };
+        // cr-ecm10-1: `would` for a letter a name bore out; `may` for one
+        // the class would lose by its text, which no name tried showed.
+        let would = if spellings.narrowing_borne_out {
+            "would"
+        } else {
+            "may"
+        };
         format!(
             "\"{pattern}\"{shown_from} matches exactly as typed{more}; capital letters matter \
-             (--ignore-case changes what {they}: {class} would stop matching {lost})."
+             (--ignore-case changes what {they}: {class} {would} stop matching {lost})."
         )
     } else if spellings.others.is_empty() {
         // cr-ecm8-2: the rule, and no more. No spelling the option would
@@ -366,6 +400,10 @@ struct Spellings<'a> {
     /// is one, `others` is empty: no spelling of the pattern says what the
     /// option does to it.
     narrowed: Option<(&'a str, String)>,
+    /// cr-ecm10-1: a name was found that the run stops naming there — the
+    /// letters are the ones borne out. Otherwise they are the ones the
+    /// class would lose by its text, and the line says `may`.
+    narrowing_borne_out: bool,
 }
 
 impl<'a> Spellings<'a> {
@@ -462,21 +500,24 @@ impl<'a> Spellings<'a> {
         // there (cr-ecm4-3). None is offered for a pattern that holds one,
         // whether or not the narrowing itself is borne out.
         let takes_less_somewhere = !candidates.is_empty();
-        // cr-ecm9-2: and the claim is the letters that ARE lost there — one
-        // is enough. It was made only when every letter the class would
-        // lose was lost, so `{[!ab].txt,A.txt}`, whose `A.txt` stays
-        // matched by the alternative beside the class, said nothing of
-        // `B.txt`, which the option stops protecting.
-        let narrowed: Option<(&'a str, String)> = match asked {
-            Some(asked) => candidates.into_iter().find_map(|(at, class, _)| {
+        // cr-ecm9-2: the claim is the letters that ARE lost there — one is
+        // enough. cr-ecm10-1: and where no name shows any, the class that
+        // would lose some by its text is still named, as one that MAY: a
+        // name that happened to be kept by another pattern is no proof
+        // that every name is.
+        let borne_out = asked.and_then(|asked| {
+            candidates.iter().find_map(|&(at, class, _)| {
                 let lost = asked.lost_here(pattern, at, class, windows);
                 (!lost.is_empty()).then(|| (class, written(&lost)))
-            }),
-            None => candidates
+            })
+        });
+        let narrowing_borne_out = borne_out.is_some() || asked.is_none();
+        let narrowed: Option<(&'a str, String)> = borne_out.or_else(|| {
+            candidates
                 .into_iter()
                 .next()
-                .map(|(_, class, lost)| (class, lost)),
-        };
+                .map(|(_, class, lost)| (class, lost))
+        });
         let mut others = Vec::new();
         if !takes_less_somewhere {
             for (other, raised) in [(lower, false), (upper, true)] {
@@ -495,8 +536,7 @@ impl<'a> Spellings<'a> {
             if others.is_empty() && narrowed.is_none() {
                 match asked.compared(pattern, windows) {
                     Compared::Same => return None,
-                    // Names the option would match and the filter does
-                    // not already name.
+                    // Names the run would treat otherwise with the option.
                     Compared::Differs(names) => others = names,
                     Compared::Unknown => {}
                 }
@@ -506,6 +546,7 @@ impl<'a> Spellings<'a> {
             typed,
             others,
             narrowed,
+            narrowing_borne_out,
         })
     }
 }
@@ -602,6 +643,11 @@ struct Asked {
 
 /// What a filter says of one name: taken as a file, and taken as a folder.
 type Named = (bool, bool);
+
+/// What a `*` is tried as when names are read off a pattern: some text,
+/// and none. cr-ecm10-1: one text in its place found `Ax.txt` for
+/// `[!a]*.txt`, a name another pattern kept, and never `A.txt`.
+const STARS: [&str; 2] = ["x", ""];
 
 impl Asked {
     fn about(pattern: &str, role: Role, whole: &std::rc::Rc<Complete>) -> Option<Self> {
@@ -737,11 +783,12 @@ impl Asked {
             })
     }
 
-    /// The letters the class that begins at byte `at` of the pattern
-    /// really stops matching: each of those it is said to lose for which a
-    /// name with that letter where this class stands — read through the
-    /// alternative that holds the class, and no other — is one the run
-    /// stops naming with the option ([`Self::lost`]).
+    /// The letters the class that begins at byte `at` of the pattern is
+    /// SHOWN to stop matching: each of those it would lose by its text for
+    /// which some name with that letter where this class stands — read
+    /// through the alternative that holds the class, and no other — is one
+    /// the run stops naming with the option ([`Self::lost`]). cr-ecm10-1:
+    /// each `*` on the way is tried as some text and as none.
     fn lost_here(&self, pattern: &str, at: usize, class: &str, windows: bool) -> Vec<char> {
         let Some(letters) = lost_letters(class) else {
             return Vec::new();
@@ -749,8 +796,10 @@ impl Asked {
         letters
             .into_iter()
             .filter(|&letter| {
-                samples(pattern, windows, Some((at, letter)))
-                    .is_some_and(|names| names.iter().any(|name| self.lost(name)))
+                STARS.iter().any(|star| {
+                    samples_with(pattern, windows, Some((at, letter)), star)
+                        .is_some_and(|names| names.iter().any(|name| self.lost(name)))
+                })
             })
             .collect()
     }
@@ -761,9 +810,14 @@ impl Asked {
     /// pattern names a finite set of names, the option adds every other
     /// case of each of their letters and nothing else, and all of those
     /// spellings can be put to the two filters. Then either no name is
-    /// read differently ([`Compared::Same`]: `{a,A}`), or here are names
-    /// the option would also match ([`Compared::Differs`]: `ς` for
-    /// `{Σ,σ}`, which no change to lower or upper case reaches).
+    /// read differently ([`Compared::Same`]: `{a,A}`), or some are
+    /// ([`Compared::Differs`]), and the ones the RUN would treat
+    /// otherwise are the examples: `ς` for `{Σ,σ}`, which no change to
+    /// lower or upper case reaches.
+    ///
+    /// cr-ecm10-1: the pattern's OWN readings, and no other pattern's. A
+    /// pattern was called the same when the list as typed named every
+    /// such spelling — at the root, where the names were tried.
     ///
     /// For any other pattern, and past [`MOST_SPELLINGS`], the answer is
     /// [`Compared::Unknown`] — never "the same" on the strength of the
@@ -812,19 +866,15 @@ impl Asked {
                         letter
                     })
                     .collect();
-                // cr-ecm9-2: against the filter as typed. What the option
-                // names through this pattern and the filter names already
-                // is no change.
                 let (typed, ignoring) = (
-                    Self::named(self.role, &self.whole.typed, &name),
+                    Self::named(self.role, &self.as_typed, &name),
                     Self::named(self.role, &self.ignoring_case, &name),
                 );
-                let only_ignoring = (ignoring.0 && !typed.0) || (ignoring.1 && !typed.1);
-                if !only_ignoring {
+                if typed == ignoring {
                     continue;
                 }
                 differs = true;
-                if gained.len() < MOST_EXAMPLES && !gained.contains(&name) {
+                if gained.len() < MOST_EXAMPLES && !gained.contains(&name) && self.gained(&name) {
                     gained.push(name);
                 }
             }
@@ -843,7 +893,9 @@ impl Asked {
 enum Compared {
     /// No name is read differently: the option changes nothing here.
     Same,
-    /// Names the option would match and the pattern as typed does not.
+    /// Some name is read differently; these are names among them that the
+    /// run would treat otherwise with the option — none, when every one
+    /// of the few looked at is a name the filter already names.
     Differs(Vec<String>),
     /// Not every such name could be asked about.
     Unknown,
@@ -892,8 +944,19 @@ const MOST_SAMPLES: usize = 16;
 /// would be about no file. `**//Cache` read off as `/Cache` — the text
 /// matches, and no entry is ever called that — leaves no name at all.
 fn samples(text: &str, windows: bool, pick: Option<(usize, char)>) -> Option<Vec<String>> {
+    samples_with(text, windows, pick, "x")
+}
+
+/// [`samples`] with each run of `*` standing for `star` — some text, or
+/// none ([`STARS`]).
+fn samples_with(
+    text: &str,
+    windows: bool,
+    pick: Option<(usize, char)>,
+    star: &str,
+) -> Option<Vec<String>> {
     let mut names: Vec<String> = Vec::new();
-    for (name, through) in expand(text, 0, windows, pick)? {
+    for (name, through) in expand(text, 0, windows, pick, star)? {
         if pick.is_some() && !through {
             continue;
         }
@@ -929,6 +992,7 @@ fn expand(
     base: usize,
     windows: bool,
     pick: Option<(usize, char)>,
+    star: &str,
 ) -> Option<Vec<(String, bool)>> {
     let mut names = vec![(String::new(), false)];
     let mut rest = text;
@@ -977,7 +1041,7 @@ fn expand(
                 1
             }
             '*' => {
-                push(&mut names, 'x');
+                names.iter_mut().for_each(|(name, _)| name.push_str(star));
                 rest.len() - rest.trim_start_matches('*').len()
             }
             '?' => {
@@ -989,7 +1053,7 @@ fn expand(
                     let mut next = Vec::new();
                     for alternative in alternatives {
                         let inner = at + (alternative.as_ptr() as usize - rest.as_ptr() as usize);
-                        for (ending, picked) in expand(alternative, inner, windows, pick)? {
+                        for (ending, picked) in expand(alternative, inner, windows, pick, star)? {
                             for (name, through) in &names {
                                 next.push((format!("{name}{ending}"), *through || picked));
                             }
@@ -1926,9 +1990,17 @@ mod tests {
             )
         );
         // cr-ecm9-2: beside a pattern that names everything, the option
-        // adds nothing through this one: the filter keeps `thumbs.db`
-        // already, and no line claims otherwise.
-        assert_eq!(note(&["??", "*.1", "Thumbs.db", "*"]), None);
+        // adds nothing through this one that a name bears out: the filter
+        // keeps `thumbs.db` already, and no spelling is offered.
+        // cr-ecm10-1: the line stays, in words — that `*` covers every
+        // spelling everywhere is not what one name at the root shows.
+        assert_eq!(
+            note(&["??", "*.1", "Thumbs.db", "*"]).as_deref(),
+            Some(
+                "\"Thumbs.db\" matches exactly as typed; capital letters matter \
+                 (--ignore-case ignores them)."
+            )
+        );
         assert_eq!(
             note(&["??", "Thumbs.db", "*.1", "*.tmp"]),
             line(
@@ -2600,36 +2672,54 @@ mod tests {
             )
         );
         // cr-ecm9-2: a gain is judged against the whole filter. `A` was
-        // offered for `a`, and the pattern beside it keeps `A` already:
-        // the option changes nothing these two name.
-        assert_eq!(note(&["a", "A"]), None);
-        assert_eq!(note(&["a", "A", "{b,B}"]), None);
-        assert_eq!(
-            note(&["a", "A", "*.Doc"]).as_deref(),
-            Some(
-                "\"*.Doc\" matches .Doc only; capital letters matter (--ignore-case would also \
-                 match .doc, .DOC)."
-            )
-        );
-        // A loss too: `A.dat` is kept by the second pattern either way.
+        // offered for `a`, and the pattern beside it keeps `A` already.
+        // cr-ecm10-1: no spelling is offered — and the line stays. It was
+        // dropped, as if the option changed nothing these two name; with
+        // `./A` in place of `A` that is false one level down (`sub/A`),
+        // and a name at the root cannot tell the two commands apart.
+        let in_words = "\"a\" matches exactly as typed, and 1 more pattern matches only as \
+                        typed; capital letters matter (--ignore-case ignores them).";
+        assert_eq!(note(&["a", "A"]).as_deref(), Some(in_words));
+        assert_eq!(note(&["a", "./A"]).as_deref(), Some(in_words));
+        // A pattern whose own two readings are the same is still neither
+        // shown nor counted.
+        assert_eq!(note(&["a", "A", "{b,B}"]).as_deref(), Some(in_words));
+        assert_eq!(note(&["{b,B}", "[Cc]"]), None);
+        let doc = "\"*.Doc\" matches .Doc only, and 2 more patterns match only as typed; \
+                   capital letters matter (--ignore-case would also match .doc, .DOC).";
+        assert_eq!(note(&["a", "A", "*.Doc"]).as_deref(), Some(doc));
+        // cr-ecm10-1: where a class could take less and no name shows it,
+        // the warning stays, and says `may`. `A.dat` is kept by the second
+        // pattern either way — at the root, which is where it was tried.
         assert_eq!(
             note(&["[!a].dat", "A.dat"]).as_deref(),
             Some(
-                "\"A.dat\" matches A.dat only, and 1 more pattern matches only as typed; \
-                 capital letters matter (--ignore-case would also match a.dat, A.DAT)."
+                "\"[!a].dat\" matches exactly as typed, and 1 more pattern matches only as \
+                 typed; capital letters matter (--ignore-case changes what they match: [!a] \
+                 may stop matching A)."
             )
         );
-        // Where no letter of a class is really lost, no loss is claimed,
-        // and no spelling is made of a class that would take less.
         for pattern in ["{[!a].1,A.1}", "x{[!a],A}"] {
             assert_eq!(
                 note(&[pattern]),
                 Some(format!(
                     "\"{pattern}\" matches exactly as typed; capital letters matter \
-                     (--ignore-case ignores them)."
+                     (--ignore-case changes what it matches: [!a] may stop matching A)."
                 )),
             );
         }
+        // cr-ecm10-1: a `*` is tried as some text and as none. With
+        // `Ax.txt` kept by the third pattern, `A.txt` shows the loss the
+        // line missed — it spoke of `Keep`, and the option gave up
+        // `Ay.txt`.
+        assert_eq!(
+            note(&["Keep", "[!a]*.txt", "Ax.txt"]).as_deref(),
+            Some(
+                "\"[!a]*.txt\" matches exactly as typed, and 2 more patterns match only as \
+                 typed; capital letters matter (--ignore-case changes what they match: [!a] \
+                 would stop matching A)."
+            )
+        );
         // cr-ecm10-2: both lists, as the run applies them. The line named
         // the loss of `A` at `[!a].bin`; no include names `A.bin`, so the
         // run leaves it alone either way. What the option gives up is
@@ -2786,6 +2876,13 @@ mod tests {
             among("[!a].dat", &["Keep"]).lost_here("[!a].dat", 0, "[!a]", false),
             ['A']
         );
+        // cr-ecm10-1: a name is tried with each `*` as some text and as
+        // none. With `Ax.txt` kept by another pattern, `A.txt` still shows
+        // what `[!a]*.txt` gives up.
+        assert_eq!(
+            among("[!a]*.txt", &["Keep", "Ax.txt"]).lost_here("[!a]*.txt", 0, "[!a]", false),
+            ['A']
+        );
         // cr-ecm10-2: and against BOTH lists. No include names `A.bin`, so
         // the run leaves it alone either way and nothing is lost at
         // `[!a]`; `B.txt` is let in by `*.txt` once `[!b]` refuses it.
@@ -2812,10 +2909,18 @@ mod tests {
         // the names it is shown for, `x.O` among them, are not.
         assert!(among("*.o", &["??"]).matched_only_ignoring_case("*.o", ".O", true, false));
         assert!(!among("*.o", &["*"]).matched_only_ignoring_case("*.o", ".O", true, false));
-        // And a pattern that adds nothing to the filter is the same with
-        // the option.
-        assert_eq!(among("a", &["A"]).compared("a", false), Compared::Same);
-        assert_eq!(among("A", &["a"]).compared("A", false), Compared::Same);
+        // cr-ecm10-1: whether a pattern's readings are THE SAME is asked of
+        // the pattern alone. Beside `A` — or beside `./A`, which keeps `A`
+        // at the root and nowhere else — `a` still reads otherwise; there
+        // is only no example of it the run bears out.
+        assert_eq!(
+            among("a", &["A"]).compared("a", false),
+            Compared::Differs(vec![])
+        );
+        assert_eq!(
+            among("a", &["./A"]).compared("a", false),
+            Compared::Differs(vec![])
+        );
         assert_eq!(
             among("a", &["b"]).compared("a", false),
             Compared::Differs(vec!["A".to_string()])
@@ -2861,11 +2966,17 @@ mod tests {
         ] {
             assert_eq!(compared(unknown), Compared::Unknown, "{unknown}");
         }
-        // Names are read off a text's own syntax.
+        // Names are read off a text's own syntax — a `*` as some text, or
+        // as none.
         assert_eq!(
             samples("a{b,{c,D}}*?", false, None).unwrap(),
             ["abxx", "acxx", "aDxx"]
         );
+        assert_eq!(
+            samples_with("a{b,{c,D}}*?", false, None, "").unwrap(),
+            ["abx", "acx", "aDx"]
+        );
+        assert_eq!(samples_with("*.o", false, None, "").unwrap(), [".o"]);
         // A negated class is tried with the other case of a letter it
         // holds as well: the name a spelling goes wrong on.
         assert_eq!(
