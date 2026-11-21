@@ -1,9 +1,9 @@
 # cr-ecm13-5: With `--size-only`, a file of the right length where a copy was left was reported copied
 
 **Severity**: HIGH — a retry reports one file copied, no bytes written, exit 0, and the destination holds something else
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r15` (Codex openreview, 2026-11-21) reviewed `b8273ac1..35adeacb` — the seven `utility-slices-r3` fixes, the seven `exclude-case-r13` fixes and utilities slice 4 — with `guard_confirmed: true`, which required no change to it. (What stands at a path and is still written through — a dangling link — is cr-ecm14-2)
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm13-5`)
+**Commit**: `d5f51874`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r13` over `c99ad483..bd84649f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r13.codex.md`. It completes cr-ecm12-2. Fixed by cr-ecm13-1; this commit is its guard.
 
 ## Evidence

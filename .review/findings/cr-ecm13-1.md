@@ -1,9 +1,9 @@
 # cr-ecm13-1: A retry under `--ignore-existing` still wrote over a file put where its incomplete copy had been
 
 **Severity**: HIGH — a retry overwrites a file someone put at the destination, under the option that promises to keep it, and exits 0
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r15` (Codex openreview, 2026-11-21) reviewed `b8273ac1..35adeacb` — the seven `utility-slices-r3` fixes, the seven `exclude-case-r13` fixes and utilities slice 4 — with `guard_confirmed: true`. A retry still writes where something stands: "I retried a recorded leftover with a dangling symlink in its place. The retry followed the link, created its referent, and exited 0." The remaining work is cr-ecm14-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm13-1`)
+**Commit**: `fc3df295`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r13` over `c99ad483..bd84649f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r13.codex.md`. It completes cr-ecm12-2, by withdrawing what that fix tried to make safe.
 
 ## Evidence

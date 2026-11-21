@@ -1,9 +1,9 @@
 # cr-uv3-8: Two of the new tests ran only where they were written
 
 **Severity**: MEDIUM — on macOS one test fails before its portable half is asked; on a Linux built against another C library the core crate's tests do not compile
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r15` (Codex openreview, 2026-11-21) reviewed `b8273ac1..35adeacb` — the seven `utility-slices-r3` fixes, the seven `exclude-case-r13` fixes and utilities slice 4 — with `guard_confirmed: true`, which required no change to it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv3-8`)
+**Commit**: `d3e6a2ec`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r3` over `eb0cc4d8..dd0a3179` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r3.codex.md`. It completes cr-uv2-5 and cr-uv2-6.
 
 ## Evidence

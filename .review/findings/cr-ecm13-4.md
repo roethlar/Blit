@@ -1,9 +1,9 @@
 # cr-ecm13-4: A retry's own record forgot where the run before it had left an incomplete copy
 
 **Severity**: HIGH — a retry of a retry exits 0 with the destination still holding the incomplete copy
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r15` (Codex openreview, 2026-11-21) reviewed `b8273ac1..35adeacb` — the seven `utility-slices-r3` fixes, the seven `exclude-case-r13` fixes and utilities slice 4 — with `guard_confirmed: true`, which required no change to it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm13-4`)
+**Commit**: `f950e261`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r13` over `c99ad483..bd84649f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r13.codex.md`. It completes cr-ecm12-2 (and cr-rework-2, which carried this through one command's passes only).
 
 ## Evidence

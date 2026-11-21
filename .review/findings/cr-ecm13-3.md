@@ -1,9 +1,9 @@
 # cr-ecm13-3: A retry asked for a failed file whose name is not text by another file's name
 
 **Severity**: HIGH — the file that failed is never retried, another is sent in its place, and the command exits 0
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r15` (Codex openreview, 2026-11-21) reviewed `b8273ac1..35adeacb` — the seven `utility-slices-r3` fixes, the seven `exclude-case-r13` fixes and utilities slice 4 — with `guard_confirmed: true`. The account of what a retry did not find drops the bytes: "A job recorded two failures, one named `dup` plus byte `FF`, the other `dup` plus U+FFFD. After the first disappeared, `jobs retry` copied the second and exited 0." And the answer two daemons give a CLI is not versioned for the new list: "a head CLI and two contract-25 daemons still agree on delegated spec version 12. Those daemons omit the raw failed-path list." The remaining work is cr-ecm14-1 and cr-ecm14-3
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: `6f0479dc`, completed by this commit (the second `Fix cr-ecm13-3`)
+**Commit**: `6f0479dc`, `b2b77b78`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r13` over `c99ad483..bd84649f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r13.codex.md`. Older than the plan (the retry passes, ssc-6); found through cr-ecm12-1's guard.
 
 ## Evidence

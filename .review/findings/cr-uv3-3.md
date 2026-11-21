@@ -1,9 +1,9 @@
 # cr-uv3-3: A utility path was read by the receiving system's own path rules
 
 **Severity**: HIGH — on Unix a name the commands print is refused; on Windows a name is read as two and another entry can be removed
-**Status**: Fixed, awaiting review
+**Status**: Verified — `combined-r15` (Codex openreview, 2026-11-21) reviewed `b8273ac1..35adeacb` — the seven `utility-slices-r3` fixes, the seven `exclude-case-r13` fixes and utilities slice 4 — with `guard_confirmed: true`, which required no change to it
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv3-3`)
+**Commit**: `c99ad483`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r3` over `eb0cc4d8..dd0a3179` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r3.codex.md`. It completes cr-uv2-5.
 
 ## Evidence

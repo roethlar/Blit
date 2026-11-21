@@ -1,9 +1,9 @@
 # cr-ecm13-2: A retry decided again where its files go, and decided otherwise
 
 **Severity**: HIGH — a retry writes the files that failed somewhere else, exits 0, and the place they failed at is left as it was
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r15` (Codex openreview, 2026-11-21) reviewed `b8273ac1..35adeacb` — the seven `utility-slices-r3` fixes, the seven `exclude-case-r13` fixes and utilities slice 4 — with `guard_confirmed: true`. It keeps the "persisted retry destination"; a record from before the field is still replayed by reading the arguments again: "I replayed an old-format record for `copy src backup`, where the first run created `backup`. The retry wrote `backup/src/big`, left `backup/big` missing, and exited 0." The remaining work is cr-ecm14-4
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm13-2`)
+**Commit**: `bf4987de`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r13` over `c99ad483..bd84649f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r13.codex.md`. Older than the plan (`blit jobs retry`, JOB_LOGS jl-4); found through cr-ecm12-2's guard.
 
 ## Evidence

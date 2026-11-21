@@ -1,9 +1,9 @@
 # cr-ecm13-7: The line printed a whole alternative of which part changes
 
 **Severity**: MEDIUM — the question names `{A,B}` as gained where only `B` is treated otherwise
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r15` (Codex openreview, 2026-11-21) reviewed `b8273ac1..35adeacb` — the seven `utility-slices-r3` fixes, the seven `exclude-case-r13` fixes and utilities slice 4 — with `guard_confirmed: true`. A spelling is still printed where the claim rests on samples: "With `--include 'a?b' --exclude '?1?'`, the note offered `A?B`. Enabling `--ignore-case` added `AxB`, while `A1B` stayed excluded." The remaining work is cr-ecm14-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm13-7`)
+**Commit**: `b7139bd9`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r13` over `c99ad483..bd84649f` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r13.codex.md`. It completes cr-ecm12-4.
 
 ## Evidence

@@ -1,9 +1,9 @@
 # cr-uv3-1: The removal that ends a move took what the move had not carried
 
 **Severity**: HIGH — a `move` from a daemon exits 0 with an entry gone from the source that was never copied
-**Status**: Fixed, awaiting review
+**Status**: Reviewed, found incomplete — `combined-r15` (Codex openreview, 2026-11-21) reviewed `b8273ac1..35adeacb` — the seven `utility-slices-r3` fixes, the seven `exclude-case-r13` fixes and utilities slice 4 — with `guard_confirmed: true`. It keeps "source-issued move tickets" and finds the account too loose: "A receipt accepted a replacement with different contents, the same length, and a modification time 800 ms later in the same second. Cleanup would delete it. Tickets are built from manifest entries before delivery is confirmed." And the bound on what a daemon keeps does not hold: "A single account larger than the advertised 1 GiB limit evicts every older account and is then inserted in full." The remaining work is cr-uv4-1 and cr-uv4-5
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-uv3-1`)
+**Commit**: `57e8ee24`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `utility-slices-r3` over `eb0cc4d8..dd0a3179` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/utility-slices-r3.codex.md`. The removal is older than the plan; that it ends WELL is cr-uv2-1's doing.
 
 ## Evidence
