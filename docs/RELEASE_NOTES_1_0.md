@@ -101,7 +101,9 @@ the source side too, and adds a retry pass.
   leaves the line out. Where `--ignore-case` would make a pattern match
   less — a negated class such as `[!x]`, which then refuses `X` as well —
   the line says that instead: `(--ignore-case changes what it matches:
-  [!x] would stop matching X).`
+  [!x] would stop matching X).` With `--delete-scope all` a filter only
+  chooses what is copied — every destination entry the filtered source
+  lacks is deleted, excluded ones included — and the question says so.
 - **`?` and a bracket class match one byte**, with or without
   `--ignore-case`, as in rsync and git: `?.txt` does not name `é.txt`. A
   class that holds a letter beyond ASCII (`[aé].txt`) could never match

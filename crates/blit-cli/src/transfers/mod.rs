@@ -531,6 +531,31 @@ fn case_note(args: &TransferArgs, resolved: &filter::ResolvedExcludes) -> Option
     )
 }
 
+/// cr-ecm5-6: the line a `mirror --delete-scope all` shows in place of
+/// the one about capital letters, when it has a filter of any kind.
+/// Under that scope a filter chooses what is COPIED and nothing else:
+/// every destination entry the filtered source does not hold is deleted,
+/// the ones an `--exclude` names included. The line about capital letters
+/// says which names a pattern "matches", which reads as which names are
+/// kept — and under this scope none are: with `--exclude '*Cache'` it
+/// appeared as usual and the mirror deleted the destination's own
+/// `caseCache`. `None` with `-y`, like every line of the question.
+fn delete_scope_note(args: &TransferArgs, mode: TransferKind) -> Option<String> {
+    let filtered = !args.exclude.is_empty()
+        || !args.include.is_empty()
+        || args.files_from.is_some()
+        || args.min_size.is_some()
+        || args.max_size.is_some()
+        || args.min_age.is_some()
+        || args.max_age.is_some();
+    (mode.is_mirror() && args.delete_scope_all() && filtered && !args.yes)
+        .then(|| DELETE_SCOPE_ALL_NOTE.to_string())
+}
+
+/// What [`delete_scope_note`] says.
+const DELETE_SCOPE_ALL_NOTE: &str = "--delete-scope all: the filter chooses what is copied, not \
+     what is kept; destination entries it leaves out are deleted too.";
+
 /// Prompt for confirmation of a destructive operation. Returns true if the user confirms.
 /// Always returns true if `skip_prompt` is true. `note` is printed on its
 /// own line just before the question.
@@ -719,7 +744,9 @@ async fn run_transfer_inner(
     // For mirror operations, prompt unless --yes or --dry-run. The line
     // about capital letters is part of the question when one is asked,
     // and a note on stderr when none is (`copy`, a dry run): AC-3, AC-9.
-    let case_note = case_note(args, &resolved_excludes);
+    // cr-ecm5-6: under `--delete-scope all` a filter protects nothing at
+    // the destination, and the question says that instead.
+    let case_note = delete_scope_note(args, mode).or_else(|| case_note(args, &resolved_excludes));
     if mode.is_mirror() && !args.dry_run {
         let prompt = format!(
             "Mirror will delete extraneous files at destination '{}'. Continue?",

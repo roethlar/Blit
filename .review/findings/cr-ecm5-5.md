@@ -13,7 +13,7 @@ Reproduced here before any change (2026-11-20, Linux, local `mirror --yes`), and
 
 Cause: under a list the walk admits every directory, because a listed file may lie anywhere below (`FileFilter::should_include_dir`, `crates/blit-core/src/fs_enum.rs`), and the deletion planner treats every directory the destination walk returns as a candidate unless a kept source file lies under it (`crates/blit-core/src/mirror_planner.rs`). Directories are then removed only if empty, so the damage is to empty directories. Older than this plan; cr-ecm4-2's guard asserted "nothing is in the deletion scope" under an empty list and checked files only.
 
-Not the same thing, and unchanged: with NO list, a mirror removes an empty destination directory even when the source has it too, because transfers do not carry empty directories (documented in `blit mirror --help` and `blit check --help`).
+Not the same thing, and unchanged: with NO list, a mirror removes an empty destination directory even when the source has it too, because transfers do not carry empty directories (stated in `blit check --help` — "Transfers don't preserve them today" — and nowhere in `mirror`'s own help; recorded for the owner in `docs/STATE.md`).
 
 ## Predicted observable failure
 `blit mirror --files-from LIST SRC DST`: every empty directory at the destination that the list does not vouch for is removed, on every route.
@@ -35,6 +35,6 @@ Under a list of exact names, a destination directory is a deletion candidate onl
 
 ## Known gaps
 - A directory left empty because this same mirror deleted the listed files in it is not removed unless the list names the directory.
-- The no-list behaviour above (empty directories are not carried, and a mirror removes them) is by design and documented in `--help`; whether it should be is not this finding's question.
+- The no-list behaviour above (empty directories are not carried, and a mirror removes them) is older than this plan and stated only in `check --help`; whether it should be so is the owner's question, not this finding's.
 - The daemon-to-daemon route is not run; it plans deletions through the same function.
 - Run on Linux only.

@@ -588,6 +588,115 @@ fn the_line_is_said_of_the_filter_the_run_uses() {
     );
 }
 
+/// cr-ecm5-6: under `--delete-scope all` a filter chooses what is copied
+/// and protects nothing at the destination, and the question says so in
+/// place of the line about capital letters. That line appeared as usual
+/// with `--exclude '*Cache'` — "matches Cache only" — and the mirror then
+/// deleted the destination's own `bCache`, which the pattern names.
+#[test]
+fn delete_scope_all_says_a_filter_protects_nothing_at_the_destination() {
+    const SCOPE_LINE: &str = "--delete-scope all: the filter chooses what is copied, not what \
+                              is kept; destination entries it leaves out are deleted too.";
+    let tmp = tempdir().unwrap();
+    let (src, dst) = trees(tmp.path());
+    let (from, to) = (with_slash(&src), with_slash(&dst));
+    let all = ["mirror", "--delete-scope", "all", "--exclude", "*Cache"];
+
+    let asked = blit(tmp.path(), &[&all[..], &[&from, &to]].concat(), Some("n\n"));
+    assert!(
+        asked.stdout.contains(&format!("{SCOPE_LINE}\n{QUESTION}")),
+        "the line, then the question:\n{}",
+        asked.all()
+    );
+    assert!(!asked.all().contains(MARK), "{}", asked.all());
+    assert!(untouched(&dst), "answered no: nothing copied or deleted");
+
+    // And it is what happens: the entry the exclude names is deleted.
+    let agreed = blit(tmp.path(), &[&all[..], &[&from, &to]].concat(), Some("y\n"));
+    assert_eq!(agreed.code, Some(0), "{}", agreed.all());
+    assert!(!dst.join("bCache").exists(), "{}", agreed.all());
+    assert!(!dst.join("cCACHE").exists() && !dst.join("extra.txt").exists());
+    assert!(dst.join("keep.txt").exists());
+
+    // A filter of any kind brings the line; no filter, no line; and the
+    // default scope keeps the line about capital letters.
+    let sized = blit(
+        tmp.path(),
+        &[
+            "mirror",
+            "--delete-scope",
+            "all",
+            "--min-size",
+            "1",
+            &from,
+            &to,
+        ],
+        Some("n\n"),
+    );
+    assert!(sized.stdout.contains(SCOPE_LINE), "{}", sized.all());
+    let unfiltered = blit(
+        tmp.path(),
+        &["mirror", "--delete-scope", "all", &from, &to],
+        Some("n\n"),
+    );
+    assert!(
+        !unfiltered.all().contains("--delete-scope all:"),
+        "{}",
+        unfiltered.all()
+    );
+    assert!(unfiltered.stdout.contains(QUESTION), "{}", unfiltered.all());
+    let subset = blit(
+        tmp.path(),
+        &["mirror", "--exclude", "*Cache", &from, &to],
+        Some("n\n"),
+    );
+    assert!(subset.stdout.contains(CACHE_LINE), "{}", subset.all());
+    assert!(
+        !subset.all().contains("--delete-scope all:"),
+        "{}",
+        subset.all()
+    );
+
+    // With `-y` nothing is asked and nothing is said; a dry run asks
+    // nothing and says it as a note; `copy` deletes nothing, so its note
+    // is still the one about capital letters.
+    let waived = blit(
+        tmp.path(),
+        &[&all[..], &["--dry-run", "-y", &from, &to]].concat(),
+        None,
+    );
+    assert!(
+        !waived.all().contains("--delete-scope all:"),
+        "{}",
+        waived.all()
+    );
+    let dry = blit(
+        tmp.path(),
+        &[&all[..], &["--dry-run", &from, &to]].concat(),
+        None,
+    );
+    assert!(
+        dry.stderr.contains(&format!("blit: {SCOPE_LINE}")),
+        "{}",
+        dry.all()
+    );
+    let copy = blit(
+        tmp.path(),
+        &[
+            "copy",
+            "--delete-scope",
+            "all",
+            "--exclude",
+            "*Cache",
+            "--dry-run",
+            &from,
+            &to,
+        ],
+        None,
+    );
+    assert!(copy.stderr.contains(CACHE_LINE), "{}", copy.all());
+}
+
 /// cr-ecm5-4: what the line shows keeps a directory the pattern requires.
 /// `*/Cache` names `Cache` one level down, never at the top. The line used
 /// to drop the `*/` and say `--ignore-case` would also match `cache`; the

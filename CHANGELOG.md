@@ -142,7 +142,9 @@ part, and a job you can list, read, re-run and retry.
   it names under the source. Where the option would make a pattern match
   LESS — a negated class such as `[!x]`, which then refuses `X` too — the
   line says so instead of showing a spelling: `(--ignore-case changes
-  what it matches: [!x] would stop matching X).`
+  what it matches: [!x] would stop matching X).` Under `--delete-scope
+  all`, where a filter chooses what is copied and protects nothing at the
+  destination, the question says that instead.
 - `?` and a bracket class match one byte in both modes. A class holding a
   letter beyond ASCII (`[aé].txt`) is refused with the spelling that works
   (`{a,é}.txt`), on the command line, in a pattern file, from a saved job
