@@ -2,22 +2,27 @@
 `-delete` — the system's, and each build's through its own loopback daemon.
 
 Usage: bench_uv4.py <where> <label=release dir>...   Best and median of RUNS, milliseconds.
-Everything is made in a directory of this script's own inside <where> (`blit-bench-uv4`), which is all it
-ever removes: <where> itself, and anything else in it, is left alone (cr-uv4-6 — it used to remove the
-directory it was given, whole, before it began)."""
+Everything is made in a directory this run makes for itself inside <where> (`blit-bench-uv4-` and a name
+no other directory has), which is all it ever removes: <where> itself and anything else in it — another
+run's directory among them — is left alone. (cr-uv4-6: it used to remove the directory it was given,
+whole, before it began. cr-uv5-6: then a directory of one fixed name, which could be somebody's, and
+was another run's whenever two ran at once.)"""
+import atexit
 import os
 import shutil
 import socket
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 
-work = os.path.join(sys.argv[1], "blit-bench-uv4")
+os.makedirs(sys.argv[1], exist_ok=True)
+work = tempfile.mkdtemp(prefix="blit-bench-uv4-", dir=sys.argv[1])
+atexit.register(shutil.rmtree, work, ignore_errors=True)
 builds = [arg.split("=", 1) for arg in sys.argv[2:]]
 RUNS = 5
 DIRS, FILES = 2000, 100
-shutil.rmtree(work, ignore_errors=True)
 module = os.path.join(work, "module")
 os.makedirs(module)
 
@@ -122,4 +127,3 @@ for label, release in builds:
         daemon.wait(timeout=10)
         log.close()
 print("the tree's filesystem:", subprocess.run(["stat", "-f", "-c", "%T", work], capture_output=True, text=True).stdout.strip())
-shutil.rmtree(work, ignore_errors=True)

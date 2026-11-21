@@ -2,20 +2,25 @@
 build's through its own loopback daemon.
 
 Usage: bench_uv5.py <where> <label=release dir>...   Best and median of RUNS, milliseconds.
-Everything is made in a directory of this script's own inside <where> (`blit-bench-uv5`), which is all it
-ever removes: <where> itself, and anything else in it, is left alone."""
+Everything is made in a directory this run makes for itself inside <where> (`blit-bench-uv5-` and a name
+no other directory has), which is all it ever removes: <where> itself and anything else in it — another
+run's directory among them — is left alone. (cr-uv5-6: it used to remove a directory of one fixed name,
+which could be somebody's, and was another run's whenever two ran at once.)"""
+import atexit
 import os
 import shutil
 import socket
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 
-work = os.path.join(sys.argv[1], "blit-bench-uv5")
+os.makedirs(sys.argv[1], exist_ok=True)
+work = tempfile.mkdtemp(prefix="blit-bench-uv5-", dir=sys.argv[1])
+atexit.register(shutil.rmtree, work, ignore_errors=True)
 builds = [arg.split("=", 1) for arg in sys.argv[2:]]
 RUNS = 5
-shutil.rmtree(work, ignore_errors=True)
 module = os.path.join(work, "module")
 os.makedirs(module)
 for name, count in (("big", 200_000), ("small", 1_000)):
@@ -95,4 +100,3 @@ for label, release in builds:
         daemon.wait(timeout=10)
         log.close()
 print("the tree's filesystem:", subprocess.run(["stat", "-f", "-c", "%T", work], capture_output=True, text=True).stdout.strip())
-shutil.rmtree(work, ignore_errors=True)
