@@ -1,9 +1,9 @@
 # cr-ecm8-4: Eight streams at once did not bound what a client holds unread
 
 **Severity**: MEDIUM — the bound stated for the payload one connection can hold unread (and the number the small-frame budget is proved against) was not established on a client: responses whose streams have ended are not counted by the stream limit
-**Status**: Fixed — awaiting review
+**Status**: Verified — `exclude-case-r9` (Codex openreview, 2026-11-21) reviewed `3bc3ee47..ab7331c3`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm8-4`)
+**Commit**: `add64602`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r8` over `3bc3ee47..f4203c31` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r8.codex.md`.
 
 ## Evidence

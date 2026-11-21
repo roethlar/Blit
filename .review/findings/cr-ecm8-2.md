@@ -1,9 +1,9 @@
 # cr-ecm8-2: The line could be absent, or name the wrong class, for patterns it should speak of
 
 **Severity**: HIGH — the question was asked with no line at all for a pattern whose protection `--ignore-case` changes, and a confirmed mirror deleted what the option would have kept; for another pattern the line said the wrong name loses protection
-**Status**: Fixed — awaiting review
+**Status**: Reviewed, found incomplete — `exclude-case-r9` (Codex openreview, 2026-11-21) reviewed `3bc3ee47..ab7331c3`, which holds this fix, with `guard_confirmed: true`. Leaving a pattern out only on proof stands. Two things in it do not: a narrowing is claimed only when EVERY letter a class would lose is lost, so a real loss beside an unlost letter is not shown (`{[!ab].txt,A.txt}` loses `B.txt`, and the line spoke of `Keep`); and a gain is judged against the one pattern, not the filter (`--exclude a --exclude A` offered `A`, which the second pattern already keeps). The remaining work is cr-ecm9-2
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm8-2`)
+**Commit**: `e3b46470`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r8` over `3bc3ee47..f4203c31` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r8.codex.md`.
 
 ## Evidence

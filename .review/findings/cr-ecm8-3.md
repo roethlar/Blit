@@ -1,9 +1,9 @@
 # cr-ecm8-3: A list line holding a NUL refused the whole request through a daemon
 
 **Severity**: MEDIUM — one malformed line of a `--files-from` list changed the outcome by route: reported and passed over between local folders, the whole transfer refused through a daemon
-**Status**: Fixed — awaiting review
+**Status**: Verified — `exclude-case-r9` (Codex openreview, 2026-11-21) reviewed `3bc3ee47..ab7331c3`, which holds this fix, with `guard_confirmed: true`, and required nothing further on this finding
 **Branch**: — (default-branch mode; fixes land on master)
-**Commit**: this commit (`Fix cr-ecm8-3`)
+**Commit**: `e6e16fb5`
 **Reviewer**: codex / gpt-6.2-astra (as dispatched) / max / frontier, codex-cli 0.171.0 headless one-shot, openreview `exclude-case-r8` over `3bc3ee47..f4203c31` (verdict `acceptable_with_changes`, capability_ok and guard_confirmed true); `.review/results/exclude-case-r8.codex.md`.
 
 ## Evidence
